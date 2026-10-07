@@ -274,6 +274,13 @@ impl Listed {
     }
 }
 
+/// `wait --settle`, through the helper, waiting on the thread: how it
+/// waited (`settled`, `waitedMs`, `polls`), or `None` when the eye cannot be
+/// had.
+pub fn wait_settled_desktop(asked_ms: u64) -> Option<Value> {
+    wait_settled(&MEMORY, asked_ms, &mut super::call, &mut std::thread::sleep).map(Settled::answer)
+}
+
 /// `watch`, through the helper, waiting on the thread.
 pub fn watch_desktop(params: &Value) -> Result<Value, ComputerUseError> {
     watch(&MEMORY, params, &mut super::call, &mut std::thread::sleep)
@@ -377,6 +384,55 @@ pub(super) fn settle(
     call: Call<'_>,
     pause: &mut dyn FnMut(Duration),
 ) -> Option<Settled> {
+    after_the_act(
+        memory,
+        display,
+        call,
+        pause,
+        EYE_SETTLE_MAX_MS,
+        |changes, act, windows, now, _| {
+            zerocode_core::computer_use_protocol::eye::settle(changes, act, windows, now)
+        },
+    )
+}
+
+/// `wait --settle` (t-37883): wait until what the last act painted has held
+/// still (`computer_use_protocol::eye::wait_settled`), never past `asked_ms`
+/// from now. `None` when the eye cannot be had, and the caller waits the
+/// whole time as a plain `wait` does.
+pub(super) fn wait_settled(
+    memory: &Memory,
+    asked_ms: u64,
+    call: Call<'_>,
+    pause: &mut dyn FnMut(Duration),
+) -> Option<Settled> {
+    after_the_act(
+        memory,
+        None,
+        call,
+        pause,
+        asked_ms,
+        |changes, act, windows, now, began| {
+            let until = began.saturating_add(i64::try_from(asked_ms).unwrap_or(i64::MAX));
+            zerocode_core::computer_use_protocol::eye::wait_settled(
+                changes, act, windows, now, until,
+            )
+        },
+    )
+}
+
+/// The one loop the look after an act and a settling wait share: the act's
+/// mark, the repaints gathered at the table's pace, and `rule` asked after
+/// each ask (with the helper's clock now and when the wait began) until it
+/// says to stop. `most_ms` bounds a clock that never moves.
+fn after_the_act(
+    memory: &Memory,
+    display: Option<u64>,
+    call: Call<'_>,
+    pause: &mut dyn FnMut(Duration),
+    most_ms: u64,
+    rule: impl Fn(&[Change], Mark, &[DesktopWindow], i64, i64) -> Settle,
+) -> Option<Settled> {
     if memory.refused_lately() {
         return None;
     }
@@ -392,19 +448,14 @@ pub(super) fn settle(
     let mut gathered = Gathered::new(act, status.cursor());
     // The helper's clock decides; this bound only keeps a clock that never
     // moves from holding the look forever.
-    let most = EYE_SETTLE_MAX_MS / EYE_POLL_MS + 2;
+    let most = most_ms / EYE_POLL_MS + 2;
     let mut polls = 0_u32;
     loop {
         polls += 1;
         let before = gathered.changes.len();
         let now = gathered.poll(memory, display, call).ok()?;
         let windows = listed.judging(gathered.changes.len() > before, now, call);
-        match zerocode_core::computer_use_protocol::eye::settle(
-            &gathered.changes,
-            act,
-            windows,
-            now,
-        ) {
+        match rule(&gathered.changes, act, windows, now, status.now_ms) {
             Settle::Look { settled } => {
                 return Some(Settled {
                     settled,

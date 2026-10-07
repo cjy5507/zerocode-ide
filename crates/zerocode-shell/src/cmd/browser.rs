@@ -2,6 +2,10 @@
 
 use crate::*;
 
+/// The form pair (`fields`, `fill`, and the same inside an `eval`).
+pub(crate) mod form;
+pub(crate) use form::{automate_fields, automate_fill, eval_script};
+
 /// The callback channel is shared by find/grab/menu and the automation
 /// surface below. A page owns every byte it returns, so both the engine wait
 /// and the amount accepted back into Rust are bounded here, once.
@@ -82,10 +86,15 @@ pub(crate) struct BrowserInputReport {
     /// from which a settle counts the document's stillness (t-6721).
     #[serde(skip)]
     pub(crate) pressed_at: Option<f64>,
-    /// How the page settled after a press by number (t-6721) — said in the
-    /// press's sentence ([`input_said`]); a press by selector does not wait.
+    /// How the page settled after a press by number (t-6721), or by selector in
+    /// a form its agent had read (t-41592) — said in the press's sentence
+    /// ([`input_said`]); any other press by selector does not wait.
     #[serde(skip)]
     pub(crate) settle: Option<SettleReport>,
+    /// What the page said after a press in a form its agent had read, set
+    /// against that form: said below the press's sentence, in the page's own words.
+    #[serde(skip)]
+    pub(crate) after: Option<zerocode_core::browser_form::PressAfter>,
 }
 
 /// How a press's settle ended (t-6721): the core's verdict
@@ -490,6 +499,7 @@ pub(crate) fn page_failure(reply: &serde_json::Value) -> String {
         "element_disabled" => "고른 요소가 비활성화되어 있습니다",
         "element_read_only" => "고른 요소는 읽기 전용입니다",
         "element_not_editable" => "고른 요소에는 글을 입력할 수 없습니다",
+        "no_option" => "고른 목록에 그 글과 맞는 선택지가 없습니다",
         "input_cancelled" => "페이지가 입력을 거부했습니다",
         "document_moving" => {
             "페이지가 읽는 동안 계속 바뀌어 한 상태로 읽을 수 없습니다 — 다시 `zerocode-browser marks`"
@@ -499,6 +509,8 @@ pub(crate) fn page_failure(reply: &serde_json::Value) -> String {
         }
         "value_changed" => "그 칸의 값이 marks 때와 다릅니다 — 다시 `zerocode-browser marks`",
         "text_too_long" => "입력 글이 요소의 최대 길이를 넘습니다",
+        "frame_sealed" => "그 틀은 다른 출처이거나 sandbox여서 칸을 가리킬 수 없습니다",
+        "form_stale" => "양식이 읽은 뒤 바뀌었습니다 — 다시 fields로 읽으세요",
         "async_value" => "비동기 값은 이 eval 왕복에서 돌려줄 수 없습니다",
         "evaluation_failed" => "페이지 식을 평가하지 못했습니다",
         "serialization_failed" => "페이지 식의 값을 직렬화할 수 없습니다",
@@ -581,6 +593,7 @@ pub(crate) fn input_report(
         page_url,
         pressed_at,
         settle: None,
+        after: None,
     })
 }
 
@@ -662,8 +675,10 @@ const zcEncode = (answer, cap = 64000) => {
 const zcFail = (code) => zcEncode({ ok: false, code });
 // A password field is the platform's own fact — the input's type, or the
 // `current-password` a form declares — never a label's word: the one rule
-// the typing holds its keys by and a look calls a field secret by.
-const zcSecretField = (element) => element instanceof HTMLInputElement
+// the typing holds its keys by, a look and a form read call a field secret
+// by. Read by the element's tag, not its realm's class, so a field inside a
+// frame is judged as one on the page.
+const zcSecretField = (element) => String((element && element.tagName) || "").toLowerCase() === "input"
   && (String(element.type).toLowerCase() === "password"
     || String(element.autocomplete || "").toLowerCase() === "current-password");
 // The element a selector names is the first one a person could SEE, not the
@@ -2064,7 +2079,7 @@ pub(crate) async fn automate_eval(
 ) -> Result<serde_json::Value, String> {
     checked_expression(expression)?;
     let pane = browser_pane_of(app, state, label)?;
-    let script = automation_script(&serde_json::json!({}), &inlined_eval_body(expression));
+    let script = eval_script(expression, &inlined_eval_body(expression));
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE)
         .await
         .map_err(inlined_eval_failure)?;
@@ -2577,7 +2592,12 @@ pub(crate) async fn automate_click(
 ) -> Result<BrowserInputReport, String> {
     checked_selector(selector)?;
     let pane = browser_pane_of(app, state, label)?;
-    press(&pane, selector, None).await
+    // A pane whose agent has read a form is pressed in it: the page is waited for and read, and said
+    // against that form. A pane that has read none is pressed as it was, with no read of its own.
+    match form::known_form(label) {
+        Some(known) => form::press_in_form(&pane, label, selector, known).await,
+        None => press(&pane, selector, None).await,
+    }
 }
 
 /// The one press: the click's page script by a selector, answered as the
@@ -2757,7 +2777,7 @@ const zcWords = (text, cap) => zcCut(String(text || "").replace(/\s+/g, " ").tri
 // another control inside it (a select's options, a textarea's text).
 const zcLabelWords = (label) => {
   const skip = "select, textarea, button, script, style, template";
-  const walker = document.createTreeWalker(label, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+  const walker = (label.ownerDocument || document).createTreeWalker(label, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => node.nodeType === 1 && node.matches(skip)
       ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
   const words = [];
@@ -2768,11 +2788,11 @@ const zcLabelWords = (label) => {
 };
 // An element's name in the order a reader takes it: the elements it is
 // labelled by, its own label, the labels that name it, a table's caption,
-// its title.
+// its title — each looked up in the element's own document (a frame's).
 const zcNameOf = (el) => {
   const by = el.getAttribute("aria-labelledby");
   if (by) {
-    const words = by.split(/\s+/).map((id) => document.getElementById(id)).filter(Boolean)
+    const words = by.split(/\s+/).map((id) => (el.ownerDocument || document).getElementById(id)).filter(Boolean)
       .map((node) => node.textContent).join(" ");
     if (words.trim()) return words;
   }
@@ -2790,7 +2810,7 @@ const zcNameOf = (el) => {
 const zcNear = (el, field) => {
   const around = el.closest(field.regions.join(","));
   const heading = (around && around.querySelector(field.headings.join(",")))
-    || document.querySelector("h1");
+    || (el.ownerDocument || document).querySelector("h1");
   return heading ? heading.textContent : "";
 };
 // A numbered control read as a field — its kind, whether it holds a secret,
@@ -3621,6 +3641,16 @@ pub(crate) const BROWSER_OBSERVE_HELPERS: &str = r##"
 // The document a script runs in, by the moment it began: another document is
 // another epoch, a document that only changed is the same one.
 const zcEpoch = () => String(performance.timeOrigin || performance.timing.navigationStart);
+// A text's digest: its length and its FNV-1a hash — what a pin and a form's
+// fingerprint compare instead of the text itself.
+const zcDigest = (held) => {
+  let hash = 0x811c9dc5;
+  for (let at = 0; at < held.length; at += 1) {
+    hash ^= held.charCodeAt(at);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return held.length + ":" + hash.toString(16);
+};
 // What a field holds, as a pin compares it: a digest of its value — a box's
 // checked state, a select's choice — never a secret's fingerprint, and none at
 // all for a control that holds no value.
@@ -3640,12 +3670,7 @@ const zcValueDigest = (el) => {
   } else {
     return null;
   }
-  let hash = 0x811c9dc5;
-  for (let at = 0; at < held.length; at += 1) {
-    hash ^= held.charCodeAt(at);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return held.length + ":" + hash.toString(16);
+  return zcDigest(held);
 };
 // The watch a settle reads: when this document last changed, on its own
 // clock, kept on the document itself — another document starts with none, a
@@ -3772,15 +3797,27 @@ pub(crate) async fn automate_type(
         return Err("한 번에 입력할 글은 100000자를 넘을 수 없습니다".to_string());
     }
     let pane = browser_pane_of(app, state, label)?;
-    let script = automation_script(
-        &serde_json::json!({
-            "selector": selector,
-            "text": text,
-            "road": road.word(),
-            "blockRoots": block_roots(),
-        }),
-        TYPE_BODY,
-    );
+    let mut request = serde_json::json!({
+        "selector": selector,
+        "text": text,
+        "road": road.word(),
+        "blockRoots": block_roots(),
+        "frameSeparator": zerocode_core::browser_form::BROWSER_FORM_FRAME_SEPARATOR,
+    });
+    // The form helpers stand under the body: whether a field is secret is what the read says of it (a part of one secret value, a one-time code), not its own facts alone. A field inside a
+    // frame is typed into the form its agent read: when the pane's agent has read one, the page proves it is still that form before anything is written.
+    request["expect"] = match (
+        selector.contains(zerocode_core::browser_form::BROWSER_FORM_FRAME_SEPARATOR),
+        form::known_form(label),
+    ) {
+        (true, Some(known)) => serde_json::Value::String(known),
+        _ => serde_json::Value::Null,
+    };
+    let mut held = form::form_request();
+    if let (Some(held), Some(asked)) = (held.as_object_mut(), request.as_object()) {
+        held.extend(asked.clone());
+    }
+    let script = form::form_script(&held, TYPE_BODY);
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
     typed_report(page_value(reply)?, road)
 }
@@ -3794,72 +3831,125 @@ pub(crate) async fn automate_type(
 /// value. The keys road is WebKit's editing command, else the synthetic
 /// events controlled forms listen to.
 pub(crate) const TYPE_BODY: &str = r#"
-const selected = zcSelect(request.selector);
-if (selected.code) return zcFail(selected.code);
-const element = selected.element;
-if (!zcVisible(element)) return zcFail("element_not_visible");
+// A handle with the frame separator names a field inside a frame of the page's own origin: the part before the separator is the frame, the part after it the field inside. A frame of
+// another origin or a sandboxed one is refused by name, and the field is typed with the frame's own constructors. Held to `expect` — the fingerprint of the form its agent read — when given.
+const separator = request.frameSeparator;
+const framed = Boolean(separator) && String(request.selector).includes(separator);
+let doc = document;
+let win = window;
+let element;
+if (framed) {
+  const visibleIn = (view, one) => {
+    if (!one.isConnected || one.hidden) return false;
+    const style = view.getComputedStyle(one);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    const rect = one.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const parts = String(request.selector).split(separator);
+  for (const part of parts.slice(0, -1)) {
+    let frames;
+    try { frames = [...doc.querySelectorAll(part)]; } catch (_) { return zcFail("invalid_selector"); }
+    const frame = frames.find((one) => /^(iframe|frame)$/i.test(one.tagName));
+    if (!frame) return zcFail("selector_not_found");
+    if (!visibleIn(win, frame)) return zcFail("element_not_visible");
+    const sandbox = frame.getAttribute("sandbox");
+    if (sandbox !== null && !sandbox.split(/\s+/).includes("allow-same-origin")) return zcFail("frame_sealed");
+    let inner = null;
+    try { inner = frame.contentDocument; } catch (_) {}
+    if (!inner || !inner.defaultView) return zcFail("frame_sealed");
+    doc = inner;
+    win = inner.defaultView;
+  }
+  let matches;
+  try { matches = [...doc.querySelectorAll(parts[parts.length - 1])]; } catch (_) { return zcFail("invalid_selector"); }
+  if (!matches.length) return zcFail("selector_not_found");
+  element = matches.find((one) => visibleIn(win, one)) || matches[0];
+  if (!visibleIn(win, element)) return zcFail("element_not_visible");
+  if (request.expect && zcFormFields(request).print !== request.expect) return zcFail("form_stale");
+} else {
+  const selected = zcSelect(request.selector);
+  if (selected.code) return zcFail(selected.code);
+  element = selected.element;
+  if (!zcVisible(element)) return zcFail("element_not_visible");
+}
 if (element.matches && element.matches(":disabled")) return zcFail("element_disabled");
 if (element.readOnly) return zcFail("element_read_only");
-const input = element instanceof HTMLInputElement;
-const area = element instanceof HTMLTextAreaElement;
+const input = element instanceof win.HTMLInputElement;
+const area = element instanceof win.HTMLTextAreaElement;
 const editable = element.isContentEditable;
-if (!input && !area && !editable) return zcFail("element_not_editable");
+// A select takes the stdin road only: the text names one of its options, by the option's value or its words (a secret select — a card's expiry month — is written so).
+const select = element instanceof win.HTMLSelectElement;
+if (!input && !area && !editable && !select) return zcFail("element_not_editable");
 if (input && String(element.type).toLowerCase() === "file") return zcFail("element_not_editable");
 if ((input || area) && element.maxLength >= 0 && request.text.length > element.maxLength) {
   return zcFail("text_too_long");
 }
-const secureField = zcSecretField(element);
+const secureField = zcSecretField(element) || (typeof zcSecretSet === "function" && zcSecretSet(request).has(element));
 if (request.road === "keys" && secureField) {
   return zcEncode({ ok: true, value: { method: "held", secureField } });
 }
+if (select && request.road !== "setter") return zcFail("element_not_editable");
 element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
 element.focus({ preventScroll: true });
 if (request.road === "setter") {
+  if (select) {
+    const fold = (text) => String(text).replace(/\s+/g, " ").trim().toLowerCase();
+    const asked = fold(request.text);
+    const option = [...element.options].find((one) => !one.disabled && (fold(one.value) === asked || fold(one.label || one.text) === asked));
+    if (!option) return zcFail("no_option");
+    option.selected = true;
+    element.dispatchEvent(new win.Event("input", { bubbles: true }));
+    element.dispatchEvent(new win.Event("change", { bubbles: true }));
+    return zcEncode({ ok: true, value: { method: "value-setter", secureField,
+      blockPath: zcStructuralChain(element, request.blockRoots), pageUrl: zcSafeUrl(location.href) } });
+  }
   if (input || area) {
-    const prototype = input ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+    const prototype = input ? win.HTMLInputElement.prototype : win.HTMLTextAreaElement.prototype;
     Object.getOwnPropertyDescriptor(prototype, "value").set.call(element, request.text);
   } else {
     element.textContent = request.text;
   }
-  element.dispatchEvent(typeof InputEvent === "function"
-    ? new InputEvent("input", { bubbles: true, composed: true, inputType: "insertReplacementText" })
-    : new Event("input", { bubbles: true }));
+  element.dispatchEvent(typeof win.InputEvent === "function"
+    ? new win.InputEvent("input", { bubbles: true, composed: true, inputType: "insertReplacementText" })
+    : new win.Event("input", { bubbles: true }));
   return zcEncode({ ok: true, value: { method: "value-setter", secureField,
     blockPath: zcStructuralChain(element, request.blockRoots), pageUrl: zcSafeUrl(location.href) } });
 }
 if (input || area) {
   try { element.select(); } catch (_) {}
 } else {
-  const range = document.createRange();
+  const range = doc.createRange();
   range.selectNodeContents(element);
-  const selection = getSelection();
+  const selection = win.getSelection();
   selection.removeAllRanges();
   selection.addRange(range);
 }
 let edited = false;
 let method = "editing-command";
 try {
-  edited = document.execCommand("insertText", false, request.text);
+  // The editing command of the document the field stands in: the page's own, or the frame's for a field inside a frame.
+  edited = framed ? doc.execCommand("insertText", false, request.text) : document.execCommand("insertText", false, request.text);
 } catch (_) {}
 const current = input || area ? element.value : element.textContent;
 if (!edited || current !== request.text) {
   method = "synthetic-events";
-  const before = typeof InputEvent === "function"
-    ? new InputEvent("beforeinput", { bubbles: true, cancelable: true, composed: true,
+  const before = typeof win.InputEvent === "function"
+    ? new win.InputEvent("beforeinput", { bubbles: true, cancelable: true, composed: true,
         data: request.text, inputType: "insertReplacementText" })
-    : new Event("beforeinput", { bubbles: true, cancelable: true });
+    : new win.Event("beforeinput", { bubbles: true, cancelable: true });
   if (!element.dispatchEvent(before)) return zcFail("input_cancelled");
   if (input || area) {
-    const prototype = input ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+    const prototype = input ? win.HTMLInputElement.prototype : win.HTMLTextAreaElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(prototype, "value").set;
     setter.call(element, request.text);
   } else {
     element.textContent = request.text;
   }
-  const inputEvent = typeof InputEvent === "function"
-    ? new InputEvent("input", { bubbles: true, composed: true,
+  const inputEvent = typeof win.InputEvent === "function"
+    ? new win.InputEvent("input", { bubbles: true, composed: true,
         data: request.text, inputType: "insertReplacementText" })
-    : new Event("input", { bubbles: true });
+    : new win.Event("input", { bubbles: true });
   element.dispatchEvent(inputEvent);
 }
 return zcEncode({ ok: true, value: { method, secureField,

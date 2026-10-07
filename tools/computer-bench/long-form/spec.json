@@ -1,0 +1,149 @@
+{
+  "title": "Traveller registration",
+  "notice": "A synthetic form for the Computer Use bench (t-37883). Nothing here is a real person, document or site.",
+  "version": 1,
+  "options": {
+    "titles": [["mr", "Mr"], ["ms", "Ms"], ["mx", "Mx"], ["dr", "Dr"]],
+    "sexes": [["f", "Female"], ["m", "Male"], ["x", "X (unspecified)"]],
+    "yesno": [["yes", "Yes"], ["no", "No"]],
+    "purposes": [["tourism", "Tourism"], ["business", "Business"], ["study", "Study"], ["family", "Visiting family or friends"], ["transit", "Transit"]],
+    "stays": [["hotel", "Hotel"], ["home", "Private home"], ["hostel", "Hostel"], ["other", "Other"]],
+    "relations": [["parent", "Parent"], ["spouse", "Spouse or partner"], ["sibling", "Brother or sister"], ["child", "Son or daughter"], ["friend", "Friend"], ["other", "Other"]],
+    "dial_codes": [["+1", "+1 Canada / United States"], ["+33", "+33 France"], ["+44", "+44 United Kingdom"], ["+49", "+49 Germany"], ["+61", "+61 Australia"], ["+64", "+64 New Zealand"], ["+65", "+65 Singapore"], ["+81", "+81 Japan"], ["+82", "+82 Korea, Republic of"], ["+84", "+84 Viet Nam"], ["+86", "+86 China"], ["+886", "+886 Taiwan"]],
+    "countries": [
+      ["AR", "Argentina"], ["AU", "Australia"], ["AT", "Austria"], ["BE", "Belgium"], ["BR", "Brazil"],
+      ["BG", "Bulgaria"], ["KH", "Cambodia"], ["CA", "Canada"], ["CL", "Chile"], ["CN", "China"],
+      ["CO", "Colombia"], ["HR", "Croatia"], ["CZ", "Czechia"], ["DK", "Denmark"], ["EG", "Egypt"],
+      ["EE", "Estonia"], ["FI", "Finland"], ["FR", "France"], ["DE", "Germany"], ["GR", "Greece"],
+      ["HK", "Hong Kong"], ["HU", "Hungary"], ["IS", "Iceland"], ["IN", "India"], ["ID", "Indonesia"],
+      ["IE", "Ireland"], ["IL", "Israel"], ["IT", "Italy"], ["JP", "Japan"], ["KZ", "Kazakhstan"],
+      ["KP", "Korea, Democratic People's Republic of"], ["KR", "Korea, Republic of"], ["LA", "Lao People's Democratic Republic"],
+      ["LV", "Latvia"], ["LT", "Lithuania"], ["MY", "Malaysia"], ["MX", "Mexico"], ["MN", "Mongolia"],
+      ["NL", "Netherlands"], ["NZ", "New Zealand"], ["NO", "Norway"], ["PE", "Peru"], ["PH", "Philippines"],
+      ["PL", "Poland"], ["PT", "Portugal"], ["RO", "Romania"], ["SG", "Singapore"], ["SK", "Slovakia"],
+      ["SI", "Slovenia"], ["ZA", "South Africa"], ["ES", "Spain"], ["SE", "Sweden"], ["CH", "Switzerland"],
+      ["TW", "Taiwan"], ["TH", "Thailand"], ["TR", "Türkiye"], ["UA", "Ukraine"], ["AE", "United Arab Emirates"],
+      ["GB", "United Kingdom"], ["US", "United States"], ["UY", "Uruguay"], ["UZ", "Uzbekistan"], ["VN", "Viet Nam"]
+    ]
+  },
+  "sections": [
+    {"id": "traveller", "title": "1. Traveller details", "fields": [
+      {"id": "title", "label": "Title", "kind": "select", "options": "titles", "required": true},
+      {"id": "given_names", "label": "Given names (as in passport)", "kind": "text", "required": true},
+      {"id": "family_name", "label": "Family name (as in passport)", "kind": "text", "required": true},
+      {"id": "other_names", "label": "Other names used (optional)", "kind": "text", "required": false},
+      {"id": "sex", "label": "Sex", "kind": "radio", "options": "sexes", "required": true},
+      {"id": "birth_date", "label": "Date of birth", "kind": "date", "required": true},
+      {"id": "birth_place", "label": "Place of birth (city)", "kind": "text", "required": true},
+      {"id": "nationality", "label": "Nationality", "kind": "combobox", "options": "countries", "required": true}
+    ]},
+    {"id": "passport", "title": "2. Passport", "fields": [
+      {"id": "passport_number", "label": "Passport number", "kind": "text", "required": true, "hint": "One letter and eight digits"},
+      {"id": "passport_country", "label": "Issuing country", "kind": "select", "options": "countries", "required": true},
+      {"id": "passport_issued", "label": "Date of issue", "kind": "datepick", "required": true},
+      {"id": "passport_expires", "label": "Date of expiry", "kind": "datepick", "required": true},
+      {"id": "passport_authority", "label": "Issuing authority", "kind": "text", "required": true}
+    ]},
+    {"id": "contact", "title": "3. Contact details", "fields": [
+      {"id": "email", "label": "Email address", "kind": "email", "required": true},
+      {"id": "email_confirm", "label": "Confirm email address", "kind": "email", "required": true},
+      {"id": "phone_code", "label": "Mobile country code", "kind": "select", "options": "dial_codes", "required": true},
+      {"id": "phone", "label": "Mobile number", "kind": "tel", "required": true},
+      {"id": "address_line1", "label": "Home address", "kind": "text", "required": true},
+      {"id": "address_line2", "label": "Address line 2 (optional)", "kind": "text", "required": false},
+      {"id": "city", "label": "Town or city", "kind": "text", "required": true},
+      {"id": "postal_code", "label": "Postal code", "kind": "text", "required": true},
+      {"id": "residence", "label": "Country of residence", "kind": "select", "options": "countries", "required": true}
+    ]},
+    {"id": "trip", "title": "4. Your trip", "fields": [
+      {"id": "purpose", "label": "Main purpose of travel", "kind": "radio", "options": "purposes", "required": true},
+      {"id": "arrival_date", "label": "Arrival date", "kind": "datepick", "required": true},
+      {"id": "departure_date", "label": "Departure date", "kind": "datepick", "required": true},
+      {"id": "flight", "label": "Flight or vessel number", "kind": "text", "required": true},
+      {"id": "companions", "label": "Number of people travelling with you", "kind": "counter", "min": 0, "max": 9, "required": true},
+      {"id": "stay_type", "label": "Where will you stay?", "kind": "select", "options": "stays", "required": true},
+      {"id": "stay_name", "label": "Name of the hotel or host", "kind": "text", "required": true},
+      {"id": "stay_address", "label": "Address where you will stay", "kind": "textarea", "required": true}
+    ]},
+    {"id": "emergency", "title": "5. Emergency contact", "fields": [
+      {"id": "emergency_name", "label": "Full name", "kind": "text", "required": true},
+      {"id": "emergency_relation", "label": "Relationship to you", "kind": "select", "options": "relations", "required": true},
+      {"id": "emergency_phone", "label": "Phone number (with country code)", "kind": "tel", "required": true}
+    ]},
+    {"id": "declarations", "title": "6. Declarations", "fields": [
+      {"id": "decl_currency", "label": "Are you carrying more than 10,000 USD in cash or its equivalent?", "kind": "yesno", "options": "yesno", "required": true},
+      {"id": "decl_food", "label": "Are you carrying food, plants or animal products?", "kind": "yesno", "options": "yesno", "required": true},
+      {"id": "decl_farm", "label": "Have you visited a farm in the last 30 days?", "kind": "yesno", "options": "yesno", "required": true},
+      {"id": "decl_refused", "label": "Have you ever been refused entry to any country?", "kind": "yesno", "options": "yesno", "required": true},
+      {"id": "decl_health", "label": "Do you have a fever or symptoms of an infectious disease?", "kind": "yesno", "options": "yesno", "required": true},
+      {"id": "decl_dual", "label": "Do you hold another nationality?", "kind": "yesno", "options": "yesno", "required": true},
+      {"id": "second_nationality", "label": "Your other nationality", "kind": "select", "options": "countries", "required": true, "shows_when": {"field": "decl_dual", "is": "yes"}}
+    ]},
+    {"id": "documents", "title": "7. Documents", "fields": [
+      {"id": "passport_scan", "label": "Scan of your passport photo page", "kind": "file", "required": true, "hint": "JPG, PNG or PDF, up to 5 MB"}
+    ]},
+    {"id": "consent", "title": "8. Declaration", "fields": [
+      {"id": "consent_true", "label": "I declare that the information I have given is true and complete.", "kind": "checkbox", "required": true},
+      {"id": "consent_advisories", "label": "Send me travel advisories by email (optional).", "kind": "checkbox", "required": false}
+    ]}
+  ],
+  "card": {
+    "text": [
+      "Register my trip on the traveller registration form {where}. My details:",
+      "Me: Mr Alex Jordan Sample — given names ALEX JORDAN, family name SAMPLE, no other names. Male, born 12 March 1990 in Sampletown. I am a South Korean national and I also hold Canadian nationality.",
+      "Passport X12345678, issued by South Korea (Ministry of Foreign Affairs) on 4 May 2021, expires 4 May 2031.",
+      "Email alex.sample@example.com, mobile +82 10 5550 0123. Home: 1 Example Street, Apt 2, Sampletown, postal code 12345, South Korea.",
+      "Trip: tourism. Arriving 20 November 2026, leaving 29 November 2026 on flight ZC 123. Two friends travel with me. We stay at the Harbour View Hotel, 10 Quay Road, Port Sample.",
+      "Emergency contact: my sister Jamie Sample, +82 10 5550 0199.",
+      "Declarations: no cash over the limit, no food or plants, no farm visits, never refused entry, no symptoms.",
+      "I will attach the passport scan myself when you reach the upload — hand that one step to me.",
+      "I agree to the declaration; I do not want advisory emails. Submit the form and tell me the reference number."
+    ],
+    "expected": {
+      "title": "mr",
+      "given_names": "ALEX JORDAN",
+      "family_name": "SAMPLE",
+      "other_names": "",
+      "sex": "m",
+      "birth_date": "1990-03-12",
+      "birth_place": "Sampletown",
+      "nationality": "KR",
+      "passport_number": "X12345678",
+      "passport_country": "KR",
+      "passport_issued": "2021-05-04",
+      "passport_expires": "2031-05-04",
+      "passport_authority": "Ministry of Foreign Affairs",
+      "email": "alex.sample@example.com",
+      "email_confirm": "alex.sample@example.com",
+      "phone_code": "+82",
+      "phone": "10 5550 0123",
+      "address_line1": "1 Example Street",
+      "address_line2": "Apt 2",
+      "city": "Sampletown",
+      "postal_code": "12345",
+      "residence": "KR",
+      "purpose": "tourism",
+      "arrival_date": "2026-11-20",
+      "departure_date": "2026-11-29",
+      "flight": "ZC 123",
+      "companions": 2,
+      "stay_type": "hotel",
+      "stay_name": "Harbour View Hotel",
+      "stay_address": "10 Quay Road, Port Sample",
+      "emergency_name": "Jamie Sample",
+      "emergency_relation": "sibling",
+      "emergency_phone": "+82 10 5550 0199",
+      "decl_currency": "no",
+      "decl_food": "no",
+      "decl_farm": "no",
+      "decl_refused": "no",
+      "decl_health": "no",
+      "decl_dual": "yes",
+      "second_nationality": "CA",
+      "passport_scan": "attached",
+      "consent_true": true,
+      "consent_advisories": false
+    },
+    "handed_to_person": ["passport_scan"]
+  }
+}

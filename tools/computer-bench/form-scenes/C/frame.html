@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>카드 정보 입력</title>
+<style>
+:root{--pri:#0b5cff;--ink:#1d2433;--sub:#5c6678;--line:#d5dbe6;--err:#d12f49}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{font:14.5px/1.5 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif;color:var(--ink);background:#fff}
+.box{padding:14px 18px 10px}
+.hd{font-weight:700;font-size:15px;margin-bottom:2px}
+.hd .hint{font-weight:400;color:var(--sub);font-size:12.5px}
+.loading{padding:40px 0;text-align:center;color:var(--sub)}
+.banner{margin:8px 0;padding:8px 12px;border-radius:8px;background:#fdecef;border:1px solid #f3b8c2;color:#9b1c33;font-size:13px}
+.row{display:grid;grid-template-columns:120px minmax(0,1fr);gap:4px 12px;padding:10px 0;border-top:1px solid #edf0f5;align-items:start}
+.cap{padding-top:8px;font-weight:600;font-size:13.5px}
+.cap label{font-weight:600}
+input[type=text],input[type=password],select{height:36px;padding:0 10px;border:1px solid #b9c2d3;border-radius:8px;font:inherit;background:#fff;color:var(--ink)}
+input:focus,select:focus{outline:2px solid #7aa7ff;outline-offset:1px}
+.n4{width:66px;text-align:center;letter-spacing:1px}
+.n2{width:54px;text-align:center}
+.n3{width:80px;text-align:center}
+.wide{width:100%;max-width:300px;text-transform:uppercase}
+.sep{color:var(--sub);margin:0 4px}
+.sub{color:var(--sub);font-size:12px;margin-top:3px}
+.err{color:var(--err);font-size:12.5px;margin-top:3px}
+.err:empty{display:none}
+.row.bad input,.row.bad select{border-color:var(--err)}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="hd">카드 정보 입력 <span class="hint">(시험용 화면 · 실제 결제되지 않습니다)</span></div>
+  <div id="loading" class="loading">보안 입력창을 불러오는 중…</div>
+  <form id="cf" hidden autocomplete="off" novalidate onsubmit="return false">
+    <div class="row">
+      <div class="cap">카드 번호</div>
+      <div>
+        <input type="text" id="c1" maxlength="4" inputmode="numeric" class="n4" autocomplete="off"><span class="sep">-</span><input type="text" id="c2" maxlength="4" inputmode="numeric" class="n4" autocomplete="off"><span class="sep">-</span><input type="password" id="c3" maxlength="4" inputmode="numeric" class="n4" autocomplete="off"><span class="sep">-</span><input type="password" id="c4" maxlength="4" inputmode="numeric" class="n4" autocomplete="off">
+        <div class="err" data-err="card"></div>
+      </div>
+    </div>
+    <div class="row">
+      <span class="cap">유효기간</span>
+      <div>
+        <input type="text" id="xm" maxlength="2" inputmode="numeric" placeholder="MM" class="n2" autocomplete="off"><span class="sep">/</span><input type="text" id="xy" maxlength="2" inputmode="numeric" placeholder="YY" class="n2" autocomplete="off">
+        <div class="err" data-err="exp"></div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="cap"><label for="cn">카드 소유자명</label></div>
+      <div>
+        <input type="text" id="cn" class="wide" maxlength="26" autocomplete="off">
+        <div class="sub">영문, 카드에 적힌 대로</div>
+        <div class="err" data-err="name"></div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="cap">CVC</div>
+      <div>
+        <input type="password" id="cv" maxlength="3" inputmode="numeric" class="n3" autocomplete="off">
+        <div class="sub">카드 뒷면 숫자 3자리</div>
+        <div class="err" data-err="cvc"></div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="cap"><label for="inst">할부</label></div>
+      <div>
+        <select id="inst">
+          <option value="0">일시불</option>
+          <option value="2">2개월</option>
+          <option value="3">3개월</option>
+          <option value="6">6개월</option>
+          <option value="12">12개월</option>
+        </select>
+      </div>
+    </div>
+  </form>
+</div>
+<script>
+(function () {
+  'use strict';
+  var $ = function (s) { return document.querySelector(s); };
+
+  /* The card box appears a moment after the frame loads, like an embedded payment form. */
+  setTimeout(function () { $('#loading').hidden = true; $('#cf').hidden = false; }, 500);
+
+  function setErr(key, msg) {
+    var el = $('[data-err="' + key + '"]');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.closest('.row').classList.toggle('bad', !!msg);
+  }
+
+  var cardBoxes = ['#c1', '#c2', '#c3', '#c4'].map($);
+  cardBoxes.forEach(function (el, i) {
+    el.addEventListener('input', function () {
+      el.value = el.value.replace(/\D/g, '');
+      if (el.value.length >= el.maxLength && i < 3 && document.activeElement === el) cardBoxes[i + 1].focus();
+      setErr('card', '');
+    });
+    el.addEventListener('keydown', function (e) {
+      if (e.key === 'Backspace' && el.value === '' && i > 0) cardBoxes[i - 1].focus();
+    });
+    el.addEventListener('paste', function (e) {
+      var cd = e.clipboardData || window.clipboardData;
+      var t = ((cd && cd.getData('text')) || '').replace(/\D/g, '');
+      if (t.length <= el.maxLength) return;
+      e.preventDefault();
+      var k = 0, j = i;
+      for (; j < 4 && k < t.length; j++, k += 4) cardBoxes[j].value = t.slice(k, k + 4);
+      cardBoxes[Math.min(3, j - 1)].focus();
+      setErr('card', '');
+    });
+  });
+
+  $('#xm').addEventListener('input', function (e) {
+    e.target.value = e.target.value.replace(/\D/g, '');
+    if (e.target.value.length >= 2 && document.activeElement === e.target) $('#xy').focus();
+    setErr('exp', '');
+  });
+  $('#xy').addEventListener('input', function (e) {
+    e.target.value = e.target.value.replace(/\D/g, '');
+    setErr('exp', '');
+  });
+  $('#cn').addEventListener('input', function () { setErr('name', ''); });
+  $('#cv').addEventListener('input', function (e) {
+    e.target.value = e.target.value.replace(/\D/g, '');
+    setErr('cvc', '');
+  });
+
+  function validate() {
+    ['card', 'exp', 'name', 'cvc'].forEach(function (k) { setErr(k, ''); });
+    var ok = true;
+    var v = {};
+
+    var n = cardBoxes.map(function (b) { return b.value; });
+    if (!n.every(function (x) { return /^\d{4}$/.test(x); })) { setErr('card', '카드 번호 16자리를 모두 입력해 주세요.'); ok = false; }
+    v.card = n.join('');
+
+    var mm = $('#xm').value, yy = $('#xy').value;
+    if (!/^(0[1-9]|1[0-2])$/.test(mm) || !/^\d{2}$/.test(yy)) {
+      setErr('exp', '유효기간을 월/년 두 자리씩 입력해 주세요. 예) 11/28'); ok = false;
+    } else if (Number(yy) < 26 || (Number(yy) === 26 && Number(mm) < 10)) {
+      setErr('exp', '유효기간이 지난 카드입니다.'); ok = false;
+    }
+    v.exp = mm + '/' + yy;
+
+    var nm = $('#cn').value.trim().replace(/\s+/g, ' ').toUpperCase();
+    if (!/^[A-Z][A-Z .'-]{1,25}$/.test(nm)) { setErr('name', '카드에 적힌 영문 이름을 입력해 주세요.'); ok = false; }
+    v.cardName = nm;
+
+    var cv = $('#cv').value;
+    if (!/^\d{3}$/.test(cv)) { setErr('cvc', 'CVC 3자리를 입력해 주세요.'); ok = false; }
+    v.cvc = cv;
+
+    v.inst = $('#inst').value;
+    return { ok: ok, values: v };
+  }
+
+  window.addEventListener('message', function (ev) {
+    if (ev.source !== window.parent) return;
+    var d = ev.data;
+    if (!d || d.t !== 'hpf-validate') return;
+    var r = validate();
+    window.parent.postMessage({ t: 'hpf-card', id: d.id, ok: r.ok, values: r.values }, '*');
+  });
+})();
+</script>
+</body>
+</html>

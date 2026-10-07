@@ -64,6 +64,7 @@ tools-test:
     python3 tools/computer-bench/test_fixture_reflex.py
     python3 tools/computer-bench/test_fixture_support.py
     python3 tools/computer-bench/test_fixture_rts.py
+    python3 tools/computer-bench/long-form/test_long_form.py
     python3 tools/tests/test_decision_shadow_summary.py
     python3 tools/tests/test_jev_token_diet_baseline.py
     python3 tools/tests/test_hedge_replay_seed.py
@@ -144,6 +145,25 @@ browser-door-test:
 # red for four days after t-2931 (2026-09-07 → 09-11) and nobody saw it.
 knowledge-browser-test:
     node ui/tests/test-knowledge-graph.mjs
+
+# The long-form Computer Use bench's page, fake desk and oracle in Chromium,
+# without a model (t-37883): a scripted hand through the desktop verbs passes,
+# a run that does nothing fails. A bench's own check, run by the build line
+# beside a measurement rather than by `verify`.
+long-form-test:
+    node tools/computer-bench/long-form/test-desk.mjs
+
+# The form bench's stand-in browser door, its shim and the runner of a real
+# agent, held to what the window answers (t-41387): no model and no login — a
+# shell script stands where `claude -p` stands. Builds the core's `door_text`
+# example first, which says what the window says. A bench's own check, run by
+# the build line, not by `verify`.
+form-bench-test:
+    cargo build -p zerocode-core --example door_text
+    node tools/computer-bench/form-scenes/test-desk.mjs --door-text "${CARGO_TARGET_DIR:-target}/debug/examples/door_text"
+    node tools/computer-bench/form-scenes/test-real.mjs --door-text "${CARGO_TARGET_DIR:-target}/debug/examples/door_text"
+    node tools/computer-bench/form-scenes/test-kit.mjs
+    node tools/computer-bench/form-scenes/test-drive.mjs
 
 # Release builds use a deliberately small frontend tree. Keeping this separate
 # from ui/ means browser fixtures and prototypes remain available to developers

@@ -1,0 +1,21 @@
+{
+  "treatment": "cavity",
+  "visitType": "first",
+  "symptoms": "cold,bite",
+  "pain": "6",
+  "branch": "hanbit",
+  "doctor": "d-seo",
+  "date": "2026-11-12",
+  "time": "14:30",
+  "name": "윤하린",
+  "birth": "1992-03-14",
+  "phoneCountry": "+82",
+  "phone": "01055500142",
+  "phoneCode": "229212",
+  "email": "haerin.yoon@example.com",
+  "memo": "",
+  "agreePrivacy": true,
+  "agreeHealth": true,
+  "marketing": false,
+  "reservationNo": "PG261112-143042"
+}

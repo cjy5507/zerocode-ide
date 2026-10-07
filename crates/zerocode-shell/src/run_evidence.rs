@@ -126,8 +126,8 @@ pub fn captures(tool: &str, verb: &str) -> Option<bool> {
         ("emulator", "screenshot")
         | (
             "browser",
-            "goto" | "click" | "type" | "eval" | "wait" | "screenshot" | "viewport" | "scroll"
-            | "find",
+            "goto" | "click" | "type" | "fill" | "eval" | "wait" | "screenshot" | "viewport"
+            | "scroll" | "find",
         )
         | (
             "computer",
@@ -190,7 +190,12 @@ pub fn captures(tool: &str, verb: &str) -> Option<bool> {
 /// frames already hold, and a recipe replays it.
 #[must_use]
 pub fn redacted(tool: &str, argv: &[String]) -> Vec<String> {
-    let typing = tool == "browser" && argv.first().is_some_and(|verb| verb == "type");
+    // A browser `type` and a `fill` carry what was typed last, as one word
+    // or after `--value`.
+    let typing = tool == "browser"
+        && argv
+            .first()
+            .is_some_and(|verb| verb == "type" || verb == "fill");
     let needle = tool == "computer"
         && argv
             .first()
@@ -1221,6 +1226,17 @@ mod tests {
         assert_eq!(
             redacted("browser", &words(&["type", "b1", "#pw", "hunter2"])),
             words(&["type", "b1", "#pw", "[7 chars]"])
+        );
+        // A fill's bundle holds a person's details: one word, or after
+        // `--value` (the stdin road's shape).
+        let bundle = r##"{"#name":"Kim"}"##;
+        assert_eq!(
+            redacted("browser", &words(&["fill", "b1", bundle])),
+            words(&["fill", "b1", "[15 chars]"])
+        );
+        assert_eq!(
+            redacted("browser", &words(&["fill", "b1", "--value", bundle])),
+            words(&["fill", "b1", "--value", "[15 chars]"])
         );
         assert_eq!(
             redacted(

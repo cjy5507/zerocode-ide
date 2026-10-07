@@ -154,10 +154,37 @@ fn frame_key(params: &Map<String, Value>) -> String {
         let region = text("region").unwrap_or_else(|| "full".to_string());
         format!("desktop:{display}/region:{region}")
     };
-    match text("viewer") {
+    viewers(params, place)
+}
+
+/// A place as one viewer keeps it: each model's looks are its own.
+fn viewers(params: &Map<String, Value>, place: String) -> String {
+    match params.get("viewer").and_then(Value::as_str) {
         Some(viewer) => format!("viewer:{viewer}/{place}"),
         None => place,
     }
+}
+
+/// An app look's place by what the helper resolved — the app's bundle id
+/// (its pid when it has none) and the window's id — so one window looked at
+/// under its English name, its own-language name or its bundle id keeps one
+/// last frame (t-37883: a mirrored phone's session named one window three
+/// ways). `None` when the helper's answer names neither.
+fn resolved_key(params: &Map<String, Value>, frame: &Value) -> Option<String> {
+    let app = frame.pointer("/snapshot/app")?;
+    let who = app
+        .get("bundleId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            app.get("pid")
+                .and_then(Value::as_i64)
+                .map(|pid| format!("pid:{pid}"))
+        })?;
+    let window = frame
+        .pointer("/snapshot/window/id")
+        .and_then(Value::as_i64)?;
+    Some(viewers(params, format!("app:{who}/window:id:{window}")))
 }
 
 fn take_last(key: &str) -> Option<LastFrame> {
@@ -544,6 +571,13 @@ fn look(
     } else {
         None
     };
+    // An app's window is kept under who the helper says it is, whatever
+    // name it was asked by.
+    let key = if app {
+        resolved_key(params, &frame).unwrap_or(key)
+    } else {
+        key
+    };
     // Taken out once the picture and its text are had: a look the helper
     // refused leaves the place's last look where it was.
     let held = take_last(&key);
@@ -632,6 +666,11 @@ fn look(
         "changed": changed,
         "changedShare": share,
     });
+    // Who an app look saw, as the helper resolved it — one name to keep
+    // asking by.
+    if let Some(resolved) = frame.pointer("/snapshot/app").filter(|_| app) {
+        answer["app"] = resolved.clone();
+    }
     if let Some(share) = share {
         let stuck = super::state::note_look(
             share > 0.0,
@@ -1293,6 +1332,52 @@ mod tests {
             answer.get("stuck").is_none(),
             "an unknown look is not counted as one that saw nothing change"
         );
+    }
+
+    /// t-37883: one window asked for by its English name, its own-language
+    /// name and its bundle id is one place — the next look compares with the
+    /// first — and the look says who it saw.
+    #[test]
+    fn an_apps_window_named_three_ways_keeps_one_last_frame() {
+        let picture = png(8, 8, |_, _| [9, 9, 9, 255]);
+        let mut call = |method: &str, _: Value| -> Result<Value, ComputerUseError> {
+            match method {
+                "getAppState" => {
+                    let mut frame = answered(&picture, (8, 8), (742.0, 61.0), 1.0);
+                    frame["snapshot"] = serde_json::json!({
+                        "app": { "name": "iPhone Mirroring", "bundleId": "com.apple.ScreenContinuity", "pid": 4243 },
+                        "window": { "id": 77, "title": "iPhone Mirroring" },
+                        "treeText": "",
+                        "elementCount": 1,
+                    });
+                    Ok(frame)
+                }
+                other => Err(ComputerUseError::new(
+                    error_code::UNSUPPORTED_CAPABILITY,
+                    format!("not asked here: {other}"),
+                )),
+            }
+        };
+        let memory = super::super::eye::Memory::new();
+        let look = |name: &str| {
+            let mut params = diff_look("t-37883-names");
+            params.insert("app".into(), name.into());
+            params
+        };
+        let first =
+            observe_with(&look("iPhone Mirroring"), &memory, &mut call, &mut |_| {}).unwrap();
+        assert_eq!(
+            first["app"]["bundleId"], "com.apple.ScreenContinuity",
+            "the look says who it saw"
+        );
+        for name in ["iPhone 미러링", "com.apple.ScreenContinuity"] {
+            let again = observe_with(&look(name), &memory, &mut call, &mut |_| {}).unwrap();
+            assert_eq!(
+                again["changed"],
+                serde_json::json!([]),
+                "{name}: the same window, and nothing changed"
+            );
+        }
     }
 
     /// The measurement: every look leaves one line of numbers — how many

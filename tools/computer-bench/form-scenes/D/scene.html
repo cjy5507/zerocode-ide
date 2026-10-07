@@ -1,0 +1,1038 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>노을결 캠퍼 렌탈 - 캠핑카 대여 예약</title>
+<style>
+:root{--bg:#f3f4f7;--card:#fff;--ink:#1c2230;--mut:#5d6677;--line:#cfd5df;--acc:#1b6ad0;--accd:#1555a8;--accl:#e5effc;--err:#c0262d;--errbg:#fdecee;--ok:#18794a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif}
+[hidden]{display:none!important}
+.wrap{max-width:820px;margin:0 auto;padding:24px 16px 80px}
+.top .brand{color:var(--acc);font-weight:700;letter-spacing:.02em}
+.top h1{margin:4px 0 6px;font-size:26px}
+.top .lead{margin:0 0 8px;color:var(--mut)}
+.sec{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px 22px 6px;margin:16px 0}
+.sec>h2{margin:0 0 16px;font-size:18px}
+.field{margin:0 0 20px;border:0;padding:0;min-width:0}
+legend.cap{padding:0}
+.cap{display:block;font-weight:600;margin:0 0 6px}
+.cap small{font-weight:400;color:var(--mut);margin-left:4px}
+.req{color:var(--err)}
+.hint{margin-top:6px;color:var(--mut);font-size:13px}
+.err{margin-top:6px;color:var(--err);font-size:13px;font-weight:600}
+.ok{color:var(--ok);font-weight:600}
+input[type=text],input[type=email],input[type=tel],select,textarea{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;color:inherit;font:inherit}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--acc);outline-offset:0;border-color:var(--acc)}
+input[readonly]{background:#f1f3f6;color:var(--mut)}
+select:disabled,input:disabled{background:#eef0f4;color:#8a92a2}
+.short{max-width:220px}
+.inline{display:flex;gap:8px}
+.inline input{flex:1;min-width:0}
+.trip{display:flex;gap:8px}
+.trip select{flex:1;min-width:0}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.count{text-align:right;color:var(--mut);font-size:12px;margin-top:2px}
+.field.bad input,.field.bad select,.field.bad textarea,.field.bad .rcell,.field.bad .wheel,.field.bad .copt,.field.bad .terms,.field.bad .stepper,.field.bad .seg{border-color:var(--err)}
+
+.btn{font:inherit;padding:10px 16px;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--ink);cursor:pointer;white-space:nowrap}
+.btn:hover:not(:disabled){background:#f1f4f9}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+.btn.pri:hover:not(:disabled){background:var(--accd)}
+.btn.big{width:100%;padding:14px;font-size:17px}
+.btn.ghost{background:transparent}
+
+/* range calendar */
+.rwrap{position:relative}
+.rtrig{display:flex;align-items:stretch;gap:8px;flex-wrap:wrap}
+.rcell{flex:1;min-width:150px;display:flex;flex-direction:column;align-items:flex-start;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;cursor:pointer;text-align:left;color:inherit}
+.rcell .rk{font-size:12px;color:var(--mut)}
+.rcell .rv{font-weight:600}
+.rcell[aria-expanded=true]{border-color:var(--acc);box-shadow:0 0 0 2px var(--accl)}
+.rarr{align-self:center;color:var(--mut)}
+.rnight{align-self:center;color:var(--acc);font-weight:600}
+.rpop{position:absolute;left:0;top:calc(100% + 6px);z-index:30;width:min(100%,760px);background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(20,30,50,.2);padding:14px}
+.rpop-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.rpop-title{flex:1;text-align:center;font-weight:600;font-size:14px}
+.nav{width:36px;height:36px;border:1px solid var(--line);border-radius:50%;background:#fff;font-size:20px;line-height:1;cursor:pointer}
+.nav:disabled{opacity:.35;cursor:not-allowed}
+.months{display:flex;gap:18px}
+.month{flex:1;min-width:0}
+.mtitle{text-align:center;margin:4px 0 8px;font-size:15px}
+.wk,.days{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+.wk span{text-align:center;color:var(--mut);font-size:12px;padding:4px 0}
+.day{height:50px;border:0;background:transparent;border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;font:inherit;color:inherit;cursor:pointer;padding:0}
+.day .n{font-weight:600;font-size:14px;line-height:1.1}
+.day .r{font-size:10px;color:var(--mut);line-height:1.1;min-height:11px}
+.day:hover:not(:disabled){background:var(--accl)}
+.day:disabled{color:#b6bcc7;cursor:not-allowed}
+.day.blk .n{text-decoration:line-through}
+.day.in,.day.hov{background:var(--accl);border-radius:0}
+.day.sel{background:var(--acc);color:#fff}
+.day.sel .r{color:#dbe8fb}
+.day.blank{pointer-events:none}
+.rpop-msg{min-height:20px;margin:8px 0 0;color:var(--err);font-size:13px;font-weight:600}
+.rpop-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}
+@media (max-width:720px){.months{flex-direction:column}}
+
+/* time wheel */
+.timewrap{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}
+.wheel{position:relative;width:150px;height:190px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;background:#fff;scroll-snap-type:y proximity}
+.wheel:focus-visible{outline:2px solid var(--acc)}
+.wopt{height:38px;line-height:38px;text-align:center;cursor:pointer;scroll-snap-align:center;font-variant-numeric:tabular-nums}
+.wopt:hover{background:#f1f4f9}
+.wopt[aria-selected=true]{background:var(--acc);color:#fff;font-weight:700}
+.picked{margin-top:6px}
+.ampmrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ampmrow select{width:auto;min-width:92px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.segb{padding:10px 16px;border:0;background:#fff;font:inherit;color:inherit;cursor:pointer}
+.segb+.segb{border-left:1px solid var(--line)}
+.segb[aria-checked=true]{background:var(--acc);color:#fff;font-weight:600}
+
+/* option cards, stepper, chips */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.copt{display:grid;grid-template-columns:20px 1fr;grid-template-areas:"r t" ". s";gap:2px 8px;align-items:center;padding:12px;border:1px solid var(--line);border-radius:10px;cursor:pointer;background:#fff}
+.copt input{grid-area:r;margin:0}
+.copt .ct{grid-area:t;font-weight:600}
+.copt .cs{grid-area:s;color:var(--mut);font-size:13px}
+.copt:has(input:checked){border-color:var(--acc);background:var(--accl)}
+.stepper{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}
+.stepper button{width:44px;height:42px;border:0;background:#f4f6fa;font-size:20px;cursor:pointer;color:inherit}
+.stepper button:disabled{color:#b3bac7;cursor:not-allowed}
+.stepper .st-val{min-width:54px;text-align:center;font-weight:700;font-size:17px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;gap:6px;align-items:baseline;padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:#fff;font:inherit;color:inherit;cursor:pointer}
+.chip .cp{color:var(--mut);font-size:12px}
+.chip[aria-pressed=true]{background:var(--accl);border-color:var(--acc);color:var(--accd);font-weight:600}
+.chip[aria-pressed=true]::before{content:"\2713"}
+
+/* address autocomplete */
+.ac{position:relative}
+.ac-list{position:absolute;left:0;right:0;top:100%;z-index:25;background:#fff;border:1px solid var(--line);border-radius:8px;margin-top:2px;box-shadow:0 8px 20px rgba(20,30,50,.15);max-height:340px;overflow:auto}
+.ac-item{padding:9px 12px;cursor:pointer;border-bottom:1px solid #eef0f4}
+.ac-item:last-child{border-bottom:0}
+.ac-item .m{display:block;font-weight:600}
+.ac-item .s{display:block;font-size:12px;color:var(--mut)}
+.ac-item:hover,.ac-item.on{background:var(--accl)}
+.ac-msg{padding:10px 12px;color:var(--mut)}
+
+/* terms */
+.terms{height:150px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:10px 14px;background:#fafbfc;font-size:13px;color:#39414f}
+.terms:focus-visible{outline:2px solid var(--acc)}
+.terms h5{margin:10px 0 2px;font-size:13px}
+.terms p{margin:0 0 6px}
+.chk{display:flex;gap:8px;align-items:center;cursor:pointer;margin-top:10px}
+.chk input{width:18px;height:18px;margin:0}
+
+/* summary and result */
+.sl{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed #e2e6ec}
+.total{display:flex;justify-content:space-between;padding:10px 0 14px;font-size:17px;font-weight:700}
+.banner{background:var(--errbg);border:1px solid #f2b8bc;color:var(--err);padding:12px 16px;border-radius:10px;margin:12px 0;font-weight:600}
+.actions{margin:16px 0}
+.done h2{color:var(--ok)}
+.done dl{display:grid;grid-template-columns:130px 1fr;gap:4px 12px;margin:10px 0 16px}
+.done dt{color:var(--mut)}
+.done dd{margin:0}
+@media (max-width:560px){.row2{grid-template-columns:1fr}.sec{padding:16px 14px 4px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="brand">노을결 캠퍼 렌탈</div>
+  <h1>캠핑카 대여 예약</h1>
+  <p class="lead">대여 일정, 차량, 운전자 정보를 입력해 주세요. <span class="req">*</span> 표시는 필수 항목입니다.</p>
+</header>
+
+<form id="bookForm" novalidate autocomplete="off">
+
+<section class="sec">
+  <h2>1. 대여 일정</h2>
+
+  <div class="field" id="fld-range">
+    <div class="cap" id="rangeCap">대여 기간 <span class="req">*</span></div>
+    <div class="rwrap" id="rwrap">
+      <div class="rtrig">
+        <button type="button" class="rcell" id="rStartBtn" aria-haspopup="dialog" aria-expanded="false"><span class="rk">출발</span><span class="rv" id="rStartTxt">날짜 선택</span></button>
+        <span class="rarr" aria-hidden="true">&rarr;</span>
+        <button type="button" class="rcell" id="rEndBtn" aria-haspopup="dialog" aria-expanded="false"><span class="rk">반납</span><span class="rv" id="rEndTxt">날짜 선택</span></button>
+        <span class="rnight" id="rNights"></span>
+      </div>
+      <div class="rpop" id="rPop" role="dialog" aria-label="대여 기간 선택" hidden>
+        <div class="rpop-head">
+          <button type="button" class="nav" id="calPrev" aria-label="이전 달">&lsaquo;</button>
+          <div class="rpop-title" id="calSum">출발일을 선택해 주세요.</div>
+          <button type="button" class="nav" id="calNext" aria-label="다음 달">&rsaquo;</button>
+        </div>
+        <div class="months" id="calMonths"></div>
+        <div class="rpop-msg" id="calMsg" role="status"></div>
+        <div class="rpop-foot">
+          <button type="button" class="btn ghost" id="calReset">초기화</button>
+          <button type="button" class="btn ghost" id="calClose">닫기</button>
+          <button type="button" class="btn pri" id="calApply" disabled>선택 완료</button>
+        </div>
+      </div>
+    </div>
+    <div class="hint">최소 2박, 최대 14박까지 예약할 수 있고 오늘부터 7일 뒤 출발일부터 선택할 수 있어요.</div>
+    <div class="err" id="err-range" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-pt">
+    <div class="cap" id="ptCap">인수 시간 <span class="req">*</span></div>
+    <div class="timewrap">
+      <div class="wheel" id="ptWheel" role="listbox" tabindex="0" aria-labelledby="ptCap"></div>
+      <div>
+        <div class="hint" style="margin-top:0">영업시간 09:00-18:00, 30분 단위</div>
+        <div class="picked">선택한 시간 <b id="ptSel">-</b></div>
+      </div>
+    </div>
+    <div class="err" id="err-pt" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-rt">
+    <div class="cap" id="rtCap">반납 시간 <span class="req">*</span></div>
+    <div class="ampmrow" role="group" aria-labelledby="rtCap">
+      <div class="seg" id="rtAmpm" role="radiogroup" aria-label="오전 또는 오후">
+        <button type="button" class="segb" role="radio" aria-checked="false" data-v="am">오전</button>
+        <button type="button" class="segb" role="radio" aria-checked="false" data-v="pm">오후</button>
+      </div>
+      <select id="rtHour" aria-label="시"></select>
+      <select id="rtMin" aria-label="분"></select>
+    </div>
+    <div class="hint">반납은 지점에서만 가능하며 09:00-18:00 사이에 도착해야 해요.</div>
+    <div class="err" id="err-rt" role="alert" hidden></div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2>2. 차량과 인원</h2>
+
+  <fieldset class="field" id="fld-cls">
+    <legend class="cap">차량 등급 <span class="req">*</span></legend>
+    <div class="cards">
+      <label class="copt"><input type="radio" name="cls" value="small"><span class="ct">소형 밴</span><span class="cs">최대 2인 · 1박 ₩69,000</span></label>
+      <label class="copt"><input type="radio" name="cls" value="mid"><span class="ct">중형 캠퍼</span><span class="cs">최대 5인 · 1박 ₩98,000</span></label>
+      <label class="copt"><input type="radio" name="cls" value="large"><span class="ct">대형 캠퍼</span><span class="cs">최대 7인 · 1박 ₩128,000</span></label>
+    </div>
+    <div class="err" id="err-cls" role="alert" hidden></div>
+  </fieldset>
+
+  <div class="field" id="fld-model">
+    <label class="cap" for="model">모델 <span class="req">*</span></label>
+    <select id="model" disabled><option value="">차량 등급을 먼저 선택하세요</option></select>
+    <div class="err" id="err-model" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-pax">
+    <div class="row2">
+      <div>
+        <div class="cap" id="adCap">성인 <small>만 13세 이상</small></div>
+        <div class="stepper" data-key="adults" data-min="1" data-max="6" role="group" aria-labelledby="adCap">
+          <button type="button" class="st-minus" aria-label="성인 줄이기">&minus;</button>
+          <output class="st-val">1</output>
+          <button type="button" class="st-plus" aria-label="성인 늘리기">+</button>
+        </div>
+      </div>
+      <div>
+        <div class="cap" id="chCap">어린이 <small>만 12세 이하</small></div>
+        <div class="stepper" data-key="children" data-min="0" data-max="4" role="group" aria-labelledby="chCap">
+          <button type="button" class="st-minus" aria-label="어린이 줄이기">&minus;</button>
+          <output class="st-val">0</output>
+          <button type="button" class="st-plus" aria-label="어린이 늘리기">+</button>
+        </div>
+      </div>
+    </div>
+    <div class="err" id="err-pax" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-extras">
+    <div class="cap" id="exCap">추가 옵션 <small>여러 개 선택할 수 있어요</small></div>
+    <div class="chips" role="group" aria-labelledby="exCap">
+      <button type="button" class="chip" data-k="bike" aria-pressed="false"><span class="cn">자전거 거치대</span><span class="cp">+₩10,000</span></button>
+      <button type="button" class="chip" data-k="chairs" aria-pressed="false"><span class="cn">캠핑 의자 세트</span><span class="cp">+₩15,000</span></button>
+      <button type="button" class="chip" data-k="stove" aria-pressed="true"><span class="cn">휴대용 버너</span><span class="cp">+₩12,000</span></button>
+      <button type="button" class="chip" data-k="bedding" aria-pressed="false"><span class="cn">침구 세트</span><span class="cp">+₩20,000</span></button>
+      <button type="button" class="chip" data-k="net" aria-pressed="false"><span class="cn">차박 모기장</span><span class="cp">+₩8,000</span></button>
+    </div>
+  </div>
+
+  <fieldset class="field" id="fld-ins">
+    <legend class="cap">보장 범위 <span class="req">*</span></legend>
+    <div class="cards">
+      <label class="copt"><input type="radio" name="ins" value="basic"><span class="ct">기본 보장</span><span class="cs">요금에 포함 · 사고 시 자기부담금 100만원</span></label>
+      <label class="copt"><input type="radio" name="ins" value="full"><span class="ct">완전 보장</span><span class="cs">+₩15,000/박 · 자기부담금 없음</span></label>
+    </div>
+    <div class="err" id="err-ins" role="alert" hidden></div>
+  </fieldset>
+</section>
+
+<section class="sec">
+  <h2>3. 인수 방법</h2>
+
+  <fieldset class="field" id="fld-method">
+    <legend class="cap">인수 방법 <span class="req">*</span></legend>
+    <div class="cards">
+      <label class="copt"><input type="radio" name="method" value="delivery"><span class="ct">배송 받기</span><span class="cs">지정한 주소로 가져다 드려요 · +₩30,000</span></label>
+      <label class="copt"><input type="radio" name="method" value="depot"><span class="ct">지점 방문</span><span class="cs">가까운 지점에서 직접 인수 · 무료</span></label>
+    </div>
+    <div class="err" id="err-method" role="alert" hidden></div>
+  </fieldset>
+
+  <div id="boxDelivery" hidden>
+    <div class="field" id="fld-addr">
+      <label class="cap" for="addr">배송 주소 <span class="req">*</span></label>
+      <div class="ac">
+        <input type="text" id="addr" autocomplete="off" placeholder="도로명이나 건물명을 입력해 보세요">
+        <div class="ac-list" id="addrList" role="listbox" aria-label="주소 검색 결과" hidden></div>
+      </div>
+      <div class="hint" id="addrHint">두 글자 이상 입력한 뒤 목록에서 주소를 골라 주세요.</div>
+      <div class="err" id="err-addr" role="alert" hidden></div>
+    </div>
+    <div class="field" id="fld-zip">
+      <label class="cap" for="zip">우편번호</label>
+      <input type="text" id="zip" class="short" readonly tabindex="-1" placeholder="주소를 고르면 채워져요">
+    </div>
+    <div class="field" id="fld-addr2">
+      <label class="cap" for="addr2">상세 주소 <span class="req">*</span></label>
+      <input type="text" id="addr2" maxlength="60" placeholder="동, 호수 등">
+      <div class="err" id="err-addr2" role="alert" hidden></div>
+    </div>
+  </div>
+
+  <div id="boxDepot" hidden>
+    <div class="field" id="fld-depot">
+      <label class="cap" for="depot">인수 지점 <span class="req">*</span></label>
+      <select id="depot" disabled><option value="">지점 목록을 불러오는 중…</option></select>
+      <div class="err" id="err-depot" role="alert" hidden></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2>4. 운전자 정보</h2>
+
+  <div class="field" id="fld-name">
+    <label class="cap" for="dname">운전자 성명 <span class="req">*</span></label>
+    <input type="text" id="dname" maxlength="20" placeholder="면허증과 같은 이름">
+    <div class="err" id="err-name" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-birth">
+    <div class="cap" id="bCap">생년월일 <span class="req">*</span></div>
+    <div class="trip" role="group" aria-labelledby="bCap">
+      <select id="bY" aria-label="년"></select>
+      <select id="bM" aria-label="월"></select>
+      <select id="bD" aria-label="일"></select>
+    </div>
+    <div class="hint">만 21세 이상만 운전자로 등록할 수 있어요.</div>
+    <div class="err" id="err-birth" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-lic">
+    <label class="cap" for="lic">면허 종류 <span class="req">*</span></label>
+    <select id="lic">
+      <option value="">선택하세요</option>
+      <option value="c1">1종 보통</option>
+      <option value="c2">2종 보통</option>
+    </select>
+    <div class="err" id="err-lic" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-licno">
+    <label class="cap" for="licno">면허번호 <span class="req">*</span></label>
+    <input type="text" id="licno" maxlength="15" placeholder="00-00-000000-00">
+    <div class="err" id="err-licno" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-email">
+    <label class="cap" for="email">이메일 <span class="req">*</span></label>
+    <input type="email" id="email" maxlength="60" placeholder="name@example.com">
+    <div class="err" id="err-email" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-phone">
+    <label class="cap" for="phone">휴대전화 <span class="req">*</span></label>
+    <div class="inline">
+      <input type="tel" id="phone" maxlength="13" placeholder="010-0000-0000">
+      <button type="button" class="btn" id="sendBtn">인증번호 받기</button>
+    </div>
+    <div class="hint" id="phoneMsg"></div>
+    <div class="err" id="err-phone" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-code" hidden>
+    <label class="cap" for="code">인증번호 <span class="req">*</span></label>
+    <div class="inline">
+      <input type="text" id="code" inputmode="numeric" maxlength="6" placeholder="6자리 숫자">
+      <button type="button" class="btn" id="verifyBtn">인증 확인</button>
+    </div>
+    <div class="hint ok" id="codeMsg"></div>
+    <div class="err" id="err-code" role="alert" hidden></div>
+  </div>
+</section>
+
+<section class="sec">
+  <h2>5. 요청 사항과 약관</h2>
+
+  <div class="field" id="fld-note">
+    <label class="cap" for="note">요청 사항 <small>(선택)</small></label>
+    <textarea id="note" rows="3" maxlength="100" placeholder="인수 때 알려 주실 내용을 적어 주세요."></textarea>
+    <div class="count"><span id="noteN">0</span>/100</div>
+  </div>
+
+  <div class="field" id="fld-terms">
+    <div class="cap" id="tCap">대여 약관 <span class="req">*</span></div>
+    <div class="terms" id="termsBox" tabindex="0" role="region" aria-labelledby="tCap">
+      <h5>제1조 (목적)</h5>
+      <p>이 약관은 노을결 캠퍼 렌탈(이하 "회사")이 제공하는 캠핑카 대여 서비스의 이용 조건과 절차를 정하는 것을 목적으로 합니다.</p>
+      <h5>제2조 (운전자 자격)</h5>
+      <p>운전자는 만 21세 이상이며 유효한 운전면허를 1년 이상 보유해야 합니다. 대형 캠퍼는 1종 보통 면허가 필요합니다.</p>
+      <h5>제3조 (예약과 요금)</h5>
+      <p>요금은 박 단위로 계산하며 선택한 옵션, 보장, 배송 요금이 더해집니다. 성수기에는 요금이 달라질 수 있고, 예약 확정 시점의 요금이 적용됩니다.</p>
+      <h5>제4조 (취소와 변경)</h5>
+      <p>출발일 7일 전까지는 무료로 취소할 수 있습니다. 6일 전부터 전날까지는 총 요금의 30%, 당일 취소와 미인수는 50%를 위약금으로 받습니다.</p>
+      <h5>제5조 (인수와 반납)</h5>
+      <p>인수는 신청한 시간에, 반납은 영업시간(09:00-18:00) 안에 지점에서 합니다. 반납이 늦어지면 1시간마다 1박 요금의 10%를 추가로 받습니다.</p>
+      <h5>제6조 (연료와 청소)</h5>
+      <p>차량은 연료를 가득 채운 상태로 인수하며 반납할 때도 가득 채워야 합니다. 실내 청소가 필요한 경우 청소비가 부과됩니다.</p>
+      <h5>제7조 (금지 행위)</h5>
+      <p>실내 흡연, 비포장 오지 주행, 허가받지 않은 반려동물 동반, 등록하지 않은 사람에게 운전을 맡기는 행위를 금지합니다.</p>
+      <h5>제8조 (사고와 고장)</h5>
+      <p>사고나 고장이 생기면 즉시 고객센터에 알려야 하며 회사의 동의 없이 임의로 수리해서는 안 됩니다.</p>
+      <h5>제9조 (보장 범위)</h5>
+      <p>기본 보장은 사고 때 자기부담금 100만원이 있고, 완전 보장은 자기부담금이 없습니다. 음주, 무면허, 약관 위반으로 생긴 사고는 어느 쪽도 보장하지 않습니다.</p>
+      <h5>제10조 (개인정보)</h5>
+      <p>예약을 처리하기 위해 이름, 생년월일, 면허 정보, 연락처를 수집하며 대여가 끝난 뒤 3년간 보관한 다음 파기합니다.</p>
+      <h5>제11조 (면책)</h5>
+      <p>천재지변, 도로 통제 등 회사의 책임이 아닌 사유로 일정이 바뀌는 경우 회사는 그로 인한 손해를 책임지지 않습니다.</p>
+      <h5>제12조 (분쟁 해결)</h5>
+      <p>분쟁은 서로 협의해 해결하며 협의가 되지 않으면 회사 소재지의 관할 법원에서 정합니다.</p>
+      <h5>부칙</h5>
+      <p>이 약관은 2026년 10월 1일부터 시행합니다. - 끝 -</p>
+    </div>
+    <div class="hint" id="termsHint">약관을 끝까지 내려야 동의할 수 있어요.</div>
+    <label class="chk"><input type="checkbox" id="agree" disabled><span>대여 약관에 동의합니다 (필수)</span></label>
+    <div class="err" id="err-terms" role="alert" hidden></div>
+  </div>
+
+  <div class="field" id="fld-mkt">
+    <label class="chk" style="margin-top:0"><input type="checkbox" id="mkt"><span>이벤트·소식 문자 수신 (선택)</span></label>
+  </div>
+</section>
+
+<section class="sec" aria-live="polite">
+  <h2>예상 요금</h2>
+  <div id="sumLines"></div>
+  <div class="total"><span>합계</span><span id="sumTotal">₩0</span></div>
+</section>
+
+<div class="actions">
+  <div class="banner" id="banner" role="alert" hidden></div>
+  <button type="submit" class="btn pri big" id="submitBtn">예약 신청하기</button>
+</div>
+</form>
+
+<section class="sec done" id="done" hidden>
+  <h2>예약이 접수되었습니다</h2>
+  <p>예약번호 <b id="doneNo"></b> · 입력하신 이메일로 안내를 보내 드릴게요.</p>
+  <dl id="doneSum"></dl>
+</section>
+</div>
+
+<script>
+(function(){
+'use strict';
+
+/* ---------- fixed "today" for this page ---------- */
+const TODAY='2026-10-05';
+const TY=+TODAY.slice(0,4), TM=+TODAY.slice(5,7);
+const DOWK=['일','월','화','수','목','금','토'];
+
+const $=(s,r)=>(r||document).querySelector(s);
+const $$=(s,r)=>Array.from((r||document).querySelectorAll(s));
+const el=id=>document.getElementById(id);
+const pad=n=>(n<10?'0':'')+n;
+const iso=(y,m,d)=>y+'-'+pad(m)+'-'+pad(d);
+const dim=(y,m)=>new Date(Date.UTC(y,m,0)).getUTCDate();
+const dowOf=(y,m,d)=>new Date(Date.UTC(y,m-1,d)).getUTCDay();
+const dnum=s=>{const p=s.split('-');return Math.round(Date.UTC(+p[0],+p[1]-1,+p[2])/86400000);};
+const fromNum=n=>new Date(n*86400000).toISOString().slice(0,10);
+const nightsOf=(a,b)=>dnum(b)-dnum(a);
+const shortD=s=>{const p=s.split('-').map(Number);return p[1]+'월 '+p[2]+'일';};
+const prettyD=s=>{const p=s.split('-').map(Number);return s+' ('+DOWK[dowOf(p[0],p[1],p[2])]+')';};
+const won=n=>'₩'+n.toLocaleString('en-US');
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+const MIN_START=fromNum(dnum(TODAY)+7);
+const MAX_ISO='2027-09-30';
+const BLOCKED=new Set(['2026-10-24','2026-11-14','2026-11-15','2026-12-05','2026-12-24','2026-12-25','2026-12-31']);
+
+const CLASSES={
+  small:{name:'소형 밴',cap:2,rate:69000,models:[['lean-s1','린 S1'],['lean-s2a','린 S2 오토']]},
+  mid:{name:'중형 캠퍼',cap:5,rate:98000,models:[['solar-520','솔라 520'],['solar-560a','솔라 560 오토'],['dori-m4','도리 M4']]},
+  large:{name:'대형 캠퍼',cap:7,rate:128000,models:[['grand-solar-700','그랜드 솔라 700'],['grand-dori-l8','그랜드 도리 L8']]}
+};
+const EXTRAS=[
+  {k:'bike',price:10000},{k:'chairs',price:15000},{k:'stove',price:12000},{k:'bedding',price:20000},{k:'net',price:8000}
+];
+const ADDR=[
+  {main:'해오름시 달빛로 24',sub:'소담동 112-3 · 소담빌라',zip:'99120'},
+  {main:'해오름시 달빛로 240',sub:'새솔동 55 · 큰들오피스텔',zip:'99134'},
+  {main:'해오름시 달빛로 24-3',sub:'소담동 112-9 · 아람상가',zip:'99120'},
+  {main:'해오름시 달빛로 42',sub:'소담동 130 · 한결아파트',zip:'99121'},
+  {main:'해오름시 달빛로2길 4',sub:'소담동 98 · 보람하우스',zip:'99118'},
+  {main:'해오름시 달무리길 24',sub:'별내동 8-2 · 바다마루',zip:'99207'},
+  {main:'푸른내시 달빛로 24',sub:'들샘동 301 · 늘봄하이츠',zip:'77030'}
+];
+const DEPOTS=[['haeoreum','해오름역 지점'],['mulgyeol','물결항 지점'],['dalbit','달빛사거리 지점']];
+
+const S={
+  start:null,end:null,pickupTime:null,ampm:null,
+  cls:null,adults:1,children:0,
+  extras:{bike:false,chairs:false,stove:true,bedding:false,net:false},
+  insurance:null,method:null,addr:null,
+  sent:false,verified:false,verifiedPhone:null,code:null,codeAt:0
+};
+
+/* ---------- element refs ---------- */
+const form=el('bookForm');
+const rwrap=el('rwrap'),rStartBtn=el('rStartBtn'),rEndBtn=el('rEndBtn'),rStartTxt=el('rStartTxt'),rEndTxt=el('rEndTxt'),rNights=el('rNights');
+const rPop=el('rPop'),calPrev=el('calPrev'),calNext=el('calNext'),calSum=el('calSum'),calMonths=el('calMonths'),calMsg=el('calMsg');
+const calReset=el('calReset'),calClose=el('calClose'),calApply=el('calApply');
+const ptWheel=el('ptWheel'),ptSel=el('ptSel');
+const rtAmpm=el('rtAmpm'),rtHour=el('rtHour'),rtMin=el('rtMin');
+const modelSel=el('model');
+const boxDelivery=el('boxDelivery'),boxDepot=el('boxDepot');
+const addr=el('addr'),addrList=el('addrList'),addrHint=el('addrHint'),zip=el('zip'),addr2=el('addr2'),depotSel=el('depot');
+const dname=el('dname'),bY=el('bY'),bM=el('bM'),bD=el('bD'),lic=el('lic'),licno=el('licno'),email=el('email');
+const phoneInp=el('phone'),sendBtn=el('sendBtn'),phoneMsg=el('phoneMsg');
+const fldCode=el('fld-code'),codeInp=el('code'),verifyBtn=el('verifyBtn'),codeMsg=el('codeMsg');
+const note=el('note'),noteN=el('noteN'),termsBox=el('termsBox'),termsHint=el('termsHint'),agree=el('agree'),mkt=el('mkt');
+const sumLines=el('sumLines'),sumTotal=el('sumTotal'),banner=el('banner'),done=el('done');
+
+/* ---------- error helpers ---------- */
+function setErr(key,msg){
+  const e=el('err-'+key);if(!e)return;
+  e.textContent=msg;e.hidden=false;
+  const f=e.closest('.field');if(f)f.classList.add('bad');
+}
+function clrErr(key){
+  const e=el('err-'+key);if(!e)return;
+  e.hidden=true;e.textContent='';
+  const f=e.closest('.field');if(f)f.classList.remove('bad');
+}
+form.addEventListener('input',e=>{
+  const f=e.target.closest('.field');
+  if(f){$$('.err',f).forEach(x=>{x.hidden=true;});f.classList.remove('bad');}
+});
+form.addEventListener('change',e=>{
+  const f=e.target.closest('.field');
+  if(f){$$('.err',f).forEach(x=>{x.hidden=true;});f.classList.remove('bad');}
+});
+
+/* ---------- 1. date range calendar ---------- */
+let view={y:TY,m:TM};
+let pend={start:null,end:null};
+let hoverD=null;
+
+function leftOf(s){const p=s.split('-').map(Number);return (p[0]*7+p[1]*5+p[2]*3)%4+1;}
+function hasBlocked(a,b){
+  for(let n=dnum(a);n<dnum(b);n++){if(BLOCKED.has(fromNum(n)))return true;}
+  return false;
+}
+function monthHtml(y,m){
+  let h='<div class="month" role="group" aria-label="'+y+'년 '+m+'월"><h4 class="mtitle">'+y+'년 '+m+'월</h4><div class="wk">'+
+    DOWK.map(d=>'<span>'+d+'</span>').join('')+'</div><div class="days">';
+  const first=dowOf(y,m,1);
+  for(let i=0;i<first;i++)h+='<span class="day blank"></span>';
+  for(let d=1;d<=dim(y,m);d++){
+    const s=iso(y,m,d);
+    const blk=BLOCKED.has(s);
+    const dis=blk||s<MIN_START||s>MAX_ISO;
+    let c='day';
+    if(blk)c+=' blk';
+    if(s===pend.start||s===pend.end)c+=' sel';
+    else if(pend.start&&pend.end&&s>pend.start&&s<pend.end)c+=' in';
+    const sub=blk?'마감':(dis?'':'잔여 '+leftOf(s));
+    h+='<button type="button" class="'+c+'" data-date="'+s+'"'+(dis?' disabled':'')+' aria-label="'+m+'월 '+d+'일'+(blk?' 마감':'')+'">'+
+       '<span class="n">'+d+'</span><span class="r">'+sub+'</span></button>';
+  }
+  return h+'</div></div>';
+}
+function calStatus(){
+  if(!pend.start)return '출발일을 선택해 주세요.';
+  if(!pend.end)return shortD(pend.start)+' 출발 · 반납일을 선택해 주세요. (최소 2박)';
+  const n=nightsOf(pend.start,pend.end);
+  return shortD(pend.start)+' → '+shortD(pend.end)+' · '+n+'박 '+(n+1)+'일';
+}
+function renderCal(){
+  let y2=view.y,m2=view.m+1;
+  if(m2>12){m2=1;y2++;}
+  calMonths.innerHTML=monthHtml(view.y,view.m)+monthHtml(y2,m2);
+  calPrev.disabled=(view.y===TY&&view.m===TM);
+  calNext.disabled=(y2*100+m2)>=2027*100+9;
+  calSum.textContent=calStatus();
+  calApply.disabled=!(pend.start&&pend.end);
+  paintHover();
+}
+function paintHover(){
+  $$('.day[data-date]',calMonths).forEach(b=>{
+    const s=b.dataset.date;
+    const on=pend.start&&!pend.end&&hoverD&&s>pend.start&&s<=hoverD;
+    b.classList.toggle('hov',!!on);
+  });
+}
+function pick(d){
+  calMsg.textContent='';
+  if(!pend.start||pend.end){
+    pend={start:d,end:null};
+  }else if(d<=pend.start){
+    pend={start:d,end:null};
+  }else{
+    const n=nightsOf(pend.start,d);
+    if(n<2){calMsg.textContent='최소 2박부터 예약할 수 있어요.';}
+    else if(n>14){calMsg.textContent='최대 14박까지 예약할 수 있어요.';}
+    else if(hasBlocked(pend.start,d)){
+      calMsg.textContent='선택한 기간에 예약이 마감된 날이 있어요. 출발일부터 다시 골라 주세요.';
+      pend={start:null,end:null};
+    }else{pend.end=d;}
+  }
+  renderCal();
+}
+function openPop(){
+  pend={start:S.start,end:S.end};
+  const base=S.start||TODAY;
+  view={y:+base.slice(0,4),m:+base.slice(5,7)};
+  calMsg.textContent='';
+  renderCal();
+  rPop.hidden=false;
+  rStartBtn.setAttribute('aria-expanded','true');
+  rEndBtn.setAttribute('aria-expanded','true');
+}
+function closePop(){
+  rPop.hidden=true;
+  rStartBtn.setAttribute('aria-expanded','false');
+  rEndBtn.setAttribute('aria-expanded','false');
+}
+function paintRange(){
+  rStartTxt.textContent=S.start?prettyD(S.start):'날짜 선택';
+  rEndTxt.textContent=S.end?prettyD(S.end):'날짜 선택';
+  if(S.start&&S.end){const n=nightsOf(S.start,S.end);rNights.textContent=n+'박 '+(n+1)+'일';}
+  else rNights.textContent='';
+}
+rStartBtn.addEventListener('click',()=>{if(rPop.hidden)openPop();});
+rEndBtn.addEventListener('click',()=>{if(rPop.hidden)openPop();});
+calPrev.addEventListener('click',()=>{view.m--;if(view.m<1){view.m=12;view.y--;}renderCal();});
+calNext.addEventListener('click',()=>{view.m++;if(view.m>12){view.m=1;view.y++;}renderCal();});
+calMonths.addEventListener('click',e=>{
+  const b=e.target.closest('.day[data-date]');
+  if(!b||b.disabled)return;
+  pick(b.dataset.date);
+});
+calMonths.addEventListener('mouseover',e=>{
+  const b=e.target.closest('.day[data-date]');
+  hoverD=(b&&!b.disabled)?b.dataset.date:null;
+  paintHover();
+});
+calMonths.addEventListener('mouseleave',()=>{hoverD=null;paintHover();});
+calReset.addEventListener('click',()=>{pend={start:null,end:null};calMsg.textContent='';renderCal();});
+calClose.addEventListener('click',closePop);
+calApply.addEventListener('click',()=>{
+  if(!(pend.start&&pend.end))return;
+  S.start=pend.start;S.end=pend.end;
+  paintRange();closePop();clrErr('range');recalc();
+});
+document.addEventListener('click',e=>{
+  if(rPop.hidden)return;
+  const path=e.composedPath();
+  if(path.indexOf(rwrap)<0)closePop();
+});
+
+/* ---------- 1b. pick-up time list ---------- */
+const PT=[];
+for(let h=9;h<=18;h++){PT.push(pad(h)+':00');if(h<18)PT.push(pad(h)+':30');}
+ptWheel.innerHTML=PT.map(t=>'<div class="wopt" role="option" aria-selected="false" data-v="'+t+'">'+t+'</div>').join('');
+function setPT(v,scroll){
+  S.pickupTime=v;
+  $$('.wopt',ptWheel).forEach(o=>o.setAttribute('aria-selected',String(o.dataset.v===v)));
+  ptSel.textContent=v||'-';
+  if(scroll){
+    const o=$('.wopt[data-v="'+v+'"]',ptWheel);
+    if(o)ptWheel.scrollTop=o.offsetTop-(ptWheel.clientHeight-o.offsetHeight)/2;
+  }
+  clrErr('pt');
+}
+ptWheel.addEventListener('click',e=>{
+  const o=e.target.closest('.wopt');
+  if(o)setPT(o.dataset.v,false);
+});
+ptWheel.addEventListener('keydown',e=>{
+  const k=e.key;
+  if(['ArrowDown','ArrowUp','Home','End'].indexOf(k)<0)return;
+  e.preventDefault();
+  let i=PT.indexOf(S.pickupTime);
+  if(k==='ArrowDown')i=i<0?0:Math.min(PT.length-1,i+1);
+  else if(k==='ArrowUp')i=i<0?0:Math.max(0,i-1);
+  else if(k==='Home')i=0;
+  else i=PT.length-1;
+  setPT(PT[i],true);
+});
+
+/* ---------- 1c. return time: am/pm + hour + minute ---------- */
+rtHour.innerHTML='<option value="">시</option>'+Array.from({length:12},(_,i)=>'<option value="'+(i+1)+'">'+(i+1)+'시</option>').join('');
+rtMin.innerHTML='<option value="">분</option>'+['00','10','20','30','40','50'].map(m=>'<option value="'+m+'">'+m+'분</option>').join('');
+$$('.segb',rtAmpm).forEach(b=>b.addEventListener('click',()=>{
+  S.ampm=b.dataset.v;
+  $$('.segb',rtAmpm).forEach(x=>x.setAttribute('aria-checked',String(x===b)));
+  clrErr('rt');
+}));
+function retTime(){
+  if(!S.ampm||!rtHour.value||!rtMin.value)return null;
+  const h=(+rtHour.value)%12+(S.ampm==='pm'?12:0);
+  return pad(h)+':'+rtMin.value;
+}
+
+/* ---------- 2. vehicle, models that load late, steppers, chips, cover ---------- */
+let modelTimer=null;
+function loadModels(){
+  clearTimeout(modelTimer);
+  modelSel.disabled=true;
+  modelSel.innerHTML='<option value="">모델 목록을 불러오는 중…</option>';
+  const cls=S.cls;
+  modelTimer=setTimeout(()=>{
+    if(S.cls!==cls)return;
+    modelSel.innerHTML='<option value="">모델을 선택하세요</option>'+
+      CLASSES[cls].models.map(m=>'<option value="'+m[0]+'">'+m[1]+'</option>').join('');
+    modelSel.disabled=false;
+  },550);
+}
+$$('input[name=cls]').forEach(r=>r.addEventListener('change',()=>{
+  if(!r.checked)return;
+  S.cls=r.value;
+  clrErr('cls');clrErr('pax');clrErr('model');
+  loadModels();recalc();
+}));
+modelSel.addEventListener('change',recalc);
+
+function initSteppers(){
+  $$('.stepper').forEach(st=>{
+    const key=st.dataset.key,min=+st.dataset.min,max=+st.dataset.max;
+    const out=$('.st-val',st),minus=$('.st-minus',st),plus=$('.st-plus',st);
+    const paint=()=>{
+      out.textContent=String(S[key]);
+      minus.disabled=S[key]<=min;
+      plus.disabled=S[key]>=max;
+    };
+    minus.addEventListener('click',()=>{if(S[key]>min){S[key]--;paint();clrErr('pax');recalc();}});
+    plus.addEventListener('click',()=>{if(S[key]<max){S[key]++;paint();clrErr('pax');recalc();}});
+    paint();
+  });
+}
+$$('.chip').forEach(c=>c.addEventListener('click',()=>{
+  const k=c.dataset.k;
+  S.extras[k]=!S.extras[k];
+  c.setAttribute('aria-pressed',String(S.extras[k]));
+  recalc();
+}));
+$$('input[name=ins]').forEach(r=>r.addEventListener('change',()=>{
+  if(!r.checked)return;
+  S.insurance=r.value;clrErr('ins');recalc();
+}));
+
+/* ---------- 3. hand-over method, address suggestions, branch list ---------- */
+let depTimer=null;
+function loadDepots(){
+  clearTimeout(depTimer);
+  depotSel.disabled=true;
+  depotSel.innerHTML='<option value="">지점 목록을 불러오는 중…</option>';
+  depTimer=setTimeout(()=>{
+    depotSel.innerHTML='<option value="">지점을 선택하세요</option>'+
+      DEPOTS.map(d=>'<option value="'+d[0]+'">'+d[1]+'</option>').join('');
+    depotSel.disabled=false;
+  },600);
+}
+$$('input[name=method]').forEach(r=>r.addEventListener('change',()=>{
+  if(!r.checked)return;
+  S.method=r.value;
+  boxDelivery.hidden=S.method!=='delivery';
+  boxDepot.hidden=S.method!=='depot';
+  clrErr('method');
+  if(S.method==='depot')loadDepots();
+  else closeList();
+  recalc();
+}));
+
+let acTimer=null,acToken=0,acActive=-1,acItems=[];
+function closeList(){
+  acToken++;clearTimeout(acTimer);
+  addrList.hidden=true;addrList.innerHTML='';
+  acItems=[];acActive=-1;
+}
+function choose(i){
+  const a=acItems[i];if(!a)return;
+  S.addr=a;
+  addr.value=a.main;
+  zip.value=a.zip;
+  closeList();
+  addrHint.textContent='주소가 확인되었어요. 상세 주소를 이어서 적어 주세요.';
+  clrErr('addr');
+}
+addr.addEventListener('input',()=>{
+  S.addr=null;zip.value='';
+  addrHint.textContent='두 글자 이상 입력한 뒤 목록에서 주소를 골라 주세요.';
+  clearTimeout(acTimer);
+  const q=addr.value.replace(/\s+/g,'');
+  if(q.length<2){closeList();return;}
+  const my=++acToken;
+  addrList.hidden=false;
+  addrList.innerHTML='<div class="ac-msg">검색 중…</div>';
+  acItems=[];acActive=-1;
+  acTimer=setTimeout(()=>{
+    if(my!==acToken)return;
+    const res=ADDR.filter(a=>(a.main+'|'+a.sub).replace(/\s+/g,'').indexOf(q)>=0).slice(0,6);
+    acItems=res;acActive=-1;
+    if(!res.length){addrList.innerHTML='<div class="ac-msg">검색 결과가 없어요.</div>';return;}
+    addrList.innerHTML=res.map((a,i)=>
+      '<div class="ac-item" role="option" data-i="'+i+'"><span class="m">'+esc(a.main)+'</span><span class="s">'+esc(a.sub)+' · '+a.zip+'</span></div>'
+    ).join('');
+  },350);
+});
+addrList.addEventListener('mousedown',e=>e.preventDefault());
+addrList.addEventListener('click',e=>{
+  const it=e.target.closest('.ac-item');
+  if(it)choose(+it.dataset.i);
+});
+addr.addEventListener('keydown',e=>{
+  if(addrList.hidden||!acItems.length)return;
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+    e.preventDefault();
+    const n=acItems.length;
+    if(e.key==='ArrowDown')acActive=acActive<0?0:(acActive+1)%n;
+    else acActive=acActive<0?n-1:(acActive+n-1)%n;
+    $$('.ac-item',addrList).forEach((x,i)=>x.classList.toggle('on',i===acActive));
+  }
+});
+addr.addEventListener('blur',()=>{
+  setTimeout(()=>{if(document.activeElement!==addr)closeList();},150);
+});
+
+/* ---------- 4. driver: birth date by three lists ---------- */
+function fillDays(){
+  const y=(+bY.value)||2000,m=+bM.value;
+  const max=m?dim(y,m):31;
+  const cur=bD.value;
+  let h='<option value="">일</option>';
+  for(let d=1;d<=max;d++)h+='<option value="'+d+'">'+d+'일</option>';
+  bD.innerHTML=h;
+  bD.value=(cur&&+cur<=max)?cur:'';
+}
+function initBirth(){
+  let h='<option value="">년</option>';
+  for(let y=2008;y>=1940;y--)h+='<option value="'+y+'">'+y+'년</option>';
+  bY.innerHTML=h;
+  let m='<option value="">월</option>';
+  for(let i=1;i<=12;i++)m+='<option value="'+i+'">'+i+'월</option>';
+  bM.innerHTML=m;
+  fillDays();
+}
+bY.addEventListener('change',fillDays);
+bM.addEventListener('change',fillDays);
+
+/* ---------- 4b. phone verification ---------- */
+let sendSeq=0;
+function normPhone(){
+  const d=phoneInp.value.replace(/\D/g,'');
+  if(!/^01[016789]\d{7,8}$/.test(d))return null;
+  return d.length===11?d.slice(0,3)+'-'+d.slice(3,7)+'-'+d.slice(7):d.slice(0,3)+'-'+d.slice(3,6)+'-'+d.slice(6);
+}
+function resetVerify(){
+  sendSeq++;
+  S.code=null;S.sent=false;S.verified=false;S.verifiedPhone=null;
+  try{delete window.__personPhone;}catch(_){}
+  fldCode.hidden=true;codeInp.value='';codeInp.disabled=false;verifyBtn.disabled=false;
+  sendBtn.disabled=false;sendBtn.textContent='인증번호 받기';
+  codeMsg.textContent='';phoneMsg.textContent='';
+}
+phoneInp.addEventListener('input',()=>{
+  if(S.sent||S.verified||S.code||sendBtn.disabled)resetVerify();
+});
+sendBtn.addEventListener('click',()=>{
+  clrErr('phone');
+  const p=normPhone();
+  if(!p){setErr('phone','휴대전화 번호를 정확히 입력해 주세요. (예: 010-1234-5678)');return;}
+  if(S.verified)return;
+  const id=++sendSeq;
+  sendBtn.disabled=true;sendBtn.textContent='전송 중…';
+  phoneMsg.textContent='인증번호를 보내는 중이에요…';
+  setTimeout(()=>{
+    if(id!==sendSeq)return;
+    const c=String(100000+Math.floor(Math.random()*900000));
+    S.code=c;S.codeAt=Date.now();S.sent=true;
+    window.__personPhone=c;
+    fldCode.hidden=false;codeInp.value='';codeInp.disabled=false;verifyBtn.disabled=false;
+    sendBtn.disabled=false;sendBtn.textContent='인증번호 재전송';
+    phoneMsg.textContent='인증번호를 문자로 보냈어요. 10분 안에 입력해 주세요.';
+    codeMsg.textContent='';
+  },700);
+});
+verifyBtn.addEventListener('click',()=>{
+  clrErr('code');
+  if(!S.code){setErr('code','먼저 인증번호를 받아 주세요.');return;}
+  if(Date.now()-S.codeAt>600000){setErr('code','입력 시간이 지났어요. 인증번호를 다시 받아 주세요.');return;}
+  if(codeInp.value.trim()!==S.code){setErr('code','인증번호가 일치하지 않아요.');return;}
+  S.verified=true;S.verifiedPhone=normPhone();
+  codeInp.disabled=true;verifyBtn.disabled=true;
+  codeMsg.textContent='✓ 인증이 완료되었습니다.';
+  clrErr('phone');
+});
+
+/* ---------- 5. note, terms ---------- */
+note.addEventListener('input',()=>{noteN.textContent=String(note.value.length);});
+function checkTermsEnd(){
+  if(agree.disabled&&termsBox.scrollTop+termsBox.clientHeight>=termsBox.scrollHeight-4){
+    agree.disabled=false;
+    termsHint.textContent='약관을 모두 확인했어요. 동의하실 수 있어요.';
+  }
+}
+termsBox.addEventListener('scroll',checkTermsEnd);
+
+/* ---------- price summary ---------- */
+function calc(){
+  const r={n:0,rental:0,extras:0,ins:0,delivery:0,total:0};
+  if(S.start&&S.end)r.n=nightsOf(S.start,S.end);
+  if(S.cls&&r.n)r.rental=CLASSES[S.cls].rate*r.n;
+  EXTRAS.forEach(e=>{if(S.extras[e.k])r.extras+=e.price;});
+  if(S.insurance==='full')r.ins=15000*r.n;
+  if(S.method==='delivery')r.delivery=30000;
+  r.total=r.rental+r.extras+r.ins+r.delivery;
+  return r;
+}
+function recalc(){
+  const c=calc();
+  const rows=[['대여료'+(c.n?' ('+c.n+'박)':''),c.rental],['옵션 요금',c.extras],['보장 요금',c.ins],['배송 요금',c.delivery]];
+  sumLines.innerHTML=rows.map(r=>'<div class="sl"><span>'+r[0]+'</span><span>'+won(r[1])+'</span></div>').join('');
+  sumTotal.textContent=won(c.total);
+}
+
+/* ---------- validation and submit ---------- */
+function validate(){
+  const errs=[];
+  const add=(k,m)=>errs.push([k,m]);
+  if(!S.start||!S.end)add('range','대여 기간(출발일과 반납일)을 선택해 주세요.');
+  if(!S.pickupTime)add('pt','인수 시간을 선택해 주세요.');
+  const rt=retTime();
+  if(!rt)add('rt','반납 시간(오전/오후, 시, 분)을 모두 선택해 주세요.');
+  else if(rt<'09:00'||rt>'18:00')add('rt','반납은 09:00부터 18:00 사이에만 가능해요.');
+  if(!S.cls)add('cls','차량 등급을 선택해 주세요.');
+  if(!modelSel.value)add('model','모델을 선택해 주세요.');
+  if(S.cls&&S.adults+S.children>CLASSES[S.cls].cap)
+    add('pax','선택한 차량은 최대 '+CLASSES[S.cls].cap+'인까지 탈 수 있어요. (현재 '+(S.adults+S.children)+'인)');
+  if(!S.insurance)add('ins','보장 범위를 선택해 주세요.');
+  if(!S.method)add('method','인수 방법을 선택해 주세요.');
+  else if(S.method==='delivery'){
+    if(!S.addr)add('addr','검색 결과 목록에서 주소를 골라 주세요.');
+    if(!addr2.value.trim())add('addr2','상세 주소를 입력해 주세요.');
+  }else if(!depotSel.value)add('depot','인수 지점을 선택해 주세요.');
+  if(!/^[가-힣A-Za-z ]{2,20}$/.test(dname.value.trim()))add('name','운전자 성명을 정확히 입력해 주세요.');
+  if(!bY.value||!bM.value||!bD.value)add('birth','생년월일을 모두 선택해 주세요.');
+  else{
+    const b=iso(+bY.value,+bM.value,+bD.value);
+    const limit=String(TY-21)+TODAY.slice(4);
+    if(b>limit)add('birth','만 21세 이상만 운전자로 등록할 수 있어요.');
+  }
+  if(!lic.value)add('lic','면허 종류를 선택해 주세요.');
+  else if(S.cls==='large'&&lic.value!=='c1')add('lic','대형 캠퍼는 1종 보통 면허가 필요해요.');
+  if(!/^\d{2}-\d{2}-\d{6}-\d{2}$/.test(licno.value.trim()))add('licno','면허번호 형식을 확인해 주세요. (00-00-000000-00)');
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.value.trim()))add('email','이메일 주소를 정확히 입력해 주세요.');
+  const p=normPhone();
+  if(!p)add('phone','휴대전화 번호를 정확히 입력해 주세요.');
+  else if(!S.verified||S.verifiedPhone!==p)add('phone','휴대전화 인증을 완료해 주세요.');
+  if(!agree.checked)add('terms','대여 약관에 동의해 주세요.');
+  return errs;
+}
+function buildResult(){
+  const c=calc();
+  const r={
+    start:S.start,end:S.end,nights:c.n,
+    pickupTime:S.pickupTime,returnTime:retTime(),
+    cls:S.cls,model:modelSel.value,
+    adults:S.adults,children:S.children,
+    extras:EXTRAS.filter(e=>S.extras[e.k]).map(e=>e.k),
+    insurance:S.insurance,method:S.method
+  };
+  if(S.method==='delivery'){r.addr=S.addr.main;r.zip=S.addr.zip;r.addr2=addr2.value.trim();}
+  else r.depot=depotSel.value;
+  r.name=dname.value.trim();
+  r.birth=iso(+bY.value,+bM.value,+bD.value);
+  r.license=lic.value;
+  r.licenseNo=licno.value.trim();
+  r.email=email.value.trim();
+  r.phone=normPhone();
+  r.phoneVerified=true;
+  r.note=note.value.trim();
+  r.termsAgreed=true;
+  r.marketing=mkt.checked;
+  r.total=c.total;
+  return r;
+}
+function showDone(res){
+  const rows=[
+    ['대여 기간',res.start+' ~ '+res.end+' ('+res.nights+'박)'],
+    ['인수·반납 시간',res.pickupTime+' / '+res.returnTime],
+    ['차량',CLASSES[res.cls].name],
+    ['인원','성인 '+res.adults+'명, 어린이 '+res.children+'명'],
+    ['운전자',res.name],
+    ['예상 요금',won(res.total)]
+  ];
+  el('doneSum').innerHTML=rows.map(r=>'<dt>'+r[0]+'</dt><dd>'+esc(r[1])+'</dd>').join('');
+  el('doneNo').textContent='NR-'+String(dnum(res.start)%100000);
+  form.hidden=true;
+  done.hidden=false;
+  done.scrollIntoView();
+}
+function onSubmit(){
+  if(window.__sceneResult)return;
+  const errs=validate();
+  $$('.err').forEach(x=>{x.hidden=true;});
+  $$('.field.bad').forEach(f=>f.classList.remove('bad'));
+  if(errs.length){
+    errs.forEach(x=>setErr(x[0],x[1]));
+    banner.textContent='입력하신 내용을 다시 확인해 주세요. ('+errs.length+'개 항목)';
+    banner.hidden=false;
+    const first=el('err-'+errs[0][0]);
+    const f=first&&first.closest('.field');
+    if(f)f.scrollIntoView({block:'center'});
+    return;
+  }
+  banner.hidden=true;
+  const res=buildResult();
+  window.__sceneResult=res;
+  showDone(res);
+}
+form.addEventListener('submit',e=>{e.preventDefault();onSubmit();});
+form.addEventListener('keydown',e=>{
+  if(e.key!=='Enter')return;
+  const t=e.target;
+  if(t===addr){e.preventDefault();if(acActive>=0&&acItems[acActive])choose(acActive);return;}
+  if(t===phoneInp){e.preventDefault();sendBtn.click();return;}
+  if(t===codeInp){e.preventDefault();verifyBtn.click();return;}
+  if(t.tagName==='INPUT'&&t.type!=='checkbox'&&t.type!=='radio')e.preventDefault();
+});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape')return;
+  if(!rPop.hidden)closePop();
+  if(!addrList.hidden)closeList();
+});
+
+/* ---------- start ---------- */
+initBirth();
+initSteppers();
+paintRange();
+recalc();
+})();
+</script>
+</body>
+</html>

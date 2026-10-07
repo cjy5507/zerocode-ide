@@ -63,3 +63,24 @@ fn the_gate_and_the_walk_read_one_table_and_the_commit_row_asks_no_person() {
     assert_eq!(confirm_kind_of("결제하기"), Some(ConfirmKind::Payment));
     assert_eq!(confirm_kind_of("Send money"), Some(ConfirmKind::Transfer));
 }
+
+/// The list a page script is handed is the table's rows whole and in order:
+/// the gate's three kinds first, each in the gate's own order, the commit row
+/// the walk adds last — so a word added to any row reaches every reader.
+#[test]
+fn the_held_rows_are_the_tables_four_rows_in_their_order() {
+    let words: Vec<&str> = HELD_ROWS.concat();
+    let gate: Vec<&str> = ConfirmKind::ALL
+        .into_iter()
+        .flat_map(|kind| kind.words().iter().copied())
+        .collect();
+    assert_eq!(words[..gate.len()], gate[..], "the gate's rows come first");
+    assert_eq!(
+        words[gate.len()..],
+        *COMMIT_WORDS,
+        "and the commit row last"
+    );
+    for word in &words {
+        assert_eq!(kind_of(word), ControlKind::Destructive, "{word}");
+    }
+}

@@ -83,6 +83,13 @@ pub const COMMIT_WORDS: &[&str] = &[
     "confirmar",
 ];
 
+/// The table's four rows in their order — payment, transfer, delete, commit:
+/// the one list every reader that holds a control back by its words reads.
+/// [`kind_of`] here; the browser door's page scripts through the form request
+/// (`holds`), where a control that says one of them is never pressed on a
+/// guess.
+pub const HELD_ROWS: [&[&str]; 4] = [PAYMENT_WORDS, TRANSFER_WORDS, DELETE_WORDS, COMMIT_WORDS];
+
 /// The last step where money moves or things vanish (§1.5): the kinds a
 /// person confirms by default, each with the words a control carries in the
 /// five languages the window speaks. The helper matches labels against
@@ -161,7 +168,7 @@ impl ControlKind {
 #[must_use]
 pub fn kind_of(legend: &str) -> ControlKind {
     let shown = legend.to_lowercase();
-    let destructive = [PAYMENT_WORDS, TRANSFER_WORDS, DELETE_WORDS, COMMIT_WORDS]
+    let destructive = HELD_ROWS
         .into_iter()
         .flatten()
         .any(|word| shown.contains(word));

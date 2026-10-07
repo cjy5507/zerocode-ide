@@ -1,0 +1,875 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>장바구니 · 주문 | 새벽들 장터</title>
+<style>
+[hidden]{display:none!important}
+:root{--g:#2f7d4f;--gd:#22613c;--gl:#eaf4ee;--line:#e2e5e8;--mut:#80878d;--err:#d63c3c;--bg:#f5f6f4}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font-family:"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif;font-size:14px;color:#222;background:var(--bg);line-height:1.45}
+button,input,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+p{margin:0}
+.top{background:#fff;border-bottom:1px solid var(--line)}
+.top-in{width:1120px;margin:0 auto;height:62px;display:flex;align-items:center;gap:28px}
+.logo{font-size:22px;font-weight:800;color:var(--g);letter-spacing:-1px}
+.logo small{font-size:12px;font-weight:400;color:var(--mut);letter-spacing:0;margin-left:8px}
+.steps{display:flex;list-style:none;margin:0 0 0 auto;padding:0;font-size:13px;color:#b3b8bc}
+.steps li+li:before{content:"›";margin:0 10px;color:#ccd}
+.steps li.on{color:#222;font-weight:700}
+.steps li.past{color:var(--g)}
+.me{font-size:13px;color:#555}
+.wrap{width:1120px;margin:22px auto 40px}
+h1{font-size:24px;margin:0 0 16px;letter-spacing:-.5px}
+.cols{display:flex;gap:24px;align-items:flex-start}
+.main{flex:1;min-width:0}
+.side{width:330px;flex:none;position:sticky;top:16px}
+.box{background:#fff;border:1px solid var(--line);border-radius:10px;padding:20px 24px;margin-bottom:14px}
+.box h2{font-size:17px;margin:0 0 12px}
+.muted{color:var(--mut)}
+.small{font-size:12px}
+.center{text-align:center}
+.req{color:var(--err);font-style:normal;margin-left:2px}
+.link-btn{background:none;border:0;padding:0;color:#555;text-decoration:underline;font-size:13px}
+.btn-primary{display:block;width:100%;height:52px;border:0;border-radius:8px;background:var(--g);color:#fff;font-size:16px;font-weight:700;margin-top:14px}
+.btn-primary:hover{background:var(--gd)}
+.btn-primary:disabled{background:#c5cbc7;cursor:default}
+.btn-line{height:42px;padding:0 16px;border:1px solid var(--g);background:#fff;color:var(--g);border-radius:6px;font-weight:600;white-space:nowrap}
+.btn-line:disabled{border-color:#ccc;color:#999;cursor:default}
+.cart-head{display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.cart-head label{display:flex;align-items:center;gap:8px;font-weight:600}
+.cart-list{list-style:none;margin:0;padding:0}
+.cart-row{display:flex;align-items:center;gap:16px;padding:16px 0;border-bottom:1px solid #f0f1f2}
+.thumb{width:72px;height:72px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:#555}
+.info{flex:1;min-width:0}
+.pname{font-size:15px;font-weight:600}
+.pdesc{font-size:12px;color:var(--mut);margin-top:2px}
+.price{margin-top:6px}
+.price s{color:#aaa;font-size:12px;margin-right:4px}
+.stepper{display:flex;border:1px solid #d5d9dc;border-radius:6px;overflow:hidden;flex:none}
+.stepper button{width:32px;height:34px;border:0;background:#fff;font-size:16px}
+.stepper button:disabled{color:#ccc;cursor:default}
+.qty-input{width:40px;height:34px;border:0;border-left:1px solid #eee;border-right:1px solid #eee;text-align:center}
+.line-total{width:90px;text-align:right;flex:none}
+.row-del{border:0;background:none;font-size:20px;color:#aaa;width:28px;flex:none}
+.free-msg{margin-top:12px;font-size:13px;color:var(--g)}
+.sum dl{margin:0}
+.sum dl div{display:flex;justify-content:space-between;padding:5px 0}
+.sum dt{color:#555}
+.sum dd{margin:0}
+.sum .minus{color:var(--err)}
+.sum-total{display:flex;justify-content:space-between;align-items:baseline;border-top:1px solid var(--line);margin-top:8px;padding-top:12px;font-weight:700}
+.sum-total strong{font-size:22px;color:var(--g)}
+.row{display:flex;gap:16px;padding:9px 0}
+.lbl{width:118px;flex:none;padding-top:11px;font-weight:600}
+.fld{flex:1;min-width:0;position:relative}
+.fld input[type=text],.fld input[type=tel],textarea{width:100%;height:42px;border:1px solid #cfd4d8;border-radius:6px;padding:0 12px;background:#fff}
+textarea{height:auto;padding:10px 12px;resize:none}
+.fld input[readonly]{background:#f7f8f9}
+input:focus,textarea:focus{outline:none;border-color:var(--g)}
+.has-err input[type=text],.has-err input[type=tel],.has-err .dd-btn{border-color:var(--err)}
+.err{color:var(--err);font-size:12px;margin-top:4px}
+.err:empty{display:none}
+.ok{color:var(--g);font-size:13px;margin-top:6px}
+.radios{display:flex;gap:20px;padding-top:10px;flex-wrap:wrap}
+.radios label{display:flex;align-items:center;gap:6px}
+input[type=radio],input[type=checkbox]{accent-color:var(--g);width:17px;height:17px;margin:0}
+.saved-card{margin:4px 0 6px 134px;border:1px solid var(--line);border-radius:8px;padding:12px 16px;background:#fafbfa;line-height:1.7}
+.badge{display:inline-block;font-size:11px;background:var(--gl);color:var(--g);border-radius:3px;padding:0 5px;margin-left:4px}
+.zip-line,.coupon-line{display:flex;gap:8px}
+.zip-line input{width:140px!important}
+#addr1,#addr2{margin-top:8px}
+.hint{font-size:13px;color:#555;background:var(--gl);border-radius:6px;padding:8px 12px;margin-bottom:6px}
+.date-in{position:relative;width:260px}
+.date-in input{cursor:pointer;padding-right:40px!important}
+.cal-ico{position:absolute;right:6px;top:6px;width:30px;height:30px;border:0;background:none}
+.cal-ico:before{content:"";display:block;width:16px;height:14px;margin:0 auto;border:2px solid #777;border-top-width:4px;border-radius:2px}
+.cal{position:absolute;top:46px;left:0;z-index:20;width:300px;background:#fff;border:1px solid #cfd4d8;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:12px}
+.cal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.cal-head button{width:30px;height:30px;border:1px solid var(--line);background:#fff;border-radius:50%;font-size:16px}
+.cal-head button:disabled{color:#ddd;cursor:default}
+.cal-grid{width:100%;border-collapse:collapse;text-align:center}
+.cal-grid th{font-size:12px;font-weight:400;color:#888;padding:4px 0}
+.cal-grid th.sun,.day.sun{color:#e06a6a}
+.day{width:36px;height:34px;border:0;background:none;border-radius:50%;font-weight:600}
+.day:hover:not(:disabled){background:var(--gl)}
+.day:disabled{color:#d3d6d8;font-weight:400;cursor:default}
+.day.sel{background:var(--g);color:#fff}
+.cal-foot{font-size:11px;color:#999;margin-top:6px}
+.slots{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.slot{border:1px solid #cfd4d8;border-radius:8px;padding:11px 12px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;background:#fff}
+.slot:focus{outline:2px solid #bfe0cb}
+.slot.sel{border-color:var(--g);background:var(--gl);font-weight:700}
+.slot.off{color:#bbb;background:#f6f6f6;cursor:not-allowed}
+.slot-b{font-size:11px;border-radius:3px;padding:1px 5px;background:#eee;color:#888;font-weight:400}
+.slot-b.few{background:#fff1e6;color:#e07b26}
+.loading{display:flex;align-items:center;gap:8px;padding-top:10px;grid-column:1/-1}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.chip{border:1px solid #d5d9dc;background:#fff;border-radius:16px;padding:5px 12px;font-size:13px}
+.chip.on{border-color:var(--g);color:var(--g);background:var(--gl)}
+.ta-wrap{position:relative}
+.counter{position:absolute;right:10px;bottom:8px;font-size:11px;color:#999}
+.pay-cards{display:flex;gap:10px}
+.pay-card{flex:1;position:relative;border:1px solid #cfd4d8;border-radius:8px;padding:14px 16px;cursor:pointer;display:block}
+.pay-card input{position:absolute;opacity:0;pointer-events:none}
+.pay-card.on{border-color:var(--g);box-shadow:0 0 0 1px var(--g) inset;background:var(--gl)}
+.pay-card:focus-within{outline:2px solid #bfe0cb}
+.pc-t{display:block;font-weight:700;font-size:15px}
+.pc-d{display:block;font-size:12px;color:var(--mut);margin-top:4px}
+.dd{position:relative}
+.dd-btn{width:100%;height:42px;text-align:left;border:1px solid #cfd4d8;border-radius:6px;background:#fff;padding:0 36px 0 12px;color:#999;position:relative}
+.dd-btn.chosen{color:#222}
+.dd-btn:after{content:"";position:absolute;right:14px;top:17px;border:5px solid transparent;border-top-color:#888}
+.dd-list{position:absolute;left:0;right:0;top:44px;z-index:15;list-style:none;margin:0;padding:4px 0;background:#fff;border:1px solid #cfd4d8;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.1)}
+.dd-list li{padding:10px 12px;cursor:pointer}
+.dd-list li:hover,.dd-list li:focus{background:var(--gl);outline:none}
+.dd-list li span,.dd-btn span span{color:#777;font-size:13px;margin-left:6px}
+.sub-row{margin-top:10px}
+.sub-lbl{display:block;font-size:12px;color:#555;margin-bottom:4px}
+#receiptNo{width:260px!important}
+.info-box{margin:6px 0 0 134px;background:#f7f8f9;border-radius:6px;padding:10px 14px;font-size:13px;color:#555}
+.agree-all{display:flex;align-items:center;gap:8px;padding:12px 14px;background:#f7f8f9;border-radius:8px;font-size:15px}
+.agree-list{list-style:none;margin:8px 0 0;padding:0 14px}
+.agree-item{padding:7px 0;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between}
+.agree-item label{display:flex;align-items:center;gap:8px}
+.tag-req{color:var(--g);font-weight:700}
+.tag-opt{color:#999}
+.terms{flex-basis:100%;margin:8px 0 2px 25px;padding:10px 12px;background:#f7f8f9;border-radius:6px;font-size:12px;color:#666;line-height:1.6}
+.ord-items{list-style:none;margin:0;padding:0}
+.ord-items li{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed #eee}
+.kv{border-collapse:collapse}
+.kv th{text-align:left;font-weight:400;color:var(--mut);padding:4px 24px 4px 0;vertical-align:top}
+.kv td{padding:4px 0}
+.done{text-align:center;padding:48px 24px;max-width:640px;margin:0 auto}
+.done-ico{width:56px;height:56px;border-radius:50%;background:var(--g);color:#fff;font-size:30px;line-height:56px;margin:0 auto 14px}
+.done-bank{background:var(--gl);border-radius:8px;padding:14px;margin:18px 0;line-height:1.7}
+.done .kv{margin:16px auto 0;text-align:left}
+.layer{position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.45);z-index:50;display:flex;align-items:center;justify-content:center}
+.layer-box{width:480px;background:#fff;border-radius:10px;overflow:hidden}
+.layer-head{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
+.layer-head .x{border:0;background:none;font-size:24px;line-height:1;color:#666}
+#zipFrame{display:block;width:100%;height:460px;border:0}
+.busy{position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(255,255,255,.75);z-index:60;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;font-weight:600}
+.spin,.spin-s{border:3px solid #cfe5d7;border-top-color:var(--g);border-radius:50%;animation:sp .8s linear infinite}
+.spin{width:36px;height:36px}
+.spin-s{width:14px;height:14px;border-width:2px;display:inline-block}
+@keyframes sp{to{transform:rotate(360deg)}}
+.toast{position:fixed;left:50%;bottom:40px;transform:translateX(-50%);background:#333;color:#fff;padding:10px 18px;border-radius:20px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:70}
+.toast.show{opacity:.92}
+.back-row{margin-bottom:8px}
+.foot{text-align:center;font-size:12px;color:#999;padding:10px 0 40px}
+</style>
+</head>
+<body>
+<header class="top"><div class="top-in">
+<div class="logo">새벽들 장터<small>오늘 거둔 것을 내일 새벽에</small></div>
+<ol class="steps" id="steps"><li class="on"><b>01</b> 장바구니</li><li><b>02</b> 주문서 작성</li><li><b>03</b> 주문 완료</li></ol>
+<span class="me">한소윤님</span>
+</div></header>
+<main class="wrap">
+<section id="step1">
+<h1>장바구니</h1>
+<div class="cols">
+<div class="main"><div class="box">
+<div class="cart-head">
+<label><input type="checkbox" id="checkAll" checked> 전체 선택 (<span id="selCnt">0</span>/<span id="allCnt">0</span>)</label>
+<span class="small muted">냉장 상품은 새벽들 전용 냉장차로 배송돼요</span>
+</div>
+<ul class="cart-list" id="cartList"></ul>
+<p class="free-msg" id="freeMsg"></p>
+</div></div>
+<aside class="side"><div class="box sum">
+<h2>결제 예정 금액</h2>
+<dl><div><dt>상품 금액</dt><dd id="s1Goods">0원</dd></div><div><dt>배송비</dt><dd id="s1Ship">0원</dd></div></dl>
+<div class="sum-total"><span>합계</span><strong id="s1Total">0원</strong></div>
+<button type="button" class="btn-primary" id="toOrder">주문하기</button>
+<p class="small muted center" style="margin-top:10px">쿠폰은 다음 단계인 주문서에서 쓸 수 있어요.</p>
+</div></aside>
+</div>
+</section>
+<section id="step2" hidden>
+<div class="back-row"><button type="button" class="link-btn" id="backToCart">‹ 장바구니로 돌아가기</button></div>
+<h1>주문서 작성</h1>
+<div class="cols">
+<div class="main">
+<div class="box"><h2>주문 상품 <span class="small muted" id="ordCnt"></span></h2><ul class="ord-items" id="ordItems"></ul></div>
+
+<div class="box"><h2>주문자 정보</h2>
+<table class="kv"><tr><th>이름</th><td>한소윤</td></tr><tr><th>휴대폰</th><td>010-5550-0142</td></tr><tr><th>이메일</th><td>soyun.han@example.com</td></tr></table>
+</div>
+
+<div class="box" id="shipBox"><h2>배송 정보</h2>
+<div class="row"><span class="lbl">배송지 선택</span>
+<div class="fld"><div class="radios" id="shipToGroup">
+<label><input type="radio" name="shipTo" value="saved" checked> 기본 배송지</label>
+<label><input type="radio" name="shipTo" value="new"> 새로운 배송지</label>
+</div></div></div>
+<div class="saved-card" id="savedAddr"><p><b>한소윤</b><span class="badge">기본</span></p><p>010-5550-0142</p><p>(48390) 가람시 동녘구 나루터로 77, 302호</p></div>
+<div id="newAddr" hidden>
+<div class="row"><label class="lbl" for="rcvName">받는 분<em class="req">*</em></label>
+<div class="fld"><input type="text" id="rcvName" maxlength="20" placeholder="이름을 입력해 주세요" autocomplete="off"><p class="err" data-for="rcvName"></p></div></div>
+<div class="row"><label class="lbl" for="rcvPhone">연락처<em class="req">*</em></label>
+<div class="fld"><input type="tel" id="rcvPhone" maxlength="13" placeholder="010-0000-0000" autocomplete="off"><p class="err" data-for="rcvPhone"></p></div></div>
+<div class="row"><span class="lbl">주소<em class="req">*</em></span>
+<div class="fld">
+<div class="zip-line"><input type="text" id="zip" readonly placeholder="우편번호" aria-label="우편번호"><button type="button" class="btn-line" id="zipBtn">주소 검색</button></div>
+<input type="text" id="addr1" readonly placeholder="기본 주소" aria-label="기본 주소">
+<input type="text" id="addr2" maxlength="40" placeholder="상세 주소" autocomplete="off">
+<p class="err" data-for="addr"></p>
+</div></div>
+</div>
+</div>
+
+<div class="box" id="whenBox"><h2>배송 일정</h2>
+<p class="hint">지금 주문하시면 <b id="firstDay"></b>부터 받으실 수 있어요. 일요일에는 배송하지 않아요.</p>
+<div class="row"><label class="lbl" for="dDate">배송 희망일<em class="req">*</em></label>
+<div class="fld">
+<div class="date-in"><input type="text" id="dDate" readonly placeholder="날짜를 선택해 주세요"><button type="button" class="cal-ico" id="dDateBtn" aria-label="달력 열기"></button></div>
+<div class="cal" id="cal" hidden></div>
+<p class="err" data-for="dDate"></p>
+</div></div>
+<div class="row"><span class="lbl" id="slotLbl">배송 시간대<em class="req">*</em></span>
+<div class="fld">
+<div class="slots" id="slotList" role="radiogroup" aria-labelledby="slotLbl"><p class="muted" style="padding-top:10px;grid-column:1/-1">배송 희망일을 먼저 선택해 주세요.</p></div>
+<p class="err" data-for="slot"></p>
+</div></div>
+<div class="row"><label class="lbl" for="note">배송 요청사항</label>
+<div class="fld">
+<div class="chips" id="noteChips"><button type="button" class="chip">문 앞에 놓아 주세요</button><button type="button" class="chip">경비실에 맡겨 주세요</button><button type="button" class="chip">배송 전에 연락 주세요</button><button type="button" class="chip">벨은 누르지 말아 주세요</button></div>
+<div class="ta-wrap"><textarea id="note" rows="2" maxlength="50" placeholder="기사님께 전할 말을 남겨 주세요"></textarea><span class="counter"><span id="noteLen">0</span>/50</span></div>
+</div></div>
+</div>
+
+<div class="box" id="couponBox"><h2>할인</h2>
+<div class="row"><label class="lbl" for="couponCode">쿠폰 코드</label>
+<div class="fld">
+<div class="coupon-line"><input type="text" id="couponCode" maxlength="20" placeholder="쿠폰 코드를 입력해 주세요" autocomplete="off"><button type="button" class="btn-line" id="couponApply">적용</button></div>
+<p class="ok" id="couponOk" hidden><span id="couponOkText"></span> <button type="button" class="link-btn" id="couponDrop">취소</button></p>
+<p class="err" data-for="coupon"></p>
+<p class="small muted" style="margin-top:6px">3만원 이상 주문 시 사용 가능 · 주문 한 건에 쿠폰 한 장</p>
+</div></div>
+</div>
+
+<div class="box" id="payBox"><h2>결제</h2>
+<div class="row"><span class="lbl" id="payLbl">결제 수단<em class="req">*</em></span>
+<div class="fld">
+<div class="pay-cards" role="radiogroup" aria-labelledby="payLbl">
+<label class="pay-card"><input type="radio" name="pay" value="bank"><span class="pc-t">무통장입금</span><span class="pc-d">주문 후 24시간 안에 입금해 주세요</span></label>
+<label class="pay-card"><input type="radio" name="pay" value="cod"><span class="pc-t">만나서 결제</span><span class="pc-d">받으실 때 기사님께 현금으로 · 수수료 1,000원</span></label>
+</div>
+<p class="err" data-for="pay"></p>
+</div></div>
+<div id="bankFields" hidden>
+<div class="row"><span class="lbl" id="bankLbl">입금 은행<em class="req">*</em></span>
+<div class="fld">
+<div class="dd" id="bankDD">
+<button type="button" class="dd-btn" id="bankBtn" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="bankLbl bankText"><span id="bankText">입금하실 계좌를 선택해 주세요</span></button>
+<ul class="dd-list" id="bankList" role="listbox" aria-labelledby="bankLbl" hidden>
+<li role="option" tabindex="0" aria-selected="false" data-v="garam"><b>가람은행</b><span>301-0142-5550-21</span></li>
+<li role="option" tabindex="0" aria-selected="false" data-v="solbit"><b>솔빛은행</b><span>110-555-014221</span></li>
+<li role="option" tabindex="0" aria-selected="false" data-v="saenae"><b>새내신협</b><span>131-055-500142</span></li>
+</ul>
+</div>
+<p class="small muted" style="margin-top:4px">예금주: (주)새벽들장터</p>
+<p class="err" data-for="bank"></p>
+</div></div>
+<div class="row"><label class="lbl" for="depositor">입금자명<em class="req">*</em></label>
+<div class="fld"><input type="text" id="depositor" maxlength="20" placeholder="실제로 입금하실 분의 이름" autocomplete="off"><p class="err" data-for="depositor"></p></div></div>
+<div class="row"><span class="lbl">현금영수증</span>
+<div class="fld">
+<div class="radios" id="receiptGroup">
+<label><input type="radio" name="receipt" value="none" checked> 신청 안 함</label>
+<label><input type="radio" name="receipt" value="income"> 소득공제용</label>
+<label><input type="radio" name="receipt" value="biz"> 지출증빙용</label>
+</div>
+<div class="sub-row" id="receiptNoRow" hidden><label class="sub-lbl" for="receiptNo">발급 번호</label><input type="text" id="receiptNo" maxlength="13" placeholder="휴대폰 번호 (숫자만)" autocomplete="off"><p class="err" data-for="receiptNo"></p></div>
+</div></div>
+</div>
+<div class="info-box" id="codInfo" hidden>상품을 받으실 때 기사님께 현금으로 결제해 주세요.</div>
+</div>
+
+<div class="box" id="agreeBox"><h2>약관 동의</h2>
+<label class="agree-all"><input type="checkbox" id="agreeAll"> <b>전체 동의</b> <span class="small muted">(선택 항목 포함)</span></label>
+<ul class="agree-list">
+<li class="agree-item"><label><input type="checkbox" id="agPurchase" data-req="1"> <span class="tag-req">[필수]</span> 구매조건 확인 및 결제진행 동의</label><button type="button" class="link-btn view" data-t="terms1" aria-expanded="false">보기</button>
+<div class="terms" id="terms1" hidden>주문 상품의 이름, 가격, 배송 정보를 확인했습니다. 신선식품은 받은 날부터 2일 안에 알려 주시면 교환·환불해 드립니다.</div></li>
+<li class="agree-item"><label><input type="checkbox" id="agPrivacy" data-req="1"> <span class="tag-req">[필수]</span> 개인정보 수집·이용 동의</label><button type="button" class="link-btn view" data-t="terms2" aria-expanded="false">보기</button>
+<div class="terms" id="terms2" hidden>수집 항목: 받는 분 이름·연락처·주소, 입금자명 · 목적: 주문 처리와 배송 · 보유 기간: 거래 종료 후 5년</div></li>
+<li class="agree-item"><label><input type="checkbox" id="agThird" data-req="1"> <span class="tag-req">[필수]</span> 개인정보 제3자 제공 동의</label><button type="button" class="link-btn view" data-t="terms3" aria-expanded="false">보기</button>
+<div class="terms" id="terms3" hidden>제공받는 곳: 새벽들 배송 협력 업체 · 항목: 받는 분 이름·연락처·주소, 배송 요청사항 · 보유 기간: 배송 완료 후 1개월</div></li>
+<li class="agree-item"><label><input type="checkbox" id="agMkt"> <span class="tag-opt">[선택]</span> 마케팅 정보 수신 동의 (문자·이메일)</label></li>
+</ul>
+<p class="err" data-for="agree"></p>
+</div>
+</div>
+
+<aside class="side"><div class="box sum">
+<h2>결제 금액</h2>
+<dl>
+<div><dt>상품 금액</dt><dd id="s2Goods">0원</dd></div>
+<div><dt>배송비</dt><dd id="s2Ship">0원</dd></div>
+<div id="s2CouponRow" hidden><dt>쿠폰 할인</dt><dd class="minus" id="s2Coupon"></dd></div>
+<div id="s2CodRow" hidden><dt>만나서 결제 수수료</dt><dd id="s2Cod"></dd></div>
+</dl>
+<div class="sum-total"><span>총 결제 금액</span><strong id="s2Total">0원</strong></div>
+<p class="small muted" style="margin-top:6px">구매 확정 시 <span id="s2Point">0</span>P 적립 예정</p>
+<button type="button" class="btn-primary" id="submitOrder"><span id="submitText">주문하기</span></button>
+<p class="err center" id="submitErr" style="margin-top:8px"></p>
+</div></aside>
+</div>
+</section>
+
+<section id="step3" hidden>
+<div class="box done">
+<div class="done-ico">✓</div>
+<h1>주문이 접수되었어요</h1>
+<p class="muted">주문번호 <b id="doneNo"></b></p>
+<div class="done-bank" id="doneBank" hidden><p><b id="doneDue"></b>까지 아래 계좌로 <b id="doneAmt"></b>을 보내 주세요.<br>입금이 확인되면 문자로 알려 드릴게요.</p><p id="doneAcct"></p></div>
+<table class="kv">
+<tr><th>받는 분</th><td id="doneTo"></td></tr>
+<tr><th>배송지</th><td id="doneAddr"></td></tr>
+<tr><th>배송 일정</th><td id="doneWhen"></td></tr>
+</table>
+</div>
+</section>
+</main>
+<footer class="foot">(주)새벽들장터 · 고객센터 평일 09:00~18:00 · help@example.com</footer>
+
+<div class="layer" id="zipLayer" hidden>
+<div class="layer-box" role="dialog" aria-modal="true" aria-labelledby="zipTitle">
+<div class="layer-head"><strong id="zipTitle">우편번호 찾기</strong><button type="button" class="x" id="zipClose" aria-label="닫기">×</button></div>
+<iframe id="zipFrame" title="우편번호 검색"></iframe>
+</div>
+</div>
+<div class="busy" id="busy" hidden><div class="spin"></div><p>주문을 접수하고 있어요…</p></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+'use strict';
+var $ = function (id) { return document.getElementById(id); };
+var each = function (list, fn) { Array.prototype.forEach.call(list, fn); };
+
+// 서버가 내려 주는 값
+var SERVER_TODAY = '2026-11-23';
+var FREE_SHIP = 40000, SHIP_FEE = 3000, COD_FEE = 1000;
+var COUPONS = { FRESH3000: { off: 3000, min: 30000 } };
+var SAVED_ADDR = { name: '한소윤', phone: '010-5550-0142', zip: '48390', road: '가람시 동녘구 나루터로 77', detail: '302호' };
+var BANKS = { garam: '가람은행 301-0142-5550-21', solbit: '솔빛은행 110-555-014221', saenae: '새내신협 131-055-500142' };
+var CART = [
+  { id: 'tomato', name: '유기농 방울토마토 500g', desc: '산지 직송 · 냉장', list: 7900, price: 6900, qty: 1, max: 10, color: '#f8d9d0', label: '방울토마토' },
+  { id: 'spinach', name: '무농약 시금치 1단', desc: '아침 수확 · 냉장', list: 0, price: 2800, qty: 2, max: 10, color: '#d8ecd2', label: '시금치' },
+  { id: 'tangerine', name: '햇감귤 3kg', desc: '중과 · 상온', list: 17900, price: 15900, qty: 1, max: 5, color: '#fde3b6', label: '감귤' }
+];
+CART.forEach(function (it) { it.checked = true; it.removed = false; });
+var state = { coupon: null, date: '', slot: '', slotText: '', pay: '', bank: '' };
+
+function comma(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+function won(n) { return comma(n) + '원'; }
+function pad(n) { return (n < 10 ? '0' : '') + n; }
+var toastTimer = 0;
+function toast(msg) {
+  var t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { t.classList.remove('show'); }, 2400);
+}
+
+/* 장바구니 */
+var cartList = $('cartList');
+function find(id) { for (var i = 0; i < CART.length; i++) if (CART[i].id === id) return CART[i]; return null; }
+function itemOf(el) { var li = el.closest('.cart-row'); return li ? find(li.getAttribute('data-id')) : null; }
+function rowOf(it) { return cartList.querySelector('.cart-row[data-id="' + it.id + '"]'); }
+function live() { return CART.filter(function (it) { return !it.removed; }); }
+function chosen() { return CART.filter(function (it) { return !it.removed && it.checked; }); }
+function goodsSum() { return chosen().reduce(function (s, it) { return s + it.price * it.qty; }, 0); }
+
+cartList.innerHTML = CART.map(function (it) {
+  return '<li class="cart-row" data-id="' + it.id + '">' +
+    '<input type="checkbox" class="row-check" checked aria-label="' + it.name + ' 선택">' +
+    '<div class="thumb" style="background:' + it.color + '">' + it.label + '</div>' +
+    '<div class="info"><p class="pname">' + it.name + '</p><p class="pdesc">' + it.desc + '</p>' +
+    '<p class="price">' + (it.list ? '<s>' + won(it.list) + '</s>' : '') + won(it.price) + '</p></div>' +
+    '<div class="stepper"><button type="button" class="qty-minus" aria-label="수량 빼기">−</button>' +
+    '<input type="text" class="qty-input" inputmode="numeric" value="' + it.qty + '" aria-label="수량">' +
+    '<button type="button" class="qty-plus" aria-label="수량 더하기">+</button></div>' +
+    '<strong class="line-total"></strong><button type="button" class="row-del" aria-label="삭제">×</button></li>';
+}).join('');
+
+function syncRow(it) {
+  var li = rowOf(it);
+  if (!li) return;
+  var inp = li.querySelector('.qty-input');
+  if (document.activeElement !== inp) inp.value = it.qty;
+  li.querySelector('.qty-minus').disabled = it.qty <= 1;
+  li.querySelector('.qty-plus').disabled = it.qty >= it.max;
+  li.querySelector('.line-total').textContent = won(it.price * it.qty);
+}
+function setQty(it, q) {
+  q = parseInt(q, 10);
+  if (isNaN(q) || q < 1) q = 1;
+  if (q > it.max) { q = it.max; toast('이 상품은 한 번에 ' + it.max + '개까지 담을 수 있어요.'); }
+  it.qty = q;
+  recalc();
+}
+cartList.addEventListener('click', function (e) {
+  var it = itemOf(e.target);
+  if (!it) return;
+  if (e.target.closest('.qty-minus')) setQty(it, it.qty - 1);
+  else if (e.target.closest('.qty-plus')) setQty(it, it.qty + 1);
+  else if (e.target.closest('.row-del')) {
+    it.removed = true;
+    rowOf(it).remove();
+    toast(it.name + ' 상품을 장바구니에서 뺐어요.');
+    recalc();
+  }
+});
+cartList.addEventListener('input', function (e) {
+  var inp = e.target;
+  if (!inp.classList.contains('qty-input')) return;
+  var it = itemOf(inp), v = inp.value.replace(/\D/g, '').slice(0, 3);
+  if (inp.value !== v) inp.value = v;
+  if (v && +v >= 1) { it.qty = Math.min(+v, it.max); recalc(); }
+});
+cartList.addEventListener('change', function (e) {
+  var t = e.target, it = itemOf(t);
+  if (!it) return;
+  if (t.classList.contains('qty-input')) { setQty(it, t.value); t.value = it.qty; }
+  else if (t.classList.contains('row-check')) { it.checked = t.checked; recalc(); }
+});
+$('checkAll').addEventListener('change', function () {
+  var on = this.checked;
+  live().forEach(function (it) { it.checked = on; rowOf(it).querySelector('.row-check').checked = on; });
+  recalc();
+});
+
+function totals() {
+  var g = goodsSum(), ship = g === 0 || g >= FREE_SHIP ? 0 : SHIP_FEE;
+  var off = state.coupon ? state.coupon.off : 0, cod = state.pay === 'cod' ? COD_FEE : 0;
+  return { goods: g, ship: ship, off: off, cod: cod, total: Math.max(0, g + ship - off + cod) };
+}
+function recalc() {
+  if (state.coupon && goodsSum() < state.coupon.min) {
+    dropCoupon();
+    setErr('coupon', '주문 금액이 3만원보다 적어져 쿠폰 적용이 취소되었어요.');
+  }
+  var t = totals(), all = live(), sel = chosen();
+  $('selCnt').textContent = sel.length;
+  $('allCnt').textContent = all.length;
+  $('checkAll').checked = all.length > 0 && sel.length === all.length;
+  $('s1Goods').textContent = won(t.goods);
+  $('s1Ship').textContent = t.ship ? won(t.ship) : '무료';
+  $('s1Total').textContent = won(t.goods + t.ship);
+  $('toOrder').disabled = !sel.length;
+  $('toOrder').textContent = sel.length ? '주문하기 (' + sel.length + '건)' : '주문할 상품을 선택해 주세요';
+  $('freeMsg').innerHTML = !t.goods ? '' : t.goods >= FREE_SHIP ? '무료배송 조건을 채웠어요.' : '<b>' + won(FREE_SHIP - t.goods) + '</b> 더 담으면 무료배송이에요.';
+  if (!all.length) cartList.innerHTML = '<li class="muted center" style="padding:40px 0">장바구니가 비어 있어요.</li>';
+  $('s2Goods').textContent = won(t.goods);
+  $('s2Ship').textContent = t.ship ? '+' + won(t.ship) : '무료';
+  $('s2CouponRow').hidden = !t.off;
+  $('s2Coupon').textContent = '-' + won(t.off);
+  $('s2CodRow').hidden = !t.cod;
+  $('s2Cod').textContent = '+' + won(t.cod);
+  $('s2Total').textContent = won(t.total);
+  $('submitText').textContent = won(t.total) + ' 주문하기';
+  $('s2Point').textContent = comma(Math.floor(t.goods / 100));
+  CART.forEach(syncRow);
+}
+
+/* 단계 이동 */
+function go(n) {
+  [1, 2, 3].forEach(function (i) { $('step' + i).hidden = i !== n; });
+  each($('steps').children, function (li, i) { li.className = i + 1 === n ? 'on' : i + 1 < n ? 'past' : ''; });
+  closePops();
+  window.scrollTo(0, 0);
+}
+$('toOrder').addEventListener('click', function () {
+  var sel = chosen();
+  if (!sel.length) return;
+  $('ordItems').innerHTML = sel.map(function (it) {
+    return '<li><span>' + it.name + ' <span class="muted">· ' + it.qty + '개</span></span><span>' + won(it.price * it.qty) + '</span></li>';
+  }).join('');
+  $('ordCnt').textContent = sel.length + '건';
+  go(2);
+});
+$('backToCart').addEventListener('click', function () { go(1); });
+
+function errEl(key) { return document.querySelector('.err[data-for="' + key + '"]'); }
+function setErr(key, msg) {
+  var el = errEl(key), row = el.closest('.row');
+  el.textContent = msg || '';
+  if (row) row.classList.toggle('has-err', !!msg);
+}
+
+/* 배송지 */
+function shipToVal() { var r = document.querySelector('input[name="shipTo"]:checked'); return r ? r.value : 'saved'; }
+each(document.querySelectorAll('input[name="shipTo"]'), function (r) {
+  r.addEventListener('change', function () {
+    var nw = shipToVal() === 'new';
+    $('newAddr').hidden = !nw;
+    $('savedAddr').hidden = nw;
+  });
+});
+
+var PHONE_RE = /^01[016789]-\d{3,4}-\d{4}$/;
+function fmtPhone(v) {
+  var d = v.replace(/\D/g, '').slice(0, 11);
+  if (d.length < 4) return d;
+  if (d.length < 8) return d.slice(0, 3) + '-' + d.slice(3);
+  if (d.length < 11) return d.slice(0, 3) + '-' + d.slice(3, 6) + '-' + d.slice(6);
+  return d.slice(0, 3) + '-' + d.slice(3, 7) + '-' + d.slice(7);
+}
+function fmtBiz(v) {
+  var d = v.replace(/\D/g, '').slice(0, 10);
+  return d.length < 4 ? d : d.length < 6 ? d.slice(0, 3) + '-' + d.slice(3) : d.slice(0, 3) + '-' + d.slice(3, 5) + '-' + d.slice(5);
+}
+$('rcvPhone').addEventListener('input', function () { this.value = fmtPhone(this.value); });
+$('receiptNo').addEventListener('input', function () { this.value = receiptVal() === 'biz' ? fmtBiz(this.value) : fmtPhone(this.value); });
+
+/* 우편번호 찾기 */
+var zipLayer = $('zipLayer'), zipFrame = $('zipFrame'), zipRoad = '';
+function openZip() {
+  closePops();
+  if (!zipFrame.getAttribute('src')) zipFrame.setAttribute('src', 'frame.html');
+  else zipFrame.contentWindow.postMessage({ kind: 'zip:open' }, '*');
+  zipLayer.hidden = false;
+}
+function closeZip() { zipLayer.hidden = true; $('zipBtn').focus(); }
+$('zipBtn').addEventListener('click', openZip);
+$('zip').addEventListener('click', openZip);
+$('addr1').addEventListener('click', openZip);
+$('zipClose').addEventListener('click', closeZip);
+zipLayer.addEventListener('click', function (e) { if (e.target === zipLayer) closeZip(); });
+window.addEventListener('message', function (e) {
+  var d = e.data;
+  if (e.source !== zipFrame.contentWindow || !d || d.kind !== 'zip:selected') return;
+  zipRoad = d.roadAddress;
+  $('zip').value = d.zonecode;
+  $('addr1').value = d.roadAddress + (d.extra ? ' ' + d.extra : '');
+  zipLayer.hidden = true;
+  setErr('addr', '');
+  $('addr2').focus();
+});
+
+/* 배송 희망일 */
+var WD = ['일', '월', '화', '수', '목', '금', '토'];
+function parseD(s) { var p = s.split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); }
+function fmtD(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+function addDays(s, n) { var d = parseD(s); d.setDate(d.getDate() + n); return fmtD(d); }
+function monthKey(s) { var d = parseD(s); return d.getFullYear() * 12 + d.getMonth(); }
+function dayLabel(s) { var d = parseD(s); return (d.getMonth() + 1) + '월 ' + d.getDate() + '일 (' + WD[d.getDay()] + ')'; }
+var MIN_DATE = addDays(SERVER_TODAY, 2), MAX_DATE = addDays(SERVER_TODAY, 30);
+function isOpenDay(s) { return s >= MIN_DATE && s <= MAX_DATE && parseD(s).getDay() !== 0; }
+
+var cal = $('cal'), view = 0;
+function renderCal() {
+  var y = Math.floor(view / 12), m = view % 12;
+  var start = new Date(y, m, 1).getDay(), days = new Date(y, m + 1, 0).getDate();
+  var h = '<div class="cal-head"><button type="button" class="cal-prev" aria-label="이전 달"' + (view <= monthKey(MIN_DATE) ? ' disabled' : '') + '>‹</button>' +
+    '<strong>' + y + '년 ' + (m + 1) + '월</strong><button type="button" class="cal-next" aria-label="다음 달"' + (view >= monthKey(MAX_DATE) ? ' disabled' : '') + '>›</button></div>' +
+    '<table class="cal-grid"><thead><tr>' + WD.map(function (w, i) { return '<th' + (i ? '' : ' class="sun"') + '>' + w + '</th>'; }).join('') + '</tr></thead><tbody><tr>';
+  for (var i = 0; i < start; i++) h += '<td></td>';
+  for (var d = 1; d <= days; d++) {
+    var wd = (start + d - 1) % 7, ds = y + '-' + pad(m + 1) + '-' + pad(d);
+    if (wd === 0 && d > 1) h += '</tr><tr>';
+    h += '<td><button type="button" class="day' + (wd ? '' : ' sun') + (ds === state.date ? ' sel' : '') + '" data-date="' + ds + '"' +
+      (isOpenDay(ds) ? '' : ' disabled') + ' aria-label="' + (m + 1) + '월 ' + d + '일 ' + WD[wd] + '요일">' + d + '</button></td>';
+  }
+  for (var j = (start + days) % 7; j && j < 7; j++) h += '<td></td>';
+  cal.innerHTML = h + '</tr></tbody></table><p class="cal-foot">일요일과 회색 날짜는 배송하지 않아요.</p>';
+}
+function toggleCal() {
+  if (!cal.hidden) { cal.hidden = true; return; }
+  view = monthKey(state.date || MIN_DATE);
+  renderCal();
+  openBank(false);
+  cal.hidden = false;
+}
+function pickDate(ds) {
+  cal.hidden = true;
+  if (ds === state.date) return;
+  state.date = ds;
+  state.slot = state.slotText = '';
+  $('dDate').value = dayLabel(ds);
+  setErr('dDate', '');
+  loadSlots(ds);
+}
+$('dDate').addEventListener('click', toggleCal);
+$('dDateBtn').addEventListener('click', toggleCal);
+cal.addEventListener('click', function (e) {
+  e.stopPropagation();
+  var b = e.target.closest('button');
+  if (!b || b.disabled) return;
+  if (b.classList.contains('cal-prev')) { view--; renderCal(); }
+  else if (b.classList.contains('cal-next')) { view++; renderCal(); }
+  else pickDate(b.getAttribute('data-date'));
+});
+
+/* 배송 시간대: 날짜를 고르면 남은 자리를 불러온다 */
+var SLOTS = [
+  { v: '07-10', t: '오전 7시 ~ 10시', sat: true },
+  { v: '10-13', t: '오전 10시 ~ 오후 1시', sat: true },
+  { v: '14-17', t: '오후 2시 ~ 5시' },
+  { v: '18-21', t: '오후 6시 ~ 9시' }
+];
+var slotList = $('slotList'), slotSeq = 0;
+function loadSlots(ds) {
+  var my = ++slotSeq;
+  slotList.innerHTML = '<p class="muted loading"><span class="spin-s"></span>배송 가능한 시간대를 확인하고 있어요…</p>';
+  setTimeout(function () { if (my === slotSeq) renderSlots(ds); }, 450);
+}
+function renderSlots(ds) {
+  var d = parseD(ds), sat = d.getDay() === 6;
+  slotList.innerHTML = SLOTS.filter(function (s) { return !sat || s.sat; }).map(function (s, i) {
+    var k = (d.getDate() + i) % 5;
+    return '<div class="slot' + (k ? '' : ' off') + '" role="radio" aria-checked="false" tabindex="' + (k ? 0 : -1) + '"' +
+      (k ? '' : ' aria-disabled="true"') + ' data-v="' + s.v + '"><span class="slot-t">' + s.t + '</span>' +
+      (k ? (k === 4 ? '<span class="slot-b few">마감 임박</span>' : '') : '<span class="slot-b">마감</span>') + '</div>';
+  }).join('') + (sat ? '<p class="small muted" style="grid-column:1/-1">토요일은 오전에만 배송해요.</p>' : '');
+}
+function pickSlot(el) {
+  if (el.classList.contains('off')) { toast('이 시간대는 주문이 마감되었어요.'); return; }
+  state.slot = el.getAttribute('data-v');
+  state.slotText = el.querySelector('.slot-t').textContent;
+  each(slotList.querySelectorAll('.slot'), function (s) {
+    s.classList.toggle('sel', s === el);
+    s.setAttribute('aria-checked', String(s === el));
+  });
+  setErr('slot', '');
+}
+slotList.addEventListener('click', function (e) { var el = e.target.closest('.slot'); if (el) pickSlot(el); });
+slotList.addEventListener('keydown', function (e) {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('slot')) { e.preventDefault(); pickSlot(e.target); }
+});
+
+/* 배송 요청사항 */
+var note = $('note');
+function syncNote() {
+  $('noteLen').textContent = note.value.length;
+  each($('noteChips').children, function (c) { c.classList.toggle('on', c.textContent === note.value.trim()); });
+}
+$('noteChips').addEventListener('click', function (e) {
+  var c = e.target.closest('.chip');
+  if (c) { note.value = c.textContent; syncNote(); }
+});
+note.addEventListener('input', syncNote);
+
+/* 쿠폰 */
+var cIn = $('couponCode'), cBtn = $('couponApply');
+function applyCoupon() {
+  if (state.coupon || cBtn.disabled) return;
+  var code = cIn.value.trim().toUpperCase();
+  if (!code) { setErr('coupon', '쿠폰 코드를 입력해 주세요.'); return; }
+  cBtn.disabled = true;
+  cBtn.textContent = '확인 중';
+  setTimeout(function () {
+    cBtn.disabled = false;
+    cBtn.textContent = '적용';
+    var c = Object.prototype.hasOwnProperty.call(COUPONS, code) ? COUPONS[code] : null;
+    if (!c) { setErr('coupon', '사용할 수 없는 쿠폰 코드예요.'); return; }
+    if (goodsSum() < c.min) { setErr('coupon', '30,000원 이상 주문 시 쓸 수 있는 쿠폰이에요.'); return; }
+    state.coupon = { code: code, off: c.off, min: c.min };
+    cIn.value = code;
+    cIn.readOnly = cBtn.disabled = true;
+    cBtn.textContent = '적용됨';
+    $('couponOkText').textContent = code + ' · ' + won(c.off) + ' 할인이 적용되었어요.';
+    $('couponOk').hidden = false;
+    setErr('coupon', '');
+    recalc();
+  }, 500);
+}
+function dropCoupon() {
+  state.coupon = null;
+  cIn.readOnly = cBtn.disabled = false;
+  cBtn.textContent = '적용';
+  $('couponOk').hidden = true;
+}
+cBtn.addEventListener('click', applyCoupon);
+cIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); applyCoupon(); } });
+cIn.addEventListener('input', function () { setErr('coupon', ''); });
+$('couponDrop').addEventListener('click', function () { dropCoupon(); cIn.value = ''; recalc(); cIn.focus(); });
+
+/* 결제 */
+each(document.querySelectorAll('input[name="pay"]'), function (r) {
+  r.addEventListener('change', function () {
+    state.pay = r.value;
+    $('bankFields').hidden = r.value !== 'bank';
+    $('codInfo').hidden = r.value !== 'cod';
+    each(document.querySelectorAll('.pay-card'), function (c) { c.classList.toggle('on', c.querySelector('input').checked); });
+    setErr('pay', '');
+    recalc();
+  });
+});
+var bankBtn = $('bankBtn'), bankList = $('bankList');
+function openBank(open) {
+  bankList.hidden = !open;
+  bankBtn.setAttribute('aria-expanded', String(open));
+}
+function pickBank(li) {
+  state.bank = li.getAttribute('data-v');
+  each(bankList.children, function (o) { o.setAttribute('aria-selected', String(o === li)); });
+  $('bankText').innerHTML = li.innerHTML;
+  bankBtn.classList.add('chosen');
+  openBank(false);
+  setErr('bank', '');
+  bankBtn.focus();
+}
+bankBtn.addEventListener('click', function () { cal.hidden = true; openBank(bankList.hidden); });
+bankList.addEventListener('click', function (e) { var li = e.target.closest('li'); if (li) pickBank(li); });
+bankList.addEventListener('keydown', function (e) {
+  var li = e.target.closest('li');
+  if (li && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); pickBank(li); }
+});
+
+function receiptVal() { var r = document.querySelector('input[name="receipt"]:checked'); return r ? r.value : 'none'; }
+each(document.querySelectorAll('input[name="receipt"]'), function (r) {
+  r.addEventListener('change', function () {
+    var v = receiptVal(), no = $('receiptNo');
+    $('receiptNoRow').hidden = v === 'none';
+    no.value = '';
+    no.placeholder = v === 'biz' ? '사업자등록번호 (숫자만)' : '휴대폰 번호 (숫자만)';
+    setErr('receiptNo', '');
+  });
+});
+
+/* 약관 동의 */
+var agrees = ['agPurchase', 'agPrivacy', 'agThird', 'agMkt'].map(function (id) { return $(id); });
+function reqAgreed() { return agrees.every(function (b) { return !b.hasAttribute('data-req') || b.checked; }); }
+function syncAgree() {
+  $('agreeAll').checked = agrees.every(function (b) { return b.checked; });
+  if (reqAgreed()) setErr('agree', '');
+}
+$('agreeAll').addEventListener('change', function () {
+  var on = this.checked;
+  agrees.forEach(function (b) { b.checked = on; });
+  syncAgree();
+});
+agrees.forEach(function (b) { b.addEventListener('change', syncAgree); });
+each(document.querySelectorAll('.view'), function (btn) {
+  btn.addEventListener('click', function () {
+    var t = $(btn.getAttribute('data-t'));
+    t.hidden = !t.hidden;
+    btn.textContent = t.hidden ? '보기' : '접기';
+    btn.setAttribute('aria-expanded', String(!t.hidden));
+  });
+});
+
+/* 입력 검사 */
+var V = {
+  rcvName: function () { var v = $('rcvName').value.trim(); return !v ? '받는 분 이름을 입력해 주세요.' : v.length < 2 ? '이름은 두 글자 이상 입력해 주세요.' : ''; },
+  rcvPhone: function () { var v = $('rcvPhone').value; return !v ? '연락처를 입력해 주세요.' : PHONE_RE.test(v) ? '' : '휴대폰 번호를 정확히 입력해 주세요.'; },
+  addr: function () { return !$('zip').value ? '주소 검색으로 주소를 입력해 주세요.' : $('addr2').value.trim() ? '' : '상세 주소를 입력해 주세요.'; },
+  dDate: function () { return state.date ? '' : '배송 희망일을 선택해 주세요.'; },
+  slot: function () { return state.slot ? '' : '배송 시간대를 선택해 주세요.'; },
+  coupon: function () { return !state.coupon && cIn.value.trim() ? '입력한 쿠폰 코드를 적용하거나 지워 주세요.' : ''; },
+  pay: function () { return state.pay ? '' : '결제 수단을 선택해 주세요.'; },
+  bank: function () { return state.bank ? '' : '입금하실 계좌를 선택해 주세요.'; },
+  depositor: function () { return $('depositor').value.trim() ? '' : '입금자명을 입력해 주세요.'; },
+  receiptNo: function () {
+    var v = $('receiptNo').value, biz = receiptVal() === 'biz';
+    if (!v) return biz ? '사업자등록번호를 입력해 주세요.' : '현금영수증 받을 휴대폰 번호를 입력해 주세요.';
+    return (biz ? /^\d{3}-\d{2}-\d{5}$/ : PHONE_RE).test(v) ? '' : '번호를 정확히 입력해 주세요.';
+  },
+  agree: function () { return reqAgreed() ? '' : '필수 약관에 모두 동의해 주세요.'; }
+};
+function activeKeys() {
+  var k = shipToVal() === 'new' ? ['rcvName', 'rcvPhone', 'addr'] : [];
+  k.push('dDate', 'slot', 'coupon', 'pay');
+  if (state.pay === 'bank') k.push('bank', 'depositor');
+  if (state.pay === 'bank' && receiptVal() !== 'none') k.push('receiptNo');
+  return k.concat('agree');
+}
+function watch(id, key) {
+  var dirty = false;
+  $(id).addEventListener('input', function () { dirty = true; if (errEl(key).textContent) setErr(key, V[key]()); });
+  $(id).addEventListener('blur', function () { if (dirty) setErr(key, V[key]()); });
+}
+watch('rcvName', 'rcvName');
+watch('rcvPhone', 'rcvPhone');
+watch('addr2', 'addr');
+watch('depositor', 'depositor');
+watch('receiptNo', 'receiptNo');
+var FOCUS = { rcvName: 'rcvName', rcvPhone: 'rcvPhone', addr: 'addr2', dDate: 'dDate', slot: 'slotList', coupon: 'couponCode',
+  pay: 'payBox', bank: 'bankBtn', depositor: 'depositor', receiptNo: 'receiptNo', agree: 'agreeBox' };
+function focusErr(k) {
+  var el = k === 'addr' && !$('zip').value ? $('zipBtn') : $(FOCUS[k]);
+  el.scrollIntoView({ block: 'center' });
+  el.focus({ preventScroll: true });
+}
+
+/* 주문 */
+var busy = false;
+$('submitOrder').addEventListener('click', function () {
+  if (busy) return;
+  var first = '';
+  activeKeys().forEach(function (k) {
+    var m = V[k]();
+    setErr(k, m);
+    if (m && !first) first = k;
+  });
+  $('submitErr').textContent = first ? '입력하지 않았거나 다시 확인할 항목이 있어요.' : '';
+  if (first) { focusErr(first); return; }
+  busy = true;
+  $('busy').hidden = false;
+  setTimeout(function () { busy = false; $('busy').hidden = true; finish(); }, 900);
+});
+function finish() {
+  var t = totals(), nw = shipToVal() === 'new', bank = state.pay === 'bank', rc = bank ? receiptVal() : 'none';
+  function qtyOf(id) { var it = find(id); return !it.removed && it.checked ? String(it.qty) : '0'; }
+  var res = {
+    qtyTomato: qtyOf('tomato'), qtySpinach: qtyOf('spinach'), qtyTangerine: qtyOf('tangerine'),
+    coupon: state.coupon ? state.coupon.code : '',
+    shipTo: nw ? 'new' : 'saved',
+    recipientName: nw ? $('rcvName').value.trim() : SAVED_ADDR.name,
+    recipientPhone: nw ? $('rcvPhone').value : SAVED_ADDR.phone,
+    zip: nw ? $('zip').value : SAVED_ADDR.zip,
+    address1: nw ? zipRoad : SAVED_ADDR.road,
+    address2: nw ? $('addr2').value.trim() : SAVED_ADDR.detail,
+    deliveryDate: state.date,
+    deliverySlot: state.slot,
+    courierNote: note.value.trim(),
+    payMethod: state.pay,
+    depositBank: bank ? state.bank : '',
+    depositor: bank ? $('depositor').value.trim() : '',
+    cashReceipt: rc,
+    cashReceiptNo: rc !== 'none' ? $('receiptNo').value : '',
+    agreePurchase: $('agPurchase').checked,
+    agreePrivacy: $('agPrivacy').checked,
+    agreeThirdParty: $('agThird').checked,
+    agreeMarketing: $('agMkt').checked,
+    total: String(t.total)
+  };
+  $('doneNo').textContent = 'SB' + SERVER_TODAY.replace(/-/g, '') + '-' + (1000 + Math.floor(Math.random() * 9000));
+  $('doneBank').hidden = !bank;
+  $('doneDue').textContent = dayLabel(addDays(SERVER_TODAY, 1)) + ' 23:59';
+  $('doneAmt').textContent = won(t.total);
+  $('doneAcct').textContent = (BANKS[state.bank] || '') + ' · 예금주 (주)새벽들장터';
+  $('doneTo').textContent = res.recipientName + ' · ' + res.recipientPhone;
+  $('doneAddr').textContent = '(' + res.zip + ') ' + res.address1 + ' ' + res.address2;
+  $('doneWhen').textContent = dayLabel(state.date) + ' ' + state.slotText;
+  window.__sceneResult = res;
+  go(3);
+}
+
+/* 열린 창 닫기 */
+function closePops() { cal.hidden = true; openBank(false); }
+document.addEventListener('click', function (e) {
+  if (!bankList.hidden && !$('bankDD').contains(e.target)) openBank(false);
+  if (!cal.hidden && !e.target.closest('.date-in')) cal.hidden = true;
+});
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Escape') return;
+  if (!zipLayer.hidden) closeZip();
+  closePops();
+});
+
+$('firstDay').textContent = dayLabel(MIN_DATE);
+recalc();
+})();
+</script>
+</body>
+</html>

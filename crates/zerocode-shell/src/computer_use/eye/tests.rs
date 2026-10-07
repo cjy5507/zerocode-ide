@@ -498,3 +498,65 @@ fn repaints_become_the_areas_a_diff_answers() {
     );
     assert!(super::super::compare::rect_regions(&[]).is_empty());
 }
+
+/// A mirrored phone (t-37883): the tap reaches the phone a quarter of a
+/// second late, its sheet slides for 300 ms, and a wait after the tap ends
+/// once that has held still for the wait's quiet — not at the 4 s it asked.
+#[test]
+fn a_settling_wait_ends_once_the_acts_late_paint_has_held_still() {
+    let memory = Memory::new();
+    let mut status = stream(10, 1_000, Vec::new());
+    status["act"] = json!({ "seq": 10, "atMs": 1_000 });
+    // The phone's window, beside ZeroCode's pane (windows(): Mail's place).
+    let phone = [742.0, 75.0, 436.0, 800.0];
+    let script = Script::new().changes(vec![
+        status,
+        stream(10, 1_100, Vec::new()),
+        stream(
+            12,
+            1_300,
+            vec![repaint(11, 1_250, phone), repaint(12, 1_290, phone)],
+        ),
+        stream(13, 1_560, vec![repaint(13, 1_550, phone)]),
+        stream(13, 1_700, Vec::new()),
+        stream(13, 1_860, Vec::new()),
+    ]);
+    let mut call = script.call();
+    let waited = wait_settled(&memory, 4_000, &mut call, &mut |_| {});
+    drop(call);
+    assert_eq!(
+        waited,
+        Some(Settled {
+            settled: true,
+            waited_ms: 860,
+            polls: 5
+        }),
+        "still for the wait's quiet since the sheet's last frame at 1 550 ms"
+    );
+}
+
+/// A wait whose act painted nothing yet runs its whole time: a slow screen
+/// paints late, and a plan asked for that long.
+#[test]
+fn a_settling_wait_on_a_screen_the_act_has_not_moved_runs_its_time() {
+    let memory = Memory::new();
+    let mut status = stream(10, 1_000, Vec::new());
+    status["act"] = json!({ "seq": 10, "atMs": 1_000 });
+    let script = Script::new().changes(vec![
+        status,
+        stream(10, 1_100, Vec::new()),
+        stream(10, 1_200, Vec::new()),
+        stream(10, 1_300, Vec::new()),
+    ]);
+    let mut call = script.call();
+    let waited = wait_settled(&memory, 300, &mut call, &mut |_| {});
+    drop(call);
+    assert_eq!(
+        waited,
+        Some(Settled {
+            settled: false,
+            waited_ms: 300,
+            polls: 3
+        })
+    );
+}

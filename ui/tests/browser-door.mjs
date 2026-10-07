@@ -22,6 +22,9 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./playwright-chromium.mjs";
+import { rustList, rustNumber, rustText } from "./rust-source.mjs";
+import { FORM_REQUEST, evalFormScript, fieldsScript, fillPasses, fillReadScript, fillWriteScript } from "./browser-scripts.mjs";
+import * as twin from "./browser-scripts.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DOOR = await readFile(resolve(UI, "../crates/zerocode-shell/src/cmd/browser.rs"), "utf8");
@@ -294,22 +297,6 @@ await test("a press names the block it landed in by the same chain the cutter wr
 const CORE = await readFile(resolve(UI, "../crates/zerocode-core/src/agent_browser.rs"), "utf8");
 const SCREEN = await readFile(resolve(UI, "../crates/zerocode-core/src/screen_action.rs"), "utf8");
 const VALUE_QUESTION = JSON.parse(await readFile(resolve(UI, "../crates/zerocode-core/fixtures/type-value/question.json"), "utf8"));
-/* A Rust `&str` constant's text, raw or plain — null when the source has
- * none, so a missing script fails its own tests, not the whole file. */
-const rustText = (source, name) => {
-  const raw = source.match(new RegExp(`const ${name}: &str = r(#+)"([\\s\\S]*?)"\\1;`));
-  if (raw) return raw[2];
-  const plain = source.match(new RegExp(`const ${name}: &str = "((?:[^"\\\\]|\\\\.)*)";`));
-  return plain ? JSON.parse(`"${plain[1]}"`) : null;
-};
-const rustList = (source, name) => {
-  const held = source.match(new RegExp(`const ${name}: (?:&\\[&str\\]|\\[&str; \\d+\\]) = &?\\[([\\s\\S]*?)\\];`));
-  return held ? [...held[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((hit) => JSON.parse(`"${hit[1]}"`)) : null;
-};
-const rustNumber = (source, name) => {
-  const held = source.match(new RegExp(`const ${name}: \\w+ = ([\\d_.]+);`));
-  return held ? Number(held[1].replace(/_/g, "")) : null;
-};
 const snapshotKey = (name) => rustText(SCREEN, name);
 const observeKey = (head) => SCREEN.match(new RegExp(`pub const fn key\\(self\\)[\\s\\S]*?Self::${head} => "(\\w+)"`))[1];
 const MARK_HELPERS = rustText(DOOR, "BROWSER_MARK_HELPERS");
@@ -689,6 +676,2601 @@ await test("background_observation_does_not_focus_another_pane", async () => {
     assert(JSON.stringify(backgroundAfter) === JSON.stringify(backgroundBefore), "the observed tab's did too", { backgroundBefore, backgroundAfter });
     return JSON.stringify(personAfter);
   } finally { await context.close(); }
+});
+
+/* ---- The form pair (t-37883): `fields` reads every field a page draws,
+ * `fill` writes a bundle and reads each field back. The scripts and their
+ * tables are read from the Rust the pane runs; the pages are the bench's
+ * regression scenes (tools/computer-bench/form-scenes), each a shape real
+ * sites build — the door is told nothing about them. */
+const SCENES = resolve(UI, "../tools/computer-bench/form-scenes");
+const scene = async (name) => readFile(resolve(SCENES, name, "scene.html"), "utf8");
+const readFields = async (target) => {
+  const read = await evalJson(target, fieldsScript());
+  assert(read.ok, "the read was refused", read);
+  return read.value;
+};
+const fillBundle = (target, bundle, expect = null) => fillPasses((source) => evalJson(target, source), bundle, expect);
+const byHandle = (read) => Object.fromEntries(read.fields.map((field) => [field.handle, field]));
+const handleOf = (read, label) => {
+  const found = read.fields.filter((field) => field.label === label);
+  assert(found.length === 1, `one field reads "${label}"`, read.fields.map((field) => field.label));
+  return found[0].handle;
+};
+
+await test("a_form_read_names_every_field_by_the_pages_own_words", async () => {
+  const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await booking.setContent(await scene("A"));
+    const read = await readFields(booking);
+    const labels = read.fields.map((field) => field.label);
+    const expected = ["입차일", "입차 시간", "출차일", "출차 시간", "이름", "휴대폰 (1/3)", "휴대폰 (2/3)", "휴대폰 (3/3)",
+      "이메일", "차량번호", "항공편", "인원", "주차 구역", "개인정보 수집·이용 동의 (필수)"];
+    assert(JSON.stringify(labels) === JSON.stringify(expected), "the page's own words, in its order, below the fold too", labels);
+    const fields = Object.fromEntries(read.fields.map((field) => [field.label, field]));
+    assert(fields["입차 시간"].disabled && fields["입차 시간"].kind === "select", "a list not loaded yet is off", fields["입차 시간"]);
+    assert(fields["출차 시간"].options.length === 38 && fields["출차 시간"].options[0] === "05:00" && fields["출차 시간"].moreOptions === 0,
+      "a select's choices by their words", fields["출차 시간"]);
+    assert(fields["휴대폰 (1/3)"].maxLength === 3 && fields["휴대폰 (2/3)"].maxLength === 4, "the parts say their length");
+    assert(fields["주차 구역"].kind === "radio" && JSON.stringify(fields["주차 구역"].options) === JSON.stringify(["실내", "실외"])
+      && fields["주차 구역"].required, "a radio group is one field", fields["주차 구역"]);
+    assert(fields["개인정보 수집·이용 동의 (필수)"].value === false, "a checkbox hidden behind its label is read", fields);
+    assert(fields["이름"].section === "예약자 정보" && fields["입차일"].section === "이용 일정", "the section is the legend");
+    assert(read.fields.every((field) => field.required === !["항공편", "인원"].includes(field.label)), "required as the page marks it");
+    const actions = read.actions.map((action) => action.label);
+    assert(actions.includes("인증요청") && actions.includes("예약하기"), "the buttons beside the fields", read.actions);
+    for (const field of read.fields) {
+      const found = await booking.evaluate((handle) => document.querySelectorAll(handle).length, field.handle);
+      assert(found >= 1, `the handle ${field.handle} finds its field`);
+    }
+    assert(!labels.includes("인증번호"), "a field the page has not drawn yet is not read");
+    return `${read.fields.length} fields, ${read.actions.length} buttons`;
+  } finally { await booking.close(); }
+});
+
+await test("a_fill_writes_a_bundle_in_one_call_and_reads_each_back", async () => {
+  const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await booking.setContent(await scene("A"));
+    const read = await readFields(booking);
+    const at = (label) => handleOf(read, label);
+    const bundle = {
+      [at("입차일")]: "2026.11.3", [at("입차 시간")]: "07:30", [at("출차일")]: "2026-11-07", [at("출차 시간")]: "21:00",
+      [at("이름")]: "김예시", [at("휴대폰 (1/3)")]: "010", [at("휴대폰 (2/3)")]: "5550", [at("휴대폰 (3/3)")]: "0142",
+      [at("이메일")]: "kim@example.com", [at("차량번호")]: "12가3456", [at("항공편")]: "SH204", [at("인원")]: 2,
+      [at("주차 구역")]: "실내", [at("개인정보 수집·이용 동의 (필수)")]: true,
+    };
+    const filled = await fillBundle(booking, bundle);
+    const statuses = filled.results.map((result) => result.status);
+    assert(statuses.every((status) => status === "set"), "every field took", filled.results);
+    assert(filled.passes >= 2, "the time list a date loads took a later pass", filled.passes);
+    assert(filled.results[0].now === "2026-11-03", "a date as written becomes the input's own form", filled.results[0]);
+    assert(filled.left.length === 0, "nothing required is left", filled.left);
+    const kept = await booking.evaluate(() => {
+      document.querySelector('input[name="flight"]').dispatchEvent(new Event("input", { bubbles: true }));
+      const form = document.getElementById("booking");
+      return { name: form.elements.name.value, email: form.elements.email.value, time: form.elements["in-time"].value,
+        lot: form.querySelector('input[name="lot"]:checked')?.value, agree: document.getElementById("agree").checked };
+    });
+    assert(JSON.stringify(kept) === JSON.stringify({ name: "김예시", email: "kim@example.com", time: "07:30", lot: "indoor", agree: true }),
+      "the framework's own state holds what was written", kept);
+    const again = await fillBundle(booking, { [at("이름")]: "김예시", [at("개인정보 수집·이용 동의 (필수)")]: true });
+    assert(again.results.every((result) => result.status === "same"), "a value already held is not written again", again.results);
+    return `${filled.passes} passes`;
+  } finally { await booking.close(); }
+});
+
+await test("a_fill_refuses_by_name_what_it_must_not_or_cannot_write", async () => {
+  const odd = await browser.newPage();
+  try {
+    await odd.setContent(`<form><label>비밀번호 <input id="pw" type="password"></label>
+      <label>사진 <input id="photo" type="file"></label><label>코드 <input id="short" maxlength="4"></label>
+      <label>도시 <select id="city"><option value="">선택</option><option>부산</option><option>대구</option></select></label></form>`);
+    const filled = await fillBundle(odd, { "#pw": "hunter2", "#photo": "/x.png", "#short": "12345", "#city": "광주",
+      "#nowhere": "x", "<<<": "x" });
+    const said = Object.fromEntries(filled.results.map((result) => [result.handle, result.status]));
+    assert(JSON.stringify(said) === JSON.stringify({ "#pw": "secret", "#photo": "file", "#short": "too_long", "#city": "no_option",
+      "#nowhere": "not_found", "<<<": "invalid_handle" }), "each refusal by its name", said);
+    const city = filled.results.find((result) => result.handle === "#city");
+    assert(JSON.stringify(city.options) === JSON.stringify(["부산", "대구"]), "a missing choice says the choices there are", city);
+    const untouched = await odd.evaluate(() => [document.getElementById("pw").value, document.getElementById("short").value]);
+    assert(JSON.stringify(untouched) === JSON.stringify(["", ""]), "nothing refused was written", untouched);
+    const read = await readFields(odd);
+    assert(read.fields.find((field) => field.handle === "#pw").masked, "a secret is read as masked");
+    return JSON.stringify(said);
+  } finally { await odd.close(); }
+});
+
+await test("drawn_widgets_steps_and_a_frame_are_read_and_filled_by_their_words", async () => {
+  const rental = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await rental.setContent(await scene("B"));
+    const step = async (bundle, next) => {
+      const read = await readFields(rental);
+      const filled = await fillBundle(rental, Object.fromEntries(Object.entries(bundle).map(([label, value]) => [handleOf(read, label), value])));
+      assert(filled.results.every((result) => result.status === "set"), "every field of the step took", filled.results);
+      if (next) {
+        const button = read.actions.find((action) => action.label === next);
+        assert(button, `the step's button ${next} is read`, read.actions);
+        await rental.evaluate((handle) => document.querySelector(handle).click(), button.handle);
+      }
+      return { read, filled };
+    };
+    const one = await step({ "차종": "준중형 · 아반떼", "운전자 생년월일": "19880214", "연료": "휘발유" }, "다음");
+    const model = one.read.fields.find((field) => field.label === "차종");
+    assert(model.kind === "combobox", "a button that opens a list is a dropdown", model);
+    const two = await step({ "반납일": "2026-11-07", "반납 장소": "기타", "보험 추가": true });
+    assert(two.read.fields.find((field) => field.label === "반납일").readOnly, "a date the page keeps from typing is read-only");
+    assert(two.filled.results[0].now === "2026.11.07", "the date was picked on the page's own calendar", two.filled.results[0]);
+    await rental.waitForTimeout(450);
+    await step({ "상세 장소": "북문 주차장" }, "다음");
+    const three = await readFields(rental);
+    const labels = three.fields.map((field) => field.label);
+    for (const label of ["카드 소유자", "카드번호 (1/4)", "카드번호 (4/4)", "유효기간 (1/2)", "유효기간 (2/2)", "이용 약관에 동의합니다"]) {
+      assert(labels.includes(label), `step 3 reads ${label}`, labels);
+    }
+    const framed = three.fields.find((field) => field.label === "카드 소유자");
+    assert(framed.handle.includes(FORM_REQUEST.frameSeparator), "a field in a frame is named through its frame", framed);
+    const at = (label) => handleOf(three, label);
+    const paid = await fillBundle(rental, { [at("카드 소유자")]: "KIM YESI", [at("카드번호 (1/4)")]: "4000", [at("카드번호 (2/4)")]: "0012",
+      [at("카드번호 (3/4)")]: "3456", [at("카드번호 (4/4)")]: "7899", [at("유효기간 (1/2)")]: "08", [at("유효기간 (2/2)")]: "28",
+      [at("이용 약관에 동의합니다")]: true });
+    const pieces = [["카드번호 (1/4)", "4000"], ["카드번호 (2/4)", "0012"], ["카드번호 (3/4)", "3456"], ["카드번호 (4/4)", "7899"]];
+    // The card's expiry — two selects the page names by its words beside the number — is secret as the number is (t-41720, 2026-10-06): the fill refuses it, the stdin road picks the option the text names.
+    const expiry = [["유효기간 (1/2)", "08"], ["유효기간 (2/2)", "28"]];
+    const secretBoxes = [...pieces, ...expiry].map(([label]) => at(label));
+    // The boxes of the card number are secret by the words the page gives them (t-41720, letter m-41895), and the expiry's selects by theirs: the fill refuses each by name, and the rest of the frame's fields and the page's took.
+    assert(paid.results.filter((result) => secretBoxes.includes(result.handle)).length === 6
+      && paid.results.filter((result) => secretBoxes.includes(result.handle)).every((result) => result.status === "secret"), "the four boxes of the card number and the two selects of its expiry are refused by name", paid.results);
+    assert(paid.results.filter((result) => !secretBoxes.includes(result.handle)).every((result) => result.status === "set"), "and the frame's other fields and the page's took", paid.results);
+    for (const [label, piece] of [...pieces, ...expiry]) {
+      const typed = await evalJson(rental, twin.typeScript(at(label), piece, "setter"));
+      assert(typed.ok && typed.value.method === "value-setter", `the stdin road writes ${label} in the frame`, typed);
+    }
+    await rental.evaluate((handle) => document.querySelector(handle).click(), three.actions.find((action) => action.label === "결제하기").handle);
+    const result = await rental.evaluate(() => window.__sceneResult);
+    const expected = JSON.parse(await readFile(resolve(SCENES, "B", "expected.json"), "utf8"));
+    assert(JSON.stringify(result) === JSON.stringify(expected), "the page took the booking", result);
+    return "3 steps";
+  } finally { await rental.close(); }
+});
+
+await test("a_tab_nobody_looks_at_reads_and_fills_and_the_persons_tab_keeps_its_focus", async () => {
+  const context = await browser.newContext({ viewport: { width: 900, height: 600 } });
+  try {
+    const person = await context.newPage();
+    await person.setContent(`<input id="typing" value="half a sentence"><div style="height:3000px"></div>`);
+    const background = await context.newPage();
+    await background.setContent(HIDDEN + await scene("A"));
+    await person.bringToFront();
+    await person.focus("#typing");
+    await person.evaluate(() => { document.getElementById("typing").setSelectionRange(2, 6); window.scrollTo(0, 120); });
+    const where = () => person.evaluate(() => ({ active: document.activeElement?.id, start: document.activeElement?.selectionStart,
+      end: document.activeElement?.selectionEnd, y: Math.round(window.scrollY) }));
+    const before = await where();
+    const read = await readFields(background);
+    const filled = await fillBundle(background, { [handleOf(read, "이름")]: "김예시", [handleOf(read, "주차 구역")]: "실외",
+      [handleOf(read, "인원")]: "3" });
+    assert(filled.results.every((result) => result.status === "set"), "the hidden tab filled", filled.results);
+    assert(await background.evaluate(() => window.__frames) === 0, "no frame was waited for");
+    const after = await where();
+    assert(JSON.stringify(after) === JSON.stringify(before), "the person's focus, selection and scroll stayed", { before, after });
+    return JSON.stringify(after);
+  } finally { await context.close(); }
+});
+
+/* One eval, one step (`eval_script`): the expression reads the page's
+ * fields, fills them by the words it read and says what is left — the
+ * script the skill teaches, run as the door runs it. */
+await test("one_eval_reads_fills_and_checks_a_step_by_the_words_it_read", async () => {
+  const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await booking.setContent(await scene("A"));
+    const card = JSON.parse(await readFile(resolve(SCENES, "A", "card.json"), "utf8"));
+    const step = `(() => {
+      const card = ${JSON.stringify(Object.fromEntries(card.facts.map((fact) => [fact.says, fact.value])))};
+      const read = zerocode.fields();
+      const bundle = {};
+      for (const field of read.fields) {
+        const words = field.label.replace(/ \\(\\d+\\/\\d+\\)$/, "");
+        if (!(words in card)) continue;
+        const part = field.label.match(/\\((\\d+)\\/(\\d+)\\)$/);
+        bundle[field.handle] = part ? String(card[words]).split(/\\D+/)[Number(part[1]) - 1] : card[words];
+      }
+      const filled = zerocode.fill(bundle);
+      return { statuses: filled.results.map((r) => r.label + ":" + r.status), left: filled.left.map((f) => f.label) };
+    })()`;
+    const first = await evalJson(booking, evalFormScript(step));
+    assert(first.ok, "the one script ran", first);
+    const notSet = first.value.statuses.filter((said) => !said.endsWith(":set"));
+    assert(JSON.stringify(notSet) === JSON.stringify(["입차 시간:disabled"]), "all but the list a date loads took in one call", first.value);
+    await booking.waitForTimeout(350);
+    const second = await evalJson(booking, evalFormScript(step));
+    assert(second.value.statuses.every((said) => said.endsWith(":set") || said.endsWith(":same")), "the next call finishes it", second.value);
+    return `${first.value.statuses.length} fields in one call`;
+  } finally { await booking.close(); }
+});
+
+/* A fill is held to the form its agent read (m-40824): a field renamed
+ * after the read, and the whole bundle is refused unwritten — on the door's
+ * road and inside one eval alike; the form as read takes it. */
+await test("a_fill_on_a_form_that_changed_since_its_read_writes_nothing", async () => {
+  const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await booking.setContent(await scene("A"));
+    const read = await readFields(booking);
+    assert(/^\d+:[0-9a-f]+$/.test(read.fingerprint || ""), "the read carries the form's fingerprint", read.fingerprint);
+    const bundle = { [handleOf(read, "이름")]: "김예시", [handleOf(read, "항공편")]: "SH204" };
+    await booking.evaluate(() => { document.querySelector('input[name="flight"]').closest("tr").querySelector("th").textContent = "편명"; });
+    const stale = await fillBundle(booking, bundle, read.fingerprint);
+    assert(stale.stale === true && stale.passes === 1, "a renamed field makes the form stale", stale);
+    const held = await booking.evaluate(() => [document.querySelector('input[name="name"]').value,
+      document.querySelector('input[name="flight"]').value]);
+    assert(JSON.stringify(held) === JSON.stringify(["", ""]), "nothing was written", held);
+    const again = await readFields(booking);
+    assert(again.fingerprint !== read.fingerprint, "the form read again is another form");
+    const fresh = await fillBundle(booking, { [handleOf(again, "이름")]: "김예시", [handleOf(again, "편명")]: "SH204" }, again.fingerprint);
+    assert(!fresh.stale && fresh.results.every((result) => result.status === "set"), "the form as read takes the bundle", fresh);
+    const script = await evalJson(booking, evalFormScript(`(() => {
+      const read = zerocode.fields();
+      document.querySelector('input[name="email"]').closest("tr").remove();
+      return zerocode.fill({ [read.fields.find((f) => f.label === "차량번호").handle]: "12가3456" }, read);
+    })()`));
+    assert(script.ok && script.value.stale === true, "one eval's fill is held to the read it made", script);
+    assert(await booking.evaluate(() => document.querySelector('input[name="car"]').value) === "", "and wrote nothing");
+    return `${read.fingerprint} → ${again.fingerprint}`;
+  } finally { await booking.close(); }
+});
+
+/* Dates on a page's own widgets (t-37883, third part): a date field the
+ * page keeps from typing is filled on its calendar — the heading read as a
+ * year and a month (its numbers, or the month's name the platform knows),
+ * paged with its own controls, the day of that month pressed, never a day
+ * the grid borrows from the months around it — a day that says its whole
+ * date is trusted first, a field that takes typing gets its own format,
+ * three selects take a date's numbers, and a calendar the fill cannot read
+ * is answered `no_option` with what it shows. */
+const PICKERS = `<!doctype html><html lang="ko"><meta charset="utf-8"><title>pickers</title>
+<style>.pop{background:#fff;border:1px solid #999;padding:4px;display:inline-block}.pop .days{display:grid;grid-template-columns:repeat(7,30px)}</style>
+<form>
+  <div><label for="a">출발일</label> <input id="a" readonly></div>
+  <div><label for="b">Return</label> <input id="b" readonly></div>
+  <div><label for="c">체크인</label> <input id="c" readonly></div>
+  <div><label for="d">생일</label> <input id="d" placeholder="YYYY.MM.DD"></div>
+  <div><label for="e">기타일</label> <input id="e" readonly></div>
+  <div>방문일 <select id="vy"><option value="">년</option><option>2026</option><option>2027</option></select>
+    <select id="vm"><option value="">월</option></select> <select id="vd"><option value="">일</option></select></div>
+</form>
+<script>
+  const pad = (n) => String(n).padStart(2, "0");
+  for (let m = 1; m <= 12; m += 1) document.getElementById("vm").add(new Option(m + "월", String(m)));
+  for (let d = 1; d <= 31; d += 1) document.getElementById("vd").add(new Option(d + "일", String(d)));
+  const svg = '<svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 5h6"/></svg>';
+  // One calendar, shaped per field: a heading or none, pagers as symbols or
+  // as icons, days that carry their whole date or only their number.
+  function calendar(input, shape) {
+    input.addEventListener("click", () => {
+      if (input.parentElement.querySelector(".pop")) return;
+      let [y, m] = shape.start;
+      const pop = document.createElement("div");
+      pop.className = "pop";
+      const draw = () => {
+        pop.replaceChildren();
+        const top = document.createElement("div");
+        const pager = (step) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          if (shape.pagers === "icons") { button.innerHTML = svg; button.setAttribute("aria-label", step < 0 ? "Previous month" : "Next month"); }
+          else button.textContent = step < 0 ? "‹" : "›";
+          button.addEventListener("click", () => { m += step; if (m < 1) { m = 12; y -= 1; } if (m > 12) { m = 1; y += 1; } draw(); });
+          return button;
+        };
+        const close = document.createElement("button");
+        close.type = "button";
+        close.textContent = "×";
+        close.addEventListener("click", () => pop.remove());
+        if (shape.closeFirst) top.append(close);
+        if (shape.pagers) top.append(pager(-1));
+        if (shape.heading) { const h = document.createElement("strong"); h.textContent = shape.heading(y, m); top.append(h); }
+        if (shape.pagers) top.append(pager(1));
+        pop.append(top);
+        const days = document.createElement("div");
+        days.className = "days";
+        const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+        const count = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        const before = new Date(Date.UTC(y, m - 1, 0)).getUTCDate();
+        const cell = (d, own) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = String(d);
+          if (shape.whole && own) button.dataset.date = y + "-" + pad(m) + "-" + pad(d);
+          if (own && shape.off && shape.off(y, m, d)) button.disabled = true;
+          button.addEventListener("click", () => { if (!own) return; input.value = y + "-" + pad(m) + "-" + pad(d); pop.remove(); });
+          days.append(button);
+        };
+        for (let i = first - 1; i >= 0; i -= 1) cell(before - i, false);
+        for (let d = 1; d <= count; d += 1) cell(d, true);
+        for (let d = 1; (first + count + d - 1) % 7 !== 0; d += 1) cell(d, false);
+        pop.append(days);
+      };
+      draw();
+      input.parentElement.append(pop);
+    });
+  }
+  const english = (y, m) => new Intl.DateTimeFormat("en", { month: "long", timeZone: "UTC" }).format(new Date(Date.UTC(y, m - 1, 1))) + " " + y;
+  calendar(document.getElementById("a"), { start: [2026, 10], heading: (y, m) => y + "년 " + m + "월", pagers: "symbols", closeFirst: true,
+    off: (y, m, d) => d === 31 });
+  calendar(document.getElementById("b"), { start: [2026, 11], heading: english, pagers: "icons" });
+  calendar(document.getElementById("c"), { start: [2026, 12], whole: true });
+  calendar(document.getElementById("e"), { start: [2026, 10], pagers: "symbols" });
+</script>`;
+
+await test("a_date_is_filled_on_the_pages_own_calendar_and_in_the_fields_own_format", async () => {
+  const pickers = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await pickers.setContent(PICKERS);
+    const filled = await fillBundle(pickers, { "#a": "2026-12-30", "#b": "2027-01-05", "#c": "2026-12-09", "#d": "2026-11-28",
+      "#vy": "2026", "#vm": "11", "#vd": "04" });
+    const said = Object.fromEntries(filled.results.map((result) => [result.handle, result.status]));
+    assert(Object.values(said).every((status) => status === "set"), "every date took", filled.results);
+    const held = await pickers.evaluate(() => ["a", "b", "c", "d", "vy", "vm", "vd"].map((id) => document.getElementById(id).value));
+    assert(JSON.stringify(held) === JSON.stringify(["2026-12-30", "2027-01-05", "2026-12-09", "2026.11.28", "2026", "11", "4"]),
+      "each field holds the asked date: paged two months past a closer, a month's name across a year, a day that says its date, the field's own format, three selects", held);
+    return JSON.stringify(said);
+  } finally { await pickers.close(); }
+});
+
+await test("a_calendar_the_fill_cannot_read_is_answered_with_what_it_shows", async () => {
+  const pickers = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await pickers.setContent(PICKERS);
+    const filled = await fillBundle(pickers, { "#e": "2026-12-09" });
+    const [only] = filled.results;
+    assert(only.status === "no_option" && only.widget && only.widget.days && only.widget.pagers.length === 2,
+      "no heading to read: no_option, with the calendar's days and pagers", only);
+    const off = await fillBundle(pickers, { "#a": "2026-10-31" });
+    assert(off.results[0].status === "no_option", "an off day is no choice", off.results[0]);
+    assert(await pickers.evaluate(() => document.getElementById("a").value) === "", "and nothing was written");
+    return JSON.stringify(only.widget);
+  } finally { await pickers.close(); }
+});
+
+/* A calendar's own box may hold controls that page nothing (t-41387). A pager
+ * is learnt by pressing a control with no words and reading the heading
+ * again — so a control that SAYS it is something else (by its ARIA name, its
+ * title, the picture it is drawn with, its value), and that something cannot
+ * be taken back (a deletion, a send, a payment: the window's one table of
+ * them, `request.holds`), is never pressed. A control with no name is pressed
+ * as before — except one that says in its own markup that it submits its form
+ * (`<button type="submit">`, `<input type="submit">`), whatever it is named:
+ * pressed on a guess it would send the form. A `<button>` with no type at all
+ * is still a candidate (calendar libraries draw their pagers so). */
+const HELD_PICKERS = `<!doctype html><html lang="ko"><meta charset="utf-8"><title>held pickers</title>
+<form>
+  <div><label for="g">반납일</label> <input id="g" readonly></div>
+  <div><label for="h">기타일</label> <input id="h" readonly></div>
+  <div><label for="s">취소일</label> <input id="s" readonly></div>
+  <div><label for="t">변경일</label> <input id="t" readonly></div>
+</form>
+<script>
+  window.pressed = [];
+  // The form is never really sent: a submit is counted and stopped.
+  window.submitted = 0;
+  document.querySelector("form").addEventListener("submit", (event) => { event.preventDefault(); window.submitted += 1; });
+  const pad = (n) => String(n).padStart(2, "0");
+  const dot = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+  // Controls that page nothing, each named another way — an ARIA name, a
+  // title, an image's alt, an input button's value — and each counting its presses.
+  const STRANGERS = '<button type="button" aria-label="삭제">🗑</button>'
+    + '<button type="button" title="Submit">⏎</button>'
+    + '<button type="button"><img alt="송금" src="' + dot + '"></button>'
+    + '<input type="button" value="결제">';
+  // Controls that say in their own markup they submit the form, with no name at all.
+  const SUBMITTERS = '<button type="submit">▶</button>' + '<input type="submit" value="">';
+  function calendar(input, shape) {
+    input.addEventListener("click", () => {
+      if (input.parentElement.querySelector(".pop")) return;
+      let [y, m] = shape.start;
+      const pop = document.createElement("div");
+      pop.className = "pop";
+      const draw = () => {
+        pop.replaceChildren();
+        const top = document.createElement("div");
+        top.insertAdjacentHTML("beforeend", shape.controls || STRANGERS);
+        for (const control of top.children) {
+          control.addEventListener("click", () => window.pressed.push(
+            control.getAttribute("aria-label") || control.title || control.value || (control.querySelector("img") || {}).alt || control.tagName));
+        }
+        const pager = (step) => {
+          const button = document.createElement("button");
+          // A pager drawn with no type at all, as calendar libraries do, stops the form's own submit.
+          if (shape.typeless) button.addEventListener("click", (event) => event.preventDefault());
+          else button.type = "button";
+          button.textContent = step < 0 ? "‹" : "›";
+          button.addEventListener("click", () => { m += step; if (m < 1) { m = 12; y -= 1; } if (m > 12) { m = 1; y += 1; } draw(); });
+          return button;
+        };
+        if (shape.pagers) top.append(pager(-1));
+        const heading = document.createElement("strong");
+        heading.textContent = y + "년 " + m + "월";
+        top.append(heading);
+        if (shape.pagers) top.append(pager(1));
+        pop.append(top);
+        const days = document.createElement("div");
+        days.className = "days";
+        const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+        const count = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        const before = new Date(Date.UTC(y, m - 1, 0)).getUTCDate();
+        const cell = (d, own) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = String(d);
+          button.addEventListener("click", () => { if (!own) return; input.value = y + "-" + pad(m) + "-" + pad(d); pop.remove(); });
+          days.append(button);
+        };
+        for (let i = first - 1; i >= 0; i -= 1) cell(before - i, false);
+        for (let d = 1; d <= count; d += 1) cell(d, true);
+        for (let d = 1; (first + count + d - 1) % 7 !== 0; d += 1) cell(d, false);
+        pop.append(days);
+      };
+      draw();
+      input.parentElement.append(pop);
+    });
+  }
+  calendar(document.getElementById("g"), { start: [2026, 10], pagers: true });
+  calendar(document.getElementById("h"), { start: [2026, 10], pagers: false });
+  calendar(document.getElementById("s"), { start: [2026, 10], pagers: true, controls: SUBMITTERS, typeless: true });
+  calendar(document.getElementById("t"), { start: [2026, 10], pagers: false, controls: SUBMITTERS });
+</script>`;
+
+await test("a_control_in_a_calendar_that_names_a_press_that_cannot_be_taken_back_is_never_pressed_to_learn_a_pager", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(HELD_PICKERS);
+    const filled = await fillBundle(held, { "#g": "2026-12-09" });
+    const [only] = filled.results;
+    assert(only.status === "set", "the two controls with no name still paged the calendar to the day", only);
+    assert(await held.evaluate(() => document.getElementById("g").value) === "2026-12-09", "and the day is the asked one");
+    const pressed = await held.evaluate(() => window.pressed);
+    assert(pressed.length === 0, "no control named for a deletion, a send or a payment was pressed", pressed);
+    return "paged by the nameless pair; none of the four named controls was pressed";
+  } finally { await held.close(); }
+});
+
+await test("a_calendar_whose_only_candidates_name_such_presses_is_answered_with_what_it_shows_and_none_is_pressed", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(HELD_PICKERS);
+    const filled = await fillBundle(held, { "#h": "2026-12-09" });
+    const [only] = filled.results;
+    assert(only.status === "no_option" && only.widget && only.widget.month === "2026-10" && only.widget.pagers.length === 0,
+      "no pager to page by: no_option, with the calendar's month and days and no pager", only);
+    const pressed = await held.evaluate(() => window.pressed);
+    assert(pressed.length === 0, "none of them was pressed to find out", pressed);
+    assert(await held.evaluate(() => document.getElementById("h").value) === "", "and nothing was written");
+    return JSON.stringify(only.widget);
+  } finally { await held.close(); }
+});
+
+await test("a_control_that_says_it_submits_its_form_is_never_pressed_to_learn_a_pager_but_a_pager_with_no_type_still_is", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(HELD_PICKERS);
+    const filled = await fillBundle(held, { "#s": "2026-12-09" });
+    const [only] = filled.results;
+    assert(only.status === "set", "the pagers with no type attribute still paged the calendar to the day", only);
+    assert(await held.evaluate(() => document.getElementById("s").value) === "2026-12-09", "and the day is the asked one");
+    const sent = await held.evaluate(() => ({ submitted: window.submitted, pressed: window.pressed }));
+    assert(sent.submitted === 0 && sent.pressed.length === 0, "no control that says it submits was pressed, and the form was never sent", sent);
+    return "paged by the typeless pair; the form was not sent";
+  } finally { await held.close(); }
+});
+
+await test("a_calendar_whose_only_candidates_say_they_submit_is_answered_with_what_it_shows_and_the_form_is_not_sent", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(HELD_PICKERS);
+    const filled = await fillBundle(held, { "#t": "2026-12-09" });
+    const [only] = filled.results;
+    assert(only.status === "no_option" && only.widget && only.widget.month === "2026-10" && only.widget.pagers.length === 0,
+      "no pager to page by: no_option, with the calendar's month and days and no pager", only);
+    const sent = await held.evaluate(() => ({ submitted: window.submitted, pressed: window.pressed }));
+    assert(sent.submitted === 0 && sent.pressed.length === 0, "none of them was pressed to find out, and the form was never sent", sent);
+    assert(await held.evaluate(() => document.getElementById("t").value) === "", "and nothing was written");
+    return JSON.stringify(only.widget);
+  } finally { await held.close(); }
+});
+
+/* Parts of one value with the page's unit words between them — an hour
+ * and a minute (시 · 분), a year, a month and a day (년 · 월 · 일) — are one
+ * caption's parts, not a caption each: the words between two parts are the
+ * first part's unit. */
+await test("parts_with_unit_words_between_them_are_one_captions_parts", async () => {
+  const units = await browser.newPage();
+  try {
+    await units.setContent(`<!doctype html><html lang="ko"><meta charset="utf-8"><form>
+      <div class="row"><div class="cap">출차 시각<em>*</em></div><div class="ctl">
+        <select id="h"><option value="">시</option><option>00</option><option>09</option><option>18</option></select><span>시</span>
+        <select id="m"><option value="">분</option><option>00</option><option>30</option></select><span>분</span></div></div>
+      <div class="row"><div class="cap">생년월일</div><div class="ctl">
+        <select id="y"><option value="">년</option><option>1988</option></select> 년
+        <select id="mo"><option value="">월</option><option>2</option></select> 월
+        <select id="d"><option value="">일</option><option>14</option></select> 일</div></div></form>`);
+    const read = await readFields(units);
+    const labels = read.fields.map((field) => field.label);
+    assert(JSON.stringify(labels) === JSON.stringify(["출차 시각 (1/2)", "출차 시각 (2/2)", "생년월일 (1/3)", "생년월일 (2/3)", "생년월일 (3/3)"]),
+      "the unit words between parts make no caption of their own", labels);
+    const filled = await fillBundle(units, { [handleOf(read, "출차 시각 (1/2)")]: "18", [handleOf(read, "출차 시각 (2/2)")]: "00" });
+    assert(filled.results.every((result) => result.status === "set"), "each part takes its number", filled.results);
+    return labels.join(" · ");
+  } finally { await units.close(); }
+});
+
+/* A field the page keeps from being typed in (its value comes from a window a button opens) and a field that takes text, side by side in one box with no caption of their own — a base
+ * address and a detail line — are no parts of one value: the parts of one value are written alike. Each is named by its own words, the one by its ARIA label and the other by
+ * its placeholder, and no part number says the second is the first's. */
+await test("a_read_only_field_and_a_field_that_takes_text_side_by_side_are_no_parts_of_one_value_and_each_is_named_by_its_own_words", async () => {
+  const mixed = await browser.newPage();
+  try {
+    await mixed.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div class="row"><span class="cap">Depot<em>*</em></span><div class="ctl">
+        <input id="code" readonly aria-label="Depot code" placeholder="Depot code">
+        <input id="bay" placeholder="Bay and shelf" maxlength="40"></div></div></form>`);
+    const read = await readFields(mixed);
+    const labels = read.fields.map((field) => field.label);
+    assert(labels.length === 2 && labels.every((label) => !/\(\d+\/\d+\)/.test(label)), "neither is a numbered part", labels);
+    assert(labels[0] === "Depot code" && labels[1].endsWith("Bay and shelf"), "each is named by its own words (the box's caption may stand in front of the one a placeholder names)", labels);
+    const filled = await fillBundle(mixed, { [read.fields[1].handle]: "B-12" });
+    assert(filled.results.length === 1 && filled.results[0].status === "set", "the field that takes text is written by its own name", filled.results);
+    return labels.join(" · ");
+  } finally { await mixed.close(); }
+});
+
+/* A secret the door's read says is secret is secret whole (t-41720, letter m-41895): the parts of one value — the boxes of a number, side by side under one caption — are all secret when one of
+ * them is a password field, so a fill never writes one of them and no answer, read or record carries the value of any. The way in is `type` from stdin; its keys road holds before a secret part
+ * as it holds before a password field. */
+const SECRET_PARTS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div class="row"><label for="k1">Vault number</label>
+    <input id="k1" maxlength="4"> - <input id="k2" maxlength="4"> - <input id="k3" type="password" maxlength="4"> - <input id="k4" type="password" maxlength="4"></div>
+  <label for="nick">Nickname</label> <input id="nick">
+</form>
+<script>
+  document.getElementById("k1").value = "1357";
+  document.getElementById("k2").value = "2468";
+</script>`;
+
+await test("parts_of_one_value_are_all_secret_when_one_of_them_is_a_password_field_so_the_read_the_fill_and_the_type_treat_them_alike", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(SECRET_PARTS);
+    const read = await readFields(held);
+    const parts = read.fields.filter((field) => /^Vault number \(\d\/4\)$/.test(field.label));
+    assert(parts.length === 4, "the four boxes are the parts of one value", read.fields.map((field) => field.label));
+    assert(parts.every((field) => field.masked === true && field.value === ""), "all four are secret: none says its value", parts);
+    assert(!JSON.stringify(read).includes("1357") && !JSON.stringify(read).includes("2468"), "and the read carries neither value", read);
+    const nick = read.fields.find((field) => field.label === "Nickname");
+    assert(nick && nick.masked === false, "a field outside the parts is no secret", nick);
+    const filled = await fillBundle(held, { [parts[0].handle]: "9999", [nick.handle]: "Kim" });
+    const byHandle = Object.fromEntries(filled.results.map((result) => [result.handle, result]));
+    assert(byHandle[parts[0].handle].status === "secret" && byHandle[nick.handle].status === "set", "the fill refuses a secret part by name and writes the rest", filled.results);
+    assert(await held.evaluate(() => document.getElementById("k1").value) === "1357", "and the part kept what it held");
+    assert(!JSON.stringify(filled).includes("9999") && !JSON.stringify(filled).includes("1357"), "the answer of the fill carries no value of a part", filled);
+    const keys = await evalJson(held, twin.typeScript(parts[1].handle, "5555", "keys"));
+    assert(keys.ok && keys.value.method === "held" && keys.value.secureField === true, "the keys road holds its keys before a secret part", keys);
+    const typed = await evalJson(held, twin.typeScript(parts[1].handle, "5555", "setter"));
+    assert(typed.ok && typed.value.method === "value-setter", "the stdin road writes it", typed);
+    assert(!JSON.stringify(typed).includes("5555"), "and says nothing of the value", typed);
+    const again = await readFields(held);
+    assert(!JSON.stringify(again).includes("5555"), "a read after it carries no value of a part", again);
+    return parts.map((field) => field.label).join(" · ");
+  } finally { await held.close(); }
+});
+
+/* A one-time code is secret as a password is: by the platform's own mark (`autocomplete="one-time-code"`), or — a page that marks nothing — by its shape (a numeric box of four to eight characters) together
+ * with the words the page itself gives it (one-time, verification, security code, SMS, OTP); a row of four or more single-character numeric boxes is one code, and the boxes of one code go together. */
+const ONE_TIME_CODES = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <label for="m1">Login token</label> <input id="m1" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
+  <label for="s1">Verification code</label> <input id="s1" inputmode="numeric" maxlength="6">
+  <label for="z1">Postal code</label> <input id="z1" inputmode="numeric" maxlength="5">
+  <label for="n1">Verification note</label> <input id="n1" maxlength="6">
+  <label for="l1">Verification reference</label> <input id="l1" inputmode="numeric" maxlength="12">
+  <div role="group" aria-labelledby="markedLbl"><span id="markedLbl">Marked digits</span>
+    <input id="a1" inputmode="numeric" maxlength="1" aria-label="Mark 1" autocomplete="one-time-code"><input id="a2" inputmode="numeric" maxlength="1" aria-label="Mark 2"><input id="a3" inputmode="numeric" maxlength="1" aria-label="Mark 3"><input id="a4" inputmode="numeric" maxlength="1" aria-label="Mark 4"></div>
+  <div role="group" aria-labelledby="plainLbl"><span id="plainLbl">Plain digits</span>
+    <input id="b1" inputmode="numeric" maxlength="1" aria-label="Plain 1"><input id="b2" inputmode="numeric" maxlength="1" aria-label="Plain 2"><input id="b3" inputmode="numeric" maxlength="1" aria-label="Plain 3"><input id="b4" inputmode="numeric" maxlength="1" aria-label="Plain 4"></div>
+</form>`;
+
+await test("a_one_time_code_is_secret_by_the_platforms_mark_or_by_its_shape_and_words_and_the_boxes_of_one_code_go_together", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(ONE_TIME_CODES);
+    await held.evaluate(() => { for (const id of ["m1", "s1", "z1", "n1", "l1", "a1"]) document.getElementById(id).value = "86420"; });
+    const read = await readFields(held);
+    const secret = Object.fromEntries(read.fields.map((field) => [field.handle.replace(/^#/, ""), field.masked === true]));
+    const want = { m1: true, s1: true, z1: false, n1: false, l1: false, a1: true, a2: true, a3: true, a4: true, b1: true, b2: true, b3: true, b4: true };
+    assert(JSON.stringify(secret) === JSON.stringify(want), "the mark, the shape with the words, and the boxes of one code are secret — and nothing else", secret);
+    assert(!JSON.stringify(read.fields.filter((field) => field.masked)).includes("86420"), "no secret one says its value", read.fields);
+    const filled = await fillBundle(held, { "#s1": "11", "#b2": "2" });
+    assert(filled.results.every((result) => result.status === "secret"), "a fill writes neither", filled.results);
+    assert(await held.evaluate(() => document.getElementById("s1").value) === "86420", "and the code kept what it held");
+    const keys = await evalJson(held, twin.typeScript("#m1", "424242", "keys"));
+    assert(keys.ok && keys.value.method === "held", "the keys road holds before a code too", keys);
+    return Object.keys(secret).filter((id) => secret[id]).join(" ");
+  } finally { await held.close(); }
+});
+
+/* A payment card's number and security code are secret as a password is (t-41720, letter m-41895): by the platform's own mark (`autocomplete` `cc-number`, `cc-csc`, `cc-exp`, `cc-exp-month`, `cc-exp-year`) or, a page that marks
+ * nothing, by the short words the page gives them — card number, CVC, CVV, security code, in two languages. The boxes of one number go together: when one of them is secret by a mark or a word, all of them are. */
+const CARD_FIELDS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div class="row"><label for="p1">Card number</label>
+    <input id="p1" maxlength="4"> - <input id="p2" maxlength="4"> - <input id="p3" maxlength="4"> - <input id="p4" maxlength="4"></div>
+  <label for="one">Reference</label> <input id="one" autocomplete="cc-number">
+  <label for="sc">Reference two</label> <input id="sc" autocomplete="billing cc-csc" maxlength="4">
+  <label for="cv">CVV</label> <input id="cv" maxlength="4">
+  <label for="sec">Security code</label> <input id="sec" maxlength="4">
+  <label for="mon">Month</label> <input id="mon" autocomplete="cc-exp-month" maxlength="2">
+  <label for="kr">카드번호</label> <input id="kr" maxlength="19">
+  <div role="group" aria-labelledby="payl"><span id="payl">Payment</span>
+    <input id="g1" aria-label="First" maxlength="4" autocomplete="cc-number"><input id="g2" aria-label="Second" maxlength="4"><input id="g3" aria-label="Third" maxlength="4"><input id="g4" aria-label="Fourth" maxlength="4"></div>
+  <label for="holder">Card holder</label> <input id="holder" autocomplete="cc-name">
+  <label for="type">Card type</label> <input id="type">
+  <label for="dis">Discard number</label> <input id="dis">
+  <label for="note">Note</label> <input id="note">
+</form>`;
+
+await test("a_card_number_or_security_code_is_secret_by_the_platforms_mark_or_by_the_words_the_page_gives_it_and_the_boxes_of_one_number_go_together", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(CARD_FIELDS);
+    await held.evaluate(() => { for (const id of ["p1", "p2", "p3", "p4", "one", "sc", "cv", "sec", "mon", "kr", "g1", "g2", "g3", "g4"]) document.getElementById(id).value = "4242"; });
+    const read = await readFields(held);
+    const secret = Object.fromEntries(read.fields.map((field) => [field.handle.replace(/^#/, ""), field.masked === true]));
+    const want = { p1: true, p2: true, p3: true, p4: true, one: true, sc: true, cv: true, sec: true, mon: true, kr: true, g1: true, g2: true, g3: true, g4: true,
+      holder: false, type: false, dis: false, note: false };
+    assert(JSON.stringify(secret) === JSON.stringify(want), "the mark, the words and the boxes of one number are secret — and the holder, the type, a word that only holds the letters, and a note are not", secret);
+    assert(!JSON.stringify(read.fields.filter((field) => field.masked)).includes("4242"), "no secret one says its value", read.fields);
+    const filled = await fillBundle(held, { "#p1": "1111", "#cv": "222", "#g3": "333", "#holder": "Kim" });
+    const byHandle = Object.fromEntries(filled.results.map((result) => [result.handle, result]));
+    assert(byHandle["#p1"].status === "secret" && byHandle["#cv"].status === "secret" && byHandle["#g3"].status === "secret" && byHandle["#holder"].status === "set", "a fill refuses each by name and writes the holder", filled.results);
+    assert(await held.evaluate(() => document.getElementById("p1").value) === "4242", "and the box kept what it held");
+    assert(!JSON.stringify(filled).includes("4242") && !JSON.stringify(filled).includes("1111"), "the answer of the fill carries no value of a secret box", filled);
+    const keys = await evalJson(held, twin.typeScript("#cv", "999", "keys"));
+    assert(keys.ok && keys.value.method === "held" && keys.value.secureField === true, "the keys road holds before a security code", keys);
+    const typed = await evalJson(held, twin.typeScript("#g2", "5555", "setter"));
+    assert(typed.ok && typed.value.method === "value-setter" && !JSON.stringify(typed).includes("5555"), "the stdin road writes a box of the marked row and says nothing of the value", typed);
+    return Object.keys(secret).filter((id) => secret[id]).join(" ");
+  } finally { await held.close(); }
+});
+
+/* A payment card's expiry date is secret as its number is (t-41720, the supervisor's finding of 2026-10-06: the month and the year of B's and C's cards stood in the bench's
+ * records): by the words the page gives the field — expiry, expiration, valid thru, MM/YY, 유효기간, 만료 — when the field stands in the form that holds the card's number or
+ * security code, as an input or as a select. A coupon's expiry in a form with no card is a plain field. A secret select keeps its options readable (the page's own words),
+ * never its choice; a fill refuses it by name; the stdin road picks its option by the text and says nothing of it; the keys road holds. */
+const CARD_EXPIRY = `<!doctype html><html lang="ko"><meta charset="utf-8">
+<form id="pay">
+  <label for="cardno">카드 번호</label> <input id="cardno" maxlength="19">
+  <label for="exm">유효기간 (월)</label> <input id="exm" maxlength="2">
+  <label for="exy">유효기간 (년)</label> <input id="exy" maxlength="2">
+  <label for="emon">Expiry month</label> <select id="emon"><option value="">MM</option><option>01</option><option>12</option></select>
+  <label for="eyr">Expiry year</label> <select id="eyr"><option value="">YY</option><option value="28">2028</option></select>
+  <label for="owner">Card holder</label> <input id="owner">
+</form>
+<form id="coupon">
+  <label for="cpn">Coupon</label> <input id="cpn">
+  <label for="cpuntil">유효기간</label> <input id="cpuntil">
+  <label for="size">Size</label> <select id="size"><option>S</option><option selected>M</option></select>
+</form>`;
+
+await test("a_payment_cards_expiry_is_secret_by_its_words_in_the_form_that_holds_the_card_as_an_input_or_a_select_and_a_coupons_expiry_is_not", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(CARD_EXPIRY);
+    await held.evaluate(() => {
+      document.getElementById("cardno").value = "4242424242424242"; document.getElementById("exm").value = "12"; document.getElementById("exy").value = "28";
+      document.getElementById("emon").value = "12"; document.getElementById("eyr").value = "28"; document.getElementById("cpuntil").value = "2027-12-31";
+    });
+    const read = await readFields(held);
+    const secret = Object.fromEntries(read.fields.map((field) => [field.handle.replace(/^#/, ""), field.masked === true]));
+    const want = { cardno: true, exm: true, exy: true, emon: true, eyr: true, owner: false, cpn: false, cpuntil: false, size: false };
+    assert(JSON.stringify(secret) === JSON.stringify(want), "the expiry's inputs and selects in the card's form are secret; the coupon's expiry, the holder and the sizes are not", secret);
+    const masked = read.fields.filter((field) => field.masked);
+    assert(masked.every((field) => field.value === ""), "no secret one says its value", masked);
+    const em = read.fields.find((field) => field.handle === "#emon");
+    assert(em && em.kind === "select" && em.options.includes("12") && em.options.includes("01"), "a secret select still says its options — the page's own words", em);
+    const filled = await fillBundle(held, { "#exm": "11", "#emon": "01", "#cpn": "SAVE5", "#owner": "Kim" });
+    const byHandle = Object.fromEntries(filled.results.map((result) => [result.handle, result]));
+    assert(byHandle["#exm"].status === "secret" && byHandle["#emon"].status === "secret" && byHandle["#cpn"].status === "set" && byHandle["#owner"].status === "set",
+      "a fill refuses the card's expiry by name and writes the coupon and the holder", byHandle);
+    assert(await held.evaluate(() => document.getElementById("emon").value) === "12", "and the select kept its choice");
+    assert(!JSON.stringify(filled).includes('"12"') && !JSON.stringify(filled).includes('"28"'), "the answer of the fill carries no choice of a secret select", filled);
+    const keys = await evalJson(held, twin.typeScript("#emon", "01", "keys"));
+    assert(keys.ok && keys.value.method === "held" && keys.value.secureField === true, "the keys road holds before a secret select", keys);
+    const typed = await evalJson(held, twin.typeScript("#eyr", "2028", "setter"));
+    assert(typed.ok && typed.value.method === "value-setter" && typed.value.secureField === true && !JSON.stringify(typed).includes("2028"),
+      "the stdin road picks the option by its words and says nothing of it", typed);
+    assert(await held.evaluate(() => document.getElementById("eyr").value) === "28", "the option is chosen");
+    const byValue = await evalJson(held, twin.typeScript("#emon", "01", "setter"));
+    assert(byValue.ok && await held.evaluate(() => document.getElementById("emon").value) === "01", "or by its value", byValue);
+    const none = await evalJson(held, twin.typeScript("#emon", "13", "setter"));
+    assert(!none.ok && none.code === "no_option", "a text that names no option is refused by name", none);
+    return Object.keys(secret).filter((id) => secret[id]).join(" ");
+  } finally { await held.close(); }
+});
+
+/* The parts of one value are written alike, but a part the page makes read-only after a choice is still one of them: the box for an address's own host that a list fills in and then keeps from being typed in
+ * is part of the address as it was while it took text. Only a read-only field at the head of the row — a value that comes from a window — is no part of the typed ones (the test before this one). */
+await test("a_part_the_page_makes_read_only_after_a_choice_stays_a_numbered_part_of_the_value_it_belongs_to", async () => {
+  const relay = await browser.newPage();
+  try {
+    await relay.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div class="row"><span>Relay</span> <input id="rn"><span class="sep">@</span><input id="rd" placeholder="Own host">
+        <select id="rs"><option value="">Own host</option><option value="a.test">a.test</option></select></div></form>
+      <script>
+        document.getElementById("rs").addEventListener("change", () => {
+          const box = document.getElementById("rd");
+          box.value = document.getElementById("rs").value;
+          box.readOnly = Boolean(box.value);
+        });
+      </script>`);
+    const names = async () => (await readFields(relay)).fields.map((field) => field.label);
+    const first = await names();
+    assert(first.length === 3 && first.every((label) => /^Relay \(\d\/3\)$/.test(label)), "the three boxes are the parts of one value while all of them take text", first);
+    await relay.selectOption("#rs", "a.test");
+    const second = await names();
+    assert(JSON.stringify(second) === JSON.stringify(first), "and the same three parts once the page made the host box read-only", second);
+    return second.join(" · ");
+  } finally { await relay.close(); }
+});
+
+/* A count the page draws between two buttons — a number shown by an output or a span, a button before it and a button after it, in a group of their own (ARIA's `group`) — is one field of
+ * kind `stepper`: named by the group's name, holding the number it shows; its two buttons are its own and are no buttons of the form. A pair of buttons around words that are no
+ * whole number (a page counter), and a pair around a field of its own, are no such field. */
+const BERTHS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div id="berthCap">Berths <small>for grown-ups</small></div>
+  <div role="group" aria-labelledby="berthCap" id="berths">
+    <button type="button" id="berthLess" aria-label="Remove a berth">&minus;</button><output id="berthN">1</output><button type="button" id="berthMore" aria-label="Add a berth">+</button>
+  </div>
+  <div id="podCap">Pods</div>
+  <div role="group" aria-labelledby="podCap" id="pods">
+    <button type="button" id="podMore" aria-label="Add a pod">+</button><span id="podN">0</span><button type="button" id="podLess" aria-label="Remove a pod">&minus;</button>
+  </div>
+  <nav role="group" aria-label="Leaves" id="leaves"><button type="button" id="leafBack" aria-label="Back a leaf">‹</button><span>2 / 5</span><button type="button" id="leafOn" aria-label="On a leaf">›</button></nav>
+  <div role="group" aria-label="Bunks" id="bunks"><button type="button" id="bunkLess" aria-label="Remove a bunk">&minus;</button><input id="bunkN" value="1" aria-label="Bunks"><button type="button" id="bunkMore" aria-label="Add a bunk">+</button></div>
+  <button type="button" id="send">Send</button>
+</form>
+<script>
+  const wire = (less, more, out, min, max) => {
+    let n = min;
+    const draw = () => {
+      document.getElementById(out).textContent = String(n);
+      document.getElementById(less).disabled = n <= min;
+      document.getElementById(more).disabled = n >= max;
+    };
+    document.getElementById(less).addEventListener("click", () => { n -= 1; draw(); });
+    document.getElementById(more).addEventListener("click", () => { n += 1; draw(); });
+    draw();
+  };
+  wire("berthLess", "berthMore", "berthN", 1, 4);
+  wire("podLess", "podMore", "podN", 0, 3);
+</script>`;
+
+await test("a_count_drawn_between_two_buttons_is_one_field_with_the_number_it_shows_and_its_buttons_are_no_buttons_of_the_form", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(BERTHS);
+    const read = await readFields(held);
+    const counts = read.fields.filter((field) => field.kind === "stepper");
+    assert(counts.length === 2, "the two counts are fields of kind stepper", read.fields.map((field) => [field.kind, field.label]));
+    assert(counts[0].label.startsWith("Berths") && counts[0].value === "1" && counts[1].label === "Pods" && counts[1].value === "0",
+      "each says its name and the number it shows", counts);
+    const labels = read.actions.map((action) => action.label);
+    assert(["Back a leaf", "On a leaf", "Remove a bunk", "Add a bunk", "Send"].every((one) => labels.includes(one)),
+      "the page counter's buttons, the buttons around a field and the form's own button are buttons", labels);
+    assert(!labels.some((one) => /berth|pod/i.test(one)), "the buttons of a count are the count's, not the form's", labels);
+    assert(read.fields.filter((field) => field.kind !== "stepper").map((field) => field.label).join("|") === "Bunks",
+      "a pair of buttons around a field of its own and a page counter make no stepper", read.fields.map((field) => [field.kind, field.label]));
+    return counts.map((field) => `${field.label} = ${field.value}`).join(" · ");
+  } finally { await held.close(); }
+});
+
+await test("a_fill_of_a_count_drawn_between_two_buttons_presses_the_button_that_moves_it_until_the_number_shows_the_asked_one_whichever_way_the_page_draws_them_and_says_where_a_limit_stops_it", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(BERTHS);
+    const read = await readFields(held);
+    const counted = read.fields.find((field) => field.kind === "stepper" && field.label.startsWith("Berths"));
+    assert(counted, "the count of berths is a field to fill", read.fields.map((field) => [field.kind, field.label]));
+    const berths = counted.handle;
+    const pods = handleOf(read, "Pods");
+    const shown = (id) => held.evaluate((one) => document.getElementById(one).textContent, id);
+    const up = await fillBundle(held, { [berths]: "3" });
+    assert(up.results[0].status === "set" && await shown("berthN") === "3", "three berths: pressed up from one", up.results);
+    const down = await fillBundle(held, { [berths]: 2 });
+    assert(down.results[0].status === "set" && await shown("berthN") === "2", "a number asked as a number, pressed down", down.results);
+    const flipped = await fillBundle(held, { [pods]: "2" });
+    assert(flipped.results[0].status === "set" && await shown("podN") === "2", "a page that draws the plus before the minus is raised by the button that raises", flipped.results);
+    const same = await fillBundle(held, { [pods]: "2" });
+    assert(same.results[0].status === "same", "a count that already shows the number is not pressed", same.results);
+    const past = await fillBundle(held, { [berths]: "9" });
+    assert(past.results[0].status === "mismatch" && await shown("berthN") === "4" && past.results[0].now === "4",
+      "past the limit it stops there and says the number it shows", past.results);
+    const words = await fillBundle(held, { [berths]: "many" });
+    assert(words.results[0].status === "no_option", "words that are no number are no option", words.results);
+    return "set · set · set · same · mismatch at 4 · no_option";
+  } finally { await held.close(); }
+});
+
+/* A dropdown drawn with no ARIA at all — a focusable box with a list beside
+ * it, items filled late after another choice — is read as a field with its
+ * items for choices, and filled by opening it and pressing the item. */
+await test("a_focusable_box_with_a_list_beside_it_is_a_dropdown", async () => {
+  const plain = await browser.newPage();
+  try {
+    await plain.setContent(`<!doctype html><html lang="ko"><meta charset="utf-8"><form>
+      <div class="row"><div class="cap">터미널</div><div class="ctl"><select id="t"><option value="">선택</option><option value="A">A동</option><option value="B">B동</option></select></div></div>
+      <div class="row"><div class="cap">주차장</div><div class="ctl"><div class="dd">
+        <div class="btn" tabindex="0"><span class="val">터미널을 먼저 고르세요</span></div><ul class="list" hidden></ul></div></div></div></form>
+      <script>
+        const box = document.querySelector(".dd"), button = box.querySelector(".btn"), list = box.querySelector(".list");
+        button.addEventListener("click", () => { list.hidden = !list.hidden; });
+        list.addEventListener("click", (event) => {
+          const item = event.target.closest("li");
+          if (!item) return;
+          button.querySelector(".val").textContent = item.textContent;
+          box.dataset.value = item.dataset.value;
+          list.hidden = true;
+        });
+        document.getElementById("t").addEventListener("change", (event) => setTimeout(() => {
+          list.replaceChildren(...(event.target.value === "B" ? ["P3 단기", "P4 장기"] : ["P1 단기", "P2 장기"]).map((words, at) => {
+            const item = document.createElement("li"); item.textContent = words; item.dataset.value = "p" + at; return item; }));
+          button.querySelector(".val").textContent = "주차장을 고르세요";
+        }, 150));
+      </script>`);
+    const read = await readFields(plain);
+    const lot = read.fields.find((field) => field.label === "주차장");
+    assert(lot && lot.kind === "dropdown", "a focusable box with a list beside it is a dropdown", read.fields);
+    const filled = await fillBundle(plain, { [handleOf(read, "터미널")]: "B동", [lot.handle]: "P4 장기" });
+    assert(filled.results.every((result) => result.status === "set"), "the late items are chosen by their words", filled.results);
+    const shown = await plain.evaluate(() => [document.querySelector(".val").textContent, document.querySelector(".dd").dataset.value]);
+    assert(JSON.stringify(shown) === JSON.stringify(["P4 장기", "p1"]), "the page took the item", shown);
+    return `${filled.passes} passes`;
+  } finally { await plain.close(); }
+});
+
+/* A net under every rule: what a person can press or focus beside the
+ * fields that the read names no kind for — a box that shows a pointer, a
+ * focusable chip with no list, a text with a click handler — is said as
+ * \`unknown\` with its words and caption; what nobody can press (a notice), a
+ * label of a field, a link, stays out. */
+await test("a_pressable_thing_the_read_cannot_name_is_said_as_unknown", async () => {
+  const odd = await browser.newPage();
+  try {
+    await odd.setContent(`<!doctype html><html lang="ko"><meta charset="utf-8"><form>
+      <div class="row"><div class="cap">지역</div><div class="ctl"><div id="region" style="cursor:pointer">지역을 고르세요 <b>▾</b></div></div></div>
+      <div class="row"><div class="cap">옵션</div><div class="ctl"><div class="chip" tabindex="0">아침 식사</div></div></div>
+      <div class="row"><div class="cap">이름</div><div class="ctl"><input id="name"></div></div>
+      <p class="notice">안내: 입력한 내용은 저장됩니다</p>
+      <label style="cursor:pointer"><input type="checkbox" id="agree"> 동의</label>
+      <a href="#help">도움말</a> <span id="more" onclick="void 0">더보기</span>
+    </form>`);
+    const read = await readFields(odd);
+    const unknown = (read.unknowns || []).map((thing) => thing.label);
+    assert(JSON.stringify(unknown) === JSON.stringify(["지역을 고르세요 ▾", "아침 식사", "더보기"]),
+      "each pressable thing of no kind is said once, outermost, in the page's order — the notice, the label and the link are not", read.unknowns);
+    assert(read.unknowns[0].caption === "지역" && read.unknowns[1].caption === "옵션", "with the caption beside it", read.unknowns);
+    for (const thing of read.unknowns) {
+      assert(await odd.evaluate((handle) => document.querySelectorAll(handle).length === 1, thing.handle), `the handle ${thing.handle} finds it`);
+    }
+    assert(read.fields.map((field) => field.label).join(",") === "이름,동의", "the fields are still the fields", read.fields);
+    return unknown.join(" · ");
+  } finally { await odd.close(); }
+});
+
+/* A field under a term (or a header) in a box of its own — no other field
+ * in it — with its own words before it there, as a code box drawn under the
+ * phone it was sent to, is named by those words; the parts in the term's own
+ * cell, and a box with no words of its own, share the term. */
+await test("a_field_in_its_own_box_under_a_term_is_named_by_its_own_words", async () => {
+  const nested = await browser.newPage();
+  try {
+    await nested.setContent(`<!doctype html><html lang="ko"><meta charset="utf-8"><form><dl>
+      <dt>휴대전화<em>*</em></dt><dd><select id="p1"><option>010</option><option>011</option></select><span>-</span>
+        <input id="p2" maxlength="4"><span>-</span><input id="p3" maxlength="4">
+        <div class="code"><div class="row"><span>인증번호</span><span class="w"><input id="code" maxlength="6"></span><button type="button">확인</button></div></div></dd>
+      <dt>요금</dt><dd><div class="price"><input id="fee"></div></dd></dl>
+      <table><tr><th>차량번호</th><td><div class="box"><span>앞자리</span><input id="car"></div></td></tr></table></form>`);
+    const read = await readFields(nested);
+    const labels = Object.fromEntries(read.fields.map((field) => [field.handle, field.label]));
+    assert(labels["#code"] === "인증번호", "the code box is named by its own words, not the phone's term", labels);
+    assert(labels["#car"] === "앞자리", "so is a box of its own under a header", labels);
+    assert(String(labels["#fee"]).startsWith("요금"), "a box with no words of its own keeps the term", labels);
+    assert(["#p1", "#p2", "#p3"].every((handle) => String(labels[handle]).startsWith("휴대전화")),
+      "the parts in the term's own cell keep it", labels);
+    return JSON.stringify(labels);
+  } finally { await nested.close(); }
+});
+
+await test("a_frame_of_another_origin_is_named_not_read", async () => {
+  const sealed = await browser.newPage();
+  try {
+    await sealed.setContent(`<form><label>이름 <input id="who"></label>
+      <iframe id="card" src="data:text/html,<input id=inside>"></iframe></form>`);
+    await sealed.waitForTimeout(100);
+    const read = await readFields(sealed);
+    assert(read.fields.length === 1 && read.fields[0].handle === "#who", "only the page's own field", read.fields);
+    assert(read.sealedFrames.length === 1, "the other origin's frame is named", read.sealedFrames);
+    return JSON.stringify(read.sealedFrames);
+  } finally { await sealed.close(); }
+});
+
+/* A table cell with no header of its row is named by the header over its
+ * column (t-41387): HTML's own table meaning, the same for any table whose
+ * head says so — a `thead`, or a first row of nothing but headers, a head cell
+ * that spans several columns covering each of them. A row's own header still
+ * names its cells first, and a cell under no head keeps the words before it. */
+await test("a_field_in_a_table_cell_with_no_row_header_is_named_by_the_header_over_its_column", async () => {
+  const grid = await browser.newPage();
+  try {
+    await grid.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <table><thead><tr><th>Seat</th><th colspan="2">Guest</th><th>Meal</th></tr></thead><tbody>
+        <tr><td>A1</td><td><input id="first"></td><td><input id="last"></td>
+          <td><select id="meal"><option value="">-</option><option>Fish</option><option>Veg</option></select></td></tr>
+      </tbody></table>
+      <table><tr><th>Name</th><th>Phone</th></tr><tr><td><input id="n"></td><td><input id="p"></td></tr></table>
+      <table><thead><tr><td></td><th>Mon</th></tr></thead><tbody><tr><th scope="row">Morning</th><td><input id="mm"></td></tr></tbody></table>
+      <table><tr><td>Voucher</td><td><input id="v"></td></tr></table>
+    </form>`);
+    const labels = Object.fromEntries((await readFields(grid)).fields.map((field) => [field.handle, field.label]));
+    assert(labels["#first"] === "Guest #1" && labels["#last"] === "Guest #2" && labels["#meal"] === "Meal",
+      "under a thead, a head cell that spans two columns covers both of them — and two fields of one name are told by number", labels);
+    assert(labels["#n"] === "Name" && labels["#p"] === "Phone", "a first row of nothing but headers is the head too", labels);
+    assert(labels["#mm"] === "Morning", "a row's own header still names its cell first", labels);
+    assert(labels["#v"] === "Voucher", "a cell under no head keeps the words before it", labels);
+    return JSON.stringify(labels);
+  } finally { await grid.close(); }
+});
+
+/* The reason a field is off, and what there is to read (t-41387): a field
+ * that is disabled or cannot be written says the words the page gives about
+ * it — what its aria-describedby names, else its title, else the words of the
+ * nearest box around it that holds no other field, minus its own labels —
+ * and a field that is on says nothing more. A box the page lets scroll that
+ * has more below what is shown is said; one read to its end, one with
+ * nothing more to read, one holding a field and one not drawn are not. */
+const REASONS = `<!doctype html><html lang="en"><meta charset="utf-8">
+<style>.box{height:60px;overflow:auto;border:1px solid #999}</style>
+<form>
+  <div class="row"><label for="state">State</label> <select id="state" disabled aria-describedby="why-state"><option>-</option></select>
+    <p id="why-state">Choose a country first.</p></div>
+  <div class="row"><label for="promo">Promo code</label> <input id="promo" disabled title="Available after you create an account"></div>
+  <div class="row"><label><input type="checkbox" id="accept" disabled> I have read the licence</label>
+    <span class="note">Scroll the licence to its end to switch this on.</span></div>
+  <div class="row"><label for="ref">Reference</label> <input id="ref" readonly value="X1">
+    <small>Filled in by the shop; you cannot change it.</small></div>
+  <div class="row"><label for="nick">Nickname</label> <input id="nick"><small>Shown to other guests.</small></div>
+  <div id="licence" class="box"><p>Licence terms 1</p><p>2</p><p>3</p><p>4</p><p>5</p><p>6</p><p>7</p><p>8</p></div>
+  <div id="read" class="box"><p>Privacy 1</p><p>2</p><p>3</p><p>4</p><p>5</p><p>6</p><p>7</p><p>8</p></div>
+  <div id="short" class="box" style="height:200px"><p>One line.</p></div>
+  <div id="editor" class="box"><textarea id="bio" rows="8"></textarea></div>
+  <div id="gone" class="box" style="display:none"><p>1</p><p>2</p><p>3</p><p>4</p><p>5</p><p>6</p><p>7</p><p>8</p></div>
+</form>
+<script>document.getElementById("read").scrollTop = document.getElementById("read").scrollHeight;</script>`;
+
+await test("a_field_that_is_off_or_cannot_be_written_says_the_words_the_page_gives_about_it", async () => {
+  const why = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await why.setContent(REASONS);
+    const fields = byHandle(await readFields(why));
+    assert(fields["#state"].hint === "Choose a country first.", "the words its aria-describedby names", fields["#state"]);
+    assert(fields["#promo"].hint === "Available after you create an account", "else its title, a label having named it", fields["#promo"]);
+    assert(fields["#accept"].hint === "Scroll the licence to its end to switch this on.", "else the words in its box beside its own label", fields["#accept"]);
+    assert(fields["#ref"].hint === "Filled in by the shop; you cannot change it.", "a field that cannot be written, too", fields["#ref"]);
+    assert(!fields["#nick"].hint, "a field that is on says nothing more", fields["#nick"]);
+    return fields["#accept"].hint;
+  } finally { await why.close(); }
+});
+
+await test("a_box_with_more_to_read_below_it_is_said_and_one_read_to_its_end_or_holding_a_field_is_not", async () => {
+  const why = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await why.setContent(REASONS);
+    const read = await readFields(why);
+    const boxes = (read.scrollBoxes || []).map((box) => `${box.handle} ${box.label.slice(0, 15)}`);
+    assert(JSON.stringify(boxes) === JSON.stringify(["#licence Licence terms 1"]),
+      "only the box with more below it: not the one read to its end, the short one, the one holding a field, the one not drawn", read.scrollBoxes);
+    await why.evaluate(() => { const box = document.getElementById("licence"); box.scrollTop = box.scrollHeight; });
+    assert(((await readFields(why)).scrollBoxes || []).length === 0, "and once it is read to its end it is not said again");
+    return boxes.join(" · ");
+  } finally { await why.close(); }
+});
+
+await test("a_fill_of_a_field_that_is_off_says_the_words_the_page_gives_about_it", async () => {
+  const why = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await why.setContent(REASONS);
+    const filled = await fillBundle(why, { "#accept": true });
+    const [only] = filled.results;
+    assert(only.status === "disabled" && only.hint === "Scroll the licence to its end to switch this on.",
+      "disabled, and why", only);
+    return only.hint;
+  } finally { await why.close(); }
+});
+
+/* The buttons a fill leaves (t-41387): a step's button that turns on once its
+ * field is right, and one the page takes away, are said in the fill's own
+ * answer — the agent presses the step's button with no read between — by the
+ * page's own states: `disabled`, and not drawn. */
+const STEP_BUTTONS = `<!doctype html><html lang="en"><meta charset="utf-8">
+<form onsubmit="return false">
+  <label for="mail">Contact email</label> <input id="mail" type="email">
+  <button type="button" id="go" disabled>Continue</button>
+  <button type="button" id="back">Go back</button>
+  <button type="button" id="later">Skip this step</button>
+</form>
+<script>
+  const mail = document.getElementById("mail");
+  mail.addEventListener("input", () => {
+    const ok = mail.validity.valid && mail.value !== "";
+    document.getElementById("go").disabled = !ok;
+    document.getElementById("later").hidden = ok;
+  });
+</script>`;
+const buttonStates = (actions) => JSON.stringify(Object.fromEntries((Array.isArray(actions) ? actions : [])
+  .map((action) => [action.label, action.disabled ? "off" : "on"])));
+
+await test("a_fill_answers_the_state_of_the_buttons_the_form_has_after_it", async () => {
+  const step = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await step.setContent(STEP_BUTTONS);
+    const before = await readFields(step);
+    assert(buttonStates(before.actions) === JSON.stringify({ "Continue": "off", "Go back": "on", "Skip this step": "on" }),
+      "before the fill the step's button is off", before.actions);
+    const filled = await fillBundle(step, { "#mail": "kim@example.com" }, before.fingerprint);
+    assert(buttonStates(filled.actions) === JSON.stringify({ "Continue": "on", "Go back": "on" }),
+      "after it the step's button is on and the one the page took away is not there", filled.actions);
+    assert(filled.fingerprint === before.fingerprint, "the form's own fields did not change", filled);
+    return buttonStates(filled.actions);
+  } finally { await step.close(); }
+});
+
+await test("a_fill_inside_an_eval_answers_the_buttons_after_it_too", async () => {
+  const step = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await step.setContent(STEP_BUTTONS);
+    const script = `(() => { const read = zerocode.fields();
+      const filled = zerocode.fill({ "#mail": "kim@example.com" }, read);
+      return filled.actions; })()`;
+    const answer = await evalJson(step, evalFormScript(script));
+    assert(answer.ok, "the one script ran", answer);
+    assert(buttonStates(answer.value) === JSON.stringify({ "Continue": "on", "Go back": "on" }),
+      "the eval's fill says the buttons after it", answer.value);
+    return buttonStates(answer.value);
+  } finally { await step.close(); }
+});
+
+/* The page a fill reads is the page after it has settled (t-41387). A page that
+ * updates after its input handler has returned — in a microtask (Vue's and
+ * Svelte's nextTick, React's batched update), after a check that says it is busy
+ * — shows a read made in the same instant as the write the screen as it was. So
+ * the fill waits,
+ * with the window's own settle (the one a press by number waits with), between
+ * its write and its read: the buttons, each field's value and error and what is
+ * left are the settled screen's; a page that never stands still is said so. */
+const LATE_PAGE = (script) => `<!doctype html><html lang="en"><meta charset="utf-8">
+<form onsubmit="return false">
+  <label for="mail">Contact email</label> <input id="mail" type="email" aria-describedby="mail-err">
+  <p id="mail-err" role="alert"></p>
+  <button type="button" id="go" disabled>Continue</button>
+  <p id="tick">0</p>
+</form>
+<script>${script}</script>`;
+const AFTER_A_MICROTASK = LATE_PAGE(`
+  const mail = document.getElementById("mail"), go = document.getElementById("go");
+  mail.addEventListener("input", () => queueMicrotask(() => { go.disabled = !mail.value.includes("@"); }));`);
+// An async check, as a page with one writes it: it says it is busy while the check runs
+// (`aria-busy`), and shows its verdict 150 ms after the input.
+const AFTER_A_BUSY_CHECK = LATE_PAGE(`
+  const form = document.querySelector("form"), mail = document.getElementById("mail"), err = document.getElementById("mail-err");
+  mail.removeAttribute("type");
+  let timer = 0;
+  mail.addEventListener("input", () => {
+    clearTimeout(timer);
+    form.setAttribute("aria-busy", "true");
+    timer = setTimeout(() => {
+      const bad = !mail.value.includes("@");
+      mail.setAttribute("aria-invalid", bad ? "true" : "false");
+      err.textContent = bad ? "Enter a valid email" : "";
+      form.setAttribute("aria-busy", "false");
+    }, 150);
+  });`);
+const NEVER_STILL = LATE_PAGE(`
+  let ticks = 0;
+  setInterval(() => { document.getElementById("tick").textContent = String(++ticks); }, 20);`);
+
+await test("a_fill_reads_the_buttons_a_page_turns_on_after_its_handler_has_returned", async () => {
+  const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await late.setContent(AFTER_A_MICROTASK);
+    const before = await readFields(late);
+    const filled = await fillBundle(late, { "#mail": "kim@example.com" }, before.fingerprint);
+    assert(buttonStates(filled.actions) === JSON.stringify({ "Continue": "on" }),
+      "the button the page turned on after the write is on in the fill's answer", filled.actions);
+    assert(filled.moving === false, "and the page stood still when it was read", filled.moving);
+    return buttonStates(filled.actions);
+  } finally { await late.close(); }
+});
+
+await test("a_fill_reads_the_error_a_check_shows_after_the_write_while_the_page_says_it_is_busy", async () => {
+  const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await late.setContent(AFTER_A_BUSY_CHECK);
+    const before = await readFields(late);
+    const filled = await fillBundle(late, { "#mail": "nope" }, before.fingerprint);
+    const [only] = filled.results;
+    assert(only.status === "set" && only.error === "Enter a valid email",
+      "the error the page showed 150 ms after the write, once it was no longer busy, is the field's error", only);
+    assert(filled.left.some((field) => field.error === "Enter a valid email"), "and the field is left with it", filled.left);
+    return only.error;
+  } finally { await late.close(); }
+});
+
+await test("a_fill_on_a_page_that_never_stands_still_ends_and_says_it_is_still_changing", async () => {
+  const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await late.setContent(NEVER_STILL);
+    const before = await readFields(late);
+    const began = Date.now();
+    const filled = await fillBundle(late, { "#mail": "kim@example.com" }, before.fingerprint);
+    const took = Date.now() - began;
+    assert(filled.moving === true, "the fill says the page was still changing", filled.moving);
+    assert(took < 4000, "and it ended inside the settle's time, not waited for", took);
+    return `${took} ms`;
+  } finally { await late.close(); }
+});
+
+// A check with no signal: a timer shows its verdict 150 ms after the input and the page says
+// nothing while it waits. The settle is the window's own — a page that stood still for the
+// quiet window is settled — so the fill does not see this error; the answer must not call
+// itself the page's last word (the core's last line says so), and the next read sees it.
+const AFTER_A_SILENT_TIMER = LATE_PAGE(`
+  const mail = document.getElementById("mail"), err = document.getElementById("mail-err");
+  mail.removeAttribute("type");
+  let timer = 0;
+  mail.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const bad = !mail.value.includes("@");
+      mail.setAttribute("aria-invalid", bad ? "true" : "false");
+      err.textContent = bad ? "Enter a valid email" : "";
+    }, 150);
+  });`);
+
+await test("a_fill_does_not_see_an_error_a_silent_timer_shows_later_and_the_next_read_does", async () => {
+  const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await late.setContent(AFTER_A_SILENT_TIMER);
+    const before = await readFields(late);
+    const filled = await fillBundle(late, { "#mail": "nope" }, before.fingerprint);
+    const [only] = filled.results;
+    assert(only.status === "set" && only.error === "" && filled.left.length === 0,
+      "the error the page shows after a silent 150 ms is not in the fill's answer — the limit, pinned", only);
+    assert(filled.moving === false, "the page stood still for the quiet window, so the fill took it for settled", filled.moving);
+    await late.waitForTimeout(300);
+    const next = byHandle(await readFields(late));
+    assert(next["#mail"].error === "Enter a valid email", "and the next read has it", next["#mail"]);
+    return `fill: "${only.error}"; next read: "${next["#mail"].error}"`;
+  } finally { await late.close(); }
+});
+
+await test("a_fill_read_in_another_document_than_the_write_says_the_page_was_replaced", async () => {
+  const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await late.setContent(AFTER_A_MICROTASK);
+    const wrote = await evalJson(late, fillWriteScript([{ handle: "#mail", value: "kim@example.com" }], null));
+    assert(wrote.ok && Array.isArray(wrote.value.held) && typeof wrote.value.epoch === "string" && wrote.value.wrote === true,
+      "the write half answers what it held, the document it wrote in and that it wrote", wrote);
+    const read = await evalJson(late, fillReadScript(wrote.value.held, "another-document"));
+    assert(read.ok && read.value.results[0].status === "replaced",
+      "read in a document that is not the one written in, the field is said replaced", read);
+    const same = await evalJson(late, fillReadScript(wrote.value.held, wrote.value.epoch));
+    assert(same.ok && same.value.results[0].status === "set", "and read in its own document it is read back", same);
+    return read.value.results[0].status;
+  } finally { await late.close(); }
+});
+
+/* What a review of the nets found wrong on pages shaped like our own scenes (t-41387):
+ * a hint is the words nearest the field that are no one else's — not the text of
+ * the box around it, a symbol, a hidden calendar or a field's own caption; a
+ * column head follows the table's spans; a list a field offers is no box to read
+ * to its end. */
+const HINT_SHAPES = `<!doctype html><html lang="en"><meta charset="utf-8">
+<style>.box{height:60px;overflow:auto;border:1px solid #999}</style>
+<form>
+  <div class="field">
+    <label id="tl">Service terms <span class="req">*</span></label>
+    <div id="tbox" class="box" tabindex="0"><p>Article 1. These terms apply to every booking.</p><p>Article 2. The deposit is kept.</p><p>Article 3. Cancel before noon.</p><p>Article 4. Pets are not allowed.</p><p>Article 5. Quiet after ten.</p><p>Article 6. Keys stay with the guest.</p><p>Article 7. Damage is charged.</p><p>Article 8. These terms end on checkout.</p></div>
+    <div class="hint">Read the terms to the end to accept them.</div>
+    <label class="chk"><input type="checkbox" id="accept" disabled><span>I accept the terms</span></label>
+    <div id="err" role="alert" hidden>You must accept the terms.</div>
+  </div>
+  <div class="field">
+    <label for="arrive">Arrival</label>
+    <input id="arrive" readonly placeholder="YYYY-MM-DD">
+    <span class="req">*</span>
+    <div class="cal" hidden>Nov 2026 Mo Tu We Th Fr Sa Su</div>
+  </div>
+  <div class="field">
+    <div id="news" role="checkbox" aria-checked="false" aria-disabled="true" tabindex="-1">Send me news</div>
+  </div>
+  <div class="field">
+    <label for="pickup">Pickup</label> <input id="pickup" disabled> <span class="note">Choose a branch first.</span>
+    <span class="note">Opening hours vary.</span>
+  </div>
+</form>`;
+const SPAN_TABLES = `<!doctype html><html lang="en"><meta charset="utf-8">
+<table id="two"><thead><tr><th rowspan="2">Name</th><th colspan="2">Contact</th></tr><tr><th>Phone</th><th>Email</th></tr></thead>
+  <tbody><tr><td><input id="n1"></td><td><input id="p1"></td><td><input id="e1"></td></tr></tbody></table>
+<table id="down"><thead><tr><th>Group</th><th>Item</th></tr></thead>
+  <tbody><tr><td rowspan="2"><input id="g1"></td><td><input id="h1"></td></tr><tr><td><input id="h2"></td></tr></tbody></table>
+<table id="title"><tr><th colspan="2">Booking</th></tr><tr><td>Guest</td><td><input id="t1"></td></tr></table>`;
+const OFFERED_LIST = `<!doctype html><html lang="en"><meta charset="utf-8">
+<style>#lst{height:40px;overflow:auto;margin:0;padding:0}</style>
+<form>
+  <input id="nick" disabled>
+  <div id="city" role="combobox" aria-expanded="true" aria-controls="lst" tabindex="0">Choose a city</div>
+  <ul id="lst" role="listbox"><li role="option">Seoul</li><li role="option">Busan</li><li role="option">Daegu</li><li role="option">Jeju</li><li role="option">Ulsan</li></ul>
+</form>`;
+
+await test("a_hint_is_the_words_nearest_the_field_not_the_box_around_it_a_symbol_a_hidden_calendar_or_its_own_words", async () => {
+  const shapes = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await shapes.setContent(HINT_SHAPES);
+    const fields = byHandle(await readFields(shapes));
+    assert(fields["#accept"].hint === "Read the terms to the end to accept them.",
+      "the sentence beside the checkbox, not the terms box, its heading or a hidden error", fields["#accept"]);
+    assert(!fields["#arrive"].hint, "a required mark and a hidden calendar are no hint", fields["#arrive"]);
+    assert(!fields["#news"].hint, "a custom checkbox's own words are its name, not a hint", fields["#news"]);
+    assert(fields["#pickup"].hint === "Choose a branch first.", "the nearest words after the field, not the second note", fields["#pickup"]);
+    return fields["#accept"].hint;
+  } finally { await shapes.close(); }
+});
+
+await test("a_column_head_follows_the_tables_spans_and_a_title_over_every_column_is_no_column_head", async () => {
+  const spans = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await spans.setContent(SPAN_TABLES);
+    const labels = Object.fromEntries((await readFields(spans)).fields.map((field) => [field.handle, field.label]));
+    assert(JSON.stringify([labels["#n1"], labels["#p1"], labels["#e1"]]) === JSON.stringify(["Name", "Phone", "Email"]),
+      "a head cell spanning two rows names its own column, the head row under it the next two", labels);
+    assert(JSON.stringify([labels["#g1"], labels["#h1"], labels["#h2"]]) === JSON.stringify(["Group", "Item #1", "Item #2"]),
+      "a body cell spanning two rows leaves its column to the row below — and the two cells of one name are told by number", labels);
+    assert(labels["#t1"] === "Guest", "a head cell over every column is the table's title: the words before the field stand", labels);
+    return JSON.stringify(labels);
+  } finally { await spans.close(); }
+});
+
+await test("a_list_a_field_offers_is_no_box_to_read_to_its_end", async () => {
+  const offered = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await offered.setContent(OFFERED_LIST);
+    const read = await readFields(offered);
+    const city = read.fields.find((field) => field.handle === "#city");
+    assert(city && city.options.length === 5, "the dropdown's choices are read as the field's options", read.fields);
+    assert((read.scrollBoxes || []).length === 0, "and the list that holds them is not named a box with more to read", read.scrollBoxes);
+    return "no box";
+  } finally { await offered.close(); }
+});
+
+/* What a read still leaves out (t-41592), each on a page of the shape the gap was found on and none a scene of the bench. */
+
+/* A step with no field of its own — a review, a confirmation, a modal that asks
+ * yes or no — still has its buttons: the drawn forms, dialogs and main regions
+ * that hold no field are read for them too, and a page with no such box at all
+ * is read whole. The site's menu outside such a box is still not said. */
+await test("a_step_with_no_field_of_its_own_still_says_its_buttons", async () => {
+  const bare = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await bare.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><header><button id="menu">Menu</button></header>
+      <main><h1>Review</h1><form id="review"><p>Check what you entered.</p>
+        <button type="button" id="back">Back</button><button type="button" id="send" disabled>Send</button></form></main>`);
+    const step = await readFields(bare);
+    assert(step.fields.length === 0, "a review has no field", step.fields);
+    assert(JSON.stringify(step.actions.map((action) => [action.label, action.disabled])) === JSON.stringify([["Back", false], ["Send", true]]),
+      "its buttons are said, on and off — and not the site's menu outside it", step.actions);
+    await bare.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><header><button id="menu">Menu</button></header>
+      <form id="order"><label>Name <input id="name"></label><button type="button" id="next">Next</button></form>
+      <div role="dialog" aria-label="Leave this page?"><p>Your answers are not saved.</p>
+        <button type="button" id="stay">Stay</button><button type="button" id="leave">Leave</button></div>`);
+    const asked = await readFields(bare);
+    assert(JSON.stringify(asked.actions.map((action) => action.label)) === JSON.stringify(["Next", "Stay", "Leave"]),
+      "the buttons of a dialog that holds no field are said beside the form's — and still not the menu", asked.actions);
+    await bare.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><h1>All done</h1><p>Thank you.</p>
+      <button type="button" id="again">Start again</button>`);
+    const done = await readFields(bare);
+    assert(JSON.stringify(done.actions.map((action) => action.label)) === JSON.stringify(["Start again"]),
+      "a page with no field and no box to read is read whole", done.actions);
+    return `${step.actions.length} + ${asked.actions.length} + ${done.actions.length} buttons`;
+  } finally { await bare.close(); }
+});
+
+/* A button that opens a list (`aria-haspopup="listbox"`) is a field: named by the
+ * words beside it, never by the value it shows; holding what it shows; saying
+ * whether its list is open; offering the items of the list it controls or the
+ * one beside it, drawn or not; and filled by opening it and pressing the item.
+ * A button that opens a menu is still a button. */
+const LIST_BUTTONS = `<!doctype html><html lang="en"><meta charset="utf-8"><style>[hidden]{display:none}</style>
+<form>
+  <div class="row"><span class="cap">Branch</span>
+    <button type="button" id="branch" aria-haspopup="listbox" aria-expanded="false" aria-controls="branches">Select a branch</button>
+    <ul id="branches" role="listbox" hidden><li role="option" data-value="hb">Hanbit</li><li role="option" data-value="sl">Seoul</li></ul></div>
+  <div class="row"><label id="dl">Doctor</label>
+    <button type="button" id="doctor" aria-haspopup="listbox" aria-expanded="false" aria-controls="docs" aria-labelledby="dl doctor">Dr. Seo</button>
+    <ul id="docs" role="listbox" hidden><li role="option">Dr. Seo</li><li role="option">Dr. Min</li></ul></div>
+  <div class="row"><span class="cap">Phone prefix</span>
+    <button type="button" id="prefix" aria-haspopup="listbox" aria-expanded="false">US +1</button>
+    <ul role="listbox" hidden><li role="option">US +1</li><li role="option">KR +82</li></ul></div>
+  <button type="button" id="more" aria-haspopup="menu">More</button>
+  <button type="button" id="go">Go</button>
+</form>
+<script>
+  for (const button of document.querySelectorAll('[aria-haspopup="listbox"]')) {
+    const list = document.getElementById(button.getAttribute("aria-controls")) || button.nextElementSibling;
+    button.addEventListener("click", () => {
+      const open = button.getAttribute("aria-expanded") !== "true";
+      button.setAttribute("aria-expanded", String(open));
+      list.hidden = !open;
+    });
+    list.addEventListener("click", (event) => {
+      const option = event.target.closest("[role=option]");
+      if (!option) return;
+      button.textContent = option.textContent;
+      button.dataset.value = option.dataset.value || option.textContent;
+      button.setAttribute("aria-expanded", "false");
+      list.hidden = true;
+    });
+  }
+</script>`;
+await test("a_button_that_opens_a_list_is_a_field_named_by_the_words_beside_it_and_filled_by_its_list", async () => {
+  const popup = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await popup.setContent(LIST_BUTTONS);
+    const read = await readFields(popup);
+    const field = (handle) => read.fields.find((one) => one.handle === handle);
+    assert(["#branch", "#doctor", "#prefix"].every((handle) => field(handle)?.kind === "combobox"),
+      "each button that opens a list is a field", read.fields);
+    assert(JSON.stringify(["#branch", "#doctor", "#prefix"].map((handle) => field(handle).label)) === JSON.stringify(["Branch", "Doctor", "Phone prefix"]),
+      "named by the words beside it — not by the value it shows, nor by a name that holds itself", read.fields.map((one) => one.label));
+    assert(JSON.stringify(["#branch", "#doctor", "#prefix"].map((handle) => field(handle).value)) === JSON.stringify(["Select a branch", "Dr. Seo", "US +1"]),
+      "holding what it shows", read.fields.map((one) => one.value));
+    assert(["#branch", "#doctor", "#prefix"].every((handle) => field(handle).open === false), "saying its list is shut", read.fields);
+    assert(JSON.stringify(field("#branch").options) === JSON.stringify(["Hanbit", "Seoul"])
+      && JSON.stringify(field("#doctor").options) === JSON.stringify(["Dr. Seo", "Dr. Min"])
+      && JSON.stringify(field("#prefix").options) === JSON.stringify(["US +1", "KR +82"]),
+      "offering the items of the list it controls or the one beside it, though neither is drawn", read.fields);
+    assert(JSON.stringify(read.actions.map((action) => action.label)) === JSON.stringify(["More", "Go"]),
+      "a button that opens a menu is still a button, and a list button is no button beside its field", read.actions);
+    assert((read.unknowns || []).length === 0, "and none is said a second time as a thing of no kind", read.unknowns);
+    const filled = await fillBundle(popup, { "#branch": "Seoul", "#prefix": "KR +82" });
+    assert(filled.results.every((result) => result.status === "set"), "the items are chosen by their words", filled.results);
+    const taken = await popup.evaluate(() => ({ branch: document.getElementById("branch").textContent,
+      value: document.getElementById("branch").dataset.value, prefix: document.getElementById("prefix").textContent }));
+    assert(JSON.stringify(taken) === JSON.stringify({ branch: "Seoul", value: "sl", prefix: "KR +82" }), "the page took the items", taken);
+    await popup.click("#doctor");
+    const opened = (await readFields(popup)).fields.find((one) => one.handle === "#doctor");
+    assert(opened.open === true, "a list that is open says so", opened);
+    return `${read.fields.length} fields`;
+  } finally { await popup.close(); }
+});
+
+/* A group of radios is named by its title — the name ARIA gives it, the legend of
+ * its fieldset, else the heading just above it — and the sentence between that
+ * title and the group is a note about it (`hint`), not its name. A caption in a
+ * box of its own, under a heading that stands over other fields too, is still the
+ * group's name. */
+await test("a_group_is_named_by_its_title_and_the_sentence_between_title_and_group_is_a_note", async () => {
+  const groups = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await groups.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <section><h2>Choose a pass</h2><p>Early prices until May.</p>
+        <div role="radiogroup" aria-label="Choose a pass"><label><input type="radio" name="pass" value="a"> Standard</label>
+          <label><input type="radio" name="pass" value="b"> Premium</label></div></section>
+      <section><h2>Seating</h2><p>Seats go fast.</p>
+        <div><label><input type="radio" name="seat" value="w"> Window</label><label><input type="radio" name="seat" value="a"> Aisle</label></div></section>
+      <fieldset><legend>Meal</legend><p>Pick one.</p>
+        <label><input type="radio" name="meal" value="v"> Veg</label><label><input type="radio" name="meal" value="m"> Meat</label></fieldset>
+      <section><h2>Order</h2><label>Name <input id="who"></label>
+        <div class="row"><span>Size</span><div><label><input type="radio" name="size" value="s"> Small</label><label><input type="radio" name="size" value="l"> Large</label></div></div></section>
+    </form>`);
+    const read = await readFields(groups);
+    const group = (first) => read.fields.find((one) => one.kind === "radio" && one.options[0] === first);
+    const pass = group("Standard"), seat = group("Window"), meal = group("Veg"), size = group("Small");
+    assert(pass.label === "Choose a pass" && pass.hint === "Early prices until May.",
+      "a group named by ARIA keeps its name and the sentence under the heading is its note", pass);
+    assert(seat.label === "Seating" && seat.hint === "Seats go fast.",
+      "a group with no name of its own is named by the heading above it, the sentence between them its note", seat);
+    assert(meal.label === "Meal" && meal.hint === "Pick one.", "a legend is the title, the sentence after it a note", meal);
+    assert(size.label === "Size" && !size.hint, "a caption in a box of its own is the name, though a heading stands over other fields above it", size);
+    return [pass, seat, meal, size].map((one) => one.label).join(" · ");
+  } finally { await groups.close(); }
+});
+
+/* A field whose value the door never reads — a password — is not "required and
+ * empty": the fill's left-over list says nothing of it. */
+await test("a_secret_field_is_not_counted_as_required_and_empty_after_a_fill", async () => {
+  const secret = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await secret.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <label>Email <input id="mail" required></label><label>Password <input id="pw" type="password" required></label>
+      <label>Nickname <input id="nick" required></label></form>`);
+    const read = await readFields(secret);
+    assert(read.fields.find((one) => one.handle === "#pw").masked, "the password is masked", read.fields);
+    const filled = await fillBundle(secret, { "#mail": "kim@example.com" });
+    assert(filled.results[0].status === "set", "the email took", filled.results);
+    assert(JSON.stringify(filled.left.map((one) => one.handle)) === JSON.stringify(["#nick"]),
+      "what is left is the field the door can see empty — not the one whose value it never reads", filled.left);
+    return filled.left.map((one) => one.handle).join(",");
+  } finally { await secret.close(); }
+});
+
+/* Fields of one read that go by the same words are told apart by the title of the
+ * row, list item or card each stands in — `<title>: <words>` — else numbered, and
+ * a number says it is only an order. Two fields of one name under
+ * different headings are told by those headings too — a name is what a script reads a
+ * field by. A fill says the name the read gave. */
+await test("fields_of_one_name_are_told_apart_by_the_title_of_the_item_each_stands_in_else_numbered", async () => {
+  const same = await browser.newPage({ viewport: { width: 900, height: 1200 } });
+  try {
+    await same.setContent(`<!doctype html><html lang="en"><meta charset="utf-8">
+      <form><table><tr><th scope="row">Tomato 500g</th><td>3,000</td><td><label>Qty <input id="q1"></label></td></tr>
+        <tr><th scope="row">Spinach 1 bunch</th><td>2,000</td><td><label>Qty <input id="q2"></label></td></tr></table>
+      <ul><li><h3>Green tea</h3><label>Amount <input id="a1"></label></li><li><h3>Black tea</h3><label>Amount <input id="a2"></label></li></ul>
+      <div class="card"><strong>Room A</strong><p>Sea view</p><label>Guests <select id="g1"><option>1</option><option>2</option></select></label></div>
+      <div class="card"><strong>Room B</strong><p>Garden</p><label>Guests <select id="g2"><option>1</option><option>2</option></select></label></div>
+      <div><label>Note <input id="n1"></label></div><div><label>Note <input id="n2"></label></div>
+      <section><h2>Guest</h2><label>Surname <input id="s1"></label></section><section><h2>Host</h2><label>Surname <input id="s2"></label></section></form>`);
+    const read = await readFields(same);
+    const label = (handle) => read.fields.find((one) => one.handle === handle).label;
+    assert(label("#q1") === "Tomato 500g: Qty" && label("#q2") === "Spinach 1 bunch: Qty", "rows are told apart by their header", read.fields.map((one) => one.label));
+    assert(label("#a1") === "Green tea: Amount" && label("#a2") === "Black tea: Amount", "list items by their heading", read.fields.map((one) => one.label));
+    assert(label("#g1") === "Room A: Guests" && label("#g2") === "Room B: Guests", "cards by their first words", read.fields.map((one) => one.label));
+    assert(label("#n1") === "Note #1" && label("#n2") === "Note #2", "with nothing to tell them by, by number", read.fields.map((one) => one.label));
+    assert(read.fields.find((one) => one.handle === "#n2").ordinal === true && !read.fields.find((one) => one.handle === "#q1").ordinal,
+      "and the number says it is only an order", read.fields);
+    assert(label("#s1") === "Guest: Surname" && label("#s2") === "Host: Surname",
+      "fields of one name under different headings are told by them too — what is read by name is the name", read.fields.map((one) => one.label));
+    const filled = await fillBundle(same, { "#q1": "2", "#n2": "later" });
+    assert(filled.results[0].label === "Tomato 500g: Qty" && filled.results[1].label === "Note #2", "a fill says the name the read gave", filled.results);
+    return `${read.fields.length} fields`;
+  } finally { await same.close(); }
+});
+
+/* What a write or a press brings (t-41592): the text that stands new in the box around a field
+ * — a check's verdict written beside it and tied to it by nothing — is said beside that field as
+ * the page wrote it, never as an error; a field the page marks invalid and says nothing of is told
+ * so; the notice a live region made is said beside no field; words the page tied to a field are its
+ * error and are not said again as new. A press says the same, in a form its agent read. */
+const BRINGS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div class="row"><label for="mail">Email</label> <input id="mail"><span class="hint">We never share it.</span></div>
+  <div class="row"><label for="age">Age</label> <input id="age" aria-invalid="false"></div>
+  <div class="row"><label for="code">Code</label> <input id="code"></div>
+  <div class="row"><label for="tip">Tip</label> <input id="tip" aria-describedby="tip-why"><span id="tip-why"></span></div>
+  <div id="toast" role="status"></div>
+</form>
+<script>
+  const mail = document.getElementById("mail");
+  mail.addEventListener("change", () => {
+    const old = mail.parentElement.querySelector(".err");
+    if (old) old.remove();
+    if (!mail.value.includes("@")) {
+      const err = document.createElement("span"); err.className = "err"; err.textContent = "Enter a valid email";
+      mail.parentElement.append(err);
+    }
+  });
+  document.getElementById("age").addEventListener("change", (event) => {
+    event.target.setAttribute("aria-invalid", String(Number(event.target.value) < 18));
+  });
+  document.getElementById("code").addEventListener("change", () => { document.getElementById("toast").textContent = "Code sent again"; });
+  document.getElementById("tip").addEventListener("change", (event) => {
+    const bad = Number(event.target.value) < 0;
+    event.target.setAttribute("aria-invalid", String(bad));
+    document.getElementById("tip-why").textContent = bad ? "A tip cannot be negative" : "";
+  });
+</script>`;
+await test("a_fill_says_the_text_that_appeared_beside_a_field_it_wrote_and_a_notice_the_page_made", async () => {
+  const brings = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await brings.setContent(BRINGS);
+    const before = await readFields(brings);
+    const filled = await fillBundle(brings, { "#mail": "kim", "#age": "12", "#code": "1", "#tip": "-5" }, before.fingerprint);
+    const result = (handle) => filled.results.find((one) => one.handle === handle);
+    assert(JSON.stringify(result("#mail").fresh) === JSON.stringify(["Enter a valid email"]),
+      "the text that appeared beside the field is said — not the sentence that was always there", result("#mail"));
+    assert(result("#age").silent === true && result("#age").error === "aria-invalid" && !result("#age").fresh,
+      "a field marked invalid with nothing said about why is told so", result("#age"));
+    assert(!result("#code").fresh && !result("#code").silent, "a field with nothing new says nothing", result("#code"));
+    assert(JSON.stringify(filled.alerts) === JSON.stringify(["Code sent again"]),
+      "the notice a live region made is said, beside no field", filled.alerts);
+    assert(result("#tip").error === "A tip cannot be negative" && !result("#tip").fresh && !result("#tip").silent,
+      "words the page tied to the field are its error, not said a second time as new text", result("#tip"));
+    assert(filled.left.some((one) => one.handle === "#age" && one.silent === true), "and a field that is left carries it too", filled.left);
+    const again = await fillBundle(brings, { "#mail": "kim@example.com" });
+    assert(!again.results[0].fresh && JSON.stringify(again.alerts) === JSON.stringify([]),
+      "a value the page takes brings nothing — and what was said is not new twice", again);
+    return JSON.stringify(result("#mail").fresh);
+  } finally { await brings.close(); }
+});
+
+const PRESSES = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div class="row"><label for="mail">Email</label> <input id="mail"></div>
+  <div class="row"><label for="phone">Phone</label> <input id="phone"></div>
+  <button type="button" id="next">Next</button>
+  <button type="button" id="idle">Nothing</button>
+  <div id="step2" hidden><div class="row"><label for="city">City</label> <input id="city"></div></div>
+</form>
+<script>
+  const mail = document.getElementById("mail"), phone = document.getElementById("phone");
+  document.getElementById("next").addEventListener("click", () => {
+    const old = mail.parentElement.querySelector(".err");
+    if (old) old.remove();
+    phone.setAttribute("aria-invalid", String(phone.value === ""));
+    if (!mail.value.includes("@")) {
+      const err = document.createElement("span"); err.className = "err"; err.textContent = "Enter a valid email";
+      mail.parentElement.append(err);
+      return;
+    }
+    document.getElementById("step2").hidden = false;
+  });
+</script>`;
+await test("a_press_in_a_known_form_says_what_appeared_beside_its_field_and_a_press_that_moves_on_says_so", async () => {
+  assert(typeof twin.pressInForm === "function", "the stand-in presses as the window does in a form that was read");
+  const form = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await form.setContent(PRESSES);
+    const run = (source) => evalJson(form, source);
+    const read = await readFields(form);
+    const stayed = await twin.pressInForm(run, "#next");
+    assert(stayed.read.fingerprint === read.fingerprint, "the form is the one that was read", stayed.read);
+    const noted = Object.fromEntries(stayed.read.noted.map((one) => [one.handle, one]));
+    assert(JSON.stringify(noted["#mail"]?.fresh) === JSON.stringify(["Enter a valid email"]),
+      "what appeared beside the field is the reason the press did not move on", stayed.read.noted);
+    assert(noted["#phone"]?.silent === true && noted["#phone"].error === "aria-invalid",
+      "a field the page marked invalid and said nothing about is told so", stayed.read.noted);
+    assert(stayed.settle.state === "ready" && stayed.moving === false, "the page was waited for", stayed.settle);
+    const idle = await twin.pressInForm(run, "#idle");
+    assert(idle.read.fingerprint === read.fingerprint && !idle.read.noted.some((one) => one.handle === "#mail")
+      && JSON.stringify(idle.read.alerts) === JSON.stringify([]),
+      "a press that changes nothing brings nothing new — the sentence said before is not new again", idle.read);
+    await fillBundle(form, { "#mail": "kim@example.com" });
+    const moved = await twin.pressInForm(run, "#next");
+    assert(moved.read.fingerprint !== read.fingerprint, "a press that moves the form on brings a form that is not the one read", moved.read);
+    return `${stayed.read.noted.length} noted`;
+  } finally { await form.close(); }
+});
+
+/* An item is titled by its name — the words a person would call it by — not by a short label that
+ * stands before it (a thumbnail's), nor by a price, a count or a total, which have letters in them
+ * only as units: fields of one name in rows of a cart are told apart by the name of the product. */
+await test("an_item_is_titled_by_its_name_not_by_a_short_label_before_it_or_a_price_or_total_around_it", async () => {
+  const cart = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    const row = (name, desc, list, price) => `<li><input type="checkbox" aria-label="${name} select">
+      <div class="thumb">${name.split(" ")[0]}</div>
+      <div class="info"><p class="n">${name}</p><p class="d">${desc}</p><p class="price"><s>${list} won</s> ${price} won</p></div>
+      <div class="step"><button type="button" aria-label="Less">-</button><input aria-label="Qty" value="1"><button type="button" aria-label="More">+</button></div>
+      <strong class="total">${price} won</strong></li>`;
+    await cart.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form><ul>
+      ${row("Green tea tin 100g", "Loose leaf · chilled", "7,900", "6,900")}
+      ${row("Black tea tin 100g", "Smoked · room", "5,000", "4,200")}
+      ${row("Mint 1 bunch", "Fresh · chilled", "0", "2,800")}</ul></form>`);
+    const read = await readFields(cart);
+    const quantities = read.fields.filter((field) => field.kind === "text").map((field) => field.label);
+    assert(JSON.stringify(quantities) === JSON.stringify(["Green tea tin 100g: Qty", "Black tea tin 100g: Qty", "Mint 1 bunch: Qty"]),
+      "each row's quantity is told by the product's name — not by its thumbnail's word, its price or its total", quantities);
+    return quantities.join(" · ");
+  } finally { await cart.close(); }
+});
+
+/* A button that opens a list is named by what labels it from outside: a label that names it by
+ * `aria-labelledby` together with the element inside it that holds the value it shows is the
+ * label's words alone — the value element is part of the button, not of its name. */
+await test("a_list_button_is_named_by_the_words_beside_it_not_by_the_value_element_inside_it", async () => {
+  const inner = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await inner.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <span class="glabel" id="t-l">Session track <b>*</b></span>
+      <div class="dd"><button type="button" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="t-l t-v" id="track">
+        <span id="t-v">Choose a session…</span><span class="caret"></span></button>
+        <ul role="listbox" hidden><li role="option">Lab</li><li role="option">Experiments</li></ul></div></form>`);
+    const field = (await readFields(inner)).fields.find((one) => one.handle === "#track");
+    assert(field && field.label === "Session track *", "the label's words, not the words of the value inside the button", field);
+    assert(field.value === "Choose a session…", "and the value is what the button shows", field);
+    return field.label;
+  } finally { await inner.close(); }
+});
+
+/* Fields of one name in groups the page titles — a fieldset with its legend, as a party of two
+ * is entered — are told by the title: `<legend>: <name>`, as a person says them. */
+await test("fields_of_one_name_in_fieldsets_under_different_legends_are_told_by_the_legend", async () => {
+  const party = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await party.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <fieldset><legend>Attendee 1 <span class="badge">Booking contact</span></legend>
+        <label>First name <b>*</b> <input id="f1"></label><label>Last name <b>*</b> <input id="l1"></label></fieldset>
+      <fieldset><legend>Attendee 2</legend>
+        <label>First name <b>*</b> <input id="f2"></label><label>Last name <b>*</b> <input id="l2"></label></fieldset></form>`);
+    const labels = Object.fromEntries((await readFields(party)).fields.map((one) => [one.handle, one.label]));
+    assert(labels["#f1"] === "Attendee 1: First name *" && labels["#f2"] === "Attendee 2: First name *"
+      && labels["#l1"] === "Attendee 1: Last name *" && labels["#l2"] === "Attendee 2: Last name *",
+      "each is told by the legend of the fieldset it stands in", labels);
+    return JSON.stringify(labels);
+  } finally { await party.close(); }
+});
+
+/* A note is the sentence just under the title — the text blocks that follow the heading until the first
+ * thing that is no mere text (a control, a button, a label, another heading, the group itself) — not every
+ * word the page has between the title and the group. */
+await test("a_note_is_the_sentence_just_under_the_title_not_every_word_between_title_and_group", async () => {
+  const under = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await under.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form><section><h2>Schedule</h2>
+      <p>Two nights at least.</p>
+      <div class="row"><span class="cap">Pick-up</span> <button type="button">Choose a time</button></div>
+      <div role="radiogroup" aria-label="Morning or evening"><label><input type="radio" name="ampm" value="a"> Morning</label>
+        <label><input type="radio" name="ampm" value="p"> Evening</label></div></section></form>`);
+    const group = (await readFields(under)).fields.find((one) => one.kind === "radio");
+    assert(group.label === "Morning or evening" && group.hint === "Two nights at least.",
+      "the sentence under the title is the note — not the caption of a button that stands between", group);
+    return group.hint;
+  } finally { await under.close(); }
+});
+
+/* What stands new beside a field is words: a counter that counts, a countdown that runs, and the
+ * value the page shows of the field itself — in the control or beside it — are the field's own
+ * number or value changing, not text the page brought; a sentence the page brought is still said. */
+await test("a_counter_a_countdown_or_the_value_shown_beside_a_field_is_no_new_text", async () => {
+  const live = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await live.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div class="row"><label for="note">Note</label> <textarea id="note"></textarea><span id="count">0/100</span></div>
+      <div class="row"><label for="code">Code</label> <input id="code"><span id="left">Valid for 03:00</span></div>
+      <div class="row"><label for="nick">Nickname</label> <input id="nick"><span id="echo"></span></div>
+      <div class="row"><label for="mail">Email</label> <input id="mail"></div>
+    </form>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      $("note").addEventListener("change", (event) => { $("count").textContent = event.target.value.length + "/100"; });
+      $("code").addEventListener("change", () => { $("left").textContent = "Valid for 02:59"; });
+      $("nick").addEventListener("change", (event) => { $("echo").textContent = event.target.value; });
+      $("mail").addEventListener("change", () => {
+        const saved = document.createElement("span"); saved.textContent = "Saved to your profile"; $("mail").parentElement.append(saved);
+      });
+    </script>`);
+    const before = await readFields(live);
+    const filled = await fillBundle(live, { "#note": "hello there", "#code": "123456", "#nick": "Kim", "#mail": "kim@example.com" }, before.fingerprint);
+    const result = (handle) => filled.results.find((one) => one.handle === handle);
+    assert(!result("#note").fresh, "a counter that counts is no new text", result("#note"));
+    assert(!result("#code").fresh, "a countdown that runs is no new text — its words are the same, its number is not", result("#code"));
+    assert(!result("#nick").fresh, "the value shown beside the field is the field's own", result("#nick"));
+    assert(JSON.stringify(result("#mail").fresh) === JSON.stringify(["Saved to your profile"]), "a sentence the page brought is still said", result("#mail"));
+    return JSON.stringify(result("#mail").fresh);
+  } finally { await live.close(); }
+});
+
+await test("the_item_a_dropdown_shows_in_its_own_box_is_no_new_text_beside_it", async () => {
+  const shown = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await shown.setContent(`<!doctype html><html lang="ko"><meta charset="utf-8"><form>
+      <div class="row"><div class="cap">주차장</div><div class="ctl"><div class="dd">
+        <div class="btn" tabindex="0"><span class="val">주차장을 고르세요</span></div>
+        <ul class="list" hidden><li data-value="p0">P3 단기</li><li data-value="p1">P4 장기</li></ul></div></div></div></form>
+      <script>
+        const box = document.querySelector(".dd"), button = box.querySelector(".btn"), list = box.querySelector(".list");
+        button.addEventListener("click", () => { list.hidden = !list.hidden; });
+        list.addEventListener("click", (event) => {
+          const item = event.target.closest("li");
+          if (!item) return;
+          button.querySelector(".val").textContent = item.textContent;
+          list.hidden = true;
+        });
+      </script>`);
+    const read = await readFields(shown);
+    const lot = read.fields.find((field) => field.label === "주차장");
+    assert(lot && lot.kind === "dropdown", "a focusable box with a list beside it is a dropdown", read.fields);
+    const filled = await fillBundle(shown, { [lot.handle]: "P4 장기" }, read.fingerprint);
+    assert(filled.results[0].status === "set", "the item is chosen by its words", filled.results);
+    assert(!filled.results[0].fresh, "the item the box shows now is the field's own value, not text the page brought", filled.results[0]);
+    return "own value";
+  } finally { await shown.close(); }
+});
+
+/* A field marked invalid is told "the page does not say why" only when nothing but its own words
+ * stands in its box: a sentence that stood beside it all along may be the reason. */
+await test("a_field_marked_invalid_is_told_silent_only_when_nothing_but_its_own_words_stands_beside_it", async () => {
+  const marks = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await marks.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div class="row"><label for="a">Alpha</label> <input id="a"></div>
+      <div class="row"><label for="b">Beta</label> <input id="b"><span class="msg">Use letters only</span></div>
+    </form>
+    <script>
+      for (const id of ["a", "b"]) document.getElementById(id).addEventListener("change", (event) => event.target.setAttribute("aria-invalid", "true"));
+    </script>`);
+    const before = await readFields(marks);
+    const filled = await fillBundle(marks, { "#a": "1", "#b": "2" }, before.fingerprint);
+    const result = (handle) => filled.results.find((one) => one.handle === handle);
+    assert(result("#a").silent === true && result("#a").error === "aria-invalid", "nothing but its own words beside it: the page says nothing of why", result("#a"));
+    assert(result("#b").error === "aria-invalid" && !result("#b").silent && !result("#b").fresh,
+      "a sentence stood beside it all along: it is not told that the page says nothing", result("#b"));
+    assert(filled.left.some((one) => one.handle === "#a" && one.silent === true) && !filled.left.some((one) => one.handle === "#b" && one.silent),
+      "and the fields that are left carry the same", filled.left);
+    return "own words only";
+  } finally { await marks.close(); }
+});
+
+/* Text that stands new in the form beside no single field is the page's too: the reason a check
+ * writes under a value made of several fields (an address and its domain), a sentence under a group of
+ * buttons that are no fields. It is said apart from the fields — once, never what a field's own box
+ * already says, never a counter, never what the page's live regions said — after a fill and after a press. */
+const ASIDE = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <dl><div class="row"><dt>Email</dt><dd>
+    <input id="e-id" aria-label="Email name"><span class="sep">@</span><input id="e-dom" aria-label="Email domain">
+    <select id="e-sel" aria-label="Email provider"><option value="">own</option><option value="example.com">example.com</option></select>
+    <div id="mailErr"></div></dd></div></dl>
+  <div role="group" aria-label="Diet"><button type="button" aria-pressed="false">Vegan</button><button type="button" aria-pressed="false">Halal</button></div>
+  <div id="dietErr"></div>
+  <div class="row"><label for="city">City</label> <input id="city"><span id="cityErr"></span></div>
+  <div class="row"><label for="plate">Plate</label> <input id="plate"><span id="count">0/10</span></div>
+  <button type="button" id="go">Go</button>
+  <div id="banner" role="alert"></div>
+</form>
+<script>
+  (() => {
+    const $ = (id) => document.getElementById(id);
+    $("plate").addEventListener("change", (event) => {
+      $("count").textContent = event.target.value.length + "/10";
+      $("dietErr").textContent = "Choose a diet";
+    });
+    $("go").addEventListener("click", () => {
+      $("mailErr").textContent = "Check the email address";
+      $("dietErr").textContent = "Choose a diet";
+      $("cityErr").textContent = "Pick a city";
+      $("banner").textContent = "3 items need a fix";
+    });
+  })();
+</script>`;
+await test("text_that_appears_beside_no_single_field_is_said_apart_once_and_never_as_a_counter_or_a_fields_own_text", async () => {
+  assert(typeof twin.pressInForm === "function", "the stand-in presses as the window does in a form that was read");
+  const aside = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await aside.setContent(ASIDE);
+    const before = await readFields(aside);
+    assert(before.outside === undefined, "a plain read says nothing of what is new", Object.keys(before));
+    const filled = await fillBundle(aside, { "#plate": "abcdefg" }, before.fingerprint);
+    assert(JSON.stringify(filled.outside) === JSON.stringify(["Choose a diet"]),
+      "the sentence that appeared under the buttons is said — not the counter that counted", filled.outside);
+    const again = await fillBundle(aside, { "#plate": "abcdefgh" });
+    assert(JSON.stringify(again.outside) === JSON.stringify([]), "and what was said is not new twice", again.outside);
+    await aside.setContent(ASIDE);
+    const read = await readFields(aside);
+    const run = (source) => evalJson(aside, source);
+    const pressed = await twin.pressInForm(run, "#go");
+    assert(pressed.read.fingerprint === read.fingerprint, "the form is the one that was read", pressed.read);
+    assert(JSON.stringify(pressed.read.outside) === JSON.stringify(["Check the email address", "Choose a diet"]),
+      "the reasons under the value made of several fields and under the buttons are said, in the page's order", pressed.read.outside);
+    assert(JSON.stringify(pressed.read.alerts) === JSON.stringify(["3 items need a fix"]),
+      "what the live region said is the notice — not said a second time as text beside no field", pressed.read.alerts);
+    const noted = Object.fromEntries(pressed.read.noted.map((one) => [one.handle, one]));
+    assert(JSON.stringify(noted["#city"]?.fresh) === JSON.stringify(["Pick a city"]),
+      "text in a field's own box stays with the field", pressed.read.noted);
+    const idle = await twin.pressInForm(run, "#go");
+    assert(JSON.stringify(idle.read.outside) === JSON.stringify([]), "a press that brings nothing new says none", idle.read.outside);
+    return JSON.stringify(pressed.read.outside);
+  } finally { await aside.close(); }
+});
+
+/* A row of buttons that say whether they are pressed (`aria-pressed`) is one field (t-41656) — chips: its
+ * title the name (ARIA's name for the row, its fieldset's legend, the words before it), its options the
+ * buttons' words, its value the ones pressed — and is no longer said again as buttons. A toggle that stands in a
+ * box with a field of its own (a "show" beside a password) is that field's, and stays a button. */
+const CHIPS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div id="coloursTitle">Pick colours</div>
+  <div id="colours" role="group" aria-labelledby="coloursTitle">
+    <button type="button" aria-pressed="false">Red</button>
+    <button type="button" aria-pressed="true">Green</button>
+    <button type="button" aria-pressed="false">Blue</button>
+  </div>
+  <fieldset><legend>Size</legend>
+    <div id="size"><button type="button" aria-pressed="false">Small</button><button type="button" aria-pressed="true">Medium</button><button type="button" aria-pressed="false">Large</button></div>
+  </fieldset>
+  <div class="row"><label for="pw">Password</label>
+    <span class="wrap"><input id="pw" type="password"><button type="button" id="show" aria-pressed="false">Show</button></span></div>
+  <button type="button" id="go">Go</button>
+</form>
+<script>
+  (() => {
+    window.__presses = [];
+    const pressed = (button) => button.getAttribute("aria-pressed") === "true";
+    // One row lets several be pressed; the other is one choice of several, which lets go of the rest.
+    document.getElementById("colours").addEventListener("click", (event) => {
+      const button = event.target.closest("button");
+      if (!button) return;
+      window.__presses.push(button.textContent);
+      button.setAttribute("aria-pressed", String(!pressed(button)));
+    });
+    document.getElementById("size").addEventListener("click", (event) => {
+      const button = event.target.closest("button");
+      if (!button) return;
+      window.__presses.push(button.textContent);
+      for (const other of document.querySelectorAll("#size button")) other.setAttribute("aria-pressed", String(other === button));
+    });
+  })();
+</script>`;
+const heldChips = (target, row) => target.evaluate((selector) =>
+  [...document.querySelectorAll(selector + " button")].filter((button) => button.getAttribute("aria-pressed") === "true").map((button) => button.textContent), row);
+const pressesOf = (target) => target.evaluate(() => window.__presses.slice());
+
+await test("a_row_of_buttons_that_say_they_are_pressed_is_one_field_named_by_its_title_with_the_buttons_as_its_options", async () => {
+  const chips = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await chips.setContent(CHIPS);
+    const read = await readFields(chips);
+    const likes = read.fields.find((one) => one.handle === "#colours");
+    const diet = read.fields.find((one) => one.handle === "#size");
+    assert(likes && likes.kind === "chips", "a row of buttons that say whether they are pressed is one field of kind chips", read.fields);
+    assert(likes.label === "Pick colours" && JSON.stringify(likes.options) === JSON.stringify(["Red", "Green", "Blue"])
+      && JSON.stringify(likes.value) === JSON.stringify(["Green"]),
+    "named by the title ARIA gives the row, its options the buttons' words, its value the buttons pressed", likes);
+    assert(diet && diet.kind === "chips" && diet.label === "Size" && JSON.stringify(diet.value) === JSON.stringify(["Medium"]),
+      "a row in a fieldset is named by the legend", diet);
+    const buttons = read.actions.map((one) => one.label);
+    assert(!buttons.some((label) => ["Red", "Green", "Blue", "Small", "Medium", "Large"].includes(label)),
+      "the buttons of a row are not said again as buttons", buttons);
+    assert(buttons.includes("Show") && buttons.includes("Go") && !read.fields.some((one) => one.kind === "chips" && one.handle !== "#colours" && one.handle !== "#size"),
+      "a toggle beside a field of its own stays a button", { buttons, fields: read.fields.map((one) => one.handle) });
+    await chips.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div id="yn"><button type="button" aria-pressed="false">Yes</button><button type="button" aria-pressed="false">No</button></div>
+      <ul id="wrapped"><li><button type="button" aria-pressed="false">Alpha</button></li><li><button type="button" aria-pressed="true">Beta</button></li><li><button type="button" aria-pressed="false">Gamma</button></li></ul>
+      <div id="tri"><button type="button" aria-pressed="mixed">Some</button><button type="button" aria-pressed="false">Few</button></div>
+      <div class="flat"><label for="p1">Pin</label><input id="p1" type="password"><button type="button" aria-pressed="false">Reveal pin</button>
+        <label for="p2">Repeat</label><input id="p2" type="password"><button type="button" aria-pressed="false">Reveal repeat</button></div></form>`);
+    const bare = await readFields(chips);
+    const yn = bare.fields.find((one) => one.handle === "#yn");
+    const wrapped = bare.fields.find((one) => one.handle === "#wrapped");
+    assert(yn && yn.kind === "chips" && yn.label === "" && JSON.stringify(yn.options) === JSON.stringify(["Yes", "No"]),
+      "a row the page gives no title is still one field, with the name empty for the words to say so", bare.fields);
+    assert(wrapped && wrapped.kind === "chips" && JSON.stringify(wrapped.options) === JSON.stringify(["Alpha", "Beta", "Gamma"])
+      && JSON.stringify(wrapped.value) === JSON.stringify(["Beta"]), "buttons each in a box of their own are one row", bare.fields);
+    assert(!bare.fields.some((one) => one.handle === "#tri") && ["Some", "Few"].every((label) => bare.actions.some((one) => one.label === label)),
+      "a button half pressed says a state the read has no word for: it stays a button, and so does the one beside it — it is no row of the chips the page has elsewhere", { fields: bare.fields.map((one) => one.handle), actions: bare.actions.map((one) => one.label) });
+    assert(bare.fields.filter((one) => one.kind === "chips").map((one) => one.handle).sort().join() === "#wrapped,#yn"
+      && ["Reveal pin", "Reveal repeat"].every((label) => bare.actions.some((one) => one.label === label)),
+    "toggles with a field between them, each beside its own, are buttons and no row", { fields: bare.fields.map((one) => `${one.kind} ${one.handle}`), actions: bare.actions.map((one) => one.label) });
+    return [likes, diet, yn].map((one) => one.label || "(no title)").join(" · ");
+  } finally { await chips.close(); }
+});
+
+await test("a_row_of_chips_is_written_by_pressing_only_the_buttons_whose_state_differs_as_the_page_behaves", async () => {
+  const chips = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await chips.setContent(CHIPS);
+    const read = await readFields(chips);
+    const set = await fillBundle(chips, { "#colours": ["Red", "Blue"] }, read.fingerprint);
+    assert(set.results[0]?.status === "set" && JSON.stringify(set.results[0].now) === JSON.stringify(["Red", "Blue"]),
+      "a list of the options wanted is written and read back as the list held", set.results);
+    assert(JSON.stringify(await heldChips(chips, "#colours")) === JSON.stringify(["Red", "Blue"]), "the page holds what was asked", await heldChips(chips, "#colours"));
+    assert(JSON.stringify((await pressesOf(chips)).sort()) === JSON.stringify(["Blue", "Green", "Red"]),
+      "each button that differed was pressed once and no other", await pressesOf(chips));
+    const same = await fillBundle(chips, { "#colours": ["Red", "Blue"] });
+    assert(same.results[0]?.status === "same" && (await pressesOf(chips)).length === 3, "a row that already holds it is pressed no more", same.results);
+    const single = await fillBundle(chips, { "#size": ["Small"] });
+    const afterDiet = (await pressesOf(chips)).slice(3);
+    assert(single.results[0]?.status === "set" && JSON.stringify(await heldChips(chips, "#size")) === JSON.stringify(["Small"]),
+      "one choice of several: the page lets go of the other itself", single.results);
+    assert(JSON.stringify(afterDiet) === JSON.stringify(["Small"]), "so the button the page had let go of is not pressed again", afterDiet);
+    const words = await fillBundle(chips, { "#colours": "Green, Blue" });
+    assert(words.results[0]?.status === "set" && JSON.stringify(await heldChips(chips, "#colours")) === JSON.stringify(["Green", "Blue"]),
+      "the same options said as one text", words.results);
+    const before = (await pressesOf(chips)).length;
+    const nothing = await fillBundle(chips, { "#colours": ["Nonexistent"] });
+    assert(nothing.results[0]?.status === "no_option" && JSON.stringify(nothing.results[0].options) === JSON.stringify(["Red", "Green", "Blue"])
+      && (await pressesOf(chips)).length === before, "an option the row lacks is refused by name with the options, and nothing is pressed", nothing.results);
+    return JSON.stringify(await pressesOf(chips));
+  } finally { await chips.close(); }
+});
+
+/* A value split across several fields is told by the caption of the group the parts stand in (t-41656): a part
+ * the page names only by its own short words ("Hour") takes the group's caption in front of it
+ * (`<caption> — <words>`), when the group holds more than one such part and the words do not already say it. Fields
+ * the page names by a label of its own, a part alone in its box and names that already hold the caption are as they were. */
+const PARTS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div id="rtCap">End time <span>*</span></div>
+  <div role="group" aria-labelledby="rtCap">
+    <div id="ampm" role="radiogroup" aria-label="AM or PM"><button type="button" role="radio" aria-checked="false">AM</button><button type="button" role="radio" aria-checked="false">PM</button></div>
+    <select id="rtHour" aria-label="Hour"><option value="">-</option><option value="9">9</option></select>
+    <select id="rtMin" aria-label="Minute"><option value="">-</option><option value="00">00</option></select>
+  </div>
+  <div id="ptCap">Start time</div>
+  <div role="group" aria-labelledby="ptCap">
+    <select id="ptHour" aria-label="Hour"><option value="">-</option><option value="9">9</option></select>
+    <select id="ptMin" aria-label="Minute"><option value="">-</option><option value="00">00</option></select>
+  </div>
+  <div class="row"><span>Phone</span> <input id="p1" aria-label="Area"> <input id="p2" aria-label="Number"></div>
+  <fieldset><legend>Billing</legend><label>Street <input id="street"></label><label>City <input id="city"></label></fieldset>
+  <div class="row"><span>Search</span> <input id="q" aria-label="Query"></div>
+  <dl><div class="row"><dt>Email</dt><dd><input id="e-id" aria-label="Email name"><span>@</span><input id="e-dom" aria-label="Email domain"></dd></div></dl>
+  <div id="bdCap">Birth day *</div>
+  <div role="group" aria-labelledby="bdCap">
+    <select id="bY" aria-label="Year"><option value="">-</option><option>2000</option></select>
+    <select id="bM" aria-label="Month"><option value="">-</option><option>1</option></select>
+    <select id="bD" aria-label="Day"><option value="">-</option><option>1</option></select>
+  </div>
+  <ul><li><span>Mint 1 bunch</span> <input type="checkbox" id="pick" aria-label="Mint select">
+    <div class="step"><button type="button" aria-label="Less">-</button><input id="qty" aria-label="Count" value="1"><button type="button" aria-label="More">+</button></div></li></ul>
+</form>`;
+await test("a_part_the_page_names_only_by_its_own_short_words_is_told_by_the_caption_of_its_group_or_row", async () => {
+  const parts = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await parts.setContent(PARTS);
+    const read = await readFields(parts);
+    const label = (handle) => read.fields.find((one) => one.handle === handle)?.label;
+    assert(label("#rtHour") === "End time — Hour *" && label("#rtMin") === "End time — Minute *" && label("#ampm") === "End time — AM or PM *",
+      "the parts of a group the page names say its caption, and the star the page put on the caption stays with them", read.fields.map((one) => one.label));
+    assert(label("#ptHour") === "Start time — Hour" && label("#ptMin") === "Start time — Minute",
+      "so two parts of one name are told apart by their groups, not by a number", read.fields.map((one) => one.label));
+    assert(label("#p1") === "Phone — Area" && label("#p2") === "Phone — Number",
+      "the parts side by side in one box under a caption say it too", read.fields.map((one) => one.label));
+    assert(label("#street") === "Street" && label("#city") === "City" && label("#q") === "Query",
+      "a field a label names, and a part alone in its box, are as they were", read.fields.map((one) => one.label));
+    assert(label("#e-id") === "Email name" && label("#e-dom") === "Email domain",
+      "a name that already holds the caption is not given it twice", read.fields.map((one) => one.label));
+    assert(label("#bD") === "Birth day — Day *" && label("#bY") === "Birth day — Year *",
+      "a name that is a word of the caption (a unit) is still told by it", read.fields.map((one) => one.label));
+    assert(label("#pick") === "Mint select" && label("#qty") === "Count",
+      "fields of one item that are not side by side — a checkbox and a stepper's box — are no parts of one value", read.fields.map((one) => one.label));
+    assert(!read.fields.some((one) => one.ordinal), "no field is told by a number", read.fields.filter((one) => one.ordinal));
+    return ["#rtHour", "#ptHour", "#p1"].map(label).join(" · ");
+  } finally { await parts.close(); }
+});
+
+/* A button the page declares a submit — `type="submit"`, on a button or an input — is marked in the
+ * buttons the read, a fill and a press say (t-41656); a button with no such type is not. */
+await test("a_button_that_declares_it_submits_the_form_is_marked_and_one_that_does_not_is_not", async () => {
+  const submits = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await submits.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+      <label for="a">A</label> <input id="a">
+      <button type="submit" id="s1">Save</button><input type="submit" id="s2" value="Send">
+      <button type="button" id="b1">Next</button><button id="b2">Maybe</button><button type="reset" id="r">Reset</button></form>`);
+    const read = await readFields(submits);
+    const mark = (actions) => Object.fromEntries(actions.map((one) => [one.label, one.submit === true]));
+    assert(JSON.stringify(mark(read.actions)) === JSON.stringify({ Save: true, Send: true, Next: false, Maybe: false, Reset: false }),
+      "only the buttons that declare a submit are marked", read.actions);
+    const filled = await fillBundle(submits, { "#a": "x" }, read.fingerprint);
+    assert(JSON.stringify(mark(filled.actions)) === JSON.stringify(mark(read.actions)), "a fill's buttons are marked the same", filled.actions);
+    return JSON.stringify(mark(read.actions));
+  } finally { await submits.close(); }
+});
+
+/* A field's name is taken only from words the page draws (t-41720): text a page keeps from the eye — display, the
+ * hidden attribute, visibility, no opacity, a font of no size, a box collapsed to nothing — is no one's name. The
+ * words before a field that names nothing else are then the field's own placeholder, or nothing, which the read says. */
+const HIDDEN_WORDS = `<!doctype html><html lang="en"><meta charset="utf-8"><style>
+  .off { display: none } .ghost { visibility: hidden } .clear { opacity: 0 } .tiny { font-size: 0 }
+  .fold { max-height: 0; overflow: hidden } .readers { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0) }
+</style><form>
+  <div><label for="l1">Lane</label> <input id="l1"><p class="off">Check the lane</p></div><div><input id="n1" placeholder="Hint one"></div>
+  <div><label for="l2">Lane two</label> <input id="l2"><p hidden>Check the second lane</p></div><div><input id="n2" placeholder="Hint two"></div>
+  <div><label for="l3">Lane three</label> <input id="l3"><p class="ghost">Check the third lane</p></div><div><input id="n3" placeholder="Hint three"></div>
+  <div><label for="l4">Lane four</label> <input id="l4"><p class="clear">Check the fourth lane</p></div><div><input id="n4" placeholder="Hint four"></div>
+  <div><label for="l5">Lane five</label> <input id="l5"><p class="tiny">Check the fifth lane</p></div><div><input id="n5" placeholder="Hint five"></div>
+  <div><label for="l6">Lane six</label> <input id="l6"><p class="fold">Check the sixth lane</p></div><div><input id="n6" placeholder="Hint six"></div>
+  <div><label for="l7">Lane seven</label> <input id="l7"><p class="off">Check the seventh lane</p></div><div><input id="none"></div>
+  <div><label for="l8">Lane eight</label> <input id="l8"><p>Say it plainly</p></div><div><input id="n8" placeholder="Hint eight"></div>
+  <div><input id="l9"><span class="readers">Reader's note</span><input id="n9"></div>
+</form>`;
+await test("a_name_is_taken_only_from_words_the_page_draws_so_hidden_text_names_no_field", async () => {
+  const hidden = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await hidden.setContent(HIDDEN_WORDS);
+    const read = await readFields(hidden);
+    const label = (handle) => read.fields.find((one) => one.handle === handle)?.label;
+    const labels = read.fields.map((one) => [one.handle, one.label]);
+    for (const [handle, hint] of [["#n1", "Hint one"], ["#n2", "Hint two"], ["#n3", "Hint three"], ["#n4", "Hint four"], ["#n5", "Hint five"], ["#n6", "Hint six"]]) {
+      assert(label(handle) === hint, `a field whose words before it are kept from the eye is named by its own placeholder (${handle})`, labels);
+    }
+    assert(label("#none") === "", "a field with nothing to name it by says it has no name, and borrows no other field's words", labels);
+    assert(label("#n8") === "Say it plainly", "words the page draws before a field still name it", labels);
+    assert(label("#n9") === "Reader's note", "words drawn for readers only, in a box a pixel wide, are still the page's words", labels);
+    return labels.filter(([handle]) => handle.startsWith("#n")).map(([, one]) => one).join(" · ");
+  } finally { await hidden.close(); }
+});
+
+/* A text read back that differs by its letters from the value given is no different value when the page's own
+ * state shows the same one (t-41720): the option a list button's list marks chosen, a date drawn without its
+ * year that says the asked month and day. Where the page's state does not say, the door says it cannot see — never
+ * a difference it does not know of, never a sameness it cannot show — and where it does say another, it is one. */
+const UNSEEN = `<!doctype html><html lang="en"><meta charset="utf-8"><body><form>
+  <div><span id="rl">Rating</span> <button type="button" id="rate" class="pick" aria-haspopup="listbox" aria-controls="rate-list" aria-expanded="false" aria-labelledby="rl" data-short="5★">Pick one</button>
+    <ul id="rate-list" role="listbox" hidden><li role="option" aria-selected="false" data-short="5★">★★★★★ Five stars</li><li role="option" aria-selected="false" data-short="4★">★★★★ Four stars</li></ul></div>
+  <div><span id="tl">Plan</span> <button type="button" id="tier" class="pick" aria-haspopup="listbox" aria-controls="tier-list" aria-expanded="false" aria-labelledby="tl">Pick one</button>
+    <ul id="tier-list" role="listbox" hidden><li role="option" data-short="Gold">Gold plan (monthly)</li><li role="option" data-short="Silver">Silver plan (monthly)</li></ul></div>
+  <div><span id="sl">Seat</span> <button type="button" id="seat" class="pick keeps" aria-haspopup="listbox" aria-controls="seat-list" aria-expanded="false" aria-labelledby="sl">★★★★ Four stars</button>
+    <ul id="seat-list" role="listbox" hidden><li role="option" aria-selected="true">★★★★ Four stars</li><li role="option" aria-selected="false">★★★★★ Five stars</li></ul></div>
+  <div><label for="when">Arrival</label> <input id="when" data-draws="short"></div>
+  <div><label for="back">Return</label> <input id="back" data-draws="next"></div>
+  <div><label for="plain">Memo</label> <input id="plain"></div>
+</form><script>
+  for (const button of document.querySelectorAll("button.pick")) {
+    const list = document.getElementById(button.getAttribute("aria-controls"));
+    button.addEventListener("click", () => {
+      const open = button.getAttribute("aria-expanded") === "true";
+      button.setAttribute("aria-expanded", String(!open));
+      list.hidden = open;
+    });
+    for (const item of list.children) {
+      item.addEventListener("click", () => {
+        list.hidden = true;
+        button.setAttribute("aria-expanded", "false");
+        if (button.classList.contains("keeps")) return;
+        for (const other of list.children) if (other.hasAttribute("aria-selected")) other.setAttribute("aria-selected", String(other === item));
+        button.textContent = item.dataset.short;
+      });
+    }
+  }
+  for (const input of document.querySelectorAll("input[data-draws]")) {
+    input.addEventListener("change", () => {
+      const [, year, month, day] = input.value.match(/^(\\d{4})-(\\d\\d)-(\\d\\d)$/) || [];
+      if (!year) return;
+      input.value = input.dataset.draws === "short" ? month + "/" + day : month + "/" + String(Number(day) + 1).padStart(2, "0");
+    });
+  }
+</script>`;
+await test("a_text_read_back_is_no_different_value_when_the_pages_own_state_shows_the_same_one_and_else_the_door_says_it_cannot_see", async () => {
+  const shown = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await shown.setContent(UNSEEN);
+    const read = await readFields(shown);
+    const filled = await fillBundle(shown, {
+      "#rate": "Five stars", "#tier": "Gold plan (monthly)", "#seat": "Five stars",
+      "#when": "2027-02-17", "#back": "2027-02-17", "#plain": "abc",
+    }, read.fingerprint);
+    const status = Object.fromEntries(filled.results.map((result) => [result.handle, result.status]));
+    const shownNow = Object.fromEntries(filled.results.map((result) => [result.handle, result.now]));
+    assert(status["#rate"] === "set", "a list button that shows its choice shortened is no different value when the chosen option is the one asked", { status, shownNow });
+    assert(status["#tier"] === "unseen" && shownNow["#tier"] === "Gold",
+      "a list that says nothing of which item is chosen: the door passes on what is shown and says it cannot see", { status, shownNow });
+    assert(status["#seat"] === "mismatch", "a list that marks another item chosen is a different value", { status, shownNow });
+    assert(status["#when"] === "unseen" && shownNow["#when"] === "02/17",
+      "a date drawn without its year, with the asked month and day, is neither the same nor another", { status, shownNow });
+    assert(status["#back"] === "mismatch" && shownNow["#back"] === "02/18", "a date whose day is another is a different value", { status, shownNow });
+    assert(status["#plain"] === "set", "a text that reads back as given is as it was", { status, shownNow });
+    return JSON.stringify(status);
+  } finally { await shown.close(); }
+});
+
+/* A value split across fields says, beside each part with another after it, the short symbol the page draws
+ * between them (t-41720) — an @, a dash, a colon, a slash — whether the parts are numbered (no words of their own)
+ * or told by their group's caption. Words between them (a unit), a symbol the page does not draw, and fields that are
+ * not parts of one value say none. */
+const JOINTS = `<!doctype html><html lang="en"><meta charset="utf-8"><style>.off { display: none }</style><form>
+  <div class="row"><span>Score</span> <input id="sa"> <span class="sep">/</span> <input id="sb"></div>
+  <fieldset><legend>Window</legend><input id="w1" aria-label="From"> ~ <input id="w2" aria-label="To"> <input id="w3" aria-label="Zone"></fieldset>
+  <div class="row"><span>Span</span> <input id="u1" aria-label="Hours"> <span class="off">:</span> <input id="u2" aria-label="Minutes"></div>
+  <div class="row"><span>Size</span> <input id="d1" aria-label="Width"> by <input id="d2" aria-label="Height"></div>
+  <div class="row"><label for="x1">Left</label> <input id="x1"> <span>|</span> <label for="x2">Right</label> <input id="x2"></div>
+  <div class="row"><span>Code</span> <input id="c1" size="2">-<input id="c2" size="2">-<input id="c3" size="2"></div>
+</form>`;
+await test("a_part_of_a_split_value_says_the_short_symbol_the_page_draws_after_it_and_words_or_hidden_marks_are_none", async () => {
+  const joints = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await joints.setContent(JOINTS);
+    const read = await readFields(joints);
+    const joint = (handle) => read.fields.find((one) => one.handle === handle)?.joint;
+    const labels = read.fields.map((one) => [one.handle, one.label, one.joint]);
+    assert(joint("#sa") === "/" && joint("#sb") === undefined, "parts numbered by their caption say the symbol after the first and none after the last", labels);
+    assert(joint("#w1") === "~" && joint("#w2") === undefined && joint("#w3") === undefined,
+      "parts told by their group's caption say it too, and only where a symbol stands", labels);
+    assert(joint("#u1") === undefined && joint("#d1") === undefined, "a symbol the page does not draw, and a word between parts, are no symbol", labels);
+    assert(joint("#x1") === undefined && joint("#x2") === undefined, "fields a label of their own names are no parts, whatever stands between them", labels);
+    assert(joint("#c1") === "-" && joint("#c2") === "-" && joint("#c3") === undefined, "a symbol between parts with no space around it is as well said", labels);
+    return labels.filter(([, , one]) => one).map(([handle, , one]) => `${handle}:${one}`).join(" ");
+  } finally { await joints.close(); }
+});
+
+/* A field's own choices are no buttons (t-41720): the options of a group of radios the page draws with buttons
+ * are said once, as the field's options, and not again in the buttons line. A button that is not a choice stays. */
+await test("a_fields_own_choices_are_not_listed_again_as_buttons", async () => {
+  const own = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await own.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div id="slot" role="radiogroup" aria-label="Slot"><button type="button" role="radio" aria-checked="false">Morning</button><button type="button" role="radio" aria-checked="true">Evening</button></div>
+      <fieldset><legend>Seat</legend><label><input type="radio" name="seat" value="a"> Aisle</label><label><input type="radio" name="seat" value="w"> Window</label></fieldset>
+      <button type="button" id="next">Next</button></form><script>
+        for (const radio of document.querySelectorAll("[role=radio]")) radio.addEventListener("click", () => {
+          for (const other of radio.parentElement.children) other.setAttribute("aria-checked", String(other === radio));
+        });
+      </script>`);
+    const read = await readFields(own);
+    const slot = read.fields.find((one) => one.handle === "#slot");
+    assert(slot?.kind === "radio" && JSON.stringify(slot.options) === JSON.stringify(["Morning", "Evening"]),
+      "the group is one field that offers its options", read.fields);
+    assert(JSON.stringify(read.actions.map((one) => one.label)) === JSON.stringify(["Next"]),
+      "its options are not listed again as buttons, and the button that is none stays", read.actions);
+    const filled = await fillBundle(own, { "#slot": "Morning" }, read.fingerprint);
+    assert(JSON.stringify(filled.actions.map((one) => one.label)) === JSON.stringify(["Next"]), "a fill's buttons are the same", filled.actions);
+    return JSON.stringify(read.actions.map((one) => one.label));
+  } finally { await own.close(); }
+});
+
+/* A button that stands beside one field is said to be that field's, by its place (t-41720): in the nearest box that
+ * holds a field, with no other element between them. A button in a box with two fields, one set apart from its
+ * field by other words, and one the form holds directly are no field's. */
+const BESIDE = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div class="row"><label for="v">Voucher</label><div class="line"><input id="v"><button type="button" id="apply">Apply</button></div><p>One per order</p></div>
+  <div class="row"><input id="a1" aria-label="First"> <input id="a2" aria-label="Second"> <button type="button" id="swap">Swap</button></div>
+  <div class="row"><label for="far">Far</label><input id="far"><p>A note about it</p><button type="button" id="apart">Check</button></div>
+  <div class="step"><button type="button" id="less" aria-label="Less">-</button><input id="qty" aria-label="Count"><button type="button" id="more" aria-label="More">+</button></div>
+  <ul><li><label><input type="checkbox" id="agree"> Terms</label> <button type="button" id="view">View</button></li></ul>
+  <button type="button" id="next">Next</button></form>`;
+await test("a_button_beside_one_field_is_said_to_be_that_fields_by_its_place_and_no_other_is", async () => {
+  const beside = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await beside.setContent(BESIDE);
+    const read = await readFields(beside);
+    const of = (id) => read.actions.find((one) => one.handle === "#" + id)?.beside;
+    const sides = read.actions.map((one) => [one.handle, one.beside]);
+    assert(of("apply") === "#v", "the button in the box of one field and next to it is that field's", sides);
+    assert(of("less") === "#qty" && of("more") === "#qty", "both buttons around one field are its", sides);
+    assert(of("view") === "#agree", "a button next to a checkbox is the checkbox's", sides);
+    assert(of("swap") === undefined, "a button in a box with two fields is no one's", sides);
+    assert(of("apart") === undefined, "a button set apart from its field by other words is no one's", sides);
+    assert(of("next") === undefined, "a button the form holds directly is no field's", sides);
+    const filled = await fillBundle(beside, { "#v": "X1" }, read.fingerprint);
+    assert(filled.actions.find((one) => one.handle === "#apply")?.beside === "#v", "a fill's buttons say it too", filled.actions);
+    return sides.filter(([, one]) => one).map(([handle, one]) => `${handle}→${one}`).join(" ");
+  } finally { await beside.close(); }
+});
+
+/* A list drawn once and never marked again (t-41720): choosing an item closes it and the button shows the item shortened, while the mark that says which
+ * item is chosen stays where the page last drew it. That mark is not the page's word about the choice now: another item marked chosen is no proof the
+ * value is another, so the door says it cannot see — it does not say "다른 값". */
+const STALE = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div><span id="pl">Pick plan</span> <button type="button" id="plan" aria-haspopup="listbox" aria-controls="plan-list" aria-expanded="false" aria-labelledby="pl">Starter</button>
+    <ul id="plan-list" role="listbox" hidden><li role="option" aria-selected="true" data-short="Starter">Starter plan</li><li role="option" aria-selected="false" data-short="Pro">Pro plan</li></ul></div>
+</form><script>
+  const button = document.getElementById("plan"), list = document.getElementById("plan-list");
+  button.addEventListener("click", () => {
+    const open = button.getAttribute("aria-expanded") === "true";
+    button.setAttribute("aria-expanded", String(!open));
+    list.hidden = open;
+  });
+  for (const item of list.children) item.addEventListener("click", () => {
+    list.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+    button.textContent = item.dataset.short;
+  });
+</script>`;
+await test("a_list_whose_chosen_mark_is_not_kept_up_to_date_is_no_proof_of_another_value_so_the_door_says_it_cannot_see", async () => {
+  const stale = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await stale.setContent(STALE);
+    const read = await readFields(stale);
+    const filled = await fillBundle(stale, { "#plan": "Pro plan" }, read.fingerprint);
+    const one = filled.results[0];
+    assert(one?.status === "unseen" && one.now === "Pro",
+      "the item asked is not marked chosen and another still is — the mark is the page's old word, so the door can neither say the value is another nor the same", filled.results);
+    return `${one.status} ${JSON.stringify(one.now)}`;
+  } finally { await stale.close(); }
+});
+
+/* A list drawn only while it is open (t-41720): its items are made when the button opens it and the box that holds them is hidden again once one is chosen, so at the
+ * read-back no item is drawn to compare the asked words with, and the button shows the choice shortened. Nothing there tells the same value from another — the door says
+ * it cannot see; it does not say "다른 값" for want of an item to look at. */
+const OPEN_ONLY = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div><span id="gl">Region</span> <button type="button" id="region" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="gl"><span id="gv">Pick</span></button>
+    <div id="gpop" hidden><ul id="glist" role="listbox"></ul></div></div>
+</form><script>
+  const button = document.getElementById("region"), pop = document.getElementById("gpop"), list = document.getElementById("glist"), shown = document.getElementById("gv");
+  const items = [["Oslo (NO)", "NO"], ["Lima (PE)", "PE"]];
+  button.addEventListener("click", () => {
+    if (!pop.hidden) { pop.hidden = true; button.setAttribute("aria-expanded", "false"); return; }
+    list.innerHTML = items.map(([name, code]) => '<li role="option" aria-selected="false" data-code="' + code + '">' + name + '</li>').join("");
+    pop.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+  });
+  list.addEventListener("click", (event) => {
+    const item = event.target.closest("li");
+    if (!item) return;
+    shown.textContent = item.dataset.code;
+    pop.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+  });
+</script>`;
+await test("a_list_drawn_only_while_it_is_open_leaves_no_item_to_compare_so_the_door_says_it_cannot_see", async () => {
+  const closed = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await closed.setContent(OPEN_ONLY);
+    const read = await readFields(closed);
+    const filled = await fillBundle(closed, { "#region": "Lima (PE)" }, read.fingerprint);
+    const one = filled.results[0];
+    assert(one?.status === "unseen" && one.now === "PE",
+      "the list is shut and draws no item, the button shows the choice shortened: the door can neither say the value is another nor the same", filled.results);
+    return `${one.status} ${JSON.stringify(one.now)}`;
+  } finally { await closed.close(); }
+});
+
+/* A group of radios the page names only by plain words that stand in its row (t-41720): each radio is wrapped in its own label, so the label is the radio's, not a box around
+ * the group, and does not use up a box of the words' reach — a title in the row, one box beyond the old reach of three, names the group. A group that had a name keeps it,
+ * and a group with no words in its own row still has none (the words of another row are never borrowed). */
+const WRAPPED = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false"><div class="card"><h3>Page notes</h3>
+  <div class="row"><span class="lbl">Shirt colour</span><div class="fld"><div class="radios">
+    <label><input type="radio" name="rc" value="a" checked> Red</label><label><input type="radio" name="rc" value="b"> Blue</label></div></div></div>
+  <div class="row"><div class="fld"><div class="radios">
+    <label><input type="radio" name="zz" value="a"> Alpha</label><label><input type="radio" name="zz" value="b"> Beta</label></div></div></div>
+  <div class="far"><span class="lbl">Print finish</span><div class="row"><div class="box"><div class="fld"><div class="radios">
+    <label><input type="radio" name="sp" value="a"> Matte</label><label><input type="radio" name="sp" value="b"> Gloss</label></div></div></div></div></div>
+</div></form>`;
+await test("a_radio_group_whose_radios_are_each_wrapped_in_a_label_takes_the_plain_text_title_that_stands_one_box_beyond_the_old_reach", async () => {
+  const wrapped = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await wrapped.setContent(WRAPPED);
+    const read = await readFields(wrapped);
+    const label = (name) => read.fields.find((one) => one.handle.includes(`name="${name}"`))?.label;
+    const labels = read.fields.map((one) => [one.handle, one.label]);
+    assert(label("rc") === "Shirt colour", "the title in the group's row names a group of radios each wrapped in its own label", labels);
+    assert(label("zz") === "", "a group with no words in its own row is still nameless — the words of the row above are not borrowed", labels);
+    assert(label("sp") === "", "words two boxes further out stay out of reach", labels);
+    return labels.map(([, one]) => JSON.stringify(one)).join(" · ");
+  } finally { await wrapped.close(); }
+});
+
+const NAMED_ALREADY = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <fieldset><legend>Seating</legend><label><input type="radio" name="s1" value="a"> Aisle</label><label><input type="radio" name="s1" value="b"> Window</label></fieldset>
+  <div id="pl">Plan</div><div role="radiogroup" aria-labelledby="pl"><label><input type="radio" name="p" value="a"> Basic</label><label><input type="radio" name="p" value="b"> Plus</label></div>
+  <div class="outer"><span class="lbl">Farther title</span><div class="row"><span class="lbl">Near title</span><div class="radios">
+    <label><input type="radio" name="n" value="a"> One</label><label><input type="radio" name="n" value="b"> Two</label></div></div></div>
+  <div class="row"><span class="lbl">Buttons title</span><div class="radios" id="bt" role="radiogroup"><button type="button" role="radio" aria-checked="false">Left</button><button type="button" role="radio" aria-checked="true">Right</button></div></div>
+  <label for="t1">Voucher</label> <input id="t1">
+  <label><input type="checkbox" id="c1"> Terms</label>
+</form>`;
+await test("a_radio_group_that_already_had_a_name_keeps_it_when_the_reach_of_the_words_grows_by_the_wrapping_label", async () => {
+  const kept = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await kept.setContent(NAMED_ALREADY);
+    const read = await readFields(kept);
+    const label = (key) => read.fields.find((one) => one.handle.includes(key))?.label;
+    const labels = read.fields.map((one) => [one.handle, one.label]);
+    assert(label('name="s1"') === "Seating", "a fieldset's legend still names its group", labels);
+    assert(label('name="p"') === "Plan", "a group that ARIA names still goes by that name", labels);
+    assert(label('name="n"') === "Near title", "of two titles the nearer names the group, as before", labels);
+    assert(read.fields.find((one) => one.handle === "#bt")?.label === "Buttons title", "radios drawn as buttons are named as they were", labels);
+    assert(label("#t1") === "Voucher" && label("#c1") === "Terms", "a text field and a checkbox are named as they were", labels);
+    return labels.map(([, one]) => one).join(" · ");
+  } finally { await kept.close(); }
+});
+
+/* A field the page keeps from being typed in and fills from a window a button opens (a pick from a list the page searches) says which button opens it (t-41720): the
+ * button beside it, else the one beside the read-only field next to it; and the answer of a fill that cannot write it says the same. A window of the same origin that holds a
+ * frame is read once it is open — the frame's field and button are in the read. */
+const OPENER = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="line"><input id="lk" readonly aria-label="Locker"><button type="button" id="pick">Pick a locker</button></div>
+  <input id="pt" readonly aria-label="Parcel point">
+  <input id="note" aria-label="Note">
+  <div id="layer" hidden><iframe id="fr" title="Locker search"></iframe></div>
+</form>
+<script>
+  document.getElementById("pick").addEventListener("click", () => {
+    const frame = document.getElementById("fr");
+    if (!frame.getAttribute("srcdoc")) frame.setAttribute("srcdoc", '<!doctype html><form><input id="q" aria-label="Search words"><button type="submit">Go</button></form>');
+    document.getElementById("layer").hidden = false;
+  });
+</script>`;
+await test("a_read_only_field_says_the_button_that_opens_it_beside_it_or_beside_the_read_only_field_next_to_it", async () => {
+  const opener = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await opener.setContent(OPENER);
+    const read = await readFields(opener);
+    const opens = (handle) => read.fields.find((one) => one.handle === handle)?.opens;
+    assert(opens("#lk")?.handle === "#pick" && opens("#lk")?.label === "Pick a locker", "the button that stands beside a read-only field opens it", read.fields);
+    assert(opens("#pt")?.handle === "#pick", "a read-only field with no button of its own is opened by the one beside the read-only field next to it", read.fields);
+    assert(opens("#note") === undefined, "a field that can be written has none", read.fields);
+    return JSON.stringify([opens("#lk"), opens("#pt")]);
+  } finally { await opener.close(); }
+});
+await test("a_fill_that_the_page_keeps_from_writing_answers_the_button_that_opens_the_field", async () => {
+  const opener = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await opener.setContent(OPENER);
+    const read = await readFields(opener);
+    const filled = await fillBundle(opener, { "#pt": "North Gate 9" }, read.fingerprint);
+    const one = filled.results[0];
+    assert(one?.status === "read_only", "the page keeps the field from being written", filled.results);
+    assert(one.opens?.handle === "#pick" && one.opens?.label === "Pick a locker", "the answer names the button that opens it", one);
+    return `${one.status} ${one.opens?.handle}`;
+  } finally { await opener.close(); }
+});
+await test("a_layer_that_holds_a_frame_of_the_same_origin_is_read_once_it_is_open", async () => {
+  const opener = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await opener.setContent(OPENER);
+    const shut = await readFields(opener);
+    assert(!shut.fields.some((one) => one.handle.includes(" >> ")), "a layer that is shut shows no field of its frame", shut.fields);
+    await opener.click("#pick");
+    await opener.waitForTimeout(200);
+    const open = await readFields(opener);
+    const inside = open.fields.find((one) => one.handle === "#fr >> #q");
+    assert(inside && inside.label === "Search words", "the frame's search field is in the read once the layer is open", open.fields);
+    const go = open.actions.find((one) => one.handle.startsWith("#fr >> ") && one.label === "Go");
+    assert(go && go.submit === true, "and its button, which says it submits", open.actions);
+    return `${inside.handle} · ${go.handle}`;
+  } finally { await opener.close(); }
+});
+
+/* A text field with a list of suggestions the page makes after the text (t-41720): the page builds the list 350 ms after something is typed and shuts it 150 ms after the field loses the focus,
+ * and the value it takes is the item chosen from the list, not the text typed. A fill types the text and keeps the field, waits in the passes that follow for the list, and presses the item whose
+ * words are the asked ones — the one that is a whole line of an item, not the items that only hold the words — and writes the other fields of its bundle first, so none takes the focus
+ * from the field while its list is made. A text field with no such list is written as before. */
+const SUGGEST = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="ac"><input id="spot" aria-label="Pickup spot" autocomplete="off"><div id="spotList" role="listbox" aria-label="Spot suggestions" hidden></div></div>
+  <input id="memo" aria-label="Memo">
+  <input id="plain" aria-label="Plain note">
+</form>
+<script>
+  const SPOTS = [{ main: "Pier 7", sub: "Harbour road" }, { main: "Pier 70", sub: "North quay" }, { main: "Pier 7-3", sub: "Cold store" }, { main: "Dock 7", sub: "Harbour road" }];
+  const spot = document.getElementById("spot"), list = document.getElementById("spotList");
+  let timer = 0, token = 0, found = [];
+  window.__chosen = null;
+  window.__plainBlurred = false;
+  const close = () => { token += 1; clearTimeout(timer); list.hidden = true; list.innerHTML = ""; found = []; };
+  const norm = (text) => String(text).replace(/\\s+/g, "").toLowerCase();
+  spot.addEventListener("input", () => {
+    window.__chosen = null;
+    clearTimeout(timer);
+    const query = norm(spot.value);
+    if (query.length < 2) { close(); return; }
+    const mine = ++token;
+    list.hidden = false;
+    list.innerHTML = '<div class="msg">Searching…</div>';
+    timer = setTimeout(() => {
+      if (mine !== token) return;
+      found = SPOTS.filter((one) => norm(one.main + one.sub).includes(query));
+      list.innerHTML = found.length ? found.map((one, at) => '<div role="option" data-at="' + at + '"><span>' + one.main + '</span><span>' + one.sub + '</span></div>').join("")
+        : '<div class="msg">No results</div>';
+    }, 350);
+  });
+  spot.addEventListener("blur", () => { setTimeout(() => { if (document.activeElement !== spot) close(); }, 150); });
+  list.addEventListener("mousedown", (event) => event.preventDefault());
+  list.addEventListener("click", (event) => {
+    const item = event.target.closest("[role=option]");
+    if (!item) return;
+    window.__chosen = found[Number(item.dataset.at)];
+    spot.value = window.__chosen.main;
+    close();
+  });
+  document.getElementById("plain").addEventListener("blur", () => { window.__plainBlurred = true; });
+</script>`;
+await test("a_text_field_with_a_list_the_page_makes_after_the_text_takes_the_item_chosen_from_the_list_not_the_text_typed", async () => {
+  const suggest = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await suggest.setContent(SUGGEST);
+    const read = await readFields(suggest);
+    const filled = await fillBundle(suggest, { "#spot": "Pier 7", "#memo": "Back door" }, read.fingerprint);
+    const by = Object.fromEntries(filled.results.map((one) => [one.handle, one]));
+    assert(by["#spot"]?.status === "set" && by["#memo"]?.status === "set", "the field and the others of the bundle take what they are asked", filled.results);
+    const chosen = await suggest.evaluate(() => window.__chosen);
+    assert(chosen && chosen.main === "Pier 7", "the page took the item chosen from its list — the one whose line is the words asked, not Pier 70 or Pier 7-3", chosen);
+    assert(await suggest.evaluate(() => document.getElementById("spot").value) === "Pier 7", "and the field shows it");
+    return JSON.stringify(chosen);
+  } finally { await suggest.close(); }
+});
+await test("a_text_field_whose_list_shows_no_item_for_the_words_asked_says_no_option_and_keeps_the_text", async () => {
+  const suggest = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await suggest.setContent(SUGGEST);
+    const read = await readFields(suggest);
+    const filled = await fillBundle(suggest, { "#spot": "Quay 99" }, read.fingerprint);
+    const one = filled.results[0];
+    assert(one?.status === "no_option", "no item of the list is the words asked", filled.results);
+    assert(await suggest.evaluate(() => document.getElementById("spot").value) === "Quay 99", "the text typed stays in the field");
+    assert(await suggest.evaluate(() => window.__chosen) === null, "and nothing was chosen");
+    return one.status;
+  } finally { await suggest.close(); }
+});
+
+await test("a_text_field_with_no_list_beside_it_is_written_as_before_and_loses_the_focus", async () => {
+  const suggest = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await suggest.setContent(SUGGEST);
+    const read = await readFields(suggest);
+    const filled = await fillBundle(suggest, { "#plain": "Nothing" }, read.fingerprint);
+    assert(filled.results[0]?.status === "set", "the text is in", filled.results);
+    assert(await suggest.evaluate(() => window.__plainBlurred) === true, "and the field lost the focus, as a fill leaves a field", filled.results);
+    assert(await suggest.evaluate(() => document.activeElement && document.activeElement.id) !== "plain", "it is not the one that has the focus");
+    return "blurred";
+  } finally { await suggest.close(); }
+});
+
+/* A button that opens a dialog (`aria-haspopup="dialog"`) says the name of the dialog it opens, and a date can be given to it (t-41720): a dialog the page keeps beside its buttons holds a calendar of two
+ * months drawn when it opens, with arrows that page it and a button that applies the range. The calendar's days are one thing, not sixty buttons — the buttons a read lists are the page's own and
+ * the dialog's (the one that applies the range is among them). A fill given a date for the button opens the dialog, pages to the month and presses the day. */
+const STAY = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="cap">Stay</div>
+  <div class="wrap">
+    <div class="trig">
+      <button type="button" id="from" aria-haspopup="dialog" aria-expanded="false"><span>Start date</span> <span id="fromTxt">Pick a date</span></button>
+      <button type="button" id="to" aria-haspopup="dialog" aria-expanded="false"><span>End date</span> <span id="toTxt">Pick a date</span></button>
+    </div>
+    <div id="pop" role="dialog" aria-label="Stay dates" hidden>
+      <div class="head"><button type="button" id="prev" aria-label="Earlier">‹</button><span id="sum"></span><button type="button" id="next" aria-label="Later">›</button></div>
+      <div id="months"></div>
+      <div class="foot"><button type="button" id="reset">Clear</button> <button type="button" id="apply" disabled>Done</button></div>
+    </div>
+  </div>
+</form>
+<script>
+  const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const $ = (id) => document.getElementById(id);
+  const pad = (number) => String(number).padStart(2, "0");
+  const first = { y: 2026, m: 10 };
+  let view = { ...first }, pend = { start: null, end: null }, applied = null;
+  window.__pend = pend;
+  const monthHtml = (y, m) => {
+    let html = '<div class="month" role="group" aria-label="' + y + ' ' + MONTHS[m - 1] + '"><h4>' + y + ' ' + MONTHS[m - 1] + '</h4><div class="days">';
+    for (let d = 1; d <= new Date(y, m, 0).getDate(); d += 1) {
+      const date = y + "-" + pad(m) + "-" + pad(d);
+      html += '<button type="button" class="day" data-date="' + date + '" aria-label="' + MONTHS[m - 1] + ' ' + d + '"><span class="n">' + d + '</span><span class="r">2 left</span></button>';
+    }
+    return html + "</div></div>";
+  };
+  const render = () => {
+    const next = view.m === 12 ? { y: view.y + 1, m: 1 } : { y: view.y, m: view.m + 1 };
+    $("months").innerHTML = monthHtml(view.y, view.m) + monthHtml(next.y, next.m);
+    $("prev").disabled = view.y === first.y && view.m === first.m;
+    $("apply").disabled = !(pend.start && pend.end);
+    $("sum").textContent = pend.start ? (pend.end ? pend.start + " to " + pend.end : pend.start + " - pick the last day") : "Pick the first day";
+    window.__pend = { ...pend };
+  };
+  const open = () => { if ($("pop").hidden) { pend = { start: applied ? applied.start : null, end: applied ? applied.end : null }; render(); $("pop").hidden = false; } };
+  $("from").addEventListener("click", open);
+  $("to").addEventListener("click", open);
+  $("prev").addEventListener("click", () => { view = view.m === 1 ? { y: view.y - 1, m: 12 } : { y: view.y, m: view.m - 1 }; render(); });
+  $("next").addEventListener("click", () => { view = view.m === 12 ? { y: view.y + 1, m: 1 } : { y: view.y, m: view.m + 1 }; render(); });
+  $("months").addEventListener("click", (event) => {
+    const day = event.target.closest(".day[data-date]");
+    if (!day) return;
+    const date = day.dataset.date;
+    if (!pend.start || pend.end || date <= pend.start) pend = { start: date, end: null }; else pend = { start: pend.start, end: date };
+    render();
+  });
+  $("apply").addEventListener("click", () => {
+    applied = { ...pend };
+    $("fromTxt").textContent = applied.start;
+    $("toTxt").textContent = applied.end;
+    $("pop").hidden = true;
+  });
+</script>`;
+await test("a_button_that_opens_a_dialog_says_the_name_of_the_dialog_it_opens", async () => {
+  const stay = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await stay.setContent(STAY);
+    const read = await readFields(stay);
+    const dialogOf = (handle) => read.actions.find((one) => one.handle === handle)?.dialog;
+    assert(dialogOf("#from") === "Stay dates" && dialogOf("#to") === "Stay dates", "both buttons name the dialog they open", read.actions);
+    assert(read.actions.every((one) => one.dialog === undefined || one.handle === "#from" || one.handle === "#to"), "no other button does", read.actions);
+    return `${dialogOf("#from")}`;
+  } finally { await stay.close(); }
+});
+await test("a_calendar_the_page_draws_in_a_dialog_is_no_list_of_buttons_and_the_button_that_applies_it_is_in_the_read", async () => {
+  const stay = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await stay.setContent(STAY);
+    await stay.click("#from");
+    const read = await readFields(stay);
+    assert(!read.actions.some((one) => /^(October|November|December) \d+$/.test(one.label)), "the days of the calendar are not listed as buttons", read.actions.map((one) => one.label));
+    assert(read.actions.some((one) => one.handle === "#apply" && one.disabled === true), "the dialog's button that applies the range is, and it is off until a range is picked", read.actions.map((one) => [one.handle, one.disabled]));
+    return `${read.actions.length} buttons`;
+  } finally { await stay.close(); }
+});
+await test("a_fill_given_a_date_for_a_button_that_opens_a_dialog_opens_it_pages_the_calendar_and_presses_the_day", async () => {
+  const stay = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await stay.setContent(STAY);
+    const read = await readFields(stay);
+    const filled = await fillBundle(stay, { "#from": "2026-11-20", "#to": "2026-12-04" }, read.fingerprint);
+    const pend = await stay.evaluate(() => window.__pend);
+    assert(pend.start === "2026-11-20" && pend.end === "2026-12-04", "the page has the range picked: the day of the month paged to, for each", { pend, results: filled.results });
+    assert(filled.results.every((one) => one.status === "unseen"), "what the dialog shows is not the date until it is applied: the fill says it cannot tell, and does not press again", filled.results);
+    const after = await readFields(stay);
+    assert(after.actions.find((one) => one.handle === "#apply")?.disabled === false, "and the button that applies the range is on", after.actions.map((one) => [one.handle, one.disabled]));
+    return JSON.stringify(pend);
+  } finally { await stay.close(); }
+});
+
+/* A frame's page is small and is read whole (t-41720): the buttons of a search's results, drawn beside the search form and not in it, are in the read — a window that holds a search shows its results
+ * there. A page's own buttons are still those beside its fields. */
+const SEARCH_FRAME = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div id="layer"><iframe id="fr" title="Locker search" srcdoc='&lt;!doctype html&gt;&lt;form id="f"&gt;&lt;input id="q" aria-label="Search words"&gt;&lt;button type="submit"&gt;Go&lt;/button&gt;&lt;/form&gt;&lt;p&gt;Results follow&lt;/p&gt;&lt;div id="out"&gt;&lt;/div&gt;&lt;script&gt;document.getElementById("f").addEventListener("submit", function (event) { event.preventDefault(); document.getElementById("out").innerHTML = "&lt;button type=button&gt;Locker A&lt;/button&gt;&lt;button type=button&gt;Locker B&lt;/button&gt;"; });&lt;/script&gt;'></iframe></div>
+  <button type="button" id="page-button">Page button</button>
+</form>`;
+await test("a_frame_of_the_same_origin_is_read_whole_so_the_buttons_of_its_results_beside_its_search_form_are_in_the_read", async () => {
+  const searching = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await searching.setContent(SEARCH_FRAME);
+    await searching.waitForTimeout(200);
+    await searching.evaluate(() => document.getElementById("fr").contentDocument.querySelector("button[type=submit]").click());
+    await searching.waitForTimeout(100);
+    const read = await readFields(searching);
+    const labels = read.actions.map((one) => one.label);
+    assert(labels.includes("Locker A") && labels.includes("Locker B"), "the results drawn beside the frame's search form are buttons of the read", read.actions);
+    assert(read.actions.filter((one) => one.label === "Locker A")[0].handle.startsWith("#fr >> "), "each with the handle that names the frame and the button inside it", read.actions);
+    return labels.join(" · ");
+  } finally { await searching.close(); }
+});
+
+/* `type` names a field inside a frame by its handle (t-41720): `#frame >> #field`, the part before the separator the frame and the part after it the field inside — a frame of the page's own
+ * origin only. A frame of another origin and a sandboxed one are refused by name and nothing is written; a field inside a frame is typed with the frame's own constructors, and the answer
+ * and the page's words never carry the value. A handle held to the form its agent read is refused when the form is no longer that one. */
+const FRAMED = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label>Name <input id="who"></label>
+  <iframe id="same" srcdoc='&lt;!doctype html&gt;&lt;input id="pin" type="password" aria-label="PIN"&gt;&lt;input id="plainf" aria-label="Plain note"&gt;&lt;script&gt;window.__inputs = []; document.getElementById("pin").addEventListener("input", function (event) { window.__inputs.push(event instanceof InputEvent); });&lt;/script&gt;'></iframe>
+  <iframe id="sealed" sandbox="allow-scripts" srcdoc='&lt;!doctype html&gt;&lt;input id="pin" type="password" aria-label="PIN"&gt;'></iframe>
+  <iframe id="other" src="data:text/html,%3Cinput%20id%3Dpin%20type%3Dpassword%3E"></iframe>
+</form>`;
+const SECRET_WORDS = "Zq-9981-secret";
+await test("a_secret_field_inside_a_frame_of_the_same_origin_is_typed_by_its_handle_and_the_value_stays_out_of_the_answer", async () => {
+  const framed = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await framed.setContent(FRAMED);
+    await framed.waitForTimeout(150);
+    const typed = await evalJson(framed, twin.typeScript("#same >> #pin", SECRET_WORDS, "setter"));
+    assert(typed.ok && typed.value.method === "value-setter" && typed.value.secureField === true, "the value goes in by the setter, into a field the door calls secret", typed);
+    const inside = await framed.evaluate(() => document.getElementById("same").contentDocument.getElementById("pin").value);
+    assert(inside === SECRET_WORDS, "and the frame's field holds it");
+    const events = await framed.evaluate(() => document.getElementById("same").contentWindow.__inputs);
+    assert(events.length === 1 && events[0] === true, "with one input event made by the frame's own constructor", events);
+    assert(!JSON.stringify(typed).includes(SECRET_WORDS), "the answer does not carry the value", typed);
+    return "typed";
+  } finally { await framed.close(); }
+});
+await test("a_frame_of_another_origin_or_a_sandboxed_one_refuses_the_type_by_name_and_nothing_is_written", async () => {
+  const framed = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await framed.setContent(FRAMED);
+    await framed.waitForTimeout(150);
+    for (const handle of ["#sealed >> #pin", "#other >> #pin"]) {
+      const typed = await evalJson(framed, twin.typeScript(handle, SECRET_WORDS, "setter"));
+      assert(!typed.ok && typed.code === "frame_sealed", `${handle}: a frame the page may not read is refused by name`, typed);
+    }
+    const missing = await evalJson(framed, twin.typeScript("#none >> #pin", SECRET_WORDS, "setter"));
+    assert(!missing.ok && missing.code === "selector_not_found", "a frame that is not there is a selector that finds nothing", missing);
+    assert(await framed.evaluate(() => document.getElementById("who").value) === "", "nothing was written to the page");
+    return "refused";
+  } finally { await framed.close(); }
+});
+await test("a_type_into_a_frame_held_to_the_form_its_agent_read_is_refused_when_the_form_is_no_longer_that_one", async () => {
+  const framed = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await framed.setContent(FRAMED);
+    await framed.waitForTimeout(150);
+    const read = await readFields(framed);
+    const held = await evalJson(framed, twin.typeScript("#same >> #pin", SECRET_WORDS, "setter", read.fingerprint));
+    assert(held.ok, "the form is the one that was read: the value goes in", held);
+    await framed.evaluate(() => { const inner = document.getElementById("same").contentDocument; inner.body.insertAdjacentHTML("beforeend", '<input id="extra" aria-label="Another field">'); });
+    const stale = await evalJson(framed, twin.typeScript("#same >> #pin", "other-words", "setter", read.fingerprint));
+    assert(!stale.ok && stale.code === "form_stale", "a field that came into the frame since the read: nothing is written", stale);
+    assert(await framed.evaluate(() => document.getElementById("same").contentDocument.getElementById("pin").value) === SECRET_WORDS, "and the field keeps what it held");
+    return "stale";
+  } finally { await framed.close(); }
+});
+
+/* The value a `type` writes is in the page script's request and in nothing that script answers (t-41720): every answer the typing's page script encodes — in the page and in a frame — is read for
+ * the words of the value, and none holds them; the driver's step for a type says the value is not in its trace. The answer of the Rust side is the page's report and nothing else. */
+await test("the_typing_body_answers_without_the_value_it_typed_in_the_page_and_in_a_frame", () => {
+  const answers = [...TYPE_BODY.matchAll(/zcEncode\(([\s\S]*?)\);/g)].map((one) => one[1]);
+  assert(answers.length >= 3, "the typing answers in a few places", answers.length);
+  for (const answer of answers) assert(!/request\.text/.test(answer), "an answer of the typing never carries the value it typed", answer);
+  assert(TYPE_BODY.includes("frame_sealed") && TYPE_BODY.includes("form_stale"), "and the two refusals of a field in a frame are in the typing's body");
+  return `${answers.length} answers`;
 });
 
 await browser.close();
