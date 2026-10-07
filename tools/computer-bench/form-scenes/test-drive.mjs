@@ -1118,11 +1118,11 @@ await test("a driver types a payment card's expiry selects by the stdin road whe
 
 /* The facts a card calls secret, by its own words: the number, the code, the expiry, a password, a one-time code — and not the holder's name, the card's type or a card of another kind. */
 await test("the facts a card calls secret are the number, the security code, the expiry, a password and a one-time code — not the card's holder or type", () => {
-  const facts = [{ says: "Card holder", value: "Kim" }, { says: "카드 소유자", value: "김예시" }, { says: "Card type", value: "Visa" }, { says: "Boarding card", value: "A12" },
+  const facts = [{ says: "Card holder", value: "Kim" }, { says: "카드 소유자", value: "홍보기" }, { says: "Card type", value: "Visa" }, { says: "Boarding card", value: "A12" },
     { says: "Card number", value: "5208 3917 6402 8851" }, { says: "카드 번호", value: "5208391764028851" }, { says: "CVV", value: "4172" }, { says: "Expiry", value: "12/28" },
-    { says: "유효기간", value: "08/28" }, { says: "Password", value: "pw-example" }, { says: "인증번호", value: "483920" }, { says: "PIN", value: "7391" }];
+    { says: "유효기간", value: "03/33" }, { says: "Password", value: "pw-example" }, { says: "인증번호", value: "483920" }, { says: "PIN", value: "7391" }];
   const kept = secretFacts({ facts });
-  assert(JSON.stringify(kept) === JSON.stringify(["5208 3917 6402 8851", "5208391764028851", "4172", "12/28", "08/28", "pw-example", "483920", "7391"]), "the number, the code, the expiry, the password, the one-time code and the PIN — nothing of the holder, the type or the boarding card", kept);
+  assert(JSON.stringify(kept) === JSON.stringify(["5208 3917 6402 8851", "5208391764028851", "4172", "12/28", "03/33", "pw-example", "483920", "7391"]), "the number, the code, the expiry, the password, the one-time code and the PIN — nothing of the holder, the type or the boarding card", kept);
   assert(madeOfSecrets("Kim", kept) === false && madeOfSecrets("12/28", kept) === true && madeOfSecrets("5208391764028851", ["5208", "3917", "6402", "8851"]) === true && madeOfSecrets("12", ["12", "28"]) === false, "a value is made of secrets by equality or by its digits tiled, and a lone two-character value is not");
   return `${kept.length} of ${facts.length} facts`;
 });
