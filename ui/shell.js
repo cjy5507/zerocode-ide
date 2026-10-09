@@ -1805,13 +1805,16 @@ function scheduleWaitingList() {
 
 async function refreshWaitingList() {
   if (isPopout) return;
+  let rows = [];
   try {
-    waitingRows = await invoke("waiting_on_me");
+    const answer = await invoke("waiting_on_me");
+    // Only a list of rows counts: anything else reads as nobody waiting.
+    rows = Array.isArray(answer) ? answer : [];
   } catch {
     // The list reads the rows as they are now. A failed read shows none, never
     // the rows of the last good read.
-    waitingRows = [];
   }
+  waitingRows = rows;
   paintWaitingList();
 }
 

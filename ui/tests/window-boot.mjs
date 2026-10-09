@@ -1397,6 +1397,10 @@ const stubBackend = ({ boot, pollers }) => {
     // stub answers nothing by default, which is the state every other test
     // here runs in.
     pane_subagents: () => window.__SUBAGENTS__ ?? [],
+    // 나를 기다림 — a fresh window has no pane waiting on the person, and a finish
+    // mark nobody holds is released by nothing (t-26595).
+    waiting_on_me: () => [],
+    clear_finish_mark: () => false,
     // And what those agents have been DOING — the ring the backend keeps per
     // card, for a window that opened after the work started. Empty by default,
     // which is the state every other test here runs in.
