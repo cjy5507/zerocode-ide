@@ -28,6 +28,7 @@ import { testArtifactBand, testArtifactBeside, testArtifactFollowed, testArtifac
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
+import { testWaitingList } from "./waiting-list.mjs";
 import { testAccountSwitch } from "./account-switch.mjs";
 import { testTaskBoard } from "./task-board.mjs";
 import { testScmHealth } from "./scm-health.mjs";
@@ -241,6 +242,7 @@ suite("usage-refresh", async ({ browser, origin, ok }) => {
   await testUsageWords(browser, origin, standBackend, ok);
 });
 suite("account-switch", ({ browser, origin, ok }) => testAccountSwitch(browser, origin, standBackend, ok));
+suite("waiting-list", ({ browser, origin, ok }) => testWaitingList(browser, origin, standBackend, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
 suite("explain", ({ browser, origin, ok }) => testExplain(browser, origin, ok));

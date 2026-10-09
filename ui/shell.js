@@ -1783,6 +1783,72 @@ function paintActionHubModal() {
 window.openActionHub = openActionHub;
 window.closeActionHub = closeActionHub;
 
+/* 나를 기다림 (t-26595) — the column's top list: which pane waits on the person,
+ * and for what. Rust decides the rows (`waiting_on_me`, the notify rules); this
+ * only paints them. A row opens its pane the way a board card does, and looking
+ * releases the pane's finish mark (`clear_finish_mark`). */
+let waitingRows = [];
+
+async function refreshWaitingList() {
+  if (isPopout) return;
+  try {
+    waitingRows = await invoke("waiting_on_me");
+  } catch {
+    // The list reads the rows as they are now. A failed read shows none, never
+    // the rows of the last good read.
+    waitingRows = [];
+  }
+  paintWaitingList();
+}
+
+function waitingKindWord(waiting) {
+  if (waiting === "blocked") return t("waiting.blocked", "막힘");
+  if (waiting === "question") return t("waiting.question", "질문");
+  return t("waiting.finished", "끝남");
+}
+
+function paintWaitingList() {
+  const box = el("waiting-list");
+  const list = el("waiting-list-items");
+  if (!box || !list) return;
+  box.hidden = waitingRows.length === 0;
+  list.replaceChildren(
+    ...waitingRows.map((row) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "waiting-row";
+      button.dataset.waiting = row.waiting;
+
+      const agent = document.createElement("span");
+      agent.className = "waiting-row-agent";
+      agent.textContent = row.agent || "Agent";
+
+      const kind = document.createElement("span");
+      kind.className = "waiting-row-kind";
+      kind.textContent = waitingKindWord(row.waiting);
+
+      const place = document.createElement("span");
+      place.className = "waiting-row-place";
+      place.textContent = row.worktree.split("/").filter(Boolean).pop() || row.pane;
+      place.title = row.worktree;
+
+      button.append(agent, kind, place);
+      button.addEventListener("click", () => openWaitingRow(row));
+      item.appendChild(button);
+      return item;
+    }),
+  );
+}
+
+function openWaitingRow(row) {
+  const bucket = row.waiting === "finished" ? "done" : "attention";
+  openBoardCard({ pane: row.pane, agent: row.agent, worktree: row.worktree }, bucket);
+  void invoke("clear_finish_mark", { pane: row.pane })
+    .catch(() => false)
+    .then(() => refreshWaitingList());
+}
+
 el("nav-attention")?.addEventListener("click", openActionHub);
 el("action-hub-close")?.addEventListener("click", closeActionHub);
 el("action-hub-dismiss")?.addEventListener("click", closeActionHub);
@@ -9479,8 +9545,10 @@ listen("hook:activity", (event) => {
  * 같은 사실의 두 번째 사본이 생긴다. */
 listen("agents:changed", () => {
   void refreshPaneLedger();
+  void refreshWaitingList();
   scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
 });
+void refreshWaitingList();
 
 listen("hook:subagent", (event) => {
   const { term, rows } = event.payload ?? {};

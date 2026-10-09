@@ -21644,6 +21644,69 @@ mod tests {
         );
     }
 
+    /// 나를 기다림 (t-26595): the sidebar's top list and the finish setting are
+    /// pinned — the list sits in the column above the shortcut rows, the window
+    /// asks Rust for its rows and releases a finish by its pane, the setting
+    /// writes its word through its own command, and every word the two show is
+    /// in the four languages that are not the source.
+    #[test]
+    fn the_waiting_list_sits_on_top_and_its_words_reach_every_language() {
+        let markup = include_str!("../../../../ui/index.html");
+        let column = markup_between(
+            markup,
+            "<aside class=\"threads\"",
+            "<nav class=\"nav-rows\"",
+        );
+        assert!(
+            column.contains("<section class=\"waiting-list\" id=\"waiting-list\""),
+            "the waiting list left the top of the column:\n{column}"
+        );
+        assert!(
+            markup.contains("id=\"notify-finish-mode\"")
+                && !markup.contains("id=\"notify-agent-completion\""),
+            "the finish setting is no longer the three-way select"
+        );
+
+        let shell = include_str!("../../../../ui/shell.js");
+        assert!(
+            shell.contains("invoke(\"waiting_on_me\")")
+                && shell.contains("invoke(\"clear_finish_mark\""),
+            "the list no longer asks Rust for its rows, or no longer releases a \
+             finish by its pane"
+        );
+
+        let settings = include_str!("../../../../ui/shell-settings.js");
+        assert!(
+            settings.contains("\"set_finish_notification_mode\""),
+            "the finish setting no longer writes its word"
+        );
+
+        let main = include_str!("../../src/main.rs");
+        assert!(
+            main.contains("waiting_on_me,") && main.contains("clear_finish_mark,"),
+            "the list commands are not registered with the window"
+        );
+
+        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        for key in [
+            "waiting.label",
+            "waiting.title",
+            "waiting.blocked",
+            "waiting.question",
+            "waiting.finished",
+            "settings.notifications.finishOff",
+            "settings.notifications.finishLong",
+            "settings.notifications.finishAlways",
+            "settings.notifications.completionHint",
+        ] {
+            assert_eq!(
+                i18n.matches(&format!("\"{key}\"")).count(),
+                4,
+                "{key} must be in en/ja/zh/es"
+            );
+        }
+    }
+
     /// A lane rings through the same bell as a pane.
     ///
     /// 1-cp shipped the notifications and recorded the gap honestly: a

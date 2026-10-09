@@ -356,7 +356,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
     "alerts": { "landing": true }
   },
   "worktree_prefs": { "branch_prefix": "git-username" },
-  "notifications": { "enabled": true, "agent_attention": true, "agent_completion": true },
+  "notifications": { "enabled": true, "agent_attention": true, "agent_completion": "long" },
   "computer_awake_mode": "off",
   "computer_confirm_payment": true,
   "computer_confirm_transfer": true,
@@ -761,7 +761,7 @@ function scmTreeRows(area, paths, folded) {
 const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_crash_watchdog", "set_theme", "set_locale", "set_ui_zoom", "set_app_font_family", "set_show_titlebar_app_name", "set_show_menu_bar_icon", "set_minimize_to_tray_on_close", "set_compact_worktree_cards", "set_show_git_ignored_files", "set_source_control_group_order", "set_source_control_compare_base", "set_refresh_local_base_ref_on_worktree_create", "patch_left_sidebar_appearance", "set_status_bar_item", "set_usage_percentage_display", "set_status_bar_usage_mode", "set_usage_analytics_enabled", "set_source_control_view_mode", "set_terminal_command", "set_setup_script_launch_mode", "set_terminal_shortcut_policy", "set_terminal_prefs",
   "patch_terminal_prefs", "patch_editing_prefs", "patch_update_prefs", "apply_ghostty_import", "set_panel_width",
-  "set_notification_preference", "set_browser_home_page", "set_browser_search_engine",
+  "set_notification_preference", "set_finish_notification_mode", "set_browser_home_page", "set_browser_search_engine",
   "patch_browser_link_routing", "patch_browser_user_agents", "set_browser_restore_tabs", "set_browser_default_zoom", "set_browser_open_tabs",
   "set_terminal_opacity",
   "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
@@ -1552,6 +1552,13 @@ class StatefulBackend {
         };
         keys = ["notifications"];
         break;
+      case "set_finish_notification_mode":
+        this.settings.notifications = {
+          ...this.settings.notifications,
+          agent_completion: args.mode,
+        };
+        keys = ["notifications"];
+        break;
       case "set_browser_home_page":
         this.settings.browser = { ...this.settings.browser, home_page: args.homePage };
         keys = ["browser"];
@@ -2110,6 +2117,9 @@ class StatefulBackend {
       // 없는 창에 답하는 그대로(`zerocode_core::board::snapshot`).
       case "board_snapshot": return { columns: [], attention_count: 0, total_count: 0 };
       case "pane_subagents": return [];
+      // 나를 기다림 — 기다리는 판이 없는 창이 실제 백엔드에서 받는 답(t-26595).
+      case "waiting_on_me": return [];
+      case "clear_finish_mark": return false;
       case "pane_activities": return [];
       case "process_memory": return 0;
       case "listening_ports": return { rows: [], unavailable: false };
@@ -10080,12 +10090,12 @@ await test("notification and browser controls remain item patches across stale w
   const attention = await backend.waitForCall("A", "set_notification_preference", from);
   assertEqual(attention.args, { kind: "agent_attention", on: false }, "notification sent sibling state");
   from = backend.calls.length;
-  await pageB.uncheck("#notify-agent-completion");
-  const completion = await backend.waitForCall("B", "set_notification_preference", from);
-  assertEqual(completion.args, { kind: "agent_completion", on: false }, "notification sent sibling state");
+  await pageB.selectOption("#notify-finish-mode", "off");
+  const completion = await backend.waitForCall("B", "set_finish_notification_mode", from);
+  assertEqual(completion.args, { mode: "off" }, "finish mode sent the wrong word");
   assertEqual(
     backend.settings.notifications,
-    { enabled: true, agent_attention: false, agent_completion: false },
+    { enabled: true, agent_attention: false, agent_completion: "off" },
     "stale notification patches lost one field",
   );
   // 마스터가 꺼지면 벨 전체가 침묵하고, 종류별 스위치는 만질 수 없게
@@ -10096,7 +10106,7 @@ await test("notification and browser controls remain item patches across stale w
   assertEqual(master.args, { kind: "enabled", on: false }, "master sent sibling state");
   assert(
     (await pageA.isDisabled("#notify-agent-attention"))
-      && (await pageA.isDisabled("#notify-agent-completion")),
+      && (await pageA.isDisabled("#notify-finish-mode")),
     "kind switches stayed live under a dead master",
   );
   from = backend.calls.length;
