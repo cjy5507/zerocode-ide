@@ -23,6 +23,8 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::hook::HookState;
 use crate::lane::LaneState;
 
@@ -31,6 +33,157 @@ pub const COOLDOWN_MS: i64 = 5_000;
 
 /// How long a `Done` must stand before it counts as finished.
 pub const DONE_QUIET_MS: i64 = 1_500;
+
+/// How long an attention stop (막힘·질문) must stand before it rings.
+pub const ATTENTION_QUIET_MS: i64 = 10_000;
+
+/// How long a finished turn must stand before it rings (끝남).
+pub const FINISHED_QUIET_MS: i64 = 60_000;
+
+/// The shortest turn that earns a finish ring under [`FinishRing::Long`].
+pub const LONG_TURN_MS: i64 = 60_000;
+
+/// RED STUB — today's behaviour: no wait at all.
+#[must_use]
+pub const fn quiet_ms(_ring: Ring) -> i64 {
+    0
+}
+
+/// Which finishes ring (`알림` → 끝남). Per device, in the settings card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FinishRing {
+    /// No finish rings, and no finish is listed as waiting.
+    Off,
+    /// Only a turn that ran for at least [`LONG_TURN_MS`] rings.
+    #[default]
+    Long,
+    /// Every finish that stands its quiet rings.
+    Always,
+}
+
+impl FinishRing {
+    /// Every mode, in the order the settings card offers them.
+    pub const ALL: [Self; 3] = [Self::Off, Self::Long, Self::Always];
+
+    /// The word the settings file keeps for this mode.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Long => "long",
+            Self::Always => "always",
+        }
+    }
+
+    /// The mode a settings word names, if it names one.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.word() == word)
+    }
+
+    /// RED STUB — today's behaviour: every finish rings.
+    #[must_use]
+    pub fn earns(self, _turn_ms: Option<i64>) -> bool {
+        true
+    }
+}
+
+/// How long a turn ran, when its start is known. RED STUB.
+#[must_use]
+pub const fn turn_ms(_turn_started_at_ms: Option<i64>, _ended_at_ms: i64) -> Option<i64> {
+    None
+}
+
+/// When the turn a pane is in began, after one report. RED STUB.
+#[must_use]
+pub const fn turn_started_after(
+    _prior: Option<(HookState, Option<i64>)>,
+    _next: HookState,
+    _now_ms: i64,
+) -> Option<i64> {
+    None
+}
+
+/// Whether the pane still shows a finish nobody has looked at. RED STUB.
+#[must_use]
+pub const fn finish_mark_after(
+    _prior_mark: bool,
+    _next: HookState,
+    _prior: Option<HookState>,
+    _interrupted: bool,
+    _session_boundary: bool,
+) -> bool {
+    false
+}
+
+/// What a pane is waiting on the person for (`나를 기다림`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waiting {
+    /// A permission or a stop nobody else can clear.
+    Blocked,
+    /// A question the agent asked.
+    Question,
+    /// A finished turn nobody has looked at.
+    Finished,
+}
+
+/// The facts the waiting list reads about one pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Look {
+    pub state: HookState,
+    /// Whether the stop carries a question.
+    pub asking: bool,
+    /// Whether the finish mark stands.
+    pub mark: bool,
+    /// How long the turn ran, when it is known.
+    pub turn_ms: Option<i64>,
+}
+
+/// What a pane waits on the person for, under a finish mode. RED STUB.
+#[must_use]
+pub const fn waiting_for(_look: Look, _mode: FinishRing) -> Option<Waiting> {
+    None
+}
+
+/// Rings that wait for their stop to keep standing. Each armed ring fires at
+/// most once, and only when its stop still stands at the due time.
+#[derive(Debug)]
+pub struct Quiet<K> {
+    armed: HashMap<K, Armed>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Armed {
+    ring: Ring,
+    stamp: i64,
+}
+
+impl<K> Default for Quiet<K> {
+    fn default() -> Self {
+        Self {
+            armed: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Eq + std::hash::Hash> Quiet<K> {
+    /// Arm `ring` for the stop stamped `stamp`, at `now_ms`.
+    pub fn arm(&mut self, key: K, ring: Ring, stamp: i64, _now_ms: i64) {
+        self.armed.insert(key, Armed { ring, stamp });
+    }
+
+    /// Cancel any armed ring for `key`.
+    pub fn cancel(&mut self, key: &K) {
+        self.armed.remove(key);
+    }
+
+    /// RED STUB — today's behaviour: the ring fires at once, whatever the
+    /// clock and the stop say.
+    pub fn settle(&mut self, key: &K, _now_ms: i64, _standing: Option<i64>) -> Option<Ring> {
+        self.armed.remove(key).map(|armed| armed.ring)
+    }
+}
 
 /// Which kind of ring a state earns. `Working` earns none — progress is what
 /// the board is for.
@@ -582,5 +735,213 @@ mod tests {
             notice("t-2943", "zo", Ring::Push, false, None, None).body,
             ""
         );
+    }
+
+    // The clock in every test below is a number the test chose. Nothing sleeps:
+    // a ring that would fire after a minute is asked about at the minute.
+
+    /// The two waits: ten seconds for a stop, a minute for a finish. A push the
+    /// agent sent on purpose does not wait.
+    #[test]
+    fn the_waits_are_ten_seconds_for_a_stop_and_a_minute_for_a_finish() {
+        assert_eq!(quiet_ms(Ring::Attention), 10_000);
+        assert_eq!(quiet_ms(Ring::Completion), 60_000);
+        assert_eq!(quiet_ms(Ring::Push), 0);
+        assert_eq!(LONG_TURN_MS, 60_000);
+    }
+
+    /// Acceptance 1a: a stop that clears inside ten seconds rings nothing.
+    #[test]
+    fn a_stop_that_clears_inside_ten_seconds_rings_nothing() {
+        let mut quiet = Quiet::default();
+        quiet.arm("pane-1", Ring::Attention, 1_000, 1_000);
+        // The stop is gone at 6 s: the pane is working, so no stop stands.
+        assert_eq!(quiet.settle(&"pane-1", 11_000, None), None);
+    }
+
+    /// Acceptance 1a, the other side: a stop that stands for ten seconds rings
+    /// once, and the same stop never rings twice.
+    #[test]
+    fn a_stop_that_stands_for_ten_seconds_rings_once() {
+        let mut quiet = Quiet::default();
+        quiet.arm("pane-1", Ring::Attention, 1_000, 1_000);
+        assert_eq!(quiet.settle(&"pane-1", 10_999, Some(1_000)), None, "not due yet");
+        assert_eq!(
+            quiet.settle(&"pane-1", 11_000, Some(1_000)),
+            Some(Ring::Attention)
+        );
+        assert_eq!(quiet.settle(&"pane-1", 60_000, Some(1_000)), None);
+    }
+
+    /// Acceptance 1b: a turn of a minute or more that finishes rings exactly once.
+    #[test]
+    fn a_long_turn_that_finishes_rings_exactly_once() {
+        // The turn began at 0 s and the pane said Done at 65 s.
+        let turn = turn_ms(Some(0), 65_000);
+        assert_eq!(turn, Some(65_000));
+        assert!(FinishRing::Long.earns(turn));
+        let mut quiet = Quiet::default();
+        quiet.arm("pane-1", Ring::Completion, 65_000, 65_000);
+        assert_eq!(quiet.settle(&"pane-1", 124_999, Some(65_000)), None);
+        assert_eq!(
+            quiet.settle(&"pane-1", 125_000, Some(65_000)),
+            Some(Ring::Completion)
+        );
+        assert_eq!(quiet.settle(&"pane-1", 200_000, Some(65_000)), None);
+    }
+
+    /// Acceptance 1c: under the long-only mode a short turn's finish rings
+    /// nothing. Off rings no finish at all, and always rings every one.
+    #[test]
+    fn a_short_turn_that_finishes_rings_nothing_under_long_only() {
+        let short = turn_ms(Some(0), 30_000);
+        assert!(!FinishRing::Long.earns(short));
+        assert!(!FinishRing::Off.earns(Some(900_000)));
+        assert!(FinishRing::Always.earns(short));
+        assert!(
+            !FinishRing::Long.earns(None),
+            "a turn of unknown length is not proven long"
+        );
+    }
+
+    /// A finish the agent works past inside the minute is cancelled.
+    #[test]
+    fn a_finish_the_agent_works_past_inside_a_minute_is_cancelled() {
+        let mut quiet = Quiet::default();
+        quiet.arm("pane-1", Ring::Completion, 65_000, 65_000);
+        // Working again at 70 s: the Done stamp no longer stands at 125 s.
+        assert_eq!(quiet.settle(&"pane-1", 125_000, None), None);
+    }
+
+    /// Acceptance 1d: a Stop hook that never comes still leaves one finished
+    /// mark when the pane goes to rest, and the mark lists one waiting pane.
+    #[test]
+    fn a_missed_stop_hook_leaves_one_finished_mark() {
+        // Working from 0 s; no Stop; the pane is at rest at 90 s.
+        let mark = finish_mark_after(
+            false,
+            HookState::Idle,
+            Some(HookState::Working),
+            false,
+            false,
+        );
+        assert!(mark, "the rest after work is a finish");
+        let look = Look {
+            state: HookState::Idle,
+            asking: false,
+            mark,
+            turn_ms: turn_ms(Some(0), 90_000),
+        };
+        assert_eq!(waiting_for(look, FinishRing::Long), Some(Waiting::Finished));
+        // A missed finish of a short turn is still marked, but the long-only
+        // mode lists no finish for it.
+        let short = Look {
+            turn_ms: turn_ms(Some(0), 20_000),
+            ..look
+        };
+        assert_eq!(waiting_for(short, FinishRing::Long), None);
+    }
+
+    /// The mark is released by new work, and a turn a person stopped or a
+    /// resumed session never sets it.
+    #[test]
+    fn the_finished_mark_clears_on_new_work_and_only_a_real_finish_sets_it() {
+        assert!(!finish_mark_after(
+            true,
+            HookState::Working,
+            Some(HookState::Done),
+            false,
+            false,
+        ));
+        assert!(
+            !finish_mark_after(false, HookState::Done, Some(HookState::Working), true, false),
+            "a turn a person stopped is not a finish"
+        );
+        assert!(
+            !finish_mark_after(false, HookState::Done, Some(HookState::Working), false, true),
+            "a resumed session is nobody's finish"
+        );
+        assert!(finish_mark_after(
+            false,
+            HookState::Done,
+            Some(HookState::Working),
+            false,
+            false,
+        ));
+    }
+
+    /// The waiting list names what each pane waits on, under each mode.
+    #[test]
+    fn the_waiting_list_names_what_each_pane_waits_for() {
+        let finished = Look {
+            state: HookState::Done,
+            asking: false,
+            mark: true,
+            turn_ms: Some(90_000),
+        };
+        let asking = Look {
+            state: HookState::NeedsAttention,
+            asking: true,
+            mark: false,
+            turn_ms: None,
+        };
+        let blocked = Look {
+            asking: false,
+            ..asking
+        };
+        assert_eq!(waiting_for(asking, FinishRing::Long), Some(Waiting::Question));
+        assert_eq!(waiting_for(blocked, FinishRing::Long), Some(Waiting::Blocked));
+        assert_eq!(waiting_for(finished, FinishRing::Long), Some(Waiting::Finished));
+        assert_eq!(waiting_for(finished, FinishRing::Off), None, "off lists no finish");
+        let working = Look {
+            state: HookState::Working,
+            ..finished
+        };
+        assert_eq!(waiting_for(working, FinishRing::Always), None);
+        let short = Look {
+            turn_ms: Some(20_000),
+            ..finished
+        };
+        assert_eq!(waiting_for(short, FinishRing::Long), None);
+        assert_eq!(waiting_for(short, FinishRing::Always), Some(Waiting::Finished));
+    }
+
+    /// A turn keeps its start through a question, a new prompt starts its own,
+    /// and the first turn of a pane starts when it is first heard.
+    #[test]
+    fn a_turn_keeps_its_start_through_a_question_and_a_new_prompt_starts_one() {
+        assert_eq!(
+            turn_started_after(Some((HookState::Working, Some(0))), HookState::NeedsAttention, 20_000),
+            Some(0)
+        );
+        assert_eq!(
+            turn_started_after(Some((HookState::NeedsAttention, Some(0))), HookState::Working, 40_000),
+            Some(0),
+            "the answered question is the same turn"
+        );
+        assert_eq!(
+            turn_started_after(Some((HookState::Working, Some(0))), HookState::Done, 65_000),
+            Some(0)
+        );
+        assert_eq!(
+            turn_started_after(Some((HookState::Done, Some(0))), HookState::Working, 100_000),
+            Some(100_000),
+            "a new prompt starts a new turn"
+        );
+        assert_eq!(
+            turn_started_after(None, HookState::Working, 5_000),
+            Some(5_000)
+        );
+    }
+
+    /// The finish setting reads back from its word, and the default is the
+    /// long-turn rule.
+    #[test]
+    fn the_finish_setting_reads_back_and_defaults_to_long_turns() {
+        assert_eq!(FinishRing::default(), FinishRing::Long);
+        for mode in FinishRing::ALL {
+            assert_eq!(FinishRing::from_word(mode.word()), Some(mode));
+        }
+        assert_eq!(FinishRing::from_word("bell"), None);
     }
 }
