@@ -1587,7 +1587,6 @@ mod probe_guard_tests {
 
 #[cfg(test)]
 mod audit_context_tests {
-    use super::ToolContext;
     use crate::gateway::{
         RouteDecisionRecord, ToolResultMetadata, begin_tool_invocation, epoch_millis_now,
         successful_result,
@@ -1608,7 +1607,7 @@ mod audit_context_tests {
 
     #[test]
     fn tool_invocation_carries_run_and_turn_id() {
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         ctx.set_active_run_id(Some("run-7".to_string()));
         ctx.set_active_turn_id(Some("turn-3".to_string()));
 
@@ -1633,7 +1632,7 @@ mod audit_context_tests {
     fn audit_ledgers_are_bounded_to_the_cap() {
         use super::MAX_AUDIT_LEDGER_ENTRIES;
 
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let overflow = MAX_AUDIT_LEDGER_ENTRIES + 25;
         for _ in 0..overflow {
             ctx.record_tool_invocation(ok_invocation("bash"));
@@ -1674,7 +1673,7 @@ mod audit_context_tests {
 
     #[test]
     fn route_decision_is_recorded_in_audit() {
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         ctx.set_active_turn_id(Some("turn-9".to_string()));
         ctx.record_route_decision(RouteDecisionRecord {
             shape: "delegate_one".to_string(),

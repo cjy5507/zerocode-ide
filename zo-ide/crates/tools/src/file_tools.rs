@@ -1385,7 +1385,7 @@ mod instrument_log_tests {
     fn instrument_then_revert_restores_byte_identical() {
         let original = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
         let path = temp_source(original);
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
 
         instrument(&ctx, &path, "let x = 1;", "eprintln!(\"probe x={x:?}\");");
 
@@ -1413,7 +1413,7 @@ mod instrument_log_tests {
         // probe line is stripped — that is the whole point of the marker.
         let original = "let a = 1;\nlet b = 2;\n";
         let path = temp_source(original);
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         instrument(&ctx, &path, "let a = 1;", "// trace a");
 
         // Simulate the agent fixing an unrelated line after instrumenting.
@@ -1435,7 +1435,7 @@ mod instrument_log_tests {
         // edit_file's unique-anchor guard surfaces: a probe must target one site,
         // and a failed insert must not leave a phantom ledger entry.
         let path = temp_source("dup\ndup\n");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let result = run_instrument_log(
             &InstrumentLogInput {
                 path: path.to_string_lossy().into_owned(),
@@ -1454,7 +1454,7 @@ mod instrument_log_tests {
     fn two_probes_revert_independently() {
         let original = "one\ntwo\n";
         let path = temp_source(original);
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         instrument(&ctx, &path, "one", "// p1");
         instrument(&ctx, &path, "two", "// p2");
         assert_eq!(probe_count(&ctx), 2);
@@ -1472,7 +1472,7 @@ mod debug_hypothesis_tests {
         next_hypothesis_id, render_ledger, run_debug_hypothesis, upsert_hypothesis,
         DebugHypothesisInput,
     };
-    use crate::context::{DebugHypothesis, HypothesisStatus, ToolContext};
+    use crate::context::{DebugHypothesis, HypothesisStatus};
 
     fn entry(id: &str, status: HypothesisStatus) -> DebugHypothesis {
         DebugHypothesis {
@@ -1591,7 +1591,7 @@ mod debug_hypothesis_tests {
         // The same context shared across calls is the whole point: call two
         // updates the hypothesis call one recorded, proving the ledger persists
         // between a debugger sub-agent's iterations.
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let first = run_debug_hypothesis(
             DebugHypothesisInput {
                 hypothesis: "the flush is skipped on early return".into(),
@@ -1722,7 +1722,7 @@ mod read_image_tests {
         let path = temp_file("pixel-png", PNG_1X1);
         // No workspace_root → no boundary enforcement; absolute path read works
         // with no cwd mutation (deterministic, no test races).
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let out = run_read_image(
             &ReadImageInput {
                 path: path.to_string_lossy().into_owned(),
@@ -1766,7 +1766,7 @@ mod read_image_tests {
 
         let oversized = oversized_rgba_png(runtime::image_guard::IMAGE_CLAMP_DIMENSION + 1, 1);
         let path = temp_file("oversized-png", &oversized);
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let out = run_read_image(
             &ReadImageInput {
                 path: path.to_string_lossy().into_owned(),
@@ -1811,7 +1811,7 @@ mod read_image_tests {
         let image = temp_file("outside-pixel-png", PNG_1X1);
         // A workspace root that deliberately does NOT contain `image`.
         let ws_root = std::env::temp_dir().join("zo-g10-ws-root-only");
-        let ctx = ToolContext::new().with_workspace_root(ws_root);
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_workspace_root(ws_root);
         let out = run_read_image(
             &ReadImageInput {
                 path: image.to_string_lossy().into_owned(),
@@ -1907,7 +1907,12 @@ mod read_image_tests {
     #[test]
     fn a_small_screenshot_is_staged_as_it_is() {
         let path = temp_file("small-shot", PNG_1X1);
-        let (summary, staged) = staged_summary(&path, ImageIntake::Screenshot);
+        let (summary, staged) = {
+            let _env = crate::tests::env_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            staged_summary(&path, ImageIntake::Screenshot)
+        };
         assert_eq!(summary["media_type"], "image/png", "summary: {summary}");
         assert_eq!(staged[0].0, "image/png");
         let _ = std::fs::remove_file(&path);
@@ -1939,7 +1944,7 @@ mod read_image_tests {
     #[test]
     fn read_image_rejects_a_non_image_file() {
         let path = temp_file("not-image", b"this is plain text, not an image");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let result = run_read_image(
             &ReadImageInput {
                 path: path.to_string_lossy().into_owned(),
@@ -1998,7 +2003,7 @@ mod boundary_tests {
     }
 
     fn context(workspace_root: Option<&std::path::Path>) -> ToolContext {
-        let mut context = ToolContext::new();
+        let mut context = crate::tests::tool_context_outside_cwd_windows();
         context.workspace_root = workspace_root.map(std::path::Path::to_path_buf);
         context
     }
@@ -2828,7 +2833,7 @@ mod read_guard_tests {
     fn edit_after_external_modification_is_rejected_until_reread() {
         let path = temp_file("external-modify");
         std::fs::write(&path, "v1 alpha\n").expect("seed");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         read(&ctx, &path).expect("initial read");
 
         // 외부 변경 (길이·내용 모두 상이 — hash 권위 판정).
@@ -2867,7 +2872,7 @@ mod read_guard_tests {
     fn consecutive_edits_after_one_read_are_allowed() {
         let path = temp_file("consecutive-edits");
         std::fs::write(&path, "one two three\n").expect("seed");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         read(&ctx, &path).expect("read once");
 
         edit(&ctx, &path, "one", "ONE").expect("first edit");
@@ -2886,7 +2891,7 @@ mod read_guard_tests {
     fn edit_without_prior_read_is_rejected() {
         let path = temp_file("never-read-edit");
         std::fs::write(&path, "alpha\n").expect("seed");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
 
         let err = edit(&ctx, &path, "alpha", "omega").expect_err("unread edit must be refused");
         let message = err.to_string();
@@ -2903,7 +2908,7 @@ mod read_guard_tests {
     fn overwrite_without_prior_read_is_rejected() {
         let path = temp_file("never-read-overwrite");
         std::fs::write(&path, "precious existing content\n").expect("seed");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
 
         let err = write(&ctx, &path, "clobbered").expect_err("unread overwrite must be refused");
         assert!(err.to_string().contains("has not been read"), "{err}");
@@ -2921,7 +2926,7 @@ mod read_guard_tests {
     fn new_file_write_is_exempt_and_seeds_the_registry() {
         let path = temp_file("new-file");
         assert!(!path.exists());
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
 
         write(&ctx, &path, "fresh alpha\n").expect("creating a new file needs no prior read");
         edit(&ctx, &path, "alpha", "omega").expect("edit right after own write");
@@ -2943,8 +2948,8 @@ mod read_guard_tests {
         std::fs::write(&path, "shared alpha\n").expect("seed");
         let path_str = path.to_string_lossy().into_owned();
 
-        let ctx_a = ToolContext::new();
-        let ctx_b = ToolContext::new(); // 서브에이전트/별도 대화에 해당
+        let ctx_a = crate::tests::tool_context_outside_cwd_windows();
+        let ctx_b = crate::tests::tool_context_outside_cwd_windows(); // 서브에이전트/별도 대화에 해당
 
         dispatch(&ctx_a, None, "read_file", &json!({ "path": path_str }))
             .expect("read_file dispatches")
@@ -2983,7 +2988,7 @@ mod read_guard_tests {
     fn windowed_read_registers_the_whole_file() {
         let path = temp_file("windowed-read");
         std::fs::write(&path, "l1\nl2\nl3\n").expect("seed");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         run_read_file(
             &ReadFileInput {
                 path: path.to_string_lossy().into_owned(),
@@ -3037,7 +3042,7 @@ mod search_input_tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         std::fs::write(dir.join("hello.txt"), "hi").expect("seed file");
 
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let result = dispatch(
             &ctx,
             None,
@@ -3053,7 +3058,7 @@ mod search_input_tests {
 
     #[test]
     fn grep_without_pattern_gets_corrective_error() {
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let error = dispatch(&ctx, None, "grep_search", &json!({"path": "src"}))
             .expect("grep_search is dispatched")
             .expect_err("missing pattern must fail");
@@ -3090,7 +3095,7 @@ mod search_input_tests {
         )
         .expect("record");
 
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let searched = dispatch(
             &ctx,
             None,

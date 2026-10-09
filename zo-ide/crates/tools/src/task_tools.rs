@@ -817,7 +817,7 @@ mod tests {
             Some("session-b"),
         );
         let legacy = registry.create("legacy task", None);
-        let ctx = ToolContext::new().with_tasks(registry.clone());
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_tasks(registry.clone());
         ctx.set_session_id("session-b");
 
         let listed = dispatch(&ctx, None, "TaskList", &json!({}))

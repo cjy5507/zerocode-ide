@@ -64,7 +64,7 @@ fn background_agent_default_is_off_until_an_interactive_host_opts_in() {
     // nothing consumes the completion channel there, so a detached result
     // would be silently lost. The shared cell propagates the interactive
     // host's opt-in to every registry clone.
-    let context = ToolContext::new();
+    let context = crate::tests::tool_context_outside_cwd_windows();
     assert!(!context.background_agent_default());
     let clone = context.clone();
     context.set_background_agent_default(true);
@@ -103,7 +103,7 @@ fn the_agent_schema_promises_a_detached_interactive_default() {
     // The cell the dispatcher reads. `false` is the safe default a fresh
     // context (sub-agent, headless) keeps; the interactive host must be able
     // to flip it, and the flip must reach every clone the registry handed out.
-    let context = ToolContext::new();
+    let context = crate::tests::tool_context_outside_cwd_windows();
     assert!(
         !context.background_agent_default(),
         "a fresh context must keep the blocking default"

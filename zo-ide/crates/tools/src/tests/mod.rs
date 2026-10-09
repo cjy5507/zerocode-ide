@@ -31,10 +31,17 @@ use runtime::{
 };
 use serde_json::json;
 
-/// Shared test context — cheap to create (registries are Arc-backed).
+/// Shared test context — cheap to create (registries are Arc-backed). Its task
+/// registry is pinned to this crate's folder: the first caller may run inside
+/// another test's cwd window, and the process cwd must not pick the registry
+/// folder (t-21146).
 fn test_ctx() -> &'static ToolContext {
     static CTX: OnceLock<ToolContext> = OnceLock::new();
-    CTX.get_or_init(ToolContext::new)
+    CTX.get_or_init(|| {
+        ToolContext::new().with_tasks(runtime::task_registry::TaskRegistry::with_persistence_path(
+            Some(Path::new(env!("CARGO_MANIFEST_DIR")).join(".zo/registries/tasks.json")),
+        ))
+    })
 }
 
 /// Convenience wrapper matching the old two-arg signature used across tests.
@@ -42,6 +49,7 @@ fn run_tool(name: &str, input: &serde_json::Value) -> Result<String, ToolError> 
     execute_tool(test_ctx(), name, input)
 }
 
+/// Every caller holds `env_lock` (t-21146), so the context is built raw here.
 fn run_tool_isolated(name: &str, input: &serde_json::Value) -> Result<String, ToolError> {
     let ctx = ToolContext::new();
     execute_tool(&ctx, name, input)
@@ -61,10 +69,23 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
 
 /// A `ToolContext` for tests that may run beside another test's `set_current_dir`
 /// window (t-21146). `ToolContext::new()` binds the process cwd's `.zo/registries`
-/// when it is built. This commit takes no lock yet; the next commit makes the
-/// construction wait for the windows' `env_lock`.
+/// when it is built, so the construction waits for `env_lock`, which each window's
+/// owner holds for the whole window. Do not call it while holding `env_lock`:
+/// std's mutex does not re-enter.
 pub(crate) fn tool_context_outside_cwd_windows() -> ToolContext {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     ToolContext::new()
+}
+
+/// A `TaskRegistry` built outside every other test's cwd window (t-21146). The
+/// same rule as `tool_context_outside_cwd_windows`.
+pub(crate) fn task_registry_outside_cwd_windows() -> runtime::task_registry::TaskRegistry {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    runtime::task_registry::TaskRegistry::new()
 }
 
 /// A scoped environment override shared by tests that use process-wide state.
@@ -170,8 +191,22 @@ fn sandbox_disabled_cwd(name: &str) -> PathBuf {
     root
 }
 
+/// For callers that already hold `env_lock` (t-21146): the context is built raw.
 fn run_tool_in_cwd(name: &str, input: &serde_json::Value, cwd: &Path) -> Result<String, ToolError> {
     execute_tool(&ToolContext::new().with_cwd(cwd.to_path_buf()), name, input)
+}
+
+/// The `run_tool_in_cwd` for callers that do not hold `env_lock` (t-21146).
+fn run_tool_in_cwd_outside_windows(
+    name: &str,
+    input: &serde_json::Value,
+    cwd: &Path,
+) -> Result<String, ToolError> {
+    execute_tool(
+        &tool_context_outside_cwd_windows().with_cwd(cwd.to_path_buf()),
+        name,
+        input,
+    )
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {

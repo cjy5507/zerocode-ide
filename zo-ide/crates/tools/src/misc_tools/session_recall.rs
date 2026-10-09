@@ -1054,7 +1054,7 @@ mod tests {
     }
 
     fn ctx_for(base: &std::path::Path) -> ToolContext {
-        ToolContext::new().with_cwd(base.to_path_buf())
+        crate::tests::tool_context_outside_cwd_windows().with_cwd(base.to_path_buf())
     }
 
     #[test]
@@ -1748,7 +1748,7 @@ mod tests {
                     last_n: None,
                     ..Default::default()
                 },
-                &ToolContext::new(),
+                &crate::tests::tool_context_outside_cwd_windows(),
             )
             .expect_err("path-like ref rejected");
             assert!(
@@ -1768,7 +1768,7 @@ mod tests {
                 last_n: Some(0),
                 ..Default::default()
             },
-            &ToolContext::new(),
+            &crate::tests::tool_context_outside_cwd_windows(),
         )
         .expect_err("last_n=0 rejected");
         assert!(err.to_string().contains("last_n must be >= 1"), "{err}");
@@ -2129,7 +2129,7 @@ mod tests {
                 before_days: Some(20.0),
                 ..Default::default()
             },
-            &ToolContext::new(),
+            &crate::tests::tool_context_outside_cwd_windows(),
         )
         .expect_err("empty window rejected");
         assert!(
@@ -2147,7 +2147,7 @@ mod tests {
                 since_days: Some(-1.0),
                 ..Default::default()
             },
-            &ToolContext::new(),
+            &crate::tests::tool_context_outside_cwd_windows(),
         )
         .expect_err("negative days rejected");
         assert!(err.to_string().contains("non-negative"), "{err}");
@@ -2163,7 +2163,7 @@ mod tests {
                 since_days: Some(3.0),
                 ..Default::default()
             },
-            &ToolContext::new(),
+            &crate::tests::tool_context_outside_cwd_windows(),
         )
         .expect_err("time filter in recall mode rejected");
         assert!(
@@ -2181,7 +2181,7 @@ mod tests {
                 seq_to: Some(5),
                 ..Default::default()
             },
-            &ToolContext::new(),
+            &crate::tests::tool_context_outside_cwd_windows(),
         )
         .expect_err("inverted seq window rejected");
         assert!(
@@ -2395,7 +2395,6 @@ mod measure {
     use std::time::{Duration, Instant};
 
     use super::{run_session_recall, SessionRecallInput};
-    use crate::ToolContext;
 
     const RUNS: usize = 5;
     const DEFAULT_QUERY: &str = "needle";
@@ -2415,7 +2414,7 @@ mod measure {
         let query = std::env::var("ZO_MEASURE_QUERY").unwrap_or_else(|_| DEFAULT_QUERY.to_string());
         let base = std::env::temp_dir().join(format!("zo-measure-recall-{}", std::process::id()));
         std::fs::create_dir_all(&base).expect("base dir");
-        let ctx = ToolContext::new().with_cwd(base.clone());
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_cwd(base.clone());
         let mut searches = Vec::with_capacity(RUNS);
         let mut header = String::new();
         for _ in 0..RUNS {

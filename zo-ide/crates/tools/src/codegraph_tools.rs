@@ -656,7 +656,7 @@ mod tests {
             workspace.path().join("cache").join(DEFAULT_CACHE_FILE_NAME),
         )
         .expect("fixture graph");
-        let ctx = ToolContext::new().with_cwd(workspace.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_cwd(workspace.path());
         *ctx.codegraph
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(graph);
@@ -780,7 +780,7 @@ mod tests {
         )
         .expect("fixture graph");
         let root = graph.workspace_root().to_path_buf();
-        let ctx = ToolContext::new().with_cwd(workspace.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_cwd(workspace.path());
         *ctx.codegraph
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(graph);
@@ -829,7 +829,7 @@ mod tests {
             workspace.path().join("cache").join(DEFAULT_CACHE_FILE_NAME),
         )
         .expect("fixture graph");
-        let ctx = ToolContext::new().with_cwd(workspace.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_cwd(workspace.path());
         *ctx.codegraph
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(graph);
@@ -884,7 +884,7 @@ mod tests {
             workspace.path().join("cache").join(DEFAULT_CACHE_FILE_NAME),
         )
         .expect("fixture graph");
-        let ctx = ToolContext::new().with_cwd(workspace.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_cwd(workspace.path());
         *ctx.codegraph
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(graph);
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn find_symbol_rejects_unknown_kind() {
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let error = dispatch(
             &ctx,
             None,

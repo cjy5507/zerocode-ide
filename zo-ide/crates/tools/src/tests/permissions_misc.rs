@@ -154,7 +154,7 @@ fn send_to_user_with_channel_pushes_and_reports_delivered() {
     }
 
     let sink = Arc::new(Mutex::new(Vec::new()));
-    let ctx = ToolContext::new()
+    let ctx = crate::tests::tool_context_outside_cwd_windows()
         .with_user_question_channel(Arc::new(RecordingChannel(Arc::clone(&sink))));
 
     let result = execute_tool(&ctx, "send_to_user", &json!({ "message": "pushed body" }))

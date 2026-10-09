@@ -8,13 +8,13 @@ use super::*;
 #[test]
 fn bash_tool_reports_success_exit_failure_timeout_and_background() {
     let cwd = sandbox_disabled_cwd("bash-structured-cwd");
-    let success = run_tool_in_cwd("bash", &json!({ "command": "printf 'hello'" }), &cwd)
+    let success = run_tool_in_cwd_outside_windows("bash", &json!({ "command": "printf 'hello'" }), &cwd)
         .expect("bash should succeed");
     let success_output: serde_json::Value = serde_json::from_str(&success).expect("json");
     assert_eq!(success_output["stdout"], "hello");
     assert_eq!(success_output["interrupted"], false);
 
-    let failure = run_tool_in_cwd(
+    let failure = run_tool_in_cwd_outside_windows(
         "bash",
         &json!({ "command": "printf 'oops' >&2; exit 7" }),
         &cwd,
@@ -30,7 +30,7 @@ fn bash_tool_reports_success_exit_failure_timeout_and_background() {
     // `timeout` is milliseconds; values below MIN_BASH_TIMEOUT_MS (1s) are
     // treated as a ms/s unit slip and fall back to the default, so use a
     // genuine 1s deadline against a command that runs well past it.
-    let timeout = run_tool_in_cwd(
+    let timeout = run_tool_in_cwd_outside_windows(
         "bash",
         &json!({ "command": "sleep 30", "timeout": 1000 }),
         &cwd,
@@ -44,7 +44,7 @@ fn bash_tool_reports_success_exit_failure_timeout_and_background() {
         .expect("stderr")
         .contains("Command exceeded timeout"));
 
-    let background = run_tool_in_cwd(
+    let background = run_tool_in_cwd_outside_windows(
         "bash",
         &json!({ "command": "sleep 1", "run_in_background": true }),
         &cwd,
@@ -107,7 +107,7 @@ fn tool_context_built_inside_another_tests_cwd_window_leaves_the_window_alone() 
 #[test]
 fn bash_background_launch_uses_session_and_stop_waits_for_reap() {
     let cwd = sandbox_disabled_cwd("bash-background-session-cwd");
-    let ctx = ToolContext::new().with_cwd(cwd.clone());
+    let ctx = crate::tests::tool_context_outside_cwd_windows().with_cwd(cwd.clone());
     ctx.set_session_id("visible-session");
     let live = ctx
         .tasks
@@ -161,7 +161,7 @@ fn an_attended_poll_starts_in_the_background_and_ends_as_written_once() {
         world.display(),
         written.display()
     );
-    let tasks = runtime::task_registry::TaskRegistry::new();
+    let tasks = crate::tests::task_registry_outside_cwd_windows();
     let completions: Arc<Mutex<Vec<(runtime::task_registry::TaskStatus, String)>>> =
         Arc::default();
     let seen = Arc::clone(&completions);
@@ -229,7 +229,7 @@ fn bash_tool_surfaces_destructive_safety_warning() {
     // A command matching a known destructive pattern still runs but
     // carries a non-blocking advisory on the structured result.
     let cwd = sandbox_disabled_cwd("bash-warning-cwd");
-    let dangerous = run_tool_in_cwd("bash", &json!({ "command": "printf 'rm -rf /'" }), &cwd)
+    let dangerous = run_tool_in_cwd_outside_windows("bash", &json!({ "command": "printf 'rm -rf /'" }), &cwd)
         .expect("bash should run");
     let output: serde_json::Value = serde_json::from_str(&dangerous).expect("json");
     assert!(
@@ -240,7 +240,7 @@ fn bash_tool_surfaces_destructive_safety_warning() {
     );
 
     // A benign command omits the advisory entirely (skip_serializing_if).
-    let benign = run_tool_in_cwd("bash", &json!({ "command": "printf 'hello'" }), &cwd)
+    let benign = run_tool_in_cwd_outside_windows("bash", &json!({ "command": "printf 'hello'" }), &cwd)
         .expect("bash should run");
     let benign_output: serde_json::Value = serde_json::from_str(&benign).expect("json");
     assert!(benign_output.get("safetyWarning").is_none());
@@ -251,7 +251,7 @@ fn bash_tool_surfaces_destructive_safety_warning() {
 fn audit_tool_summarizes_the_invocation_ledger() {
     // WI-E2: the Audit tool turns the otherwise write-only shadow ledger into a
     // readable rollup. Share one context so every dispatch lands in its ledger.
-    let ctx = ToolContext::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
     // A succeeding read-only tool, then a dispatch that fails (unknown tool).
     let _ = execute_tool(&ctx, "ToolSearch", &json!({ "query": "read" }));
     let unknown = execute_tool(&ctx, "DefinitelyNotATool", &json!({}));
@@ -585,7 +585,7 @@ fn powershell_errors_when_shell_is_missing() {
 #[test]
 fn given_no_enforcer_when_bash_then_executes_normally() {
     let cwd = sandbox_disabled_cwd("bash-no-enforcer-cwd");
-    let mut ctx = ToolContext::new();
+    let mut ctx = crate::tests::tool_context_outside_cwd_windows();
     ctx.cwd = Some(cwd.clone());
     let registry = crate::GlobalToolRegistry::builtin().with_context(ctx);
     let result = registry

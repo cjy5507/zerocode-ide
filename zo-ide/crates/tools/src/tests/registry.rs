@@ -110,7 +110,7 @@ fn a_searched_session_recall_runs_through_capability_invoke() {
         .expect("persist recall fixture");
 
     let registry = GlobalToolRegistry::builtin()
-        .with_context(ToolContext::new().with_cwd(base.clone()));
+        .with_context(crate::tests::tool_context_outside_cwd_windows().with_cwd(base.clone()));
     let wire: BTreeSet<String> = registry
         .definitions(None)
         .into_iter()
@@ -493,7 +493,7 @@ fn global_tool_registry_denies_blocked_tool_before_dispatch() {
 fn tool_gateway_records_builtin_success_metadata() {
     let tmp = temp_path("gateway-read-success.txt");
     fs::write(&tmp, "gateway ok\n").expect("seed temp file");
-    let ctx = ToolContext::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
 
     let output = execute_tool(&ctx, "Read", &json!({ "path": tmp.display().to_string() }))
         .expect("read_file should succeed");
@@ -767,7 +767,7 @@ fn builtin_registry_hides_lsp_from_public_surface_without_registered_servers() {
 
 #[test]
 fn builtin_registry_exposes_lsp_when_server_is_registered() {
-    let context = ToolContext::new();
+    let context = crate::tests::tool_context_outside_cwd_windows();
     context.lsp.register(
         "rust",
         runtime::lsp_client::LspServerStatus::Connected,
@@ -875,7 +875,7 @@ fn tool_search_supports_keyword_and_select_queries() {
 
 #[test]
 fn tool_search_respects_disabled_tools_from_context() {
-    let ctx = ToolContext::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
     ctx.set_disabled_tools(BTreeSet::from(["WebSearch".to_string()]));
 
     let result = execute_tool(

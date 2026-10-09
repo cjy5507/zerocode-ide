@@ -3317,7 +3317,7 @@ fn the_receipt_names_the_road_the_surface_took() {
         (PushRoad::SkippedNowhere, false),
     ] {
         let channel = std::sync::Arc::new(RoadChannel::new(road));
-        let ctx = ToolContext::new().with_user_question_channel(channel.clone());
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_user_question_channel(channel.clone());
         let receipt = push_receipt(&ctx, "Build is green; merge when you are back");
         assert_eq!(receipt["road"], road.as_str(), "{receipt}");
         assert_eq!(receipt["delivered"], delivered, "{receipt}");
@@ -3332,7 +3332,7 @@ fn the_receipt_names_the_road_the_surface_took() {
 /// and the message comes back inline so nothing the model wrote is lost.
 #[test]
 fn without_a_surface_the_push_is_skipped_nowhere_and_echoed_inline() {
-    let ctx = ToolContext::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
     let receipt = push_receipt(&ctx, "Done: 3 tests failed");
     assert_eq!(receipt["road"], "skipped: nowhere");
     assert_eq!(receipt["delivered"], false);
@@ -3345,7 +3345,7 @@ fn without_a_surface_the_push_is_skipped_nowhere_and_echoed_inline() {
 fn the_message_is_one_line_and_capped_at_the_table() {
     let limits = PushLimits::default();
     let channel = std::sync::Arc::new(RoadChannel::new(PushRoad::Terminal));
-    let ctx = ToolContext::new().with_user_question_channel(channel.clone());
+    let ctx = crate::tests::tool_context_outside_cwd_windows().with_user_question_channel(channel.clone());
 
     let long = "가".repeat(limits.max_message_chars + 40);
     let receipt = push_receipt(&ctx, &format!("first line\n\n  second   line\n{long}"));
@@ -3361,7 +3361,7 @@ fn the_message_is_one_line_and_capped_at_the_table() {
 #[test]
 fn an_empty_message_is_refused_before_any_surface_is_asked() {
     let channel = std::sync::Arc::new(RoadChannel::new(PushRoad::Terminal));
-    let ctx = ToolContext::new().with_user_question_channel(channel.clone());
+    let ctx = crate::tests::tool_context_outside_cwd_windows().with_user_question_channel(channel.clone());
     let error = run_push_notification(&push_input("  \n "), &ctx).expect_err("empty is refused");
     assert!(matches!(error, ToolError::InvalidInput(_)), "{error:?}");
     assert!(channel.seen.lock().expect("notice lock").is_none());
