@@ -21,6 +21,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(unix)]
+use crate::bounded_child::{end_group, Group};
+use crate::bounded_child::{reap, try_reap};
 use crate::error::PluginError;
 
 /// Maximum wall-clock time a single plugin subprocess may run before it is
@@ -33,6 +36,10 @@ pub(crate) const PLUGIN_PROCESS_TIMEOUT: Duration = Duration::from_secs(120);
 /// model actually needs) with an elision marker between, so a runaway writer
 /// cannot exhaust memory yet the useful context survives. 1 MiB per stream.
 pub(crate) const MAX_PLUGIN_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// How long a timed-out plugin's process group has between SIGTERM and SIGKILL.
+#[cfg(unix)]
+const PLUGIN_GROUP_GRACE: Duration = Duration::from_millis(50);
 
 /// The captured result of a finished plugin subprocess.
 #[derive(Debug)]
@@ -120,9 +127,9 @@ fn run_plugin_process_with_timeout(
         // and drop the read handles (joining the reader threads, which end at
         // pipe EOF once the processes are gone).
         #[cfg(unix)]
-        terminate_process_group(child.id());
+        let _ = end_group(child.id(), Group::Terminate { grace: PLUGIN_GROUP_GRACE });
         let _ = child.kill();
-        let _ = child.wait();
+        let _ = reap(&mut child);
         let _ = stdout_reader.join();
         let _ = stderr_reader.join();
         join_stdin_writer(stdin_writer, context)?;
@@ -209,29 +216,6 @@ fn elision_marker(dropped: usize) -> String {
     format!("… [{dropped} bytes elided] …")
 }
 
-/// Signal the timed-out child's whole process group (`SIGTERM`, then `SIGKILL`)
-/// so grandchildren are reaped too, not just the direct child. The child leads
-/// its own group, so its pid is the group id; errors are best-effort (the caller
-/// still `kill()`s + `wait()`s the direct child).
-#[cfg(unix)]
-fn terminate_process_group(pid: u32) {
-    use nix::sys::signal::{self, Signal};
-    use nix::unistd::Pid;
-
-    let Ok(pid) = i32::try_from(pid) else {
-        return;
-    };
-    // Negative pid targets the whole process group. Any kill error (ESRCH gone
-    // group, macOS EPERM for a zombies-only group we own) means "nothing left to
-    // stop", so a failed SIGTERM just skips the SIGKILL.
-    let group = Pid::from_raw(-pid);
-    if signal::kill(group, Signal::SIGTERM).is_err() {
-        return;
-    }
-    std::thread::sleep(Duration::from_millis(50));
-    let _ = signal::kill(group, Signal::SIGKILL);
-}
-
 /// Accumulate bytes but keep only the first and last `limit / 2` bytes once the
 /// total exceeds `limit`, so an unbounded stream cannot exhaust memory while the
 /// human-relevant head and tail survive. The elision marker records how many
@@ -300,7 +284,7 @@ fn wait_with_timeout(
 ) -> std::io::Result<Option<std::process::ExitStatus>> {
     // Fast path: many plugin commands finish promptly. Poll once cheaply before
     // paying for a thread.
-    if let Some(status) = child.try_wait()? {
+    if let Some(status) = try_reap(child)? {
         return Ok(Some(status));
     }
 
@@ -322,7 +306,7 @@ fn wait_with_timeout(
     };
 
     let result = loop {
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = try_reap(child)? {
             break Ok(Some(status));
         }
         if std::time::Instant::now() >= deadline {
@@ -332,7 +316,7 @@ fn wait_with_timeout(
         // bounded recv so we still honor the deadline.
         match receiver.recv_timeout(Duration::from_millis(50)) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break child.try_wait(),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break try_reap(child),
         }
     };
 

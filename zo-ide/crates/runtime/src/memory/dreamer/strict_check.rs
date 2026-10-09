@@ -16,6 +16,9 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use decision_core::dreamer::PatchCheckResult;
+#[cfg(unix)]
+use plugins::bounded_child::{end_group, Group};
+use plugins::bounded_child::{reap, try_reap};
 
 use super::QuarantineCheckCommand;
 
@@ -118,7 +121,7 @@ fn spawn_and_wait(command: &mut Command) -> Result<(ExitStatus, Vec<u8>), &'stat
                 Some(diagnostic)
             } else {
                 terminate_check_tree(child.id());
-                let _ = child.wait();
+                let _ = reap(&mut child);
                 return Err("check_diagnostic_setup_error");
             }
         }
@@ -130,7 +133,7 @@ fn spawn_and_wait(command: &mut Command) -> Result<(ExitStatus, Vec<u8>), &'stat
         if let Some(diagnostic) = diagnostic.as_mut() {
             diagnostic.drain();
         }
-        match child.try_wait() {
+        match try_reap(&mut child) {
             Ok(Some(status)) => {
                 terminate_check_tree(child.id());
                 #[cfg(unix)]
@@ -140,7 +143,7 @@ fn spawn_and_wait(command: &mut Command) -> Result<(ExitStatus, Vec<u8>), &'stat
             }
             Ok(None) if Instant::now() >= deadline => {
                 terminate_check_tree(child.id());
-                let _ = child.wait();
+                let _ = reap(&mut child);
                 #[cfg(unix)]
                 let _ = finish_diagnostic(diagnostic);
                 return Err("check_timeout");
@@ -148,7 +151,7 @@ fn spawn_and_wait(command: &mut Command) -> Result<(ExitStatus, Vec<u8>), &'stat
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(_) => {
                 terminate_check_tree(child.id());
-                let _ = child.wait();
+                let _ = reap(&mut child);
                 #[cfg(unix)]
                 let _ = finish_diagnostic(diagnostic);
                 return Err("check_wait_error");
@@ -296,13 +299,7 @@ fn diagnostic_scope(diagnostic: &str, worktree: &Path, check_state: &Path) -> &'
 
 #[cfg(unix)]
 fn terminate_check_tree(pid: u32) {
-    use nix::sys::signal::{Signal, killpg};
-    use nix::unistd::Pid;
-
-    let Ok(pid) = i32::try_from(pid) else {
-        return;
-    };
-    let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+    let _ = end_group(pid, Group::Kill);
 }
 
 #[cfg(not(unix))]

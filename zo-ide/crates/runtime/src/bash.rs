@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+use plugins::bounded_child::note_reaped;
+#[cfg(unix)]
+use plugins::bounded_child::{end_group, Group};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 use tokio::runtime::Builder;
@@ -102,6 +105,11 @@ const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
 /// and fall back to the default in [`resolve_bash_timeout_ms`], mirroring
 /// `default_bash_timeout_ms`'s "0 must not instant-timeout" rule.
 const MIN_BASH_TIMEOUT_MS: u64 = 1_000;
+
+/// How long a run's process group has between SIGTERM and SIGKILL when the run
+/// times out or is cancelled (t-19897: the value the external `kill` pair used).
+#[cfg(unix)]
+const BASH_GROUP_GRACE: Duration = Duration::from_millis(50);
 
 /// Resolve the default bash timeout, honoring a `ZO_BASH_TIMEOUT_MS`
 /// override. A malformed or non-positive value falls back to the compiled
@@ -790,7 +798,6 @@ async fn execute_bash_async(
     // Captured before `child` is borrowed by the collect future. On Unix this is
     // the process-group leader's pid (== pgid), used to reap the whole tree on a
     // timeout below.
-    #[cfg(unix)]
     let child_pid = child.id();
 
     // Publish the group for the duration of the run so a user cancel (Esc once)
@@ -836,7 +843,7 @@ async fn execute_bash_async(
                 &spill,
                 SpillStream::Stderr,
             ),
-            child.wait(),
+            wait_child(&mut child, child_pid),
         );
         Ok::<_, io::Error>((out?, err?, status?))
     });
@@ -1225,24 +1232,21 @@ fn terminate_process_group(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
-    let group = format!("-{pid}");
-    let _ = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg("--")
-        .arg(&group)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    std::thread::sleep(Duration::from_millis(50));
-    let _ = std::process::Command::new("kill")
-        .arg("-KILL")
-        .arg("--")
-        .arg(&group)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = end_group(pid, Group::Terminate { grace: BASH_GROUP_GRACE });
+}
+
+/// Waits for a run's child to end, and records the reap for the order tests
+/// (t-19897). tokio forgets the pid once the child is awaited, so the caller
+/// reads it first and passes it in.
+async fn wait_child(
+    child: &mut tokio::process::Child,
+    pid: Option<u32>,
+) -> io::Result<std::process::ExitStatus> {
+    let status = child.wait().await;
+    if let Some(pid) = pid {
+        note_reaped(pid);
+    }
+    status
 }
 
 fn fail_closed_if_sandbox_unavailable(sandbox_status: &SandboxStatus) -> io::Result<()> {
