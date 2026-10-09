@@ -126,12 +126,15 @@ fn look_once(app: &AppHandle, watches: &mut HashMap<TermId, PaneWatch>) {
         let Some(output_at) = answer_door::output_clock(&held) else {
             continue;
         };
+        // Read before the pane's lock is taken: the agent map is never held inside it.
+        let agent_pane = state.agent_terms().contains_key(&term);
         let said = judge(
             watches.entry(term).or_default(),
             output_at,
             epoch_ms_now(),
             || {
-                let prompt = answer_door::secret_prompt(&held)?;
+                // A question is said only where a typed value may reach it.
+                let prompt = answer_door::secret_prompt(&held, agent_pane)?;
                 Some(SecretQuestion {
                     kind: prompt.kind,
                     line: prompt.line,

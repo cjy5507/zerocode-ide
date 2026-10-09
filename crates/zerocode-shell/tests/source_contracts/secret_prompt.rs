@@ -122,8 +122,8 @@ fn the_value_is_typed_through_the_answer_door_and_recorded_nowhere() {
     let terminal = strip_rust_comments(TERMINAL);
     let command = block_after(&terminal, "fn answer_secret(");
     assert!(
-        command.contains("type_secret_if_up"),
-        "the command types through the answer door, which reads the pane again first"
+        command.contains("answer_secret_into"),
+        "the command hands the value to the answer road, which types through the answer door"
     );
     for keep in BACKEND_KEEPS {
         assert!(
@@ -132,7 +132,19 @@ fn the_value_is_typed_through_the_answer_door_and_recorded_nowhere() {
         );
     }
     let answer_door = strip_rust_comments(ANSWER_DOOR);
+    let road = block_after(&answer_door, "fn answer_secret_into(");
+    assert!(
+        road.contains("type_secret_if_up") && road.contains("value_is_typable"),
+        "the road checks the value and then types it through the door"
+    );
+    for keep in BACKEND_KEEPS {
+        assert!(!road.contains(keep), "answer_secret_into names {keep}");
+    }
     let door = block_after(&answer_door, "fn type_secret_if_up(");
+    assert!(
+        door.contains("secret_route_open(&pty"),
+        "the door asks the route before it writes, under the same lock"
+    );
     assert!(
         door.contains("write_input(&typed)"),
         "the door writes the value and its return to the pane, and nowhere else"

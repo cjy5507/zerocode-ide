@@ -18,6 +18,10 @@ unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
 vte = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# The echo flag of a terminal is read with `tcgetattr` on the master descriptor.
+libc = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 # The ConPTY has no foreground process group; the lane reads the process
 # tree (Toolhelp) and image names (QueryFullProcessImageNameW) instead.

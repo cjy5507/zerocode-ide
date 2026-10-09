@@ -2031,7 +2031,9 @@ pub(crate) fn answer_approval(
 /// into the pane whose question it answers.
 ///
 /// Through the answer door, so the value goes in only while the pane still shows
-/// the same question (`line` and `kind`, as the card was raised). A value that is
+/// the same question (`line` and `kind`, as the card was raised), and only while
+/// a job of the pane's own holds its terminal without echo (`secret_route_open`).
+/// A value that is
 /// not one line of visible text is refused before it is held anywhere. The value
 /// is kept as bytes that are wiped when this call returns, and no log, record or
 /// ledger line names it.
@@ -2043,24 +2045,16 @@ pub(crate) fn answer_secret(
     line: String,
     value: String,
 ) -> Result<(), String> {
-    if !zerocode_core::secret_prompt::value_is_typable(value.as_bytes()) {
-        return Err(answer_door::SECRET_INVALID.to_string());
-    }
-    let bytes = zeroize::Zeroizing::new(value.into_bytes());
-    let Some(held) = state.terminals().handle(term) else {
-        return Err("터미널이 떠 있지 않습니다".to_string());
-    };
-    let expect = SecretPrompt { kind, line };
-    let lease = answer_door::answer_lease(term).map_err(answer_door::Refusal::into_message)?;
-    let typed = answer_door::type_secret_if_up(&held, &expect, &bytes)
-        .map_err(|error| error.to_string())?;
-    state.cadence().wake();
-    answer_door::settle_in_background(lease);
-    if typed {
-        Ok(())
-    } else {
-        Err(answer_door::QUESTION_CHANGED.to_string())
-    }
+    let held = state.terminals().handle(term);
+    let agent_pane = state.agent_terms().contains_key(&term);
+    answer_door::answer_secret_into(
+        held,
+        term,
+        SecretPrompt { kind, line },
+        value,
+        agent_pane,
+        &|| state.cadence().wake(),
+    )
 }
 
 #[tauri::command(async)]

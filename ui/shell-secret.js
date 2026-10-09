@@ -116,7 +116,7 @@ registerAskKind("secret", {
     say(el("ask-secret-hint"), () =>
       t(
         "secret.hint",
-        "입력한 값은 판에 한 번만 입력되고 어디에도 저장되지 않습니다 · 에이전트는 값을 받지 않습니다",
+        "입력한 값은 판에 한 번만 입력되고 이 창과 기록에는 남지 않습니다 · 에이전트가 입력을 받는 중에는 보내지 않습니다",
       ),
     );
     paintSecretRefusal();

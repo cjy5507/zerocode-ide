@@ -57,3 +57,8 @@ none | 0 | 암호 변경이 완료되었습니다.
 none | 0 | Password: | hunter2
 none | 1 | Password: | <blank>
 none | 3 | db: |   user: dev |   password: | <blank>
+# Look-alikes a pager and git print, and a question mysql asks: a prompt that asks for a
+# name or shows a colon is not a secret, and a password question with no quotes is one.
+none | 1 | a line of the file being paged | :
+none | 0 | Username for 'https://github.com':
+password | 0 | Enter password:

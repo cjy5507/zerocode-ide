@@ -742,10 +742,30 @@ impl PtyLane {
 
     /// Whether the terminal echoes what is typed into it, as its flags say now.
     ///
-    /// Not read yet: this answer is `None` until the flags are read.
+    /// `None` when the platform will not say: a ConPTY has no line discipline to
+    /// ask, and a descriptor that is closed or not a terminal answers nothing.
+    /// A caller reads `None` as "cannot tell", never as "does not echo".
     #[must_use]
     pub fn echo_on(&self) -> Option<bool> {
-        None
+        #[cfg(unix)]
+        {
+            let fd = self.master.as_raw_fd()?;
+            let mut flags = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: `tcgetattr` writes one `termios` through the pointer it is
+            // given and returns 0 only when it has; `fd` is the master we hold.
+            let read = unsafe { libc::tcgetattr(fd, flags.as_mut_ptr()) };
+            if read != 0 {
+                return None;
+            }
+            // SAFETY: the call above returned 0, so `flags` is initialised.
+            let flags = unsafe { flags.assume_init() };
+            Some(flags.c_lflag & libc::ECHO != 0)
+        }
+
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 
     /// Who holds this ConPTY, from one process snapshot.

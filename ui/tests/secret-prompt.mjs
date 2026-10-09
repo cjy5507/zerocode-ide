@@ -30,7 +30,7 @@ export const SECRET_WORDS = Object.freeze({
     send: "보내기",
     cancel: "취소",
     label: "입력",
-    hint: "입력한 값은 판에 한 번만 입력되고 어디에도 저장되지 않습니다 · 에이전트는 값을 받지 않습니다",
+    hint: "입력한 값은 판에 한 번만 입력되고 이 창과 기록에는 남지 않습니다 · 에이전트가 입력을 받는 중에는 보내지 않습니다",
     empty: "값을 입력해 주세요",
     busy: "다른 답이 아직 가는 중입니다 — 잠시 뒤 다시 보내 주세요",
   },
@@ -39,7 +39,7 @@ export const SECRET_WORDS = Object.freeze({
     send: "Send",
     cancel: "Cancel",
     label: "Value",
-    hint: "The value is typed into the pane once and stored nowhere · the agent never receives it",
+    hint: "The value is typed into the pane once and kept by neither this window nor any record · it is not sent while an agent takes the input",
     empty: "Type the value first",
     busy: "Another answer is still on its way — send again in a moment",
   },
@@ -48,7 +48,7 @@ export const SECRET_WORDS = Object.freeze({
     send: "送信",
     cancel: "キャンセル",
     label: "値",
-    hint: "入力した値はペインに一度だけ入力され、どこにも保存されません · エージェントは値を受け取りません",
+    hint: "入力した値はペインに一度だけ入力され、この画面にも記録にも残りません · エージェントが入力を受けている間は送りません",
     empty: "値を入力してください",
     busy: "別の回答がまだ送信中です — しばらくしてから再度送ってください",
   },
@@ -57,7 +57,7 @@ export const SECRET_WORDS = Object.freeze({
     send: "发送",
     cancel: "取消",
     label: "内容",
-    hint: "输入的内容只会在该窗格中输入一次，不会保存在任何地方 · 智能体不会收到它",
+    hint: "输入的内容只会在该窗格中输入一次，本窗口和任何记录都不会保留 · 智能体正在接收输入时不会发送",
     empty: "请先输入内容",
     busy: "另一个回答仍在发送中，请稍后再发送",
   },
@@ -66,7 +66,7 @@ export const SECRET_WORDS = Object.freeze({
     send: "Enviar",
     cancel: "Cancelar",
     label: "Valor",
-    hint: "El valor se escribe una vez en el panel y no se guarda en ningún sitio · el agente no lo recibe",
+    hint: "El valor se escribe una vez en el panel y ni esta ventana ni ningún registro lo guardan · no se envía mientras un agente tiene la entrada",
     empty: "Escribe primero el valor",
     busy: "Otra respuesta sigue en camino: envía de nuevo en un momento",
   },
@@ -161,6 +161,12 @@ const installSecretHands = () => {
     if (typeof T.reply === "string") throw new Error(T.reply);
     return null;
   };
+  // The three roads a key or a string takes into a pane. Each is recorded even
+  // where the stub map does not name it yet, so a value that leaks through any of
+  // them shows.
+  for (const name of ["term_text", "term_key", "key_input"]) {
+    window.__ANSWER__[name] ??= () => null;
+  }
   // Every command the page calls passes through one record, so a search can see
   // what each of them was given.
   for (const name of Object.keys(window.__ANSWER__)) {
@@ -280,6 +286,45 @@ async function typedOnce(browser, origin, ok) {
       return { shown: T.look().shown, calls: T.calls("answer_secret").length };
     }, WAIT);
     ok("an answered question that has not changed is not raised again", again.shown === false && again.calls === 1, JSON.stringify(again));
+  });
+}
+
+/* The value typed with the keyboard, as a person types it: real key events into
+ * the focused field, not a write to its value. The roads a key or a string takes
+ * into a pane must carry none of it, whole or in any piece of six characters. */
+async function typedByKeyboard(browser, origin, ok) {
+  await scenario(browser, origin, "typed by the keyboard", ok, async (page) => {
+    await page.evaluate(async (wait) => {
+      const T = window.__ST__;
+      T.say([wait]);
+      await T.settle();
+    }, WAIT);
+    await page.focus("#ask-secret-input");
+    await page.keyboard.type(SENTINEL);
+    await page.keyboard.press("Enter");
+    const pieces = Array.from({ length: SENTINEL.length - 5 }, (_, at) => SENTINEL.slice(at, at + 6));
+    const sent = await page.evaluate(async (wanted) => {
+      const T = window.__ST__;
+      await T.settle(300);
+      const forwarded = ["term_text", "term_key", "key_input"].flatMap((name) => T.calls(name));
+      return {
+        calls: T.calls("answer_secret").length,
+        sent: window.__SECRET_SENT__ ?? null,
+        forwarded: forwarded.length,
+        carried: forwarded.filter((call) => wanted.some((piece) => call.args.includes(piece))).map((call) => call.name),
+      };
+    }, pieces);
+    ok(
+      "a value typed with the keyboard is sent once, and no key or text call carries any of it",
+      sent.calls === 1 && sent.sent?.value === SENTINEL && sent.carried.length === 0,
+      JSON.stringify({ calls: sent.calls, forwarded: sent.forwarded, carried: sent.carried }),
+    );
+    const kept = await page.evaluate(keepsOf);
+    ok(
+      "the value typed with the keyboard is kept by no document, storage, console or other call",
+      !kept.includes(SENTINEL),
+      "searched the document, both storages, the console and every backend call but the one that types",
+    );
   });
 }
 
@@ -462,6 +507,7 @@ async function timing(browser, origin, ok) {
 export async function testSecretPrompt(browser, origin, ok) {
   await raised(browser, origin, ok);
   await typedOnce(browser, origin, ok);
+  await typedByKeyboard(browser, origin, ok);
   await cancelled(browser, origin, ok);
   await refusedWhileBusy(browser, origin, ok);
   await questionChanged(browser, origin, ok);
