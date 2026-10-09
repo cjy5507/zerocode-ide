@@ -20,7 +20,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use e2e::harness::{history_rows_raw, PtyRun, Screen};
+use e2e::harness::{find_bytes, history_rows_raw, PtyRun, Screen, SYNC_END};
 use e2e::scripted::ScriptedAnthropicService;
 use tempfile::TempDir;
 
@@ -666,18 +666,14 @@ async fn a_pane_grown_without_sigwinch_and_without_a_key_is_put_right_within_the
     let _ = run.finish();
 }
 
-/// The painter closes every frame with this sequence (`SYNC_END` in
-/// `painter.rs`, which is private to the crate). A resize repaints the transcript
-/// inside one frame, so the repaint has written every row it owes once the frame
-/// carrying the answer's last line has ended.
-const FRAME_END: &[u8] = b"\x1b[?2026l";
-
-/// The offset just past the first [`FRAME_END`] that follows the first
-/// occurrence of `words` in `bytes`, or `None` while that frame has not ended.
+/// The offset just past the first [`SYNC_END`] that follows the first occurrence
+/// of `words` in `bytes`, or `None` while that frame has not ended. A resize
+/// repaints the transcript inside one frame, so the repaint has written every row
+/// it owes once the frame carrying the answer's last line has ended.
 fn frame_end_after(bytes: &[u8], words: &[u8]) -> Option<usize> {
-    let at = bytes.windows(words.len()).position(|window| window == words)?;
-    let end = bytes[at..].windows(FRAME_END.len()).position(|window| window == FRAME_END)?;
-    Some(at + end + FRAME_END.len())
+    let at = find_bytes(bytes, words)?;
+    let end = find_bytes(&bytes[at..], SYNC_END)?;
+    Some(at + end + SYNC_END.len())
 }
 
 /// Waits until the repaint a resize made has ended and returns the capture's
@@ -751,6 +747,10 @@ async fn a_pane_shrunk_with_sigwinch_loses_no_rows() {
     // still streams cuts its answer and says nothing about the wrap.
     let _ = wait_until_idle_after_the_answer(&mut run, 24).await;
     let capture = run.finish();
+    assert!(
+        max_cursor_row(&capture[before_resize..before_second]) <= 24,
+        "the repaint itself must not address rows past the pane's new floor"
+    );
     assert_second_turn_at_the_floor(&capture[before_second..]);
 }
 
@@ -783,6 +783,10 @@ async fn a_pane_shrunk_without_sigwinch_loses_no_rows() {
     run.wait_for_after("영향 없습니다", before_second, TEST_TIMEOUT);
     let _ = wait_until_idle_after_the_answer(&mut run, 24).await;
     let capture = run.finish();
+    assert!(
+        max_cursor_row(&capture[before_resize..before_second]) <= 24,
+        "the repaint itself must not address rows past the pane's new floor"
+    );
     assert_second_turn_at_the_floor(&capture[before_second..]);
 }
 

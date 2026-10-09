@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use e2e::contract::{self, Rule};
-use e2e::harness::{history_rows_raw, run_pipe, run_pipe_with_env, visible_row_occupancy, PtyRun, Screen};
+use e2e::harness::{find_bytes, history_rows_raw, run_pipe, run_pipe_with_env, visible_row_occupancy, PtyRun, Screen, SYNC_END};
 use e2e::scripted::{user_text_contains, ScriptedAnthropicService};
 use mock_anthropic_service::{CapturedRequest, MockAnthropicService};
 use tempfile::TempDir;
@@ -192,7 +192,7 @@ fn mask_volatile(bytes: &[u8], layout: &Layout) -> Vec<u8> {
 /// 가린다. 행 단위라서 안전하다(스트림 전체에 쓰면 뒤를 전부 잘라 먹는다).
 fn mask_history_row(row: &[u8], layout: &Layout) -> Vec<u8> {
     let mut masked = mask_volatile(row, layout);
-    if let Some(at) = find(&masked, b"directory:") {
+    if let Some(at) = find_bytes(&masked, b"directory:") {
         masked.truncate(at + b"directory:".len());
         masked.extend_from_slice(b" <cwd>");
     }
@@ -239,12 +239,6 @@ fn replace_bytes(haystack: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
         index += 1;
     }
     out
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 /// 골든과 견준다. `ZO_E2E_BLESS=1` 이면 대신 **다시 쓴다** — 기본 실행에서는
@@ -2530,7 +2524,7 @@ async fn e2e_a_line_typed_during_a_running_tool_reaches_the_model() {
     assert!(
         !history_rows_raw(&preview)
             .iter()
-            .any(|row| find(row, "아직 도는중?".as_bytes()).is_some()),
+            .any(|row| find_bytes(row, "아직 도는중?".as_bytes()).is_some()),
         "a pending steer was committed before the runtime consumed it"
     );
     run.wait_for("yes, still running", TEST_TIMEOUT);
@@ -2557,7 +2551,7 @@ async fn e2e_a_line_typed_during_a_running_tool_reaches_the_model() {
     assert!(!screen.contains("⤷ steering:"));
     let steer_rows = history_rows_raw(&capture)
         .into_iter()
-        .filter(|row| find(row, "아직 도는중?".as_bytes()).is_some())
+        .filter(|row| find_bytes(row, "아직 도는중?".as_bytes()).is_some())
         .count();
     assert_eq!(steer_rows, 1, "the consumed steer must be one user row");
     assert_history_golden(
@@ -2587,7 +2581,7 @@ async fn e2e_tab_queues_a_follow_up_turn_without_optimistic_history() {
     assert!(
         !history_rows_raw(&preview)
             .iter()
-            .any(|row| find(row, b"R34_QUEUED_FOLLOW_UP").is_some()),
+            .any(|row| find_bytes(row, b"R34_QUEUED_FOLLOW_UP").is_some()),
         "a Tab-queued draft was committed before its turn started"
     );
 
@@ -2610,7 +2604,7 @@ async fn e2e_tab_queues_a_follow_up_turn_without_optimistic_history() {
     );
     let queued_rows = history_rows_raw(&capture)
         .into_iter()
-        .filter(|row| find(row, b"R34_QUEUED_FOLLOW_UP").is_some())
+        .filter(|row| find_bytes(row, b"R34_QUEUED_FOLLOW_UP").is_some())
         .count();
     assert_eq!(queued_rows, 1, "the queued turn must commit one user row");
 }
@@ -2647,7 +2641,7 @@ async fn e2e_alt_up_edits_the_latest_queued_message() {
     let rows = history_rows_raw(&capture);
     assert_eq!(
         rows.iter()
-            .filter(|row| find(row, b"R34_QUEUED_DRAFT").is_some())
+            .filter(|row| find_bytes(row, b"R34_QUEUED_DRAFT").is_some())
             .count(),
         1,
         "the edited draft must commit only when its steer is consumed"
@@ -2688,7 +2682,7 @@ async fn e2e_esc_with_pending_steer_resubmits_it_as_a_fresh_turn() {
     assert_eq!(
         history_rows_raw(&capture)
             .iter()
-            .filter(|row| find(row, b"R34_SEND_NOW").is_some())
+            .filter(|row| find_bytes(row, b"R34_SEND_NOW").is_some())
             .count(),
         1,
         "fresh steer turn must have exactly one user row"
@@ -3768,10 +3762,9 @@ fn growing_pty(layout: &Layout, base_url: &str, cursor_row: u16) -> PtyRun {
 
 fn wait_for_bottom_anchored_frame(run: &mut PtyRun, grow_at: usize) {
     const LAST_ROW_CUP: &[u8] = b"\x1b[60;1H";
-    const SYNC_END: &[u8] = b"\x1b[?2026l";
     run.wait_until(grow_at, TEST_TIMEOUT, |bytes| {
-        find(bytes, LAST_ROW_CUP)
-            .is_some_and(|last_row| find(&bytes[last_row..], SYNC_END).is_some())
+        find_bytes(bytes, LAST_ROW_CUP)
+            .is_some_and(|last_row| find_bytes(&bytes[last_row..], SYNC_END).is_some())
     });
 }
 
@@ -4763,7 +4756,7 @@ async fn e2e_resume_after_the_answer_died_mid_stream_sends_a_valid_request() {
     doomed.kill9();
     let capture = doomed.finish();
     assert!(
-        find(&capture, DRIBBLE_TAIL.as_bytes()).is_none(),
+        find_bytes(&capture, DRIBBLE_TAIL.as_bytes()).is_none(),
         "the kill was too late — the whole answer had already landed",
     );
 
@@ -8113,7 +8106,7 @@ async fn e2e_push_notification_is_skipped_while_the_person_is_at_the_keyboard() 
         bodies[1]
     );
     assert!(
-        find(&capture, b"\x1b]777;notify;").is_none(),
+        find_bytes(&capture, b"\x1b]777;notify;").is_none(),
         "a skipped push must not ring the terminal"
     );
 }
@@ -8157,7 +8150,7 @@ async fn e2e_push_notification_rings_the_bare_terminal_when_nobody_is_at_the_key
         "the notification carries the message: {payload:?}"
     );
     assert!(
-        find(&capture, b"\x1b]9;Build is green; merge when you are back\x07").is_some(),
+        find_bytes(&capture, b"\x1b]9;Build is green; merge when you are back\x07").is_some(),
         "iTerm2's OSC 9 carries the same body"
     );
     // `split` yields one more piece than there are BELs.
