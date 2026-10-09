@@ -572,3 +572,179 @@ fn a_report_that_appears_wins_over_a_remembered_answer() {
         Ok((reported.clone(), Via::Reported))
     );
 }
+
+// ------------------------------------------ the found answers asked again (t-43204)
+
+#[test]
+fn a_file_found_through_the_open_files_moves_to_the_file_the_pane_opens_next() {
+    let listing = vec![claude("aaa"), claude("bbb")];
+    let on_a = Disk {
+        open: vec![claude("aaa")],
+        ..disk_of(listing.clone())
+    };
+    let on_b = Disk {
+        open: vec![claude("bbb")],
+        ..disk_of(listing)
+    };
+    let memo = Mutex::new(Memo::<u32>::default());
+    let start = Instant::now();
+    on_a.clock.set(Some(start));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &on_a),
+        Ok((claude("aaa"), Via::OpenFile))
+    );
+    // The pane now holds B open. A stands until the interval has passed.
+    on_b.clock
+        .set(Some(start + OPEN_FILE_RECHECK - Duration::from_millis(1)));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &on_b),
+        Ok((claude("aaa"), Via::OpenFile)),
+        "inside the interval the file found earlier stands"
+    );
+    on_b.clock.set(Some(start + OPEN_FILE_RECHECK));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &on_b),
+        Ok((claude("bbb"), Via::OpenFile)),
+        "at the interval the file the pane holds open now is named"
+    );
+}
+
+#[test]
+fn a_file_found_through_the_open_files_stands_while_nothing_is_open() {
+    let listing = vec![claude("aaa")];
+    let on_a = Disk {
+        open: vec![claude("aaa")],
+        ..disk_of(listing.clone())
+    };
+    let nothing_open = disk_of(listing);
+    let memo = Mutex::new(Memo::<u32>::default());
+    let start = Instant::now();
+    on_a.clock.set(Some(start));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &on_a),
+        Ok((claude("aaa"), Via::OpenFile))
+    );
+    // Ten minutes with nothing open: every ask finds no file, and A stands at each.
+    for second in 1..=600 {
+        nothing_open
+            .clock
+            .set(Some(start + Duration::from_secs(second)));
+        assert_eq!(
+            bind_remembered(&memo, 7, "claude", None, None, &nothing_open),
+            Ok((claude("aaa"), Via::OpenFile)),
+            "at {second} s, with nothing open, the file found earlier stands"
+        );
+    }
+}
+
+#[test]
+fn a_file_found_through_the_screen_is_asked_again_after_its_interval() {
+    let line_b = "Now the drain test is the second conversation";
+    let listing = vec![claude("aaa"), claude("bbb")];
+    let texts = BTreeMap::from([
+        (claude("aaa"), format!("user: {LINE}")),
+        (claude("bbb"), format!("user: {line_b}")),
+    ]);
+    let on_a = Disk {
+        texts: texts.clone(),
+        screen: vec![LINE.to_string()],
+        ..disk_of(listing.clone())
+    };
+    let on_b = Disk {
+        texts,
+        screen: vec![line_b.to_string()],
+        ..disk_of(listing)
+    };
+    let memo = Mutex::new(Memo::<u32>::default());
+    let start = Instant::now();
+    on_a.clock.set(Some(start));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &on_a),
+        Ok((claude("aaa"), Via::ScreenMatch))
+    );
+    on_b.clock
+        .set(Some(start + SCREEN_RECHECK - Duration::from_millis(1)));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &on_b),
+        Ok((claude("aaa"), Via::ScreenMatch)),
+        "inside the interval the file found earlier stands"
+    );
+    on_b.clock.set(Some(start + SCREEN_RECHECK));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &on_b),
+        Ok((claude("bbb"), Via::ScreenMatch)),
+        "at the interval the file that holds the new screen line is named"
+    );
+}
+
+// ------------------------------------------ the no-file answers backed off (t-43204)
+
+#[test]
+fn consecutive_no_file_answers_wait_twice_as_long_each_time_up_to_the_cap() {
+    let disk = disk_of(Vec::new());
+    let memo = Mutex::new(Memo::<u32>::default());
+    let mut asked_at = Instant::now();
+    disk.clock.set(Some(asked_at));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk),
+        Err(Absent::NoSessionFile)
+    );
+    for wait in [2, 4, 8, 16, 32, 60, 60] {
+        let wait = Duration::from_secs(wait);
+        let walks = disk.walks.get();
+        disk.clock
+            .set(Some(asked_at + wait - Duration::from_millis(1)));
+        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk);
+        assert_eq!(
+            disk.walks.get(),
+            walks,
+            "the store is not listed before the {wait:?} wait is over"
+        );
+        disk.clock.set(Some(asked_at + wait));
+        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk);
+        assert_eq!(
+            disk.walks.get(),
+            walks + 1,
+            "the store is listed once the {wait:?} wait is over"
+        );
+        asked_at += wait;
+    }
+}
+
+#[test]
+fn a_changed_question_waits_the_first_interval_again() {
+    let disk = disk_of(Vec::new());
+    let memo = Mutex::new(Memo::<u32>::default());
+    let mut asked_at = Instant::now();
+    disk.clock.set(Some(asked_at));
+    bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk);
+    for wait in [2, 4, 8, 16, 32, 60] {
+        asked_at += Duration::from_secs(wait);
+        disk.clock.set(Some(asked_at));
+        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk);
+    }
+    // A new session id is asked at once, and its next ask comes ABSENT_RECHECK later.
+    let walks = disk.walks.get();
+    disk.clock.set(Some(asked_at));
+    bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk);
+    assert_eq!(
+        disk.walks.get(),
+        walks + 1,
+        "a new question is asked at once"
+    );
+    disk.clock
+        .set(Some(asked_at + ABSENT_RECHECK - Duration::from_millis(1)));
+    bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk);
+    assert_eq!(
+        disk.walks.get(),
+        walks + 1,
+        "inside the first interval the new question is not asked again"
+    );
+    disk.clock.set(Some(asked_at + ABSENT_RECHECK));
+    bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk);
+    assert_eq!(
+        disk.walks.get(),
+        walks + 2,
+        "after the first interval the new question is asked again"
+    );
+}

@@ -413,13 +413,29 @@ mod tests {
             .collect()
     }
 
+    /// The most one first-line read takes from a file: the reader's default buffer.
+    const PROBE_BUFFER: u64 = 8 * 1024;
+
+    /// The bytes a read of `path` takes at most: the file's length, capped at `cap`.
+    fn read_bytes(path: &Path, cap: u64) -> u64 {
+        std::fs::metadata(path).map_or(0, |meta| meta.len().min(cap))
+    }
+
     /// The window's facts over a synthetic home, with each read counted and a
     /// screen the test gives. A panel with no PTY shows no screen of its own.
+    /// `clock` dates the memory's answers; unset, it is the real clock.
     struct Counted {
         facts: PaneFacts,
         screen: Vec<String>,
         walks: Cell<usize>,
         first_lines: Cell<usize>,
+        tails: Cell<usize>,
+        /// Bytes the screen's tail reads took, and bytes the first-line reads
+        /// took at most ([`PROBE_BUFFER`] each, or the whole file when smaller).
+        tail_bytes: Cell<u64>,
+        probe_bytes: Cell<u64>,
+        opens: Cell<usize>,
+        clock: Cell<Option<Instant>>,
     }
 
     impl Counted {
@@ -433,6 +449,11 @@ mod tests {
                 screen: screen.iter().map(|line| line.to_string()).collect(),
                 walks: Cell::new(0),
                 first_lines: Cell::new(0),
+                tails: Cell::new(0),
+                tail_bytes: Cell::new(0),
+                probe_bytes: Cell::new(0),
+                opens: Cell::new(0),
+                clock: Cell::new(None),
             }
         }
     }
@@ -458,10 +479,13 @@ mod tests {
 
         fn first_line_id(&self, path: &Path) -> Option<String> {
             self.first_lines.set(self.first_lines.get() + 1);
+            self.probe_bytes
+                .set(self.probe_bytes.get() + read_bytes(path, PROBE_BUFFER));
             self.facts.first_line_id(path)
         }
 
         fn open_files(&self) -> Vec<PathBuf> {
+            self.opens.set(self.opens.get() + 1);
             self.facts.open_files()
         }
 
@@ -470,7 +494,14 @@ mod tests {
         }
 
         fn text_of(&self, path: &Path) -> Option<String> {
+            self.tails.set(self.tails.get() + 1);
+            self.tail_bytes
+                .set(self.tail_bytes.get() + read_bytes(path, SCREEN_TEXT_BYTES));
             self.facts.text_of(path)
+        }
+
+        fn now(&self) -> Instant {
+            self.clock.get().unwrap_or_else(Instant::now)
         }
     }
 
@@ -675,6 +706,169 @@ mod tests {
                 None,
             );
             checks.push(("screen-200-miss", got, Err(Absent::NoScreenMatch)));
+        }
+
+        for (label, got, want) in checks {
+            assert_eq!(got, want, "{label}: the answer");
+        }
+    }
+
+    // ------------------------------------- the cost per minute (t-43204)
+
+    /// The first line of a zo session file: zo's `session_meta` record with the
+    /// five keys `vault.rs` documents (no cwd, epoch-ms times). The values only
+    /// give the shape its size; they name no session.
+    fn zo_first_line(id: &str) -> String {
+        format!(
+            r#"{{"created_at_ms":1785288389469,"session_id":"{id}","type":"session_meta","updated_at_ms":1785288401000,"version":1}}"#
+        )
+    }
+
+    /// `count` zo session files in one project's sessions folder. Each file runs
+    /// on past one reader buffer, as a real session does.
+    fn write_zo_store(home: &Path, count: usize) {
+        let folder = home.join(".zo/projects/Users-dev-repo/sessions");
+        for n in 0..count {
+            let id = format!("session-1785288389469-{n}");
+            let text = format!("{}\n{}\n", zo_first_line(&id), "x".repeat(16 * 1024));
+            write_text(&folder.join(format!("{id}.jsonl")), &text);
+        }
+    }
+
+    /// What a pane's asks have cost so far: asks (store listings), first-line
+    /// reads, screen tail reads, bytes read, lsof calls, and the wall time spent.
+    #[derive(Clone, Copy, Default)]
+    struct Costs {
+        asks: usize,
+        probes: usize,
+        tails: usize,
+        bytes: u64,
+        opens: usize,
+        ms: f64,
+    }
+
+    impl Costs {
+        fn since(self, earlier: Costs) -> Costs {
+            Costs {
+                asks: self.asks - earlier.asks,
+                probes: self.probes - earlier.probes,
+                tails: self.tails - earlier.tails,
+                bytes: self.bytes - earlier.bytes,
+                opens: self.opens - earlier.opens,
+                ms: self.ms - earlier.ms,
+            }
+        }
+    }
+
+    fn costs_of(facts: &Counted, ms: f64) -> Costs {
+        Costs {
+            asks: facts.walks.get(),
+            probes: facts.first_lines.get(),
+            tails: facts.tails.get(),
+            bytes: facts.tail_bytes.get() + facts.probe_bytes.get(),
+            opens: facts.opens.get(),
+            ms,
+        }
+    }
+
+    /// One pane's answer over three simulated minutes, asked once a second as
+    /// the window's helper page asks. Prints the third minute's costs and the
+    /// three minutes together, and returns the last answer.
+    fn per_minute(
+        label: &str,
+        slug: &str,
+        id: Option<&str>,
+        facts: &Counted,
+    ) -> Result<(PathBuf, Via), Absent> {
+        let memo = Mutex::new(Memo::<u32>::default());
+        let start = Instant::now();
+        let mut ms = 0.0;
+        let mut marks = Vec::new();
+        let mut answer = None;
+        for second in 0..180u64 {
+            if second % 60 == 0 {
+                marks.push(costs_of(facts, ms));
+            }
+            facts.clock.set(Some(start + Duration::from_secs(second)));
+            let call = Instant::now();
+            let got = bind_remembered(&memo, 7, slug, None, id, facts);
+            ms += call.elapsed().as_secs_f64() * 1000.0;
+            answer = Some(got);
+        }
+        marks.push(costs_of(facts, ms));
+        let (third, all) = (marks[3].since(marks[2]), marks[3].since(marks[0]));
+        let answer = answer.expect("the loop asks at least once");
+        println!(
+            "t-43204 per minute {label}: third minute asks={} probes={} tails={} bytes={} \
+             opens={} ms={:.3}; three minutes asks={} probes={} tails={} bytes={} opens={} \
+             ms={:.3}; answer={:?}",
+            third.asks,
+            third.probes,
+            third.tails,
+            third.bytes,
+            third.opens,
+            third.ms,
+            all.asks,
+            all.probes,
+            all.tails,
+            all.bytes,
+            all.opens,
+            all.ms,
+            answer.as_ref().map(|(_, via)| via),
+        );
+        answer
+    }
+
+    /// The cost one pane's answer keeps per simulated minute (herdr 4 follow-up,
+    /// t-43204). Three scenes: (zo) 300 zo files and a session id no file
+    /// carries, which stays unresolved; (screen) 200 Claude files of 256 KiB and
+    /// a screen line no file holds, which stays unresolved; (screen, found) the
+    /// same store and a screen line one file holds, which stays found. Checks
+    /// each answer. Run it with
+    /// `cargo test -p zerocode-shell measure_the_unresolved_pane_per_minute -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement: run with --ignored --nocapture"]
+    fn measure_the_unresolved_pane_per_minute() {
+        type Answer = Result<(PathBuf, Via), Absent>;
+        let mut checks: Vec<(&str, Answer, Answer)> = Vec::new();
+
+        {
+            let dir = tempfile::tempdir().expect("a temporary home");
+            let home = dir.path().canonicalize().expect("a real home");
+            write_zo_store(&home, 300);
+            let facts = Counted::at(&home, &[]);
+            let got = per_minute(
+                "zo 300 files, session id held by no file",
+                "zo",
+                Some("session-1785288389469-999"),
+                &facts,
+            );
+            checks.push(("zo-300", got, Err(Absent::NoSessionFile)));
+        }
+        {
+            let dir = tempfile::tempdir().expect("a temporary home");
+            let home = dir.path().canonicalize().expect("a real home");
+            let paths = write_screen_store(&home, 123);
+            let facts = Counted::at(&home, &["Nothing in this store says this sentence"]);
+            let got = per_minute(
+                "screen 200 files, no file holds the line",
+                "claude",
+                None,
+                &facts,
+            );
+            checks.push(("screen-200-miss", got, Err(Absent::NoScreenMatch)));
+            let facts = Counted::at(&home, &[SCREEN_LINE]);
+            let got = per_minute(
+                "screen 200 files, one file holds the line",
+                "claude",
+                None,
+                &facts,
+            );
+            checks.push((
+                "screen-200-match",
+                got,
+                Ok((paths[123].clone(), Via::ScreenMatch)),
+            ));
         }
 
         for (label, got, want) in checks {

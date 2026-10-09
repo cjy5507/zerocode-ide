@@ -40,6 +40,20 @@ use crate::vault::{self, AgentSource, IdPlacement};
 /// there, so only the absent answers wait.
 pub const ABSENT_RECHECK: Duration = Duration::from_secs(2);
 
+/// The longest wait between two "no file" answers in a row (herdr 4 follow-up,
+/// t-43204). The wait starts at [`ABSENT_RECHECK`] and doubles with each "no
+/// file" answer in a row, up to this.
+pub const ABSENT_RECHECK_MAX: Duration = Duration::from_secs(60);
+
+/// How long a file found through the open files stands before the rule asks
+/// again (t-43204). One ask is one lsof call on macOS.
+pub const OPEN_FILE_RECHECK: Duration = Duration::from_secs(10);
+
+/// How long a file found through the screen stands before the rule asks again
+/// (t-43204). One ask reads the end of every session file in the folder (up to
+/// [`SCREEN_CANDIDATES_MAX`]), so it waits longer than the open-file route.
+pub const SCREEN_RECHECK: Duration = Duration::from_secs(60);
+
 /// Shorter screen lines are too common to name a file: a prompt's chrome or a
 /// one-word answer appears in many transcripts at once.
 pub const SCREEN_LINE_CHARS: usize = 24;
