@@ -143,28 +143,97 @@ pub fn observe_exit(_pid: u32, _until: Option<Instant>) -> Option<bool> {
 /// signal for those), has nothing left to stop, which is not an error.
 #[cfg(unix)]
 pub fn end_group(pid: u32, how: Group) -> Result<(), nix::errno::Errno> {
-    use nix::errno::Errno;
-    use nix::sys::signal::{killpg, Signal};
-
-    let Some(group) = spawned_group(pid) else {
+    let Some(end) = GroupEnd::begin(pid, how) else {
         return Ok(());
     };
-    record_ended(pid);
-    let nothing_left = |result: Result<(), Errno>| match result {
+    if let Some(grace) = end.first()? {
+        std::thread::sleep(grace);
+        end.finish()?;
+    }
+    Ok(())
+}
+
+/// One group end, split at its grace so that a caller can hold its own lock
+/// around each half (t-19897). `begin` names the group. `first` sends SIGTERM,
+/// or SIGKILL for `Group::Kill`, and says how long to wait before `finish`, which
+/// sends SIGKILL. The policy for ESRCH and EPERM lives here, once.
+#[cfg(unix)]
+pub struct GroupEnd {
+    pid: u32,
+    group: nix::unistd::Pid,
+    how: Group,
+}
+
+#[cfg(unix)]
+impl GroupEnd {
+    /// `None` for a pid that this module may not signal (see `spawned_group`).
+    #[must_use]
+    pub fn begin(pid: u32, how: Group) -> Option<Self> {
+        Some(Self {
+            pid,
+            group: spawned_group(pid)?,
+            how,
+        })
+    }
+
+    /// Sends the first signal. `Ok(Some(grace))`: the group may remain, and
+    /// `finish` must follow once `grace` has passed. `Ok(None)`: nothing is left.
+    pub fn first(&self) -> Result<Option<Duration>, nix::errno::Errno> {
+        use nix::errno::Errno;
+        use nix::sys::signal::{killpg, Signal};
+
+        record_ended(self.pid);
+        match self.how {
+            Group::Kill => nothing_left(killpg(self.group, Signal::SIGKILL)).map(|()| None),
+            Group::Terminate { grace } => match killpg(self.group, Signal::SIGTERM) {
+                Ok(()) => Ok(Some(grace)),
+                Err(Errno::ESRCH | Errno::EPERM) => Ok(None),
+                Err(error) => Err(error),
+            },
+        }
+    }
+
+    /// Sends SIGKILL, after the grace that `first` named.
+    pub fn finish(&self) -> Result<(), nix::errno::Errno> {
+        use nix::sys::signal::{killpg, Signal};
+        nothing_left(killpg(self.group, Signal::SIGKILL))
+    }
+}
+
+/// `Ok` for a signal that found nothing to stop (ESRCH), or only zombies (EPERM).
+#[cfg(unix)]
+fn nothing_left(result: Result<(), nix::errno::Errno>) -> Result<(), nix::errno::Errno> {
+    use nix::errno::Errno;
+    match result {
         Ok(()) | Err(Errno::ESRCH | Errno::EPERM) => Ok(()),
         Err(error) => Err(error),
-    };
-    match how {
-        Group::Kill => nothing_left(killpg(group, Signal::SIGKILL)),
-        Group::Terminate { grace } => {
-            match killpg(group, Signal::SIGTERM) {
-                Ok(()) => {}
-                Err(Errno::ESRCH | Errno::EPERM) => return Ok(()),
-                Err(error) => return Err(error),
+    }
+}
+
+/// Reaps the child if it has exited, and returns its status; `None` while it runs.
+/// Where its exit can be seen without reaping, the group is ended first when
+/// `sweep` asks for it, while the leader is still unreaped, and only then is the
+/// child reaped. Where that look does not exist, the child is reaped as
+/// `try_reap` does, and no group is ended.
+pub fn reap_if_exited(child: &mut Child, sweep: Option<Group>) -> io::Result<Option<ExitStatus>> {
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        match observe_exit(pid, Some(Instant::now())) {
+            Some(true) => {
+                if let Some(how) = sweep {
+                    let _ = end_group(pid, how);
+                }
+                reap(child).map(Some)
             }
-            std::thread::sleep(grace);
-            nothing_left(killpg(group, Signal::SIGKILL))
+            Some(false) => Ok(None),
+            None => try_reap(child),
         }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = sweep;
+        try_reap(child)
     }
 }
 

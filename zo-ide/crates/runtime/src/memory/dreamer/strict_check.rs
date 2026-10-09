@@ -17,8 +17,8 @@ use std::process::Stdio;
 
 use decision_core::dreamer::PatchCheckResult;
 #[cfg(unix)]
-use plugins::bounded_child::{end_group, Group};
-use plugins::bounded_child::{reap, try_reap};
+use plugins::bounded_child::end_group;
+use plugins::bounded_child::{reap, reap_if_exited, Group};
 
 use super::QuarantineCheckCommand;
 
@@ -133,9 +133,8 @@ fn spawn_and_wait(command: &mut Command) -> Result<(ExitStatus, Vec<u8>), &'stat
         if let Some(diagnostic) = diagnostic.as_mut() {
             diagnostic.drain();
         }
-        match try_reap(&mut child) {
+        match reap_if_exited(&mut child, Some(Group::Kill)) {
             Ok(Some(status)) => {
-                terminate_check_tree(child.id());
                 #[cfg(unix)]
                 return Ok((status, finish_diagnostic(diagnostic)));
                 #[cfg(not(unix))]

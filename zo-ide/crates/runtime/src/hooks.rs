@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
-use plugins::bounded_child::{end_group, reap, try_reap, Group};
+use plugins::bounded_child::{end_group, reap, reap_if_exited, Group};
 use serde_json::{json, Value};
 
 use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
@@ -1084,11 +1084,8 @@ impl CommandWithStdin {
                 terminate_hook_child(&mut child);
                 break None;
             }
-            match try_reap(&mut child) {
-                Ok(Some(status)) => {
-                    let _ = end_group(child.id(), Group::Terminate { grace: HOOK_PROCESS_GROUP_GRACE });
-                    break Some(status);
-                }
+            match reap_if_exited(&mut child, Some(Group::Terminate { grace: HOOK_PROCESS_GROUP_GRACE })) {
+                Ok(Some(status)) => break Some(status),
                 Ok(None) => thread::sleep(Duration::from_millis(20)),
                 Err(error) => {
                     terminate_hook_child(&mut child);

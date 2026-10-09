@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use plugins::bounded_child::note_reaped;
 #[cfg(unix)]
-use plugins::bounded_child::{end_group, Group};
+use plugins::bounded_child::{Group, GroupEnd};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 use tokio::runtime::Builder;
@@ -111,6 +111,11 @@ const MIN_BASH_TIMEOUT_MS: u64 = 1_000;
 #[cfg(unix)]
 const BASH_GROUP_GRACE: Duration = Duration::from_millis(50);
 
+/// How often a run's leader is looked for once its output pipes have closed. The
+/// wait is for the leader to end, and it is not a timeout of its own.
+#[cfg(unix)]
+const BASH_REAP_LOOK_EVERY: Duration = Duration::from_millis(10);
+
 /// Resolve the default bash timeout, honoring a `ZO_BASH_TIMEOUT_MS`
 /// override. A malformed or non-positive value falls back to the compiled
 /// default rather than degrading to an instant timeout on every command.
@@ -139,8 +144,9 @@ fn resolve_bash_timeout_ms(requested: Option<u64>) -> u64 {
 /// command outlived the deadline.
 ///
 /// Says only what the host can actually guarantee. Termination is *requested*,
-/// not confirmed: the process-group sweep in `terminate_process_group` is
-/// `#[cfg(unix)]`, both `kill` results there are discarded, the branch returns
+/// not confirmed: the process-group sweep in `end_registered_group` is
+/// `#[cfg(unix)]`, its signals are sent best-effort and their failures are not
+/// reported, the branch returns
 /// without awaiting exit, and `kill_on_drop` schedules a kill rather than
 /// synchronously reaping. On a non-Unix host only the direct `sh` child is
 /// signalled, so a descendant can outlive the request — claiming the command
@@ -824,7 +830,7 @@ async fn execute_bash_async(
     // once a stream outgrows the in-memory cap (see `RawSpill`).
     let spill = RawSpill::shared();
     let collect_all = Box::pin(async {
-        let (out, err, status) = tokio::join!(
+        let (out, err) = tokio::join!(
             read_capped(
                 stdout_reader,
                 MAX_OUTPUT_BYTES,
@@ -843,8 +849,8 @@ async fn execute_bash_async(
                 &spill,
                 SpillStream::Stderr,
             ),
-            wait_child(&mut child, child_pid),
         );
+        let status = reap_run_leader(&mut child, child_pid).await;
         Ok::<_, io::Error>((out?, err?, status?))
     });
 
@@ -862,11 +868,15 @@ async fn execute_bash_async(
         let (stdout_cap, stderr_cap, status) = result?;
         (stdout_cap, stderr_cap, status, false)
     } else {
-        // Timeout: signal the whole process group first so backgrounded
-        // grandchildren are reaped too, then return — dropping `child`
-        // triggers `kill_on_drop` as the leader backstop (WI-G).
+        // Timeout: end the group of this run while its leader is still
+        // registered, so backgrounded grandchildren are reaped too, then return.
+        // Dropping `child` triggers `kill_on_drop` as the leader backstop (WI-G).
         #[cfg(unix)]
-        terminate_process_group(child_pid);
+        {
+            if let Some(pid) = child_pid {
+                end_registered_group(pid).await;
+            }
+        }
         spill
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1185,9 +1195,11 @@ impl Drop for ForegroundBashGroup {
 /// Kill every foreground bash process group owned by `session_id`, returning how
 /// many groups were signalled.
 ///
-/// Called when the user cancels the running tool (Esc once). The entries are
-/// removed under the lock before signalling, so a concurrent second Esc cannot
-/// signal the same pid twice after it has been reaped and its pid recycled.
+/// Called when the user cancels the running tool (Esc once). A run stays
+/// registered until its leader is reaped, and each signal is sent only while the
+/// pid is still registered and under the registry lock, so a cancel can never
+/// signal a pid that has been reaped and handed on. The grace between the two
+/// signals is slept outside the lock.
 ///
 /// Honest limits, all of them deliberate:
 /// - Unix only. On Windows this is a no-op and a wedged command keeps running;
@@ -1197,20 +1209,23 @@ impl Drop for ForegroundBashGroup {
 ///   [`crate::tool_cancel`] for what the caller does about that.
 #[cfg(unix)]
 pub fn interrupt_foreground_bash(session_id: Option<&str>) -> usize {
-    let doomed: Vec<u32> = {
-        let mut groups = foreground_bash_groups()
+    let owned: Vec<u32> = {
+        let groups = foreground_bash_groups()
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (mine, theirs): (Vec<_>, Vec<_>) = groups
-            .drain(..)
-            .partition(|(owner, _)| owner.as_deref() == session_id);
-        *groups = theirs;
-        mine.into_iter().map(|(_, pid)| pid).collect()
+        groups
+            .iter()
+            .filter(|(owner, _)| owner.as_deref() == session_id)
+            .map(|(_, pid)| *pid)
+            .collect()
     };
-    for pid in &doomed {
-        terminate_process_group(Some(*pid));
+    for pid in &owned {
+        if let Some(end) = terminate_registered(*pid) {
+            std::thread::sleep(BASH_GROUP_GRACE);
+            finish_registered(*pid, &end);
+        }
     }
-    doomed.len()
+    owned.len()
 }
 
 /// Non-Unix stub: no process-group signalling is available, so a cancelled bash
@@ -1221,18 +1236,73 @@ pub fn interrupt_foreground_bash(_session_id: Option<&str>) -> usize {
     0
 }
 
-/// Kill an entire process group on Unix — the child plus any grandchildren it
-/// spawned. The child is its own group leader (`process_group(0)`), so its pid
-/// doubles as the pgid and a negated pid signals the whole group. Mirrors the
-/// dependency-free `kill` shell-out the compat-harness runner already uses:
-/// SIGTERM for a graceful stop, then SIGKILL after a short grace. `kill_on_drop`
-/// remains the backstop for the leader itself.
+/// Reaps a run's leader once its output pipes have closed (t-19897). On Unix the
+/// registry lock is held while the leader is tried, and the run's registration is
+/// taken out in the same breath as the reap, so a cancel can only ever name a pid
+/// that is still unreaped. The leader is not reaped while its pipes are open: a
+/// backgrounded job's output stays in the result, and its group is ended only by
+/// a timeout or a cancel.
+async fn reap_run_leader(
+    child: &mut tokio::process::Child,
+    pid: Option<u32>,
+) -> io::Result<std::process::ExitStatus> {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = pid {
+            loop {
+                {
+                    let mut groups = foreground_bash_groups()
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if let Some(status) = child.try_wait()? {
+                        groups.retain(|(_, live)| *live != pid);
+                        note_reaped(pid);
+                        return Ok(status);
+                    }
+                }
+                tokio::time::sleep(BASH_REAP_LOOK_EVERY).await;
+            }
+        }
+    }
+    wait_child(child, pid).await
+}
+
+/// SIGTERM to the group of a registered run, sent under the registry lock. A
+/// registered pid is unreaped, so it still names its group. `None` once the run
+/// is no longer registered, which means its leader has been reaped.
 #[cfg(unix)]
-fn terminate_process_group(pid: Option<u32>) {
-    let Some(pid) = pid else {
-        return;
-    };
-    let _ = end_group(pid, Group::Terminate { grace: BASH_GROUP_GRACE });
+fn terminate_registered(pid: u32) -> Option<GroupEnd> {
+    let groups = foreground_bash_groups()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if !groups.iter().any(|(_, live)| *live == pid) {
+        return None;
+    }
+    let end = GroupEnd::begin(pid, Group::Terminate { grace: BASH_GROUP_GRACE })?;
+    matches!(end.first(), Ok(Some(_))).then_some(end)
+}
+
+/// SIGKILL to the group of a run that `terminate_registered` signalled. Sent under
+/// the registry lock, and only while the pid is still registered, so unreaped.
+#[cfg(unix)]
+fn finish_registered(pid: u32, end: &GroupEnd) {
+    let groups = foreground_bash_groups()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if groups.iter().any(|(_, live)| *live == pid) {
+        let _ = end.finish();
+    }
+}
+
+/// The timeout's end of a registered run's group: SIGTERM, the grace outside the
+/// registry lock, then SIGKILL (t-19897). A backgrounded grandchild that holds the
+/// output pipes is reaped with the group.
+#[cfg(unix)]
+async fn end_registered_group(pid: u32) {
+    if let Some(end) = terminate_registered(pid) {
+        tokio::time::sleep(BASH_GROUP_GRACE).await;
+        finish_registered(pid, &end);
+    }
 }
 
 /// Waits for a run's child to end, and records the reap for the order tests
@@ -1560,7 +1630,13 @@ mod tests {
 
         assert!(output.interrupted, "the pipes held by the grandchild must time the run out");
         plugins::bounded_child::trace::assert_ended_before_reaped(leader);
-        assert!(nix::sys::signal::kill(grandchild, None).is_err(), "the grandchild outlived its group");
+        // A grandchild that has just been signalled is a zombie for a moment, and a
+        // zombie still answers `kill`, so wait for it to be reaped.
+        let until = Instant::now() + Duration::from_secs(5);
+        while nix::sys::signal::kill(grandchild, None).is_ok() {
+            assert!(Instant::now() < until, "the grandchild outlived its group");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
         assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
     }
