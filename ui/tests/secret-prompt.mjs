@@ -6,7 +6,7 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * passphrase or a PIN gets a password field in the popup, and the value goes
  * into that pane once.
  *
- * The backend says which panes wait (`pane_secret`) and takes the value
+ * The backend says which panes wait (a `term:secret` event) and takes the value
  * (`answer_secret`). This suite stands in for it and drives the card only
  * through what a person does (typing, Enter, the buttons), and reads the result
  * off the document. It also searches everything the page can keep — the
@@ -72,7 +72,7 @@ export const SECRET_WORDS = Object.freeze({
   },
 });
 
-/* One question a pane waits on, as `pane_secret` answers it. `since` is the
+/* One question a pane waits on, as the `term:secret` event says it. `since` is the
  * pane's output time: a question that stays the same keeps its key. */
 const WAIT = Object.freeze({ term: 4, kind: "password", line: "[sudo] password for dev:", since: 1000 });
 
@@ -132,8 +132,15 @@ const installSecretHands = () => {
       button?.click();
       return button !== undefined;
     },
-    output(term = 4) {
-      noteTermOutput(term);
+    fire(name, payload) {
+      for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+    },
+    say(list) {
+      const first = list[0] ?? null;
+      T.fire("term:secret", {
+        term: first?.term ?? 4,
+        question: first ? { kind: first.kind, line: first.line, since: first.since } : null,
+      });
     },
     calls(name) {
       return window.__CALLS__.filter((call) => call.name === name);
@@ -149,10 +156,6 @@ const installSecretHands = () => {
       original(...args);
     };
   }
-  window.__ANSWER__.pane_secret = ({ term }) => {
-    const hit = T.waiting.find((one) => one.term === term);
-    return hit ? { ...hit } : null;
-  };
   window.__ANSWER__.answer_secret = (args) => {
     window.__SECRET_SENT__ = JSON.parse(JSON.stringify(args));
     if (typeof T.reply === "string") throw new Error(T.reply);
@@ -214,7 +217,7 @@ async function raised(browser, origin, ok) {
     await shot(page, "secret-before.png");
     const seen = await page.evaluate(async (wait) => {
       const T = window.__ST__;
-      T.waiting = [wait]; T.output();
+      T.say([wait]);
       await T.settle();
       return T.look();
     }, WAIT);
@@ -243,7 +246,7 @@ async function typedOnce(browser, origin, ok) {
   await scenario(browser, origin, "typed once", ok, async (page) => {
     const sent = await page.evaluate(async ([wait, value]) => {
       const T = window.__ST__;
-      T.waiting = [wait]; T.output();
+      T.say([wait]);
       await T.settle();
       T.type(value);
       T.enter();
@@ -272,7 +275,7 @@ async function typedOnce(browser, origin, ok) {
     // The same question, polled again with nothing new printed, is not asked twice.
     const again = await page.evaluate(async (wait) => {
       const T = window.__ST__;
-      T.waiting = [wait]; T.output();
+      T.say([wait]);
       await T.settle();
       return { shown: T.look().shown, calls: T.calls("answer_secret").length };
     }, WAIT);
@@ -284,14 +287,14 @@ async function cancelled(browser, origin, ok) {
   await scenario(browser, origin, "cancel", ok, async (page) => {
     const result = await page.evaluate(async (wait) => {
       const T = window.__ST__;
-      T.waiting = [wait]; T.output();
+      T.say([wait]);
       await T.settle();
       const pressed = T.press(T.look().buttons.at(-1));
       await T.settle(300);
       const closed = T.look().shown === false;
       await T.settle();
       const staysClosed = T.look().shown === false;
-      T.waiting = [{ ...wait, since: wait.since + 1000 }]; T.output();
+      T.say([{ ...wait, since: wait.since + 1000 }]);
       await T.settle();
       return { pressed, closed, staysClosed, raisedAgain: T.look().shown, calls: T.calls("answer_secret").length };
     }, WAIT);
@@ -306,13 +309,13 @@ async function refusedWhileBusy(browser, origin, ok) {
     const result = await page.evaluate(async ([wait, value]) => {
       const T = window.__ST__;
       T.reply = "answer-in-flight";
-      T.waiting = [wait]; T.output();
+      T.say([wait]);
       await T.settle();
       T.type(value);
       T.press(T.look().buttons[0]);
       await T.settle(300);
       const after = T.look();
-      T.waiting = []; T.output();
+      T.say([]);
       await T.settle();
       return { after, gone: T.look().shown === false };
     }, [WAIT, SENTINEL]);
@@ -330,16 +333,16 @@ async function questionChanged(browser, origin, ok) {
     const result = await page.evaluate(async ([wait, value]) => {
       const T = window.__ST__;
       T.reply = "question-changed";
-      T.waiting = [wait]; T.output();
+      T.say([wait]);
       await T.settle();
       T.type(value);
       T.press(T.look().buttons[0]);
       // The pane moved on as the answer went out: it no longer asks anything.
-      T.waiting = []; T.output();
+      T.say([]);
       await T.settle(300);
       const left = T.look();
       T.reply = null;
-      T.waiting = [{ ...wait, line: "Password:", since: wait.since + 5000 }]; T.output();
+      T.say([{ ...wait, line: "Password:", since: wait.since + 5000 }]);
       await T.settle();
       return { left, next: T.look() };
     }, [WAIT, SENTINEL]);
@@ -352,7 +355,7 @@ async function emptyRefused(browser, origin, ok) {
   await scenario(browser, origin, "empty send", ok, async (page) => {
     const result = await page.evaluate(async (wait) => {
       const T = window.__ST__;
-      T.waiting = [wait]; T.output();
+      T.say([wait]);
       await T.settle();
       T.enter();
       await T.settle(200);
@@ -370,13 +373,13 @@ async function answeredThenAskedAgain(browser, origin, ok) {
   await scenario(browser, origin, "wrong password asked again", ok, async (page) => {
     const result = await page.evaluate(async ([wait, value]) => {
       const T = window.__ST__;
-      T.waiting = [wait]; T.output();
+      T.say([wait]);
       await T.settle();
       T.type(value);
       T.enter();
       await T.settle(300);
       // The pane printed "Sorry, try again." and asks once more: its output moved.
-      T.waiting = [{ ...wait, since: wait.since + 2000 }]; T.output();
+      T.say([{ ...wait, since: wait.since + 2000 }]);
       await T.settle();
       return { again: T.look(), calls: T.calls("answer_secret").length };
     }, [WAIT, SENTINEL]);
@@ -397,7 +400,7 @@ async function languages(browser, origin, ok) {
       for (const code of codes) {
         setLocale(code, { persist: false, refresh: false });
         since += 1;
-        T.waiting = [{ term: 4, kind: "password", line: "[sudo] password for dev:", since }]; T.output();
+        T.say([{ term: 4, kind: "password", line: "[sudo] password for dev:", since }]);
         await T.settle();
         const look = T.look();
         T.enter();
@@ -406,7 +409,7 @@ async function languages(browser, origin, ok) {
         out[code] = { title: look.title, label: look.label, hint: look.hint, buttons: look.buttons, empty: refused.error };
         T.press(T.look().buttons.at(-1));
         await T.settle(150);
-        T.waiting = []; T.output();
+        T.say([]);
         await T.settle(120);
       }
       setLocale("ko", { persist: false, refresh: false });
@@ -432,13 +435,13 @@ async function timing(browser, origin, ok) {
       const measured = [];
       for (let round = 0; round < count; round += 1) {
         const started = performance.now();
-        T.waiting = [{ term: 4, kind: "password", line: "[sudo] password for dev:", since: 20000 + round }]; T.output();
+        T.say([{ term: 4, kind: "password", line: "[sudo] password for dev:", since: 20000 + round }]);
         while (!T.look().shown && performance.now() - started < 5000) {
           await new Promise((done) => setTimeout(done, 5));
         }
         measured.push(performance.now() - started);
         T.press(T.look().buttons.at(-1));
-        T.waiting = []; T.output();
+        T.say([]);
         await T.settle(120);
       }
       const sorted = [...measured].sort((a, b) => a - b);

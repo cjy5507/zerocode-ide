@@ -169,6 +169,7 @@ mod scrcpy;
 mod scrcpy_video;
 mod script;
 mod seat_triage;
+mod secret_watch;
 mod settings;
 mod settings_runtime;
 mod sftp_runtime;
