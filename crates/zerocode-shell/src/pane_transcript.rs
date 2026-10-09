@@ -22,10 +22,14 @@ const FIRST_LINE_BYTES: u64 = 64 * 1024;
 const SCREEN_TEXT_BYTES: u64 = 256 * 1024;
 
 /// The facts of one pane, read from the disk under `home` and from the
-/// pane's process when it is live.
+/// pane's process when it is live. `read_env` says whether the environment
+/// may move a store's root (`CODEX_HOME` and the like): the window reads it,
+/// and a synthetic bundle does not, so its answer never depends on the
+/// machine's own transcripts.
 pub(crate) struct PaneFacts {
     home: Option<PathBuf>,
     pane: Option<HeldTerminal>,
+    read_env: bool,
 }
 
 impl Facts for PaneFacts {
@@ -37,11 +41,15 @@ impl Facts for PaneFacts {
         let Some(home) = self.home.as_deref() else {
             return Vec::new();
         };
-        let mut roots: Vec<PathBuf> =
-            vault::roots(source, home, vault::env_home(source).as_deref())
-                .into_iter()
-                .map(|root| root.canonicalize().unwrap_or(root))
-                .collect();
+        let named = if self.read_env {
+            vault::env_home(source)
+        } else {
+            None
+        };
+        let mut roots: Vec<PathBuf> = vault::roots(source, home, named.as_deref())
+            .into_iter()
+            .map(|root| root.canonicalize().unwrap_or(root))
+            .collect();
         roots.sort();
         roots.dedup();
         roots
@@ -100,6 +108,7 @@ pub(crate) fn pane_transcript(
     let facts = PaneFacts {
         home: dirs::home_dir(),
         pane: state.terminals().handle(term),
+        read_env: true,
     };
     bind(
         slug,
@@ -112,15 +121,18 @@ pub(crate) fn pane_transcript(
 
 /// The first line of a file, read through at most [`FIRST_LINE_BYTES`].
 fn first_line(path: &Path) -> Option<String> {
-    use std::io::Read as _;
-    let mut head = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(FIRST_LINE_BYTES)
-        .read_to_end(&mut head)
+    use std::io::{BufRead as _, Read as _};
+    let capped = std::fs::File::open(path).ok()?.take(FIRST_LINE_BYTES);
+    let mut line = Vec::new();
+    // Read up to the newline and no further: a session file is megabytes, and
+    // its first line is the only part an id lookup needs.
+    std::io::BufReader::new(capped)
+        .read_until(b'\n', &mut line)
         .ok()?;
-    let end = head.iter().position(|byte| *byte == b'\n')?;
-    Some(String::from_utf8_lossy(&head[..end]).into_owned())
+    if line.pop() != Some(b'\n') {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&line).into_owned())
 }
 
 /// The last `bytes` of a file, as text.
@@ -229,6 +241,7 @@ mod tests {
         let facts = PaneFacts {
             home: Some(home.clone()),
             pane: None,
+            read_env: false,
         };
         let mut right = 0;
         let mut wrong = 0;
@@ -245,53 +258,6 @@ mod tests {
             }
         }
         let ms_per_join = started.elapsed().as_secs_f64() * 1000.0 / expected.len() as f64;
-        // Where one join's time goes: the listing of the zo store, then one
-        // first-line read.
-        let zo_row = vault::AGENT_SOURCES
-            .iter()
-            .find(|row| row.slug == "zo")
-            .expect("a zo row");
-        let listing = Instant::now();
-        let listed = facts.session_files(zo_row).map(|files| files.len());
-        println!(
-            "t-26597 zo listing us={} files={listed:?}",
-            listing.elapsed().as_micros()
-        );
-        let head = Instant::now();
-        let first = facts.first_line_id(&zo_folder.join("session-1000-0.jsonl"));
-        println!(
-            "t-26597 zo first line us={} id={first:?}",
-            head.elapsed().as_micros()
-        );
-        let codex_row = vault::AGENT_SOURCES
-            .iter()
-            .find(|row| row.slug == "codex")
-            .expect("a codex row");
-        let env_at = Instant::now();
-        let env_set = vault::env_home(codex_row).is_some();
-        println!(
-            "t-26597 codex env us={} set={env_set}",
-            env_at.elapsed().as_micros()
-        );
-        let roots_at = Instant::now();
-        let roots = facts.roots(codex_row).len();
-        println!(
-            "t-26597 codex roots us={} count={roots}",
-            roots_at.elapsed().as_micros()
-        );
-        let codex_listing = Instant::now();
-        let codex_listed = facts.session_files(codex_row).map(|files| files.len());
-        println!(
-            "t-26597 codex listing us={} files={codex_listed:?}",
-            codex_listing.elapsed().as_micros()
-        );
-        let codex_head = Instant::now();
-        let codex_first =
-            facts.first_line_id(&codex_folder.join("rollout-2026-10-10T09-00-00.jsonl"));
-        println!(
-            "t-26597 codex first line us={} id={codex_first:?}",
-            codex_head.elapsed().as_micros()
-        );
 
         // What "the newest file of the folder" would have named, per panel.
         let newest = |folder: &Path| -> PathBuf {
@@ -331,6 +297,7 @@ mod tests {
         let after_restart = PaneFacts {
             home: Some(home),
             pane: None,
+            read_env: false,
         };
         for (slug, id, want) in &expected {
             assert_eq!(
