@@ -263,6 +263,35 @@ mod tests {
             "t-26597 zo first line us={} id={first:?}",
             head.elapsed().as_micros()
         );
+        let codex_row = vault::AGENT_SOURCES
+            .iter()
+            .find(|row| row.slug == "codex")
+            .expect("a codex row");
+        let env_at = Instant::now();
+        let env_set = vault::env_home(codex_row).is_some();
+        println!(
+            "t-26597 codex env us={} set={env_set}",
+            env_at.elapsed().as_micros()
+        );
+        let roots_at = Instant::now();
+        let roots = facts.roots(codex_row).len();
+        println!(
+            "t-26597 codex roots us={} count={roots}",
+            roots_at.elapsed().as_micros()
+        );
+        let codex_listing = Instant::now();
+        let codex_listed = facts.session_files(codex_row).map(|files| files.len());
+        println!(
+            "t-26597 codex listing us={} files={codex_listed:?}",
+            codex_listing.elapsed().as_micros()
+        );
+        let codex_head = Instant::now();
+        let codex_first =
+            facts.first_line_id(&codex_folder.join("rollout-2026-10-10T09-00-00.jsonl"));
+        println!(
+            "t-26597 codex first line us={} id={codex_first:?}",
+            codex_head.elapsed().as_micros()
+        );
 
         // What "the newest file of the folder" would have named, per panel.
         let newest = |folder: &Path| -> PathBuf {
