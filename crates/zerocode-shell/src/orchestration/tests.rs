@@ -25206,10 +25206,18 @@ fn an_unpointed_message_is_told_to_the_person_and_to_its_sender_once() {
         !letters.stdout.contains(SECRET),
         "the letter carried the message's body"
     );
+    // Counted by its receipt, not by its words: this window's ledger is shared
+    // with the other tests in this file, and their letters may read the same.
+    let answer: serde_json::Value =
+        serde_json::from_str(&sent.stdout).expect("the send's answer is JSON");
+    let receipt = format!(
+        "pointer-held:{}",
+        answer["messageId"].as_str().expect("a message id")
+    );
     let copies = the_rows()
         .messages
         .iter()
-        .filter(|row| row.body.contains("was NOT pointed"))
+        .filter(|row| row.subject.as_str() == receipt)
         .count();
     assert_eq!(
         copies, 1,
