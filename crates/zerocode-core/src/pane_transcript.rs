@@ -159,22 +159,62 @@ fn carries_id(source: &AgentSource, id: &str, path: &Path, facts: &dyn Facts) ->
     }
 }
 
-/// The one session file that carries `id`.
-fn by_session_id(_source: &AgentSource, _id: &str, _facts: &dyn Facts) -> Result<PathBuf, Absent> {
-    // Red stub: the id rule is not written yet.
-    Err(Absent::NoSessionFile)
+/// The one session file that carries `id`. Every session file is read the way
+/// its store places the id, so two files that carry it name neither.
+fn by_session_id(source: &AgentSource, id: &str, facts: &dyn Facts) -> Result<PathBuf, Absent> {
+    let files = facts.session_files(source).ok_or(Absent::NoSessionFile)?;
+    let mut carriers = files
+        .into_iter()
+        .filter(|path| carries_id(source, id, path, facts));
+    let first = carriers.next().ok_or(Absent::NoSessionFile)?;
+    if carriers.next().is_some() {
+        return Err(Absent::TwoSessionFiles);
+    }
+    Ok(first)
 }
 
-/// The one session file the pane's process holds open.
-fn by_open_file(_source: &AgentSource, _facts: &dyn Facts) -> Result<PathBuf, Absent> {
-    // Red stub: the open-file rule is not written yet.
-    Err(Absent::NoOpenFile)
+/// The one session file the pane's process holds open. Only a file under this
+/// source's own roots counts: a file open anywhere else is not a transcript.
+fn by_open_file(source: &AgentSource, facts: &dyn Facts) -> Result<PathBuf, Absent> {
+    let roots = facts.roots(source);
+    let mut held = facts
+        .open_files()
+        .into_iter()
+        .filter(|path| roots.iter().any(|root| path.starts_with(root)))
+        .filter(|path| vault::wanted(source, path));
+    let first = held.next().ok_or(Absent::NoOpenFile)?;
+    if held.next().is_some() {
+        return Err(Absent::TwoOpenFiles);
+    }
+    Ok(first)
 }
 
-/// The one session file whose text holds a line of the screen.
-fn by_screen(_source: &AgentSource, _facts: &dyn Facts) -> Result<PathBuf, Absent> {
-    // Red stub: the screen rule is not written yet.
-    Err(Absent::NoScreenMatch)
+/// The one session file whose text holds a line of the screen. A short line is
+/// not evidence, and a listing too long to read names nothing.
+fn by_screen(source: &AgentSource, facts: &dyn Facts) -> Result<PathBuf, Absent> {
+    let files = facts.session_files(source).ok_or(Absent::NoScreenMatch)?;
+    if files.len() > SCREEN_CANDIDATES_MAX {
+        return Err(Absent::NoScreenMatch);
+    }
+    let lines: Vec<String> = facts
+        .screen_lines()
+        .iter()
+        .map(|line| line.trim().to_string())
+        .filter(|line| line.chars().count() >= SCREEN_LINE_CHARS)
+        .collect();
+    if lines.is_empty() {
+        return Err(Absent::NoScreenMatch);
+    }
+    let mut holders = files.into_iter().filter(|path| {
+        facts
+            .text_of(path)
+            .is_some_and(|text| lines.iter().any(|line| text.contains(line.as_str())))
+    });
+    let first = holders.next().ok_or(Absent::NoScreenMatch)?;
+    if holders.next().is_some() {
+        return Err(Absent::TwoScreenMatches);
+    }
+    Ok(first)
 }
 
 #[cfg(test)]

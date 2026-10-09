@@ -134,15 +134,30 @@ fn tail_text(path: &Path, bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&tail).into_owned())
 }
 
+/// lsof's flags for one process's open files: no name lookups (`-nP`), the
+/// process picked by its id (`-p`), and the field output (`-Fn`) that
+/// [`parse_open_names`] reads.
+#[cfg(target_os = "macos")]
+const LSOF_NO_LOOKUPS: &str = "-nP";
+#[cfg(target_os = "macos")]
+const LSOF_PROCESS: &str = "-p";
+#[cfg(target_os = "macos")]
+const LSOF_NAME_FIELDS: &str = "-Fn";
+
 /// The files a process holds open. Only macOS has the window's lsof road
 /// (`system_runtime::run_lsof`); elsewhere no file is named this way, and the
 /// rule falls through to the screen.
 #[cfg(target_os = "macos")]
 fn open_files_of(pid: u32) -> Vec<PathBuf> {
     let pid = pid.to_string();
-    crate::system_runtime::run_lsof(&["-nP", "-p", pid.as_str(), "-Fn"])
-        .map(|raw| parse_open_names(&raw))
-        .unwrap_or_default()
+    crate::system_runtime::run_lsof(&[
+        LSOF_NO_LOOKUPS,
+        LSOF_PROCESS,
+        pid.as_str(),
+        LSOF_NAME_FIELDS,
+    ])
+    .map(|raw| parse_open_names(&raw))
+    .unwrap_or_default()
 }
 
 #[cfg(not(target_os = "macos"))]
