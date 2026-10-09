@@ -1582,7 +1582,7 @@ fn operation_and_all_targets_share_exactly_one_wire_request() {
     use std::cell::RefCell;
 
     use zerocode_core::computer_recipe::RecipeTool;
-    use zerocode_core::screen_action::snapshot;
+    use zerocode_core::screen_action::{Navigation, snapshot};
     use zerocode_hookd::TeamAnswer;
 
     use crate::computer_use::errand::desk::{Aim, GoalWorld};
@@ -1618,10 +1618,12 @@ fn operation_and_all_targets_share_exactly_one_wire_request() {
             .collect();
         json!({ "type": "choice", "choice": choice, "probabilities": probabilities, "confidence": 0.9 })
     };
+    let mut action_options = vec!["mark:1", "mark:2", "type_text", "give_up", "done"];
+    action_options.extend(Navigation::ALL.into_iter().map(Navigation::word));
     let body = json!({
         "model": ANSWERING_VERSION,
         "answers": {
-            "action": head("mark:2", &["mark:1", "mark:2", "type_text", "give_up", "done"]),
+            "action": head("mark:2", &action_options),
             "type_target": head("mark:1", &["mark:1"]),
             "container": head("container:1", &["container:1", "none"]),
             "image": head("none", &["image:1", "none"]),

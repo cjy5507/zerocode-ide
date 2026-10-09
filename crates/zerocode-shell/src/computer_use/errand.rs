@@ -52,7 +52,7 @@ use serde_json::{Value, json};
 use zerocode_core::branching::{BranchAsk, NextStep};
 use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
-use zerocode_core::computer_use::walk_words;
+use zerocode_core::computer_use::{WALK_WAIT_LIMIT, walk_words};
 use zerocode_core::guarded::{ControlKind, kind_of};
 use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{
@@ -60,9 +60,9 @@ use zerocode_core::jev::summary::{
 };
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{
-    ActionAsk, ActionChoice, ActionLook, ActionRead, Beside, Chosen, Guard, Observe,
-    SCREEN_ACTION_RUBRIC_VERSION, Stopped, TYPE_TEXT, Where, ask_with, option_of, snapshot,
-    typed_line,
+    ActionAsk, ActionChoice, ActionLook, ActionRead, Beside, Chosen, Guard, MORE_CONTROLS,
+    Navigation, Observe, SCREEN_ACTION_RUBRIC_VERSION, Stopped, TYPE_TEXT, Where, ask_from,
+    ask_with, option_of, snapshot, typed_line,
 };
 
 pub use branch::{Branching, Compared, Saved};
@@ -445,13 +445,19 @@ impl Screen {
     /// when the walk `types` ([`Self::fields_left`]), and the candidates the
     /// look observed.
     #[must_use]
-    pub fn beside<'a>(&'a self, types: bool, fields: &'a [Value]) -> Beside<'a> {
+    pub fn beside<'a>(
+        &'a self,
+        types: bool,
+        fields: &'a [Value],
+        navigation: &'a [Navigation],
+    ) -> Beside<'a> {
         Beside {
             types,
             fields,
             containers: &self.snapshot.containers,
             images: &self.snapshot.images,
             rows: &self.snapshot.rows,
+            navigation,
         }
     }
 
@@ -489,7 +495,12 @@ impl Screen {
     /// [`same_legend`]: zerocode_core::computer_use_protocol::marks::same_legend
     #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
+        self.same_controls(other) && self.snapshot == other.snapshot && self.shows == other.shows
+    }
+
+    fn same_controls(&self, other: &Self) -> bool {
         self.at == other.at
+            && self.snapshot.epoch == other.snapshot.epoch
             && zerocode_core::computer_use_protocol::marks::same_legend(&self.items, &other.items)
     }
 }
@@ -516,6 +527,13 @@ pub trait World {
     /// a stale pin, a host outside the recording and a shut door are all
     /// `false`, and none of them is retried.
     fn press(&mut self, mark: usize) -> bool;
+    fn navigation(&self) -> &'static [Navigation] {
+        &[]
+    }
+    fn navigate(&mut self, action: Navigation) -> bool {
+        let _ = action;
+        false
+    }
     /// Milliseconds the call has left.
     fn left_ms(&mut self) -> u64;
     /// Walk the document again from `step`, answering the report. Only a
@@ -1190,6 +1208,10 @@ fn walk(
     let mut entered: Vec<String> = Vec::new();
     let mut before: Option<Screen> = None;
     let mut still = 0usize;
+    let mut waiting = false;
+    let mut waits = 0usize;
+    let mut candidate_offset = 0usize;
+    let mut inspecting = false;
     // The judgment begun on the last look, if the walk asked ahead
     // ([`Options::overlap`]): used when the next look asks the same question,
     // dropped when it does not.
@@ -1237,8 +1259,12 @@ fn walk(
                 // A forked step whose pick left the screen where it was is a
                 // step the walk now retries (t-6044).
                 branch::settle(&mut walked, fork.take(), NextStep::SameScreen);
-                still += 1;
-                if still >= SAME_SCREEN_LIMIT {
+                if waiting {
+                    waits += 1;
+                } else if !inspecting {
+                    still += 1;
+                }
+                if still >= SAME_SCREEN_LIMIT || waits >= WALK_WAIT_LIMIT {
                     walked.agreed = Some(false);
                     walked.rows.push(row(
                         mode,
@@ -1249,16 +1275,22 @@ fn walk(
                     return walked;
                 }
             }
-            Some(_) => {
+            Some(was) => {
                 still = 0;
+                waits = 0;
+                if !was.same_controls(&screen) || !tried.is_empty() {
+                    candidate_offset = 0;
+                }
                 tried.clear();
             }
             None => {}
         }
+        waiting = false;
+        inspecting = false;
         // One request asks every head the look can answer: the action, the
         // field when the world can type into one it read, and the containers,
         // images and rows it read (t-6720).
-        let Some(asked) = ask_with(
+        let Some(asked) = ask_from(
             &ActionLook {
                 goal: at.goal,
                 errand: at.asked(),
@@ -1268,7 +1300,12 @@ fn walk(
                 pressed: &pressed_so_far,
                 shows: &screen.shows,
             },
-            &screen.beside(world.types(), &screen.fields_left(&entered)),
+            &screen.beside(
+                world.types(),
+                &screen.fields_left(&entered),
+                world.navigation(),
+            ),
+            candidate_offset,
         ) else {
             walked.agreed = Some(false);
             walked
@@ -1355,7 +1392,7 @@ fn walk(
                     CANDIDATES_SEEN.canonical: candidates_seen,
                     CANDIDATES_SIGNAL.canonical: candidates_signal,
                     "showsLines": shows_lines,
-                    "pressedBefore": pressed_so_far.len(),
+                    "pressedBefore": walked.pressed,
                     "confidence": choice.confidence,
                     "probabilities": choice.probabilities,
                 }),
@@ -1395,6 +1432,8 @@ fn walk(
                 Chosen::Mark(_) | Chosen::Type(_) => NextStep::MovedOn,
                 Chosen::Done => NextStep::Reached,
                 Chosen::GiveUp => NextStep::GaveUp,
+                Chosen::Navigate(_) => NextStep::Unknown,
+                Chosen::MoreControls => NextStep::Unknown,
             };
             branch::settle(&mut walked, fork.take(), next);
         }
@@ -1420,9 +1459,92 @@ fn walk(
         // The hand goes out to one number either way: a control to press, or
         // a field to type into (t-6720). Everything up to the hand — the
         // row's words, the stand, the guards and the floor — is one road.
+        if !matches!(choice.chosen, Chosen::MoreControls) {
+            candidate_offset = 0;
+        }
         let (chosen, typing) = match choice.chosen {
             Chosen::Mark(mark) => (mark, false),
             Chosen::Type(field) => (field, true),
+            Chosen::MoreControls => {
+                note(&mut said, walk_words::CHOSEN, json!(MORE_CONTROLS));
+                note(&mut said, OPERATION, json!(MORE_CONTROLS));
+                if !admit_action(acting, choice.guard, &mut said) {
+                    walked.rows.push(row(mode, at, attempt, said));
+                    return walked;
+                }
+                let Some(next) = asked.next_candidate_offset() else {
+                    note(&mut said, REASON, json!("no_more_controls"));
+                    note(&mut said, "routeUse", json!(USE_FALLBACK));
+                    walked.rows.push(row(mode, at, attempt, said));
+                    return walked;
+                };
+                candidate_offset = next;
+                inspecting = true;
+                ahead = None;
+                note(&mut said, "candidateOffset", json!(candidate_offset));
+                note(&mut said, "routeUse", json!(USE_APPLIED));
+                walked.rows.push(row(mode, at, attempt, said));
+                continue;
+            }
+            Chosen::Navigate(action) => {
+                note(&mut said, walk_words::CHOSEN, json!(action.word()));
+                note(&mut said, OPERATION, json!(action.word()));
+                note(&mut said, CONTROL_KIND, json!(ControlKind::Plain.word()));
+                if !admit_action(acting, choice.guard, &mut said) {
+                    walked.rows.push(row(mode, at, attempt, said));
+                    return walked;
+                }
+                let stopped = if !press_policy.permits_press_at(
+                    choice.confidence,
+                    ControlKind::Plain,
+                    options.act_line,
+                ) {
+                    Some(Barred::LowConfidence.as_str())
+                } else if !world.navigation().contains(&action) {
+                    Some("navigation_unavailable")
+                } else {
+                    None
+                };
+                if let Some(reason) = stopped {
+                    note(&mut said, REASON, json!(reason));
+                    if reason == Barred::LowConfidence.as_str() {
+                        note(&mut said, BARRED, json!(reason));
+                    }
+                    note(&mut said, walk_words::PRESSED, json!(false));
+                    note(&mut said, "routeUse", json!(USE_FALLBACK));
+                    walked.rows.push(row(mode, at, attempt, said));
+                    return walked;
+                }
+                ahead = None;
+                let performed = crate::run_evidence::observing(
+                    json!({
+                        "look_ms": look_ms,
+                        "judgment": { "asked": true, "ms": judgment_ms, "confidence": choice.confidence },
+                    }),
+                    || world.navigate(action),
+                );
+                if !performed {
+                    note(&mut said, REASON, json!("navigation_refused"));
+                    note(&mut said, walk_words::PRESSED, json!(false));
+                    note(&mut said, "routeUse", json!(USE_FALLBACK));
+                    walked.rows.push(row(mode, at, attempt, said));
+                    return walked;
+                }
+                if action == Navigation::Wait {
+                    waiting = true;
+                } else {
+                    walked.pressed += 1;
+                    note(&mut said, walk_words::PRESSED, json!(true));
+                }
+                pressed_so_far.push(action.word().to_string());
+                note(&mut said, "routeUse", json!(USE_APPLIED));
+                let reached = check_goal(world, &mut walked, &mut said);
+                walked.rows.push(row(mode, at, attempt, said));
+                if reached {
+                    return walked;
+                }
+                continue;
+            }
             Chosen::GiveUp | Chosen::Done => {
                 let ended = match choice.chosen {
                     Chosen::Done => zerocode_core::screen_action::DONE,
@@ -1471,26 +1593,7 @@ fn walk(
         // named by. Without it the row is a judgment with no consequence and
         // no account of why, which reads from the outside exactly like a
         // screen that had nothing worth pressing (t-5455).
-        if !acting {
-            note(&mut said, "routeUse", json!(USE_SHADOW));
-            note(&mut said, walk_words::PRESSED, json!(false));
-            note(&mut said, REASON, json!(SEAT_RECORDING));
-            walked.rows.push(row(mode, at, attempt, said));
-            return walked;
-        }
-
-        // A screen whose text gives the walk orders, or a wall in front of
-        // the page the goal needs, is not pressed on — by this judgment or by
-        // a second reader's (t-6187). The walk steps back to the person, as a
-        // judgment under the press floor does, and the row names the stop.
-        if let Some(stopped) = choice.guard.and_then(Guard::stops) {
-            let word = Barred::from(stopped).as_str();
-            note(&mut said, BARRED, json!(word));
-            // The walk's own answer says why no hand went out
-            // ([`no_press_reason`]), so the one who asked can tell the person.
-            note(&mut said, REASON, json!(word));
-            note(&mut said, walk_words::PRESSED, json!(false));
-            note(&mut said, "routeUse", json!(USE_FALLBACK));
+        if !admit_action(acting, choice.guard, &mut said) {
             walked.rows.push(row(mode, at, attempt, said));
             return walked;
         }
@@ -1697,7 +1800,11 @@ fn walk(
                         pressed: &pressed_ahead,
                         shows: &seen.shows,
                     },
-                    &seen.beside(world.types(), &seen.fields_left(&entered)),
+                    &seen.beside(
+                        world.types(),
+                        &seen.fields_left(&entered),
+                        world.navigation(),
+                    ),
                 )
                 .and_then(|question| judge.begin(&question));
             }
@@ -1766,7 +1873,11 @@ fn walk(
                             pressed: &pressed_so_far,
                             shows: &screen.shows,
                         },
-                        &screen.beside(world.types(), &screen.fields_left(&entered)),
+                        &screen.beside(
+                            world.types(),
+                            &screen.fields_left(&entered),
+                            world.navigation(),
+                        ),
                     )
                     .and_then(|question| judge.begin(&question));
                 }
@@ -1820,15 +1931,10 @@ fn walk(
                 // The caller's own condition, asked of the screen. It is the
                 // only verified end a goal walk has; `done` is a judgment's
                 // word about itself.
-                let reached = world.reached();
-                if let Some(reached) = reached {
-                    note(&mut said, walk_words::RECHECK, json!(reached));
-                    walked.agreed = Some(reached);
-                }
+                let reached = check_goal(world, &mut walked, &mut said);
                 walked.rows.push(row(mode, at, attempt, said));
-                if reached == Some(true) {
+                if reached {
                     branch::settle(&mut walked, fork.take(), NextStep::Reached);
-                    walked.reached = Some(true);
                     return walked;
                 }
             }
@@ -1837,13 +1943,37 @@ fn walk(
     walked
 }
 
-/// What the second reader's answer comes to under the seat's own press rule
-/// ([`Options::rescue`]): the number to press, and the word the row says it
-/// by. `pressed` when it named a number the seat would press; `low_confidence`
-/// when its confidence is under the floor; `link` when the number carries the
-/// screen elsewhere — a rescue that navigates away is the person's call;
-/// `give_up`/`done` when it declined to press; the wire's own token when it
-/// answered nothing.
+fn admit_action(acting: bool, guard: Option<Guard>, said: &mut Value) -> bool {
+    let refusal = if !acting {
+        Some((SEAT_RECORDING, USE_SHADOW))
+    } else {
+        guard.and_then(Guard::stops).map(|stopped| {
+            let word = Barred::from(stopped).as_str();
+            note(said, BARRED, json!(word));
+            (word, USE_FALLBACK)
+        })
+    };
+    if let Some((reason, route)) = refusal {
+        note(said, "routeUse", json!(route));
+        note(said, walk_words::PRESSED, json!(false));
+        note(said, REASON, json!(reason));
+        return false;
+    }
+    true
+}
+
+fn check_goal(world: &mut dyn World, walked: &mut Walked, said: &mut Value) -> bool {
+    let reached = world.reached();
+    if let Some(reached) = reached {
+        note(said, walk_words::RECHECK, json!(reached));
+        walked.agreed = Some(reached);
+        if reached {
+            walked.reached = Some(true);
+        }
+    }
+    reached == Some(true)
+}
+
 fn second_rung(
     policy: &JevUse,
     line: Option<u16>,
@@ -1858,6 +1988,8 @@ fn second_rung(
             // A second reader names one option and never a field
             // ([`ActionAsk::choice_of`]); an entry is not a press it rescues.
             Chosen::Type(_) => (TYPE_TEXT.to_string(), None),
+            Chosen::Navigate(action) => (action.word().to_string(), None),
+            Chosen::MoreControls => (MORE_CONTROLS.to_string(), None),
             Chosen::Mark(mark)
                 if !press_rule(policy, line, seen, mark, second.choice.confidence).0 =>
             {
@@ -1876,6 +2008,8 @@ fn chosen_word(chosen: Chosen) -> String {
         Chosen::Mark(mark) | Chosen::Type(mark) => option_of(mark),
         Chosen::GiveUp => zerocode_core::screen_action::GIVE_UP.to_string(),
         Chosen::Done => zerocode_core::screen_action::DONE.to_string(),
+        Chosen::Navigate(action) => action.word().to_string(),
+        Chosen::MoreControls => MORE_CONTROLS.to_string(),
     }
 }
 

@@ -1051,18 +1051,22 @@ pub fn parse_viewport(word: &str) -> Result<Viewport, String> {
     }
 }
 
-/// What `scroll <label> <css|top|bottom|dx,dy>` asks for.
+/// What a scroll asks for: a selector, an endpoint, a viewport step or an offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScrollTarget {
     Top,
     Bottom,
+    PageUp,
+    PageDown,
     /// `dx,dy` in CSS pixels, either sign.
     By(i64, i64),
     /// A CSS selector: the first match is scrolled into the middle.
     Selector(String),
 }
 
-/// Parse a scroll word. `top`/`bottom` and `dx,dy` are the door's own; every
+pub const BROWSER_SCROLL_PAGE_PERCENT: u16 = 80;
+
+/// Parse a scroll word. Endpoints, viewport steps and `dx,dy` are the door's own; every
 /// other word is a selector, and the page decides whether it is one.
 pub fn parse_scroll(word: &str) -> Result<ScrollTarget, String> {
     let word = word.trim();
@@ -1074,6 +1078,12 @@ pub fn parse_scroll(word: &str) -> Result<ScrollTarget, String> {
     }
     if word == "bottom" {
         return Ok(ScrollTarget::Bottom);
+    }
+    if word == "page-up" {
+        return Ok(ScrollTarget::PageUp);
+    }
+    if word == "page-down" {
+        return Ok(ScrollTarget::PageDown);
     }
     if let Some((dx, dy)) = word.split_once(',')
         && let (Ok(dx), Ok(dy)) = (dx.trim().parse::<i64>(), dy.trim().parse::<i64>())
@@ -1280,7 +1290,7 @@ pub fn usage() -> String {
         "                                             페이지 요청: seq·method·status·ms·url",
         "  zerocode-browser viewport <label> <preset|WxH|default>",
         "                                             판 크기: mobile-s|mobile-m|mobile-l|tablet|laptop|laptop-l|desktop 또는 WxH",
-        "  zerocode-browser scroll <label> <css|top|bottom|dx,dy>",
+        "  zerocode-browser scroll <label> <css|top|bottom|page-up|page-down|dx,dy>",
         "                                             스크롤 뒤 좌표",
         "  zerocode-browser find <label> <text>  페이지에서 찾기 — {count,index}",
         "  zerocode-browser diagnose <label> [--json]",
@@ -1520,7 +1530,7 @@ mod tests {
             "tabs                 판마다 라벨·상태(loading|finished|dead|blank)",
             "close <label>",
             "viewport <label> <preset|WxH|default>",
-            "scroll <label> <css|top|bottom|dx,dy>",
+            "scroll <label> <css|top|bottom|page-up|page-down|dx,dy>",
             "find <label> <text>",
             "diagnose <label> [--json]",
         ] {
@@ -1651,6 +1661,8 @@ mod tests {
 
         assert_eq!(parse_scroll("top"), Ok(ScrollTarget::Top));
         assert_eq!(parse_scroll("bottom"), Ok(ScrollTarget::Bottom));
+        assert_eq!(parse_scroll("page-up"), Ok(ScrollTarget::PageUp));
+        assert_eq!(parse_scroll("page-down"), Ok(ScrollTarget::PageDown));
         assert_eq!(parse_scroll("0,-400"), Ok(ScrollTarget::By(0, -400)));
         assert_eq!(
             parse_scroll("#comments > li:nth-child(3)"),

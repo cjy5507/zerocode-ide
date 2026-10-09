@@ -3008,6 +3008,7 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
             containers: &containers,
             images: &images,
             rows: &rows,
+            navigation: &[],
         };
         let stopped = screen::ActionLook {
             errand: Errand::Clear {

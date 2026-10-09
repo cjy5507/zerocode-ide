@@ -1826,6 +1826,9 @@ pub const WALK_STEPS_DEFAULT: usize = 30;
 /// screen-did-not-move rule exists to end.
 pub const WALK_STEPS_MAX: usize = 40;
 
+pub const WALK_WAIT_MS: u64 = 500;
+pub const WALK_WAIT_LIMIT: usize = 4;
+
 /// How many presses this walk may spend: what the caller asked, clamped to
 /// [`WALK_STEPS_MAX`], or [`WALK_STEPS_DEFAULT`] when they asked for none.
 /// The parser refuses anything out of range, so this reads a checked value —

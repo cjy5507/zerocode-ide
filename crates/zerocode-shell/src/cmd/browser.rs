@@ -1819,6 +1819,11 @@ pub(crate) async fn automate_scroll(
     let request = match target {
         ScrollTarget::Top => serde_json::json!({ "kind": "top" }),
         ScrollTarget::Bottom => serde_json::json!({ "kind": "bottom" }),
+        ScrollTarget::PageUp | ScrollTarget::PageDown => serde_json::json!({
+            "kind": "page",
+            "direction": if matches!(target, ScrollTarget::PageUp) { "up" } else { "down" },
+            "pagePercent": zerocode_core::agent_browser::BROWSER_SCROLL_PAGE_PERCENT,
+        }),
         ScrollTarget::By(dx, dy) => serde_json::json!({ "kind": "by", "dx": dx, "dy": dy }),
         ScrollTarget::Selector(selector) => {
             checked_selector(selector)?;
@@ -1826,24 +1831,7 @@ pub(crate) async fn automate_scroll(
         }
     };
     let pane = browser_pane_of(app, state, label)?;
-    let script = automation_script(
-        &request,
-        r#"
-if (request.kind === "selector") {
-  const selected = zcSelect(request.selector);
-  if (selected.code) return zcFail(selected.code);
-  selected.element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
-} else if (request.kind === "top") {
-  window.scrollTo(0, 0);
-} else if (request.kind === "bottom") {
-  const body = document.body ? document.body.scrollHeight : 0;
-  window.scrollTo(0, Math.max(document.documentElement.scrollHeight, body));
-} else {
-  window.scrollBy(Number(request.dx) || 0, Number(request.dy) || 0);
-}
-return zcEncode({ ok: true, value: { x: Math.round(window.scrollX), y: Math.round(window.scrollY) } });
-"#,
-    );
+    let script = automation_script(&request, BROWSER_SCROLL_BODY);
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
     let value = page_value(reply)?;
     let axis = |name: &str| {
@@ -1854,6 +1842,25 @@ return zcEncode({ ok: true, value: { x: Math.round(window.scrollX), y: Math.roun
     };
     Ok((axis("x")?, axis("y")?))
 }
+
+const BROWSER_SCROLL_BODY: &str = r#"
+if (request.kind === "selector") {
+  const selected = zcSelect(request.selector);
+  if (selected.code) return zcFail(selected.code);
+  selected.element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+} else if (request.kind === "top") {
+  window.scrollTo(0, 0);
+} else if (request.kind === "bottom") {
+  const body = document.body ? document.body.scrollHeight : 0;
+  window.scrollTo(0, Math.max(document.documentElement.scrollHeight, body));
+} else if (request.kind === "page") {
+  const direction = request.direction === "up" ? -1 : 1;
+  window.scrollBy(0, direction * Math.max(1, Math.floor(window.innerHeight * request.pagePercent / 100)));
+} else {
+  window.scrollBy(Number(request.dx) || 0, Number(request.dy) || 0);
+}
+return zcEncode({ ok: true, value: { x: Math.round(window.scrollX), y: Math.round(window.scrollY) } });
+"#;
 
 /// The door's budget for a fact the WINDOW makes true — a pane appearing
 /// after `browser:agent-open`, leaving after `browser:agent-close`. Seven

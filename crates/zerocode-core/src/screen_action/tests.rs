@@ -19,6 +19,113 @@ fn item(mark: usize, role: &str, label: &str) -> Value {
     })
 }
 
+#[test]
+fn navigation_is_offered_only_when_the_goal_world_can_perform_it() {
+    let controls = [item(1, "button", "Continue")];
+    let beside = Beside {
+        navigation: &Navigation::ALL,
+        ..Beside::default()
+    };
+    let asked = ask_with(&a_goal(&controls, &[]), &beside).unwrap();
+    for action in Navigation::ALL {
+        let read = asked.read(&answered(&asked, action.word(), 0.9)).unwrap();
+        assert_eq!(read.chosen, Chosen::Navigate(action));
+        assert!(asked.choice_of(action.word(), 0.9).is_err());
+    }
+    let plain = ask(&a_goal(&controls, &[])).unwrap();
+    let recovery = ask_with(&a_look(&controls, &[]), &beside).unwrap();
+    for asked in [plain, recovery] {
+        for action in Navigation::ALL {
+            assert!(!asked.options().iter().any(|option| option == action.word()));
+            assert!(asked.read(&answered(&asked, action.word(), 0.9)).is_err());
+        }
+    }
+}
+
+#[test]
+fn a_loading_screen_can_wait_without_an_invented_control() {
+    let beside = Beside {
+        navigation: &[Navigation::Wait],
+        ..Beside::default()
+    };
+    let asked = ask_with(&a_goal(&[], &[]), &beside).unwrap();
+    assert!(asked.marks().is_empty());
+    assert_eq!(asked.options(), ["wait", GIVE_UP, DONE]);
+    assert_eq!(
+        asked.read(&answered(&asked, "wait", 0.9)).unwrap().chosen,
+        Chosen::Navigate(Navigation::Wait)
+    );
+    assert!(asked.read(&answered(&asked, "scroll_down", 0.9)).is_err());
+    assert!(ask_with(&a_look(&[], &[]), &beside).is_none());
+}
+
+#[test]
+fn a_goal_can_inspect_visible_controls_beyond_the_first_candidate_page() {
+    let controls: Vec<Value> = (1..=MAX_ACTION_CANDIDATES + 1)
+        .map(|mark| item(mark, "button", "Item"))
+        .collect();
+    let asked = ask(&a_goal(&controls, &[])).unwrap();
+    assert!(
+        asked
+            .options()
+            .iter()
+            .any(|option| option == "more_controls")
+    );
+}
+
+#[test]
+fn candidate_pages_cover_only_observed_controls_once_and_end_at_the_last_page() {
+    let total = MAX_ACTION_CANDIDATES * 2 + 1;
+    let controls: Vec<Value> = (1..=total)
+        .map(|mark| item(mark, "button", "Item"))
+        .collect();
+    let goal = a_goal(&controls, &[]);
+    let mut offset = 0;
+    let mut offered = Vec::new();
+    loop {
+        let asked = ask_from(&goal, &Beside::default(), offset).unwrap();
+        assert!(asked.marks().len() <= MAX_ACTION_CANDIDATES);
+        offered.extend_from_slice(asked.marks());
+        let Some(next) = asked.next_candidate_offset() else {
+            assert!(!asked.options().contains(&MORE_CONTROLS.to_string()));
+            assert!(asked.read(&answered(&asked, MORE_CONTROLS, 0.9)).is_err());
+            break;
+        };
+        assert!(next > offset);
+        assert_eq!(
+            asked
+                .read(&answered(&asked, MORE_CONTROLS, 0.9))
+                .unwrap()
+                .chosen,
+            Chosen::MoreControls
+        );
+        offset = next;
+    }
+    assert_eq!(offered, (1..=total).collect::<Vec<_>>());
+    assert!(ask_from(&goal, &Beside::default(), total).is_none());
+    let clear = a_look(&controls, &[]);
+    assert_eq!(
+        ask_from(&clear, &Beside::default(), MAX_ACTION_CANDIDATES),
+        ask(&clear)
+    );
+}
+
+#[test]
+fn screen_text_is_bounded_before_it_is_owned_and_keeps_whole_unicode_lines() {
+    let visited = std::cell::Cell::new(0);
+    let lines = (0..SHOWS_LINE_CAP * 100).map(|_| {
+        visited.set(visited.get() + 1);
+        "visible"
+    });
+    let kept = shows_from(lines);
+    assert_eq!(kept.len(), SHOWS_LINE_CAP);
+    assert_eq!(visited.get(), SHOWS_LINE_CAP);
+    let text = "界".repeat(SHOWS_CHAR_CAP);
+    assert_eq!(shows_from([text.as_str(), "more"]), [text.as_str()]);
+    let oversized = format!("{text}界");
+    assert!(shows_from([oversized.as_str()]).is_empty());
+}
+
 fn a_look<'a>(items: &'a [Value], tried: &'a [usize]) -> ActionLook<'a> {
     ActionLook {
         goal: "checkout smoke",
@@ -272,10 +379,10 @@ fn every_broken_rule_discards_the_answer_whole() {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 6);
+    assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 7);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "31af4b5fa6fb9b34"
+        "1a17821b352bdfc8"
     );
 }
 

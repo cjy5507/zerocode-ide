@@ -189,21 +189,9 @@ return zcEncode({ ok: true, value: !selected.code && !selected.hidden && zcVisib
 `);
 /* `scroll`: the page scrolled to its top or bottom, by an offset, or a
  * selector's first match brought to the middle (`automate_scroll`). */
-export const scrollScript = (request) => doorScript(request, `
-if (request.kind === "selector") {
-  const selected = zcSelect(request.selector);
-  if (selected.code) return zcFail(selected.code);
-  selected.element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
-} else if (request.kind === "top") {
-  window.scrollTo(0, 0);
-} else if (request.kind === "bottom") {
-  const body = document.body ? document.body.scrollHeight : 0;
-  window.scrollTo(0, Math.max(document.documentElement.scrollHeight, body));
-} else {
-  window.scrollBy(Number(request.dx) || 0, Number(request.dy) || 0);
-}
-return zcEncode({ ok: true, value: { x: Math.round(window.scrollX), y: Math.round(window.scrollY) } });
-`);
+export const SCROLL_PAGE_PERCENT = need("BROWSER_SCROLL_PAGE_PERCENT", rustNumber(CORE, "BROWSER_SCROLL_PAGE_PERCENT"));
+const SCROLL_BODY = need("BROWSER_SCROLL_BODY", rustText(DOOR, "BROWSER_SCROLL_BODY"));
+export const scrollScript = (request) => doorScript({ ...request, pagePercent: SCROLL_PAGE_PERCENT }, SCROLL_BODY);
 
 /* `settle_with`: poll the page's own facts (`settleScript`) until the document
  * a write was made in has stood still for the quiet window since the write
