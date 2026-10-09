@@ -4279,9 +4279,10 @@ function noteTermFocus() {
   tellFocus(focusedTerm, false);
   focusedTerm = wanted;
   tellFocus(focusedTerm, true);
-  // The pane that now holds the keyboard is one the person is looking at, so
-  // its finish mark is released (t-26595). Nothing to release when no pane has it.
-  if (focusedTerm !== null && focusedTerm !== undefined) {
+  // The pane that now holds the keyboard is one the person is looking at, so a
+  // finish the list shows for it is released (t-26595). A switch between panes
+  // with nothing to release costs no round trip.
+  if (focusedTerm !== null && focusedTerm !== undefined && waitingFinishStands(focusedTerm)) {
     void invoke("clear_finish_mark", { pane: `term:${focusedTerm}` }).catch(() => false);
   }
 }

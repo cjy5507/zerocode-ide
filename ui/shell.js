@@ -1818,6 +1818,12 @@ async function refreshWaitingList() {
   paintWaitingList();
 }
 
+/* Whether the list shows this pane as a finish nobody has looked at. Releasing a
+ * mark costs a round trip, so it is asked only when there is a finish to release. */
+function waitingFinishStands(term) {
+  return waitingRows.some((row) => row.pane === `term:${term}` && row.waiting === "finished");
+}
+
 function waitingKindWord(waiting) {
   if (waiting === "blocked") return t("waiting.blocked", "막힘");
   if (waiting === "question") return t("waiting.question", "질문");
@@ -1848,7 +1854,7 @@ function paintWaitingList() {
       const place = document.createElement("span");
       place.className = "waiting-row-place";
       place.textContent = row.worktree.split("/").filter(Boolean).pop() || row.pane;
-      place.title = row.worktree;
+      place.dataset.tip = row.worktree;
 
       button.append(agent, kind, place);
       button.addEventListener("click", () => openWaitingRow(row));
@@ -2446,8 +2452,8 @@ function boardCardDestination(card) {
 function openBoardCard(card, bucket) {
   const { kind, id, term, valid } = boardCardDestination(card);
   if (!valid) return;
-  // Opening a pane is looking at it: its finish mark is released (t-26595).
-  if ((kind === "term" || kind === "sub") && term !== null) {
+  // Opening a pane is looking at it: a finish the list shows is released (t-26595).
+  if ((kind === "term" || kind === "sub") && term !== null && waitingFinishStands(term)) {
     void invoke("clear_finish_mark", { pane: `term:${term}` }).catch(() => false);
   }
   if (kind === "term") {

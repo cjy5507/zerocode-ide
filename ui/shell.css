@@ -23312,7 +23312,7 @@ button.helper-sib:hover {
   display: grid;
   gap: 2px;
   padding: 6px var(--nav-inset) 8px;
-  border-bottom: 1px solid var(--accent-rule);
+  border-bottom: 1px solid var(--edge-rule);
 }
 
 .waiting-list[hidden] {
@@ -23351,6 +23351,7 @@ button.helper-sib:hover {
   font-size: var(--text-sm);
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--ease-standard);
 }
 
 .waiting-row:hover {
@@ -23373,13 +23374,13 @@ button.helper-sib:hover {
 }
 
 .waiting-row[data-waiting="finished"] .waiting-row-kind {
-  color: var(--status-success);
+  color: var(--lane-1);
 }
 
 .waiting-row-place {
   min-width: 0;
   overflow: hidden;
-  color: var(--muted);
+  color: var(--ink-label);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

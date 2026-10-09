@@ -47,6 +47,7 @@ const fn word(waiting: Waiting) -> &'static str {
 /// then finishes; each kind lists its newest first.
 #[tauri::command]
 pub(crate) fn waiting_on_me(state: State<'_, AppState>) -> Vec<WaitingRow> {
+    let _crumb = crate::crumbs::Command::enter("waiting_on_me");
     let mode = load_settings_for_boot(state.settings())
         .document
         .notifications
@@ -97,6 +98,7 @@ pub(crate) fn waiting_on_me(state: State<'_, AppState>) -> Vec<WaitingRow> {
 /// mark stood and was released; a pane id that names no terminal releases nothing.
 #[tauri::command]
 pub(crate) fn clear_finish_mark(state: State<'_, AppState>, pane: String) -> bool {
+    let _crumb = crate::crumbs::Command::enter("clear_finish_mark");
     let Some(term) = pane
         .strip_prefix("term:")
         .and_then(|id| id.parse::<TermId>().ok())

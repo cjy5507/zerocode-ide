@@ -151,6 +151,7 @@ pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
     ("cmd/remote.rs", include_str!("../../src/cmd/remote.rs")),
     ("cmd/browser.rs", include_str!("../../src/cmd/browser.rs")),
     ("cmd/usage.rs", include_str!("../../src/cmd/usage.rs")),
+    ("cmd/waiting.rs", include_str!("../../src/cmd/waiting.rs")),
     (
         "cmd/appearance.rs",
         include_str!("../../src/cmd/appearance.rs"),
