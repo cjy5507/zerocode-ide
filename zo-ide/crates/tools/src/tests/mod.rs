@@ -59,6 +59,14 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
     })
 }
 
+/// A `ToolContext` for tests that may run beside another test's `set_current_dir`
+/// window (t-21146). `ToolContext::new()` binds the process cwd's `.zo/registries`
+/// when it is built. This commit takes no lock yet; the next commit makes the
+/// construction wait for the windows' `env_lock`.
+pub(crate) fn tool_context_outside_cwd_windows() -> ToolContext {
+    ToolContext::new()
+}
+
 /// A scoped environment override shared by tests that use process-wide state.
 pub(crate) struct EnvGuard {
     key: &'static str,
