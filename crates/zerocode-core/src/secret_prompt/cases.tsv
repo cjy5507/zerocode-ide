@@ -1,0 +1,59 @@
+# The bundle of screens read by secret_prompt::tests. One screen per line:
+# expected kind (none = no question) | cursor row | the screen's rows from the top.
+# <blank> is an empty row. The rows are written from the prompts each tool
+# prints (sudo, ssh, git, gpg, passwd, a PIN prompt, and the same in Korean,
+# Japanese, Chinese and Spanish) and from the look-alikes ordinary output shows.
+
+# Questions: a secret is asked on the cursor's row, which is the last row with text.
+password | 0 | Password:
+password | 0 | Password: | <blank>
+password | 0 | [sudo] password for dev:
+password | 0 | dev@192.0.2.10's password:
+password | 0 | Password for 'https://dev@example.com':
+password | 0 | New password:
+password | 0 | Retype new password:
+password | 0 | Current password:
+password | 0 | Enter new password:
+password | 0 | Enter your password:
+password | 0 | 암호:
+password | 0 | 비밀번호:
+password | 0 | 패스워드:
+password | 0 | [sudo] 비밀번호:
+password | 0 | 새 비밀번호:
+password | 0 | パスワード:
+password | 0 | 密码：
+password | 0 | Contraseña:
+password | 1 | Sorry, try again. | Password:
+passphrase | 0 | Enter passphrase:
+passphrase | 0 | Enter passphrase for key '/Users/dev/.ssh/id_ed25519':
+passphrase | 0 | Enter passphrase for /Users/dev/.ssh/id_ed25519:
+pin | 0 | PIN:
+pin | 0 | Pin:
+pin | 0 | Enter PIN:
+
+# Look-alikes: the same words in ordinary output, or a question that is not
+# waiting. None of these is a question, so none may put a secret box up.
+none | 0 | password.txt:
+none | 0 | Passwords:
+none | 0 | Reset your password:
+none | 0 | Incorrect password:
+none | 0 | Password reset complete.
+none | 0 | password: hunter2
+none | 0 | Password: hunter2:
+none | 0 | password
+none | 0 | dev@192.0.2.10's password
+none | 0 | [INFO] 2026-10-10 10:00:00 password:
+none | 0 | Last login: Fri Oct 10 01:00:00 on ttys001
+none | 0 | The password is required:
+none | 0 | Enter password for the new account:
+none | 0 | password for the account:
+none | 0 | dev@192.0.2.10 password:
+none | 0 | [INFO] password:
+none | 0 | user password for dev:
+none | 0 | Verification code:
+none | 0 | Spin:
+none | 0 | PINs:
+none | 0 | 암호 변경이 완료되었습니다.
+none | 0 | Password: | hunter2
+none | 1 | Password: | <blank>
+none | 3 | db: |   user: dev |   password: | <blank>

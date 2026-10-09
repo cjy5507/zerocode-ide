@@ -32,6 +32,7 @@
 use super::*;
 use zerocode_core::ask::{AskPrompt, AskQuestion, AskSelection};
 use zerocode_core::screen_menu::{self, ScreenMenu};
+use zerocode_core::secret_prompt::SecretPrompt;
 
 use crate::terminal_registry::HeldTerminal;
 
@@ -256,6 +257,29 @@ pub(super) fn screen_card(held: &HeldTerminal) -> Option<AskPrompt> {
     screen_menu::read_menu(&rows, cursor)?.card()
 }
 
+/// How long a pane's output must have been silent before its last line is
+/// read as a question the pane waits on. A line still being printed is not
+/// yet a question.
+pub(super) const SECRET_QUIET: Duration = Duration::from_millis(300);
+
+/// The secret the pane's question asks for, once the pane has been quiet for
+/// [`SECRET_QUIET`]. Red stage: not yet read.
+pub(super) fn secret_prompt(held: &HeldTerminal) -> Option<SecretPrompt> {
+    let _ = held;
+    None
+}
+
+/// Type a secret the person gave a card — the value and its return — if and
+/// only if the pane still shows `expect`'s question. Red stage: never types.
+pub(super) fn type_secret_if_up(
+    held: &HeldTerminal,
+    expect: &SecretPrompt,
+    value: &[u8],
+) -> Result<bool, PtyTransportError> {
+    let _ = (held, expect, value);
+    Ok(false)
+}
+
 /// Take the right to type one answer into `term`, or say why not.
 pub(super) fn answer_lease(term: TermId) -> Result<tokio::sync::OwnedMutexGuard<()>, Refusal> {
     crate::ssh_send_guard::send_lease(term)
@@ -278,8 +302,134 @@ pub(super) fn settle_in_background(lease: tokio::sync::OwnedMutexGuard<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
     use zerocode_core::ask::AskOption;
+    use zerocode_core::secret_prompt::SecretKind;
     use zerocode_pty::{Pumped, Terminal};
+
+    /// A synthetic program that asks for a secret the way sudo does: it draws
+    /// its question and waits, and it says when its output last moved.
+    struct SecretCli {
+        terminal: Terminal,
+        last_output: Option<Instant>,
+        written: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl PtyTransport for SecretCli {
+        fn pump(&mut self) -> Pumped {
+            Pumped {
+                bytes: 0,
+                ended: false,
+                answered: false,
+                unanswered_since: None,
+            }
+        }
+
+        fn terminal(&self) -> &Terminal {
+            &self.terminal
+        }
+
+        fn terminal_mut(&mut self) -> &mut Terminal {
+            &mut self.terminal
+        }
+
+        fn write_input(&mut self, bytes: &[u8]) -> Result<(), PtyTransportError> {
+            self.written.lock().unwrap().push(bytes.to_vec());
+            Ok(())
+        }
+
+        fn resize(&mut self, _rows: u16, _cols: u16) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+
+        fn try_wait(&mut self) -> Result<Option<u32>, PtyTransportError> {
+            Ok(None)
+        }
+
+        fn kill(&mut self) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+
+        fn last_output_at(&self) -> Option<Instant> {
+            self.last_output
+        }
+    }
+
+    struct SecretPane {
+        held: HeldTerminal,
+        written: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl SecretPane {
+        fn typed(&self) -> Vec<String> {
+            self.written
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                .collect()
+        }
+    }
+
+    /// A pane whose screen shows `question` on its first row, with the cursor
+    /// at its end, and whose output last moved `silent_for` ago.
+    fn secret_pane(question: &str, silent_for: Duration) -> SecretPane {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut terminal = Terminal::new(24, 80);
+        terminal.feed(format!("\x1b[2J\x1b[H{question}").as_bytes());
+        let cli = SecretCli {
+            terminal,
+            last_output: Instant::now().checked_sub(silent_for),
+            written: Arc::clone(&written),
+        };
+        SecretPane {
+            held: Arc::new(Mutex::new(PtyHandle::new(cli))),
+            written,
+        }
+    }
+
+    #[test]
+    fn a_question_for_a_secret_is_read_only_once_its_pane_has_been_quiet() {
+        let talking = secret_pane("[sudo] password for dev:", Duration::ZERO);
+        assert_eq!(
+            secret_prompt(&talking.held),
+            None,
+            "a line still being printed is not yet a question"
+        );
+        let waiting = secret_pane("[sudo] password for dev:", SECRET_QUIET * 2);
+        assert_eq!(
+            secret_prompt(&waiting.held),
+            Some(SecretPrompt {
+                kind: SecretKind::Password,
+                line: "[sudo] password for dev:".to_string(),
+            }),
+        );
+    }
+
+    #[test]
+    fn a_secret_is_typed_with_its_return_once_when_the_same_question_still_shows() {
+        let pane = secret_pane("Password:", SECRET_QUIET * 2);
+        let expect = SecretPrompt {
+            kind: SecretKind::Password,
+            line: "Password:".to_string(),
+        };
+        assert!(type_secret_if_up(&pane.held, &expect, b"SENTINEL-not-a-secret").unwrap());
+        assert_eq!(pane.typed(), vec!["SENTINEL-not-a-secret\r".to_string()]);
+    }
+
+    #[test]
+    fn a_secret_is_not_typed_into_a_pane_that_asks_something_else() {
+        let pane = secret_pane("Enter passphrase:", SECRET_QUIET * 2);
+        let expect = SecretPrompt {
+            kind: SecretKind::Password,
+            line: "Password:".to_string(),
+        };
+        assert!(matches!(
+            type_secret_if_up(&pane.held, &expect, b"SENTINEL-not-a-secret"),
+            Ok(false)
+        ));
+        assert!(pane.typed().is_empty());
+    }
 
     /// A synthetic CLI that draws a numbered menu and takes arrow keys and
     /// Enter the way a menu does — the pane every test here types into.
