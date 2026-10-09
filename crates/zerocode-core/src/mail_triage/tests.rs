@@ -529,12 +529,13 @@ fn the_door_cuts_a_batch_to_the_cap_and_never_sends_it_whole() {
     let settings = JevSettings::from_root(
         &json!({ "smart": { "jev": { "enabled": true, "workspaces": ["*"] } } }),
     );
+    let workspace = crate::test_paths::host_spelled("/work/checkout");
     let cleared = may_send(
         &MAIL_TRIAGE,
         &Asking {
             key: true,
             settings: &settings,
-            workspace: Some("/work/checkout"),
+            workspace: Some(&workspace),
             sent_today: 0,
         },
         body,
