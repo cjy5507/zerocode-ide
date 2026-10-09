@@ -28,6 +28,10 @@ use serde::Serialize;
 /// longer line is someone's text that happens to end in a colon.
 pub const PROMPT_MAX_CHARS: usize = 160;
 
+/// The most bytes a typed secret may have: the field's room, so a value the
+/// field could not hold is refused before it reaches a pane.
+pub const SECRET_MAX_BYTES: usize = 1024;
+
 /// The kind of secret a question asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,9 +73,49 @@ pub fn read_secret_prompt(rows: &[String], cursor_row: usize) -> Option<SecretPr
     None
 }
 
+/// Whether a typed value may be written into a pane: one non-empty line of
+/// visible text, at most [`SECRET_MAX_BYTES`]. A control byte (a return, a tab,
+/// an escape) would end the line early or be read as a key, so none is let
+/// through. Red stage: refuses everything.
+#[must_use]
+pub fn value_is_typable(value: &[u8]) -> bool {
+    let _ = value;
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_value_is_one_line_of_visible_text_of_bounded_size() {
+        assert!(value_is_typable("hunter2-not-a-secret".as_bytes()));
+        assert!(
+            value_is_typable("비밀번호 123!".as_bytes()),
+            "visible text in any language"
+        );
+        assert!(
+            value_is_typable(&[b'a'; SECRET_MAX_BYTES]),
+            "as long as the field's room"
+        );
+        assert!(!value_is_typable(b""), "nothing to type");
+        assert!(
+            !value_is_typable(&[b'a'; SECRET_MAX_BYTES + 1]),
+            "longer than the field's room"
+        );
+        for refused in [
+            &b"one\rtwo"[..],
+            b"one\ntwo",
+            b"one\ttwo",
+            b"one\x1b[A",
+            b"one\0two",
+        ] {
+            assert!(
+                !value_is_typable(refused),
+                "a control byte ends the line early: {refused:?}"
+            );
+        }
+    }
 
     /// The bundle: one screen per line, written by hand from the prompts each
     /// tool prints and from the look-alikes ordinary output shows. Columns are

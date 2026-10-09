@@ -1,0 +1,180 @@
+//! The secret card (herdr 3, t-26596): what a test of one function cannot see
+//! from inside it. The behaviour is the answer door's own tests (`answer_door`),
+//! core's rule (`zerocode_core::secret_prompt`) and the window suite
+//! (`ui/tests/secret-prompt.mjs`). These contracts hold where a typed value may
+//! go — into the pane, once, through the answer door — and that nothing else
+//! keeps a copy of it: no storage, no console, no log line, no ledger record,
+//! and no backend call but the one that types.
+
+use std::path::Path;
+
+use super::support::{block_after, strip_rust_comments};
+
+const TERMINAL: &str = include_str!("../../src/cmd/terminal.rs");
+const ANSWER_DOOR: &str = include_str!("../../src/answer_door.rs");
+const MAIN: &str = include_str!("../../src/main.rs");
+
+/// A window file, read when the test runs: a missing one fails this contract
+/// alone, not the whole target it sits in.
+fn ui_file(name: &str) -> String {
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
+    std::fs::read_to_string(ui.join(name)).unwrap_or_else(|why| panic!("{name}: {why}"))
+}
+
+/// The places a page keeps things. The card names none of them.
+const PAGE_KEEPS: &[&str] = &[
+    "localStorage",
+    "sessionStorage",
+    "indexedDB",
+    "console.",
+    "tellWindowLog",
+    "document.cookie",
+    "history.",
+    "fetch(",
+    "XMLHttpRequest",
+    "navigator.clipboard",
+];
+
+/// The places a backend keeps things, or prints them. The typing command and
+/// the door it goes through name none of them.
+const BACKEND_KEEPS: &[&str] = &[
+    "eprintln!",
+    "println!",
+    "tracing::",
+    "log::",
+    "record(",
+    "ledger",
+    "crumbs::",
+    "{:?}",
+];
+
+/// The body of a struct with the given name, up to its closing brace.
+fn struct_body<'a>(source: &'a str, name: &str) -> &'a str {
+    let start = source
+        .find(&format!("struct {name} {{"))
+        .unwrap_or_else(|| panic!("struct {name} is not defined"));
+    let rest = &source[start..];
+    &rest[..rest.find("\n}").map_or(rest.len(), |end| end + 2)]
+}
+
+#[test]
+fn the_card_keeps_no_copy_of_the_value_and_sends_it_in_one_call() {
+    let card = ui_file("shell-secret.js");
+    assert!(
+        card.contains("registerAskKind(\"secret\""),
+        "the card is the popup's secret kind"
+    );
+    for keep in PAGE_KEEPS {
+        assert!(
+            !card.contains(keep),
+            "the card names {keep}, a place the page keeps things"
+        );
+    }
+    assert_eq!(
+        card.matches("invoke(\"answer_secret\"").count(),
+        1,
+        "exactly one call types the value"
+    );
+    assert_eq!(
+        card.matches("invoke(").count(),
+        2,
+        "only the poll and the answer call the backend"
+    );
+}
+
+#[test]
+fn the_field_is_a_password_input_that_no_form_owns() {
+    let markup = ui_file("index.html");
+    let at = markup
+        .find("id=\"ask-secret-input\"")
+        .expect("the popup has the secret field");
+    let tag_start = markup[..at].rfind('<').expect("the field is a tag");
+    let tag = &markup[tag_start..at + markup[at..].find('>').expect("the tag closes")];
+    for attribute in [
+        "type=\"password\"",
+        "autocomplete=\"new-password\"",
+        "autocapitalize=\"none\"",
+        "autocorrect=\"off\"",
+        "spellcheck=\"false\"",
+    ] {
+        assert!(
+            tag.contains(attribute),
+            "the field carries {attribute}: {tag}"
+        );
+    }
+    let before = &markup[..at];
+    let inside_a_form = before
+        .rfind("<form")
+        .is_some_and(|open| before.rfind("</form>").is_none_or(|close| close < open));
+    assert!(
+        !inside_a_form,
+        "no form owns the field, so no browser keeps what is sent from it"
+    );
+    assert!(
+        markup.contains("./shell-secret.js"),
+        "the page loads the card's script"
+    );
+}
+
+#[test]
+fn the_value_is_typed_through_the_answer_door_and_recorded_nowhere() {
+    let command = block_after(&strip_rust_comments(TERMINAL), "fn answer_secret(");
+    assert!(
+        command.contains("type_secret_if_up"),
+        "the command types through the answer door, which reads the pane again first"
+    );
+    for keep in BACKEND_KEEPS {
+        assert!(
+            !command.contains(keep),
+            "answer_secret names {keep}, a place the value could be kept"
+        );
+    }
+    let door = block_after(&strip_rust_comments(ANSWER_DOOR), "fn type_secret_if_up(");
+    assert!(
+        door.contains("write_input(value)"),
+        "the door writes the value to the pane and nowhere else"
+    );
+    for keep in BACKEND_KEEPS {
+        assert!(!door.contains(keep), "type_secret_if_up names {keep}");
+    }
+}
+
+#[test]
+fn the_panes_listing_carries_the_question_and_no_value() {
+    let listing = struct_body(&strip_rust_comments(TERMINAL), "PaneSecret");
+    for field in ["term:", "kind:", "line:", "since:"] {
+        assert!(listing.contains(field), "PaneSecret names {field}");
+    }
+    assert!(
+        !listing.contains("value"),
+        "a pane's question is listed without any value"
+    );
+    for command in ["answer_secret", "panes_secret"] {
+        assert!(
+            MAIN.contains(command),
+            "{command} is on the window's command list"
+        );
+    }
+}
+
+#[test]
+fn every_secret_word_is_translated_in_the_four_catalogs_beside_korean() {
+    let catalog = ui_file("shell-i18n.js");
+    for key in [
+        "secret.title.password",
+        "secret.title.passphrase",
+        "secret.title.pin",
+        "secret.send",
+        "secret.label",
+        "secret.hint",
+        "secret.empty",
+        "secret.busy",
+        "secret.invalid",
+    ] {
+        assert_eq!(
+            catalog.matches(&format!("\"{key}\":")).count(),
+            4,
+            "{key} is translated in en, ja, zh and es (Korean is the source)"
+        );
+    }
+}
