@@ -68,8 +68,8 @@ pub(super) struct PaneState {
     ///
     /// Kept on the ROW as well as the report because the consumers that must
     /// skip it are downstream of the row: the ring reads it before arming, and
-    /// the delayed completion re-reads the row 1.5s later, by which time the
-    /// report is gone.
+    /// the armed completion re-reads the row when its quiet ends, a minute
+    /// later, by which time the report is gone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) session_boundary: bool,
     /// A person ended this turn — see [`hooks::PaneHookReport::interrupted`].

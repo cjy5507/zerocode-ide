@@ -114,10 +114,11 @@ pub const fn turn_ms(turn_started_at_ms: Option<i64>, ended_at_ms: i64) -> Optio
     }
 }
 
-/// When the turn a pane is in began, after one report. A `Working` report
-/// from a rest (or from nothing) starts a turn. A question and its answer, and
-/// any report inside a turn, keep the turn's start; a turn heard for the first
-/// time at a stop starts when it is heard.
+/// When the turn a pane is in began, after one report. A turn runs from its
+/// first report until the pane comes to rest (`Done` or `Idle`); the first
+/// report after a rest starts the next turn, and so does the first report of a
+/// pane nobody has heard from. A question and its answer keep the turn's start,
+/// and so does a repeated `Done` — the same rest, not a new one.
 #[must_use]
 pub const fn turn_started_after(
     prior: Option<(HookState, Option<i64>)>,
@@ -128,13 +129,14 @@ pub const fn turn_started_after(
         Some((state, started)) => (Some(state), started),
         None => (None, None),
     };
-    let inside_turn = matches!(held, Some(HookState::Working | HookState::NeedsAttention));
-    match next {
-        HookState::Working if !inside_turn => Some(now_ms),
-        _ => match started {
-            Some(start) => Some(start),
-            None => Some(now_ms),
-        },
+    let rests = matches!(held, None | Some(HookState::Done | HookState::Idle));
+    let repeats_rest = matches!((held, next), (Some(HookState::Done), HookState::Done));
+    if rests && !repeats_rest {
+        return Some(now_ms);
+    }
+    match started {
+        Some(start) => Some(start),
+        None => Some(now_ms),
     }
 }
 
@@ -1068,6 +1070,23 @@ mod tests {
         assert_eq!(
             turn_started_after(None, HookState::Working, 5_000),
             Some(5_000)
+        );
+        // A pane whose agent left starts a new turn at the next report, even a
+        // question: the old turn's start must not reach the new agent's finish.
+        assert_eq!(
+            turn_started_after(
+                Some((HookState::Idle, Some(0))),
+                HookState::NeedsAttention,
+                100_000
+            ),
+            Some(100_000),
+            "a new agent in a pane the last one left starts its own turn"
+        );
+        // A repeated finish is the same rest, so the turn keeps its start.
+        assert_eq!(
+            turn_started_after(Some((HookState::Done, Some(0))), HookState::Done, 120_000),
+            Some(0),
+            "a repeated Done is the same rest"
         );
     }
 
