@@ -25150,6 +25150,20 @@ fn an_unpointed_message_is_told_to_the_person_and_to_its_sender_once() {
     };
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");
+    // t-35823: the ledger holds 45 runs here. The letter about this mail is
+    // filed in the mail's run alone, so the 44 others stay letter-free.
+    for extra in 0..44 {
+        let opened = run(
+            &host,
+            Vec::new(),
+            &team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(&format!("run-create --name unpointed-{extra}")),
+            clock(),
+        );
+        assert_eq!(opened.exit_code, 0, "{}", opened.stderr);
+    }
     let sent = run(
         &host,
         Vec::new(),
@@ -25191,6 +25205,15 @@ fn an_unpointed_message_is_told_to_the_person_and_to_its_sender_once() {
     assert!(
         !letters.stdout.contains(SECRET),
         "the letter carried the message's body"
+    );
+    let copies = the_rows()
+        .messages
+        .iter()
+        .filter(|row| row.body.contains("was NOT pointed"))
+        .count();
+    assert_eq!(
+        copies, 1,
+        "the letter was filed {copies} times across the ledger's runs"
     );
     // The mail stays unread on purpose (it was never pointed), so the pane
     // leaves the way its siblings do — the terms leave the team and the

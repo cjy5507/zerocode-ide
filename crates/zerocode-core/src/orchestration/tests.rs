@@ -22919,6 +22919,109 @@ fn a_pr_observation_receipt_survives_restart_and_lost_ack_without_duplicate_mail
     );
 }
 
+/// A pane's own mail, as the window files it into the run the pane sits in.
+fn a_pane_mail(run: &str) -> Draft {
+    Draft {
+        from: "pane:%7".into(),
+        to: format!("run:{run}"),
+        kind: MessageKind::Status,
+        body: "the pane's words".into(),
+        subject: Text::default(),
+        priority: Priority::Normal,
+        payload: Text::default(),
+        thread: None,
+        task: None,
+        dispatch: None,
+    }
+}
+
+/// How many messages carry this subject, summed over the runs named.
+fn messages_with_subject(ledger: &Ledger, runs: &[String], subject: &str) -> usize {
+    runs.iter()
+        .map(|run| {
+            ledger
+                .run(run)
+                .expect("a run")
+                .messages()
+                .iter()
+                .filter(|one| one.subject.as_str() == subject)
+                .count()
+        })
+        .sum()
+}
+
+/// t-35823: when the window cannot type a pane's pointer, the sender of that
+/// mail is told by a letter filed in the run the mail is in, and in no other
+/// run. The letter is addressed to a pane, which every run accepts, so the
+/// call the window made without a run copied it into each run of the ledger.
+#[test]
+fn a_letter_about_a_pane_mail_that_was_not_pointed_is_filed_in_its_run_only() {
+    let mut ledger = Ledger::new();
+    let runs: Vec<String> = (0..45)
+        .map(|n| ledger.create_run(&format!("run {n}"), 1))
+        .collect();
+    let mail_run = runs[30].clone();
+    let mail = ledger
+        .post(&mail_run, a_pane_mail(&mail_run), 2)
+        .expect("the pane's mail is filed in its run");
+    let receipt = format!("pointer-held:{mail}");
+    let filed = ledger.post_observation_once(
+        "pane:%7",
+        "message was filed in its inbox but was NOT pointed",
+        Some(receipt.as_str()),
+        3,
+    );
+    let copies = messages_with_subject(&ledger, &runs, &receipt);
+    assert_eq!(
+        copies,
+        1,
+        "the letter was filed {copies} times over {} runs",
+        runs.len()
+    );
+    assert_eq!(filed, 1);
+}
+
+/// Measurement, not a rule (t-35823): the synthetic ledger of the test above,
+/// read through the two verbs a person looks at it with. Prints the rows that
+/// carry the letter and the median milliseconds of 200 reads of each verb.
+#[test]
+#[ignore = "measurement, not a rule"]
+fn measure_a_pointer_letter_about_a_pane_mail_across_forty_five_runs() {
+    let mut bench = Bench::new();
+    let mut runs = Vec::new();
+    for n in 0..45 {
+        let opened = bench.json(&format!("run-create --name measure-{n}"));
+        runs.push(opened["runId"].as_str().expect("a run id").to_string());
+    }
+    let mail_run = runs[30].clone();
+    let mail = bench
+        .ledger
+        .post(&mail_run, a_pane_mail(&mail_run), 2)
+        .expect("the pane's mail is filed in its run");
+    let receipt = format!("pointer-held:{mail}");
+    bench
+        .ledger
+        .post_observation_once("pane:%7", "was NOT pointed", Some(receipt.as_str()), 3);
+    let rows = messages_with_subject(&bench.ledger, &runs, &receipt);
+    let mut median_ms = |line: &str| {
+        let mut samples: Vec<f64> = (0..200)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                bench.json(line);
+                started.elapsed().as_secs_f64() * 1_000.0
+            })
+            .collect();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    };
+    let inbox = median_ms("inbox");
+    let check = median_ms("check --peek");
+    eprintln!(
+        "t-35823 measure: runs={} letter_rows={rows} inbox_median_ms={inbox:.3} check_peek_median_ms={check:.3}",
+        runs.len()
+    );
+}
+
 /// A coordinator who pinned a model already chose among the agents (t-6342):
 /// 82 of the 85 summonses the seat was asked about on this machine named
 /// one, and the question offered every installed agent anyway — codex was
