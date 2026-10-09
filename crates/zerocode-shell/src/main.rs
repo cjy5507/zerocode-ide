@@ -143,6 +143,7 @@ mod pane_cwd_runtime;
 mod pane_guard;
 mod pane_layout;
 mod pane_runtime;
+mod pane_transcript;
 mod pick_runtime;
 mod preference_runtime;
 mod primary_selection;

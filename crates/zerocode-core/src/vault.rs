@@ -187,6 +187,38 @@ pub enum Format {
     Unread,
 }
 
+/// Where a session's id shows in its file, so a file can be matched to its
+/// session without reading a conversation (herdr 4, t-26597).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IdPlacement {
+    /// The file is named `<id>.jsonl`.
+    FileStem,
+    /// The first line is a `session_meta` record that carries the id.
+    FirstLine,
+    /// A folder on the way to the file is named by the id.
+    Folder,
+    /// The store does not say where the id is, so no file is matched by it.
+    Unstated,
+}
+
+impl Format {
+    /// Where this shape keeps a session's id.
+    pub const fn id_placement(self) -> IdPlacement {
+        match self {
+            Self::ClaudeLines => IdPlacement::FileStem,
+            Self::CodexRollout | Self::ZoLines => IdPlacement::FirstLine,
+            Self::AntigravityTranscript => IdPlacement::Folder,
+            Self::Unread => IdPlacement::Unstated,
+        }
+    }
+
+    /// Whether this window's conversation reader can read this shape.
+    pub const fn readable(self) -> bool {
+        matches!(self, Self::ClaudeLines | Self::CodexRollout | Self::ZoLines)
+    }
+}
+
 /// Every agent whose sessions Orca lists, with the root it reads
 /// (index.js:137227-137240, and the per-agent `discoverFiles` calls at
 /// :137262-137390 for the extensions and predicates).
@@ -1713,6 +1745,34 @@ fn codex_home_of(path: &Path, home: &Path) -> Option<String> {
         at = dir.parent();
     }
     None
+}
+
+/// Every session file of one source under `roots`, or `None` when the walk
+/// was cut short by [`MAX_CANDIDATE_FILES`] — a file missing from a cut-short
+/// listing cannot be ruled out, so the caller names nothing from it.
+pub fn session_files(source: &AgentSource, roots: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut truncated = false;
+    for root in roots {
+        walk(root, source, 0, &mut found, &mut truncated);
+    }
+    (!truncated).then_some(found)
+}
+
+/// The session id a `session_meta` first line names: Codex's `payload.id`, or
+/// zo's `session_id`. `None` for any other line, and for an id that would not
+/// be safe on a command line ([`crate::provider_session::is_usable_session_id`]).
+pub fn session_meta_id(first_line: &str) -> Option<String> {
+    let record: serde_json::Value = serde_json::from_str(first_line).ok()?;
+    if record.get("type")?.as_str()? != "session_meta" {
+        return None;
+    }
+    let id = record
+        .get("session_id")
+        .or_else(|| record.pointer("/payload/id"))?
+        .as_str()?
+        .trim();
+    crate::provider_session::is_usable_session_id(id).then(|| id.to_string())
 }
 
 fn walk(

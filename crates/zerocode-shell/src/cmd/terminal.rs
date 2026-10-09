@@ -189,8 +189,8 @@ pub(crate) fn subagent_log(
 /// Where a pane's helper keeps its conversation. The vendor may have said so
 /// itself — zo names each running helper's session file in its `subagents`
 /// frame and the row remembers it — and failing that, Claude Code's helpers
-/// live under the pane's own transcript, the path the agent reported when it
-/// started. The window names a pane and an id, never a path.
+/// live under the pane's own transcript, the file the one rule names for the
+/// pane. The window names a pane and an id, never a path.
 fn helper_transcript_path(state: &AppState, term: TermId, id: &str) -> Option<PathBuf> {
     let named = state
         .subagents()
@@ -200,11 +200,12 @@ fn helper_transcript_path(state: &AppState, term: TermId, id: &str) -> Option<Pa
     if named.is_some() {
         return named;
     }
-    let transcript = state
-        .pane_sessions()
-        .get(&term)
-        .and_then(|session| session.transcript_path.clone())?;
-    find_subagent_transcript(&subagent_transcript_root(&transcript), id, 3)
+    let transcript = crate::pane_transcript::pane_transcript(state, term).ok()?;
+    find_subagent_transcript(
+        &subagent_transcript_root(&transcript.to_string_lossy()),
+        id,
+        3,
+    )
 }
 
 /// One image of a pane's conversation, or of its helper's, by the place its
@@ -228,11 +229,7 @@ pub(crate) fn pane_image(
             }
             helper_transcript_path(&state, term, &id)
         }
-        None => state
-            .pane_sessions()
-            .get(&term)
-            .and_then(|session| session.transcript_path.clone())
-            .map(PathBuf::from),
+        None => crate::pane_transcript::pane_transcript(&state, term).ok(),
     }
     .ok_or_else(|| "이 판의 전사를 찾지 못했습니다".to_string())?;
     payload_at(&path, &at)
@@ -262,22 +259,18 @@ pub(crate) fn payload_at(path: &Path, at: &str) -> Result<String, String> {
     String::from_utf8(payload).map_err(|error| error.to_string())
 }
 
-/// A pane's own conversation, out of the transcript its agent reported when
-/// it started (`pane_sessions`): the same bounded, complete-line read the
-/// helper's page makes, for a terminal turning its screen over to a
-/// conversation view. `found: false` where the agent named no transcript —
-/// the view says so instead of guessing at a file.
+/// A pane's own conversation, out of the transcript the one rule names for
+/// it (`pane_transcript`): the same bounded, complete-line read the helper's
+/// page makes, for a terminal turning its screen over to a conversation view.
+/// `found: false` where no file can be named — the view says so instead of
+/// guessing at a file.
 #[tauri::command(async)]
 pub(crate) fn pane_log(
     state: State<'_, AppState>,
     term: TermId,
     after: Option<u64>,
 ) -> Result<SubagentLog, String> {
-    let Some(path) = state
-        .pane_sessions()
-        .get(&term)
-        .and_then(|session| session.transcript_path.clone())
-    else {
+    let Ok(path) = crate::pane_transcript::pane_transcript(&state, term) else {
         return Ok(SubagentLog {
             turns: Vec::new(),
             model: None,
