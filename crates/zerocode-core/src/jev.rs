@@ -3062,16 +3062,12 @@ pub const NOTIFY_RECENT_CAP: usize = 6;
 /// The wall the bell holds an attention ring for the seat's answer, in
 /// milliseconds, when the seat acts.
 ///
-/// The completion's own quiet (`crate::notify::DONE_QUIET_MS`), which every
-/// completion ring already waits before it may ring at all: an answer inside
-/// it delays an attention ring by no more than every "finished" is already
-/// delayed, and a completion's question is asked beside its quiet rather
-/// than after it. Past the wall today's rule rings, exactly as it did before
-/// the seat existed. Written as the completion's number and not read from
-/// [`ROUTING_APPLY_DEADLINE_MS`], which happens to coincide: that is a
-/// turn's wait, this is a bell's, and two policies that coincide are still
-/// two policies.
-pub const NOTIFY_APPLY_DEADLINE_MS: u64 = crate::notify::DONE_QUIET_MS.unsigned_abs();
+/// Its own 1.5 seconds. Past the wall today's rule rings, exactly as it did
+/// before the seat existed. It is a bell's wall and not a rule's wait: the
+/// stop's own quiet (`crate::notify::ATTENTION_QUIET_MS`, ten seconds, and
+/// `crate::notify::FINISHED_QUIET_MS`, a minute) decides when a ring may fire,
+/// and the seat only answers inside the wall once that has happened.
+pub const NOTIFY_APPLY_DEADLINE_MS: u64 = 1_500;
 
 /// What the notify seat's answers must bound above before `auto` rises to
 /// holding and dropping rings (§4): nine in ten.
