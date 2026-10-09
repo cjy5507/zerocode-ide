@@ -437,6 +437,7 @@ export async function testPaneConversation(browser, origin, ok) {
       seen.nothing = await say(null);
       seen.read = await say({ verb: "read", target: "src/tui/view.rs", phase: "started", elapsed_secs: 2 });
       seen.bash = await say({ verb: "bash", target: "cd /Users/dev/shop-app && make test", phase: "started", elapsed_secs: 3 });
+      seen.shell = await say({ verb: "bash", target: "cd /Users/dev/zo-ide && cargo test -p zo-ide", phase: "started", elapsed_secs: 3 });
       seen.waiting = await say({ verb: "waiting", target: "model", phase: "started", elapsed_secs: 4 });
       seen.reconnecting = await say({ verb: "reconnecting", target: "attempt 2 in 5s", phase: "started", elapsed_secs: 5 });
       seen.thinking = await say({ verb: "reasoning silently", phase: "started", elapsed_secs: 6 });
@@ -475,6 +476,9 @@ export async function testPaneConversation(browser, origin, ok) {
       nowLine.thinking.now === nowLine.wantThinking &&
       [nowLine.read, nowLine.bash, nowLine.waiting, nowLine.reconnecting, nowLine.thinking].every((one) => one.lead === nowLine.lead && !one.seeing.includes(nowLine.busy)),
       JSON.stringify(nowLine));
+    ok("a shell command behind a cd lead is said as 「셸 cargo test -p zo-ide · zo-ide」 — its command and its folder, no cd",
+      nowLine.shell.now === "셸 cargo test -p zo-ide · zo-ide",
+      JSON.stringify(nowLine.shell));
     ok("a status that says quiet names nothing the page can name, and a status frame with no activity takes the line back to 「작업 중…」",
       nothingKnown(nowLine.quiet) && nothingKnown(nowLine.cleared),
       JSON.stringify({ quiet: nowLine.quiet, cleared: nowLine.cleared }));

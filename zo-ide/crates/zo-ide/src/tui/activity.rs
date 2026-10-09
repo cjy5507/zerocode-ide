@@ -157,6 +157,8 @@ fn path_tail(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::Activity;
+    use crate::tui::view::StatusActivity;
+    use std::time::Duration;
 
     #[test]
     fn file_targets_keep_only_two_trailing_components() {
@@ -172,5 +174,67 @@ mod tests {
             Activity::new("Bash", Some("cargo test -p zo-ide")).target,
             Some("cargo".to_string())
         );
+    }
+
+    #[test]
+    fn bash_target_skips_leading_cd_leads() {
+        let target = |command: &str| Activity::new("Bash", Some(command)).target;
+        assert_eq!(target("cd /a/b && make test"), Some("make".to_string()));
+        assert_eq!(target("cd \"/a b\" ; cargo test"), Some("cargo".to_string()));
+        assert_eq!(target("cd '/a b' && cd c;make"), Some("make".to_string()));
+        assert_eq!(target("cd my\\ dir && make"), Some("make".to_string()));
+        assert_eq!(target("cd /a/b"), Some("cd".to_string()));
+        assert_eq!(target("cd /a/b &&"), Some("cd".to_string()));
+    }
+
+    #[test]
+    fn hook_input_after_a_cd_lead_is_the_command_word() {
+        let make = Activity::new("Bash", Some("cd /a/b && make test"));
+        assert_eq!(make.hook_input("cd /a/b && make test"), "make");
+        let codex = Activity::new("Bash", Some("cd /a/b && codex exec x"));
+        assert_eq!(codex.hook_input("cd /a/b && codex exec x"), "codex");
+    }
+
+    #[test]
+    fn bash_card_carries_the_whole_command() {
+        let activity = Activity::new("Bash", Some("cd /a/b && cargo test -p zo-ide"));
+        let card = activity.started_card();
+        assert_eq!(card.verb, "bash");
+        assert_eq!(card.target.as_deref(), Some("cd /a/b && cargo test -p zo-ide"));
+    }
+
+    #[test]
+    fn bash_card_is_cut_to_200_characters_at_a_character_boundary() {
+        let command = format!("echo {}", "가".repeat(300));
+        let expected: String = command.chars().take(200).collect();
+        assert_eq!(expected.chars().count(), 200);
+        let activity = Activity::new("Bash", Some(command.as_str()));
+        assert_eq!(activity.started_card().target.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn status_tool_target_is_the_whole_command_and_its_line_the_command_word() {
+        let status = StatusActivity::Tool {
+            activity: Activity::new("Bash", Some("cd /a/b && make test")),
+            elapsed: Duration::ZERO,
+        };
+        assert_eq!(status.target().as_deref(), Some("cd /a/b && make test"));
+        assert!(status.line().contains("make"));
+        assert!(!status.line().contains("cd /a/b"));
+    }
+
+    #[test]
+    fn websearch_goes_on_the_wire_as_websearch() {
+        let search = Activity::new("WebSearch", Some("rust async"));
+        assert_eq!(search.wire_verb(), "websearch");
+        let snake = Activity::new("web_search", Some("rust async"));
+        assert_eq!(snake.wire_verb(), "websearch");
+    }
+
+    #[test]
+    fn web_fetch_and_unknown_tools_keep_their_names() {
+        let fetch = Activity::new("WebFetch", Some("https://example.com"));
+        assert_eq!(fetch.wire_verb(), "WebFetch");
+        assert_eq!(Activity::new("mcp__docs__search", None).wire_verb(), "mcp__docs__search");
     }
 }
