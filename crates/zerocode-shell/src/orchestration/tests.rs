@@ -2125,6 +2125,15 @@ impl Host for Nowhere {
 /// runs and each other's door. Not a flaw in either test: it is what the
 /// tick is — one window, one ledger, one beat — and a test of it has to be
 /// the only one beating.
+///
+/// The order is part of the lock. A test takes a window road
+/// (`PrivateWindow::boot*`, `WalledClaude::stand*`, `the_window()`) before this
+/// beat, never after: a deadlock needs both halves of a cycle, one test holding
+/// the beat while it waits for a window and another holding a window while it
+/// waits here for the beat (`WalledClaude::stand_full` is that other half). The
+/// v1.1.46 gate stood 50 minutes on exactly that, and the source contract
+/// `every_test_takes_the_window_before_the_beat` refuses any test that reaches
+/// for the beat first (t-19979).
 fn one_beat_at_a_time() -> std::sync::MutexGuard<'static, ()> {
     static TURNS: Mutex<()> = Mutex::new(());
     TURNS.lock().unwrap_or_else(|held| held.into_inner())
