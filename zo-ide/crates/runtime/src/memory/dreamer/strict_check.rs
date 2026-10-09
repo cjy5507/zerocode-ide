@@ -970,6 +970,33 @@ mod stderr_tests {
         assert!(status.success(), "verbose child failed: {status:?}");
         assert_eq!(diagnostic.len(), CHECK_DIAGNOSTIC_CAP);
     }
+    /// The order a finished check took, from the trace of its leader: the group
+    /// must be ended before the leader is reaped (t-19897). Today the leader is
+    /// reaped first, and the sweep after it signals a group named by a reaped pid.
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_check_has_its_group_ended_before_its_leader_is_reaped() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let pidfile = std::env::temp_dir().join(format!("zo-check-order-{}-{unique}.pid", std::process::id()));
+        let mut command = std::process::Command::new("/bin/sh");
+        command.arg("-c").arg(format!("echo $$ > {}; sleep 5 & exit 0", pidfile.display()));
+
+        let (status, _) = spawn_and_wait(&mut command).expect("the check should end");
+        let leader: u32 = std::fs::read_to_string(&pidfile)
+            .expect("leader pidfile written")
+            .trim()
+            .parse()
+            .expect("valid leader pid");
+        let _ = std::fs::remove_file(&pidfile);
+
+        assert!(status.success(), "the check's command exits cleanly");
+        plugins::bounded_child::trace::assert_ended_before_reaped(leader);
+        let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
+        assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
+    }
+
     #[test]
     fn stderr_drain_deadline_handles_a_descendant_that_keeps_the_pipe_open() {
         let mut command = Command::new("/bin/sh");

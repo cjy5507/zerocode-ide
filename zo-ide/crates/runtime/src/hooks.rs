@@ -1224,6 +1224,38 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
+    /// The order a finished command took, from the trace of its leader: the group
+    /// must be ended before the leader is reaped (t-19897). Today the leader is
+    /// reaped first, and the sweep after it signals a group named by a reaped pid.
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_command_has_its_group_ended_before_its_leader_is_reaped() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let pidfile = std::env::temp_dir().join(format!("zo-hook-order-{}-{unique}.pid", std::process::id()));
+        let mut command = shell_command(&format!("echo $$ > {}; sleep 5 & exit 0", pidfile.display()));
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let result = command
+            .output_with_stdin(&[], None, Duration::from_secs(1))
+            .expect("successful parent execution should return cleanly");
+        let leader: u32 = std::fs::read_to_string(&pidfile)
+            .expect("leader pidfile written")
+            .trim()
+            .parse()
+            .expect("valid leader pid");
+        let _ = std::fs::remove_file(&pidfile);
+
+        assert!(matches!(result, CommandExecution::Finished(output) if output.status.success()));
+        plugins::bounded_child::trace::assert_ended_before_reaped(leader);
+        let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
+        assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
+    }
+
     #[cfg(windows)]
     #[test]
     fn command_with_stdin_kills_windows_job_descendants_after_parent_exit() {

@@ -1537,6 +1537,72 @@ mod tests {
         assert_group_empty(leader);
     }
 
+    /// A run whose leader exits first while a grandchild still holds the output
+    /// pipes ends its group before the leader is reaped (t-19897). Today the
+    /// leader is reaped as soon as it exits, and the timeout signals it after.
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_run_ends_its_group_before_reaping_a_leader_that_already_exited() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let pidfile = std::env::temp_dir().join(format!("zo-order-timeout-{}-{unique}.pid", std::process::id()));
+        let command = format!("sleep 30 & echo $$ $! > {}; exit 0", pidfile.display());
+
+        let output = execute_bash(unsandboxed(&command, 1_500)).expect("bash command should execute");
+        let text = std::fs::read_to_string(&pidfile).expect("pidfile written");
+        let _ = std::fs::remove_file(&pidfile);
+        let mut pids = text.split_whitespace().map(|word| word.parse::<u32>().expect("valid pid"));
+        let leader = pids.next().expect("leader pid");
+        let grandchild = nix::unistd::Pid::from_raw(
+            i32::try_from(pids.next().expect("grandchild pid")).expect("grandchild pid fits"),
+        );
+
+        assert!(output.interrupted, "the pipes held by the grandchild must time the run out");
+        plugins::bounded_child::trace::assert_ended_before_reaped(leader);
+        assert!(nix::sys::signal::kill(grandchild, None).is_err(), "the grandchild outlived its group");
+        let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
+        assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
+    }
+
+    /// A cancel after the leader has exited, while a grandchild holds the output
+    /// pipes, ends the group before the leader is reaped (t-19897). Today the
+    /// leader is reaped as soon as it exits, and the cancel signals it after.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancel_after_the_leader_exited_ends_its_group_before_reaping_the_leader() {
+        const OWNER: &str = "t19897-cancel-after-leader-exit";
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let pidfile = std::env::temp_dir().join(format!("zo-order-cancel-{}-{unique}.pid", std::process::id()));
+        let command = format!("sleep 30 & echo $$ $! > {}; exit 0", pidfile.display());
+
+        let input = unsandboxed(&command, 60_000);
+        let runner = std::thread::spawn(move || super::execute_bash_with_tasks(input, None, Some(OWNER)));
+        // Registered once it runs, and its pids are written once the shell has started.
+        let text = wait_for(Duration::from_secs(10), || {
+            let registered = super::foreground_bash_groups()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|(owner, _)| owner.as_deref() == Some(OWNER));
+            let text = std::fs::read_to_string(&pidfile).ok()?;
+            (registered && text.ends_with('\n')).then_some(text)
+        });
+        // The leader exits at once, after writing its pids.
+        std::thread::sleep(Duration::from_millis(300));
+
+        assert_eq!(super::interrupt_foreground_bash(Some(OWNER)), 1, "the live group must be signalled");
+        let _ = runner.join();
+        let _ = std::fs::remove_file(&pidfile);
+        let mut pids = text.split_whitespace().map(|word| word.parse::<u32>().expect("valid pid"));
+        let leader = pids.next().expect("leader pid");
+        plugins::bounded_child::trace::assert_ended_before_reaped(leader);
+        let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
+        assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
+    }
+
     /// 유예가 만료되는 경로의 계약: 파이프가 아직 열려 있어 기다림이 끝나지
     /// 않더라도 로그는 **봉인**되므로, 종결 상태 뒤로 드레인이 한 줄도 더
     /// 붙일 수 없다. 봉인 전 출력은 남고, 잘렸다는 사실은 호출자가 기록한다.

@@ -63,6 +63,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [dev-dependencies]
 session-corpus = { path = "../session-corpus" }
+# The order tests read the group-end and reap trace that plugins keeps for them
+# (t-19897). Only the test build of this crate turns the feature on.
+plugins = { path = "../plugins", features = ["order-trace"] }
 
 [lints]
 workspace = true
