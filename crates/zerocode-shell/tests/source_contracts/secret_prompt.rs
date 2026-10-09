@@ -156,7 +156,7 @@ fn the_panes_listing_carries_the_question_and_no_value() {
         !listing.contains("value"),
         "a pane's question is listed without any value"
     );
-    for command in ["answer_secret", "panes_secret"] {
+    for command in ["answer_secret", "pane_secret"] {
         assert!(
             MAIN.contains(command),
             "{command} is on the window's command list"

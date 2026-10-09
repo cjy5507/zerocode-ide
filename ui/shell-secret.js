@@ -2,9 +2,9 @@
  *
  * A program that asks for a password, a passphrase or a PIN draws its question
  * on the line its cursor stands on, and then waits. The backend reads that line
- * (`zerocode_core::secret_prompt`) and names the panes that wait by
- * `panes_secret`; this file raises each one as a question of the popup, with a
- * password field that types the value into its pane once (`answer_secret`).
+ * (`zerocode_core::secret_prompt`) and says, for one pane at a time, whether it
+ * waits (`pane_secret`); this file raises that as a question of the popup, with
+ * a password field that types the value into its pane once (`answer_secret`).
  *
  * What the page keeps of the value: nothing but the field. The field is the
  * person's own input. It is read once, when they send, and emptied the moment
@@ -14,9 +14,10 @@
  * (`source_contracts/secret_prompt.rs`) and the window suite
  * (`ui/tests/secret-prompt.mjs`) search for it in all of those places. */
 
-/* How often the window asks which panes wait for a secret. The backend answers
- * from a quiet pane's last line, so one poll costs one lock per pane. */
-const SECRET_POLL_MS = 500;
+/* How long a pane must stay quiet before the window asks whether it waits for a
+ * secret: past the backend's own quiet spell (answer_door::SECRET_QUIET, 300 ms),
+ * so the question is still the pane's last line when it is asked. */
+const SECRET_CHECK_AFTER_MS = 450;
 
 /* The words the backend answers a refused send with (`answer_door`). A refusal
  * the page knows is painted in its own sentence; anything else is a failure. */
@@ -178,37 +179,44 @@ secretInput.addEventListener("keydown", (event) => {
   if (activeAsk?.kind === "secret") void answerAsk({ decision: "send" });
 });
 
-let secretPolling = false;
+/* The window asks about a pane once that pane has printed and then gone quiet.
+ * shell.js calls `noteTermOutput` for each frame of output; the check is armed
+ * for that pane and runs when its output has stopped for SECRET_CHECK_AFTER_MS.
+ * A window in which no pane prints arms nothing and asks nothing. */
+const secretChecks = new Map();
 
-/* Ask the backend which panes wait for a secret, and make the popup agree:
- * a question that left the pane leaves the popup, a new one is raised. A poll
- * that fails changes nothing on the screen; the next poll tries again. */
-async function pollSecrets() {
-  if (secretPolling) return;
-  secretPolling = true;
-  try {
-    const waiting = await invoke("panes_secret");
-    const keys = new Set(waiting.map(secretKeyOf));
-    withdrawAsks((ask) => ask.kind === "secret" && !keys.has(ask.key));
-    for (const item of waiting) {
-      if (secretSettled.has(secretKeyOf(item))) continue;
-      raiseAsk(secretAskOf(item));
-    }
-    for (const key of [...secretSettled]) if (!keys.has(key)) secretSettled.delete(key);
-  } catch {
-    // Nothing to show this time.
-  } finally {
-    secretPolling = false;
-  }
+function noteTermOutput(term) {
+  clearTimeout(secretChecks.get(term));
+  secretChecks.set(
+    term,
+    setTimeout(() => {
+      secretChecks.delete(term);
+      void checkSecret(term);
+    }, SECRET_CHECK_AFTER_MS),
+  );
 }
 
-/* An idle poller (shell-boot.js): it asks only while the window is visible and
- * a terminal is open, so an empty window pays no timer round trip. Terminal
- * views call `sync()` when one opens or closes (shell-term.js). */
-const secretPoll = idlePoller({
-  wanted: () => termViews.size > 0,
-  every: SECRET_POLL_MS,
-  tick: () => void pollSecrets(),
-  onResume: () => void pollSecrets(),
-});
-secretPoll.sync();
+/* Ask the backend whether one pane waits for a secret, and make the popup
+ * agree. A question the pane no longer asks leaves the popup, and what was
+ * settled for that pane goes with it. A new question raises its card, and a
+ * card for an older question of the same pane goes. A failed check changes
+ * nothing on the screen. */
+async function checkSecret(term) {
+  let item;
+  try {
+    item = await invoke("pane_secret", { term });
+  } catch {
+    return;
+  }
+  if (!item) {
+    withdrawAsks((ask) => ask.kind === "secret" && ask.term === term);
+    for (const key of [...secretSettled]) {
+      if (key.startsWith(`secret:${term}:`)) secretSettled.delete(key);
+    }
+    return;
+  }
+  if (secretSettled.has(secretKeyOf(item))) return;
+  const ask = secretAskOf(item);
+  withdrawAsks((queued) => queued.kind === "secret" && queued.term === term && queued.key !== ask.key);
+  raiseAsk(ask);
+}

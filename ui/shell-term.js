@@ -5518,7 +5518,6 @@ function termView(term) {
     address: () => ({ kind: "term", term, key: `term:${term}` }),
   });
   termViews.set(term, view);
-  secretPoll.sync();
   return view;
 }
 
@@ -6043,7 +6042,6 @@ function dropTermScreen(term) {
   // holding it would keep the overlay — and the moved key sink — forever.
   if (preeditBox.parentNode === view.host) clearPreedit();
   termViews.delete(term);
-  secretPoll.sync();
   // A per-pane zoom dies with its pane — a bounded map is the rule
   // (북극성: a keyed collection needs its deleting door).
   termFontOverrides.delete(term);

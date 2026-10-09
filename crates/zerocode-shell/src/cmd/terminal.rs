@@ -2040,27 +2040,21 @@ pub(crate) struct PaneSecret {
     pub(crate) since: i64,
 }
 
-/// The panes whose question waits for a secret right now. A pane that printed
-/// within the last quiet spell is not listed yet; the window polls, so a
-/// question is listed on the first poll after it settles.
+/// The question one pane waits on for a secret, if it waits on one. The window
+/// asks about one pane at a time, after that pane has printed and then gone
+/// quiet, so an idle window asks nothing. A pane still printing, or one whose
+/// last line is not such a question, answers `None`.
 #[tauri::command]
-pub(crate) fn panes_secret(state: State<'_, AppState>) -> Vec<PaneSecret> {
-    let _crumb = crate::crumbs::Command::enter("panes_secret");
-    state
-        .terminals()
-        .terms()
-        .into_iter()
-        .filter_map(|term| {
-            let held = state.terminals().handle(term)?;
-            let prompt = answer_door::secret_prompt(&held)?;
-            Some(PaneSecret {
-                term,
-                kind: prompt.kind,
-                line: prompt.line,
-                since: answer_door::quiet_since(&held),
-            })
-        })
-        .collect()
+pub(crate) fn pane_secret(state: State<'_, AppState>, term: TermId) -> Option<PaneSecret> {
+    let _crumb = crate::crumbs::Command::enter("pane_secret");
+    let held = state.terminals().handle(term)?;
+    let prompt = answer_door::secret_prompt(&held)?;
+    Some(PaneSecret {
+        term,
+        kind: prompt.kind,
+        line: prompt.line,
+        since: answer_door::quiet_since(&held),
+    })
 }
 
 /// Type the value a person gave a secret card, and the return that sends it,
