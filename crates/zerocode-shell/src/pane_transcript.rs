@@ -4,6 +4,8 @@
 //! its facts from the disk and from the pane's process, so every road to a
 //! transcript the window reads goes through the one answer.
 
+use super::*;
+
 use std::path::{Path, PathBuf};
 
 use zerocode_core::SessionKey;
