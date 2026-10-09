@@ -3,6 +3,7 @@ mod agent_capabilities;
 mod answer_door;
 mod artifact_export;
 mod ask_popup;
+mod beat_lock_order;
 mod bundle_resources;
 mod cli_login;
 mod computer_use_mirrors;
