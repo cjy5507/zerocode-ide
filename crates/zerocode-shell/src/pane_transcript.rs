@@ -235,13 +235,34 @@ mod tests {
         let mut none = 0;
         let started = Instant::now();
         for (slug, id, want) in &expected {
-            match bind(slug, None, Some(id.as_str()), &facts) {
+            let one = Instant::now();
+            let answer = bind(slug, None, Some(id.as_str()), &facts);
+            println!("t-26597 join {slug} {id} us={}", one.elapsed().as_micros());
+            match answer {
                 Ok((path, _)) if &path == want => right += 1,
                 Ok(_) => wrong += 1,
                 Err(_) => none += 1,
             }
         }
         let ms_per_join = started.elapsed().as_secs_f64() * 1000.0 / expected.len() as f64;
+        // Where one join's time goes: the listing of the zo store, then one
+        // first-line read.
+        let zo_row = vault::AGENT_SOURCES
+            .iter()
+            .find(|row| row.slug == "zo")
+            .expect("a zo row");
+        let listing = Instant::now();
+        let listed = facts.session_files(zo_row).map(|files| files.len());
+        println!(
+            "t-26597 zo listing us={} files={listed:?}",
+            listing.elapsed().as_micros()
+        );
+        let head = Instant::now();
+        let first = facts.first_line_id(&zo_folder.join("session-1000-0.jsonl"));
+        println!(
+            "t-26597 zo first line us={} id={first:?}",
+            head.elapsed().as_micros()
+        );
 
         // What "the newest file of the folder" would have named, per panel.
         let newest = |folder: &Path| -> PathBuf {
