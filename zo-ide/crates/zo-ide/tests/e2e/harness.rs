@@ -1153,7 +1153,8 @@ fn match_end_after(output: &[u8], needle: &[u8], offset: usize) -> Option<usize>
     find_bytes(&visible, needle).map(|at| offset + ends[at + needle.len() - 1])
 }
 
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+/// The offset of the first `needle` in `haystack`, shared by the pty suites.
+pub fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
@@ -1161,6 +1162,11 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .windows(needle.len())
         .position(|window| window == needle)
 }
+
+/// The sequence the painter closes every synchronized frame with (`SYNC_END` in
+/// `painter.rs`, private to the crate): a frame is whole once it has come.
+#[allow(dead_code)] // the pane and hermetic suites read it; the other test binaries do not
+pub const SYNC_END: &[u8] = b"\x1b[?2026l";
 
 
 /// `ps -o time=` prints `[[DD-]HH:]MM:SS.cc`.  Parsed here rather than shelled

@@ -13,7 +13,6 @@
 # contract), the old ~/.local/share/zerocode/release/release-judge.sh.
 root:codex_queue::tests::installed_codex_starts_and_cleans_an_explicit_worker_sidecar
 zo:preferences::tests::persisted_fast_models_are_normalized_to_the_bare_family
-zo:a_pane_shrunk_without_sigwinch_loses_no_rows
 zo:opening_a_pane_uses_its_private_events_channel
 # 2026-09-14 v1.3.62 root gate (load 26 while two worker builds ran beside it):
 # the same zerocode-lane supervisor test (crates/zerocode-lane/tests/supervisor.rs)

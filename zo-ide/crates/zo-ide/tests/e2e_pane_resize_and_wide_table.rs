@@ -20,7 +20,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use e2e::harness::{history_rows_raw, PtyRun, Screen};
+use e2e::harness::{find_bytes, history_rows_raw, PtyRun, Screen, SYNC_END};
 use e2e::scripted::ScriptedAnthropicService;
 use tempfile::TempDir;
 
@@ -558,12 +558,14 @@ fn spawn_pane_without_signal(layout: &Layout, base_url: &str, rows: u16, cols: u
 /// After an answer, an idle zo: the turn's "Working … esc to interrupt" row is
 /// gone — a running turn keeps a one-second size poll of its own, which is not
 /// what the tests below are about — and the pane has said nothing for two and a
-/// half seconds. Returns how long the row took to go and how long the pane took
-/// to go quiet, both counted from the call (the answer's last row was just seen).
-async fn wait_until_idle_after_the_answer(run: &mut PtyRun) -> (Duration, Duration) {
+/// half seconds. `rows` is the pane's height at the time: the capture is replayed
+/// onto a screen of that size. Returns how long the row took to go and how long
+/// the pane took to go quiet, both counted from the call (the answer's last row
+/// was just seen).
+async fn wait_until_idle_after_the_answer(run: &mut PtyRun, rows: usize) -> (Duration, Duration) {
     let answered_at = std::time::Instant::now();
     run.wait_until(0, SETTLE_TIMEOUT, |bytes| {
-        let mut screen = Screen::new(24);
+        let mut screen = Screen::new(rows);
         screen.feed(bytes);
         !screen.visible().iter().any(|row| row.contains("esc to interrupt"))
     });
@@ -605,7 +607,7 @@ async fn a_pane_grown_without_sigwinch_is_put_right_by_the_next_key_and_not_by_a
     let before_first = run.output_len();
     run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 1");
     run.wait_for_after("영향 없습니다", before_first, TEST_TIMEOUT);
-    let (working_left, went_quiet) = wait_until_idle_after_the_answer(&mut run).await;
+    let (working_left, went_quiet) = wait_until_idle_after_the_answer(&mut run, 24).await;
 
     // The pane grows and nobody says so.
     let before_resize = run.output_len();
@@ -654,7 +656,7 @@ async fn a_pane_grown_without_sigwinch_and_without_a_key_is_put_right_within_the
     let before_first = run.output_len();
     run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 1");
     run.wait_for_after("영향 없습니다", before_first, TEST_TIMEOUT);
-    let _ = wait_until_idle_after_the_answer(&mut run).await;
+    let _ = wait_until_idle_after_the_answer(&mut run, 24).await;
 
     let before_resize = run.output_len();
     let resized_at = std::time::Instant::now();
@@ -664,13 +666,67 @@ async fn a_pane_grown_without_sigwinch_and_without_a_key_is_put_right_within_the
     let _ = run.finish();
 }
 
-/// The report's direction: the pane SHRINKS and the signal never comes. Rows
-/// laid out for the old, taller terminal would be clamped onto the pane's last
-/// row and overwrite each other — the table body vanishing. With the poll the
-/// next turn is laid out for 24 rows, addresses nothing beyond them, wraps at
-/// 133, and every row of the answer reaches the screen.
+/// The offset just past the first [`SYNC_END`] that follows the first occurrence
+/// of `words` in `bytes`, or `None` while that frame has not ended. A resize
+/// repaints the transcript inside one frame, so the repaint has written every row
+/// it owes once the frame carrying the answer's last line has ended.
+fn frame_end_after(bytes: &[u8], words: &[u8]) -> Option<usize> {
+    let at = find_bytes(bytes, words)?;
+    let end = find_bytes(&bytes[at..], SYNC_END)?;
+    Some(at + end + SYNC_END.len())
+}
+
+/// Waits until the repaint a resize made has ended and returns the capture's
+/// length at that point, the offset the second prompt's turn starts from. The
+/// repaint rewrites the answer's last line, the very text the second turn is
+/// waited for by, so the first byte after the resize says nothing about whether
+/// the repaint is over: the run then counted the repaint's copy as the second
+/// turn and closed the pane while that turn was still streaming (2026-10-09).
+fn wait_for_repaint(run: &mut PtyRun, from: usize) -> usize {
+    let mut landed = from;
+    run.wait_until(from, SETTLE_TIMEOUT, |bytes| {
+        match frame_end_after(bytes, "영향 없습니다".as_bytes()) {
+            Some(end) => {
+                landed = from + end;
+                true
+            }
+            None => false,
+        }
+    });
+    landed
+}
+
+/// The second turn of a shrink, read off its raw bytes after the prompt: nothing
+/// may be addressed past the pane's new floor, the answer's first paragraph must
+/// wrap at 133 columns, and every needle of the answer must reach the screen.
+fn assert_second_turn_at_the_floor(second: &[u8]) {
+    // The raw bytes of the second turn, for replaying through a terminal
+    // emulator when the row numbers alone do not say what went where.
+    if let Ok(path) = std::env::var("ZO_E2E_DUMP") {
+        std::fs::write(&path, second).expect("dump the capture");
+    }
+    let rows_second: Vec<String> = history_rows_raw(second).iter().map(|r| strip_ansi(r)).collect();
+    let max_row = max_cursor_row(second);
+    eprintln!("--- shrink: {} history rows in turn 2, highest cursor row {max_row}", rows_second.len());
+    for r in &rows_second { eprintln!("  2|{r}"); }
+
+    assert!(max_row <= 24, "after the shrink zo must not address rows the pane no longer has, got {max_row}");
+    assert_eq!(paragraph_rows(&rows_second), 2, "after the shrink the next turn must wrap at 133 columns");
+    let joined = rows_second.join("\n");
+    for needle in ["대상", "발급 가능 지점", "재고 수량", "영향 없음", "영향 없습니다"] {
+        assert!(joined.contains(needle), "second turn is missing {needle:?}");
+    }
+}
+
+/// The pane SHRINKS and the window's resize reaches zo as its signal: on a
+/// controlling pty the kernel raises SIGWINCH for the `stty`, as it does for a
+/// window's drag, and zo repaints the transcript at the new floor. Rows laid out
+/// for the old, taller terminal would be clamped onto the pane's last row and
+/// overwrite each other — the table body vanishing. So the next turn is laid out
+/// for 24 rows, addresses nothing beyond them, wraps at 133, and every row of the
+/// answer reaches the screen.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pane_shrunk_without_sigwinch_loses_no_rows() {
+async fn a_pane_shrunk_with_sigwinch_loses_no_rows() {
     let layout = Layout::new();
     let service = ScriptedAnthropicService::text(KOREAN_TABLE_ANSWER)
         .await
@@ -680,32 +736,58 @@ async fn a_pane_shrunk_without_sigwinch_loses_no_rows() {
     let before_first = run.output_len();
     run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 1");
     run.wait_for_after("영향 없습니다", before_first, TEST_TIMEOUT);
+    let _ = wait_until_idle_after_the_answer(&mut run, 44).await;
+
+    let before_resize = run.output_len();
+    run.resize_silently(24, 133).expect("resize pty");
+    let before_second = wait_for_repaint(&mut run, before_resize);
+    run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 2");
+    run.wait_for_after("영향 없습니다", before_second, TEST_TIMEOUT);
+    // The second turn ends before the pane closes: a close that lands while it
+    // still streams cuts its answer and says nothing about the wrap.
+    let _ = wait_until_idle_after_the_answer(&mut run, 24).await;
+    let capture = run.finish();
+    assert!(
+        max_cursor_row(&capture[before_resize..before_second]) <= 24,
+        "the repaint itself must not address rows past the pane's new floor"
+    );
+    assert_second_turn_at_the_floor(&capture[before_second..]);
+}
+
+/// The pane SHRINKS and nothing tells zo: the signal never comes, and no timer
+/// looks at the terminal before the idle look, thirty seconds away (`IDLE_TEND`).
+/// The next key is what puts the screen right: its frame asks the pty's size and
+/// repaints the transcript at the new floor (see the grow test above). The next
+/// turn must then wrap at 133 columns and lose no row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pane_shrunk_without_sigwinch_loses_no_rows() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text(KOREAN_TABLE_ANSWER)
+        .await
+        .expect("start script");
+    let mut run = spawn_pane_without_signal(&layout, service.base_url(), 44, 176);
+    run.wait_for("directory:", TEST_TIMEOUT);
+    let before_first = run.output_len();
+    run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 1");
+    run.wait_for_after("영향 없습니다", before_first, TEST_TIMEOUT);
+    let _ = wait_until_idle_after_the_answer(&mut run, 44).await;
 
     let before_resize = run.output_len();
     run.resize_silently(24, 133).expect("resize pty silently");
-    // The poll's repaint at the new floor is the sign it noticed the shrink.
-    run.wait_until(before_resize, SETTLE_TIMEOUT, |bytes| !bytes.is_empty());
-    let before_second = run.output_len();
+    // A key is the first look at the terminal. It is typed into the composer, so
+    // it is erased again before the prompt goes in.
+    run.send(b"k").expect("a key");
+    let before_second = wait_for_repaint(&mut run, before_resize);
+    run.send(b"\x7f").expect("erase the key");
     run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 2");
     run.wait_for_after("영향 없습니다", before_second, TEST_TIMEOUT);
+    let _ = wait_until_idle_after_the_answer(&mut run, 24).await;
     let capture = run.finish();
-    let second = &capture[before_second..];
-    // The raw bytes of the second turn, for replaying through a terminal
-    // emulator when the row numbers alone do not say what went where.
-    if let Ok(path) = std::env::var("ZO_E2E_DUMP") {
-        std::fs::write(&path, second).expect("dump the capture");
-    }
-    let rows_second: Vec<String> = history_rows_raw(second).iter().map(|r| strip_ansi(r)).collect();
-    let max_row = max_cursor_row(second);
-    eprintln!("--- silent shrink: {} history rows in turn 2, highest cursor row {max_row}", rows_second.len());
-    for r in &rows_second { eprintln!("  2|{r}"); }
-
-    assert!(max_row <= 24, "after the silent shrink zo must not address rows the pane no longer has, got {max_row}");
-    assert_eq!(paragraph_rows(&rows_second), 2, "after the silent shrink the next turn must wrap at 133 columns");
-    let joined = rows_second.join("\n");
-    for needle in ["대상", "발급 가능 지점", "재고 수량", "영향 없음", "영향 없습니다"] {
-        assert!(joined.contains(needle), "second turn is missing {needle:?}");
-    }
+    assert!(
+        max_cursor_row(&capture[before_resize..before_second]) <= 24,
+        "the repaint itself must not address rows past the pane's new floor"
+    );
+    assert_second_turn_at_the_floor(&capture[before_second..]);
 }
 
 /// A tool cell that filled the pane — a bash run whose live output grows the
