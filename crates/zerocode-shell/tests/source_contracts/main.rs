@@ -10799,9 +10799,12 @@ mod tests {
         // Fifteen since t-6588: the task board desk's minute (`deskAmbient`),
         // the release lane and the machine strip, only while the desk is on
         // screen.
+        // Sixteen since t-26596: the secret card's poll (`secretPoll`), asked
+        // only while the window is visible and a terminal view is open, so an
+        // empty window makes no `panes_secret` call.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            15,
+            16,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");
