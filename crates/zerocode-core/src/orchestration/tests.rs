@@ -22884,13 +22884,13 @@ fn a_pr_observation_receipt_survives_restart_and_lost_ack_without_duplicate_mail
         .unwrap();
     ledger.worker_seated(("team-scm", "%1"), "/wt/scm");
     assert_eq!(
-        ledger.post_observation_once("@worktree:/wt/scm", "ci failed", Some("scm:ci:1"), 3),
+        ledger.post_observation_once(None, "@worktree:/wt/scm", "ci failed", Some("scm:ci:1"), 3),
         1
     );
     let mut restored: Ledger =
         serde_json::from_str(&serde_json::to_string(&ledger).unwrap()).unwrap();
     assert_eq!(
-        restored.post_observation_once("@worktree:/wt/scm", "ci failed", Some("scm:ci:1"), 4),
+        restored.post_observation_once(None, "@worktree:/wt/scm", "ci failed", Some("scm:ci:1"), 4),
         1
     );
     assert_eq!(
@@ -22904,7 +22904,7 @@ fn a_pr_observation_receipt_survives_restart_and_lost_ack_without_duplicate_mail
         1
     );
     assert_eq!(
-        restored.post_observation_once("@worktree:/wt/scm", "ci failed", Some("scm:ci:2"), 5),
+        restored.post_observation_once(None, "@worktree:/wt/scm", "ci failed", Some("scm:ci:2"), 5),
         1
     );
     assert_eq!(
@@ -22916,6 +22916,262 @@ fn a_pr_observation_receipt_survives_restart_and_lost_ack_without_duplicate_mail
             .filter(|m| m.subject.as_str().starts_with("scm:"))
             .count(),
         2
+    );
+}
+
+/// A pane's own mail, as the window files it into the run the pane sits in.
+fn a_pane_mail(run: &str) -> Draft {
+    Draft {
+        from: "pane:%7".into(),
+        to: format!("run:{run}"),
+        kind: MessageKind::Status,
+        body: "the pane's words".into(),
+        subject: Text::default(),
+        priority: Priority::Normal,
+        payload: Text::default(),
+        thread: None,
+        task: None,
+        dispatch: None,
+    }
+}
+
+/// How many messages carry this subject, summed over the runs named.
+fn messages_with_subject(ledger: &Ledger, runs: &[String], subject: &str) -> usize {
+    runs.iter()
+        .map(|run| {
+            ledger
+                .run(run)
+                .expect("a run")
+                .messages()
+                .iter()
+                .filter(|one| one.subject.as_str() == subject)
+                .count()
+        })
+        .sum()
+}
+
+/// t-35823: when the window cannot type a pane's pointer, the sender of that
+/// mail is told by a letter filed in the run the mail is in, and in no other
+/// run. The letter is addressed to a pane, which every run accepts, so the
+/// call the window made without a run copied it into each run of the ledger.
+#[test]
+fn a_letter_about_a_pane_mail_that_was_not_pointed_is_filed_in_its_run_only() {
+    let mut ledger = Ledger::new();
+    let runs: Vec<String> = (0..45)
+        .map(|n| ledger.create_run(&format!("run {n}"), 1))
+        .collect();
+    let mail_run = runs[30].clone();
+    let mail = ledger
+        .post(&mail_run, a_pane_mail(&mail_run), 2)
+        .expect("the pane's mail is filed in its run");
+    let receipt = format!("pointer-held:{mail}");
+    let filed = ledger.post_observation_once(
+        Some(mail_run.as_str()),
+        "pane:%7",
+        "message was filed in its inbox but was NOT pointed",
+        Some(receipt.as_str()),
+        3,
+    );
+    let copies = messages_with_subject(&ledger, &runs, &receipt);
+    assert_eq!(
+        copies,
+        1,
+        "the letter was filed {copies} times over {} runs",
+        runs.len()
+    );
+    assert_eq!(filed, 1);
+}
+
+/// Measurement, not a rule (t-35823): the synthetic ledger of the test above,
+/// read through the two verbs a person looks at it with. Prints the rows that
+/// carry the letter and the median milliseconds of 200 reads of each verb.
+#[test]
+#[ignore = "measurement, not a rule"]
+fn measure_a_pointer_letter_about_a_pane_mail_across_forty_five_runs() {
+    let mut bench = Bench::new();
+    let mut runs = Vec::new();
+    for n in 0..45 {
+        let opened = bench.json(&format!("run-create --name measure-{n}"));
+        runs.push(opened["runId"].as_str().expect("a run id").to_string());
+    }
+    let mail_run = runs[30].clone();
+    let mail = bench
+        .ledger
+        .post(&mail_run, a_pane_mail(&mail_run), 2)
+        .expect("the pane's mail is filed in its run");
+    let receipt = format!("pointer-held:{mail}");
+    bench.ledger.post_observation_once(
+        Some(mail_run.as_str()),
+        "pane:%7",
+        "was NOT pointed",
+        Some(receipt.as_str()),
+        3,
+    );
+    let rows = messages_with_subject(&bench.ledger, &runs, &receipt);
+    let mut median_ms = |line: &str| {
+        let mut samples: Vec<f64> = (0..200)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                bench.json(line);
+                started.elapsed().as_secs_f64() * 1_000.0
+            })
+            .collect();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    };
+    let inbox = median_ms("inbox");
+    let check = median_ms("check --peek");
+    eprintln!(
+        "t-35823 measure: runs={} letter_rows={rows} inbox_median_ms={inbox:.3} check_peek_median_ms={check:.3}",
+        runs.len()
+    );
+}
+
+/// Measurement, not a rule (t-35823): a checks letter to a checkout group on
+/// the same 45-run ledger. Only one run seats a worker in the checkout, so the
+/// letter should land in that run and nowhere else.
+#[test]
+#[ignore = "measurement, not a rule"]
+fn measure_a_checks_letter_across_forty_five_runs() {
+    let mut ledger = Ledger::new();
+    let runs: Vec<String> = (0..45)
+        .map(|n| ledger.create_run(&format!("run {n}"), 1))
+        .collect();
+    ledger
+        .start_worker(&runs[30], "codex", ("team-checks", "%1"), None, 2)
+        .unwrap();
+    ledger.worker_seated(("team-checks", "%1"), "/wt/checks");
+    let filed = ledger.post_observation_once(
+        None,
+        "@worktree:/wt/checks",
+        "checks: 1 failed (ci/test)",
+        Some("checks:ci:1"),
+        3,
+    );
+    eprintln!(
+        "t-35823 measure checks: runs={} filed={filed} letter_rows={}",
+        runs.len(),
+        messages_with_subject(&ledger, &runs, "checks:ci:1")
+    );
+}
+
+/// t-35823: a checks letter goes to a checkout group, and a group is only the
+/// runs that seat a worker in that checkout. On a ledger of 45 runs with one
+/// such seat, the letter lands in that run and in no other.
+#[test]
+fn a_checks_letter_reaches_only_the_runs_that_seat_its_checkout() {
+    let mut ledger = Ledger::new();
+    let runs: Vec<String> = (0..45)
+        .map(|n| ledger.create_run(&format!("run {n}"), 1))
+        .collect();
+    ledger
+        .start_worker(&runs[30], "codex", ("team-checks", "%1"), None, 2)
+        .unwrap();
+    ledger.worker_seated(("team-checks", "%1"), "/wt/checks");
+    assert_eq!(
+        ledger.post_observation_once(
+            None,
+            "@worktree:/wt/checks",
+            "checks: 1 failed (ci/test)",
+            Some("checks:ci:1"),
+            3,
+        ),
+        1
+    );
+    assert_eq!(messages_with_subject(&ledger, &runs, "checks:ci:1"), 1);
+    assert_eq!(
+        messages_with_subject(&ledger, &runs[30..31], "checks:ci:1"),
+        1,
+        "the letter is in the run that seats the checkout"
+    );
+}
+
+/// t-35823: a letter named to a run that is not in the ledger is filed in no
+/// run, and the count says so.
+#[test]
+fn a_letter_named_to_a_run_that_is_not_there_is_filed_nowhere() {
+    let mut ledger = Ledger::new();
+    let runs: Vec<String> = (0..3)
+        .map(|n| ledger.create_run(&format!("run {n}"), 1))
+        .collect();
+    assert_eq!(
+        ledger.post_observation_once(
+            Some("run-that-is-not-there"),
+            "pane:%7",
+            "was NOT pointed",
+            Some("pointer-held:m-missing"),
+            2,
+        ),
+        0
+    );
+    assert_eq!(
+        messages_with_subject(&ledger, &runs, "pointer-held:m-missing"),
+        0
+    );
+}
+
+/// t-35823: a letter named to its run keeps the receipt rule of the road. Asked
+/// again under the same receipt, it is answered as filed and written once.
+#[test]
+fn a_letter_named_to_its_run_is_written_once_when_it_is_asked_again() {
+    let mut ledger = Ledger::new();
+    let runs: Vec<String> = (0..3)
+        .map(|n| ledger.create_run(&format!("run {n}"), 1))
+        .collect();
+    let mail = ledger
+        .post(&runs[1], a_pane_mail(&runs[1]), 2)
+        .expect("the pane's mail is filed in its run");
+    let receipt = format!("pointer-held:{mail}");
+    for now in [3, 4] {
+        assert_eq!(
+            ledger.post_observation_once(
+                Some(runs[1].as_str()),
+                "pane:%7",
+                "was NOT pointed",
+                Some(receipt.as_str()),
+                now,
+            ),
+            1
+        );
+    }
+    assert_eq!(messages_with_subject(&ledger, &runs, &receipt), 1);
+}
+
+/// t-35823: a letter lives in its run. When the retention sweep takes a
+/// finished run, the letter goes with it; a run still working keeps its own.
+#[test]
+fn a_letter_filed_in_a_run_goes_with_that_run_when_the_sweep_takes_it() {
+    let mut bench = Bench::new();
+    let (finished, _) = a_finished_run(&mut bench, "nightly", "drain-the-gate");
+    let live = bench.json("run-create --name still-going")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    bench.json("task-create --spec keep-open --title still-open");
+    let homes = [finished.clone(), live.clone()];
+    let receipt = "pointer-held:m-retention";
+    for run in &homes {
+        let at = bench.clock;
+        assert_eq!(
+            bench.ledger.post_observation_once(
+                Some(run.as_str()),
+                "pane:%7",
+                "was NOT pointed",
+                Some(receipt),
+                at,
+            ),
+            1
+        );
+    }
+    assert_eq!(messages_with_subject(&bench.ledger, &homes, receipt), 2);
+    let now = long_after(&bench);
+    let swept = bench.ledger.sweep_retention(now);
+    assert_eq!(swept.runs, 1, "only the finished run was taken: {swept:?}");
+    assert_eq!(messages_with_subject(&bench.ledger, &homes, receipt), 1);
+    assert_eq!(
+        messages_with_subject(&bench.ledger, &homes[1..], receipt),
+        1,
+        "the run still working kept its letter"
     );
 }
 
