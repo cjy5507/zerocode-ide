@@ -129,7 +129,7 @@ impl StatusActivity {
     #[must_use]
     pub fn target(&self) -> Option<String> {
         match self {
-            Self::Tool { activity, .. } => activity.target.clone(),
+            Self::Tool { activity, .. } => activity.card_target(),
             Self::Waiting { .. } => Some(strings::ACTIVITY_MODEL_TARGET.to_string()),
             Self::Reconnecting { attempt, seconds_left } => {
                 Some(strings::reconnecting_fact(*attempt, *seconds_left))

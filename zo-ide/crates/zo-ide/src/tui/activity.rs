@@ -2,18 +2,26 @@
 
 use runtime::message_stream::ToolPreview;
 
+const CARD_COMMAND_CHARS: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Activity {
     pub tool: String,
     pub target: Option<String>,
+    pub full_target: Option<String>,
 }
 
 impl Activity {
     #[must_use]
     pub fn new(tool: &str, target: Option<&str>) -> Self {
         let tool = display_tool(tool);
-        let target = target.and_then(|target| compact_target(&tool, target));
-        Self { tool, target }
+        let full_target = target.and_then(clean_target);
+        let target = full_target.as_deref().and_then(|full| compact_target(&tool, full));
+        Self {
+            tool,
+            target,
+            full_target,
+        }
     }
 
     #[must_use]
@@ -57,7 +65,7 @@ impl Activity {
         }
     }
 
-    /// The compact fact a tool START puts on the wire.
+    /// The fact a tool START puts on the wire.
     ///
     /// `session_status.activity` and the `PreToolUse` payload share this one
     /// shape; at a start the clock reads zero by definition. Later seconds
@@ -66,9 +74,20 @@ impl Activity {
     pub fn started_card(&self) -> crate::ide::channel::state::ActivityCard {
         crate::ide::channel::state::ActivityCard {
             verb: self.wire_verb(),
-            target: self.target.clone(),
+            target: self.card_target(),
             phase: super::strings::ACTIVITY_PHASE_STARTED.to_string(),
             elapsed_secs: 0,
+        }
+    }
+
+    /// A command's whole text up to the card's character budget; else the compact target.
+    #[must_use]
+    pub fn card_target(&self) -> Option<String> {
+        match self.full_target.as_deref() {
+            Some(full) if self.tool.eq_ignore_ascii_case("bash") => {
+                Some(full.chars().take(CARD_COMMAND_CHARS).collect())
+            }
+            _ => self.target.clone(),
         }
     }
 
@@ -89,7 +108,7 @@ impl Activity {
             "Write" => "write".to_string(),
             "Bash" => "bash".to_string(),
             "Grep" | "Glob" => "grep".to_string(),
-            "WebSearch" => "web".to_string(),
+            "WebSearch" => "websearch".to_string(),
             "Agent" | "SpawnMultiAgent" | "Workflow" | "Task" => "task".to_string(),
             other => other.to_string(),
         }
@@ -124,21 +143,68 @@ fn display_tool(tool: &str) -> String {
     }
 }
 
-fn compact_target(tool: &str, target: &str) -> Option<String> {
+fn clean_target(target: &str) -> Option<String> {
     let cleaned = crate::util::ansi::sanitize_inline(target.trim());
-    if cleaned.is_empty() {
-        return None;
-    }
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn compact_target(tool: &str, cleaned: &str) -> Option<String> {
     if tool.eq_ignore_ascii_case("bash") {
-        return cleaned.split_whitespace().next().map(str::to_string);
+        return command_word_source(cleaned)
+            .split_whitespace()
+            .next()
+            .map(str::to_string);
     }
     if matches!(
         tool.to_ascii_lowercase().as_str(),
         "read" | "write" | "edit" | "glob"
     ) {
-        return Some(path_tail(&cleaned));
+        return Some(path_tail(cleaned));
     }
-    Some(cleaned)
+    Some(cleaned.to_string())
+}
+
+// The window's leading-cd rule, so the Working line names the word the window does.
+fn command_word_source(command: &str) -> &str {
+    let mut rest = command;
+    while let Some(after) = cd_lead(rest) {
+        if after.is_empty() {
+            break;
+        }
+        rest = after;
+    }
+    rest
+}
+
+fn cd_lead(command: &str) -> Option<&str> {
+    let after_cd = command.trim_start().strip_prefix("cd")?;
+    if !after_cd.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let arg = after_cd.trim_start();
+    let arg_len = match arg.chars().next()? {
+        quote @ ('"' | '\'') => arg[1..].find(quote)? + 2,
+        _ => unquoted_arg_len(arg)?,
+    };
+    let rest = arg[arg_len..].trim_start();
+    let after_separator = rest.strip_prefix("&&").or_else(|| rest.strip_prefix(';'))?;
+    Some(after_separator.trim_start())
+}
+
+fn unquoted_arg_len(arg: &str) -> Option<usize> {
+    let mut len = 0;
+    let mut chars = arg.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => len += ch.len_utf8() + chars.next()?.len_utf8(),
+            other if other.is_whitespace() || matches!(other, ';' | '&' | '|' | '"' | '\'') => {
+                break;
+            }
+            other => len += other.len_utf8(),
+        }
+    }
+    (len > 0).then_some(len)
 }
 
 fn path_tail(path: &str) -> String {

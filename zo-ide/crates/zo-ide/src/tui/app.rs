@@ -3721,7 +3721,7 @@ impl Ui {
                     status.note_tool_started(
                         &tool_call_id.0,
                         &activity.tool,
-                        activity.target.as_deref(),
+                        activity.full_target.as_deref(),
                     );
                 }
                 // 도구가 시작하면 스트림을 먼저 접는다 — codex 도 exec 이
