@@ -310,4 +310,368 @@ mod tests {
         assert_eq!(wrong, 0, "no panel names another panel's file");
         assert_eq!(right, expected.len(), "every panel names its own file");
     }
+
+    // ------------------------------------------- the memory and real sizes (t-42948)
+
+    use std::cell::Cell;
+    use std::sync::Mutex;
+    use zerocode_core::pane_transcript::{Memo, Via, bind_remembered};
+
+    /// The one screen line the synthetic panel shows. It is long enough to name
+    /// a file, and only one of the 200 screen files holds it.
+    const SCREEN_LINE: &str = "Refactor the drain test so it stops flaking";
+
+    /// A session id shaped like a uuid, so a file name can end with it.
+    fn uuid(n: usize) -> String {
+        format!("{n:08x}-0000-4000-8000-{n:012x}")
+    }
+
+    /// A Codex rollout's first line, `bytes` long, naming `id`.
+    fn codex_first_line(id: &str, bytes: usize) -> String {
+        let padding = "x".repeat(bytes.saturating_sub(id.len() + 48));
+        format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"instructions\":\"{padding}\"}}}}"
+        )
+    }
+
+    fn write_text(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().expect("a folder")).expect("folder");
+        std::fs::write(path, text).expect("file");
+    }
+
+    /// `count` Codex rollouts in one day's folder. Each is named by its id and
+    /// holds that id on its first line. Returns every file's (id, path).
+    fn write_codex_store(
+        home: &Path,
+        count: usize,
+        first_line_bytes: usize,
+    ) -> Vec<(String, PathBuf)> {
+        let folder = home.join(".codex/sessions/2026/10/10");
+        (0..count)
+            .map(|n| {
+                let id = uuid(n);
+                let path = folder.join(format!("rollout-2026-10-10T09-00-00-{id}.jsonl"));
+                let text = format!(
+                    "{}\n{{\"type\":\"message\"}}\n",
+                    codex_first_line(&id, first_line_bytes)
+                );
+                write_text(&path, &text);
+                (id, path)
+            })
+            .collect()
+    }
+
+    /// `folders` × `per_folder` Claude session files. Each is `<id>.jsonl` under
+    /// its own project folder, and `bytes` long.
+    fn write_claude_store(
+        home: &Path,
+        folders: usize,
+        per_folder: usize,
+        bytes: usize,
+    ) -> Vec<(String, PathBuf)> {
+        let mut all = Vec::new();
+        for folder in 0..folders {
+            for n in 0..per_folder {
+                let id = uuid(folder * per_folder + n);
+                let path = home.join(format!(
+                    ".claude/projects/Users-dev-project-{folder}/{id}.jsonl"
+                ));
+                write_text(&path, &"a".repeat(bytes));
+                all.push((id, path));
+            }
+        }
+        all
+    }
+
+    /// 200 Claude session files of 256 KiB each, in 20 project folders. The
+    /// file numbered `holder` ends with [`SCREEN_LINE`]. No other file holds it.
+    fn write_screen_store(home: &Path, holder: usize) -> Vec<PathBuf> {
+        let size = 256 * 1024;
+        (0..200)
+            .map(|n| {
+                let id = uuid(n);
+                let path = home.join(format!(
+                    ".claude/projects/Users-dev-project-{}/{id}.jsonl",
+                    n / 10
+                ));
+                let last = if n == holder {
+                    SCREEN_LINE
+                } else {
+                    "a line that is not on the screen"
+                };
+                let body = format!("{}\n{last}", "a".repeat(size - last.len() - 1));
+                write_text(&path, &body);
+                path
+            })
+            .collect()
+    }
+
+    /// The window's facts over a synthetic home, with each read counted and a
+    /// screen the test gives. A panel with no PTY shows no screen of its own.
+    struct Counted {
+        facts: PaneFacts,
+        screen: Vec<String>,
+        walks: Cell<usize>,
+        first_lines: Cell<usize>,
+    }
+
+    impl Counted {
+        fn at(home: &Path, screen: &[&str]) -> Self {
+            Self {
+                facts: PaneFacts {
+                    home: Some(home.to_path_buf()),
+                    pane: None,
+                    read_env: false,
+                },
+                screen: screen.iter().map(|line| line.to_string()).collect(),
+                walks: Cell::new(0),
+                first_lines: Cell::new(0),
+            }
+        }
+    }
+
+    impl Facts for Counted {
+        fn exists(&self, path: &Path) -> bool {
+            self.facts.exists(path)
+        }
+
+        fn roots(&self, source: &AgentSource) -> Vec<PathBuf> {
+            self.facts.roots(source)
+        }
+
+        fn session_files(&self, source: &AgentSource) -> Option<Vec<PathBuf>> {
+            self.walks.set(self.walks.get() + 1);
+            self.facts.session_files(source)
+        }
+
+        fn session_candidates(&self, source: &AgentSource, id: &str) -> Option<Vec<PathBuf>> {
+            self.walks.set(self.walks.get() + 1);
+            self.facts.session_candidates(source, id)
+        }
+
+        fn first_line_id(&self, path: &Path) -> Option<String> {
+            self.first_lines.set(self.first_lines.get() + 1);
+            self.facts.first_line_id(path)
+        }
+
+        fn open_files(&self) -> Vec<PathBuf> {
+            self.facts.open_files()
+        }
+
+        fn screen_lines(&self) -> Vec<String> {
+            self.screen.clone()
+        }
+
+        fn text_of(&self, path: &Path) -> Option<String> {
+            self.facts.text_of(path)
+        }
+    }
+
+    /// A Codex panel names its file by the id in the file's name, so the id's
+    /// file is the only first line read. Red on the code that reads every
+    /// first line of the store.
+    #[test]
+    fn a_codex_panel_reads_one_first_line_in_a_400_file_store() {
+        let dir = tempfile::tempdir().expect("a temporary home");
+        let home = dir.path().canonicalize().expect("a real home");
+        let store = write_codex_store(&home, 400, 24 * 1024);
+        let (id, want) = &store[137];
+        let facts = Counted::at(&home, &[]);
+        assert_eq!(
+            bind("codex", None, Some(id.as_str()), &facts).map(|(path, _)| path),
+            Ok(want.clone())
+        );
+        assert!(
+            facts.first_lines.get() <= 1,
+            "the id's file is found by its name, so at most one first line is read; read {}",
+            facts.first_lines.get()
+        );
+    }
+
+    /// An id that no file name carries names no file, and reads no first line.
+    #[test]
+    fn a_codex_id_that_no_file_name_carries_reads_no_first_line() {
+        let dir = tempfile::tempdir().expect("a temporary home");
+        let home = dir.path().canonicalize().expect("a real home");
+        write_codex_store(&home, 400, 24 * 1024);
+        let facts = Counted::at(&home, &[]);
+        assert_eq!(
+            bind("codex", None, Some(uuid(9_999).as_str()), &facts),
+            Err(Absent::NoSessionFile)
+        );
+        assert_eq!(
+            facts.first_lines.get(),
+            0,
+            "no first line is read for an id that no name carries"
+        );
+    }
+
+    /// A Codex file whose name carries no id is still found by its first line.
+    #[test]
+    fn a_codex_file_named_without_an_id_is_found_by_its_first_line() {
+        let dir = tempfile::tempdir().expect("a temporary home");
+        let home = dir.path().canonicalize().expect("a real home");
+        let folder = home.join(".codex/sessions/2026/09/01");
+        for n in 0..3 {
+            let text = format!("{}\n", codex_first_line(&uuid(500 + n), 1024));
+            write_text(&folder.join(format!("rollout-old-{n}.jsonl")), &text);
+        }
+        let facts = Counted::at(&home, &[]);
+        assert_eq!(
+            bind("codex", None, Some(uuid(501).as_str()), &facts).map(|(path, _)| path),
+            Ok(folder.join("rollout-old-1.jsonl"))
+        );
+    }
+
+    /// A Claude store past the 4000-file listing cap still names a panel's file.
+    /// The file is named by its id, so its folder is looked at and no listing is
+    /// made. Red on the code that lists the store first.
+    #[test]
+    fn a_claude_panel_finds_its_file_in_a_store_past_the_listing_cap() {
+        let dir = tempfile::tempdir().expect("a temporary home");
+        let home = dir.path().canonicalize().expect("a real home");
+        let store = write_claude_store(&home, 41, 100, 64);
+        let (id, want) = &store[2_050];
+        let facts = Counted::at(&home, &[]);
+        assert_eq!(
+            bind("claude", None, Some(id.as_str()), &facts).map(|(path, _)| path),
+            Ok(want.clone())
+        );
+    }
+
+    /// The same Claude id in two project folders names neither file.
+    #[test]
+    fn a_claude_id_in_two_project_folders_names_neither() {
+        let dir = tempfile::tempdir().expect("a temporary home");
+        let home = dir.path().canonicalize().expect("a real home");
+        let id = uuid(77);
+        write_text(
+            &home.join(format!(".claude/projects/Users-dev-a/{id}.jsonl")),
+            "a",
+        );
+        write_text(
+            &home.join(format!(".claude/projects/Users-dev-b/{id}.jsonl")),
+            "a",
+        );
+        let facts = Counted::at(&home, &[]);
+        assert_eq!(
+            bind("claude", None, Some(id.as_str()), &facts),
+            Err(Absent::TwoSessionFiles)
+        );
+    }
+
+    /// One panel's join at a real size: the first join, then the 63 joins that
+    /// follow it on the same panel. Prints the times in milliseconds, and returns
+    /// the first answer.
+    fn join_row(
+        label: &str,
+        facts: &Counted,
+        slug: &str,
+        id: Option<&str>,
+    ) -> Result<(PathBuf, Via), Absent> {
+        let memo = Mutex::new(Memo::<u32>::default());
+        let started = Instant::now();
+        let answer = bind_remembered(&memo, 7, slug, None, id, facts);
+        let first_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let (listed_first, lines_first) = (facts.walks.get(), facts.first_lines.get());
+        let started = Instant::now();
+        for _ in 0..63 {
+            let _ = bind_remembered(&memo, 7, slug, None, id, facts);
+        }
+        let next_mean_ms = started.elapsed().as_secs_f64() * 1000.0 / 63.0;
+        println!(
+            "t-42948 measure {label}: first_ms={first_ms:.3} next_mean_ms={next_mean_ms:.3} \
+             listed_first={listed_first} first_lines_first={lines_first} \
+             listed_all={} first_lines_all={} answer={:?}",
+            facts.walks.get(),
+            facts.first_lines.get(),
+            answer.as_ref().map(|(_, via)| via),
+        );
+        answer
+    }
+
+    /// The join's cost at the sizes herdr meets (t-42948): 400 Codex rollouts
+    /// with 24 KiB first lines; a store past the 4000-file cap (Claude and
+    /// Codex); and 200 screen files of 256 KiB. Prints one line per scenario and
+    /// checks each answer. Run it with
+    /// `cargo test -p zerocode-shell measure_the_join_at_real_sizes -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement: run with --ignored --nocapture"]
+    fn measure_the_join_at_real_sizes() {
+        type Answer = Result<(PathBuf, Via), Absent>;
+        let mut checks: Vec<(&str, Answer, Answer)> = Vec::new();
+
+        {
+            let dir = tempfile::tempdir().expect("a temporary home");
+            let home = dir.path().canonicalize().expect("a real home");
+            let store = write_codex_store(&home, 400, 24 * 1024);
+            let facts = Counted::at(&home, &[]);
+            let got = join_row(
+                "codex 400 files, first line 24 KiB, id named by the file",
+                &facts,
+                "codex",
+                Some(store[200].0.as_str()),
+            );
+            checks.push(("codex-400", got, Ok((store[200].1.clone(), Via::SessionId))));
+        }
+        {
+            let dir = tempfile::tempdir().expect("a temporary home");
+            let home = dir.path().canonicalize().expect("a real home");
+            let store = write_claude_store(&home, 41, 100, 64);
+            let facts = Counted::at(&home, &[]);
+            let got = join_row(
+                "claude 4100 files past the listing cap, id named by the file",
+                &facts,
+                "claude",
+                Some(store[2_050].0.as_str()),
+            );
+            checks.push((
+                "claude-4100",
+                got,
+                Ok((store[2_050].1.clone(), Via::SessionId)),
+            ));
+        }
+        {
+            let dir = tempfile::tempdir().expect("a temporary home");
+            let home = dir.path().canonicalize().expect("a real home");
+            let store = write_codex_store(&home, 4_100, 1024);
+            let facts = Counted::at(&home, &[]);
+            let got = join_row(
+                "codex 4100 files past the listing cap, first line 1 KiB",
+                &facts,
+                "codex",
+                Some(store[2_050].0.as_str()),
+            );
+            checks.push(("codex-4100", got, Err(Absent::NoSessionFile)));
+        }
+        {
+            let dir = tempfile::tempdir().expect("a temporary home");
+            let home = dir.path().canonicalize().expect("a real home");
+            let paths = write_screen_store(&home, 123);
+            let facts = Counted::at(&home, &[SCREEN_LINE]);
+            let got = join_row(
+                "screen 200 files of 256 KiB, the screen line held by one file",
+                &facts,
+                "claude",
+                None,
+            );
+            checks.push((
+                "screen-200-match",
+                got,
+                Ok((paths[123].clone(), Via::ScreenMatch)),
+            ));
+            let facts = Counted::at(&home, &["Nothing in this store says this sentence"]);
+            let got = join_row(
+                "screen 200 files of 256 KiB, the screen line held by no file",
+                &facts,
+                "claude",
+                None,
+            );
+            checks.push(("screen-200-miss", got, Err(Absent::NoScreenMatch)));
+        }
+
+        for (label, got, want) in checks {
+            assert_eq!(got, want, "{label}: the answer");
+        }
+    }
 }

@@ -24,6 +24,11 @@ struct Disk {
     cut_short: bool,
     asked_open: Cell<bool>,
     asked_screen: Cell<bool>,
+    /// How many times the store was listed, and how many first lines were read.
+    walks: Cell<usize>,
+    first_line_reads: Cell<usize>,
+    /// The clock the memory reads. Unset, it is the real clock.
+    clock: Cell<Option<Instant>>,
 }
 
 impl Facts for Disk {
@@ -36,6 +41,7 @@ impl Facts for Disk {
     }
 
     fn session_files(&self, source: &AgentSource) -> Option<Vec<PathBuf>> {
+        self.walks.set(self.walks.get() + 1);
         if self.cut_short {
             return None;
         }
@@ -51,6 +57,7 @@ impl Facts for Disk {
     }
 
     fn first_line_id(&self, path: &Path) -> Option<String> {
+        self.first_line_reads.set(self.first_line_reads.get() + 1);
         self.first_lines.get(path).cloned()
     }
 
@@ -66,6 +73,10 @@ impl Facts for Disk {
 
     fn text_of(&self, path: &Path) -> Option<String> {
         self.texts.get(path).cloned()
+    }
+
+    fn now(&self) -> Instant {
+        self.clock.get().unwrap_or_else(Instant::now)
     }
 }
 
@@ -401,5 +412,160 @@ fn a_session_meta_line_names_its_id_for_codex_and_zo_and_nothing_else() {
     assert_eq!(
         vault::session_meta_id(r#"{"type":"session_meta","session_id":"-rm"}"#),
         None
+    );
+}
+
+// ---------------------------------------------------------------- the memory
+//
+// Each test asks through the window's memory of a pane (herdr 4 follow-up,
+// t-42948). Pane 7 is the panel that asks; pane 1 and pane 2 are the others.
+
+#[test]
+fn a_named_file_is_not_walked_again_on_the_next_poll() {
+    let disk = disk_of(vec![claude("aaa"), claude("bbb")]);
+    let memo = Mutex::new(Memo::<u32>::default());
+    for _ in 0..64 {
+        assert_eq!(
+            bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk),
+            Ok((claude("bbb"), Via::SessionId))
+        );
+    }
+    assert_eq!(
+        disk.walks.get(),
+        1,
+        "64 polls of one panel list the store once"
+    );
+}
+
+#[test]
+fn an_open_file_that_comes_and_goes_does_not_flip_the_answer() {
+    let listing = vec![claude("aaa"), claude("bbb")];
+    let open = Disk {
+        open: vec![claude("aaa")],
+        ..disk_of(listing.clone())
+    };
+    let closed = disk_of(listing);
+    let memo = Mutex::new(Memo::<u32>::default());
+    // The agent opens and closes its file between polls. The file is there on
+    // every poll, so the panel names it on every poll.
+    for poll in 0..6 {
+        let disk = if poll % 2 == 0 { &open } else { &closed };
+        assert_eq!(
+            bind_remembered(&memo, 7, "claude", None, None, disk),
+            Ok((claude("aaa"), Via::OpenFile)),
+            "poll {poll} names the file that is still there"
+        );
+    }
+}
+
+#[test]
+fn a_remembered_file_that_is_gone_is_not_named() {
+    let open = Disk {
+        open: vec![claude("aaa")],
+        ..disk_of(vec![claude("aaa")])
+    };
+    let memo = Mutex::new(Memo::<u32>::default());
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &open),
+        Ok((claude("aaa"), Via::OpenFile))
+    );
+    let gone = disk_of(Vec::new());
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &gone),
+        Err(Absent::NoScreenMatch)
+    );
+}
+
+#[test]
+fn a_no_file_answer_is_asked_again_only_after_the_recheck_interval() {
+    let disk = disk_of(Vec::new());
+    let start = Instant::now();
+    let memo = Mutex::new(Memo::<u32>::default());
+    disk.clock.set(Some(start));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk),
+        Err(Absent::NoSessionFile)
+    );
+    disk.clock
+        .set(Some(start + ABSENT_RECHECK - Duration::from_millis(1)));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk),
+        Err(Absent::NoSessionFile)
+    );
+    assert_eq!(
+        disk.walks.get(),
+        1,
+        "inside the interval the store is not listed again"
+    );
+    disk.clock.set(Some(start + ABSENT_RECHECK));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk),
+        Err(Absent::NoSessionFile)
+    );
+    assert_eq!(
+        disk.walks.get(),
+        2,
+        "at the interval the store is listed again"
+    );
+}
+
+#[test]
+fn a_remembered_answer_is_never_handed_to_another_panel() {
+    let listing = vec![claude("aaa"), claude("bbb")];
+    let one = Disk {
+        open: vec![claude("aaa")],
+        ..disk_of(listing.clone())
+    };
+    let nothing_open = disk_of(listing);
+    let memo = Mutex::new(Memo::<u32>::default());
+    assert_eq!(
+        bind_remembered(&memo, 1, "claude", None, None, &one),
+        Ok((claude("aaa"), Via::OpenFile))
+    );
+    // Pane two holds no file open and its screen names nothing. Pane one's
+    // answer must not reach it, though both panels are Claude panels with no id.
+    assert_eq!(
+        bind_remembered(&memo, 2, "claude", None, None, &nothing_open),
+        Err(Absent::NoScreenMatch)
+    );
+    assert_eq!(
+        bind_remembered(&memo, 1, "claude", None, None, &one),
+        Ok((claude("aaa"), Via::OpenFile))
+    );
+}
+
+#[test]
+fn a_changed_session_id_is_asked_again() {
+    let disk = disk_of(vec![claude("aaa"), claude("bbb")]);
+    let memo = Mutex::new(Memo::<u32>::default());
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk),
+        Ok((claude("aaa"), Via::SessionId))
+    );
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk),
+        Ok((claude("bbb"), Via::SessionId))
+    );
+}
+
+#[test]
+fn a_report_that_appears_wins_over_a_remembered_answer() {
+    let disk = disk_of(vec![claude("aaa"), claude("ccc")]);
+    let memo = Mutex::new(Memo::<u32>::default());
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk),
+        Ok((claude("aaa"), Via::SessionId))
+    );
+    let reported = claude("ccc");
+    assert_eq!(
+        bind_remembered(
+            &memo,
+            7,
+            "claude",
+            Some(reported.as_path()),
+            Some("aaa"),
+            &disk
+        ),
+        Ok((reported.clone(), Via::Reported))
     );
 }

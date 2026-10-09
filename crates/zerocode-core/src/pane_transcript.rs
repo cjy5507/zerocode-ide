@@ -23,9 +23,17 @@
 //! [`Facts`], so the same rule answers the window and the tests alike. A CLI
 //! joins by its row of [`crate::vault::AGENT_SOURCES`] and by no branch here.
 
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::vault::{self, AgentSource, IdPlacement};
+
+/// How long a "no file" answer stands before the rule asks the disk again
+/// (herdr 4 follow-up, t-42948). A file that was named stays named while it is
+/// there, so only the absent answers wait.
+pub const ABSENT_RECHECK: Duration = Duration::from_secs(2);
 
 /// Shorter screen lines are too common to name a file: a prompt's chrome or a
 /// one-word answer appears in many transcripts at once.
@@ -94,6 +102,15 @@ pub trait Facts {
     fn screen_lines(&self) -> Vec<String>;
     /// The text of one file, bounded, or `None` when it cannot be read.
     fn text_of(&self, path: &Path) -> Option<String>;
+    /// The clock the remembered answers are dated by.
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    /// The session files that may carry `id`, listed the way the store places
+    /// ids. `None` when the listing was cut short. By default, the whole listing.
+    fn session_candidates(&self, source: &AgentSource, _id: &str) -> Option<Vec<PathBuf>> {
+        self.session_files(source)
+    }
 }
 
 /// The file one pane's conversation is read from, and how it was found.
@@ -215,6 +232,31 @@ fn by_screen(source: &AgentSource, facts: &dyn Facts) -> Result<PathBuf, Absent>
         return Err(Absent::TwoScreenMatches);
     }
     Ok(first)
+}
+
+/// The answers the window gave each pane, kept between two polls
+/// (herdr 4 follow-up, t-42948). Red step: this skeleton keeps nothing yet.
+pub struct Memo<P> {
+    _pane: PhantomData<P>,
+}
+
+impl<P> Default for Memo<P> {
+    fn default() -> Self {
+        Self { _pane: PhantomData }
+    }
+}
+
+/// [`bind`], asked through the window's memory of each pane's answer. Red
+/// step: this asks the rule every time, as before.
+pub fn bind_remembered<P>(
+    _memo: &Mutex<Memo<P>>,
+    _pane: P,
+    slug: &str,
+    reported: Option<&Path>,
+    session_id: Option<&str>,
+    facts: &dyn Facts,
+) -> Result<(PathBuf, Via), Absent> {
+    bind(slug, reported, session_id, facts)
 }
 
 #[cfg(test)]
