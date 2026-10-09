@@ -3288,7 +3288,7 @@ mod subagent_image_tests {
 
         let mut allowed = BTreeSet::new();
         allowed.insert("read_image".to_string());
-        let mut exec = SubagentToolExecutor::new(allowed);
+        let mut exec = crate::tests::subagent_executor_outside_cwd_windows(allowed);
 
         let input = serde_json::json!({ "path": path.to_string_lossy() }).to_string();
         let summary = exec.execute("read_image", &input).expect("read_image runs");
@@ -3322,7 +3322,7 @@ mod subagent_lsp_tests {
         // diagnostics. Prove it shares the Arc, not a snapshot: a server
         // registered AFTER the share is visible through the executor's context.
         let registry = LspRegistry::new();
-        let exec = SubagentToolExecutor::new(BTreeSet::new()).with_lsp(registry.clone());
+        let exec = crate::tests::subagent_executor_outside_cwd_windows(BTreeSet::new()).with_lsp(registry.clone());
         assert!(exec.context.lsp.is_empty(), "starts empty");
 
         registry.register("rust", LspServerStatus::Connected, None, vec![]);
@@ -3336,7 +3336,7 @@ mod subagent_lsp_tests {
     fn a_fresh_subagent_has_no_lsp() {
         // Without `with_lsp` (the isolated / no-parent path) the context LSP is
         // empty, so the enrich gate (`!ctx.lsp.is_empty()`) is correctly skipped.
-        let exec = SubagentToolExecutor::new(BTreeSet::new());
+        let exec = crate::tests::subagent_executor_outside_cwd_windows(BTreeSet::new());
         assert!(exec.context.lsp.is_empty());
     }
 
@@ -3377,7 +3377,7 @@ mod subagent_instrument_tests {
 
         let mut allowed = BTreeSet::new();
         allowed.insert("InstrumentLog".to_string());
-        let mut exec = SubagentToolExecutor::new(allowed);
+        let mut exec = crate::tests::subagent_executor_outside_cwd_windows(allowed);
 
         let input = serde_json::json!({
             "path": path.to_string_lossy(),
@@ -3412,7 +3412,7 @@ mod subagent_instrument_tests {
     fn instrument_log_is_denied_for_a_subagent_without_it() {
         // A sub-agent whose allow-list omits InstrumentLog cannot call it, so the
         // probe path is unreachable outside the debugger.
-        let mut exec = SubagentToolExecutor::new(BTreeSet::new());
+        let mut exec = crate::tests::subagent_executor_outside_cwd_windows(BTreeSet::new());
         let err = exec
             .execute("InstrumentLog", "{}")
             .expect_err("InstrumentLog must be gated by the allow-list");

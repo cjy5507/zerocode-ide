@@ -676,7 +676,7 @@ mod tests {
             assert!(spec.description.contains("exact identifier-name matches"));
             assert!(spec.description.contains("does not replace LSP"));
         }
-        let advertised = GlobalToolRegistry::builtin()
+        let advertised = crate::tests::builtin_registry_outside_cwd_windows()
             .definitions(None)
             .into_iter()
             .map(|definition| definition.name)

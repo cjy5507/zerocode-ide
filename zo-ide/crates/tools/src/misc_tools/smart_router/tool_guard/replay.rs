@@ -47,7 +47,7 @@ pub(super) fn tool_of(source: &str) -> &'static str {
 
 /// What the real `read_file` hands back for `path`.
 fn read_file(root: &Path, path: &Path) -> String {
-    let ctx = crate::context::ToolContext::new().with_cwd(root);
+    let ctx = crate::tests::tool_context_outside_cwd_windows().with_cwd(root);
     crate::file_tools::dispatch(&ctx, None, "read_file", &json!({ "path": path.to_string_lossy() }))
         .expect("read_file is a file tool")
         .expect("the file reads")

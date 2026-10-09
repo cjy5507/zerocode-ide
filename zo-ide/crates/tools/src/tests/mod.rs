@@ -88,6 +88,36 @@ pub(crate) fn task_registry_outside_cwd_windows() -> runtime::task_registry::Tas
     runtime::task_registry::TaskRegistry::new()
 }
 
+/// `GlobalToolRegistry::builtin()` for callers that do not hold `env_lock`: the
+/// registry's own `ToolContext` binds the process cwd (t-21146).
+pub(crate) fn builtin_registry_outside_cwd_windows() -> GlobalToolRegistry {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    GlobalToolRegistry::builtin()
+}
+
+/// `GlobalToolRegistry::with_plugin_tools` for callers that do not hold `env_lock`
+/// (t-21146): it builds a registry with its own `ToolContext`.
+pub(crate) fn with_plugin_tools_outside_cwd_windows(
+    plugin_tools: Vec<plugins::PluginTool>,
+) -> Result<GlobalToolRegistry, ToolError> {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    GlobalToolRegistry::with_plugin_tools(plugin_tools)
+}
+
+/// `SubagentToolExecutor::new` for callers that do not hold `env_lock` (t-21146).
+pub(crate) fn subagent_executor_outside_cwd_windows(
+    allowed_tools: BTreeSet<String>,
+) -> crate::misc_tools::agent_tools::SubagentToolExecutor {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::misc_tools::agent_tools::SubagentToolExecutor::new(allowed_tools)
+}
+
 /// A scoped environment override shared by tests that use process-wide state.
 pub(crate) struct EnvGuard {
     key: &'static str,

@@ -587,7 +587,7 @@ fn given_no_enforcer_when_bash_then_executes_normally() {
     let cwd = sandbox_disabled_cwd("bash-no-enforcer-cwd");
     let mut ctx = crate::tests::tool_context_outside_cwd_windows();
     ctx.cwd = Some(cwd.clone());
-    let registry = crate::GlobalToolRegistry::builtin().with_context(ctx);
+    let registry = crate::tests::builtin_registry_outside_cwd_windows().with_context(ctx);
     let result = registry
         .execute("bash", &json!({ "command": "printf 'ok'" }))
         .expect("bash should succeed without enforcer");

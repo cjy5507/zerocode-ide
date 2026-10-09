@@ -57,7 +57,7 @@ fn zo_wire_tools_puts_a_deferred_schema_back_on_the_wire() {
 /// would be the only sign anything was wrong.
 #[test]
 fn a_deferred_tool_is_hidden_from_the_wire_but_still_resolves_by_name() {
-    let registry = GlobalToolRegistry::builtin();
+    let registry = crate::tests::builtin_registry_outside_cwd_windows();
     let advertised: Vec<String> = registry
         .definitions(None)
         .into_iter()
@@ -109,7 +109,7 @@ fn a_searched_session_recall_runs_through_capability_invoke() {
         .save_to_path(session_dir.join("session-r49.jsonl"))
         .expect("persist recall fixture");
 
-    let registry = GlobalToolRegistry::builtin()
+    let registry = crate::tests::builtin_registry_outside_cwd_windows()
         .with_context(crate::tests::tool_context_outside_cwd_windows().with_cwd(base.clone()));
     let wire: BTreeSet<String> = registry
         .definitions(None)
@@ -167,7 +167,7 @@ fn a_write_tier_tool_is_denied_before_dispatch_and_the_denial_is_audited() {
     assert_eq!(write_file.required_permission, PermissionMode::WorkspaceWrite);
 
     let policy = permission_policy_for_mode(PermissionMode::ReadOnly);
-    let registry = GlobalToolRegistry::builtin().with_enforcer(PermissionEnforcer::new(policy));
+    let registry = crate::tests::builtin_registry_outside_cwd_windows().with_enforcer(PermissionEnforcer::new(policy));
     let error = registry
         .execute("write_file", &json!({ "path": "x.txt", "content": "y" }))
         .expect_err("a write is denied under read-only");
@@ -274,7 +274,7 @@ fn multi_edit_is_registered_inline_with_the_expected_schema() {
         })
     );
 
-    let advertised = GlobalToolRegistry::builtin()
+    let advertised = crate::tests::builtin_registry_outside_cwd_windows()
         .definitions(None)
         .into_iter()
         .map(|definition| definition.name)
@@ -284,7 +284,7 @@ fn multi_edit_is_registered_inline_with_the_expected_schema() {
 
 #[test]
 fn legacy_mcp_tools_are_not_model_facing_builtin_tools() {
-    let registry = GlobalToolRegistry::builtin();
+    let registry = crate::tests::builtin_registry_outside_cwd_windows();
     let legacy_names = ["ListMcpResources", "ReadMcpResource", "McpAuth", "MCP"];
     let advertised = registry
         .definitions(None)
@@ -364,7 +364,7 @@ fn tool_registry_dispatch_accepts_read_aliases_for_same_handler() {
     fs::write(&tmp, "hello world\n").expect("seed temp file");
     let path = tmp.to_string_lossy().to_string();
 
-    let registry = GlobalToolRegistry::builtin();
+    let registry = crate::tests::builtin_registry_outside_cwd_windows();
     let input = json!({ "path": path });
 
     let via_pascal = registry
@@ -450,7 +450,7 @@ fn tool_registry_dispatch_accepts_write_and_bash_aliases() {
 
 #[test]
 fn resolve_allowed_tools_accepts_pascal_case_alias_inputs() {
-    let registry = GlobalToolRegistry::builtin();
+    let registry = crate::tests::builtin_registry_outside_cwd_windows();
     let allowed = registry
         .normalize_allowed_tools(&[
             "Read".to_string(),
@@ -470,7 +470,7 @@ fn resolve_allowed_tools_accepts_pascal_case_alias_inputs() {
 fn global_tool_registry_denies_blocked_tool_before_dispatch() {
     // given
     let policy = permission_policy_for_mode(PermissionMode::ReadOnly);
-    let registry = GlobalToolRegistry::builtin().with_enforcer(PermissionEnforcer::new(policy));
+    let registry = crate::tests::builtin_registry_outside_cwd_windows().with_enforcer(PermissionEnforcer::new(policy));
 
     // when
     let error = registry
@@ -526,7 +526,7 @@ fn tool_gateway_records_builtin_success_metadata() {
 #[test]
 fn tool_gateway_records_permission_denials() {
     let policy = permission_policy_for_mode(PermissionMode::ReadOnly);
-    let registry = GlobalToolRegistry::builtin().with_enforcer(PermissionEnforcer::new(policy));
+    let registry = crate::tests::builtin_registry_outside_cwd_windows().with_enforcer(PermissionEnforcer::new(policy));
 
     let error = registry
         .execute(
@@ -566,7 +566,7 @@ fn tool_gateway_records_permission_denials() {
 
 #[test]
 fn tool_gateway_records_tool_toggle_denials() {
-    let registry = GlobalToolRegistry::builtin()
+    let registry = crate::tests::builtin_registry_outside_cwd_windows()
         .with_disabled_tools(BTreeSet::from(["WebSearch".to_string()]));
 
     let error = registry
@@ -661,7 +661,7 @@ fn permission_mode_from_plugin_rejects_invalid_inputs() {
 
 #[test]
 fn runtime_tools_extend_registry_definitions_permissions_and_search() {
-    let registry = GlobalToolRegistry::builtin()
+    let registry = crate::tests::builtin_registry_outside_cwd_windows()
         .with_runtime_tools(vec![crate::RuntimeToolDefinition {
             name: "mcp__demo__echo".to_string(),
             description: Some("Echo text from the demo MCP server".to_string()),
@@ -727,7 +727,7 @@ fn runtime_tools_extend_registry_definitions_permissions_and_search() {
 
 #[test]
 fn normalize_allowed_tools_accepts_aliases_and_mixed_separators() {
-    let registry = GlobalToolRegistry::builtin();
+    let registry = crate::tests::builtin_registry_outside_cwd_windows();
 
     let allowed = registry
         .normalize_allowed_tools(&["read, write   grep".to_string()])
@@ -754,7 +754,7 @@ fn normalize_shell_command_collapses_whitespace_before_lowercasing() {
 
 #[test]
 fn builtin_registry_hides_lsp_from_public_surface_without_registered_servers() {
-    let registry = GlobalToolRegistry::builtin();
+    let registry = crate::tests::builtin_registry_outside_cwd_windows();
 
     let definitions = registry.definitions(None);
     assert!(!definitions
@@ -774,7 +774,7 @@ fn builtin_registry_exposes_lsp_when_server_is_registered() {
         None,
         vec!["hover".into()],
     );
-    let registry = GlobalToolRegistry::builtin().with_context(context);
+    let registry = crate::tests::builtin_registry_outside_cwd_windows().with_context(context);
 
     let definitions = registry.definitions(None);
     assert!(definitions
@@ -928,7 +928,7 @@ fn task_creation_tools_are_not_exposed_and_specs_are_honest() {
 /// surface behind the registry the receipt says so rather than failing.
 #[test]
 fn push_notification_is_deferred_and_still_answers_by_name() {
-    let registry = GlobalToolRegistry::builtin();
+    let registry = crate::tests::builtin_registry_outside_cwd_windows();
     let advertised: std::collections::BTreeSet<String> = registry
         .definitions(None)
         .into_iter()
@@ -957,7 +957,7 @@ fn push_notification_is_deferred_and_still_answers_by_name() {
 fn push_notification_schema_is_measured_and_deferred() {
     const WIRE_SEAT_TOKENS: u64 = 60;
     const CEILING_TOKENS: u64 = 200;
-    let definition = GlobalToolRegistry::builtin()
+    let definition = crate::tests::builtin_registry_outside_cwd_windows()
         .definitions(Some(&std::iter::once("PushNotification".to_string()).collect()))
         .into_iter()
         .find(|definition| definition.name == "PushNotification")
@@ -1036,7 +1036,7 @@ fn jev_is_deferred_still_answers_by_name_and_is_off_until_a_person_says_so() {
 fn jev_schema_is_measured_and_deferred() {
     const WIRE_SEAT_TOKENS: u64 = 60;
     const CEILING_TOKENS: u64 = 260;
-    let definition = GlobalToolRegistry::builtin()
+    let definition = crate::tests::builtin_registry_outside_cwd_windows()
         .definitions(Some(&std::iter::once("Jev".to_string()).collect()))
         .into_iter()
         .find(|definition| definition.name == "Jev")

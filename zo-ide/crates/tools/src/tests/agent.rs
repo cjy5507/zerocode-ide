@@ -736,7 +736,7 @@ fn worker_tools_detect_misdelivery_and_arm_prompt_replay() {
 fn subagent_tool_executor_denies_blocked_tool_before_dispatch() {
     // given
     let policy = permission_policy_for_mode(PermissionMode::ReadOnly);
-    let mut executor = SubagentToolExecutor::new(BTreeSet::from([String::from("write_file")]))
+    let mut executor = crate::tests::subagent_executor_outside_cwd_windows(BTreeSet::from([String::from("write_file")]))
         .with_enforcer(PermissionEnforcer::new(policy));
 
     // when

@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn artifact_is_deferred_and_discoverable() {
-        let registry = crate::GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         assert!(!registry.definitions(None).iter().any(|tool| tool.name == "Artifact"));
         assert!(crate::deferred_tool_manifest_section().contains("Artifact ("));
     }

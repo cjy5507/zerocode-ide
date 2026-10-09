@@ -96,7 +96,7 @@ fn one_session(root: &Path, scenario: &str, phase: &str, jev: &Mutex<Vec<usize>>
     runtime=runtime.with_auto_compaction_input_tokens_threshold(if scenario=="headroom" {500} else {500_000});
     runtime.set_auto_compaction_enabled(false);
     runtime.set_compaction_seat(Some(Arc::new(CompactionJudge::at(root))));
-    let ctx=ToolContext::new().with_cwd(cwd.clone());ctx.set_session_id("impact");
+    let ctx=crate::tests::tool_context_outside_cwd_windows().with_cwd(cwd.clone());ctx.set_session_id("impact");
     let start_requests=jev.lock().unwrap().len();
     let rounds=if scenario=="normal" {6} else {1};
     let mut results=Vec::new();

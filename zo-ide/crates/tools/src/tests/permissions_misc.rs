@@ -193,7 +193,7 @@ fn send_to_user_channel_install_reaches_pre_existing_registry_clones() {
     // clone at session BOOT, while the TUI installs the channel per-TURN into
     // the executor's clone. The install must write through to the boot-time
     // clone, or live `send_to_user` silently degrades to its inline echo.
-    let mut registry = crate::GlobalToolRegistry::builtin();
+    let mut registry = crate::tests::builtin_registry_outside_cwd_windows();
     let dispatch_clone = registry.clone();
 
     let sink = Arc::new(Mutex::new(Vec::new()));
@@ -467,12 +467,20 @@ fn read_only_registry() -> crate::GlobalToolRegistry {
     registry
 }
 
+/// `read_only_registry` for callers that do not hold `env_lock` (t-21146).
+fn read_only_registry_outside_cwd_windows() -> crate::GlobalToolRegistry {
+    let _guard = crate::tests::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    read_only_registry()
+}
+
 /// A provably read-only command (`echo`) passes the classifier, so its
 /// effective requirement drops to `ReadOnly` and the call executes — the
 /// CC-parity behavior that makes read-only sessions usable for analysis.
 #[test]
 fn given_read_only_enforcer_when_read_only_safe_bash_then_allowed() {
-    let registry = read_only_registry();
+    let registry = read_only_registry_outside_cwd_windows();
     let output = registry
         .execute("bash", &json!({ "command": "echo zo-readonly-ok" }))
         .expect("read-only-safe bash must run in read-only mode");
@@ -487,7 +495,7 @@ fn given_read_only_enforcer_when_read_only_safe_bash_then_allowed() {
 /// mode-ladder denial.
 #[test]
 fn given_read_only_enforcer_when_mutating_bash_then_denied() {
-    let registry = read_only_registry();
+    let registry = read_only_registry_outside_cwd_windows();
     let err = registry
         .execute("bash", &json!({ "command": "rm notes.txt" }))
         .expect_err("mutating bash should be denied in read-only mode");
@@ -507,7 +515,7 @@ fn given_read_only_enforcer_when_mutating_bash_then_denied() {
 
 #[test]
 fn given_read_only_enforcer_when_write_file_then_denied() {
-    let registry = read_only_registry();
+    let registry = read_only_registry_outside_cwd_windows();
     let err = registry
         .execute(
             "write_file",
@@ -530,7 +538,7 @@ fn given_read_only_enforcer_when_write_file_then_denied() {
 
 #[test]
 fn given_read_only_enforcer_when_edit_file_then_denied() {
-    let registry = read_only_registry();
+    let registry = read_only_registry_outside_cwd_windows();
     let err = registry
         .execute(
             "edit_file",
@@ -570,7 +578,7 @@ fn given_read_only_enforcer_when_read_file_then_not_permission_denied() {
 
 #[test]
 fn given_read_only_enforcer_when_glob_search_then_not_permission_denied() {
-    let registry = read_only_registry();
+    let registry = read_only_registry_outside_cwd_windows();
     // Explicit path: this asserts the PERMISSION outcome, and a bare pattern
     // resolves against the process cwd — which parallel env_lock tests move to
     // (and then delete) temp dirs, making the cwd-relative form flake.

@@ -26,7 +26,7 @@ fn td(name: &str) -> std::path::PathBuf {
 fn foreground_registry(ws: &std::path::Path, mode: PermissionMode) -> GlobalToolRegistry {
     let ctx = crate::tests::tool_context_outside_cwd_windows().with_workspace_root(ws.to_path_buf());
     ctx.set_permission_mode(mode);
-    GlobalToolRegistry::builtin().with_context(ctx)
+    crate::tests::builtin_registry_outside_cwd_windows().with_context(ctx)
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn no_session_mode_falls_back_to_boundary_when_below_full_access() {
     std::fs::write(&rpath, "x").expect("seed");
 
     // workspace root set, NO permission mode recorded, NO enforcer.
-    let reg = GlobalToolRegistry::builtin()
+    let reg = crate::tests::builtin_registry_outside_cwd_windows()
         .with_context(crate::tests::tool_context_outside_cwd_windows().with_workspace_root(ws.clone()));
     let read = reg.execute("read_file", &json!({ "path": rpath.to_string_lossy() }));
     assert!(
