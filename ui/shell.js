@@ -11602,9 +11602,6 @@ listen("hook:agent", (event) => {
  * (`term:bell`), and counting it off a frame too would count it twice. */
 function applyTermFrames(term, frames) {
   const newest = frames[frames.length - 1];
-  // A pane that printed may be waiting for a secret once it goes quiet
-  // (shell-secret.js): the check is armed here and asks nothing until then.
-  noteTermOutput(term);
   noteMouseModes(`term:${term}`, newest);
   // The program's own name for what it is doing — state, so the newest word
   // any of these frames said wins.

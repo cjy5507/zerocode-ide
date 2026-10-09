@@ -13,6 +13,7 @@ use super::support::{block_after, strip_rust_comments};
 const TERMINAL: &str = include_str!("../../src/cmd/terminal.rs");
 const ANSWER_DOOR: &str = include_str!("../../src/answer_door.rs");
 const MAIN: &str = include_str!("../../src/main.rs");
+const WATCH: &str = include_str!("../../src/secret_watch.rs");
 
 /// A window file, read when the test runs: a missing one fails this contract
 /// alone, not the whole target it sits in.
@@ -77,8 +78,8 @@ fn the_card_keeps_no_copy_of_the_value_and_sends_it_in_one_call() {
     );
     assert_eq!(
         card.matches("invoke(").count(),
-        2,
-        "only the poll and the answer call the backend"
+        1,
+        "the card calls the backend only to answer; the backend says when a pane asks"
     );
 }
 
@@ -146,22 +147,35 @@ fn the_value_is_typed_through_the_answer_door_and_recorded_nowhere() {
 }
 
 #[test]
-fn the_panes_listing_carries_the_question_and_no_value() {
-    let terminal = strip_rust_comments(TERMINAL);
-    let listing = struct_body(&terminal, "PaneSecret");
-    for field in ["term:", "kind:", "line:", "since:"] {
-        assert!(listing.contains(field), "PaneSecret names {field}");
+fn the_question_is_heard_without_a_value_and_the_card_listens_for_it() {
+    let watch = strip_rust_comments(WATCH);
+    assert!(
+        watch.contains("\"term:secret\""),
+        "the watcher says a pane's question on the term:secret event"
+    );
+    let question = struct_body(&watch, "SecretQuestion");
+    for field in ["kind:", "line:", "since:"] {
+        assert!(question.contains(field), "SecretQuestion names {field}");
     }
     assert!(
-        !listing.contains("value"),
-        "a pane's question is listed without any value"
+        !question.contains("value"),
+        "a pane's question is said without any value"
     );
-    for command in ["answer_secret", "pane_secret"] {
+    for keep in BACKEND_KEEPS {
         assert!(
-            MAIN.contains(command),
-            "{command} is on the window's command list"
+            !watch.contains(keep),
+            "secret_watch names {keep}, a place the value could be kept"
         );
     }
+    let card = ui_file("shell-secret.js");
+    assert!(
+        card.contains("listen(\"term:secret\""),
+        "the card hears the watcher's event instead of asking the backend"
+    );
+    assert!(
+        MAIN.contains("answer_secret"),
+        "answer_secret is on the window's command list"
+    );
 }
 
 #[test]

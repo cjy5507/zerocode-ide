@@ -6,9 +6,10 @@
 //! for each stretch of output, so an idle window reads nothing and sends
 //! nothing. When a pane's question appears, or leaves, the window hears it as a
 //! `term:secret` event; the window never has to call the backend to find out.
-//!
-//! Red stage: [`judge`] says nothing yet, so the tests below fail.
 
+use super::*;
+
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -50,20 +51,101 @@ pub(crate) enum Said {
     Gone,
 }
 
-/// Decide what one look at a pane says. Red stage: says nothing.
+/// What the window hears on `term:secret`: a pane's question, or `null` when the
+/// pane no longer asks one.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SecretNotice {
+    pub(crate) term: TermId,
+    pub(crate) question: Option<SecretQuestion>,
+}
+
+/// Decide what one look at a pane says. `output_at` is the pane's last output
+/// time, `None` when its transport does not say. `read` reads the pane's
+/// question, and runs at most once for each stretch of output, and only once the
+/// pane has been quiet for the spell.
 pub(crate) fn judge(
     watch: &mut PaneWatch,
     output_at: Option<i64>,
     now_ms: i64,
     read: impl FnOnce() -> Option<SecretQuestion>,
 ) -> Said {
-    let _ = (watch, output_at, now_ms, read);
-    Said::Nothing
+    if watch.output_at != output_at {
+        watch.output_at = output_at;
+        watch.read = false;
+    }
+    // A transport that does not say when it last wrote cannot be waited on, so
+    // its stretch is read at once, and only once.
+    let quiet = output_at.is_none_or(|at| now_ms.saturating_sub(at) >= quiet_ms());
+    if watch.read || !quiet {
+        return Said::Nothing;
+    }
+    watch.read = true;
+    match read() {
+        Some(question) if watch.said.as_ref() == Some(&question) => Said::Nothing,
+        Some(question) => {
+            watch.said = Some(question.clone());
+            Said::Question(question)
+        }
+        None => match watch.said.take() {
+            Some(_) => Said::Gone,
+            None => Said::Nothing,
+        },
+    }
 }
 
 /// The quiet spell a pane must keep before its question is read.
 fn quiet_ms() -> i64 {
     i64::try_from(answer_door::SECRET_QUIET.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Start the watcher: one thread for the whole process, one look at every pane
+/// each [`SECRET_WATCH_TICK`].
+pub(crate) fn spawn(app: AppHandle) {
+    let _ = std::thread::Builder::new()
+        .name("secret-watch".to_string())
+        .spawn(move || {
+            let mut watches: HashMap<TermId, PaneWatch> = HashMap::new();
+            loop {
+                std::thread::sleep(SECRET_WATCH_TICK);
+                look_once(&app, &mut watches);
+            }
+        });
+}
+
+/// One look at every pane this process holds, and the changes said on.
+fn look_once(app: &AppHandle, watches: &mut HashMap<TermId, PaneWatch>) {
+    let state = app.state::<AppState>();
+    let living = state.terminals().terms();
+    watches.retain(|term, _| living.contains(term));
+    for term in living {
+        let Some(held) = state.terminals().handle(term) else {
+            continue;
+        };
+        // A pane being parsed this instant is looked at on the next look.
+        let Some(output_at) = answer_door::output_clock(&held) else {
+            continue;
+        };
+        let said = judge(
+            watches.entry(term).or_default(),
+            output_at,
+            epoch_ms_now(),
+            || {
+                let prompt = answer_door::secret_prompt(&held)?;
+                Some(SecretQuestion {
+                    kind: prompt.kind,
+                    line: prompt.line,
+                    since: answer_door::quiet_since(&held),
+                })
+            },
+        );
+        let question = match said {
+            Said::Nothing => continue,
+            Said::Question(question) => Some(question),
+            Said::Gone => None,
+        };
+        let _ = app.emit("term:secret", SecretNotice { term, question });
+    }
 }
 
 #[cfg(test)]

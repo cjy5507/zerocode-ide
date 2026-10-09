@@ -2027,36 +2027,6 @@ pub(crate) fn answer_approval(
     }
 }
 
-/// A question a pane waits on for a secret, as the window's popup lists it: the
-/// pane, the kind of secret, the question's own line, and the output time the
-/// question was read at. No value is in it; [`answer_secret`] types one and
-/// keeps none.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PaneSecret {
-    pub(crate) term: TermId,
-    pub(crate) kind: SecretKind,
-    pub(crate) line: String,
-    pub(crate) since: i64,
-}
-
-/// The question one pane waits on for a secret, if it waits on one. The window
-/// asks about one pane at a time, after that pane has printed and then gone
-/// quiet, so an idle window asks nothing. A pane still printing, or one whose
-/// last line is not such a question, answers `None`.
-#[tauri::command]
-pub(crate) fn pane_secret(state: State<'_, AppState>, term: TermId) -> Option<PaneSecret> {
-    let _crumb = crate::crumbs::Command::enter("pane_secret");
-    let held = state.terminals().handle(term)?;
-    let prompt = answer_door::secret_prompt(&held)?;
-    Some(PaneSecret {
-        term,
-        kind: prompt.kind,
-        line: prompt.line,
-        since: answer_door::quiet_since(&held),
-    })
-}
-
 /// Type the value a person gave a secret card, and the return that sends it,
 /// into the pane whose question it answers.
 ///

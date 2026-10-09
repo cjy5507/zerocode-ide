@@ -297,6 +297,18 @@ pub(super) fn quiet_since(held: &HeldTerminal) -> i64 {
     lock_pty(held).last_output_epoch_ms().unwrap_or(0)
 }
 
+/// When the pane's output last moved, as the watcher reads it, without waiting
+/// for the pane's lock: `None` while the pane is being parsed this instant (the
+/// next look reads it), and `Some(None)` for a transport that does not say.
+pub(super) fn output_clock(held: &HeldTerminal) -> Option<Option<i64>> {
+    let pty = match held.try_lock() {
+        Ok(pty) => pty,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    Some(pty.last_output_epoch_ms())
+}
+
 /// Type a secret the person gave a card, and the return that sends it, into the
 /// pane — if and only if the pane still shows `expect`'s question. The screen is
 /// read and the value written in one hold of the pane's lock, as

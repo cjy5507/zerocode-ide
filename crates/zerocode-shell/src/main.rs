@@ -299,15 +299,15 @@ use cmd::{
     open_remote_workspace_terminal, open_ssh_terminal, open_term_tab, open_terminal, open_url,
     open_workspace_in_application, opencode_usage, opencode_usage_stats, orchestration_accuracy,
     orchestration_report, orchestration_runtime_state, pane_activities, pane_agents, pane_image,
-    pane_layouts, pane_log, pane_secret, pane_sessions, pane_subagents, paste_input,
-    patch_browser_link_routing, patch_browser_user_agents, patch_editing_prefs,
-    patch_floating_workspace, patch_left_sidebar_appearance, patch_open_in_applications,
-    patch_terminal_prefs, patch_update_prefs, patch_workspace_board_items,
-    patch_workspace_board_status, patch_workspace_creation_prefs, path_kinds, paths_exist,
-    pr_check_details, pr_checks, preview_ghostty_import, preview_warp_terminal_themes,
-    probe_remote_workspace, probe_ssh_host, process_memory, project_catalog, project_kind,
-    project_scripts, pull_request_seed, read_image_file, read_primary_selection, read_text_file,
-    recall_folder_panel, record_archive_trust, record_repo_trust, relaunch_window, release_status,
+    pane_layouts, pane_log, pane_sessions, pane_subagents, paste_input, patch_browser_link_routing,
+    patch_browser_user_agents, patch_editing_prefs, patch_floating_workspace,
+    patch_left_sidebar_appearance, patch_open_in_applications, patch_terminal_prefs,
+    patch_update_prefs, patch_workspace_board_items, patch_workspace_board_status,
+    patch_workspace_creation_prefs, path_kinds, paths_exist, pr_check_details, pr_checks,
+    preview_ghostty_import, preview_warp_terminal_themes, probe_remote_workspace, probe_ssh_host,
+    process_memory, project_catalog, project_kind, project_scripts, pull_request_seed,
+    read_image_file, read_primary_selection, read_text_file, recall_folder_panel,
+    record_archive_trust, record_repo_trust, relaunch_window, release_status,
     release_untitled_markdown, relogin_claude_account, relogin_codex_account, relogin_codex_login,
     remote_servers, remote_workspaces, remove_api_router, remove_claude_account,
     remove_codex_account, remove_project, remove_remote_server, remove_remote_workspace,
@@ -2600,7 +2600,6 @@ fn main() -> ExitCode {
             answer_ask,
             answer_approval,
             answer_secret,
-            pane_secret,
             resize_lane,
             respond_permission,
             gate_lane,
@@ -3534,6 +3533,7 @@ fn main() -> ExitCode {
                     }
                 });
             });
+            secret_watch::spawn(handle.clone());
             std::thread::spawn(move || pump_loop(&handle));
             // Sleep's far edge (P0-17 잔여): a fixed nap, and the wall
             // clock's overshoot judged by `resume_watch::slept_for`. The

@@ -2,9 +2,10 @@
  *
  * A program that asks for a password, a passphrase or a PIN draws its question
  * on the line its cursor stands on, and then waits. The backend reads that line
- * (`zerocode_core::secret_prompt`) and says, for one pane at a time, whether it
- * waits (`pane_secret`); this file raises that as a question of the popup, with
- * a password field that types the value into its pane once (`answer_secret`).
+ * (`zerocode_core::secret_prompt`), and the backend's watcher says when a pane
+ * starts or stops waiting (`term:secret`); this file raises that as a question
+ * of the popup, with a password field that types the value into its pane once
+ * (`answer_secret`).
  *
  * What the page keeps of the value: nothing but the field. The field is the
  * person's own input. It is read once, when they send, and emptied the moment
@@ -13,11 +14,6 @@
  * ledger, or a second copy in a variable this file keeps. The source contract
  * (`source_contracts/secret_prompt.rs`) and the window suite
  * (`ui/tests/secret-prompt.mjs`) search for it in all of those places. */
-
-/* How long a pane must stay quiet before the window asks whether it waits for a
- * secret: past the backend's own quiet spell (answer_door::SECRET_QUIET, 300 ms),
- * so the question is still the pane's last line when it is asked. */
-const SECRET_CHECK_AFTER_MS = 450;
 
 /* The words the backend answers a refused send with (`answer_door`). A refusal
  * the page knows is painted in its own sentence; anything else is a failure. */
@@ -179,44 +175,23 @@ secretInput.addEventListener("keydown", (event) => {
   if (activeAsk?.kind === "secret") void answerAsk({ decision: "send" });
 });
 
-/* The window asks about a pane once that pane has printed and then gone quiet.
- * shell.js calls `noteTermOutput` for each frame of output; the check is armed
- * for that pane and runs when its output has stopped for SECRET_CHECK_AFTER_MS.
- * A window in which no pane prints arms nothing and asks nothing. */
-const secretChecks = new Map();
-
-function noteTermOutput(term) {
-  clearTimeout(secretChecks.get(term));
-  secretChecks.set(
-    term,
-    setTimeout(() => {
-      secretChecks.delete(term);
-      void checkSecret(term);
-    }, SECRET_CHECK_AFTER_MS),
-  );
-}
-
-/* Ask the backend whether one pane waits for a secret, and make the popup
- * agree. A question the pane no longer asks leaves the popup, and what was
- * settled for that pane goes with it. A new question raises its card, and a
- * card for an older question of the same pane goes. A failed check changes
- * nothing on the screen. */
-async function checkSecret(term) {
-  let item;
-  try {
-    item = await invoke("pane_secret", { term });
-  } catch {
-    return;
-  }
-  if (!item) {
+/* The backend says when a pane starts or stops waiting for a secret: a
+ * `term:secret` event carries the pane's question, or `null` once it asks none
+ * (secret_watch.rs). The window only listens, so an idle window calls nothing.
+ * A question the pane no longer asks leaves the popup, and what was settled for
+ * that pane goes with it. A new question raises its card, and a card for an
+ * older question of the same pane goes. */
+listen("term:secret", (event) => {
+  const { term, question } = event.payload;
+  if (question === null) {
     withdrawAsks((ask) => ask.kind === "secret" && ask.term === term);
     for (const key of [...secretSettled]) {
       if (key.startsWith(`secret:${term}:`)) secretSettled.delete(key);
     }
     return;
   }
-  if (secretSettled.has(secretKeyOf(item))) return;
-  const ask = secretAskOf(item);
+  const ask = secretAskOf({ term, kind: question.kind, line: question.line, since: question.since });
+  if (secretSettled.has(ask.key)) return;
   withdrawAsks((queued) => queued.kind === "secret" && queued.term === term && queued.key !== ask.key);
   raiseAsk(ask);
-}
+});
