@@ -362,12 +362,34 @@ mod tests {
     use zerocode_core::secret_prompt::SecretKind;
     use zerocode_pty::{Pumped, Terminal};
 
+    /// What a fake pane's terminal says about who holds it, and whether it echoes.
+    #[derive(Clone)]
+    struct Holder {
+        child: Option<u32>,
+        holder: Option<u32>,
+        names: Vec<String>,
+        echo: Option<bool>,
+    }
+
+    impl Holder {
+        /// A job the pane's shell started holds the terminal, and it does not echo.
+        fn job() -> Self {
+            Self {
+                child: Some(100),
+                holder: Some(200),
+                names: vec!["ssh".to_string()],
+                echo: Some(false),
+            }
+        }
+    }
+
     /// A synthetic program that asks for a secret the way sudo does: it draws
     /// its question and waits, and it says when its output last moved.
     struct SecretCli {
         terminal: Terminal,
         last_output: Option<Instant>,
         written: Arc<Mutex<Vec<Vec<u8>>>>,
+        holder: Holder,
     }
 
     impl PtyTransport for SecretCli {
@@ -408,6 +430,22 @@ mod tests {
         fn last_output_at(&self) -> Option<Instant> {
             self.last_output
         }
+
+        fn pid(&self) -> Option<u32> {
+            self.holder.child
+        }
+
+        fn foreground_process_id(&self) -> Option<u32> {
+            self.holder.holder
+        }
+
+        fn foreground_programs(&self) -> Vec<String> {
+            self.holder.names.clone()
+        }
+
+        fn echo_on(&self) -> Option<bool> {
+            self.holder.echo
+        }
     }
 
     struct SecretPane {
@@ -427,8 +465,13 @@ mod tests {
     }
 
     /// A pane whose screen shows `question` on its first row, with the cursor
-    /// at its end, and whose output last moved `silent_for` ago.
+    /// at its end, and whose output last moved `silent_for` ago. A job the
+    /// shell started holds its terminal ([`Holder::job`]).
     fn secret_pane(question: &str, silent_for: Duration) -> SecretPane {
+        secret_pane_with(question, silent_for, Holder::job())
+    }
+
+    fn secret_pane_with(question: &str, silent_for: Duration, holder: Holder) -> SecretPane {
         let written = Arc::new(Mutex::new(Vec::new()));
         let mut terminal = Terminal::new(24, 80);
         terminal.feed(format!("\x1b[2J\x1b[H{question}").as_bytes());
@@ -436,6 +479,7 @@ mod tests {
             terminal,
             last_output: Instant::now().checked_sub(silent_for),
             written: Arc::clone(&written),
+            holder,
         };
         SecretPane {
             held: Arc::new(Mutex::new(PtyHandle::new(cli))),
@@ -491,6 +535,65 @@ mod tests {
     #[test]
     fn a_secret_is_not_typed_into_a_pane_that_asks_something_else() {
         let pane = secret_pane("Enter passphrase:", SECRET_QUIET * 2);
+        let expect = SecretPrompt {
+            kind: SecretKind::Password,
+            line: "Password:".to_string(),
+        };
+        assert!(matches!(
+            type_secret_if_up(&pane.held, &expect, b"SENTINEL-not-a-secret"),
+            Ok(false)
+        ));
+        assert!(pane.typed().is_empty());
+    }
+
+    #[test]
+    fn a_secret_is_not_offered_while_the_pane_itself_holds_its_terminal() {
+        let mut holder = Holder::job();
+        holder.holder = holder.child;
+        let pane = secret_pane_with("Password:", SECRET_QUIET * 2, holder);
+        assert_eq!(
+            secret_prompt(&pane.held),
+            None,
+            "a shell at its own prompt, or an agent with no job in front, asked for nothing a value answers"
+        );
+    }
+
+    #[test]
+    fn a_secret_is_not_offered_while_an_agent_is_the_job_in_front() {
+        let mut holder = Holder::job();
+        holder.names = vec!["claude".to_string(), "bin".to_string()];
+        let pane = secret_pane_with("Password:", SECRET_QUIET * 2, holder);
+        assert_eq!(
+            secret_prompt(&pane.held),
+            None,
+            "a tool's prompt on an agent's terminal is read by the agent, not by the tool"
+        );
+    }
+
+    #[test]
+    fn a_secret_is_not_typed_into_a_question_that_echoes() {
+        let mut holder = Holder::job();
+        holder.echo = Some(true);
+        let pane = secret_pane_with("Password:", SECRET_QUIET * 2, holder);
+        let expect = SecretPrompt {
+            kind: SecretKind::Password,
+            line: "Password:".to_string(),
+        };
+        assert!(matches!(
+            type_secret_if_up(&pane.held, &expect, b"SENTINEL-not-a-secret"),
+            Ok(false)
+        ));
+        assert!(
+            pane.typed().is_empty(),
+            "an echoing terminal keeps the typed value on the screen and in scrollback"
+        );
+    }
+
+    #[test]
+    fn a_secret_is_not_typed_when_the_terminal_cannot_say_who_holds_it() {
+        let mut holder = Holder::job();
+        holder.holder = None;
+        let pane = secret_pane_with("Password:", SECRET_QUIET * 2, holder);
         let expect = SecretPrompt {
             kind: SecretKind::Password,
             line: "Password:".to_string(),

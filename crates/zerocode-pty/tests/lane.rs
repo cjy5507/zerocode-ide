@@ -654,6 +654,60 @@ fn the_lane_can_tell_a_shell_at_its_prompt_from_one_running_a_job() {
     assert_eq!(lane.foreground_process_id(), Some(shell_pid));
 }
 
+/// A terminal says whether it echoes what is typed, as its program set it.
+///
+/// A line discipline in ECHO copies a typed value back onto the screen, where
+/// it stays in the grid and in scrollback. A cooked terminal echoes until a
+/// program turns ECHO off, so a secret must never be typed while it echoes.
+#[cfg(unix)]
+#[test]
+fn the_lane_says_whether_its_terminal_echoes_what_is_typed() {
+    let mut echoing = PtyLane::spawn(
+        "/bin/sh",
+        &["-c".to_string(), "read -r line".to_string()],
+        None,
+        &[],
+        10,
+        40,
+    )
+    .expect("spawn");
+    assert_eq!(
+        wait_for_echo(&mut echoing, true),
+        Some(true),
+        "a cooked terminal nobody has changed echoes what is typed"
+    );
+
+    let mut quiet = PtyLane::spawn(
+        "/bin/sh",
+        &["-c".to_string(), "stty -echo; read -r line".to_string()],
+        None,
+        &[],
+        10,
+        40,
+    )
+    .expect("spawn");
+    assert_eq!(
+        wait_for_echo(&mut quiet, false),
+        Some(false),
+        "a program that turns ECHO off is reported as a terminal that does not echo"
+    );
+}
+
+/// Poll until the lane's echo answer is `want`, and report what it was.
+#[cfg(unix)]
+fn wait_for_echo(lane: &mut PtyLane, want: bool) -> Option<bool> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = lane.echo_on();
+    while Instant::now() < deadline {
+        seen = lane.echo_on();
+        if seen == Some(want) {
+            return seen;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    seen
+}
+
 /// One byte ends a job, and it is the kernel that ends it.
 ///
 /// Reported live: Ctrl+C in a terminal did nothing. The window was at fault —

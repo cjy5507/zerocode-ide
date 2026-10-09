@@ -740,6 +740,14 @@ impl PtyLane {
         }
     }
 
+    /// Whether the terminal echoes what is typed into it, as its flags say now.
+    ///
+    /// Not read yet: this answer is `None` until the flags are read.
+    #[must_use]
+    pub fn echo_on(&self) -> Option<bool> {
+        None
+    }
+
     /// Who holds this ConPTY, from one process snapshot.
     #[cfg(windows)]
     fn conpty(&self) -> Option<ConptyForeground> {

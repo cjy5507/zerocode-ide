@@ -97,6 +97,13 @@ pub trait PtyTransport: Send {
     fn foreground_programs(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Whether the terminal echoes typed bytes right now. `None` is "cannot
+    /// tell": a ConPTY has no line discipline to ask, and a remote channel has
+    /// none here.
+    fn echo_on(&self) -> Option<bool> {
+        None
+    }
 }
 
 /// One owned live terminal, with its concrete transport erased.
@@ -175,6 +182,10 @@ impl PtyTransport for PtyHandle {
     fn foreground_programs(&self) -> Vec<String> {
         self.transport.foreground_programs()
     }
+
+    fn echo_on(&self) -> Option<bool> {
+        self.transport.echo_on()
+    }
 }
 
 impl PtyTransport for PtyLane {
@@ -240,6 +251,10 @@ impl PtyTransport for PtyLane {
             return programs;
         }
         PtyLane::foreground_programs(self)
+    }
+
+    fn echo_on(&self) -> Option<bool> {
+        PtyLane::echo_on(self)
     }
 }
 
