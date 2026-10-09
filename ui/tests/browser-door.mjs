@@ -96,6 +96,26 @@ const page = await browser.newPage({ viewport: { width: 900, height: 600 } });
 await page.setContent(FIXTURE);
 const run = async (request, body) => JSON.parse(await page.evaluate(script(request, body)));
 
+await test("page scrolling follows the current viewport and returns to the same position", async () => {
+  const scrollPage = await browser.newPage();
+  try {
+    for (const height of [500, 900]) {
+      await scrollPage.setViewportSize({ width: 900, height });
+      await scrollPage.setContent('<main style="height: 500vh">Scrollable content</main>');
+      await scrollPage.evaluate(() => window.scrollTo(0, 0));
+      const down = JSON.parse(await scrollPage.evaluate(twin.scrollScript({ kind: "page", direction: "down" })));
+      const expected = Math.floor(height * twin.SCROLL_PAGE_PERCENT / 100);
+      assert(down.ok && down.value.y === expected, "page distance did not follow the viewport", { height, expected, down });
+      assert(await scrollPage.evaluate(() => window.scrollY) === expected, "the page did not actually scroll");
+      const up = JSON.parse(await scrollPage.evaluate(twin.scrollScript({ kind: "page", direction: "up" })));
+      assert(up.ok && up.value.y === 0, "page up did not reverse page down", up);
+      assert(await scrollPage.evaluate(() => window.scrollY) === 0, "the page did not return to its original position");
+    }
+  } finally {
+    await scrollPage.close();
+  }
+});
+
 await test("zcSelect answers the first element a person could see, past a hidden twin", async () => {
   const seen = await run({ selector: ".go" }, SELECT_BODY);
   assert(seen.ok && seen.value.id === "go-seen" && !seen.value.hidden, "the visible twin was not chosen", seen);

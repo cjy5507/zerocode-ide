@@ -256,8 +256,8 @@ use cmd::{
     busy_census, cancel_folder_panel, cancel_google_login, check_typesafe_key, choose_paths,
     choose_project, claude_account_usage, claude_accounts, claude_autoswitch_apply,
     claude_autoswitch_mode, claude_token_usage, claude_usage, claude_usage_stats,
-    clear_delivered_diff_notes, clear_diff_notes, cli_login_list, cli_login_logout,
-    cli_login_start, cli_login_wait, cli_login_witness, cli_login_witness_drop,
+    clear_delivered_diff_notes, clear_diff_notes, clear_finish_mark, cli_login_list,
+    cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness, cli_login_witness_drop,
     clipboard_has_image, clone_repository, clone_target_name, close_browser_pane, close_lane,
     close_onboarding, close_term, codex_account_list, codex_token_usage, codex_usage,
     codex_usage_stats, commit_failure_card, commit_file_diff, commit_files, commit_landings,
@@ -334,14 +334,15 @@ use cmd::{
     set_computer_generator_road, set_computer_live_reflex, set_confirm_close_pinned,
     set_conversation_focus_view, set_crash_watchdog, set_ctrl_tab_order_mode, set_default_agent,
     set_default_task_source, set_diff_side_by_side, set_dock_badge,
-    set_external_worktree_visibility, set_guide_dismissed, set_harness_settings,
-    set_hidden_shortcuts, set_hidden_task_sources, set_hide_agent_scratch_workspaces,
-    set_hide_automation_workspaces, set_hide_default_branch_workspaces,
-    set_hide_detached_head_workspaces, set_hide_sleeping_workspaces, set_hooks_enabled,
-    set_jev_enabled, set_jev_model, set_jev_review_enabled, set_keep_default_branch_awake,
-    set_keybinding, set_locale, set_minimize_to_tray_on_close, set_notification_preference,
-    set_opencode_cookie, set_opencode_workspace, set_panel_width, set_panel_widths,
-    set_previewed_terms, set_project_script_policy, set_project_script_setting,
+    set_external_worktree_visibility, set_finish_notification_mode, set_guide_dismissed,
+    set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
+    set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
+    set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
+    set_hide_sleeping_workspaces, set_hooks_enabled, set_jev_enabled, set_jev_model,
+    set_jev_review_enabled, set_keep_default_branch_awake, set_keybinding, set_locale,
+    set_minimize_to_tray_on_close, set_notification_preference, set_opencode_cookie,
+    set_opencode_workspace, set_panel_width, set_panel_widths, set_previewed_terms,
+    set_project_script_policy, set_project_script_setting,
     set_refresh_local_base_ref_on_worktree_create, set_repo_mark, set_route_classifier,
     set_second_brain_explore, set_second_brain_scenes, set_second_brain_weekly_review,
     set_setup_script_launch_mode, set_shortcut_visibility, set_show_git_ignored_files,
@@ -370,12 +371,12 @@ use cmd::{
     tip_verdict, tour_decision, tree_selection, type_value_keys, typesafe_settings, unstage_path,
     unstage_paths, update_check, update_download, update_history, update_install, upstream_status,
     use_system_claude_login, validate_branch_name, vault_sessions, verify_claude_accounts,
-    verify_codex_accounts, watch_files, wire_answer, wire_image, wire_interrupt, wire_log,
-    wire_models, wire_send, wire_set_mode, wire_set_model, wire_start, wire_stop, work_item_seed,
-    worker_screen, workspace_cleanup_scan, workspace_space_cancel, workspace_space_git,
-    workspace_space_scan, worktree_committed_diff, worktree_evidence, worktree_landing_stamp,
-    worktree_last_agent, worktree_loss, worktree_prefs, worktree_stamp, write_primary_selection,
-    write_text_file,
+    verify_codex_accounts, waiting_on_me, watch_files, wire_answer, wire_image, wire_interrupt,
+    wire_log, wire_models, wire_send, wire_set_mode, wire_set_model, wire_start, wire_stop,
+    work_item_seed, worker_screen, workspace_cleanup_scan, workspace_space_cancel,
+    workspace_space_git, workspace_space_scan, worktree_committed_diff, worktree_evidence,
+    worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs, worktree_stamp,
+    write_primary_selection, write_text_file,
 };
 use cmd::{
     artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
@@ -1198,6 +1199,9 @@ struct ShellRuntime {
     inference_sends: Mutex<HashMap<TermId, u64>>,
     /// When each worktree last rang a notification — the cooldown's memory.
     rings: Mutex<zerocode_core::notify::RingLedger>,
+    /// The stops waiting out their quiet before they may ring: a block's ten
+    /// seconds, a finish's minute (`notify::Quiet`). Armed when a stop is seen.
+    quiet_rings: Mutex<zerocode_core::notify::Quiet<TermId>>,
     /// What the notify seat remembers about the rings it asked about: the
     /// person's last hand on the window, each pane's last rings, the rows
     /// waiting for their label and the rings held for the next hand
@@ -1407,6 +1411,12 @@ impl ShellRuntime {
 
     fn rings(&self) -> MutexGuard<'_, zerocode_core::notify::RingLedger> {
         self.rings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn quiet_rings(&self) -> MutexGuard<'_, zerocode_core::notify::Quiet<TermId>> {
+        self.quiet_rings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -1781,6 +1791,7 @@ trait ShellStateExt {
     fn previewed_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>>;
     fn hold_terminal(&self, term: TermId, pty: impl Into<PtyHandle>);
     fn rings(&self) -> MutexGuard<'_, zerocode_core::notify::RingLedger>;
+    fn quiet_rings(&self) -> MutexGuard<'_, zerocode_core::notify::Quiet<TermId>>;
     fn notify_book(&self) -> MutexGuard<'_, notify_call::NotifyBook>;
     fn lane_bell(&self) -> MutexGuard<'_, zerocode_core::notify::LaneBell>;
     fn commit_failure(&self) -> MutexGuard<'_, Option<CommitFailure>>;
@@ -1919,6 +1930,10 @@ impl ShellStateExt for AppState {
 
     fn rings(&self) -> MutexGuard<'_, zerocode_core::notify::RingLedger> {
         self.shell_runtime().rings()
+    }
+
+    fn quiet_rings(&self) -> MutexGuard<'_, zerocode_core::notify::Quiet<TermId>> {
+        self.shell_runtime().quiet_rings()
     }
 
     fn notify_book(&self) -> MutexGuard<'_, notify_call::NotifyBook> {
@@ -2387,6 +2402,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         }),
         project_root: root,
         rings: Mutex::new(zerocode_core::notify::RingLedger::default()),
+        quiet_rings: Mutex::new(zerocode_core::notify::Quiet::default()),
         notify_book: Mutex::new(notify_call::NotifyBook::default()),
         lane_bell: Mutex::new(zerocode_core::notify::LaneBell::default()),
         native_tray: native_tray::NativeTray::default(),
@@ -2916,6 +2932,9 @@ fn main() -> ExitCode {
             gitlab_inline_comment,
             notification_probe,
             set_notification_preference,
+            set_finish_notification_mode,
+            waiting_on_me,
+            clear_finish_mark,
             set_browser_home_page,
             set_browser_search_engine,
             patch_browser_link_routing,

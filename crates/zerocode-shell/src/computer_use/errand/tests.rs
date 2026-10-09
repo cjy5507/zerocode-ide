@@ -91,24 +91,20 @@ impl FakeJudge {
 /// would have read one: the action head said [`TYPE_TEXT`] and the field's
 /// head named `field` (t-6720).
 pub(super) fn entry(field: usize) -> Judged {
-    Judged::Chose(
-        ActionChoice {
-            chosen: Chosen::Type(field),
-            probabilities: BTreeMap::new(),
-            confidence: 0.7,
-            guard: None,
-        }
-        .into(),
-    )
+    judged_choice(Chosen::Type(field), 0.7)
 }
 
 /// A validated choice of `mark`, as the pure module would have read one.
 pub(super) fn pick(mark: usize) -> Judged {
+    judged_choice(Chosen::Mark(mark), 0.7)
+}
+
+fn judged_choice(chosen: Chosen, confidence: f64) -> Judged {
     Judged::Chose(
         ActionChoice {
-            chosen: Chosen::Mark(mark),
+            chosen,
             probabilities: BTreeMap::new(),
-            confidence: 0.7,
+            confidence,
             guard: None,
         }
         .into(),
@@ -243,6 +239,10 @@ pub(super) fn memory() -> Arc<Mutex<Values>> {
 /// A world that answers what the test says and remembers what was done to it —
 /// shared with the wire's tests, which put the live judge in front of it.
 pub(super) struct FakeWorld {
+    changing_text: bool,
+    navigation: &'static [Navigation],
+    navigated: Vec<Navigation>,
+    navigation_after: Option<(usize, Screen)>,
     screen: Option<Screen>,
     pub(super) presses: Vec<usize>,
     pub(super) withdraw_after_press: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -332,6 +332,10 @@ pub(super) struct FakeWorld {
 impl FakeWorld {
     pub(super) fn showing(marks: &[usize]) -> Self {
         Self {
+            changing_text: false,
+            navigation: &[],
+            navigated: Vec::new(),
+            navigation_after: None,
             screen: Some(Screen {
                 shows: Vec::new(),
                 at: Seen::Page {
@@ -430,8 +434,29 @@ impl FakeWorld {
 }
 
 impl World for FakeWorld {
+    fn navigation(&self) -> &'static [Navigation] {
+        self.navigation
+    }
+
+    fn navigate(&mut self, action: Navigation) -> bool {
+        self.navigated.push(action);
+        if self
+            .navigation_after
+            .as_ref()
+            .is_some_and(|(after, _)| *after == self.navigated.len())
+        {
+            self.screen = self.navigation_after.take().map(|(_, screen)| screen);
+        }
+        true
+    }
+
     fn look(&mut self) -> Option<Screen> {
         self.looks += 1;
+        if self.changing_text
+            && let Some(screen) = &mut self.screen
+        {
+            screen.shows = vec![format!("Reading {}", self.looks)];
+        }
         self.spend(self.look_ms);
         std::thread::sleep(self.look_holds);
         self.screen.clone()
@@ -604,6 +629,217 @@ pub(super) fn goal(steps: usize) -> Errand<'static> {
         flow: None,
         moves_money: false,
     }
+}
+
+fn navigation_choice(action: Navigation) -> Judged {
+    judged_choice(Chosen::Navigate(action), 0.95)
+}
+
+#[test]
+fn a_goal_reaches_later_visible_controls_without_another_host_turn_or_fake_actions() {
+    let cap = zerocode_core::screen_action::MAX_ACTION_CANDIDATES;
+    let target = cap * 2 + 1;
+    for changing_text in [false, true] {
+        let mut world = FakeWorld::showing(&(1..=target).collect::<Vec<_>>());
+        world.changing_text = changing_text;
+        world.reached = vec![true];
+        let mut judge = FakeJudge::saying(vec![
+            judged_choice(Chosen::MoreControls, 0.9),
+            judged_choice(Chosen::MoreControls, 0.9),
+            pick(target),
+        ]);
+        let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
+        assert_eq!(walked.reached, Some(true));
+        assert_eq!(world.presses, [target]);
+        assert_eq!(walked.pressed, 1);
+        assert_eq!(
+            judge.asked,
+            [
+                (1..=cap).collect::<Vec<_>>(),
+                (cap + 1..=cap * 2).collect::<Vec<_>>(),
+                vec![target],
+            ]
+        );
+    }
+}
+
+#[test]
+fn scrolling_and_waiting_reach_a_new_control_in_one_goal_walk() {
+    let mut world = FakeWorld::showing(&[1]);
+    world.navigation = &Navigation::ALL;
+    world.navigation_after = Some((3, FakeWorld::showing(&[7]).look_now()));
+    world.reached = vec![false, false, false, true];
+    let mut judge = FakeJudge::saying(vec![
+        navigation_choice(Navigation::ScrollDown),
+        navigation_choice(Navigation::Wait),
+        navigation_choice(Navigation::Wait),
+        pick(7),
+    ]);
+    let walked = run(Mode::On, true, &goal(4), &mut judge, &mut world);
+    assert_eq!(walked.reached, Some(true));
+    assert_eq!(world.presses, [7]);
+    assert_eq!(
+        world.navigated,
+        [Navigation::ScrollDown, Navigation::Wait, Navigation::Wait]
+    );
+    assert_eq!(walked.pressed, 2);
+    assert_eq!(walked.rows.last().unwrap()["pressedBefore"], 1);
+    assert_eq!(judge.asked.len(), 4);
+}
+
+#[test]
+fn an_empty_loading_screen_can_wait_and_then_finish_without_repeating_an_action() {
+    let mut world = FakeWorld::showing(&[]);
+    world.navigation = &[Navigation::Wait];
+    world.navigation_after = Some((1, FakeWorld::showing(&[7]).look_now()));
+    world.reached = vec![false, true];
+    let mut judge = FakeJudge::saying(vec![navigation_choice(Navigation::Wait), pick(7)]);
+    let walked = run(Mode::On, true, &goal(2), &mut judge, &mut world);
+    assert_eq!(walked.reached, Some(true));
+    assert_eq!(world.presses, [7]);
+    assert_eq!(walked.pressed, 1);
+}
+
+#[test]
+fn waiting_on_an_unchanged_screen_is_bounded_and_earns_no_actions() {
+    let mut world = FakeWorld::showing(&[]);
+    world.navigation = &[Navigation::Wait];
+    let mut judge = FakeJudge::saying(vec![
+        navigation_choice(Navigation::Wait);
+        WALK_WAIT_LIMIT + 1
+    ]);
+    let walked = run(
+        Mode::On,
+        true,
+        &goal(WALK_WAIT_LIMIT + 2),
+        &mut judge,
+        &mut world,
+    );
+    assert_eq!(world.navigated.len(), WALK_WAIT_LIMIT);
+    assert_eq!(walked.pressed, 0);
+    assert_eq!(
+        walked.rows.last().unwrap()[walk_words::OUTCOME],
+        walk_words::STUCK
+    );
+    assert!(
+        walked
+            .rows
+            .iter()
+            .all(|row| row.get(walk_words::PRESSED) != Some(&json!(true)))
+    );
+}
+
+#[test]
+fn navigation_obeys_the_same_admission_as_a_press() {
+    for (mode, acting, confidence, guard) in [
+        (Mode::Off, false, 0.95, None),
+        (Mode::Shadow, false, 0.95, None),
+        (Mode::On, true, 0.01, None),
+        (
+            Mode::On,
+            true,
+            0.95,
+            Some(Guard {
+                instructed: 1.0,
+                walled: 0.0,
+            }),
+        ),
+    ] {
+        let mut world = FakeWorld::showing(&[1]);
+        world.navigation = &Navigation::ALL;
+        let mut choice = navigation_choice(Navigation::ScrollDown);
+        if let Judged::Chose(read) = &mut choice {
+            read.choice.confidence = confidence;
+            read.choice.guard = guard;
+        }
+        let mut judge = FakeJudge::saying(vec![choice]);
+        let walked = run(mode, acting, &goal(1), &mut judge, &mut world);
+        assert!(world.navigated.is_empty());
+        assert_eq!(walked.pressed, 0);
+    }
+}
+
+#[test]
+fn progress_in_visible_text_or_document_identity_is_not_a_stuck_screen() {
+    let before = FakeWorld::showing(&[1]).look_now();
+    let mut after = before.clone();
+    after.shows.push("Ready".into());
+    assert!(!before.same_as(&after));
+    after.shows.clear();
+    after.snapshot.epoch = "new-document".into();
+    assert!(!before.same_as(&after));
+}
+
+#[test]
+fn entering_several_fields_with_unchanged_labels_keeps_making_progress() {
+    struct FormWorld {
+        fields: Vec<Value>,
+        entered: Vec<usize>,
+    }
+
+    impl World for FormWorld {
+        fn look(&mut self) -> Option<Screen> {
+            Some(Screen {
+                items: self
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        json!({
+                            "mark": field["mark"], "role": "textbox", "label": field["label"],
+                            "selector": field["selector"], "centerX": 10.0, "centerY": 20.0,
+                        })
+                    })
+                    .collect(),
+                snapshot: Snapshot {
+                    epoch: "form".into(),
+                    fields: self.fields.clone(),
+                    ..Snapshot::default()
+                },
+                ..Screen::default()
+            })
+        }
+
+        fn press(&mut self, _mark: usize) -> bool {
+            false
+        }
+
+        fn left_ms(&mut self) -> u64 {
+            60_000
+        }
+
+        fn types(&self) -> bool {
+            true
+        }
+
+        fn type_into(&mut self, mark: usize, _goal: &str) -> Typed {
+            let Some(field) = self.fields.iter_mut().find(|field| field["mark"] == mark) else {
+                return Typed::Refused(NO_FIELD.into());
+            };
+            field["value"] = json!("entered");
+            self.entered.push(mark);
+            Typed::Typed {
+                source: ValueSource::Reused,
+                chars: "entered".len(),
+            }
+        }
+
+        fn reached(&mut self) -> Option<bool> {
+            Some(self.fields.iter().all(|field| field["value"] == "entered"))
+        }
+    }
+
+    let mut world = FormWorld {
+        fields: (1..=3).map(|mark| json!({
+            "mark": mark, "kind": "text", "secret": false,
+            "label": format!("Field {mark}"), "selector": format!("#field-{mark}"), "value": "",
+        })).collect(),
+        entered: Vec::new(),
+    };
+    let mut judge = FakeJudge::saying(vec![entry(1), entry(2), entry(3)]);
+    let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
+    assert_eq!(walked.reached, Some(true));
+    assert_eq!(world.entered, [1, 2, 3]);
+    assert_eq!(walked.typed, 3);
 }
 
 #[test]
@@ -1889,7 +2125,7 @@ fn waiting_judgment(done: std::sync::mpsc::Receiver<Done>) -> Pending {
             pressed: &[],
             shows: &screen.shows,
         },
-        &screen.beside(false, &[]),
+        &screen.beside(false, &[], &[]),
     )
     .expect("a question with two controls");
     Pending::new(asked, done)

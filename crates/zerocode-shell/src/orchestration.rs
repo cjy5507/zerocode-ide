@@ -1595,14 +1595,23 @@ pub(crate) fn checkout_examined(
 
 /// Mail a window observation to a ledger address (t-2733): CI moved on the
 /// review a checkout is on, told to `@worktree:<path>` as one `status` line
-/// from the ledger itself. Rings the window when a letter was filed; silent
-/// when the runtime is down or nobody is seated there — the panel already
-/// shows the change, and an agent that is not there has nobody to tell.
-pub(crate) fn post_observation_once(to: &str, body: &str, receipt: &str, now_ms: i64) -> bool {
+/// from the ledger itself. `run` names the one run the letter is filed in
+/// (t-35823); `None` files it in every run where the address resolves. Rings
+/// the window when a letter was filed; silent when the runtime is down or
+/// nobody is seated there — the panel already shows the change, and an agent
+/// that is not there has nobody to tell.
+pub(crate) fn post_observation_once(
+    run: Option<&str>,
+    to: &str,
+    body: &str,
+    receipt: &str,
+    now_ms: i64,
+) -> bool {
     let Some(held) = runtime() else {
         return false;
     };
     match held.actor.observation_once(
+        run.map(str::to_string),
         to.to_string(),
         body.to_string(),
         Some(receipt.to_string()),
@@ -1613,7 +1622,7 @@ pub(crate) fn post_observation_once(to: &str, body: &str, receipt: &str, now_ms:
             moved
         }
         Err(_) => {
-            note_ledger_unwritten("a checks observation");
+            note_ledger_unwritten("a window observation");
             false
         }
     }
@@ -4522,8 +4531,9 @@ fn unpointed_letter(newest: &str, address: &str, term: Option<u32>, why: Unpoint
 
 /// A pointer was not typed: say so where each side can see it, once per
 /// waiting message. The person gets the pane's own notice (when there is a
-/// pane); the sender gets a letter from the ledger, so a coordinator knows the
-/// reply sits unpointed rather than waiting for an answer that cannot come.
+/// pane); the sender gets a letter from the ledger, filed in the run the mail is
+/// in (t-35823), so a coordinator knows the reply sits unpointed rather than
+/// waiting for an answer that cannot come.
 fn tell_unpointed(
     host: &dyn Host,
     run: &str,
@@ -4544,6 +4554,7 @@ fn tell_unpointed(
         return;
     }
     post_observation_once(
+        Some(run),
         &sender,
         &unpointed_letter(newest, address, term, why),
         &unpointed_receipt(newest),

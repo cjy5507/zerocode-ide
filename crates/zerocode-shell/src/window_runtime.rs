@@ -68,8 +68,8 @@ pub(super) struct PaneState {
     ///
     /// Kept on the ROW as well as the report because the consumers that must
     /// skip it are downstream of the row: the ring reads it before arming, and
-    /// the delayed completion re-reads the row 1.5s later, by which time the
-    /// report is gone.
+    /// the armed completion re-reads the row when its quiet ends, a minute
+    /// later, by which time the report is gone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) session_boundary: bool,
     /// A person ended this turn — see [`hooks::PaneHookReport::interrupted`].
@@ -81,6 +81,18 @@ pub(super) struct PaneState {
     /// a live pane came to rest.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) interrupted: bool,
+    /// When the turn this pane is in began, in the same unit as `at`. It is
+    /// kept through questions and answers and starts again at a new prompt
+    /// (`zerocode_core::notify::turn_started_after`), so a finish knows how long
+    /// its turn ran (`zerocode_core::notify::turn_ms`) for the long-turn rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) turn_started_at: Option<i64>,
+    /// A finish nobody has looked at stands: a real finish set it, or a pane
+    /// that went to rest from work without its Stop hook did
+    /// (`zerocode_core::notify::finish_mark_after`). The person opening the pane
+    /// and new work clear it. Memory only, like the rest of the live row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) finish_mark: bool,
     /// What this pane was before a HELPER's wait took its word away, when one
     /// did — Orca's `stateBeforeWait`
     /// ([`zerocode_core::hook::wait_stash`] holds the whole rule).

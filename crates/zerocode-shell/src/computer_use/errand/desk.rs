@@ -9,11 +9,12 @@
 //!
 //! What a goal walk may NOT do is as load-bearing as what it may:
 //!
-//! - It presses, and — on a page, when its look read a field it may type
+//! - It presses, scrolls the observed surface, waits for a pending change,
+//!   and — on a page, when its look read a field it may type
 //!   into (t-6720) — it types. It does not navigate, run a script or set a
-//!   value of its own choosing: the answer space is a number and nothing
-//!   else, so there is no road from a judgment to a value, a selector or an
-//!   address. A typed value is the value seat's
+//!   value of its own choosing: the answer space is observed numbers and
+//!   supported navigation actions, so there is no road from a judgment to a
+//!   value, a selector or an address. A typed value is the value seat's
 //!   ([`super::value::ValueWriter`]), entered into the field the look itself
 //!   numbered: pressed first by its pinned number, then typed through the
 //!   look's own selector for it down the door's value road
@@ -38,10 +39,10 @@ use zerocode_core::agent_browser::{
 };
 use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
 use zerocode_core::computer_use::{
-    EMULATOR_PREVIEW_FLAG, EmulatorPlatform, FLOW_BASELINE_PROBE_MS,
+    EMULATOR_PREVIEW_FLAG, EmulatorPlatform, FLOW_BASELINE_PROBE_MS, WALK_WAIT_MS,
 };
 use zerocode_core::computer_use_protocol::marks::{ITEMS_KEY, LOOK_ID_KEY};
-use zerocode_core::screen_action::snapshot;
+use zerocode_core::screen_action::{Navigation, snapshot};
 use zerocode_core::type_value::{FieldLook, ValueInput};
 use zerocode_hookd::TeamAnswer;
 
@@ -117,9 +118,8 @@ fn phone_argv(verb: &str, platform: EmulatorPlatform, device: &str) -> Vec<Strin
 /// The lines of a surface's text answer, as the screen carries them —
 /// trimmed, blanks dropped; the question does the cutting.
 fn shows_of(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
+    zerocode_core::screen_action::shows_from(text.lines())
+        .into_iter()
         .map(str::to_string)
         .collect()
 }
@@ -317,7 +317,11 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                             .to_string(),
                     },
                     items: marks.get(ITEMS_KEY)?.as_array()?.clone(),
-                    shows: Vec::new(),
+                    shows: said
+                        .pointer("/tree/text")
+                        .and_then(Value::as_str)
+                        .map(shows_of)
+                        .unwrap_or_default(),
                     snapshot: Snapshot::default(),
                 },
                 marks
@@ -433,6 +437,7 @@ pub struct GoalWorld<'a, Road> {
     values: Arc<Mutex<Values>>,
     /// Whether the writer's road was opened ahead of this walk's first entry.
     warmed: bool,
+    scroll_window: Option<(u64, f64, f64)>,
 }
 
 impl<'a, Road> GoalWorld<'a, Road> {
@@ -464,6 +469,7 @@ impl<'a, Road> GoalWorld<'a, Road> {
             writer: None,
             values: window_values(),
             warmed: false,
+            scroll_window: None,
         }
     }
 
@@ -609,7 +615,7 @@ where
     fn look(&mut self) -> Option<Screen> {
         if let Some((screen, look)) = self.kept.take() {
             self.look = look;
-            self.seen = Some(screen.clone());
+            self.seen = matches!(self.aim, Aim::Pane { .. }).then(|| screen.clone());
             return Some(screen);
         }
         let argv = self.aim.look_argv();
@@ -619,17 +625,31 @@ where
         // envelope and the bare answer when it did not; both are read here so
         // the walk is not one envelope's prisoner.
         let (mut screen, look) = screen_of(&self.aim, &said)?;
+        self.scroll_window = (|| {
+            let window = said.pointer("/tree/window")?;
+            let identifier = window.get("id")?.as_u64()?;
+            let width = window.get("width")?.as_f64()?;
+            let height = window.get("height")?.as_f64()?;
+            (identifier > 0
+                && width.is_finite()
+                && height.is_finite()
+                && width > 0.0
+                && height > 0.0)
+                .then_some((identifier, width, height))
+        })();
         if matches!(self.aim, Aim::Pane { .. }) {
             screen.at = self.page.clone();
         }
-        if let Some(argv) = self.aim.shows_argv() {
+        if said.pointer("/tree/text").and_then(Value::as_str).is_none()
+            && let Some(argv) = self.aim.shows_argv()
+        {
             let answer = read_unjudged(self.road, self.aim.tool(), &argv);
             screen.shows = answer_value(&answer)
                 .and_then(|read| Some(shows_of(read.get("text")?.as_str()?)))
                 .unwrap_or_default();
         }
         self.look = look;
-        self.seen = Some(screen.clone());
+        self.seen = matches!(self.aim, Aim::Pane { .. }).then(|| screen.clone());
         // The first look that read a field opens the value seat's road, so a
         // first entry is written over a connection the judgment's own wait
         // has already paid for.
@@ -648,6 +668,81 @@ where
         // (t-9712); an entry's own press settles as ever ([`Self::type_into`]).
         let later = self.previewing && matches!(self.aim, Aim::Pane { .. });
         self.press_by(mark, later)
+    }
+
+    fn navigation(&self) -> &'static [Navigation] {
+        if self.seen.is_none() && self.look.is_empty() {
+            return &[];
+        }
+        match self.aim {
+            Aim::Pane { .. } => &Navigation::ALL,
+            Aim::App { .. } if self.scroll_window.is_some() => &Navigation::ALL,
+            Aim::App { .. } => &[Navigation::Wait],
+            Aim::Phone { .. } => &[],
+        }
+    }
+
+    fn navigate(&mut self, action: Navigation) -> bool {
+        if !self.navigation().contains(&action) {
+            return false;
+        }
+        let (tool, argv) = if action == Navigation::Wait {
+            (
+                RecipeTool::Computer,
+                vec![
+                    "wait".into(),
+                    "--ms".into(),
+                    WALK_WAIT_MS.to_string(),
+                    JSON_FLAG.into(),
+                ],
+            )
+        } else {
+            let direction = if action == Navigation::ScrollDown {
+                "down"
+            } else {
+                "up"
+            };
+            match &self.aim {
+                Aim::Pane { label } => (
+                    RecipeTool::Browser,
+                    vec!["scroll".into(), label.clone(), format!("page-{direction}")],
+                ),
+                Aim::App { name } => {
+                    let Some((window, width, height)) = self.scroll_window else {
+                        return false;
+                    };
+                    (
+                        RecipeTool::Computer,
+                        vec![
+                            "scroll".into(),
+                            "--app".into(),
+                            name.clone(),
+                            "--window-id".into(),
+                            window.to_string(),
+                            "--x".into(),
+                            (width / 2.0).to_string(),
+                            "--y".into(),
+                            (height / 2.0).to_string(),
+                            "--direction".into(),
+                            direction.into(),
+                            "--no-screenshot".into(),
+                            JSON_FLAG.into(),
+                        ],
+                    )
+                }
+                Aim::Phone { .. } => return false,
+            }
+        };
+        let left = self.left_ms();
+        if left == 0 || left < recipe_line_holds_ms(tool, &argv) {
+            return false;
+        }
+        self.kept = None;
+        self.settled = None;
+        self.unsettled = None;
+        self.settling = false;
+        self.counted = None;
+        (self.road)(tool, &argv, &argv).exit_code == 0
     }
 
     fn settled(&mut self) -> Option<Settled> {

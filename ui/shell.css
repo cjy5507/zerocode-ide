@@ -23305,6 +23305,86 @@ button.helper-sib:hover {
   font-weight: 700;
 }
 
+/* 나를 기다림 (t-26595): the column's top list. A block and a question wear the
+ * attention colour, a finish the success colour. The rows truncate the place
+ * name rather than widen the column. */
+.waiting-list {
+  display: grid;
+  gap: 2px;
+  padding: 6px var(--nav-inset) 8px;
+  border-bottom: 1px solid var(--edge-rule);
+}
+
+.waiting-list[hidden] {
+  display: none;
+}
+
+.waiting-list-title {
+  margin: 0;
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.waiting-list-items {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.waiting-row {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 26px;
+  padding-inline: 6px;
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--ease-standard);
+}
+
+.waiting-row:hover {
+  background: var(--surface-raised);
+}
+
+.waiting-row-agent {
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.waiting-row-kind {
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+}
+
+.waiting-row[data-waiting="blocked"] .waiting-row-kind,
+.waiting-row[data-waiting="question"] .waiting-row-kind {
+  color: var(--lane-3);
+}
+
+.waiting-row[data-waiting="finished"] .waiting-row-kind {
+  color: var(--lane-1);
+}
+
+.waiting-row-place {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .action-hub-modal {
   max-width: 620px;
   width: 100%;

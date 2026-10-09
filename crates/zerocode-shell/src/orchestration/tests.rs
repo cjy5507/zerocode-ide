@@ -2125,6 +2125,15 @@ impl Host for Nowhere {
 /// runs and each other's door. Not a flaw in either test: it is what the
 /// tick is — one window, one ledger, one beat — and a test of it has to be
 /// the only one beating.
+///
+/// The order is part of the lock. A test takes a window road
+/// (`PrivateWindow::boot*`, `WalledClaude::stand*`, `the_window()`) before this
+/// beat, never after: a deadlock needs both halves of a cycle, one test holding
+/// the beat while it waits for a window and another holding a window while it
+/// waits here for the beat (`WalledClaude::stand_full` is that other half). The
+/// v1.1.46 gate stood 50 minutes on exactly that, and the source contract
+/// `every_test_takes_the_window_before_the_beat` refuses any test that reaches
+/// for the beat first (t-19979).
 fn one_beat_at_a_time() -> std::sync::MutexGuard<'static, ()> {
     static TURNS: Mutex<()> = Mutex::new(());
     TURNS.lock().unwrap_or_else(|held| held.into_inner())
@@ -25150,6 +25159,20 @@ fn an_unpointed_message_is_told_to_the_person_and_to_its_sender_once() {
     };
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");
+    // t-35823: the ledger holds 45 runs here. The letter about this mail is
+    // filed in the mail's run alone, so the 44 others stay letter-free.
+    for extra in 0..44 {
+        let opened = run(
+            &host,
+            Vec::new(),
+            &team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(&format!("run-create --name unpointed-{extra}")),
+            clock(),
+        );
+        assert_eq!(opened.exit_code, 0, "{}", opened.stderr);
+    }
     let sent = run(
         &host,
         Vec::new(),
@@ -25191,6 +25214,23 @@ fn an_unpointed_message_is_told_to_the_person_and_to_its_sender_once() {
     assert!(
         !letters.stdout.contains(SECRET),
         "the letter carried the message's body"
+    );
+    // Counted by its receipt, not by its words: this window's ledger is shared
+    // with the other tests in this file, and their letters may read the same.
+    let answer: serde_json::Value =
+        serde_json::from_str(&sent.stdout).expect("the send's answer is JSON");
+    let receipt = format!(
+        "pointer-held:{}",
+        answer["messageId"].as_str().expect("a message id")
+    );
+    let copies = the_rows()
+        .messages
+        .iter()
+        .filter(|row| row.subject.as_str() == receipt)
+        .count();
+    assert_eq!(
+        copies, 1,
+        "the letter was filed {copies} times across the ledger's runs"
     );
     // The mail stays unread on purpose (it was never pointed), so the pane
     // leaves the way its siblings do — the terms leave the team and the

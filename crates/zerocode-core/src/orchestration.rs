@@ -8906,20 +8906,31 @@ impl Ledger {
     /// Answers how many runs a letter was filed in, so the caller knows
     /// whether anything was written down and the actor whether to persist.
     pub fn post_observation(&mut self, to: &str, body: &str, now_ms: i64) -> usize {
-        self.post_observation_once(to, body, None, now_ms)
+        self.post_observation_once(None, to, body, None, now_ms)
     }
 
     /// An observer receipt is filed with the mail, so losing its local ACK
     /// (even across restart) cannot create a second letter for the same fact.
     /// The count includes accepted replays; an empty audience is not an ACK.
+    ///
+    /// `run` names where the letter is filed. `None` is every run where `to`
+    /// resolves, the checkout group's reading above. `Some` is that one run and
+    /// no other, for a letter about one mail: the run the mail is in. A pane
+    /// address resolves in every run (the ledger's own letters skip the
+    /// has-spoken check), so a caller holding a pane address names its run, or
+    /// the letter is copied into each of them (t-35823).
     pub fn post_observation_once(
         &mut self,
+        run: Option<&str>,
         to: &str,
         body: &str,
         receipt: Option<&str>,
         now_ms: i64,
     ) -> usize {
-        let runs: Vec<String> = self.runs.iter().map(|run| run.id.clone()).collect();
+        let runs: Vec<String> = match run {
+            Some(one) => vec![one.to_string()],
+            None => self.runs.iter().map(|held| held.id.clone()).collect(),
+        };
         runs.iter()
             .filter(|run_id| {
                 if let Some(receipt) = receipt

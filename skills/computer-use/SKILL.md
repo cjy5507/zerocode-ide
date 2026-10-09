@@ -35,10 +35,22 @@ command every other agent runs.
 | A game or live screen that must be answered faster than a turn | `zerocode-computer reflex-start --flow <file> --display N --seconds N` | none — the CLI only |
 
 A `walk` runs the window's own loop — look at the screen's numbered controls,
-choose, press, check — in one call, up to `--steps` presses (30 by default, 40
+choose, act, check — in one call, up to `--steps` steps (30 by default, 40
 at most) under the call's own deadline. Name the screen by the id a look
 gave you. Give `--until` whenever success shows as text: it is the only check
 that proves the walk got there.
+
+Use a form's `fields`/`fill` or a script to handle its known values together,
+and a batch for known hand steps, including on a first encounter. When the
+next navigation step depends on what appears, give `walk` a bounded goal
+once the surface is known. The page and desktop loops can scroll
+the observed surface and wait for an earlier action to finish, then read it
+again within the same call. A goal walk can inspect further groups of controls
+already visible when its first candidate group omits the target; this spends
+no input and stays within the same step budget. A page can also enter ordinary text through its
+configured value writer. Desktop text entry still uses a batch or the normal
+typing commands. Use the returned state to plan the next stage; a refused
+walk is not a reason to repeat the same goal unchanged.
 
 ```json
 {"action": "walk", "pane": "browser-13", "goal": "도움말에서 설치 안내 페이지를 연다", "until": "설치 안내", "max_steps": 6}
@@ -89,7 +101,7 @@ zerocode-browser screenshot <pane-label> [--out <path>] [--json] [--marks]
 zerocode-browser console <pane-label> [--since N] [--level error|warn|all]
 zerocode-browser network <pane-label> [--since N] [--failed]
 zerocode-browser viewport <pane-label> <preset|WxH|default>
-zerocode-browser scroll <pane-label> <css|top|bottom|dx,dy>
+zerocode-browser scroll <pane-label> <css|top|bottom|page-up|page-down|dx,dy>
 zerocode-browser find <pane-label> <text>
 zerocode-browser diagnose <pane-label> [--json]
 zerocode-browser fields <pane-label> [--json]           # every field of the page's forms at once: handle, kind, words, value, choices, required; and the buttons

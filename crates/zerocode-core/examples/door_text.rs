@@ -93,6 +93,12 @@ fn parse(asked: &Value) -> Value {
         Some("scroll") => match argv.get(2).map(|word| agent_browser::parse_scroll(word)) {
             Some(Ok(ScrollTarget::Top)) => json!({ "ok": true, "kind": "top" }),
             Some(Ok(ScrollTarget::Bottom)) => json!({ "ok": true, "kind": "bottom" }),
+            Some(Ok(ScrollTarget::PageUp)) => {
+                json!({ "ok": true, "kind": "page", "direction": "up" })
+            }
+            Some(Ok(ScrollTarget::PageDown)) => {
+                json!({ "ok": true, "kind": "page", "direction": "down" })
+            }
             Some(Ok(ScrollTarget::By(dx, dy))) => {
                 json!({ "ok": true, "kind": "by", "dx": dx, "dy": dy })
             }

@@ -11340,24 +11340,32 @@ setInterval(() => {
 let notificationPrefs = {
   enabled: true,
   agent_attention: true,
-  agent_completion: true,
+  // The finish setting is one of "off", "long" (a turn of a minute or more) or
+  // "always" — the settings file's own words (`FinishRing`).
+  agent_completion: "long",
 };
 
 function paintNotificationPrefs() {
   const master = notificationPrefs.enabled !== false;
   el("notify-enabled").checked = master;
   el("notify-agent-attention").checked = notificationPrefs.agent_attention !== false;
-  el("notify-agent-completion").checked = notificationPrefs.agent_completion !== false;
+  el("notify-finish-mode").value = notificationPrefs.agent_completion ?? "long";
   // 마스터가 꺼지면 종류별은 만질 수 없다 — Orca NotificationsPane의
   // 관용: 죽은 스위치를 살아 있는 것처럼 두면 "껐는데 왜 꺼졌지"가 된다.
   el("notify-agent-attention").disabled = !master;
-  el("notify-agent-completion").disabled = !master;
+  el("notify-finish-mode").disabled = !master;
 }
+
+el("notify-finish-mode").addEventListener("change", (event) => {
+  const mode = event.target.value;
+  notificationPrefs = { ...notificationPrefs, agent_completion: mode };
+  paintNotificationPrefs();
+  void commitSetting("notifications.agent_completion", "set_finish_notification_mode", { mode });
+});
 
 for (const [id, kind, field] of [
   ["notify-enabled", "enabled", "enabled"],
   ["notify-agent-attention", "agent_attention", "agent_attention"],
-  ["notify-agent-completion", "agent_completion", "agent_completion"],
 ]) {
   el(id).addEventListener("change", (event) => {
     notificationPrefs = { ...notificationPrefs, [field]: event.target.checked };

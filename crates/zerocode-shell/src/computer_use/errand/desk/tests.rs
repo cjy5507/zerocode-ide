@@ -84,6 +84,150 @@ fn pane_answer() -> String {
 }
 
 #[test]
+fn desktop_words_come_from_the_same_observation_as_its_marks() {
+    let road = Road::new(|verb| match verb {
+        "observe" => {
+            let mut answer: Value = serde_json::from_str(&desktop_answer()).unwrap();
+            answer["result"]["tree"]["text"] = json!("Current state\n\nReady");
+            ok(&answer.to_string())
+        }
+        "read" => ok(r#"{"text":"A different observation"}"#),
+        _ => refused(),
+    });
+    let mut road_fn = road.road();
+    let mut world = GoalWorld::new(
+        &mut road_fn,
+        Aim::App {
+            name: "Editor".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    );
+    let screen = world.look().unwrap();
+    assert_eq!(screen.shows, ["Current state", "Ready"]);
+    assert_eq!(road.said.borrow().len(), 1);
+}
+
+#[test]
+fn an_empty_observed_text_does_not_trigger_another_tree_walk() {
+    let road = Road::new(|verb| match verb {
+        "observe" => {
+            let mut answer: Value = serde_json::from_str(&desktop_answer()).unwrap();
+            answer["result"]["tree"]["text"] = json!("");
+            ok(&answer.to_string())
+        }
+        "read" => ok(r#"{"text":"A different observation"}"#),
+        _ => refused(),
+    });
+    let mut road_fn = road.road();
+    let mut world = GoalWorld::new(
+        &mut road_fn,
+        Aim::App {
+            name: "Editor".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    );
+    assert!(world.look().unwrap().shows.is_empty());
+    assert_eq!(road.said.borrow().len(), 1);
+}
+
+#[test]
+fn desktop_scroll_is_bound_to_the_window_and_geometry_that_were_observed() {
+    let road = Road::new(|verb| match verb {
+        "observe" => {
+            let mut answer: Value = serde_json::from_str(&desktop_answer()).unwrap();
+            answer["result"]["tree"] = json!({
+                "text": "List",
+                "window": { "id": 7, "title": "List", "width": 800, "height": 600 },
+            });
+            ok(&answer.to_string())
+        }
+        "scroll" | "wait" => ok("{}"),
+        _ => refused(),
+    });
+    let mut road_fn = road.road();
+    let mut world = GoalWorld::new(
+        &mut road_fn,
+        Aim::App {
+            name: "Editor".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    );
+    assert!(world.navigation().is_empty());
+    world.look().unwrap();
+    assert!(world.navigate(Navigation::ScrollDown));
+    let argv = road.argv(1);
+    let command = zerocode_core::computer_use::parse_command(&argv).unwrap();
+    assert_eq!(command.params["windowId"], 7);
+    assert_eq!(command.params["app"], "Editor");
+    assert_eq!(command.params["x"], 400.0);
+    assert_eq!(command.params["y"], 300.0);
+    assert_eq!(command.params["direction"], "down");
+    assert!(world.navigate(Navigation::Wait));
+    assert_eq!(
+        road.argv(2),
+        ["wait", "--ms", &WALK_WAIT_MS.to_string(), "--json"]
+    );
+}
+
+#[test]
+fn a_page_walk_scrolls_by_viewport_without_requesting_another_model_turn() {
+    let road = Road::new(|verb| match verb {
+        "marks" => ok(&pane_answer()),
+        "scroll" => ok("{}"),
+        _ => refused(),
+    });
+    let mut road_fn = road.road();
+    let mut world = GoalWorld::new(
+        &mut road_fn,
+        Aim::Pane {
+            label: "browser-5".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    );
+    world.look().unwrap();
+    assert!(world.navigate(Navigation::ScrollDown));
+    assert_eq!(road.argv(1), ["scroll", "browser-5", "page-down"]);
+    assert_eq!(road.tool(1), RecipeTool::Browser);
+}
+
+#[test]
+fn no_observed_window_geometry_means_no_desktop_scroll() {
+    let road = Road::new(|verb| match verb {
+        "observe" => ok(&desktop_answer()),
+        "read" => ok(r#"{"text":"Ready"}"#),
+        _ => refused(),
+    });
+    let mut road_fn = road.road();
+    let mut world = GoalWorld::new(
+        &mut road_fn,
+        Aim::App {
+            name: "Editor".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    );
+    world.look().unwrap();
+    assert_eq!(world.navigation(), [Navigation::Wait]);
+    let before = road.said.borrow().len();
+    assert!(!world.navigate(Navigation::ScrollUp));
+    assert_eq!(road.said.borrow().len(), before);
+}
+
+#[test]
 fn a_desktop_walk_looks_presses_and_checks_through_the_apps_own_door() {
     let road = Road::new(|verb| match verb {
         "observe" => ok(&desktop_answer()),

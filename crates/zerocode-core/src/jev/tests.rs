@@ -1235,12 +1235,10 @@ fn the_notify_seat_judges_one_ring_and_rises_on_the_persons_reaction() {
         Some(NOTIFY_AGREEMENT_FLOOR_PERMILLE)
     );
     assert_eq!(NOTIFY.apply_deadline_ms, Some(NOTIFY_APPLY_DEADLINE_MS));
-    // The wall an attention ring may be held is the wait every completion
-    // ring already sits through before it may ring at all.
+    // The seat's wall is a bell's own 1.5 seconds, not a rule's wait.
     assert_eq!(
-        NOTIFY_APPLY_DEADLINE_MS,
-        crate::notify::DONE_QUIET_MS.unsigned_abs(),
-        "the seat's wall is the completion's own quiet"
+        NOTIFY_APPLY_DEADLINE_MS, 1_500,
+        "the seat's wall is its own 1.5 seconds"
     );
     assert_eq!(
         NOTIFY_OPTIONS,
@@ -3008,6 +3006,7 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
             containers: &containers,
             images: &images,
             rows: &rows,
+            navigation: &[],
         };
         let stopped = screen::ActionLook {
             errand: Errand::Clear {

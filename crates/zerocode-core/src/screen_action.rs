@@ -26,11 +26,13 @@
 //!
 //! The rule the whole design rests on: **the answer space is closed.** A look
 //! hands in the controls it saw, this module offers exactly those numbers plus
-//! [`GIVE_UP`] (and, for a goal, [`DONE`]), and an answer naming anything else
+//! [`GIVE_UP`] (and, for a goal, [`DONE`] and navigation the world supports).
+//! An answer naming anything else
 //! is refused whole. A judgment cannot reach an element the look did not see,
 //! and it never writes a selector, a URL, a script or a value — it writes a
-//! number, which the caller spends on `click --mark <n>`, through the same pin
-//! and the same fingerprint every other press goes through.
+//! number or a supported navigation action. A number goes through the same
+//! pin and fingerprint as every other press; navigation stays on the
+//! observed surface.
 //!
 //! What a look may put in the state is likewise narrow. A step's argv is NOT
 //! state: `type <label> <css> <text>` carries the text a person typed, so
@@ -117,6 +119,10 @@ pub const GIVE_UP: &str = "give_up";
 /// the document it interrupted is finished — the document's own re-walk is.
 pub const DONE: &str = "done";
 
+pub const MORE_CONTROLS: &str = "more_controls";
+const MORE_CONTROLS_MEANS: &str = "Inspect the next group of controls already visible on this screen, without pressing or scrolling, because the current group does not contain the control needed for the goal.";
+const CANDIDATE_WINDOW_KEY: &str = "candidateWindow";
+
 /// What a mark's option is called. The number after it is the number the look
 /// handed out, so the caller spends the answer without a table of its own.
 const MARK_OPTION_PREFIX: &str = "mark:";
@@ -152,6 +158,47 @@ const DONE_MEANS: &str = "The goal has already been reached on this screen; noth
 /// `type_target` head's answer; the text itself is written by the value seat
 /// (`crate::type_value`), never by this judgment.
 pub const TYPE_TEXT: &str = "type_text";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Navigation {
+    ScrollDown,
+    ScrollUp,
+    Wait,
+}
+
+impl Navigation {
+    pub const ALL: [Self; 3] = [Self::ScrollDown, Self::ScrollUp, Self::Wait];
+
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::ScrollDown => "scroll_down",
+            Self::ScrollUp => "scroll_up",
+            Self::Wait => "wait",
+        }
+    }
+
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|action| action.word() == word)
+    }
+
+    const fn means(self) -> &'static str {
+        match self {
+            Self::ScrollDown => {
+                "Scroll the observed surface down one page to reveal content needed for the goal below the visible controls."
+            }
+            Self::ScrollUp => {
+                "Scroll the observed surface up one page to return to content needed for the goal above the visible controls."
+            }
+            Self::Wait => {
+                "An earlier action is still loading or updating this screen. Wait briefly and observe again without pressing or entering anything."
+            }
+        }
+    }
+}
+
+const GOAL_NAVIGATION_INSTRUCTIONS: &str = "Someone wants to reach the goal in `goal` on the screen described by `where`. Choose the next available action. Numbered options press observed controls; type_text, when offered, enters text into the field named by type_target. When offered, more_controls inspects remaining controls already visible: use it before scrolling or giving up when the current group omits a useful control. Scroll only when the goal needs content outside the current view. Wait only when the screen is still responding to an earlier action; do not repeat that action while waiting. Read `shows`, the offered controls, and `pressed` together. Done means the goal has already been reached. Give up when none of the available actions can advance the goal.";
 
 /// What [`TYPE_TEXT`] means.
 const TYPE_TEXT_MEANS: &str = "Enter text into one of the fields this screen shows — the one `type_target` names — because the goal needs text there that the field does not hold yet.";
@@ -634,11 +681,19 @@ fn score(item: &Value, fields: &[Value], terms: &Terms) -> usize {
 /// ([`CANDIDATE_PICK`]) and handed back in the look's own order.
 #[must_use]
 pub fn pick(items: &[&Value], fields: &[Value], goal: &str, how: Pick) -> Picked {
+    pick_from(items, fields, goal, how, 0)
+}
+
+fn pick_from(items: &[&Value], fields: &[Value], goal: &str, how: Pick, offset: usize) -> Picked {
     let (order, signal) = match how {
         Pick::InOrder => ((0..items.len()).collect(), Signal::None),
         Pick::ByGoal => ranked(items, fields, goal),
     };
-    let mut kept: Vec<usize> = order.into_iter().take(MAX_ACTION_CANDIDATES).collect();
+    let mut kept: Vec<usize> = order
+        .into_iter()
+        .skip(offset)
+        .take(MAX_ACTION_CANDIDATES)
+        .collect();
     kept.sort_unstable();
     Picked { kept, signal }
 }
@@ -656,6 +711,7 @@ pub struct Beside<'a> {
     pub containers: &'a [Value],
     pub images: &'a [Value],
     pub rows: &'a [Value],
+    pub navigation: &'a [Navigation],
 }
 
 impl<'a> Beside<'a> {
@@ -680,7 +736,7 @@ impl<'a> Beside<'a> {
 /// ([`Errand::key`]), so evidence is read per errand; what a single version
 /// buys is that neither errand's words can change while the other's evidence
 /// silently keeps its number.
-pub const SCREEN_ACTION_RUBRIC_VERSION: u32 = 6;
+pub const SCREEN_ACTION_RUBRIC_VERSION: u32 = 7;
 
 /// What a walk is asking the screen about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -799,17 +855,24 @@ pub struct ActionLook<'a> {
 /// until either cap is reached.
 #[must_use]
 pub fn shows_cut(shows: &[String]) -> Vec<&str> {
+    shows_from(shows.iter().map(String::as_str))
+}
+
+#[must_use]
+pub fn shows_from<'text>(shows: impl IntoIterator<Item = &'text str>) -> Vec<&'text str> {
     let mut kept = Vec::new();
     let mut chars = 0usize;
     for line in shows
-        .iter()
-        .map(|line| line.trim())
+        .into_iter()
+        .map(str::trim)
         .filter(|line| !line.is_empty())
+        .take(SHOWS_LINE_CAP)
     {
-        if kept.len() == SHOWS_LINE_CAP || chars + line.chars().count() > SHOWS_CHAR_CAP {
+        let length = line.chars().take(SHOWS_CHAR_CAP - chars + 1).count();
+        if chars + length > SHOWS_CHAR_CAP {
             break;
         }
-        chars += line.chars().count();
+        chars += length;
         kept.push(line);
     }
     kept
@@ -840,6 +903,8 @@ pub struct ActionAsk {
     typing: Vec<usize>,
     /// Each observation head asked, with the look's numbers it offered.
     observing: Vec<(Observe, Vec<usize>)>,
+    navigation: Vec<Navigation>,
+    candidate_offset: usize,
 }
 
 /// What an answer chose.
@@ -850,6 +915,8 @@ pub enum Chosen {
     /// Enter a written value into the field this number names — the
     /// `type_target` head's answer to a [`TYPE_TEXT`].
     Type(usize),
+    Navigate(Navigation),
+    MoreControls,
     /// Nothing here helps.
     GiveUp,
     /// The goal is already reached; press nothing.
@@ -984,11 +1051,15 @@ pub fn rubric_words() -> String {
     for line in [
         CLEAR_INSTRUCTIONS,
         GOAL_INSTRUCTIONS,
+        GOAL_NAVIGATION_INSTRUCTIONS,
         GIVE_UP,
         GIVE_UP_MEANS,
         GOAL_GIVE_UP_MEANS,
         DONE,
         DONE_MEANS,
+        MORE_CONTROLS,
+        MORE_CONTROLS_MEANS,
+        CANDIDATE_WINDOW_KEY,
         MARK_OPTION_PREFIX,
         INSTRUCTED,
         INSTRUCTED_INSTRUCTIONS,
@@ -1000,6 +1071,12 @@ pub fn rubric_words() -> String {
         WALLED_NO,
     ] {
         words.push_str(line);
+        words.push('\n');
+    }
+    for action in Navigation::ALL {
+        words.push_str(action.word());
+        words.push('\n');
+        words.push_str(action.means());
         words.push('\n');
     }
     words.push_str(&STATE_KEYS.join(","));
@@ -1081,9 +1158,29 @@ pub fn ask_with(look: &ActionLook<'_>, beside: &Beside<'_>) -> Option<ActionAsk>
     ask_by(look, beside, CANDIDATE_PICK)
 }
 
+#[must_use]
+pub fn ask_from(look: &ActionLook<'_>, beside: &Beside<'_>, offset: usize) -> Option<ActionAsk> {
+    ask_page(look, beside, CANDIDATE_PICK, offset)
+}
+
 /// [`ask_with`], cut by `how` — the one place a question's controls are
 /// chosen, so the cut a walk asks and the cut a test holds it to are one.
 fn ask_by(look: &ActionLook<'_>, beside: &Beside<'_>, how: Pick) -> Option<ActionAsk> {
+    ask_page(look, beside, how, 0)
+}
+
+fn ask_page(
+    look: &ActionLook<'_>,
+    beside: &Beside<'_>,
+    how: Pick,
+    offset: usize,
+) -> Option<ActionAsk> {
+    let goal = matches!(look.errand, Errand::Goal);
+    let offset = if goal { offset } else { 0 };
+    let navigation: Vec<Navigation> = Navigation::ALL
+        .into_iter()
+        .filter(|action| goal && beside.navigation.contains(action))
+        .collect();
     let tried: BTreeSet<usize> = look.tried.iter().copied().collect();
     // Every control this walk may still choose, in the look's order; the
     // pick cuts them to what one question offers.
@@ -1103,11 +1200,12 @@ fn ask_by(look: &ActionLook<'_>, beside: &Beside<'_>, how: Pick) -> Option<Actio
         };
         seen.push((mark, line, item));
     }
-    if seen.is_empty() {
+    if (seen.is_empty() && navigation.is_empty()) || (offset > 0 && offset >= seen.len()) {
         return None;
     }
     let items: Vec<&Value> = seen.iter().map(|(_, _, item)| *item).collect();
-    let Picked { kept, signal } = pick(&items, beside.fields, look.goal, how);
+    let Picked { kept, signal } = pick_from(&items, beside.fields, look.goal, how, offset);
+    let more = goal && offset + kept.len() < seen.len();
     let mut marks = Vec::with_capacity(kept.len());
     let mut criteria = Map::new();
     let mut candidates = Vec::with_capacity(kept.len());
@@ -1120,7 +1218,6 @@ fn ask_by(look: &ActionLook<'_>, beside: &Beside<'_>, how: Pick) -> Option<Actio
     // What a goal walk may type into: the offered numbers the look itself
     // read as plain text fields — never a secret, never a field it did not
     // read, never one this walk already spent here.
-    let goal = matches!(look.errand, Errand::Goal);
     let typing: Vec<usize> = if goal && beside.types {
         marks
             .iter()
@@ -1135,6 +1232,12 @@ fn ask_by(look: &ActionLook<'_>, beside: &Beside<'_>, how: Pick) -> Option<Actio
             TYPE_TEXT.to_string(),
             Value::String(TYPE_TEXT_MEANS.to_string()),
         );
+    }
+    for action in &navigation {
+        criteria.insert(action.word().to_string(), json!(action.means()));
+    }
+    if more {
+        criteria.insert(MORE_CONTROLS.to_string(), json!(MORE_CONTROLS_MEANS));
     }
     criteria.insert(
         GIVE_UP.to_string(),
@@ -1172,7 +1275,17 @@ fn ask_by(look: &ActionLook<'_>, beside: &Beside<'_>, how: Pick) -> Option<Actio
     state.insert(STATE_KEYS[3].to_string(), json!(look.pressed));
     state.insert(STATE_KEYS[4].to_string(), json!(shows_cut(look.shows)));
     state.insert(CANDIDATES_KEY.to_string(), Value::Array(candidates));
-    let instructions = if typing.is_empty() {
+    if more || offset > 0 {
+        state.insert(
+            CANDIDATE_WINDOW_KEY.to_string(),
+            json!({
+                "offset": offset, "shown": marks.len(), "total": seen.len(),
+            }),
+        );
+    }
+    let instructions = if !navigation.is_empty() || more {
+        GOAL_NAVIGATION_INSTRUCTIONS
+    } else if typing.is_empty() {
         look.errand.instructions()
     } else {
         GOAL_TYPING_INSTRUCTIONS
@@ -1248,6 +1361,8 @@ fn ask_by(look: &ActionLook<'_>, beside: &Beside<'_>, how: Pick) -> Option<Actio
         ends_itself,
         typing,
         observing,
+        navigation,
+        candidate_offset: offset,
     })
 }
 
@@ -1298,6 +1413,12 @@ impl ActionAsk {
     #[must_use]
     pub const fn seen(&self) -> usize {
         self.seen
+    }
+
+    #[must_use]
+    pub fn next_candidate_offset(&self) -> Option<usize> {
+        let next = self.candidate_offset + self.marks.len();
+        (self.ends_itself && next < self.seen).then_some(next)
     }
 
     /// Whether the goal's words named any control the look held.
@@ -1368,6 +1489,7 @@ impl ActionAsk {
         let (chosen, confidence) = match action.chosen.as_str() {
             GIVE_UP => (Chosen::GiveUp, action.confidence),
             DONE => (Chosen::Done, action.confidence),
+            MORE_CONTROLS => (Chosen::MoreControls, action.confidence),
             TYPE_TEXT => {
                 let field = typed.as_ref().ok_or(ChoiceRefusal::NoAnswer)?;
                 (
@@ -1375,10 +1497,13 @@ impl ActionAsk {
                     action.confidence.min(field.confidence),
                 )
             }
-            named => (
-                Chosen::Mark(mark_of(named).ok_or(ChoiceRefusal::UnknownOption)?),
-                action.confidence,
-            ),
+            named => {
+                let chosen = match Navigation::from_word(named) {
+                    Some(navigation) => Chosen::Navigate(navigation),
+                    None => Chosen::Mark(mark_of(named).ok_or(ChoiceRefusal::UnknownOption)?),
+                };
+                (chosen, action.confidence)
+            }
         };
         Ok(ActionRead {
             choice: ActionChoice {
@@ -1434,6 +1559,15 @@ impl ActionAsk {
             .iter()
             .map(|mark| option_of(*mark))
             .chain((!self.typing.is_empty()).then(|| TYPE_TEXT.to_string()))
+            .chain(
+                self.navigation
+                    .iter()
+                    .map(|action| action.word().to_string()),
+            )
+            .chain(
+                self.next_candidate_offset()
+                    .map(|_| MORE_CONTROLS.to_string()),
+            )
             .chain(std::iter::once(GIVE_UP.to_string()))
             .chain(self.ends_itself.then(|| DONE.to_string()))
             .collect()

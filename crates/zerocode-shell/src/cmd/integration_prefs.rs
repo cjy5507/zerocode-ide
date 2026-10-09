@@ -131,9 +131,38 @@ pub(crate) fn set_notification_preference(
                     settings.notifications.agent_attention = on;
                 }
                 NotificationPreferenceKind::AgentCompletion => {
-                    settings.notifications.agent_completion = on;
+                    // The boolean road of an earlier release: on is the default
+                    // rule (long turns), off silences the finishes.
+                    settings.notifications.agent_completion = if on {
+                        zerocode_core::notify::FinishRing::Long
+                    } else {
+                        zerocode_core::notify::FinishRing::Off
+                    };
                 }
             }
+            Ok(())
+        },
+    )
+}
+
+/// The finish setting by its word: `off`, `long` (a turn of a minute or more) or
+/// `always`. The settings card writes this one.
+#[tauri::command(async)]
+pub(crate) fn set_finish_notification_mode(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    mode: String,
+) -> Result<SettingsSnapshot, String> {
+    let mode = zerocode_core::notify::FinishRing::from_word(&mode)
+        .ok_or("알림 모드는 off, long, always 중 하나여야 합니다")?;
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::NOTIFICATIONS],
+        move |settings| {
+            settings.notifications.agent_completion = mode;
             Ok(())
         },
     )
