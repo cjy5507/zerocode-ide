@@ -4279,6 +4279,11 @@ function noteTermFocus() {
   tellFocus(focusedTerm, false);
   focusedTerm = wanted;
   tellFocus(focusedTerm, true);
+  // The pane that now holds the keyboard is one the person is looking at, so
+  // its finish mark is released (t-26595). Nothing to release when no pane has it.
+  if (focusedTerm !== null && focusedTerm !== undefined) {
+    void invoke("clear_finish_mark", { pane: `term:${focusedTerm}` }).catch(() => false);
+  }
 }
 
 window.addEventListener("focus", noteTermFocus);

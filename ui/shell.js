@@ -1789,6 +1789,20 @@ window.closeActionHub = closeActionHub;
  * releases the pane's finish mark (`clear_finish_mark`). */
 let waitingRows = [];
 
+/* How long the list waits to be read after the last report. A busy turn reports
+ * many times a second; the list is read once per settled beat, not per report. */
+const WAITING_REFRESH_MS = 150;
+
+let waitingRefreshTimer = 0;
+
+function scheduleWaitingList() {
+  if (waitingRefreshTimer) return;
+  waitingRefreshTimer = setTimeout(() => {
+    waitingRefreshTimer = 0;
+    void refreshWaitingList();
+  }, WAITING_REFRESH_MS);
+}
+
 async function refreshWaitingList() {
   if (isPopout) return;
   try {
@@ -2429,6 +2443,10 @@ function boardCardDestination(card) {
 function openBoardCard(card, bucket) {
   const { kind, id, term, valid } = boardCardDestination(card);
   if (!valid) return;
+  // Opening a pane is looking at it: its finish mark is released (t-26595).
+  if ((kind === "term" || kind === "sub") && term !== null) {
+    void invoke("clear_finish_mark", { pane: `term:${term}` }).catch(() => false);
+  }
   if (kind === "term") {
     void openBoardPeek(card, term, bucket);
     return;
@@ -9545,7 +9563,7 @@ listen("hook:activity", (event) => {
  * 같은 사실의 두 번째 사본이 생긴다. */
 listen("agents:changed", () => {
   void refreshPaneLedger();
-  void refreshWaitingList();
+  scheduleWaitingList();
   scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
 });
 void refreshWaitingList();
@@ -11462,6 +11480,7 @@ const agentClock = idlePoller({
 });
 
 listen("hook:agent", (event) => {
+  scheduleWaitingList();
   const { term, state, agent, session } = event.payload;
   agentGraphHotKey = agentGraphAgentKey(`term:${term}`);
   // A run NESTED in this pane reports through the pane's own terminal — it
