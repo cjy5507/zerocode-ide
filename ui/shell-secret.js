@@ -202,4 +202,13 @@ async function pollSecrets() {
   }
 }
 
-setInterval(() => void pollSecrets(), SECRET_POLL_MS);
+/* An idle poller (shell-boot.js): it asks only while the window is visible and
+ * a terminal is open, so an empty window pays no timer round trip. Terminal
+ * views call `sync()` when one opens or closes (shell-term.js). */
+const secretPoll = idlePoller({
+  wanted: () => termViews.size > 0,
+  every: SECRET_POLL_MS,
+  tick: () => void pollSecrets(),
+  onResume: () => void pollSecrets(),
+});
+secretPoll.sync();
