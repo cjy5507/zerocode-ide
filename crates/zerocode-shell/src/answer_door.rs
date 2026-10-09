@@ -297,10 +297,14 @@ pub(super) fn quiet_since(held: &HeldTerminal) -> i64 {
     lock_pty(held).last_output_epoch_ms().unwrap_or(0)
 }
 
-/// Type a secret the person gave a card — the value, and the return that sends
-/// it — if and only if the pane still shows `expect`'s question. The screen is
+/// Type a secret the person gave a card, and the return that sends it, into the
+/// pane — if and only if the pane still shows `expect`'s question. The screen is
 /// read and the value written in one hold of the pane's lock, as
 /// [`type_if_up`] does. `Ok(false)` is a refusal: nothing was typed.
+///
+/// The value and its return go out as one write, in a buffer that is wiped when
+/// this returns, so the return is never a separate key a changed screen could
+/// take.
 pub(super) fn type_secret_if_up(
     held: &HeldTerminal,
     expect: &SecretPrompt,
@@ -312,7 +316,10 @@ pub(super) fn type_secret_if_up(
     if shown.as_ref() != Some(expect) {
         return Ok(false);
     }
-    pty.write_input(value)?;
+    let mut typed = zeroize::Zeroizing::new(Vec::with_capacity(value.len() + 1));
+    typed.extend_from_slice(value);
+    typed.push(b'\r');
+    pty.write_input(&typed)?;
     Ok(true)
 }
 

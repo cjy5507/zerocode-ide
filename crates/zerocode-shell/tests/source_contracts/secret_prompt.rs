@@ -133,8 +133,12 @@ fn the_value_is_typed_through_the_answer_door_and_recorded_nowhere() {
     let answer_door = strip_rust_comments(ANSWER_DOOR);
     let door = block_after(&answer_door, "fn type_secret_if_up(");
     assert!(
-        door.contains("write_input(value)"),
-        "the door writes the value to the pane and nowhere else"
+        door.contains("write_input(&typed)"),
+        "the door writes the value and its return to the pane, and nowhere else"
+    );
+    assert!(
+        door.contains("Zeroizing::new(Vec::with_capacity"),
+        "the buffer that holds the value is wiped when it goes out of scope"
     );
     for keep in BACKEND_KEEPS {
         assert!(!door.contains(keep), "type_secret_if_up names {keep}");

@@ -24,8 +24,15 @@ const SECRET_QUESTION_CHANGED = "question-changed";
 const SECRET_ANSWER_IN_FLIGHT = "answer-in-flight";
 const SECRET_INVALID = "secret-invalid";
 
-/* The title of each kind, in Korean — the source language. The other four
- * come from the catalog (`secret.title.<kind>`, shell-i18n.js). */
+/* The catalog key of each kind's title, written out whole so each one is
+ * findable by its name (shell-i18n.js holds the four other languages). */
+const SECRET_TITLE_KEYS = Object.freeze({
+  password: "secret.title.password",
+  passphrase: "secret.title.passphrase",
+  pin: "secret.title.pin",
+});
+
+/* The title of each kind, in Korean — the source language. */
 const SECRET_TITLES = Object.freeze({
   password: "비밀번호를 입력해 주세요",
   passphrase: "암호 문구를 입력해 주세요",
@@ -89,7 +96,7 @@ registerAskKind("secret", {
   tone: "secret",
   view: (ask) => ({
     agent: null,
-    title: t(`secret.title.${ask.secretKind}`, SECRET_TITLES[ask.secretKind] ?? SECRET_TITLES.password),
+    title: t(SECRET_TITLE_KEYS[ask.secretKind] ?? SECRET_TITLE_KEYS.password, SECRET_TITLES[ask.secretKind] ?? SECRET_TITLES.password),
     // The pane's own question, as the pane printed it — never what was typed.
     mono: ask.line,
     why: null,

@@ -2045,6 +2045,7 @@ pub(crate) struct PaneSecret {
 /// question is listed on the first poll after it settles.
 #[tauri::command]
 pub(crate) fn panes_secret(state: State<'_, AppState>) -> Vec<PaneSecret> {
+    let _crumb = crate::crumbs::Command::enter("panes_secret");
     state
         .terminals()
         .terms()
@@ -2081,8 +2082,7 @@ pub(crate) fn answer_secret(
     if !zerocode_core::secret_prompt::value_is_typable(value.as_bytes()) {
         return Err(answer_door::SECRET_INVALID.to_string());
     }
-    let mut bytes = zeroize::Zeroizing::new(value.into_bytes());
-    bytes.push(b'\r');
+    let bytes = zeroize::Zeroizing::new(value.into_bytes());
     let Some(held) = state.terminals().handle(term) else {
         return Err("터미널이 떠 있지 않습니다".to_string());
     };
