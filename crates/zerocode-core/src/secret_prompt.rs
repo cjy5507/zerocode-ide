@@ -14,15 +14,15 @@
 //!   question. A question followed by more output is not waiting, and neither
 //!   is a file whose last line ends in `password:` with the cursor below it;
 //! - the line must end with a colon, and what comes before the colon must be a
-//!   form the table below names: a bare secret word (after at most one
+//!   form the tables below name: a bare secret word (after at most one
 //!   qualifier such as `Enter` or `New`), `[sudo] password for <user>`,
 //!   `Password for '<target>'`, `<user>@<host>'s password`, or
 //!   `Enter passphrase for <key>`.
 //!
-//! The words and their kinds are the tables in this file. The window's
-//! sentence for each kind is its own translation table.
+//! The window's sentence for each kind is its own translation table; this file
+//! only says which kind a question asks for.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The most characters a line may have and still be read as a question. A
 /// longer line is someone's text that happens to end in a colon.
@@ -32,8 +32,11 @@ pub const PROMPT_MAX_CHARS: usize = 160;
 /// field could not hold is refused before it reaches a pane.
 pub const SECRET_MAX_BYTES: usize = 1024;
 
+/// The most characters a `sudo` user name may have.
+const USER_NAME_MAX_CHARS: usize = 32;
+
 /// The kind of secret a question asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SecretKind {
     Password,
@@ -42,7 +45,7 @@ pub enum SecretKind {
 }
 
 impl SecretKind {
-    /// The word the window keys its sentence by (`secret.kind.<word>`).
+    /// The word the window keys its sentence by (`secret.title.<word>`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -62,25 +65,140 @@ pub struct SecretPrompt {
     pub line: String,
 }
 
+/// The words a secret is asked for by, each with the kind it asks for. Latin
+/// words are matched in lower case; the rest as written. A phrase such as
+/// "비밀번호를 입력하세요" is a whole question, so it is listed whole.
+const SECRET_WORDS: &[(&str, SecretKind)] = &[
+    ("password", SecretKind::Password),
+    ("passphrase", SecretKind::Passphrase),
+    ("pin", SecretKind::Pin),
+    ("암호", SecretKind::Password),
+    ("비밀번호", SecretKind::Password),
+    ("패스워드", SecretKind::Password),
+    ("비밀번호를 입력하세요", SecretKind::Password),
+    ("암호를 입력하세요", SecretKind::Password),
+    ("パスワード", SecretKind::Password),
+    ("密码", SecretKind::Password),
+    ("contraseña", SecretKind::Password),
+    ("contrasena", SecretKind::Password),
+];
+
+/// The words that may stand before a secret word in a bare question: "Enter
+/// passphrase", "New password", "새 비밀번호". Only these — any other word
+/// before a secret word makes a sentence ("Reset your password:"), not a
+/// question. Each ends in a space, so the secret word after it is whole. Longer
+/// phrases come first, so "enter new " is taken before "enter ".
+const QUALIFIERS: &[&str] = &[
+    "enter your ",
+    "enter new ",
+    "enter current ",
+    "enter old ",
+    "enter ",
+    "retype new ",
+    "new ",
+    "current ",
+    "old ",
+    "your ",
+    "새 ",
+    "현재 ",
+];
+
 /// Read the question on a pane's screen, if the pane waits for a secret.
 ///
 /// `rows` are the visible rows from the top of the screen, and `cursor_row` is
-/// the row the cursor stands on. Not yet implemented: this red stage answers
-/// nothing, so the bundle in `secret_prompt/cases.tsv` fails.
+/// the row the cursor stands on. The question is read only from the last
+/// non-blank row, and only when the cursor stands on that row.
 #[must_use]
 pub fn read_secret_prompt(rows: &[String], cursor_row: usize) -> Option<SecretPrompt> {
-    let _ = (rows, cursor_row);
-    None
+    let last = rows.iter().rposition(|row| !row.trim().is_empty())?;
+    if cursor_row != last {
+        return None;
+    }
+    let line = rows[last].trim_end();
+    if line.chars().count() > PROMPT_MAX_CHARS {
+        return None;
+    }
+    let body = line.strip_suffix(':').or_else(|| line.strip_suffix('：'))?;
+    let kind = kind_of_question(body)?;
+    Some(SecretPrompt {
+        kind,
+        line: line.to_string(),
+    })
+}
+
+/// The kind of secret a question asks for, from the question's text without its
+/// colon — or `None` when the text is not one of the forms this module reads.
+fn kind_of_question(body: &str) -> Option<SecretKind> {
+    let question = body.trim().to_lowercase();
+    let (sudo, rest) = match question.strip_prefix("[sudo] ") {
+        Some(rest) => (true, rest),
+        None => (false, question.as_str()),
+    };
+    if let Some(kind) = bare_kind(rest) {
+        return Some(kind);
+    }
+    // `<user>@<host>'s password`, as ssh asks it: the user and the host are one
+    // word, and the word has an `@`.
+    if let Some(who) = rest.strip_suffix("'s password") {
+        return (who.contains('@') && !who.contains(' ')).then_some(SecretKind::Password);
+    }
+    let (head, target) = rest.split_once(" for ")?;
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    match head {
+        // `[sudo] password for <user>`: one user name and nothing after it.
+        "password" if sudo => is_user_name(target).then_some(SecretKind::Password),
+        // `Password for '<target>'`, which git and others quote, or a target
+        // with an `@` in it.
+        "password" => (quoted(target) || target.contains('@')).then_some(SecretKind::Password),
+        // `Enter passphrase for <key>`: the key is a path or a name.
+        "enter passphrase" | "passphrase" => Some(SecretKind::Passphrase),
+        _ => None,
+    }
+}
+
+/// The kind of a question that is only a secret word, with at most one
+/// qualifier before it (`password`, `enter pin`, `new password`).
+fn bare_kind(question: &str) -> Option<SecretKind> {
+    let word = QUALIFIERS
+        .iter()
+        .find_map(|qualifier| question.strip_prefix(qualifier))
+        .unwrap_or(question)
+        .trim();
+    SECRET_WORDS
+        .iter()
+        .find(|(known, _)| *known == word)
+        .map(|(_, kind)| *kind)
+}
+
+/// A `sudo` user name: a short run of letters, digits, dots, dashes and
+/// underscores, with no space in it.
+fn is_user_name(target: &str) -> bool {
+    !target.is_empty()
+        && target.chars().count() <= USER_NAME_MAX_CHARS
+        && target
+            .chars()
+            .all(|one| one.is_ascii_alphanumeric() || matches!(one, '.' | '_' | '-'))
+}
+
+/// Whether a target is wrapped in matching single or double quotes.
+fn quoted(target: &str) -> bool {
+    target.len() >= 2
+        && ((target.starts_with('\'') && target.ends_with('\''))
+            || (target.starts_with('"') && target.ends_with('"')))
 }
 
 /// Whether a typed value may be written into a pane: one non-empty line of
 /// visible text, at most [`SECRET_MAX_BYTES`]. A control byte (a return, a tab,
 /// an escape) would end the line early or be read as a key, so none is let
-/// through. Red stage: refuses everything.
+/// through. Non-ASCII bytes are visible text, so any language's letters pass.
 #[must_use]
 pub fn value_is_typable(value: &[u8]) -> bool {
-    let _ = value;
-    false
+    !value.is_empty()
+        && value.len() <= SECRET_MAX_BYTES
+        && value.iter().all(|byte| *byte >= 0x20 && *byte != 0x7f)
 }
 
 #[cfg(test)]

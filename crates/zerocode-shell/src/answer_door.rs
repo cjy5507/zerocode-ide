@@ -49,6 +49,10 @@ pub(crate) const ANSWER_IN_FLIGHT: &str = "answer-in-flight";
 /// only words: a menu takes a row.
 pub(crate) const MENU_NEEDS_A_ROW: &str = "menu-needs-a-row";
 
+/// The word a refused secret carries when its value cannot be typed as one
+/// line of visible text (`zerocode_core::secret_prompt::value_is_typable`).
+pub(crate) const SECRET_INVALID: &str = "secret-invalid";
+
 /// How long a pane stays "being answered" after the last key of an answer.
 ///
 /// The child needs a redraw to show it took the key. A second answer inside
@@ -263,21 +267,53 @@ pub(super) fn screen_card(held: &HeldTerminal) -> Option<AskPrompt> {
 pub(super) const SECRET_QUIET: Duration = Duration::from_millis(300);
 
 /// The secret the pane's question asks for, once the pane has been quiet for
-/// [`SECRET_QUIET`]. Red stage: not yet read.
+/// [`SECRET_QUIET`]. `None` while the pane is still printing, and `None` for any
+/// last line that is not such a question.
+///
+/// Never blocks: a pane whose terminal is being parsed this instant is simply
+/// not read this time, as a numbered menu's card is not either.
 pub(super) fn secret_prompt(held: &HeldTerminal) -> Option<SecretPrompt> {
-    let _ = held;
-    None
+    let pty = match held.try_lock() {
+        Ok(pty) => pty,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    // A transport that does not say when it last wrote is read as quiet; the
+    // reading itself still needs the question on the cursor's last row.
+    let quiet = pty
+        .last_output_at()
+        .is_none_or(|at| at.elapsed() >= SECRET_QUIET);
+    if !quiet {
+        return None;
+    }
+    let (rows, cursor) = screen_of(&pty);
+    zerocode_core::secret_prompt::read_secret_prompt(&rows, cursor?)
 }
 
-/// Type a secret the person gave a card — the value and its return — if and
-/// only if the pane still shows `expect`'s question. Red stage: never types.
+/// When the pane's output last moved, in epoch milliseconds — the key a
+/// question is listed under, so the same question read again is the same
+/// question. `0` when the transport does not say.
+pub(super) fn quiet_since(held: &HeldTerminal) -> i64 {
+    lock_pty(held).last_output_epoch_ms().unwrap_or(0)
+}
+
+/// Type a secret the person gave a card — the value, and the return that sends
+/// it — if and only if the pane still shows `expect`'s question. The screen is
+/// read and the value written in one hold of the pane's lock, as
+/// [`type_if_up`] does. `Ok(false)` is a refusal: nothing was typed.
 pub(super) fn type_secret_if_up(
     held: &HeldTerminal,
     expect: &SecretPrompt,
     value: &[u8],
 ) -> Result<bool, PtyTransportError> {
-    let _ = (held, expect, value);
-    Ok(false)
+    let mut pty = lock_pty(held);
+    let (rows, cursor) = screen_of(&pty);
+    let shown = cursor.and_then(|row| zerocode_core::secret_prompt::read_secret_prompt(&rows, row));
+    if shown.as_ref() != Some(expect) {
+        return Ok(false);
+    }
+    pty.write_input(value)?;
+    Ok(true)
 }
 
 /// Take the right to type one answer into `term`, or say why not.
@@ -415,6 +451,22 @@ mod tests {
         };
         assert!(type_secret_if_up(&pane.held, &expect, b"SENTINEL-not-a-secret").unwrap());
         assert_eq!(pane.typed(), vec!["SENTINEL-not-a-secret\r".to_string()]);
+    }
+
+    #[test]
+    #[ignore = "measurement: cargo test -p zerocode-shell --bin zerocode-shell answer_door::tests::measure_the_secret_door -- --ignored --nocapture"]
+    fn measure_the_secret_door() {
+        const ITERATIONS: u32 = 2_000;
+        let pane = secret_pane("[sudo] password for dev:", SECRET_QUIET * 2);
+        let started = Instant::now();
+        let mut found = 0_u32;
+        for _ in 0..ITERATIONS {
+            found += u32::from(secret_prompt(&pane.held).is_some());
+        }
+        let per_look_us = started.elapsed().as_secs_f64() * 1e6 / f64::from(ITERATIONS);
+        eprintln!(
+            "MEASURE secret door: {per_look_us:.2} us per look at a quiet pane ({found} of {ITERATIONS} looks read the question)"
+        );
     }
 
     #[test]

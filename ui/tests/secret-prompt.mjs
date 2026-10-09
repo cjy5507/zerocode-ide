@@ -328,6 +328,8 @@ async function questionChanged(browser, origin, ok) {
       await T.settle();
       T.type(value);
       T.press(T.look().buttons[0]);
+      // The pane moved on as the answer went out: it no longer asks anything.
+      T.waiting = [];
       await T.settle(300);
       const left = T.look();
       T.reply = null;

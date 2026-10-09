@@ -40,6 +40,7 @@
     <script defer src="./shell-i18n.js"></script>
     <script defer src="./shell-term-selection.js"></script>
     <script defer src="./shell-term.js"></script>
+    <script defer src="./shell-secret.js"></script>
     <script defer src="./shell-status.js"></script>
     <script defer src="./shell-doc.js"></script>
     <script defer src="./shell-artifact-tasks.js"></script>
@@ -9902,6 +9903,15 @@
           <input class="ask-code-input" id="ask-code-input" type="text" autocomplete="one-time-code" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="ask-code-hint ask-code-error" aria-invalid="false" />
           <p class="ask-code-hint" id="ask-code-hint"></p>
           <p class="ask-code-error" id="ask-code-error" role="alert" hidden></p>
+        </div>
+        <!-- 판이 암호·비밀번호·PIN을 묻는 물음(herdr 3, t-26596)의 칸. 진짜 비밀번호
+             칸이고 어떤 양식에도 들어 있지 않다 — 브라우저가 보낸 값을 저장할 자리가 없다.
+             값은 보내는 순간 판에 한 번 입력되고, 칸은 그때 비워진다. -->
+        <div class="ask-code ask-secret" id="ask-secret" hidden>
+          <label class="ask-code-label" id="ask-secret-label" for="ask-secret-input"></label>
+          <input class="ask-code-input" id="ask-secret-input" type="password" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="ask-secret-hint ask-secret-error" aria-invalid="false" />
+          <p class="ask-code-hint" id="ask-secret-hint"></p>
+          <p class="ask-code-error" id="ask-secret-error" role="alert" hidden></p>
         </div>
         <!-- 다른 물음이 동시에 기다리면 여기 그 수가 선다. 팝업은 가장 오래된
              물음 하나만 보여주고, 답하면 다음 것이 올라온다. -->

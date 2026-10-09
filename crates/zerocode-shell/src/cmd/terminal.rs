@@ -3,6 +3,7 @@
 use crate::*;
 use zerocode_core::agent::{Injected, prompt_injection};
 use zerocode_core::capabilities::SpawnRoad;
+use zerocode_core::secret_prompt::{SecretKind, SecretPrompt};
 
 /// Open the floating panel's shell, if it is not already running.
 ///
@@ -2016,6 +2017,78 @@ pub(crate) fn answer_approval(
     };
     let lease = answer_door::answer_lease(term).map_err(answer_door::Refusal::into_message)?;
     let typed = answer_door::type_if_up(&held, &answer_door::Expect::any_menu(), key.as_bytes())
+        .map_err(|error| error.to_string())?;
+    state.cadence().wake();
+    answer_door::settle_in_background(lease);
+    if typed {
+        Ok(())
+    } else {
+        Err(answer_door::QUESTION_CHANGED.to_string())
+    }
+}
+
+/// A question a pane waits on for a secret, as the window's popup lists it: the
+/// pane, the kind of secret, the question's own line, and the output time the
+/// question was read at. No value is in it; [`answer_secret`] types one and
+/// keeps none.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PaneSecret {
+    pub(crate) term: TermId,
+    pub(crate) kind: SecretKind,
+    pub(crate) line: String,
+    pub(crate) since: i64,
+}
+
+/// The panes whose question waits for a secret right now. A pane that printed
+/// within the last quiet spell is not listed yet; the window polls, so a
+/// question is listed on the first poll after it settles.
+#[tauri::command]
+pub(crate) fn panes_secret(state: State<'_, AppState>) -> Vec<PaneSecret> {
+    state
+        .terminals()
+        .terms()
+        .into_iter()
+        .filter_map(|term| {
+            let held = state.terminals().handle(term)?;
+            let prompt = answer_door::secret_prompt(&held)?;
+            Some(PaneSecret {
+                term,
+                kind: prompt.kind,
+                line: prompt.line,
+                since: answer_door::quiet_since(&held),
+            })
+        })
+        .collect()
+}
+
+/// Type the value a person gave a secret card, and the return that sends it,
+/// into the pane whose question it answers.
+///
+/// Through the answer door, so the value goes in only while the pane still shows
+/// the same question (`line` and `kind`, as the card was raised). A value that is
+/// not one line of visible text is refused before it is held anywhere. The value
+/// is kept as bytes that are wiped when this call returns, and no log, record or
+/// ledger line names it.
+#[tauri::command(async)]
+pub(crate) fn answer_secret(
+    state: State<'_, AppState>,
+    term: TermId,
+    kind: SecretKind,
+    line: String,
+    value: String,
+) -> Result<(), String> {
+    if !zerocode_core::secret_prompt::value_is_typable(value.as_bytes()) {
+        return Err(answer_door::SECRET_INVALID.to_string());
+    }
+    let mut bytes = zeroize::Zeroizing::new(value.into_bytes());
+    bytes.push(b'\r');
+    let Some(held) = state.terminals().handle(term) else {
+        return Err("터미널이 떠 있지 않습니다".to_string());
+    };
+    let expect = SecretPrompt { kind, line };
+    let lease = answer_door::answer_lease(term).map_err(answer_door::Refusal::into_message)?;
+    let typed = answer_door::type_secret_if_up(&held, &expect, &bytes)
         .map_err(|error| error.to_string())?;
     state.cadence().wake();
     answer_door::settle_in_background(lease);
