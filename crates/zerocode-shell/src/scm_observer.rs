@@ -93,6 +93,7 @@ impl Effects for WindowEffects<'_> {
             1024,
         );
         if crate::orchestration::post_observation_once(
+            None,
             &checks_runtime::worktree_address(Path::new(&subject.root)),
             &format!("{identity}\n{body}"),
             receipt,
