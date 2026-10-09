@@ -8,13 +8,13 @@ use super::*;
 #[test]
 fn bash_tool_reports_success_exit_failure_timeout_and_background() {
     let cwd = sandbox_disabled_cwd("bash-structured-cwd");
-    let success = run_tool_in_cwd("bash", &json!({ "command": "printf 'hello'" }), &cwd)
+    let success = run_tool_in_cwd_outside_windows("bash", &json!({ "command": "printf 'hello'" }), &cwd)
         .expect("bash should succeed");
     let success_output: serde_json::Value = serde_json::from_str(&success).expect("json");
     assert_eq!(success_output["stdout"], "hello");
     assert_eq!(success_output["interrupted"], false);
 
-    let failure = run_tool_in_cwd(
+    let failure = run_tool_in_cwd_outside_windows(
         "bash",
         &json!({ "command": "printf 'oops' >&2; exit 7" }),
         &cwd,
@@ -30,7 +30,7 @@ fn bash_tool_reports_success_exit_failure_timeout_and_background() {
     // `timeout` is milliseconds; values below MIN_BASH_TIMEOUT_MS (1s) are
     // treated as a ms/s unit slip and fall back to the default, so use a
     // genuine 1s deadline against a command that runs well past it.
-    let timeout = run_tool_in_cwd(
+    let timeout = run_tool_in_cwd_outside_windows(
         "bash",
         &json!({ "command": "sleep 30", "timeout": 1000 }),
         &cwd,
@@ -44,7 +44,7 @@ fn bash_tool_reports_success_exit_failure_timeout_and_background() {
         .expect("stderr")
         .contains("Command exceeded timeout"));
 
-    let background = run_tool_in_cwd(
+    let background = run_tool_in_cwd_outside_windows(
         "bash",
         &json!({ "command": "sleep 1", "run_in_background": true }),
         &cwd,
@@ -67,8 +67,50 @@ fn bash_tool_reports_success_exit_failure_timeout_and_background() {
     let _ = fs::remove_dir_all(cwd);
 }
 
+/// t-21146: `ToolContext::new()` binds `<process cwd>/.zo/registries` when it is
+/// built. A context built inside another test's `set_current_dir` window binds
+/// that window's temp root, and the window's cleanup then removes the directory
+/// under the registry's writes. The window closes only after the victim has built
+/// its context, and the cwd goes back to the previous directory under the lock.
+#[test]
+fn tool_context_built_inside_another_tests_cwd_window_leaves_the_window_alone() {
+    let window = temp_path("t21146-window-cwd");
+    fs::create_dir_all(&window).expect("mkdir window");
+    let guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&window).expect("open window");
+    let (built_tx, built_rx) = std::sync::mpsc::channel();
+    let victim = thread::spawn(move || {
+        let ctx = tool_context_outside_cwd_windows();
+        built_tx.send(()).ok();
+        let task = ctx.tasks.create("probe", None);
+        let outcome = ctx.tasks.update(&task.task_id, "probe").map(|_| ());
+        let _ = ctx.tasks.remove(&task.task_id);
+        outcome
+    });
+    // A context built under the lock waits for `guard`, so this wait is bounded.
+    let _ = built_rx.recv_timeout(Duration::from_secs(2));
+    std::env::set_current_dir(&previous).expect("restore cwd");
+    drop(guard);
+    let outcome = victim.join().expect("victim thread");
+    let window_has_registry = window.join(".zo/registries/tasks.json").exists();
+    let _ = fs::remove_dir_all(&window);
+    assert_eq!(outcome, Ok(()), "a persisted update should succeed");
+    assert!(
+        !window_has_registry,
+        "a context built inside another test's cwd window must not bind that window"
+    );
+}
+
 #[test]
 fn bash_background_launch_uses_session_and_stop_waits_for_reap() {
+    // Held for the whole test: the spawned bash resolves through `PATH`, which the
+    // tests that hold `env_lock` change (t-21146).
+    let _env = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cwd = sandbox_disabled_cwd("bash-background-session-cwd");
     let ctx = ToolContext::new().with_cwd(cwd.clone());
     ctx.set_session_id("visible-session");
@@ -116,6 +158,10 @@ fn bash_background_launch_uses_session_and_stop_waits_for_reap() {
 /// as the task's completion.
 #[test]
 fn an_attended_poll_starts_in_the_background_and_ends_as_written_once() {
+    // Held for the whole test, as the background bash test above (t-21146).
+    let _env = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cwd = sandbox_disabled_cwd("bash-attended-poll-cwd");
     let world = cwd.join("released");
     let written = cwd.join("written");
@@ -192,7 +238,7 @@ fn bash_tool_surfaces_destructive_safety_warning() {
     // A command matching a known destructive pattern still runs but
     // carries a non-blocking advisory on the structured result.
     let cwd = sandbox_disabled_cwd("bash-warning-cwd");
-    let dangerous = run_tool_in_cwd("bash", &json!({ "command": "printf 'rm -rf /'" }), &cwd)
+    let dangerous = run_tool_in_cwd_outside_windows("bash", &json!({ "command": "printf 'rm -rf /'" }), &cwd)
         .expect("bash should run");
     let output: serde_json::Value = serde_json::from_str(&dangerous).expect("json");
     assert!(
@@ -203,7 +249,7 @@ fn bash_tool_surfaces_destructive_safety_warning() {
     );
 
     // A benign command omits the advisory entirely (skip_serializing_if).
-    let benign = run_tool_in_cwd("bash", &json!({ "command": "printf 'hello'" }), &cwd)
+    let benign = run_tool_in_cwd_outside_windows("bash", &json!({ "command": "printf 'hello'" }), &cwd)
         .expect("bash should run");
     let benign_output: serde_json::Value = serde_json::from_str(&benign).expect("json");
     assert!(benign_output.get("safetyWarning").is_none());
@@ -214,7 +260,7 @@ fn bash_tool_surfaces_destructive_safety_warning() {
 fn audit_tool_summarizes_the_invocation_ledger() {
     // WI-E2: the Audit tool turns the otherwise write-only shadow ledger into a
     // readable rollup. Share one context so every dispatch lands in its ledger.
-    let ctx = ToolContext::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
     // A succeeding read-only tool, then a dispatch that fails (unknown tool).
     let _ = execute_tool(&ctx, "ToolSearch", &json!({ "query": "read" }));
     let unknown = execute_tool(&ctx, "DefinitelyNotATool", &json!({}));
@@ -547,10 +593,14 @@ fn powershell_errors_when_shell_is_missing() {
 
 #[test]
 fn given_no_enforcer_when_bash_then_executes_normally() {
+    // Held for the whole test, as the background bash test above (t-21146).
+    let _env = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cwd = sandbox_disabled_cwd("bash-no-enforcer-cwd");
     let mut ctx = ToolContext::new();
     ctx.cwd = Some(cwd.clone());
-    let registry = crate::GlobalToolRegistry::builtin().with_context(ctx);
+    let registry = GlobalToolRegistry::builtin().with_context(ctx);
     let result = registry
         .execute("bash", &json!({ "command": "printf 'ok'" }))
         .expect("bash should succeed without enforcer");

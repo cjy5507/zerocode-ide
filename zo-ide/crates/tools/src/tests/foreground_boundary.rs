@@ -7,7 +7,7 @@
 //! Before the fix, a danger-full-access user was wrongly denied an outside
 //! `read_file`/`write_file`/`edit_file` with "escapes workspace boundary", even
 //! though `bash cat` / `read_image` could reach the same path.
-use crate::{GlobalToolRegistry, ToolContext};
+use crate::GlobalToolRegistry;
 use runtime::PermissionMode;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,9 +24,9 @@ fn td(name: &str) -> std::path::PathBuf {
 /// set on the context, the session permission mode is recorded on the context,
 /// and **no enforcer is installed on the registry**.
 fn foreground_registry(ws: &std::path::Path, mode: PermissionMode) -> GlobalToolRegistry {
-    let ctx = ToolContext::new().with_workspace_root(ws.to_path_buf());
+    let ctx = crate::tests::tool_context_outside_cwd_windows().with_workspace_root(ws.to_path_buf());
     ctx.set_permission_mode(mode);
-    GlobalToolRegistry::builtin().with_context(ctx)
+    crate::tests::builtin_registry_outside_cwd_windows().with_context(ctx)
 }
 
 #[test]
@@ -131,8 +131,8 @@ fn no_session_mode_falls_back_to_boundary_when_below_full_access() {
     std::fs::write(&rpath, "x").expect("seed");
 
     // workspace root set, NO permission mode recorded, NO enforcer.
-    let reg = GlobalToolRegistry::builtin()
-        .with_context(ToolContext::new().with_workspace_root(ws.clone()));
+    let reg = crate::tests::builtin_registry_outside_cwd_windows()
+        .with_context(crate::tests::tool_context_outside_cwd_windows().with_workspace_root(ws.clone()));
     let read = reg.execute("read_file", &json!({ "path": rpath.to_string_lossy() }));
     assert!(
         matches!(read, Err(crate::ToolError::PermissionDenied { .. })),

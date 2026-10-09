@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn artifact_export_prepares_absolute_destination_and_shim_arguments() {
         let dir = tempfile::tempdir().unwrap();
-        let mut ctx = ToolContext::new();
+        let mut ctx = crate::tests::tool_context_outside_cwd_windows();
         ctx.cwd = Some(dir.path().to_path_buf());
         let prepared = prepare(&json!({"action":"export", "id":"p-test", "version":2, "out":"share # 한.html"}), &ctx, None).unwrap();
         assert_eq!(prepared["out"], json!(dir.path().join("share # 한.html")));
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn artifact_publish_requires_a_successful_design_skill_in_this_turn() {
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let input = json!({"action":"publish", "file_path":"unused.html"});
         let refused = dispatch(&ctx, None, "Artifact", &input).unwrap().unwrap_err().to_string();
         assert!(refused.contains("Skill") && refused.contains("artifact-design"), "{refused}");
@@ -244,7 +244,7 @@ mod tests {
         assert!(!ctx.artifact_design_read());
         crate::misc_tools::dispatch(&ctx, None, "Skill", &json!({"skill":"artifact-design"})).unwrap().unwrap();
         assert!(ctx.artifact_design_read());
-        let independent = ToolContext::new();
+        let independent = crate::tests::tool_context_outside_cwd_windows();
         assert!(!independent.artifact_design_read());
         ctx.begin_skill_turn();
         assert!(!ctx.artifact_design_read());
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn artifact_is_deferred_and_discoverable() {
-        let registry = crate::GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         assert!(!registry.definitions(None).iter().any(|tool| tool.name == "Artifact"));
         assert!(crate::deferred_tool_manifest_section().contains("Artifact ("));
     }

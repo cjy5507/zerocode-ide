@@ -944,7 +944,7 @@ mod tests {
             std::thread::current().name().unwrap_or("test")
         ));
         let _ = std::fs::remove_file(&path);
-        let context = ToolContext::new();
+        let context = crate::tests::tool_context_outside_cwd_windows();
         context.begin_workspace_checkpoint(1);
         context
             .record_workspace_checkpoint_before(&path)
@@ -964,7 +964,7 @@ mod tests {
 
     #[test]
     fn shell_read_only_command_does_not_mark_checkpoint_incomplete() {
-        let context = ToolContext::new();
+        let context = crate::tests::tool_context_outside_cwd_windows();
         context.begin_workspace_checkpoint(1);
 
         mark_shell_checkpoint_if_write_intent(&context, "git status --short");
@@ -979,7 +979,7 @@ mod tests {
     fn confined_agent_rejects_git_escape_out_of_worktree() {
         // A worktree-isolated agent's shell must not redirect git at another
         // checkout. The guard returns before the command ever runs.
-        let ctx = ToolContext::new().with_worktree_confinement(std::path::PathBuf::from("/work/wt"));
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_worktree_confinement(std::path::PathBuf::from("/work/wt"));
         for command in [
             "git -C /repo status",
             "git --git-dir=/repo/.git log",
@@ -1462,7 +1462,7 @@ mod tests {
         // A ReadOnly sub-agent must not run REPL ungated: REPL requires
         // DangerFullAccess, so the enforcer denies it at the dispatch seam
         // (previously the REPL arm carried no permission check at all).
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let enforcer =
             PermissionEnforcer::new(runtime::PermissionPolicy::new(PermissionMode::ReadOnly));
         let input = json!({ "code": "touch x", "language": "bash" });

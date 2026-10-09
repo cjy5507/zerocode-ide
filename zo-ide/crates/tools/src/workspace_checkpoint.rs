@@ -615,7 +615,7 @@ mod tests {
         let c = dir.join("c.bin");
         fs::write(&a, b"a0").unwrap();
         fs::write(&b, b"b0").unwrap();
-        let mut context = ToolContext::new();
+        let mut context = crate::tests::tool_context_outside_cwd_windows();
         context.workspace_root = Some(dir.clone());
         context.cwd = Some(dir.clone());
         checkpoint_changes(
@@ -869,7 +869,7 @@ mod tests {
         let dir = temp_dir("conflict");
         let path = dir.join("file.bin");
         fs::write(&path, b"before").unwrap();
-        let mut context = ToolContext::new();
+        let mut context = crate::tests::tool_context_outside_cwd_windows();
         context.workspace_root = Some(dir.clone());
         context.cwd = Some(dir.clone());
         checkpoint_changes(&context, 1, &[(path.as_path(), Some(b"after"))]);
