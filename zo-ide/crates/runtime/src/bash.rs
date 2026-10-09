@@ -872,11 +872,7 @@ async fn execute_bash_async(
         // registered, so backgrounded grandchildren are reaped too, then return.
         // Dropping `child` triggers `kill_on_drop` as the leader backstop (WI-G).
         #[cfg(unix)]
-        {
-            if let Some(pid) = child_pid {
-                end_registered_group(pid).await;
-            }
-        }
+        end_registered_group(child_pid).await;
         spill
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1298,7 +1294,10 @@ fn finish_registered(pid: u32, end: &GroupEnd) {
 /// registry lock, then SIGKILL (t-19897). A backgrounded grandchild that holds the
 /// output pipes is reaped with the group.
 #[cfg(unix)]
-async fn end_registered_group(pid: u32) {
+async fn end_registered_group(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
     if let Some(end) = terminate_registered(pid) {
         tokio::time::sleep(BASH_GROUP_GRACE).await;
         finish_registered(pid, &end);
