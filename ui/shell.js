@@ -1783,6 +1783,95 @@ function paintActionHubModal() {
 window.openActionHub = openActionHub;
 window.closeActionHub = closeActionHub;
 
+/* 나를 기다림 (t-26595) — the column's top list: which pane waits on the person,
+ * and for what. Rust decides the rows (`waiting_on_me`, the notify rules); this
+ * only paints them. A row opens its pane the way a board card does, and looking
+ * releases the pane's finish mark (`clear_finish_mark`). */
+let waitingRows = [];
+
+/* How long the list waits to be read after the last report. A busy turn reports
+ * many times a second; the list is read once per settled beat, not per report. */
+const WAITING_REFRESH_MS = 150;
+
+let waitingRefreshTimer = 0;
+
+function scheduleWaitingList() {
+  if (waitingRefreshTimer) return;
+  waitingRefreshTimer = setTimeout(() => {
+    waitingRefreshTimer = 0;
+    void refreshWaitingList();
+  }, WAITING_REFRESH_MS);
+}
+
+async function refreshWaitingList() {
+  if (isPopout) return;
+  let rows = [];
+  try {
+    const answer = await invoke("waiting_on_me");
+    // Only a list of rows counts: anything else reads as nobody waiting.
+    rows = Array.isArray(answer) ? answer : [];
+  } catch {
+    // The list reads the rows as they are now. A failed read shows none, never
+    // the rows of the last good read.
+  }
+  waitingRows = rows;
+  paintWaitingList();
+}
+
+/* Whether the list shows this pane as a finish nobody has looked at. Releasing a
+ * mark costs a round trip, so it is asked only when there is a finish to release. */
+function waitingFinishStands(term) {
+  return waitingRows.some((row) => row.pane === `term:${term}` && row.waiting === "finished");
+}
+
+function waitingKindWord(waiting) {
+  if (waiting === "blocked") return t("waiting.blocked", "막힘");
+  if (waiting === "question") return t("waiting.question", "질문");
+  return t("waiting.finished", "끝남");
+}
+
+function paintWaitingList() {
+  const box = el("waiting-list");
+  const list = el("waiting-list-items");
+  if (!box || !list) return;
+  box.hidden = waitingRows.length === 0;
+  list.replaceChildren(
+    ...waitingRows.map((row) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "waiting-row";
+      button.dataset.waiting = row.waiting;
+
+      const agent = document.createElement("span");
+      agent.className = "waiting-row-agent";
+      agent.textContent = row.agent || "Agent";
+
+      const kind = document.createElement("span");
+      kind.className = "waiting-row-kind";
+      kind.textContent = waitingKindWord(row.waiting);
+
+      const place = document.createElement("span");
+      place.className = "waiting-row-place";
+      place.textContent = row.worktree.split("/").filter(Boolean).pop() || row.pane;
+      place.dataset.tip = row.worktree;
+
+      button.append(agent, kind, place);
+      button.addEventListener("click", () => openWaitingRow(row));
+      item.appendChild(button);
+      return item;
+    }),
+  );
+}
+
+function openWaitingRow(row) {
+  const bucket = row.waiting === "finished" ? "done" : "attention";
+  openBoardCard({ pane: row.pane, agent: row.agent, worktree: row.worktree }, bucket);
+  void invoke("clear_finish_mark", { pane: row.pane })
+    .catch(() => false)
+    .then(() => refreshWaitingList());
+}
+
 el("nav-attention")?.addEventListener("click", openActionHub);
 el("action-hub-close")?.addEventListener("click", closeActionHub);
 el("action-hub-dismiss")?.addEventListener("click", closeActionHub);
@@ -2363,6 +2452,10 @@ function boardCardDestination(card) {
 function openBoardCard(card, bucket) {
   const { kind, id, term, valid } = boardCardDestination(card);
   if (!valid) return;
+  // Opening a pane is looking at it: a finish the list shows is released (t-26595).
+  if ((kind === "term" || kind === "sub") && term !== null && waitingFinishStands(term)) {
+    void invoke("clear_finish_mark", { pane: `term:${term}` }).catch(() => false);
+  }
   if (kind === "term") {
     void openBoardPeek(card, term, bucket);
     return;
@@ -9479,8 +9572,10 @@ listen("hook:activity", (event) => {
  * 같은 사실의 두 번째 사본이 생긴다. */
 listen("agents:changed", () => {
   void refreshPaneLedger();
+  scheduleWaitingList();
   scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
 });
+void refreshWaitingList();
 
 listen("hook:subagent", (event) => {
   const { term, rows } = event.payload ?? {};
@@ -11394,6 +11489,7 @@ const agentClock = idlePoller({
 });
 
 listen("hook:agent", (event) => {
+  scheduleWaitingList();
   const { term, state, agent, session } = event.payload;
   agentGraphHotKey = agentGraphAgentKey(`term:${term}`);
   // A run NESTED in this pane reports through the pane's own terminal — it

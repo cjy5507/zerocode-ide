@@ -1330,6 +1330,22 @@ pub(super) fn note_pane_state(
         let session_boundary =
             zerocode_core::hook::done_provenance(report.state, report.session_boundary);
         let interrupted = zerocode_core::hook::done_provenance(report.state, report.interrupted);
+        // The turn and the finish mark are read from the row BEFORE this report
+        // (`prior`). The hook says what happened; the clock says when the turn
+        // began (`turn_started_after`); a finish stays marked until the person
+        // looks or new work begins (`finish_mark_after`).
+        let turn_started_at = zerocode_core::notify::turn_started_after(
+            prior.map(|held| (held.state, held.turn_started_at)),
+            report.state,
+            now,
+        );
+        let finish_mark = zerocode_core::notify::finish_mark_after(
+            prior.is_some_and(|held| held.finish_mark),
+            report.state,
+            prior.map(|held| held.state),
+            interrupted,
+            session_boundary,
+        );
         if let Some(worktree) = worktree {
             let seat = last_status::key(worktree, report.term);
             state.last_status_seats().insert(report.term, seat.clone());
@@ -1384,6 +1400,8 @@ pub(super) fn note_pane_state(
                 submit_shape,
                 session_boundary,
                 interrupted,
+                turn_started_at,
+                finish_mark,
                 before_wait,
                 autonomy,
             },
@@ -1529,9 +1547,11 @@ pub(super) fn last_statuses(state: State<'_, AppState>) -> Vec<last_status::Last
 
 /// Ring the OS about a pane's stop, under the rules that keep ringing rare.
 ///
-/// The decisions are `zerocode_core::notify`'s (Orca's own: cooldown 5s per
-/// worktree, suppression at the watched screen, a 1.5s quiet before
-/// "finished"); what lives here is the clock, the focus fact, and the OS call.
+/// The decisions are `zerocode_core::notify`'s: a stop waits its quiet (ten
+/// seconds for a block, a minute for a finish) and fires only if the same stop
+/// still stands when the wait ends; a finish also has to earn its ring under the
+/// device's finish setting. What lives here is the clock, the focus fact, and
+/// the OS call.
 pub(super) fn ring_for_pane(app: &AppHandle, worktree: &str, report: &hooks::PaneHookReport) {
     use zerocode_core::notify::{self, Ring};
     // A session boundary is nobody's completion: the `done` it wears exists
@@ -1545,12 +1565,12 @@ pub(super) fn ring_for_pane(app: &AppHandle, worktree: &str, report: &hooks::Pan
         return;
     };
     // 마스터·종류별 게이트는 여기 없다: `ring_now`의 한 사다리가 전부
-    // 검사한다 — armed 완료 벨도 fire 시점에 같은 문을 지나므로, 조용한
-    // 시간 동안 바뀐 설정이 그대로 존중된다.
+    // 검사한다 — 기다린 뒤 울리는 벨도 발사 시점에 같은 문을 지난다.
     match ring {
         // `ring_of` never yields a push — that road is `ring_zo_push` — but a
-        // push that reached here would ring at once, like attention.
-        Ring::Attention | Ring::Push => {
+        // push that reached here rings at once: it is the agent's own word,
+        // not a stop that might clear.
+        Ring::Push => {
             let (ask, said) = pane_words(app, report.term);
             ring_now(
                 app,
@@ -1570,58 +1590,117 @@ pub(super) fn ring_for_pane(app: &AppHandle, worktree: &str, report: &hooks::Pan
                 },
             )
         }
-        // Armed, not fired: agents end a turn and immediately start the next,
-        // and ringing on every Done would ring mid-conversation. The quiet
-        // passes, and the ring fires only if the pane still says Done —
-        // checked by the STAMP, because a newer Done is a different turn.
-        Ring::Completion => {
-            let app = app.clone();
-            let worktree = worktree.to_string();
-            let agent = report.agent.slug();
-            let term = report.term;
-            let armed_at = app
-                .state::<AppState>()
-                .pane_states()
-                .get(&term)
-                .map(|held| held.at);
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    notify::DONE_QUIET_MS as u64,
-                ))
-                .await;
-                let still = {
-                    let state = app.state::<AppState>();
-                    let states = state.pane_states();
-                    states
-                        .get(&term)
-                        .map(|held| (held.state, held.at, held.interrupted))
-                };
-                // 깃발은 **발사 시점의 줄에서** 읽는다. 무장 시점의 보고서가
-                // 아니다: 조용한 1.5초 안에 같은 턴에 대한 이벤트가 더 올 수
-                // 있고, Orca도 알림을 보낼 때 스토어의 행에서 읽는다
-                // (`use-notification-dispatch.ts:202`). 무장 때 베껴 두면
-                // 그 1.5초 동안 사람이 누른 키가 낱말에 반영되지 않는다.
-                if let Some((state, at, interrupted)) = still
-                    && state == zerocode_core::hook::HookState::Done
-                    && armed_at == Some(at)
-                {
-                    let (ask, said) = pane_words(&app, term);
-                    ring_now(
-                        &app,
-                        RingNotice {
-                            worktree: &worktree,
-                            term: Some(term),
-                            agent,
-                            ring: Ring::Completion,
-                            interrupted,
-                            ask,
-                            said,
-                        },
-                    );
-                }
-            });
+        Ring::Attention | Ring::Completion => {
+            arm_stop_ring(app, worktree, report.term, report.agent.slug(), ring)
         }
     }
+}
+
+/// Whether the row shows the stop a ring is about: a block for attention, a
+/// finished turn for completion.
+fn stop_stands(state: zerocode_core::hook::HookState, ring: zerocode_core::notify::Ring) -> bool {
+    use zerocode_core::hook::HookState;
+    use zerocode_core::notify::Ring;
+    matches!(
+        (ring, state),
+        (Ring::Attention, HookState::NeedsAttention) | (Ring::Completion, HookState::Done)
+    )
+}
+
+/// Arm a stop's ring for the quiet its kind waits (`notify::quiet_ms`), and fire
+/// it when the wait ends if the same stop still stands (`notify::Quiet`). A
+/// block that clears inside its wait never rings, and a repeated report of a
+/// stop that already rang does not ring it again.
+///
+/// A finish fires only if its turn earns the ring under the device's finish
+/// setting when the wait ends (`finish_earns`).
+fn arm_stop_ring(
+    app: &AppHandle,
+    worktree: &str,
+    term: TermId,
+    agent: &'static str,
+    ring: zerocode_core::notify::Ring,
+) {
+    let stamp = {
+        let state = app.state::<AppState>();
+        let states = state.pane_states();
+        match states.get(&term) {
+            Some(held) if stop_stands(held.state, ring) => held.state_started_at,
+            _ => return,
+        }
+    };
+    {
+        let state = app.state::<AppState>();
+        state.quiet_rings().arm(term, ring, stamp, epoch_ms_now());
+    }
+    let app = app.clone();
+    let worktree = worktree.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            zerocode_core::notify::quiet_ms(ring).unsigned_abs(),
+        ))
+        .await;
+        let standing = {
+            let state = app.state::<AppState>();
+            let states = state.pane_states();
+            states
+                .get(&term)
+                .filter(|held| stop_stands(held.state, ring))
+                .map(|held| held.state_started_at)
+        };
+        let fired = {
+            let state = app.state::<AppState>();
+            let mut quiet = state.quiet_rings();
+            quiet.settle(&term, epoch_ms_now(), standing)
+        };
+        let Some(fired) = fired else {
+            return;
+        };
+        if fired == zerocode_core::notify::Ring::Completion && !finish_earns(&app, term) {
+            return;
+        }
+        let (ask, said) = pane_words(&app, term);
+        let interrupted = {
+            let state = app.state::<AppState>();
+            let states = state.pane_states();
+            states.get(&term).is_some_and(|held| held.interrupted)
+        };
+        // 깃발은 발사 시점의 줄에서 읽는다 — 기다리는 동안 사람이 누른 키가
+        // 낱말에 반영되어야 하므로(`interrupted`, `ask`, `said`는 여기서 읽는다).
+        ring_now(
+            &app,
+            RingNotice {
+                worktree: &worktree,
+                term: Some(term),
+                agent,
+                ring: fired,
+                interrupted,
+                ask,
+                said,
+            },
+        );
+    });
+}
+
+/// Whether a finish of this pane earns its ring now: the device's finish
+/// setting, with the turn's length read from the row
+/// (`notify::FinishRing::earns`, `notify::turn_ms`).
+fn finish_earns(app: &AppHandle, term: TermId) -> bool {
+    let mode = {
+        let state = app.state::<AppState>();
+        load_settings_for_boot(state.settings())
+            .document
+            .notifications
+            .agent_completion
+    };
+    let turn = {
+        let state = app.state::<AppState>();
+        let states = state.pane_states();
+        states.get(&term).and_then(|held| {
+            zerocode_core::notify::turn_ms(held.turn_started_at, held.state_started_at)
+        })
+    };
+    mode.earns(turn)
 }
 
 /// Notice the agents that left without saying so, and clear the panes they
@@ -2917,7 +2996,8 @@ fn ring_gates_open(app: &AppHandle, ring: zerocode_core::notify::Ring) -> bool {
         ring,
         zerocode_core::notify::Ring::Attention | zerocode_core::notify::Ring::Push
     ) && !preferences.agent_attention
-        || matches!(ring, zerocode_core::notify::Ring::Completion) && !preferences.agent_completion
+        || matches!(ring, zerocode_core::notify::Ring::Completion)
+            && preferences.agent_completion == zerocode_core::notify::FinishRing::Off
     {
         return false;
     }

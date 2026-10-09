@@ -1602,8 +1602,11 @@ pub(super) struct NotificationPrefs {
     pub(super) enabled: bool,
     #[serde(default = "enabled_by_default")]
     pub(super) agent_attention: bool,
-    #[serde(default = "enabled_by_default")]
-    pub(super) agent_completion: bool,
+    /// Which finishes ring (끝남): `off`, `long` (a turn of a minute or more,
+    /// the default) or `always`. Read through [`finish_ring_setting`], so a
+    /// boolean an earlier release wrote still loads.
+    #[serde(default, deserialize_with = "finish_ring_setting")]
+    pub(super) agent_completion: zerocode_core::notify::FinishRing,
 }
 
 /// Preferences shared by the file editor and editable diff surface.
@@ -1830,8 +1833,33 @@ impl Default for NotificationPrefs {
         Self {
             enabled: true,
             agent_attention: true,
-            agent_completion: true,
+            agent_completion: zerocode_core::notify::FinishRing::Long,
         }
+    }
+}
+
+/// Reads the finish setting from its word (`off`, `long`, `always`), or from the
+/// boolean an earlier release wrote: `true` rang every finish, which the
+/// long-turn rule now stands for, and `false` rang none.
+fn finish_ring_setting<'de, D>(
+    deserializer: D,
+) -> Result<zerocode_core::notify::FinishRing, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use zerocode_core::notify::FinishRing;
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Flag(bool),
+        Word(String),
+    }
+    match <Stored as serde::Deserialize>::deserialize(deserializer)? {
+        Stored::Flag(true) => Ok(FinishRing::Long),
+        Stored::Flag(false) => Ok(FinishRing::Off),
+        Stored::Word(word) => FinishRing::from_word(&word).ok_or_else(|| {
+            <D::Error as serde::de::Error>::custom(format!("unknown finish setting `{word}`"))
+        }),
     }
 }
 

@@ -1069,6 +1069,14 @@
              row painted first and hidden a tick later is the flash this
              attribute exists to skip. Whichever rows the report names stay
              hidden; `paintShortcuts` only ever turns this back off. -->
+        <!-- 나를 기다림 (t-26595): the panes that wait on the person, at the very
+             top of the column — a block, a question, or a finish nobody has
+             looked at. Hidden while nothing waits. Rust decides the rows; a
+             row opens its pane. -->
+        <section class="waiting-list" id="waiting-list" data-i18n-aria="waiting.label" aria-label="나를 기다림" hidden>
+          <h2 class="waiting-list-title" data-i18n="waiting.title">나를 기다림</h2>
+          <ul class="waiting-list-items" id="waiting-list-items"></ul>
+        </section>
         <nav class="nav-rows" data-i18n-aria="view.navLabel" aria-label="바로 가기">
           <!-- 시작 체크리스트로 가는 한 줄, 나브의 첫 행으로 — Orca의
                SetupGuideSidebarEntry가 SidebarNav의 첫 자식이다
@@ -6897,15 +6905,19 @@
             </label>
           </div>
           <div class="settings-option-row settings-option-row--copy">
-            <label class="settings-check" for="notify-agent-completion">
-              <input type="checkbox" id="notify-agent-completion" />
+            <label class="settings-check" for="notify-finish-mode">
               <span>
                 <span class="settings-label" data-i18n="settings.notifications.completion">작업을 마쳤을 때</span>
                 <span class="settings-row-desc" data-i18n="settings.notifications.completionHint">
-                  잠깐의 안정 시간을 지난 완료 상태만 알립니다.
+                  막힘은 10초, 끝남은 1분 동안 그대로 남아 있어야 알립니다. 긴 작업만은 1분 이상 걸린 턴만 알립니다.
                 </span>
               </span>
             </label>
+            <select class="settings-input" id="notify-finish-mode" data-i18n-aria="settings.notifications.completion" aria-label="작업을 마쳤을 때">
+              <option value="off" data-i18n="settings.notifications.finishOff">끔</option>
+              <option value="long" data-i18n="settings.notifications.finishLong">1분 이상 걸린 작업만</option>
+              <option value="always" data-i18n="settings.notifications.finishAlways">항상</option>
+            </select>
           </div>
           <div class="settings-action-row">
             <p class="settings-inline-status" id="notify-test-status" role="status" aria-live="polite"></p>
