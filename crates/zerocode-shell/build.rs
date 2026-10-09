@@ -157,6 +157,7 @@ const UI_FILES: &[&str] = &[
     "shell-remote.js",
     "shell-sftp.js",
     "shell-scm.js",
+    "shell-secret.js",
     "shell-settings.js",
     "shell-jev.js",
     "shell-status.js",
