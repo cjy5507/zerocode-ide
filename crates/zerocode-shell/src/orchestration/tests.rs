@@ -16457,12 +16457,14 @@ fn a_restored_coordinator_sits_again_through_the_restore_pass() {
 
 /// A host whose conversation comes back after a restart: the pane at
 /// `returned_at` runs the conversation `conversation_of`, which the ledger bound
-/// to its run before the restart, and a split opens its pane at `onto`.
-/// Records what is typed at each pane, so a test can count what reached one.
+/// to its run before the restart. Splits open panes from `onto` upward, in the
+/// order they are asked for. Records what is typed at each pane, so a test can
+/// count what reached one.
 struct Returning {
     onto: u32,
     returned_at: u32,
     conversation_of: u32,
+    splits: Mutex<Vec<u32>>,
     sends: Mutex<Vec<(u32, String)>>,
 }
 
@@ -16472,6 +16474,7 @@ impl Returning {
             onto,
             returned_at,
             conversation_of,
+            splits: Mutex::new(Vec::new()),
             sends: Mutex::new(Vec::new()),
         }
     }
@@ -16491,6 +16494,15 @@ impl Returning {
             .unwrap_or_else(|held| held.into_inner())
             .clear();
     }
+
+    /// The pane the latest split opened, if one opened.
+    fn last_split(&self) -> Option<u32> {
+        self.splits
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .last()
+            .copied()
+    }
 }
 
 impl Host for Returning {
@@ -16502,9 +16514,18 @@ impl Host for Returning {
         _pane: &str,
         _direction: zerocode_core::agent_teams::Direction,
         _command: &str,
-        _token: &str,
+        token: &str,
     ) -> Option<u32> {
-        Some(self.onto)
+        // The pane opens in the checkout the sleeper was seated in, as the
+        // window's own pane does, so its seat report can name the checkout.
+        crate::agent_teams::place_seat_checkout(
+            token,
+            crate::test_host::existing_directory().to_string(),
+        );
+        let mut splits = self.splits.lock().unwrap_or_else(|held| held.into_inner());
+        let term = self.onto + splits.len() as u32;
+        splits.push(term);
+        Some(term)
     }
     fn send(&self, term: u32, text: &str) -> bool {
         self.sends
@@ -16520,10 +16541,10 @@ impl Host for Returning {
         true
     }
     fn close(&self, _term: u32) {}
-    /// The pane a sleeper is reseated into runs the claude hook route, so a turn
-    /// begun there parks its pointer the way it does in production.
+    /// The panes this host opens run the claude hook route, so a turn begun
+    /// there parks its pointer the way it does in production.
     fn agent_of(&self, term: u32) -> Option<String> {
-        (term == self.onto).then(|| "claude".to_string())
+        (term >= self.onto).then(|| "claude".to_string())
     }
     fn actor_for(&self, term: u32) -> Option<String> {
         let conversation = if term == self.returned_at {
@@ -16686,60 +16707,75 @@ fn a_second_pane_of_a_bound_conversation_beside_a_live_chair_is_told_once() {
 }
 
 /// t-21908, the numbers: a fake window over one simulated hour, six returns
-/// ten minutes apart. Each return restarts the window at its own boot (the
-/// coordinator's chair is vacated and its sleeping worker waits), the
-/// coordinator's conversation comes back in a new pane, one mail goes to the
-/// worker, and the worker's pane starts a turn, so its pointer is parked for
-/// its hook. The hook is modelled: every other return it knocks at once,
-/// within the grace, and the rest never knock. It prints what each return did
-/// and asserts no number: the numbers are the measurement.
+/// ten minutes apart. Each return restarts the window at its own boot, so the
+/// coordinator's chair is vacated and the worker the previous return started is
+/// asleep. The coordinator's conversation comes back in a new pane, which seats
+/// the chair and the sleeper; then one mail goes to that worker and its pane
+/// starts a turn, so its pointer waits on the pane's hook. The hook is modelled:
+/// every other return it knocks at once, within the grace, and the rest never
+/// knock. A restore is spent per worker per window incarnation, so each return
+/// wakes a worker no restore has seated yet. It prints what each return did and
+/// asserts no number: the numbers are the measurement.
 #[test]
 fn t21908_a_fake_window_hour_counts_the_sleepers_woken_and_the_mail_pointed() {
     use crate::orchestration_pointer_mailbox::{Parked, age_parked, collect_stale};
-    use zerocode_hookd::pointer_mailbox::{PointerMailbox as _, PointerMoment};
+    use zerocode_hookd::pointer_mailbox::PointerMoment;
     const LEADER: u32 = 21_920;
-    const WORKER: u32 = 21_921;
+    const FIRST_WORKER: u32 = 21_921;
+    const PANE: u32 = 21_940;
     const RETURNS: u32 = 6;
     const BEATS: i64 = 5;
     const TEN_MINUTES_MS: i64 = 600_000;
     const BEAT_MS: i64 = 1_000;
     let (private, _store) = PrivateWindow::boot();
     let host = Seating {
-        onto: WORKER,
+        onto: FIRST_WORKER,
         checkout: crate::test_host::existing_directory(),
     };
-    let (_team, _task, worker) =
-        a_seated_worker_with_a_session(&host, LEADER, WORKER, "t21908-session");
+    let (_team, _task, first) =
+        a_seated_worker_with_a_session(&host, LEADER, FIRST_WORKER, "t21908-session-0");
     let run_id = the_rows()
         .workers
         .iter()
-        .find(|row| row.id == worker)
+        .find(|row| row.id == first)
         .map(|row| row.run.clone())
         .expect("the run that holds the worker");
-    let inbox = zerocode_core::orchestration::worker_address(&worker);
     let grace = crate::orchestration_pointer_mailbox::HOOK_COLLECTION_GRACE;
     let held = super::runtime().expect("the private runtime");
     let base = clock();
     let (mut sat, mut woken, mut parked, mut knocked, mut stuck, mut pointed) =
         (0_u32, 0_u32, 0_u32, 0_u32, 0_u32, 0_u32);
     let mut latencies: Vec<i64> = Vec::new();
+    let mut sleeper = first;
     // The first conversation's pane was the run's leader before any restart.
     crate::agent_teams::forget_term(LEADER);
     for index in 0..RETURNS {
         let at = base + i64::from(index) * TEN_MINUTES_MS;
         let new_leader = 21_930 + index;
-        let pane = 21_940 + index;
+        // Each return's panes get terms of their own, as the window numbers its panes.
+        let pane = PANE + 2 * index;
+        let inbox = zerocode_core::orchestration::worker_address(&sleeper);
         held.actor.window_restarted(at).expect("the sweep");
         // This window boots now, so its grace runs from this restart.
         let _young = BootedHere::at(at);
-        // A window restart takes its panes' teams with it.
-        if index > 0 {
-            crate::agent_teams::forget_term(new_leader - 1);
-        }
+        // The previous return's team stays in the table: its leader's
+        // conversation is not this one, so it binds nothing here, and forgetting
+        // its pane would drop the session the sleeper must come back with.
         let new_team = format!("team-t21908-return-{new_leader}");
         seat_a_team(&new_team, new_leader);
         let returned = Returning::new(pane, new_leader, LEADER);
         super::tick(&returned, &[], at + BEAT_MS);
+        // The window's own last word about this worker on this beat, if any.
+        let window_said = super::BLACKBOX
+            .get()
+            .and_then(|root| std::fs::read_to_string(root.join("window-errors.log")).ok())
+            .unwrap_or_default()
+            .lines()
+            .rfind(|line| line.contains(sleeper.as_str()))
+            .map_or_else(
+                || "nothing".to_string(),
+                |line| line.chars().take(200).collect(),
+            );
         let rows = the_rows();
         let chair = rows
             .runs
@@ -16768,9 +16804,26 @@ fn t21908_a_fake_window_hour_counts_the_sleepers_woken_and_the_mail_pointed() {
         let worker_state = rows
             .workers
             .iter()
-            .find(|row| row.id == worker)
+            .find(|row| row.id == sleeper)
             .map_or_else(|| "missing".to_string(), |row| format!("{:?}", row.state));
         let worker_up = worker_state == "Active";
+        // Why the sleeper was not seated, asked of the ledger's pure preparation.
+        let reseat_why = if worker_up {
+            "not asked".to_string()
+        } else {
+            match held.actor.prepare_worker_reseat(
+                run_id.as_str(),
+                sleeper.as_str(),
+                new_team.as_str(),
+                zerocode_core::agent_teams::LEADER_PANE,
+                new_leader,
+                super::reseat_nudge(&sleeper, None),
+            ) {
+                Ok(Ok(_)) => "prepared".to_string(),
+                Ok(Err(why)) => why.chars().take(200).collect(),
+                Err(_) => "the ledger did not answer".to_string(),
+            }
+        };
         sat += u32::from(chair_sat);
         woken += u32::from(worker_up);
 
@@ -16828,13 +16881,71 @@ fn t21908_a_fake_window_hour_counts_the_sleepers_woken_and_the_mail_pointed() {
         crate::orchestration_pointer_mailbox::forget_term(pane);
         println!(
             "t-21908 measure return {index}: chair {chair_desc}; sleeper {worker_state}; \
-             mail exit {} ({}); pointer parked {}; hook {}; latency {} ms",
+             window said {window_said}; reseat says {reseat_why}; mail exit {} ({}); \
+             pointer parked {}; hook {}; latency {} ms",
             sent.exit_code,
-            sent.stderr.chars().take(120).collect::<String>().replace('\n', " "),
+            sent.stderr
+                .chars()
+                .take(120)
+                .collect::<String>()
+                .replace('\n', " "),
             latency.is_some(),
-            if knocks { "knocks at once" } else { "never knocks" },
+            if knocks {
+                "knocks at once"
+            } else {
+                "never knocks"
+            },
             latency.map_or_else(|| "none".to_string(), |ms| ms.to_string()),
         );
+
+        // The next sleeper: a worker this coordinator starts now, which the next
+        // restart puts to sleep and the next return seats again.
+        let task = run(
+            &returned,
+            Vec::new(),
+            &new_team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words("task-create --spec keep-going"),
+            at + 5 * BEAT_MS,
+        );
+        let Ok(task) = serde_json::from_str::<serde_json::Value>(&task.stdout) else {
+            println!("t-21908 measure: no task for the next sleeper");
+            break;
+        };
+        let Some(task) = task["taskId"].as_str().map(str::to_string) else {
+            println!("t-21908 measure: no task for the next sleeper");
+            break;
+        };
+        let started = run(
+            &returned,
+            Vec::new(),
+            &new_team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(&format!("worker-start --agent codex --task {task}")),
+            at + 6 * BEAT_MS,
+        );
+        let Ok(started) = serde_json::from_str::<serde_json::Value>(&started.stdout) else {
+            println!("t-21908 measure: no worker for the next sleeper");
+            break;
+        };
+        let Some(next) = started["workerId"].as_str().map(str::to_string) else {
+            println!("t-21908 measure: no worker for the next sleeper");
+            break;
+        };
+        if let Some(pane) = returned.last_split() {
+            let _ = held.actor.worker_session_reported(
+                pane,
+                zerocode_core::ProviderSession {
+                    key: zerocode_core::SessionKey::SessionId,
+                    id: format!("t21908-session-{}", index + 1),
+                    transcript_path: None,
+                },
+                at + 7 * BEAT_MS,
+            );
+        }
+        sleeper = next;
     }
     latencies.sort_unstable();
     let pick = |share: f64| -> String {
