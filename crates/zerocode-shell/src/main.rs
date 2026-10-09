@@ -1062,6 +1062,10 @@ struct ShellRuntime {
     /// Written from hook events, never guessed: an id we invented would resume
     /// nothing.
     pane_sessions: Mutex<HashMap<TermId, zerocode_core::ProviderSession>>,
+    /// The answer each pane's transcript question last got, so a poll that asks
+    /// the same question again does not walk the agent's store (herdr 4
+    /// follow-up, t-42948). Forgotten when the pane closes.
+    pane_memo: Mutex<zerocode_core::pane_transcript::Memo<TermId>>,
     /// What each pane's agent last reported, and when.
     ///
     /// The window is told every state change as it happens, so this is not how
@@ -1534,6 +1538,10 @@ impl ShellRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn pane_memo(&self) -> &Mutex<zerocode_core::pane_transcript::Memo<TermId>> {
+        &self.pane_memo
+    }
+
     fn pane_sessions(&self) -> MutexGuard<'_, HashMap<TermId, zerocode_core::ProviderSession>> {
         self.pane_sessions
             .lock()
@@ -1806,6 +1814,7 @@ trait ShellStateExt {
     fn browser_records(&self) -> MutexGuard<'_, HashMap<String, BrowserPaneRecord>>;
     fn browser_reserved(&self) -> MutexGuard<'_, std::collections::HashSet<String>>;
     fn pane_sessions(&self) -> MutexGuard<'_, HashMap<TermId, zerocode_core::ProviderSession>>;
+    fn pane_memo(&self) -> &Mutex<zerocode_core::pane_transcript::Memo<TermId>>;
     fn pane_states(&self) -> MutexGuard<'_, HashMap<TermId, PaneState>>;
     fn last_statuses(&self) -> MutexGuard<'_, HashMap<String, last_status::LastStatus>>;
     fn last_status_seats(&self) -> MutexGuard<'_, HashMap<TermId, String>>;
@@ -2013,6 +2022,10 @@ impl ShellStateExt for AppState {
 
     fn pane_sessions(&self) -> MutexGuard<'_, HashMap<TermId, zerocode_core::ProviderSession>> {
         self.shell_runtime().pane_sessions()
+    }
+
+    fn pane_memo(&self) -> &Mutex<zerocode_core::pane_transcript::Memo<TermId>> {
+        self.shell_runtime().pane_memo()
     }
 
     fn pane_states(&self) -> MutexGuard<'_, HashMap<TermId, PaneState>> {
@@ -2346,6 +2359,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         browser_records: Mutex::new(HashMap::new()),
         browser_reserved: Mutex::new(std::collections::HashSet::new()),
         pane_sessions: Mutex::new(HashMap::new()),
+        pane_memo: Mutex::new(zerocode_core::pane_transcript::Memo::default()),
         pane_states: Mutex::new(HashMap::new()),
         last_statuses: Mutex::new(last_statuses),
         // 자리 지도는 늘 빈 손으로 시작한다: 하이드레이트로 올라온 행들은

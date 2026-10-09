@@ -22,10 +22,15 @@
 //! The rule reads nothing itself. The window supplies the facts through
 //! [`Facts`], so the same rule answers the window and the tests alike. A CLI
 //! joins by its row of [`crate::vault::AGENT_SOURCES`] and by no branch here.
+//!
+//! The window asks every second, so each pane's answer is kept between asks
+//! ([`bind_remembered`]). A named file stays named while it is there, and a
+//! "no file" answer is asked again only after [`ABSENT_RECHECK`].
 
-use std::marker::PhantomData;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::vault::{self, AgentSource, IdPlacement};
@@ -167,7 +172,9 @@ pub fn bind(
 fn carries_id(source: &AgentSource, id: &str, path: &Path, facts: &dyn Facts) -> bool {
     match source.format.id_placement() {
         IdPlacement::FileStem => path.file_stem().and_then(|stem| stem.to_str()) == Some(id),
-        IdPlacement::FirstLine => facts.first_line_id(path).as_deref() == Some(id),
+        IdPlacement::FirstLine | IdPlacement::FirstLineNamed => {
+            facts.first_line_id(path).as_deref() == Some(id)
+        }
         IdPlacement::Folder => path
             .ancestors()
             .skip(1)
@@ -176,10 +183,12 @@ fn carries_id(source: &AgentSource, id: &str, path: &Path, facts: &dyn Facts) ->
     }
 }
 
-/// The one session file that carries `id`. Every session file is read the way
-/// its store places the id, so two files that carry it name neither.
+/// The one session file that carries `id`. Every candidate is read the way its
+/// store places the id, so two files that carry it name neither.
 fn by_session_id(source: &AgentSource, id: &str, facts: &dyn Facts) -> Result<PathBuf, Absent> {
-    let files = facts.session_files(source).ok_or(Absent::NoSessionFile)?;
+    let files = facts
+        .session_candidates(source, id)
+        .ok_or(Absent::NoSessionFile)?;
     let mut carriers = files
         .into_iter()
         .filter(|path| carries_id(source, id, path, facts));
@@ -234,29 +243,116 @@ fn by_screen(source: &AgentSource, facts: &dyn Facts) -> Result<PathBuf, Absent>
     Ok(first)
 }
 
-/// The answers the window gave each pane, kept between two polls
-/// (herdr 4 follow-up, t-42948). Red step: this skeleton keeps nothing yet.
+/// The question the window asked about one pane: the agent's slug, the
+/// transcript the agent reported, and the session id it reported. An answer
+/// stands only while the question stays the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Asked {
+    slug: String,
+    reported: Option<PathBuf>,
+    session_id: Option<String>,
+}
+
+/// The answer kept for one pane.
+#[derive(Debug, Clone)]
+enum Kept {
+    /// A file was named. It stands while the file is there.
+    Named(PathBuf, Via),
+    /// No file was named when the rule was asked. It stands for
+    /// [`ABSENT_RECHECK`] from that instant, and no longer.
+    Unnamed(Absent, Instant),
+}
+
+/// The answer the window gave each pane, kept between two polls (herdr 4
+/// follow-up, t-42948). A helper page asks every second. Without this memory a
+/// pane whose file is not reported walks its whole store on every ask.
 pub struct Memo<P> {
-    _pane: PhantomData<P>,
+    panes: HashMap<P, (Asked, Kept)>,
 }
 
 impl<P> Default for Memo<P> {
     fn default() -> Self {
-        Self { _pane: PhantomData }
+        Self {
+            panes: HashMap::new(),
+        }
     }
 }
 
-/// [`bind`], asked through the window's memory of each pane's answer. Red
-/// step: this asks the rule every time, as before.
-pub fn bind_remembered<P>(
-    _memo: &Mutex<Memo<P>>,
-    _pane: P,
+impl<P: Eq + Hash> Memo<P> {
+    /// Drops the answer kept for a pane that has closed.
+    pub fn forget(&mut self, pane: &P) {
+        self.panes.remove(pane);
+    }
+
+    /// The kept answer for this pane, when it asked the same question and the
+    /// answer still stands. `None` means the rule must be asked.
+    fn recall(
+        &self,
+        pane: &P,
+        asked: &Asked,
+        now: Instant,
+        facts: &dyn Facts,
+    ) -> Option<Result<(PathBuf, Via), Absent>> {
+        let (held, kept) = self.panes.get(pane)?;
+        if held != asked {
+            return None;
+        }
+        match kept {
+            Kept::Named(path, via) => facts.exists(path).then(|| Ok((path.clone(), *via))),
+            Kept::Unnamed(reason, asked_at) => {
+                (now.saturating_duration_since(*asked_at) < ABSENT_RECHECK).then_some(Err(*reason))
+            }
+        }
+    }
+
+    fn remember(
+        &mut self,
+        pane: P,
+        asked: Asked,
+        answer: &Result<(PathBuf, Via), Absent>,
+        now: Instant,
+    ) {
+        let kept = match answer {
+            Ok((path, via)) => Kept::Named(path.clone(), *via),
+            Err(reason) => Kept::Unnamed(*reason, now),
+        };
+        self.panes.insert(pane, (asked, kept));
+    }
+}
+
+/// [`bind`], asked through the window's memory of each pane's answer.
+///
+/// A named file is returned while it is there, with no listing of the store. A
+/// "no file" answer is returned until [`ABSENT_RECHECK`] has passed. The memory
+/// is keyed by the pane and by the question, so one pane never receives another
+/// pane's answer, and a changed report or id is asked again at once. The lock
+/// covers the map only, never the disk.
+pub fn bind_remembered<P: Eq + Hash>(
+    memo: &Mutex<Memo<P>>,
+    pane: P,
     slug: &str,
     reported: Option<&Path>,
     session_id: Option<&str>,
     facts: &dyn Facts,
 ) -> Result<(PathBuf, Via), Absent> {
-    bind(slug, reported, session_id, facts)
+    let asked = Asked {
+        slug: slug.to_string(),
+        reported: reported.map(Path::to_path_buf),
+        session_id: session_id.map(str::to_string),
+    };
+    let now = facts.now();
+    let kept = lock(memo).recall(&pane, &asked, now, facts);
+    if let Some(answer) = kept {
+        return answer;
+    }
+    let answer = bind(slug, reported, session_id, facts);
+    lock(memo).remember(pane, asked, &answer, now);
+    answer
+}
+
+/// The memo's guard. A poisoned lock still holds a whole map, so it is taken anyway.
+fn lock<P>(memo: &Mutex<Memo<P>>) -> MutexGuard<'_, Memo<P>> {
+    memo.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]

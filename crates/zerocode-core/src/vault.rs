@@ -196,6 +196,9 @@ pub enum IdPlacement {
     FileStem,
     /// The first line is a `session_meta` record that carries the id.
     FirstLine,
+    /// The first line carries the id, and the file name ends with it too. A
+    /// file named for another id is not read at all (herdr 4 follow-up, t-42948).
+    FirstLineNamed,
     /// A folder on the way to the file is named by the id.
     Folder,
     /// The store does not say where the id is, so no file is matched by it.
@@ -207,7 +210,8 @@ impl Format {
     pub const fn id_placement(self) -> IdPlacement {
         match self {
             Self::ClaudeLines => IdPlacement::FileStem,
-            Self::CodexRollout | Self::ZoLines => IdPlacement::FirstLine,
+            Self::CodexRollout => IdPlacement::FirstLineNamed,
+            Self::ZoLines => IdPlacement::FirstLine,
             Self::AntigravityTranscript => IdPlacement::Folder,
             Self::Unread => IdPlacement::Unstated,
         }
@@ -1758,6 +1762,83 @@ pub fn session_files(source: &AgentSource, roots: &[PathBuf]) -> Option<Vec<Path
     }
     (!truncated).then_some(found)
 }
+
+/// The session files that may carry `id`, listed the way the store places ids
+/// (herdr 4 follow-up, t-42948). A store that names each file by its id
+/// (Claude's `<id>.jsonl`) is looked at folder by folder, so the store is not
+/// listed. A store whose file names end with the session id (Codex) leaves out
+/// the files named for another id, so their first lines are never read. Every
+/// other store is listed whole. `None` when a listing was cut short.
+pub fn session_candidates(
+    source: &AgentSource,
+    roots: &[PathBuf],
+    id: &str,
+) -> Option<Vec<PathBuf>> {
+    match source.format.id_placement() {
+        IdPlacement::FileStem => named_session_files(source, roots, id),
+        IdPlacement::FirstLineNamed => {
+            let mut found = session_files(source, roots)?;
+            found.retain(|path| !names_other_id(path, id));
+            Some(found)
+        }
+        IdPlacement::FirstLine | IdPlacement::Folder => session_files(source, roots),
+        IdPlacement::Unstated => Some(Vec::new()),
+    }
+}
+
+/// The files named `<id>.<extension>` in a root, and in each folder directly
+/// under it. A store that keeps one session per file, named by its id, holds
+/// the file in one of these places. `None` when a root has more entries than
+/// [`MAX_CANDIDATE_FILES`], the same bound the walk keeps.
+fn named_session_files(source: &AgentSource, roots: &[PathBuf], id: &str) -> Option<Vec<PathBuf>> {
+    let file_name = format!("{id}.{}", source.extension);
+    let mut found = Vec::new();
+    for root in roots {
+        let mut folders = vec![root.clone()];
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for (seen, entry) in entries.flatten().enumerate() {
+                if seen >= MAX_CANDIDATE_FILES {
+                    return None;
+                }
+                // `symlink_metadata`, as `walk` reads it: a link is not followed.
+                let path = entry.path();
+                if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+                    folders.push(path);
+                }
+            }
+        }
+        for folder in folders {
+            let path = folder.join(&file_name);
+            let is_file = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file());
+            if is_file && wanted(source, &path) {
+                found.push(path);
+            }
+        }
+    }
+    Some(found)
+}
+
+/// Whether a file's name ends with a session id other than `id`. A Codex
+/// rollout is named `rollout-<stamp>-<uuid>.jsonl`, so its name names its session.
+fn names_other_id(path: &Path, id: &str) -> bool {
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    !stem.ends_with(id) && trailing_uuid(stem).is_some()
+}
+
+/// The uuid a name ends with, when it ends with one: 8-4-4-4-12 hex digits.
+fn trailing_uuid(stem: &str) -> Option<&str> {
+    let tail = stem.get(stem.len().checked_sub(UUID_LEN)?..)?;
+    let shaped = tail.bytes().enumerate().all(|(at, byte)| match at {
+        8 | 13 | 18 | 23 => byte == b'-',
+        _ => byte.is_ascii_hexdigit(),
+    });
+    shaped.then_some(tail)
+}
+
+/// The length of a uuid written with its dashes.
+const UUID_LEN: usize = 36;
 
 /// The session id a `session_meta` first line names: Codex's `payload.id`, or
 /// zo's `session_id`. `None` for any other line, and for an id that would not

@@ -1,15 +1,16 @@
 //! The transcript file a pane's conversation is read from (herdr 4, t-26597).
 //!
-//! The rule is `zerocode_core::pane_transcript::bind`. This file only gathers
-//! its facts from the disk and from the pane's process, so every road to a
-//! transcript the window reads goes through the one answer.
+//! The rule is `zerocode_core::pane_transcript::bind`, asked through the
+//! window's memory of each pane's answer (`bind_remembered`). This file only
+//! gathers the facts from the disk and from the pane's process, so every road
+//! to a transcript the window reads goes through the one answer.
 
 use super::*;
 
 use std::path::{Path, PathBuf};
 
 use zerocode_core::SessionKey;
-use zerocode_core::pane_transcript::{Absent, Facts, bind};
+use zerocode_core::pane_transcript::{Absent, Facts, bind_remembered};
 use zerocode_core::vault::{self, AgentSource};
 
 use crate::terminal_registry::{HeldTerminal, lock_pty};
@@ -59,6 +60,10 @@ impl Facts for PaneFacts {
         vault::session_files(source, &self.roots(source))
     }
 
+    fn session_candidates(&self, source: &AgentSource, id: &str) -> Option<Vec<PathBuf>> {
+        vault::session_candidates(source, &self.roots(source), id)
+    }
+
     fn first_line_id(&self, path: &Path) -> Option<String> {
         vault::session_meta_id(&first_line(path)?)
     }
@@ -88,7 +93,7 @@ impl Facts for PaneFacts {
 
 /// The transcript file one pane's conversation is read from, or why there is
 /// none. Reads the agent's report and session id the pane holds, then the
-/// rule.
+/// rule, through the window's memory of the pane's answer.
 pub(crate) fn pane_transcript(
     state: &crate::AppState,
     term: crate::TermId,
@@ -110,7 +115,9 @@ pub(crate) fn pane_transcript(
         pane: state.terminals().handle(term),
         read_env: true,
     };
-    bind(
+    bind_remembered(
+        state.pane_memo(),
+        term,
         slug,
         reported.as_deref().map(Path::new),
         session_id.as_deref(),
@@ -315,7 +322,7 @@ mod tests {
 
     use std::cell::Cell;
     use std::sync::Mutex;
-    use zerocode_core::pane_transcript::{Memo, Via, bind_remembered};
+    use zerocode_core::pane_transcript::{Memo, Via, bind, bind_remembered};
 
     /// The one screen line the synthetic panel shows. It is long enough to name
     /// a file, and only one of the 200 screen files holds it.

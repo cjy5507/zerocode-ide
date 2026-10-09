@@ -380,7 +380,10 @@ fn a_store_this_window_cannot_read_yet_says_so() {
 #[test]
 fn each_shape_says_where_its_id_shows_and_which_shapes_are_readable() {
     assert_eq!(Format::ClaudeLines.id_placement(), IdPlacement::FileStem);
-    assert_eq!(Format::CodexRollout.id_placement(), IdPlacement::FirstLine);
+    assert_eq!(
+        Format::CodexRollout.id_placement(),
+        IdPlacement::FirstLineNamed
+    );
     assert_eq!(Format::ZoLines.id_placement(), IdPlacement::FirstLine);
     assert_eq!(
         Format::AntigravityTranscript.id_placement(),
