@@ -499,10 +499,14 @@ pub(crate) fn strip_comments(source: &str) -> String {
 /// stripping quietly stopped working reports its subject as clean. Only the
 /// unambiguous char-literal shapes are consumed (`'x'`, `'\x'`), so a lifetime
 /// like `&'a str` is still left alone.
+///
+/// A raw string (`r"…"`, `r#"…"#`, `br#"…"#`) is kept whole: a `"` or a `//`
+/// inside its body is text, not the end of a string or the start of a comment.
+/// Read as either, it hid the code after it from the walk (t-19979).
 pub(crate) fn strip_rust_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut rest = source;
-    while let Some(at) = rest.find(['/', '"', '\'']) {
+    while let Some(at) = rest.find(['/', '"', '\'', 'r']) {
         out.push_str(&rest[..at]);
         let tail = &rest[at..];
         if let Some(body) = tail.strip_prefix("/*") {
@@ -544,13 +548,48 @@ pub(crate) fn strip_rust_comments(source: &str) -> String {
             }
             out.push_str(&tail[..end]);
             rest = &tail[end..];
+        } else if let Some(len) =
+            raw_string_len(tail).filter(|_| !r_in_a_name(source, source.len() - rest.len() + at))
+        {
+            out.push_str(&tail[..len]);
+            rest = &tail[len..];
         } else {
-            out.push('/');
+            // A `/` that opens no comment, or an `r` that opens no raw string.
+            out.push_str(&tail[..1]);
             rest = &tail[1..];
         }
     }
     out.push_str(rest);
     out
+}
+
+/// The byte length of the raw string literal `tail` opens with, closing fence
+/// included, or `None` when it opens none. The fence is a `"` and the same run of
+/// `#`s, so a bare `"` in the body does not end the literal.
+fn raw_string_len(tail: &str) -> Option<usize> {
+    let hashes = tail
+        .strip_prefix('r')?
+        .bytes()
+        .take_while(|byte| *byte == b'#')
+        .count();
+    let quote = 1 + hashes;
+    if tail.as_bytes().get(quote) != Some(&b'"') {
+        return None;
+    }
+    let body = &tail[quote + 1..];
+    let fence = format!("\"{}", "#".repeat(hashes));
+    Some(quote + 1 + body.find(&fence).map_or(body.len(), |to| to + fence.len()))
+}
+
+/// Whether the `r` at byte `at` of `source` sits inside a longer name. A `b` before
+/// it is the byte-string prefix (`br"…"`), so the `r` still opens a raw string.
+fn r_in_a_name(source: &str, at: usize) -> bool {
+    let before = &source[..at];
+    let before = before.strip_suffix('b').unwrap_or(before);
+    before
+        .chars()
+        .next_back()
+        .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
 pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
