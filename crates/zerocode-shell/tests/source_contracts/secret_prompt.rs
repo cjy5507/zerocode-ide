@@ -118,7 +118,8 @@ fn the_field_is_a_password_input_that_no_form_owns() {
 
 #[test]
 fn the_value_is_typed_through_the_answer_door_and_recorded_nowhere() {
-    let command = block_after(&strip_rust_comments(TERMINAL), "fn answer_secret(");
+    let terminal = strip_rust_comments(TERMINAL);
+    let command = block_after(&terminal, "fn answer_secret(");
     assert!(
         command.contains("type_secret_if_up"),
         "the command types through the answer door, which reads the pane again first"
@@ -129,7 +130,8 @@ fn the_value_is_typed_through_the_answer_door_and_recorded_nowhere() {
             "answer_secret names {keep}, a place the value could be kept"
         );
     }
-    let door = block_after(&strip_rust_comments(ANSWER_DOOR), "fn type_secret_if_up(");
+    let answer_door = strip_rust_comments(ANSWER_DOOR);
+    let door = block_after(&answer_door, "fn type_secret_if_up(");
     assert!(
         door.contains("write_input(value)"),
         "the door writes the value to the pane and nowhere else"
@@ -141,7 +143,8 @@ fn the_value_is_typed_through_the_answer_door_and_recorded_nowhere() {
 
 #[test]
 fn the_panes_listing_carries_the_question_and_no_value() {
-    let listing = struct_body(&strip_rust_comments(TERMINAL), "PaneSecret");
+    let terminal = strip_rust_comments(TERMINAL);
+    let listing = struct_body(&terminal, "PaneSecret");
     for field in ["term:", "kind:", "line:", "since:"] {
         assert!(listing.contains(field), "PaneSecret names {field}");
     }
