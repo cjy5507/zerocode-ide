@@ -45,10 +45,10 @@ use crate::hook::HookState;
 /// *stretch* of time rather than a sample of it.
 ///
 /// Three and no more, because the cost of waiting is a badge that keeps lying
-/// for as long as the wait. At [`LOOK_EVERY_MS`] that is 1.5 seconds — the same
-/// grace this product already makes a `Done` stand for before it believes a
-/// turn ended ([`crate::notify::DONE_QUIET_MS`]), which is not a coincidence:
-/// both are answers to "how long must a stop hold still before it is real".
+/// for as long as the wait. At [`LOOK_EVERY_MS`] that is 1.5 seconds: how long
+/// a departure must hold still before it is believed. A finish waits its own
+/// minute now (`crate::notify::FINISHED_QUIET_MS`); the two waits answer
+/// different questions and only share a length by coincidence.
 pub const LOOKS_BEFORE_GONE: u8 = 3;
 
 /// How often the pump asks. Not every round — the pump turns at the display

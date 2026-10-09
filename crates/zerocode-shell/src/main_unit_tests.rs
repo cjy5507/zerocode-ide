@@ -8377,9 +8377,9 @@ fn an_agent_that_left_its_shell_behind_stops_being_drawn_as_running() {
     }
     assert_eq!(
         FOREGROUND_LOOK_EVERY * u32::from(zerocode_core::LOOKS_BEFORE_GONE),
-        Duration::from_millis(zerocode_core::notify::DONE_QUIET_MS as u64),
-        "a departure now settles in a different time than a finished turn, \
-         which are the same question asked of two roads"
+        Duration::from_millis(1_500),
+        "a departure settles in its own 1.5 seconds; a finished turn waits its \
+         own minute (notify::FINISHED_QUIET_MS), so the two no longer share a wait"
     );
     // Ridden on the pump, on a gate of its own — not per round, and not on
     // a thread of its own.
@@ -15363,7 +15363,7 @@ fn non_default_settings_are_the_next_boot_snapshot() {
         document.notifications = NotificationPrefs {
             enabled: true,
             agent_attention: false,
-            agent_completion: true,
+            agent_completion: zerocode_core::notify::FinishRing::Always,
         };
         document.browser = BrowserPrefs {
             home_page: "https://example.com".to_string(),
@@ -15547,7 +15547,11 @@ fn non_default_settings_are_the_next_boot_snapshot() {
         }]
     );
     assert!(!boot.document.notifications.agent_attention);
-    assert!(boot.document.notifications.agent_completion);
+    assert_eq!(
+        boot.document.notifications.agent_completion,
+        zerocode_core::notify::FinishRing::Always,
+        "the finish setting survives the boot round trip"
+    );
     assert_eq!(boot.document.browser.home_page, "https://example.com/");
     assert_eq!(
         boot.document.browser.search_engine,

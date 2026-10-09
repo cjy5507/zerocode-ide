@@ -21577,29 +21577,41 @@ mod tests {
              others"
         );
 
-        // The Done ring is armed and re-checked by stamp.
-        let arming = block_after(shipped, "fn ring_for_pane(");
+        // A stop's ring is armed when the stop is seen, and fires only when the
+        // same stop still stands at the end of its quiet (t-26595).
+        let routing = block_after(shipped, "fn ring_for_pane(");
         assert!(
-            arming.contains("notify::DONE_QUIET_MS"),
-            "the finished ring fires immediately, mid-conversation:\n{arming}"
+            routing.contains("arm_stop_ring("),
+            "the stop rings no longer go through the armed wait:\n{routing}"
         );
+        let arming = block_after(shipped, "fn arm_stop_ring(");
         // 두 사실을 따로 잰다 — 한 표현의 철자로 재면 모양을 바꾸는 순간
         // 깨지고, 깨진 핀은 고치는 사람이 의도까지 함께 지운다.
         assert!(
-            arming.contains("state == zerocode_core::hook::HookState::Done"),
-            "the quiet's re-check no longer asks whether the pane is still \
-             done:\n{arming}"
+            arming.contains("zerocode_core::notify::quiet_ms(ring)"),
+            "the armed ring no longer waits the quiet its kind earns:\n{arming}"
         );
         assert!(
-            arming.contains("armed_at == Some(at)"),
-            "the quiet's re-check no longer compares the stamp, so an armed \
-             ring fires for a turn that already moved on:\n{arming}"
+            arming.contains("stop_stands(held.state, ring)"),
+            "the quiet's re-check no longer asks whether the same stop still \
+             stands, so an armed ring fires for a stop that moved on:\n{arming}"
+        );
+        assert!(
+            arming.contains("quiet.settle(&term, epoch_ms_now(), standing)"),
+            "the wait no longer settles through the one book, so a stop can ring \
+             twice:\n{arming}"
+        );
+        // 한 번 울린 멈춤의 발사는 설정을 발사 시점에 다시 본다.
+        assert!(
+            arming.contains("finish_earns(&app, term)"),
+            "a finish fires without asking the finish setting at the moment it \
+             fires:\n{arming}"
         );
         // 그리고 인터럽트 깃발은 **발사 시점의 줄에서** 읽힌다. 무장 때
-        // 베껴 두면 조용한 1.5초 동안 사람이 누른 키가 낱말에 안 나타난다 —
+        // 베껴 두면 조용한 대기 동안 사람이 누른 키가 낱말에 안 나타난다 —
         // 원본도 보낼 때 스토어에서 읽는다(`use-notification-dispatch.ts:202`).
         assert!(
-            arming.contains("held.interrupted)"),
+            arming.contains("held.interrupted"),
             "the armed completion copies the interrupt flag instead of reading \
              the row when it fires:\n{arming}"
         );

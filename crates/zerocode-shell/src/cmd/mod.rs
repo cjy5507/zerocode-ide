@@ -41,6 +41,7 @@ pub(crate) mod system;
 pub(crate) mod terminal;
 pub(crate) mod update;
 pub(crate) mod usage;
+pub(crate) mod waiting;
 pub(crate) mod workspace;
 pub(crate) mod worktree;
 
@@ -167,8 +168,10 @@ pub(crate) use integration_prefs::{
     github_test_connection, gitlab_status, notification_probe, patch_browser_link_routing,
     patch_browser_user_agents, set_browser_default_zoom, set_browser_home_page,
     set_browser_open_tabs, set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
-    set_notification_preference,
+    set_finish_notification_mode, set_notification_preference,
 };
+
+pub(crate) use waiting::{clear_finish_mark, waiting_on_me};
 
 pub(crate) use workspace::{
     workspace_cleanup_scan, workspace_space_cancel, workspace_space_git, workspace_space_scan,
