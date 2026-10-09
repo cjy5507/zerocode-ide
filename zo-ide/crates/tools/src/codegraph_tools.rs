@@ -646,7 +646,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{mvp_tool_specs, GlobalToolRegistry};
+    use crate::mvp_tool_specs;
 
     fn context_with_source(source: &str) -> (tempfile::TempDir, ToolContext) {
         let workspace = tempfile::tempdir().expect("temp workspace");

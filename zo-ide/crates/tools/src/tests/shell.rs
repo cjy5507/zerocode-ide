@@ -106,8 +106,13 @@ fn tool_context_built_inside_another_tests_cwd_window_leaves_the_window_alone() 
 
 #[test]
 fn bash_background_launch_uses_session_and_stop_waits_for_reap() {
+    // Held for the whole test: the spawned bash resolves through `PATH`, which the
+    // tests that hold `env_lock` change (t-21146).
+    let _env = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cwd = sandbox_disabled_cwd("bash-background-session-cwd");
-    let ctx = crate::tests::tool_context_outside_cwd_windows().with_cwd(cwd.clone());
+    let ctx = ToolContext::new().with_cwd(cwd.clone());
     ctx.set_session_id("visible-session");
     let live = ctx
         .tasks
@@ -153,6 +158,10 @@ fn bash_background_launch_uses_session_and_stop_waits_for_reap() {
 /// as the task's completion.
 #[test]
 fn an_attended_poll_starts_in_the_background_and_ends_as_written_once() {
+    // Held for the whole test, as the background bash test above (t-21146).
+    let _env = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cwd = sandbox_disabled_cwd("bash-attended-poll-cwd");
     let world = cwd.join("released");
     let written = cwd.join("written");
@@ -161,7 +170,7 @@ fn an_attended_poll_starts_in_the_background_and_ends_as_written_once() {
         world.display(),
         written.display()
     );
-    let tasks = crate::tests::task_registry_outside_cwd_windows();
+    let tasks = runtime::task_registry::TaskRegistry::new();
     let completions: Arc<Mutex<Vec<(runtime::task_registry::TaskStatus, String)>>> =
         Arc::default();
     let seen = Arc::clone(&completions);
@@ -584,10 +593,14 @@ fn powershell_errors_when_shell_is_missing() {
 
 #[test]
 fn given_no_enforcer_when_bash_then_executes_normally() {
+    // Held for the whole test, as the background bash test above (t-21146).
+    let _env = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cwd = sandbox_disabled_cwd("bash-no-enforcer-cwd");
-    let mut ctx = crate::tests::tool_context_outside_cwd_windows();
+    let mut ctx = ToolContext::new();
     ctx.cwd = Some(cwd.clone());
-    let registry = crate::tests::builtin_registry_outside_cwd_windows().with_context(ctx);
+    let registry = GlobalToolRegistry::builtin().with_context(ctx);
     let result = registry
         .execute("bash", &json!({ "command": "printf 'ok'" }))
         .expect("bash should succeed without enforcer");

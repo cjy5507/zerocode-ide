@@ -3260,7 +3260,6 @@ use super::canonical_tool_token;
 
 #[cfg(test)]
 mod subagent_image_tests {
-    use super::SubagentToolExecutor;
     use runtime::ToolExecutor;
     use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3310,7 +3309,7 @@ mod subagent_image_tests {
 
 #[cfg(test)]
 mod subagent_lsp_tests {
-    use super::{inherited_lsp, LspRegistry, SubagentToolExecutor};
+    use super::{inherited_lsp, LspRegistry};
     use runtime::lsp_client::LspServerStatus;
     use std::collections::BTreeSet;
     use std::path::Path;
@@ -3356,7 +3355,6 @@ mod subagent_lsp_tests {
 
 #[cfg(test)]
 mod subagent_instrument_tests {
-    use super::SubagentToolExecutor;
     use runtime::ToolExecutor;
     use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};

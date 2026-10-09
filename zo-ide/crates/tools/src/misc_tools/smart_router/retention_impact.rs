@@ -16,7 +16,6 @@ use zerocode_core::jev::COMPACTION;
 use super::compaction_seat::CompactionJudge;
 use super::jev_mock::{machine, Mock};
 use super::super::session_recall::{run_session_recall, SessionRecallInput};
-use crate::ToolContext;
 
 #[derive(Default)]
 struct Calls {

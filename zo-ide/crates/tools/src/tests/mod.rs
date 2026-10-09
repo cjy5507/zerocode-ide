@@ -79,15 +79,6 @@ pub(crate) fn tool_context_outside_cwd_windows() -> ToolContext {
     ToolContext::new()
 }
 
-/// A `TaskRegistry` built outside every other test's cwd window (t-21146). The
-/// same rule as `tool_context_outside_cwd_windows`.
-pub(crate) fn task_registry_outside_cwd_windows() -> runtime::task_registry::TaskRegistry {
-    let _guard = env_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    runtime::task_registry::TaskRegistry::new()
-}
-
 /// `GlobalToolRegistry::builtin()` for callers that do not hold `env_lock`: the
 /// registry's own `ToolContext` binds the process cwd (t-21146).
 pub(crate) fn builtin_registry_outside_cwd_windows() -> GlobalToolRegistry {
@@ -226,17 +217,18 @@ fn run_tool_in_cwd(name: &str, input: &serde_json::Value, cwd: &Path) -> Result<
     execute_tool(&ToolContext::new().with_cwd(cwd.to_path_buf()), name, input)
 }
 
-/// The `run_tool_in_cwd` for callers that do not hold `env_lock` (t-21146).
+/// The `run_tool_in_cwd` for callers that do not hold `env_lock` (t-21146). The lock
+/// covers the run as well as the construction: a bash call spawns through `PATH`,
+/// and the tests that point `PATH` elsewhere hold `env_lock` while they do.
 fn run_tool_in_cwd_outside_windows(
     name: &str,
     input: &serde_json::Value,
     cwd: &Path,
 ) -> Result<String, ToolError> {
-    execute_tool(
-        &tool_context_outside_cwd_windows().with_cwd(cwd.to_path_buf()),
-        name,
-        input,
-    )
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    execute_tool(&ToolContext::new().with_cwd(cwd.to_path_buf()), name, input)
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {
