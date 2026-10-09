@@ -2832,7 +2832,7 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
         .pane_memo()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .forget(&term);
+        .drop_pane(&term);
     // 그 판이 원장에서 앉아 있던 자리도 잊는다. 원장의 행 자체는 남는다 —
     // 재시작을 살아넘는 것이 그 행의 일이므로 — 잊는 것은 **번호에서 자리로
     // 가는 지도**뿐이다. 남겨 두면 다음에 이 번호를 물려받는 판이 지난

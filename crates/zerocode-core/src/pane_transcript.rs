@@ -280,7 +280,7 @@ impl<P> Default for Memo<P> {
 
 impl<P: Eq + Hash> Memo<P> {
     /// Drops the answer kept for a pane that has closed.
-    pub fn forget(&mut self, pane: &P) {
+    pub fn drop_pane(&mut self, pane: &P) {
         self.panes.remove(pane);
     }
 
