@@ -5283,6 +5283,9 @@ await test("라우터 저장 중 이름이나 모델을 바꾸면 옛 저장 응
   for (const change of ["name", "model"]) {
     const held = backend.holdBeforeNext("save_api_router");
     const saving = pageA.evaluate(() => saveApiRouterEntry());
+    // Awaited below. A failed wait before that must not leave this rejection
+    // unhandled: Node would end the whole suite before its summary.
+    saving.catch(() => {});
     await held.reached;
     try {
       if (change === "name") await pageA.fill("#router-name-input", "unsaved-draft");
@@ -10168,6 +10171,9 @@ await test("an older same-key rejection cannot report over a newer browser value
       },
     }).then((answer) => ({ answer, message }));
   }, { homePage: oldHome, message: staleError });
+  // Awaited below. A failed wait before that must not leave this rejection
+  // unhandled: Node would end the whole suite before its summary.
+  oldRequest.catch(() => {});
   await backend.waitForCall("A", "set_browser_home_page", oldFrom);
 
   const newerFrom = backend.calls.length;
