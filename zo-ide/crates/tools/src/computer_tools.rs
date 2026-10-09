@@ -1821,7 +1821,7 @@ mod tests {
             batch_argv(&[input(json!({ "action": "left_click", "app": "Mail", "element_index": 1 }))], ShotFrame::UNIT).is_err(),
             "an element click goes alone too"
         );
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let argv = spelled(json!({ "action": "left_click", "mark": 7 })).unwrap();
         assert!(with_marked_look(argv.clone(), &ctx).is_err(), "no marked look yet");
         let mut screen = json!({ "marks": {
@@ -1996,7 +1996,7 @@ mod tests {
     fn a_code_asked_for_without_into_is_refused_before_the_shell_is_called() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (road, _) = fake_shim(dir.path());
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let cases = [
             ("ask_code alone", json!({ "action": "handoff", "text": "x", "ask_code": true })),
             ("an empty into", json!({ "action": "handoff", "text": "x", "ask_code": true, "into": [] })),
@@ -2027,7 +2027,7 @@ mod tests {
         assert!(!acts("handoff") && !presses("handoff"), "a handoff is a turn the person takes, no act of the model's");
         let dir = tempfile::tempdir().expect("tempdir");
         let (road, _) = fake_shim(dir.path());
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let answer = run_computer(&a_code_into_a_field(), &ctx, &road);
         assert!(answer.is_ok(), "the handoff answers: {answer:?}");
         let verbs = calls(dir.path());
@@ -2171,7 +2171,7 @@ printf '%s
     fn repeated_observe_omits_only_a_picture_already_shown_from_the_same_target() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (road, changed) = fake_shim(dir.path());
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let observe = |app: &str| -> Value {
             serde_json::from_str(&run_computer(&json!({ "action": "observe", "app": app }), &ctx, &road).unwrap()).unwrap()
         };
@@ -2194,7 +2194,7 @@ printf '%s
     fn an_unstaged_picture_does_not_replace_the_models_coordinate_frame() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (road, _) = fake_shim(dir.path());
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let previous = half((400.0, 200.0));
         ctx.set_computer_frame(previous);
         std::fs::remove_file(dir.path().join("shot.png")).unwrap();
@@ -2213,7 +2213,7 @@ printf '%s
         let dir = tempfile::tempdir().expect("tempdir");
         let (road, _) = fake_shim(dir.path());
         std::fs::remove_file(dir.path().join("shot.png")).unwrap();
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         for input in [json!({ "action": "left_click", "coordinate": [0, 0] }),
             json!({ "action": "batch", "steps": [{ "action": "left_click", "coordinate": [0, 0] }] })] {
             assert!(run_computer(&input, &ctx, &road).unwrap_err().to_string().contains("could not be shown"));
@@ -2225,7 +2225,7 @@ printf '%s
     #[test]
     fn an_unchanged_look_is_shown_after_window_marks_or_frame_change_and_after_staging_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let path = dir.path().join("shot.png");
         let show = |window, mark: &str, origin, valid, diff| {
             if valid {
@@ -2255,7 +2255,7 @@ printf '%s
         let (road, changed) = fake_shim(dir.path());
         let script = std::fs::read_to_string(&road.program).unwrap().replace("screenshot|observe)", "screenshot|observe|zoom)");
         std::fs::write(&road.program, script).unwrap();
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         run_computer(&json!({ "action": "observe" }), &ctx, &road).unwrap();
         std::fs::write(&changed, "[]").unwrap();
         run_computer(&json!({ "action": "zoom", "region": [0, 0, 10, 10] }), &ctx, &road).unwrap();
@@ -2273,7 +2273,7 @@ printf '%s
             if settle == Some(false) {
                 std::fs::write(changed, "[]").unwrap();
             }
-            let ctx = ToolContext::new();
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
             ctx.set_computer_frame(half((0.0, 0.0)));
             let mut fields = json!({ "action": "left_click", "coordinate": [10, 10] });
             if let Some(settle) = settle {
@@ -2298,7 +2298,7 @@ printf '%s
     fn an_immediate_batch_still_stops_on_a_refused_action() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (road, _) = fake_shim(dir.path());
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let steps = json!([{ "action": "key", "text": "a" }, { "action": "key", "text": "b" }]);
         std::fs::write(dir.path().join("batch"), json!({
             "ok": false, "error": { "code": "stopped", "message": "the person stopped" },
@@ -2326,7 +2326,7 @@ printf '%s
     fn the_shim_road_is_answered_in_the_pixels_the_model_sees() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (road, changed) = fake_shim(dir.path());
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let run = |fields: Value| -> Value {
             serde_json::from_str(&run_computer(&fields, &ctx, &road).expect("an answer")).expect("json")
         };
@@ -2373,7 +2373,7 @@ printf '%s
         assert_eq!(staged(&ctx), 3);
 
         // A process that has shown its model no picture shows one first.
-        let fresh = ToolContext::new();
+        let fresh = crate::tests::tool_context_outside_cwd_windows();
         let first: Value = serde_json::from_str(
             &run_computer(&json!({ "action": "left_click", "coordinate": [100, 40] }), &fresh, &road).expect("an answer"),
         )
@@ -2382,7 +2382,7 @@ printf '%s
         assert!(first["result"]["said"].as_str().unwrap().starts_with("mouse-click --x 200 --y 80 "), "{first}");
         // A process whose first action answers places is shown a picture
         // first too, so the place it answers is in the pixels it will click.
-        let finder = ToolContext::new();
+        let finder = crate::tests::tool_context_outside_cwd_windows();
         let found: Value = serde_json::from_str(
             &run_computer(&json!({ "action": "find", "ocr": true, "text": "Save" }), &finder, &road).expect("an answer"),
         )
@@ -2397,7 +2397,7 @@ printf '%s
             "#!/bin/sh\ncase \"$1\" in observe) printf '%s\\n' '{\"ok\":false,\"error\":{\"code\":\"permission_denied\",\"message\":\"no screen recording\"}}' >&2; exit 1;; esac\nprintf '%s\\n' '{\"ok\":true,\"result\":{\"said\":\"'\"$*\"'\"}}'\n",
         )
         .unwrap();
-        let blind_ctx = ToolContext::new();
+        let blind_ctx = crate::tests::tool_context_outside_cwd_windows();
         let blind: Value = serde_json::from_str(
             &run_computer(&json!({ "action": "left_click", "coordinate": [100, 40] }), &blind_ctx, &blind_road)
                 .expect("the click still answers"),
@@ -2413,11 +2413,11 @@ printf '%s
             "#!/bin/sh\ncase \"$1\" in observe) printf '%s\\n' '{\"ok\":false,\"error\":{\"code\":\"action_timeout\",\"message\":\"slow\"}}' >&2; exit 1;; esac\nprintf '%s\\n' '{\"ok\":true,\"result\":{}}'\n",
         )
         .unwrap();
-        let stopped = run_computer(&json!({ "action": "left_click", "coordinate": [1, 1] }), &ToolContext::new(), &blind_road)
+        let stopped = run_computer(&json!({ "action": "left_click", "coordinate": [1, 1] }), &crate::tests::tool_context_outside_cwd_windows(), &blind_road)
             .expect_err("no frame, no act");
         assert!(stopped.to_string().contains("action_timeout"), "{stopped}");
         let untouched: Value = serde_json::from_str(
-            &run_computer(&json!({ "action": "type", "text": "x" }), &ToolContext::new(), &road).expect("an answer"),
+            &run_computer(&json!({ "action": "type", "text": "x" }), &crate::tests::tool_context_outside_cwd_windows(), &road).expect("an answer"),
         )
         .unwrap();
         assert!(untouched["first_look"].is_null(), "no position, nothing to learn");
@@ -2480,7 +2480,7 @@ printf '%s
             { "action": "type", "text": "world" },
             { "action": "key", "text": "Return" },
         ]);
-        let singly = ToolContext::new();
+        let singly = crate::tests::tool_context_outside_cwd_windows();
         singly.set_computer_frame(half((0.0, 0.0)));
         for step in five.as_array().unwrap() {
             run_computer(step, &singly, &road).expect("an answer");
@@ -2491,7 +2491,7 @@ printf '%s
         std::fs::remove_file(dir.path().join("calls")).unwrap();
         let steps: Vec<Value> = (1..=5).map(|n| json!({ "n": n, "verb": "x", "ok": true, "ms": 1, "result": { "cursor": { "x": 20, "y": 20 } } })).collect();
         std::fs::write(dir.path().join("batch"), json!({ "ok": true, "result": { "ran": 5, "of": 5, "steps": steps } }).to_string()).unwrap();
-        let batched = ToolContext::new();
+        let batched = crate::tests::tool_context_outside_cwd_windows();
         batched.set_computer_frame(half((0.0, 0.0)));
         let answer: Value = serde_json::from_str(&run_computer(&json!({ "action": "batch", "steps": five }), &batched, &road).expect("an answer")).unwrap();
         assert_eq!(calls(dir.path()), ["batch", "observe"], "one batch, one look");
@@ -2511,7 +2511,7 @@ printf '%s
         let (road, _) = fake_shim(dir.path());
         let ran: Vec<Value> = (1..=2).map(|n| json!({ "n": n, "verb": "x", "ok": true, "ms": 1, "result": {} })).collect();
         std::fs::write(dir.path().join("batch"), json!({ "ok": true, "result": { "ran": 2, "of": 2, "steps": ran } }).to_string()).unwrap();
-        let fresh = ToolContext::new();
+        let fresh = crate::tests::tool_context_outside_cwd_windows();
         let steps = json!([{ "action": "left_click", "coordinate": [10, 10] }, { "action": "type", "text": "hi" }]);
         run_computer(&json!({ "action": "batch", "steps": steps }), &fresh, &road).expect("an answer");
         assert_eq!(calls(dir.path()), ["observe", "batch", "observe"], "a look, the batch, a look");
@@ -2531,7 +2531,7 @@ printf '%s
     fn a_batch_refused_midway_says_what_ran_and_still_looks() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (road, _) = fake_shim(dir.path());
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         ctx.set_computer_frame(half((0.0, 0.0)));
         let three = json!([{ "action": "key", "text": "a" }, { "action": "key", "text": "b" }, { "action": "left_click", "coordinate": [1, 1] }]);
         std::fs::write(dir.path().join("batch"), json!({
@@ -2569,11 +2569,11 @@ printf '%s
             json!([{ "action": "wait_for", "window": "Save" }]),
             json!((0..=COMPUTER_BATCH_MAX_STEPS).map(|_| json!({ "action": "wait", "duration": 0.01 })).collect::<Vec<_>>()),
         ] {
-            let error = run_computer(&json!({ "action": "batch", "steps": steps }), &ToolContext::new(), &road).expect_err("refused");
+            let error = run_computer(&json!({ "action": "batch", "steps": steps }), &crate::tests::tool_context_outside_cwd_windows(), &road).expect_err("refused");
             assert!(matches!(error, ToolError::InvalidInput(_)), "{error}");
         }
         assert!(calls(dir.path()).is_empty(), "no trip, no look: {:?}", calls(dir.path()));
-        let stray = run_computer(&json!({ "action": "key", "text": "a", "steps": [] }), &ToolContext::new(), &road).expect_err("stray steps");
+        let stray = run_computer(&json!({ "action": "key", "text": "a", "steps": [] }), &crate::tests::tool_context_outside_cwd_windows(), &road).expect_err("stray steps");
         assert!(stray.to_string().contains("belongs to `batch`"));
 
         let spec = tool_specs().pop().expect("one spec");
@@ -2645,7 +2645,7 @@ printf '%s
             assert_eq!(walk_steps(&tool.params), walk_steps(&cli.params), "the same budget");
         }
         // What a walk may not be is the core's to say, read before anything moves.
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let road = ComputerRoad { program: PathBuf::from("/nonexistent/zerocode-computer") };
         for (fields, why) in [
             (json!({ "action": "walk", "pane": "browser-1" }), "a goal"),
@@ -2742,7 +2742,7 @@ printf '%s
             let dir = tempfile::tempdir().expect("tempdir");
             let (road, _) = fake_shim(dir.path());
             std::fs::write(dir.path().join("walk"), walk_answer(mode, 0, false, None, &[]).to_string()).unwrap();
-            let ctx = ToolContext::new();
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
             let said: Value = serde_json::from_str(
                 &run_computer(&json!({ "action": "walk", "goal": "g", "app": "Calculator" }), &ctx, &road).unwrap(),
             )
@@ -2772,7 +2772,7 @@ printf '%s
             let dir = tempfile::tempdir().expect("tempdir");
             let (road, _) = fake_shim(dir.path());
             std::fs::write(dir.path().join("walk"), answer.to_string()).unwrap();
-            let ctx = ToolContext::new();
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
             let mut fields = json!({ "action": "walk", "goal": "도움말에서 설치 안내를 연다", "until": "설치 안내", "max_steps": 6 });
             for (key, value) in screen.as_object().unwrap() {
                 fields[key] = value.clone();
@@ -2890,7 +2890,7 @@ printf '%s
         let (road, _) = fake_shim(dir.path());
         let ran: Vec<Value> = (1..=2).map(|n| json!({ "n": n, "verb": "x", "ok": true, "ms": 1, "result": {} })).collect();
         std::fs::write(dir.path().join("batch"), json!({ "ok": true, "result": { "ran": 2, "of": 2, "steps": ran } }).to_string()).unwrap();
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         ctx.set_computer_frame(half((0.0, 0.0)));
         let steps = json!([{ "action": "activate", "app": "iPhone Mirroring" }, { "action": "left_click", "coordinate": [10, 10] }]);
         let answer: Value = serde_json::from_str(&run_computer(&json!({ "action": "batch", "steps": steps }), &ctx, &road).expect("an answer")).unwrap();
@@ -3018,7 +3018,7 @@ printf '%s
     fn a_code_the_window_answers_is_in_no_store_of_a_zo_conversation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (road, _) = fake_shim(dir.path());
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let calls_made = [
             ("call-1", a_code_into_a_field()),
             ("call-2", json!({ "action": "handoff", "text": "The site's one-time code", "ask_code": true })),

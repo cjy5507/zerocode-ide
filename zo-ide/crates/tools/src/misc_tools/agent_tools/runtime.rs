@@ -591,7 +591,7 @@ mod tests {
         let mut allowed = BTreeSet::new();
         allowed.insert(crate::capability::CAPABILITY_INVOKE.to_string());
         allowed.insert("glob_search".to_string());
-        let mut executor = SubagentToolExecutor::new(allowed);
+        let mut executor = crate::tests::subagent_executor_outside_cwd_windows(allowed);
         let error = executor
             .execute(
                 crate::capability::CAPABILITY_INVOKE,
@@ -618,7 +618,7 @@ mod tests {
         let mut allowed = BTreeSet::new();
         allowed.insert("mcp__ctx7__query".to_string());
         let mut executor =
-            SubagentToolExecutor::new(allowed).with_mcp_passthrough(Some(test_passthrough()));
+            crate::tests::subagent_executor_outside_cwd_windows(allowed).with_mcp_passthrough(Some(test_passthrough()));
 
         let output = executor
             .execute("mcp__ctx7__query", r#"{"q": "hi"}"#)
@@ -632,7 +632,7 @@ mod tests {
         allowed.insert("ToolSearch".to_string());
         allowed.insert("mcp__ctx7__query".to_string());
         let mut executor =
-            SubagentToolExecutor::new(allowed).with_mcp_passthrough(Some(test_passthrough()));
+            crate::tests::subagent_executor_outside_cwd_windows(allowed).with_mcp_passthrough(Some(test_passthrough()));
 
         let output = executor
             .execute(
@@ -674,7 +674,7 @@ mod tests {
         let mut allowed = BTreeSet::new();
         allowed.insert("ToolSearch".to_string());
         allowed.insert("mcp__ctx7__query".to_string());
-        let mut executor = SubagentToolExecutor::new(allowed).with_mcp_passthrough(Some(passthrough));
+        let mut executor = crate::tests::subagent_executor_outside_cwd_windows(allowed).with_mcp_passthrough(Some(passthrough));
 
         let output = executor
             .execute(
@@ -703,7 +703,7 @@ mod tests {
         allowed.insert("mcp__ctx7__query".to_string());
         let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
             .with_tool_requirement("ToolSearch", PermissionMode::WorkspaceWrite);
-        let mut executor = SubagentToolExecutor::new(allowed)
+        let mut executor = crate::tests::subagent_executor_outside_cwd_windows(allowed)
             .with_enforcer(PermissionEnforcer::new(policy))
             .with_mcp_passthrough(Some(test_passthrough()));
 
@@ -740,7 +740,7 @@ mod tests {
         );
         let mut allowed = BTreeSet::new();
         allowed.insert("mcp__ctx7__query".to_string());
-        let mut executor = SubagentToolExecutor::new(allowed).with_mcp_passthrough(Some(passthrough));
+        let mut executor = crate::tests::subagent_executor_outside_cwd_windows(allowed).with_mcp_passthrough(Some(passthrough));
 
         let output = executor
             .execute("mcp__ctx7__query", r#"{"q":"hi"}"#)
@@ -779,7 +779,7 @@ mod tests {
         // exact grading `build_agent_runtime` registers from the definition.
         let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
             .with_tool_requirement("mcp__ctx7__query", PermissionMode::DangerFullAccess);
-        let mut executor = SubagentToolExecutor::new(allowed)
+        let mut executor = crate::tests::subagent_executor_outside_cwd_windows(allowed)
             .with_enforcer(PermissionEnforcer::new(policy))
             .with_mcp_passthrough(Some(test_passthrough()));
 
@@ -796,7 +796,7 @@ mod tests {
     fn subagent_without_passthrough_rejects_mcp_names() {
         let mut allowed = BTreeSet::new();
         allowed.insert("mcp__ctx7__query".to_string());
-        let mut executor = SubagentToolExecutor::new(allowed);
+        let mut executor = crate::tests::subagent_executor_outside_cwd_windows(allowed);
         let error = executor
             .execute("mcp__ctx7__query", r#"{"q": "hi"}"#)
             .expect_err("no passthrough installed");

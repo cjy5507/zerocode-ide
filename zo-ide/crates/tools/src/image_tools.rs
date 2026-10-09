@@ -384,7 +384,7 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("zo-imagegen-{unique}"));
         fs::create_dir(&root).expect("create fixture root");
-        let mut context = ToolContext::new();
+        let mut context = crate::tests::tool_context_outside_cwd_windows();
         context.workspace_root = Some(root.clone());
         context.cwd = Some(root.clone());
 
@@ -421,7 +421,7 @@ mod tests {
         fs::create_dir_all(&root).expect("create workspace");
         fs::create_dir_all(&outside).expect("create outside directory");
         symlink(&outside, root.join(".zo")).expect("create escape symlink");
-        let mut context = ToolContext::new();
+        let mut context = crate::tests::tool_context_outside_cwd_windows();
         context.workspace_root = Some(root);
 
         let error = persist_generated_image(&context, &STANDARD.encode(PNG_1X1))

@@ -1472,7 +1472,7 @@ mod tests {
 
     #[test]
     fn imagegen_is_deferred_and_reachable_only_for_current_gpt_models() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         let advertised = |registry: &GlobalToolRegistry| {
             registry
                 .definitions(None)
@@ -1510,7 +1510,7 @@ mod tests {
 
     #[test]
     fn deferred_families_are_off_the_wire_but_searchable() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
 
         let wire: BTreeSet<String> = registry
             .definitions(None)
@@ -1612,7 +1612,7 @@ mod tests {
     /// advertisement does not move.
     #[test]
     fn searching_never_changes_the_wire_advertisement() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         let wire = |registry: &GlobalToolRegistry| {
             registry
                 .definitions(None)
@@ -1735,7 +1735,7 @@ mod tests {
 
     #[test]
     fn tool_search_returns_full_schemas_for_selected_deferred_tools() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         let output = registry.search("select:Workflow", 3, None, None);
 
         assert_eq!(output.matches, vec!["Workflow".to_string()]);
@@ -1756,7 +1756,7 @@ mod tests {
 
     #[test]
     fn explicit_allowlist_overrides_deferral() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         let allowed: BTreeSet<String> = ["EnterWorktree".to_string()].into_iter().collect();
 
         let wire: Vec<String> = registry
@@ -1772,7 +1772,7 @@ mod tests {
 
     #[test]
     fn plugin_tool_names_lists_registered_plugin_tools() {
-        let registry = GlobalToolRegistry::with_plugin_tools(vec![
+        let registry = crate::tests::with_plugin_tools_outside_cwd_windows(vec![
             plugin_tool("alpha_tool"),
             plugin_tool("beta_tool"),
         ])
@@ -1785,13 +1785,13 @@ mod tests {
 
     #[test]
     fn plugin_tool_names_is_empty_without_plugins() {
-        let registry = GlobalToolRegistry::with_plugin_tools(Vec::new()).expect("empty registry");
+        let registry = crate::tests::with_plugin_tools_outside_cwd_windows(Vec::new()).expect("empty registry");
         assert!(registry.plugin_tool_names().is_empty());
     }
 
     #[test]
     fn resolvable_tool_names_include_deferred_runtime_and_plugin_tools() {
-        let registry = GlobalToolRegistry::with_plugin_tools(vec![plugin_tool("plugin_demo")])
+        let registry = crate::tests::with_plugin_tools_outside_cwd_windows(vec![plugin_tool("plugin_demo")])
             .expect("plugin registry")
             .with_runtime_tools(vec![runtime_tool("mcp__demo__echo")])
             .expect("runtime tool");
@@ -1837,7 +1837,7 @@ mod tests {
             PluginToolPermission::WorkspaceWrite,
             Some(root.clone()),
         );
-        let mut registry = GlobalToolRegistry::with_plugin_tools(vec![tool]).expect("registry");
+        let mut registry = crate::tests::with_plugin_tools_outside_cwd_windows(vec![tool]).expect("registry");
         let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
             .with_tool_requirement("plugin_write", PermissionMode::WorkspaceWrite);
         registry.set_enforcer(PermissionEnforcer::new(policy));
@@ -1867,7 +1867,7 @@ mod tests {
                 .any(|s| s.name == "InstrumentLog"),
             "InstrumentLog must exist as a builtin spec",
         );
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         assert!(
             !registry
                 .definitions(None)
@@ -1902,7 +1902,7 @@ mod tests {
         // parenthesized scope is a permission-policy concern, not a tool-offer
         // concern, so the normalizer must reduce `Bash(git status:*)` to the bare
         // `bash` tool rather than tokenizing on the inner space and rejecting it.
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         let allowed = registry
             .normalize_allowed_tools(&["Bash(git status:*)".to_string(), "Read".to_string()])
             .expect("CC permission-spec form must normalize, not error")
@@ -1925,7 +1925,7 @@ mod tests {
                 .any(|s| s.name == "DebugHypothesis"),
             "DebugHypothesis must exist as a builtin spec",
         );
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         assert!(
             !registry
                 .definitions(None)
@@ -2006,7 +2006,7 @@ mod tests {
 
     #[test]
     fn execute_unknown_tool_name_returns_actionable_notfound() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         let result = registry.execute("read_fil", &json!({}));
         let error = result.expect_err("unknown tool must error");
         assert!(
@@ -2044,7 +2044,7 @@ mod tests {
             "mcp__demo__echo".to_string(),
             "plugin_demo".to_string(),
         ]);
-        let registry = GlobalToolRegistry::with_plugin_tools(vec![plugin_tool("plugin_demo")])
+        let registry = crate::tests::with_plugin_tools_outside_cwd_windows(vec![plugin_tool("plugin_demo")])
             .expect("plugin registry")
             .with_runtime_tools(vec![runtime_tool("mcp__demo__echo")])
             .expect("runtime tool")
@@ -2107,7 +2107,7 @@ mod tests {
 
     #[test]
     fn toggleable_tools_keep_disabled_tools_visible_with_state() {
-        let registry = GlobalToolRegistry::with_plugin_tools(vec![plugin_tool("plugin_demo")])
+        let registry = crate::tests::with_plugin_tools_outside_cwd_windows(vec![plugin_tool("plugin_demo")])
             .expect("plugin registry")
             .with_runtime_tools(vec![runtime_tool("mcp__demo__echo")])
             .expect("runtime tool")
@@ -2135,7 +2135,7 @@ mod tests {
 
     #[test]
     fn set_runtime_tools_propagates_across_clones() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         let clone = registry.clone();
         assert!(!clone.has_runtime_tool("mcp_demo"));
         // Refreshing the ORIGINAL must be visible on a CLONE — they share the
@@ -2175,7 +2175,7 @@ mod tests {
     fn execute_tool_search_respects_permission_enforcer() {
         let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
             .with_tool_requirement("ToolSearch", PermissionMode::WorkspaceWrite);
-        let registry = GlobalToolRegistry::builtin().with_enforcer(PermissionEnforcer::new(policy));
+        let registry = crate::tests::builtin_registry_outside_cwd_windows().with_enforcer(PermissionEnforcer::new(policy));
 
         let error = registry
             .execute("ToolSearch", &json!({ "query": "read", "max_results": 5 }))
@@ -2192,7 +2192,7 @@ mod tests {
 
     #[test]
     fn execute_tool_search_uses_live_registry_for_runtime_and_plugin_tools() {
-        let registry = GlobalToolRegistry::with_plugin_tools(vec![plugin_tool("plugin_demo")])
+        let registry = crate::tests::with_plugin_tools_outside_cwd_windows(vec![plugin_tool("plugin_demo")])
             .expect("plugin registry");
         registry
             .set_runtime_tools(vec![runtime_tool("mcp__demo__echo")])
@@ -2244,7 +2244,7 @@ mod tests {
     /// one schema.)
     #[test]
     fn mcp_and_plugin_schemas_stay_off_the_wire_unless_explicitly_allowed() {
-        let registry = GlobalToolRegistry::with_plugin_tools(vec![plugin_tool("plugin_demo")])
+        let registry = crate::tests::with_plugin_tools_outside_cwd_windows(vec![plugin_tool("plugin_demo")])
             .expect("plugin registry");
         registry
             .set_runtime_tools(vec![runtime_tool("mcp__demo__echo")])
@@ -2298,7 +2298,7 @@ mod tests {
     /// DATA rather than as a new entry in the advertisement.
     #[test]
     fn a_found_deferred_builtin_returns_its_schema_without_joining_the_wire() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         let advertised = |registry: &GlobalToolRegistry| {
             registry
                 .definitions(None)
@@ -2323,7 +2323,7 @@ mod tests {
     #[test]
     fn set_runtime_tools_preserves_disabled_runtime_filter_across_refreshes() {
         let disabled_name = "mcp__demo__fresh";
-        let registry = GlobalToolRegistry::builtin()
+        let registry = crate::tests::builtin_registry_outside_cwd_windows()
             .with_disabled_tools(BTreeSet::from([disabled_name.to_string()]));
         let clone = registry.clone();
 
@@ -2384,14 +2384,14 @@ mod tests {
 
     #[test]
     fn set_runtime_tools_rejects_duplicate_names() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         let err = registry.set_runtime_tools(vec![runtime_tool("dup"), runtime_tool("dup")]);
         assert!(err.is_err(), "duplicate runtime tool names are rejected");
     }
 
     #[test]
     fn runtime_tool_definitions_round_trips_the_current_set() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         assert!(registry.runtime_tool_definitions().is_empty());
         registry
             .set_runtime_tools(vec![runtime_tool("mcp_a"), runtime_tool("mcp_b")])
@@ -2426,7 +2426,7 @@ mod tests {
     /// bytes in both.
     #[test]
     fn selecting_plan_does_not_move_the_wire() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         let reachable = |registry: &GlobalToolRegistry| {
             let found = registry.search("select:ExitPlanModeV2", 1, None, None);
             found
@@ -2469,7 +2469,7 @@ mod tests {
 
     #[test]
     fn stale_enter_plan_mode_is_idempotent_success_under_selected_plan() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         registry.context().set_plan_selected(true);
 
         // A stale/in-flight EnterPlanMode call still arrives even though it is
@@ -2483,7 +2483,7 @@ mod tests {
 
     #[test]
     fn stale_legacy_exit_plan_mode_is_denied_as_user_controlled_under_plan() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
         registry.context().set_plan_selected(true);
 
         // The model must not be able to restore write access by calling the
@@ -2502,7 +2502,7 @@ mod tests {
 
     #[test]
     fn tool_search_cannot_re_advertise_plan_reentry_tools_under_selected_plan() {
-        let registry = GlobalToolRegistry::builtin();
+        let registry = crate::tests::builtin_registry_outside_cwd_windows();
 
         // ToolSearch surfaces builtins via `searchable_tool_specs`, which is
         // built from `builtin_tool_specs`. Confirm the plan filter carries

@@ -1497,7 +1497,7 @@ fn file_tools_cover_read_write_and_edit_behaviors() {
 fn multi_edit_applies_edits_sequentially_against_one_buffer() {
     let path = temp_path("multi-edit-sequential.txt");
     fs::write(&path, "alpha\ntail\n").expect("seed multi-edit file");
-    let ctx = ToolContext::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
     execute_tool(&ctx, "read_file", &json!({ "path": path }))
         .expect("read should seed freshness guard");
 
@@ -1522,7 +1522,7 @@ fn multi_edit_applies_edits_sequentially_against_one_buffer() {
 fn multi_edit_without_prior_read_is_rejected() {
     let path = temp_path("multi-edit-unread.txt");
     fs::write(&path, "alpha\n").expect("seed unread file");
-    let ctx = ToolContext::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
 
     let error = execute_tool(
         &ctx,
@@ -1549,7 +1549,7 @@ fn multi_edit_duplicate_edit_reports_index_and_writes_nothing() {
     let path = temp_path("multi-edit-duplicate-failure.txt");
     let original = "alpha\ntail\n";
     fs::write(&path, original).expect("seed multi-edit file");
-    let ctx = ToolContext::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
     execute_tool(&ctx, "read_file", &json!({ "path": path }))
         .expect("read should seed freshness guard");
 
@@ -1576,7 +1576,7 @@ fn multi_edit_ambiguous_edit_reports_index_and_writes_nothing() {
     let path = temp_path("multi-edit-atomic-ambiguous.txt");
     let original = "alpha\nduplicate\nduplicate\n";
     fs::write(&path, original).expect("seed multi-edit file");
-    let ctx = ToolContext::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
     execute_tool(&ctx, "read_file", &json!({ "path": path }))
         .expect("read should seed freshness guard");
 
@@ -1602,7 +1602,7 @@ fn multi_edit_ambiguous_edit_reports_index_and_writes_nothing() {
 fn multi_edit_tolerant_match_preserves_crlf_line_endings() {
     let path = temp_path("multi-edit-crlf.txt");
     fs::write(&path, b"alpha\r\nbeta\r\ntail\r\n").expect("seed CRLF file");
-    let ctx = ToolContext::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
     execute_tool(&ctx, "read_file", &json!({ "path": path }))
         .expect("read should seed freshness guard");
 

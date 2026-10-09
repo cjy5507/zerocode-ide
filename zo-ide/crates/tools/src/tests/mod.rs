@@ -31,10 +31,17 @@ use runtime::{
 };
 use serde_json::json;
 
-/// Shared test context — cheap to create (registries are Arc-backed).
+/// Shared test context — cheap to create (registries are Arc-backed). Its task
+/// registry is pinned to this crate's folder: the first caller may run inside
+/// another test's cwd window, and the process cwd must not pick the registry
+/// folder (t-21146).
 fn test_ctx() -> &'static ToolContext {
     static CTX: OnceLock<ToolContext> = OnceLock::new();
-    CTX.get_or_init(ToolContext::new)
+    CTX.get_or_init(|| {
+        ToolContext::new().with_tasks(runtime::task_registry::TaskRegistry::with_persistence_path(
+            Some(Path::new(env!("CARGO_MANIFEST_DIR")).join(".zo/registries/tasks.json")),
+        ))
+    })
 }
 
 /// Convenience wrapper matching the old two-arg signature used across tests.
@@ -42,6 +49,7 @@ fn run_tool(name: &str, input: &serde_json::Value) -> Result<String, ToolError> 
     execute_tool(test_ctx(), name, input)
 }
 
+/// Every caller holds `env_lock` (t-21146), so the context is built raw here.
 fn run_tool_isolated(name: &str, input: &serde_json::Value) -> Result<String, ToolError> {
     let ctx = ToolContext::new();
     execute_tool(&ctx, name, input)
@@ -57,6 +65,48 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
         std::env::set_var("ZO_DISABLE_KEYCHAIN", "1");
         Mutex::new(())
     })
+}
+
+/// A `ToolContext` for tests that may run beside another test's `set_current_dir`
+/// window (t-21146). `ToolContext::new()` binds the process cwd's `.zo/registries`
+/// when it is built, so the construction waits for `env_lock`, which each window's
+/// owner holds for the whole window. Do not call it while holding `env_lock`:
+/// std's mutex does not re-enter.
+pub(crate) fn tool_context_outside_cwd_windows() -> ToolContext {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ToolContext::new()
+}
+
+/// `GlobalToolRegistry::builtin()` for callers that do not hold `env_lock`: the
+/// registry's own `ToolContext` binds the process cwd (t-21146).
+pub(crate) fn builtin_registry_outside_cwd_windows() -> GlobalToolRegistry {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    GlobalToolRegistry::builtin()
+}
+
+/// `GlobalToolRegistry::with_plugin_tools` for callers that do not hold `env_lock`
+/// (t-21146): it builds a registry with its own `ToolContext`.
+pub(crate) fn with_plugin_tools_outside_cwd_windows(
+    plugin_tools: Vec<plugins::PluginTool>,
+) -> Result<GlobalToolRegistry, ToolError> {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    GlobalToolRegistry::with_plugin_tools(plugin_tools)
+}
+
+/// `SubagentToolExecutor::new` for callers that do not hold `env_lock` (t-21146).
+pub(crate) fn subagent_executor_outside_cwd_windows(
+    allowed_tools: BTreeSet<String>,
+) -> crate::misc_tools::agent_tools::SubagentToolExecutor {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::misc_tools::agent_tools::SubagentToolExecutor::new(allowed_tools)
 }
 
 /// A scoped environment override shared by tests that use process-wide state.
@@ -162,7 +212,22 @@ fn sandbox_disabled_cwd(name: &str) -> PathBuf {
     root
 }
 
+/// For callers that already hold `env_lock` (t-21146): the context is built raw.
 fn run_tool_in_cwd(name: &str, input: &serde_json::Value, cwd: &Path) -> Result<String, ToolError> {
+    execute_tool(&ToolContext::new().with_cwd(cwd.to_path_buf()), name, input)
+}
+
+/// The `run_tool_in_cwd` for callers that do not hold `env_lock` (t-21146). The lock
+/// covers the run as well as the construction: a bash call spawns through `PATH`,
+/// and the tests that point `PATH` elsewhere hold `env_lock` while they do.
+fn run_tool_in_cwd_outside_windows(
+    name: &str,
+    input: &serde_json::Value,
+    cwd: &Path,
+) -> Result<String, ToolError> {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     execute_tool(&ToolContext::new().with_cwd(cwd.to_path_buf()), name, input)
 }
 

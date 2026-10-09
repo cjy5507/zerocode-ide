@@ -804,7 +804,7 @@ mod auto_format_guard_tests {
 
     #[test]
     fn file_has_staged_probe_reflects_the_sink() {
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         assert!(!file_has_staged_probe(&ctx), "empty sink → false");
         stage_probe(&ctx, "x.rs".into(), "\n/*ZO_PROBE:1*/ x");
         assert!(file_has_staged_probe(&ctx), "staged probe → true");
@@ -814,7 +814,7 @@ mod auto_format_guard_tests {
     fn enrichment_target_resolves_relative_path_against_tool_cwd() {
         let cwd = unique_temp_path("enrich-cwd");
         std::fs::create_dir_all(&cwd).expect("create cwd");
-        let ctx = ToolContext::new().with_cwd(cwd.clone());
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_cwd(cwd.clone());
         let input = serde_json::json!({ "path": "src/lib.rs" });
 
         let target = enrichment_target_path(&ctx, &input).expect("target path");
@@ -835,7 +835,7 @@ mod auto_format_guard_tests {
         let cwd = unique_temp_path("enrich-other-cwd");
         std::fs::create_dir_all(&workspace).expect("create workspace");
         std::fs::create_dir_all(&cwd).expect("create cwd");
-        let mut ctx = ToolContext::new().with_workspace_root(workspace.clone());
+        let mut ctx = crate::tests::tool_context_outside_cwd_windows().with_workspace_root(workspace.clone());
         ctx.cwd = Some(cwd.clone());
         let input = serde_json::json!({ "path": "relative.rs" });
 
@@ -857,7 +857,7 @@ mod auto_format_guard_tests {
     fn enrichment_target_normalizes_missing_segments_like_file_tools() {
         let workspace = unique_temp_path("enrich-normalized-workspace");
         std::fs::create_dir_all(&workspace).expect("create workspace");
-        let ctx = ToolContext::new().with_workspace_root(workspace.clone());
+        let ctx = crate::tests::tool_context_outside_cwd_windows().with_workspace_root(workspace.clone());
         let input = serde_json::json!({ "path": "missing_dir/../relative.rs" });
 
         let target = enrichment_target_path(&ctx, &input).expect("target path");
@@ -884,7 +884,7 @@ mod auto_format_guard_tests {
         let misformatted = "fn   f( ){let x=1;}\n"; // rustfmt would rewrite this
         std::fs::write(&path, misformatted).expect("write fixture");
 
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         stage_probe(&ctx, path.clone(), "\n/*ZO_PROBE:1*/ //p");
 
         let input = serde_json::json!({ "path": path.to_string_lossy() });
@@ -1065,7 +1065,7 @@ mod auto_format_guard_tests {
     fn over_cap_bash_dispatch_returns_digest_and_recovery_notice() {
         let artifact_dir = unique_temp_path("bash-digest-artifacts");
         std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let command = "i=0; while [ $i -lt 1200 ]; do printf 'stdout-line-%04d detail detail detail\n' \"$i\"; i=$((i+1)); done; printf 'stderr-tail failure detail\n' >&2; exit 1";
         let input = serde_json::json!({ "command": command, "timeout": 20 });
 
@@ -1098,7 +1098,7 @@ mod auto_format_guard_tests {
 
         let artifact_dir = unique_temp_path("bash-small-artifacts");
         std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let input = serde_json::json!({ "command": "echo waited", "timeout": 20000 });
 
         let content = super::execute_tool_with_context_and_artifact_dir(
@@ -1136,7 +1136,7 @@ mod auto_format_guard_tests {
 
         let artifact_dir = unique_temp_path("cargo-test-bash-artifacts");
         std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let command = "echo 'running 901 tests'; i=0; while [ $i -lt 900 ]; do printf 'test pass_%04d ... ok\n' \"$i\"; i=$((i+1)); done; printf 'test fail_case ... FAILED\n\nfailures:\n\n---- fail_case stdout ----\nthread '\''fail_case'\'' panicked at crates/demo.rs:42:9:\nexpected true\n\nfailures:\n    fail_case\n\ntest result: FAILED. 900 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n'; exit 1";
         let input = serde_json::json!({ "command": command, "timeout": 20 });
 
@@ -1184,7 +1184,7 @@ mod auto_format_guard_tests {
     fn oversized_tool_error_is_capped_and_kept_recoverable() {
         let artifact_dir = unique_temp_path("tool-error-artifacts");
         std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let huge_path = format!("/nonexistent-zo-test/{}.png", "p".repeat(40_000));
         let input = serde_json::json!({ "path": huge_path });
 
@@ -1236,7 +1236,7 @@ mod auto_format_guard_tests {
     fn ordinary_tool_error_is_left_exactly_as_it_was() {
         let artifact_dir = unique_temp_path("tool-error-small");
         std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
-        let ctx = ToolContext::new();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
         let input = serde_json::json!({ "path": "/nonexistent-zo-test/missing.png" });
 
         let error = super::execute_tool_with_context_and_artifact_dir(
