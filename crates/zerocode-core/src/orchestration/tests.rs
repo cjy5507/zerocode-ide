@@ -23022,6 +23022,33 @@ fn measure_a_pointer_letter_about_a_pane_mail_across_forty_five_runs() {
     );
 }
 
+/// Measurement, not a rule (t-35823): a checks letter to a checkout group on
+/// the same 45-run ledger. Only one run seats a worker in the checkout, so the
+/// letter should land in that run and nowhere else.
+#[test]
+#[ignore = "measurement, not a rule"]
+fn measure_a_checks_letter_across_forty_five_runs() {
+    let mut ledger = Ledger::new();
+    let runs: Vec<String> = (0..45)
+        .map(|n| ledger.create_run(&format!("run {n}"), 1))
+        .collect();
+    ledger
+        .start_worker(&runs[30], "codex", ("team-checks", "%1"), None, 2)
+        .unwrap();
+    ledger.worker_seated(("team-checks", "%1"), "/wt/checks");
+    let filed = ledger.post_observation_once(
+        "@worktree:/wt/checks",
+        "checks: 1 failed (ci/test)",
+        Some("checks:ci:1"),
+        3,
+    );
+    eprintln!(
+        "t-35823 measure checks: runs={} filed={filed} letter_rows={}",
+        runs.len(),
+        messages_with_subject(&ledger, &runs, "checks:ci:1")
+    );
+}
+
 /// A coordinator who pinned a model already chose among the agents (t-6342):
 /// 82 of the 85 summonses the seat was asked about on this machine named
 /// one, and the question offered every installed agent anyway — codex was
