@@ -88,6 +88,7 @@ import { testEditorRecovery } from "./editor-recovery.mjs";
 import { testComposerAttach } from "./attach.mjs";
 import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
+import { testImeKoreanRegression } from "./ime-korean-regression.mjs";
 import { testWorkers } from "./workers.mjs";
 import { testSidebarAgents } from "./sidebar-agents.mjs";
 import { testSidebarReviewState } from "./sidebar-review-state.mjs";
@@ -306,6 +307,7 @@ suite("ask-popup", ({ browser, origin, ok }) => testAskPopup(browser, origin, ok
 suite("editor-selection", ({ browser, origin, ok }) => testEditorSelection(browser, origin, ok));
 suite("editor-recovery", ({ browser, origin, ok }) => testEditorRecovery(browser, origin, ok));
 suite("ime-broken-commit", ({ browser, origin, ok }) => testImeBrokenCommit(browser, origin, ok));
+suite("ime-korean-regression", ({ browser, origin, ok }) => testImeKoreanRegression(browser, origin, ok));
 suite("vault", async ({ browser, origin }) => {
   const { page } = await openWindowTestPage(browser, origin, {
     before: (surface) => surface.addInitScript(() => { window.__GEMINI_VENDOR_FIXTURE__ = true; }),
