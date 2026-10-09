@@ -104,7 +104,9 @@ export async function measure(browser, origin) {
         list.push({ role: "user", text: `질문 ${n}` });
         list.push({ role: "assistant", text: `답 ${n}\n\n둘째 문단 ${n}` });
       }
-      window.__ANSWER__.pane_log = () => ({ found: true, next: turns + 1, skipped: false, more: false, folded: false, model: "claude-opus-5", turns: list });
+      // The poll asks for the turns after its cursor, as the backend answers it: a steady
+      // chat then stops repainting, and the buttons the touch built stay where they are.
+      window.__ANSWER__.pane_log = (args) => ({ found: true, next: list.length, skipped: false, more: false, folded: false, model: "claude-opus-5", turns: list.slice(args.after ?? 0) });
       await setPaneChat(term, true);
       await new Promise((done) => setTimeout(done, 800));
     }, TURNS);
@@ -144,6 +146,8 @@ export async function measure(browser, origin) {
     for (let n = 0; n < CARD_OPENS; n += 1) {
       open.push(await page.evaluate(async () => {
         const answer = document.querySelector(".helper-turn.is-assistant");
+        // The pointer reaches the answer first, as a person's does: that touch builds the button.
+        answer.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
         const button = answer.querySelector(".explain-open");
         const t0 = performance.now();
         await openExplainCard(button);
@@ -156,6 +160,7 @@ export async function measure(browser, origin) {
     out.card = { openMs: median(open), openP95Ms: p95(open), longTasks: await page.evaluate(() => window.__LONG__) };
     await page.evaluate(async () => {
       const answer = document.querySelector(".helper-turn.is-assistant");
+      answer.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
       await openExplainCard(answer.querySelector(".explain-open"));
     });
     out.cardOpen = await counters(cdp);
@@ -167,6 +172,7 @@ export async function measure(browser, origin) {
     const before = await heap(cdp);
     await page.evaluate(async (cycles) => {
       const answer = document.querySelector(".helper-turn.is-assistant");
+      answer.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
       const button = answer.querySelector(".explain-open");
       for (let n = 0; n < cycles; n += 1) {
         await openExplainCard(button);
