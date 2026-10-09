@@ -1448,6 +1448,91 @@ mod tests {
         }
     }
 
+    /// A run as the bash tool starts it, with the sandbox off, so that only the
+    /// wait and the end of the process group are under test (t-19897).
+    #[cfg(unix)]
+    fn unsandboxed(command: &str, timeout: u64) -> BashCommandInput {
+        BashCommandInput {
+            command: String::from(command),
+            timeout: Some(timeout),
+            description: None,
+            run_in_background: Some(false),
+            dangerously_disable_sandbox: Some(true),
+            namespace_restrictions: Some(false),
+            isolate_network: Some(false),
+            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+            allowed_mounts: None,
+            cwd: None,
+        }
+    }
+
+    /// Asserts that nothing is left in the process group `pgid`, which a run led.
+    #[cfg(unix)]
+    fn assert_group_empty(pgid: i32) {
+        let group = nix::unistd::Pid::from_raw(pgid);
+        let until = Instant::now() + Duration::from_secs(5);
+        while nix::sys::signal::killpg(group, None).is_ok() {
+            assert!(Instant::now() < until, "the group {pgid} still has members");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Output that a background job writes after its foreground leader has exited
+    /// is part of the result: the run waits for the output pipes to close, not for
+    /// the leader alone. The group is empty afterwards (t-19897, behaviour to keep).
+    #[cfg(unix)]
+    #[test]
+    fn background_output_written_after_the_leader_exits_is_kept() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let pidfile =
+            std::env::temp_dir().join(format!("zo-late-output-{}-{unique}.pid", std::process::id()));
+        let command = format!("echo $$ > {}; (sleep 0.3; echo late) & echo start", pidfile.display());
+
+        let output = execute_bash(unsandboxed(&command, 5_000)).expect("bash command should execute");
+        let leader: i32 = std::fs::read_to_string(&pidfile)
+            .expect("leader pidfile written")
+            .trim()
+            .parse()
+            .expect("valid leader pid");
+        let _ = std::fs::remove_file(&pidfile);
+
+        assert!(!output.interrupted, "the run must end before its timeout");
+        assert!(output.stdout.contains("start"), "{}", output.stdout);
+        assert!(output.stdout.contains("late"), "the background output was dropped: {}", output.stdout);
+        assert_group_empty(leader);
+    }
+
+    /// A leader that exits first while a backgrounded grandchild still holds the
+    /// output pipes: the run times out, and the grandchild dies with its group
+    /// (WI-G). Nothing is left in the group afterwards (t-19897, behaviour to keep).
+    #[cfg(unix)]
+    #[test]
+    fn a_grandchild_holding_the_pipes_after_its_leader_exited_dies_at_the_timeout() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let pidfile =
+            std::env::temp_dir().join(format!("zo-leader-exited-{}-{unique}.pid", std::process::id()));
+        let command = format!("sleep 30 & echo $$ $! > {}; exit 0", pidfile.display());
+
+        let output = execute_bash(unsandboxed(&command, 1_500)).expect("bash command should execute");
+        let text = std::fs::read_to_string(&pidfile).expect("pidfile written");
+        let _ = std::fs::remove_file(&pidfile);
+        let mut pids = text.split_whitespace().map(|word| word.parse::<i32>().expect("valid pid"));
+        let leader = pids.next().expect("leader pid");
+        let grandchild = nix::unistd::Pid::from_raw(pids.next().expect("grandchild pid"));
+
+        assert!(output.interrupted, "the pipes held by the grandchild must time the run out");
+        let until = Instant::now() + Duration::from_secs(5);
+        while nix::sys::signal::kill(grandchild, None).is_ok() {
+            assert!(Instant::now() < until, "the grandchild outlived its group's end");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_group_empty(leader);
+    }
+
     /// 유예가 만료되는 경로의 계약: 파이프가 아직 열려 있어 기다림이 끝나지
     /// 않더라도 로그는 **봉인**되므로, 종결 상태 뒤로 드레인이 한 줄도 더
     /// 붙일 수 없다. 봉인 전 출력은 남고, 잘렸다는 사실은 호출자가 기록한다.
