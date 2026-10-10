@@ -1089,6 +1089,8 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       });
       await window.__PAINTED__();
       seen.asked = Object.keys(window.__COUNTS__).length;
+      // The names of the commands that were counted, so a failure says which call came in.
+      seen.askedNames = Object.keys(window.__COUNTS__);
       window.__HOLD_POLLERS__ = false;
       window.__RELEASE_POLLERS__();
       seen.working = said();
