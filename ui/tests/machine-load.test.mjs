@@ -41,7 +41,9 @@ const HOSTED = { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" };
 
 test("a GitHub-hosted runner records an absolute frame budget and never judges it, whatever the load", () => {
   assert.equal(machineLoad.frameBudgetHolds(206, 128, { platform: "darwin", load: 0, env: HOSTED }), true);
-  assert.match(machineLoad.loadNote({ platform: "darwin", load: 0, env: HOSTED }), /hosted runner/);
+  assert.equal(machineLoad.frameBudgetHolds(206, 128, { platform: "darwin", load: 1e3, env: HOSTED }), true);
+  assert.match(machineLoad.loadNote({ platform: "darwin", load: 0, env: HOSTED }),
+    /^load \d+\.\d\/\d+ \(hosted runner — budget unjudged\)$/);
 });
 
 test("a self-hosted runner, or one with no CI environment, still judges an absolute frame budget", () => {
