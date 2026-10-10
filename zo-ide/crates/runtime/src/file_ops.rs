@@ -1612,14 +1612,17 @@ fn build_search_regex(input: &GrepSearchInput) -> io::Result<Regex> {
 
 /// Deepest non-wildcard directory prefix of a glob pattern, used as the walk
 /// root so the ignore filters apply before the pattern is matched. Falls back
-/// to `.` when the pattern begins with a wildcard.
+/// to `.` when the pattern begins with a wildcard. Only a normal component can
+/// hold a wildcard: the verbatim prefix `\\?\C:` that `canonicalize` returns on
+/// Windows has a `?` in its text, but it names a drive and stays in the root.
 fn glob_literal_root(pattern: &str) -> PathBuf {
     let mut root = PathBuf::new();
     for component in Path::new(pattern).components() {
-        if component
-            .as_os_str()
-            .to_string_lossy()
-            .contains(['*', '?', '['])
+        if matches!(component, std::path::Component::Normal(_))
+            && component
+                .as_os_str()
+                .to_string_lossy()
+                .contains(['*', '?', '['])
         {
             break;
         }
