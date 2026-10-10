@@ -279,6 +279,9 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
           return [row?.querySelector(".wt-task-id"), row?.querySelector(".wt-stage")]
             .some((node) => node && !node.hidden && node.textContent !== "");
         }).length;
+        // The empty worktree's card, as the checks above opened it: the checkout active again, its stage repainted.
+        activeWorktreePath = scene.finished;
+        paintStagePlaceholder();
         const card = document.querySelector(".stage-card");
         const before = total();
         const paint = timed(repaint);
@@ -289,7 +292,7 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
           rowsSaying, rowsOf: scene.paths.length, cardShown: Boolean(card && !card.hidden),
           paintMs: paint, cardPaintMs: cardPaint, invokesDuringRepaints: idleInvokes, repaints: runs,
         };
-      }, { panes: PANES, tabs: TABS, paths: SCENE_PATHS });
+      }, { panes: PANES, tabs: TABS, paths: SCENE_PATHS, finished: FINISHED });
       console.log("MEASURE " + JSON.stringify(numbers));
     }
 
