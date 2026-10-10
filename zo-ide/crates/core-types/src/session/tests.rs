@@ -1556,7 +1556,7 @@ fn appended_turn_reload_matches_forced_full_snapshot() {
 fn a_rewrite_of_a_persisted_message_is_published_at_once_as_one_record() {
     const FOLDED: &str = "t11457-folded-words";
     let path = temp_session_path("publish-rewrite").with_extension("jsonl");
-    let mut session = Session::new().with_persistence_path(path.to_path_buf());
+    let mut session = Session::new().with_persistence_path(path.clone());
     session.push_user_text("run it").expect("append user");
     session
         .push_message(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
