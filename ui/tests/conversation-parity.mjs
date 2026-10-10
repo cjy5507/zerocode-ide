@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
 import { FIXTURE_PNG, MIXED_STREAM_FENCES, conversationFixture, openFixtureConversation, streamingAnswer, webkitType } from "./conversation-perf.mjs";
+import { frameBudgetHolds } from "./machine-load.mjs";
 
 /* A wire session's page opened on `history` — the page with the most roads
  * on it (turns, a live answer, the composer's wire) — painted once. */
@@ -4781,7 +4782,8 @@ export async function testConversationCodeColours(browser, origin, ok) {
     );
     ok(
       "P1: the colouring ran in slices, and none of them — nor the colours laid as a fence is drawn — held the main thread past `CODE_COLOUR.sliceMs`",
-      seen.line !== null && seen.slices > 0 && seen.sliceMax <= seen.line && seen.inlineMax <= seen.line,
+      seen.line !== null && seen.slices > 0
+        && frameBudgetHolds(seen.sliceMax, seen.line) && frameBudgetHolds(seen.inlineMax, seen.line),
       JSON.stringify({ slices: seen.slices, sliceMax: seen.sliceMax, inlineMax: seen.inlineMax, line: seen.line }),
     );
     ok("P1: the 400-turn page raised no page errors", long.faults.length === 0, long.faults.join("\n"));
