@@ -1608,7 +1608,7 @@ mod windows_impl {
 
     /// The options with an explicit data-rights mask. An explicit mask replaces the
     /// append rights, so an append passes the append-only part of a write
-    /// (FILE_GENERIC_WRITE without FILE_WRITE_DATA); under GENERIC_WRITE the write
+    /// (`FILE_GENERIC_WRITE` without `FILE_WRITE_DATA`); under `GENERIC_WRITE` the write
     /// would start at offset 0 and replace the file's first bytes.
     fn entry_options_with_data(data_access: u32, directory: bool, write_dacl: bool) -> OpenOptions {
         let mut options = OpenOptions::new();
