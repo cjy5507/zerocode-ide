@@ -255,6 +255,9 @@ async function refreshPaneLedger() {
     // task — and only a real change costs a repaint.
     const moved = paneLedgerSaid(next) !== paneLedgerSaid(paneLedger);
     const kept = JSON.stringify([...settled]) !== JSON.stringify([...checkoutLedger]);
+    // The strip reads a pane's task as its tab's name (`tabLabel`, t-44016), so a task that
+    // arrives after the tab was painted is the strip's news too — not only the cards'.
+    const renamed = moved && paneTaskWords(next) !== paneTaskWords(paneLedger);
     if (moved) {
       paneLedger.clear();
       for (const [term, facts] of next) paneLedger.set(term, facts);
@@ -263,13 +266,20 @@ async function refreshPaneLedger() {
       checkoutLedger.clear();
       for (const [checkout, facts] of settled) checkoutLedger.set(checkout, facts);
     }
-    if (moved || kept) scheduleAgentPaint(["cards", "board"]);
+    if (moved || kept) scheduleAgentPaint(renamed ? ["tabs", "cards", "board"] : ["cards", "board"]);
   } catch {
     // The ledger may be unavailable in this window; the rows then say what
     // the hooks say, which is what they said before this map existed.
   } finally {
     paneLedgerAsking = false;
   }
+}
+/* The words a tab can take from the ledger, per pane — the part of the map whose change renames a tab. */
+function paneTaskWords(map) {
+  return [...map.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([term, f]) => `${term}:${f.task}`)
+    .join(",");
 }
 function paneLedgerSaid(map) {
   return [...map.entries()]
