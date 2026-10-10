@@ -239,13 +239,11 @@ async function testRemainders(page, ok) {
     JSON.stringify(lines),
   );
 
-  // The state word of a line sits at its end, so no word moves a title. The longest word that a catalog
-  // gives the landing state is tried on the first line, in the real chip, and every title is measured again.
-  const longest = await page.evaluate(() => ["en", "ja", "zh", "es"].map((language) => Object.entries(CATALOG?.[language] ?? {})
-    .filter(([key, value]) => /^(worktree\.land|artifacts\.landing)/.test(key) && typeof value === "string")
-    .map(([, value]) => value)
-    .sort((a, b) => b.length - a.length)[0] ?? ""));
-  const aligned = await page.evaluate((words) => {
+  // The state chip is the last thing in a line's second line, so no state word moves a title. The words
+  // are the product's own: worktreeLandingSay in each of the five languages, its longest chip word put in
+  // the real chip on the first line; the titles and the number boxes are measured again after each word.
+  const aligned = await page.evaluate(() => {
+    const saved = locale;
     const view = artifactsView();
     const frame = view?.querySelector(".artifacts-tasks")?.getBoundingClientRect() ?? { top: 0, bottom: 0 };
     const onList = () => [...(view?.querySelectorAll(".artifact-task") ?? [])].filter((one) => {
@@ -253,30 +251,51 @@ async function testRemainders(page, ok) {
       return box.height > 0 && box.top >= frame.top - 0.5 && box.bottom <= frame.bottom + 0.5;
     });
     const starts = () => onList().map((one) => Math.round(one.querySelector(".artifact-task-title").getBoundingClientRect().left * 2) / 2);
-    const idWidths = onList().map((one) => Math.round(one.querySelector(".artifact-task-id").getBoundingClientRect().width));
+    const idWidths = () => onList().map((one) => Math.round(one.querySelector(".artifact-task-id").getBoundingClientRect().width));
+    const chip = onList()[0]?.querySelector(".artifact-task-landing") ?? null;
+    const original = chip ? { text: chip.textContent, tip: chip.dataset.tip, label: chip.getAttribute("aria-label"), landing: chip.dataset.landing } : null;
+    const landings = [
+      { state: "unlanded", compare_ref: "origin/main", ahead: 12, behind: 9, far_behind: true, conflict: { total: 3 }, dirty: false, ignored: false },
+      { state: "landed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: true, ignored: true },
+      { state: "no_ref", compare_ref: "", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "no_commits", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "failed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "pending", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+    ];
     const before = starts();
-    const landing = onList()[0]?.querySelector(".artifact-task-landing") ?? null;
-    const original = landing?.textContent ?? "";
+    const idsBefore = idWidths();
     const moved = [];
-    for (const word of words) {
-      if (!landing) break;
-      landing.textContent = word;
+    const idsAfter = [];
+    const longest = {};
+    for (const code of ["ko", "en", "ja", "zh", "es"]) {
+      locale = code;
+      const says = landings.map((landing) => worktreeLandingSay(landing, {})).filter(Boolean);
+      const widest = says.reduce((a, b) => (b.head.length > a.head.length ? b : a));
+      longest[code] = widest.head;
+      if (chip) dressArtifactLanding(chip, widest);
       moved.push(...starts());
+      idsAfter.push(...idWidths());
     }
-    if (landing) landing.textContent = original;
+    locale = saved;
+    if (chip && original) {
+      chip.textContent = original.text;
+      chip.dataset.tip = original.tip;
+      chip.setAttribute("aria-label", original.label);
+      chip.dataset.landing = original.landing;
+    }
     return {
       rows: before.length,
       start: before[0] ?? null,
       sameStart: before.length > 1 && before.every((x) => x === before[0]),
       stays: moved.length > 0 && moved.every((x) => x === before[0]),
-      idsSame: idWidths.length > 1 && idWidths.every((w) => w === idWidths[0]),
-      words: words.length,
+      idsSame: idsBefore.length > 1 && idsBefore.every((w) => w === idsBefore[0]) && idsAfter.every((w) => w === idsBefore[0]),
+      longest,
     };
-  }, [...new Set(["확인 안 됨", ...longest])]);
+  });
   ok(
-    "every line's title starts at the same x, and a line's state word moves no title — the longest state word of each catalog tried in the real chip — and the number box keeps its width",
+    "every line's title starts at the same x, and no state word of the five languages moves a title or a number box — the longest chip word of each language, made by the product's own words, tried in the real chip",
     aligned.rows > 1 && aligned.sameStart && aligned.stays && aligned.idsSame,
-    JSON.stringify({ ...aligned, longest }),
+    JSON.stringify(aligned),
   );
 
   await openTask(page, "t-501");
@@ -324,9 +343,59 @@ async function testRemainders(page, ok) {
     };
   });
   ok(
-    "in the band a line's second line shows its state chip and no count or time, so no count is cut to a letter",
-    strip.open && strip.rows > 0 && strip.countsShown === 0 && strip.timeShown === 0,
+    "in the band a line's second line shows its state chip and no count or time, so no count is cut to a letter — the three lines of the fixture that have a state each show their chip",
+    strip.open && strip.rows > 0 && strip.countsShown === 0 && strip.timeShown === 0 && strip.landingShown === 3,
     JSON.stringify(strip),
+  );
+
+  // In the band the state chip stays inside its row for the longest chip word of each language (the
+  // product's own words, in the real chip); the whole word stands in the chip's accessible name and first
+  // tooltip line, and a word too long for the band is cut with an ellipsis.
+  const inBand = await page.evaluate(() => {
+    const saved = locale;
+    const view = artifactsView();
+    const row = [...(view?.querySelectorAll(".artifact-task") ?? [])].find((one) => one.getClientRects().length > 0) ?? null;
+    const chip = row?.querySelector(".artifact-task-landing") ?? null;
+    const original = chip ? { text: chip.textContent, tip: chip.dataset.tip, label: chip.getAttribute("aria-label"), landing: chip.dataset.landing } : null;
+    const landings = [
+      { state: "unlanded", compare_ref: "origin/main", ahead: 12, behind: 9, far_behind: true, conflict: { total: 3 }, dirty: false, ignored: false },
+      { state: "landed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: true, ignored: true },
+      { state: "no_ref", compare_ref: "", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "no_commits", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "failed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "pending", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+    ];
+    const seen = {};
+    for (const code of ["ko", "en", "ja", "zh", "es"]) {
+      locale = code;
+      const says = landings.map((landing) => worktreeLandingSay(landing, {})).filter(Boolean);
+      const widest = says.reduce((a, b) => (b.head.length > a.head.length ? b : a));
+      if (chip) dressArtifactLanding(chip, widest);
+      const rowBox = row?.getBoundingClientRect();
+      const padRight = row ? parseFloat(getComputedStyle(row).paddingRight) : 0;
+      const chipBox = chip?.getBoundingClientRect();
+      seen[code] = {
+        word: widest.head,
+        inside: Boolean(rowBox && chipBox) && chipBox.right <= rowBox.right - padRight + 0.5 && chipBox.left >= rowBox.left,
+        named: chip?.getAttribute("aria-label") === widest.head,
+        tipLeads: (chip?.dataset.tip ?? "").split("\n")[0] === widest.head,
+        cut: chip ? chip.scrollWidth > chip.clientWidth + 0.5 : false,
+      };
+    }
+    locale = saved;
+    if (chip && original) {
+      chip.textContent = original.text;
+      chip.dataset.tip = original.tip;
+      chip.setAttribute("aria-label", original.label);
+      chip.dataset.landing = original.landing;
+    }
+    return { row: Boolean(row), chip: Boolean(chip), seen };
+  });
+  ok(
+    "in the band the state chip stays inside its row for the longest chip word of each of the five languages, and the whole word stands in its accessible name and tooltip",
+    inBand.row && inBand.chip && Object.keys(inBand.seen).length === 5
+      && Object.values(inBand.seen).every((one) => one.inside && one.named && one.tipLeads),
+    JSON.stringify(inBand),
   );
 
   await openFresh(page);

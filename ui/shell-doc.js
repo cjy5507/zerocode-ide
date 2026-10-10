@@ -6547,7 +6547,11 @@ function dressArtifactLanding(chip, say) {
   chip.hidden = !say;
   if (!say) return;
   if (chip.dataset.landing !== say.tone) chip.dataset.landing = say.tone;
-  if (chip.dataset.tip !== say.tip) chip.dataset.tip = say.tip;
+  // 칩의 말이 말줄임으로 줄면 온전한 말은 접근성 이름과 풍선의 첫 줄에 있다(t-43931).
+  const whole = say.head ?? "";
+  if (chip.getAttribute("aria-label") !== whole) chip.setAttribute("aria-label", whole);
+  const tip = [whole, say.tip].filter(Boolean).join("\n");
+  if (chip.dataset.tip !== tip) chip.dataset.tip = tip;
 }
 
 /* 작업 칩 하나의 옷 — 카드와 서랍이 같은 옷을 입는다. 풍선의 첫 줄은 그 작업의 이름이다:

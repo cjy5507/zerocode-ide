@@ -45772,11 +45772,19 @@ button.jev-token:hover {
   white-space: nowrap;
 }
 
-/* 둘째 줄: 수(말줄임)와 오른쪽 끝의 반영 칩. 칩의 글이 길어도 제목의 시작 x는 변하지 않는다(번호 칸과 제목 칸은 고정이다). */
+/* 둘째 줄: 수(말줄임)와 오른쪽 끝의 반영 칩. 칩의 글이 길어도 제목의 시작 x는 변하지 않는다(번호 칸과 제목 칸은 고정이다).
+ * 칩은 블록이라야 말줄임이 선다 — 칩이 줄 밖으로 잘려 보이지 않는다. */
 .artifact-task-landing {
   grid-row: 2;
   grid-column: 3;
   justify-self: end;
+  display: block;
+  box-sizing: border-box;
+  max-width: min(100%, var(--artifact-task-landing-max-width));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: calc(var(--artifact-task-chip-height) - 2px);
 }
 
 .artifact-task-parts {
