@@ -33,8 +33,8 @@ mod windows_owner_only {
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
         DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL, WRITE_DAC,
-        WRITE_OWNER,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES,
+        FILE_WRITE_DATA, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     };
 
     use super::{classify_owner, private_open_intent, restrictable_directory, OwnerClass};
@@ -103,8 +103,20 @@ mod windows_owner_only {
     }
 
     fn entry_open_options(write: bool) -> OpenOptions {
-        let mut options = OpenOptions::new();
         let data_access = if write { GENERIC_WRITE } else { GENERIC_READ };
+        entry_options_with(data_access, write)
+    }
+
+    /// The options of an append. An explicit access mask replaces the append
+    /// rights that `OpenOptions::append` would give, so the mask is the append-only
+    /// part of a write: FILE_GENERIC_WRITE without FILE_WRITE_DATA, as std and
+    /// cap-primitives use. Each write then goes to the end of the file.
+    fn append_open_options() -> OpenOptions {
+        entry_options_with(FILE_GENERIC_WRITE & !FILE_WRITE_DATA, true)
+    }
+
+    fn entry_options_with(data_access: u32, write: bool) -> OpenOptions {
+        let mut options = OpenOptions::new();
         // A handle that may restrict an entry also asks for WRITE_OWNER, which
         // moves an entry created under the token's default owner to the user.
         let owner_access = if write { WRITE_OWNER } else { 0 };
@@ -366,7 +378,11 @@ mod windows_owner_only {
     ) -> io::Result<File> {
         let (parent, leaf) = open_parent_no_follow(path)?;
         let intent = private_open_intent(append, truncate);
-        let mut options = entry_open_options(true);
+        let mut options = if intent.data_write {
+            entry_open_options(true)
+        } else {
+            append_open_options()
+        };
         options
             .write(intent.write)
             .create(intent.create)
@@ -385,7 +401,11 @@ mod windows_owner_only {
 
     pub(super) fn open_existing_private_file(path: &Path, append: bool) -> io::Result<File> {
         let (parent, leaf) = open_parent_no_follow(path)?;
-        let mut options = entry_open_options(append);
+        let mut options = if append {
+            append_open_options()
+        } else {
+            entry_open_options(false)
+        };
         options.read(!append).append(append);
         let file = parent.open_with(leaf, &options)?;
         let metadata = file.metadata()?;
@@ -494,7 +514,7 @@ struct PrivateOpenIntent {
 fn private_open_intent(append: bool, truncate: bool) -> PrivateOpenIntent {
     PrivateOpenIntent {
         write: true,
-        data_write: true,
+        data_write: !append,
         append,
         create: true,
         truncate: truncate && !append,

@@ -1559,8 +1559,8 @@ mod windows_impl {
     use std::sync::atomic::Ordering;
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE,
+        FILE_READ_ATTRIBUTES, FILE_WRITE_DATA, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     };
 
     fn root_and_names(path: &Path) -> io::Result<(PathBuf, Vec<OsString>)> {
@@ -1602,8 +1602,16 @@ mod windows_impl {
     }
 
     fn entry_options(write: bool, directory: bool, write_dacl: bool) -> OpenOptions {
-        let mut options = OpenOptions::new();
         let data_access = if write { GENERIC_WRITE } else { GENERIC_READ };
+        entry_options_with_data(data_access, directory, write_dacl)
+    }
+
+    /// The options with an explicit data-rights mask. An explicit mask replaces the
+    /// append rights, so an append passes the append-only part of a write
+    /// (FILE_GENERIC_WRITE without FILE_WRITE_DATA); under GENERIC_WRITE the write
+    /// would start at offset 0 and replace the file's first bytes.
+    fn entry_options_with_data(data_access: u32, directory: bool, write_dacl: bool) -> OpenOptions {
+        let mut options = OpenOptions::new();
         // A handle that restricts an entry also asks for WRITE_OWNER: an entry the
         // token's default owner created moves to the token user (see core-types paths).
         let dacl_access = if write_dacl { WRITE_DAC | WRITE_OWNER } else { 0 };
@@ -1719,7 +1727,11 @@ mod windows_impl {
         create_new: bool,
         append: bool,
     ) -> io::Result<File> {
-        let mut options = entry_options(write, false, write);
+        let mut options = if append {
+            entry_options_with_data(FILE_GENERIC_WRITE & !FILE_WRITE_DATA, false, write)
+        } else {
+            entry_options(write, false, write)
+        };
         options
             .read(!write)
             .write(write && !append)
