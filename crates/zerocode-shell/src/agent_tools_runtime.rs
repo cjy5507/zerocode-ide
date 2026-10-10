@@ -788,6 +788,13 @@ impl agent_teams::Host for TeamWindow {
         receipt_actor_of(&self.app.state::<AppState>(), term)
     }
 
+    /// A run's empty chair was just sat from `leader_term` (t-21908): its
+    /// sleepers are asked for their seats by the pass a restored coordinator
+    /// tab runs at mount, off the beat.
+    fn coordinator_sat(&self, leader_term: TermId) {
+        schedule_orchestration_restore(&self.app, leader_term);
+    }
+
     /// The wake's own table, which its receipt watch walks: a row stands
     /// until the pane's `working` hook or the watch's give-up removes it.
     fn wake_words_pending(&self, term: TermId) -> bool {

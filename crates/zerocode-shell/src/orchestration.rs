@@ -575,6 +575,8 @@ fn reseat_sleeping_in_line(
         if answered.exit_code == 0 {
             restored += 1;
             forget_switch_mark(&worker);
+        } else {
+            tell_reseat_refused_once(&worker, &answered.stderr);
         }
     }
     restored
@@ -2929,6 +2931,79 @@ fn note_seatless_mail(run: &str, address: &str) {
              this window — nothing can be pointed at it until a pane binds to \
              the run; open that agent's conversation in a pane here again"
         ),
+    );
+}
+
+/// A conversation bound to `run` came back into the pane at `term`, and the
+/// run's empty chair is sat from there (t-21908). Its sleeping workers are asked
+/// for their seats next, the way a restored coordinator tab asks at mount.
+fn note_chair_sat(run: &str, term: u32) {
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: run {run}'s empty coordinator chair was sat again from \
+             terminal {term}; its sleeping workers are asked for their seats"
+        ),
+    );
+}
+
+/// The facts this window has already said once, in this process, keyed by the
+/// facts themselves. A beat is a second long, so a repeat is the same line
+/// over again (t-21908).
+fn said_once() -> &'static Mutex<std::collections::HashSet<String>> {
+    static TOLD: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    TOLD.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// A conversation bound to `run` stands in terminal `term`, and another live
+/// pane holds the run's chair. The chair is not taken from its holder, and the
+/// person is told once which pane holds it (t-21908): a beat is a second long,
+/// so a repeat of the same fact is the same line over again.
+fn tell_chair_held_once(run: &str, holder: &str, term: u32) {
+    let key = format!("{run}\u{1f}{holder}\u{1f}{term}");
+    let first = said_once()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(key);
+    if !first {
+        return;
+    }
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: run {run}'s coordinator chair is held by live pane {holder}; \
+             the conversation in terminal {term} did not take it. To move it, close that \
+             pane or run-takeover --run {run} --from {holder} --reason <why>"
+        ),
+    );
+}
+
+/// A sleeper the window could not seat again in its pane, and the refusal that
+/// said why (t-21908). A refusal used to pass in silence, so its mail waited
+/// with nobody told why; now the reason is written down once per worker and
+/// reason, and the mail stays where it is.
+fn tell_reseat_refused_once(worker: &str, why: &str) {
+    let reason: String = why
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(200)
+        .collect();
+    let key = format!("reseat\u{1f}{worker}\u{1f}{reason}");
+    let first = said_once()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(key);
+    if !first {
+        return;
+    }
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!("orchestration: sleeping worker {worker} was not put back in its pane: {reason}"),
     );
 }
 
@@ -7208,6 +7283,19 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
         why: Unpointed,
     }
     let mut unsaid: Vec<Unsaid> = Vec::new();
+    /// A conversation bound to a run came back into the run's empty chair from
+    /// this pane (t-21908). Sat once the marks are let go, like every ledger
+    /// write in this pass.
+    struct Sitting {
+        run: String,
+        team: String,
+        pane: String,
+        actor: Option<String>,
+        leader_term: u32,
+    }
+    let mut sitting: Vec<Sitting> = Vec::new();
+    // Conversations bound to a run that stand behind another live pane's chair.
+    let mut held_chairs: Vec<(String, String, u32)> = Vec::new();
     {
         let tables = crate::agent_teams::teams();
         let mut marks = pointed().lock().unwrap_or_else(|held| held.into_inner());
@@ -7250,7 +7338,19 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                 if team.pane(&team.leader_pane).is_none() {
                     continue;
                 }
-                if run.seat_is_coordinator(&format!("{id}/{}", team.leader_pane)) == Some(false) {
+                let chair = format!("{id}/{}", team.leader_pane);
+                let conversation = host.actor_for(team.leader_term);
+                let bound_here = conversation
+                    .as_deref()
+                    .is_some_and(|actor| rows.bound_run(actor) == Some(run.id.as_str()));
+                if run.seat_is_coordinator(&chair) == Some(false) {
+                    /* A live chair its holder keeps is never taken here
+                     * (t-21908). A conversation bound to this run that stands in
+                     * this pane beside it is told once, in the window's own log,
+                     * which pane holds the chair. */
+                    if bound_here {
+                        held_chairs.push((run.id.clone(), chair.clone(), team.leader_term));
+                    }
                     continue;
                 }
                 /* Two spellings, and the run has to be recognised under
@@ -7266,17 +7366,25 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * A beat where the actor is momentarily unknown and the run
                  * has cut no panes yet skips the seat, and the next beat
                  * recovers it. */
-                let leader_bound = host
-                    .actor_for(team.leader_term)
-                    .is_some_and(|actor| rows.bound_run(&actor) == Some(run.id.as_str()))
-                    || cut_panes_in.contains(id.as_str());
+                let leader_bound = bound_here || cut_panes_in.contains(id.as_str());
                 if leader_bound {
                     leader_seated = true;
-                    seats.push((
-                        run.address(),
-                        team.leader_term,
-                        format!("{id}/{}", team.leader_pane),
-                    ));
+                    seats.push((run.address(), team.leader_term, chair.clone()));
+                }
+                /* A conversation bound to this run is back in its pane and the
+                 * run's chair is empty. A restart vacated every chair, and only a
+                 * restored tab's mount sat one again, so a conversation that came
+                 * back any other way left its run's sleepers asleep (t-21908).
+                 * The chair is sat after the marks are let go, by the door the
+                 * mount uses. */
+                if bound_here && run.coordinator_live().is_none() {
+                    sitting.push(Sitting {
+                        run: run.id.clone(),
+                        team: id.clone(),
+                        pane: team.leader_pane.clone(),
+                        actor: conversation.clone(),
+                        leader_term: team.leader_term,
+                    });
                 }
             }
             /* Addresses whose mail has a READER but no seat in this window.
@@ -7801,6 +7909,25 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
             &told.newest,
             told.why,
         );
+    }
+    for chair in sitting {
+        let Ok((moved, _)) = held.actor.coordinator_returned(
+            &chair.run,
+            &chair.team,
+            &chair.pane,
+            chair.actor,
+            now_ms,
+        ) else {
+            continue;
+        };
+        rang(moved);
+        if moved {
+            note_chair_sat(&chair.run, chair.leader_term);
+            host.coordinator_sat(chair.leader_term);
+        }
+    }
+    for (run, holder, term) in held_chairs {
+        tell_chair_held_once(&run, &holder, term);
     }
     for one in pointing {
         let key = (one.run, one.address);
