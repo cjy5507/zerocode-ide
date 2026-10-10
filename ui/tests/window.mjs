@@ -22386,7 +22386,7 @@ const previewFind = await page.evaluate(async () => {
   };
   const commandF = async () => {
     document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true, cancelable: true }),
+      new KeyboardEvent("keydown", { key: "f", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }),
     );
     await new Promise((done) => setTimeout(done, 80));
   };
@@ -22464,7 +22464,7 @@ const diffFind = await page.evaluate(async () => {
   const bar = view.querySelector(".doc-findbar");
   seen.barStands = bar !== null && bar.hidden === true;
   document.dispatchEvent(
-    new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true, cancelable: true }),
+    new KeyboardEvent("keydown", { key: "f", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }),
   );
   await new Promise((done) => setTimeout(done, 80));
   const input = view.querySelector(".doc-find-input");
@@ -22505,7 +22505,7 @@ const mergeFind = await page.evaluate(async () => {
   const seed = editor.state.sliceDoc(first.from, Math.min(first.from + 2, first.to));
   editor.dispatch({ selection: { anchor: first.from, head: first.from + seed.length } });
   document.dispatchEvent(
-    new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true, cancelable: true }),
+    new KeyboardEvent("keydown", { key: "f", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }),
   );
   await new Promise((done) => setTimeout(done, 80));
   const bar = view.querySelector(".doc-findbar");
@@ -24732,10 +24732,10 @@ const floatDoor = await page.evaluate(async () => {
   rebuildBound();
   seen.bothDefaultsBound = BOUND.get("mod+alt+a")?.id === "terminal.toggle" &&
     BOUND.get("mod+`")?.id === "terminal.toggle";
-  document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", altKey: true, metaKey: true, bubbles: true, cancelable: true }));
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", altKey: true, ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }));
   await settle();
   seen.chordOpens = !termFloat.hidden;
-  document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", altKey: true, metaKey: true, bubbles: true, cancelable: true }));
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", altKey: true, ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }));
   await settle();
   seen.chordCloses = termFloat.hidden;
   if (hadOverride) keybindingOverrides["terminal.toggle"] = previous;
@@ -24800,7 +24800,7 @@ const floatPrefs = await page.evaluate(async () => {
   delete keybindingOverrides["terminal.toggle"];
   rebuildBound();
   document.dispatchEvent(new KeyboardEvent("keydown", {
-    key: "a", altKey: true, metaKey: true, bubbles: true, cancelable: true,
+    key: "a", altKey: true, ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
   }));
   await settle();
   seen.chordClaimsNothing = termFloat.hidden;
@@ -50409,7 +50409,7 @@ const editorZoom = await page.evaluate(async () => {
   const before = parseFloat(root.style.getPropertyValue("--editor-font-size"));
   document.dispatchEvent(
     new KeyboardEvent("keydown", {
-      key: "=", code: "Equal", metaKey: true, bubbles: true, cancelable: true,
+      key: "=", code: "Equal", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
     }),
   );
   await new Promise((done) => setTimeout(done, 30));
@@ -50425,7 +50425,7 @@ const editorZoom = await page.evaluate(async () => {
   ];
   document.dispatchEvent(
     new KeyboardEvent("keydown", {
-      key: "0", code: "Digit0", metaKey: true, bubbles: true, cancelable: true,
+      key: "0", code: "Digit0", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
     }),
   );
   await new Promise((done) => setTimeout(done, 30));
@@ -50461,7 +50461,7 @@ const termZoom = await page.evaluate(async () => {
   const view = termViews.get(made);
   const dial = (key, code) =>
     document.dispatchEvent(
-      new KeyboardEvent("keydown", { key, code, metaKey: true, bubbles: true, cancelable: true }),
+      new KeyboardEvent("keydown", { key, code, ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }),
     );
   dial("=", "Equal");
   await new Promise((done) => setTimeout(done, 30));
@@ -50501,7 +50501,7 @@ const uiZoomKeys = await page.evaluate(async () => {
   const writesBefore = window.__UI_ZOOM_WRITES__.length;
   document.dispatchEvent(
     new KeyboardEvent("keydown", {
-      key: "=", code: "Equal", metaKey: true, bubbles: true, cancelable: true,
+      key: "=", code: "Equal", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
     }),
   );
   await new Promise((done) => setTimeout(done, 30));
@@ -50509,7 +50509,7 @@ const uiZoomKeys = await page.evaluate(async () => {
   seen.hudKind = el("zoom-overlay").querySelector(".zoom-overlay-kind").textContent;
   document.dispatchEvent(
     new KeyboardEvent("keydown", {
-      key: "0", code: "Digit0", metaKey: true, bubbles: true, cancelable: true,
+      key: "0", code: "Digit0", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
     }),
   );
   await new Promise((done) => setTimeout(done, 30));
