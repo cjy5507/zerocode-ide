@@ -208,6 +208,7 @@ fn a_mark_click_is_the_pinned_element_of_the_looks_own_window() {
     assert_eq!(click.params["elementIndex"], third["elementIndex"]);
     assert_eq!(click.params["session"], MARK_SNAPSHOT_SESSION);
     assert_eq!(click.params["noScreenshot"], true);
+    assert_eq!(click.params["deferObservation"], true);
     assert_eq!(click.params[PIN_TOLERANCE_KEY], MARK_PIN_TOLERANCE_POINTS);
     assert_eq!(click.params[PIN_SIGNATURE_KEY], "AXButton\u{1f}key 2");
     assert_eq!(click.params[PIN_NAME_KEY], "key 2");

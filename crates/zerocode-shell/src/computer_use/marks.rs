@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use base64::Engine as _;
+use serde::Deserialize as _;
 use serde_json::{Map, Value, json};
 use zerocode_core::computer_use::{
     MARK_BADGE_BORDER_PX, MARK_BADGE_PAD_PX, MARK_DIGIT_GLYPHS, MARK_FILL_RGBA, MARK_GLYPH_COLUMNS,
@@ -42,7 +43,7 @@ pub(super) struct MarkTable {
     /// picture's fingerprint: a later look there with the very same pixels
     /// keeps these numbers.
     place: String,
-    picture: u64,
+    picture: Option<u64>,
     window: MarkedWindow,
     marks: Vec<PlacedMark>,
     fields: Vec<Value>,
@@ -53,6 +54,17 @@ pub(super) struct MarkTable {
     omitted: usize,
     frame: ShotFrame,
     made: Instant,
+}
+
+impl MarkTable {
+    fn has_readable_controls(&self) -> bool {
+        !self.fields.is_empty()
+            || self.marks.iter().any(|mark| {
+                mark.label
+                    .as_deref()
+                    .is_some_and(|label| !label.trim().is_empty())
+            })
+    }
 }
 
 static TABLES: Mutex<Kept<MarkTable>> = Mutex::new(Kept::new(MARK_LOOKS_KEPT));
@@ -119,6 +131,64 @@ pub(super) struct Picture<'a> {
     pub text: Option<&'a Value>,
 }
 
+struct Layout<'a> {
+    size: (u32, u32),
+    fingerprint: Option<u64>,
+    placed: ShotFrame,
+    place: &'a str,
+}
+
+impl Picture<'_> {
+    fn layout(&self) -> Layout<'_> {
+        Layout {
+            size: (self.clean.width, self.clean.height),
+            fingerprint: Some(self.fingerprint),
+            placed: self.placed,
+            place: self.place,
+        }
+    }
+}
+
+pub(super) fn structured_marks(
+    frame_answer: &Value,
+    place: &str,
+) -> Result<Option<Marked>, ComputerUseError> {
+    let snapshot = frame_answer.get("snapshot").ok_or_else(|| {
+        ComputerUseError::new(
+            error_code::PROVIDER_INCOMPATIBLE,
+            "an app look without its snapshot",
+        )
+    })?;
+    let Some(window) = window_rect(snapshot).filter(|window| {
+        [window.x, window.y, window.width, window.height]
+            .iter()
+            .all(|value| value.is_finite())
+            && window.width > 0.0
+            && window.height > 0.0
+            && window.width <= f64::from(u32::MAX)
+            && window.height <= f64::from(u32::MAX)
+    }) else {
+        return Ok(None);
+    };
+    let Some(placed) = ShotFrame::new((window.x, window.y), 1.0) else {
+        return Ok(None);
+    };
+    let layout = Layout {
+        size: (window.width.ceil() as u32, window.height.ceil() as u32),
+        fingerprint: None,
+        placed,
+        place,
+    };
+    let table = table(snapshot, window, &layout, Vec::new(), None)?;
+    if !table.has_readable_controls() {
+        return Ok(None);
+    }
+    tables().keep(table.window.look_id.clone(), table.clone());
+    let mut marked = draw_answer(table, None, false);
+    marked.answer["perception"] = "accessibility".into();
+    Ok(Some(marked))
+}
+
 /// Mark a look: the app's own window when the look named one, else the
 /// frontmost document window on the picture that is not ZeroCode's own
 /// (`before`: the windows listed just before the picture). A look at the
@@ -137,7 +207,7 @@ pub(super) fn mark_look(
     if !params.contains_key("app")
         && let Some(kept) = latest_at(picture)
     {
-        return draw_answer(kept, picture.clean, true, draws);
+        return draw_answer(kept, draws.then_some(picture.clean), true);
     }
     let made = if params.contains_key("app") {
         app_marks(
@@ -167,10 +237,10 @@ pub(super) fn mark_look(
                 && kept.fields == table.fields
                 && kept.pixels == table.pixels
             {
-                return draw_answer(kept, picture.clean, true, draws);
+                return draw_answer(kept, draws.then_some(picture.clean), true);
             }
             tables().keep(table.window.look_id.clone(), table.clone());
-            draw_answer(table, picture.clean, false, draws)
+            draw_answer(table, draws.then_some(picture.clean), false)
         }
         Ok(None) => unavailable(&ComputerUseError::new(
             error_code::WINDOW_NOT_FOUND,
@@ -189,7 +259,7 @@ fn latest_at(picture: &Picture<'_>) -> Option<MarkTable> {
         .rev()
         .find(|(_, table)| {
             table.place == picture.place
-                && table.picture == picture.fingerprint
+                && table.picture == Some(picture.fingerprint)
                 && table.frame == picture.placed
                 && !cache::is_expired(table.made, Instant::now())
         })
@@ -207,7 +277,7 @@ fn faces_of(snapshot: &Value) -> Result<Vec<ElementFace>, ComputerUseError> {
             "the provider answered no element faces (an older helper?)",
         )
     })?;
-    serde_json::from_value(faces.clone()).map_err(|error| {
+    Vec::<ElementFace>::deserialize(faces).map_err(|error| {
         ComputerUseError::new(error_code::PROVIDER_INCOMPATIBLE, error.to_string())
     })
 }
@@ -248,7 +318,7 @@ fn marked_window(snapshot: &Value) -> MarkedWindow {
 fn table(
     snapshot: &Value,
     window: Rect,
-    picture: &Picture<'_>,
+    picture: &Layout<'_>,
     occluders: Vec<Rect>,
     text: Option<&Value>,
 ) -> Result<MarkTable, ComputerUseError> {
@@ -260,7 +330,7 @@ fn table(
         faces: &faces,
         window,
         frame: picture.placed,
-        picture: (picture.clean.width, picture.clean.height),
+        picture: picture.size,
         occluders,
     });
     pixels.retain(|index, _| {
@@ -314,8 +384,9 @@ fn app_marks(
     let Some(window) = window_rect(snapshot) else {
         return Ok(None);
     };
-    let accessible = table(snapshot, window, picture, Vec::new(), None)?;
-    if !read_pixels && !accessible.marks.is_empty() {
+    let layout = picture.layout();
+    let accessible = table(snapshot, window, &layout, Vec::new(), None)?;
+    if !read_pixels && accessible.has_readable_controls() {
         return Ok(Some(accessible));
     }
     let reading = if picture.text.is_none() {
@@ -340,7 +411,7 @@ fn app_marks(
             if text.get("capturedFrame") == Some(&Value::Bool(true))
                 && text.get("pixelTextPins") == Some(&Value::Bool(true)) =>
         {
-            table(snapshot, window, picture, Vec::new(), Some(text)).map(Some)
+            table(snapshot, window, &layout, Vec::new(), Some(text)).map(Some)
         }
         _ => Ok(Some(accessible)),
     }
@@ -400,7 +471,7 @@ fn desktop_marks(
     table(
         snapshot,
         window,
-        picture,
+        &picture.layout(),
         plan::occluders(before, target),
         None,
     )
@@ -421,8 +492,8 @@ fn desktop_marks(
 /// marked look 645 ms, the same frame and tree without the drawing 383 ms).
 /// Over a thirty-step walk that is 7.8 seconds spent on pictures nobody opens,
 /// so `--no-screenshot` skips it and the answer carries the numbers alone.
-fn draw_answer(table: MarkTable, clean: &RgbaImage, same: bool, draws: bool) -> Marked {
-    let png = if draws {
+fn draw_answer(table: MarkTable, clean: Option<&RgbaImage>, same: bool) -> Marked {
+    let png = if let Some(clean) = clean {
         let mut picture = clean.clone();
         draw(&mut picture, &table.marks);
         let Some(png) = picture.encode() else {
@@ -627,6 +698,7 @@ pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
     helper.insert("windowId".into(), table.window.window_id.into());
     helper.insert("session".into(), MARK_SNAPSHOT_SESSION.into());
     helper.insert("noScreenshot".into(), true.into());
+    helper.insert("deferObservation".into(), true.into());
     if let Some(line) = table.pixels.get(&placed.element_index) {
         helper.insert(
             "x".into(),
@@ -658,7 +730,13 @@ pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
                 .unwrap_or(Value::Null),
         );
     }
-    for key in ["mouseButton", "clickCount", "modifiers", "confirming"] {
+    for key in [
+        "mouseButton",
+        "clickCount",
+        "modifiers",
+        "confirming",
+        "background",
+    ] {
         if let Some(value) = params.get(key) {
             helper.insert(key.into(), value.clone());
         }

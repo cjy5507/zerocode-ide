@@ -16,6 +16,9 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use decision_core::dreamer::PatchCheckResult;
+#[cfg(unix)]
+use plugins::bounded_child::end_group;
+use plugins::bounded_child::{reap, reap_if_exited, Group};
 
 use super::QuarantineCheckCommand;
 
@@ -118,7 +121,7 @@ fn spawn_and_wait(command: &mut Command) -> Result<(ExitStatus, Vec<u8>), &'stat
                 Some(diagnostic)
             } else {
                 terminate_check_tree(child.id());
-                let _ = child.wait();
+                let _ = reap(&mut child);
                 return Err("check_diagnostic_setup_error");
             }
         }
@@ -130,9 +133,8 @@ fn spawn_and_wait(command: &mut Command) -> Result<(ExitStatus, Vec<u8>), &'stat
         if let Some(diagnostic) = diagnostic.as_mut() {
             diagnostic.drain();
         }
-        match child.try_wait() {
+        match reap_if_exited(&mut child, Some(Group::Kill)) {
             Ok(Some(status)) => {
-                terminate_check_tree(child.id());
                 #[cfg(unix)]
                 return Ok((status, finish_diagnostic(diagnostic)));
                 #[cfg(not(unix))]
@@ -140,7 +142,7 @@ fn spawn_and_wait(command: &mut Command) -> Result<(ExitStatus, Vec<u8>), &'stat
             }
             Ok(None) if Instant::now() >= deadline => {
                 terminate_check_tree(child.id());
-                let _ = child.wait();
+                let _ = reap(&mut child);
                 #[cfg(unix)]
                 let _ = finish_diagnostic(diagnostic);
                 return Err("check_timeout");
@@ -148,7 +150,7 @@ fn spawn_and_wait(command: &mut Command) -> Result<(ExitStatus, Vec<u8>), &'stat
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(_) => {
                 terminate_check_tree(child.id());
-                let _ = child.wait();
+                let _ = reap(&mut child);
                 #[cfg(unix)]
                 let _ = finish_diagnostic(diagnostic);
                 return Err("check_wait_error");
@@ -296,13 +298,7 @@ fn diagnostic_scope(diagnostic: &str, worktree: &Path, check_state: &Path) -> &'
 
 #[cfg(unix)]
 fn terminate_check_tree(pid: u32) {
-    use nix::sys::signal::{Signal, killpg};
-    use nix::unistd::Pid;
-
-    let Ok(pid) = i32::try_from(pid) else {
-        return;
-    };
-    let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+    let _ = end_group(pid, Group::Kill);
 }
 
 #[cfg(not(unix))]
@@ -973,6 +969,34 @@ mod stderr_tests {
         assert!(status.success(), "verbose child failed: {status:?}");
         assert_eq!(diagnostic.len(), CHECK_DIAGNOSTIC_CAP);
     }
+    /// The order a finished check took, from the trace of its leader: the group
+    /// must be ended before the leader is reaped (t-19897). Today the leader is
+    /// reaped first, and the sweep after it signals a group named by a reaped pid.
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_check_has_its_group_ended_before_its_leader_is_reaped() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let pidfile = std::env::temp_dir().join(format!("zo-check-order-{}-{unique}.pid", std::process::id()));
+        let mut command = std::process::Command::new("/bin/sh");
+        command.arg("-c").arg(format!("echo $$ > {}; sleep 5 & exit 0", pidfile.display()));
+
+        let mark = plugins::bounded_child::trace::mark();
+        let (status, _) = spawn_and_wait(&mut command).expect("the check should end");
+        let leader: u32 = std::fs::read_to_string(&pidfile)
+            .expect("leader pidfile written")
+            .trim()
+            .parse()
+            .expect("valid leader pid");
+        let _ = std::fs::remove_file(&pidfile);
+
+        assert!(status.success(), "the check's command exits cleanly");
+        plugins::bounded_child::trace::assert_ended_before_reaped(mark, leader);
+        let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
+        assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
+    }
+
     #[test]
     fn stderr_drain_deadline_handles_a_descendant_that_keeps_the_pipe_open() {
         let mut command = Command::new("/bin/sh");

@@ -273,6 +273,16 @@ final class Provider {
     static let keyedMethods: Set<String> = ["key", "holdKey", "type"]
 
     func handle(method: String, params: [String: JSONValue]) throws -> Any {
+        if params["background"] != nil && params["background"]?.bool == nil {
+            throw ProviderError.coded("invalid_argument", "background must be a boolean")
+        }
+        if let refusal = BackgroundInput.validate(
+            method: method, requested: params["background"]?.bool == true,
+            restoresWindow: params["restoreWindow"]?.bool == true,
+            hasApp: params["app"]?.string?.isEmpty == false
+        ) {
+            throw ProviderError.coded(refusal.rawValue, "background input requires a scoped semantic action; no foreground fallback was attempted")
+        }
         guard Self.actingMethods.contains(method) else { return try dispatch(method: method, params: params) }
         // One hand (realtime v1 §5.4): an acting request holds it from its
         // count to its last event — never beside a reflex run — and a stop
@@ -477,7 +487,21 @@ final class Provider {
     }
 
     private func actionResult(params: [String: JSONValue], action runAction: () throws -> [String: Any]) throws -> [String: Any] {
+        let foreground = params["background"]?.bool == true ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
         var action = try runAction()
+        if params["background"]?.bool == true {
+            action["background"] = [
+                "requested": true,
+                "foregroundUnchanged": foreground != nil && foreground == NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            ]
+        }
+        if params["deferObservation"]?.bool == true,
+           params["noScreenshot"]?.bool == true,
+           let window = params["windowId"]?.number,
+           let windowID = boundedInteger(window, as: UInt32.self), windowID > 0 {
+            action["targetWindowId"] = Int(windowID)
+            return ["action": action, "observationDeferred": true]
+        }
         do {
             return try renderActionResult(action: action, snapshot: observe(params: params))
         } catch let error as ProviderError where (error.code == "window_not_found" || error.code == "window_stale") && hasRequestedWindowSelector(params) {
@@ -781,6 +805,7 @@ final class Provider {
                     "ocr": false,
                 ],
                 "actions": [
+                    "background": true,
                     "click": true,
                     "typeText": true,
                     "pressKey": true,
@@ -1092,6 +1117,24 @@ final class Provider {
             )
         }
         let modifiers = try KeyMap.parseModifiers(params["modifiers"]?.string)
+        if params["background"]?.bool == true {
+            try admitBackgroundTarget(snapshot)
+            let query = readingQuery(params)
+            let index = try optionalInteger(params, "elementIndex")
+                ?? (query.isEmpty ? nil : chosenIndex(query, in: snapshot))
+            guard let index else { throw backgroundUnavailable() }
+            let record = try element(snapshot, index)
+            guard let action = BackgroundInput.clickAction(
+                actions: record.actions,
+                textEntry: MarkPin.textEntryRoles.contains(record.role),
+                plainLeftClick: modifiers.isEmpty && count == 1 && button == .left
+            ) else { throw backgroundUnavailable() }
+            try requireOnTop(record, in: snapshot, background: true)
+            guard performAction(record.element, action) else {
+                throw ProviderError.coded("accessibility_error", "the background semantic action failed; no fallback was attempted")
+            }
+            return actionMetadata(path: "accessibility", actionName: action)
+        }
         // Why: agents expect a click into a target app to make the next
         // keyboard action safe, even when the click uses an AX action path.
         recoverWindow(snapshot.app, windowId: snapshot.windowId, windowBounds: snapshot.windowBounds)
@@ -1193,12 +1236,13 @@ final class Provider {
     /// it, or around it: a mark never presses, or points at, something a
     /// person could not hit there (a row scrolled under a header, a control
     /// under a menu or an in-page dialog).
-    private func requireOnTop(_ record: ElementRecord, in snapshot: Snapshot) throws {
-        guard let point = center(record.localFrame, in: snapshot.windowBounds) else {
+    private func requireOnTop(_ record: ElementRecord, in snapshot: Snapshot, background: Bool = false, at requestedPoint: CGPoint? = nil) throws {
+        guard let point = requestedPoint ?? center(record.localFrame, in: snapshot.windowBounds) else {
             throw ProviderError.coded("element_not_clickable", "element \(record.index) has no clickable frame")
         }
         var hit: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
+        let scope = background ? AXUIElementCreateApplication(snapshot.app.pid) : AXUIElementCreateSystemWide()
+        guard AXUIElementCopyElementAtPosition(scope, Float(point.x), Float(point.y), &hit) == .success,
               let hit
         else {
             throw ProviderError.coded("element_not_found", "nothing answers at the centre of element \(record.index); look again with --marks")
@@ -1254,6 +1298,10 @@ final class Provider {
     private func setValue(params: [String: JSONValue]) throws -> [String: Any] {
         let snapshot = try currentSnapshot(params: params)
         let record = try element(snapshot, try requiredInteger(params, "elementIndex"))
+        if params["background"]?.bool == true {
+            try admitBackgroundTarget(snapshot)
+            try requireOnTop(record, in: snapshot, background: true)
+        }
         let expected = try requiredStringAllowingEmpty(params, "value")
         if params["plainInputOnly"]?.bool == true,
            record.plainInput == nil || record.plainInput != params["expectedPlainValue"]?.string || looksLikeSecret(record.element) {
@@ -1483,6 +1531,9 @@ final class Provider {
         let snapshot = try currentSnapshot(params: params)
         let direction = try scrollDirection(try requiredString(params, "direction"))
         let pages = try positiveNumber(params["pages"]?.number, defaultValue: 1, name: "pages")
+        if params["background"]?.bool == true {
+            return try backgroundScroll(params: params, snapshot: snapshot, direction: direction, pages: pages)
+        }
         if let elementIndex = try optionalInteger(params, "elementIndex") {
             let record = try element(snapshot, elementIndex)
             let action = "AXScroll\(direction.capitalized)ByPage"
@@ -1502,6 +1553,48 @@ final class Provider {
         let point = try coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot)
         try Input.scroll(pid: snapshot.app.pid, at: point, direction: direction, pages: pages)
         return actionMetadata(path: "synthetic")
+    }
+
+    private func backgroundUnavailable() -> ProviderError {
+        .coded("requires_foreground", "this control has no supported background path; no foreground or synthetic fallback was attempted")
+    }
+
+    private func admitBackgroundTarget(_ snapshot: Snapshot) throws {
+        guard BackgroundInput.admitsTarget(snapshot.app.pid, foreground: NSWorkspace.shared.frontmostApplication?.processIdentifier) else {
+            throw ProviderError.coded("requires_foreground", "background input pauses while the person is using the target app or the foreground app is unknown")
+        }
+    }
+
+    private func backgroundScroll(params: [String: JSONValue], snapshot: Snapshot, direction: String, pages: Double) throws -> [String: Any] {
+        try admitBackgroundTarget(snapshot)
+        guard pages == 1 else { throw backgroundUnavailable() }
+        let action = "AXScroll\(direction.capitalized)ByPage"
+        let index: Int
+        let point: CGPoint
+        if let requested = try optionalInteger(params, "elementIndex") {
+            index = requested
+            let record = try element(snapshot, index)
+            guard let visiblePoint = center(record.visible ?? record.localFrame, in: snapshot.windowBounds) else {
+                throw backgroundUnavailable()
+            }
+            point = visiblePoint
+        } else {
+            point = try coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot)
+            let local = CGPoint(x: point.x - snapshot.windowBounds.minX, y: point.y - snapshot.windowBounds.minY)
+            let candidates = snapshot.elements.values.compactMap { record -> BackgroundInput.Scroller? in
+                guard record.actions.contains(action), let frame = record.localFrame else { return nil }
+                return BackgroundInput.Scroller(index: record.index, frame: record.visible.map { frame.intersection($0) } ?? frame)
+            }
+            guard let chosen = BackgroundInput.scrollTarget(at: local, among: candidates) else { throw backgroundUnavailable() }
+            index = chosen
+        }
+        let record = try element(snapshot, index)
+        guard record.actions.contains(action) else { throw backgroundUnavailable() }
+        try requireOnTop(record, in: snapshot, background: true, at: point)
+        guard performAction(record.element, action) else {
+            throw ProviderError.coded("accessibility_error", "the background scroll failed; no fallback was attempted")
+        }
+        return actionMetadata(path: "accessibility", actionName: action)
     }
 
     private func drag(params: [String: JSONValue]) throws -> [String: Any] {

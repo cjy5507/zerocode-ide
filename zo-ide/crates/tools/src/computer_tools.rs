@@ -202,6 +202,7 @@ fn window_kinds(keep: impl Fn(ComputerMethod) -> bool) -> Vec<&'static str> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ComputerInput {
     pub action: String,
+    pub background: Option<bool>,
     /// `[x, y]` in the pixels of the last screenshot, the Anthropic way.
     pub coordinate: Option<[f64; 2]>,
     pub start_coordinate: Option<[f64; 2]>,
@@ -350,6 +351,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
     });
     // A walk's own fields: what the CLI's walk takes, and nothing it lacks.
     let walk = json!({
+        "background": { "type": "boolean", "description": "App walk: AX only." },
         "goal": { "type": "string", "maxLength": GOAL_CHAR_CAP },
         "pane": { "type": "string" },
         "platform": { "type": "string" },
@@ -578,6 +580,9 @@ fn spelled_region(region: [f64; 4]) -> String {
 /// families — looking and input, apps and the system, the meaning layer.
 pub(crate) fn argv_for(input: &ComputerInput) -> Result<Vec<String>, ToolError> {
     let action = input.action.trim();
+    if input.background == Some(true) && action != WALK_ACTION {
+        return Err(ToolError::InvalidInput("background is supported by app walks; it cannot be dropped or applied to global input".into()));
+    }
     if input.mark.is_some() && !MARK_CLICKS.contains(&action) {
         return Err(ToolError::InvalidInput(format!("`mark` belongs to the clicks ({}), not `{action}`", MARK_CLICKS.join(", "))));
     }
@@ -989,7 +994,7 @@ fn argv_walk(action: &str, input: &ComputerInput, argv: &mut Vec<String>) -> boo
     if let Some(steps) = input.max_steps {
         push(argv, &["--steps", &steps.to_string()]);
     }
-    for (flag, asked) in [(WALK_OVERLAP_FLAG, input.overlap), (WALK_RESCUE_FLAG, input.rescue), (WALK_REPLAY_FLAG, input.replay)] {
+    for (flag, asked) in [(WALK_OVERLAP_FLAG, input.overlap), (WALK_RESCUE_FLAG, input.rescue), (WALK_REPLAY_FLAG, input.replay), ("background", input.background)] {
         if asked == Some(true) {
             argv.push(format!("--{flag}"));
         }
@@ -1600,6 +1605,11 @@ pub(crate) fn read_walk(answer: &Value, budget: u64) -> WalkRead {
         read.reason = Some(refused.code);
         return read;
     }
+    if said.pointer("/background/interrupted") == Some(&Value::Bool(true)) {
+        read.status = WalkStatus::Stopped;
+        read.reason = Some("background_interrupted".into());
+        return read;
+    }
     let last = rows.last();
     let recheck = |row: &Value| row.get(walk_words::RECHECK).and_then(Value::as_bool);
     let (status, reason) = if said.get(walk_words::REACHED) == Some(&Value::Bool(true)) {
@@ -1686,6 +1696,9 @@ fn run_computer_walk(input: &ComputerInput, ctx: &ToolContext, road: &ComputerRo
 
 pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<String, ToolError> {
     let input: ComputerInput = from_value(input)?;
+    if input.background == Some(true) {
+        argv_for(&input)?;
+    }
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
     let action = input.action.trim().to_string();
     if action == BATCH_ACTION {
@@ -2626,11 +2639,17 @@ printf '%s
     /// are the walk's own; a batch's `steps` stays the batch's.
     #[test]
     fn a_walk_is_the_clis_walk_read_by_the_same_parser() {
+        for action in ["left_click", "key", "batch"] {
+            let input: ComputerInput = serde_json::from_value(json!({ "action": action, "background": true })).unwrap();
+            assert!(argv_for(&input).is_err(), "background must not disappear from {action}");
+        }
         let parse = |words: &[&str]| {
             zerocode_core::computer_use::parse_command(&words.iter().map(|word| (*word).to_string()).collect::<Vec<_>>())
                 .expect("the CLI's walk")
         };
         let cases: Vec<(Value, Vec<&str>)> = vec![
+            (json!({ "action": "walk", "goal": "g", "app": "Fixture", "background": true }),
+                vec!["walk", "--app", "Fixture", "--goal", "g", "--background", "--json"]),
             (json!({ "action": "walk", "goal": "g", "pane": "browser-13", "until": "u", "max_steps": 6, "overlap": true }),
                 vec!["walk", "--pane", "browser-13", "--goal", "g", "--steps", "6", "--until", "u", "--overlap", "--json"]),
             (json!({ "action": "walk", "goal": "g", "app": "Calculator", "rescue": true, "replay": true }),
@@ -2664,6 +2683,7 @@ printf '%s
         let schema = &tool_specs().pop().expect("one spec").input_schema["properties"];
         assert_eq!(schema["max_steps"]["maximum"], json!(WALK_STEPS_MAX));
         assert_eq!(schema["goal"]["maxLength"], json!(GOAL_CHAR_CAP));
+        assert_eq!(schema["background"]["type"], "boolean");
         assert!(schema["steps"]["items"]["properties"].get("goal").is_none(), "a walk is never a batch step");
     }
 
@@ -2671,6 +2691,11 @@ printf '%s
     /// the judgment's own `done` alone.
     #[test]
     fn a_walks_answer_reads_into_one_of_five_statuses() {
+        let mut interrupted = walk_answer("on", 1, true, Some(false), &[walk_row(1, json!({ "recheck": true }))]);
+        interrupted["result"]["background"] = json!({ "requested": true, "interrupted": true });
+        let stopped = read_walk(&interrupted, 6);
+        assert_eq!(stopped.status, WalkStatus::Stopped);
+        assert_eq!(stopped.reason.as_deref(), Some("background_interrupted"));
         let on = JevMode::On.key();
         let barred = zerocode_core::jev::summary::BARRED.canonical;
         let pressed = |attempt: u64, recheck: Option<bool>| {

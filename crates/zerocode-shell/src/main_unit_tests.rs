@@ -20322,6 +20322,14 @@ pub(crate) mod computer_desktop_wait {
         use crate::agent_tools_runtime::click_by_words;
         use crate::computer_use::confirm::{self, Asking};
         use zerocode_core::computer_use_protocol::error_code;
+        let background = zerocode_core::computer_use::parse_command(
+            &["click", "--app", "Fixture", "--ocr", "--text", "Continue", "--background"]
+                .map(str::to_owned),
+        ).unwrap();
+        let refusal = click_by_words(&background, Asking::HandBack, &mut |_, _| {
+            panic!("background OCR must not escape into a desktop coordinate click")
+        }).unwrap_err();
+        assert_eq!(refusal.code, "requires_foreground");
         let _hand = ONE_HAND
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -113,6 +113,9 @@ fn held_client() -> &'static Mutex<Option<platform::Session>> {
 /// Call the persistent provider. Transport failures discard the session so a
 /// later request gets one clean restart; provider refusals keep its snapshots.
 pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
+    if let Some(params) = params.as_object() {
+        zerocode_core::computer_use_protocol::execution::validate(method, params)?;
+    }
     let mut held = held_client()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -122,6 +125,12 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
         *held = Some(session);
     }
     let session = held.as_mut().expect("session stood");
+    if let Some(params) = params.as_object() {
+        zerocode_core::computer_use_protocol::execution::require_support(
+            session.supports_background(),
+            params,
+        )?;
+    }
     // ZeroCode's own window under a point the request presses at — or a
     // point whose window cannot be read — is refused here first: the helper
     // reads the pointer's own picture, where the window server lists one, as

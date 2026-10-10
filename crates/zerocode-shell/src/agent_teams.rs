@@ -1162,6 +1162,13 @@ pub trait Host {
         None
     }
 
+    /// A conversation the ledger binds to a run sat its run's empty coordinator
+    /// chair from the pane at `leader_term` (t-21908), and the chair's sleepers
+    /// are asked for their seats the way a restored coordinator tab asks at
+    /// mount. Nothing is typed into the pane here. Defaulted to nothing, so a
+    /// host that seats no sleepers keeps the chair without them.
+    fn coordinator_sat(&self, _leader_term: u32) {}
+
     /// Which agent runs in this terminal, as the catalog spells it.
     ///
     /// The mail pointer's one exception reads this: a `cursor` composer

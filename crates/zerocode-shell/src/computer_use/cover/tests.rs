@@ -563,6 +563,33 @@ fn mark() -> PinnedClick {
     }
 }
 
+#[test]
+fn a_background_pin_refusal_never_uncover_moves_or_retries() {
+    let mut target = mark();
+    target.params.insert("background".into(), true.into());
+    let mut presses = 0;
+    let refusal = press_mark(
+        &target,
+        &mut || {
+            presses += 1;
+            Err(ComputerUseError::new(
+                error_code::ELEMENT_NOT_FOUND,
+                "pin changed",
+            ))
+        },
+        &mut Hand {
+            call: &mut |_, _| panic!("background cannot move or raise any window"),
+            pause: &mut |_| panic!("background cannot retry a failed pin"),
+            person: &mut |_| panic!("background cannot silently change execution modes"),
+            wall_ms: &|| 0,
+        },
+        &mut Unasked,
+    )
+    .unwrap_err();
+    assert_eq!(refusal.code, error_code::ELEMENT_NOT_FOUND);
+    assert_eq!(presses, 1);
+}
+
 /// Press `mark()` on `desk` as the helper would: refused while its centre is
 /// under another window, pressed once it shows. Returns the answer, how many
 /// presses went, and the lines the person saw.

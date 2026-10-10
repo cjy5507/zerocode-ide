@@ -459,6 +459,8 @@ pub struct GoalWorld<'a, Road> {
     scroll_window: Option<(u64, f64, f64)>,
     pixels: bool,
     pixel_baseline: Option<Option<bool>>,
+    background: bool,
+    background_interrupted: bool,
 }
 
 impl<'a, Road> GoalWorld<'a, Road> {
@@ -528,6 +530,32 @@ impl<'a, Road> GoalWorld<'a, Road> {
             scroll_window: None,
             pixels: false,
             pixel_baseline: None,
+            background: false,
+            background_interrupted: false,
+        }
+    }
+
+    #[must_use]
+    pub fn background(mut self, requested: bool) -> Self {
+        self.background = requested && matches!(self.aim, Aim::App { .. });
+        self
+    }
+
+    pub const fn background_interrupted(&self) -> bool {
+        self.background_interrupted
+    }
+
+    fn background_argv(&self, argv: &mut Vec<String>) {
+        if self.background {
+            argv.push("--background".into());
+        }
+    }
+
+    fn note_background(&mut self, answer: Option<&Value>) {
+        if self.background {
+            self.background_interrupted |= answer
+                .and_then(|answer| answer.pointer("/action/background/foregroundUnchanged"))
+                != Some(&Value::Bool(true));
         }
     }
 
@@ -586,6 +614,10 @@ impl<'a, Road> GoalWorld<'a, Road> {
         // longer holds. A phone's press is asked to count the caller's words
         // in the screen it settles on, so a walk that got there looks no more.
         let mut argv = self.aim.press_argv(mark, &self.look);
+        if self.background_interrupted {
+            return false;
+        }
+        self.background_argv(&mut argv);
         if let (Aim::Phone { .. }, Some(until)) = (&self.aim, &self.until) {
             argv.extend(["--text".to_string(), until.clone()]);
         }
@@ -605,6 +637,7 @@ impl<'a, Road> GoalWorld<'a, Road> {
         self.unsettled = None;
         let answer = (self.road)(self.aim.tool(), &argv, &argv);
         let said = answer_value(&answer);
+        self.note_background(said.as_ref());
         self.settled = said.as_ref().and_then(|said| {
             Some(Settled {
                 note: said
@@ -670,12 +703,16 @@ where
     Road: FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
 {
     fn look(&mut self) -> Option<Screen> {
+        if self.background_interrupted {
+            return None;
+        }
         if let Some((screen, look)) = self.kept.take() {
             self.look = look;
             self.seen = self.remember_fields(&screen);
             return Some(screen);
         }
         let mut argv = self.aim.look_argv();
+        self.background_argv(&mut argv);
         if self.pixels {
             argv.push("--ocr".into());
         }
@@ -703,8 +740,9 @@ where
             screen.at = self.page.clone();
         }
         if said.pointer("/tree/text").and_then(Value::as_str).is_none()
-            && let Some(argv) = self.aim.shows_argv()
+            && let Some(mut argv) = self.aim.shows_argv()
         {
+            self.background_argv(&mut argv);
             let answer = read_unjudged(self.road, self.aim.tool(), &argv);
             screen.shows = answer_value(&answer)
                 .and_then(|read| Some(shows_of(read.get("text")?.as_str()?)))
@@ -741,6 +779,7 @@ where
         }
         match self.aim {
             Aim::Pane { .. } => &Navigation::PAGE,
+            Aim::App { .. } if self.background && self.scroll_window.is_some() => &Navigation::PAGE,
             Aim::App { .. } if self.scroll_window.is_some() => {
                 if cfg!(target_os = "macos") && !self.pixels {
                     &Navigation::ALL
@@ -762,7 +801,7 @@ where
     }
 
     fn navigate(&mut self, action: Navigation) -> bool {
-        if !self.navigation().contains(&action) {
+        if self.background_interrupted || !self.navigation().contains(&action) {
             return false;
         }
         if action == Navigation::ReadPixels {
@@ -770,7 +809,7 @@ where
             self.kept = None;
             return true;
         }
-        let (tool, argv) = if action == Navigation::Wait {
+        let (tool, mut argv) = if action == Navigation::Wait {
             (
                 RecipeTool::Computer,
                 vec![
@@ -851,6 +890,9 @@ where
                 Aim::Phone { .. } => return false,
             }
         };
+        if action != Navigation::Wait {
+            self.background_argv(&mut argv);
+        }
         let left = self.left_ms();
         if left == 0 || left < recipe_line_holds_ms(tool, &argv) {
             return false;
@@ -860,7 +902,11 @@ where
         self.unsettled = None;
         self.settling = false;
         self.counted = None;
-        (self.road)(tool, &argv, &argv).exit_code == 0
+        let answer = (self.road)(tool, &argv, &argv);
+        if action != Navigation::Wait {
+            self.note_background(answer_value(&answer).as_ref());
+        }
+        answer.exit_code == 0
     }
 
     fn settled(&mut self) -> Option<Settled> {
@@ -917,6 +963,9 @@ where
     }
 
     fn type_into(&mut self, mark: usize, goal: &str) -> Typed {
+        if self.background_interrupted {
+            return Typed::Refused(TYPE_REFUSED.to_string());
+        }
         if matches!(self.aim, Aim::Phone { .. }) {
             return Typed::Refused(NO_TYPING.to_string());
         }
@@ -975,7 +1024,7 @@ where
         // press — and typed at once, by the look's own selector for it: a
         // press that settles before it answers, since the typing follows it.
         let chars = value.chars().count();
-        let (tool, argv) = match &self.aim {
+        let (tool, mut argv) = match &self.aim {
             Aim::Pane { label } => {
                 let pane = label.clone();
                 if !self.press_by(mark, false) {
@@ -1007,6 +1056,7 @@ where
             ),
             Aim::Phone { .. } => return Typed::Refused(NO_TYPING.to_string()),
         };
+        self.background_argv(&mut argv);
         let logged = crate::run_evidence::redacted(tool.as_str(), &argv);
         let holds = recipe_line_holds_ms(tool, &argv);
         let left = self.left_ms();
@@ -1014,15 +1064,17 @@ where
             return Typed::Refused(TYPE_REFUSED.to_string());
         }
         let answer = (self.road)(tool, &argv, &logged);
+        self.note_background(answer_value(&answer).as_ref());
         if answer.exit_code != 0 {
             return Typed::Refused(TYPE_REFUSED.to_string());
         }
-        if tool == RecipeTool::Computer
-            && answer_value(&answer)
-                .and_then(|said| said.pointer("/action/verification/state").cloned())
-                .as_ref()
-                .and_then(Value::as_str)
-                != Some("verified")
+        if self.background_interrupted
+            || (tool == RecipeTool::Computer
+                && answer_value(&answer)
+                    .and_then(|said| said.pointer("/action/verification/state").cloned())
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    != Some("verified"))
         {
             return Typed::Unverified { source, chars };
         }
@@ -1042,6 +1094,9 @@ where
     }
 
     fn reached(&mut self) -> Option<bool> {
+        if self.background_interrupted {
+            return None;
+        }
         let until = self.until.clone()?;
         // A page's press that settled before it answered (t-9876) counted no
         // words: a page asks `find`, as ever.
@@ -1068,6 +1123,7 @@ where
             return Some(count.is_some_and(|count| count > 0));
         }
         let mut argv = self.aim.reached_argv(&until);
+        self.background_argv(&mut argv);
         if self.pixels && matches!(self.aim, Aim::App { .. }) {
             argv.extend(["--ocr".into(), JSON_FLAG.into()]);
         }
