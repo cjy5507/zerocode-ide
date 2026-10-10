@@ -1560,7 +1560,7 @@ mod windows_impl {
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        READ_CONTROL, WRITE_DAC,
+        READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     };
 
     fn root_and_names(path: &Path) -> io::Result<(PathBuf, Vec<OsString>)> {
@@ -1604,7 +1604,9 @@ mod windows_impl {
     fn entry_options(write: bool, directory: bool, write_dacl: bool) -> OpenOptions {
         let mut options = OpenOptions::new();
         let data_access = if write { GENERIC_WRITE } else { GENERIC_READ };
-        let dacl_access = if write_dacl { WRITE_DAC } else { 0 };
+        // A handle that restricts an entry also asks for WRITE_OWNER: an entry the
+        // token's default owner created moves to the token user (see core-types paths).
+        let dacl_access = if write_dacl { WRITE_DAC | WRITE_OWNER } else { 0 };
         options
             .access_mode(data_access | READ_CONTROL | dacl_access | FILE_READ_ATTRIBUTES)
             .custom_flags(

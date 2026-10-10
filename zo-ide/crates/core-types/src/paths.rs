@@ -29,12 +29,15 @@ mod windows_owner_only {
     use windows_permissions::constants::{
         AccessRights, AceType, SeObjectType, SecurityInformation,
     };
-    use windows_permissions::{LocalBox, SecurityDescriptor};
+    use windows_permissions::{LocalBox, Sid, SecurityDescriptor};
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        READ_CONTROL, WRITE_DAC,
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL, WRITE_DAC,
+        WRITE_OWNER,
     };
+
+    use super::{classify_owner, OwnerClass};
 
     const PRIVATE_DACL_PREFIX: &str = "D:P";
 
@@ -102,8 +105,13 @@ mod windows_owner_only {
     fn entry_open_options(write: bool) -> OpenOptions {
         let mut options = OpenOptions::new();
         let data_access = if write { GENERIC_WRITE } else { GENERIC_READ };
+        // A handle that may restrict an entry also asks for WRITE_OWNER, which
+        // moves an entry created under the token's default owner to the user.
+        let owner_access = if write { WRITE_OWNER } else { 0 };
         options
-            .access_mode(data_access | READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES)
+            .access_mode(
+                data_access | READ_CONTROL | WRITE_DAC | owner_access | FILE_READ_ATTRIBUTES,
+            )
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
             .follow(FollowSymlinks::No)
             .maybe_dir(true);
@@ -157,7 +165,9 @@ mod windows_owner_only {
     }
 
     pub(super) fn restrict_handle<H: AsRawHandle>(handle: &mut H) -> io::Result<()> {
-        if !is_handle_current_user_owned(handle)? {
+        let current = windows_permissions::utilities::current_process_sid()?;
+        let owner = owner_class(handle, &current)?;
+        if owner == OwnerClass::Other {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "refusing to change the DACL of a Windows entry owned by another SID",
@@ -167,11 +177,27 @@ mod windows_owner_only {
         let dacl = descriptor
             .dacl()
             .ok_or_else(|| invalid_path("owner-only Windows descriptor has no DACL"))?;
+        // An entry the token's default owner created moves to the token user in
+        // the same call that applies the DACL. The owner check below accepts
+        // only the token user, so the entry is left owned the way it is checked.
+        let (security_info, new_owner) = if owner == OwnerClass::TokenDefault {
+            (
+                SecurityInformation::Owner
+                    | SecurityInformation::Dacl
+                    | SecurityInformation::ProtectedDacl,
+                Some(current.as_ref()),
+            )
+        } else {
+            (
+                SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+                None,
+            )
+        };
         windows_permissions::wrappers::SetSecurityInfo(
             handle,
             SeObjectType::SE_FILE_OBJECT,
-            SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-            None,
+            security_info,
+            new_owner,
             None,
             Some(dacl),
             None,
@@ -222,12 +248,83 @@ mod windows_owner_only {
 
     pub(super) fn is_handle_current_user_owned<H: AsRawHandle>(handle: &H) -> io::Result<bool> {
         let current = windows_permissions::utilities::current_process_sid()?;
+        Ok(owner_class(handle, &current)? != OwnerClass::Other)
+    }
+
+    /// Classify a retained handle's owner as the policy sees it. An entry with
+    /// no owner SID is refused like one owned by another principal. The token's
+    /// default owner is read only for an entry the token user does not own.
+    fn owner_class<H: AsRawHandle>(handle: &H, current: &Sid) -> io::Result<OwnerClass> {
         let descriptor = windows_permissions::wrappers::GetSecurityInfo(
             handle,
             SeObjectType::SE_FILE_OBJECT,
             SecurityInformation::Owner,
         )?;
-        Ok(descriptor.owner() == Some(current.as_ref()))
+        let Some(owner) = descriptor.owner() else {
+            return Ok(OwnerClass::Other);
+        };
+        let owner = owner.to_string();
+        let current = current.to_string();
+        if owner == current {
+            return Ok(OwnerClass::CurrentUser);
+        }
+        let default_owner = token_default_owner()?;
+        Ok(classify_owner(owner.as_str(), current.as_str(), default_owner))
+    }
+
+    /// The token's default owner as SID text: the owner Windows gives every entry
+    /// this process creates without an explicit descriptor. The entry itself is
+    /// not reachable without `unsafe`, so the owner is read from a probe entry.
+    /// Only a successful read is kept, for the rest of the process.
+    pub(super) fn token_default_owner() -> io::Result<&'static str> {
+        static DEFAULT_OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        if let Some(owner) = DEFAULT_OWNER.get() {
+            return Ok(owner.as_str());
+        }
+        let owner = probe_default_owner()?;
+        Ok(DEFAULT_OWNER.get_or_init(|| owner).as_str())
+    }
+
+    /// Create one entry under a fresh name and read the owner it was given. The
+    /// probe is created only by this process. `create_new` refuses a name in
+    /// use, and FILE_FLAG_DELETE_ON_CLOSE removes the entry when the handle
+    /// closes, even if the process dies before the probe is dropped.
+    fn probe_default_owner() -> io::Result<String> {
+        use rand::Rng as _;
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        const PROBE_ATTEMPTS: usize = 8;
+        for _ in 0..PROBE_ATTEMPTS {
+            let name = format!(
+                "zo-owner-probe-{}-{:032x}.tmp",
+                std::process::id(),
+                rand::rng().random::<u128>()
+            );
+            let probe = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .access_mode(DELETE | READ_CONTROL)
+                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+                .open(std::env::temp_dir().join(name))
+            {
+                Ok(probe) => probe,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            };
+            let descriptor = windows_permissions::wrappers::GetSecurityInfo(
+                &probe,
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Owner,
+            )?;
+            return descriptor
+                .owner()
+                .map(|owner| owner.to_string())
+                .ok_or_else(|| io::Error::other("the probe entry has no owner"));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no unused name for the owner probe",
+        ))
     }
 
     pub(super) fn restrict_path(path: &Path) -> io::Result<()> {
@@ -349,9 +446,10 @@ fn classify_owner<T: PartialEq + ?Sized>(
     current_user: &T,
     token_default_owner: &T,
 ) -> OwnerClass {
-    let _ = token_default_owner;
     if owner == current_user {
         OwnerClass::CurrentUser
+    } else if owner == token_default_owner {
+        OwnerClass::TokenDefault
     } else {
         OwnerClass::Other
     }
@@ -644,8 +742,10 @@ pub fn windows_handle_is_owner_only<H: std::os::windows::io::AsRawHandle>(
 }
 
 /// Verify that an already retained Windows file or directory handle is owned
-/// by the current process SID. This is separate from DACL privacy so callers
-/// can classify an owner-owned but overly broad entry before tightening it.
+/// by the current token's user or by its default owner (the Administrators
+/// group for an elevated token), the two owners the policy can restrict. Any
+/// other owner is refused. This is separate from DACL privacy so callers can
+/// classify an owner-owned but overly broad entry before tightening it.
 #[cfg(windows)]
 pub fn windows_handle_is_current_user_owned<H: std::os::windows::io::AsRawHandle>(
     handle: &H,
@@ -977,6 +1077,31 @@ mod tests {
             classify_owner(&"administrators", &"user", &"user"),
             OwnerClass::Other
         );
+    }
+
+    /// Windows only. An entry this process creates is restricted to the token
+    /// user, whichever owner Windows gave it. The flag in the message says whether
+    /// the probed default owner is the token user, so a failure shows which case ran.
+    #[cfg(windows)]
+    #[test]
+    fn a_restricted_entry_ends_owned_by_the_token_user() {
+        use rand::Rng as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "zo-owner-normalize-{}-{:032x}",
+            std::process::id(),
+            rand::rng().random::<u128>()
+        ));
+        let entry = root.join("entry");
+        std::fs::create_dir_all(&entry).unwrap();
+        restrict_permissions_owner_only(&entry).unwrap();
+        let token_user = windows_permissions::utilities::current_process_sid()
+            .unwrap()
+            .to_string();
+        let default_is_user = windows_owner_only::token_default_owner().unwrap() == token_user;
+        let owner_only = permissions_are_owner_only(&entry).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(owner_only, "default_owner_is_user={default_is_user}");
     }
 
     #[test]
