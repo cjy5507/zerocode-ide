@@ -255,12 +255,11 @@ async function testRemainders(page, ok) {
       return box.left < frame.left - 0.5 || box.right > frame.right + 0.5;
     }).length;
     const last = cards.at(-1) ?? null;
-    last?.focus({ preventScroll: false });
-    await new Promise((done) => setTimeout(done, 100));
     const at = last?.getBoundingClientRect();
-    const reached = Boolean(at) && at.left >= frame.left - 0.5 && at.right <= frame.right + 0.5
+    const reached = document.activeElement === last && Boolean(at)
+      && at.left >= frame.left - 0.5 && at.right <= frame.right + 0.5
       && at.top >= frame.top - 0.5 && at.bottom <= frame.bottom + 0.5;
-    return { cards: cards.length, past, overflowX: Math.round((strip?.scrollWidth ?? 0) - (strip?.clientWidth ?? 0)), reached };
+    return { cards: cards.length, past, overflowX: Math.round((strip?.scrollWidth ?? 0) - (strip?.clientWidth ?? 0)), reached, focused: document.activeElement?.className ?? null };
   });
   ok(
     "the evidence of a task reaches its last card without a sideways run: no card runs past the band's edge, the band has no sideways overflow, and the keyboard reaches the last card",
