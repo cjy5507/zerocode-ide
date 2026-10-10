@@ -2442,6 +2442,17 @@ export async function openWindowTestPage(browser, origin, { faults = [], before 
   const page = await context.newPage();
   page.on("close", () => context.close().catch(() => {}));
   page.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));
+  // What the page asked for and what failed, kept for the one message that says why a page never finished loading:
+  // a request that failed or answered an error, and the console's errors. Read only on that failure.
+  const requests = [];
+  const consoleErrors = [];
+  page.on("requestfailed", (request) => requests.push(`${request.url()} failed: ${request.failure()?.errorText ?? "unknown"}`));
+  page.on("response", (response) => {
+    if (response.status() >= 400) requests.push(`${response.url()} HTTP ${response.status()}`);
+  });
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
   // `WINDOW_TRACE=1`: a page-side `console.log("TRACE …")` reaches stderr, so
   // a scenario that never returns can say how far it got.
   if (process.env.WINDOW_TRACE) {
@@ -2462,7 +2473,20 @@ export async function openWindowTestPage(browser, origin, { faults = [], before 
   try {
     await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
   } catch (error) {
-    throw new Error(`window did not finish loading: ${faults.join(" | ") || error}`);
+    // The boot globals and the script resources that did arrive: which scripts the page actually ran.
+    const boot = await page.evaluate(() => ({
+      readyState: document.readyState,
+      openSkillsView: typeof openSkillsView,
+      paintFileView: typeof paintFileView,
+      editingPrefs: typeof editingPrefs,
+      BOUND: typeof BOUND,
+      scriptsArrived: performance.getEntriesByType("resource")
+        .filter((entry) => entry.name.endsWith(".js")).map((entry) => entry.name.split("/").pop()),
+    })).catch((failure) => ({ unreadable: String(failure).slice(0, 200) }));
+    throw new Error(`window did not finish loading: ${faults.join(" | ") || error}`
+      + ` | failed requests: ${requests.join(" | ") || "none"}`
+      + ` | console errors: ${consoleErrors.join(" | ") || "none"}`
+      + ` | boot: ${JSON.stringify(boot)}`);
   }
   return { page, faults };
 }
