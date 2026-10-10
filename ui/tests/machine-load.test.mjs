@@ -7,18 +7,18 @@ import assert from "node:assert/strict";
 import * as machineLoad from "./machine-load.mjs";
 
 test("a frame over its wall on a platform that cannot read the load holds, unjudged", () => {
-  assert.equal(machineLoad.frameBudgetHolds(166, 128, { platform: "win32", load: 0 }), true);
+  assert.equal(machineLoad.frameBudgetHolds(166, 128, { platform: "win32", load: 0, env: {} }), true);
 });
 
 test("the load note names an unreadable platform in its own words", () => {
-  assert.match(machineLoad.loadNote({ platform: "win32", load: 0 }), /load unreadable on win32/);
+  assert.match(machineLoad.loadNote({ platform: "win32", load: 0, env: {} }), /load unreadable on win32/);
 });
 
 test("the rule reads a platform's own load: a readable one judges a frame over its wall by the machine's load", () => {
-  assert.equal(machineLoad.frameBudgetHolds(166, 128, { platform: "darwin", load: 0 }), false);
-  assert.equal(machineLoad.frameBudgetHolds(166, 128, { platform: "darwin", load: 1e3 }), true);
-  assert.equal(machineLoad.frameBudgetHolds(60, 128, { platform: "darwin", load: 0 }), true);
-  assert.equal(machineLoad.frameBudgetHolds(166, 128, { platform: "win32", load: 1e3 }), true);
+  assert.equal(machineLoad.frameBudgetHolds(166, 128, { platform: "darwin", load: 0, env: {} }), false);
+  assert.equal(machineLoad.frameBudgetHolds(166, 128, { platform: "darwin", load: 1e3, env: {} }), true);
+  assert.equal(machineLoad.frameBudgetHolds(60, 128, { platform: "darwin", load: 0, env: {} }), true);
+  assert.equal(machineLoad.frameBudgetHolds(166, 128, { platform: "win32", load: 1e3, env: {} }), true);
 });
 
 test("the default platform is the machine's own, not the page's report", () => {
@@ -34,7 +34,24 @@ test("a platform that cannot read the load is loud, so its budget is unjudgeable
 });
 
 test("a budget with no platform passed is judged on this machine's own platform", () => {
-  assert.equal(machineLoad.frameBudgetHolds(166, 128, { load: 0 }), process.platform === "win32");
+  assert.equal(machineLoad.frameBudgetHolds(166, 128, { load: 0, env: {} }), process.platform === "win32");
+});
+
+const HOSTED = { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" };
+
+test("a GitHub-hosted runner records an absolute frame budget and never judges it, whatever the load", () => {
+  assert.equal(machineLoad.frameBudgetHolds(206, 128, { platform: "darwin", load: 0, env: HOSTED }), true);
+  assert.match(machineLoad.loadNote({ platform: "darwin", load: 0, env: HOSTED }), /hosted runner/);
+});
+
+test("a self-hosted runner, or one with no CI environment, still judges an absolute frame budget", () => {
+  assert.equal(machineLoad.frameBudgetHolds(206, 128, { platform: "darwin", load: 0, env: {} }), false);
+  assert.equal(machineLoad.frameBudgetHolds(206, 128, { platform: "darwin", load: 0,
+    env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" } }), false);
+});
+
+test("the hosted rule is for absolute budgets only: the ratio rule still judges on a hosted runner", () => {
+  assert.equal(machineLoad.machineIsLoudNow({ platform: "darwin", load: 0, env: HOSTED }), false);
 });
 
 test("the load note this run saw is logged for the record", () => {
