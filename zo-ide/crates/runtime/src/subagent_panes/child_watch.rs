@@ -23,13 +23,14 @@
 //!
 //! Two answers come from other threads (t-18917): a tmux ask runs on a thread
 //! of its own, whose [`Waker`] ends the wait's rest when the confirmation of a
-//! death is in, and that thread learns its tmux has exited from [`exited_by`] —
-//! the kernel's word, not a look every few milliseconds.
+//! death is in. That thread learns its tmux has exited from
+//! `plugins::bounded_child::observe_exit` (t-19897) — the kernel's word, not a
+//! look every few milliseconds.
 //!
 //! macOS only: everywhere else [`ChildWatch::open`] answers `None` and the wait
 //! goes on as it did (a 250 ms look), except that tmux is asked every few
-//! seconds instead of at every look; [`exited_by`] answers `None` and the ask
-//! looks for the exit on a timer.
+//! seconds instead of at every look; `plugins::bounded_child::observe_exit`
+//! answers `None` there and the ask looks for the exit on a timer.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -60,7 +61,7 @@ impl Woken {
 }
 
 pub use imp::ChildWatch;
-pub(crate) use imp::{exited_by, Waker};
+pub(crate) use imp::Waker;
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -69,9 +70,8 @@ mod imp {
     use std::os::fd::{AsRawFd as _, RawFd};
     use std::path::Path;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
-    use nix::errno::Errno;
     use nix::libc::{c_long, time_t, timespec};
     use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue};
 
@@ -114,42 +114,6 @@ mod imp {
             );
             let mut none: [KEvent; 0] = [];
             let _ = self.queue.kevent(&[poke], &mut none, Some(timespec_of(Duration::ZERO)));
-        }
-    }
-
-    /// Rest until process `pid` exits or `deadline` passes, without reaping
-    /// it (t-18917): `Some(true)` once it has exited, `Some(false)` at the
-    /// deadline, `None` when the kernel will not watch it and the caller has
-    /// to look for itself. One kqueue per process asked about; it is closed
-    /// on the way out.
-    pub(crate) fn exited_by(pid: u32, deadline: Instant) -> Option<bool> {
-        let queue = Kqueue::new().ok()?;
-        let watch = KEvent::new(
-            usize::try_from(pid).ok()?,
-            EventFilter::EVFILT_PROC,
-            EventFlag::EV_ADD | EventFlag::EV_ONESHOT,
-            FilterFlag::NOTE_EXIT,
-            0,
-            0,
-        );
-        let mut none: [KEvent; 0] = [];
-        match queue.kevent(&[watch], &mut none, Some(timespec_of(Duration::ZERO))) {
-            Ok(_) => {}
-            // Exited before it could be watched: a process that has exited is
-            // not one the kernel watches.
-            Err(Errno::ESRCH) => return Some(true),
-            Err(_) => return None,
-        }
-        let mut events = [blank()];
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match queue.kevent(&[], &mut events, Some(timespec_of(left))) {
-                Ok(0) if left.is_zero() => return Some(false),
-                // The rest ran out: what is left of it is looked at again.
-                Ok(0) | Err(Errno::EINTR) => {}
-                Ok(_) => return Some(true),
-                Err(_) => return None,
-            }
         }
     }
 
@@ -319,7 +283,7 @@ mod imp {
 mod imp {
     use std::net::SocketAddr;
     use std::path::Path;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::Woken;
 
@@ -334,11 +298,6 @@ mod imp {
         pub(crate) fn wake(&self) {
             match *self {}
         }
-    }
-
-    /// The kernel is not asked here: the caller looks for the exit itself.
-    pub(crate) fn exited_by(_pid: u32, _deadline: Instant) -> Option<bool> {
-        None
     }
 
     impl ChildWatch {
@@ -546,27 +505,5 @@ mod tests {
         let started = Instant::now();
         assert_eq!(watch.wait(Duration::from_secs(5)), Woken::NOTHING);
         assert!(started.elapsed() < Duration::from_millis(250), "a wake before the rest was lost");
-    }
-
-    /// The kernel says when a process exits, without reaping it, and a
-    /// deadline is kept when it does not (t-18917).
-    #[test]
-    fn an_exit_is_heard_at_once_and_a_deadline_is_kept() {
-        let mut quick = std::process::Command::new("/bin/sleep").arg("0.1").spawn().expect("spawn");
-        let started = Instant::now();
-        assert_eq!(super::exited_by(quick.id(), started + Duration::from_secs(5)), Some(true));
-        assert!(started.elapsed() < Duration::from_secs(1), "the exit was heard after {:?}", started.elapsed());
-        assert!(quick.try_wait().expect("try_wait").is_some(), "the exited process was not left to reap");
-
-        let mut slow = std::process::Command::new("/bin/sleep").arg("5").spawn().expect("spawn");
-        let started = Instant::now();
-        assert_eq!(super::exited_by(slow.id(), started + Duration::from_millis(300)), Some(false));
-        let took = started.elapsed();
-        assert!(
-            took >= Duration::from_millis(300) && took < Duration::from_millis(600),
-            "a 300 ms deadline was kept at {took:?}"
-        );
-        let _ = slow.kill();
-        let _ = slow.wait();
     }
 }

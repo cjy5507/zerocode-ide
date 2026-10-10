@@ -12,8 +12,8 @@
 //! ([`super::TMUX_SPLIT_BOUND`], t-19898) — and ends it then. The caller holds
 //! an [`Ask`] and looks at it when it likes, or waits for it a while; dropping
 //! one that has not answered ends its tmux at once. The thread rests on the
-//! kernel's word that the tmux exited ([`child_watch::exited_by`]), not on a
-//! look every few milliseconds, and wakes the asking wait's watch only when
+//! kernel's word that the tmux exited (`plugins::bounded_child::observe_exit`),
+//! not on a look every few milliseconds, and wakes the asking wait's watch only when
 //! the wait handed it one to wake; either way an ask costs the wait no look on
 //! a timer — wake-ups are what the pane probe counts.
 //!
@@ -23,7 +23,8 @@
 //! spawned would leave the rest running out deadlines of their own. The group
 //! is signalled only while its leader is unreaped: the leader's pid is taken
 //! back before it is reaped, so a pid the system may have handed on is never
-//! signalled, and [`spawned_group`] refuses 0 and this process's own group.
+//! signalled, and `plugins::bounded_child::end_group` refuses 0 and this
+//! process's own group.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -32,14 +33,15 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::child_watch::{self, Waker};
+use plugins::bounded_child::{observe_exit, reap, try_reap, EXIT_LOOK_EVERY};
+#[cfg(unix)]
+use plugins::bounded_child::{end_group, Group};
+
+use super::child_watch::Waker;
 use super::TMUX_ASK_BOUND;
 
 /// More than any `list-panes` prints. What a tmux prints past it is not read.
 const PRINTED_LIMIT: u64 = 1 << 20;
-
-/// How often an exit is looked for where the kernel does not report one.
-const EXIT_LOOK_EVERY: Duration = Duration::from_millis(5);
 
 /// What one tmux call came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,7 +208,7 @@ impl Drop for Ask {
         // under before any reap, so never after one.
         #[cfg(unix)]
         if let Some(pid) = state.pid {
-            end_group(pid);
+            let _ = end_group(pid, Group::Kill);
         }
     }
 }
@@ -323,14 +325,14 @@ enum Exit {
 
 /// Rest until the tmux exits or `deadline` passes.
 fn exit_by(shared: &Shared, child: &mut Child, pid: u32, deadline: Instant) -> Exit {
-    match child_watch::exited_by(pid, deadline) {
+    match observe_exit(pid, Some(deadline)) {
         Some(true) => {
             lock(shared).pid = None;
             // What the tmux left running in its group goes with it. The
             // leader is not reaped yet, so the group is still only its own.
             #[cfg(unix)]
-            end_group(pid);
-            child.wait().map_or(Exit::Gone, Exit::Reaped)
+            let _ = end_group(pid, Group::Kill);
+            reap(child).map_or(Exit::Gone, Exit::Reaped)
         }
         Some(false) => Exit::Running,
         None => look_for_exit(shared, child, deadline),
@@ -344,7 +346,7 @@ fn look_for_exit(shared: &Shared, child: &mut Child, deadline: Instant) -> Exit 
     loop {
         {
             let mut state = lock(shared);
-            match child.try_wait() {
+            match try_reap(child) {
                 Ok(Some(status)) => {
                     state.pid = None;
                     return Exit::Reaped(status);
@@ -368,29 +370,11 @@ fn look_for_exit(shared: &Shared, child: &mut Child, deadline: Instant) -> Exit 
 /// End a tmux that has not exited, with whatever it started, and reap it.
 fn end(child: &mut Child, pid: u32) {
     #[cfg(unix)]
-    end_group(pid);
+    let _ = end_group(pid, Group::Kill);
     #[cfg(not(unix))]
     let _ = pid;
     let _ = child.kill();
-    let _ = child.wait();
-}
-
-/// Kill the process group the tmux `pid` leads.
-#[cfg(unix)]
-fn end_group(pid: u32) {
-    if let Some(group) = spawned_group(pid) {
-        // ESRCH: nothing is left of it. EPERM: only its unreaped leader is.
-        let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
-    }
-}
-
-/// The group a tmux spawned here leads, which is the only group this module
-/// signals — never 0, which `killpg` reads as the caller's own group, nor
-/// init's, nor this process's own.
-#[cfg(unix)]
-fn spawned_group(pid: u32) -> Option<nix::unistd::Pid> {
-    let group = nix::unistd::Pid::from_raw(i32::try_from(pid).ok().filter(|raw| *raw > 1)?);
-    (group != nix::unistd::getpid() && group != nix::unistd::getpgrp()).then_some(group)
+    let _ = reap(child);
 }
 
 /// Tests only: a spawn the system holds — a first exec it checks, a stuck
@@ -447,21 +431,15 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use nix::sys::signal::kill;
-    use nix::unistd::{getpgid, getpgrp, getpid, Pid};
+    use nix::unistd::{getpgid, Pid};
 
-    use super::{lock, spawned_group, Ask, Said};
+    use super::{lock, Ask, Said};
 
-    /// Only the group a tmux leads is ever signalled: not 0 (this process's
-    /// own group, to `killpg`), not init's, not this process or its group,
-    /// and not a pid that reads as a negative number (t-18917).
+    /// A tmux asked and then dropped unanswered is ended with its group at once.
+    /// Which groups may be signalled at all is tested beside the helper
+    /// (t-18917, t-19897).
     #[test]
-    fn only_the_group_a_tmux_leads_is_ever_signalled() {
-        let own = u32::try_from(getpid().as_raw()).expect("own pid");
-        let own_group = u32::try_from(getpgrp().as_raw()).expect("own group");
-        for refused in [0, 1, own, own_group, u32::MAX] {
-            assert!(spawned_group(refused).is_none(), "{refused} could be signalled");
-        }
-
+    fn a_dropped_ask_ends_its_tmux_group_at_once() {
         // An asked process leads a group of its own, and that group — its own
         // pid — is the one that would be ended.
         let ask = Ask::start(std::ffi::OsStr::new("/bin/sleep"), &["5"], false, None);
@@ -475,7 +453,6 @@ mod tests {
         };
         let raw = Pid::from_raw(i32::try_from(pid).expect("pid"));
         assert_eq!(getpgid(Some(raw)).expect("its group"), raw, "the asked process shares a group");
-        assert_eq!(spawned_group(pid), Some(raw));
 
         // Dropped unanswered, it is ended with its group at once.
         let dropped = Instant::now();

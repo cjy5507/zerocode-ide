@@ -6,8 +6,14 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use plugins::bounded_child::{end_group, Group};
+
 const FORMATTER_STDERR_LIMIT: usize = 64 * 1024;
 const FORMATTER_STDERR_TRUNCATED_NOTICE: &[u8] = b"\n[formatter stderr truncated]\n";
+/// How long a formatter's group has between SIGTERM and SIGKILL on a timeout.
+#[cfg(unix)]
+const FORMATTER_GROUP_GRACE: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Formatter {
@@ -261,35 +267,8 @@ fn temp_stderr_path() -> PathBuf {
 
 #[cfg(unix)]
 fn terminate_process_group_or_log(pid: u32) {
-    if let Err(error) = terminate_process_group(pid) {
+    if let Err(error) = end_group(pid, Group::Terminate { grace: FORMATTER_GROUP_GRACE }) {
         eprintln!("auto-format timeout: failed to signal formatter process group {pid}: {error}");
-    }
-}
-
-#[cfg(unix)]
-fn terminate_process_group(pid: u32) -> Result<(), nix::errno::Errno> {
-    use nix::errno::Errno;
-    use nix::sys::signal::{self, Signal};
-    use nix::unistd::Pid;
-
-    let Ok(pid) = i32::try_from(pid) else {
-        return Err(Errno::EINVAL);
-    };
-    let process_group = Pid::from_raw(-pid);
-    // ESRCH: the group is already gone. EPERM: macOS (XNU) reports EPERM for a
-    // group whose remaining members are all zombies — the formatter exited
-    // right at the deadline and hasn't been reaped yet. We spawned this group
-    // under our own uid, so a real privilege mismatch is impossible; both mean
-    // "nothing left to stop" and the caller's `kill()`+`wait()` reaps the rest.
-    match signal::kill(process_group, Signal::SIGTERM) {
-        Ok(()) => {}
-        Err(Errno::ESRCH | Errno::EPERM) => return Ok(()),
-        Err(error) => return Err(error),
-    }
-    std::thread::sleep(Duration::from_millis(50));
-    match signal::kill(process_group, Signal::SIGKILL) {
-        Ok(()) | Err(Errno::ESRCH | Errno::EPERM) => Ok(()),
-        Err(error) => Err(error),
     }
 }
 
