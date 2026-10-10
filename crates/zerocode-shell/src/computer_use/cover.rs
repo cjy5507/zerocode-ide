@@ -498,6 +498,9 @@ pub(crate) fn press_mark(
     hand: &mut Hand<'_>,
     judge: &mut dyn Judge,
 ) -> Result<Value, ComputerUseError> {
+    if zerocode_core::computer_use_protocol::execution::requested(&mark.params) {
+        return press();
+    }
     let refused = match press() {
         Err(error) if error.code == error_code::ELEMENT_NOT_FOUND => error,
         pressed => return pressed,

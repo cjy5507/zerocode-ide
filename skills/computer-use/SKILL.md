@@ -55,6 +55,32 @@ types into a secret or unreadable field. Fields above 4096 UTF-8 bytes are
 left to the normal editing commands rather than truncated and replaced.
 Desktop walks also offer bounded Tab, Shift+Tab, Escape, Find and Select All
 actions, tied to the observed window, not model-written key strings.
+For concurrent use on macOS, add `--background` to an app walk or to
+app-scoped observation, click, scroll and set-value commands (zo's Computer
+tool: `background: true` on an app `walk`). This is a
+semantic accessibility mode, not a separate computer: it never raises or
+moves a window, focuses a text field, sends synthetic keys or pointer events,
+or changes the clipboard. Use pinned `set-value` for fields. Clicks need an
+advertised semantic action; scrolling needs an unambiguous accessible
+container and moves one page per observation. Coordinate/OCR clicks, global
+keys and unsupported controls return `requires_foreground`, without a
+fallback. Do not remove the flag to recover automatically.
+
+Background input pauses when the person is using the target app or its
+foreground state cannot be read. An app can still activate itself in response
+to its own action: the receipt reports `action.background.foregroundUnchanged`,
+and a walk stops taking actions when that receipt is missing or false.
+Avoid using the same app concurrently. Old helpers and Windows currently
+refuse this mode rather than claiming isolation; arbitrary visual apps need
+an explicitly separate desktop/VM or a foreground handoff.
+
+App observation with `--no-screenshot` reads only the accessibility tree
+when neither OCR, a pixel diff nor settling was requested. Marked looks retain
+the same fresh identity/value pins. Empty mark sets, or controls with neither
+readable labels nor input fields, fall back to a real
+capture for OCR; no synthetic image or pixel-diff baseline is invented.
+Pinned actions may answer `observationDeferred: true`: their next look
+provides the state, and the action acknowledgement is not task verification.
 On macOS, an empty accessibility mark set automatically tries OCR on the
 same captured frame. A walk can also choose `read_pixels` when the tree
 misses content. OCR regions remain distinct from accessibility controls:
@@ -760,7 +786,7 @@ Recording permission the screenshots use — no new prompt.
     confirm action — that is a Return); on Windows it is a pointer click at
     its centre. A double, triple, middle or modified click, or a control
     with no press of its own, is a fenced pointer click at the control's
-    centre: it moves the pointer. Every element click brings the app forward
+    centre: it moves the pointer. A foreground element click brings the app forward
     first (about 0.4 s). Badges hide a few pixels: `zoom` is never marked.
 - **Plan → act → verify**: write the steps with the screen evidence that ends
   each one, then for every step act once and verify with `wait-for`, `find`

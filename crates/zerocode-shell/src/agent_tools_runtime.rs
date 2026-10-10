@@ -3608,6 +3608,7 @@ pub(super) fn run_goal(
         act_line: crate::systemone::act_line(judge.wire(), seat),
     };
     let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0)
+        .background(command.params.get("background") == Some(&serde_json::Value::Bool(true)))
         .with_snapshots(snapshots)
         .previewing(options.overlap)
         .writing(Box::new(writer));
@@ -3653,6 +3654,11 @@ pub(super) fn run_goal(
     });
     if let Some(until_before) = until_before {
         answer[words::UNTIL_BEFORE] = serde_json::json!(until_before);
+    }
+    if command.params.get("background") == Some(&serde_json::Value::Bool(true)) {
+        answer["background"] = serde_json::json!({
+            "requested": true, "interrupted": world.background_interrupted(),
+        });
     }
     said(answer)
 }
@@ -5478,6 +5484,9 @@ pub(crate) fn click_by_words(
     use zerocode_core::computer_use::{ComputerCommand, ComputerMethod};
     use zerocode_core::computer_use_protocol::words;
     let params = &command.params;
+    if params.get("background") == Some(&serde_json::Value::Bool(true)) {
+        return Err(zerocode_core::computer_use_protocol::execution::unavailable());
+    }
     let word = |key: &str| params.get(key).and_then(serde_json::Value::as_str);
     let mut read = serde_json::Map::new();
     for key in ["app", "windowId", "windowIndex"] {

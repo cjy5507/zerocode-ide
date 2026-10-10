@@ -20,6 +20,7 @@ pub mod cache;
 pub mod click_plan;
 pub mod coerce;
 pub mod cover;
+pub mod execution;
 pub mod eye;
 pub mod frame;
 pub mod game_state;
@@ -609,6 +610,8 @@ pub struct ObservationSupport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionSupport {
+    #[serde(default)]
+    pub background: bool,
     pub click: bool,
     pub type_text: bool,
     pub press_key: bool,
@@ -666,6 +669,7 @@ impl SupportMatrix {
                 ocr: false,
             },
             actions: ActionSupport {
+                background: false,
                 click: true,
                 type_text: true,
                 press_key: true,

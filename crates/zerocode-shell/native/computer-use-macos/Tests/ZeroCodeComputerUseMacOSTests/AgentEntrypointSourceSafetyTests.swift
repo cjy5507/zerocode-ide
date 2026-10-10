@@ -1,6 +1,21 @@
 import XCTest
 
 final class AgentEntrypointSourceSafetyTests: XCTestCase {
+    func testDeferredObservationStillPerformsThePinnedActionFirst() throws {
+        let source = try agentEntrypointSource()
+        let start = try XCTUnwrap(source.range(of: "private func actionResult("))
+        let end = try XCTUnwrap(source.range(of: "private func observe(", range: start.upperBound..<source.endIndex))
+        let body = String(source[start.lowerBound..<end.lowerBound])
+        let acted = try XCTUnwrap(body.range(of: "var action = try runAction()"))
+        let deferred = try XCTUnwrap(body.range(of: "params[\"deferObservation\"]?.bool == true"))
+        let observed = try XCTUnwrap(body.range(of: "snapshot: observe(params: params)"))
+        XCTAssertLessThan(acted.lowerBound, deferred.lowerBound)
+        XCTAssertLessThan(deferred.lowerBound, observed.lowerBound)
+        XCTAssertTrue(body.contains("params[\"noScreenshot\"]?.bool == true"))
+        XCTAssertTrue(body.contains("let window = params[\"windowId\"]?.number"))
+        XCTAssertTrue(body.contains("[\"action\": action, \"observationDeferred\": true]"))
+    }
+
     func testAgentEntrypointDoesNotUnlinkCallerSuppliedPaths() throws {
         let testFile = URL(fileURLWithPath: #filePath)
         let packageRoot = testFile
