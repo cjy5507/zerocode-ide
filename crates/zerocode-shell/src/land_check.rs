@@ -56,6 +56,10 @@ const LOG_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// How many clashing file names a letter names; the total is always the true count.
 const CONFLICT_NAMES: usize = 20;
 
+/// The extension of the script a check's command is written to beside its log, where the shell
+/// takes a file (cmd); it goes when the check ends.
+const SCRIPT_EXTENSION: &str = "cmd";
+
 /// How often the window looks at a running check's exit.
 const POLL: Duration = Duration::from_millis(50);
 
@@ -143,8 +147,8 @@ impl Policy {
     }
 }
 
-/// The program that reads a check's command: `bash` reads it on stdin, `cmd` takes it as an
-/// argument.
+/// The program that reads a check's command: `bash` reads it on stdin, `cmd` runs it as a script
+/// beside the log (see [`spawn`]).
 fn default_shell() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from("cmd")
@@ -501,7 +505,8 @@ fn run_command(job: &Job, command: &str) -> CheckEnd {
         Ok(log) => log,
         Err(why) => return CheckEnd::Unstartable(format!("the log could not be made: {why}")),
     };
-    let mut child = match spawn(&job.policy, command, &job.folder, log) {
+    let script = job.log.with_extension(SCRIPT_EXTENSION);
+    let mut child = match spawn(&job.policy, command, &job.folder, log, &script) {
         Ok(child) => child,
         Err(why) => return CheckEnd::Unstartable(format!("the check did not start: {why}")),
     };
@@ -531,6 +536,8 @@ fn run_command(job: &Job, command: &str) -> CheckEnd {
         }
     };
     unregister_running(pid);
+    // The script a Windows check ran from goes with the check; the log stays for its keep.
+    let _ = fs::remove_file(&script);
     end
 }
 
@@ -538,10 +545,18 @@ fn elapsed_ms(started: Instant) -> i64 {
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
-/// The shell that reads the command, started in the folder with its output on the log. The command
-/// arrives on the shell's stdin on every platform: bash reads it with `-s`, and cmd reads it when it
-/// is given no argument.
-fn spawn(policy: &Policy, command: &str, folder: &Path, log: File) -> std::io::Result<Child> {
+/// The shell that reads the command, started in the folder with its output on the log. bash reads
+/// the command on its stdin (`-s`). cmd runs it as a script written beside the log (`script_at`)
+/// with `/C`, whose exit code is the script's last errorlevel: cmd reading its commands from stdin
+/// exits 0 at the end of the input whatever the last command's errorlevel, so a failing check was
+/// judged `passed` on Windows (draft PR #3's leg, t-42447).
+fn spawn(
+    policy: &Policy,
+    command: &str,
+    folder: &Path,
+    log: File,
+    script_at: &Path,
+) -> std::io::Result<Child> {
     let stderr = log.try_clone()?;
     let mut process = crate::proc::quiet_command(&policy.shell);
     process
@@ -551,8 +566,15 @@ fn spawn(policy: &Policy, command: &str, folder: &Path, log: File) -> std::io::R
         .stderr(Stdio::from(stderr));
     #[cfg(unix)]
     {
+        let _ = script_at;
         process.arg("-s");
         crate::codex_queue::prepare_process_group(&mut process);
+    }
+    #[cfg(windows)]
+    {
+        fs::write(script_at, command)?;
+        process.arg("/D").arg("/C").arg(script_at);
+        process.stdin(Stdio::null());
     }
     let mut child = process.spawn()?;
     {
