@@ -946,7 +946,7 @@ fn loads_legacy_session_json_object() {
 #[test]
 fn appends_messages_to_persisted_jsonl_session() {
     let path = temp_session_path("append");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session
         .save_to_path(&path)
         .expect("initial save should succeed");
@@ -1023,7 +1023,7 @@ fn record_compaction_rewrites_persisted_snapshot_to_compacted_state() {
     // compacted messages, not the pre-compaction ones (no crash-window
     // divergence between memory and disk).
     let path = temp_session_path("compaction-rewrite");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session
         .push_user_text("first turn")
         .expect("user append should succeed");
@@ -1071,7 +1071,7 @@ fn record_compaction_rewrites_persisted_snapshot_to_compacted_state() {
 #[test]
 fn seal_evicted_to_vault_preserves_raw_messages_losslessly() {
     let path = temp_session_path("vault-seal");
-    let session = Session::new().with_persistence_path(path.clone());
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     let evicted = vec![
         ConversationMessage::user_text("raw one"),
         ConversationMessage::assistant(vec![ContentBlock::Text {
@@ -1095,7 +1095,7 @@ fn seal_evicted_to_vault_preserves_raw_messages_losslessly() {
 #[test]
 fn vault_accumulates_across_compaction_rounds_without_overlapping_seqs() {
     let path = temp_session_path("vault-rounds");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
 
     // Round 1: first_message_index is 0, so this batch seals at seqs [0, 2).
     let round1 = vec![
@@ -1130,7 +1130,7 @@ fn vault_accumulates_across_compaction_rounds_without_overlapping_seqs() {
 #[test]
 fn read_vault_round_trips_sealed_messages() {
     let path = temp_session_path("vault-read");
-    let session = Session::new().with_persistence_path(path.clone());
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     let evicted = vec![
         ConversationMessage::user_text("first raw"),
         ConversationMessage::user_text("second raw"),
@@ -1152,7 +1152,7 @@ fn read_vault_deduplicates_reappended_seqs_last_wins() {
     // A crash between seal and the destructive rewrite (or two processes) can
     // re-seal the same seq range. The reader must dedup by seq, not double-count.
     let path = temp_session_path("vault-dedup");
-    let session = Session::new().with_persistence_path(path.clone());
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     let _ = session.seal_evicted_to_vault(&[ConversationMessage::user_text("v0")]);
     let _ = session.seal_evicted_to_vault(&[ConversationMessage::user_text("v0 again")]);
 
@@ -1172,7 +1172,7 @@ fn read_vault_deduplicates_reappended_seqs_last_wins() {
 fn read_vault_skips_torn_or_corrupt_lines() {
     use std::io::Write;
     let path = temp_session_path("vault-torn");
-    let session = Session::new().with_persistence_path(path.clone());
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     let _ = session.seal_evicted_to_vault(&[ConversationMessage::user_text("good one")]);
     // Append a torn/garbage trailing line, as a crash mid-append would leave.
     let vault_path = vault_path_for(&path);
@@ -1201,7 +1201,7 @@ fn seal_evicted_to_vault_noops_without_persistence() {
 #[test]
 fn anchor_summary_round_trips_through_session_jsonl() {
     let path = temp_session_path("anchor-roundtrip");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session.push_user_text("before").expect("append");
     session.messages = std::sync::Arc::new(vec![ConversationMessage::user_text("kept")]);
     let anchor = AnchorSummary {
@@ -1234,7 +1234,7 @@ fn anchor_summary_round_trips_through_session_jsonl() {
 #[test]
 fn seal_returns_span_and_rounds_do_not_overlap() {
     let path = temp_session_path("vault-span");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
 
     // Round 1: first_message_index is 0, three messages seal at seqs [0, 2].
     let round1 = vec![
@@ -1280,7 +1280,7 @@ fn seal_returns_none_without_persistence_or_empty_batch() {
     );
     // Empty batch → nothing to seal.
     let path = temp_session_path("vault-empty");
-    let session = Session::new().with_persistence_path(path);
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     assert_eq!(session.seal_evicted_to_vault(&[]), None, "empty batch seals nothing");
 }
 
@@ -1289,7 +1289,7 @@ fn anchor_without_vault_ranges_loads_as_empty() {
     // A record whose anchor predates the vault_ranges field (the key is simply
     // absent) must load with an empty ranges vec, not error.
     let path = temp_session_path("anchor-no-ranges");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session.push_user_text("before").expect("append");
     session.messages = std::sync::Arc::new(vec![ConversationMessage::user_text("kept")]);
     let anchor = AnchorSummary {
@@ -1325,7 +1325,7 @@ fn compaction_record_tolerates_unknown_forward_compatible_keys() {
     // ignoring unknown keys — this guards the decision that additive
     // compaction-record fields need no schema-version gate.
     let path = temp_session_path("compaction-unknown-keys");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session.push_user_text("before").expect("append");
     session.messages = std::sync::Arc::new(vec![ConversationMessage::user_text("kept")]);
     session.record_compaction("summary", 1);
@@ -1364,7 +1364,7 @@ fn forks_sessions_with_branch_metadata_and_persists_it() {
 
     let forked = session
         .fork(Some("investigation".to_string()))
-        .with_persistence_path(path.clone());
+        .with_persistence_path(path.to_path_buf());
     forked
         .save_to_path(&path)
         .expect("forked session should save");
@@ -1422,7 +1422,7 @@ fn ordinary_turn_persistence_does_not_rotate_oversized_session() {
     let path = temp_session_path("ordinary-turn-no-rotation");
     let oversized_length =
         usize::try_from(super::ROTATE_AFTER_BYTES + 10).expect("rotate threshold should fit");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session
         .push_user_text("x".repeat(oversized_length))
         .expect("oversized message should append");
@@ -1453,7 +1453,7 @@ fn ordinary_turn_persistence_does_not_rotate_oversized_session() {
 #[test]
 fn append_aware_persist_rejects_a_stale_store() {
     let path = temp_session_path("append-aware-stale-store");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session
         .push_user_text("durable before peer rewrite")
         .expect("initial append should persist");
@@ -1471,7 +1471,7 @@ fn append_aware_persist_rejects_a_stale_store() {
 #[test]
 fn appended_turn_reload_matches_forced_full_snapshot() {
     let path = temp_session_path("appended-turn-load-parity");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session.name = Some("load parity".to_string());
     session.session_goal = Some("preserve append durability".to_string());
     session.save_to_path(&path).expect("seed full snapshot");
@@ -1556,7 +1556,7 @@ fn appended_turn_reload_matches_forced_full_snapshot() {
 fn a_rewrite_of_a_persisted_message_is_published_at_once_as_one_record() {
     const FOLDED: &str = "t11457-folded-words";
     let path = temp_session_path("publish-rewrite").with_extension("jsonl");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session.push_user_text("run it").expect("append user");
     session
         .push_message(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
@@ -1701,15 +1701,54 @@ fn rejects_unknown_content_block_type() {
     assert!(error.to_string().contains("unsupported block type"));
 }
 
-fn temp_session_path(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("runtime-session-{label}-{nanos}.json"))
+/// A session file in a folder this test made for itself. The folder belongs to
+/// the process user, so the owner-only policy restricts that folder. The shared
+/// temp root can belong to another user, and the policy refuses to change it.
+/// Dropping the value removes the folder; a removal Windows refuses (a file still
+/// open) is ignored, so it cannot fail the test.
+struct TempSession {
+    folder: PathBuf,
+    path: PathBuf,
 }
 
-fn write_temp_session_file(label: &str, contents: &str) -> PathBuf {
+impl TempSession {
+    fn new(label: &str) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let folder = std::env::temp_dir().join(format!("runtime-session-{label}-{nanos}"));
+        fs::create_dir_all(&folder).expect("temp session folder should be created");
+        let path = folder.join(format!("runtime-session-{label}-{nanos}.json"));
+        Self { folder, path }
+    }
+}
+
+impl Drop for TempSession {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.folder);
+    }
+}
+
+impl std::ops::Deref for TempSession {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TempSession {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn temp_session_path(label: &str) -> TempSession {
+    TempSession::new(label)
+}
+
+fn write_temp_session_file(label: &str, contents: &str) -> TempSession {
     let path = temp_session_path(label);
     fs::write(&path, format!("{contents}\n")).expect("temp session file should write");
     path
@@ -1974,14 +2013,14 @@ fn secure_persistence_rejects_symlinks_and_hardlinks() {
 
     symlink(&victim, &path).expect("create transcript symlink");
     assert!(Session::load_from_secure_path(&path).is_err());
-    let mut session = Session::new().with_secure_persistence_path(path.clone());
+    let mut session = Session::new().with_secure_persistence_path(path.to_path_buf());
     assert!(session.push_user_text("must not follow").is_err());
     assert_eq!(fs::read_to_string(&victim).expect("read victim"), "do not touch");
 
     fs::remove_file(&path).expect("remove symlink");
     fs::hard_link(&victim, &path).expect("create transcript hardlink");
     assert!(Session::load_from_secure_path(&path).is_err());
-    let mut session = Session::new().with_secure_persistence_path(path.clone());
+    let mut session = Session::new().with_secure_persistence_path(path.to_path_buf());
     assert!(session.push_user_text("must not append").is_err());
     assert_eq!(fs::read_to_string(&victim).expect("read victim"), "do not touch");
 
@@ -2029,7 +2068,7 @@ fn concurrent_write_atomic_never_corrupts_or_steals_temp() {
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let mut handles = Vec::new();
     for payload in [payload_a.clone(), payload_b.clone()] {
-        let path = path.clone();
+        let path = path.to_path_buf();
         let barrier = std::sync::Arc::clone(&barrier);
         let expected_a = payload_a.clone();
         let expected_b = payload_b.clone();
@@ -2106,7 +2145,7 @@ fn concurrent_write_atomic_secure_never_fails_spuriously() {
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let mut handles = Vec::new();
     for payload in [payload_a.clone(), payload_b.clone()] {
-        let path = path.clone();
+        let path = path.to_path_buf();
         let barrier = std::sync::Arc::clone(&barrier);
         let expected_a = payload_a.clone();
         let expected_b = payload_b.clone();
@@ -2736,7 +2775,7 @@ fn a_header_only_full_save_leaves_no_rotated_copy() {
     }
     let _ = fs::remove_file(&path);
 
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     let oversized =
         usize::try_from(super::ROTATE_AFTER_BYTES + 10).expect("rotate threshold should fit");
     session
@@ -2863,7 +2902,7 @@ fn cleanup_session_file(path: &Path) {
 #[test]
 fn steady_state_appends_never_re_read_the_whole_transcript() {
     let path = temp_session_path("append-no-full-reads");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     // Bootstrap and the first append are allowed to look at the file; what must
     // stay O(appended bytes) is the steady state that follows.
     push_text(&mut session, "seed").expect("seed append");
@@ -2887,7 +2926,7 @@ fn steady_state_appends_never_re_read_the_whole_transcript() {
 #[test]
 fn incremental_append_fingerprint_equals_a_full_re_read() {
     let path = temp_session_path("append-fingerprint-equivalence");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     for turn in 0..20 {
         // Vary the payload length so a byte-count slip cannot cancel out.
         let payload = "payload ".repeat(turn % 7 + 1);
@@ -2952,7 +2991,7 @@ fn peer_rewrite_between_appends_still_conflicts() {
 #[test]
 fn append_after_a_full_snapshot_keeps_the_fingerprint_exact() {
     let path = temp_session_path("append-after-snapshot");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     push_text(&mut session, "before snapshot").expect("seed append");
 
     session.name = Some("forces a full snapshot".to_string());
@@ -2983,7 +3022,7 @@ fn append_after_a_full_snapshot_keeps_the_fingerprint_exact() {
 #[test]
 fn same_length_in_place_rewrite_with_restored_mtime_still_conflicts() {
     let path = temp_session_path("append-guard-forged-mtime");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     push_text(&mut session, "durable before forged rewrite").expect("seed append");
     push_text(&mut session, "second append arms the fast path").expect("second append");
 
@@ -3038,7 +3077,7 @@ fn same_length_in_place_rewrite_with_restored_mtime_still_conflicts() {
 #[test]
 fn releasing_the_writer_lease_forces_the_next_append_to_re_read() {
     let path = temp_session_path("append-lease-release-disarms");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     push_text(&mut session, "seed").expect("seed append");
     push_text(&mut session, "arm the fast path").expect("second append");
 
@@ -3068,7 +3107,7 @@ fn releasing_the_writer_lease_forces_the_next_append_to_re_read() {
 #[test]
 fn secure_persistence_appends_keep_the_fingerprint_exact_without_re_reading() {
     let path = temp_session_path("append-secure-incremental");
-    let mut session = Session::new().with_secure_persistence_path(path.clone());
+    let mut session = Session::new().with_secure_persistence_path(path.to_path_buf());
     push_text(&mut session, "secure seed").expect("seed append");
     push_text(&mut session, "secure arm").expect("second append");
 
@@ -3103,7 +3142,7 @@ fn secure_persistence_appends_keep_the_fingerprint_exact_without_re_reading() {
 #[test]
 fn whole_ordinary_turns_never_re_read_the_whole_transcript() {
     let path = temp_session_path("ordinary-turn-no-full-reads");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session.push_user_text("seed the store").expect("seed append");
     session
         .persist_appended_state_to_path(&path)
@@ -3139,7 +3178,7 @@ fn whole_ordinary_turns_never_re_read_the_whole_transcript() {
 #[test]
 fn a_full_snapshot_re_arms_the_fast_path_for_the_next_append() {
     let path = temp_session_path("snapshot-re-arms-fast-path");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     push_text(&mut session, "before snapshot").expect("seed append");
     session.name = Some("forces a full snapshot".to_string());
     session.save_to_path(&path).expect("full snapshot should publish");
@@ -3196,9 +3235,9 @@ fn wait_past(after_ms: u64) {
 /// down the append road as its own line and carries its own time; the first
 /// message of a file that does not exist yet is written by another road, which
 /// `the_first_message_of_a_new_file_carries_its_time` covers.
-fn a_session_with_four_timed_messages(label: &str) -> (Session, PathBuf) {
+fn a_session_with_four_timed_messages(label: &str) -> (Session, TempSession) {
     let path = temp_session_path(label);
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session.save_to_path(&path).expect("seed the header");
     for text in ["one", "two", "three", "four"] {
         wait_past(session.updated_at_ms);
@@ -3210,9 +3249,9 @@ fn a_session_with_four_timed_messages(label: &str) -> (Session, PathBuf) {
 /// A bound session holding two prompt-and-answer turns appended one clock tick
 /// apart, and the path of its file, seeded with its header like the session
 /// above.
-fn a_session_with_two_timed_turns(label: &str) -> (Session, PathBuf) {
+fn a_session_with_two_timed_turns(label: &str) -> (Session, TempSession) {
     let path = temp_session_path(label);
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session.save_to_path(&path).expect("seed the header");
     for prompt in ["one", "two"] {
         wait_past(session.updated_at_ms);
@@ -3271,7 +3310,7 @@ fn the_first_message_of_a_new_file_carries_its_time() {
     // the session instead of one line, and that snapshot wrote the message
     // without its time: the first prompt of every new session had none.
     let path = temp_session_path("times-first-message");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
 
     push_text(&mut session, "the first words").expect("append");
 
@@ -3764,7 +3803,7 @@ fn messages_handed_to_a_session_with_their_own_times_are_saved_with_them() {
     // What an importer of another program's transcript does: it knows when each
     // message was written, hands the session the messages as they were, and saves.
     let path = temp_session_path("times-imported");
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session.messages = std::sync::Arc::new(vec![
         ConversationMessage::user_text("one").with_updated_at_ms(Some(1_790_000_000_111)),
         ConversationMessage::user_text("two"),

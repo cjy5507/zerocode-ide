@@ -4689,9 +4689,9 @@ fn a_steer_typed_during_a_tool_is_on_disk_when_the_model_reads_it() {
     let inbox_slot = Arc::new(Mutex::new(None));
     let at_the_fold = Arc::new(Mutex::new(None));
     let mut runtime = ConversationRuntime::new(
-        Session::new().with_persistence_path(path.clone()),
+        Session::new().with_persistence_path(path.to_path_buf()),
         ReadsTheTranscriptAtTheFoldClient {
-            path: path.clone(),
+            path: path.to_path_buf(),
             calls: 0,
             at_the_fold: Arc::clone(&at_the_fold),
         },
@@ -4752,9 +4752,9 @@ fn sync_run_turn_puts_a_steer_typed_during_a_tool_on_disk_before_the_next_reques
     let steering: super::SteeringQueue = Arc::new(Mutex::new(Vec::new()));
     let at_the_fold = Arc::new(Mutex::new(None));
     let mut runtime = ConversationRuntime::new(
-        Session::new().with_persistence_path(path.clone()),
+        Session::new().with_persistence_path(path.to_path_buf()),
         ReadsTheTranscriptAtTheFoldClient {
-            path: path.clone(),
+            path: path.to_path_buf(),
             calls: 0,
             at_the_fold: Arc::clone(&at_the_fold),
         },
@@ -9621,7 +9621,7 @@ fn the_batching_nudge_is_on_disk_where_the_model_read_it() {
     let _todo_store = HermeticTodoStore::pin();
     let path = temp_workspace("nudge-on-disk").with_extension("jsonl");
     let mut runtime = ConversationRuntime::new(
-        Session::new().with_persistence_path(path.clone()),
+        Session::new().with_persistence_path(path.to_path_buf()),
         OneReadPerMessageClient { calls: 0 },
         StaticToolExecutor::new().register("read_file", |_| Ok("contents".to_string())),
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
@@ -10803,7 +10803,7 @@ fn anthropic_output_tokens_details_reach_persisted_assistant_session_row() {
     }
 
     let path = temp_session_path("anthropic-output-token-details");
-    let session = Session::new().with_persistence_path(path.clone());
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     let mut runtime = ConversationRuntime::new(
         session,
         AnthropicDetailsApi,
@@ -10859,7 +10859,7 @@ fn non_anthropic_usage_omits_output_tokens_details_from_session_row() {
     }
 
     let path = temp_session_path("non-anthropic-output-token-details");
-    let session = Session::new().with_persistence_path(path.clone());
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     let mut runtime = ConversationRuntime::new(
         session,
         OpenAiCompatApi,
@@ -10899,7 +10899,7 @@ fn persists_conversation_turn_messages_to_jsonl_session() {
     }
 
     let path = temp_session_path("persisted-turn");
-    let session = Session::new().with_persistence_path(path.clone());
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     let mut runtime = ConversationRuntime::new(
         session,
         SimpleApi,
@@ -10950,12 +10950,36 @@ fn forks_runtime_session_without_mutating_original() {
     assert!(runtime.session().fork.is_none());
 }
 
-fn temp_session_path(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("runtime-conversation-{label}-{nanos}.json"))
+/// A file in a folder this test made for itself. The shared temp root can belong
+/// to another user, and the owner-only policy refuses to change a folder that
+/// another user owns, so a session file never goes there directly. The folder is
+/// removed when the value is dropped; a removal Windows refuses is ignored.
+struct TempSession {
+    _folder: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl std::ops::Deref for TempSession {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::path::Path> for TempSession {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+fn temp_session_path(label: &str) -> TempSession {
+    let folder = tempfile::tempdir().expect("temp session folder should be created");
+    let path = folder.path().join(format!("runtime-conversation-{label}.json"));
+    TempSession {
+        _folder: folder,
+        path,
+    }
 }
 
 #[cfg(windows)]
@@ -13924,7 +13948,7 @@ fn streaming_overflow_guard_rejection_is_not_replayable_after_resume() {
         std::process::id()
     ));
 
-    let session = overflow_guard_long_session(MARKER).with_persistence_path(path.clone());
+    let session = overflow_guard_long_session(MARKER).with_persistence_path(path.to_path_buf());
     let mut runtime = ConversationRuntime::new(
         session,
         CompactingApi,
@@ -15057,7 +15081,7 @@ fn repeated_auto_compaction_seals_both_rounds_to_the_vault() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("session.jsonl");
 
-    let mut session = Session::new().with_persistence_path(path.clone());
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
     session.messages = ::std::sync::Arc::new(vec![
         ConversationMessage::user_text(format!("ROUND-ONE-DETAIL {}", "x".repeat(410_000))),
         ConversationMessage::assistant(vec![ContentBlock::Text {
