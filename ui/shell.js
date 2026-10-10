@@ -10868,11 +10868,43 @@ function makeAgentRow(row, gutter = false) {
   return node;
 }
 
+/* How many times a click follows a terminal that moved while its checkout was coming to the
+ * front (t-44057): the click, one move during the first activation, and one more during the
+ * second. A terminal still moving after that is not somewhere the stage can land. */
+const FOCUS_FOLLOW_HOPS = 3;
+
 async function focusAgentPane(worktree, tabId, term, agent = null) {
-  if (worktree && worktree !== activeWorktreePath) {
-    if (!(await activateWorktree(worktree))) return;
+  // The tab says where the terminal stands now; the row says where it stood
+  // when its card was last drawn. The ledger can seat the worker in another
+  // checkout before that card repaints (t-44057), so the click follows the
+  // terminal: its checkout is the one to go to, and the row is the fallback.
+  const holder = () =>
+    tabOfTerm(term) ?? (tabId === null ? null : tabs.find((held) => held.id === tabId) ?? null);
+  // The terminal can move again while a checkout is coming to the front: each activation is
+  // awaited, and the ledger may re-seat the worker meanwhile. So the click follows the terminal
+  // until the checkout in front is the one its tab stands in — a bounded number of times, since
+  // a worker that keeps moving is not a place the stage can settle on.
+  for (let hop = 0; hop < FOCUS_FOLLOW_HOPS; hop += 1) {
+    const home = holder()?.worktree ?? worktree;
+    if (!home || home === activeWorktreePath) break;
+    if (!(await activateWorktree(home))) return;
   }
-  const tab = tabId === null ? null : tabs.find((held) => held.id === tabId);
+  const tab = holder();
+  // Still elsewhere after the last hop: the terminal moved again. Each activation on the way chose
+  // the checkout's living agent first (`activateWorktree`), so the tab it left selected may be this
+  // worker's, now standing in another checkout. A tab whose checkout is not on the stage must not
+  // stay in front as if it were: the stage goes back to a tab of the checkout in front, and the
+  // click stops here, choosing nothing more.
+  if (tab && tab.worktree && tab.worktree !== activeWorktreePath) {
+    if (activeTabId === tab.id) {
+      const own = tabs.filter((held) => held.worktree === activeWorktreePath && held.kind !== "board" && held.id !== tab.id);
+      const back = own.find((held) => held.id === activeTabByWorktree.get(activeWorktreePath)) ?? own[own.length - 1];
+      // No tab of its own to go back to: the stage shows nothing, the same state a checkout has
+      // before its tabs are restored (`restoreActiveWorktreeTab`), rather than another checkout's tab.
+      setActiveTab(back?.id ?? null);
+    }
+    return;
+  }
   if (!tab) {
     // 떼어 둔 에이전트는 판이 없다. 그 줄을 누르는 것이 곧 다시 붙는 것이고,
     // 화면은 백엔드에 그대로 있으므로 새로 띄우는 것이 아니라 돌려받는 것이다.
