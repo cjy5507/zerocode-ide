@@ -518,25 +518,23 @@ fn elapsed_ms(started: Instant) -> i64 {
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
-/// The shell that reads the command, started in the folder with its output on the log.
+/// The shell that reads the command, started in the folder with its output on the log. The command
+/// arrives on the shell's stdin on every platform: bash reads it with `-s`, and cmd reads it when it
+/// is given no argument.
 fn spawn(policy: &Policy, command: &str, folder: &Path, log: File) -> std::io::Result<Child> {
     let stderr = log.try_clone()?;
     let mut process = crate::proc::quiet_command(&policy.shell);
     process
         .current_dir(folder)
+        .stdin(Stdio::piped())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr));
     #[cfg(unix)]
     {
-        process.arg("-s").stdin(Stdio::piped());
+        process.arg("-s");
         crate::codex_queue::prepare_process_group(&mut process);
     }
-    #[cfg(windows)]
-    {
-        process.arg("/C").arg(command).stdin(Stdio::null());
-    }
     let mut child = process.spawn()?;
-    #[cfg(unix)]
     {
         use std::io::Write as _;
         if let Some(mut stdin) = child.stdin.take() {
@@ -861,9 +859,7 @@ fn prepared_row(job: &Job, tree: &str, now_ms: i64) -> serde_json::Value {
     let mut row = running_row(job, job.started_ms);
     row["state"] = "prepared".into();
     row["tree"] = tree.into();
-    row["leaseUntilMs"] = now_ms
-        .saturating_add(i64::try_from(PREPARED_TTL_MS).unwrap_or(0))
-        .into();
+    row["leaseUntilMs"] = now_ms.saturating_add(PREPARED_TTL_MS).into();
     row
 }
 
