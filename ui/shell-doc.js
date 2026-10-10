@@ -8653,6 +8653,8 @@ function paintArtifactBar(drawer, row, landed) {
   writeTextContent(maker, said);
   maker.hidden = said === "";
   maker.dataset.tip = [agent ? agentName(agent) : "", model].filter(Boolean).join(" · ");
+  // 머리가 이름을 줄이면 온전한 이름은 접근성 이름에 있다 — 글은 「claude sonnet-5-5」로 줄어 보인다.
+  maker.setAttribute("aria-label", maker.dataset.tip);
   paintArtifactAttempts(bar.querySelector(".artifact-detail-attempts"), row);
 }
 
