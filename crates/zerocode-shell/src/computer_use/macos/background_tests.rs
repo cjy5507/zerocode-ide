@@ -105,8 +105,8 @@ fn assert_background_input(route: EditingRoute) {
             .extend(point(window, "button").as_object().expect("point").clone());
         let refusal = session
             .request("click", guarded)
-            .err()
-            .expect("the target's label needs confirmation even behind another app");
+            .map(drop)
+            .expect_err("the target's label needs confirmation even behind another app");
         assert_eq!(refusal.into_error().code, "confirmation_required");
         let mut perform = |method: &str, extra: Value| {
             let admission_started = Instant::now();
@@ -189,8 +189,8 @@ fn assert_background_input(route: EditingRoute) {
                             "background": true, "key": "left",
                         }),
                     )
-                    .err()
-                    .expect("an unverified keyboard receiver must be refused");
+                    .map(drop)
+                    .expect_err("an unverified keyboard receiver must be refused");
                 assert_eq!(refusal.into_error().code, "focus_changed");
             }
         } else {
@@ -203,7 +203,7 @@ fn assert_background_input(route: EditingRoute) {
                         "key": "return", "confirmGuard": {"payment": ["increment"]}, "noScreenshot": true,
                     }),
                 )
-                .err().expect("the target window's default button needs confirmation");
+                .map(drop).expect_err("the target window's default button needs confirmation");
             assert_eq!(refusal.into_error().code, "confirmation_required");
         }
     }
