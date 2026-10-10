@@ -778,6 +778,15 @@ const orbitOverlaps = (page) => page.evaluate(() => {
       .map((tag) => tag.key), width: state.width };
 });
 
+/* The label facts a fold is judged by, for a failure: the stage's size and chip, the labels and how many stand named, and
+ * the labels' own widths. A wider face makes each name wider, so fewer find a clear place and fold into a chip. */
+const orbitLabelFacts = (page) => page.evaluate(() => {
+  const state = window.__ORBIT_STATE__();
+  const widths = [...state.host.children].map((label) => label.offsetWidth).sort((a, b) => a - b);
+  return { stage: [state.width, state.height], chip: state.chip, labels: widths.length, named: state.named,
+    widths: { min: widths[0] ?? 0, median: widths[Math.floor(widths.length / 2)] ?? 0, max: widths.at(-1) ?? 0 } };
+});
+
 /* 여는 카메라의 화면에서: 판의 윗면(네 모서리)끼리 겹치는가, 로봇이 제 판의 윗면 안에 서는가,
  * 로봇(발에서 머리까지)이 다른 판의 윗면을 덮는가, 판이 판 밖이나 흐름 한 줄·범례에 걸리는가,
  * 이름표가 판의 윗면에 서는가. 반 픽셀 안의 닿음은 겹침이 아니다. */
@@ -1131,7 +1140,7 @@ async function testOrbitSpace(browser, origin, ok) {
         return window.__ORBIT_FRAMES__(4);
       });
       crowds.push({ size, ...(await orbitOverlaps(one.page)), viewport: width, clear: await orbitClearance(one.page),
-        faults: one.faults.length });
+        faults: one.faults.length, facts: await orbitLabelFacts(one.page) });
     } finally {
       await one.page.close();
     }
@@ -1147,7 +1156,7 @@ async function testOrbitSpace(browser, origin, ok) {
     crowds.length === 4 && crowds.every((one) => one.unnamed.length === 0
       && one.named >= one.labels * floors[`${one.size}:${one.viewport}`]),
     JSON.stringify(crowds.map((one) => ({ size: one.size, viewport: one.viewport, named: `${one.named}/${one.labels}`,
-      floor: floors[`${one.size}:${one.viewport}`], unnamed: one.unnamed }))));
+      floor: floors[`${one.size}:${one.viewport}`], unnamed: one.unnamed, facts: one.facts }))));
   const clearOf = (pick) => JSON.stringify(crowds.map((one) => ({ size: one.size, viewport: one.viewport,
     fit: one.clear.fit, ...pick(one.clear) })));
   ok("on the screen no two platform tops overlap, every robot stands inside its own platform's top, and no robot "
