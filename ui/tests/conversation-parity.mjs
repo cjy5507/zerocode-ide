@@ -540,7 +540,11 @@ export async function testConversationKeys(browser, origin, ok) {
       for (let beat = 0; beat < 4; beat += 1) await window.__PAINTED__();
       const held = paneChats.get(term);
       const keysFor = () => calls("term_key").filter((args) => args.term === term).map((args) => args.press);
-      press(held.host.querySelector(".helper-turns"), "Escape");
+      // What the key met, for a failure: the pane's word at the press, whether the conversation's Escape road is on this
+      // page, and whether a listener before it took the key (its default prevented, so the road returns).
+      seen.paneWord = hookStates.get(term) ?? null;
+      seen.paneRoad = held.host.__interruptKeys === true;
+      seen.paneEscPrevented = press(held.host.querySelector(".helper-turns"), "Escape") === false;
       await settle();
       seen.paneEsc = JSON.stringify(keysFor());
       held.host.querySelector(".worker-composer-send.is-stop")?.click();
