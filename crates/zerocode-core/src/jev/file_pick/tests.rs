@@ -218,3 +218,14 @@ fn a_search_looks_for_the_tasks_own_words_and_names_that_look_like_code_first() 
         ["lexer_state", "crash"]
     );
 }
+
+/// A hindsight file label is a structural proxy by name (`labelSource`,
+/// t-26584, ①): the files a turn edited later are a stand-in for the answer,
+/// and a proxy may not raise a seat.
+#[test]
+fn a_hindsight_file_label_names_itself_a_proxy() {
+    let label = label_row(&json!({}), 7, &["src/a.rs".to_string()], None, 1);
+    let row = serde_json::to_value(&label).expect("the label serializes");
+    assert_eq!(row["labelSource"], json!("proxy"));
+    assert_eq!(row["labelAuthor"], json!("file_pick"));
+}

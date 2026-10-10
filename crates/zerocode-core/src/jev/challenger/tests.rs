@@ -1211,3 +1211,13 @@ fn the_challenger_rows_this_machine_wrote_replayed() {
     }
     println!("{}", json!({ "until": seed["until"], "pairs": table }));
 }
+
+/// A receipt's label names where its verdict came from (`labelSource`) and
+/// which writer put it in the ledger (`labelAuthor`), so a judge can tell an
+/// executed outcome from a proxy (t-26584, ①).
+#[test]
+fn a_receipt_label_names_its_source_and_its_author() {
+    let row = label_row("dp-7", &on(Receipt::Passed, ""), Preferred::Challenger, 5);
+    assert_eq!(row["labelSource"], json!("executed"));
+    assert_eq!(row["labelAuthor"], json!("challenger"));
+}

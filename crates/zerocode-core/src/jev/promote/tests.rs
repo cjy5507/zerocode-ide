@@ -3389,3 +3389,142 @@ fn risen_reads_only_a_rise_the_judge_recorded_under_the_words_asked_now() {
         );
     }
 }
+
+// ---- t-26584: label provenance, the named rise bar, calibration, human bundle
+
+/// A label says where its verdict came from (`labelSource`, t-26584, ①): an
+/// executed outcome, a judgment, or a structural proxy — a pane moved, a file
+/// read later. A proxy may not raise a seat (ADR-171), and a label that names
+/// no source is no label at all. The same marks written as executions rise.
+#[test]
+fn a_proxy_or_unsourced_label_cannot_raise_a_seat() {
+    let seat = &crate::jev::RECALL;
+    let asked = asked_count(seat);
+    let rows_with = |source: Option<&str>| {
+        let mut rows = recording(seat);
+        rows.extend((0..asked).map(|at| asked_by(seat, at)));
+        rows.extend(marks_that_rise(seat, asked).into_iter().map(|mut row| {
+            if let Some(source) = source {
+                row["labelSource"] = json!(source);
+            }
+            row
+        }));
+        rows
+    };
+    assert_eq!(
+        judge_seat(seat, &rows_with(Some("executed")))
+            .expect("judged")
+            .verdict,
+        Verdict::Rise,
+        "the positive control: executed labels clear the same lines"
+    );
+    for source in [Some("proxy"), None] {
+        let verdict = judge_seat(seat, &rows_with(source))
+            .expect("judged")
+            .verdict;
+        assert!(!matches!(verdict, Verdict::Rise), "{source:?}: {verdict:?}");
+    }
+}
+
+/// The rise bar is named and read on paired records (ADR-150, t-26584, ②):
+/// the candidate's cost per decision may not rise by one percent or more over
+/// the judgment it would replace, and its p95 latency not by five percent or
+/// more. A pair written exactly on the bar is not inside it. Marks alone, with
+/// no cost or latency beside them, do not rise a seat.
+#[test]
+fn a_rise_needs_paired_costs_and_latencies_inside_the_named_bar() {
+    let seat = &crate::jev::RECALL;
+    let asked = asked_count(seat);
+    let rows_with = |tokens: (u64, u64), ms: (u64, u64)| {
+        let mut rows = recording(seat);
+        rows.extend((0..asked).map(|at| asked_by(seat, at)));
+        rows.extend(marks_that_rise(seat, asked).into_iter().map(|mut row| {
+            row["labelSource"] = json!("executed");
+            row["inputTokens"] = json!(tokens.0);
+            row["currentInputTokens"] = json!(tokens.1);
+            row["elapsedMs"] = json!(ms.0);
+            row["currentElapsedMs"] = json!(ms.1);
+            row
+        }));
+        rows
+    };
+    let on_the_cost_line = judge_seat(seat, &rows_with((1_010, 1_000), (1_000, 1_000)))
+        .expect("judged")
+        .verdict;
+    assert!(
+        !matches!(on_the_cost_line, Verdict::Rise),
+        "+1% exactly is not under the one-percent bar: {on_the_cost_line:?}"
+    );
+    let on_the_latency_line = judge_seat(seat, &rows_with((1_000, 1_000), (1_050, 1_000)))
+        .expect("judged")
+        .verdict;
+    assert!(
+        !matches!(on_the_latency_line, Verdict::Rise),
+        "+5% exactly is not under the five-percent bar: {on_the_latency_line:?}"
+    );
+    let inside = judge_seat(seat, &rows_with((1_009, 1_000), (1_049, 1_000)))
+        .expect("judged")
+        .verdict;
+    assert_eq!(inside, Verdict::Rise, "under both bars, the rise stands");
+    let unpaired = judge_seat(seat, &{
+        let mut rows = recording(seat);
+        rows.extend((0..asked).map(|at| asked_by(seat, at)));
+        rows.extend(marks_that_rise(seat, asked).into_iter().map(|mut row| {
+            row["labelSource"] = json!("executed");
+            row
+        }));
+        rows
+    })
+    .expect("judged")
+    .verdict;
+    assert!(
+        !matches!(unpaired, Verdict::Rise),
+        "marks with no cost or latency pair: {unpaired:?}"
+    );
+}
+
+/// An act-line seat acts from a line read off its own graded answers
+/// (t-26584, ③). With no calibration record for it, it holds however clean
+/// its marks are: a line nobody calibrated is a default, and the judge says
+/// so instead of rising on it.
+#[test]
+fn an_act_line_seat_without_a_calibration_record_does_not_rise() {
+    let seat = &crate::jev::PLACEMENT;
+    let asked = asked_count(seat);
+    let mut rows = recording(seat);
+    rows.extend((0..asked).map(|at| asked_by(seat, at)));
+    rows.extend(marks_that_rise(seat, asked).into_iter().map(|mut row| {
+        row["labelSource"] = json!("executed");
+        row
+    }));
+    let verdict = judge_seat(seat, &rows).expect("judged").verdict;
+    assert!(
+        !matches!(verdict, Verdict::Rise),
+        "uncalibrated act-line seat rose: {verdict:?}"
+    );
+}
+
+/// A calibrated line is still only the seat's own answers read back to it
+/// (t-26584, ④): the judge also needs a fixed human bundle in the ledger to
+/// hold the line to, so a self-fitted line cannot pass on its own bench. A
+/// calibrated seat with no pinned human bundle holds.
+#[test]
+fn a_calibrated_act_line_seat_without_a_pinned_human_bundle_does_not_rise() {
+    let seat = &crate::jev::PLACEMENT;
+    let asked = asked_count(seat);
+    let mut rows = recording(seat);
+    rows.extend((0..asked).map(|at| asked_by(seat, at)));
+    rows.extend(marks_that_rise(seat, asked).into_iter().map(|mut row| {
+        row["labelSource"] = json!("executed");
+        row
+    }));
+    rows.iter_mut()
+        .for_each(|row| row["confidence"] = json!(0.9));
+    let verdict = judge_seat_in(seat, &rows, Some(500))
+        .expect("judged")
+        .verdict;
+    assert!(
+        !matches!(verdict, Verdict::Rise),
+        "a calibrated seat with no pinned human bundle rose: {verdict:?}"
+    );
+}
