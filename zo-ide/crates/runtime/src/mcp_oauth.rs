@@ -997,26 +997,35 @@ impl BrowserOpener for LocalBrowserOpener {
 /// # Errors
 /// Returns an `io::Error` if a launcher is found but fails, or
 /// `NotFound` if no supported opener command exists.
-/// The launch commands for `target_os`, in the order they are tried. The plan
-/// is plain data, so the Windows launch can be checked on any host.
+/// The launch commands for `target_os`, in the order they are tried. Only a web
+/// address (what [`require_web_url`] accepts) gets a plan, and the address is
+/// passed as its serialization. The plan is plain data, so the Windows launch
+/// can be checked on any host.
+///
+/// Windows starts the address with `rundll32 url.dll,FileProtocolHandler`, which
+/// hands it to `ShellExecute` with no shell. The program is named by its full path
+/// under `system_root`, so a program of the same name in the working directory
+/// is not the one that runs.
 fn browser_opener_plan(
     target_os: &str,
     system_root: Option<&std::ffi::OsStr>,
     address: &str,
 ) -> io::Result<Vec<(std::path::PathBuf, Vec<String>)>> {
-    let _ = system_root;
+    let address = require_web_url(address, "browser address")?;
     Ok(match target_os {
-        "macos" => vec![("open".into(), vec![address.to_owned()])],
-        "windows" => vec![(
-            "cmd".into(),
-            vec![
-                "/C".to_owned(),
-                "start".to_owned(),
-                String::new(),
-                address.to_owned(),
-            ],
-        )],
-        _ => vec![("xdg-open".into(), vec![address.to_owned()])],
+        "macos" => vec![("open".into(), vec![address])],
+        "windows" => {
+            let system_root = system_root
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "SystemRoot is not set"))?;
+            let rundll32 = std::path::Path::new(system_root)
+                .join("System32")
+                .join("rundll32.exe");
+            vec![(
+                rundll32,
+                vec!["url.dll,FileProtocolHandler".to_owned(), address],
+            )]
+        }
+        _ => vec![("xdg-open".into(), vec![address])],
     })
 }
 
@@ -1077,6 +1086,22 @@ mod tests {
     fn a_local_web_address_still_reaches_an_opener() {
         let root = Some(std::ffi::OsStr::new("C:\\WINDOWS"));
         assert!(browser_opener_plan("windows", root, "http://localhost:8080/callback").is_ok());
+    }
+
+    #[test]
+    fn a_non_ascii_address_reaches_the_opener_as_its_ascii_serialization() {
+        let address = "https://예시.example/경로?q=a&b=c";
+        let plan = browser_opener_plan(
+            "windows",
+            Some(std::ffi::OsStr::new("C:\\WINDOWS")),
+            address,
+        )
+        .expect("a web address has a Windows opener");
+        let (_, args) = plan.last().expect("one Windows opener");
+        let argument = args.last().expect("the address argument");
+        let serialized = reqwest::Url::parse(address).expect("a parsed address");
+        assert!(argument.is_ascii(), "the address is serialized to ASCII: {argument}");
+        assert_eq!(argument.as_str(), serialized.as_str());
     }
 
     #[test]
