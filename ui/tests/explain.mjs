@@ -138,7 +138,9 @@ export async function testExplain(browser, origin, ok) {
       seen.facts = pop.querySelector(".explain-facts")?.textContent ?? "";
       seen.names = [...pop.querySelectorAll(".note-pop-row .note-pop-name")].map((one) => one.textContent);
       seen.where = pop.querySelector(".note-pop-row .note-pop-where")?.textContent ?? "";
-      seen.expectedWhere = t("terminal.numbered", "터미널 {{n}}", { n: term });
+      // A pane that runs an agent, with nothing else to name it, is named for its folder (t-44016): the
+      // place the request came from is that folder, not the tab's number.
+      seen.expectedWhere = (tabOfTerm(term)?.worktree ?? "").split("/").pop();
       seen.quotas = [...pop.querySelectorAll(".explain-once .explain-quota")].map((one) => one.textContent);
       seen.focusedRow = document.activeElement === pop.querySelector(".note-pop-row");
       seen.dialogName = pop.getAttribute("aria-label");

@@ -11360,8 +11360,9 @@ function paintWorktreeAgents() {
     host.hidden = all.length + deadSummary.total === 0 && !restoring;
     const unseated = host.previousElementSibling?.querySelector(".wt-unseated");
     if (unseated) {
-      // 「에이전트 창 없음」 is never a row's only word (t-44016): it stands beside the stage the work is at.
-      unseated.hidden = !host.hidden || landingStageWord(worktreeStageOf(path)) === "";
+      // 「에이전트 창 없음」 is not said beside a stage the ledger holds (t-44016): the stage says more. On a folder
+      // with nothing to say, it stays as the explanation of its empty list.
+      unseated.hidden = !host.hidden || landingStageWord(worktreeStageOf(path)) !== "";
       // The branch line's standing is one decision (`dressWorktreeTitle`):
       // a name the title already said, a base chip, this marker.
       dressWorktreeTitle(host.previousElementSibling);

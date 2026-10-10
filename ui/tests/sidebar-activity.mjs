@@ -176,10 +176,10 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
     const empty = await page.evaluate((path) => window.__WT__(path), "/r/empty-wt");
     const wtNumbers = await page.evaluate((paths) => paths.map((path) => window.__WT__(path)), SCENE_PATHS);
     ok(
-      "a worktree row says its task id and title, the stage its work stands at in the ledger's words, and the agent that worked there with its model and end time — and 「에이전트 창 없음」 is never its only word",
+      "a worktree row says its task id and title, the stage its work stands at in the ledger's words, and the agent that worked there with its model and end time — and 「에이전트 창 없음」 is not said beside that stage",
       wt !== null && wt.taskId.includes("t-44016") && wt.title.includes(TASK) && wt.stage === "착지 대기" &&
         wt.branch.includes("Claude") && wt.branch.includes("haiku-5-5") && wt.branch.includes("끝") &&
-        empty !== null && empty.unseatedShown === false,
+        wt.unseatedShown === false && empty !== null,
       JSON.stringify({ finished: wt, empty, rows: wtNumbers }),
     );
 

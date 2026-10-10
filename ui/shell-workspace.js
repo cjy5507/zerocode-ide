@@ -4546,7 +4546,7 @@ function makeWorktreeNode(worktree, held) {
     '<button class="wt-twist" type="button"></button>' +
     '<span class="wt-dot" aria-hidden="true"></span>' +
     '<span class="wt-titlebox">' +
-    '<span class="wt-topline"><span class="wt-task-id" hidden></span><span class="wt-title"></span><span class="wt-default"></span>' +
+    '<span class="wt-topline"><span class="wt-title"></span><span class="wt-default"></span>' +
     '<span class="wt-phase" aria-hidden="true"></span>' +
     '<span class="wt-landing" aria-hidden="true"></span></span>' +
     '<span class="wt-branch"></span>' +
@@ -4758,13 +4758,18 @@ function makeWorktreeNode(worktree, held) {
   unseated.dataset.i18nSourcedatatip = unseatedTip.word;
   unseated.dataset.tip = t(unseatedTip.key, unseatedTip.word);
   unseated.hidden = true;
-  // What the work in this checkout is at, and who did it (t-44016) — beside the name, filled by `dressWorktreeWork`.
+  // The task id, the stage and the worker of the work in this checkout (t-44016), set on the branch line where the
+  // title keeps its whole width; `dressWorktreeWork` fills them.
+  const taskId = document.createElement("span");
+  taskId.className = "wt-task-id";
+  taskId.hidden = true;
   const stage = document.createElement("span");
   stage.className = "wt-stage";
   stage.hidden = true;
   const worker = document.createElement("span");
   worker.className = "wt-worker";
   worker.hidden = true;
+  branch.prepend(taskId);
   branch.append(stage, worker);
   branch.appendChild(unseated);
   // A workspace can be carried straight from the rail into a board lane. If

@@ -9056,10 +9056,11 @@ function tabLabel(tab) {
       if (prompt) return prompt;
     }
     // A pane that runs an agent, with nothing above to say, is named for its folder: the folder is the
-    // work's own name, where "터미널 N" says only where the tab sits (t-44016). A plain shell keeps its number.
-    const launched = leaves.length === 1 && (paneAgents.has(leaves[0]) || Boolean(tab.agent));
+    // work's own name, where "터미널 N" says only where the tab sits (t-44016). A tab that carries its
+    // agent's name keeps it, and a plain shell keeps its number.
+    const launched = leaves.length === 1 && paneAgents.has(leaves[0]);
     const folder = launched && tab.worktree ? basename(tab.worktree) : "";
-    return tab.title ?? (folder || tab.agent) ?? t("terminal.numbered", "터미널 {{n}}", { n: tab.term });
+    return tab.title ?? tab.agent ?? (folder || t("terminal.numbered", "터미널 {{n}}", { n: tab.term }));
   }
   const entry = lanes.get(focusedId);
   return entry ? laneTitle(entry.lane) : t("terminal.label", "터미널");

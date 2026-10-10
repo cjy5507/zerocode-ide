@@ -1462,21 +1462,33 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 }
 
 /* The task id, the stage and the worker of the work standing in a checkout (t-44016): small, and set after the
- * name, which still gives way first (`min-width: 0` on the branch line). */
+ * name. They shrink and elide before the title or the landing word does, and take no more than a share of the
+ * row; `line-height: 1` keeps a chip from taller than the line it sits in, so a row with a chip is as tall as
+ * one without (sidebar-review-state). */
 .wt-task-id {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 30%;
   margin-inline-end: var(--space-1);
+  overflow: hidden;
   color: var(--ink-mist);
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
+  line-height: 1;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .wt-stage,
 .wt-worker {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
   margin-inline-start: var(--space-1);
+  overflow: hidden;
   font-size: var(--text-2xs);
+  line-height: 1;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
