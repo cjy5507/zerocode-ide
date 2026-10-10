@@ -9,7 +9,7 @@
  */
 
 import { endRun } from "./end-run.mjs";
-import { PLATFORM_OVERRIDE, TEST_PLATFORM } from "./test-platform.mjs";
+import { PLATFORM_OVERRIDE, reportedPlatformScript, TEST_PLATFORM } from "./test-platform.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -3153,23 +3153,14 @@ const installTauri = async (page, windowId) => {
   }, windowId);
 };
 
-const addReportedPlatform = (page, platform) => page.addInitScript((reported) => {
-  Object.defineProperty(navigator, "userAgentData", {
-    configurable: true,
-    get: () => ({ platform: reported }),
-  });
-}, platform);
+const addReportedPlatform = (page, platform) => page.addInitScript(reportedPlatformScript, platform);
 
 const pageA = await context.newPage();
 const pageB = await context.newPage();
 // `ZO_TEST_PLATFORM` names another platform: both windows report it before shell.js reads it (test-platform.mjs).
 if (PLATFORM_OVERRIDE) {
-  for (const page of [pageA, pageB]) {
-    await page.addInitScript((reported) => {
-      Object.defineProperty(navigator, "userAgentData", { configurable: true, get: () => ({ platform: reported }) });
-      Object.defineProperty(navigator, "platform", { configurable: true, get: () => reported });
-    }, PLATFORM_OVERRIDE);
-  }
+  await addReportedPlatform(pageA, PLATFORM_OVERRIDE);
+  await addReportedPlatform(pageB, PLATFORM_OVERRIDE);
 }
 await installTauri(pageA, "A");
 await installTauri(pageB, "B");

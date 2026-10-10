@@ -23,3 +23,10 @@ export const PLATFORM_OVERRIDE = named === process.platform ? null : REPORTED[na
 export const PRIMARY_EVENT = named === "darwin"
   ? Object.freeze({ metaKey: true })
   : Object.freeze({ ctrlKey: true });
+
+/** The page half of the override. Runs before any page script, so shell.js reads the platform this names:
+ * `userAgentData` first, then `navigator.platform`. Pass it to `addInitScript` with the platform as its argument. */
+export function reportedPlatformScript(reported) {
+  Object.defineProperty(Navigator.prototype, "userAgentData", { configurable: true, get: () => ({ platform: reported }) });
+  Object.defineProperty(Navigator.prototype, "platform", { configurable: true, get: () => reported });
+}

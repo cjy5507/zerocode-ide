@@ -6,7 +6,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { standIpcCensus } from "./ipc-census.mjs";
-import { PLATFORM_OVERRIDE, PRIMARY_EVENT } from "./test-platform.mjs";
+import { PLATFORM_OVERRIDE, PRIMARY_EVENT, reportedPlatformScript } from "./test-platform.mjs";
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /* The primary modifier as a synthetic-event spread — ⌘ on macOS, Ctrl
  * elsewhere (test-platform.mjs). `shell.js` reads the same platform; a test
@@ -2301,63 +2301,62 @@ const standBackend = async (surface, boot = BOOT) => {
  * settles at all, so 20 s is two orders over the slowest settled flush and still a small slice of the queue's cap. */
 const ENCODER_FLUSH_DEADLINE_MS = 20000;
 
-const installHarnessHands = (surface) => surface.addInitScript(({ primaryEvent, flushDeadlineMs, reported }) => {
-  window.__TEST_PRIMARY_EVENT__ = primaryEvent;
-  // `ZO_TEST_PLATFORM` names a platform other than the machine's: the page reports that one before shell.js reads
-  // it (test-platform.mjs). `reported` is null on the runners, which keep the platform they run on.
-  if (reported) {
-    Object.defineProperty(Navigator.prototype, "userAgentData", { configurable: true, get: () => ({ platform: reported }) });
-    Object.defineProperty(Navigator.prototype, "platform", { configurable: true, get: () => reported });
-  }
-  // A WebCodecs encoder's `flush()` has no deadline of its own, and under the software GL of the runner's host
-  // (`runner-host.mjs`) it has been seen never to settle, which held the whole window suite until the queue's cap
-  // killed it (t-21351). Every scenario that encodes waits through this: the flush that does not settle in
-  // `flushDeadlineMs` throws, so the suite names the encoder instead of going quiet.
-  window.__FLUSH_ENCODER__ = (encoder) =>
-    Promise.race([
-      encoder.flush(),
-      new Promise((_, giveUp) => setTimeout(() => giveUp(new Error(`the encoder's flush did not settle in ${flushDeadlineMs} ms`)), flushDeadlineMs)),
-    ]);
-  const owner = () => tabs.find((held) => held.id === activeTabId);
-  // The live EditorView in front of the active tab, or null when the tab in
-  // front is not a file.
-  window.__EDITOR__ = () => {
-    const tab = owner();
-    return tab ? editorShowing(tab) : null;
-  };
-  window.__SHOWN__ = () => window.__EDITOR__()?.state.doc.toString() ?? null;
-  // What typing into the whole document does. Selecting everything and
-  // replacing it is one transaction, which is what ⌘A followed by a paste is.
-  window.__TYPE__ = (text) => {
-    const editor = window.__EDITOR__();
-    editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: text } });
-  };
-  window.__CARET__ = (at) => window.__EDITOR__().dispatch({ selection: { anchor: at } });
-  window.__AT__ = () => window.__EDITOR__().state.selection.main.head;
+const installHarnessHands = async (surface) => {
+  // `ZO_TEST_PLATFORM` names a platform other than the machine's: the page reports it before shell.js reads the
+  // platform (test-platform.mjs). Null on the runners, which keep the platform they run on.
+  if (PLATFORM_OVERRIDE) await surface.addInitScript(reportedPlatformScript, PLATFORM_OVERRIDE);
+  await surface.addInitScript(({ primaryEvent, flushDeadlineMs }) => {
+    window.__TEST_PRIMARY_EVENT__ = primaryEvent;
+    // A WebCodecs encoder's `flush()` has no deadline of its own, and under the software GL of the runner's host
+    // (`runner-host.mjs`) it has been seen never to settle, which held the whole window suite until the queue's cap
+    // killed it (t-21351). Every scenario that encodes waits through this: the flush that does not settle in
+    // `flushDeadlineMs` throws, so the suite names the encoder instead of going quiet.
+    window.__FLUSH_ENCODER__ = (encoder) =>
+      Promise.race([
+        encoder.flush(),
+        new Promise((_, giveUp) => setTimeout(() => giveUp(new Error(`the encoder's flush did not settle in ${flushDeadlineMs} ms`)), flushDeadlineMs)),
+      ]);
+    const owner = () => tabs.find((held) => held.id === activeTabId);
+    // The live EditorView in front of the active tab, or null when the tab in
+    // front is not a file.
+    window.__EDITOR__ = () => {
+      const tab = owner();
+      return tab ? editorShowing(tab) : null;
+    };
+    window.__SHOWN__ = () => window.__EDITOR__()?.state.doc.toString() ?? null;
+    // What typing into the whole document does. Selecting everything and
+    // replacing it is one transaction, which is what ⌘A followed by a paste is.
+    window.__TYPE__ = (text) => {
+      const editor = window.__EDITOR__();
+      editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: text } });
+    };
+    window.__CARET__ = (at) => window.__EDITOR__().dispatch({ selection: { anchor: at } });
+    window.__AT__ = () => window.__EDITOR__().state.selection.main.head;
 
-  /* 에이전트 소식이 그림이 되기까지 기다리는 문 (1-ep).
-   *
-   * 탭 배지·카드 행·문 배지·보드는 이제 이벤트마다가 아니라 **한 프레임에 한
-   * 번** 그려진다. 그래서 훅을 흘린 직후의 DOM은 아직 옛 그림이고, 그것을 읽는
-   * 시험은 임의의 밀리초가 아니라 프레임 하나를 기다려야 한다. 두 번 기다리는
-   * 것은 예약이 이번 프레임의 콜백 뒤에 걸렸을 수도 있기 때문이다. */
-  window.__PAINTED__ = () =>
-    new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    /* 에이전트 소식이 그림이 되기까지 기다리는 문 (1-ep).
+     *
+     * 탭 배지·카드 행·문 배지·보드는 이제 이벤트마다가 아니라 **한 프레임에 한
+     * 번** 그려진다. 그래서 훅을 흘린 직후의 DOM은 아직 옛 그림이고, 그것을 읽는
+     * 시험은 임의의 밀리초가 아니라 프레임 하나를 기다려야 한다. 두 번 기다리는
+     * 것은 예약이 이번 프레임의 콜백 뒤에 걸렸을 수도 있기 때문이다. */
+    window.__PAINTED__ = () =>
+      new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
 
-  /* 「값이 0」을 재기 전의 한 박자 (t-2412 규칙 3).
-   *
-   * 케이스는 서로의 상태를 물려받지 않는다: 앞 케이스가 남긴 프레임 예약과,
-   * 이미 떠난 물음의 `.then`이 뒷 케이스의 계수에 섞이면 그 숫자는 케이스의
-   * 것이 아니다. 프레임 둘과 매크로태스크 하나를 흘려보낸 뒤 계수기를 0으로
-   * 잡는다. 폴러의 한 주기를 따로 기다리지 않는 것은 `__HOLD_POLLERS__`가
-   * 이미 그것을 주차했기 때문이다 — 기다림은 그 주차가 없을 때의 대용이다. */
-  window.__SETTLED__ = async () => {
-    await window.__PAINTED__();
-    await new Promise((done) => setTimeout(done, 0));
-    await window.__PAINTED__();
-    window.__COUNTS__ = {};
-  };
-}, { primaryEvent: PRIMARY_EVENT, flushDeadlineMs: ENCODER_FLUSH_DEADLINE_MS, reported: PLATFORM_OVERRIDE });
+    /* 「값이 0」을 재기 전의 한 박자 (t-2412 규칙 3).
+     *
+     * 케이스는 서로의 상태를 물려받지 않는다: 앞 케이스가 남긴 프레임 예약과,
+     * 이미 떠난 물음의 `.then`이 뒷 케이스의 계수에 섞이면 그 숫자는 케이스의
+     * 것이 아니다. 프레임 둘과 매크로태스크 하나를 흘려보낸 뒤 계수기를 0으로
+     * 잡는다. 폴러의 한 주기를 따로 기다리지 않는 것은 `__HOLD_POLLERS__`가
+     * 이미 그것을 주차했기 때문이다 — 기다림은 그 주차가 없을 때의 대용이다. */
+    window.__SETTLED__ = async () => {
+      await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, 0));
+      await window.__PAINTED__();
+      window.__COUNTS__ = {};
+    };
+  }, { primaryEvent: PRIMARY_EVENT, flushDeadlineMs: ENCODER_FLUSH_DEADLINE_MS });
+};
 
 /* `WINDOW_FRAME_LAG_MS=<ms>`: every animation frame on the page lands this
  * much later — a loaded machine's frames, on an idle one (t-9741).

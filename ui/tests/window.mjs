@@ -2,7 +2,7 @@ import { endRun } from "./end-run.mjs";
 import "./scm-notices.mjs";
 import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 import { createRunner } from "./window-runner.mjs";
-import { TEST_PLATFORM } from "./test-platform.mjs";
+import { reportedPlatformScript, TEST_PLATFORM } from "./test-platform.mjs";
 /* The window, driven for real.
  *
  * The Rust gates read this window's source; they cannot lay it out. Anything
@@ -149,19 +149,9 @@ const EXPECTED_TERMINAL_FONT = TEST_PLATFORM === "win32"
 
 const primaryPress = (...keys) => [PRIMARY_KEY, ...keys].join("+");
 
-const addReportedPlatform = (page, platform) => page.addInitScript((reported) => {
-  // `shell.js` prefers userAgentData and falls back to navigator.platform.
-  // Override both before it loads so a Windows shortcut test remains Windows
-  // even when this harness itself runs on macOS or Linux.
-  Object.defineProperty(Navigator.prototype, "userAgentData", {
-    configurable: true,
-    get: () => ({ platform: reported }),
-  });
-  Object.defineProperty(Navigator.prototype, "platform", {
-    configurable: true,
-    get: () => reported,
-  });
-}, platform);
+// Both halves of the reported platform (`shell.js` prefers userAgentData and falls back to navigator.platform): a
+// Windows shortcut test stays Windows even when this harness itself runs on macOS or Linux.
+const addReportedPlatform = (page, platform) => page.addInitScript(reportedPlatformScript, platform);
 
 /* The window asks the backend for everything it draws, so the backend is
  * stubbed down to the answers a first frame needs. Anything missing here does
