@@ -3,6 +3,7 @@ import "./scm-notices.mjs";
 import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 import { createRunner } from "./window-runner.mjs";
 import { reportedPlatformScript, TEST_PLATFORM } from "./test-platform.mjs";
+import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
 /* The window, driven for real.
  *
  * The Rust gates read this window's source; they cannot lay it out. Anything
@@ -53816,6 +53817,11 @@ const brainScale = await page.evaluate(async () => {
 });
 const brainLeast = (key) => Math.min(...brainScale.map((one) => one[key]));
 const brainFirst = brainScale[0];
+/* 천 쪽 시험이 시간으로 재는 두 벽(밀리초, 조용한 기계 기준). 값은 이 시험이 원래 쓰던 그대로이고 이름만 달았다.
+ * frameBudgetHolds(machine-load.mjs)는 이 기계에서 판정할 수 없으면 — 부하가 코어 수를 넘거나, 부하를 읽을 수 없는
+ * 플랫폼(win32)이면 — 판정하지 않고 기록만 한다(loadNote가 그렇게 말한다). */
+const SETTLE_FRAME_BUDGET_MS = 16 * 8;
+const FIRST_PAINT_BUDGET_MS = 300;
 ok(
   "a thousand pages draw their first picture inside the budget and lay out deterministically",
   brainScale.length === 5 &&
@@ -53830,7 +53836,7 @@ ok(
       one.laidOut > 0 && one.samples >= 10 && one.laidOut / one.samples < 40) &&
     brainFirst.asked === 1 && brainFirst.nodes === 1020 && brainFirst.edges > 1500 &&
     brainLeast("firstPaint") > 0 &&
-    brainLeast("firstPaint") < 300 &&
+    frameBudgetHolds(brainLeast("firstPaint"), FIRST_PAINT_BUDGET_MS) &&
     /* 그리고 그 걸음이 무거워졌는가 — 이쪽은 시간으로만 물을 수 있다. 벽은
      * 폭발을 잡는 것이지 10ms 표류를 잡는 것이 아니다: 이 창의 정착 프레임은
      * 이 기계에서 원래 80~90ms이고(다섯 라운드 최소값 실측 73·84, 라운드 하나로는
@@ -53838,8 +53844,9 @@ ok(
      * 바닥 위에 절반의 여유를 두고 선다 — 그 아래로 좁히면 재는 것은 그림이
      * 아니라 그날의 부하고, 그보다 넓히면 폭발을 놓친다. 최소값 위에 선 벽이므로
      * 넘겼다면 그것은 위상이 아니라 그림이다. 첫 그림이 서는 프레임은
-     * `firstPaint`가 따로 재고 있다. */
-    brainLeast("worstGap") < 16 * 8 &&
+     * `firstPaint`가 따로 재고 있다. 이 벽은 SETTLE_FRAME_BUDGET_MS이고, 판정은
+     * frameBudgetHolds가 한다(부하를 읽을 수 없는 win32에서는 기록만). */
+    frameBudgetHolds(brainLeast("worstGap"), SETTLE_FRAME_BUDGET_MS) &&
     brainScale.every((one) => one.spread > 400 && one.spread < 6000) &&
     // 천 개의 제목을 한 화면에 겹쳐 쓰지 않는다 — 이름은 격자가 나눠 준
     // 예산 안에서만 선다(09-16).
@@ -53853,7 +53860,7 @@ console.log(`      knowledge graph: 1000 pages, first paint `
   + `${brainScale.map((one) => one.firstPaint).join("/")}ms (least ${brainLeast("firstPaint")}), `
   + `${brainFirst.nodes} nodes / ${brainFirst.edges} edges, worst frame gap `
   + `${brainScale.map((one) => one.worstGap).join("/")}ms (least ${brainLeast("worstGap")}), `
-  + `layout steps ${brainFirst.layoutRuns}`);
+  + `layout steps ${brainFirst.layoutRuns}, ${loadNote()}`);
 
 /* 라이브 층(t-2931): 워처의 다시 읽기·회상 고리·BUS LOG·활동 렌즈·merge 후보.
  * 절은 제 파일에 있고(`knowledge-live.mjs`), `KNOWLEDGE_LIVE_ONLY=1`로 혼자 돈다. */
