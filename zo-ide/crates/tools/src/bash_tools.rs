@@ -936,6 +936,17 @@ fn wait_child_with_timeout_for_key(
 mod tests {
     use super::*;
 
+    /// The running test's name, as a part of a scratch directory name.
+    fn thread_tag() -> String {
+        std::thread::current().name().unwrap_or("test").to_string()
+    }
+
+    #[test]
+    fn scratch_directory_names_hold_no_windows_forbidden_characters() {
+        let tag = thread_tag();
+        assert!(!tag.contains(':'), "a Windows file name cannot hold `:`: {tag}");
+    }
+
     #[test]
     fn shell_write_intent_marks_a_file_checkpoint_incomplete() {
         let path = std::env::temp_dir().join(format!(

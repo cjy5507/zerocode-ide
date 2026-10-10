@@ -804,6 +804,17 @@ fn openai_oauth_expired(tokens: &OpenAiOAuthTokens) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The running test's name, as a part of a scratch directory name.
+    fn thread_tag() -> String {
+        std::thread::current().name().unwrap_or("test").to_string()
+    }
+
+    #[test]
+    fn scratch_directory_names_hold_no_windows_forbidden_characters() {
+        let tag = thread_tag();
+        assert!(!tag.contains(':'), "a Windows file name cannot hold `:`: {tag}");
+    }
+
     /// 죽은 로그인을 고치는 길은 그 로그인이 **누구 것이냐**에 달렸다: 창의
     /// 계정이면 다시 로그인이 답이지만, 제 저장소가 죽은 것이라면 한 걸음
     /// 옆의 창에 살아 있는 계정이 있다 — 그 사실을 말하지 않는 문구가 사람을
