@@ -260,17 +260,21 @@ const ORBIT_STAND_STEP_MS = 50;
 const ORBIT_GLIDE_TIME_CONSTANTS = 25;  // a glide decays by ORBIT.camera.glideMs per time constant; twenty-five is at rest
 const ORBIT_TURN_RESUME_MAX_MS = 3_000; // a turn that has not started again in three seconds is the failure
 
-/* A released camera glides and then stands: wait for two reads that agree. The bound is read from the page's own glide
- * constant, so a retuned glide keeps the same number of time constants. */
+/* A released camera glides and then stands. The glide moves the camera only on a frame, and a frame can come as rarely as
+ * the runner draws: the unfocused check measured 2.4 fps on this runner, so two reads 50 ms apart can fall between two
+ * frames and agree while the glide goes on. The camera stands when it has not moved for ORBIT_STAND_QUIET_STEPS reads in
+ * a row (500 ms, longer than one frame at 2 fps). The bound is read from the page's own glide constant, so a retuned glide
+ * keeps the same number of time constants. */
+const ORBIT_STAND_QUIET_STEPS = 10;
 const untilCameraStands = async (page, camera) => {
   const bound = ORBIT_GLIDE_TIME_CONSTANTS * await page.evaluate(() => ORBIT.camera.glideMs);
   let previous = await camera();
+  let quiet = 0;
   for (let waited = ORBIT_STAND_STEP_MS; waited <= bound; waited += ORBIT_STAND_STEP_MS) {
     await page.evaluate((ms) => window.__ORBIT_WAIT__(ms), ORBIT_STAND_STEP_MS);
     const now = await camera();
-    if (Math.abs(now.yaw - previous.yaw) < 1e-6 && Math.abs(now.pitch - previous.pitch) < 1e-6) {
-      return { camera: now, settled: true, waitedMs: waited };
-    }
+    quiet = Math.abs(now.yaw - previous.yaw) < 1e-6 && Math.abs(now.pitch - previous.pitch) < 1e-6 ? quiet + 1 : 0;
+    if (quiet === ORBIT_STAND_QUIET_STEPS) return { camera: now, settled: true, waitedMs: waited };
     previous = now;
   }
   return { camera: previous, settled: false, waitedMs: bound };
