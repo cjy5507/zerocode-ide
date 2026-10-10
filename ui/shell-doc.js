@@ -6002,9 +6002,10 @@ const ARTIFACT_VERDICT_WORDS = Object.freeze({
  * `Filter.kinds`의 낱말이다. */
 const ARTIFACT_TABS = Object.freeze([
   { tab: "tasks", kinds: [], key: "artifacts.tab.tasks", word: "작업별" },
-  // 보고서 카드는 글이 얼굴이다: 아이콘 얼굴 없이 칩·제목·만든 이 세 줄로 선다(`plain`).
+  // 글이 얼굴인 탭: 그림이 없는 종류의 카드는 아이콘 얼굴 없이 글 세 줄로 선다(`plain`). 보고서와
+  // 증거(스크린샷 포함)는 그림을 띄우지 못하니 얼굴이 빈 자리였다(t-43931).
   { tab: "reports", kinds: ["report"], key: "artifacts.kind.report", word: "보고서", plain: true },
-  { tab: "evidence", kinds: ["screenshot", "evidence"], key: "artifacts.kind.evidence", word: "증거" },
+  { tab: "evidence", kinds: ["screenshot", "evidence"], key: "artifacts.kind.evidence", word: "증거", plain: true },
   { tab: "pages", kinds: ["page", "document", "web"], key: "artifacts.tab.pages", word: "페이지·문서" },
   { tab: "other", kinds: ["export", "transcript", "other"], key: "artifacts.kind.other", word: "기타" },
 ]);
@@ -7982,6 +7983,12 @@ function artifactColumns(view) {
   return Math.max(1, Math.floor(width / (tuning.cardMin + tuning.gap)));
 }
 
+/* 얼굴 없는 카드의 종류: 「글이 얼굴인」 탭(`plain`)에 속한 종류다. 그 탭의 카드 높이와 카드의
+ * 얼굴이 같은 말을 해야 한다 — 종류 하나가 한쪽만 바꾸면 빈 얼굴이나 빈 높이가 남는다. */
+function artifactKindPlain(kind) {
+  return ARTIFACT_TABS.some((row) => row.plain === true && row.kinds.includes(kind));
+}
+
 /* 카드 한 장의 옷 — 제자리에서. 노드는 풀의 것이고 id만 갈아입는다. */
 function dressArtifactCard(node, row, selected) {
   if (node._artifactRow !== row) {
@@ -7993,8 +8000,8 @@ function dressArtifactCard(node, row, selected) {
     // 발행한 페이지의 설명은 제목의 풍선이다 — 카드의 셋째 줄은 만든 이의 것이다.
     title.dataset.tip = row.description ?? "";
     node.classList.toggle("is-missing", artifactMissing.has(row.id));
-    // 보고서 카드는 글이 얼굴이다: 종류 칩이 서고, 아래 줄은 같은 낱말을 되풀이하지 않는다.
-    const plain = row.kind === "report";
+    // 얼굴 없는 카드(글이 얼굴인 탭의 종류)는 종류 칩 대신 낱말 한 줄로 선다 — 탭의 높이와 같은 말.
+    const plain = artifactKindPlain(row.kind);
     node.classList.toggle("is-plain", plain);
     const subtype = node.querySelector(".artifact-card-subtype");
     subtype.textContent = plain ? artifactKindWord(row) : "";
