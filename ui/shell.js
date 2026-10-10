@@ -17053,6 +17053,9 @@ const STAGE_NEXT = Object.freeze({
   closed: { key: "stage.card.next.closed", word: "닫힌 과업입니다" },
 });
 const STAGE_NEXT_START = { key: "stage.card.next.start", word: "에이전트를 열어 작업을 시작하세요" };
+// A commit id as git spells it (7 to 40 hex digits), and the length the card shows of it.
+const COMMIT_ID = /^[0-9a-f]{7,40}$/i;
+const SHORT_COMMIT_LENGTH = 9;
 
 function paintStageCard() {
   const card = el("stage-card");
@@ -17077,7 +17080,7 @@ function paintStageCard() {
   put(".stage-card-state", landingStageWord(stage));
   put(".stage-card-landing", landing?.word ?? "");
   put(".stage-card-unseated", t("worktree.unseated", "에이전트 창 없음"));
-  put(".stage-card-commit", /^[0-9a-f]{7,40}$/i.test(handedIn) ? t("stage.card.lastCommit", "마지막 커밋 {{sha}}", { sha: handedIn.slice(0, 9) }) : "");
+  put(".stage-card-commit", COMMIT_ID.test(handedIn) ? t("stage.card.lastCommit", "마지막 커밋 {{sha}}", { sha: handedIn.slice(0, SHORT_COMMIT_LENGTH) }) : "");
   put(".stage-card-next", t(next.key, next.word));
   card.hidden = false;
 }
