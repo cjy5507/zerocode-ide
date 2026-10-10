@@ -20,6 +20,7 @@ mod quiet_children;
 mod quota_wall;
 mod readiness;
 mod release_versions;
+mod secret_prompt;
 mod skills_view;
 mod support;
 mod type_value_keys;

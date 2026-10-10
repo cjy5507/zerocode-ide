@@ -104,6 +104,7 @@ pub mod second_brain_pairs;
 pub mod second_brain_paths;
 pub mod second_brain_relate;
 pub mod second_brain_related;
+pub mod secret_prompt;
 pub mod session;
 pub mod shell_history;
 pub mod shell_rule;

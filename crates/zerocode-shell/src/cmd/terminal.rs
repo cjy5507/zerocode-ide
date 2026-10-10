@@ -3,6 +3,7 @@
 use crate::*;
 use zerocode_core::agent::{Injected, prompt_injection};
 use zerocode_core::capabilities::SpawnRoad;
+use zerocode_core::secret_prompt::{SecretKind, SecretPrompt};
 
 /// Open the floating panel's shell, if it is not already running.
 ///
@@ -2024,6 +2025,36 @@ pub(crate) fn answer_approval(
     } else {
         Err(answer_door::QUESTION_CHANGED.to_string())
     }
+}
+
+/// Type the value a person gave a secret card, and the return that sends it,
+/// into the pane whose question it answers.
+///
+/// Through the answer door, so the value goes in only while the pane still shows
+/// the same question (`line` and `kind`, as the card was raised), and only while
+/// a job of the pane's own holds its terminal without echo (`secret_route_open`).
+/// A value that is
+/// not one line of visible text is refused before it is held anywhere. The value
+/// is kept as bytes that are wiped when this call returns, and no log, record or
+/// ledger line names it.
+#[tauri::command(async)]
+pub(crate) fn answer_secret(
+    state: State<'_, AppState>,
+    term: TermId,
+    kind: SecretKind,
+    line: String,
+    value: String,
+) -> Result<(), String> {
+    let held = state.terminals().handle(term);
+    let agent_pane = state.agent_terms().contains_key(&term);
+    answer_door::answer_secret_into(
+        held,
+        term,
+        SecretPrompt { kind, line },
+        value,
+        agent_pane,
+        &|| state.cadence().wake(),
+    )
 }
 
 #[tauri::command(async)]
