@@ -1610,20 +1610,19 @@ fn usage_field(usage: Option<&Value>, key: &str) -> u32 {
 }
 
 /// Default cap on transparent mid-stream restarts. Seven bounded restarts give
-/// a transient failure eight total attempts while [`MAX_RESTART_WALLCLOCK`]
-/// still caps a slow or silent reconnect storm by elapsed time.
+/// a transient failure eight total attempts, and [`MAX_RESTART_WALLCLOCK`] caps
+/// the bundle of failures they belong to by elapsed time.
 const DEFAULT_STREAM_MAX_RETRIES: u32 = 7;
 const DEFAULT_STREAM_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
 const DEFAULT_STREAM_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Total wall-clock ceiling over a single pre-commit restart sequence. The
-/// per-attempt cap (`max_retries`) does not bound elapsed time, so a silent
-/// backend that idle-times-out (`CHATGPT_STREAM_IDLE_TIMEOUT_MS`) and re-opens
-/// each time can hold the turn for minutes before exhausting attempts (the
-/// observed ~275 s freeze). Once the sequence has been retrying longer than
-/// this, the next fault propagates as a retryable error instead of restarting
-/// again, so the turn fails fast and the UI is freed. Sized above one idle
-/// timeout plus a couple of brisk re-opens, below the multi-minute storm.
+/// Total wall-clock ceiling over one bundle of failed attempts: the restarts
+/// since the last response-level event (see [`is_response_level_event`]). The
+/// ceiling covers the whole bundle, including the wait of its last attempt. A
+/// stall window is cut to what the bundle has left, so a backend that fails fast
+/// and then goes quiet ends the turn at the ceiling instead of a full window
+/// later. Once the bundle has run longer than this, its next fault propagates
+/// as a retryable error and the turn fails fast.
 const MAX_RESTART_WALLCLOCK: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Client for the ChatGPT subscription backend (Responses API). Built from a
@@ -1818,7 +1817,7 @@ impl ChatGptBackendClient {
             Err(_) => Err(match kind {
                 StreamOpenTimeoutKind::Idle => ApiError::stream_idle_timeout(budget),
                 StreamOpenTimeoutKind::Startup => {
-                    ApiError::stream_startup_no_progress(budget, false)
+                    ApiError::stream_startup_no_progress(budget, "")
                 }
             }),
         }
@@ -1893,7 +1892,7 @@ impl ChatGptBackendClient {
             Err(_) => Err(match kind {
                 StreamOpenTimeoutKind::Idle => ApiError::stream_idle_timeout(budget),
                 StreamOpenTimeoutKind::Startup => {
-                    ApiError::stream_startup_no_progress(budget, false)
+                    ApiError::stream_startup_no_progress(budget, "")
                 }
             }),
         }
@@ -2025,7 +2024,10 @@ impl ChatGptBackendClient {
             startup_window,
             startup_deadline: startup_window
                 .and_then(|window| startup_started_at.checked_add(window)),
+            startup_wait: startup_window,
             startup_reasoning_extended: false,
+            bundle_causes: std::collections::BTreeMap::new(),
+            request_seq: NEXT_STREAM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -2347,6 +2349,9 @@ impl ChatGptTransport {
     }
 }
 
+/// Source of [`ChatGptStream::request_seq`].
+static NEXT_STREAM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 pub struct ChatGptStream {
     transport: ChatGptTransport,
     state: ResponsesStreamState,
@@ -2357,10 +2362,9 @@ pub struct ChatGptStream {
     request: MessageRequest,
     /// Transparent restarts spent so far, bounded by `client.max_retries`.
     restart_attempts: u32,
-    /// Wall clock at the first restart of the current pre-commit sequence, so the
-    /// whole restart storm is bounded by elapsed time and not only by attempt
-    /// count — a silent backend that idle-times-out and re-opens repeatedly would
-    /// otherwise hold the turn for minutes (see [`MAX_RESTART_WALLCLOCK`]).
+    /// Wall clock at the first failure of the current bundle, so the bundle's
+    /// whole run of restarts is bounded by elapsed time and not only by attempt
+    /// count (see [`MAX_RESTART_WALLCLOCK`]). `None` when no bundle is open.
     restart_window_start: Option<std::time::Instant>,
     /// Set once text or tool-call argument bytes are surfaced; locks out further
     /// restarts to avoid duplicate user-visible output or malformed tools.
@@ -2370,11 +2374,20 @@ pub struct ChatGptStream {
     /// "reconnecting" instead of a freeze. `None` (the default) preserves the
     /// old log-only behaviour for non-interactive callers.
     retry_notice: Option<StreamRetryCallback>,
-    /// First-action watchdog for keep-alive-only streams. Transport bytes do not
-    /// count as progress; one decoded reasoning delta grants one extra window.
+    /// Pre-commit stall watchdog. Transport bytes (keep-alives, pings) do not
+    /// count as progress; each response-level event re-arms the window from that
+    /// event, and a reasoning delta grants one equal extension per attempt.
     startup_window: Option<std::time::Duration>,
     startup_deadline: Option<std::time::Instant>,
+    /// The wait the current attempt was given: the window, or less when its
+    /// bundle has less ceiling left, plus the reasoning extension when granted.
+    startup_wait: Option<std::time::Duration>,
     startup_reasoning_extended: bool,
+    /// The failures that restarted the current bundle, by kind, for the stall
+    /// message when the bundle ends. Cleared when progress closes the bundle.
+    bundle_causes: std::collections::BTreeMap<String, u32>,
+    /// This stream's number among the process's streams, for the restart log.
+    request_seq: u64,
 }
 
 /// Sink for [`ChatGptStream`] mid-stream restart notices. Boxed `Fn` so the
@@ -2397,11 +2410,13 @@ impl std::fmt::Debug for ChatGptStream {
             .field("has_retry_notice", &self.retry_notice.is_some())
             .field("startup_window", &self.startup_window)
             .field("startup_deadline", &self.startup_deadline)
+            .field("startup_wait", &self.startup_wait)
             .field(
                 "startup_reasoning_extended",
                 &self.startup_reasoning_extended,
             )
-
+            .field("bundle_causes", &self.bundle_causes)
+            .field("request_seq", &self.request_seq)
             .finish()
     }
 }
@@ -2436,9 +2451,9 @@ const CHATGPT_STREAM_IDLE_TIMEOUT_MS: u64 = 90_000;
 /// idle timeout entirely (restores the unbounded-wait behaviour).
 const CHATGPT_STREAM_IDLE_TIMEOUT_ENV: &str = "ZO_CHATGPT_STREAM_IDLE_TIMEOUT_MS";
 
-/// First decoded task action deadline. Unlike the 90-second byte-idle guard,
-/// this clock is not reset by transport keep-alives. A reasoning delta grants
-/// one equal extension, matching the effort-aware workflow startup watchdog.
+/// Response-level stall window. Unlike the 90-second byte-idle guard, this clock
+/// is not reset by transport keep-alives: each response-level event re-arms it,
+/// and a reasoning delta still grants one equal extension per attempt.
 const CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_MS: u64 = 240_000;
 const CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_ENV: &str =
     "ZO_CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_MS";
@@ -2495,6 +2510,41 @@ fn extend_startup_deadline_for_reasoning(
         *deadline = current.checked_add(extension);
         *already_extended = true;
     }
+}
+
+/// Whether a transport value is a response-level event: the server making this
+/// response (`response.created`, output items, deltas, `response.completed`).
+/// Keep-alives arrive as empty chunks; a failed or incomplete response ends
+/// rather than progresses; other frame kinds say nothing about the response.
+fn is_response_level_event(value: &Value) -> bool {
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| {
+            kind.starts_with("response.")
+                && !matches!(kind, "response.failed" | "response.incomplete")
+        })
+}
+
+/// The kind a failure is named by in a bundle summary: the stream's error type,
+/// or the HTTP status of a refused request.
+fn failure_kind(error: &ApiError) -> String {
+    match error {
+        ApiError::StreamApi {
+            error_type: Some(kind),
+            ..
+        } => kind.clone(),
+        ApiError::StreamApi { .. } => "stream_error".to_string(),
+        ApiError::Api { status, .. } => format!("http_{}", status.as_u16()),
+        _ => "provider_error".to_string(),
+    }
+}
+
+/// Wall clock in milliseconds since the Unix epoch, for the restart log.
+fn unix_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis())
 }
 
 use super::{crosses_restart_commit_boundary, should_restart_within_budget};
@@ -2586,6 +2636,9 @@ impl ChatGptStream {
             };
             match chunk {
                 Some(batch) => {
+                    if batch.iter().any(is_response_level_event) {
+                        self.note_response_progress();
+                    }
                     let emitted = self.ingest_batch(batch).await;
                     if emitted {
                         quiet_chunks = 0;
@@ -2682,7 +2735,7 @@ impl ChatGptStream {
             .with_session_id(self.client.cache_scope().to_string());
         self.pending.clear();
         self.done = false;
-        self.reset_startup_watchdog();
+        self.arm_startup_watchdog();
         Ok(true)
     }
 
@@ -2743,6 +2796,12 @@ impl ChatGptStream {
                 self.startup_window,
                 &mut self.startup_reasoning_extended,
             );
+            if self.startup_reasoning_extended {
+                self.startup_wait = self
+                    .startup_wait
+                    .zip(self.startup_window)
+                    .map(|(wait, extension)| wait.saturating_add(extension));
+            }
         }
     }
 
@@ -2751,15 +2810,10 @@ impl ChatGptStream {
         if std::time::Instant::now() < deadline {
             return None;
         }
-        let window = self.startup_window?;
-        let budget = if self.startup_reasoning_extended {
-            window.checked_add(window).unwrap_or(std::time::Duration::MAX)
-        } else {
-            window
-        };
+        let wait = self.startup_wait?;
         Some(ApiError::stream_startup_no_progress(
-            budget,
-            self.startup_reasoning_extended,
+            wait,
+            &self.bundle_summary(),
         ))
     }
 
@@ -2789,11 +2843,70 @@ impl ChatGptStream {
         Err(self.wrap_restart_exhaustion(error))
     }
 
-    fn reset_startup_watchdog(&mut self) {
+    /// Start the stall window for the attempt that starts now, cut to the ceiling
+    /// its bundle has left: the bundle's last attempt cannot outlive the ceiling
+    /// by waiting out a full window. A new attempt may take its extension again.
+    fn arm_startup_watchdog(&mut self) {
+        self.startup_reasoning_extended = false;
+        self.startup_wait = self.startup_window.map(|window| {
+            self.bundle_remaining()
+                .map_or(window, |left| window.min(left))
+        });
+        self.startup_deadline = self
+            .startup_wait
+            .and_then(|wait| std::time::Instant::now().checked_add(wait));
+    }
+
+    /// Response-level progress: the server is making this response. It closes the
+    /// bundle of failures before it and re-arms the window from the event. The
+    /// attempt's reasoning extension is not granted again.
+    fn note_response_progress(&mut self) {
+        if self.committed {
+            return;
+        }
+        self.restart_window_start = None;
+        self.bundle_causes.clear();
+        self.startup_wait = self.startup_window;
         self.startup_deadline = self
             .startup_window
             .and_then(|window| std::time::Instant::now().checked_add(window));
-        self.startup_reasoning_extended = false;
+    }
+
+    /// The ceiling the open bundle has left, or `None` when no bundle is open.
+    fn bundle_remaining(&self) -> Option<std::time::Duration> {
+        self.restart_window_start.map(|start| {
+            self.client
+                .max_restart_wallclock
+                .saturating_sub(start.elapsed())
+        })
+    }
+
+    fn record_bundle_cause(&mut self, error: &ApiError) {
+        *self.bundle_causes.entry(failure_kind(error)).or_insert(0) += 1;
+    }
+
+    /// The failures that restarted the open bundle, by kind: `server_error x7`.
+    fn bundle_summary(&self) -> String {
+        self.bundle_causes
+            .iter()
+            .map(|(kind, count)| format!("{kind} x{count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Open the next connection of the bundle. The open counts toward the ceiling
+    /// as well: it is cut to what the bundle has left.
+    async fn open_bundle_connection(&self) -> Result<ChatGptTransport, ApiError> {
+        let left = self
+            .bundle_remaining()
+            .unwrap_or(self.client.max_restart_wallclock);
+        match tokio::time::timeout(left, self.client.open_transport(&self.request, false)).await {
+            Ok(opened) => opened,
+            Err(_elapsed) => Err(ApiError::stream_startup_no_progress(
+                left,
+                &self.bundle_summary(),
+            )),
+        }
     }
 
     /// Last-resort recovery for a pre-commit terminal Responses stream failure.
@@ -2889,7 +3002,7 @@ impl ChatGptStream {
             .with_session_id(self.client.cache_scope().to_string());
         self.pending.clear();
         self.done = false;
-        self.reset_startup_watchdog();
+        self.arm_startup_watchdog();
         Ok(true)
     }
 
@@ -2897,39 +3010,54 @@ impl ChatGptStream {
     /// replace the live response and parser/state so the loop resumes from a
     /// clean turn. Any partial bytes buffered in the old parser are discarded
     /// with it — safe because nothing has been surfaced.
-    async fn restart(&mut self, last_error: ApiError) -> Result<(), ApiError> {
-        // Stamp the start of the restart sequence on the first restart so the
-        // wall-clock budget in `can_restart` measures the whole storm.
-        self.restart_window_start.get_or_insert_with(std::time::Instant::now);
-        self.restart_attempts += 1;
-        let base = self.client.backoff_for_attempt(self.restart_attempts)?;
-        let delay = super::retry_backoff::spread_backoff(base);
-        eprintln!(
-            "[zo] gpt stream stalled ({last_error}); restarting in {:.1}s (attempt {}/{})",
-            delay.as_secs_f64(),
-            self.restart_attempts,
-            self.client.max_retries,
-        );
-        // Surface the otherwise-silent reconnect pause to a live UI so it reads
-        // as "reconnecting", not a freeze. The classifier label is shared with
-        // the establish-time retry notice so the wording stays in lockstep.
-        if let Some(notice) = &self.retry_notice {
-            notice(StreamRetryNotice {
-                kind: core_types::StreamNoticeKind::Reconnect,
-                label: core_types::retry_signal::retry_notice_label(&last_error.to_string()),
-                attempt: self.restart_attempts,
-                max_attempts: self.client.max_retries,
-                delay,
-            });
+    async fn restart(&mut self, mut last_error: ApiError) -> Result<(), ApiError> {
+        loop {
+            // The bundle opens at its first failure. Its ceiling covers every wait
+            // from here on, the reconnect's own included.
+            self.restart_window_start
+                .get_or_insert_with(std::time::Instant::now);
+            self.restart_attempts += 1;
+            self.record_bundle_cause(&last_error);
+            let base = self.client.backoff_for_attempt(self.restart_attempts)?;
+            let delay = super::retry_backoff::spread_backoff(base);
+            eprintln!(
+                "[zo] gpt stream stalled ({last_error}); restarting in {:.1}s (attempt {}/{}, request {}, session {}, at {}ms)",
+                delay.as_secs_f64(),
+                self.restart_attempts,
+                self.client.max_retries,
+                self.request_seq,
+                self.client.cache_scope(),
+                unix_millis(),
+            );
+            // Surface the otherwise-silent reconnect pause to a live UI so it reads
+            // as "reconnecting", not a freeze. The classifier label is shared with
+            // the establish-time retry notice so the wording stays in lockstep.
+            if let Some(notice) = &self.retry_notice {
+                notice(StreamRetryNotice {
+                    kind: core_types::StreamNoticeKind::Reconnect,
+                    label: core_types::retry_signal::retry_notice_label(&last_error.to_string()),
+                    attempt: self.restart_attempts,
+                    max_attempts: self.client.max_retries,
+                    delay,
+                });
+            }
+            tokio::time::sleep(delay).await;
+            match self.open_bundle_connection().await {
+                Ok(transport) => {
+                    self.transport = transport;
+                    self.state = ResponsesStreamState::new(self.request.model.clone())
+                        .with_session_id(self.client.cache_scope().to_string());
+                    self.pending.clear();
+                    self.done = false;
+                    self.arm_startup_watchdog();
+                    return Ok(());
+                }
+                // A connection that will not open is one more failed attempt of
+                // the same bundle, not a turn-ending error.
+                Err(error) if self.can_restart(&error) => last_error = error,
+                Err(error) => return Err(self.wrap_restart_exhaustion(error)),
+            }
         }
-        tokio::time::sleep(delay).await;
-        self.transport = self.client.open_transport(&self.request, false).await?;
-        self.state = ResponsesStreamState::new(self.request.model.clone())
-            .with_session_id(self.client.cache_scope().to_string());
-        self.pending.clear();
-        self.done = false;
-        self.reset_startup_watchdog();
-        Ok(())
     }
 }
 

@@ -2282,126 +2282,6 @@ async fn keepalive_only_stream_restarts_at_startup_progress_deadline() {
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
-/// Reasoning is useful startup activity, but it is not a task action. The first
-/// delta grants one extension; a backend that then streams reasoning forever
-/// must still be restarted when the extended deadline expires. This exercises
-/// the real `emitted == true` path rather than the keepalive-only branch above.
-// end-to-end reasoning-restart test; body exceeds the 100-line lint threshold
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::await_holding_lock)]
-#[tokio::test]
-async fn continuous_reasoning_restarts_after_single_startup_extension() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    let _guard = env_lock();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let server_hits = hits.clone();
-
-    let server = tokio::spawn(async move {
-        let (mut first, _) = listener.accept().await.unwrap();
-        server_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let mut scratch = [0u8; 1024];
-        let _ = first.read(&mut scratch).await;
-        first
-            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
-            .await
-            .unwrap();
-        first
-            .write_all(concat!(
-                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n",
-                "data: {\"type\":\"response.output_item.added\",\"output_index\":0,",
-                "\"item\":{\"type\":\"reasoning\"}}\n\n",
-            ).as_bytes())
-            .await
-            .unwrap();
-        first.flush().await.unwrap();
-        tokio::spawn(async move {
-            for _ in 0..100 {
-                if first
-                    .write_all(concat!(
-                        "data: {\"type\":\"response.reasoning_summary_text.delta\",",
-                        "\"output_index\":0,\"delta\":\"still thinking\"}\n\n",
-                    ).as_bytes())
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                if first.flush().await.is_err() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        });
-
-        let (mut second, _) = listener.accept().await.unwrap();
-        server_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let _ = second.read(&mut scratch).await;
-        let body = concat!(
-            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r2\"}}\n\n",
-            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,",
-            "\"item\":{\"type\":\"message\"}}\n\n",
-            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,",
-            "\"delta\":\"recovered after bounded reasoning\"}\n\n",
-            "data: {\"type\":\"response.output_item.done\",\"output_index\":0}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":",
-            "{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
-        );
-        let head = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n",
-            body.len()
-        );
-        second.write_all(head.as_bytes()).await.unwrap();
-        second.write_all(body.as_bytes()).await.unwrap();
-        second.flush().await.unwrap();
-    });
-
-    let startup_key = super::CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_ENV;
-    let restore_startup = std::env::var(startup_key).ok();
-    std::env::set_var(startup_key, "100");
-    let client = super::ChatGptBackendClient::new("token", None)
-        .with_base_url(format!("http://{addr}"))
-        .with_retry_policy(
-            1,
-            std::time::Duration::from_millis(10),
-            std::time::Duration::from_millis(20),
-        );
-    let mut stream = client
-        .stream_message(&request(vec![InputMessage::user_text("hi")], None, None))
-        .await
-        .expect("open stream");
-
-    let outcome = tokio::time::timeout(std::time::Duration::from_millis(900), async {
-        let mut text = String::new();
-        while let Some(event) = stream.next_event().await? {
-            if let StreamEvent::ContentBlockDelta(delta) = event {
-                if let ContentBlockDelta::TextDelta { text: chunk } = delta.delta {
-                    text.push_str(&chunk);
-                }
-            }
-        }
-        Ok::<_, ApiError>(text)
-    })
-    .await;
-    match restore_startup {
-        Some(value) => std::env::set_var(startup_key, value),
-        None => std::env::remove_var(startup_key),
-    }
-    if outcome.is_err() {
-        server.abort();
-    }
-    let text = outcome
-        .expect("continuous reasoning must not bypass the extended startup deadline")
-        .expect("restart should recover");
-    server.await.unwrap();
-
-    assert_eq!(text, "recovered after bounded reasoning");
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
-}
-
 /// End-to-end proof that a pre-commit stall recovers over a real socket:
 /// the mock server's first connection sends only headers and then hangs
 /// (the silent-reasoning case), and the second connection serves a full SSE
@@ -4855,6 +4735,33 @@ async fn a_continuation_the_server_no_longer_holds_is_sent_whole_on_a_fresh_conn
     );
 }
 
+
+#[test]
+fn only_response_level_events_are_progress() {
+    assert!(super::is_response_level_event(
+        &json!({"type":"response.created","response":{"id":"r"}})
+    ));
+    assert!(super::is_response_level_event(
+        &json!({"type":"response.reasoning_summary_text.delta","delta":"x"})
+    ));
+    assert!(super::is_response_level_event(
+        &json!({"type":"response.completed"})
+    ));
+    assert!(
+        !super::is_response_level_event(&json!({"type":"response.failed"})),
+        "a failed response ends; it does not progress"
+    );
+    assert!(!super::is_response_level_event(
+        &json!({"type":"response.incomplete"})
+    ));
+    assert!(!super::is_response_level_event(
+        &json!({"type":"error","code":"server_error"})
+    ));
+    assert!(!super::is_response_level_event(
+        &json!({"type":"codex.rate_limits"})
+    ));
+    assert!(!super::is_response_level_event(&json!({})));
+}
 
 // --- Stall-window scenes (t-43970) ------------------------------------------
 //

@@ -219,20 +219,22 @@ impl ApiError {
         }
     }
 
-    /// A provider kept the transport alive but produced no task action before
-    /// the startup deadline. This is distinct from a byte-level idle timeout:
-    /// keep-alive frames may have arrived, but they are not model progress.
+    /// A provider kept the transport alive but sent no response-level event
+    /// within the stall window, or within the part of its bundle's ceiling that
+    /// was left. `bundle` names the failures that came before it in the same
+    /// bundle (`server_error x7`), or is empty. This is distinct from a byte-level
+    /// idle timeout: keep-alive frames may have arrived, but they are not progress.
     #[must_use]
-    pub fn stream_startup_no_progress(budget: Duration, reasoning_extended: bool) -> Self {
-        let extension = if reasoning_extended {
-            " after one reasoning-based extension"
+    pub fn stream_startup_no_progress(budget: Duration, bundle: &str) -> Self {
+        let after = if bundle.is_empty() {
+            String::new()
         } else {
-            ""
+            format!(" after {bundle}")
         };
         Self::StreamApi {
             error_type: Some("stream_startup_no_progress".to_string()),
             message: Some(format!(
-                "no text or tool action within {}s{extension}; transport keep-alives are not progress",
+                "no response event within {}s{after}; transport keep-alives are not progress",
                 budget.as_secs()
             )),
             body: String::new(),
@@ -1098,12 +1100,13 @@ mod tests {
 
     #[test]
     fn stream_startup_no_progress_is_retryable_and_distinct_from_transport_idle() {
-        let err = ApiError::stream_startup_no_progress(Duration::from_secs(480), true);
+        let err = ApiError::stream_startup_no_progress(Duration::from_secs(240), "server_error x7");
         assert!(err.is_retryable());
         let rendered = err.to_string();
         assert!(rendered.contains("stream_startup_no_progress"));
-        assert!(rendered.contains("480s"));
-        assert!(rendered.contains("reasoning-based extension"));
+        assert!(rendered.contains("within 240s after server_error x7;"), "{rendered}");
+        let alone = ApiError::stream_startup_no_progress(Duration::from_secs(240), "").to_string();
+        assert!(alone.contains("within 240s;"), "{alone}");
     }
 
     #[test]
