@@ -28,6 +28,15 @@ test("the default platform is the machine's own, not the page's report", () => {
   assert.equal(machineLoad.loadReadable("darwin"), true);
 });
 
+test("a platform that cannot read the load is loud, so its budget is unjudgeable; a readable quiet one is not", () => {
+  assert.equal(machineLoad.machineIsLoudNow({ platform: "win32", load: 0 }), true);
+  assert.equal(machineLoad.machineIsLoudNow({ platform: "darwin", load: 0 }), false);
+});
+
+test("a budget with no platform passed is judged on this machine's own platform", () => {
+  assert.equal(machineLoad.frameBudgetHolds(166, 128, { load: 0 }), process.platform === "win32");
+});
+
 test("the load note this run saw is logged for the record", () => {
   console.log(`load note at this run: ${machineLoad.loadNote()} on ${process.platform}`);
 });
