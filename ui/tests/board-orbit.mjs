@@ -1194,10 +1194,12 @@ async function testOrbitCamera(browser, origin, ok) {
     await page.evaluate(() => window.__ORBIT_FRAMES__(3));
     const fitted = await page.evaluate(() => ({ ...window.__ORBIT__().camera, zoom: agentGraphZoom,
       pitchWanted: ORBIT.camera.pitch }));
-    const turning = await countOver(page, 300);
+    /* 「카메라가 다시 돈다」는 움직임을 기다린다. 300 ms 동안 rAF를 세면 그 구간이 멈춘 러너에서 0이 된다
+     * (v1.1.54 Windows: turning 0). 손을 뗀 뒤의 시험과 같은 기다림이다. */
+    const turning = await untilTurnResumes(page, camera);
     ok("a double click fits: zoom 1, the table's pitch, and the camera turns again",
       fitted.zoom === 1 && fitted.spin === true && Math.abs(fitted.pitch - fitted.pitchWanted) < 1e-9
-        && turning.rafs > 0, JSON.stringify({ fitted, turning: turning.rafs }));
+        && turning.turned, JSON.stringify({ fitted, turning }));
     ok("the camera page raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
