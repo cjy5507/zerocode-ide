@@ -962,7 +962,7 @@ final class Provider {
             )
         }
         let appElement = AXUIElementCreateApplication(app.pid)
-        enableManualAccessibilityIfNeeded(appElement, app: app)
+        prepareApplicationAccessibility(appElement, app: app)
         let windowCandidates = WindowCapture.candidates(pid: app.pid)
         let focused = try focusedWindow(
             appElement: appElement,
@@ -1819,7 +1819,8 @@ private func openSystemSettings(_ value: String) {
     NSWorkspace.shared.open(url)
 }
 
-private func enableManualAccessibilityIfNeeded(_ appElement: AXUIElement, app: AppDescriptor) {
+private func prepareApplicationAccessibility(_ appElement: AXUIElement, app: AppDescriptor) {
+    _ = stringAttribute(appElement, kAXRoleAttribute as String)
     guard app.needsManualAccessibilityMode else {
         return
     }
