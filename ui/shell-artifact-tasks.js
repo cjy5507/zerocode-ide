@@ -392,8 +392,7 @@ function wireArtifactTasks(view) {
   list.addEventListener("scroll", () => paintArtifactTaskRows(view), { passive: true });
   list.addEventListener("click", (event) => {
     const row = event.target.closest(".artifact-task");
-    // 줄을 고르면 그 줄이 보이는 자리에 남는다 — 띠가 서면 높이가 바뀌어 줄이 밀려날 수 있다.
-    if (row?.dataset.task) openArtifactTask(view, row.dataset.task, { reveal: true });
+    if (row?.dataset.task) openArtifactTask(view, row.dataset.task);
   });
   list.addEventListener("keydown", (event) => {
     const step = { ArrowDown: 1, ArrowUp: -1 }[event.key];
@@ -531,12 +530,6 @@ function dressArtifactTaskRow(node, line, selected) {
   writeAttribute(node, "aria-selected", selected ? "true" : "false");
 }
 
-/* 줄의 높이: 목록이 넓으면 한 줄, 작업을 연 띠에서는 두 줄이다. 가상화는 이 높이로 자리를 곱한다. */
-function artifactTaskRowHeight(view) {
-  const tuning = artifactTuning(view);
-  return view.classList.contains("is-task-open") ? tuning.taskRowStrip : tuning.taskRow;
-}
-
 /* 보이는 줄(+overscan)만 선다 — 줄의 높이는 토큰 하나라 자리는 곱셈이다. 스크롤마다 도는
  * 그리기라, 바뀐 것만 쓴다: 제자리의 줄에 같은 자리와 같은 값을 다시 쓰지 않는다. */
 function paintArtifactTaskRows(view) {
@@ -549,7 +542,7 @@ function paintArtifactTaskRows(view) {
     pool = { nodes: [], byTask: new Map() };
     artifactTaskPools.set(view, pool);
   }
-  const height = artifactTaskRowHeight(view);
+  const height = tuning.taskRow;
   writeStyleValue(list.querySelector(".artifacts-tasks-spacer"), "height", `${artifactTaskLines.length * height}px`);
   const empty = list.querySelector(".artifacts-tasks-empty");
   const hideEmpty = artifactTaskLines.length > 0 || artifactError !== null;
@@ -640,17 +633,15 @@ function openArtifactTask(view, task, { reveal = false } = {}) {
   if (!line) return;
   artifactTaskOpen = task;
   artifactSelectedId = line.lead ?? null;
-  closeArtifactCompare(view);
-  // 띠가 서면 줄의 높이가 바뀐다 — 먼저 그려 제 높이를 정한 뒤에 그 줄을 보여 준다.
-  paintArtifactTasks(view);
   if (reveal) {
     const list = view.querySelector(".artifacts-tasks");
-    const height = artifactTaskRowHeight(view);
+    const height = artifactTuning(view).taskRow;
     const top = artifactTaskLines.indexOf(line) * height;
     if (top < list.scrollTop) list.scrollTop = top;
     else if (top + height > list.scrollTop + list.clientHeight) list.scrollTop = top + height - list.clientHeight;
-    paintArtifactTaskRows(view);
   }
+  closeArtifactCompare(view);
+  paintArtifactTasks(view);
   paintArtifactDrawer(view);
 }
 
