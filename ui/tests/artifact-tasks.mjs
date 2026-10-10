@@ -239,6 +239,46 @@ async function testRemainders(page, ok) {
     JSON.stringify(lines),
   );
 
+  // The state word of a line sits at its end, so no word moves a title. The longest word that a catalog
+  // gives the landing state is tried on the first line, in the real chip, and every title is measured again.
+  const longest = await page.evaluate(() => ["en", "ja", "zh", "es"].map((language) => Object.entries(CATALOG?.[language] ?? {})
+    .filter(([key, value]) => /^(worktree\.land|artifacts\.landing)/.test(key) && typeof value === "string")
+    .map(([, value]) => value)
+    .sort((a, b) => b.length - a.length)[0] ?? ""));
+  const aligned = await page.evaluate((words) => {
+    const view = artifactsView();
+    const frame = view?.querySelector(".artifacts-tasks")?.getBoundingClientRect() ?? { top: 0, bottom: 0 };
+    const onList = () => [...(view?.querySelectorAll(".artifact-task") ?? [])].filter((one) => {
+      const box = one.getBoundingClientRect();
+      return box.height > 0 && box.top >= frame.top - 0.5 && box.bottom <= frame.bottom + 0.5;
+    });
+    const starts = () => onList().map((one) => Math.round(one.querySelector(".artifact-task-title").getBoundingClientRect().left * 2) / 2);
+    const idWidths = onList().map((one) => Math.round(one.querySelector(".artifact-task-id").getBoundingClientRect().width));
+    const before = starts();
+    const landing = onList()[0]?.querySelector(".artifact-task-landing") ?? null;
+    const original = landing?.textContent ?? "";
+    const moved = [];
+    for (const word of words) {
+      if (!landing) break;
+      landing.textContent = word;
+      moved.push(...starts());
+    }
+    if (landing) landing.textContent = original;
+    return {
+      rows: before.length,
+      start: before[0] ?? null,
+      sameStart: before.length > 1 && before.every((x) => x === before[0]),
+      stays: moved.length > 0 && moved.every((x) => x === before[0]),
+      idsSame: idWidths.length > 1 && idWidths.every((w) => w === idWidths[0]),
+      words: words.length,
+    };
+  }, [...new Set(["확인 안 됨", ...longest])]);
+  ok(
+    "every line's title starts at the same x, and a line's state word moves no title — the longest state word of each catalog tried in the real chip — and the number box keeps its width",
+    aligned.rows > 1 && aligned.sameStart && aligned.stays && aligned.idsSame,
+    JSON.stringify({ ...aligned, longest }),
+  );
+
   await openTask(page, "t-501");
   // The keyboard walks the band: the first card takes the focus, then one Tab for each card after it.
   const count = await page.evaluate(() => {
@@ -267,6 +307,26 @@ async function testRemainders(page, ok) {
     "the evidence of a task reaches its last card without a sideways run: no card runs past the band's edge, the band has no sideways overflow, and the keyboard reaches the last card",
     band.cards >= 5 && band.past === 0 && band.overflowX <= 0 && band.reached,
     JSON.stringify(band),
+  );
+
+  // In the band (200 px) the second line holds the state chip only: a count or a time that cannot stand
+  // whole stands nowhere, so no count is ever cut to a letter (the counts and the time stay in the reader).
+  const strip = await page.evaluate(() => {
+    const view = artifactsView();
+    const rows = [...(view?.querySelectorAll(".artifact-task") ?? [])].filter((one) => one.getClientRects().length > 0);
+    const shownDisplay = (node) => (node ? getComputedStyle(node).display !== "none" : false);
+    return {
+      open: view?.classList.contains("is-task-open") ?? false,
+      rows: rows.length,
+      countsShown: rows.filter((one) => shownDisplay(one.querySelector(".artifact-task-parts"))).length,
+      timeShown: rows.filter((one) => shownDisplay(one.querySelector(".artifact-task-when"))).length,
+      landingShown: rows.filter((one) => shownDisplay(one.querySelector(".artifact-task-landing"))).length,
+    };
+  });
+  ok(
+    "in the band a line's second line shows its state chip and no count or time, so no count is cut to a letter",
+    strip.open && strip.rows > 0 && strip.countsShown === 0 && strip.timeShown === 0,
+    JSON.stringify(strip),
   );
 
   await openFresh(page);
