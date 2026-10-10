@@ -31,6 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use zerocode_core::jev::provenance::{LabelSource, stamp_label};
 
 use serde_json::{Value, json};
 use zerocode_core::jev::batch::{Request, requests};
@@ -630,6 +631,7 @@ fn label_row(
         }
         Err(why) => row[NOT_COMPARED.canonical] = json!(why.word()),
     }
+    stamp_label(&mut row, LabelSource::Proxy, "mail_triage");
     row
 }
 

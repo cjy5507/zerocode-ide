@@ -21,6 +21,7 @@
 //! question, and the one reading of a row that the judge, the counter and a
 //! replay all take.
 
+use crate::jev::provenance::{LabelSource, stamp_label};
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
@@ -856,7 +857,9 @@ pub fn label_row(attempt: &str, receipted: &Receipted, preferred: Preferred, at_
             );
         }
     }
-    Value::Object(row)
+    let mut label = Value::Object(row);
+    stamp_label(&mut label, LabelSource::Executed, "challenger");
+    label
 }
 
 /// The source a label row names as the one its receipt judged

@@ -22,6 +22,7 @@
 //! Its marks are later facts: whether the move the answer put first is the one
 //! that left the place clear ([`marks`]).
 
+use crate::jev::provenance::{LabelSource, stamp_label};
 use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
@@ -439,6 +440,7 @@ pub fn label_row(
         }
         Err(word) => row[NOT_COMPARED.canonical] = json!(word),
     }
+    stamp_label(&mut row, LabelSource::Executed, "cover");
     row
 }
 

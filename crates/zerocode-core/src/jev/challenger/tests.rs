@@ -808,6 +808,16 @@ fn the_seat_judge_reads_the_rows_this_module_writes_and_raises_the_seat_on_recei
         ));
     }
 
+    // A rise is read on priced pairs (ADR-150, t-26584): without the cost and
+    // latency each label carries, the same receipts hold the seat.
+    let unpriced = judge_seat(&CHALLENGER, &rows).expect("the seat is judged");
+    assert!(matches!(unpriced.verdict, Verdict::Hold(_)), "{unpriced:?}");
+    for row in rows.iter_mut().filter(|row| row.get("label").is_some()) {
+        row["inputTokens"] = json!(100);
+        row["currentInputTokens"] = json!(100);
+        row["elapsedMs"] = json!(100);
+        row["currentElapsedMs"] = json!(100);
+    }
     let judged = judge_seat(&CHALLENGER, &rows).expect("the seat promotes");
     assert_eq!(judged.agreement.compared, labels);
     assert_eq!(judged.agreement.agreed, labels - misses);

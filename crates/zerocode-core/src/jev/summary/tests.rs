@@ -432,7 +432,7 @@ fn an_agreement_over_rows_already_picked_out_reads_the_same_marks() {
     let rows = [
         json!({"at": 1, "agreed": true}),
         json!({"at": 2, "agreed": false}),
-        json!({"at": 3, "label": "x", "agreed": true}),
+        json!({"at": 3, "label": "x", "labelSource": "executed", "agreed": true}),
     ];
     let held: Vec<&Value> = rows
         .iter()

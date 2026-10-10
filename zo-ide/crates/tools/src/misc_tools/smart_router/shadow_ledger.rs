@@ -76,7 +76,9 @@ pub fn append_shadow_row<T: Serialize>(path: &Path, row: &T, max_bytes: u64) -> 
     if fs::metadata(path).is_ok_and(|meta| meta.len() > max_bytes) {
         keep_newer_half(path)?;
     }
-    let mut line = serde_json::to_string(row).map_err(io::Error::other)?;
+    let mut value = serde_json::to_value(row).map_err(io::Error::other)?;
+    zerocode_core::jev::provenance::stamp_for_ledger(path, &mut value);
+    let mut line = serde_json::to_string(&value).map_err(io::Error::other)?;
     line.push('\n');
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(line.as_bytes())

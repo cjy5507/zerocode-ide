@@ -203,8 +203,10 @@ fn a_series_the_host_cannot_vouch_for_does_not_rise_on_marks_it_never_had() {
         assert_eq!(transitions_in(&ledger), Vec::<Value>::new(), "no rise on a rule graded on nothing");
         let rows: Vec<Value> = read_shadow_rows(&ledger);
         let judged = promote::judge_seat(&TOOL_TEXT_GUARD, &rows).expect("the guard is judged");
+        // Its marks are proxies, so the judge says so before it counts a baseline
+        // (t-26584, ①): no mark may raise the guard.
         assert!(
-            matches!(judged.verdict, promote::Verdict::Hold(Line::TooFewBaseline { compared: 0, .. })),
+            matches!(judged.verdict, promote::Verdict::Hold(Line::ProxyOnly { .. })),
             "{:?} on {:?}",
             judged.verdict,
             judged.agreement

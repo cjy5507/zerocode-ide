@@ -365,10 +365,11 @@ fn a_label_row_is_not_counted_as_a_request() {
     let tally = summary::summarize(&rows, 0);
     assert_eq!(tally.rows, 3, "three requests, three labels");
     assert_eq!(tally.answered, 3);
-    // And the judge still reads every mark.
-    let judged = zerocode_core::jev::promote::judge_seat(&SKILLS, &rows).expect("a rising seat");
-    assert_eq!(judged.agreement.compared, 3);
-    assert_eq!(judged.agreement.agreed, 2);
+    // The judge reads every mark, and a skill's first load is a comparison, a
+    // structural proxy (t-26584, ①): all three are withheld, none agreed.
+    let judged = zerocode_core::jev::promote::judge_seat(&SKILLS, &rows).expect("a judged seat");
+    assert_eq!(judged.agreement.compared, 0);
+    assert_eq!(judged.agreement.proxied, 3);
 }
 
 /// The path is the use table's: a ledger the summary looks for by name.

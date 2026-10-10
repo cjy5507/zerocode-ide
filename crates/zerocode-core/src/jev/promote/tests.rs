@@ -45,7 +45,75 @@ fn named(seat: &JevUse, n: usize) -> Value {
 /// that picks out one asking of words asked again (t-6877 round 3,
 /// [`crate::jev::Naming::Words`]).
 fn label_of(seat: &JevUse, at: usize, n: usize) -> Value {
-    json!({"at": at, "label": named(seat, n), (REQUEST_AT.canonical): n})
+    json!({"at": at, "label": named(seat, n), (REQUEST_AT.canonical): n, "labelSource": "executed", "labelAuthor": "test"})
+}
+
+/// The cost and latency a mark's pair carries (ADR-150, t-26584): the same on
+/// both sides, so a rise is not a cost rise by default.
+fn priced_equally(row: &mut Value) {
+    // A request row's own cost and wall time are the candidate's, and its
+    // latency is the window's too: they stay as they are. A label row has
+    // none, so it is priced equally at a hundred.
+    for (cost, current) in [
+        ("inputTokens", "currentInputTokens"),
+        ("elapsedMs", "currentElapsedMs"),
+    ] {
+        let paid = row.get(cost).cloned().unwrap_or_else(|| json!(100));
+        row[cost] = paid.clone();
+        row[current] = paid;
+    }
+}
+
+/// The line an act-line seat is drawn at in these tests: under every answer's
+/// confidence, so each answer acts (t-26584, ③).
+const DRAWN_LINE: u16 = 500;
+
+/// The person-judged rows that pin a human bundle for `seat` (ADR-176): more
+/// than a window's worth, with canary rows among them, and the pin the
+/// calibrator writes beside them.
+fn bundle_for(seat: &JevUse) -> Vec<Value> {
+    let rows: Vec<Value> = (0..60)
+        .map(|n| {
+            json!({
+                "at": 1,
+                "label": format!("person-{n}"),
+                "labelSource": "person",
+                "agreed": true,
+            })
+        })
+        .collect();
+    let pin = crate::jev::provenance::bundle_pin_for(&rows, seat.id);
+    let mut all = rows;
+    all.push(pin);
+    all
+}
+
+/// [`judge_seat`] for a seat that rises on its evidence: an act-line seat is
+/// judged on the line it is drawn at and the bundle it is pinned to, as the
+/// product reads them (t-26584, ③④).
+fn judge_rising(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
+    if seat.reads_act_line {
+        let mut all = rows.to_vec();
+        // An act line reads each answer's confidence: an answered row that names
+        // none is given the confidence these tests' answers carry.
+        for row in &mut all {
+            if row.get("outcome").and_then(Value::as_str) == Some("answered")
+                && row.get("confidence").is_none()
+            {
+                row["confidence"] = json!(0.9);
+            }
+        }
+        all.extend(bundle_for(seat));
+        super::judge_seat_in(seat, &all, Some(DRAWN_LINE))
+    } else {
+        super::judge_seat(seat, rows)
+    }
+}
+
+/// The judgment of a seat that rises on its evidence (see [`judge_rising`]).
+/// The tests of the gates themselves call [`super::judge_seat`] directly.
+fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
+    judge_rising(seat, rows)
 }
 
 /// A mark of `seat` grading request `n`, written at `at`, as the seat's
@@ -60,6 +128,7 @@ fn mark(seat: &JevUse, at: usize, n: usize, fields: Value) -> Value {
     } else {
         label_of(seat, at, n)
     };
+    priced_equally(&mut row);
     for (key, value) in fields.as_object().expect("the mark's fields") {
         row[key.as_str()] = value.clone();
     }
@@ -387,7 +456,7 @@ fn a_row_that_is_neither_a_request_nor_a_mark_cuts_no_window() {
         let at = n * 4;
         rows.push(json!({"kind": "judgment", "at": at, "attempt": "s@1", "step": n, "outcome": "answered", "elapsedMs": 1, model: "jev-1.13.0", "rubricVersion": seat.rubric_version}));
         rows.push(json!({"kind": "step", "at": at + 1, model: chat[n % chat.len()]}));
-        rows.push(json!({"kind": "label", "at": at + 2, "label": format!("s@1:{n}"), "agreed": n >= crate::jev::NEGATIVES_WANTED, "baselineAgreed": n % 2 == 0}));
+        rows.push(json!({"kind": "label", "at": at + 2, "labelSource": "executed", "label": format!("s@1:{n}"), "agreed": n >= crate::jev::NEGATIVES_WANTED, "baselineAgreed": n % 2 == 0}));
         rows.push(json!({"kind": "step", "at": at + 3, model: chat[(n + 1) % chat.len()]}));
     }
     let version = on_the_newest_version(seat, &rows);
@@ -421,7 +490,7 @@ fn a_row_that_is_neither_a_request_nor_a_mark_cuts_no_window() {
     let unanswered = [
         json!({"kind": "judgment", "at": 1, "attempt": "s@1", "step": 1, "outcome": "no_key", "rubricVersion": seat.rubric_version}),
         json!({"kind": "step", "at": 2, model: "claude-opus-5"}),
-        json!({"kind": "label", "at": 3, "label": "s@1:1", "agreed": false}),
+        json!({"kind": "label", "at": 3, "labelSource": "executed", "label": "s@1:1", "agreed": false}),
     ];
     let version = on_the_newest_version(seat, &unanswered);
     assert_eq!((version.model, version.cut), (None, None));
@@ -604,6 +673,10 @@ fn clean() -> Evidence<'static> {
         disagreed_on_record: crate::jev::NEGATIVES_WANTED,
         baseline: Baseline::None,
         apply_share: None,
+        calibrating: Calibrating::NotRead,
+        pairs: PairTally::default(),
+        bar_reads: false,
+        bundle: None,
     }
 }
 
@@ -1107,6 +1180,8 @@ fn a_transition_row_carries_the_numbers_and_none_of_the_request() {
         "at",
         "p95Ms",
         "rows",
+        // The judge names the one it decided on (t-26584, ③ and the decider).
+        "decidedBy",
         RUBRIC_VERSIONS.canonical,
         TRANSITION.canonical,
     ];
@@ -1342,6 +1417,7 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
             baseline_compared: wanted,
             baseline_agreed: wanted.div_ceil(2),
             not_compared: 0,
+            proxied: 0,
         },
         "the old marks are outside the window"
     );
@@ -2043,7 +2119,7 @@ fn a_ledgers_text_stands_where_its_series_does() {
     let stood = [
         rise_on(1, &[1]),
         json!({"at": 2, "outcome": "answered", "rubricVersion": 1}),
-        json!({"at": 3, "label": "x", "agreed": true, "note": "\"rubricVersion\": 9"}),
+        json!({"at": 3, "label": "x", "labelSource": "executed", "agreed": true, "note": "\"rubricVersion\": 9"}),
     ];
     both(&stood);
     assert_eq!(standing_in(first, &text(&stood)), Stand::Applying);
@@ -2279,8 +2355,7 @@ fn a_label_naming_no_time_grades_no_asking_of_words_asked_again() {
                "query": 7, "notes": 9, "rubricVersion": rubric, "model": "M"})
     };
     let label = |at: u64, agreed: bool, when: Option<u64>| {
-        let mut row =
-            json!({"at": at, "label": "7:9", "agreed": agreed, "baselineAgreed": !agreed});
+        let mut row = json!({"at": at, "labelSource": "executed", "label": "7:9", "agreed": agreed, "baselineAgreed": !agreed});
         if let Some(when) = when {
             row[REQUEST_AT.canonical] = json!(when);
         }
@@ -2387,7 +2462,7 @@ fn a_turns_label_grades_the_turn_its_several_requests_are() {
         json!({"at": at, "outcome": "answered", "requests": 1, "elapsedMs": 1, "attempt": "s@1",
                "rubricVersion": seat.rubric_version, "model": model})
     };
-    let label = json!({"at": 30, "label": "s@1", "attempt": "s@1", "agreed": true});
+    let label = json!({"at": 30, "labelSource": "executed", "label": "s@1", "attempt": "s@1", "agreed": true});
     let graded = |rows: &[Value]| {
         on_the_newest_version(seat, rows)
             .marks
@@ -2422,7 +2497,7 @@ fn each_dropped_block_is_one_comparison_of_its_compaction() {
     let seat = &crate::jev::COMPACTION;
     let asked = json!({"at": 10, "judged": 77, "outcome": "answered", "requests": 1, "elapsedMs": 1,
                        "rubricVersion": seat.rubric_version, "model": "M"});
-    let block = |at: u64, block: u64, agreed: bool| json!({"kind": "label", "at": at, "label": "77", "block": block, "agreed": agreed, "applied": false});
+    let block = |at: u64, block: u64, agreed: bool| json!({"kind": "label", "at": at, "labelSource": "executed", "label": "77", "block": block, "agreed": agreed, "applied": false});
     let rows = [
         asked,
         block(20, 1, false),
@@ -2490,7 +2565,7 @@ fn the_text_reader_and_the_row_reader_agree_on_what_fences_a_series() {
             false,
         ),
         (
-            r#"{"at":2,"label":"orphan","rubricVersion":3,"agreed":true}"#,
+            r#"{"at":2,"labelSource":"executed","label":"orphan","rubricVersion":3,"agreed":true}"#,
             false,
             false,
         ),
@@ -2643,7 +2718,7 @@ fn a_label_that_names_no_request_grades_nothing() {
         judged.agreement.compared, 0,
         "a mark naming no judgment grades none: {judged:?}"
     );
-    let named = json!({"kind": "label", "at": 11, "label": "s@1:3", "attempt": "s@1", "step": 4, "agreed": true});
+    let named = json!({"kind": "label", "at": 11, "labelSource": "executed", "label": "s@1:3", "attempt": "s@1", "step": 4, "agreed": true});
     let judged = judge_seat(seat, &[judgment, named]).expect("judged");
     assert_eq!(
         (judged.agreement.compared, judged.agreement.agreed),
@@ -3076,7 +3151,19 @@ fn a_seat_acting_from_a_line_is_judged_on_the_answers_the_line_lets_act() {
         (50, 47),
         "the answers from 0.7 alone"
     );
-    assert_eq!(lined.verdict, Verdict::Rise, "{lined:?}");
+    // A line that leaves out half the answers is no line to act from: the
+    // abstain ceiling holds the seat (t-26584, ③). This test pins the
+    // reading above; the rise itself is pinned by the calibration tests.
+    assert_eq!(
+        lined.verdict,
+        Verdict::Hold(Line::Calibration {
+            miss: crate::jev::provenance::CalibrationMiss::Abstain {
+                share_permille: 500,
+                ceiling_permille: 300,
+            },
+        }),
+        "{lined:?}"
+    );
     assert_eq!(lined.act_line, Some(700));
 }
 
@@ -3404,8 +3491,15 @@ fn a_proxy_or_unsourced_label_cannot_raise_a_seat() {
         let mut rows = recording(seat);
         rows.extend((0..asked).map(|at| asked_by(seat, at)));
         rows.extend(marks_that_rise(seat, asked).into_iter().map(|mut row| {
-            if let Some(source) = source {
-                row["labelSource"] = json!(source);
+            match source {
+                Some(source) => row["labelSource"] = json!(source),
+                // A label that names no source: the helper gives every label
+                // `executed`, so the source is taken away (t-26584, ①).
+                None => {
+                    row.as_object_mut()
+                        .expect("a label row")
+                        .remove("labelSource");
+                }
             }
             row
         }));
@@ -3471,6 +3565,15 @@ fn a_rise_needs_paired_costs_and_latencies_inside_the_named_bar() {
         rows.extend((0..asked).map(|at| asked_by(seat, at)));
         rows.extend(marks_that_rise(seat, asked).into_iter().map(|mut row| {
             row["labelSource"] = json!("executed");
+            // mark() prices every mark; this case takes the pair's costs away.
+            for key in [
+                "inputTokens",
+                "currentInputTokens",
+                "elapsedMs",
+                "currentElapsedMs",
+            ] {
+                row.as_object_mut().expect("a label row").remove(key);
+            }
             row
         }));
         rows
@@ -3497,7 +3600,7 @@ fn an_act_line_seat_without_a_calibration_record_does_not_rise() {
         row["labelSource"] = json!("executed");
         row
     }));
-    let verdict = judge_seat(seat, &rows).expect("judged").verdict;
+    let verdict = super::judge_seat(seat, &rows).expect("judged").verdict;
     assert!(
         !matches!(verdict, Verdict::Rise),
         "uncalibrated act-line seat rose: {verdict:?}"

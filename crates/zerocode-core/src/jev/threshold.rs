@@ -531,6 +531,7 @@ pub fn row(seat: &JevUse, calibrated: &Calibrated, now_ms: i64) -> Value {
         (APPLY_SHARE_KEY): line.and(at).and_then(AtLine::apply_share),
         (REASON_KEY): calibrated.line.err().map(NoLine::token),
         (GRID_KEY): calibrated.grid.iter().map(AtLine::json).collect::<Vec<Value>>(),
+        "decidedBy": "calibrator",
     })
 }
 

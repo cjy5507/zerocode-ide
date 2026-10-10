@@ -13,6 +13,7 @@
 //! makes of the files the turn edited are this file's, so a row asked in one
 //! program and a row asked in the other are one seat's rows.
 
+use crate::jev::provenance::LabelSource;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -620,6 +621,13 @@ pub struct FilePickLabelRow {
     pub hindsight: String,
     pub files_edited: usize,
     pub turns_later: u32,
+    /// Where the label's verdict came from (t-26584, ①): a file read later is
+    /// a structural proxy.
+    #[serde(default)]
+    pub label_source: String,
+    /// The writer that put the row in the ledger.
+    #[serde(default)]
+    pub label_author: String,
 }
 
 /// Fingerprints of each path, in order.
@@ -748,6 +756,8 @@ pub fn label_row(
             search_calls_before_first_edit: None,
             not_compared: Some(FILE_PICK_NO_EDIT_LABEL.to_string()),
             hindsight: FILE_PICK_LABEL_HINDSIGHT.to_string(),
+            label_source: LabelSource::Proxy.token().to_string(),
+            label_author: "file_pick".to_string(),
             files_edited: 0,
             turns_later: 0,
         }
@@ -772,6 +782,8 @@ pub fn label_row(
             search_calls_before_first_edit,
             not_compared: None,
             hindsight: FILE_PICK_LABEL_HINDSIGHT.to_string(),
+            label_source: LabelSource::Proxy.token().to_string(),
+            label_author: "file_pick".to_string(),
             files_edited: normalized_edits.len(),
             turns_later: 0,
         }

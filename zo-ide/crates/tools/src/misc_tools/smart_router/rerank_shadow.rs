@@ -3164,11 +3164,13 @@ mod tests {
             .expect("the label row");
         let series = zerocode_core::jev::promote::on_the_newest_version(&RECALL, &values);
         assert!(series.marks.contains(&named), "the label graded no asking: {named}");
-        let judged = zerocode_core::jev::promote::judge_seat(&RECALL, &values).expect("recall rises");
+        // The first note read is hindsight, a structural proxy (t-26584, ①): the
+        // judge counts the turn's label once, withheld, and never as agreement.
+        let judged = zerocode_core::jev::promote::judge_seat(&RECALL, &values).expect("recall judged");
         assert_eq!(
-            (judged.agreement.compared, judged.agreement.agreed),
-            (1, 1),
-            "the judge compared the turn's label once: {named}"
+            (judged.agreement.compared, judged.agreement.agreed, judged.agreement.proxied),
+            (0, 0, 1),
+            "the judge withheld the turn's label once: {named}"
         );
         // The asking it grades is the one its reading settled on: of the two
         // askings of these words over these notes, the later — and neither is
