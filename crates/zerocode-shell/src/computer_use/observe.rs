@@ -472,6 +472,69 @@ fn after_the_act(seen: &Value, standing: &Changes) -> bool {
             .is_some_and(|seq| seq > act.seq)
 }
 
+fn tree_answer(frame: &Value) -> Value {
+    frame.get("snapshot").map_or(Value::Null, |snapshot| {
+        serde_json::json!({
+            "id": snapshot.get("id"),
+            "window": snapshot.get("window"),
+            "text": snapshot.get("treeText"),
+            "elementCount": snapshot.get("elementCount"),
+        })
+    })
+}
+
+fn structured_look(
+    params: &Map<String, Value>,
+    mut ask: Map<String, Value>,
+    call: &mut dyn FnMut(&str, Value) -> Result<Value, ComputerUseError>,
+) -> Result<Option<Value>, ComputerUseError> {
+    let began = std::time::Instant::now();
+    ask.insert("noScreenshot".into(), true.into());
+    if params.get("marks") == Some(&Value::Bool(true)) {
+        ask.insert(ELEMENT_FRAMES_KEY.into(), true.into());
+    }
+    let frame = call("getAppState", Value::Object(ask))?;
+    let key = resolved_key(params, &frame).unwrap_or_else(|| frame_key(params));
+    let marked = if params.get("marks") == Some(&Value::Bool(true)) {
+        let Some(marked) = super::marks::structured_marks(&frame, &key)? else {
+            return Ok(None);
+        };
+        Some(marked.answer)
+    } else {
+        if frame.get("snapshot").is_none() {
+            return Err(ComputerUseError::new(
+                error_code::PROVIDER_INCOMPATIBLE,
+                "an app look without its snapshot",
+            ));
+        }
+        None
+    };
+    take_last(&key);
+    note_line(&serde_json::json!({
+        "n": LOOKS.fetch_add(1, Ordering::Relaxed) + 1,
+        "atEpochMs": crate::now_epoch_ms(),
+        "ms": u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "road": "app-structured",
+        "diff": false,
+        "imageBytes": 0,
+    }));
+    Ok(Some(serde_json::json!({
+        "app": frame.pointer("/snapshot/app"),
+        "screenshot": null,
+        "origin": {
+            "x": frame.pointer("/snapshot/window/x"),
+            "y": frame.pointer("/snapshot/window/y"),
+        },
+        "scale": 1.0,
+        "tree": tree_answer(&frame),
+        "text": null,
+        "changed": null,
+        "changedShare": null,
+        "marks": marked,
+        "perception": "accessibility",
+    })))
+}
+
 /// One look: the app's window through its tree, or the desktop — the eye's
 /// newest frame when the eye is open, a capture otherwise: always for a
 /// region, which is looked at closer than the eye sees, for a marked look,
@@ -492,10 +555,26 @@ fn look(
     let diffing = params.get("diff").and_then(Value::as_bool) == Some(true);
     let key = frame_key(params);
     let mut ask = Map::new();
-    for key in ["app", "windowId", "windowIndex", "display", "region"] {
+    for key in [
+        "app",
+        "windowId",
+        "windowIndex",
+        "display",
+        "region",
+        "background",
+    ] {
         if let Some(value) = params.get(key) {
             ask.insert(key.to_string(), value.clone());
         }
+    }
+    if app
+        && params.get("noScreenshot") == Some(&Value::Bool(true))
+        && !diffing
+        && params.get("ocr") != Some(&Value::Bool(true))
+        && params.get("settle") != Some(&Value::Bool(true))
+        && let Some(answer) = structured_look(params, ask.clone(), call)?
+    {
+        return Ok(answer);
     }
     let display = ask.get("display").and_then(Value::as_u64);
     let whole_display = !app && !ask.contains_key("region") && !marks;
@@ -665,12 +744,7 @@ fn look(
         "screenshot": frame.get("screenshot").cloned().unwrap_or(Value::Null),
         "origin": { "x": placed.origin().0, "y": placed.origin().1 },
         "scale": placed.scale(),
-        "tree": frame.get("snapshot").map(|snapshot| serde_json::json!({
-            "id": snapshot.get("id").cloned().unwrap_or(Value::Null),
-            "window": snapshot.get("window").cloned().unwrap_or(Value::Null),
-            "text": snapshot.get("treeText").cloned().unwrap_or(Value::Null),
-            "elementCount": snapshot.get("elementCount").cloned().unwrap_or(Value::Null),
-        })).unwrap_or(Value::Null),
+        "tree": tree_answer(&frame),
         "text": text.as_ref().and_then(|read| read.get("lines").cloned()).unwrap_or(Value::Null),
         "changed": changed,
         "changedShare": share,
@@ -728,6 +802,9 @@ fn look(
             }
         };
     }
+    if params.get("noScreenshot") == Some(&Value::Bool(true)) {
+        answer["screenshot"] = Value::Null;
+    }
     Ok(answer)
 }
 
@@ -749,6 +826,9 @@ fn note_line(line: &Value) {
         LOOK_LINES.with(|lines| lines.borrow_mut().push(line));
     }
 }
+
+#[cfg(test)]
+mod structured_tests;
 
 #[cfg(test)]
 mod tests {
