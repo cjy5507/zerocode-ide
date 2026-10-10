@@ -284,13 +284,16 @@ struct Kept {
 impl Kept {
     /// How long the answer stands before the rule is asked again. `None` for a
     /// file the agent reported or named by its session id: it stands while the
-    /// file is there.
+    /// file is there. A file found through the open files or the screen waits
+    /// its road's interval at the least: a "no file" answer in its place can
+    /// push the next ask further out, never bring it forward.
     fn wait(&self) -> Option<Duration> {
-        match (&self.answer, self.misses) {
-            (Ok((_, Via::Reported | Via::SessionId)), _) => None,
-            (Ok((_, Via::OpenFile)), 0) => Some(OPEN_FILE_RECHECK),
-            (Ok((_, Via::ScreenMatch)), 0) => Some(SCREEN_RECHECK),
-            _ => Some(absent_wait(self.misses)),
+        let backed_off = absent_wait(self.misses);
+        match &self.answer {
+            Ok((_, Via::Reported | Via::SessionId)) => None,
+            Ok((_, Via::OpenFile)) => Some(OPEN_FILE_RECHECK.max(backed_off)),
+            Ok((_, Via::ScreenMatch)) => Some(SCREEN_RECHECK.max(backed_off)),
+            Err(_) => Some(backed_off),
         }
     }
 
@@ -398,7 +401,8 @@ impl<P: Eq + Hash> Memo<P> {
 /// is there, with no listing of the store. A file found through the open files
 /// is asked again after [`OPEN_FILE_RECHECK`], and one found through the screen
 /// after [`SCREEN_RECHECK`]; a "no file" answer in their place does not replace
-/// it while it is there. A "no file" answer waits [`ABSENT_RECHECK`], then twice
+/// it while it is there, nor brings its next ask forward. A "no file" answer
+/// waits [`ABSENT_RECHECK`], then twice
 /// as long for each one in a row, up to [`ABSENT_RECHECK_MAX`]. The memory is
 /// keyed by the pane and by the question, so one pane never receives another
 /// pane's answer, and a changed report or id is asked again at once. The lock
