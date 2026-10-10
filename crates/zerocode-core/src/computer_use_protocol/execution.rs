@@ -1,4 +1,4 @@
-//! Background input is app-scoped semantic input, never a foreground fallback.
+//! Background input stays in its target app and never falls back to the desktop.
 
 use serde_json::{Map, Value};
 
@@ -14,6 +14,10 @@ pub const METHODS: &[&str] = &[
     "click",
     "setValue",
     "scroll",
+    "typeText",
+    "pressKey",
+    "hotkey",
+    "pasteText",
 ];
 
 #[must_use]
@@ -25,7 +29,7 @@ pub fn requested(params: &Map<String, Value>) -> bool {
 pub fn unavailable() -> ProviderError {
     ProviderError::new(
         REQUIRES_FOREGROUND,
-        "this operation has no supported background path; no foreground or synthetic fallback was attempted",
+        "this operation has no supported background path; no desktop or clipboard fallback was attempted",
     )
 }
 
@@ -97,10 +101,6 @@ mod tests {
     fn background_cannot_escape_to_global_input_or_activation() {
         let params = json!({"background": true, "app": "Fixture"});
         for method in [
-            "pressKey",
-            "hotkey",
-            "pasteText",
-            "typeText",
             "drag",
             "activateApp",
             "windowAction",

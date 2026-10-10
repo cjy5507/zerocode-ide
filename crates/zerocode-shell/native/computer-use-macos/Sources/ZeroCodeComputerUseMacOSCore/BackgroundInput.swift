@@ -1,8 +1,24 @@
 import Foundation
 
 public enum BackgroundInput {
+    public enum Focus: Equatable {
+        case none
+        case one(Int)
+        case ambiguous
+    }
+
+    public static func focus<Indices: Sequence>(among indices: Indices) -> Focus where Indices.Element == Int {
+        var chosen: Int?
+        for index in indices {
+            if let chosen, chosen != index { return .ambiguous }
+            chosen = index
+        }
+        return chosen.map(Focus.one) ?? .none
+    }
+
     public static let methods: Set<String> = [
         "getAppState", "readText", "findElements", "waitFor", "click", "setValue", "scroll",
+        "typeText", "pressKey", "hotkey", "pasteText",
     ]
 
     public enum Refusal: String, Error {
@@ -23,7 +39,8 @@ public enum BackgroundInput {
     }
 
     public static func clickAction(actions: [String], textEntry: Bool, plainLeftClick: Bool) -> String? {
-        guard !textEntry, plainLeftClick else { return nil }
+        guard plainLeftClick else { return nil }
+        if textEntry { return actions.contains("AXPress") ? "AXPress" : nil }
         return ["AXPress", "AXOpen", "AXConfirm"].first(where: actions.contains)
     }
 

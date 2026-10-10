@@ -3,6 +3,13 @@ import XCTest
 @testable import ZeroCodeComputerUseMacOS
 
 final class BackgroundInputTests: XCTestCase {
+    func testCompetingFocusClaimsAreRefusedInsteadOfChoosingTheFirstField() {
+        XCTAssertEqual(BackgroundInput.focus(among: []), .none)
+        XCTAssertEqual(BackgroundInput.focus(among: [7, 7]), .one(7))
+        XCTAssertEqual(BackgroundInput.focus(among: [7, 9]), .ambiguous)
+        XCTAssertEqual(BackgroundInput.focus(among: [9, 7]), .ambiguous)
+    }
+
     func testAdmissionMatchesTheSharedProviderTable() throws {
         for row in try SharedCaseTable.rows("background.tsv") {
             let refusal = BackgroundInput.validate(
@@ -15,7 +22,7 @@ final class BackgroundInputTests: XCTestCase {
 
     func testNativeDispatchRejectsGlobalInputBeforeTouchingTheDesktop() throws {
         let provider = Provider()
-        for method in Provider.actingMethods.subtracting(["click", "setValue", "scroll"]) {
+        for method in Provider.actingMethods.subtracting(BackgroundInput.methods) {
             XCTAssertThrowsError(try provider.handle(method: method, params: [
                 "background": .bool(true), "app": .string("Fixture"),
             ])) { error in
@@ -45,7 +52,8 @@ final class BackgroundInputTests: XCTestCase {
     func testOneAdvertisedSemanticClickOrNoClick() {
         XCTAssertEqual(BackgroundInput.clickAction(actions: ["AXPress", "AXConfirm"], textEntry: false, plainLeftClick: true), "AXPress")
         XCTAssertNil(BackgroundInput.clickAction(actions: ["AXRaise", "AXFocused"], textEntry: false, plainLeftClick: true))
-        XCTAssertNil(BackgroundInput.clickAction(actions: ["AXPress"], textEntry: true, plainLeftClick: true))
+        XCTAssertEqual(BackgroundInput.clickAction(actions: ["AXPress"], textEntry: true, plainLeftClick: true), "AXPress")
+        XCTAssertNil(BackgroundInput.clickAction(actions: ["AXConfirm", "AXOpen", "AXFocused"], textEntry: true, plainLeftClick: true))
         XCTAssertNil(BackgroundInput.clickAction(actions: ["AXPress"], textEntry: false, plainLeftClick: false))
         XCTAssertNil(BackgroundInput.clickAction(actions: [], textEntry: false, plainLeftClick: true))
     }

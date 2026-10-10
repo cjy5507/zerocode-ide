@@ -36,6 +36,9 @@ use super::session::{ProviderSession, SessionFailure};
 
 mod tcc;
 
+#[cfg(test)]
+mod background_tests;
+
 const HELPER_APP_NAME: &str = "ZeroCode Computer Use.app";
 const HELPER_EXECUTABLE: &str = "zerocode-computer-use-macos";
 const HELPER_BUNDLE_ID: &str = "dev.zerocode.app.computer-use";

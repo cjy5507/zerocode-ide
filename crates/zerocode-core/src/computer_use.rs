@@ -3609,6 +3609,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "to-y",
         ],
         ComputerMethod::TypeText | ComputerMethod::PasteText => &[
+            "background",
             "json",
             "app",
             "worktree",
@@ -3620,6 +3621,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "text",
         ],
         ComputerMethod::PressKey | ComputerMethod::Hotkey => &[
+            "background",
             "json",
             "app",
             "worktree",
@@ -4553,7 +4555,7 @@ fn validate_hotkey(key: &str) -> Result<(), String> {
 pub fn usage() -> String {
     let text = [
         "zerocode-computer — inspect and operate local desktop apps",
-        "  --background: macOS app-scoped semantic input only; no focus, synthetic input or foreground fallback",
+        "  --background: macOS app/window-scoped input; no activation, shared pointer, clipboard or desktop fallback",
         "",
         "  zerocode-computer capabilities [--json]",
         "  zerocode-computer permissions [--id accessibility|screenshots [--reset]] [--json]",
@@ -5318,6 +5320,38 @@ mod tests {
             vec!["observe", "--app", "Fixture", "--marks", "--background"],
             vec!["click", "--mark", "1", "--look", "look", "--background"],
             vec![
+                "press-key",
+                "--app",
+                "Fixture",
+                "--key",
+                "tab",
+                "--background",
+            ],
+            vec![
+                "hotkey",
+                "--app",
+                "Fixture",
+                "--key",
+                "cmd+a",
+                "--background",
+            ],
+            vec![
+                "type-text",
+                "--app",
+                "Fixture",
+                "--text",
+                "text",
+                "--background",
+            ],
+            vec![
+                "paste-text",
+                "--app",
+                "Fixture",
+                "--text",
+                "text",
+                "--background",
+            ],
+            vec![
                 "set-value",
                 "--mark",
                 "1",
@@ -5353,14 +5387,6 @@ mod tests {
                 "browser",
                 "--goal",
                 "Fill a form",
-                "--background",
-            ],
-            vec![
-                "press-key",
-                "--app",
-                "Fixture",
-                "--key",
-                "tab",
                 "--background",
             ],
             vec!["mouse-click", "--x", "1", "--y", "1", "--background"],
