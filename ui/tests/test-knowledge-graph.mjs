@@ -19,6 +19,8 @@ import { seedUniverseVault } from "./knowledge-universe-fixture.mjs";
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
+/* 첫 그림의 예산(ms). 판정은 `frameBudgetHolds`(machine-load.mjs)가 맡는다 — 조용한 기계에서만 재고, 시끄러우면 기록만. */
+const FIRST_PAINT_BUDGET_MS = 300;
 
 const files = createServer(async (request, response) => {
   const asked = decodeURIComponent((request.url ?? "/").split("?")[0]);
@@ -1609,7 +1611,8 @@ ok(
   () => brainScale.nodes === 1020 &&
     brainScale.edges > 1500 &&
     brainScale.firstPaint > 0 &&
-    brainScale.firstPaint < 300 &&
+    /* 첫 그림도 벽시계다 — 같은 부하 규칙(machine-load.mjs)을 탄다. */
+    frameBudgetHolds(brainScale.firstPaint, FIRST_PAINT_BUDGET_MS) &&
     frameBudgetHolds(brainScale.worstGap) &&
     brainScale.spread > 400 && brainScale.spread < 6000 &&
     // 묶는 축이 제 방을 채우고, 두 축 다 제 방을 넘지 않는다(contain).
