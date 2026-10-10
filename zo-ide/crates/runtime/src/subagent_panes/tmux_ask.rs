@@ -33,7 +33,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use plugins::bounded_child::{observe_exit, reap, try_reap};
+use plugins::bounded_child::{observe_exit, reap, try_reap, EXIT_LOOK_EVERY};
 #[cfg(unix)]
 use plugins::bounded_child::{end_group, Group};
 
@@ -42,9 +42,6 @@ use super::TMUX_ASK_BOUND;
 
 /// More than any `list-panes` prints. What a tmux prints past it is not read.
 const PRINTED_LIMIT: u64 = 1 << 20;
-
-/// How often an exit is looked for where the kernel does not report one.
-const EXIT_LOOK_EVERY: Duration = Duration::from_millis(5);
 
 /// What one tmux call came to.
 #[derive(Debug, Clone, PartialEq, Eq)]

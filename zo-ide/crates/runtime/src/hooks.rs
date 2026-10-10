@@ -1237,6 +1237,7 @@ mod tests {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
+        let mark = plugins::bounded_child::trace::mark();
         let result = command
             .output_with_stdin(&[], None, Duration::from_secs(1))
             .expect("successful parent execution should return cleanly");
@@ -1248,7 +1249,7 @@ mod tests {
         let _ = std::fs::remove_file(&pidfile);
 
         assert!(matches!(result, CommandExecution::Finished(output) if output.status.success()));
-        plugins::bounded_child::trace::assert_ended_before_reaped(leader);
+        plugins::bounded_child::trace::assert_ended_before_reaped(mark, leader);
         let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
         assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
     }

@@ -982,6 +982,7 @@ mod stderr_tests {
         let mut command = std::process::Command::new("/bin/sh");
         command.arg("-c").arg(format!("echo $$ > {}; sleep 5 & exit 0", pidfile.display()));
 
+        let mark = plugins::bounded_child::trace::mark();
         let (status, _) = spawn_and_wait(&mut command).expect("the check should end");
         let leader: u32 = std::fs::read_to_string(&pidfile)
             .expect("leader pidfile written")
@@ -991,7 +992,7 @@ mod stderr_tests {
         let _ = std::fs::remove_file(&pidfile);
 
         assert!(status.success(), "the check's command exits cleanly");
-        plugins::bounded_child::trace::assert_ended_before_reaped(leader);
+        plugins::bounded_child::trace::assert_ended_before_reaped(mark, leader);
         let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
         assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
     }

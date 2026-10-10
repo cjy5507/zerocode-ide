@@ -30,6 +30,11 @@ pub enum Group {
     Terminate { grace: Duration },
 }
 
+/// How often an exit is looked for where the kernel gives no watch on the child
+/// (t-19897). The tmux ask has always looked at this interval, and its fallback
+/// still does, so the two wake-up rates are the same.
+pub const EXIT_LOOK_EVERY: Duration = Duration::from_millis(5);
+
 /// Reaps the child, and returns its status.
 pub fn reap(child: &mut Child) -> io::Result<ExitStatus> {
     let pid = child.id();
@@ -94,7 +99,7 @@ pub fn observe_exit(pid: u32, until: Option<Instant>) -> Option<bool> {
 
 /// Whether the child `pid` has exited, looked for until `until` (`None`: until it
 /// has). The child is not reaped: `WNOWAIT` leaves the zombie waitable.
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "haiku"))]
+#[cfg(target_os = "linux")]
 #[must_use]
 pub fn observe_exit(pid: u32, until: Option<Instant>) -> Option<bool> {
     use nix::errno::Errno;
@@ -115,7 +120,7 @@ pub fn observe_exit(pid: u32, until: Option<Instant>) -> Option<bool> {
                 if left.is_zero() {
                     return Some(false);
                 }
-                std::thread::sleep(left.min(Duration::from_millis(5)));
+                std::thread::sleep(left.min(EXIT_LOOK_EVERY));
             }
             Ok(_) => return Some(true),
             Err(Errno::EINTR) => {}
@@ -126,13 +131,7 @@ pub fn observe_exit(pid: u32, until: Option<Instant>) -> Option<bool> {
 
 /// No exit can be seen without reaping on this platform: the caller keeps its
 /// own order.
-#[cfg(not(any(
-    target_os = "macos",
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "haiku"
-)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[must_use]
 pub fn observe_exit(_pid: u32, _until: Option<Instant>) -> Option<bool> {
     None
@@ -304,22 +303,32 @@ pub mod trace {
         STEPS.lock().unwrap_or_else(PoisonError::into_inner).push(step);
     }
 
-    /// The steps taken on the child `pid`, in the order they were taken.
+    /// A place in the recorded order. A test takes one before it starts its child,
+    /// and then looks only at the steps recorded after it. A pid is handed on
+    /// again only after its previous child has been reaped, so a step recorded
+    /// before the mark cannot belong to the child the test starts (t-19897).
     #[must_use]
-    pub fn order_of(pid: u32) -> Vec<Step> {
-        STEPS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+    pub fn mark() -> usize {
+        STEPS.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
+
+    /// The steps taken on the child `pid` after `mark`, in the order they were taken.
+    #[must_use]
+    pub fn order_since(mark: usize, pid: u32) -> Vec<Step> {
+        let steps = STEPS.lock().unwrap_or_else(PoisonError::into_inner);
+        steps
+            .get(mark..)
+            .unwrap_or(&[])
             .iter()
             .copied()
             .filter(|step| step.pid() == pid)
             .collect()
     }
 
-    /// Asserts that the group of `pid` was ended, and that no end came after its
-    /// leader was reaped.
-    pub fn assert_ended_before_reaped(pid: u32) {
-        let order = order_of(pid);
+    /// Asserts that the group of `pid` was ended after `mark`, and that no end came
+    /// after its leader was reaped.
+    pub fn assert_ended_before_reaped(mark: usize, pid: u32) {
+        let order = order_since(mark, pid);
         assert!(order.contains(&Step::Ended(pid)), "the group of {pid} was never ended: {order:?}");
         if let Some(reaped) = order.iter().position(|step| matches!(step, Step::Reaped(_))) {
             assert!(
@@ -354,7 +363,7 @@ mod tests {
 
     /// A child that has exited is heard as exited, and the look does not reap it:
     /// the status is still there to be taken afterwards (t-19897).
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "haiku"))]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_child_that_has_exited_is_seen_without_being_reaped() {
         let mut quick = Command::new("/bin/sleep").arg("0.1").spawn().expect("spawn");
@@ -366,7 +375,7 @@ mod tests {
 
     /// A child still running at the deadline is not heard as exited, and the look
     /// keeps its deadline.
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "haiku"))]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_deadline_is_kept_for_a_child_still_running() {
         let mut slow = Command::new("/bin/sleep").arg("5").spawn().expect("spawn");
@@ -374,7 +383,7 @@ mod tests {
         assert_eq!(super::observe_exit(slow.id(), Some(started + Duration::from_millis(300))), Some(false));
         let took = started.elapsed();
         assert!(
-            took >= Duration::from_millis(300) && took < Duration::from_millis(900),
+            took >= Duration::from_millis(300) && took < Duration::from_millis(600),
             "the deadline was not kept: {took:?}"
         );
         let _ = slow.kill();

@@ -1618,6 +1618,7 @@ mod tests {
         let pidfile = std::env::temp_dir().join(format!("zo-order-timeout-{}-{unique}.pid", std::process::id()));
         let command = format!("sleep 30 & echo $$ $! > {}; exit 0", pidfile.display());
 
+        let mark = plugins::bounded_child::trace::mark();
         let output = execute_bash(unsandboxed(&command, 1_500)).expect("bash command should execute");
         let text = std::fs::read_to_string(&pidfile).expect("pidfile written");
         let _ = std::fs::remove_file(&pidfile);
@@ -1628,7 +1629,7 @@ mod tests {
         );
 
         assert!(output.interrupted, "the pipes held by the grandchild must time the run out");
-        plugins::bounded_child::trace::assert_ended_before_reaped(leader);
+        plugins::bounded_child::trace::assert_ended_before_reaped(mark, leader);
         // A grandchild that has just been signalled is a zombie for a moment, and a
         // zombie still answers `kill`, so wait for it to be reaped.
         let until = Instant::now() + Duration::from_secs(5);
@@ -1653,6 +1654,7 @@ mod tests {
         let pidfile = std::env::temp_dir().join(format!("zo-order-cancel-{}-{unique}.pid", std::process::id()));
         let command = format!("sleep 30 & echo $$ $! > {}; exit 0", pidfile.display());
 
+        let mark = plugins::bounded_child::trace::mark();
         let input = unsandboxed(&command, 60_000);
         let runner = std::thread::spawn(move || super::execute_bash_with_tasks(input, None, Some(OWNER)));
         // Registered once it runs, and its pids are written once the shell has started.
@@ -1665,15 +1667,22 @@ mod tests {
             let text = std::fs::read_to_string(&pidfile).ok()?;
             (registered && text.ends_with('\n')).then_some(text)
         });
-        // The leader exits at once, after writing its pids.
-        std::thread::sleep(Duration::from_millis(300));
+        let mut pids = text.split_whitespace().map(|word| word.parse::<u32>().expect("valid pid"));
+        let leader = pids.next().expect("leader pid");
+        // The leader exits right after writing its pids. Wait for that exit without
+        // reaping it, so that the cancel comes after the leader has ended (t-19897).
+        assert!(
+            matches!(
+                plugins::bounded_child::observe_exit(leader, Some(Instant::now() + Duration::from_secs(10))),
+                Some(true)
+            ),
+            "the leader did not exit"
+        );
 
         assert_eq!(super::interrupt_foreground_bash(Some(OWNER)), 1, "the live group must be signalled");
         let _ = runner.join();
         let _ = std::fs::remove_file(&pidfile);
-        let mut pids = text.split_whitespace().map(|word| word.parse::<u32>().expect("valid pid"));
-        let leader = pids.next().expect("leader pid");
-        plugins::bounded_child::trace::assert_ended_before_reaped(leader);
+        plugins::bounded_child::trace::assert_ended_before_reaped(mark, leader);
         let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
         assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
     }
