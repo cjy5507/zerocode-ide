@@ -19,6 +19,7 @@
 //! Everything callers need is re-exported below; internal modules
 //! stay `pub(crate)` or `pub(super)` so the surface stays small.
 
+pub mod bounded_child;
 mod builtin;
 mod error;
 mod install;

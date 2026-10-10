@@ -44,6 +44,8 @@ impl Provider {
     /// `Provider.handle(method:params:)`.
     pub fn handle(&mut self, method: &str, params: Value) -> Result<Value, ComputerUseError> {
         let params = params.as_object().cloned().unwrap_or_default();
+        zerocode_core::computer_use_protocol::execution::validate(method, &params)?;
+        zerocode_core::computer_use_protocol::execution::require_support(false, &params)?;
         match method {
             "handshake" => json(capabilities()),
             "listApps" => json(self.list_apps()),

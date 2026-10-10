@@ -3359,6 +3359,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
     }
     for (flag, key) in [
         ("restore-window", "restoreWindow"),
+        ("background", "background"),
         ("no-screenshot", "noScreenshot"),
         ("full-res", "fullRes"),
         ("force", "force"),
@@ -3465,6 +3466,7 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
         let boolean = matches!(
             name,
             "json"
+                | "background"
                 | "restore-window"
                 | "no-screenshot"
                 | "local"
@@ -3518,6 +3520,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
     const BASIC: &[&str] = &["json"];
     const APP: &[&str] = &["json", "app"];
     const OBSERVE: &[&str] = &[
+        "background",
         "json",
         "app",
         "worktree",
@@ -3533,6 +3536,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::ListWindows => APP,
         ComputerMethod::GetAppState => OBSERVE,
         ComputerMethod::Click => &[
+            "background",
             "json",
             "app",
             "worktree",
@@ -3573,6 +3577,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "confirming",
         ],
         ComputerMethod::Scroll => &[
+            "background",
             "json",
             "app",
             "worktree",
@@ -3627,6 +3632,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "confirming",
         ],
         ComputerMethod::SetValue => &[
+            "background",
             "json",
             "app",
             "worktree",
@@ -3686,6 +3692,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::WindowResize => &["json", "id", "width", "height"],
         ComputerMethod::ClipboardWrite => &["json", "text"],
         ComputerMethod::Find => &[
+            "background",
             "json",
             "app",
             "text",
@@ -3698,6 +3705,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "region",
         ],
         ComputerMethod::WaitFor => &[
+            "background",
             "json",
             "app",
             "text",
@@ -3712,6 +3720,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "region",
         ],
         ComputerMethod::Read => &[
+            "background",
             "json",
             "app",
             "window-id",
@@ -3725,6 +3734,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::Evidence => &["json", "last", "verify"],
         ComputerMethod::Verdict => &["json", "pass", "fail", "reason"],
         ComputerMethod::Observe => &[
+            "background",
             "json",
             "no-screenshot",
             "app",
@@ -3761,6 +3771,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::Watch => &["json", "until", "timeout-ms", "display"],
         ComputerMethod::Batch => &["json", BATCH_COMMANDS_FLAG],
         ComputerMethod::Walk => &[
+            "background",
             "json",
             "goal",
             "app",
@@ -3815,6 +3826,14 @@ fn validate(
     flags: &BTreeMap<String, Option<String>>,
     params: &Map<String, Value>,
 ) -> Result<(), String> {
+    if flags.contains_key("background") {
+        if flags.contains_key("restore-window") {
+            return Err("--background cannot be combined with --restore-window".into());
+        }
+        if !params.contains_key("app") && !params.contains_key("mark") {
+            return Err("--background requires --app or a pinned --mark".into());
+        }
+    }
     if let Some(declared) = params.get("confirming").and_then(Value::as_str)
         && ConfirmKind::parse(declared).is_none()
     {
@@ -4534,6 +4553,7 @@ fn validate_hotkey(key: &str) -> Result<(), String> {
 pub fn usage() -> String {
     let text = [
         "zerocode-computer — inspect and operate local desktop apps",
+        "  --background: macOS app-scoped semantic input only; no focus, synthetic input or foreground fallback",
         "",
         "  zerocode-computer capabilities [--json]",
         "  zerocode-computer permissions [--id accessibility|screenshots [--reset]] [--json]",
@@ -5284,6 +5304,71 @@ pub struct ComputerErrorBody<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn background_input_is_explicit_and_never_accepts_a_restore_or_global_surface() {
+        let parse = |words: &[&str]| {
+            parse_command(
+                &words
+                    .iter()
+                    .map(|word| (*word).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        for words in [
+            vec!["observe", "--app", "Fixture", "--marks", "--background"],
+            vec!["click", "--mark", "1", "--look", "look", "--background"],
+            vec![
+                "set-value",
+                "--mark",
+                "1",
+                "--look",
+                "look",
+                "--value",
+                "text",
+                "--background",
+            ],
+            vec![
+                "walk",
+                "--app",
+                "Fixture",
+                "--goal",
+                "Fill a form",
+                "--background",
+            ],
+        ] {
+            assert_eq!(parse(&words).unwrap().params["background"], true);
+        }
+        for words in [
+            vec![
+                "observe",
+                "--app",
+                "Fixture",
+                "--background",
+                "--restore-window",
+            ],
+            vec!["observe", "--background"],
+            vec![
+                "walk",
+                "--pane",
+                "browser",
+                "--goal",
+                "Fill a form",
+                "--background",
+            ],
+            vec![
+                "press-key",
+                "--app",
+                "Fixture",
+                "--key",
+                "tab",
+                "--background",
+            ],
+            vec!["mouse-click", "--x", "1", "--y", "1", "--background"],
+        ] {
+            assert!(parse(&words).is_err(), "{words:?}");
+        }
+    }
+
     #[test]
     fn marked_values_require_a_look_and_cannot_override_its_target() {
         let parse = |words: &[&str]| {

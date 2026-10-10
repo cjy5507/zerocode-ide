@@ -60,9 +60,13 @@ pub(super) struct Session {
     directory: PathBuf,
     token: String,
     next_id: u64,
+    supports_background: bool,
 }
 
 impl ProviderSession for Session {
+    fn supports_background(&self) -> bool {
+        self.supports_background
+    }
     fn helper_pid(&self) -> Option<i32> {
         self.helper_pid
     }
@@ -174,6 +178,7 @@ impl ProviderSession for Session {
             directory,
             token: nonce,
             next_id: 1,
+            supports_background: false,
         };
         let handshake = client
             .request("handshake", json!({}))
@@ -191,6 +196,8 @@ impl ProviderSession for Session {
             ));
         }
         validate_guard_budget(&handshake)?;
+        client.supports_background =
+            handshake.pointer("/supports/actions/background") == Some(&Value::Bool(true));
         Ok(client)
     }
 

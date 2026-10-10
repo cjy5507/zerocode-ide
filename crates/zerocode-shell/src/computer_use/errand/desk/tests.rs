@@ -111,6 +111,93 @@ fn desktop_words_come_from_the_same_observation_as_its_marks() {
 }
 
 #[test]
+fn background_walk_keeps_its_mode_and_stops_after_foreground_changes() {
+    for receipt in [json!(true), json!(false), Value::Null] {
+        let returned = receipt.clone();
+        let road = Road::new(move |verb| match verb {
+            "observe" => {
+                let mut answer: Value = serde_json::from_str(&desktop_answer()).unwrap();
+                answer["result"]["tree"]["text"] = "Ready".into();
+                answer["result"]["tree"]["window"] = json!({"id": 7, "width": 400, "height": 300});
+                ok(&answer.to_string())
+            }
+            "click" | "scroll" => ok(
+                &json!({"action": {"background": {"foregroundUnchanged": returned}}}).to_string(),
+            ),
+            "wait-for" => refused(),
+            _ => panic!("unexpected {verb}"),
+        });
+        let mut send = road.road();
+        let mut world = GoalWorld::new(
+            &mut send,
+            Aim::App {
+                name: "Fixture".into(),
+            },
+            Seen::default(),
+            Some("Done".into()),
+            60_000,
+            0,
+        )
+        .background(true);
+        world.look().unwrap();
+        assert_eq!(world.navigation(), &Navigation::PAGE);
+        assert!(!world.navigate(Navigation::FocusNext));
+        assert!(world.press(1));
+        if receipt == true {
+            assert!(world.navigate(Navigation::ScrollDown));
+            assert!(world.look().is_some());
+            let _ = world.reached();
+        } else {
+            assert!(world.look().is_none());
+            assert_eq!(world.reached(), None);
+            assert!(world.background_interrupted());
+            assert!(!world.press(1));
+            assert!(!world.navigate(Navigation::ScrollDown));
+            assert_eq!(road.said.borrow().len(), 2);
+        }
+        for (_, argv) in road.said.borrow().iter() {
+            let parsed = zerocode_core::computer_use::parse_command(argv).unwrap();
+            assert_eq!(parsed.params["background"], true, "{argv:?}");
+        }
+    }
+}
+
+#[test]
+fn background_field_input_keeps_its_pin_and_has_no_focus_click() {
+    let road = Road::new(|verb| match verb {
+        "observe" => ok(&desktop_form_answer().to_string()),
+        "set-value" => ok(
+            r#"{"action":{"verification":{"state":"verified"},"background":{"foregroundUnchanged":true}}}"#,
+        ),
+        _ => panic!("unexpected {verb}"),
+    });
+    let mut send = road.road();
+    let (pen, _, _) = Pen::writing("query");
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::App {
+            name: "Fixture".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .background(true)
+    .writing(Box::new(pen))
+    .remembering(memory());
+    world.look().unwrap();
+    assert!(matches!(
+        world.type_into(1, "Search"),
+        Typed::Entered { .. }
+    ));
+    let command = zerocode_core::computer_use::parse_command(&road.argv(1)).unwrap();
+    assert_eq!(command.params["background"], true);
+    assert_eq!(command.params["look"], "field-look");
+    assert_eq!(road.said.borrow().len(), 2);
+}
+
+#[test]
 fn an_empty_observed_text_does_not_trigger_another_tree_walk() {
     let road = Road::new(|verb| match verb {
         "observe" => {

@@ -143,6 +143,7 @@ mod pane_cwd_runtime;
 mod pane_guard;
 mod pane_layout;
 mod pane_runtime;
+mod pane_transcript;
 mod pick_runtime;
 mod preference_runtime;
 mod primary_selection;
@@ -169,6 +170,7 @@ mod scrcpy;
 mod scrcpy_video;
 mod script;
 mod seat_triage;
+mod secret_watch;
 mod settings;
 mod settings_runtime;
 mod sftp_runtime;
@@ -244,30 +246,31 @@ use browser_runtime::*;
 use cmd::{
     abort_conflict_operation, ack_board_agent, add_claude_account, add_codex_account, agent_icon,
     agent_launch_plans, agent_models, agent_teams_mode, agent_terms, answer_approval, answer_ask,
-    antigravity_usage, api_router_keys_kept, api_router_presets, api_router_providers,
-    apply_ghostty_import, apply_ui_zoom, archive_trust_standing, automation_born_worktrees,
-    board_columns, board_desk, board_snapshot, boot_report, browse_dir, browse_places,
-    browser_click, browser_console, browser_devtools, browser_diagnose, browser_eval, browser_find,
-    browser_find_clear, browser_grab_arm, browser_grab_disarm, browser_grab_take, browser_history,
-    browser_menu_take, browser_navigate, browser_network, browser_place, browser_profiles,
-    browser_read, browser_reload, browser_scroll, browser_snapshot, browser_stop, browser_type,
-    browser_wait, browser_zoom, build_stamp, busy_census, cancel_folder_panel, cancel_google_login,
-    check_typesafe_key, choose_paths, choose_project, claude_account_usage, claude_accounts,
-    claude_autoswitch_apply, claude_autoswitch_mode, claude_token_usage, claude_usage,
-    claude_usage_stats, clear_delivered_diff_notes, clear_diff_notes, clear_finish_mark,
-    cli_login_list, cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness,
-    cli_login_witness_drop, clipboard_has_image, clone_repository, clone_target_name,
-    close_browser_pane, close_lane, close_onboarding, close_term, codex_account_list,
-    codex_token_usage, codex_usage, codex_usage_stats, commit_failure_card, commit_file_diff,
-    commit_files, commit_landings, commit_staged, computer_awake_status, computer_confirm_answer,
-    computer_guard_status, computer_handoff_code, computer_live_reflex_check, computer_resume,
-    computer_stop, computer_use_capabilities, computer_use_permission_status,
-    computer_use_skill_report, computer_use_tcc_row_action, conflict_card, continuation_source,
-    cookie_sources, crash_bundle, crash_open_log, create_browser_profile, create_project,
-    create_pull_request, create_untitled_markdown, create_worktree, default_project_parent,
-    default_tabs, delete_automation, delete_browser_profile, delete_diff_note,
-    delete_quick_command, delete_untitled_markdown, delete_untracked, desk_ack, desk_checkouts,
-    desk_reply, developer_permission_statuses, discard_paths, dismiss_external_worktree_prompt,
+    answer_secret, antigravity_usage, api_router_keys_kept, api_router_presets,
+    api_router_providers, apply_ghostty_import, apply_ui_zoom, archive_trust_standing,
+    automation_born_worktrees, board_columns, board_desk, board_snapshot, boot_report, browse_dir,
+    browse_places, browser_click, browser_console, browser_devtools, browser_diagnose,
+    browser_eval, browser_find, browser_find_clear, browser_grab_arm, browser_grab_disarm,
+    browser_grab_take, browser_history, browser_menu_take, browser_navigate, browser_network,
+    browser_place, browser_profiles, browser_read, browser_reload, browser_scroll,
+    browser_snapshot, browser_stop, browser_type, browser_wait, browser_zoom, build_stamp,
+    busy_census, cancel_folder_panel, cancel_google_login, check_typesafe_key, choose_paths,
+    choose_project, claude_account_usage, claude_accounts, claude_autoswitch_apply,
+    claude_autoswitch_mode, claude_token_usage, claude_usage, claude_usage_stats,
+    clear_delivered_diff_notes, clear_diff_notes, clear_finish_mark, cli_login_list,
+    cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness, cli_login_witness_drop,
+    clipboard_has_image, clone_repository, clone_target_name, close_browser_pane, close_lane,
+    close_onboarding, close_term, codex_account_list, codex_token_usage, codex_usage,
+    codex_usage_stats, commit_failure_card, commit_file_diff, commit_files, commit_landings,
+    commit_staged, computer_awake_status, computer_confirm_answer, computer_guard_status,
+    computer_handoff_code, computer_live_reflex_check, computer_resume, computer_stop,
+    computer_use_capabilities, computer_use_permission_status, computer_use_skill_report,
+    computer_use_tcc_row_action, conflict_card, continuation_source, cookie_sources, crash_bundle,
+    crash_open_log, create_browser_profile, create_project, create_pull_request,
+    create_untitled_markdown, create_worktree, default_project_parent, default_tabs,
+    delete_automation, delete_browser_profile, delete_diff_note, delete_quick_command,
+    delete_untitled_markdown, delete_untracked, desk_ack, desk_checkouts, desk_reply,
+    developer_permission_statuses, discard_paths, dismiss_external_worktree_prompt,
     enable_automation, end_all_terminal_sessions, end_terminal_session, file_diff, file_version,
     floating_workspace_seat, flow_list, flow_set, focus_lane, focus_main, fs_create, fs_duplicate,
     fs_move, fs_open_default, fs_redo, fs_rename, fs_reveal, fs_trash, fs_undo, gate_lane,
@@ -1062,6 +1065,10 @@ struct ShellRuntime {
     /// Written from hook events, never guessed: an id we invented would resume
     /// nothing.
     pane_sessions: Mutex<HashMap<TermId, zerocode_core::ProviderSession>>,
+    /// The answer each pane's transcript question last got, so a poll that asks
+    /// the same question again does not walk the agent's store (herdr 4
+    /// follow-up, t-42948). Forgotten when the pane closes.
+    pane_memo: Mutex<zerocode_core::pane_transcript::Memo<TermId>>,
     /// What each pane's agent last reported, and when.
     ///
     /// The window is told every state change as it happens, so this is not how
@@ -1543,6 +1550,10 @@ impl ShellRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn pane_memo(&self) -> &Mutex<zerocode_core::pane_transcript::Memo<TermId>> {
+        &self.pane_memo
+    }
+
     fn pane_sessions(&self) -> MutexGuard<'_, HashMap<TermId, zerocode_core::ProviderSession>> {
         self.pane_sessions
             .lock()
@@ -1816,6 +1827,7 @@ trait ShellStateExt {
     fn browser_records(&self) -> MutexGuard<'_, HashMap<String, BrowserPaneRecord>>;
     fn browser_reserved(&self) -> MutexGuard<'_, std::collections::HashSet<String>>;
     fn pane_sessions(&self) -> MutexGuard<'_, HashMap<TermId, zerocode_core::ProviderSession>>;
+    fn pane_memo(&self) -> &Mutex<zerocode_core::pane_transcript::Memo<TermId>>;
     fn pane_states(&self) -> MutexGuard<'_, HashMap<TermId, PaneState>>;
     fn last_statuses(&self) -> MutexGuard<'_, HashMap<String, last_status::LastStatus>>;
     fn last_status_seats(&self) -> MutexGuard<'_, HashMap<TermId, String>>;
@@ -2027,6 +2039,10 @@ impl ShellStateExt for AppState {
 
     fn pane_sessions(&self) -> MutexGuard<'_, HashMap<TermId, zerocode_core::ProviderSession>> {
         self.shell_runtime().pane_sessions()
+    }
+
+    fn pane_memo(&self) -> &Mutex<zerocode_core::pane_transcript::Memo<TermId>> {
+        self.shell_runtime().pane_memo()
     }
 
     fn pane_states(&self) -> MutexGuard<'_, HashMap<TermId, PaneState>> {
@@ -2360,6 +2376,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         browser_records: Mutex::new(HashMap::new()),
         browser_reserved: Mutex::new(std::collections::HashSet::new()),
         pane_sessions: Mutex::new(HashMap::new()),
+        pane_memo: Mutex::new(zerocode_core::pane_transcript::Memo::default()),
         pane_states: Mutex::new(HashMap::new()),
         last_statuses: Mutex::new(last_statuses),
         // 자리 지도는 늘 빈 손으로 시작한다: 하이드레이트로 올라온 행들은
@@ -2613,6 +2630,7 @@ fn main() -> ExitCode {
             paste_input,
             answer_ask,
             answer_approval,
+            answer_secret,
             resize_lane,
             respond_permission,
             gate_lane,
@@ -3549,6 +3567,7 @@ fn main() -> ExitCode {
                     }
                 });
             });
+            secret_watch::spawn(handle.clone());
             std::thread::spawn(move || pump_loop(&handle));
             // Sleep's far edge (P0-17 잔여): a fixed nap, and the wall
             // clock's overshoot judged by `resume_watch::slept_for`. The

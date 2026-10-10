@@ -30,6 +30,9 @@ impl SessionFailure {
 pub(super) trait ProviderSession: Sized {
     fn start() -> Result<Self, ComputerUseError>;
     fn request(&mut self, method: &str, params: Value) -> Result<Value, SessionFailure>;
+    fn supports_background(&self) -> bool {
+        false
+    }
     /// The helper process, when the platform runs one the window can signal.
     fn helper_pid(&self) -> Option<i32> {
         None
