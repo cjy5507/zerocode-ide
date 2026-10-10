@@ -9,6 +9,7 @@
  */
 
 import { endRun } from "./end-run.mjs";
+import { PLATFORM_OVERRIDE, TEST_PLATFORM } from "./test-platform.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -3161,6 +3162,15 @@ const addReportedPlatform = (page, platform) => page.addInitScript((reported) =>
 
 const pageA = await context.newPage();
 const pageB = await context.newPage();
+// `ZO_TEST_PLATFORM` names another platform: both windows report it before shell.js reads it (test-platform.mjs).
+if (PLATFORM_OVERRIDE) {
+  for (const page of [pageA, pageB]) {
+    await page.addInitScript((reported) => {
+      Object.defineProperty(navigator, "userAgentData", { configurable: true, get: () => ({ platform: reported }) });
+      Object.defineProperty(navigator, "platform", { configurable: true, get: () => reported });
+    }, PLATFORM_OVERRIDE);
+  }
+}
 await installTauri(pageA, "A");
 await installTauri(pageB, "B");
 
@@ -8318,7 +8328,7 @@ await test("the second boot paints every non-default before opening settings", a
     optionAsAlt: "left",
     optionAsAltOptions: ["auto", "true", "left", "right", "false"],
     jisYenToBackslash: true,
-    jisYenHidden: process.platform !== "darwin",
+    jisYenHidden: TEST_PLATFORM !== "darwin",
     themeDark: "Dracula",
     themeLight: "Solarized Light",
     separateLightTheme: false,

@@ -2,6 +2,7 @@ import { endRun } from "./end-run.mjs";
 import "./scm-notices.mjs";
 import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 import { createRunner } from "./window-runner.mjs";
+import { TEST_PLATFORM } from "./test-platform.mjs";
 /* The window, driven for real.
  *
  * The Rust gates read this window's source; they cannot lay it out. Anything
@@ -135,14 +136,14 @@ const ATTACH_LIMITS = await (async () => {
   const read = (name) => Number(block.match(new RegExp(`\\b${name}: ([\\d_]+)`))?.[1]?.replace(/_/g, ""));
   return { chips: read("chips"), pathChars: read("pathChars"), shown: read("shown"), menuRows: read("menuRows") };
 })();
-const PRIMARY_KEY = process.platform === "darwin" ? "Meta" : "Control";
-const PRIMARY_COMMA_LABEL = process.platform === "darwin" ? "⌘," : "Ctrl+,";
-const PRIMARY_TERMINAL_LABEL = process.platform === "darwin" ? "⌘T" : "Ctrl+T";
-const PRIMARY_SUBMIT_LABEL = process.platform === "darwin" ? "⌘↵" : "Ctrl+Enter";
+const PRIMARY_KEY = TEST_PLATFORM === "darwin" ? "Meta" : "Control";
+const PRIMARY_COMMA_LABEL = TEST_PLATFORM === "darwin" ? "⌘," : "Ctrl+,";
+const PRIMARY_TERMINAL_LABEL = TEST_PLATFORM === "darwin" ? "⌘T" : "Ctrl+T";
+const PRIMARY_SUBMIT_LABEL = TEST_PLATFORM === "darwin" ? "⌘↵" : "Ctrl+Enter";
 const IDLE_TICK_WINDOW_MS = 2500;
-const EXPECTED_TERMINAL_FONT = process.platform === "win32"
+const EXPECTED_TERMINAL_FONT = TEST_PLATFORM === "win32"
   ? "Cascadia Mono"
-  : process.platform === "darwin"
+  : TEST_PLATFORM === "darwin"
     ? "SF Mono"
     : "DejaVu Sans Mono";
 

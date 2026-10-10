@@ -6,13 +6,12 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { standIpcCensus } from "./ipc-census.mjs";
+import { PLATFORM_OVERRIDE, PRIMARY_EVENT } from "./test-platform.mjs";
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /* The primary modifier as a synthetic-event spread — ⌘ on macOS, Ctrl
- * elsewhere. `shell.js` reads the same platform; a test that builds a ⌘/Ctrl
- * click spreads `window.__TEST_PRIMARY_EVENT__` in. */
-export const PRIMARY_EVENT = process.platform === "darwin"
-  ? Object.freeze({ metaKey: true })
-  : Object.freeze({ ctrlKey: true });
+ * elsewhere (test-platform.mjs). `shell.js` reads the same platform; a test
+ * that builds a ⌘/Ctrl event spreads `window.__TEST_PRIMARY_EVENT__` in. */
+export { PRIMARY_EVENT };
 const TERMINAL_THEME_CATALOG = Object.freeze(JSON.parse(await readFile(resolve(UI, "..", "crates/zerocode-shell/src/terminal_themes.json"), "utf8")));
 /* Claude Code's spinner verbs, read off the core catalog (`CLAUDE_SPINNER_
  * VERBS`, agent.rs) rather than copied — the stub row speaks the one list. */
@@ -2302,8 +2301,14 @@ const standBackend = async (surface, boot = BOOT) => {
  * settles at all, so 20 s is two orders over the slowest settled flush and still a small slice of the queue's cap. */
 const ENCODER_FLUSH_DEADLINE_MS = 20000;
 
-const installHarnessHands = (surface) => surface.addInitScript(({ primaryEvent, flushDeadlineMs }) => {
+const installHarnessHands = (surface) => surface.addInitScript(({ primaryEvent, flushDeadlineMs, reported }) => {
   window.__TEST_PRIMARY_EVENT__ = primaryEvent;
+  // `ZO_TEST_PLATFORM` names a platform other than the machine's: the page reports that one before shell.js reads
+  // it (test-platform.mjs). `reported` is null on the runners, which keep the platform they run on.
+  if (reported) {
+    Object.defineProperty(Navigator.prototype, "userAgentData", { configurable: true, get: () => ({ platform: reported }) });
+    Object.defineProperty(Navigator.prototype, "platform", { configurable: true, get: () => reported });
+  }
   // A WebCodecs encoder's `flush()` has no deadline of its own, and under the software GL of the runner's host
   // (`runner-host.mjs`) it has been seen never to settle, which held the whole window suite until the queue's cap
   // killed it (t-21351). Every scenario that encodes waits through this: the flush that does not settle in
@@ -2352,7 +2357,7 @@ const installHarnessHands = (surface) => surface.addInitScript(({ primaryEvent, 
     await window.__PAINTED__();
     window.__COUNTS__ = {};
   };
-}, { primaryEvent: PRIMARY_EVENT, flushDeadlineMs: ENCODER_FLUSH_DEADLINE_MS });
+}, { primaryEvent: PRIMARY_EVENT, flushDeadlineMs: ENCODER_FLUSH_DEADLINE_MS, reported: PLATFORM_OVERRIDE });
 
 /* `WINDOW_FRAME_LAG_MS=<ms>`: every animation frame on the page lands this
  * much later — a loaded machine's frames, on an idle one (t-9741).
