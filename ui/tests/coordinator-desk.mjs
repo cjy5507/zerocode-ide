@@ -891,7 +891,9 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       JSON.stringify(costMoved));
     /* ---- 통과 조건과 넘김 메모 (t-26587): 조건마다 한 줄, 상태는 낱말로, 메모는 그 옆에 ---- */
     const conditioned = await page.evaluate(async () => {
-      const target = window.__DESK__.tasks.find((one) => one.stage === "gate");
+      // The row must be on the screen, so the target is a task of the stage the flow has open.
+      const open = document.querySelector('#board-view [data-desk-block="pipeline"] .board-desk-stage[aria-pressed="true"]')?.dataset.stage;
+      const target = window.__DESK__.tasks.find((one) => one.stage === open);
       window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
         tasks: window.__DESK__.tasks.map((one) => one === target
           ? { ...one, hand_in: { conditions: [

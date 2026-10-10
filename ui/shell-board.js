@@ -1220,6 +1220,10 @@ const DESK_CONDITION_WORDS = {
 
 function paintDeskConditions(list, conditions) {
   writeHidden(list, conditions.length === 0);
+  // Rebuilt only when the rows changed: writing the same rows again would be a mutation every quiet poll leaves behind.
+  const signature = conditions.map((condition) => `${condition.number}|${condition.state}|${condition.text}`).join("\n");
+  if (list.__signature === signature) return;
+  list.__signature = signature;
   if (conditions.length === 0) {
     list.replaceChildren();
     return;
