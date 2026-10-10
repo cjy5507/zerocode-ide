@@ -13989,10 +13989,22 @@ mod tests {
             )),
             "the way back can hand the board tab right back:\n{moving}"
         );
+        // The living agent of the checkout is the first way back (t-44057): a
+        // worker the ledger seated here is raised, and only without one does the
+        // ledger's own seat get asked before a fresh shell is opened.
+        assert!(
+            moving.contains(concat!(
+                "        const back =\n",
+                "          livingAgentTabOf(path) ??\n",
+                "          owned.find((held) => held.id === activeTabByWorktree.get(path)) ??\n",
+                "          owned[owned.length - 1];\n",
+            )),
+            "the way back no longer raises the checkout's living agent first:\n{moving}"
+        );
         assert!(
             moving.contains(concat!(
                 "        if (back) setActiveTab(back.id);\n",
-                "        else await openTermTab();\n",
+                "        else if (!(await openLedgerSeatedAgent())) await openTermTab();\n",
             )),
             "the board no longer yields to the workspace's terminal:\n{moving}"
         );
@@ -28999,11 +29011,11 @@ mod tests {
              && defaultAgentChosen();",
             "  if (!yieldsToDefaultAgent) {",
             "    if (await restoreWorktreeLayouts(activeWorktreePath, stored)) {",
-            "      settleRestoredStage();",
+            "      settleVisitStage(worktree);",
             "      return;",
             "    }",
             "    if (docsRestored) {",
-            "      settleRestoredStage();",
+            "      settleVisitStage(worktree);",
             "      return;",
             "    }",
             "  }",
@@ -29105,6 +29117,16 @@ mod tests {
             "a checkout that already holds a tab skips its own stored set \
              again — the conversation stored for it is never read, and the \
              next save writes it away:\n{restoring}"
+        );
+
+        // A visit raises the checkout's living agent over what the stored set
+        // left in front (t-44057): the target names it first, and every road
+        // that settles the visit does so through the helper that raises it.
+        assert!(
+            restoring.contains(
+                "const target = livingAgentTabOf(worktree) ?? owned.find((tab) => tab.id === remembered) ?? owned[owned.length - 1];"
+            ) && restoring.contains("settleVisitStage(worktree);"),
+            "a visit leaves a stored shell on the stage over the living agent of its checkout:\n{restoring}"
         );
 
         // 그리고 세트가 아무것도 돌려주지 않았을 때에도, 이미 일하고 있는 판

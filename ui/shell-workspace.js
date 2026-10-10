@@ -7565,13 +7565,19 @@ async function activateWorktree(
         const owned = tabs.filter(
           (held) => held.worktree === path && held.kind !== "board",
         );
+        // The living agent of this checkout comes first (t-44057): the ledger may
+        // have seated a worker here whose tab is not on the stage yet, and a
+        // blank shell beside it is not what the click asked for. Only when there
+        // is neither a living agent nor a terminal to return to does the ledger's
+        // own seat get asked, and then a fresh shell.
         const back =
+          livingAgentTabOf(path) ??
           owned.find((held) => held.id === activeTabByWorktree.get(path)) ??
           owned[owned.length - 1];
         // `restoreActiveWorktreeTab` would find the board tab in `owned` and
         // hand it right back; a fresh terminal is what the click asked for.
         if (back) setActiveTab(back.id);
-        else await openTermTab();
+        else if (!(await openLedgerSeatedAgent())) await openTermTab();
       }
       recordNavVisit(path);
     }

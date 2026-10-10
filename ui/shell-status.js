@@ -5203,6 +5203,26 @@ function settleRestoredStage() {
  * Asked as itself, the two facts stop being able to answer for each other. */
 const restoredWorkspaces = new Set();
 
+/* The terminal a visit raises first: a live agent pane of this checkout. An
+ * agent the ledger seated here, or one the person started here, is what was
+ * running; a plain shell, or a stored conversation still asleep, is not. A
+ * visit that raised the stored shell from before a restart and left the worker
+ * that was running beside it off the stage is the case this answers (t-44057). */
+function livingAgentTabOf(worktree) {
+  return tabs.find((held) =>
+    held.kind === "term" && held.worktree === worktree && !held.asleep &&
+    paneLeaves(held.layout).some((term) => paneAgents.has(term) || hookStates.has(term)),
+  ) ?? null;
+}
+
+/* What a visit leaves on the stage: the living agent of the checkout when it
+ * has one, and then the stage settles as it always has. */
+function settleVisitStage(worktree) {
+  const living = livingAgentTabOf(worktree);
+  if (living) setActiveTab(living.id);
+  settleRestoredStage();
+}
+
 async function restoreActiveWorktreeTab({ firstTerminal = true } = {}) {
   // Tabs from THIS worktree may have left while another one was on stage —
   // their groups could not fold then, because folding reads the visible
@@ -5211,7 +5231,7 @@ async function restoreActiveWorktreeTab({ firstTerminal = true } = {}) {
   const worktree = activeWorktreePath;
   const remembered = activeTabByWorktree.get(activeWorktreePath);
   const owned = tabs.filter((tab) => tab.worktree === activeWorktreePath);
-  const target = owned.find((tab) => tab.id === remembered) ?? owned[owned.length - 1];
+  const target = livingAgentTabOf(worktree) ?? owned.find((tab) => tab.id === remembered) ?? owned[owned.length - 1];
   if (target && restoredWorkspaces.has(worktree)) {
     setActiveTab(target.id);
     return;
@@ -5247,11 +5267,11 @@ async function restoreActiveWorktreeTab({ firstTerminal = true } = {}) {
     stored.length > 0 && !storedLayoutsHoldProgram(stored) && defaultAgentChosen();
   if (!yieldsToDefaultAgent) {
     if (await restoreWorktreeLayouts(activeWorktreePath, stored)) {
-      settleRestoredStage();
+      settleVisitStage(worktree);
       return;
     }
     if (docsRestored) {
-      settleRestoredStage();
+      settleVisitStage(worktree);
       return;
     }
   }
@@ -5262,14 +5282,14 @@ async function restoreActiveWorktreeTab({ firstTerminal = true } = {}) {
   // terminal belongs on top of a pane that is already working.
   if (target) {
     setActiveTab(target.id);
-    settleRestoredStage();
+    settleVisitStage(worktree);
     return;
   }
   // The repository's own opening layout, when it declares one and this
   // workspace has not had it yet. Falls through to the plain terminal
   // otherwise, which is what every checkout without a `defaultTabs:` gets.
   if (await openDefaultTabs(activeWorktreePath)) {
-    settleRestoredStage();
+    settleVisitStage(worktree);
     return;
   }
   // …unless the caller is about to seat this workspace's first terminal
@@ -5280,7 +5300,7 @@ async function restoreActiveWorktreeTab({ firstTerminal = true } = {}) {
   // The ledger's word first: a checkout it cut for a worker stored nothing,
   // and the default agent is a guess where the ledger has the answer.
   if (firstTerminal && !(await openLedgerSeatedAgent())) await openTermTab();
-  settleRestoredStage();
+  settleVisitStage(worktree);
 }
 
 /* The tabs a repository says a new workspace opens with.

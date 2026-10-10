@@ -10743,10 +10743,17 @@ function makeAgentRow(row, gutter = false) {
 }
 
 async function focusAgentPane(worktree, tabId, term, agent = null) {
-  if (worktree && worktree !== activeWorktreePath) {
-    if (!(await activateWorktree(worktree))) return;
+  // The tab says where the terminal stands now; the row says where it stood
+  // when its card was last drawn. The ledger can seat the worker in another
+  // checkout before that card repaints (t-44057), so the click follows the
+  // terminal: its checkout is the one to go to, and the row is the fallback.
+  const holder = () =>
+    tabOfTerm(term) ?? (tabId === null ? null : tabs.find((held) => held.id === tabId) ?? null);
+  const home = holder()?.worktree ?? worktree;
+  if (home && home !== activeWorktreePath) {
+    if (!(await activateWorktree(home))) return;
   }
-  const tab = tabId === null ? null : tabs.find((held) => held.id === tabId);
+  const tab = holder();
   if (!tab) {
     // 떼어 둔 에이전트는 판이 없다. 그 줄을 누르는 것이 곧 다시 붙는 것이고,
     // 화면은 백엔드에 그대로 있으므로 새로 띄우는 것이 아니라 돌려받는 것이다.
