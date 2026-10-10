@@ -325,6 +325,38 @@ mod windows_owner_only {
     }
 }
 
+/// Who owns an entry, as the owner-only policy sees it. Windows gives a new
+/// entry the owner of the token that created it: the token's user for an
+/// ordinary token, but the Administrators group for an elevated one.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerClass {
+    /// The token's user SID (`TokenUser`).
+    CurrentUser,
+    /// The token's default owner (`TokenOwner`), which the token stamps on
+    /// every entry it creates.
+    TokenDefault,
+    /// Any other principal. Its entries are refused, never restricted.
+    Other,
+}
+
+/// Classify an entry's owner against the current token's user and default
+/// owner. The comparison does not touch Windows, so the policy's decision can
+/// be tested on every platform.
+#[cfg(any(windows, test))]
+fn classify_owner<T: PartialEq + ?Sized>(
+    owner: &T,
+    current_user: &T,
+    token_default_owner: &T,
+) -> OwnerClass {
+    let _ = token_default_owner;
+    if owner == current_user {
+        OwnerClass::CurrentUser
+    } else {
+        OwnerClass::Other
+    }
+}
+
 /// Environment variable naming the highest-priority zo home.
 pub const ZO_CONFIG_HOME_ENV: &str = "ZO_CONFIG_HOME";
 /// Secondary home override honored after [`ZO_CONFIG_HOME_ENV`].
@@ -923,6 +955,29 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn owner_classes_accept_the_token_user_and_the_token_default_owner_only() {
+        // An ordinary token's default owner is its own user.
+        assert_eq!(classify_owner(&"user", &"user", &"user"), OwnerClass::CurrentUser);
+        // An elevated token stamps Administrators, its default owner, on the
+        // entries it creates, while its user stays the account. Those are ours.
+        assert_eq!(
+            classify_owner(&"administrators", &"user", &"administrators"),
+            OwnerClass::TokenDefault
+        );
+        // Any other principal's entry is refused.
+        assert_eq!(
+            classify_owner(&"other", &"user", &"administrators"),
+            OwnerClass::Other
+        );
+        // An ordinary token meeting an Administrators-owned entry has no
+        // default-owner match, so that entry is refused too.
+        assert_eq!(
+            classify_owner(&"administrators", &"user", &"user"),
+            OwnerClass::Other
+        );
+    }
 
     #[test]
     fn normalize_collapses_dot_and_parent_components() {
