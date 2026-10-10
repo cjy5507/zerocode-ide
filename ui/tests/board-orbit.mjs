@@ -253,6 +253,40 @@ const countOver = (page, ms) => page.evaluate(async (wait) => {
     handles: window.__ORBIT__() };
 }, ms);
 
+/* The camera is read until what the test waits for has happened, not for a fixed time a slower runner can outrun.
+ * Each wait has a named limit: past it the caller records a failure with the values it saw, and asserts nothing more
+ * on a camera it could not wait for. */
+const ORBIT_STAND_STEP_MS = 50;
+const ORBIT_GLIDE_TIME_CONSTANTS = 25;  // a glide decays by ORBIT.camera.glideMs per time constant; twenty-five is at rest
+const ORBIT_TURN_RESUME_MAX_MS = 3_000; // a turn that has not started again in three seconds is the failure
+
+/* A released camera glides and then stands: wait for two reads that agree. The bound is read from the page's own glide
+ * constant, so a retuned glide keeps the same number of time constants. */
+const untilCameraStands = async (page, camera) => {
+  const bound = ORBIT_GLIDE_TIME_CONSTANTS * await page.evaluate(() => ORBIT.camera.glideMs);
+  let previous = await camera();
+  for (let waited = ORBIT_STAND_STEP_MS; waited <= bound; waited += ORBIT_STAND_STEP_MS) {
+    await page.evaluate((ms) => window.__ORBIT_WAIT__(ms), ORBIT_STAND_STEP_MS);
+    const now = await camera();
+    if (Math.abs(now.yaw - previous.yaw) < 1e-6 && Math.abs(now.pitch - previous.pitch) < 1e-6) {
+      return { camera: now, settled: true, waitedMs: waited };
+    }
+    previous = now;
+  }
+  return { camera: previous, settled: false, waitedMs: bound };
+};
+
+/* A hand that leaves a label turns the camera again: wait for the camera to move, which is what a person sees. */
+const untilTurnResumes = async (page, camera) => {
+  const at = await camera();
+  for (let waited = ORBIT_STAND_STEP_MS; waited <= ORBIT_TURN_RESUME_MAX_MS; waited += ORBIT_STAND_STEP_MS) {
+    await page.evaluate((ms) => window.__ORBIT_WAIT__(ms), ORBIT_STAND_STEP_MS);
+    const now = await camera();
+    if (now.yaw !== at.yaw || now.pitch !== at.pitch) return { turned: true, waitedMs: waited };
+  }
+  return { turned: false, waitedMs: ORBIT_TURN_RESUME_MAX_MS };
+};
+
 /* 판의 빈 모서리 — 라벨이 서지 않는 자리(그림은 판 가운데에 맞춰 선다). 끌기와 두 번
  * 누르기가 여기서 시작한다. */
 const stageCorner = (page) => page.evaluate(() => {
@@ -1140,13 +1174,14 @@ async function testOrbitCamera(browser, origin, ok) {
       dragged.spin === false && Math.abs((dragged.yaw - before.yaw) - 120 * turn) < 120 * turn * 0.25
         && Math.abs((dragged.pitch - before.pitch) - 80 * turn) < 1e-6,
       JSON.stringify({ before, dragged, turn }));
-    await page.evaluate(() => window.__ORBIT_WAIT__(1_500));
-    const glided = await camera();
+    const still = await untilCameraStands(page, camera);
+    const glided = still.camera;
     const settled = await countOver(page, 500);
     const stood = await camera();
     ok("let go, the camera glides and stands where it was left, asking no frames",
-      glided.yaw !== dragged.yaw && stood.yaw === glided.yaw && stood.spin === false
-        && settled.rafs === 0 && settled.frames === 0, JSON.stringify({ dragged, glided, stood, settled }));
+      still.settled && glided.yaw !== dragged.yaw && stood.yaw === glided.yaw && stood.spin === false
+        && settled.rafs === 0 && settled.frames === 0,
+      JSON.stringify({ dragged, glided, stood, settled, standsWithinMs: still.waitedMs, standsSettled: still.settled }));
 
     await page.mouse.move(corner.x, corner.y);
     await page.mouse.down();
@@ -1187,8 +1222,11 @@ async function testOrbitGates(browser, origin, ok) {
     ok("a hand on a label holds the 3D view still and asks no frames",
       held.rafs === 0 && held.frames === 0 && held.handles?.paused === true, JSON.stringify(held));
     await page.mouse.move(1, 1);
+    const cameraNow = () => page.evaluate(() => window.__ORBIT__().camera);
+    const resumed = await untilTurnResumes(page, cameraNow);
     const released = await countOver(page, 300);
-    ok("the hand leaving turns it again", released.rafs > 0, JSON.stringify(released));
+    ok("the hand leaving turns it again", resumed.turned && released.rafs > 0,
+      JSON.stringify({ released, turnsWithinMs: resumed.waitedMs, turned: resumed.turned }));
 
     await page.evaluate(async () => {
       document.querySelector('#board-view [data-board-mode="tasks"]').click();
