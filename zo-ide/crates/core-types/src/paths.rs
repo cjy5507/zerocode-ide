@@ -479,6 +479,10 @@ fn classify_owner<T: PartialEq + ?Sized>(
 #[allow(clippy::struct_excessive_bools)] // each bool is one independent flag of the open, not a state machine
 struct PrivateOpenIntent {
     write: bool,
+    /// Whether the open takes the rights to overwrite data. An append takes only
+    /// the append rights: with overwrite rights the position starts at 0 and the
+    /// write replaces the file's first bytes instead of extending the file.
+    data_write: bool,
     append: bool,
     create: bool,
     truncate: bool,
@@ -490,6 +494,7 @@ struct PrivateOpenIntent {
 fn private_open_intent(append: bool, truncate: bool) -> PrivateOpenIntent {
     PrivateOpenIntent {
         write: true,
+        data_write: true,
         append,
         create: true,
         truncate: truncate && !append,
@@ -1110,6 +1115,40 @@ mod tests {
         assert!(restrictable_directory(true, false));
         assert!(!restrictable_directory(true, true), "a junction must be refused");
         assert!(!restrictable_directory(false, false), "a file is not a directory");
+    }
+
+    #[test]
+    fn an_append_open_does_not_take_overwrite_rights() {
+        assert!(
+            !private_open_intent(true, false).data_write,
+            "an append with overwrite rights writes from offset 0"
+        );
+        assert!(private_open_intent(false, true).data_write);
+    }
+
+    /// Windows only. Two appends to one private file keep both rows in order. The
+    /// flag in the message says whether the probed default owner is the token user.
+    #[cfg(windows)]
+    #[test]
+    fn two_private_appends_keep_both_rows_in_order() {
+        use rand::Rng as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "zo-append-rows-{}-{:032x}",
+            std::process::id(),
+            rand::rng().random::<u128>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("rows.jsonl");
+        append_private_file(&path, b"first\n").unwrap();
+        append_private_file(&path, b"second\n").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let token_user = windows_permissions::utilities::current_process_sid()
+            .unwrap()
+            .to_string();
+        let default_is_user = windows_owner_only::token_default_owner().unwrap() == token_user;
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(text, "first\nsecond\n", "default_owner_is_user={default_is_user}");
     }
 
     #[test]
