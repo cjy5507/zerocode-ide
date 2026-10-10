@@ -350,10 +350,11 @@ fn a_dropped_block_read_again_inside_the_window_is_regret_and_the_rest_agree_at_
         assert_eq!(label.label, row.judged.to_string());
         assert!(label.applied);
     }
-    // Counted as marks: two compared, one agreed.
+    // Counted as marks: the labels are later observations, proxies, so none
+    // compares and all three are withheld from the agreement (t-26584, ①).
     let read = super::super::jev_summary::read_rows(&ledger);
     let agreement = zerocode_core::jev::summary::agreement_since(&read, i64::MIN);
-    assert_eq!((agreement.compared, agreement.agreed), (3, 1));
+    assert_eq!((agreement.compared, agreement.agreed, agreement.proxied), (0, 0, 3));
     assert!(
         read.iter().all(|row| zerocode_core::jev::summary::asked_something(row).is_none()),
         "a label is not a request"
