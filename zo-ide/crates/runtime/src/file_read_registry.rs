@@ -295,6 +295,33 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A rewrite of the same length in the same clock tick as the record leaves
+    /// the modified time where it was. The test puts that time back, as a coarse
+    /// clock would, so only the content can tell the two versions apart.
+    #[test]
+    fn a_same_length_rewrite_in_the_recorded_tick_is_still_modified() {
+        let mut registry = FileReadRegistry::new();
+        let path = temp_path("same-tick.txt");
+        std::fs::write(&path, "v1").expect("seed");
+        registry.record_from_disk(&path);
+        let recorded = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .expect("recorded modified time");
+
+        std::fs::write(&path, "v2").expect("same-length rewrite");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(recorded))
+            .expect("put the modified time back");
+        assert_eq!(
+            registry.check(&path),
+            FileFreshness::ModifiedSinceRead,
+            "a same-length rewrite in the recorded tick was called fresh"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn recorded_file_is_fresh_until_content_changes() {
         let mut registry = FileReadRegistry::new();

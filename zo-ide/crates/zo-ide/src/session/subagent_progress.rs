@@ -119,6 +119,7 @@ pub(crate) fn snapshot_for_session(
         epoch_seconds_now(),
         None,
         &mut ManifestCache::shared(),
+        SystemTime::now(),
     )
 }
 
@@ -223,6 +224,7 @@ impl SubagentProgressWatcher {
                         epoch_seconds_now(),
                         started_at_floor,
                         &mut cache,
+                        SystemTime::now(),
                     );
                     // Noted on the blocking pool: a roster change may rewrite
                     // the registry record, and that is a disk write nobody
@@ -491,7 +493,12 @@ impl ManifestCache {
 
     /// What a listing found: the stores' times, kept only when nothing of
     /// this session was running.
-    fn settle(&mut self, stores: Vec<(PathBuf, Option<SystemTime>)>, nothing_running: bool) {
+    fn settle(
+        &mut self,
+        stores: Vec<(PathBuf, Option<SystemTime>)>,
+        nothing_running: bool,
+        _observed_at: SystemTime,
+    ) {
         self.quiet = nothing_running.then_some(stores);
         self.skipped = 0;
     }
@@ -548,6 +555,7 @@ fn scan_registry(
     now_epoch_seconds: u64,
     started_at_floor: Option<u64>,
     cache: &mut ManifestCache,
+    observed_at: SystemTime,
 ) -> Vec<SubagentProgress> {
     let Some(stores) = cache.listing_due(registry) else {
         return Vec::new();
@@ -655,7 +663,7 @@ fn scan_registry(
         });
     }
     ManifestFiles::keep_only(files, &seen, &stores);
-    cache.settle(stores, progress.is_empty());
+    cache.settle(stores, progress.is_empty(), observed_at);
     progress.sort_by(|left, right| {
         left.started_epoch
             .cmp(&right.started_epoch)
@@ -679,6 +687,7 @@ fn scan_store(
         now_epoch_seconds,
         started_at_floor,
         &mut ManifestCache::default(),
+        SystemTime::now(),
     )
 }
 
@@ -840,7 +849,7 @@ fn epoch_seconds_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use runtime::helper_activity::{Activity, Count};
     use serde_json::json;
@@ -1314,20 +1323,22 @@ mod tests {
         let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
         let mut cache = ManifestCache::default();
 
-        let first = scan_registry(&registry, "session-a", 200, None, &mut cache);
+        let first = scan_registry(&registry, "session-a", 200, None, &mut cache, SystemTime::now());
         assert_eq!(first.len(), 1);
         assert_eq!(cache.take_reads(), 6);
 
-        let second = scan_registry(&registry, "session-a", 200, None, &mut cache);
+        let clock = SystemTime::now();
+        let second = scan_registry(&registry, "session-a", 200, None, &mut cache, clock);
         assert_eq!(second, first);
         assert_eq!(cache.take_reads(), 0, "an unchanged store was read again");
 
         write("live", "session-a", "completed");
-        assert!(scan_registry(&registry, "session-a", 200, None, &mut cache).is_empty());
+        let clock = SystemTime::now();
+        assert!(scan_registry(&registry, "session-a", 200, None, &mut cache, clock).is_empty());
         assert_eq!(cache.take_reads(), 1, "only the rewritten manifest is read");
 
         fs::remove_file(temp.path().join("finished-0.json")).expect("sweep");
-        let _ = scan_registry(&registry, "session-a", 200, None, &mut cache);
+        let _ = scan_registry(&registry, "session-a", 200, None, &mut cache, SystemTime::now());
         assert_eq!(cache.remembered(), 5, "a swept manifest stays remembered");
     }
 
@@ -1335,6 +1346,42 @@ mod tests {
     /// a manifest lands in it: the tools crate publishes every manifest by a
     /// rename, which moves the directory's time. While something runs, every
     /// scan lists — its row's clock moves each second.
+    /// A store whose last change is inside the racy window is not quiet: a change
+    /// in the same clock tick as the listing leaves the store's time where it was,
+    /// so a quiet mark would hide it. The scans run one millisecond after the
+    /// store's own modified time, which puts the store inside the window.
+    #[test]
+    fn a_store_changed_inside_the_racy_window_is_listed_again() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let finished = json!({
+            "agentId": "finished-0",
+            "parentSessionId": "session-other",
+            "name": "finished-0",
+            "status": "completed",
+            "startedAt": "100",
+        });
+        fs::write(
+            temp.path().join("finished-0.json"),
+            serde_json::to_vec(&finished).expect("manifest json"),
+        )
+        .expect("write manifest");
+        let store_time = fs::metadata(temp.path())
+            .and_then(|metadata| metadata.modified())
+            .expect("store modified time");
+        let tick = store_time + Duration::from_millis(1);
+        let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
+        let mut cache = ManifestCache::default();
+
+        assert!(scan_registry(&registry, "session-a", 200, None, &mut cache, tick).is_empty());
+        assert_eq!(cache.take_listings(), 1);
+        assert!(scan_registry(&registry, "session-a", 200, None, &mut cache, tick).is_empty());
+        assert_eq!(
+            cache.take_listings(),
+            1,
+            "a store changed inside the racy window was taken for quiet"
+        );
+    }
+
     #[test]
     fn a_quiet_store_is_not_listed_again_until_a_manifest_lands() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1359,7 +1406,10 @@ mod tests {
         }
         let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
         let mut cache = ManifestCache::default();
-        let scan = |cache: &mut ManifestCache| scan_registry(&registry, "session-a", 200, None, cache);
+        let clock = SystemTime::now();
+        let scan = |cache: &mut ManifestCache| {
+            scan_registry(&registry, "session-a", 200, None, cache, clock)
+        };
 
         assert!(scan(&mut cache).is_empty());
         assert_eq!(cache.take_listings(), 1);
@@ -1400,12 +1450,17 @@ mod tests {
         }
         let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
         let mut session_watcher = ManifestCache::shared();
-        let rows = scan_registry(&registry, "session-a", 200, None, &mut session_watcher);
+        let clock = SystemTime::now();
+        let rows = scan_registry(&registry, "session-a", 200, None, &mut session_watcher, clock);
         assert_eq!(rows.len(), 1);
         assert_eq!(session_watcher.take_reads(), 4);
 
         let mut turn_watcher = ManifestCache::shared();
-        assert_eq!(scan_registry(&registry, "session-a", 200, Some(100), &mut turn_watcher), rows);
+        let clock = SystemTime::now();
+        assert_eq!(
+            scan_registry(&registry, "session-a", 200, Some(100), &mut turn_watcher, clock),
+            rows
+        );
         assert_eq!(turn_watcher.take_reads(), 0, "a new turn's watcher read the store again");
     }
 
@@ -1439,7 +1494,8 @@ mod tests {
         }
         let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
         let mut cache = ManifestCache::default();
-        assert_eq!(scan_registry(&registry, "session-a", 200, None, &mut cache).len(), 1);
+        let clock = SystemTime::now();
+        assert_eq!(scan_registry(&registry, "session-a", 200, None, &mut cache, clock).len(), 1);
         assert_eq!(cache.remembered(), 5);
         assert_eq!(cache.bodies_kept(), 2, "finished manifests were kept whole");
     }
