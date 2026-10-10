@@ -79,6 +79,7 @@ pub mod onboarding;
 pub mod orchestration;
 pub mod pane;
 pub mod pane_claim;
+pub mod pane_transcript;
 pub mod payload;
 pub mod pick;
 pub mod plain_text;

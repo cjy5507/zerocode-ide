@@ -35686,7 +35686,7 @@ mod tests {
         assert!(
             !reading.contains("path: String")
                 && reading.contains("helper_transcript_path(&state, term, &id)")
-                && finding.contains("session.transcript_path.clone()"),
+                && finding.contains("pane_transcript::pane_transcript(state, term)"),
             "the window names the file to read, instead of the pane whose \
              agent reported one:\n{reading}\n{finding}"
         );
@@ -35695,7 +35695,7 @@ mod tests {
             !image.contains("path: String")
                 && image.contains("if !is_subagent_id(&id) {")
                 && image.contains("helper_transcript_path(&state, term, &id)")
-                && image.contains("session.transcript_path.clone()")
+                && image.contains("pane_transcript::pane_transcript(&state, term)")
                 && image.contains("payload_at(&path, &at)"),
             "the image door names a file, or reads a helper's id unchecked:\n{image}"
         );
@@ -35737,7 +35737,7 @@ mod tests {
         let pane = block_after(shipped, "fn pane_log(");
         assert!(
             !pane.contains("path: String")
-                && pane.contains("session.transcript_path.clone()")
+                && pane.contains("pane_transcript::pane_transcript(&state, term)")
                 && pane.contains("transcript_log_at(&path, after)"),
             "the pane's conversation door names a file, or reads it down another road:\n{pane}"
         );
