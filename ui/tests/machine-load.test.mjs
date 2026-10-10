@@ -33,6 +33,11 @@ test("a platform that cannot read the load is loud, so its budget is unjudgeable
   assert.equal(machineLoad.machineIsLoudNow({ platform: "darwin", load: 0 }), false);
 });
 
+test("the load alone says loud: a zero reading (what Windows reads) is not loud, so the path-time excuse is not granted there", () => {
+  assert.equal(machineLoad.loadIsHigh(0), false);
+  assert.equal(machineLoad.loadIsHigh(1e3), true);
+});
+
 test("a budget with no platform passed is judged on this machine's own platform", () => {
   assert.equal(machineLoad.frameBudgetHolds(166, 128, { load: 0, env: {} }), process.platform === "win32");
 });
