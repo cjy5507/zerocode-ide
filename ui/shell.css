@@ -33369,6 +33369,48 @@ details.task-board-section > summary {
   color: var(--signal-halt-ink);
 }
 
+/* 통과 조건과 넘김 메모 (t-26587): 과업 행의 두 줄. 조건은 번호 순으로 한 줄씩, 상태는 글자로
+ * 쓴다 — 증거 없음은 기다림의 잉크, 확인됨은 조용한 글씨 — 색만으로 가르지 않는다. */
+.board-desk-task-conditions {
+  grid-column: 2;
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+}
+
+.board-desk-condition {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+}
+
+.board-desk-condition-text {
+  overflow-wrap: anywhere;
+}
+
+.board-desk-condition-state {
+  white-space: nowrap;
+}
+
+.board-desk-condition[data-state="missing"] .board-desk-condition-state {
+  color: var(--signal-wait-ink);
+}
+
+.board-desk-task-handin {
+  grid-column: 2;
+  margin: 0;
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+  overflow-wrap: anywhere;
+}
+
 .board-desk-kept-door {
   min-height: var(--control-height-sm);
   padding: 0 var(--space-3);

@@ -12010,3 +12010,6 @@ fn refused(why: impl std::fmt::Display) -> zerocode_hookd::TeamAnswer {
 
 #[cfg(test)]
 pub(crate) mod tests;
+// t-26587: the receipts a worker_done names, and the board's condition rows.
+#[cfg(test)]
+mod evidence_tests;
