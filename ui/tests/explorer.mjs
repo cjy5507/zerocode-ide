@@ -144,11 +144,24 @@ export async function testExplorer(page, ok, primaryEvent, capture) {
     const entries = [];
     const rgb = (value) => value.match(/[\d.]+/g).slice(0, 3).map(Number);
     const luminance = (values) => values.map((v) => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+    // A theme swap moves the input's background over a 140 ms transition while its placeholder
+    // colour moves at once, so a reading taken on a fixed timer can land mid-transition when the
+    // first frame after the swap comes late (a loaded runner painting a larger sidebar read 4.4
+    // against the final 5.9). The reading is taken once the colours have held still for four frames.
+    const settled = async (read) => {
+      let last = read(), still = 0;
+      for (let frame = 0; frame < 180 && still < 4; frame++) {
+        await new Promise((done) => requestAnimationFrame(() => done()));
+        const now = read();
+        still = now === last ? still + 1 : 0;
+        last = now;
+      }
+    };
     for (const theme of ['dark', 'light']) {
       document.documentElement.dataset.theme = theme;
       setFileSearchMode('text');
-      await new Promise((done) => setTimeout(done, 250));
       const input = el('file-filter-include');
+      await settled(() => [getComputedStyle(input).color, getComputedStyle(input).backgroundColor, getComputedStyle(input, '::placeholder').color].join(' '));
       const style = getComputedStyle(input);
       const values = [luminance(rgb(style.color)), luminance(rgb(style.backgroundColor))].sort((a,b) => b-a);
       const placeholder = getComputedStyle(input, '::placeholder');
