@@ -411,6 +411,20 @@ class Syntax(LaneCase):
             "the root matrix leg (macOS and Windows) and the zo leg",
         )
 
+    def test_ci_jobs_bound_a_stalled_gate_with_headroom(self):
+        workflow = (REPO / ".github" / "workflows" / "verify.yml").read_text()
+        for job, minutes in (("verify", 135), ("zo-ide-verify", 110), ("quality-baseline", 25)):
+            with self.subTest(job=job):
+                block = re.search(
+                    r"^  " + re.escape(job) + r":\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)",
+                    workflow, re.M | re.S,
+                )
+                self.assertIsNotNone(block)
+                self.assertEqual(
+                    re.findall(r"^    timeout-minutes: (\d+)$", block[1], re.M),
+                    [str(minutes)],
+                )
+
     def test_table_is_the_one_place(self):
         out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
         self.assertEqual(out.returncode, 0, out.stderr)

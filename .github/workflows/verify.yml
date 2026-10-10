@@ -21,6 +21,8 @@ permissions:
 
 jobs:
   verify:
+    # 2026-10-01..10-10 finished jobs peaked at 87.44 min; allow 50% headroom.
+    timeout-minutes: 135
     # Windows is in the matrix from the first run rather than bolted on at the
     # end. The PRD counts it as a supported platform (F10), and the port's real
     # cost is only knowable while the surface is still small — the harness has
@@ -105,6 +107,8 @@ jobs:
   # drift, the zo-ide justfile is the one that is right. Its e2e suite is
   # mock-based and touches no network.
   zo-ide-verify:
+    # 2026-10-01..10-10 finished jobs peaked at 70.5 min; allow 50% headroom.
+    timeout-minutes: 110
     strategy:
       fail-fast: false
       matrix:
@@ -135,6 +139,8 @@ jobs:
 
   # Quality measurements are evidence, never a merge or release gate.
   quality-baseline:
+    # 2026-10-01..10-10 finished jobs peaked at 15.97 min; allow 50% headroom.
+    timeout-minutes: 25
     runs-on: macos-latest
     continue-on-error: true
     env:
