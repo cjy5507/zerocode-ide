@@ -24,8 +24,11 @@
 //! joins by its row of [`crate::vault::AGENT_SOURCES`] and by no branch here.
 //!
 //! The window asks every second, so each pane's answer is kept between asks
-//! ([`bind_remembered`]). A named file stays named while it is there, and a
-//! "no file" answer is asked again only after [`ABSENT_RECHECK`].
+//! ([`bind_remembered`]). A named file stays named while it is there. A file
+//! found through the open files or the screen is asked again after its interval
+//! ([`OPEN_FILE_RECHECK`], [`SCREEN_RECHECK`]), and a "no file" answer after a
+//! wait that doubles with each one in a row ([`ABSENT_RECHECK`] up to
+//! [`ABSENT_RECHECK_MAX`]).
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -35,9 +38,9 @@ use std::time::{Duration, Instant};
 
 use crate::vault::{self, AgentSource, IdPlacement};
 
-/// How long a "no file" answer stands before the rule asks the disk again
-/// (herdr 4 follow-up, t-42948). A file that was named stays named while it is
-/// there, so only the absent answers wait.
+/// The wait after a "no file" answer before the rule asks the disk again
+/// (herdr 4 follow-up, t-42948). Each further "no file" answer in a row doubles
+/// it, up to [`ABSENT_RECHECK_MAX`] (t-43204).
 pub const ABSENT_RECHECK: Duration = Duration::from_secs(2);
 
 /// The longest wait between two "no file" answers in a row (herdr 4 follow-up,
@@ -267,14 +270,91 @@ struct Asked {
     session_id: Option<String>,
 }
 
-/// The answer kept for one pane.
+/// The answer kept for one pane, with when the rule was last asked and how many
+/// "no file" answers came in a row since a file was last named.
 #[derive(Debug, Clone)]
-enum Kept {
-    /// A file was named. It stands while the file is there.
-    Named(PathBuf, Via),
-    /// No file was named when the rule was asked. It stands for
-    /// [`ABSENT_RECHECK`] from that instant, and no longer.
-    Unnamed(Absent, Instant),
+struct Kept {
+    answer: Result<(PathBuf, Via), Absent>,
+    asked_at: Instant,
+    /// The "no file" answers in a row, the last one included. A named file
+    /// starts again from zero.
+    misses: u32,
+}
+
+impl Kept {
+    /// How long the answer stands before the rule is asked again. `None` for a
+    /// file the agent reported or named by its session id: it stands while the
+    /// file is there.
+    fn wait(&self) -> Option<Duration> {
+        match (&self.answer, self.misses) {
+            (Ok((_, Via::Reported | Via::SessionId)), _) => None,
+            (Ok((_, Via::OpenFile)), 0) => Some(OPEN_FILE_RECHECK),
+            (Ok((_, Via::ScreenMatch)), 0) => Some(SCREEN_RECHECK),
+            _ => Some(absent_wait(self.misses)),
+        }
+    }
+
+    /// The answer, when it still stands at `now`. A named file must still be
+    /// there. The disk is asked here, outside the memo's lock.
+    fn standing(&self, now: Instant, facts: &dyn Facts) -> Option<Result<(PathBuf, Via), Absent>> {
+        let there = match &self.answer {
+            Ok((path, _)) => facts.exists(path),
+            Err(_) => true,
+        };
+        let waited = self
+            .wait()
+            .is_none_or(|wait| now.saturating_duration_since(self.asked_at) < wait);
+        (there && waited).then(|| self.answer.clone())
+    }
+}
+
+/// The wait after the `misses`-th "no file" answer in a row: [`ABSENT_RECHECK`]
+/// for the first, doubled for each one after it, up to [`ABSENT_RECHECK_MAX`].
+fn absent_wait(misses: u32) -> Duration {
+    let doubled = 2u32.saturating_pow(misses.saturating_sub(1));
+    ABSENT_RECHECK
+        .saturating_mul(doubled)
+        .min(ABSENT_RECHECK_MAX)
+}
+
+/// The kept answer's file, when it was found through the open files or the
+/// screen and is still there. A file the agent reported, or named by its id,
+/// stands only while it is there, so it is not returned here.
+fn found_and_there(kept: &Kept, facts: &dyn Facts) -> Option<(PathBuf, Via)> {
+    match &kept.answer {
+        Ok((path, via))
+            if matches!(via, Via::OpenFile | Via::ScreenMatch) && facts.exists(path) =>
+        {
+            Some((path.clone(), *via))
+        }
+        _ => None,
+    }
+}
+
+/// The answer kept after one ask of the rule. A "no file" answer does not
+/// replace a file found through the open files or the screen while that file
+/// is still there, so the window does not blink: the file stands, and the
+/// "no file" answer counts toward the next wait.
+fn after_ask(
+    previous: Option<&Kept>,
+    fresh: Result<(PathBuf, Via), Absent>,
+    now: Instant,
+    facts: &dyn Facts,
+) -> Kept {
+    match fresh {
+        Ok(hit) => Kept {
+            answer: Ok(hit),
+            asked_at: now,
+            misses: 0,
+        },
+        Err(reason) => Kept {
+            answer: previous
+                .and_then(|kept| found_and_there(kept, facts))
+                .map_or(Err(reason), Ok),
+            asked_at: now,
+            misses: previous.map_or(0, |kept| kept.misses) + 1,
+        },
+    }
 }
 
 /// The answer the window gave each pane, kept between two polls (herdr 4
@@ -298,47 +378,29 @@ impl<P: Eq + Hash> Memo<P> {
         self.panes.remove(pane);
     }
 
-    /// The kept answer for this pane, when it asked the same question and the
-    /// answer still stands. `None` means the rule must be asked.
-    fn recall(
-        &self,
-        pane: &P,
-        asked: &Asked,
-        now: Instant,
-        facts: &dyn Facts,
-    ) -> Option<Result<(PathBuf, Via), Absent>> {
-        let (held, kept) = self.panes.get(pane)?;
-        if held != asked {
-            return None;
-        }
-        match kept {
-            Kept::Named(path, via) => facts.exists(path).then(|| Ok((path.clone(), *via))),
-            Kept::Unnamed(reason, asked_at) => {
-                (now.saturating_duration_since(*asked_at) < ABSENT_RECHECK).then_some(Err(*reason))
-            }
-        }
+    /// The answer kept for this pane, when it was given to the same question.
+    /// A copy, so the caller checks the disk without holding the memo's lock.
+    fn kept(&self, pane: &P, asked: &Asked) -> Option<Kept> {
+        self.panes
+            .get(pane)
+            .filter(|(held, _)| held == asked)
+            .map(|(_, kept)| kept.clone())
     }
 
-    fn remember(
-        &mut self,
-        pane: P,
-        asked: Asked,
-        answer: &Result<(PathBuf, Via), Absent>,
-        now: Instant,
-    ) {
-        let kept = match answer {
-            Ok((path, via)) => Kept::Named(path.clone(), *via),
-            Err(reason) => Kept::Unnamed(*reason, now),
-        };
+    fn keep(&mut self, pane: P, asked: Asked, kept: Kept) {
         self.panes.insert(pane, (asked, kept));
     }
 }
 
 /// [`bind`], asked through the window's memory of each pane's answer.
 ///
-/// A named file is returned while it is there, with no listing of the store. A
-/// "no file" answer is returned until [`ABSENT_RECHECK`] has passed. The memory
-/// is keyed by the pane and by the question, so one pane never receives another
+/// A file the agent reported, or named by its session id, is returned while it
+/// is there, with no listing of the store. A file found through the open files
+/// is asked again after [`OPEN_FILE_RECHECK`], and one found through the screen
+/// after [`SCREEN_RECHECK`]; a "no file" answer in their place does not replace
+/// it while it is there. A "no file" answer waits [`ABSENT_RECHECK`], then twice
+/// as long for each one in a row, up to [`ABSENT_RECHECK_MAX`]. The memory is
+/// keyed by the pane and by the question, so one pane never receives another
 /// pane's answer, and a changed report or id is asked again at once. The lock
 /// covers the map only, never the disk.
 pub fn bind_remembered<P: Eq + Hash>(
@@ -355,12 +417,18 @@ pub fn bind_remembered<P: Eq + Hash>(
         session_id: session_id.map(str::to_string),
     };
     let now = facts.now();
-    let kept = lock(memo).recall(&pane, &asked, now, facts);
-    if let Some(answer) = kept {
+    let previous = lock(memo).kept(&pane, &asked);
+    if let Some(answer) = previous.as_ref().and_then(|kept| kept.standing(now, facts)) {
         return answer;
     }
-    let answer = bind(slug, reported, session_id, facts);
-    lock(memo).remember(pane, asked, &answer, now);
+    let kept = after_ask(
+        previous.as_ref(),
+        bind(slug, reported, session_id, facts),
+        now,
+        facts,
+    );
+    let answer = kept.answer.clone();
+    lock(memo).keep(pane, asked, kept);
     answer
 }
 
