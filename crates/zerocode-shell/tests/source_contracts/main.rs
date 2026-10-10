@@ -18547,8 +18547,10 @@ mod tests {
     /// :687000) — mechanics this window already carried. What was missing was
     /// a decision: every road ended in a tab, so a second terminal always hid
     /// the first. The product owner's call goes one step past Orca — a
-    /// terminal opened in the checkout being looked at divides the stage
-    /// ("터미널이 여러 개 열리면 화면에 맞게 분할됨") — and this gate holds
+    /// terminal a launch seats in the checkout being looked at divides the
+    /// stage ("터미널이 여러 개 열리면 화면에 맞게 분할됨"), while the
+    /// new-terminal doors open a tab, as the person asking for one by hand
+    /// expects — and this gate holds
     /// that rule's edges:
     ///
     /// - the RULE is one table: same workspace, a terminal tab on stage,
