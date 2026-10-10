@@ -8655,7 +8655,7 @@ function paintArtifactBar(drawer, row, landed) {
     { what: artifactKindWord(row), time: artifactClockWords(row.modified_ms) },
   ));
   // 만든 이: 에이전트와 모델을 한 낱말씩. 모델 이름이 에이전트 이름으로 시작하면 되풀이하지
-  // 않는다(`claude` + `claude-sonnet-5-5` → 「claude sonnet-5-5」). 온전한 값은 세부 정보에 있다.
+  // 않는다(`claude` + `claude-sonnet-5-5` → 「claude sonnet-5-5」). 온전한 값은 풍선과 세부 정보에 있다.
   const maker = bar.querySelector(".artifact-detail-maker");
   const agent = row.origin?.agent ?? "";
   const model = row.origin?.model ?? "";
@@ -8663,8 +8663,6 @@ function paintArtifactBar(drawer, row, landed) {
   writeTextContent(maker, said);
   maker.hidden = said === "";
   maker.dataset.tip = [agent ? agentName(agent) : "", model].filter(Boolean).join(" · ");
-  // 머리가 이름을 줄이면 온전한 이름은 접근성 이름에 있다 — 글은 「claude sonnet-5-5」로 줄어 보인다.
-  maker.setAttribute("aria-label", maker.dataset.tip);
   paintArtifactAttempts(bar.querySelector(".artifact-detail-attempts"), row);
 }
 

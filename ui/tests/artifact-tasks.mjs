@@ -219,7 +219,7 @@ async function openTask(page, task) {
 /* The remainders of the tab (t-43931), each read as a person sees it at the real width: a line's
  * height and how many lines stand on the list; the evidence band's reach; a task filter named once
  * in the head, its ✕ kept; the compare's captions above the pictures, with the short commit of each
- * picture; the model's whole name, or its accessible name when the head shortens it.
+ * picture; the model's whole name in the maker's tooltip, the maker a plain span with no aria-label.
  * A line is at most two lines of text: a taller line holds three. The hashes are the first seven
  * characters of the commits the fixture gives the pair. */
 const LINE_MAX_PX = 56;
@@ -491,13 +491,16 @@ async function testRemainders(page, ok) {
     return {
       shown: Boolean(node) && !node.hidden && node.getClientRects().length > 0,
       text: node?.textContent ?? "",
+      tip: node?.dataset.tip ?? "",
       truncated: node ? node.scrollWidth > node.clientWidth + 0.5 : false,
-      label: node?.getAttribute("aria-label") ?? "",
+      labelled: node ? node.hasAttribute("aria-label") : true,
     };
   });
+  // The maker is a plain span: its text keeps the model's last part whole even where the head cuts it to the eye,
+  // and the whole name is in its tooltip, so no aria-label is set on it.
   ok(
-    "the model's whole name reads in the drawer's head, or, where the head shortens it, the accessible name holds the whole name",
-    maker.shown && (maker.truncated ? maker.label.includes("claude-sonnet-5-5") : maker.text.includes("sonnet-5-5")),
+    "the model's name stands whole in the drawer's maker: its text keeps sonnet-5-5 even where the head cuts it, its tooltip holds claude-sonnet-5-5, and the maker carries no aria-label",
+    maker.shown && maker.text.includes("sonnet-5-5") && maker.tip.includes("claude-sonnet-5-5") && maker.labelled === false,
     JSON.stringify(maker),
   );
 
