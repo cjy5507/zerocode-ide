@@ -225,6 +225,60 @@ export async function testSidebarStage(browser, origin, ok) {
     );
   }
 
+  // a4. No row click at all: a plain visit of D (what a sidebar card or a project switch does) while the
+  // ledger moves D's worker to E during the visit's own reads. The visit's restore chose D's living agent
+  // before it awaited the stored layouts; it must ask again afterwards and not put a tab of E in front
+  // (run-11955 m-44711).
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    await addCheckoutB(page);
+    const scene = await page.evaluate(async ({ CHECKOUT_B, CHECKOUT_C, WORKER, stageOfSource }) => {
+      const stage = eval(`(${stageOfSource})`);
+      const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+      const A = activeWorktreePath;
+      const catalog = window.__ANSWER__.project_catalog;
+      window.__ANSWER__.project_catalog = () => catalog().map((project) => ({
+        ...project,
+        worktrees: [...project.worktrees.filter((one) => one.path !== CHECKOUT_C), {
+          path: CHECKOUT_C, branch: "wt/t-44057/c", is_main: false, active: activeWorktreePath === CHECKOUT_C,
+          is_folder: false, ownership: "zerocode-managed", external_hidden: false,
+        }],
+      }));
+      const layouts = window.__ANSWER__.pane_layouts;
+      window.__ANSWER__.pane_layouts = (ask) => (ask.worktree === CHECKOUT_C ? [] : layouts(ask));
+      await refreshWorktrees();
+      const shell = await openTermTab({ placement: "tab" });
+      for (const handler of window.__LISTENERS__["term:worker"] ?? []) {
+        handler({ payload: { parent: shell, term: WORKER, worktree: A, agent: "codex" } });
+      }
+      await settle(250);
+      // The worker stands in B. The visit of B reads B's pane file; while that read is open, the ledger
+      // moves the worker to C.
+      seatLedgerManagedTerm(WORKER, CHECKOUT_B, "codex");
+      const paneFile = window.__ANSWER__.pane_layouts;
+      let movedDuring = false;
+      window.__ANSWER__.pane_layouts = async (ask) => {
+        if (ask.worktree === CHECKOUT_B && !movedDuring) {
+          movedDuring = true;
+          seatLedgerManagedTerm(WORKER, CHECKOUT_C, "codex");
+          await settle(50);
+        }
+        return paneFile(ask);
+      };
+      await activateWorktree(CHECKOUT_B);
+      await settle(150);
+      const now = stage(WORKER);
+      const front = tabs.find((held) => held.id === activeTabId) ?? null;
+      return { movedDuring, ...now, frontWorktree: front?.worktree ?? null, frontIsWorker: front?.id === tabOfTerm(WORKER)?.id };
+    }, { CHECKOUT_B, CHECKOUT_C, WORKER, stageOfSource: stageOf.toString() });
+    ok(
+      "a plain visit whose worker the ledger moves away during the visit's own reads does not put that worker's tab in front — the restore asks again which tab still stands in the checkout",
+      scene.movedDuring && scene.active === CHECKOUT_B && scene.frontIsWorker === false &&
+        (scene.frontWorktree === null || scene.frontWorktree === CHECKOUT_B) && faults.length === 0,
+      receipt({ ...scene, faults: faults.length }),
+    );
+  }
+
   // b. After a restart: a stored shell in B, and the ledger has reseated the worker into B.
   {
     const { page, faults } = await openWindowTestPage(browser, origin);
