@@ -2621,6 +2621,17 @@ mod tests {
         );
     }
 
+    /// Windows only. Two appends through `append_owner_only` keep both rows in order.
+    #[cfg(windows)]
+    #[test]
+    fn two_secure_appends_keep_both_rows_in_order() {
+        let root = TestRoot::new();
+        append_owner_only(root.path(), Path::new("rows.jsonl"), b"first\n").unwrap();
+        append_owner_only(root.path(), Path::new("rows.jsonl"), b"second\n").unwrap();
+        let text = fs::read_to_string(root.path().join("rows.jsonl")).unwrap();
+        assert_eq!(text, "first\nsecond\n", "the rows read back as {text:?}");
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_private_state_round_trip_and_symlink_refusal() {
