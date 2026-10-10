@@ -889,6 +889,10 @@ async function redesignNoWorkPerToken(browser, origin, ok) {
         await frame();
       };
       const paints = () => ({ rail: rail?.__paints ?? null, stack: stack?.__paints ?? null });
+      // The clock stands while the paints are counted: a poll that lands inside the fifty deltas on a slower runner is a
+      // call of its own, not the token's — the rule the other clock-held tests keep (t-2412). The calls it would have
+      // answered are named in the detail, so a failure says which one came in.
+      window.__HOLD_POLLERS__ = true;
       // Up the list: the reader is away from the foot, so nothing the words do moves the rows.
       list.scrollTop = Math.floor(list.scrollHeight / 3);
       list.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true }));
@@ -905,11 +909,15 @@ async function redesignNoWorkPerToken(browser, origin, ok) {
       await frame();
       await new Promise((done) => setTimeout(done, 120));
       const atFoot = paints();
+      const parkedAt = window.__PARKED__.length;
       await feed(50);
       const following = paints();
+      const parkedFollowing = window.__PARKED__.slice(parkedAt).map((call) => call.command);
+      window.__HOLD_POLLERS__ = false;
+      window.__RELEASE_POLLERS__();
       return {
         before, away, stands: Boolean(rail) && Boolean(stack),
-        followingRail: following.rail - atFoot.rail, followingStack: following.stack - atFoot.stack,
+        followingRail: following.rail - atFoot.rail, followingStack: following.stack - atFoot.stack, parkedFollowing,
       };
     });
     ok(
