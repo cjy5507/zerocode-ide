@@ -3019,7 +3019,11 @@ impl ChatGptStream {
             self.restart_attempts += 1;
             self.record_bundle_cause(&last_error);
             let base = self.client.backoff_for_attempt(self.restart_attempts)?;
-            let delay = super::retry_backoff::spread_backoff(base);
+            // The ceiling covers this pause too: a backoff the bundle cannot afford is
+            // cut to what it has left, so the turn ends at the ceiling and not a whole
+            // backoff past it.
+            let spread = super::retry_backoff::spread_backoff(base);
+            let delay = self.bundle_remaining().map_or(spread, |left| spread.min(left));
             eprintln!(
                 "[zo] gpt stream stalled ({last_error}); restarting in {:.1}s (attempt {}/{}, request {}, session {}, at {}ms)",
                 delay.as_secs_f64(),
