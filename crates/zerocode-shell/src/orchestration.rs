@@ -10301,6 +10301,8 @@ fn carried(
          * sentence: this verb's whole contract is that a caller can tell an
          * absence from a failure.
          */
+        // RED STAGE (t-42447): the window's check is not wired yet.
+        Effect::LandCheck(_) => refused("land-check is not built yet"),
         Effect::WorktreeEvidence { checkout } => {
             let own = crate::agent_teams::teams()
                 .get(team_id)

@@ -38,6 +38,7 @@
 mod completion;
 pub mod coordinator_handover;
 pub mod delegate;
+pub mod land_check;
 pub mod landing_watch;
 mod session_history;
 pub mod task_cost;
@@ -528,6 +529,14 @@ pub enum MessageKind {
     /// the worker, not the coordinator. The road that writes it is
     /// [`Ledger::landing_watch`].
     BranchDrifted,
+    /// Nobody said this either: the LEDGER's receipt of one landing check (t-34501 stage 3) —
+    /// a task's head merged into the compare ref in a throwaway checkout, and what came of it:
+    /// a clash and its files, a clean merge and its tree, or the project's check command with
+    /// its exit code, time and log. Written only from the window's own check road, once per
+    /// check id, to the run's coordinator with the task named; never from a peer's `send`: a
+    /// body wearing this kind from a worker would be a pass nobody saw. The road that writes it
+    /// is [`Ledger::land_checked`].
+    LandCheck,
 }
 
 impl MessageKind {
@@ -554,6 +563,7 @@ impl MessageKind {
             Self::GateJudged => "gate_judged",
             Self::LandingStalled => "landing_stalled",
             Self::BranchDrifted => "branch_drifted",
+            Self::LandCheck => "land_check",
         }
     }
 
@@ -18288,6 +18298,7 @@ impl std::fmt::Debug for Decided {
             Effect::CaptureSeat { .. } => "capture-seat",
             Effect::WorktreeEvidence { .. } => "worktree-evidence",
             Effect::WorkerTranscript { .. } => "worker-transcript",
+            Effect::LandCheck(..) => "land-check",
             Effect::WorkerTerminal { .. } => "worker-terminal",
             Effect::Focus { .. } => "focus",
             Effect::Close { .. } => "close",

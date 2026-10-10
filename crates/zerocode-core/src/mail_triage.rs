@@ -233,10 +233,13 @@ pub const fn kind_rule(kind: MessageKind) -> Triage {
         | MessageKind::GateJudged
         | MessageKind::LandingStalled
         | MessageKind::BranchDrifted => Triage::CanWait,
+        // RED STAGE (t-42447): a land check is news to wait for, but the rule
+        // does not say so yet.
         MessageKind::WentQuiet
         | MessageKind::Heartbeat
         | MessageKind::Resumed
-        | MessageKind::AccountSwitched => Triage::NoNeed,
+        | MessageKind::AccountSwitched
+        | MessageKind::LandCheck => Triage::NoNeed,
     }
 }
 

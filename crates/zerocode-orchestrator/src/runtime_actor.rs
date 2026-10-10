@@ -649,6 +649,12 @@ pub enum RuntimeRequest {
         receipt: Box<zerocode_core::orchestration::GateReceipt>,
         now_ms: i64,
     },
+    /// The window ran a landing check, and the ledger writes its evidence once per check id
+    /// (t-34501 stage 3).
+    LandCheck {
+        receipt: Box<zerocode_core::orchestration::land_check::LandCheckReceipt>,
+        now_ms: i64,
+    },
     /// A pane the plan asked for never opened: the worker row it minted
     /// goes back, durably — the third host fact, and the rollback half of
     /// the effect round trip.
@@ -1093,6 +1099,13 @@ impl std::fmt::Debug for RuntimeRequest {
             Self::GateJudged { receipt, now_ms } => formatter
                 .debug_struct("RuntimeRequest::GateJudged")
                 .field("key_bytes", &receipt.key.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            // Sizes: the evidence names the person's checkout, files and command.
+            Self::LandCheck { receipt, now_ms } => formatter
+                .debug_struct("RuntimeRequest::LandCheck")
+                .field("check_bytes", &receipt.check.len())
+                .field("evidence_bytes", &receipt.evidence.len())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::FinishSleepingReseat {
@@ -2537,6 +2550,18 @@ impl RuntimeActor {
         }
     }
 
+    /// One landing check's evidence (t-34501 stage 3). Answers whether a row was written — the
+    /// same check id again writes none — and the revision.
+    pub fn land_checked(
+        &self,
+        receipt: zerocode_core::orchestration::land_check::LandCheckReceipt,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        // RED STAGE (t-42447): not built yet.
+        let _ = (receipt, now_ms);
+        Err(RuntimeError::AuthorityRejected)
+    }
+
     /// A pane the plan asked for never opened; the worker row goes back.
     pub fn seat_never_opened(
         &self,
@@ -3389,6 +3414,8 @@ impl RuntimeState {
                 self.account_switched(&receipt, now_ms)
             }
             RuntimeRequest::GateJudged { receipt, now_ms } => self.gate_judged(&receipt, now_ms),
+            // RED STAGE (t-42447): the letter road is not built yet.
+            RuntimeRequest::LandCheck { .. } => Err(RuntimeError::InvalidInput),
             RuntimeRequest::SeatNeverOpened { worker, now_ms } => {
                 self.seat_never_opened(&worker, now_ms)
             }
@@ -5938,6 +5965,9 @@ mod tests {
 
     #[cfg(unix)]
     mod outside_reader;
+
+    /// t-34501 stage 3 (t-42447): the window's evidence reaches the ledger through the actor.
+    mod land_check;
 
     /// A store that could not be opened is answered, not the end of the actor.
     ///

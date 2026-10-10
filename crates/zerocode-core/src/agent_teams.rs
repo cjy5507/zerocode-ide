@@ -373,6 +373,10 @@ pub enum Effect {
         path: String,
         ask: crate::worker_transcript::TranscriptAsk,
     },
+    /// Merge a task's head into the compare ref in a throwaway checkout and run the
+    /// project's landing check there (t-34501 stage 3). The ledger chose the task, head
+    /// and repository; git and the check process are the window's, and so is the reply.
+    LandCheck(crate::orchestration::land_check::LandCheckAsk),
     /// Move the keyboard. The ONE road by which a teammate pane takes focus.
     Focus { term: u32 },
     /// End one pane.
