@@ -151,17 +151,6 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
       };
       // The strip's own words for a terminal tab (`tabLabel`), read without painting a strip per tab.
       window.__TAB__ = (term) => tabLabel(tabs.find((one) => one.id === `tab-${term}`) ?? { kind: "gone" });
-      window.__DIAG__ = () => ({
-        rows: [...document.querySelectorAll(".wt-row")].map((node) => node.dataset.worktreePath),
-        agents: [...document.querySelectorAll(".wt-agent")].map((node) => node.dataset.term),
-        tabs: tabs.map((one) => one.id),
-        paneLedger: [...paneLedger.keys()],
-        checkoutLedger: [...checkoutLedger.keys()],
-        projects: projects.map((one) => one.path),
-        nodes: document.querySelectorAll(".wt-node").length,
-        projRows: [...document.querySelectorAll(".proj-row")].map((node) => node.dataset.projectPath),
-        closed: [...closedProjects],
-      });
     }, {
       panes: PANES, tabs: TABS, finished: FINISHED, paths: SCENE_PATHS, task: TASK, head: HEAD, nothing: NOTHING,
       // Built here, where `base` lives: the page cannot call a helper of this file.
@@ -169,7 +158,6 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
         ? base("unlanded", { ahead: 3 })
         : base("landed")])),
     });
-    if (process.env.SIDEBAR_ACTIVITY_DIAG) console.log("DIAG " + JSON.stringify(await page.evaluate(() => window.__DIAG__())));
 
     /* ① — the live rows. Counted the same way before and after: a row counts when its own
      * words (tooltip, status line or the 「지금」 line) carry what the row is waiting for or doing. */
@@ -204,9 +192,6 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
       paintStagePlaceholder();
       await window.__PAINTED__();
       const node = document.querySelector(".stage-card");
-      window.__CARD_DIAG__ = { active: activeWorktreePath, exists: node !== null, hidden: node?.hidden ?? null,
-        rows: worktreeAgentRows(path).length, work: worktreeWorkFacts(path)?.taskId ?? null,
-        landing: worktreeLandingSayFor(path)?.word ?? null };
       return node && !node.hidden ? {
         text: node.textContent,
         task: node.querySelector(".stage-card-task")?.textContent ?? "",
@@ -215,7 +200,6 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
         next: node.querySelector(".stage-card-next")?.textContent ?? "",
       } : null;
     }, FINISHED);
-    if (process.env.SIDEBAR_ACTIVITY_DIAG) console.log("CARD " + JSON.stringify(await page.evaluate(() => window.__CARD_DIAG__)));
     ok(
       "an empty worktree opens on a summary card — its task, its state, the last commit the ledger holds and the next step — and only facts the ledger or git hold are said",
       card !== null && card.task.includes(TASK) && card.state === "착지 대기" && card.commit.includes(HEAD.slice(0, 9)) &&
@@ -255,6 +239,59 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
       missing.length === 0,
       JSON.stringify({ missing }),
     );
+
+    /* The numbers the report quotes (t-44016), printed when `SIDEBAR_ACTIVITY_MEASURE=1`: how many of the scene's
+     * rows and tabs say what they do or wait for, whether the empty worktree shows its card, what one full
+     * repaint of the sidebar costs (median and 95th percentile, ms, from `performance.now()`), and how many
+     * backend calls the repaints make (none is the target: a paint reads what the window holds). */
+    if (process.env.SIDEBAR_ACTIVITY_MEASURE) {
+      const numbers = await page.evaluate((scene) => {
+        const total = () => Object.values(window.__COUNTS__).reduce((sum, count) => sum + count, 0);
+        const runs = 60;
+        const timed = (fn) => {
+          const ms = [];
+          for (let i = 0; i < runs; i += 1) {
+            const at = performance.now();
+            fn();
+            ms.push(performance.now() - at);
+          }
+          ms.sort((a, b) => a - b);
+          return { median: Number(ms[runs >> 1].toFixed(3)), p95: Number(ms[Math.floor(runs * 0.95)].toFixed(3)) };
+        };
+        // A full repaint: the shape guard is cleared so every host rebuilds its rows, as a real change would.
+        const repaint = () => {
+          for (const host of document.querySelectorAll(".wt-agents[data-worktree-path]")) {
+            delete host.dataset.said;
+            delete host.dataset.restartSource;
+          }
+          paintWorktreeAgents();
+        };
+        const liveSaying = scene.panes.filter((one) => {
+          const node = document.querySelector(`.wt-agent[data-term="${one.term}"]`);
+          return node?.getAttribute("aria-label")?.includes(one.want);
+        }).length;
+        const tabsSaying = scene.tabs.filter((one) => {
+          const tab = tabs.find((held) => held.id === `tab-${one.term}`);
+          return tab && tabLabel(tab) === one.want;
+        }).length;
+        const rowsSaying = scene.paths.filter((path) => {
+          const row = document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(path)}"]`);
+          return [row?.querySelector(".wt-task-id"), row?.querySelector(".wt-stage")]
+            .some((node) => node && !node.hidden && node.textContent !== "");
+        }).length;
+        const card = document.querySelector(".stage-card");
+        const before = total();
+        const paint = timed(repaint);
+        const idleInvokes = total() - before;
+        const cardPaint = typeof paintStageCard === "function" ? timed(() => paintStageCard()) : null;
+        return {
+          liveSaying, liveOf: scene.panes.length, tabsSaying, tabsOf: scene.tabs.length,
+          rowsSaying, rowsOf: scene.paths.length, cardShown: Boolean(card && !card.hidden),
+          paintMs: paint, cardPaintMs: cardPaint, invokesDuringRepaints: idleInvokes, repaints: runs,
+        };
+      }, { panes: PANES, tabs: TABS, paths: SCENE_PATHS });
+      console.log("MEASURE " + JSON.stringify(numbers));
+    }
 
     if (capture) {
       await page.locator("#sidebar").screenshot({ path: resolve(capture, "sidebar-activity.png"), animations: "disabled" }).catch(() => {});

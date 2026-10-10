@@ -20579,7 +20579,13 @@ fn the_ledger_row_carries_the_commit_its_attempt_handed_in() {
         .start_worker(&run, "claude", ("team", "%2"), Some(&task), 3)
         .unwrap()
         .worker;
-    let dispatch = ledger.run(&run).unwrap().worker(&worker).unwrap().dispatch.clone();
+    let dispatch = ledger
+        .run(&run)
+        .unwrap()
+        .worker(&worker)
+        .unwrap()
+        .dispatch
+        .clone();
     ledger
         .send(
             &run,
