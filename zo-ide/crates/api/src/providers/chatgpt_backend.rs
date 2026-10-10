@@ -1662,6 +1662,10 @@ pub struct ChatGptBackendClient {
     /// process env, which the rest of the suite reads without a lock.
     transport: Option<websocket::Transport>,
     held: HeldSlot,
+    /// Total wall-clock ceiling over one pre-commit restart sequence (see
+    /// [`MAX_RESTART_WALLCLOCK`]). A field so the scenario tests can scale it
+    /// with the stall window, keeping production's ratio of ceiling to window.
+    max_restart_wallclock: std::time::Duration,
 }
 
 impl ChatGptBackendClient {
@@ -1679,6 +1683,7 @@ impl ChatGptBackendClient {
             max_backoff: DEFAULT_STREAM_MAX_BACKOFF,
             transport: None,
             held: HeldSlot::default(),
+            max_restart_wallclock: MAX_RESTART_WALLCLOCK,
         }
     }
 
@@ -2821,7 +2826,7 @@ impl ChatGptStream {
             self.restart_attempts,
             self.client.max_retries,
             self.restart_window_start.map(|start| start.elapsed()),
-            MAX_RESTART_WALLCLOCK,
+            self.client.max_restart_wallclock,
         )
     }
 
@@ -2829,7 +2834,7 @@ impl ChatGptStream {
         let attempts_spent = self.restart_attempts >= self.client.max_retries;
         let wallclock_spent = self
             .restart_window_start
-            .is_some_and(|start| start.elapsed() >= MAX_RESTART_WALLCLOCK);
+            .is_some_and(|start| start.elapsed() >= self.client.max_restart_wallclock);
         if !self.committed && error.is_retryable() && (attempts_spent || wallclock_spent) {
             ApiError::RetriesExhausted {
                 attempts: self.restart_attempts.saturating_add(1),
