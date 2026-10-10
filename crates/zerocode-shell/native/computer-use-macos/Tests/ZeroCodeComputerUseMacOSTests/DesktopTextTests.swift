@@ -32,6 +32,10 @@ final class DesktopTextTests: XCTestCase {
         XCTAssertGreaterThan(hello.confidence, 0.3)
         XCTAssertTrue(CGRect(x: 1000, y: 500, width: 640, height: 160).contains(hello.frame), "\(hello.frame)")
         XCTAssertGreaterThan(hello.frame.width, 200)
+        let pin = PixelTextPin(text: hello.text, frame: hello.frame, window: CGRect(x: 1000, y: 500, width: 640, height: 160), tolerance: 2, minimumConfidence: 0.8)
+        let fresh = try recognizeText(in: image, origin: CGPoint(x: 1000, y: 500), pointsWidth: 640, pointsHeight: 160)
+        XCTAssertTrue(pin.holds(lines: fresh, window: pin.window))
+        XCTAssertFalse(pin.holds(lines: [], window: pin.window))
     }
 
     func testAQueryMatchesTheWayAPersonReads() {

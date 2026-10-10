@@ -280,6 +280,7 @@ pub(super) struct ElementFacts {
     pub name: Option<String>,
     pub help_text: Option<String>,
     pub value: Option<String>,
+    pub plain_input: Option<String>,
     pub enabled: bool,
     pub has_focus: bool,
     pub frame: Option<Rect>,
@@ -393,7 +394,8 @@ pub(super) fn describe(element: &IUIAutomationElement, browser: bool) -> Element
         let role = role_for(control_type, vertical || horizontal, browser);
         let name = cached_string(element.CachedName());
         let help_text = cached_string(element.CachedHelpText());
-        let is_password = cached_bool(element.CachedIsPassword()).unwrap_or(false);
+        let password = cached_bool(element.CachedIsPassword());
+        let is_password = password.unwrap_or(false);
 
         let mut actions = Vec::new();
         let mut value = None;
@@ -486,6 +488,20 @@ pub(super) fn describe(element: &IUIAutomationElement, browser: bool) -> Element
                 .then(|| Rect::new(f64::from(rect.left), f64::from(rect.top), width, height))
         });
         ElementFacts {
+            plain_input: (password == Some(false)
+                && !secure
+                && settable
+                && value.as_ref().is_some_and(|value| {
+                    value.len()
+                        <= zerocode_core::computer_use_protocol::render::MAX_PLAIN_INPUT_BYTES
+                })
+                && cached_bool(element.CachedIsEnabled()) == Some(true)
+                && matches!(
+                    role,
+                    "AXTextField" | "AXTextArea" | "AXComboBox" | "AXSearchField"
+                ))
+            .then(|| value.clone())
+            .flatten(),
             role,
             role_description: cached_string(element.CachedLocalizedControlType()),
             name,

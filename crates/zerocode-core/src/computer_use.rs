@@ -3637,6 +3637,8 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "no-screenshot",
             "element-index",
             "value",
+            "mark",
+            "look",
         ],
         ComputerMethod::Screenshot => &["json", "display", "region", "full-res", "viewer"],
         ComputerMethod::Zoom => &["json", "display", "region"],
@@ -3825,7 +3827,7 @@ fn validate(
         return Err("use either --window-id or --window-index, not both".into());
     }
     // A mark names its own app and window: the look it was drawn on.
-    let by_mark = method == ComputerMethod::Click && has("mark");
+    let by_mark = matches!(method, ComputerMethod::Click | ComputerMethod::SetValue) && has("mark");
     // A control named by what it reads is found on a fresh tree at the press.
     let by_query = method == ComputerMethod::Click && QUERY_CLICK_KEYS.iter().any(|key| has(key));
     // A method that offers `--pane` names its place that way instead of by an
@@ -3942,7 +3944,14 @@ fn validate(
                 .ok_or("missing required --key")?,
         )?,
         ComputerMethod::SetValue => {
-            require(params, "elementIndex", "--element-index")?;
+            if by_mark {
+                validate_mark_click(params)?;
+            } else {
+                require(params, "elementIndex", "--element-index")?;
+                if has("look") {
+                    return Err("--look requires --mark".into());
+                }
+            }
             require(params, "value", "--value")?;
         }
         ComputerMethod::MouseMove | ComputerMethod::MouseClick | ComputerMethod::MouseScroll => {
@@ -4547,6 +4556,7 @@ pub fn usage() -> String {
         "  zerocode-computer hotkey --app <app> --key <modifier+key> [--json]",
         "  zerocode-computer paste-text --app <app> (--text text|--text-stdin) [--json]",
         "  zerocode-computer set-value --app <app> --element-index N (--value text|--value-stdin) [--json]",
+        "  zerocode-computer set-value --mark N --look L (--value text|--value-stdin) [--json]",
         "",
         "  the desktop, no app named — screen points, the mouse and the keys where a person has them:",
         "  zerocode-computer screenshot [--display N] [--region x,y,w,h] [--full-res] [--viewer <id>] [--json]",
@@ -5274,6 +5284,66 @@ pub struct ComputerErrorBody<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn marked_values_require_a_look_and_cannot_override_its_target() {
+        let parse = |words: &[&str]| {
+            parse_command(
+                &words
+                    .iter()
+                    .map(|word| (*word).to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert!(
+            parse(&[
+                "set-value",
+                "--mark",
+                "1",
+                "--look",
+                "look",
+                "--value",
+                "text"
+            ])
+            .is_ok()
+        );
+        for words in [
+            vec!["set-value", "--mark", "1", "--value", "text"],
+            vec![
+                "set-value",
+                "--mark",
+                "0",
+                "--look",
+                "look",
+                "--value",
+                "text",
+            ],
+            vec![
+                "set-value",
+                "--mark",
+                "1",
+                "--look",
+                "look",
+                "--app",
+                "Editor",
+                "--value",
+                "text",
+            ],
+            vec![
+                "set-value",
+                "--mark",
+                "1",
+                "--look",
+                "look",
+                "--element-index",
+                "4",
+                "--value",
+                "text",
+            ],
+        ] {
+            assert!(parse(&words).is_err(), "{words:?}");
+        }
+    }
+
     use super::*;
 
     #[test]

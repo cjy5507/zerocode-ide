@@ -218,7 +218,17 @@ impl Provider {
     ) -> Result<ActionMetadata, ProviderError> {
         let snapshot = self.current_snapshot(params)?;
         let index = params::required_index(params, "elementIndex")?;
-        let (_, element) = snapshot.element(index)?;
+        let (record, element) = snapshot.element(index)?;
+        if params::flag(params, "plainInputOnly")
+            && (record.plain_input.is_none()
+                || record.plain_input.as_deref()
+                    != params::optional_str(params, "expectedPlainValue"))
+        {
+            return Err(ProviderError::new(
+                error_code::VALUE_NOT_SETTABLE,
+                "the marked control is no longer a readable, non-secret text field",
+            ));
+        }
         let secret = uia::cached_is_password(element);
         let expected = params::required_string_allowing_empty(params, "value")?;
         let not_settable = || {

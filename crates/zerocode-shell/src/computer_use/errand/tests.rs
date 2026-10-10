@@ -688,6 +688,19 @@ fn scrolling_and_waiting_reach_a_new_control_in_one_goal_walk() {
 }
 
 #[test]
+fn pixel_inspection_reaches_new_controls_without_counting_as_input() {
+    let mut world = FakeWorld::showing(&[1]);
+    world.navigation = &[Navigation::ReadPixels];
+    world.navigation_after = Some((1, FakeWorld::showing(&[7]).look_now()));
+    world.reached = vec![true];
+    let mut judge = FakeJudge::saying(vec![navigation_choice(Navigation::ReadPixels), pick(7)]);
+    let walked = run(Mode::On, true, &goal(2), &mut judge, &mut world);
+    assert_eq!(walked.reached, Some(true));
+    assert_eq!(walked.pressed, 1);
+    assert_eq!(world.presses, [7]);
+}
+
+#[test]
 fn an_empty_loading_screen_can_wait_and_then_finish_without_repeating_an_action() {
     let mut world = FakeWorld::showing(&[]);
     world.navigation = &[Navigation::Wait];
@@ -817,7 +830,7 @@ fn entering_several_fields_with_unchanged_labels_keeps_making_progress() {
             };
             field["value"] = json!("entered");
             self.entered.push(mark);
-            Typed::Typed {
+            Typed::Entered {
                 source: ValueSource::Reused,
                 chars: "entered".len(),
             }

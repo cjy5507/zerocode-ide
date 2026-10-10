@@ -566,6 +566,15 @@ fn look(
     let text = if params.get("ocr").and_then(Value::as_bool) == Some(true) {
         let mut read = ask.clone();
         read.insert("ocr".into(), Value::Bool(true));
+        if app {
+            read.insert(
+                "capturedFrame".into(),
+                serde_json::json!({
+                    "screenshot": frame.get("screenshot"),
+                    "window": frame.pointer("/snapshot/window"),
+                }),
+            );
+        }
         let read = super::eye::reading_with(memory, &Value::Object(read), call);
         Some(call("readText", read)?)
     } else {
@@ -706,6 +715,7 @@ fn look(
                     fingerprint,
                     placed,
                     place: &key,
+                    text: text.as_ref(),
                 };
                 let marked = super::marks::mark_look(params, &frame, &picture, before, call);
                 if let Some(png) = &marked.png {

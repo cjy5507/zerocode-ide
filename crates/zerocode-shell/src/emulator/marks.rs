@@ -130,6 +130,7 @@ pub(crate) fn faces(platform: EmulatorPlatform, tree: &Value) -> Vec<ElementFace
             EmulatorPlatform::Android => None,
         };
         result.push(ElementFace {
+            plain_input: None,
             index: at,
             role,
             name,

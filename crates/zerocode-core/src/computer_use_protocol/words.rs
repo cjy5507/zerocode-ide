@@ -81,11 +81,16 @@ impl ReadLine {
 /// it with), left to right inside a row.
 #[must_use]
 pub fn lines(answer: &Value) -> Vec<ReadLine> {
-    let mut read: Vec<ReadLine> = answer
+    let read: Vec<ReadLine> = answer
         .get("lines")
         .and_then(Value::as_array)
         .map(|lines| lines.iter().filter_map(ReadLine::from_value).collect())
         .unwrap_or_default();
+    reading_order(read)
+}
+
+#[must_use]
+pub fn reading_order(mut read: Vec<ReadLine>) -> Vec<ReadLine> {
     read.sort_by(|a, b| a.center_y().total_cmp(&b.center_y()));
     let mut rows: Vec<Vec<ReadLine>> = Vec::new();
     for line in read {

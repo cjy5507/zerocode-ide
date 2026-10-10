@@ -92,6 +92,7 @@ fn face(index: usize, name: &str, (x, y, width, height): (f64, f64, f64, f64)) -
         role: "AXButton".into(),
         name: Some(name.into()),
         placeholder: None,
+        plain_input: None,
         traits: Vec::new(),
         actions: vec!["AXPress".into()],
         x,

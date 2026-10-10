@@ -33,6 +33,8 @@ use super::ComputerUseError;
 use super::observe::Kept;
 use super::screenshot_png::RgbaImage;
 
+mod pixels;
+
 /// One marked look's numbers, kept under its id.
 #[derive(Debug, Clone)]
 pub(super) struct MarkTable {
@@ -43,6 +45,10 @@ pub(super) struct MarkTable {
     picture: u64,
     window: MarkedWindow,
     marks: Vec<PlacedMark>,
+    fields: Vec<Value>,
+    pixels:
+        std::collections::BTreeMap<usize, zerocode_core::computer_use_protocol::words::ReadLine>,
+    window_frame: Rect,
     candidates: usize,
     omitted: usize,
     frame: ShotFrame,
@@ -110,6 +116,7 @@ pub(super) struct Picture<'a> {
     pub fingerprint: u64,
     pub placed: ShotFrame,
     pub place: &'a str,
+    pub text: Option<&'a Value>,
 }
 
 /// Mark a look: the app's own window when the look named one, else the
@@ -127,11 +134,18 @@ pub(super) fn mark_look(
     // A caller that does not want the picture is not drawn one: the numbers
     // are the answer, and the badges are for a person's eyes.
     let draws = !zerocode_core::computer_use_protocol::params::flag(params, "noScreenshot");
-    if let Some(kept) = latest_at(picture) {
+    if !params.contains_key("app")
+        && let Some(kept) = latest_at(picture)
+    {
         return draw_answer(kept, picture.clean, true, draws);
     }
     let made = if params.contains_key("app") {
-        app_marks(frame_answer, picture)
+        app_marks(
+            frame_answer,
+            picture,
+            params.get("ocr") == Some(&Value::Bool(true)),
+            call,
+        )
     } else {
         match before {
             Some(Ok(before)) => desktop_marks(&before, picture, call),
@@ -144,6 +158,17 @@ pub(super) fn mark_look(
     };
     match made {
         Ok(Some(table)) => {
+            if params.contains_key("app")
+                && let Some(kept) = latest_at(picture)
+                && kept.window.pid == table.window.pid
+                && kept.window.window_id == table.window.window_id
+                && kept.window_frame == table.window_frame
+                && kept.marks == table.marks
+                && kept.fields == table.fields
+                && kept.pixels == table.pixels
+            {
+                return draw_answer(kept, picture.clean, true, draws);
+            }
             tables().keep(table.window.look_id.clone(), table.clone());
             draw_answer(table, picture.clean, false, draws)
         }
@@ -225,8 +250,12 @@ fn table(
     window: Rect,
     picture: &Picture<'_>,
     occluders: Vec<Rect>,
+    text: Option<&Value>,
 ) -> Result<MarkTable, ComputerUseError> {
-    let faces = faces_of(snapshot)?;
+    let mut faces = faces_of(snapshot)?;
+    let mut pixels = text
+        .map(|text| pixels::add_faces(&mut faces, text, window))
+        .unwrap_or_default();
     let planned = plan::plan(&MarkInput {
         faces: &faces,
         window,
@@ -234,6 +263,25 @@ fn table(
         picture: (picture.clean.width, picture.clean.height),
         occluders,
     });
+    pixels.retain(|index, _| {
+        planned
+            .marks
+            .iter()
+            .any(|mark| mark.element_index == *index)
+    });
+    let fields = planned
+        .marks
+        .iter()
+        .filter_map(|mark| {
+            let face = faces.iter().find(|face| face.index == mark.element_index)?;
+            let value = face.plain_input.as_deref()?;
+            Some(json!({
+                "mark": mark.mark, "kind": "text", "secret": false,
+                "value": value, "label": face.name, "placeholder": face.placeholder,
+                "near": face.context, "identity": [face.index, face.signature, face.context],
+            }))
+        })
+        .collect();
     Ok(MarkTable {
         place: picture.place.to_string(),
         picture: picture.fingerprint,
@@ -241,6 +289,9 @@ fn table(
         candidates: planned.candidates,
         omitted: planned.omitted,
         marks: planned.marks,
+        fields,
+        pixels,
+        window_frame: window,
         frame: picture.placed,
         made: Instant::now(),
     })
@@ -251,6 +302,8 @@ fn table(
 fn app_marks(
     frame_answer: &Value,
     picture: &Picture<'_>,
+    read_pixels: bool,
+    call: &mut dyn FnMut(&str, Value) -> Result<Value, ComputerUseError>,
 ) -> Result<Option<MarkTable>, ComputerUseError> {
     let snapshot = frame_answer.get("snapshot").ok_or_else(|| {
         ComputerUseError::new(
@@ -261,7 +314,36 @@ fn app_marks(
     let Some(window) = window_rect(snapshot) else {
         return Ok(None);
     };
-    table(snapshot, window, picture, Vec::new()).map(Some)
+    let accessible = table(snapshot, window, picture, Vec::new(), None)?;
+    if !read_pixels && !accessible.marks.is_empty() {
+        return Ok(Some(accessible));
+    }
+    let reading = if picture.text.is_none() {
+        call(
+            "readText",
+            json!({
+                "app": format!("pid:{}", accessible.window.pid),
+                "windowId": accessible.window.window_id,
+                "ocr": true,
+                "capturedFrame": {
+                    "screenshot": frame_answer.get("screenshot"),
+                    "window": snapshot.get("window"),
+                },
+            }),
+        )
+        .ok()
+    } else {
+        None
+    };
+    match picture.text.or(reading.as_ref()) {
+        Some(text)
+            if text.get("capturedFrame") == Some(&Value::Bool(true))
+                && text.get("pixelTextPins") == Some(&Value::Bool(true)) =>
+        {
+            table(snapshot, window, picture, Vec::new(), Some(text)).map(Some)
+        }
+        _ => Ok(Some(accessible)),
+    }
 }
 
 /// A desktop look: the frontmost document window on the picture that is not
@@ -315,7 +397,14 @@ fn desktop_marks(
             ),
         ));
     }
-    table(snapshot, window, picture, plan::occluders(before, target)).map(Some)
+    table(
+        snapshot,
+        window,
+        picture,
+        plan::occluders(before, target),
+        None,
+    )
+    .map(Some)
 }
 
 /// Draw a table's marks into a copy of the clean picture and answer them in
@@ -346,14 +435,32 @@ fn draw_answer(table: MarkTable, clean: &RgbaImage, same: bool, draws: bool) -> 
     } else {
         None
     };
-    let mut answer = plan::answer(
-        &plan::MarkPlan {
-            marks: table.marks.clone(),
-            candidates: table.candidates,
-            omitted: table.omitted,
-        },
-        &table.window,
-    );
+    let planned = plan::MarkPlan {
+        marks: table.marks,
+        candidates: table.candidates,
+        omitted: table.omitted,
+    };
+    let mut answer = plan::answer(&planned, &table.window);
+    answer["fields"] = Value::Array(table.fields);
+    answer["documentEpoch"] = json!([table.window.pid, table.window.window_id])
+        .to_string()
+        .into();
+    if !table.pixels.is_empty() {
+        answer["perception"] = "accessibility+ocr".into();
+        answer["text"] = json!(table.pixels.values().map(|line| json!({
+            "text": line.text, "x": line.x, "y": line.y, "width": line.width, "height": line.height,
+        })).collect::<Vec<_>>());
+        if let Some(items) = answer.get_mut("items").and_then(Value::as_array_mut) {
+            for (item, placed) in items.iter_mut().zip(&planned.marks) {
+                if table.pixels.contains_key(&placed.element_index) {
+                    item["source"] = "ocr".into();
+                    if let Some(item) = item.as_object_mut() {
+                        item.remove("elementIndex");
+                    }
+                }
+            }
+        }
+    }
     if same {
         answer["sameAsLastLook"] = Value::Bool(true);
     }
@@ -479,7 +586,8 @@ pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
         .and_then(Value::as_u64)
         .and_then(|mark| usize::try_from(mark).ok())
         .unwrap_or_default();
-    let table = tables().get(look).cloned().ok_or_else(|| {
+    let held = tables();
+    let table = held.get(look).ok_or_else(|| {
         ComputerUseError::new(
             error_code::ELEMENT_NOT_FOUND,
             format!("no marked look {look} (a newer look replaced it, or the window restarted); look again with --marks"),
@@ -503,13 +611,53 @@ pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
                 table.marks.len()
             ))
         })?;
+    if params.get("value").is_some()
+        && !table
+            .fields
+            .iter()
+            .any(|field| field.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok())
+    {
+        return Err(ComputerUseError::new(
+            error_code::VALUE_NOT_SETTABLE,
+            "the marked look did not read this control as a non-secret text field",
+        ));
+    }
     let mut helper = Map::new();
     helper.insert("app".into(), format!("pid:{}", table.window.pid).into());
     helper.insert("windowId".into(), table.window.window_id.into());
-    helper.insert("elementIndex".into(), placed.element_index.into());
     helper.insert("session".into(), MARK_SNAPSHOT_SESSION.into());
     helper.insert("noScreenshot".into(), true.into());
-    placed.pin(MARK_PIN_TOLERANCE_POINTS).write(&mut helper);
+    if let Some(line) = table.pixels.get(&placed.element_index) {
+        helper.insert(
+            "x".into(),
+            (line.x + line.width / 2.0 - table.window_frame.x).into(),
+        );
+        helper.insert(
+            "y".into(),
+            (line.y + line.height / 2.0 - table.window_frame.y).into(),
+        );
+        helper.insert("ocrPin".into(), pixels::pin(line, table.window_frame));
+        if let Some(kind) = zerocode_core::guarded::confirm_kind_of(&line.text) {
+            helper.insert("confirming".into(), kind.as_str().into());
+        }
+    } else {
+        helper.insert("elementIndex".into(), placed.element_index.into());
+        placed.pin(MARK_PIN_TOLERANCE_POINTS).write(&mut helper);
+    }
+    if let Some(value) = params.get("value") {
+        helper.insert("value".into(), value.clone());
+        helper.insert("plainInputOnly".into(), true.into());
+        helper.insert(
+            "expectedPlainValue".into(),
+            table
+                .fields
+                .iter()
+                .find(|field| field.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok())
+                .and_then(|field| field.get("value"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+    }
     for key in ["mouseButton", "clickCount", "modifiers", "confirming"] {
         if let Some(value) = params.get(key) {
             helper.insert(key.into(), value.clone());
@@ -522,7 +670,7 @@ pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
         role: placed.role.clone(),
         label: placed.label.clone(),
         element_index: placed.element_index,
-        app: table.window.app,
+        app: table.window.app.clone(),
         frame: placed.screen,
         window_id: table.window.window_id,
         local: placed.local,
@@ -545,6 +693,12 @@ pub fn click_answer(mut answer: Value, mark: &PinnedClick) -> Value {
                     "frame": { "x": mark.frame.x, "y": mark.frame.y,
                                "width": mark.frame.width, "height": mark.frame.height } }),
         );
+        if mark.params.contains_key("ocrPin")
+            && let Some(metadata) = object.get_mut("mark").and_then(Value::as_object_mut)
+        {
+            metadata.remove("elementIndex");
+            metadata.insert("source".into(), "ocr".into());
+        }
     }
     answer
 }

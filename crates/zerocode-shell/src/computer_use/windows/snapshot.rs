@@ -311,6 +311,7 @@ impl UiaTree<'_> {
             },
             link_text: None,
             value: facts.value.clone(),
+            plain_input: facts.plain_input.clone(),
             placeholder: if text_like {
                 facts.help_text.clone()
             } else {

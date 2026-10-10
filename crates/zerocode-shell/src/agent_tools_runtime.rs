@@ -3547,8 +3547,7 @@ pub(super) fn run_goal(
         flow: None,
         // A goal walk carries no document, so nothing here declares a money
         // step. What keeps it off the money is the door every press goes
-        // through — the same guard, the same confirmation — and the fact that
-        // it can only press, never type an amount or a recipient.
+        // through — the same guard, the same confirmation.
         moves_money: false,
     };
     // The judge this walk asks: one its caller built — a test's, across a
@@ -3622,6 +3621,7 @@ pub(super) fn run_goal(
             .as_mut()
             .map(|team| team as &mut dyn errand::ActionJudge),
     );
+    let until_before = world.until_before(until_before);
     errand::write_rows(
         seat,
         judge.wire(),
@@ -5355,7 +5355,11 @@ pub(super) fn answer_computer_command_with(
             == Some(true)
     {
         click_by_words(&command, asking, &mut computer_use::call)
-    } else if command.method == ComputerMethod::Click && command.params.get("mark").is_some() {
+    } else if matches!(
+        command.method,
+        ComputerMethod::Click | ComputerMethod::SetValue
+    ) && command.params.get("mark").is_some()
+    {
         click_by_mark(&command, asking, workspace)
     } else if command.method == ComputerMethod::Find {
         // A desktop find reads the way a desktop read does.
@@ -5436,6 +5440,11 @@ fn click_by_mark(
         json: command.json,
     };
     let mut press = || call_with_the_persons_last_step(&resolved, asking, &mut computer_use::call);
+    if command.method == zerocode_core::computer_use::ComputerMethod::SetValue {
+        return press()
+            .map(|answer| computer_use::marks::click_answer(answer, &mark))
+            .map_err(|error| computer_use::marks::click_refusal(error, &mark));
+    }
     computer_use::cover::press_mark_here(&mark, &mut press, asking, workspace)
         .map(|answer| computer_use::marks::click_answer(answer, &mark))
         .map_err(|error| computer_use::marks::click_refusal(error, &mark))

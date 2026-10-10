@@ -60,6 +60,7 @@ public struct SnapshotTabStripCompaction: Equatable {
 }
 
 public enum SnapshotRenderHeuristics {
+    public static let maxPlainInputBytes = 4096
     /// The role words that make an element text-like, and the words that mark
     /// a secret field — the shared Rust core's `SECURE_TEXT_PROBE_ROLE_WORDS`
     /// and `SECURE_TEXT_WORDS` (a source contract holds them equal).

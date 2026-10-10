@@ -47,9 +47,21 @@ once the surface is known. The page and desktop loops can scroll
 the observed surface and wait for an earlier action to finish, then read it
 again within the same call. A goal walk can inspect further groups of controls
 already visible when its first candidate group omits the target; this spends
-no input and stays within the same step budget. A page can also enter ordinary text through its
-configured value writer. Desktop text entry still uses a batch or the normal
-typing commands. Use the returned state to plan the next stage; a refused
+no input and stays within the same step budget. Pages and desktop windows can
+enter ordinary text through the configured value writer. Desktop entry uses
+the observed field's mark and look, checks its identity and previous value,
+and requires a verified readback; it never guesses a field from a role or
+types into a secret or unreadable field. Fields above 4096 UTF-8 bytes are
+left to the normal editing commands rather than truncated and replaced.
+Desktop walks also offer bounded Tab, Shift+Tab, Escape, Find and Select All
+actions, tied to the observed window, not model-written key strings.
+On macOS, an empty accessibility mark set automatically tries OCR on the
+same captured frame. A walk can also choose `read_pixels` when the tree
+misses content. OCR regions remain distinct from accessibility controls:
+their text and position are checked again before a guarded click. They are
+never inferred text fields. Unlabelled icons and ambiguous pixel targets
+still need the normal screenshot-analysis fallback; do not guess a target.
+Use the returned state to plan the next stage; a refused
 walk is not a reason to repeat the same goal unchanged.
 
 ```json

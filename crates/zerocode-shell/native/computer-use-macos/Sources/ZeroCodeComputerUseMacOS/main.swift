@@ -149,6 +149,7 @@ final class ElementRecord {
     let role: String
     let name: String?
     let placeholder: String?
+    let plainInput: String?
     let traits: [String]
     /// The frame cut by every clipping container above it (`MarkPin.clipRoles`),
     /// and the nearest named element above it (the row a star sits in).
@@ -164,6 +165,7 @@ final class ElementRecord {
         role: String = "",
         name: String? = nil,
         placeholder: String? = nil,
+        plainInput: String? = nil,
         traits: [String] = [],
         visible: CGRect? = nil,
         context: String? = nil
@@ -176,6 +178,7 @@ final class ElementRecord {
         self.role = role
         self.name = name
         self.placeholder = placeholder
+        self.plainInput = plainInput
         self.traits = traits
         self.visible = visible
         self.context = context
@@ -1062,6 +1065,7 @@ final class Provider {
             ]
             if let name = record.name { face["name"] = name }
             if let placeholder = record.placeholder { face["placeholder"] = placeholder }
+            if let plainInput = record.plainInput { face["plainInput"] = plainInput }
             if let context = record.context { face["context"] = context }
             if let visible = record.visible {
                 face["visible"] = ["x": visible.origin.x, "y": visible.origin.y, "width": visible.width, "height": visible.height]
@@ -1091,6 +1095,9 @@ final class Provider {
         // Why: agents expect a click into a target app to make the next
         // keyboard action safe, even when the click uses an AX action path.
         recoverWindow(snapshot.app, windowId: snapshot.windowId, windowBounds: snapshot.windowBounds)
+        if let requested = params["ocrPin"] {
+            try validatePixelTarget(requested, snapshot: snapshot)
+        }
         // A control named by what it reads is chosen on this dispatch's fresh
         // tree — after the steps before it in a batch changed that tree.
         var named = try optionalInteger(params, "elementIndex")
@@ -1248,6 +1255,10 @@ final class Provider {
         let snapshot = try currentSnapshot(params: params)
         let record = try element(snapshot, try requiredInteger(params, "elementIndex"))
         let expected = try requiredStringAllowingEmpty(params, "value")
+        if params["plainInputOnly"]?.bool == true,
+           record.plainInput == nil || record.plainInput != params["expectedPlainValue"]?.string || looksLikeSecret(record.element) {
+            throw ProviderError.coded("value_not_settable", "the marked control is no longer a readable, non-secret text field")
+        }
         guard isSettable(record.element, kAXValueAttribute as String) else {
             throw ProviderError.coded("value_not_settable", "element \(record.index) is not settable")
         }
@@ -2530,6 +2541,7 @@ private final class TreeRenderer {
             role: role,
             name: name,
             placeholder: placeholder.flatMap { $0.isEmpty ? nil : SnapshotRenderHeuristics.sanitize($0) },
+            plainInput: reader.plainInput(element, role: role),
             traits: traits,
             visible: visible,
             context: context
@@ -2724,6 +2736,25 @@ private final class AXSnapshotReader {
 
     func placeholderString(_ element: AXUIElement) -> String? {
         stringAttribute(element, "AXPlaceholderValue") ?? stringAttribute(element, "AXPlaceholder")
+    }
+
+    func plainInput(_ element: AXUIElement, role: String) -> String? {
+        guard ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"].contains(role),
+              boolAttribute(element, kAXEnabledAttribute as String) == true,
+              !isSecureTextElement(element, role: role),
+              isSettable(element, kAXValueAttribute as String)
+        else { return nil }
+        var subrole = copyAttribute(element, kAXSubroleAttribute as String)
+        let status = subrole == nil
+            ? AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
+            : AXError.success
+        guard status == .success || status == .attributeUnsupported || status == .noValue,
+              status != .success || subrole is String,
+              (subrole as? String) != kAXSecureTextFieldSubrole as String
+        else { return nil }
+        guard let value = copyAttribute(element, kAXValueAttribute as String) as? String,
+              value.utf8.prefix(SnapshotRenderHeuristics.maxPlainInputBytes + 1).count <= SnapshotRenderHeuristics.maxPlainInputBytes else { return nil }
+        return value
     }
 
     func traitsFor(_ element: AXUIElement, role: String) -> [String] {
@@ -5483,6 +5514,18 @@ extension Provider {
 
     /// Pixels to read: the named app's window, or the display (a region of it).
     private func pixelsToRead(params: [String: JSONValue]) throws -> (image: CGImage, origin: CGPoint, width: CGFloat, height: CGFloat, source: [String: Any]) {
+        if let captured = params["capturedFrame"] {
+            guard case let .object(frame) = captured,
+                  case let .object(screenshot)? = frame["screenshot"],
+                  case let .object(window)? = frame["window"],
+                  let encoded = screenshot["data"]?.string,
+                  let bytes = Data(base64Encoded: encoded),
+                  let source = CGImageSourceCreateWithData(bytes as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+            else { throw ProviderError.coded("screenshot_failed", "the captured OCR frame could not be decoded") }
+            let bounds = try pixelRect(window)
+            return (image, bounds.origin, bounds.width, bounds.height, ["capturedFrame": true, "pixelTextPins": true])
+        }
         if params["app"] != nil {
             var quiet = params
             quiet["noScreenshot"] = .bool(true)
@@ -5550,6 +5593,33 @@ extension Provider {
             "x": line.frame.minX, "y": line.frame.minY, "width": line.frame.width, "height": line.frame.height,
             "centerX": line.frame.midX, "centerY": line.frame.midY,
         ]
+    }
+
+    private func pixelRect(_ fields: [String: JSONValue]) throws -> CGRect {
+        let numbers = ["x", "y", "width", "height"].compactMap { fields[$0]?.number }
+        guard numbers.count == 4, numbers.allSatisfy({ $0.isFinite }),
+              numbers[2] > 0, numbers[3] > 0
+        else { throw ProviderError.coded("invalid_argument", "an OCR target needs a finite positive rectangle") }
+        return CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
+    }
+
+    private func validatePixelTarget(_ requested: JSONValue, snapshot: Snapshot) throws {
+        guard case let .object(fields) = requested,
+              case let .object(frame)? = fields["frame"],
+              case let .object(window)? = fields["window"],
+              let text = fields["text"]?.string,
+              let tolerance = fields["tolerance"]?.number,
+              let confidence = fields["minimumConfidence"]?.number
+        else { throw ProviderError.coded("invalid_argument", "the OCR target pin is incomplete") }
+        let pin = PixelTextPin(text: text, frame: try pixelRect(frame), window: try pixelRect(window), tolerance: tolerance, minimumConfidence: confidence)
+        guard pin.windowStands(snapshot.windowBounds),
+              screenCaptureTrusted(),
+              let captured = WindowCapture.captureImage(windowId: snapshot.windowId, bounds: snapshot.windowBounds)
+        else { throw ProviderError.coded("window_stale", "the OCR target's window cannot be verified; look again") }
+        let lines = try recognizeText(in: captured.image, origin: snapshot.windowBounds.origin, pointsWidth: snapshot.windowBounds.width, pointsHeight: snapshot.windowBounds.height)
+        guard pin.holds(lines: lines, window: snapshot.windowBounds) else {
+            throw ProviderError.coded("element_not_found", "the OCR target's words or position changed; look again")
+        }
     }
 
     func findElements(params: [String: JSONValue]) throws -> [String: Any] {

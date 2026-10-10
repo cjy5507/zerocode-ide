@@ -475,7 +475,7 @@ impl Screen {
                     .get("mark")
                     .and_then(Value::as_u64)
                     .and_then(|mark| usize::try_from(mark).ok())
-                    .and_then(|mark| selector_of(self, mark))
+                    .and_then(|mark| field_identity_of(self, mark))
                     .is_none_or(|selector| !entered.contains(&selector))
             })
             .cloned()
@@ -529,6 +529,9 @@ pub trait World {
     fn press(&mut self, mark: usize) -> bool;
     fn navigation(&self) -> &'static [Navigation] {
         &[]
+    }
+    fn check_source(&self) -> Option<&'static str> {
+        None
     }
     fn navigate(&mut self, action: Navigation) -> bool {
         let _ = action;
@@ -659,7 +662,10 @@ impl ValueSource {
 pub enum Typed {
     /// The value went in: where it came from, and how many characters it
     /// was — never what it was.
-    Typed { source: ValueSource, chars: usize },
+    Entered { source: ValueSource, chars: usize },
+    /// The write was acknowledged but its readback did not verify. Count it
+    /// as an input and stop without repeating it.
+    Unverified { source: ValueSource, chars: usize },
     /// Nothing went in, and the word for why: no field there, a pin that
     /// broke, a wire that never answered, a value the seat's rules refused.
     Refused(String),
@@ -1532,12 +1538,18 @@ fn walk(
                 }
                 if action == Navigation::Wait {
                     waiting = true;
+                } else if action == Navigation::ReadPixels {
+                    inspecting = true;
                 } else {
                     walked.pressed += 1;
                     note(&mut said, walk_words::PRESSED, json!(true));
                 }
                 pressed_so_far.push(action.word().to_string());
                 note(&mut said, "routeUse", json!(USE_APPLIED));
+                if action == Navigation::ReadPixels {
+                    walked.rows.push(row(mode, at, attempt, said));
+                    continue;
+                }
                 let reached = check_goal(world, &mut walked, &mut said);
                 walked.rows.push(row(mode, at, attempt, said));
                 if reached {
@@ -1693,18 +1705,26 @@ fn walk(
                 }),
                 || world.type_into(chosen, at.goal),
             );
+            let unverified = matches!(&went_in, Typed::Unverified { .. });
             match went_in {
-                Typed::Typed { source, chars } => {
+                Typed::Entered { source, chars } | Typed::Unverified { source, chars } => {
                     note(&mut said, TYPED, typed_note(&source, chars));
                     tried.push(chosen);
                     pressed_so_far.push(typed_line(&legend));
-                    if let Some(selector) = selector_of(seen, chosen) {
-                        entered.push(selector);
+                    if let Some(identity) = field_identity_of(seen, chosen) {
+                        entered.push(identity);
                     }
                     walked.pressed += 1;
                     walked.typed += 1;
                     note(&mut said, walk_words::PRESSED, json!(true));
                     note(&mut said, "routeUse", json!(USE_APPLIED));
+                    if unverified {
+                        note(&mut said, REASON, json!("type_unverified"));
+                        said[TYPED]["verified"] = json!(false);
+                        note(&mut said, "routeUse", json!(USE_FALLBACK));
+                        walked.rows.push(row(mode, at, attempt, said));
+                        return walked;
+                    }
                 }
                 Typed::Refused(token) => {
                     // The walk's own answer says why no value went in
@@ -1965,6 +1985,19 @@ fn admit_action(acting: bool, guard: Option<Guard>, said: &mut Value) -> bool {
 fn check_goal(world: &mut dyn World, walked: &mut Walked, said: &mut Value) -> bool {
     let reached = world.reached();
     if let Some(reached) = reached {
+        if let Some(source) = world.check_source() {
+            for row in &mut walked.rows {
+                if row.get("checkSource").and_then(Value::as_str) != Some(source)
+                    && let Some(previous) = row
+                        .as_object_mut()
+                        .and_then(|row| row.remove(walk_words::RECHECK))
+                {
+                    row["priorOracleCheck"] =
+                        json!({ "source": row.get("checkSource"), "recheck": previous });
+                }
+            }
+            note(said, "checkSource", json!(source));
+        }
         note(said, walk_words::RECHECK, json!(reached));
         walked.agreed = Some(reached);
         if reached {
@@ -2094,8 +2127,15 @@ fn legend_of(seen: &Screen, mark: usize) -> String {
         .unwrap_or_else(|| format!("mark:{mark}"))
 }
 
-/// The look's own selector for the control `mark` names on `seen`.
-fn selector_of(seen: &Screen, mark: usize) -> Option<String> {
+/// The observed identity of a field across renumbered looks.
+fn field_identity_of(seen: &Screen, mark: usize) -> Option<String> {
+    if matches!(seen.at, Seen::Desk { .. }) {
+        let field =
+            seen.snapshot.fields.iter().find(|field| {
+                field.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok()
+            })?;
+        return Some(json!([seen.snapshot.epoch, field.get("identity")?]).to_string());
+    }
     seen.items
         .iter()
         .find(|item| item.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok())

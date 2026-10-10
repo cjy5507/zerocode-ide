@@ -19,6 +19,8 @@ use std::collections::BTreeMap;
 use super::{AppIdentity, MAX_TREE_DEPTH, MAX_TREE_NODES};
 use crate::computer_use::MARK_CLIP_ROLES;
 
+pub const MAX_PLAIN_INPUT_BYTES: usize = 4096;
+
 /// Everything the renderer wants to know about one element.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenderNode {
@@ -28,6 +30,7 @@ pub struct RenderNode {
     pub label: Option<String>,
     pub link_text: Option<String>,
     pub value: Option<String>,
+    pub plain_input: Option<String>,
     pub placeholder: Option<String>,
     pub url: Option<String>,
     pub traits: Vec<String>,
@@ -714,6 +717,7 @@ pub struct RenderedRecord<H> {
     /// The line's name ([`display_name`]): a row's text, a link's words.
     pub name: Option<String>,
     pub placeholder: Option<String>,
+    pub plain_input: Option<String>,
     pub traits: Vec<String>,
     /// The frame cut by every clipping container above it
     /// (`MARK_CLIP_ROLES`); zero-sized where it is cut off whole.
@@ -852,6 +856,7 @@ impl<S: TreeSource> Walk<'_, S> {
                 role: node.role.clone(),
                 name,
                 placeholder: clean(node.placeholder.as_deref()),
+                plain_input: node.plain_input.clone(),
                 traits: node.traits.clone(),
                 visible: local_frame.map(|frame| clipped(frame, inherited.clip)),
                 context: inherited.context.clone(),

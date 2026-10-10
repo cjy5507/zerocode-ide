@@ -15,6 +15,7 @@ fn face(index: usize, role: &str, rect: (f64, f64, f64, f64)) -> ElementFace {
         role: role.to_string(),
         name: None,
         placeholder: None,
+        plain_input: None,
         traits: Vec::new(),
         actions: Vec::new(),
         x: rect.0,
@@ -1292,6 +1293,7 @@ fn element_faces_carry_what_the_walk_saw() {
         role: "AXButton".into(),
         name: Some("OK".into()),
         placeholder: None,
+        plain_input: None,
         traits: vec!["selected".into()],
         visible: frame,
         context: Some("Toolbar".into()),
@@ -1318,4 +1320,24 @@ fn element_faces_carry_what_the_walk_saw() {
     assert!(wire.get("placeholder").is_none());
     let back: ElementFace = serde_json::from_value(wire).unwrap();
     assert_eq!(back, faces[0]);
+}
+
+#[test]
+fn ordinary_field_values_are_explicit_and_preserve_empty_strings() {
+    let mut field = face(7, "AXTextField", (10.0, 20.0, 100.0, 30.0));
+    assert!(
+        serde_json::to_value(&field)
+            .unwrap()
+            .get("plainInput")
+            .is_none()
+    );
+    field.plain_input = Some(String::new());
+    assert_eq!(serde_json::to_value(&field).unwrap()["plainInput"], "");
+    let swift = include_str!(
+        "../../../../zerocode-shell/native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/SnapshotRendering.swift"
+    );
+    assert!(swift.contains(&format!(
+        "maxPlainInputBytes = {}",
+        crate::computer_use_protocol::render::MAX_PLAIN_INPUT_BYTES
+    )));
 }

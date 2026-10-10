@@ -164,10 +164,37 @@ pub enum Navigation {
     ScrollDown,
     ScrollUp,
     Wait,
+    FocusNext,
+    FocusPrevious,
+    Escape,
+    Find,
+    SelectAll,
+    ReadPixels,
 }
 
 impl Navigation {
-    pub const ALL: [Self; 3] = [Self::ScrollDown, Self::ScrollUp, Self::Wait];
+    pub const PAGE: [Self; 3] = [Self::ScrollDown, Self::ScrollUp, Self::Wait];
+    pub const DESKTOP: [Self; 8] = [
+        Self::ScrollDown,
+        Self::ScrollUp,
+        Self::Wait,
+        Self::FocusNext,
+        Self::FocusPrevious,
+        Self::Escape,
+        Self::Find,
+        Self::SelectAll,
+    ];
+    pub const ALL: [Self; 9] = [
+        Self::ScrollDown,
+        Self::ScrollUp,
+        Self::Wait,
+        Self::FocusNext,
+        Self::FocusPrevious,
+        Self::Escape,
+        Self::Find,
+        Self::SelectAll,
+        Self::ReadPixels,
+    ];
 
     #[must_use]
     pub const fn word(self) -> &'static str {
@@ -175,6 +202,12 @@ impl Navigation {
             Self::ScrollDown => "scroll_down",
             Self::ScrollUp => "scroll_up",
             Self::Wait => "wait",
+            Self::FocusNext => "focus_next",
+            Self::FocusPrevious => "focus_previous",
+            Self::Escape => "escape",
+            Self::Find => "find_in_window",
+            Self::SelectAll => "select_all",
+            Self::ReadPixels => "read_pixels",
         }
     }
 
@@ -193,6 +226,24 @@ impl Navigation {
             }
             Self::Wait => {
                 "An earlier action is still loading or updating this screen. Wait briefly and observe again without pressing or entering anything."
+            }
+            Self::FocusNext => {
+                "Move keyboard focus to the next control in the observed window with Tab."
+            }
+            Self::FocusPrevious => {
+                "Move keyboard focus to the previous control in the observed window with Shift+Tab."
+            }
+            Self::Escape => {
+                "Dismiss the active menu, popup or mode in the observed window with Escape."
+            }
+            Self::Find => {
+                "Open the observed window's find interface with its standard Find shortcut."
+            }
+            Self::SelectAll => {
+                "Select all text or items in the focused control of the observed window, without copying, deleting or submitting anything."
+            }
+            Self::ReadPixels => {
+                "Read text from this window's pixels when the accessibility controls do not describe the needed content. This adds grounded OCR text regions, not inferred buttons or text fields, without pressing anything."
             }
         }
     }
@@ -736,7 +787,7 @@ impl<'a> Beside<'a> {
 /// ([`Errand::key`]), so evidence is read per errand; what a single version
 /// buys is that neither errand's words can change while the other's evidence
 /// silently keeps its number.
-pub const SCREEN_ACTION_RUBRIC_VERSION: u32 = 7;
+pub const SCREEN_ACTION_RUBRIC_VERSION: u32 = 8;
 
 /// What a walk is asking the screen about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1381,7 +1432,8 @@ fn also_ask(questions: &mut Value, name: &str, instructions: &str, criteria: Map
 /// every entry naming it says a plain text kind ([`TEXT_FIELD_KINDS`]) and
 /// an explicit `false` for a secret, and at least one does. A field the look
 /// did not read is not one — a textbox's role alone vouches for nothing.
-fn typeable(fields: &[Value], mark: usize) -> bool {
+#[must_use]
+pub fn typeable(fields: &[Value], mark: usize) -> bool {
     let mut named = fields.iter().filter(|field| {
         field.get(snapshot::FIELD_MARK_KEY).and_then(Value::as_u64) == u64::try_from(mark).ok()
     });

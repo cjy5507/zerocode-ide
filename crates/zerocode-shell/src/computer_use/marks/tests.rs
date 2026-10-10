@@ -20,6 +20,7 @@ fn face(index: usize, role: &str, rect: (f64, f64, f64, f64), name: &str) -> Ele
         role: role.into(),
         name: Some(name.into()),
         placeholder: None,
+        plain_input: None,
         traits: Vec::new(),
         actions: vec!["AXPress".into()],
         x: rect.0,
@@ -176,6 +177,7 @@ fn shot<'a>(
         fingerprint,
         placed,
         place,
+        text: None,
     }
 }
 
@@ -226,6 +228,125 @@ fn a_mark_click_is_the_pinned_element_of_the_looks_own_window() {
     assert_eq!(unknown.code, "element_not_found");
 }
 
+#[test]
+fn a_marked_value_is_bound_to_the_observed_field_and_its_old_value() {
+    let mut field = face(3, "AXTextField", (10.0, 50.0, 130.0, 30.0), "Query");
+    field.plain_input = Some("before".into());
+    let clean = picture(320, 512, |_, _| [255, 255, 255, 255]);
+    let placed = ShotFrame::new((100.0, 50.0), 1.6).unwrap();
+    let marked = mark_look(
+        &json!({"app": "Editor"}).as_object().unwrap().clone(),
+        &app_answer(&[field], "Editor"),
+        &shot(&clean, 41, placed, "input-pin"),
+        None,
+        &mut no_helper(),
+    );
+    assert_eq!(marked.answer["fields"][0]["secret"], false);
+    let pinned =
+        pinned_click(&json!({"look": marked.answer["lookId"], "mark": 1, "value": "after"}))
+            .unwrap();
+    assert_eq!(pinned.params["plainInputOnly"], true);
+    assert_eq!(pinned.params["expectedPlainValue"], "before");
+    assert_eq!(pinned.params["value"], "after");
+    assert_eq!(pinned.params["elementIndex"], 3);
+}
+
+#[test]
+fn a_button_cannot_be_written_even_when_a_caller_supplies_a_value() {
+    let clean = picture(320, 512, |_, _| [255, 255, 255, 255]);
+    let placed = ShotFrame::new((100.0, 50.0), 1.6).unwrap();
+    let marked = mark_look(
+        &json!({"app": "Editor"}).as_object().unwrap().clone(),
+        &app_answer(&keypad(1), "Editor"),
+        &shot(&clean, 42, placed, "not-input"),
+        None,
+        &mut no_helper(),
+    );
+    assert_eq!(
+        pinned_click(&json!({"look": marked.answer["lookId"], "mark": 1, "value": "after"}))
+            .unwrap_err()
+            .code,
+        "value_not_settable"
+    );
+}
+
+#[test]
+fn identical_pixels_do_not_reuse_a_fields_changed_value() {
+    let mut field = face(3, "AXTextField", (10.0, 50.0, 130.0, 30.0), "Query");
+    field.plain_input = Some("before".into());
+    let clean = picture(320, 512, |_, _| [255, 255, 255, 255]);
+    let placed = ShotFrame::new((100.0, 50.0), 1.6).unwrap();
+    let params = json!({"app": "Editor"}).as_object().unwrap().clone();
+    let first = mark_look(
+        &params,
+        &app_answer(&[field.clone()], "Editor"),
+        &shot(&clean, 44, placed, "changed-field"),
+        None,
+        &mut no_helper(),
+    );
+    field.plain_input = Some("after".into());
+    let second = mark_look(
+        &params,
+        &app_answer(&[field], "Editor"),
+        &shot(&clean, 44, placed, "changed-field"),
+        None,
+        &mut no_helper(),
+    );
+    assert_ne!(first.answer["lookId"], second.answer["lookId"]);
+    assert_eq!(second.answer["fields"][0]["value"], "after");
+}
+
+#[test]
+fn an_older_helper_cannot_turn_unpinned_ocr_into_clickable_marks() {
+    let clean = picture(320, 512, |_, _| [255, 255, 255, 255]);
+    let placed = ShotFrame::new((100.0, 50.0), 1.6).unwrap();
+    let marked = mark_look(
+        &json!({"app": "Canvas"}).as_object().unwrap().clone(),
+        &app_answer(&[], "Canvas"),
+        &shot(&clean, 45, placed, "old-helper"),
+        None,
+        &mut |_, _| {
+            Ok(
+                json!({"lines": [{"text": "Next", "confidence": 0.99, "x": 120, "y": 100, "width": 60, "height": 20}]}),
+            )
+        },
+    );
+    assert!(marked.answer["items"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn an_empty_accessibility_tree_reads_the_already_captured_frame_and_pins_ocr_clicks() {
+    let clean = picture(320, 512, |_, _| [255, 255, 255, 255]);
+    let placed = ShotFrame::new((100.0, 50.0), 1.6).unwrap();
+    let mut called = Vec::new();
+    let marked = mark_look(
+        &json!({"app": "Canvas", "noScreenshot": true})
+            .as_object()
+            .unwrap()
+            .clone(),
+        &app_answer(&[], "Canvas"),
+        &shot(&clean, 43, placed, "ocr-pin"),
+        None,
+        &mut |method, params| {
+            called.push((method.to_string(), params));
+            Ok(
+                json!({"capturedFrame": true, "pixelTextPins": true, "lines": [{"text": "Next view", "confidence": 0.95, "x": 120, "y": 100, "width": 90, "height": 30}]}),
+            )
+        },
+    );
+    assert_eq!(called.len(), 1);
+    assert_eq!(called[0].0, "readText");
+    assert!(called[0].1.get("capturedFrame").is_some());
+    assert_eq!(marked.answer["perception"], "accessibility+ocr");
+    assert_eq!(marked.answer["items"][0]["source"], "ocr");
+    let pinned = pinned_click(&json!({"look": marked.answer["lookId"], "mark": 1})).unwrap();
+    assert_eq!(pinned.params["ocrPin"]["text"], "Next view");
+    assert_eq!(pinned.params["windowId"], 77);
+    assert_eq!(pinned.params["x"], 65.0);
+    assert!(!pinned.params.contains_key("elementIndex"));
+    assert!(marked.answer["fields"].as_array().unwrap().is_empty());
+}
+
 /// A look keeps a table's numbers only for the very pixels they were drawn
 /// on: another screen at the same place — another app come to the front —
 /// is walked again, never served an old window's badges.
@@ -246,7 +367,7 @@ fn a_look_keeps_its_numbers_only_for_the_very_same_picture() {
     );
     let again = mark_look(
         &params,
-        &json!({}),
+        &answer,
         &shot(&clean, 7, placed, "place-same"),
         None,
         &mut no_helper(),

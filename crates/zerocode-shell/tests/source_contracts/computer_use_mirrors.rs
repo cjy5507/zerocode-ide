@@ -674,6 +674,7 @@ fn the_helpers_element_faces_are_the_cores() {
         role: "AXButton".into(),
         name: Some("n".into()),
         placeholder: Some("p".into()),
+        plain_input: Some("value".into()),
         traits: vec![],
         actions: vec![],
         x: 0.0,

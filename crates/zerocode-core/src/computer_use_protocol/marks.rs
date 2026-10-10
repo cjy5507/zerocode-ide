@@ -58,6 +58,8 @@ pub struct ElementFace {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plain_input: Option<String>,
     #[serde(default)]
     pub traits: Vec<String>,
     #[serde(default)]
@@ -144,6 +146,7 @@ pub fn element_faces<H>(records: &BTreeMap<usize, RenderedRecord<H>>) -> Vec<Ele
                 role: record.role.clone(),
                 name: record.name.clone(),
                 placeholder: record.placeholder.clone(),
+                plain_input: record.plain_input.clone(),
                 traits: record.traits.clone(),
                 actions: record.actions.clone(),
                 x: frame.x,
@@ -635,7 +638,7 @@ pub fn is_mark_candidate(face: &ElementFace, window: Rect) -> bool {
             .iter()
             .any(|word| MARK_SKIP_TRAITS.contains(&word.as_str()))
         && !MARK_NEVER_ROLES.contains(&face.role.as_str())
-        && (MARK_ROLES.contains(&face.role.as_str()) || presses(face))
+        && (MARK_ROLES.contains(&face.role.as_str()) || presses(face) || face.role == "OCRText")
         && (TEXT_ENTRY_ROLES.contains(&face.role.as_str())
             || face.local().area() <= MARK_MAX_WINDOW_SHARE * window.area())
 }

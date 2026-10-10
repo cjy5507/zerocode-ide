@@ -1619,7 +1619,7 @@ fn operation_and_all_targets_share_exactly_one_wire_request() {
         json!({ "type": "choice", "choice": choice, "probabilities": probabilities, "confidence": 0.9 })
     };
     let mut action_options = vec!["mark:1", "mark:2", "type_text", "give_up", "done"];
-    action_options.extend(Navigation::ALL.into_iter().map(Navigation::word));
+    action_options.extend(Navigation::PAGE.into_iter().map(Navigation::word));
     let body = json!({
         "model": ANSWERING_VERSION,
         "answers": {
