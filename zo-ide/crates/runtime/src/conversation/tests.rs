@@ -6457,6 +6457,7 @@ fn todo_lifecycle_hooks_diff_against_the_turn_entry_baseline() {
             Ok(vec![AssistantEvent::MessageStop])
         }
     }
+    crate::test_diag("body enter");
 
     // Pinned (and the crate env lock held) for the whole body: the runtime
     // reads `ZO_TODO_STORE` on every turn, and another test's pin landing
@@ -16491,6 +16492,7 @@ fn the_plan_is_not_re_anchored_while_the_model_can_still_see_it() {
 
 #[test]
 fn todo_progress_reminder_reflects_pending_plan_and_clears_when_done() {
+    crate::test_diag("body enter");
     // The mid-turn re-anchor reminder is built from the persisted plan: present
     // (and prefix-tagged, so it refreshes without accumulating) while work is in
     // progress, and `None` once every item is complete so it is cleared.
@@ -20591,6 +20593,7 @@ fn a_surfaced_decline_ends_when_a_turn_does_not_surface_it_again() {
 /// that got through are the way out the notice names.
 #[test]
 fn words_the_classifier_lets_through_after_a_standing_decline_go_through() {
+    crate::test_diag("body enter");
     let _todo_store = HermeticTodoStore::pin();
     let cwd = temp_workspace("refusal-standing-lets-through");
     fs::create_dir_all(&cwd).expect("cwd");

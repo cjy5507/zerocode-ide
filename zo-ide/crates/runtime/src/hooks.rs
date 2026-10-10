@@ -955,6 +955,8 @@ impl CommandWithStdin {
             })
         });
 
+        #[cfg(test)]
+        crate::test_diag("hook child waiting");
         let started = Instant::now();
         let mut timed_out = false;
         let mut poll_error = None;
@@ -984,6 +986,8 @@ impl CommandWithStdin {
                 }
             }
         };
+        #[cfg(test)]
+        crate::test_diag("hook child wait over");
 
         if let Some(writer) = stdin_writer {
             let _ = writer.join();
@@ -994,6 +998,8 @@ impl CommandWithStdin {
         let stderr = stderr_reader
             .map(|reader| reader.join().unwrap_or_default())
             .unwrap_or_default();
+        #[cfg(test)]
+        crate::test_diag("hook readers joined");
 
         if let Some(error) = poll_error {
             return Err(error);
@@ -1071,6 +1077,8 @@ impl CommandWithStdin {
         // a shell hook may have already exited after spawning descendants. Always
         // terminate its group before joining drain threads, so inherited stdout,
         // stderr, or stdin descriptors cannot keep those joins blocked.
+        #[cfg(test)]
+        crate::test_diag("hook child waiting");
         let started = Instant::now();
         let mut timed_out = false;
         let mut poll_error = None;
@@ -1094,6 +1102,8 @@ impl CommandWithStdin {
                 }
             }
         };
+        #[cfg(test)]
+        crate::test_diag("hook child wait over");
 
         // Group cleanup above closes any inherited descriptors before these
         // joins, so the drain and stdin writer threads cannot wait on a
@@ -1107,6 +1117,8 @@ impl CommandWithStdin {
         let stderr = stderr_reader
             .map(|reader| reader.join().unwrap_or_default())
             .unwrap_or_default();
+        #[cfg(test)]
+        crate::test_diag("hook readers joined");
 
         if let Some(error) = poll_error {
             return Err(error);
