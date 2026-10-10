@@ -10764,6 +10764,21 @@ async function focusAgentPane(worktree, tabId, term, agent = null) {
     if (!(await activateWorktree(home))) return;
   }
   const tab = holder();
+  // Still elsewhere after the last hop: the terminal moved again. Each activation on the way chose
+  // the checkout's living agent first (`activateWorktree`), so the tab it left selected may be this
+  // worker's, now standing in another checkout. A tab whose checkout is not on the stage must not
+  // stay in front as if it were: the stage goes back to a tab of the checkout in front, and the
+  // click stops here, choosing nothing more.
+  if (tab && tab.worktree && tab.worktree !== activeWorktreePath) {
+    if (activeTabId === tab.id) {
+      const own = tabs.filter((held) => held.worktree === activeWorktreePath && held.kind !== "board" && held.id !== tab.id);
+      const back = own.find((held) => held.id === activeTabByWorktree.get(activeWorktreePath)) ?? own[own.length - 1];
+      // No tab of its own to go back to: the stage shows nothing, the same state a checkout has
+      // before its tabs are restored (`restoreActiveWorktreeTab`), rather than another checkout's tab.
+      setActiveTab(back?.id ?? null);
+    }
+    return;
+  }
   if (!tab) {
     // 떼어 둔 에이전트는 판이 없다. 그 줄을 누르는 것이 곧 다시 붙는 것이고,
     // 화면은 백엔드에 그대로 있으므로 새로 띄우는 것이 아니라 돌려받는 것이다.
