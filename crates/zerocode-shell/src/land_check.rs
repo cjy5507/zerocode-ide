@@ -110,6 +110,9 @@ pub(crate) struct Policy {
     pub(crate) timeout: Duration,
     pub(crate) pinned_base: Option<String>,
     pub(crate) shell: PathBuf,
+    /// The budget of each git call the check makes in its folder: [`GIT_BUDGET`], or the shorter
+    /// one a test injects to cut a step short.
+    pub(crate) git_budget: Duration,
 }
 
 impl Policy {
@@ -133,6 +136,7 @@ impl Policy {
                 .filter(|pin| !pin.is_empty())
                 .map(str::to_string),
             shell: default_shell(),
+            git_budget: GIT_BUDGET,
         }
     }
 }
@@ -402,7 +406,8 @@ fn finish(
 /// tree's id. A clash names its files; any other git refusal is the error.
 fn merge_in_folder(host: &Host, job: &Job) -> Merged {
     let folder = job.folder.display().to_string();
-    if let Err(why) = git(
+    let budget = job.policy.git_budget;
+    if let Err(why) = git_within(
         host,
         &job.repo,
         &[
@@ -412,18 +417,21 @@ fn merge_in_folder(host: &Host, job: &Job) -> Merged {
             folder.as_str(),
             job.base_oid.as_str(),
         ],
+        budget,
     ) {
         return Merged::Broken(format!("the throwaway checkout could not be made: {why}"));
     }
-    if let Err(why) = git(
+    if let Err(why) = git_within(
         host,
         &job.folder,
         &["merge", "--no-commit", "--no-ff", job.head.as_str()],
+        budget,
     ) {
-        let clashing = git(
+        let clashing = git_within(
             host,
             &job.folder,
             &["diff", "--name-only", "--diff-filter=U"],
+            budget,
         )
         .unwrap_or_default();
         let files: Vec<String> = clashing
@@ -438,7 +446,7 @@ fn merge_in_folder(host: &Host, job: &Job) -> Merged {
             Merged::Clash(files)
         };
     }
-    match git(host, &job.folder, &["write-tree"]) {
+    match git_within(host, &job.folder, &["write-tree"], budget) {
         Ok(tree) => Merged::Clean(tree),
         Err(why) => Merged::Broken(format!("the merged tree could not be named: {why}")),
     }
@@ -782,12 +790,17 @@ fn sweep(store: &Store, now_ms: i64, sink: &Sink) {
 /// The git calls of this module, each with the same budget. Its text is the first line's trimmed
 /// output, or git's refusal.
 fn git(host: &Host, dir: &Path, args: &[&str]) -> Result<String, String> {
-    match host.vcs().try_within(dir, args, GIT_BUDGET) {
+    git_within(host, dir, args, GIT_BUDGET)
+}
+
+/// One git call under the budget given: the steps in a check's folder take the policy's.
+fn git_within(host: &Host, dir: &Path, args: &[&str], budget: Duration) -> Result<String, String> {
+    match host.vcs().try_within(dir, args, budget) {
         Within::Said(said) => Ok(said.trim().to_string()),
         Within::Refused(why) => Err(why.trim().to_string()),
         Within::Silent => Err(format!(
-            "git did not answer within {} s",
-            GIT_BUDGET.as_secs()
+            "git did not answer within {} ms",
+            budget.as_millis()
         )),
     }
 }

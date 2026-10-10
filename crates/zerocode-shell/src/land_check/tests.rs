@@ -36,7 +36,8 @@ fn policy(command: Option<&str>) -> Policy {
         command: command.map(str::to_string),
         timeout: Duration::from_secs(30),
         pinned_base: None,
-        shell: PathBuf::from("/bin/bash"),
+        shell: default_shell(),
+        git_budget: GIT_BUDGET,
     }
 }
 
@@ -253,6 +254,79 @@ fn a_failing_command_is_failed_with_its_exit_code() {
     let (_, evidence) = letter(&rx);
     assert_eq!(evidence["state"], "failed", "{evidence}");
     assert_eq!(evidence["rc"], 3, "{evidence}");
+    fixture.assert_left_nothing(&store);
+}
+
+/// A command that fails without `exit`: the shell's own end carries its last command's code on
+/// every platform's shell, so a failed check is never written `passed` for want of an `exit`.
+#[test]
+fn a_command_that_fails_without_exit_is_failed_with_its_exit_code() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    let (sink, rx) = sink();
+    let _ = said(run(
+        &store,
+        &|_| {
+            policy(Some(
+                "git rev-parse --verify --quiet refs/heads/no-such-branch",
+            ))
+        },
+        &fixture.merge(&fixture.feature, false),
+        1_000,
+        &sink,
+    ));
+    let (_, evidence) = letter(&rx);
+    assert_eq!(evidence["state"], "failed", "{evidence}");
+    assert_eq!(evidence["rc"], 1, "{evidence}");
+    fixture.assert_left_nothing(&store);
+}
+
+/// A fill cut past its git budget leaves nothing: the git that writes the folder is the window's
+/// own child, so the cut stops the writing, and the entry it leaves is one `remove --force` takes
+/// down. (One `worktree add` filled the folder through a grandchild `reset --hard` that outlived
+/// the cut and kept the entry locked as "initializing" — `remove --force` refused it and `prune`
+/// skipped it.)
+#[cfg(unix)]
+#[test]
+fn a_fill_cut_past_its_git_budget_leaves_no_entry_and_no_folder() {
+    let fixture = Fixture::new();
+    // Every text file passes a smudge filter that sleeps: filling main's two takes seconds, and
+    // the budget below is a fraction of one.
+    git(
+        &fixture.repo,
+        &["config", "filter.slow.smudge", "sleep 3; cat"],
+    );
+    git(&fixture.repo, &["config", "filter.slow.clean", "cat"]);
+    git(&fixture.repo, &["config", "filter.slow.required", "true"]);
+    commit_file(
+        &fixture.repo,
+        ".gitattributes",
+        "*.txt filter=slow\n",
+        "slow filter",
+    );
+    let store = fixture.store();
+    let (sink, rx) = sink();
+    let short = Policy {
+        git_budget: Duration::from_millis(300),
+        ..policy(None)
+    };
+    let answer = said(run(
+        &store,
+        &|_| short.clone(),
+        &fixture.merge(&fixture.feature, false),
+        1_000,
+        &sink,
+    ));
+    assert_eq!(answer["state"], "error", "{answer}");
+    let (_, evidence) = letter(&rx);
+    assert_eq!(evidence["state"], "error", "{evidence}");
+    assert!(
+        evidence["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("did not answer"),
+        "{evidence}"
+    );
     fixture.assert_left_nothing(&store);
 }
 
@@ -688,6 +762,7 @@ fn the_stored_words_name_the_command_its_limit_and_its_pin() {
     assert_eq!(none.command, None);
     assert_eq!(none.timeout, DEFAULT_TIMEOUT);
     assert_eq!(none.pinned_base, None);
+    assert_eq!(none.git_budget, GIT_BUDGET);
 
     let blank = Policy::from_settings(Some("   "), Some(0), Some(" "));
     assert_eq!(blank.command, None);
