@@ -54,6 +54,9 @@ export function standTasks(page) {
     const gone = "/tmp/zerocode-window-test/wt-gone";
     const landedCommit = "89abcdef0123456789abcdef0123456789abcdef";
     const strangerCommit = "fedcba9876543210fedcba9876543210fedcba98";
+    // The two pictures of the before-and-after pair were taken at these commits (t-43931).
+    const beforeCommit = "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d";
+    const afterCommit = "9f8e7d6c5b4a39281706f5e4d3c2b1a098f7e6d5";
     const parts = (held = {}) => ({ reports: 0, pages: 0, files: 0, pictures: 0, logs: 0, other: 0, missing: 0, ...held });
     const origin = (task, worker, more = {}) => ({
       run: "run-9", task, worker, agent: "claude", model: "claude-sonnet-5-5", work_summary: "큐 닫기", ...more,
@@ -64,8 +67,8 @@ export function standTasks(page) {
       tags: fields.tags ?? [], preview: { kind: "none" }, source: fields.source ?? "worker_evidence",
     });
     const bundleRows = {
-      "b-before": file("b-before", "screenshot", "drawer-before.png", 1.2),
-      "b-after": file("b-after", "screenshot", "drawer-after.png", 1.1),
+      "b-before": file("b-before", "screenshot", "drawer-before.png", 1.2, { origin: origin("t-501", "w-12", { worktree: kept, commit: beforeCommit }) }),
+      "b-after": file("b-after", "screenshot", "drawer-after.png", 1.1, { origin: origin("t-501", "w-12", { worktree: kept, commit: afterCommit }) }),
       "b-single": file("b-single", "screenshot", "overview.png", 1.3),
       "b-red-log": file("b-red-log", "evidence", "red-rust.log", 1.5),
       "b-green-log": file("b-green-log", "evidence", "green-rust.log", 1.4),
@@ -204,6 +207,149 @@ async function openTask(page, task) {
     await window.__PAINTED__();
     await new Promise((done) => setTimeout(done, 300));
   }, task);
+}
+
+/* The remainders of the tab (t-43931), each read as a person sees it at the real width: a line's
+ * height and how many lines stand on the list; the evidence band's reach; a task filter named once
+ * in the head, its ✕ kept; the compare's captions above the pictures, with the short commit of each
+ * picture; the model's whole name, or its accessible name when the head shortens it.
+ * A line is at most two lines of text: a taller line holds three. The hashes are the first seven
+ * characters of the commits the fixture gives the pair. */
+const LINE_MAX_PX = 56;
+const BEFORE_HASH = "1a2b3c4";
+const AFTER_HASH = "9f8e7d6";
+
+async function testRemainders(page, ok) {
+  await openFresh(page);
+  const lines = await page.evaluate(() => {
+    const view = artifactsView();
+    const frame = view?.querySelector(".artifacts-tasks")?.getBoundingClientRect() ?? { top: 0, bottom: 0, height: 0 };
+    const onList = [...(view?.querySelectorAll(".artifact-task") ?? [])]
+      .map((one) => ({ one, box: one.getBoundingClientRect() }))
+      .filter(({ box }) => box.height > 0 && box.top >= frame.top - 0.5 && box.bottom <= frame.bottom + 0.5);
+    const kept = onList.every(({ one }) => [".artifact-task-title", ".artifact-task-when", ".artifact-task-parts"]
+      .every((part) => (one.querySelector(part)?.textContent ?? "") !== ""));
+    return { height: Math.round(onList[0]?.box.height ?? 0), onList: onList.length, listHeight: Math.round(frame.height), kept };
+  });
+  ok(
+    `a line of a task is at most ${LINE_MAX_PX} px tall, the list at 1440×900 holds as many whole lines as fit at that height, and every line keeps its title, its time and its counts`,
+    lines.height > 0 && lines.height <= LINE_MAX_PX && lines.onList >= Math.floor(lines.listHeight / LINE_MAX_PX) && lines.kept,
+    JSON.stringify(lines),
+  );
+
+  await openTask(page, "t-501");
+  const band = await page.evaluate(async () => {
+    const view = artifactsView();
+    const strip = view?.querySelector(".artifact-bundle-cards") ?? null;
+    const frame = strip?.getBoundingClientRect() ?? { top: 0, bottom: 0, left: 0, right: 0 };
+    const cards = [...(strip?.querySelectorAll(".artifact-evidence") ?? [])];
+    const past = cards.filter((one) => {
+      const box = one.getBoundingClientRect();
+      return box.left < frame.left - 0.5 || box.right > frame.right + 0.5;
+    }).length;
+    const last = cards.at(-1) ?? null;
+    last?.focus({ preventScroll: false });
+    await new Promise((done) => setTimeout(done, 100));
+    const at = last?.getBoundingClientRect();
+    const reached = Boolean(at) && at.left >= frame.left - 0.5 && at.right <= frame.right + 0.5
+      && at.top >= frame.top - 0.5 && at.bottom <= frame.bottom + 0.5;
+    return { cards: cards.length, past, overflowX: Math.round((strip?.scrollWidth ?? 0) - (strip?.clientWidth ?? 0)), reached };
+  });
+  ok(
+    "the evidence of a task reaches its last card without a sideways run: no card runs past the band's edge, the band has no sideways overflow, and the keyboard reaches the last card",
+    band.cards >= 5 && band.past === 0 && band.overflowX <= 0 && band.reached,
+    JSON.stringify(band),
+  );
+
+  await openFresh(page);
+  await page.evaluate(async () => {
+    artifactsView().querySelector('[data-artifact-tab="reports"]')?.click();
+    await new Promise((done) => setTimeout(done, 250));
+  });
+  const named = await page.evaluate(async () => {
+    const view = artifactsView();
+    const pick = view.querySelector('[data-artifact-pick="task"]');
+    pick.value = "t-501";
+    pick.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((done) => setTimeout(done, 300));
+    const shown = (node) => Boolean(node) && !node.closest("[hidden]") && node.getClientRects().length > 0;
+    const chip = view.querySelector(".artifacts-origin-chip");
+    const words = [];
+    if (shown(pick) && pick.selectedOptions[0]?.textContent.includes("t-501")) words.push("picker");
+    if (shown(chip) && chip.textContent.includes("t-501")) words.push("chip");
+    return { words, clear: shown(view.querySelector(".artifacts-origin-clear")) };
+  });
+  ok(
+    "a task filter names its task once in the head, and its ✕ stays to clear it",
+    named.words.length === 1 && named.clear,
+    JSON.stringify(named),
+  );
+
+  await openFresh(page);
+  await openTask(page, "t-501");
+  const captions = await page.evaluate(async () => {
+    const view = artifactsView();
+    view.querySelector(".artifact-bundle-cards button[data-before]")?.click();
+    await new Promise((done) => setTimeout(done, 400));
+    const compare = view.querySelector(".artifact-compare");
+    const frame = compare?.querySelector(".artifact-compare-stage")?.getBoundingClientRect() ?? null;
+    return [...(compare?.querySelectorAll(".artifact-compare-label") ?? [])].map((one) => ({
+      text: one.textContent.replace(/\s+/g, " ").trim(),
+      above: Boolean(frame) && one.getBoundingClientRect().bottom <= frame.top + 0.5,
+    }));
+  });
+  ok(
+    `the compare names each picture above it, outside the picture, with the short commit of its pair: 「전 · ${BEFORE_HASH}」 and 「후 · ${AFTER_HASH}」`,
+    captions.length === 2 && captions.every((one) => one.above)
+      && captions.some((one) => one.text === `전 · ${BEFORE_HASH}`) && captions.some((one) => one.text === `후 · ${AFTER_HASH}`),
+    JSON.stringify(captions),
+  );
+
+  await openFresh(page);
+  await page.evaluate(async () => {
+    artifactsView().querySelector('[data-artifact-tab="reports"]')?.click();
+    await new Promise((done) => setTimeout(done, 250));
+  });
+  const maker = await page.evaluate(async () => {
+    const view = artifactsView();
+    view.querySelector('.artifact-card[data-id="r-final"]')?.click();
+    await new Promise((done) => setTimeout(done, 300));
+    const node = view.querySelector(".artifact-detail-maker");
+    return {
+      shown: Boolean(node) && !node.hidden && node.getClientRects().length > 0,
+      text: node?.textContent ?? "",
+      truncated: node ? node.scrollWidth > node.clientWidth + 0.5 : false,
+      label: node?.getAttribute("aria-label") ?? "",
+    };
+  });
+  ok(
+    "the model's whole name reads in the drawer's head, or, where the head shortens it, the accessible name holds the whole name",
+    maker.shown && (maker.truncated ? maker.label.includes("claude-sonnet-5-5") : maker.text.includes("sonnet-5-5")),
+    JSON.stringify(maker),
+  );
+
+  await openFresh(page);
+  await page.evaluate(async () => {
+    artifactsView().querySelector('[data-artifact-tab="evidence"]')?.click();
+    await new Promise((done) => setTimeout(done, 250));
+  });
+  const faces = await page.evaluate(() => {
+    const view = artifactsView();
+    const plainHeight = parseFloat(getComputedStyle(view).getPropertyValue("--artifact-card-plain-height"));
+    const cards = [...(view?.querySelectorAll(".artifact-card") ?? [])]
+      .filter((one) => one.getClientRects().length > 0 && ["screenshot", "evidence"].includes(one.dataset.kind));
+    return {
+      plainHeight,
+      count: cards.length,
+      heights: cards.slice(0, 4).map((one) => Math.round(one.getBoundingClientRect().height)),
+      emptyFaces: cards.filter((one) => one.querySelector(".artifact-card-face")?.getClientRects().length > 0).length,
+    };
+  });
+  ok(
+    "an evidence card that has no picture to show stands at the plain card's height, with no empty face beneath its name",
+    faces.count > 0 && faces.heights.every((height) => height <= faces.plainHeight + 2) && faces.emptyFaces === 0,
+    JSON.stringify(faces),
+  );
 }
 
 export async function testArtifactTasks(browser, origin, ok) {
@@ -919,6 +1065,7 @@ export async function testArtifactTasks(browser, origin, ok) {
       catalogs.length === 0,
       JSON.stringify(catalogs.slice(0, 12)) + (catalogs.length > 12 ? ` … ${catalogs.length}` : ""),
     );
+    await testRemainders(page, ok);
     ok("the window raised no errors", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();
