@@ -216,6 +216,40 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
       JSON.stringify({ tabs, agentRowOfTag }),
     );
 
+    /* ④b — a tab that was painted before its ledger row arrived: the strip must repaint on the task's
+     * arrival alone, with no hook, no term:title and no manual render in between (run-11955 m-44624).
+     * The tab is a real one of the checkout in front, opened the way a person opens a terminal, so the
+     * strip paints it (`paneTabs` keeps only the active checkout's tabs) and the DOM is read, not tabLabel. */
+    const lateTab = await page.evaluate(async () => {
+      const term = await openTermTab({ placement: "tab" });
+      const tab = tabOfTerm(term);
+      const folder = tab?.worktree ? tab.worktree.split("/").filter(Boolean).pop() : null;
+      paneAgents.set(term, "codex");
+      for (const handler of window.__LISTENERS__["term:title"] ?? []) handler({ payload: { term, title: "<send_user_message>" } });
+      renderTabs();
+      await window.__PAINTED__();
+      const node = () => document.querySelector(`.tab[data-tab="${tab?.id}"] .tab-label`);
+      const before = node()?.textContent ?? null;
+      // The ledger row arrives after the strip was painted: the task is the only news.
+      window.__LEDGER__.push({
+        run: "run-1", worker: `w-${term}`, agent: "codex", state: "working", ledger: "active", hearing: "pending",
+        hearing_at: 1, checkout: tab?.worktree ?? "", task: "늦게 온 과업", task_id: "t-9305", reported: false, failed: false,
+        settled: false, session: null, at: 1, review: { verified: false, merged: false, deployed: false, written: false, author: null },
+        review_since_ms: null, closed: null, asking: false, wall: null, model: null, effort: null, handed_in: null, term, kept: null,
+      });
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 10 });
+      for (let tries = 0; tries < 80 && !paneLedger.has(term); tries += 1) await new Promise((done) => setTimeout(done, 25));
+      await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, 200));
+      await window.__PAINTED__();
+      return { term, folder, before, after: node()?.textContent ?? null, seated: paneLedger.has(term) };
+    });
+    ok(
+      "a tab painted before its ledger row arrived takes the task's name when the row comes — the strip repaints on the task alone, with no hook, title or manual render in between",
+      lateTab.seated && lateTab.before !== null && lateTab.before === lateTab.folder && lateTab.after === "늦게 온 과업",
+      JSON.stringify(lateTab),
+    );
+
     /* ⑤ — the new sentences in every catalogue. */
     const langs = await page.evaluate(async () => {
       const KEYS = {
