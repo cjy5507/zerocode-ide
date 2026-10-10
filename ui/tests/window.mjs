@@ -80,6 +80,7 @@ import { testSftpAndTeam } from "./sftp.mjs";
 import { testPaneFollowsCwd } from "./pane-follow.mjs";
 import { testZoRestore } from "./zo-restore.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
+import { testSidebarStage } from "./sidebar-stage.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
 import { testExplain } from "./explain.mjs";
@@ -95,6 +96,7 @@ import { testWorkers } from "./workers.mjs";
 import { testSidebarAgents } from "./sidebar-agents.mjs";
 import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
+import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
@@ -304,6 +306,7 @@ suite("pane-follow", ({ browser, origin, ok }) => testPaneFollowsCwd(browser, or
 suite("zo-restore", ({ browser, origin, ok }) => testZoRestore(browser, origin, ok));
 // The panes a restart opens again, where they stood, in every workspace (t-14036).
 suite("restart-same-panes", ({ browser, origin, ok }) => testRestartSamePanes(browser, origin, ok));
+suite("sidebar-stage", ({ browser, origin, ok }) => testSidebarStage(browser, origin, ok));
 suite("permission-card", ({ browser, origin, ok }) => testPermissionCard(browser, origin, ok));
 // Every question the window puts to the person, in the one popup (t-17514).
 suite("ask-popup", ({ browser, origin, ok }) => testAskPopup(browser, origin, ok));
@@ -328,6 +331,8 @@ suite("sidebar-agents", testSidebarAgents);
 // The sidebar tells 작업 중, 검증 대기 and 완료 apart, by the ledger (t-18902).
 suite("sidebar-review-state", testSidebarReviewState);
 suite("sidebar-landing-state", testSidebarLandingState);
+// What each sidebar row and tab says of the work it holds (t-44016).
+suite("sidebar-activity", testSidebarActivity);
 suite("landing-alerts", testLandingAlerts);
 /* The conversation view against the Claude Code extension's own webview
  * (t-6323, docs/design/agent-conversation-claude-code-grammar-20260915.md
@@ -12775,7 +12780,9 @@ const basedCards = await page.evaluate(() => {
     const row = document.querySelector(`.wt-row[data-worktree-path="${at}"]`);
     const chip = row?.querySelector(".wt-base");
     return {
-      branch: row?.querySelector(".wt-branch")?.firstChild?.textContent ?? null,
+      // The name is read from its own span: the branch line can begin with the
+      // task id (t-44016), so its first child is not always the name.
+      branch: row?.querySelector(".wt-branch-name")?.textContent ?? null,
       chip: chip?.textContent ?? null,
       tip: chip?.dataset.tip ?? null,
     };

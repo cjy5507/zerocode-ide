@@ -1985,6 +1985,10 @@ pub(crate) struct LedgerAgent {
     pub(crate) dispatch_id: String,
     pub(crate) dispatch_started_ms: i64,
     pub(crate) retry_of: Option<String>,
+    /// What the attempt handed in for review (`Dispatch::source`): the commit the worker named, or the
+    /// report's own id where it named none. A card reads a commit id off it and never a report's id
+    /// (t-44016). `None` while nothing was handed in.
+    pub(crate) handed_in: Option<String>,
     /// What a coordinator wrote about the task's outcome, beyond the worker's
     /// claim: verified, merged, deployed — or nothing yet. Never inferred
     /// from a provider's turn ending or from `reported` above.
@@ -2543,6 +2547,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 dispatch_id,
                 dispatch_started_ms,
                 retry_of,
+                handed_in: dispatch.and_then(|one| one.source.clone()),
                 review,
                 review_since_ms,
                 closed: carried.and_then(|held| held.closed.clone()),

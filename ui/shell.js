@@ -235,6 +235,14 @@ async function refreshPaneLedger() {
         closed: row?.closed ?? null,
         // When the wait began (t-22105); null where the ledger kept none.
         review_since_ms: Number.isFinite(row?.review_since_ms) ? row.review_since_ms : null,
+        // What the worker waits on, as the ledger reads it (t-44016): a question nobody answered yet, and a
+        // quota wall that still explains its silence (`stands_until_ms`). The launch model and the commit the
+        // worker handed in ride along, so a row can say which agent did the work and what it handed in.
+        asking: row?.asking === true,
+        wall: row?.wall ?? null,
+        model: row?.model ?? null,
+        handed_in: row?.handed_in ?? null,
+        at: Number(row?.at) || 0,
       };
       if (typeof row?.term === "number") next.set(row.term, facts);
       else if (row?.settled === true && row.checkout) {
@@ -247,6 +255,9 @@ async function refreshPaneLedger() {
     // task — and only a real change costs a repaint.
     const moved = paneLedgerSaid(next) !== paneLedgerSaid(paneLedger);
     const kept = JSON.stringify([...settled]) !== JSON.stringify([...checkoutLedger]);
+    // The strip reads a pane's task as its tab's name (`tabLabel`, t-44016), so a task that
+    // arrives after the tab was painted is the strip's news too — not only the cards'.
+    const renamed = moved && paneTaskWords(next) !== paneTaskWords(paneLedger);
     if (moved) {
       paneLedger.clear();
       for (const [term, facts] of next) paneLedger.set(term, facts);
@@ -255,7 +266,7 @@ async function refreshPaneLedger() {
       checkoutLedger.clear();
       for (const [checkout, facts] of settled) checkoutLedger.set(checkout, facts);
     }
-    if (moved || kept) scheduleAgentPaint(["cards", "board"]);
+    if (moved || kept) scheduleAgentPaint(renamed ? ["tabs", "cards", "board"] : ["cards", "board"]);
   } catch {
     // The ledger may be unavailable in this window; the rows then say what
     // the hooks say, which is what they said before this map existed.
@@ -263,12 +274,20 @@ async function refreshPaneLedger() {
     paneLedgerAsking = false;
   }
 }
+/* The words a tab can take from the ledger, per pane — the part of the map whose change renames a tab. */
+function paneTaskWords(map) {
+  return [...map.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([term, f]) => `${term}:${f.task}`)
+    .join(",");
+}
 function paneLedgerSaid(map) {
   return [...map.entries()]
     .sort(([a], [b]) => a - b)
     .map(([term, f]) =>
       `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${f.failed ? 1 : 0}` +
-      `:${JSON.stringify(f.review)}:${JSON.stringify(f.closed)}:${f.review_since_ms ?? ""}`)
+      `:${JSON.stringify(f.review)}:${JSON.stringify(f.closed)}:${f.review_since_ms ?? ""}` +
+      `:${f.asking ? 1 : 0}:${f.wall?.stands_until_ms ?? ""}:${f.handed_in ?? ""}:${f.model ?? ""}`)
     .join(",");
 }
 
@@ -9827,7 +9846,9 @@ function agentRowsSaid(rows) {
         // what its row says about it; the pane's (above) is not.
         `:${row.sub ? `${agentRowModelWords(row)}|${agentRowModelTip(row)}` : ""}` +
         `:${row.sub && row.subHost === undefined ? "" : JSON.stringify(paneAutonomyValue(row.term))}` +
-        `:${agentRowHere(row) ? 1 : 0}`,
+        `:${agentRowHere(row) ? 1 : 0}` +
+        // What the row waits for is what it says too: the answer, the wall and the review come from the ledger.
+        `:${row.sub ? "" : agentWaitWordOf(row, agentRowState(row))}`,
     )
     .join(",");
 }
@@ -10080,6 +10101,31 @@ function agentRowPrimary(row, state) {
     || bucketWord(state === "needs-attention" ? "attention" : state);
 }
 
+/* What a row that is not at work waits for, as the ledger holds it (t-44016): the answer it asked for, a
+ * quota wall that still explains its silence (and how long until the reset), the coordinator's review
+ * (and how long it has waited), or the verified work that waits to land. A person's turn is the hook's
+ * word (`needs-attention`). A wait the ledger does not hold is never invented: "" says nothing. */
+function agentWaitWordOf(row, state) {
+  const facts = paneLedger.get(row.term);
+  if (!facts) return "";
+  const now = Date.now();
+  const review = facts.review ?? {};
+  if (state === "needs-attention") return t("agent.now.waitPerson", "사람의 답을 기다리는 중");
+  if (facts.asking) return t("agent.now.waitAnswer", "답을 기다리는 중");
+  if (facts.wall?.stands_until_ms > now) {
+    return t("agent.now.waitQuota", "사용량 한도 대기 · {{span}} 뒤 재개", { span: shortAgo(now, facts.wall.stands_until_ms) });
+  }
+  if (ledgerReviewPhaseOf(facts) === "review") {
+    const waited = Number.isFinite(facts.review_since_ms) ? ` · ${shortAgo(facts.review_since_ms, now)}` : "";
+    return t("agent.now.waitReview", "검토를 기다리는 중") + waited;
+  }
+  if (ledgerVouched(review) && !review.merged && !review.deployed && !review.nothing_to_land) {
+    const waited = Number.isFinite(review.verified_ms) ? ` · ${shortAgo(review.verified_ms, now)}` : "";
+    return t("agent.now.waitLand", "착지를 기다리는 중") + waited;
+  }
+  return "";
+}
+
 /* And the words after the dash — Orca's `getCompactAgentSecondary` ladder:
  * the tool preview while it is live, else the last assistant words, else the
  * type label. (`Interrupted by user` heads the original's ladder; this
@@ -10096,6 +10142,9 @@ function agentRowSecondary(row, state, primary) {
   if (autonomy && (!autonomyRunning(paneAutonomyValue(row.term)) || state === "working")) return autonomy.word;
   const preview = agentToolPreview(agentRowPane(row), state);
   if (preview) return preview;
+  // What it waits for, when the ledger says so (t-44016) — ahead of the words it said last, which are history.
+  const waiting = row.sub ? "" : agentWaitWordOf(row, state);
+  if (waiting) return waiting;
   // 원장의 말(검증 대기/검증됨/병합됨)은 이제 상태 칸의 것이다
   // (`agentRowStatusWord`) — 같은 낱말을 문장에서 되풀이하지 않는다.
   const said = row.sub ? "" : (paneSaid.get(row.term) ?? "").trim();
@@ -10207,14 +10256,90 @@ function dressFailedDot(dot) {
  * here — the card's first words then, ahead of a branch named after a task id
  * (`wt/t-4238/…`). Roots only, in the order the card lists them. */
 function worktreeTaskTitle(path) {
+  return worktreeWorkFacts(path)?.task?.trim() ?? "";
+}
+
+/* The ledger's facts for the work standing in one checkout (t-44016): the first seat here that carries a
+ * task, else the work a released worker finished in it (t-10993). The title, the task id and the agent
+ * words of the row and the summary card all read this one answer. */
+function worktreeWorkFacts(path) {
   for (const row of worktreeAgentRows(path)) {
     if (row.sub) continue;
-    const task = paneLedger.get(row.term)?.task?.trim();
-    if (task) return task;
+    const facts = paneLedger.get(row.term);
+    if (facts?.task?.trim()) return facts;
   }
-  // No pane here carries a task, but the work a released worker finished in
-  // this checkout still does (t-10993).
-  return checkoutLedger.get(checkoutKey(path))?.task?.trim() ?? "";
+  const settled = checkoutLedger.get(checkoutKey(path)) ?? null;
+  return settled?.task?.trim() ? settled : null;
+}
+
+/* Every fact the ledger holds for one checkout: each seat in its tabs, and the work released from it. */
+function worktreeSeatFacts(path) {
+  const held = [];
+  for (const tab of tabs) {
+    if (tab.kind !== "term" || tab.worktree !== path) continue;
+    for (const term of paneLeaves(tab.layout)) {
+      if (paneLedger.get(term)) held.push(paneLedger.get(term));
+    }
+  }
+  if (checkoutLedger.has(checkoutKey(path))) held.push(checkoutLedger.get(checkoutKey(path)));
+  return held;
+}
+
+/* Where one piece of work stands on its way to main (t-44016), in the ledger's facts: handed in and waiting
+ * for a review (`handedIn`), a worker that says it was verified while the coordinator has not written it
+ * (`reviewing`), verified and not yet merged (`landWait`), merged or deployed (`landed`). A failed attempt,
+ * a closed task and a task with nothing to land say so. The gate the coordinator runs before landing is not
+ * in the ledger, so no stage names it. */
+const WORKTREE_STAGE_RANK = Object.freeze({ closed: 0, landed: 1, nothing: 1, landWait: 2, reviewing: 3, handedIn: 4, failed: 5 });
+
+function ledgerLandingStage(facts) {
+  const review = facts.review ?? {};
+  if (facts.closed) return "closed";
+  if (review.merged || review.deployed) return "landed";
+  if (review.nothing_to_land) return "nothing";
+  if (review.verified) return "landWait";
+  if (facts.failed) return "failed";
+  if (facts.reported) return review.claimed_verified || review.claimed_merged || review.claimed_deployed ? "reviewing" : "handedIn";
+  return null;
+}
+
+function landingStageWord(stage) {
+  switch (stage) {
+    case "handedIn": return t("worktree.stage.handedIn", "넘김 끝 · 검토 대기");
+    case "reviewing": return t("worktree.stage.reviewing", "검토 중");
+    case "landWait": return t("worktree.stage.landWait", "착지 대기");
+    case "landed": return t("worktree.stage.landed", "착지됨");
+    case "nothing": return t("worktree.stage.nothing", "착지할 것 없음");
+    case "failed": return t("board.desk.stageFailed", "실패");
+    case "closed": return t("board.closed", "닫힘");
+    default: return "";
+  }
+}
+
+/* The stage of the work in one checkout: the one that still waits furthest, when the ledger holds any. */
+function worktreeStageOf(path) {
+  let stage = null;
+  for (const facts of worktreeSeatFacts(path)) {
+    const said = ledgerLandingStage(facts);
+    if (said !== null && (stage === null || WORKTREE_STAGE_RANK[said] > WORKTREE_STAGE_RANK[stage])) stage = said;
+  }
+  return stage;
+}
+
+/* What the work in one checkout says on its row, as one string — the repaint compares it (t-44016). */
+function worktreeWorkSaid(path) {
+  return [worktreeWorkFacts(path)?.taskId ?? "", landingStageWord(worktreeStageOf(path)), worktreeWorkerWords(path)].join("|");
+}
+
+/* The agent that did the work in one checkout, once it has ended (t-44016): its name, its model and when it
+ * ended — 「(vendor name) · (its model) · 끝 (time)」. A live seat speaks for itself on its own row, so nothing
+ * is said here for it. */
+function worktreeWorkerWords(path) {
+  const work = checkoutLedger.get(checkoutKey(path));
+  if (!work?.agent || !(work.at > 0)) return "";
+  const ended = new Date(work.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return [agentName(work.agent), work.model, t("worktree.workerEnded", "끝 {{time}}", { time: ended })]
+    .filter(Boolean).join(" · ");
 }
 
 /* Where the ledger says the work standing in one checkout is:
@@ -10317,7 +10442,8 @@ const agentHistoryShown = new Set();
 function agentPaneName(tab, term, agent = "") {
   const named = tab ? paneTitleOf(tab, term) : "";
   if (named) return named;
-  const stripped = (termTitles.get(term) ?? "").trim()
+  // A fragment a program printed as its title (a tool tag) is output, not a name (t-44016).
+  const stripped = spokenTitleOf(term)
     .replace(/^(?:[✳.*]\s+|[\u2800-\u28FF]+\s*)/u, "").trim();
   // 에이전트의 제 이름·상태 제목("Claude Code — working")은 이름이 아니라
   // 정체성이고, 경로는 이름이 아니라 자리다.
@@ -10742,11 +10868,43 @@ function makeAgentRow(row, gutter = false) {
   return node;
 }
 
+/* How many times a click follows a terminal that moved while its checkout was coming to the
+ * front (t-44057): the click, one move during the first activation, and one more during the
+ * second. A terminal still moving after that is not somewhere the stage can land. */
+const FOCUS_FOLLOW_HOPS = 3;
+
 async function focusAgentPane(worktree, tabId, term, agent = null) {
-  if (worktree && worktree !== activeWorktreePath) {
-    if (!(await activateWorktree(worktree))) return;
+  // The tab says where the terminal stands now; the row says where it stood
+  // when its card was last drawn. The ledger can seat the worker in another
+  // checkout before that card repaints (t-44057), so the click follows the
+  // terminal: its checkout is the one to go to, and the row is the fallback.
+  const holder = () =>
+    tabOfTerm(term) ?? (tabId === null ? null : tabs.find((held) => held.id === tabId) ?? null);
+  // The terminal can move again while a checkout is coming to the front: each activation is
+  // awaited, and the ledger may re-seat the worker meanwhile. So the click follows the terminal
+  // until the checkout in front is the one its tab stands in — a bounded number of times, since
+  // a worker that keeps moving is not a place the stage can settle on.
+  for (let hop = 0; hop < FOCUS_FOLLOW_HOPS; hop += 1) {
+    const home = holder()?.worktree ?? worktree;
+    if (!home || home === activeWorktreePath) break;
+    if (!(await activateWorktree(home))) return;
   }
-  const tab = tabId === null ? null : tabs.find((held) => held.id === tabId);
+  const tab = holder();
+  // Still elsewhere after the last hop: the terminal moved again. Each activation on the way chose
+  // the checkout's living agent first (`activateWorktree`), so the tab it left selected may be this
+  // worker's, now standing in another checkout. A tab whose checkout is not on the stage must not
+  // stay in front as if it were: the stage goes back to a tab of the checkout in front, and the
+  // click stops here, choosing nothing more.
+  if (tab && tab.worktree && tab.worktree !== activeWorktreePath) {
+    if (activeTabId === tab.id) {
+      const own = tabs.filter((held) => held.worktree === activeWorktreePath && held.kind !== "board" && held.id !== tab.id);
+      const back = own.find((held) => held.id === activeTabByWorktree.get(activeWorktreePath)) ?? own[own.length - 1];
+      // No tab of its own to go back to: the stage shows nothing, the same state a checkout has
+      // before its tabs are restored (`restoreActiveWorktreeTab`), rather than another checkout's tab.
+      setActiveTab(back?.id ?? null);
+    }
+    return;
+  }
   if (!tab) {
     // 떼어 둔 에이전트는 판이 없다. 그 줄을 누르는 것이 곧 다시 붙는 것이고,
     // 화면은 백엔드에 그대로 있으므로 새로 띄우는 것이 아니라 돌려받는 것이다.
@@ -11211,7 +11369,10 @@ function paintWorktreeAgents() {
         ? agentRowsSaid(rows)
         : `dead:${restartSessionsSaid(deadSummary.rows)}|total:${deadSummary.total}`
         + `|restoring:${restoring ?? ""}`)
-      + `|more:${hidden}|${open ? 1 : 0}|${full ? 1 : 0}`;
+      + `|more:${hidden}|${open ? 1 : 0}|${full ? 1 : 0}`
+      // The stage and the worker of the work here are words of this card's branch line (t-44016): a change
+      // of either repaints it, though no agent row moved.
+      + `|work:${worktreeWorkSaid(path)}`;
     if (host.dataset.said === signature) continue;
     host.dataset.said = signature;
     dressWorktreeTwist(host.previousElementSibling, path, hidden);
@@ -11241,7 +11402,9 @@ function paintWorktreeAgents() {
     host.hidden = all.length + deadSummary.total === 0 && !restoring;
     const unseated = host.previousElementSibling?.querySelector(".wt-unseated");
     if (unseated) {
-      unseated.hidden = !host.hidden;
+      // 「에이전트 창 없음」 is not said beside a stage the ledger holds (t-44016): the stage says more. On a folder
+      // with nothing to say, it stays as the explanation of its empty list.
+      unseated.hidden = !host.hidden || landingStageWord(worktreeStageOf(path)) !== "";
       // The branch line's standing is one decision (`dressWorktreeTitle`):
       // a name the title already said, a base chip, this marker.
       dressWorktreeTitle(host.previousElementSibling);
@@ -11304,6 +11467,7 @@ function flushAgentPaint() {
     paintWorktreeDots();
     paintWorktreeUnread();
     paintWorktreeAgents();
+    paintStageCard();
     // 같은 사실의 다섯째 표면: 아티팩트 스튜디오의 「초안을 받을 에이전트」는
     // 에이전트가 앉은 판의 목록이다. 서 있을 때만 그린다(2026-09-13, 「에이전트가
     // codex만 표시」 — 새 판의 에이전트가 도착해도 목록이 그대로였다).
@@ -16861,6 +17025,7 @@ function paintDetachedStagePlaceholder(rows) {
  * element while the second is showing — otherwise the next language change
  * quietly replaces a true statement about this machine with an invitation. */
 function paintStagePlaceholder() {
+  paintStageCard();
   // 프로젝트가 하나도 없으면 이 화면이 할 말은 터미널이 아니다. Orca의
   // Landing이 리포 개수로 갈리는 그 자리이고(0개면 "프로젝트를 추가하면
   // 시작합니다", 1개 이상이면 사이드바에서 고르라는 안내), 여기서는 그
@@ -16914,6 +17079,52 @@ function paintStagePlaceholder() {
   delete placeholder.dataset.i18nHtml;
   placeholder.innerHTML = t("stage.noZo", "<code>zo</code>를 PATH에서 찾지 못했습니다 — 레인 없이 계속 쓸 수 있고, 설치하면 여기에서 바로 세션이 열립니다.");
   seatStageDoor();
+}
+
+/* The summary of an empty worktree (t-44016): what its work is, where the work stands and what comes next.
+ * It shows only while no agent works in the checkout, and each word in it is one the ledger or git holds:
+ * the task and its id, the stage (`worktreeStageOf`), git's landing word, the commit the worker handed in
+ * (only a commit id — a report's own id is not one) and the next step the stage implies. */
+const STAGE_NEXT = Object.freeze({
+  handedIn: { key: "stage.card.next.review", word: "코디네이터의 검토를 기다립니다" },
+  reviewing: { key: "stage.card.next.reviewing", word: "검토가 끝나기를 기다립니다" },
+  landWait: { key: "stage.card.next.land", word: "병합을 기다리는 중" },
+  landed: { key: "stage.card.next.landed", word: "착지됐습니다" },
+  nothing: { key: "stage.card.next.nothing", word: "착지할 것이 없는 작업입니다" },
+  failed: { key: "stage.card.next.failed", word: "다시 맡기거나 버리세요" },
+  closed: { key: "stage.card.next.closed", word: "닫힌 과업입니다" },
+});
+const STAGE_NEXT_START = { key: "stage.card.next.start", word: "에이전트를 열어 작업을 시작하세요" };
+// A commit id as git spells it (7 to 40 hex digits), and the length the card shows of it.
+const COMMIT_ID = /^[0-9a-f]{7,40}$/i;
+const SHORT_COMMIT_LENGTH = 9;
+
+function paintStageCard() {
+  const card = el("stage-card");
+  if (!card) return;
+  const path = activeWorktreePath;
+  const work = path ? worktreeWorkFacts(path) : null;
+  const landing = path ? worktreeLandingSayFor(path) : null;
+  if (!path || worktreeAgentRows(path).length > 0 || (work === null && landing === null)) {
+    card.hidden = true;
+    return;
+  }
+  const stage = worktreeStageOf(path);
+  const next = stage !== null ? STAGE_NEXT[stage] : STAGE_NEXT_START;
+  const handedIn = work?.handed_in ?? "";
+  const put = (selector, words) => {
+    const node = card.querySelector(selector);
+    if (node.textContent !== words) node.textContent = words;
+    if (node.hidden !== (words === "")) node.hidden = words === "";
+  };
+  put(".stage-card-id", work?.taskId ?? "");
+  put(".stage-card-task", work?.task?.trim() || basename(path));
+  put(".stage-card-state", landingStageWord(stage));
+  put(".stage-card-landing", landing?.word ?? "");
+  put(".stage-card-unseated", t("worktree.unseated", "에이전트 창 없음"));
+  put(".stage-card-commit", COMMIT_ID.test(handedIn) ? t("stage.card.lastCommit", "마지막 커밋 {{sha}}", { sha: handedIn.slice(0, SHORT_COMMIT_LENGTH) }) : "");
+  put(".stage-card-next", t(next.key, next.word));
+  card.hidden = false;
 }
 
 /* 프로젝트가 하나도 없을 때의 첫 화면 (Orca의 `Landing`, 1-ea).

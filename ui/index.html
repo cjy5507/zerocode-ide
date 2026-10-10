@@ -1980,6 +1980,21 @@
              at runtime; only this first group lives in the markup, because it
              holds the view templates the others are cloned from. -->
 
+        <!-- The summary of an empty worktree (t-44016): what its work is, where it stands and what comes next.
+             `paintStageCard` fills it from the ledger and git; it is hidden while an agent works in the checkout. -->
+        <section class="stage-card" id="stage-card" hidden>
+          <p class="stage-card-head">
+            <span class="stage-card-id" hidden></span>
+            <span class="stage-card-task"></span>
+          </p>
+          <p class="stage-card-line">
+            <span class="stage-card-state"></span>
+            <span class="stage-card-landing"></span>
+            <span class="stage-card-unseated"></span>
+          </p>
+          <p class="stage-card-commit" hidden></p>
+          <p class="stage-card-next"></p>
+        </section>
         <p class="placeholder" id="placeholder" data-i18n-html="stage.empty">
           터미널이 열려 있지 않습니다. <kbd>{{chord}}</kbd>로 하나 엽니다 — 당신의
           셸이고, 거기서 <code>zo</code>든 <code>claude</code>든 실행하면 됩니다.
