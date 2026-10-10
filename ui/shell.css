@@ -45784,7 +45784,7 @@ button.jev-token:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  line-height: calc(var(--artifact-task-chip-height) - 2px);
+  line-height: calc(var(--artifact-task-chip-height) - 2 * var(--rule-width));
 }
 
 .artifact-task-parts {

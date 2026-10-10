@@ -6547,9 +6547,8 @@ function dressArtifactLanding(chip, say) {
   chip.hidden = !say;
   if (!say) return;
   if (chip.dataset.landing !== say.tone) chip.dataset.landing = say.tone;
-  // 칩의 말이 말줄임으로 줄면 온전한 말은 접근성 이름과 풍선의 첫 줄에 있다(t-43931).
+  // 칩의 말이 말줄임으로 줄면 온전한 말은 칩의 글과 풍선의 첫 줄에 있다(t-43931). 칩은 역할 없는 글 상자라 aria-label을 달지 않는다.
   const whole = say.head ?? "";
-  if (chip.getAttribute("aria-label") !== whole) chip.setAttribute("aria-label", whole);
   const tip = [whole, say.tip].filter(Boolean).join("\n");
   if (chip.dataset.tip !== tip) chip.dataset.tip = tip;
 }

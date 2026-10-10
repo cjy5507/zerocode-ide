@@ -100,6 +100,11 @@ export function standTasks(page) {
         task: "t-503", work: "옛 작업", modified_ms: now - 6 * hour, lead: "r-old", title: "옛 빌드가 적은 보고서",
         parts: parts({ reports: 1 }), attempts: 1, sessions: 0, commit: strangerCommit,
       },
+      {
+        // A task number of the ledger's real length (seven characters): its number box must stay in the fixed column.
+        task: "t-45392", work: "일곱 자리 번호", modified_ms: now - 4 * hour, lead: null, title: "일곱 자리 번호 줄",
+        parts: parts({ reports: 1 }), attempts: 1, sessions: 0,
+      },
     ];
     for (let at = 0; at < fillers; at += 1) {
       lines.push({
@@ -240,8 +245,8 @@ async function testRemainders(page, ok) {
   );
 
   // The state chip is the last thing in a line's second line, so no state word moves a title. The words
-  // are the product's own: worktreeLandingSay in each of the five languages, its longest chip word put in
-  // the real chip on the first line; the titles and the number boxes are measured again after each word.
+  // are the product's own: worktreeLandingSay in each of the five languages, every state word put in the
+  // real chip on the first line; the titles and each line's number box are measured again after each word.
   const aligned = await page.evaluate(() => {
     const saved = locale;
     const view = artifactsView();
@@ -252,8 +257,10 @@ async function testRemainders(page, ok) {
     });
     const starts = () => onList().map((one) => Math.round(one.querySelector(".artifact-task-title").getBoundingClientRect().left * 2) / 2);
     const idWidths = () => onList().map((one) => Math.round(one.querySelector(".artifact-task-id").getBoundingClientRect().width));
+    const idInLead = onList().every((one) => one.querySelector(".artifact-task-id").getBoundingClientRect().right
+      <= one.querySelector(".artifact-task-title").getBoundingClientRect().left + 0.5);
     const chip = onList()[0]?.querySelector(".artifact-task-landing") ?? null;
-    const original = chip ? { text: chip.textContent, tip: chip.dataset.tip, label: chip.getAttribute("aria-label"), landing: chip.dataset.landing } : null;
+    const original = chip ? { text: chip.textContent, tip: chip.dataset.tip, landing: chip.dataset.landing, hidden: chip.hidden } : null;
     const landings = [
       { state: "unlanded", compare_ref: "origin/main", ahead: 12, behind: 9, far_behind: true, conflict: { total: 3 }, dirty: false, ignored: false },
       { state: "landed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: true, ignored: true },
@@ -265,36 +272,40 @@ async function testRemainders(page, ok) {
     const before = starts();
     const idsBefore = idWidths();
     const moved = [];
-    const idsAfter = [];
-    const longest = {};
+    let idsSame = true;
+    const words = {};
     for (const code of ["ko", "en", "ja", "zh", "es"]) {
       locale = code;
       const says = landings.map((landing) => worktreeLandingSay(landing, {})).filter(Boolean);
-      const widest = says.reduce((a, b) => (b.head.length > a.head.length ? b : a));
-      longest[code] = widest.head;
-      if (chip) dressArtifactLanding(chip, widest);
-      moved.push(...starts());
-      idsAfter.push(...idWidths());
+      words[code] = says.length;
+      for (const say of says) {
+        if (chip) dressArtifactLanding(chip, say);
+        moved.push(...starts());
+        // Each line's number box is compared with its own width from before the word.
+        const after = idWidths();
+        if (after.length !== idsBefore.length || after.some((w, at) => w !== idsBefore[at])) idsSame = false;
+      }
     }
     locale = saved;
     if (chip && original) {
       chip.textContent = original.text;
       chip.dataset.tip = original.tip;
-      chip.setAttribute("aria-label", original.label);
       chip.dataset.landing = original.landing;
+      chip.hidden = original.hidden;
     }
     return {
       rows: before.length,
       start: before[0] ?? null,
       sameStart: before.length > 1 && before.every((x) => x === before[0]),
       stays: moved.length > 0 && moved.every((x) => x === before[0]),
-      idsSame: idsBefore.length > 1 && idsBefore.every((w) => w === idsBefore[0]) && idsAfter.every((w) => w === idsBefore[0]),
-      longest,
+      idsSame,
+      idInLead,
+      words,
     };
   });
   ok(
-    "every line's title starts at the same x, and no state word of the five languages moves a title or a number box — the longest chip word of each language, made by the product's own words, tried in the real chip",
-    aligned.rows > 1 && aligned.sameStart && aligned.stays && aligned.idsSame,
+    "every line's title starts at the same x, no state word of the five languages moves a title or a number box (every word tried in the real chip), and every number box stays in its fixed column, a seven-character task number included",
+    aligned.rows > 1 && aligned.sameStart && aligned.stays && aligned.idsSame && aligned.idInLead,
     JSON.stringify(aligned),
   );
 
@@ -348,15 +359,15 @@ async function testRemainders(page, ok) {
     JSON.stringify(strip),
   );
 
-  // In the band the state chip stays inside its row for the longest chip word of each language (the
-  // product's own words, in the real chip); the whole word stands in the chip's accessible name and first
-  // tooltip line, and a word too long for the band is cut with an ellipsis.
+  // In the band every state word of the five languages (the product's own words, in the real chip) stays
+  // inside its row. The whole word is the chip's text and the first line of its tooltip; a word wider than
+  // the chip is cut with an ellipsis, and the Spanish no-reference word is one of them.
   const inBand = await page.evaluate(() => {
     const saved = locale;
     const view = artifactsView();
     const row = [...(view?.querySelectorAll(".artifact-task") ?? [])].find((one) => one.getClientRects().length > 0) ?? null;
     const chip = row?.querySelector(".artifact-task-landing") ?? null;
-    const original = chip ? { text: chip.textContent, tip: chip.dataset.tip, label: chip.getAttribute("aria-label"), landing: chip.dataset.landing } : null;
+    const original = chip ? { text: chip.textContent, tip: chip.dataset.tip, landing: chip.dataset.landing, hidden: chip.hidden } : null;
     const landings = [
       { state: "unlanded", compare_ref: "origin/main", ahead: 12, behind: 9, far_behind: true, conflict: { total: 3 }, dirty: false, ignored: false },
       { state: "landed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: true, ignored: true },
@@ -365,37 +376,49 @@ async function testRemainders(page, ok) {
       { state: "failed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
       { state: "pending", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
     ];
-    const seen = {};
+    const seen = [];
     for (const code of ["ko", "en", "ja", "zh", "es"]) {
       locale = code;
       const says = landings.map((landing) => worktreeLandingSay(landing, {})).filter(Boolean);
-      const widest = says.reduce((a, b) => (b.head.length > a.head.length ? b : a));
-      if (chip) dressArtifactLanding(chip, widest);
-      const rowBox = row?.getBoundingClientRect();
-      const padRight = row ? parseFloat(getComputedStyle(row).paddingRight) : 0;
-      const chipBox = chip?.getBoundingClientRect();
-      seen[code] = {
-        word: widest.head,
-        inside: Boolean(rowBox && chipBox) && chipBox.right <= rowBox.right - padRight + 0.5 && chipBox.left >= rowBox.left,
-        named: chip?.getAttribute("aria-label") === widest.head,
-        tipLeads: (chip?.dataset.tip ?? "").split("\n")[0] === widest.head,
-        cut: chip ? chip.scrollWidth > chip.clientWidth + 0.5 : false,
-      };
+      says.forEach((say, at) => {
+        if (chip) dressArtifactLanding(chip, say);
+        const rowBox = row?.getBoundingClientRect();
+        const padRight = row ? parseFloat(getComputedStyle(row).paddingRight) : 0;
+        const chipBox = chip?.getBoundingClientRect();
+        seen.push({
+          code,
+          word: say.head,
+          noRef: at === 2,
+          inside: Boolean(rowBox && chipBox) && chipBox.right <= rowBox.right - padRight + 0.5 && chipBox.left >= rowBox.left - 0.5,
+          whole: chip?.textContent === say.head,
+          tipLeads: (chip?.dataset.tip ?? "").split("\n")[0] === say.head,
+          cut: chip ? chip.scrollWidth > chip.clientWidth + 0.5 : false,
+        });
+      });
     }
+    const ellipsis = chip ? getComputedStyle(chip).textOverflow === "ellipsis" : false;
     locale = saved;
     if (chip && original) {
       chip.textContent = original.text;
       chip.dataset.tip = original.tip;
-      chip.setAttribute("aria-label", original.label);
       chip.dataset.landing = original.landing;
+      chip.hidden = original.hidden;
     }
-    return { row: Boolean(row), chip: Boolean(chip), seen };
+    return { row: Boolean(row), chip: Boolean(chip), ellipsis, seen };
   });
   ok(
-    "in the band the state chip stays inside its row for the longest chip word of each of the five languages, and the whole word stands in its accessible name and tooltip",
-    inBand.row && inBand.chip && Object.keys(inBand.seen).length === 5
-      && Object.values(inBand.seen).every((one) => one.inside && one.named && one.tipLeads),
-    JSON.stringify(inBand),
+    "in the band every state word of the five languages stays inside its row, its whole text is the chip's text and the first tooltip line, the chip's text runs out with an ellipsis, and the Spanish no-reference word is cut there",
+    inBand.row && inBand.chip && inBand.ellipsis && inBand.seen.length === 30
+      && inBand.seen.every((one) => one.inside && one.whole && one.tipLeads)
+      && inBand.seen.some((one) => one.noRef && one.code === "es" && one.cut),
+    JSON.stringify({
+      row: inBand.row,
+      chip: inBand.chip,
+      ellipsis: inBand.ellipsis,
+      words: inBand.seen.length,
+      cut: inBand.seen.filter((one) => one.cut).map((one) => `${one.code}:${one.word}`),
+      outside: inBand.seen.filter((one) => !(one.inside && one.whole && one.tipLeads)).map((one) => `${one.code}:${one.word}`),
+    }),
   );
 
   await openFresh(page);
