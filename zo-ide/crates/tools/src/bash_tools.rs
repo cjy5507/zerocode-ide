@@ -936,9 +936,10 @@ fn wait_child_with_timeout_for_key(
 mod tests {
     use super::*;
 
-    /// The running test's name, as a part of a scratch directory name.
+    /// The running test's name, as a part of a scratch directory name. A test path
+    /// joins its modules with `::`, which a Windows file name cannot hold.
     fn thread_tag() -> String {
-        std::thread::current().name().unwrap_or("test").to_string()
+        std::thread::current().name().unwrap_or("test").replace("::", "-")
     }
 
     #[test]
@@ -952,7 +953,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "zo-shell-checkpoint-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = std::fs::remove_file(&path);
         let context = crate::tests::tool_context_outside_cwd_windows();

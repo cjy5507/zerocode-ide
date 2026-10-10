@@ -804,9 +804,10 @@ fn openai_oauth_expired(tokens: &OpenAiOAuthTokens) -> bool {
 
 #[cfg(test)]
 mod tests {
-    /// The running test's name, as a part of a scratch directory name.
+    /// The running test's name, as a part of a scratch directory name. A test path
+    /// joins its modules with `::`, which a Windows file name cannot hold.
     fn thread_tag() -> String {
-        std::thread::current().name().unwrap_or("test").to_string()
+        std::thread::current().name().unwrap_or("test").replace("::", "-")
     }
 
     #[test]
@@ -1038,7 +1039,7 @@ mod tests {
         let temp_home = std::env::temp_dir().join(format!(
             "zo-google-oauth-priority-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = std::fs::remove_dir_all(&temp_home);
         let temp_home_str = temp_home.to_str().expect("utf-8 temp path").to_string();
@@ -1098,7 +1099,7 @@ mod tests {
         let temp_home = std::env::temp_dir().join(format!(
             "zo-forced-oauth-route-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = std::fs::remove_dir_all(&temp_home);
         std::fs::create_dir_all(&temp_home).unwrap();
@@ -1150,7 +1151,7 @@ mod tests {
         let temp_home = std::env::temp_dir().join(format!(
             "zo-forced-exact-route-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = std::fs::remove_dir_all(&temp_home);
         std::fs::create_dir_all(&temp_home).unwrap();
@@ -1257,7 +1258,7 @@ mod tests {
         let temp_home = std::env::temp_dir().join(format!(
             "zo-oauth-rebuild-needed-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = std::fs::remove_dir_all(&temp_home);
         std::fs::create_dir_all(&temp_home).expect("temp home");

@@ -760,9 +760,10 @@ pub fn model_family_label(model: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The running test's name, as a part of a scratch directory name.
+    /// The running test's name, as a part of a scratch directory name. A test path
+    /// joins its modules with `::`, which a Windows file name cannot hold.
     fn thread_tag() -> String {
-        std::thread::current().name().unwrap_or("test").to_string()
+        std::thread::current().name().unwrap_or("test").replace("::", "-")
     }
 
     #[test]
@@ -948,7 +949,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!(
             "zo-model-catalog-{name}-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
