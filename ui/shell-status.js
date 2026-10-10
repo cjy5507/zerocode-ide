@@ -5281,9 +5281,17 @@ async function restoreActiveWorktreeTab({ firstTerminal = true } = {}) {
   // put back, and neither the repository's opening layout nor a plain
   // terminal belongs on top of a pane that is already working.
   if (target) {
-    setActiveTab(target.id);
-    settleVisitStage(worktree);
-    return;
+    // The target was chosen before the reads above were awaited, and the ledger can re-seat a
+    // worker elsewhere meanwhile (t-44057): a tab that no longer stands in this checkout is not
+    // this checkout's to put in front. It is asked again, on the tabs as they are now.
+    const standing = tabs.some((tab) => tab.id === target.id && tab.worktree === worktree)
+      ? target
+      : (livingAgentTabOf(worktree) ?? owned.find((tab) => tab.id === remembered && tab.worktree === worktree) ?? null);
+    if (standing) {
+      setActiveTab(standing.id);
+      settleVisitStage(worktree);
+      return;
+    }
   }
   // The repository's own opening layout, when it declares one and this
   // workspace has not had it yet. Falls through to the plain terminal
