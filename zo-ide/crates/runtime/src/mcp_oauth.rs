@@ -997,17 +997,34 @@ impl BrowserOpener for LocalBrowserOpener {
 /// # Errors
 /// Returns an `io::Error` if a launcher is found but fails, or
 /// `NotFound` if no supported opener command exists.
-pub fn open_browser(url: &str) -> io::Result<()> {
-    let commands = if cfg!(target_os = "macos") {
-        vec![("open", vec![url])]
-    } else if cfg!(target_os = "windows") {
-        vec![("cmd", vec!["/C", "start", "", url])]
-    } else {
-        vec![("xdg-open", vec![url])]
-    };
+/// The launch commands for `target_os`, in the order they are tried. The plan
+/// is plain data, so the Windows launch can be checked on any host.
+fn browser_opener_plan(
+    target_os: &str,
+    system_root: Option<&std::ffi::OsStr>,
+    address: &str,
+) -> io::Result<Vec<(std::path::PathBuf, Vec<String>)>> {
+    let _ = system_root;
+    Ok(match target_os {
+        "macos" => vec![("open".into(), vec![address.to_owned()])],
+        "windows" => vec![(
+            "cmd".into(),
+            vec![
+                "/C".to_owned(),
+                "start".to_owned(),
+                String::new(),
+                address.to_owned(),
+            ],
+        )],
+        _ => vec![("xdg-open".into(), vec![address.to_owned()])],
+    })
+}
 
-    for (program, args) in commands {
-        match Command::new(program).args(args).spawn() {
+pub fn open_browser(url: &str) -> io::Result<()> {
+    let system_root = std::env::var_os("SystemRoot");
+    let plan = browser_opener_plan(std::env::consts::OS, system_root.as_deref(), url)?;
+    for (program, args) in plan {
+        match Command::new(&program).args(args).spawn() {
             Ok(_) => return Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
@@ -1023,6 +1040,44 @@ pub fn open_browser(url: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_windows_opener_hands_the_address_over_without_a_shell() {
+        let address = "https://auth.example.test/authorize?client_id=a&state=b|c^d%PATH%";
+        let plan = browser_opener_plan(
+            "windows",
+            Some(std::ffi::OsStr::new("C:\\WINDOWS")),
+            address,
+        )
+        .expect("a web address has a Windows opener");
+        let (program, args) = plan.last().expect("one Windows opener");
+        assert_ne!(
+            program.file_stem().and_then(|stem| stem.to_str()),
+            Some("cmd"),
+            "cmd reads a bare & in the address as a command separator"
+        );
+        assert_eq!(args.last().map(String::as_str), Some(address));
+    }
+
+    #[test]
+    fn only_web_addresses_reach_an_opener() {
+        let root = Some(std::ffi::OsStr::new("C:\\WINDOWS"));
+        for address in [
+            "file:///C:/Windows/System32/calc.exe",
+            "C:\\Windows\\System32\\calc.exe",
+        ] {
+            assert!(
+                browser_opener_plan("windows", root, address).is_err(),
+                "a non-web address must not reach an opener: {address}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_local_web_address_still_reaches_an_opener() {
+        let root = Some(std::ffi::OsStr::new("C:\\WINDOWS"));
+        assert!(browser_opener_plan("windows", root, "http://localhost:8080/callback").is_ok());
+    }
 
     #[test]
     fn mcp_oauth_to_config_fills_defaults() {
