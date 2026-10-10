@@ -66,14 +66,20 @@ export async function testConversationFont(browser, origin, ok) {
     ]);
     await page.evaluate(async () => {
       const list = document.querySelector("#worker-view .helper-turns");
+      // The platform's sans is the product's own chain (`--font-ui`) with a face nobody has installed in front of it:
+      // the fall-through this test checks. The tool row is semibold, and on Windows a semibold face has its own name,
+      // so the control takes the row's weight as well.
+      const toolWeight = getComputedStyle(document.querySelector("#worker-view .helper-step-kind")).fontWeight;
+      document.documentElement.style.setProperty("--font-ui-choice", "\"No Such Face 6323\"");
       const controls = [
-        ["conversation-font-engine", "\"No Such Face 6323 Control\""],
-        ["conversation-font-system", "-apple-system, BlinkMacSystemFont, sans-serif"],
+        ["conversation-font-engine", "\"No Such Face 6323 Control\"", ""],
+        ["conversation-font-system", "var(--font-ui)", toolWeight],
       ];
-      for (const [id, face] of controls) {
+      for (const [id, face, weight] of controls) {
         const control = document.createElement("span");
         control.id = id;
         control.style.fontFamily = face;
+        control.style.fontWeight = weight;
         control.textContent = "Lookup";
         list.prepend(control);
       }
@@ -112,8 +118,9 @@ export async function testConversationFont(browser, origin, ok) {
       // Hangul.
       const latinInSans = drawn.tool?.join() === system?.join() &&
         [drawn.prose, drawn.user].every((faces) => faces?.includes(system?.[0]) === true);
-      const fellToEngine = engine?.[0] !== system?.[0] &&
-        Object.values(drawn).some((faces) => faces?.[0] === engine?.[0]);
+      // The Latin row says whether a face fell to the engine's default: the words may open with Hangul, which the
+      // engine's default (Malgun Gothic under lang=ko on Windows) draws too, so the first face of prose proves nothing.
+      const fellToEngine = engine?.[0] !== system?.[0] && drawn.tool?.[0] === engine?.[0];
       // The declared list ends in the platform's sans whatever came first.
       const chained = [declared.prose, declared.tool].every((list) =>
         list.includes("-apple-system") && /sans-serif\s*$/.test(list));
