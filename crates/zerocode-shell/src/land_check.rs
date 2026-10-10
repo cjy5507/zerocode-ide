@@ -821,11 +821,10 @@ fn git_within(host: &Host, dir: &Path, args: &[&str], budget: Duration) -> Resul
 /// (`\\?\C:\…`), which git refuses as a worktree's folder ("could not create leading
 /// directories … Invalid argument"). A plain disk path loses the prefix when the plain form
 /// fits in a classic path; a UNC path and a path longer than that keep it, as the prefix is
-/// what makes them reachable (the rule of `dunce::simplified`). Any other path is answered as
-/// it came.
+/// what makes them reachable (part of the rule of `dunce::simplified`). Any other path, and
+/// one that is not Unicode, is answered as it came.
 fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
-    let text = path.to_string_lossy();
-    let Some(rest) = text.strip_prefix(r"\\?\") else {
+    let Some(rest) = path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) else {
         return path;
     };
     let mut letters = rest.chars();

@@ -757,8 +757,6 @@ fn a_record_whose_log_is_not_its_own_log_path_is_refused() {
     assert!(row.exists(), "the refusals took the prepared row away");
 }
 
-/// The stored words of a project become one policy: a blank command is none, a missing or zero
-/// limit is the default, and a blank pin is none.
 /// The store's root is a path git can take: a Windows verbatim prefix comes off a plain disk
 /// path, while a UNC path, a path too long for a classic one and a plain path are kept as they
 /// are.
@@ -778,6 +776,8 @@ fn a_verbatim_windows_prefix_comes_off_a_plain_disk_root_only() {
     );
 }
 
+/// The stored words of a project become one policy: a blank command is none, a missing or zero
+/// limit is the default, and a blank pin is none.
 #[test]
 fn the_stored_words_name_the_command_its_limit_and_its_pin() {
     let none = Policy::from_settings(None, None, None);
