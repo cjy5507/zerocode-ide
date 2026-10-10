@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.55] — 2026-10-10
+
+### Computer Use
+- Initialize macOS application accessibility before inspecting windows, allowing lazily exposed controls and focus information to become available without adding application-specific identifiers.
+- Preserve target, focus, permission, and background-input checks during accessibility preparation.
+
+### Reliability
+- Bind transcript discovery to the pane's session and retain successful matches while bounding repeat lookups.
+- Provide masked secret entry only to the pane's eligible foreground job when terminal echo is disabled, without retaining the value in transcripts.
+- Bound stalled CI verification jobs and fix Windows documentation checks.
+
 ## [1.1.54] — 2026-10-10
 
 ### Computer Use
