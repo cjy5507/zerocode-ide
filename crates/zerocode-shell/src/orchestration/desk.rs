@@ -1253,6 +1253,57 @@ mod tests {
         );
     }
 
+    /// t-42447: a landing check's letter is news on the desk, and it carries its verdict, its exit
+    /// code and the number of files its merge clashed on — so the screen says the outcome without
+    /// reading the ledger's JSON. Other letters carry none of those three keys.
+    #[test]
+    fn a_land_check_letter_is_news_with_its_verdict_its_exit_code_and_its_clashes() {
+        let now = crate::now_epoch_ms();
+        let mut ledger = Ledger::new();
+        let (run_id, _) = a_worker_carrying_a_task(&mut ledger, now - HOUR_MS);
+        let mut passed = a_notice(
+            &run_id,
+            MessageKind::LandCheck,
+            "land-check t-1: passed · rc 0",
+        );
+        passed.payload = Text::from(r#"{"state":"passed","rc":0,"check":"lc-1-1","task":"t-1"}"#);
+        let passed = ledger
+            .post(&run_id, passed, now - 2_000)
+            .expect("a passed check's letter");
+        let mut clash = a_notice(&run_id, MessageKind::LandCheck, "land-check t-1: conflict");
+        clash.payload = Text::from(
+            r#"{"state":"conflict","conflicts":{"total":2,"files":["a.txt","b.txt"]},"check":"lc-1-2","task":"t-1"}"#,
+        );
+        let clash = ledger
+            .post(&run_id, clash, now - 1_000)
+            .expect("a clash's letter");
+        let mut worker = a_notice(&run_id, MessageKind::WorkerDied, r#"{"workerId":"w-gone"}"#);
+        let died = ledger
+            .post(&run_id, worker, now - 500)
+            .expect("a death's letter");
+        let desk = desk_json(&ledger);
+        let lines = drawn(&desk);
+        let of = |id: &str| {
+            lines
+                .iter()
+                .find(|one| one["id"].as_str() == Some(id))
+                .cloned()
+                .unwrap_or_else(|| panic!("the letter {id} is not drawn: {desk}"))
+        };
+        let passed_line = of(&passed);
+        assert_eq!(passed_line["kind"], "land_check", "{passed_line}");
+        assert_eq!(passed_line["verdict"], "passed", "{passed_line}");
+        assert_eq!(passed_line["rc"], 0, "{passed_line}");
+        assert!(passed_line.get("clashes").is_none(), "{passed_line}");
+        let clash_line = of(&clash);
+        assert_eq!(clash_line["verdict"], "conflict", "{clash_line}");
+        assert_eq!(clash_line["clashes"], 2, "{clash_line}");
+        assert!(clash_line.get("rc").is_none(), "{clash_line}");
+        let died_line = of(&died);
+        assert!(died_line.get("verdict").is_none(), "{died_line}");
+        assert!(died_line.get("clashes").is_none(), "{died_line}");
+    }
+
     /// One quiet episode is one line with one name (t-9548): a silence told
     /// again — every five minutes by a ledger written before t-15313 — keeps
     /// the name it began with, never the newest notice's id, which moved

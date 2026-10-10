@@ -112,7 +112,7 @@ impl Fixture {
 fn sink() -> (Sink, mpsc::Receiver<LandCheckReceipt>) {
     let (tx, rx) = mpsc::channel();
     (
-        Arc::new(move |receipt| {
+        Arc::new(move |receipt: LandCheckReceipt| {
             let _ = tx.send(receipt);
         }),
         rx,
