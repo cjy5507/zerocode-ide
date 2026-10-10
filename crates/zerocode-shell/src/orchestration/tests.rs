@@ -20563,6 +20563,57 @@ fn relation_dependencies_keep_completed_task_facts_after_its_latest_worker_is_re
     );
 }
 
+/// The sidebar's card says the commit a worker handed in (t-44016): a `worker_done` that names a
+/// `head` lands it as the attempt's source, and the ledger row carries it as `handed_in`. A report that
+/// names no commit carries the report's own id there instead, which the window never reads as a commit.
+#[test]
+fn the_ledger_row_carries_the_commit_its_attempt_handed_in() {
+    use zerocode_core::orchestration::{Ledger, MessageKind, worker_address};
+    let commit = "9f3c2a1b7d4e5f60718293a4b5c6d7e8f9a0b1c2";
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("hand-in commit", 1);
+    let task = ledger
+        .create_task(&run, "ship".into(), "ship".into(), vec![], None, 2)
+        .unwrap();
+    let worker = ledger
+        .start_worker(&run, "claude", ("team", "%2"), Some(&task), 3)
+        .unwrap()
+        .worker;
+    let dispatch = ledger
+        .run(&run)
+        .unwrap()
+        .worker(&worker)
+        .unwrap()
+        .dispatch
+        .clone();
+    ledger
+        .send(
+            &run,
+            zerocode_core::orchestration::Message {
+                task: Some(task.clone()),
+                dispatch,
+                ..relation_test_message(
+                    &worker_address(&worker),
+                    &format!("run:{run}"),
+                    MessageKind::WorkerDone,
+                    &format!("{{\"ok\":true,\"head\":\"{commit}\"}}"),
+                    4,
+                )
+            },
+        )
+        .unwrap();
+    let row = super::ledger_agents_for_seats(&ledger, &super::TeamSeatIndex::new())
+        .into_iter()
+        .find(|row| row.worker == worker)
+        .unwrap();
+    assert!(row.reported, "the report closed the attempt");
+    assert_eq!(
+        row.handed_in.as_deref(),
+        Some(commit),
+        "the row names the commit the attempt handed in"
+    );
+}
+
 /* ---- t-4048 Fable 적대 검증 재현 ------------------------------------------
  *
  * 워커가 `worker_done` 을 보내면 `close_dispatch` 가 `worker.dispatch = None`
