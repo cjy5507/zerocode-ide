@@ -290,11 +290,12 @@ const untilTurnResumes = async (page, camera) => {
 /* A shown view asks a frame while it has something to draw, and the counter has counted since the view was opened
  * (openOrbit installs it first): the check reads the first frame asked as soon as it is asked, bounded. A runner that
  * holds its frames for seconds (v1.1.54 Windows: 0 in a fixed 300 ms read, the view running) still gets its first frame.
- * The hidden view keeps its fixed window: there the check is that nothing is asked. */
+ * `since` is the count the check starts from: a check after an earlier phase passes its own snapshot. The hidden view
+ * keeps its fixed window: there the check is that nothing is asked. */
 const ORBIT_FIRST_FRAME_MAX_MS = 3_000; // the turn wait's bound: a view that asks no frame for three seconds has none to ask
-const untilFrameAsked = async (page) => {
+const untilFrameAsked = async (page, since = 0) => {
   for (let waited = 0; ; waited += ORBIT_STAND_STEP_MS) {
-    const rafs = await page.evaluate(() => window.__ORBIT_RAFS__);
+    const rafs = (await page.evaluate(() => window.__ORBIT_RAFS__)) - since;
     if (rafs > 0 || waited >= ORBIT_FIRST_FRAME_MAX_MS) {
       return { rafs, waitedMs: waited, handles: await page.evaluate(() => window.__ORBIT__()) };
     }
@@ -1285,11 +1286,13 @@ async function testOrbitGates(browser, origin, ok) {
     });
     const docHidden = await countOver(page, 400);
     ok("a hidden document asks no 3D frames", docHidden.rafs === 0 && docHidden.frames === 0, JSON.stringify(docHidden));
+    const framesBeforeReturn = await page.evaluate(() => window.__ORBIT_RAFS__);
     await page.evaluate(() => {
       Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
       document.dispatchEvent(new Event("visibilitychange"));
     });
-    const woke = await countOver(page, 300);
+    /* The return asks its first frame when it is read, bounded (see untilFrameAsked), not in a fixed 300 ms window. */
+    const woke = await untilFrameAsked(page, framesBeforeReturn);
     ok("the document coming back starts the 3D view again", woke.rafs > 0, JSON.stringify(woke));
 
     /* 초점 없는 창: 그림은 30 fps 이하 — 박자는 돌되 그림을 건너뛴다. */
