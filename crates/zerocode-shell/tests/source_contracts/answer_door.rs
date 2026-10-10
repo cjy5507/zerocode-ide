@@ -162,11 +162,15 @@ fn the_screen_is_read_only_where_a_pane_waits_or_an_answer_is_about_to_be_typed(
                 "{name} reads the screen's menu itself — the reading lives in answer_door.rs"
             );
         }
+        // The secret watcher (t-26596) reads a pane once for each stretch of
+        // output that has gone quiet — the moment the pane waits — and never per
+        // chunk; its own tests pin that (`secret_watch::tests`).
         if ![
             "answer_door.rs",
             "cmd/terminal.rs",
             "cmd/board.rs",
             "cmd/wire.rs",
+            "secret_watch.rs",
         ]
         .contains(&name.as_str())
         {

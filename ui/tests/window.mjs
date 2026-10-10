@@ -84,6 +84,7 @@ import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
 import { testExplain } from "./explain.mjs";
 import { testAskPopup } from "./ask-popup.mjs";
+import { testSecretPrompt } from "./secret-prompt.mjs";
 import { testEditorSelection } from "./editor-selection.mjs";
 import { testEditorRecovery } from "./editor-recovery.mjs";
 import { testComposerAttach } from "./attach.mjs";
@@ -306,6 +307,8 @@ suite("restart-same-panes", ({ browser, origin, ok }) => testRestartSamePanes(br
 suite("permission-card", ({ browser, origin, ok }) => testPermissionCard(browser, origin, ok));
 // Every question the window puts to the person, in the one popup (t-17514).
 suite("ask-popup", ({ browser, origin, ok }) => testAskPopup(browser, origin, ok));
+// The secret card: a pane that waits for a password gets a field, typed once (herdr 3, t-26596).
+suite("secret-prompt", ({ browser, origin, ok }) => testSecretPrompt(browser, origin, ok));
 suite("editor-selection", ({ browser, origin, ok }) => testEditorSelection(browser, origin, ok));
 suite("editor-recovery", ({ browser, origin, ok }) => testEditorRecovery(browser, origin, ok));
 suite("ime-broken-commit", ({ browser, origin, ok }) => testImeBrokenCommit(browser, origin, ok));

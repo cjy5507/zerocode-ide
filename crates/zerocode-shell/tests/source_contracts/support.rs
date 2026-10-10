@@ -611,6 +611,10 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
         include_str!("../../../../ui/shell-term.js"),
     ),
     (
+        "shell-secret.js",
+        include_str!("../../../../ui/shell-secret.js"),
+    ),
+    (
         "shell-status.js",
         include_str!("../../../../ui/shell-status.js"),
     ),

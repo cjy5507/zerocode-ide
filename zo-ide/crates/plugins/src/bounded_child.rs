@@ -9,7 +9,7 @@
 //! - A leader's exit is looked for without reaping it ([`observe_exit`]). A
 //!   zombie keeps its pid, and that pid is also the group's id, so the pid cannot
 //!   be handed on while the group is still being ended.
-//! - A group is ended only while its leader is unreaped ([`end_group`]).
+//! - A group is ended only while its leader is unreaped (`end_group`, unix only).
 //! - The leader is reaped last ([`reap`], [`try_reap`]).
 //!
 //! Limits, grace periods and captured output stay with the callers, which pass
