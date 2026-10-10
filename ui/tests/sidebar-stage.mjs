@@ -22,6 +22,7 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * Every path is synthetic. Nothing here is a real project or a real pane. */
 
 const CHECKOUT_B = "/tmp/t44057/wt-b";
+const CHECKOUT_C = "/tmp/t44057/wt-c";
 const WORKER = 9101;
 
 /* Lets the window's own timers and frames run. */
@@ -104,6 +105,68 @@ export async function testSidebarStage(browser, origin, ok) {
     ok(
       "a sidebar row whose worker the ledger moved to another checkout raises that worker's terminal on the stage",
       scene.drawnUnderA && scene.onStage && scene.inFront && scene.active === CHECKOUT_B && faults.length === 0,
+      receipt({ ...scene, faults: faults.length }),
+    );
+  }
+
+  // a2. The worker moves again while the click's activation of B is still in flight: the ledger
+  // seats it in C before B has finished coming to the front. The click must end where the terminal
+  // stands when the activation returns, not where it stood when the click began (run-11955 m-44638).
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    await addCheckoutB(page);
+    const scene = await page.evaluate(async ({ CHECKOUT_B, CHECKOUT_C, WORKER, stageOfSource }) => {
+      const stage = eval(`(${stageOfSource})`);
+      const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+      const A = activeWorktreePath;
+      // C beside B, through the same catalog answer the sidebar reads.
+      const catalog = window.__ANSWER__.project_catalog;
+      window.__ANSWER__.project_catalog = () => catalog().map((project) => ({
+        ...project,
+        worktrees: [...project.worktrees.filter((one) => one.path !== CHECKOUT_C), {
+          path: CHECKOUT_C, branch: "wt/t-44057/c", is_main: false, active: activeWorktreePath === CHECKOUT_C,
+          is_folder: false, ownership: "zerocode-managed", external_hidden: false,
+        }],
+      }));
+      const layouts = window.__ANSWER__.pane_layouts;
+      window.__ANSWER__.pane_layouts = (ask) => (ask.worktree === CHECKOUT_C ? [] : layouts(ask));
+      await refreshWorktrees();
+      const shell = await openTermTab({ placement: "tab" });
+      for (const handler of window.__LISTENERS__["term:worker"] ?? []) {
+        handler({ payload: { parent: shell, term: WORKER, worktree: A, agent: "codex" } });
+      }
+      await settle(250);
+      const row = document.querySelector(`.wt-agents[data-worktree-path="${A}"] .wt-agent[data-term="${WORKER}"]`);
+      seatLedgerManagedTerm(WORKER, CHECKOUT_B, "codex");
+      // The first activation (A → B) is held open; the worker moves to C meanwhile.
+      const paneFile = window.__ANSWER__.pane_layouts;
+      let movedDuring = false;
+      window.__ANSWER__.pane_layouts = async (ask) => {
+        if (ask.worktree === CHECKOUT_B && !movedDuring) {
+          movedDuring = true;
+          seatLedgerManagedTerm(WORKER, CHECKOUT_C, "codex");
+          await settle(50);
+        }
+        return paneFile(ask);
+      };
+      const pressed = performance.now();
+      row?.click();
+      let elapsed = null;
+      while (performance.now() - pressed < 3000) {
+        const now = stage(WORKER);
+        if (now.onStage && now.active === CHECKOUT_C) {
+          elapsed = Math.round(performance.now() - pressed);
+          break;
+        }
+        await new Promise((done) => requestAnimationFrame(() => done()));
+      }
+      await settle(100);
+      return { movedDuring, ms: elapsed, ...stage(WORKER) };
+    }, { CHECKOUT_B, CHECKOUT_C, WORKER, stageOfSource: stageOf.toString() });
+    ok(
+      "a worker the ledger moves again while the click's activation is in flight ends on the stage of the checkout it stands in when the activation returns",
+      scene.movedDuring && scene.onStage && scene.inFront && scene.active === CHECKOUT_C &&
+        scene.tabWorktree === CHECKOUT_C && faults.length === 0,
       receipt({ ...scene, faults: faults.length }),
     );
   }
