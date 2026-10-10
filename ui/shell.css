@@ -45698,17 +45698,20 @@ button.jev-token:hover {
   font-size: var(--text-sm);
 }
 
-/* 작업의 줄: 칩 한 줄(작업 · 반영 · 시각) · 제목 두 줄 · 수 한 줄. 높이는 가상화가 읽는 토큰이다. */
+/* 작업의 줄: 넓은 목록에서는 한 줄 — 반영 칩 · 제목 · 수 · 시각. 띠에서는 두 줄 — 번호와 반영 칩,
+ * 그 아래 제목(띠에서 빠진 수와 시각은 읽는 칸 머리가 말한다). 높이는 가상화가 읽는 토큰이다. */
 .artifact-task {
   position: absolute;
   top: 0;
   right: 0;
   left: 0;
   display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: var(--space-1) var(--space-2);
+  align-items: center;
   box-sizing: border-box;
-  padding: var(--space-2) var(--space-4) var(--space-2) calc(var(--space-4) - var(--artifact-task-edge-width));
+  padding: 0 var(--space-4) 0 calc(var(--space-4) - var(--artifact-task-edge-width));
   border-bottom: var(--rule-width) solid var(--edge-rule);
   border-left: var(--artifact-task-edge-width) solid transparent;
   overflow: hidden;
@@ -45729,18 +45732,16 @@ button.jev-token:hover {
   background: var(--surface-raised);
 }
 
+/* 머리 상자는 넓은 목록에서 풀린다(`contents`): 번호 · 반영 · 제목 · 수 · 시각이 줄의 항목이 된다. */
 .artifact-task-head {
-  display: flex;
-  flex: none;
-  gap: var(--space-2);
-  align-items: center;
-  min-width: 0;
+  display: contents;
   white-space: nowrap;
 }
 
 .artifact-task-head > [hidden] { display: none; }
 
 .artifact-task-id {
+  flex: none;
   font-family: var(--font-mono);
 }
 
@@ -45750,29 +45751,58 @@ button.jev-token:hover {
 }
 
 .artifact-task-when {
+  order: 3;
+  flex: none;
   color: var(--artifact-card-ink-soft);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .artifact-task-title {
-  display: -webkit-box;
-  flex: none;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  order: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   font-size: var(--text-sm);
   font-weight: 600;
   line-height: 1.4;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .artifact-task-parts {
+  order: 2;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
   overflow: hidden;
   color: var(--artifact-card-ink-soft);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 띠: 번호와 반영 칩이 첫 줄, 제목이 둘째 줄이다. 띠에서 빠진 수와 시각은 읽는 칸 머리가 말한다. */
+.artifacts-view.is-task-open .artifact-task {
+  flex-wrap: wrap;
+}
+
+.artifacts-view.is-task-open .artifact-task-head {
+  display: flex;
+  flex: 1 0 100%;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+.artifacts-view.is-task-open .artifact-task-title {
+  flex-basis: 100%;
+}
+
+.artifacts-view.is-task-open .artifact-task-parts,
+.artifacts-view.is-task-open .artifact-task-when {
+  display: none;
 }
 
 /* 목록 바닥의 「작업에 연결 안 된 것」 — 세 줄, 누르면 그 탭이 걸러져 열린다. */

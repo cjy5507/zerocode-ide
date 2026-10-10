@@ -5947,6 +5947,7 @@ const ARTIFACT_TOKENS = Object.freeze({
   outlineScreens: "--artifact-outline-screens",
   outlineOffset: "--artifact-outline-offset",
   taskRow: "--artifact-task-row-height",
+  taskRowStrip: "--artifact-task-row-strip-height",
   tierRail: "--artifact-tier-rail",
 });
 const ARTIFACT_KIND_GLYPH = Object.freeze({
@@ -6191,7 +6192,8 @@ function artifactTuning(view) {
     cardPlainHeight: read(ARTIFACT_TOKENS.cardPlainHeight, 140),
     outlineScreens: read(ARTIFACT_TOKENS.outlineScreens, 2),
     outlineOffset: read(ARTIFACT_TOKENS.outlineOffset, 84),
-    taskRow: read(ARTIFACT_TOKENS.taskRow, 96),
+    taskRow: read(ARTIFACT_TOKENS.taskRow, 40),
+    taskRowStrip: read(ARTIFACT_TOKENS.taskRowStrip, 56),
     tierRail: read(ARTIFACT_TOKENS.tierRail, 1100),
   };
   artifactTunings.set(view, tuning);
