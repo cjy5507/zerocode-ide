@@ -38,6 +38,7 @@
 mod completion;
 pub mod coordinator_handover;
 pub mod delegate;
+pub mod evidence;
 pub mod landing_watch;
 mod session_history;
 pub mod task_cost;
@@ -18401,13 +18402,19 @@ pub const BRIEFING_HANDS_OVER: &str = "Now do this:";
 /// Only for a worker that carries a task: there is nothing to report about
 /// work nobody wrote down, and an agent summoned to look at something would
 /// only be confused by being told how to close a dispatch it does not have.
-pub fn worker_briefing(task: &str, title: &str) -> String {
+pub fn worker_briefing(task: &str, title: &str, spec: &str) -> String {
     let carrying = if title.is_empty() || title == task {
         task.to_string()
     } else {
         format!("{title} ({task})")
     };
     let trust = message_trust_briefing();
+    // The pass conditions the spec writes, and the evidence each one owes; empty
+    // for a task that writes none, so its briefing is the one it always was.
+    let conditions = match evidence::briefing_paragraph(spec) {
+        paragraph if paragraph.is_empty() => String::new(),
+        paragraph => format!("{paragraph}\n\n"),
+    };
     format!(
         "You are a worker in this window's orchestration, carrying task {carrying}. \
 When your work is done, run: zerocode-orc send --type worker_done \
@@ -18433,7 +18440,8 @@ values masked, {cap_mb} MB at most). An intended failure is evidence too — nam
 name — and a report that is not a plain report says what it is: `\"{report_kind}\":\"review\"` \
 (one of {kinds}). Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
-a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{conditions}{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+        conditions = conditions,
         evidence = crate::hand_in::EVIDENCE_KEY,
         expect = crate::hand_in::EXPECT_KEY,
         report_kind = crate::hand_in::REPORT_KIND_KEY,
@@ -18456,8 +18464,8 @@ a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{
 }
 
 /// Add the provider-specific facts that wrap the shared worker protocol.
-fn worker_briefing_for(agent: &str, task: &str, title: &str) -> String {
-    let shared = worker_briefing(task, title);
+fn worker_briefing_for(agent: &str, task: &str, title: &str, spec: &str) -> String {
+    let shared = worker_briefing(task, title, spec);
     if agent != crate::agent::AgentKind::Zo.slug() {
         return shared;
     }
@@ -18665,7 +18673,7 @@ fn brief_spec(spec: &str) -> (String, bool) {
 pub fn dispatch_preamble(task: &Task) -> String {
     format!(
         "{}{}",
-        worker_briefing(&task.id, task.display_name()),
+        worker_briefing(&task.id, task.display_name(), task.spec.as_str()),
         task.spec.as_str()
     )
 }
@@ -19346,7 +19354,35 @@ pub fn plan(
     now_ms: i64,
     actor: Option<&str>,
 ) -> Decided {
-    match plan_inner(ledger, team, launcher, argv, pane, now_ms, actor) {
+    plan_with_receipts(
+        ledger,
+        team,
+        launcher,
+        argv,
+        pane,
+        now_ms,
+        actor,
+        &evidence::ReceiptFiles::default(),
+    )
+}
+
+/// [`plan`], with the receipt files the window read for the verb (t-26587).
+///
+/// The window reads a `worker_done`'s named receipts before the ledger judges
+/// the report, so the decision sees exactly what was read. A verb that names no
+/// receipt passes an empty set, and [`plan`] is this with nothing read.
+#[allow(clippy::too_many_arguments)] // Each argument is one fact the decision rests on.
+pub fn plan_with_receipts(
+    ledger: &mut Ledger,
+    team: &mut Team,
+    launcher: &dyn Launcher,
+    argv: &[String],
+    pane: &str,
+    now_ms: i64,
+    actor: Option<&str>,
+    receipts: &evidence::ReceiptFiles,
+) -> Decided {
+    match plan_inner(ledger, team, launcher, argv, pane, now_ms, actor, receipts) {
         Ok(decided) => decided,
         Err(why) => Decided {
             answered_from: None,
@@ -19552,6 +19588,7 @@ fn plan_inner(
     pane: &str,
     now_ms: i64,
     actor: Option<&str>,
+    receipts: &evidence::ReceiptFiles,
 ) -> Result<Decided, String> {
     let (verb, rest) = argv
         .split_first()
@@ -21066,7 +21103,11 @@ fn plan_inner(
                 asked.is_empty(),
             ) {
                 (Some(id), Some(title), false, false) => {
-                    format!("{}{asked}", worker_briefing_for(&agent, id, title))
+                    let spec = ledger
+                        .run(&run_id)
+                        .and_then(|run| run.task(id))
+                        .map_or("", |held| held.spec.as_str());
+                    format!("{}{asked}", worker_briefing_for(&agent, id, title, spec))
                 }
                 _ => asked.to_string(),
             };
@@ -22214,6 +22255,29 @@ fn plan_inner(
                     .map(str::to_string)
                     .or_else(|| carried.1.clone()),
             };
+            /* A success report owes the evidence of each pass condition its
+             * task wrote (t-26587), and the ledger judges it before anything is
+             * written: a refusal leaves the attempt open and files no receipt,
+             * so the same --retry-request sends the evidence again.
+             *
+             * Asked on this verb and not in `Ledger::send`, because a relayed
+             * report comes back through `send` with no evidence of its own.
+             * Only a task that writes conditions is judged, so a task that
+             * writes none is taken exactly as before. */
+            if kind == MessageKind::WorkerDone
+                && worker_done_succeeded(draft.body.as_str()).is_ok_and(|ok| ok)
+                && let Some(task) = draft
+                    .task
+                    .as_deref()
+                    .and_then(|id| ledger.run(&run_id).and_then(|run| run.task(id)))
+            {
+                evidence::judge_success(
+                    task.spec.as_str(),
+                    draft.body.as_str(),
+                    draft.payload.as_str(),
+                    receipts,
+                )?;
+            }
             let id = ledger.post_as(&run_id, draft, Some(&seat), now_ms)?;
             said(serde_json::json!({ "messageId": id }))
         }

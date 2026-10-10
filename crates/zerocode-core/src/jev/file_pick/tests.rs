@@ -192,7 +192,7 @@ fn the_file_pick_label_golden_table() {
 /// code — a name with `_` or an inner capital — are looked for first.
 #[test]
 fn a_search_looks_for_the_tasks_own_words_and_names_that_look_like_code_first() {
-    let briefing = crate::orchestration::worker_briefing("t-1", "the parser crash");
+    let briefing = crate::orchestration::worker_briefing("t-1", "the parser crash", "");
     let prompt = format!(
         "{briefing}Please fix the crash when an empty line reaches lexer_state in ParserTable"
     );

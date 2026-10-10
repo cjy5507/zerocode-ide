@@ -1141,7 +1141,7 @@ mod tests {
     /// spells them — and so is the coordinator's guide.
     #[test]
     fn the_worker_briefing_and_the_guide_teach_the_keys_the_window_keeps() {
-        let briefing = crate::orchestration::worker_briefing("t-1", "keep");
+        let briefing = crate::orchestration::worker_briefing("t-1", "keep", "");
         for needle in [
             format!("\"{EVIDENCE_KEY}\":["),
             format!("\"{EXPECT_KEY}\":\"fail\""),

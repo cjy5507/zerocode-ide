@@ -274,7 +274,7 @@ fn a_refused_report_can_be_sent_again_under_the_same_retry_name() {
 /// shape the evidence takes; a task with no conditions gets neither.
 #[test]
 fn a_worker_briefing_for_a_task_with_conditions_names_them_and_the_evidence_shape() {
-    let briefing = worker_briefing(TWO_CONDITIONS, "parser");
+    let briefing = worker_briefing("t-1", "parser", TWO_CONDITIONS);
     for words in [
         "cargo test -p zerocode-core is green",
         "cargo clippy --all-targets -- -D warnings is clean",
@@ -287,9 +287,98 @@ fn a_worker_briefing_for_a_task_with_conditions_names_them_and_the_evidence_shap
             "the briefing does not carry `{words}`: {briefing}"
         );
     }
-    let plain = worker_briefing(NO_CONDITIONS, "rename");
+    let plain = worker_briefing("t-1", "rename", NO_CONDITIONS);
     assert!(
         !plain.contains("\"evidence\""),
         "a task with no conditions was briefed about evidence: {plain}"
     );
+}
+
+/// A spec line is a condition when it begins with the mark, after its spaces
+/// and an optional list marker, and the mark ends at a space, a colon or the
+/// end of the line. `통과 전체` is not one.
+#[test]
+fn a_spec_line_is_a_condition_when_it_begins_with_the_mark_after_a_list_marker() {
+    let spec = "Plan first.\n  통과 전 build is green  \n2. 통과 전: clippy is clean\n- 통과 전\n통과 전체 테스트는 아님\nnot 통과 전 here\n10) 통과 전 last";
+    assert_eq!(
+        crate::orchestration::evidence::conditions(spec),
+        vec!["build is green", "clippy is clean", "", "last"]
+    );
+}
+
+/// The board reads each condition from the last report that named the task:
+/// passing evidence whose receipt the ledger read is `checked`, passing
+/// evidence without one is `claimed`, and a condition with none is `missing`.
+/// The notes the report left come along.
+#[test]
+fn the_board_reads_each_condition_from_the_last_report_that_named_the_task() {
+    use crate::orchestration::evidence::{ConditionState, hand_in_of};
+    let mut bench = Bench::new();
+    bench.json("run-create --name evidence");
+    let task = written_task(&mut bench, TWO_CONDITIONS);
+    let pane = worker_on(&mut bench, &task);
+    let body = serde_json::json!({"ok": true, "decisions": "keep the parser", "blocked": " ", "next": "review", "evidence": [
+        evidence_of(1, "tests", 0),
+        evidence_of(2, "clippy", 0),
+    ]});
+    let payload = serde_json::json!({"evidencePaths": [TESTS_RECEIPT]});
+    let planned = report(
+        &mut bench,
+        &pane,
+        &body,
+        Some(&payload),
+        &[(TESTS_RECEIPT, "0\n")],
+        "done-board",
+    );
+    assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+    let run = &bench.ledger.runs()[0];
+    let view = hand_in_of(run, run.task(&task).expect("the task"));
+    let states: Vec<ConditionState> = view.conditions.iter().map(|row| row.state).collect();
+    assert_eq!(
+        states,
+        vec![ConditionState::Checked, ConditionState::Claimed],
+        "{view:?}"
+    );
+    assert_eq!(view.decisions.as_deref(), Some("keep the parser"));
+    assert_eq!(view.blocked, None, "a blank note is no note");
+    assert_eq!(view.next.as_deref(), Some("review"));
+}
+
+/// A task that writes no conditions has nothing on the board for its hand-in,
+/// and a report with no evidence leaves every condition `missing`.
+#[test]
+fn a_task_without_conditions_has_no_hand_in_view_and_a_bare_report_leaves_every_condition_missing() {
+    use crate::orchestration::evidence::{ConditionState, hand_in_of};
+    let mut bench = Bench::new();
+    bench.json("run-create --name evidence");
+    let plain = written_task(&mut bench, NO_CONDITIONS);
+    let pane = worker_on(&mut bench, &plain);
+    let planned = report(
+        &mut bench,
+        &pane,
+        &serde_json::json!({"ok": true, "summary": "renamed"}),
+        None,
+        &[],
+        "done-plain",
+    );
+    assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+    let run = &bench.ledger.runs()[0];
+    let view = hand_in_of(run, run.task(&plain).expect("the task"));
+    assert!(view.is_empty(), "{view:?}");
+
+    let tested = written_task(&mut bench, TWO_CONDITIONS);
+    let carried = worker_on(&mut bench, &tested);
+    let failed = report(
+        &mut bench,
+        &carried,
+        &serde_json::json!({"ok": false, "summary": "not yet"}),
+        None,
+        &[],
+        "done-open",
+    );
+    assert_eq!(failed.reply.exit_code, 0, "{}", failed.reply.stderr);
+    let run = &bench.ledger.runs()[0];
+    let view = hand_in_of(run, run.task(&tested).expect("the task"));
+    let states: Vec<ConditionState> = view.conditions.iter().map(|row| row.state).collect();
+    assert_eq!(states, vec![ConditionState::Missing, ConditionState::Missing]);
 }

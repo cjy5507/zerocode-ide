@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
+use zerocode_core::orchestration::evidence::{TaskHandIn, hand_in_of};
 use zerocode_core::orchestration::task_cost::TaskCost;
 use zerocode_core::orchestration::{
     Closure, Delivery, Ledger, Message, MessageKind, Run, Task, TaskStatus, WorktreeRoom,
@@ -414,6 +415,12 @@ pub(crate) struct DeskTask {
     /// task nobody handed anything in on by name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) kept: Option<zerocode_core::hand_in::Facts>,
+    /// The pass conditions the task's spec writes, each with the state its last
+    /// report left it in, and the notes that report carried (t-26587,
+    /// [`zerocode_core::orchestration::evidence::hand_in_of`]). Empty for a
+    /// task that writes no conditions and whose report left no notes.
+    #[serde(skip_serializing_if = "TaskHandIn::is_empty")]
+    pub(crate) hand_in: TaskHandIn,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -570,6 +577,7 @@ pub(crate) fn desk_snapshot(
                     cost: None,
                     writing: None,
                     kept: None,
+                    hand_in: TaskHandIn::default(),
                 },
             ));
         }
@@ -594,8 +602,11 @@ pub(crate) fn desk_snapshot(
         // A finished task's cost, asked of the rows the desk sends and no
         // other — a stage of two hundred is two dozen rows and a count.
         let finished = FINISHED_STAGES.contains(&stage);
+        // The hand-in view is read from the ledger's own message, so it is asked
+        // of the rows the desk sends too — the same rule as the cost above.
         tasks.extend(rows.into_iter().map(|(run, task, row)| DeskTask {
             cost: finished.then(|| cost(run, task)),
+            hand_in: hand_in_of(run, task),
             ..row.clone()
         }));
     }
