@@ -1448,6 +1448,10 @@ impl LspRegistry {
         // For actions requiring a path, validate workspace boundary
         if let Some(path_str) = path {
             let workspace_root = std::env::current_dir().map_err(|e| e.to_string())?;
+            // The root is canonicalized like the path below. On Windows canonicalize
+            // adds a verbatim prefix, so comparing a plain root with a canonical path
+            // fails the boundary check for every file inside the workspace.
+            let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
             let resolved_path = workspace_root.join(path_str);
             let canonical_path = resolved_path.canonicalize().unwrap_or(resolved_path);
             if let Err(e) =
