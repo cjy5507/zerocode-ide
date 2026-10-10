@@ -10322,7 +10322,7 @@ function worktreeWorkSaid(path) {
 }
 
 /* The agent that did the work in one checkout, once it has ended (t-44016): its name, its model and when it
- * ended — 「Claude · claude-haiku-5-5 · 끝 14:00」. A live seat speaks for itself on its own row, so nothing
+ * ended — 「(vendor name) · (its model) · 끝 (time)」. A live seat speaks for itself on its own row, so nothing
  * is said here for it. */
 function worktreeWorkerWords(path) {
   const work = checkoutLedger.get(checkoutKey(path));
