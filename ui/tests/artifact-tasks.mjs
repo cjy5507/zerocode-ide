@@ -312,6 +312,17 @@ async function testRemainders(page, ok) {
       && captions.some((one) => one.text === `전 · ${BEFORE_HASH}`) && captions.some((one) => one.text === `후 · ${AFTER_HASH}`),
     JSON.stringify(captions),
   );
+  // A pair whose rows name no commit (a picture the window took itself carries none) stands bare.
+  const bare = await page.evaluate(() => {
+    const compare = artifactsView()?.querySelector(".artifact-compare") ?? null;
+    setArtifactCompareLabels(compare, "no-commit-before", "no-commit-after");
+    return [...(compare?.querySelectorAll(".artifact-compare-label") ?? [])].map((one) => one.textContent.replace(/\s+/g, " ").trim());
+  });
+  ok(
+    "a pair whose rows name no commit stands its captions bare — 「전」 and 「후」, with no hash made up",
+    bare.length === 2 && bare[0] === "전" && bare[1] === "후",
+    JSON.stringify(bare),
+  );
 
   await openFresh(page);
   await page.evaluate(async () => {

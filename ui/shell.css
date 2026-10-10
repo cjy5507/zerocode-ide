@@ -46122,6 +46122,32 @@ button.jev-token:hover {
   min-height: var(--artifact-press-min);
 }
 
+/* 꼬리표: 그림 밖 위에 선다 — 전은 왼쪽, 후는 오른쪽. 나란히 볼 때는 두 그림 위에 같은 두 칸이다. */
+.artifact-compare-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--ink-chalk);
+  font-size: var(--text-sm);
+}
+
+.artifact-compare-labels[data-compare-mode="side"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.artifact-compare-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.artifact-compare-hash {
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+}
+
 .artifact-compare-stage {
   --artifact-compare-at: 50%;
   position: relative;
@@ -46143,18 +46169,6 @@ button.jev-token:hover {
   height: auto;
 }
 
-.artifact-compare-side figcaption {
-  position: absolute;
-  top: var(--space-2);
-  left: var(--space-2);
-  padding: 0 var(--space-2);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-abyss) 70%, transparent);
-  color: var(--ink-chalk);
-  font-size: var(--text-xs);
-  line-height: 1.6;
-}
-
 .artifact-compare-stage[data-compare-mode="slide"] {
   cursor: ew-resize;
 }
@@ -46163,11 +46177,6 @@ button.jev-token:hover {
   position: absolute;
   inset: 0;
   clip-path: inset(0 calc(100% - var(--artifact-compare-at)) 0 0);
-}
-
-.artifact-compare-stage[data-compare-mode="slide"] .is-after figcaption {
-  right: var(--space-2);
-  left: auto;
 }
 
 /* 경계선은 흰 잉크다 — 호박색은 고른 것의 색이다. */
