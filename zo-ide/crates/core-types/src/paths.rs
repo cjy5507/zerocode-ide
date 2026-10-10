@@ -37,7 +37,7 @@ mod windows_owner_only {
         WRITE_OWNER,
     };
 
-    use super::{classify_owner, OwnerClass};
+    use super::{classify_owner, private_open_intent, OwnerClass};
 
     const PRIVATE_DACL_PREFIX: &str = "D:P";
 
@@ -351,11 +351,13 @@ mod windows_owner_only {
         truncate: bool,
     ) -> io::Result<File> {
         let (parent, leaf) = open_parent_no_follow(path)?;
+        let intent = private_open_intent(append, truncate);
         let mut options = entry_open_options(true);
         options
-            .create(true)
-            .append(append)
-            .truncate(truncate && !append);
+            .write(intent.write)
+            .create(intent.create)
+            .append(intent.append)
+            .truncate(intent.truncate);
         let mut file = parent.open_with(leaf, &options)?;
         let metadata = file.metadata()?;
         if !metadata.is_file() || metadata.is_symlink() || metadata.nlink() != 1 {
@@ -457,9 +459,10 @@ fn classify_owner<T: PartialEq + ?Sized>(
 
 /// What a private-file open asks the OS for, decided without touching Windows
 /// so the rule can be tested everywhere. A create or a truncate needs write
-/// intent: cap-primitives refuses one without it (ERROR_INVALID_PARAMETER).
+/// intent: cap-primitives refuses one without it (`ERROR_INVALID_PARAMETER`).
 #[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // each bool is one independent flag of the open, not a state machine
 struct PrivateOpenIntent {
     write: bool,
     append: bool,
@@ -472,7 +475,7 @@ struct PrivateOpenIntent {
 #[cfg(any(windows, test))]
 fn private_open_intent(append: bool, truncate: bool) -> PrivateOpenIntent {
     PrivateOpenIntent {
-        write: false,
+        write: true,
         append,
         create: true,
         truncate: truncate && !append,
@@ -1084,6 +1087,7 @@ mod tests {
     fn private_creating_opens_ask_for_write_intent() {
         for (append, truncate) in [(false, true), (false, false), (true, true), (true, false)] {
             let intent = private_open_intent(append, truncate);
+            assert_eq!(intent.append, append, "{intent:?}");
             assert!(intent.create, "{intent:?}");
             assert!(
                 intent.write,
