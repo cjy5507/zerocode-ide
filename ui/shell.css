@@ -45908,19 +45908,22 @@ button.jev-token:hover {
   font-size: var(--text-xs);
 }
 
-/* 증거의 띠: 카드가 옆으로 서고, 넘치면 띠 안에서 옆으로 넘긴다. */
+/* 증거의 띠: 카드가 줄바꿈 격자로 선다 — 옆으로 넘기면 끝이 숨으므로 넘치는 줄은 띠 안에서 세로로
+ * 넘긴다(키보드는 카드의 포커스를 따라 띠가 넘어간다). 띠의 높이는 토큰이 정한다. */
 .artifact-bundle-cards {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--artifact-evidence-card-width), 1fr));
   gap: var(--space-2);
   margin: 0;
   padding: 0 0 var(--space-1);
   list-style: none;
-  overflow-x: auto;
+  max-height: var(--artifact-evidence-band-max-height);
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .artifact-bundle-cards > li {
-  flex: none;
-  width: var(--artifact-evidence-card-width);
+  min-width: 0;
 }
 
 .artifact-evidence {
@@ -46050,13 +46053,11 @@ button.jev-token:hover {
   overflow-y: auto;
 }
 
+/* 증거의 열: 열 하나의 격자이고, 넘김은 열 전체가 맡는다(띠의 높이 제한을 풀어 둔다). */
 .artifacts-view.is-tab-tasks.is-rail .artifact-bundle-cards {
-  flex-direction: column;
-  overflow-x: visible;
-}
-
-.artifacts-view.is-tab-tasks.is-rail .artifact-bundle-cards > li {
-  width: auto;
+  grid-template-columns: minmax(0, 1fr);
+  max-height: none;
+  overflow-y: visible;
 }
 
 /* 전후 비교 — 읽는 칸의 폭 그대로. 겹쳐 밀기에서는 「전」이 「후」 위에 경계까지만 보이고,

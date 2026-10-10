@@ -2070,6 +2070,9 @@
   /* 증거의 열이 제 안에서 넘기기 시작하는 높이 — 창의 머리와 탭 줄을 뺀 읽는 칸보다 낮게. */
   --artifact-rail-max-height: 70vh;
   --artifact-evidence-card-width: 216px;
+  /* 증거 띠의 최대 높이(t-43931): 줄바꿈 격자로 선 카드가 세 줄쯤 보이고, 그보다 많으면 띠 안에서
+     세로로 넘긴다. 넘치는 줄의 끝이 보여 넘길 곳이 있다는 말이 된다. */
+  --artifact-evidence-band-max-height: 200px;
   /* 고른 작업 줄의 왼쪽 모서리, 전후 비교의 경계선. */
   --artifact-task-edge-width: 3px;
   --artifact-compare-line-width: 2px;

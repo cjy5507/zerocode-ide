@@ -238,7 +238,14 @@ async function testRemainders(page, ok) {
   );
 
   await openTask(page, "t-501");
-  const band = await page.evaluate(async () => {
+  // The keyboard walks the band: the first card takes the focus, then one Tab for each card after it.
+  const count = await page.evaluate(() => {
+    const cards = [...(artifactsView()?.querySelectorAll(".artifact-bundle-cards .artifact-evidence") ?? [])];
+    cards[0]?.focus({ preventScroll: true });
+    return cards.length;
+  });
+  for (let at = 1; at < count; at += 1) await page.keyboard.press("Tab");
+  const band = await page.evaluate(() => {
     const view = artifactsView();
     const strip = view?.querySelector(".artifact-bundle-cards") ?? null;
     const frame = strip?.getBoundingClientRect() ?? { top: 0, bottom: 0, left: 0, right: 0 };
@@ -480,10 +487,14 @@ export async function testArtifactTasks(browser, origin, ok) {
       seen.halt = colorOf("--signal-halt-ink");
       seen.ready = colorOf("--signal-ready-ink");
       probe.remove();
-      // The strip: the cards stand in one row under the head, above the report.
+      // The band: the cards stand in a grid under the head, above the report, each inside the band's width.
       const strip = bundle?.querySelector(".artifact-bundle-cards") ?? null;
-      const tops = new Set(cards.map((one) => Math.round(one.getBoundingClientRect().top)));
-      seen.oneRow = tops.size === 1;
+      const bandBox = box(strip) ?? { left: 0, right: 0 };
+      seen.inBand = cards.every((one) => {
+        const at = one.getBoundingClientRect();
+        return at.left >= bandBox.left - 0.5 && at.right <= bandBox.right + 0.5;
+      });
+      seen.rows = new Set(cards.map((one) => Math.round(one.getBoundingClientRect().top))).size;
       seen.stripAboveBody = (box(strip)?.bottom ?? Infinity) <= (box(drawer?.querySelector(".artifact-preview"))?.top ?? -Infinity) + 1;
       seen.rail = view?.classList.contains("is-rail") ?? null;
       seen.pages = [...(bundle?.querySelectorAll(".artifact-bundle-page") ?? [])].filter(shown).map((one) => one.textContent);
@@ -520,11 +531,11 @@ export async function testArtifactTasks(browser, origin, ok) {
     const card = (name) => reader.cards.find((one) => one.name.includes(name)) ?? null;
     ok(
       "the task's evidence stands under the head as a strip of cards, every file its own card with a plain status word beside its numbers",
-      reader.bundleShown === true && reader.cards.length === 5 && reader.oneRow === true && reader.stripAboveBody === true && reader.rail === false
+      reader.bundleShown === true && reader.cards.length === 5 && reader.inBand === true && reader.stripAboveBody === true && reader.rail === false
         && reader.cards.every((one) => one.tag === "BUTTON" && one.height >= PRESS_MIN_PX)
         && (card("green-rust.log")?.said ?? "").startsWith("✓ 통과") && (card("green-rust.log")?.said ?? "").includes("통과 12")
         && (card("green-rust.log")?.said ?? "").includes("무시됨 1") && card("green-rust.log")?.color === reader.ready,
-      JSON.stringify({ shown: reader.bundleShown, cards: reader.cards, oneRow: reader.oneRow, above: reader.stripAboveBody, rail: reader.rail }),
+      JSON.stringify({ shown: reader.bundleShown, cards: reader.cards, inBand: reader.inBand, rows: reader.rows, above: reader.stripAboveBody, rail: reader.rail }),
     );
     ok(
       "a failure the run was for is a grey ✕ 「의도한 실패」 with its exit code — never the red of a failure",
