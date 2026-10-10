@@ -482,6 +482,14 @@ fn private_open_intent(append: bool, truncate: bool) -> PrivateOpenIntent {
     }
 }
 
+/// Whether an opened directory may take the owner-only policy. A symlink or a
+/// junction is refused even though its handle opens, because the policy would
+/// then restrict the link itself. Platform-free so the rule is tested everywhere.
+#[cfg(any(windows, test))]
+fn restrictable_directory(is_dir: bool, is_link: bool) -> bool {
+    is_dir
+}
+
 /// Environment variable naming the highest-priority zo home.
 pub const ZO_CONFIG_HOME_ENV: &str = "ZO_CONFIG_HOME";
 /// Secondary home override honored after [`ZO_CONFIG_HOME_ENV`].
@@ -1082,6 +1090,13 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn restrictable_directories_are_plain_directories_only() {
+        assert!(restrictable_directory(true, false));
+        assert!(!restrictable_directory(true, true), "a junction must be refused");
+        assert!(!restrictable_directory(false, false), "a file is not a directory");
+    }
 
     #[test]
     fn private_creating_opens_ask_for_write_intent() {
