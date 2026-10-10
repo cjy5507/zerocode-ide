@@ -797,7 +797,7 @@ mod tests {
     #[test]
     fn secret_answer_keeps_no_copy_in_its_output_or_its_files() {
         let home = tempfile::tempdir().expect("a temporary home folder");
-        let child = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        let child = crate::proc::quiet_command(std::env::current_exe().expect("this test binary"))
             .args([
                 "--exact",
                 "answer_door::tests::secret_answer_road_as_a_child_process",
