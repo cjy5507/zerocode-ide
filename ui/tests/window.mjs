@@ -13781,6 +13781,11 @@ const terminalAppearance = await page.evaluate(async () => {
   const inactiveCaret = inactive.querySelector(".term-caret");
   const grip = host.querySelector(":scope > .pane-grip");
   const pseudo = (node) => getComputedStyle(node, "::after");
+  // A fade or an ease still running is a value in the middle of its way: wait for the transitions under the split to
+  // end (their `finished`), not for a fixed time that a slower runner can miss.
+  const transitionsEnded = (node) => Promise.all(node.getAnimations({ subtree: true })
+    .filter((one) => one.transitionProperty)
+    .map((one) => one.finished.catch(() => {})));
   // The strip itself is the hit target now — Orca sizes the divider element
   // to the whole reach and lets the panes flex around it, so the first read
   // is the grip's own width rather than an overlay's.
@@ -13798,6 +13803,7 @@ const terminalAppearance = await page.evaluate(async () => {
   setTermPrefs({ inactive_pane_opacity: 0.5 });
   setTermPrefs({ divider_thickness_px: 7 });
   await new Promise((done) => setTimeout(done, 180));
+  await transitionsEnded(host);
   seen.bar = {
     widths: [pseudo(activeCaret).width, pseudo(inactiveCaret).width],
     shadows: [pseudo(activeCaret).boxShadow, pseudo(inactiveCaret).boxShadow],
@@ -13806,6 +13812,7 @@ const terminalAppearance = await page.evaluate(async () => {
   };
   setTermPrefs({ cursor_style: "underline" });
   await new Promise((done) => setTimeout(done, 40));
+  await transitionsEnded(host);
   seen.underline = {
     heights: [pseudo(activeCaret).height, pseudo(inactiveCaret).height],
     shadows: [pseudo(activeCaret).boxShadow, pseudo(inactiveCaret).boxShadow],
