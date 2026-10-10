@@ -2973,9 +2973,9 @@ fn tell_chair_held_once(run: &str, holder: &str, term: u32) {
     crate::note_window_event(
         root,
         &format!(
-            "orchestration: 실행 {run}의 코디네이터 자리는 살아 있는 다른 판({holder})이 \
-             쥐고 있어, 판 {term}의 대화는 그 자리에 앉지 않았습니다. 자리를 옮기려면 \
-             그 판을 닫거나 run-takeover로 넘기세요"
+            "orchestration: run {run}'s coordinator chair is held by live pane {holder}; \
+             the conversation in terminal {term} did not take it. To move it, close that \
+             pane or run-takeover --run {run} --from {holder} --reason <why>"
         ),
     );
 }

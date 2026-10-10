@@ -16679,7 +16679,7 @@ fn a_second_pane_of_a_bound_conversation_beside_a_live_chair_is_told_once() {
         std::fs::read_to_string(&blackbox)
             .unwrap_or_default()
             .lines()
-            .filter(|line| line.contains(&run_id) && line.contains("자리"))
+            .filter(|line| line.contains(&run_id) && line.contains(&format!("terminal {TWIN}")))
             .count()
     };
     super::tick(&twin, &[], clock());
