@@ -534,18 +534,24 @@ export async function testConversationKeys(browser, origin, ok) {
       const term = await openTermTab({ placement: "tab" });
       paneAgents.set(term, "claude");
       hookStates.set(term, "working");
+      const paneSetAt = { calls: { ...(window.__COUNTS__ ?? {}) } };
       window.__ANSWER__.pane_log = () => ({ found: true, next: 1, skipped: false, more: false, folded: false,
         turns: [{ role: "user", text: "판의 부탁" }] });
       await setPaneChat(term, true);
       for (let beat = 0; beat < 4; beat += 1) await window.__PAINTED__();
       const held = paneChats.get(term);
       const keysFor = () => calls("term_key").filter((args) => args.term === term).map((args) => args.press);
-      // What the key met, for a failure: the pane's word at the press, whether the conversation's Escape road is on this
-      // page, and whether a listener before it took the key (its default prevented, so the road returns).
+      // What the key met, for a failure: the pane's word at the press and after it, whether the conversation's Escape road
+      // is on this page, whether a listener before it took the key (its default prevented, so the road returns), and the
+      // poll commands the clock sent from the set to the settle after the key. A poll that moved the word is the clock's,
+      // not the key's — the detail says which, before any clock is held.
       seen.paneWord = hookStates.get(term) ?? null;
       seen.paneRoad = held.host.__interruptKeys === true;
       seen.paneEscPrevented = press(held.host.querySelector(".helper-turns"), "Escape") === false;
       await settle();
+      seen.paneWordAfter = hookStates.get(term) ?? null;
+      seen.pollsSinceSet = Object.keys(window.__COUNTS__ ?? {}).filter((name) => window.__POLLERS__?.has(name)
+        && ((window.__COUNTS__ ?? {})[name] ?? 0) > (paneSetAt.calls[name] ?? 0));
       seen.paneEsc = JSON.stringify(keysFor());
       held.host.querySelector(".worker-composer-send.is-stop")?.click();
       await settle();
