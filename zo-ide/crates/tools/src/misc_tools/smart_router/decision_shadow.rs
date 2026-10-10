@@ -46,6 +46,7 @@ use super::probe_exec::{remember_bounded, ProbeSlot, ProbeUse, PROBE_TIMEOUT};
 use super::settings::{decision_shadow_mode_from, DecisionShadowMode};
 use zerocode_core::jev::ROUTING;
 use zerocode_core::jev::promote::{self, Verdict};
+use zerocode_core::jev::provenance::{counts_toward_agreement, PairTally};
 use zerocode_core::jev::summary::{self as jev_ledger};
 
 use super::shadow_ledger::{append_shadow_row, last_shadow_lines, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
@@ -1310,7 +1311,7 @@ fn judge_rows_on(
         agreement: agreement_counting_all(&compared),
         disagreed_on_record: agreement_counting_all(&marks).disagreed(),
         calibrating: promote::Calibrating::NotRead,
-        pairs: promote::PairTally::default(),
+        pairs: PairTally::default(),
         bar_reads: false,
         bundle: None,
         ..evidence
@@ -1406,7 +1407,7 @@ fn agreement_over(rows: &[&serde_json::Value], by_source: bool) -> promote::Agre
         if let Some(agreed) = jev_ledger::AGREED.read(row).and_then(serde_json::Value::as_bool) {
             // A mark a proxy or an unsourced label made is withheld from the
             // agreement a rise may read (t-26584, ①).
-            if by_source && !promote::counts_toward_agreement(row) {
+            if by_source && !counts_toward_agreement(row) {
                 agreement.proxied += 1;
                 continue;
             }

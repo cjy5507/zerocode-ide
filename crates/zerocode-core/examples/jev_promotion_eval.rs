@@ -279,7 +279,7 @@ fn main() {
         )
     });
     println!(
-        "marks a right rise needs (executed, priced, all agree): {}",
+        "marks a right rise needs (executed, priced): {}",
         needed.map_or_else(|| "none up to 200".to_string(), |n| n.to_string())
     );
     let per_judgment_ms = elapsed_ms / judgments.max(1) as f64;

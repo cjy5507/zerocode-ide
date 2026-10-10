@@ -814,7 +814,10 @@ pub fn gates_for(
         .unwrap_or(i64::MIN);
     let marks = version.marks_from_line(line);
     let reach = marks_that_can_clear(seat).unwrap_or(sample_floor);
-    let marks_since = crate::jev::summary::marks_from(marks.iter().copied(), since_ms, reach);
+    // The bar reads at least its own sample of pairs (ADR-150), reached back
+    // within the series the way the agreement's sample is.
+    let pair_reach = reach.max(PROMOTION_BAR.min_pairs);
+    let pairs_since = crate::jev::summary::marks_from(marks.iter().copied(), since_ms, pair_reach);
     Gates {
         calibrating: if seat.reads_act_line {
             Calibrating::Read {
@@ -830,7 +833,7 @@ pub fn gates_for(
         pairs: pair_tally(marks.iter().copied().filter(|row| {
             AT.read(row)
                 .and_then(Value::as_i64)
-                .is_some_and(|at| at >= marks_since)
+                .is_some_and(|at| at >= pairs_since)
         })),
         bar_reads: !graded_by_executions(seat),
         bundle: seat
@@ -1639,7 +1642,7 @@ fn gate_line(evidence: &Evidence) -> Option<Line> {
     calibration.or(bundle).or(bar)
 }
 
-/// [`judge_as`] with no gate: the verdict the judge gave before the evidence
+/// `judge_as` with no gate: the verdict the judge gave before the evidence
 /// rules of t-26584, on the same window and the same rows.
 pub fn judge_without_gates(seat: &JevUse, stand: Stand, evidence: &Evidence) -> Verdict {
     if on_its_marks_alone(seat, stand) {

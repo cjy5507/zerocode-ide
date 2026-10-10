@@ -1323,14 +1323,14 @@ fn a_recall_label_naming_no_time_does_not_overwrite_the_one_naming_its_asking() 
         &[
             asking(10),
             asking(20),
-            json!({"at": 21, "label": "7:9", "requestAt": 20, "agreed": false, "baselineAgreed": true}),
-            json!({"at": 22, "label": "7:9", "agreed": true, "baselineAgreed": false}),
+            json!({"at": 21, "label": "7:9", "requestAt": 20, "agreed": false, "baselineAgreed": true, "labelSource": "executed"}),
+            json!({"at": 22, "label": "7:9", "agreed": true, "baselineAgreed": false, "labelSource": "executed"}),
         ],
     );
     let report = one(seat, &roots, None, None, 1_000, 0);
     assert_eq!(
         report.judged.as_ref().map(|judged| judged.agreement),
-        Some(Agreement { compared: 1, agreed: 0, baseline_compared: 1, baseline_agreed: 1, not_compared: 0 }),
+        Some(Agreement { compared: 1, agreed: 0, baseline_compared: 1, baseline_agreed: 1, not_compared: 0, proxied: 0 }),
         "the label naming 20 stands, and the one naming no time grades neither asking"
     );
 }

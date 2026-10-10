@@ -135,12 +135,21 @@ fn mark(seat: &JevUse, at: usize, n: usize, fields: Value) -> Value {
     row
 }
 
+/// The marks a rise of `seat` is read on: enough to clear the agreement line
+/// with the negatives inside it, and never fewer than the paired records the
+/// bar reads on (ADR-150).
+fn marks_to_rise(seat: &JevUse) -> usize {
+    marks_that_can_clear(seat)
+        .unwrap_or(0)
+        .max(PROMOTION_BAR.min_pairs)
+}
+
 /// How many requests a ledger of `seat` holds before its marks: enough for
-/// a window, and enough for every mark the seat's line needs to name one.
+/// a window, and enough for every mark the seat's rise is read on to name one.
 fn asked_count(seat: &JevUse) -> usize {
     window_wanted_for(seat)
         .expect("a promoting seat")
-        .max(marks_that_can_clear(seat).unwrap_or(0))
+        .max(marks_to_rise(seat))
 }
 
 /// A rise as the judge writes it for `seat`: naming the rubric it asks.
@@ -456,7 +465,9 @@ fn a_row_that_is_neither_a_request_nor_a_mark_cuts_no_window() {
         let at = n * 4;
         rows.push(json!({"kind": "judgment", "at": at, "attempt": "s@1", "step": n, "outcome": "answered", "elapsedMs": 1, model: "jev-1.13.0", "rubricVersion": seat.rubric_version}));
         rows.push(json!({"kind": "step", "at": at + 1, model: chat[n % chat.len()]}));
-        rows.push(json!({"kind": "label", "at": at + 2, "labelSource": "executed", "label": format!("s@1:{n}"), "agreed": n >= crate::jev::NEGATIVES_WANTED, "baselineAgreed": n % 2 == 0}));
+        let mut label = json!({"kind": "label", "at": at + 2, "labelSource": "executed", "label": format!("s@1:{n}"), "agreed": n >= crate::jev::NEGATIVES_WANTED, "baselineAgreed": n % 2 == 0});
+        priced_equally(&mut label);
+        rows.push(label);
         rows.push(json!({"kind": "step", "at": at + 3, model: chat[(n + 1) % chat.len()]}));
     }
     let version = on_the_newest_version(seat, &rows);
@@ -538,8 +549,10 @@ fn one_forgiven_timeout_does_not_forgive_a_second_one() {
             // A window with marks that clear every agreement line, so the
             // one line left to clear is the answer line.
             // The misses are the newest requests, inside the window however
-            // many requests the marks needed to name.
-            let asked = asked_count(seat);
+            // many requests the marks needed to name, and past every request
+            // a mark grades: a mark names the request of its own number, so
+            // the marks must not reach the misses.
+            let asked = asked_count(seat).max(marks_to_rise(seat) + misses);
             let mut rows: Vec<Value> = (0..asked)
                 .map(|at| {
                     let mut row = asked_by(seat, at);
@@ -1364,6 +1377,7 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
     full.extend((0..wanted as i64).map(|at| {
         let mut marked = row(at, at >= crate::jev::NEGATIVES_WANTED as i64);
         marked["baselineAgreed"] = json!(at % 2 == 0);
+        priced_equally(&mut marked);
         marked
     }));
     let judged = judge_seat(seat, &full).expect("judged");
@@ -1403,10 +1417,12 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
         .collect();
     labelled.extend((0..wanted as i64).map(|at| asked(at, format!("k{at}"))));
     labelled.extend((0..wanted as i64).map(|at| {
-        json!({"at": at, "label": format!("k{at}"), "agreed": true, "baselineAgreed": at % 2 == 0})
+        let mut label = json!({"at": at, "label": format!("k{at}"), "agreed": true, "baselineAgreed": at % 2 == 0, "labelSource": "executed"});
+        priced_equally(&mut label);
+        label
     }));
     labelled.extend(
-        (1..=3).map(|n: i64| json!({"at": -n, "label": format!("old{n}"), "agreed": false})),
+        (1..=3).map(|n: i64| json!({"at": -n, "label": format!("old{n}"), "agreed": false, "labelSource": "executed"})),
     );
     let judged = judge_seat(stall, &labelled).expect("judged");
     assert_eq!(
@@ -1431,10 +1447,10 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
 /// three that say no — the record's evidence that the label can — then as
 /// many that say yes as the seat's budget needs to bound above its line with
 /// those three inside, each beside a baseline mark that is right half the
-/// time.
+/// time, and at least as many as the bar reads pairs on ([`marks_to_rise`]).
 fn marks_that_rise(seat: &JevUse, at: usize) -> Vec<Value> {
     let misses = seat.negatives_wanted.expect("a promoting seat");
-    let marks = marks_that_can_clear(seat).expect("a width the line can be cleared on");
+    let marks = marks_to_rise(seat);
     (0..marks)
         .map(|n| {
             mark(
@@ -1511,7 +1527,8 @@ fn a_seat_whose_labels_never_say_no_cannot_rise() {
 /// times in five beside a "today's tab" that was right every time has
 /// earned nothing, and one with no baseline marks at all has not been
 /// compared with anything yet. A seat whose marks grade only its own act has
-/// no such reader and is held to its floor alone.
+/// no such reader, and no current judgment to pair its marks with (ADR-150):
+/// its floor alone never raises it.
 #[test]
 fn a_seat_must_beat_its_baseline_not_only_its_floor() {
     let seat = &crate::jev::PLACEMENT;
@@ -1564,10 +1581,12 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
             .verdict,
         Verdict::Rise
     );
-    // A seat with no baseline is held to its floor alone.
+    // A seat with no baseline has no current judgment to pair its marks with
+    // (ADR-150): without the pairs it holds on the bar, and with them it rises
+    // like any seat — its floor alone is not a rise.
     let own = &crate::jev::BROWSER_READ;
     assert!(!own.baseline.binds());
-    let unmarked = window_then(own, |own, at| {
+    let unpaired = window_then(own, |own, at| {
         marks_that_rise(own, at)
             .into_iter()
             .map(|mut mark| {
@@ -1579,7 +1598,18 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
             .collect()
     });
     assert_eq!(
-        judge_seat(own, &unmarked).expect("judged").verdict,
+        judge_seat(own, &unpaired).expect("judged").verdict,
+        Verdict::Hold(Line::Bar {
+            miss: BarMiss::Pairs {
+                pairs: 0,
+                wanted: PROMOTION_BAR.min_pairs,
+            },
+        })
+    );
+    assert_eq!(
+        judge_seat(own, &window_then(own, marks_that_rise))
+            .expect("judged")
+            .verdict,
         Verdict::Rise
     );
 }
@@ -1635,13 +1665,17 @@ fn guard_request(at: usize, judged: u64, rubric: u32, model: Option<&str>, outco
 /// names carries that.
 fn guard_label(at: usize, judged: u64, agreed: bool) -> Value {
     use serde_json::json;
-    json!({
+    let mut label = json!({
         "kind": "label",
         "at": at,
         "label": judged.to_string(),
         "agreed": agreed,
         "baselineAgreed": at.is_multiple_of(2),
-    })
+        "labelSource": "executed",
+        "labelAuthor": "test",
+    });
+    priced_equally(&mut label);
+    label
 }
 
 /// The version that answers every request here.
@@ -1653,7 +1687,7 @@ const ANSWERING: &str = "jev-1.13.0";
 fn guard_window_that_rises(seat: &JevUse, rubric: u32, first: u64, at: usize) -> Vec<Value> {
     let wanted = window_wanted_for(seat).expect("the guard rises");
     let misses = seat.negatives_wanted.expect("the guard asks for negatives");
-    let marks = marks_that_can_clear(seat).expect("a width the line can be cleared on");
+    let marks = marks_to_rise(seat);
     assert!(marks <= wanted, "every mark names a request of the window");
     let mut rows: Vec<Value> = (0..wanted)
         .map(|n| {
@@ -1758,7 +1792,7 @@ fn todays_text_guard_stands_on_its_own_words_alone() {
     assert_eq!(judged.verdict, Verdict::Rise, "{judged:?}");
     assert_eq!(
         judged.agreement.compared,
-        marks_that_can_clear(seat).expect("a width"),
+        marks_to_rise(seat),
         "today's own marks, and only those"
     );
     let rose = transition_row(seat, 20_000, judged.verdict, &judged.window).expect("a rise");
@@ -1965,7 +1999,7 @@ fn the_second_version_rises_again_on_its_own_sample() {
     );
     assert_eq!(
         judged.agreement.compared,
-        marks_that_can_clear(seat).expect("a width"),
+        marks_to_rise(seat),
         "version 2's own marks, and only those"
     );
 }
@@ -2143,7 +2177,7 @@ fn a_rollback_starts_its_own_series_and_can_rise_again_on_it() {
         ..*guard()
     };
     let wanted = window_wanted_for(seat).expect("the guard rises");
-    let marks = marks_that_can_clear(seat).expect("a width");
+    let marks = marks_to_rise(seat);
     let mut rows = guard_window_that_rises(seat, 1, 1, 0);
     rows.push(rise_on(5_000, &[1]));
     rows.extend(guard_window_that_rises(seat, 2, 1_000, 10_000));
@@ -3137,7 +3171,8 @@ fn a_seat_acting_from_a_line_is_judged_on_the_answers_the_line_lets_act() {
         })
         .collect();
     let rows = confident_ledger(seat, &answers);
-    let whole = judge_seat(seat, &rows).expect("judged");
+    // No line: the seat as its whole record reads, before any act line is drawn.
+    let whole = judge_seat_in(seat, &rows, None).expect("judged");
     assert!(
         matches!(whole.verdict, Verdict::Hold(Line::Agreement { .. })),
         "{whole:?}"
@@ -3368,6 +3403,10 @@ fn a_fallen_summon_recovers_on_fresh_coordinator_comparisons_without_a_circular_
     rows.extend((0..wanted).map(|at| {
         let mut row = asked_by(seat, at);
         row["agreed"] = json!(at >= crate::jev::NEGATIVES_WANTED);
+        // The paired record: the current judgment right half the time, priced
+        // the same on both sides (ADR-150).
+        row["baselineAgreed"] = json!(at.is_multiple_of(2));
+        priced_equally(&mut row);
         row
     }));
     let judged = judge_seat(seat, &rows).expect("a full window is judged");

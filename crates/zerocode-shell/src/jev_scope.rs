@@ -734,6 +734,7 @@ fn agreement(held: &[&Value]) -> Value {
         baseline_compared: count(&out, "baselineCompared"),
         baseline_agreed: count(&out, "baselineAgreed"),
         not_compared: count(&out, "notCompared"),
+        ..zerocode_core::jev::promote::Agreement::default()
     };
     if let Some(fields) = out.as_object_mut() {
         fields.insert(LOWER_BOUND.to_string(), json!(marks.lower_bound()));
@@ -1119,6 +1120,7 @@ mod tests {
             baseline_compared: 2,
             baseline_agreed: 1,
             not_compared: 3,
+            proxied: 0,
         };
         assert_eq!(week.lower_bound, marks.lower_bound());
         assert_eq!(week.baseline_share, marks.baseline_share());
