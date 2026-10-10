@@ -37,7 +37,7 @@ mod windows_owner_only {
         WRITE_OWNER,
     };
 
-    use super::{classify_owner, private_open_intent, OwnerClass};
+    use super::{classify_owner, private_open_intent, restrictable_directory, OwnerClass};
 
     const PRIVATE_DACL_PREFIX: &str = "D:P";
 
@@ -134,28 +134,42 @@ mod windows_owner_only {
         use cap_fs_ext::DirExt as _;
 
         let (root, names) = root_and_names(path)?;
-        if names.is_empty() {
+        let Some((leaf, parents)) = names.split_last() else {
             return Err(invalid_path("refusing to modify a Windows volume root"));
-        }
+        };
         let mut dir = Dir::open_ambient_dir(root, ambient_authority())?;
-        for name in names {
-            dir = match dir.open_dir_nofollow(&name) {
+        for name in parents {
+            dir = match dir.open_dir_nofollow(name) {
                 Ok(child) => child,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    match dir.create_dir(&name) {
+                    match dir.create_dir(name) {
                         Ok(()) => {}
                         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                         Err(error) => return Err(error),
                     }
                     // A concurrent junction plant loses this no-follow open;
                     // the walk never continues through the attacker's target.
-                    dir.open_dir_nofollow(&name)?
+                    dir.open_dir_nofollow(name)?
                 }
                 Err(error) => return Err(error),
             };
         }
-        // Apply and verify the protected DACL through the retained leaf handle.
-        let mut handle = dir.try_clone()?.into_std_file();
+        match dir.create_dir(leaf) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        // The leaf is reopened with the rights the policy needs: a read-only
+        // handle cannot take a DACL. The open does not follow a reparse point,
+        // so a junction planted at the leaf shows up in the metadata and is refused.
+        let opened = dir.open_with(leaf, &entry_open_options(true))?;
+        let metadata = opened.metadata()?;
+        if !restrictable_directory(metadata.is_dir(), metadata.is_symlink()) {
+            return Err(invalid_path(
+                "secure Windows directory leaf is a symlink, junction, or non-directory",
+            ));
+        }
+        let mut handle = opened.into_std();
         restrict_handle(&mut handle)
     }
 
@@ -487,7 +501,7 @@ fn private_open_intent(append: bool, truncate: bool) -> PrivateOpenIntent {
 /// then restrict the link itself. Platform-free so the rule is tested everywhere.
 #[cfg(any(windows, test))]
 fn restrictable_directory(is_dir: bool, is_link: bool) -> bool {
-    is_dir
+    is_dir && !is_link
 }
 
 /// Environment variable naming the highest-priority zo home.
