@@ -889,6 +889,37 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       costMoved.records.length > 0 &&
         costMoved.records.every((one) => one.includes("board-desk-task-cost") && one.endsWith(`run-desk/${costMoved.id}`)),
       JSON.stringify(costMoved));
+    /* ---- 통과 조건과 넘김 메모 (t-26587): 조건마다 한 줄, 상태는 낱말로, 메모는 그 옆에 ---- */
+    const conditioned = await page.evaluate(async () => {
+      const target = window.__DESK__.tasks.find((one) => one.stage === "gate");
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
+        tasks: window.__DESK__.tasks.map((one) => one === target
+          ? { ...one, hand_in: { conditions: [
+              { number: 1, text: "cargo test -p zerocode-core is green", state: "checked" },
+              { number: 2, text: "cargo clippy is clean", state: "claimed" },
+              { number: 3, text: "the page renders", state: "missing" },
+            ], decisions: "keep the parser", blocked: null, next: "review" } } : one) };
+      refreshDeskLedger();
+      for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {
+        await new Promise((done) => requestAnimationFrame(done));
+      }
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const row = document.querySelector(`#board-view [data-desk-block="pipeline"] .board-desk-task[data-task="${target.run}/${target.id}"]`);
+      const list = row?.querySelector(".board-desk-task-conditions");
+      const handIn = row?.querySelector(".board-desk-task-handin");
+      return {
+        id: target.id,
+        shown: Boolean(list) && !list.hidden,
+        items: [...(list?.querySelectorAll(".board-desk-condition") ?? [])].map((item) =>
+          `${item.dataset.state}:${item.querySelector(".board-desk-condition-text").textContent}:${item.querySelector(".board-desk-condition-state").textContent}`),
+        handIn: handIn && !handIn.hidden ? handIn.textContent : "",
+      };
+    });
+    ok("a task with conditions shows one line per condition with its state in words, and its notes beside them",
+      conditioned.shown &&
+        conditioned.items.join() === "checked:1. cargo test -p zerocode-core is green:확인됨,claimed:2. cargo clippy is clean:주장,missing:3. the page renders:증거 없음" &&
+        conditioned.handIn === "결정: keep the parser · 다음: review",
+      JSON.stringify(conditioned));
     /* ---- 남긴 것 (t-32798): 끝난 행마다 한 줄 — 무엇을 남겼고, 무엇을 왜 못 담았는지, 정리가 막혔는지 ---- */
     const readKept = () => page.evaluate(() =>
       [...document.querySelectorAll('#board-view [data-desk-block="pipeline"] .board-desk-task')].map((row) => {
