@@ -138,7 +138,7 @@ export function standTasks(page) {
         unread: 0, pages: ["p-demo"], rowIds: ["p-demo"], missing: [],
       },
     };
-    const seen = (window.__TASKS__ = { asks: [], bundles: [], commits: [], lines: lines.length });
+    const seen = (window.__TASKS__ = { asks: [], bundles: [], commits: [], lines: lines.length, last: lines.at(-1).task });
     // The runtime's listing by task, in small: the words are asked of the line.
     window.__ANSWER__.artifact_tasks = (args) => {
       const filter = args?.filter ?? {};
@@ -262,7 +262,7 @@ async function testRemainders(page, ok) {
     const chip = onList()[0]?.querySelector(".artifact-task-landing") ?? null;
     const original = chip ? { text: chip.textContent, tip: chip.dataset.tip, landing: chip.dataset.landing, hidden: chip.hidden } : null;
     const landings = [
-      { state: "unlanded", compare_ref: "origin/main", ahead: 12, behind: 9, far_behind: true, conflict: { total: 3 }, dirty: false, ignored: false },
+      { state: "unlanded", compare_ref: "origin/main", ahead: 12, behind: 9, far_behind: true, conflict: { total: 3, files: ["ui/shell.css"] }, dirty: false, ignored: false },
       { state: "landed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: true, ignored: true },
       { state: "no_ref", compare_ref: "", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
       { state: "no_commits", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
@@ -369,7 +369,7 @@ async function testRemainders(page, ok) {
     const chip = row?.querySelector(".artifact-task-landing") ?? null;
     const original = chip ? { text: chip.textContent, tip: chip.dataset.tip, landing: chip.dataset.landing, hidden: chip.hidden } : null;
     const landings = [
-      { state: "unlanded", compare_ref: "origin/main", ahead: 12, behind: 9, far_behind: true, conflict: { total: 3 }, dirty: false, ignored: false },
+      { state: "unlanded", compare_ref: "origin/main", ahead: 12, behind: 9, far_behind: true, conflict: { total: 3, files: ["ui/shell.css"] }, dirty: false, ignored: false },
       { state: "landed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: true, ignored: true },
       { state: "no_ref", compare_ref: "", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
       { state: "no_commits", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
@@ -1204,7 +1204,7 @@ export async function testArtifactTasks(browser, origin, ok) {
       return {
         made: artifactTaskRowCreations - before,
         nodes: view.querySelectorAll(".artifact-task").length,
-        bottom: [...view.querySelectorAll(".artifact-task")].some((one) => one.dataset.task === `t-${700 + window.__TASKS__.lines - 5}`),
+        bottom: [...view.querySelectorAll(".artifact-task")].some((one) => one.dataset.task === window.__TASKS__.last),
         top: lastShown.includes("t-501"),
       };
     });
