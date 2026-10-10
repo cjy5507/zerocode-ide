@@ -856,8 +856,16 @@ fn format_hook_failure(command: &str, code: i32, stdout: Option<&str>, stderr: &
 fn shell_command(command: &str) -> CommandWithStdin {
     #[cfg(windows)]
     let command_builder = {
+        use std::os::windows::process::CommandExt as _;
+
+        // `/S /C "<command>"` makes cmd keep the text between the outer quotes as
+        // written. `arg` would escape the quotes inside the command the way
+        // CreateProcess does, and cmd does not read that escaping back.
         let mut command_builder = Command::new("cmd");
-        command_builder.arg("/C").arg(command);
+        command_builder
+            .raw_arg("/S")
+            .raw_arg("/C")
+            .raw_arg(format!("\"{command}\""));
         CommandWithStdin::new(command_builder)
     };
 
