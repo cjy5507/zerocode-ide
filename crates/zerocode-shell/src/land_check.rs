@@ -404,6 +404,12 @@ fn finish(
 
 /// The merge in the throwaway folder: the worktree, the merge without a commit, and the merged
 /// tree's id. A clash names its files; any other git refusal is the error.
+///
+/// The worktree is made empty (`--no-checkout`) and filled by a `reset --hard` of its own. One
+/// `worktree add` fills it through a grandchild `reset --hard` that outlives the kill a budget
+/// brings and keeps the entry locked as "initializing" meanwhile — an entry `remove --force`
+/// refuses and `prune` skips. An empty add is over in an instant, and a fill that is the direct
+/// child stops writing when it is cut, leaving an entry that comes down with the folder.
 fn merge_in_folder(host: &Host, job: &Job) -> Merged {
     let folder = job.folder.display().to_string();
     let budget = job.policy.git_budget;
@@ -414,12 +420,16 @@ fn merge_in_folder(host: &Host, job: &Job) -> Merged {
             "worktree",
             "add",
             "--detach",
+            "--no-checkout",
             folder.as_str(),
             job.base_oid.as_str(),
         ],
         budget,
     ) {
         return Merged::Broken(format!("the throwaway checkout could not be made: {why}"));
+    }
+    if let Err(why) = git_within(host, &job.folder, &["reset", "--hard", "--quiet"], budget) {
+        return Merged::Broken(format!("the throwaway checkout could not be filled: {why}"));
     }
     if let Err(why) = git_within(
         host,
