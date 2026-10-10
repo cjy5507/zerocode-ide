@@ -1172,8 +1172,9 @@ fn indexing_a_thousand_pages_stays_under_the_startup_budget() {
          ({key_bytes}B of keys against {read_bytes}B read) — a regression here means \
          page bodies started living in the index"
     );
-    assert!(
-        warm < cold,
-        "the mtime cache must make a rebuild cheaper than the first read (cold {cold:?}, warm {warm:?})"
+    assert_eq!(scan.pages_read, PAGES, "the first scan reads every page from disk");
+    assert_eq!(
+        warm_scan.pages_read, 0,
+        "an unchanged vault is served from the page cache, not read again"
     );
 }
