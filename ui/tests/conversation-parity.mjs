@@ -129,6 +129,9 @@ export async function testConversationFont(browser, origin, ok) {
     ok(
       "A0: the conversation draws its Latin words in the platform's sans whatever face the person chose — the default Geist (a name, not a shipped file), none, a face this machine lacks, the same typed in quotes, and a typed list all fall through to the system sans, never to the engine's default face (WebKit: Times / AppleMyungjo); the declared list keeps the system chain after the choice, a quoted name is that name, and a typed list stays a list",
       engine?.length > 0 && system?.length > 0 &&
+        // The platform's sans is not the engine's default face (Times or AppleMyungjo on macOS and WebKit, Malgun
+        // Gothic under lang=ko on Windows): a chain that collapsed to the engine default would pass the cases below.
+        engine?.[0] !== system?.[0] &&
         Object.values(cases).every((one) => one.latinInSans && !one.fellToEngine && one.chained) &&
         cases.quoted.declared.choice === cases.missing.declared.choice &&
         cases.listed.declared.choice.split(",").length === 2,
