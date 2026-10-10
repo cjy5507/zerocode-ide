@@ -11,7 +11,7 @@ use std::time::Instant;
 const LETTER_WAIT: Duration = Duration::from_secs(60);
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = crate::proc::quiet_command("git")
+    let output = zerocode_core::host::lock_free_git(crate::proc::quiet_command("git"))
         .arg("-C")
         .arg(dir)
         .args(args)

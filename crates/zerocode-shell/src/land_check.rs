@@ -83,6 +83,8 @@ impl Store {
         Ok(Store { root })
     }
 
+    /// The store's root, for the tests that name the folders they expect under it.
+    #[cfg(test)]
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }

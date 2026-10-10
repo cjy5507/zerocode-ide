@@ -1297,7 +1297,7 @@ mod tests {
         let clash = ledger
             .post(&run_id, clash, now - 1_000)
             .expect("a clash's letter");
-        let mut worker = a_notice(&run_id, MessageKind::WorkerDied, r#"{"workerId":"w-gone"}"#);
+        let worker = a_notice(&run_id, MessageKind::WorkerDied, r#"{"workerId":"w-gone"}"#);
         let died = ledger
             .post(&run_id, worker, now - 500)
             .expect("a death's letter");
