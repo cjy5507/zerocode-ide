@@ -103,6 +103,16 @@ pub(crate) struct DeskMail {
     /// and how long its CLI keeps it (`session`, `local`).
     pub(crate) switched_to: Option<String>,
     pub(crate) scope: Option<String>,
+    /// A landing check's verdict, in the window's word (`passed`, `merged`, `conflict`, `failed`,
+    /// `timed_out`, `unstartable`, `abandoned`, `error`). Only on a `land_check` letter (t-42447).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) verdict: Option<String>,
+    /// A landing check's exit code, where its command ran to an end (t-42447).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rc: Option<i64>,
+    /// How many files a landing check's merge clashed on (t-42447).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) clashes: Option<u64>,
     pub(crate) created_ms: i64,
     /// Where the letter stands in the coordinator's inbox: `pending` (not
     /// yet handed over), `delivered` (in the batch the coordinator holds,
@@ -134,7 +144,7 @@ struct NewsTable {
     /// them, and the one night that filled the desk with 46 letters was a
     /// seven-hour gap. What is older is history, and `inbox` reads history.
     stands_ms: i64,
-    kinds: [(MessageKind, NewsLine); 7],
+    kinds: [(MessageKind, NewsLine); 8],
     /// Where a folded notice can still be acknowledged from the desk: in the
     /// batch its coordinator holds open, handed over and not acknowledged
     /// (t-9548) — the folded count then offers that whole batch, as a line
@@ -169,6 +179,7 @@ const DESK_NEWS: NewsTable = NewsTable {
         (MessageKind::ClassifierDeclined, NewsLine::PerNotice),
         (MessageKind::ModelDeviated, NewsLine::PerNotice),
         (MessageKind::LandingStalled, NewsLine::PerNotice),
+        (MessageKind::LandCheck, NewsLine::PerNotice),
     ],
     folded_ack: "delivered",
 };
@@ -335,6 +346,12 @@ fn mail_row(run: &Run, message: &Message, inbox: &InboxState) -> DeskMail {
     } else {
         serde_json::from_str(message.body.as_str()).unwrap_or_default()
     };
+    // A landing check's evidence is the letter's payload; its body is the one line an agent reads.
+    let evidence: serde_json::Value = if message.kind == MessageKind::LandCheck {
+        serde_json::from_str(message.payload.as_str()).unwrap_or_default()
+    } else {
+        serde_json::Value::Null
+    };
     let worker = message
         .from
         .strip_prefix(zerocode_core::orchestration::WORKER_ADDRESS_PREFIX)
@@ -369,6 +386,9 @@ fn mail_row(run: &Run, message: &Message, inbox: &InboxState) -> DeskMail {
         rung: said["rung"].as_str().map(str::to_string),
         switched_to: said["to"].as_str().map(str::to_string),
         scope: said["scope"].as_str().map(str::to_string),
+        verdict: evidence["state"].as_str().map(str::to_string),
+        rc: evidence["rc"].as_i64(),
+        clashes: evidence["conflicts"]["total"].as_u64(),
         created_ms: message.created_ms,
         delivery,
         delivery_id: batch.filter(|_| delivered).map(|held| held.id.clone()),

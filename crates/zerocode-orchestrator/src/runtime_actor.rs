@@ -2557,9 +2557,13 @@ impl RuntimeActor {
         receipt: zerocode_core::orchestration::land_check::LandCheckReceipt,
         now_ms: i64,
     ) -> Result<(bool, u64), RuntimeError> {
-        // RED STAGE (t-42447): not built yet.
-        let _ = (receipt, now_ms);
-        Err(RuntimeError::AuthorityRejected)
+        match self.request(RuntimeRequest::LandCheck {
+            receipt: Box::new(receipt),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
     }
 
     /// A pane the plan asked for never opened; the worker row goes back.
@@ -3414,8 +3418,7 @@ impl RuntimeState {
                 self.account_switched(&receipt, now_ms)
             }
             RuntimeRequest::GateJudged { receipt, now_ms } => self.gate_judged(&receipt, now_ms),
-            // RED STAGE (t-42447): the letter road is not built yet.
-            RuntimeRequest::LandCheck { .. } => Err(RuntimeError::InvalidInput),
+            RuntimeRequest::LandCheck { receipt, now_ms } => self.land_checked(&receipt, now_ms),
             RuntimeRequest::SeatNeverOpened { worker, now_ms } => {
                 self.seat_never_opened(&worker, now_ms)
             }
@@ -4318,6 +4321,40 @@ impl RuntimeState {
             .account_switched(receipt, now_ms)
             .map_err(|_| RuntimeError::AuthorityRejected)?;
         if written.is_empty() {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn land_checked(
+        &mut self,
+        receipt: &zerocode_core::orchestration::land_check::LandCheckReceipt,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || [&receipt.run, &receipt.task, &receipt.check]
+                .iter()
+                .any(|name| name.is_empty() || name.len() > MAX_NAME)
+            || receipt.evidence.is_empty()
+            || receipt.evidence.len() > MAX_PROSE
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let written = self
+            .ledger
+            .land_checked(receipt, now_ms)
+            .map_err(|_| RuntimeError::AuthorityRejected)?;
+        if written.is_none() {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,

@@ -730,3 +730,78 @@ fn measure_one_check_on_the_fake_window() {
         pick(95)
     );
 }
+
+/// The baseline for the measurement: a clean merge run the way a person types it — worktree, merge
+/// without a commit, the tree's id, then the removal — with none of the window's own bookkeeping
+/// (rows, sweep, letters, the answer road). Asked for by name with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement: run by name with --ignored --nocapture"]
+fn measure_the_bare_git_sequence_on_the_fake_window() {
+    let fixture = Fixture::new();
+    let folder = fixture.data.join("bare-check");
+    let folder_text = folder.display().to_string();
+    let mut took: Vec<u128> = Vec::new();
+    for _ in 0..20 {
+        let started = Instant::now();
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                folder_text.as_str(),
+                fixture.main.as_str(),
+            ],
+        );
+        git(
+            &folder,
+            &["merge", "--no-commit", "--no-ff", fixture.feature.as_str()],
+        );
+        let _ = git(&folder, &["write-tree"]);
+        git(
+            &fixture.repo,
+            &["worktree", "remove", "--force", folder_text.as_str()],
+        );
+        git(&fixture.repo, &["worktree", "prune"]);
+        took.push(started.elapsed().as_millis());
+    }
+    took.sort_unstable();
+    let pick = |share: usize| took[(took.len() * share / 100).min(took.len() - 1)];
+    println!(
+        "bare git sequence on the fake window: n={} p50={} ms p95={} ms",
+        took.len(),
+        pick(50),
+        pick(95)
+    );
+}
+
+/// The window's check on the same fake window with no command set, so it is the same work as the
+/// baseline plus the window's own bookkeeping. Asked for by name with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement: run by name with --ignored --nocapture"]
+fn measure_one_merge_only_check_on_the_fake_window() {
+    let fixture = Fixture::new();
+    let store = fixture.store();
+    let mut took: Vec<u128> = Vec::new();
+    for round in 0..20 {
+        let (sink, rx) = sink();
+        let started = Instant::now();
+        let _ = said(run(
+            &store,
+            &|_| policy(None),
+            &fixture.merge(&fixture.feature, false),
+            1_000 + round,
+            &sink,
+        ));
+        let _ = letter(&rx);
+        took.push(started.elapsed().as_millis());
+    }
+    took.sort_unstable();
+    let pick = |share: usize| took[(took.len() * share / 100).min(took.len() - 1)];
+    println!(
+        "land-check merge-only on the fake window: n={} p50={} ms p95={} ms",
+        took.len(),
+        pick(50),
+        pick(95)
+    );
+}

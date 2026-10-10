@@ -2267,6 +2267,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
     let ssh_hosts = ssh_hosts::SshHostService::new();
     let remote_servers = remote_servers::RemoteServerService::new();
     let settings = Arc::new(settings::SettingsRepository::new(settings_root.clone()));
+    land_check::hold_settings(Arc::clone(&settings));
     if let Err(error) = migrate_legacy_project_settings(&settings) {
         eprintln!("zerocode-shell: could not migrate project settings: {error}");
     }
