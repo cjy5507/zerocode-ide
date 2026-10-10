@@ -432,6 +432,9 @@ fn walker_worker(
                         || (match_type == MatchType::File && is_page(relative)));
                 if wanted {
                     if let Some(relative) = relative.to_str() {
+                        // The shown path uses `/` on every platform, so a Windows
+                        // separator never appears in the list or in the inserted text.
+                        let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
                         let display: Arc<str> = Arc::from(format!("{}{relative}", root.prefix));
                         injector.push(
                             IndexedEntry {
