@@ -43,20 +43,12 @@ export function loadReadable(platform = process.platform) {
   return platform !== "win32";
 }
 
-/** Whether a one-minute load is above the core count: the one reading that makes a machine loud. The path-time excuse in
- * test-knowledge-graph.mjs asks this too. It takes the load alone, so a platform that cannot read its load (loadavg 0 on
- * Windows) is not loud by it, and that excuse is not granted there: routeMs < 2 is not a frame budget and stays judged
- * on hosted runners, as on main (t-43414). */
-export function loadIsHigh(load = loadNow()) {
-  return load > CORES;
-}
-
 /** Why a budget cannot be judged right now, or null when it can. This is the one rule every frame budget asks: a
  * platform that cannot read its load is never quiet ("unreadable"), and a machine whose one-minute load is above its
  * core count is too loud ("loud"). The platform and the load are this machine's unless a test passes its own. */
 function unjudgedBecause({ platform = process.platform, load = loadNow() } = {}) {
   if (!loadReadable(platform)) return "unreadable";
-  if (loadIsHigh(load)) return "loud";
+  if (load > CORES) return "loud";
   return null;
 }
 
