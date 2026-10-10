@@ -222,10 +222,11 @@ public func isStopHotkey(keyCode: UInt16, control: Bool, option: Bool, command: 
 // MARK: - The one hand (realtime v1 §5.4, §5.8)
 
 /// Where an event goes: the session's HID tap — the desktop, where a person's
-/// own input goes — or one process by its pid.
+/// own input goes — one process, or a window with its own local pointer.
 public enum HandRoute: Hashable, Sendable {
     case desktop
     case process(Int32)
+    case window(pid: Int32, id: UInt32)
 }
 
 /// The source an event is made with, each verb as it was made before the
@@ -240,6 +241,7 @@ public enum HeldInput: Hashable, Sendable {
     case button(MouseButtonSelection)
     case key(UInt16)
     case text(UInt16)
+    case unicode(String)
 }
 
 /// One input event as data; the platform makes and posts it (`HandPoster`).
@@ -255,6 +257,7 @@ public struct HandEvent: Equatable, Sendable {
         case key(code: UInt16, down: Bool, modifier: UInt64)
         /// One UTF-16 unit typed on virtual key 0 (`typeText`).
         case text(unit: UInt16, down: Bool)
+        case unicode(String, down: Bool)
     }
 
     public let kind: Kind
@@ -279,6 +282,7 @@ public struct HandEvent: Equatable, Sendable {
         case let .buttonDown(button, _): return .button(button)
         case let .key(code, true, _): return .key(code)
         case let .text(unit, true): return .text(unit)
+        case let .unicode(text, true): return .unicode(text)
         default: return nil
         }
     }
@@ -289,6 +293,7 @@ public struct HandEvent: Equatable, Sendable {
         case let .buttonUp(button, _): return .button(button)
         case let .key(code, false, _): return .key(code)
         case let .text(unit, false): return .text(unit)
+        case let .unicode(text, false): return .unicode(text)
         default: return nil
         }
     }
@@ -297,7 +302,7 @@ public struct HandEvent: Equatable, Sendable {
     public var points: Bool {
         switch kind {
         case .pointerMove, .buttonDown, .buttonUp, .buttonDrag, .scroll: return true
-        case .key, .text: return false
+        case .key, .text, .unicode: return false
         }
     }
 
@@ -316,6 +321,8 @@ public struct HandEvent: Equatable, Sendable {
             return HandEvent(.key(code: code, down: false, modifier: modifier), flags: flags, route: route, source: source)
         case let .text(unit, true):
             return HandEvent(.text(unit: unit, down: false), route: route, source: source)
+        case let .unicode(text, true):
+            return HandEvent(.unicode(text, down: false), flags: flags, route: route, source: source)
         default:
             return nil
         }
@@ -417,6 +424,7 @@ public final class OperatorHand: @unchecked Sendable {
     private struct Press {
         let event: HandEvent
         let hold: UInt64
+        var windowPoint: SmoothPointerPath.Point?
     }
 
     private let lock = NSLock()
@@ -486,7 +494,7 @@ public final class OperatorHand: @unchecked Sendable {
         if let refusal = refusalLocked(token) { throw refusal }
         try poster.post(event, tag: tag)
         posted += 1
-        if event.points { pointer = SmoothPointerPath.Point(x: event.x, y: event.y) }
+        notePointer(event)
         if event.holds != nil { held.append(Press(event: event, hold: token.id)) }
     }
 
@@ -497,7 +505,7 @@ public final class OperatorHand: @unchecked Sendable {
     /// still its own to press around.
     private func release(_ input: HeldInput, with event: HandEvent, by token: Token) throws {
         lock.lock()
-        guard let at = held.lastIndex(where: { $0.hold == token.id && $0.event.holds == input }) else {
+        guard let at = held.lastIndex(where: { $0.hold == token.id && $0.event.holds == input && $0.event.route == event.route }) else {
             lock.unlock()
             return
         }
@@ -513,8 +521,20 @@ public final class OperatorHand: @unchecked Sendable {
             throw error
         }
         posted += 1
-        if event.points { pointer = SmoothPointerPath.Point(x: event.x, y: event.y) }
+        notePointer(event)
         lock.unlock()
+    }
+
+    private func notePointer(_ event: HandEvent) {
+        guard event.points else { return }
+        let point = SmoothPointerPath.Point(x: event.x, y: event.y)
+        if case .window = event.route {
+            for index in held.indices where held[index].event.route == event.route {
+                held[index].windowPoint = point
+            }
+        } else {
+            pointer = point
+        }
     }
 
     /// Why `token` may not press now, or nil when it may.
@@ -626,10 +646,17 @@ public final class OperatorHand: @unchecked Sendable {
         var released: [HeldInput] = []
         var unconfirmed: [HeldInput] = []
         let at = poster.pointerLocation() ?? pointer
-        while let press = held.popLast()?.event {
+        while let heldPress = held.popLast() {
+            let press = heldPress.event
             guard let input = press.holds else { continue }
-            let flags = held.reduce(UInt64(0)) { $0 | $1.event.modifierFlag }
-            guard let release = press.release(at: at ?? SmoothPointerPath.Point(x: press.x, y: press.y), flags: flags) else { continue }
+            let flags = held.lazy.filter { $0.event.route == press.route }.reduce(UInt64(0)) { $0 | $1.event.modifierFlag }
+            let releasePoint: SmoothPointerPath.Point
+            if case .window = press.route {
+                releasePoint = heldPress.windowPoint ?? SmoothPointerPath.Point(x: press.x, y: press.y)
+            } else {
+                releasePoint = at ?? SmoothPointerPath.Point(x: press.x, y: press.y)
+            }
+            guard let release = press.release(at: releasePoint, flags: flags) else { continue }
             do {
                 try poster.post(release, tag: tag)
                 posted += 1

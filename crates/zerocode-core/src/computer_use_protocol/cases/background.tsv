@@ -10,10 +10,10 @@ mouseMove	false	true	requires_foreground
 mouseClick	false	true	requires_foreground
 mouseDrag	false	true	requires_foreground
 mouseScroll	false	true	requires_foreground
-pressKey	false	true	requires_foreground
-hotkey	false	true	requires_foreground
-typeText	false	true	requires_foreground
-pasteText	false	true	requires_foreground
+pressKey	false	true	ok
+hotkey	false	true	ok
+typeText	false	true	ok
+pasteText	false	true	ok
 key	false	true	requires_foreground
 type	false	true	requires_foreground
 holdKey	false	true	requires_foreground

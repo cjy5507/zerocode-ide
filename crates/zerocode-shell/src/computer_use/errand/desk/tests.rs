@@ -121,7 +121,7 @@ fn background_walk_keeps_its_mode_and_stops_after_foreground_changes() {
                 answer["result"]["tree"]["window"] = json!({"id": 7, "width": 400, "height": 300});
                 ok(&answer.to_string())
             }
-            "click" | "scroll" => ok(
+            "click" | "scroll" | "press-key" | "hotkey" => ok(
                 &json!({"action": {"background": {"foregroundUnchanged": returned}}}).to_string(),
             ),
             "wait-for" => refused(),
@@ -140,10 +140,17 @@ fn background_walk_keeps_its_mode_and_stops_after_foreground_changes() {
         )
         .background(true);
         world.look().unwrap();
-        assert_eq!(world.navigation(), &Navigation::PAGE);
-        assert!(!world.navigate(Navigation::FocusNext));
+        if cfg!(target_os = "macos") {
+            assert_eq!(world.navigation(), &Navigation::ALL);
+        } else {
+            assert_eq!(world.navigation(), &Navigation::PAGE);
+            assert!(!world.navigate(Navigation::FocusNext));
+        }
         assert!(world.press(1));
         if receipt == true {
+            if cfg!(target_os = "macos") {
+                assert!(world.navigate(Navigation::FocusNext));
+            }
             assert!(world.navigate(Navigation::ScrollDown));
             assert!(world.look().is_some());
             let _ = world.reached();
