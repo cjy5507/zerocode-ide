@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use runtime::file_read_registry::mtime_is_settled;
 use serde::Deserialize;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -492,14 +493,20 @@ impl ManifestCache {
     }
 
     /// What a listing found: the stores' times, kept only when nothing of
-    /// this session was running.
+    /// this session was running and every store's time was settled when the
+    /// listing was observed. A store changed in that listing's own clock tick
+    /// keeps its time, so a quiet mark would hide the change; such a store is
+    /// listed again by the next scan.
     fn settle(
         &mut self,
         stores: Vec<(PathBuf, Option<SystemTime>)>,
         nothing_running: bool,
-        _observed_at: SystemTime,
+        observed_at: SystemTime,
     ) {
-        self.quiet = nothing_running.then_some(stores);
+        let settled = stores
+            .iter()
+            .all(|(_, time)| time.is_none_or(|time| mtime_is_settled(time, observed_at)));
+        self.quiet = (nothing_running && settled).then_some(stores);
         self.skipped = 0;
     }
 
@@ -1406,7 +1413,9 @@ mod tests {
         }
         let registry = tools::AgentRegistry::at_root_for_tests("session-a", temp.path());
         let mut cache = ManifestCache::default();
-        let clock = SystemTime::now();
+        // The listings are observed a racy window after the stores were written, so
+        // the quiet mark is settled. No sleep: the observation time is moved forward.
+        let clock = SystemTime::now() + runtime::file_read_registry::RACY_WINDOW;
         let scan = |cache: &mut ManifestCache| {
             scan_registry(&registry, "session-a", 200, None, cache, clock)
         };
