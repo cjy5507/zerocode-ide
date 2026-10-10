@@ -4485,6 +4485,8 @@ function dressWorktreeTitle(row) {
   const label = row.dataset.label ?? "";
   const words = task || label;
   writeTextContent(row.querySelector(".wt-title"), words);
+  // Before the branch line below decides what it shows: the stage and the worker are words of that line (t-44016).
+  dressWorktreeWork(row, path);
   const branch = row.querySelector(".wt-branch");
   const name = branch?.querySelector(".wt-branch-name");
   if (!branch || !name) return;
@@ -4513,6 +4515,19 @@ function dressWorktreeTitle(row) {
   if (row.dataset.tip !== tip) row.dataset.tip = tip;
 }
 
+/* The task id beside the title, and beside the name the stage the work stands at and the agent that did it
+ * (t-44016). Each word is written only when it changed, like the rest of the row. */
+function dressWorktreeWork(row, path) {
+  const set = (node, words) => {
+    if (!node) return;
+    if (node.textContent !== words) node.textContent = words;
+    if (node.hidden !== (words === "")) node.hidden = words === "";
+  };
+  set(row.querySelector(".wt-task-id"), worktreeWorkFacts(path)?.taskId ?? "");
+  set(row.querySelector(".wt-stage"), landingStageWord(worktreeStageOf(path)));
+  set(row.querySelector(".wt-worker"), worktreeWorkerWords(path));
+}
+
 function makeWorktreeNode(worktree, held) {
   const owned = held.get(worktree.path) ?? [];
   const node = document.createElement("div");
@@ -4531,7 +4546,7 @@ function makeWorktreeNode(worktree, held) {
     '<button class="wt-twist" type="button"></button>' +
     '<span class="wt-dot" aria-hidden="true"></span>' +
     '<span class="wt-titlebox">' +
-    '<span class="wt-topline"><span class="wt-title"></span><span class="wt-default"></span>' +
+    '<span class="wt-topline"><span class="wt-task-id" hidden></span><span class="wt-title"></span><span class="wt-default"></span>' +
     '<span class="wt-phase" aria-hidden="true"></span>' +
     '<span class="wt-landing" aria-hidden="true"></span></span>' +
     '<span class="wt-branch"></span>' +
@@ -4743,6 +4758,14 @@ function makeWorktreeNode(worktree, held) {
   unseated.dataset.i18nSourcedatatip = unseatedTip.word;
   unseated.dataset.tip = t(unseatedTip.key, unseatedTip.word);
   unseated.hidden = true;
+  // What the work in this checkout is at, and who did it (t-44016) — beside the name, filled by `dressWorktreeWork`.
+  const stage = document.createElement("span");
+  stage.className = "wt-stage";
+  stage.hidden = true;
+  const worker = document.createElement("span");
+  worker.className = "wt-worker";
+  worker.hidden = true;
+  branch.append(stage, worker);
   branch.appendChild(unseated);
   // A workspace can be carried straight from the rail into a board lane. If
   // the board was closed, the drag opens a preview sheet; a successful drop

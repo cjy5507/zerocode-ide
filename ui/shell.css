@@ -1461,6 +1461,33 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   display: none;
 }
 
+/* The task id, the stage and the worker of the work standing in a checkout (t-44016): small, and set after the
+ * name, which still gives way first (`min-width: 0` on the branch line). */
+.wt-task-id {
+  flex: none;
+  margin-inline-end: var(--space-1);
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.wt-stage,
+.wt-worker {
+  flex: none;
+  margin-inline-start: var(--space-1);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.wt-stage {
+  color: var(--ink-chalk);
+}
+
+.wt-worker {
+  color: var(--ink-mist);
+}
+
 .wt-agent {
   position: relative;
   display: flex;
@@ -8326,6 +8353,71 @@ body.is-dragging-pane {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--ink-chalk);
+}
+
+/* The summary of an empty worktree (t-44016): one small card at the stage's top corner, clear of the shell's
+ * first line, which sits at the left. It says what the ledger and git say and takes the pointer for nothing. */
+.stage-card {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  z-index: 2;
+  display: grid;
+  gap: var(--space-1);
+  max-width: min(42ch, 60%);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--ink-mist);
+  font-size: var(--text-sm);
+  pointer-events: none;
+}
+
+/* `[hidden]` is a user-agent rule; the `display: grid` above is an author rule on a class and would outrank
+ * it, so the card is hidden said here (the same trap `.placeholder[hidden]` documents). */
+.stage-card[hidden] {
+  display: none;
+}
+
+.stage-card p {
+  margin: 0;
+}
+
+.stage-card-head,
+.stage-card-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.stage-card-task {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage-card-id,
+.stage-card-commit {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.stage-card-state {
+  color: var(--ink-chalk);
+}
+
+.stage-card-id[hidden],
+.stage-card-commit[hidden],
+.stage-card-state[hidden],
+.stage-card-landing[hidden],
+.stage-card-unseated[hidden] {
+  display: none;
 }
 
 /* The way out of the empty stage. The paragraph above refuses pointer events
