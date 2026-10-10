@@ -973,7 +973,7 @@ fn secure_session_persistence_rejects_symlink_load_and_append() {
 
     let target = temp_session_path("secure-target");
     let link = temp_session_path("secure-link");
-    let mut session = Session::new().with_secure_persistence_path(target.clone());
+    let mut session = Session::new().with_secure_persistence_path(target.to_path_buf());
     session
         .push_user_text("kept")
         .expect("secure regular-file append should succeed");
@@ -984,7 +984,7 @@ fn secure_session_persistence_rejects_symlink_load_and_append() {
     symlink(&target, &link).expect("test symlink should be created");
     Session::load_from_secure_path(&link).expect_err("secure load must reject symlinks");
 
-    let mut through_link = Session::new().with_secure_persistence_path(link.clone());
+    let mut through_link = Session::new().with_secure_persistence_path(link.to_path_buf());
     through_link
         .push_user_text("blocked")
         .expect_err("secure append must reject symlinks");
@@ -2950,7 +2950,7 @@ fn incremental_append_fingerprint_equals_a_full_re_read() {
 #[test]
 fn peer_rewrite_between_appends_still_conflicts() {
     let in_place = temp_session_path("append-guard-in-place");
-    let mut session = Session::new().with_persistence_path(in_place.clone());
+    let mut session = Session::new().with_persistence_path(in_place.to_path_buf());
     push_text(&mut session, "durable before peer rewrite").expect("seed append");
     push_text(&mut session, "second append arms the fast path").expect("second append");
     fs::write(&in_place, "peer replaced this session\n").expect("simulate in-place peer rewrite");
@@ -2961,7 +2961,7 @@ fn peer_rewrite_between_appends_still_conflicts() {
     cleanup_session_file(&in_place);
 
     let renamed = temp_session_path("append-guard-rename");
-    let mut session = Session::new().with_persistence_path(renamed.clone());
+    let mut session = Session::new().with_persistence_path(renamed.to_path_buf());
     push_text(&mut session, "durable before peer swap").expect("seed append");
     push_text(&mut session, "second append arms the fast path").expect("second append");
     let original = fs::read(&renamed).expect("read the transcript we just wrote");
