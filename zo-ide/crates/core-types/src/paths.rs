@@ -455,6 +455,30 @@ fn classify_owner<T: PartialEq + ?Sized>(
     }
 }
 
+/// What a private-file open asks the OS for, decided without touching Windows
+/// so the rule can be tested everywhere. A create or a truncate needs write
+/// intent: cap-primitives refuses one without it (ERROR_INVALID_PARAMETER).
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrivateOpenIntent {
+    write: bool,
+    append: bool,
+    create: bool,
+    truncate: bool,
+}
+
+/// The open `open_private_file` makes: it always creates, truncates only when
+/// it is not appending, and it writes.
+#[cfg(any(windows, test))]
+fn private_open_intent(append: bool, truncate: bool) -> PrivateOpenIntent {
+    PrivateOpenIntent {
+        write: false,
+        append,
+        create: true,
+        truncate: truncate && !append,
+    }
+}
+
 /// Environment variable naming the highest-priority zo home.
 pub const ZO_CONFIG_HOME_ENV: &str = "ZO_CONFIG_HOME";
 /// Secondary home override honored after [`ZO_CONFIG_HOME_ENV`].
@@ -1055,6 +1079,19 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn private_creating_opens_ask_for_write_intent() {
+        for (append, truncate) in [(false, true), (false, false), (true, true), (true, false)] {
+            let intent = private_open_intent(append, truncate);
+            assert!(intent.create, "{intent:?}");
+            assert!(
+                intent.write,
+                "a create without write intent is refused on Windows: {intent:?}"
+            );
+        }
+        assert!(!private_open_intent(true, true).truncate, "an append never truncates");
+    }
 
     #[test]
     fn owner_classes_accept_the_token_user_and_the_token_default_owner_only() {
