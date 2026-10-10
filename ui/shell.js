@@ -10742,6 +10742,11 @@ function makeAgentRow(row, gutter = false) {
   return node;
 }
 
+/* How many times a click follows a terminal that moved while its checkout was coming to the
+ * front (t-44057): the click, one move during the first activation, and one more during the
+ * second. A terminal still moving after that is not somewhere the stage can land. */
+const FOCUS_FOLLOW_HOPS = 3;
+
 async function focusAgentPane(worktree, tabId, term, agent = null) {
   // The tab says where the terminal stands now; the row says where it stood
   // when its card was last drawn. The ledger can seat the worker in another
@@ -10749,8 +10754,13 @@ async function focusAgentPane(worktree, tabId, term, agent = null) {
   // terminal: its checkout is the one to go to, and the row is the fallback.
   const holder = () =>
     tabOfTerm(term) ?? (tabId === null ? null : tabs.find((held) => held.id === tabId) ?? null);
-  const home = holder()?.worktree ?? worktree;
-  if (home && home !== activeWorktreePath) {
+  // The terminal can move again while a checkout is coming to the front: each activation is
+  // awaited, and the ledger may re-seat the worker meanwhile. So the click follows the terminal
+  // until the checkout in front is the one its tab stands in — a bounded number of times, since
+  // a worker that keeps moving is not a place the stage can settle on.
+  for (let hop = 0; hop < FOCUS_FOLLOW_HOPS; hop += 1) {
+    const home = holder()?.worktree ?? worktree;
+    if (!home || home === activeWorktreePath) break;
     if (!(await activateWorktree(home))) return;
   }
   const tab = holder();
