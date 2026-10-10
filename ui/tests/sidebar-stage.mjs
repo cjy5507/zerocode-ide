@@ -171,6 +171,60 @@ export async function testSidebarStage(browser, origin, ok) {
     );
   }
 
+  // a3. A worker that keeps moving: the ledger re-seats it during every activation. After the bounded
+  // hops the click must not pick a tab whose checkout is not the one in front — it stops, selecting
+  // nothing, rather than showing the wrong stage as if it were the worker's (run-11955 m-44652).
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    await addCheckoutB(page);
+    const scene = await page.evaluate(async ({ CHECKOUT_B, CHECKOUT_C, CHECKOUT_D, CHECKOUT_E, WORKER, stageOfSource }) => {
+      const stage = eval(`(${stageOfSource})`);
+      const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+      const A = activeWorktreePath;
+      const extra = [CHECKOUT_C, CHECKOUT_D, CHECKOUT_E];
+      const catalog = window.__ANSWER__.project_catalog;
+      window.__ANSWER__.project_catalog = () => catalog().map((project) => ({
+        ...project,
+        worktrees: [...project.worktrees.filter((one) => !extra.includes(one.path)), ...extra.map((path, at) => ({
+          path, branch: `wt/t-44057/${"cde"[at]}`, is_main: false, active: activeWorktreePath === path,
+          is_folder: false, ownership: "zerocode-managed", external_hidden: false,
+        }))],
+      }));
+      const layouts = window.__ANSWER__.pane_layouts;
+      window.__ANSWER__.pane_layouts = (ask) => (extra.includes(ask.worktree) ? [] : layouts(ask));
+      await refreshWorktrees();
+      const shell = await openTermTab({ placement: "tab" });
+      for (const handler of window.__LISTENERS__["term:worker"] ?? []) {
+        handler({ payload: { parent: shell, term: WORKER, worktree: A, agent: "codex" } });
+      }
+      await settle(250);
+      const row = document.querySelector(`.wt-agents[data-worktree-path="${A}"] .wt-agent[data-term="${WORKER}"]`);
+      seatLedgerManagedTerm(WORKER, CHECKOUT_B, "codex");
+      // Every activation the click awaits finds the worker gone one checkout further: B → C → D → E.
+      const paneFile = window.__ANSWER__.pane_layouts;
+      const next = { [CHECKOUT_B]: CHECKOUT_C, [CHECKOUT_C]: CHECKOUT_D, [CHECKOUT_D]: CHECKOUT_E };
+      let moves = 0;
+      window.__ANSWER__.pane_layouts = async (ask) => {
+        if (next[ask.worktree]) {
+          moves += 1;
+          seatLedgerManagedTerm(WORKER, next[ask.worktree], "codex");
+          await settle(30);
+        }
+        return paneFile(ask);
+      };
+      const activeBefore = activeTabId;
+      row?.click();
+      await settle(1500);
+      const now = stage(WORKER);
+      return { moves, ...now, activeTabId, activeBefore, selectedWrong: now.inFront && now.active !== now.tabWorktree };
+    }, { CHECKOUT_B, CHECKOUT_C, CHECKOUT_D: "/tmp/t44057/wt-d", CHECKOUT_E: "/tmp/t44057/wt-e", WORKER, stageOfSource: stageOf.toString() });
+    ok(
+      "a worker that keeps moving while the click follows it is not shown as in front once the bounded hops run out — the click stops rather than selecting a tab of a checkout that is not on the stage",
+      scene.moves >= 3 && scene.selectedWrong === false && scene.inFront === false && faults.length === 0,
+      receipt({ ...scene, faults: faults.length }),
+    );
+  }
+
   // b. After a restart: a stored shell in B, and the ledger has reseated the worker into B.
   {
     const { page, faults } = await openWindowTestPage(browser, origin);
