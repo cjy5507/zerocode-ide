@@ -1253,11 +1253,14 @@ async function testOrbitGates(browser, origin, ok) {
     const tasks = await countOver(page, 400);
     ok("the task list stops the 3D view's frames", tasks.rafs === 0 && tasks.frames === 0, JSON.stringify(tasks));
 
+    const framesBeforeGraph = await page.evaluate(() => window.__ORBIT_RAFS__);
     await page.evaluate(async () => {
       document.querySelector('#board-view [data-board-mode="graph"]').click();
       await window.__BOARD_SETTLED__();
     });
-    const back = await countOver(page, 300);
+    /* The return asks its first frame when the stage is measured again, bounded (see untilFrameAsked), not in a fixed
+     * 300 ms window. */
+    const back = await untilFrameAsked(page, framesBeforeGraph);
     ok("returning to the relations tab starts the 3D view again", back.rafs > 0, JSON.stringify(back));
 
     await page.evaluate(async () => {
