@@ -7,7 +7,7 @@
 //! - the `runtime` retry layer picks a backoff *schedule* (longer for capacity
 //!   stalls so an overload retry doesn't hammer the pool),
 //! - the `runtime` conversation layer picks a live-UI *label* ("provider
-//!   overloaded" / "rate limited" / "transient provider error"),
+//!   overloaded" / "rate limited" / "transient provider error" / "provider error"),
 //! - the `runtime` Anthropic stream parser decides whether a `Transport` error
 //!   is a *provider-emitted* frame (server already closed the turn — surface it
 //!   for a fresh request) versus a recoverable connection drop.
@@ -301,6 +301,9 @@ pub fn is_transient_text(lower: &str) -> bool {
         || lower.contains("connection closed")
         || lower.contains("timed out")
         || lower.contains("timeout")
+        // A silent stream: the provider sent no response event within its stall
+        // window (`stream_startup_no_progress`). Transient, like a timeout.
+        || lower.contains("no response event within")
         || lower.contains("broken pipe")
         || lower.contains("eof")
         // reqwest/hyper mid-body drops. `error decoding response body` is
@@ -690,12 +693,13 @@ pub fn retry_notice_label(error_message: &str) -> &'static str {
     match classify_error_text(error_message) {
         RetrySignal::Overloaded => "provider overloaded",
         RetrySignal::RateLimit => "rate limited",
-        // A fatal error never reaches a "retrying in Ns" row, so the remaining
-        // wording only has to cover the retryable non-capacity case. Deriving
-        // every label from the one classifier is what keeps the notice honest:
-        // the old independent `contains("overloaded")` here disagreed with the
-        // backoff arm the moment either list changed.
-        RetrySignal::Transient | RetrySignal::Fatal => "transient provider error",
+        RetrySignal::Transient => "transient provider error",
+        // A fatal-by-text error still reaches a "retrying in Ns" row when the
+        // stream restarts on its structured retryable flag (a `server_error`
+        // frame), so it is named apart from a transient fault, not labelled as
+        // one. Deriving every label from the one classifier keeps the notice
+        // honest.
+        RetrySignal::Fatal => "provider error",
     }
 }
 
@@ -1028,6 +1032,18 @@ mod tests {
         assert_eq!(
             retry_notice_label("connection reset by peer"),
             "transient provider error"
+        );
+        assert_eq!(
+            retry_notice_label("api stream error (server_error): retry"),
+            "provider error",
+            "a fatal-by-text server error is not named as transient"
+        );
+        assert_eq!(
+            retry_notice_label(
+                "api stream error (stream_startup_no_progress): no response event within 120s after server_error x7; transport keep-alives are not progress"
+            ),
+            "transient provider error",
+            "a stall is transient, like an idle timeout"
         );
     }
 

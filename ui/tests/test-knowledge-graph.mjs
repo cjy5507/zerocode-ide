@@ -19,6 +19,8 @@ import { seedUniverseVault } from "./knowledge-universe-fixture.mjs";
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
+/* 첫 그림의 예산(ms). 판정은 `frameBudgetHolds`(machine-load.mjs)가 맡는다 — 조용한 기계에서만 재고, 시끄러우면 기록만. */
+const FIRST_PAINT_BUDGET_MS = 300;
 
 const files = createServer(async (request, response) => {
   const asked = decodeURIComponent((request.url ?? "/").split("?")[0]);
@@ -45,8 +47,8 @@ const origin = `http://127.0.0.1:${files.address().port}`;
  * 재는 방법을 바꿀 뿐 그리는 코드를 바꾸지 않는다 — 전·후 두 판이 같은 손잡이로
  * 돈다. */
 const HEAP_ARGS = ["--enable-precise-memory-info", "--js-flags=--expose-gc"];
-/* 헤드리스 크로미엄은 기본으로 WebGL2를 주지 않는다 — GL 페인터의 계약을 물으려면
- * 켜야 하고, 켜지는 것은 **소프트웨어 래스터라이저**(SwiftShader)다.
+/* GL 페인터의 계약을 물으려면 WebGL2를 켜야 하고, 켜지는 것은 **소프트웨어 래스터라이저**
+ * (SwiftShader)다. 헤드리스 크로미엄이 그것을 기본으로 주는지는 러너에 달려 있다(아래 SVG_ARGS).
  *
  * 그래서 판을 둘로 나눈다. 이 손잡이를 2D의 판에 걸면 SVG의 래스터화까지 소프트웨어가
  * 지고 그 판의 모든 수가 열 배 느려진다(실측: 천 쪽 최악 프레임 46 → 436 ms, 캔버스
@@ -55,8 +57,22 @@ const HEAP_ARGS = ["--enable-precise-memory-info", "--js-flags=--expose-gc"];
  * GL의 시간은 실제 GPU에서 따로 잰다(docs/design/knowledge-graph-3d-20260916/). */
 const GL_ARGS = [...HEAP_ARGS, "--use-gl=angle", "--use-angle=swiftshader",
   "--enable-unsafe-swiftshader"];
-const browser = await chromium.launch({ args: HEAP_ARGS });
-const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
+/* 2D 판은 WebGL을 끈다. WebGL2가 서는지는 러너에 달려 있다: 이 기계의 헤드리스 크로미엄은 주지
+ * 않고, CI 러너는 SwiftShader로 준다. 서면 2D 판도 GL 손을 고르고, SVG의 계약은 GL이 판에 남긴
+ * 견본 그림과 점을 세어 빨갛게 된다(10-09 원격 실패). 끄면 2D 판은 러너와 무관하게 SVG 손이고,
+ * GL의 계약은 아래 GL_ARGS 판이 잰다. */
+const SVG_ARGS = [...HEAP_ARGS, "--disable-webgl"];
+/* 페이지 안의 스크립트가 던진 예외는 그 검사 하나의 실패다 — 파일 전체가 아니다. 호출은 `{ thrown }`을
+ * 돌려주고, 그것을 읽는 검사가 스택을 detail에 달고 실패하며, 뒤의 장면은 그대로 돈다(settings.mjs의
+ * test()가 시험마다 같은 catch를 둔다, t-34262). */
+const survivable = (target) => {
+  const evaluate = target.evaluate.bind(target);
+  target.evaluate = (script, argument) => evaluate(script, argument)
+    .catch((error) => ({ thrown: String(error?.stack ?? error) }));
+  return target;
+};
+const browser = await chromium.launch({ args: SVG_ARGS });
+const page = survivable(await browser.newPage({ viewport: { width: 1280, height: 860 } }));
 const faults = [];
 page.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));
 
@@ -66,11 +82,44 @@ await page.goto(`${origin}/index.html`);
 await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
 
 const results = [];
+/* `pass`가 함수면 검사는 여기서 돈다. 던지는 검사(실패한 장면이 채우지 못한 칸을 읽는 것)는 그 검사의
+ * 실패이고, 스택이 detail이 된다. */
 const ok = (name, pass, detail = "") => {
-  results.push({ name, pass: !!pass, detail });
-  console.log(`${pass ? "PASS" : "FAIL"} ${name}`);
-  if (!pass) console.error("   detail:", detail);
+  let held = pass;
+  if (typeof pass === "function") {
+    try {
+      held = pass();
+    } catch (error) {
+      held = false;
+      detail = String(error?.stack ?? error);
+    }
+  }
+  results.push({ name, pass: !!held, detail });
+  console.log(`${held ? "PASS" : "FAIL"} ${name}`);
+  if (!held) console.error("   detail:", detail);
 };
+/* 최상위의 한 단계가 던지면 그 단계의 실패다: 줄 번호와 함께 기록되고 시험은 요약까지 간다(settings.mjs의
+ * test()와 같은 꼴, t-34262). */
+const step = async (line, run) => {
+  try {
+    await run();
+  } catch (error) {
+    ok(`step at line ${line} threw`, false, String(error?.stack ?? error));
+  }
+};
+/* 어느 단계에도 속하지 않은 오류(예: 페이지가 뜨지 않음)도 요약과 실패 종료 코드로 끝난다 — 맨 스택만 남고
+ * `N / M` 줄이 없는 종료는 없다. */
+process.on("uncaughtException", (error) => {
+  ok("the run stopped at an error outside every step", false, String(error?.stack ?? error));
+  console.error(`\nFAILED ${results.filter((r) => !r.pass).length} / ${results.length} tests`);
+  endRun(1);
+});
+
+/* 2D 판은 러너가 WebGL2를 주든 말든 SVG 손으로 잰다. WebGL2가 서는 러너(SwiftShader로 그리는 판)에서는
+ * 페인터 표가 GL을 고르고, 그러면 아래의 SVG 계약이 GL이 판에 숨겨 둔 견본(0×0 그림 넷, 점 77개)을 세게 된다. */
+const twoDHand = await page.evaluate(() => ({ hand: knowledgePainterChoice(), webgl2: knowledgeGlSupported() }));
+ok("the 2D page paints with the SVG hand whether or not the host offers WebGL2",
+  () => twoDHand.hand === "svg", JSON.stringify(twoDHand));
 
 // Test 1: Brain initial render
 const brain = await page.evaluate(async () => {
@@ -256,7 +305,7 @@ const brain = await page.evaluate(async () => {
 });
 ok(
   "the knowledge graph draws the vault's wiki as points and its wikilinks as lines",
-  brain.entryHidden === false &&
+  () => brain.entryHidden === false &&
     brain.tab.includes("지식 그래프") &&
     brain.asks === 1 &&
     brain.askedPath === "/vault" &&
@@ -321,7 +370,7 @@ ok(
 
 // The contract names these four shots; keep the paths stable for the report.
 await mkdir(join(UI, "..", "output/playwright"), { recursive: true });
-await page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph.png") });
+await step(371, () => page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph.png") }));
 
 // Test 2: Search highlights in place; lenses alone change membership.
 const brainFilters = await page.evaluate(async () => {
@@ -406,7 +455,7 @@ const brainFilters = await page.evaluate(async () => {
 });
 ok(
   "search dims in place while lenses change membership and remember coordinates",
-  brainFilters.all === 15 &&
+  () => brainFilters.all === 15 &&
     brainFilters.search.nodes === brainFilters.all &&
     brainFilters.search.matches === 1 &&
     brainFilters.search.dimmed === brainFilters.all - 1 &&
@@ -587,7 +636,7 @@ const brainTyped = await page.evaluate(async () => {
 });
 ok(
   "typed relations use directional markers and the typed lens owns membership",
-  brainTyped.before.typed >= 5 &&
+  () => brainTyped.before.typed >= 5 &&
     brainTyped.before.named >= 1 &&
     brainTyped.before.edges > brainTyped.before.typed &&
     parseFloat(brainTyped.plainInk.width) === 1 &&
@@ -668,7 +717,7 @@ const brainHover = await page.evaluate(async () => {
 });
 
 // Take screenshot during active tracing/hover
-await page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph-hover.png") });
+await step(718, () => page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph-hover.png") }));
 
 const brainHoverRelease = await page.evaluate(async () => {
   const view = [...document.querySelectorAll(".file-view")]
@@ -806,7 +855,7 @@ const brainFocus = await page.evaluate(async () => {
     focusFlow: getComputedStyle(focusedEdge).animationName,
   };
 });
-await page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph-focus.png") });
+await step(856, () => page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph-focus.png") }));
 const brainFocusClear = await page.evaluate(async () => {
   const view = [...document.querySelectorAll(".file-view")]
     .find((one) => one.classList.contains("knowledge-view") && !one.hidden);
@@ -822,7 +871,7 @@ const brainFocusClear = await page.evaluate(async () => {
 });
 ok(
   "hover is one hop and focus depths use the reusable CSR without rebuilding nodes",
-  brainHover.tracing &&
+  () => brainHover.tracing &&
     brainHover.self &&
     brainHover.nodes > 1 &&
     brainHover.edges > 0 &&
@@ -984,7 +1033,7 @@ const brainOpen = await page.evaluate(async () => {
 });
 ok(
   "the inspector switches from vault overview to stable page cards with an explicit open action",
-  brainOpen.askedId === brainOpen.key &&
+  () => brainOpen.askedId === brainOpen.key &&
     brainOpen.askedPath === "/vault" &&
     brainOpen.askedOnSelect === null &&
     brainOpen.opened.includes(`file:/vault/${brainOpen.key}`) &&
@@ -1090,7 +1139,7 @@ const brainLint = await page.evaluate(async () => {
 });
 ok(
   "the vault health rows open the missing-page lens, the contradiction search and the index-gap lens, and close them again",
-  brainLint.ghosts.nodes > 3 &&
+  () => brainLint.ghosts.nodes > 3 &&
     brainLint.ghosts.nodes < 15 &&
     brainLint.ghosts.ghostNodes === 3 &&
     brainLint.ghosts.on &&
@@ -1145,7 +1194,7 @@ const brainFixture = await page.evaluate(async (lint) => {
 }, expectedLint);
 ok(
   "the vault health card paints exactly the table `zerocode vault-lint` answers for the fixture vault",
-  JSON.stringify(brainFixture.health) === JSON.stringify(brainFixture.expected) &&
+  () => JSON.stringify(brainFixture.health) === JSON.stringify(brainFixture.expected) &&
     brainFixture.health.includes("index_gaps=2") &&
     brainFixture.health.includes("unlogged_raw=1") &&
     brainFixture.health.includes("unsourced_edges=0") &&
@@ -1189,7 +1238,7 @@ const brainEmpty = await page.evaluate(async () => {
 });
 ok(
   "an empty vault says what to do and its button runs the vault's own ingest command",
-  brainEmpty.hidden === false &&
+  () => brainEmpty.hidden === false &&
     brainEmpty.word.includes("raw/") &&
     brainEmpty.act === "raw 취합" &&
     brainEmpty.nodes === 0 &&
@@ -1200,13 +1249,13 @@ ok(
 );
 
 // Test 7: Four container-width tiers keep every destination in the DOM.
-await page.evaluate(async () => {
+await step(1250, () => page.evaluate(async () => {
   window.__VAULT__ = { pages: 12, linksPer: 2, ghosts: 3,
     tags: ["core", "reading", "tools", "design", "systems", "notes", "ideas", "archive"] };
   dropTab("knowledge");
   document.getElementById("nav-knowledge").click();
   await new Promise((done) => setTimeout(done, 350));
-});
+}));
 const brainResponsive = [];
 for (const width of [1280, 800, 560, 280]) {
   brainResponsive.push(await page.evaluate(async (wide) => {
@@ -1260,16 +1309,16 @@ for (const width of [1280, 800, 560, 280]) {
     await page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph-narrow.png") });
   }
 }
-await page.evaluate(() => {
+await step(1310, () => page.evaluate(() => {
   const view = [...document.querySelectorAll(".file-view")]
     .find((one) => one.classList.contains("knowledge-view") && !one.hidden);
   view.style.width = "";
   view.style.maxWidth = "";
   view.style.flex = "";
-});
+}));
 ok(
   "container tiers stack, compact and pop over without overflow or deleting destinations",
-  brainResponsive[0].tier === "wide" &&
+  () => brainResponsive[0].tier === "wide" &&
     brainResponsive[0].sideBySide &&
     brainResponsive[0].toolbarRows === 1 &&
     brainResponsive[0].visibleTags === 6 &&
@@ -1366,16 +1415,16 @@ const brainContrast = await page.evaluate(async () => {
   const light = measure();
   return { dark, light };
 });
-await page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph-light.png") });
+await step(1416, () => page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph-light.png") }));
 ok(
   "eight cluster hues, the quiet grey and five relation colors keep three-to-one contrast in both themes",
-  [brainContrast.dark, brainContrast.light].every((theme) => theme.colors.length === 14
+  () => [brainContrast.dark, brainContrast.light].every((theme) => theme.colors.length === 14
     && theme.colors.every((color) => color.ratio >= 3)),
   JSON.stringify(brainContrast),
 );
 
 // Reset back to dark
-await page.evaluate(() => setTheme("dark"));
+await step(1425, () => page.evaluate(() => setTheme("dark")));
 
 // Test 9: Scale test (1000 nodes)
 const brainScale = await page.evaluate(async () => {
@@ -1519,7 +1568,7 @@ const measureHaloPaint = async (mode) => {
   return performance.now() - began;
 };
 const haloSamples = { circle: [], filter: [] };
-await measureHaloPaint("filter");
+await step(1569, () => measureHaloPaint("filter"));
 for (let round = 0; round < 7; round += 1) {
   for (const mode of ["circle", "filter"]) haloSamples[mode].push(await measureHaloPaint(mode));
 }
@@ -1531,7 +1580,7 @@ const haloPaint = {
     haloMedian(haloSamples.circle.map((ms, round) => ms / haloSamples.filter[round])) * 100,
   ) / 100,
 };
-await measureHaloPaint("circle");
+await step(1581, () => measureHaloPaint("circle"));
 
 const [knowledgeText, shellText, cssText, tokenText] = await Promise.all([
   readFile(join(UI, "shell-knowledge.js"), "utf8"),
@@ -1559,10 +1608,11 @@ const sourceGate = {
 };
 ok(
   "a thousand pages meet the frame, halo, DOM, determinism and source-hardcoding contracts",
-  brainScale.nodes === 1020 &&
+  () => brainScale.nodes === 1020 &&
     brainScale.edges > 1500 &&
     brainScale.firstPaint > 0 &&
-    brainScale.firstPaint < 300 &&
+    /* 첫 그림도 벽시계다 — 같은 부하 규칙(machine-load.mjs)을 탄다. */
+    frameBudgetHolds(brainScale.firstPaint, FIRST_PAINT_BUDGET_MS) &&
     frameBudgetHolds(brainScale.worstGap) &&
     brainScale.spread > 400 && brainScale.spread < 6000 &&
     // 묶는 축이 제 방을 채우고, 두 축 다 제 방을 넘지 않는다(contain).
@@ -1686,7 +1736,7 @@ const slicerScale = await page.evaluate(async () => {
 
 ok(
   "the time slicer collapses to 'all', dims only without relayout, and drags under 16ms at 1020 nodes",
-  slicerScale.hasSlicer &&
+  () => slicerScale.hasSlicer &&
     slicerScale.collapsedDefault &&
     (slicerScale.defaultLabel.includes("전체") || slicerScale.defaultLabel.includes("All")) &&
     slicerScale.opened &&
@@ -1883,7 +1933,7 @@ const pathTest = await page.evaluate(async () => {
 
 ok(
   "paths: Shift-click asks the backend's one calculator, its first path lights the picture, the card lists every path with kind and road, picking re-lights, the ask form resolves a name, a refusal is said, and Esc clears",
-  pathTest.node0Selected
+  () => pathTest.node0Selected
     && pathTest.asked.length === 1
     && pathTest.asked[0].from === "wiki/Page-0000.md" && pathTest.asked[0].to === "wiki/Page-0003.md"
     && pathTest.asked[0].path === "/vault" && pathTest.asked[0].sources === false && pathTest.asked[0].k === undefined
@@ -2040,7 +2090,7 @@ const provenanceLens = await page.evaluate(async () => {
     overview };
 });
 ok("provenance: three toggles default on, a hidden road drops its lines and keeps the points, the legend, the card chips and the label tooltip read the answer's road",
-  JSON.stringify(provenanceLens.flags) === JSON.stringify([["measured", "true"], ["declared", "true"], ["inferred", "true"]])
+  () => JSON.stringify(provenanceLens.flags) === JSON.stringify([["measured", "true"], ["declared", "true"], ["inferred", "true"]])
     && JSON.stringify(provenanceLens.legend) === JSON.stringify(["measured", "declared", "inferred"])
     && provenanceLens.before.edges === 4
     && JSON.stringify(provenanceLens.before.roads) === JSON.stringify(["declared", "declared", "inferred", "inferred"])
@@ -2107,7 +2157,7 @@ const exportTest = await page.evaluate(async () => {
   };
 });
 ok("export: the button hands the lens's picture — settled points in their computed inks, every line with kind, road and ink — to the one backend door and says the receipt; a lens narrows what is handed over",
-  exportTest.asked === 2 && exportTest.whole !== null && exportTest.typed !== null
+  () => exportTest.asked === 2 && exportTest.whole !== null && exportTest.typed !== null
     && exportTest.whole.vault === "/vault" && exportTest.whole.title.includes("vault")
     && exportTest.whole.nodes === 5 && exportTest.whole.edges === 4
     && exportTest.whole.theme && exportTest.whole.nodeInks && exportTest.whole.edgeInks
@@ -2186,7 +2236,7 @@ const slicerPresets = await page.evaluate(async () => {
     presetInEnglish, percentInEnglish, star, reset: lit().length };
 });
 ok("slicer presets keep the pages edited within that wall-clock window, and the slicer keeps its words across a language change",
-  JSON.stringify(slicerPresets.got["1h"].lit) === JSON.stringify([4])
+  () => JSON.stringify(slicerPresets.got["1h"].lit) === JSON.stringify([4])
     && JSON.stringify(slicerPresets.got["24h"].lit) === JSON.stringify([3, 4])
     && JSON.stringify(slicerPresets.got["7d"].lit) === JSON.stringify([2, 3, 4, 5])
     && JSON.stringify(slicerPresets.got["30d"].lit) === JSON.stringify([2, 3, 4, 5])
@@ -2199,9 +2249,9 @@ ok("slicer presets keep the pages edited within that wall-clock window, and the 
     && slicerPresets.reset === 6,
   JSON.stringify(slicerPresets));
 
-await page.setViewportSize({ width: 1600, height: 1000 });
-await page.emulateMedia({ reducedMotion: "reduce" });
-await page.evaluate(() => {
+await step(2249, () => page.setViewportSize({ width: 1600, height: 1000 }));
+await step(2250, () => page.emulateMedia({ reducedMotion: "reduce" }));
+await step(2251, () => page.evaluate(() => {
   setPanelFolded("aside", true);
   knowledgeQuery = "";
   knowledgeTagsPicked.clear();
@@ -2212,17 +2262,17 @@ await page.evaluate(() => {
     titles: Array.from({ length: 180 }, (_, at) => `${["지식 그래프에서 연결을 읽는 방법", "작은 모듈과 명확한 인터페이스", "에이전트 실행과 결과 검증", "문서에서 다음 질문을 찾기", "매일 쌓이는 기록 정리"][at % 5]} ${at}`) };
   dropTab("knowledge");
   document.getElementById("nav-knowledge").click();
-});
-await page.waitForFunction(() => {
+}));
+await step(2263, () => page.waitForFunction(() => {
   const view = document.querySelector(".knowledge-view:not([hidden])");
   return knowledgeLayouts.get(view)?.count === 192;
-});
-await page.locator(".knowledge-view:not([hidden]) .knowledge-zoom-fit").click();
-await page.waitForFunction(() => {
+}));
+await step(2267, () => page.locator(".knowledge-view:not([hidden]) .knowledge-zoom-fit").click());
+await step(2268, () => page.waitForFunction(() => {
   const layout = knowledgeLayouts.get(document.querySelector(".knowledge-view:not([hidden])"));
   return layout?.left === 0 && layout.flight === null && layout.zoom === 1;
-});
-await page.mouse.move(0, 0);
+}));
+await step(2272, () => page.mouse.move(0, 0));
 const quietThemes = [];
 for (const theme of ["dark", "light"]) {
   await page.evaluate((next) => setTheme(next), theme);
@@ -2319,7 +2369,7 @@ const quietInteractions = await page.evaluate(async () => {
    바뀌지 않은 것은 「조용함」의 뜻이다: 평평한 페인트, 빛 번짐 없음, 선택은
    움직이지 않는다. 새로 더한 것은 「겹치지 않는다」와 「확대하면 몫이 는다」. */
 ok("the quiet graph uses flat paint, a named topic per disc and static selection in both themes",
-  quietThemes.every((theme) => theme.search.appearance === "none" && theme.search.height === 28
+  () => quietThemes.every((theme) => theme.search.appearance === "none" && theme.search.height === 28
     && theme.background === "none" && theme.halos === 0
     && theme.nebulas > 0 && theme.nebulas === theme.clusterLabels
     && theme.nebulaFilter === "none"
@@ -2331,7 +2381,7 @@ ok("the quiet graph uses flat paint, a named topic per disc and static selection
     && quietInteractions.selected.edgeMotion && quietInteractions.selected.animations === 0
     && quietInteractions.zoomedShare > quietInteractions.fitShare,
   JSON.stringify({ quietThemes, quietInteractions }));
-await page.emulateMedia({ reducedMotion: "no-preference" });
+await step(2381, () => page.emulateMedia({ reducedMotion: "no-preference" }));
 
 // Test 15: Saved scenes (★ button, popover, save, reload view, restore lens/chips/search/selection/camera, missing node drop, delete)
 const sceneResult = await page.evaluate(async () => {
@@ -2457,7 +2507,7 @@ const sceneResult = await page.evaluate(async () => {
   };
 });
 ok("saved scenes: ★ button saves view state, reloads and restores camera, lens, chips, search and selection, dropping missing nodes",
-  sceneResult.hasStar
+  () => sceneResult.hasStar
     && sceneResult.defaultCollapsed
     && sceneResult.opened
     && sceneResult.savedName === "my-focus-scene"
@@ -2542,7 +2592,7 @@ const sceneLens = await page.evaluate(async () => {
   return { sources, cold };
 });
 ok("restoring a scene reproduces its lens: sources are fetched again and the cold lens is saved and put back",
-  sceneLens.sources.off === 0
+  () => sceneLens.sources.off === 0
     && sceneLens.sources.pressed === "true"
     && sceneLens.sources.drawn > 0
     && sceneLens.sources.selected === "raw/source-0.md"
@@ -2685,7 +2735,7 @@ const searchTokenResult = await page.evaluate(async () => {
   };
 });
 ok("search tokens: tag, rel, since, kind, hub and free text dim without moving nodes, with autocomplete and saved phrase chips",
-  searchTokenResult.hasAllTokenChips
+  () => searchTokenResult.hasAllTokenChips
     && searchTokenResult.tagRes.matches > 0
     && searchTokenResult.tagRes.dimmed > 0
     && searchTokenResult.tagRes.matches + searchTokenResult.tagRes.dimmed === searchTokenResult.totalNodes
@@ -2758,7 +2808,7 @@ const chipQuery = await page.evaluate(async () => {
   return { coreOn, afterToken, coreAgain, afterPhrase, hubTagged, hubLit, hubChip, cleared: find.value };
 });
 ok("tag chips follow the search box: a token or saved phrase releases the lit chip, and a tag named like a token still finds its pages",
-  chipQuery.coreOn.pressed && chipQuery.coreOn.query === "core"
+  () => chipQuery.coreOn.pressed && chipQuery.coreOn.query === "core"
     && !chipQuery.afterToken.pressed && chipQuery.afterToken.query === "core kind:"
     && chipQuery.coreAgain.pressed && chipQuery.coreAgain.query === "core"
     && !chipQuery.afterPhrase.pressed && chipQuery.afterPhrase.query === "rel:related"
@@ -2922,7 +2972,7 @@ const explore = await page.evaluate(async () => {
   return { modeButtons, crumbHiddenInGlobal, before, depth1, ring1, depth2, ring2, recentred, backed, positionsKept, after };
 });
 ok("t-4140 S1: 주변 탐색 draws only the centre's subgraph, breadcrumb and ← 이전 walk the visits, and the whole map returns with its positions, clusters and camera",
-  explore.modeButtons.join(",") === "global:true,local:false"
+  () => explore.modeButtons.join(",") === "global:true,local:false"
     && explore.crumbHiddenInGlobal === true
     && explore.before.nodes === 42
     && explore.depth1.mode === "local"
@@ -3007,7 +3057,7 @@ const mapSettle = await page.evaluate(async () => {
   return { during, after };
 });
 ok("t-4140 S1: the settle that runs while the ring stands moves the whole map behind it, never the ring, and the whole map returns already seated",
-  mapSettle.during.left === 0
+  () => mapSettle.during.left === 0
     && mapSettle.during.ringStands
     && mapSettle.during.ringStill
     && mapSettle.during.mapMoved
@@ -3081,7 +3131,7 @@ const readableLocal = await page.evaluate(async () => {
   return { measures, restored };
 });
 ok("long local labels clear one another and the controls, folded relation metadata fits below its title, and global labels recover their anchors",
-  readableLocal.restored && readableLocal.measures.every((one) => one.labelsContained
+  () => readableLocal.restored && readableLocal.measures.every((one) => one.labelsContained
     && one.labelsSeparate && one.controlsClear && one.cardContained && one.relationBelowTitle
     && one.folded && one.actionsBeforeRelations), JSON.stringify(readableLocal));
 
@@ -3147,7 +3197,7 @@ const folding = await page.evaluate(async () => {
     unfoldExpected: t("knowledge.unfold", "펼치기") };
 });
 ok("t-4140 S1: a high-degree hub inside the neighbourhood stays folded with its omitted links bundled by kind until 펼치기 is pressed",
-  folding.hubDegree >= folding.foldFloor
+  () => folding.hubDegree >= folding.foldFloor
     && folding.folded.nodes === 3
     && folding.folded.edges === 2
     && folding.folded.hubFolded === true
@@ -3265,7 +3315,7 @@ const entry = await page.evaluate(async () => {
   return { rule, first, chose, written, deepened, backOut, restored, revealed, order, viaWorkbench };
 });
 ok("t-4140 S2: the first visit is the neighbourhood of what the person last used, 「연결 보기」 enters that page's neighbourhood, and the vault's last mode, centre and depth live in the settings document",
-  entry.rule.join(",") === "local,local,global,local,local,local"
+  () => entry.rule.join(",") === "local,local,global,local,local,local"
     && entry.first.mode === "local"
     && entry.first.centre !== null
     && entry.first.nodes > 0 && entry.first.nodes < 12
@@ -3367,7 +3417,7 @@ const candidates = await page.evaluate(async () => {
   return { three, capped, moved, picked, closed, explored, empty, exploreExpected: t("knowledge.candidateExplore", "주변 탐색으로") };
 });
 ok("t-4140 S3: typing lists ranked candidates with folder and relation hints under the table's cap, ↑↓ and Enter pick one, each row opens 주변 탐색, and the token and phrase helpers stay",
-  candidates.three.role === "listbox"
+  () => candidates.three.role === "listbox"
     && candidates.three.suggesting
     && candidates.three.titles.join(",") === "개념 1,개념 10,개념 11"
     && candidates.three.notes.every((note) => typeof note === "string")
@@ -3485,7 +3535,7 @@ const panel = await page.evaluate(async () => {
   return { initial, switched, chosen, kept };
 });
 ok("t-4140 S4: the inspector is two tabs — the page (overview or the card with title, summary, path, directed and typed relation rows) and the activity log — and the chosen tab survives a repaint",
-  panel.initial.tablist === "tablist"
+  () => panel.initial.tablist === "tablist"
     && panel.initial.tabs === "page:true,activity:false"
     && panel.initial.pageHidden === false
     && panel.initial.activityHidden === true
@@ -3609,7 +3659,7 @@ const nav = await page.evaluate(async () => {
   return { shownWord, expected: t("knowledge.navPages", "목차·일지 표시"), off, searched, incoming, local, sceneNav: scene.lens.nav, restoredDefault, restoredOff, back, folded };
 });
 ok("t-4140 S6: the index/log display setting removes only their picture — pages stay in the model, search and relation lists, local mode reads it, scenes carry it, and the default is folded",
-  nav.shownWord === nav.expected
+  () => nav.shownWord === nav.expected
     && nav.off.pressed === "false"
     && nav.off.nodes === 10 && nav.off.edges === 1
     && !nav.off.index && !nav.off.log
@@ -3630,7 +3680,7 @@ ok("t-4140 S6: the index/log display setting removes only their picture — page
  *
  * 점·후보·관계 목록을 키보드로 옮기고 고른다(명시적 포커스 링), 움직임을 줄이라는 판을
  * 따르고, 색이 관계의 뜻을 혼자 나르지 않는다(모양·라벨 병기). */
-await page.emulateMedia({ reducedMotion: "no-preference" });
+await step(3680, () => page.emulateMedia({ reducedMotion: "no-preference" }));
 const access = await page.evaluate(async () => {
   const viewOf = () => document.querySelector(".knowledge-view:not([hidden])");
   const wait = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -3715,7 +3765,7 @@ const access = await page.evaluate(async () => {
   return { nodes, list: { second, last, first, stays }, combo, shape, rings };
 });
 /* 6. 움직임을 줄이라는 판: 카메라는 날지 않고 닿는다 — 주변 탐색의 재중심도 같다. */
-await page.emulateMedia({ reducedMotion: "reduce" });
+await step(3765, () => page.emulateMedia({ reducedMotion: "reduce" }));
 const stillness = await page.evaluate(async () => {
   const view = document.querySelector(".knowledge-view:not([hidden])");
   const layout = knowledgeLayouts.get(view);
@@ -3726,9 +3776,9 @@ const stillness = await page.evaluate(async () => {
   selectKnowledgeNode(view, null);
   return { landed, reduced };
 });
-await page.emulateMedia({ reducedMotion: "no-preference" });
+await step(3776, () => page.emulateMedia({ reducedMotion: "no-preference" }));
 ok("t-4140 S7: nodes, candidates and relation lists move and select from the keyboard with explicit focus rings, reduced motion lands the camera without a flight, and relation meaning is carried by shape and words as well as colour",
-  access.nodes.application === "application"
+  () => access.nodes.application === "application"
     && access.nodes.selected !== null
     && access.nodes.ring
     && access.list.second && access.list.last && access.list.first && access.list.stays
@@ -3854,7 +3904,7 @@ const linking = await page.evaluate(async () => {
   return { ghostHidden, closed, opened, options, picked, previewDepends, saved, toast, undone, previewInward, inward, undoneByKey, dragged, cancelled };
 });
 ok("t-4140 S5: 「연결 추가」 searches a target, picks kind and direction, previews the frontmatter change, saves through one Rust door, undoes through the same door, and Alt+drag prefills the target without moving the node",
-  linking.ghostHidden === true
+  () => linking.ghostHidden === true
     && linking.closed === true
     && linking.opened.shown && linking.opened.saveDisabled
     && linking.opened.kinds.join(",") === "related,implements,depends_on,supersedes,contradicts"
@@ -3925,11 +3975,11 @@ for (const shot of pixelShots) {
  *보고가 싣고 온 줄에서 목록이 서고, 다음 저장은 그 줄 위에 얹는다. 창이 제 메모리의
  * 사본만 들면 새로 읽은 창의 첫 저장이 디스크의 시야를 전부 지운다(K18). 마지막에
  * 서는 것은 이 케이스만 판 전체를 새로 읽기 때문이다. */
-await page.evaluate(() => sessionStorage.setItem("__KNOWLEDGE_REBOOT__", "1"));
-await page.reload();
-await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
-await page.waitForFunction(() => secondBrainVault === "/vault", null, { timeout: 8000 })
-  .catch(() => {});
+await step(3975, () => page.evaluate(() => sessionStorage.setItem("__KNOWLEDGE_REBOOT__", "1")));
+await step(3976, () => page.reload());
+await step(3977, () => page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0));
+await step(3978, () => page.waitForFunction(() => secondBrainVault === "/vault", null, { timeout: 8000 })
+  .catch(() => {}));
 const sceneReload = await page.evaluate(async () => {
   const persisted = () => JSON.parse(window.__SCENE_LINES__()["/vault"] ?? "{}");
   const before = persisted();
@@ -3957,16 +4007,16 @@ const sceneReload = await page.evaluate(async () => {
   };
 });
 ok("saved scenes live in the settings document: a reloaded window lists them and its next save keeps them",
-  sceneReload.before.includes("my-focus-scene")
+  () => sceneReload.before.includes("my-focus-scene")
     && sceneReload.listed.includes("my-focus-scene")
     && sceneReload.afterScenes.includes("my-focus-scene")
     && sceneReload.afterPhrases.includes("tag:core"),
   JSON.stringify(sceneReload));
 
-await testKnowledgePerformance(page, ok);
-await measureKnowledgePainterSwap(page, ok);
+await step(4013, () => testKnowledgePerformance(page, ok));
+await step(4014, () => measureKnowledgePainterSwap(page, ok));
 const sweep = knowledgeSweepFor(process.env);
-await measureKnowledgeScenes(page, ok, { frames: sweep.frames });
+await step(4016, () => measureKnowledgeScenes(page, ok, { frames: sweep.frames }));
 
 /* ---- 모양의 문법 (지식 그래프 P1, 2026-09-17) --------------------------------
  *
@@ -3992,7 +4042,7 @@ const grammarCount = grammarVault.pages + grammarVault.ghosts + Math.min(5, gram
   + grammarVault.supply.components + grammarVault.supply.vulnerabilities
   + grammarVault.code.files + grammarVault.code.symbols;
 const GRAMMAR_WORKSPACE = "/workspace/acme";
-await page.setViewportSize({ width: 1280, height: 860 });
+await step(4042, () => page.setViewportSize({ width: 1280, height: 860 }));
 const grammarOpened = await page.evaluate(({ vault, workspace }) => {
   try {
     knowledgeQuery = "";
@@ -4209,69 +4259,69 @@ const shapeGrammar = await grammarAsk(async () => {
 const AREA_SLACK = 0.02;
 const shapeDetail = JSON.stringify(shapeGrammar);
 ok("P1 G3: seven kinds meet seven shapes one to one, and every shape has one geometry row",
-  !shapeGrammar.thrown
+  () => !shapeGrammar.thrown
     && shapeGrammar.table.kinds.join(",")
       === "page,ghost,source,component,vulnerability,code_file,code_symbol"
     && shapeGrammar.table.distinct === shapeGrammar.table.kinds.length && shapeGrammar.table.geometry,
   shapeDetail);
 ok("P1 G3: every kind stands in its own shape, drawn from its geometry row, at the area its size promises",
-  !shapeGrammar.thrown && Object.values(shapeGrammar.picture).every((row) => row.drawn === row.shape
+  () => !shapeGrammar.thrown && Object.values(shapeGrammar.picture).every((row) => row.drawn === row.shape
     && row.element === row.wantedElement && row.fromTable && row.reachError < 1e-4
     && Math.abs(row.areaRatio - 1) < AREA_SLACK && row.dashedAgrees),
   shapeDetail);
 ok("P1 G4: every legend row draws the picture's own shape from the same geometry row",
-  !shapeGrammar.thrown && ["page", "ghost", "source", "recalled", "code_file", "code_symbol"]
+  () => !shapeGrammar.thrown && ["page", "ghost", "source", "recalled", "code_file", "code_symbol"]
     .every((kind) => shapeGrammar.legend.some((row) => row.kind === kind))
     && shapeGrammar.legend.every((row) => row.sameAsPicture && row.fromTable),
   shapeDetail);
 ok("P1 G1: no painter word (SVG, GL, WebGL) in the view's words, human attributes or toasts in five languages, nor anywhere in the translation table",
-  !painterWords.thrown && Object.keys(painterWords.spoken).length === 5
+  () => !painterWords.thrown && Object.keys(painterWords.spoken).length === 5
     && Object.values(painterWords.spoken).every((said) => said.length === 0)
     && painterWords.catalog.length === 0 && painterWords.controls === 0,
   JSON.stringify(painterWords));
 ok("P1 G2: the window, not a person, picks the painter — unpinned, the table's first able row stands and 2D is always able",
-  !painterPick.thrown && painterPick.pinned === null
+  () => !painterPick.thrown && painterPick.pinned === null
     && painterPick.standing === painterPick.firstAble
     && painterPick.order.at(-1) === "svg" && painterPick.able.at(-1) === true,
   JSON.stringify(painterPick));
 
 /* 공급망 렌즈(P4·P5) — 모양의 문법 위에 선다. 계약은 `knowledge-supply.mjs`에, 천 개의 구성요소의
  * 첫 그림은 이 판(SVG)과 GL 판(아래)에서 적고, 진짜 GPU의 시간은 `knowledge-gpu.mjs`가 WebKit에서 잰다. */
-await testKnowledgeSupply(page, ok);
-await measureKnowledgeSupplyScene(page, ok, { painter: "svg" });
+await step(4287, () => testKnowledgeSupply(page, ok));
+await step(4288, () => measureKnowledgeSupplyScene(page, ok, { painter: "svg" }));
 
 /* 코드 층(t-5970 G2) — 같은 모양의 문법 위에 서는 또 하나의 렌즈. 계약과 실측은 `knowledge-code.mjs`. */
-await testKnowledgeCode(page, ok);
-await measureKnowledgeCodeScene(page, ok);
+await step(4291, () => testKnowledgeCode(page, ok));
+await step(4292, () => measureKnowledgeCodeScene(page, ok));
 
 /* 우주 보기(t-12443) — WebGL2가 없는 이 판에서는 3D 단추가 까닭을 말하고 지도는 평면이다. */
-await testKnowledgeUniverseUnable(page, ok);
+await step(4295, () => testKnowledgeUniverseUnable(page, ok));
 
 /* GL의 계약은 제 판에서 묻는다(위의 `GL_ARGS` 주석). 그 판의 시간은 소프트웨어의
  * 것이므로 훑는 프레임을 짧게 잡는다 — 여기서 세는 것은 드로우와 자리이지 ms가
  * 아니다. */
 const glBrowser = await chromium.launch({ args: GL_ARGS });
-const glPage = await glBrowser.newPage({ viewport: { width: 1280, height: 860 } });
+const glPage = survivable(await glBrowser.newPage({ viewport: { width: 1280, height: 860 } }));
 glPage.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));
 await seedKnowledgeWindow(glPage);
 await seedUniverseVault(glPage);
-await glPage.goto(`${origin}/index.html`);
-await glPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
-await glPage.evaluate(() => {
+await step(4305, () => glPage.goto(`${origin}/index.html`));
+await step(4306, () => glPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0));
+await step(4307, () => glPage.evaluate(() => {
   window.__VAULT__ = { pages: 12, linksPer: 2, ghosts: 2, tags: ["core", "reading"] };
   document.getElementById("nav-knowledge").click();
-});
-await glPage.waitForFunction(() => document.querySelector(".knowledge-view:not([hidden])") !== null,
-  null, { timeout: 8000 });
+}));
+await step(4311, () => glPage.waitForFunction(() => document.querySelector(".knowledge-view:not([hidden])") !== null,
+  null, { timeout: 8000 }));
 /* 이 판의 뒤따르는 계약은 평면 지도의 것이다 — WebGL2가 서는 판의 전체 지도는 우주로 열리므로(t-12443)
  * 평면을 고른 사람의 판으로 둔다. 우주의 계약은 끝에서 제 시험(`knowledge-universe.mjs`)이 묻는다. */
-await glPage.evaluate(() => {
+await step(4315, () => glPage.evaluate(() => {
   knowledgeDimension = "2d";
-});
-await measureKnowledgeGlParity(glPage, ok);
-await measureKnowledgeGlParityStages(glPage, ok);
-await measureKnowledgeScenes(glPage, ok, { painter: "gl", frames: sweep.frames,
-  scenes: KNOWLEDGE_SCENES.filter((scene) => sweep.glScenes.includes(scene.name)) });
+}));
+await step(4318, () => measureKnowledgeGlParity(glPage, ok));
+await step(4319, () => measureKnowledgeGlParityStages(glPage, ok));
+await step(4320, () => measureKnowledgeScenes(glPage, ok, { painter: "gl", frames: sweep.frames,
+  scenes: KNOWLEDGE_SCENES.filter((scene) => sweep.glScenes.includes(scene.name)) }));
 
 /* P1 G2 — WebGL2가 서는 판에서는 사람이 고르지 않아도 GL이 선다. */
 const glPicked = await glPage.evaluate(async () => {
@@ -4290,11 +4340,11 @@ const glPicked = await glPage.evaluate(async () => {
   }
 });
 ok("P1 G2: where WebGL2 stands the window draws with GL on its own — nothing pinned, one GL canvas, no element per page",
-  !glPicked.thrown && glPicked.able && glPicked.pinned === null && glPicked.standing === "gl"
+  () => !glPicked.thrown && glPicked.able && glPicked.pinned === null && glPicked.standing === "gl"
     && glPicked.canvases === 1 && glPicked.elements === 0,
   JSON.stringify(glPicked));
-await measureKnowledgeSupplyParity(glPage, ok);
-await measureKnowledgeSupplyScene(glPage, ok, { painter: "gl" });
+await step(4343, () => measureKnowledgeSupplyParity(glPage, ok));
+await step(4344, () => measureKnowledgeSupplyScene(glPage, ok, { painter: "gl" }));
 
 /* 확대하면 이름이 선다(09-28, `placeKnowledgeLabels`). 같은 판을 두 손으로 배율 1과 2에서
  * 세운다. 배율 1에서는 두 손이 같은 격자의 답을 입는다. 이름표가 모든 점 위에 서는 GL 손은
@@ -4304,7 +4354,7 @@ await measureKnowledgeSupplyScene(glPage, ok, { painter: "gl" });
  * 띠에 선다 — 배율 1의 전체 지도에서 그 쪽들은 예산을 쓰지 않는다(옛 격자는 같은 판에서 이름
  * 40개 중 36개를 띠에 세웠다). 판은 공급망 장면과 같은 넓은 창이다. */
 const zoomSeat = glPage.viewportSize();
-await glPage.setViewportSize({ width: 1998, height: 1069 });
+await step(4354, () => glPage.setViewportSize({ width: 1998, height: 1069 }));
 const zoomNames = await glPage.evaluate(async () => {
   try {
     const frame = () => new Promise((done) => requestAnimationFrame(done));
@@ -4381,7 +4431,7 @@ const zoomNames = await glPage.evaluate(async () => {
     return { thrown: String(error?.stack ?? error) };
   }
 });
-await glPage.setViewportSize(zoomSeat);
+await step(4431, () => glPage.setViewportSize(zoomSeat));
 {
   const [svgFit, glFit, svgZoomed, glZoomed] = zoomNames.rows ?? [];
   ok("zooming in names more of the map: GL names may cover other points but never other names, and the rim's pages stay quiet at the overview",
@@ -4420,6 +4470,11 @@ const themeScene = async (mode, from) => glPage.evaluate(async ({ mode, from }) 
   setKnowledgeMode(view, "global", { paint: false });
   knowledgeReport = answer;
   await paintKnowledgeView();
+  /* 볼트의 첫 그림은 기억된 얼굴을 읽는다(`applyKnowledgeEntry`) — 기억이 없으면 표의 기본이고, WebGL2가
+   * 서는 판에서 그것은 우주(3D)다. 우주는 시간으로 떠오르므로, 평면의 픽셀을 재는 이 시험은 얼굴을 다시
+   * 평면에 고정하고 곧장 그린다(우주는 그 그림에서 걷힌다). */
+  knowledgeDimension = "2d";
+  await paintKnowledgeView();
   for (let wait = 0; wait < 1200 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; wait += 1) await frame();
   if (mode === "local") {
     setKnowledgeMode(view, "local", { paint: false });
@@ -4451,6 +4506,32 @@ const themeShot = async () => {
   }, layers);
   return shot;
 };
+/* 테마를 바꾼 뒤의 그림과 처음부터 그린 그림을 픽셀로 셈한다. 안티앨리어싱된 GL 가장자리는 같은 장면을
+ * 다르게 지나온 두 그림에서 한 단계(1/255)씩 달라질 수 있다 — 실측(10-10): 점선 가장자리 154픽셀, 모두 한
+ * 채널 1단계, 실패 두 번이 같은 픽셀 집합. 옛 테마의 색은 같은 장면에서 최대 242단계 멀어, 채널마다
+ * `inkTolerance`(2단계) 안이면 같은 그림으로 친다 — 옛 색을 가리지 않는다. 셈은 detail에 남긴다. */
+const inkTolerance = 2;
+const inkWithin = (left, right) => glPage.evaluate(async ({ left, right, tolerance }) => {
+  const pixels = async (base64) => {
+    const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext("2d");
+    context.drawImage(bitmap, 0, 0);
+    return { width: bitmap.width, height: bitmap.height, data: context.getImageData(0, 0, bitmap.width, bitmap.height).data };
+  };
+  const [a, b] = [await pixels(left), await pixels(right)];
+  if (a.width !== b.width || a.height !== b.height) return { same: false, worst: -1, differing: -1 };
+  let worst = 0;
+  let differing = 0;
+  for (let at = 0; at < a.data.length; at += 4) {
+    let delta = 0;
+    for (let channel = 0; channel < 3; channel += 1) delta = Math.max(delta, Math.abs(a.data[at + channel] - b.data[at + channel]));
+    if (delta > 0) differing += 1;
+    worst = Math.max(worst, delta);
+  }
+  return { same: worst <= tolerance, worst, differing };
+}, { left: left.toString("base64"), right: right.toString("base64"), tolerance: inkTolerance });
 const themeRuns = [];
 for (const mode of ["global", "local"]) {
   for (const [from, to] of [["dark", "light"], ["light", "dark"]]) {
@@ -4469,12 +4550,13 @@ for (const mode of ["global", "local"]) {
       for (let wait = 0; wait < 3; wait += 1) await new Promise((done) => requestAnimationFrame(done));
     });
     const fresh = await themeShot();
-    themeRuns.push({ ...scene, from, to, same: switched.equals(fresh) });
+    const judged = await inkWithin(switched, fresh);
+    themeRuns.push({ ...scene, from, to, same: judged.same, worst: judged.worst, differing: judged.differing });
   }
 }
-await glPage.evaluate(() => setTheme("dark"));
+await step(4522, () => glPage.evaluate(() => setTheme("dark")));
 ok("switching the theme repaints the GL picture as a fresh paint in that theme (both ways, overview and local)",
-  themeRuns.length === 4 && themeRuns.every((run) => run.painter === "gl" && run.same)
+  () => themeRuns.length === 4 && themeRuns.every((run) => run.painter === "gl" && run.same)
     && themeRuns.filter((run) => run.mode === "local").length === 2,
   JSON.stringify(themeRuns));
 
@@ -4602,7 +4684,7 @@ const localGrammar = await glPage.evaluate(async () => {
   }
 });
 ok("GL local exploration wears the SVG's grammar: no nebula, spokes apart from context lines, cluster-coloured points, a larger centre with its halo",
-  !localGrammar.thrown && localGrammar.svgNebula === "none" && localGrammar.glDiscs === 0
+  () => !localGrammar.thrown && localGrammar.svgNebula === "none" && localGrammar.glDiscs === 0
     && localGrammar.svgEdges > 10 && localGrammar.edgeMisses === 0
     && localGrammar.glWidths.spoke.length > 0 && localGrammar.glWidths.context.length > 0
     && localGrammar.glWidths.spoke.every((row) => !localGrammar.glWidths.context.includes(row))
@@ -4745,9 +4827,9 @@ for (const [tags, pages, wide, tall] of [[6, 359, 1280, 860], [20, 600, 1280, 86
   if (scene.thrown) plateSeats.thrown = scene.thrown;
   plateSeats.rows.push(...scene.rows.map((row) => ({ ...row, wide })));
 }
-await glPage.setViewportSize(plateSeat);
+await step(4795, () => glPage.setViewportSize(plateSeat));
 ok("cluster plates reserve the words they wear: every plate is one drawn line on its own cells, no plate meets another plate, a name or a control, and every plate — on both hands — stands at its own disc's edge",
-  !plateSeats.thrown && plateSeats.rows.length === 6
+  () => !plateSeats.thrown && plateSeats.rows.length === 6
     && plateSeats.rows.every((row) => row.unreserved === 0 && row.overlaps === 0 && row.standing > 0)
     && plateSeats.rows.every((row) => row.drawnLines === row.standing)
     && plateSeats.rows.every((row) => row.farthest < 2 * Math.max(...KNOWLEDGE_PLATE_GAPS)),
@@ -4803,7 +4885,7 @@ const plateInk = await glPage.evaluate(async () => {
   return rows;
 });
 ok("cluster plate words keep their contrast on the graph ground in both themes, standing on an outline of that ground",
-  plateInk.length > 0 && ["dark", "light"].every((theme) => plateInk.some((row) => row.theme === theme))
+  () => plateInk.length > 0 && ["dark", "light"].every((theme) => plateInk.some((row) => row.theme === theme))
     && plateInk.every((row) => row.ratio >= row.least && row.outline),
   JSON.stringify(plateInk.filter((row) => row.ratio < row.least || !row.outline).slice(0, 8)));
 
@@ -4868,7 +4950,7 @@ const rimHug = await glPage.evaluate(async () => {
   }
 });
 ok("the rim of stray pages hugs the named discs' outline, a spiral step at most, and keeps its gap from every disc",
-  !rimHug.thrown && rimHug.named >= 2 && rimHug.strays >= 40
+  () => !rimHug.thrown && rimHug.named >= 2 && rimHug.strays >= 40
     && rimHug.firstExcess <= rimHug.pitch && rimHug.closest >= rimHug.gap,
   JSON.stringify(rimHug));
 
@@ -4923,7 +5005,7 @@ const clusterInks = await glPage.evaluate(async () => {
   }
 });
 ok("the eight largest clusters wear the eight hues, one each — so no disc shares its hue with its nearest named disc — and the rest wear none",
-  !clusterInks.thrown && clusterInks.named > 8 && clusterInks.sameAsNearest === 0
+  () => !clusterInks.thrown && clusterInks.named > 8 && clusterInks.sameAsNearest === 0
     && clusterInks.firstEightMoved === 0 && clusterInks.cells.length === 8 && clusterInks.shared === 0
     && clusterInks.restColoured === 0,
   JSON.stringify(clusterInks));
@@ -4974,7 +5056,7 @@ const topicVault = ({ sizes, between, lonely = 0, ghosts = 0 }) => {
   return { spec: { pages: total, ghosts, tags, titles, customEdges }, starts, words: words.slice(0, sizes.length) };
 };
 /* 한 볼트를 한 손으로 세운다 — 전체 지도, 아무것도 고르지 않은 판, 다 앉고 맞춘 뒤. */
-await glPage.evaluate(() => {
+await step(5024, () => glPage.evaluate(() => {
   window.__standKnowledgeScene__ = async (path, spec, hand) => {
     const frame = () => new Promise((done) => requestAnimationFrame(done));
     const view = document.querySelector(".knowledge-view:not([hidden])");
@@ -5002,7 +5084,7 @@ await glPage.evaluate(() => {
     for (let wait = 0; wait < 3; wait += 1) await frame();
     return { view, layout };
   };
-});
+}));
 
 /* 열넷의 주제(40…10쪽) — 색 여덟과 회색 여섯을 세우는 볼트. 색(「colour」)과 한 줄 이름(「oneLine」)의 두 검사가 같이
  * 선다(t-12029). */
@@ -5147,7 +5229,7 @@ const bundles = await glPage.evaluate(async ({ spec, starts }) => {
   }
 }, { spec: bundleVault.spec, starts: bundleVault.starts });
 ok("the overview bundles the lines between clusters: at rest only a cluster's own lines stand, one tie per pair of eight lines or more speaks the count in its width, the strong ties list them, and picking or pointing at a cluster brings its lines back — on both hands",
-  !bundles.thrown && bundles.rows.length === 2 && bundles.rows.every((row) => row.topics === 5 && row.named >= 5
+  () => !bundles.thrown && bundles.rows.length === 2 && bundles.rows.every((row) => row.topics === 5 && row.named >= 5
     && row.least === 8 && row.widthBase === 0.9 && row.grow === 0.55
     && row.restBetween === 0 && row.restDrawn === row.intra
     && row.wanted.length === 2 && JSON.stringify(row.drawnTies) === JSON.stringify(row.wanted)
@@ -5209,7 +5291,7 @@ const tieless = await glPage.evaluate(async ({ small, lone }) => {
   }
 }, { small: tielessVault.spec, lone: bridgeOnlyVault.spec });
 ok("a map with no tie keeps every line between its topics, and a bridge still stands as its curve with only its one line stepping aside — on both hands",
-  !tieless.thrown && tieless.rows.length === 4 && tieless.rows.every((row) => row.ties === 0 && row.tiesDrawn === 0
+  () => !tieless.thrown && tieless.rows.length === 4 && tieless.rows.every((row) => row.ties === 0 && row.tiesDrawn === 0
     && (row.path === "/scene/tieless"
       ? row.named >= 3 && row.between >= 6 && row.missing.length === 0 && row.bridges.length === 0
       : row.named >= 5 && row.between >= 6 && row.bridges.length === 3 && row.bridgesDrawn === 3
@@ -5225,7 +5307,7 @@ ok("a map with no tie keeps every line between its topics, and a bridge still st
 const spreadVault = topicVault({ sizes: [64, 52, 44, 34, 26],
   between: [[0, 1, 12], [0, 2, 9], [1, 2, 3], [2, 3, 2], [0, 3, 1], [3, 4, 1]], lonely: 4, ghosts: 3 });
 const spreadSeat = glPage.viewportSize();
-await glPage.setViewportSize({ width: 1998, height: 1069 });
+await step(5275, () => glPage.setViewportSize({ width: 1998, height: 1069 }));
 const spreads = await glPage.evaluate(async ({ spec, starts }) => {
   const frame = () => new Promise((done) => requestAnimationFrame(done));
   const rows = [];
@@ -5309,7 +5391,7 @@ const spreads = await glPage.evaluate(async ({ spec, starts }) => {
     knowledgePainterKind = null;
   }
 }, { spec: spreadVault.spec, starts: spreadVault.starts });
-await glPage.setViewportSize(spreadSeat);
+await step(5359, () => glPage.setViewportSize(spreadSeat));
 {
   const one = (held, value) => held.length === 1 && held[0] === value;
   ok("the overview's clusters show their branches: small points (leaf 2.4, major 5.5, core 10, ghost 2.2, stray 2) in discs 1.3 times wider that keep their gap, few points covering each other, and the local exploration keeps its sizes — on both hands",
@@ -5396,7 +5478,7 @@ const colours = await glPage.evaluate(async ({ spec }) => {
   }
 }, { spec: fourteenTopics.spec });
 ok("colour sorts the topics again: the eight largest clusters wear the eight hues and the rest are quiet grey, leaves wear their cluster's full ink, every cluster has a flat disc whose edge stands only when lit, and the legend says eight colours and the smaller topics — on both hands",
-  !colours.thrown && colours.rows.length === 2 && colours.rows.every((row) => row.named > 8 && row.huesOk
+  () => !colours.thrown && colours.rows.length === 2 && colours.rows.every((row) => row.named > 8 && row.huesOk
     && row.discs === row.named && row.restRims === 0 && row.pickedRims === 1
     && JSON.stringify(row.keys) === JSON.stringify([0, 1, 2, 3, 4, 5, 6, 7])
     && row.quiet.includes(String(row.quietCount)))
@@ -5478,7 +5560,7 @@ const oneLines = await glPage.evaluate(async ({ spec }) => {
   }
 }, { spec: fourteenTopics.spec });
 ok("a cluster's name is one line: every standing plate draws only its name, coloured in its ink at 13 px or quiet mist at 11.5 px, its pages and main page are in its tip and accessible name, the tip stands when the keyboard reaches it, and the names step back as the map zooms in — on both hands",
-  !oneLines.thrown && oneLines.rows.length === 2 && oneLines.rows.every((row) => row.standing > 8
+  () => !oneLines.thrown && oneLines.rows.length === 2 && oneLines.rows.every((row) => row.standing > 8
     && row.quietStanding > 0 && row.manyLines === 0 && row.styleMiss === 0 && row.tipMiss === 0
     && row.focusTip.shown && row.focusTip.words === row.focusTip.want
     && row.fitOpacity > 0.9 && row.zoomedOpacity < 0.5),
@@ -5593,7 +5675,7 @@ const bridgeScene = await glPage.evaluate(async ({ spec, starts }) => {
   }
 }, { spec: bridgeVault.spec, starts: bridgeVault.starts });
 ok("surprising links stand out: the single lines between two large topics are curves in both clusters' inks with numbers no name covers, listed in the same order with their pages in a tip; pointing at a row thickens that bridge and quiets the rest, pressing it picks the line's first page — on both hands",
-  !bridgeScene.thrown && bridgeScene.rows.length === 2 && bridgeScene.rows.every((row) => row.topics === 5
+  () => !bridgeScene.thrown && bridgeScene.rows.length === 2 && bridgeScene.rows.every((row) => row.topics === 5
     && row.least === 15 && row.wanted.length === 3 && JSON.stringify(row.got) === JSON.stringify(row.wanted)
     && row.drawn === 3 && row.inkMiss === 0 && JSON.stringify(row.numbers) === JSON.stringify(["1", "2", "3"])
     && row.covered === 0 && JSON.stringify(row.listed) === JSON.stringify(["1", "2", "3"]) && row.tipsOk
@@ -5610,7 +5692,7 @@ ok("surprising links stand out: the single lines between two large topics are cu
 const fitVault = topicVault({ sizes: [40, 36, 32, 30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10],
   between: [[0, 1, 3], [2, 3, 2], [4, 5, 2], [6, 7, 2], [8, 9, 1], [10, 11, 1], [12, 13, 1]], lonely: 20 });
 const fitSeat = glPage.viewportSize();
-await glPage.setViewportSize({ width: 1998, height: 1069 });
+await step(5660, () => glPage.setViewportSize({ width: 1998, height: 1069 }));
 const fits = await glPage.evaluate(async ({ spec }) => {
   const rows = [];
   try {
@@ -5670,9 +5752,9 @@ const fits = await glPage.evaluate(async ({ spec }) => {
     knowledgePainterKind = null;
   }
 }, { spec: fitVault.spec });
-await glPage.setViewportSize(fitSeat);
+await step(5720, () => glPage.setViewportSize(fitSeat));
 ok("the map fills the canvas: its bounds take 0.9 of the binding axis above the legend's band, the discs span over 60% of the canvas, no disc lies under the legend or the zoom buttons, and the stray band keeps its gap — on both hands",
-  !fits.thrown && fits.rows.length === 2 && fits.rows.every((row) => row.mapFit === 0.9
+  () => !fits.thrown && fits.rows.length === 2 && fits.rows.every((row) => row.mapFit === 0.9
     && Math.abs(Math.max(row.shareX, row.shareY) - row.mapFit) < 0.02 && row.shareX <= row.mapFit + 0.02
     && row.shareY <= row.mapFit + 0.02 && Math.max(row.spanX, row.spanY) > 60 && row.underControls === 0
     && row.strayClosest >= row.strayGap),
@@ -6018,18 +6100,18 @@ const shapePixelsOn = async (target) => {
 const RETINA_RATIO = 2;
 const retinaContext = await glBrowser.newContext({ viewport: { width: 1280, height: 860 },
   deviceScaleFactor: RETINA_RATIO });
-const retinaPage = await retinaContext.newPage();
+const retinaPage = survivable(await retinaContext.newPage());
 retinaPage.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));
 await seedKnowledgeWindow(retinaPage);
-await retinaPage.goto(`${origin}/index.html`);
-await retinaPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
-await retinaPage.evaluate(() => document.getElementById("nav-knowledge").click());
-await retinaPage.waitForFunction(() => document.querySelector(".knowledge-view:not([hidden])") !== null,
-  null, { timeout: 8000 });
+await step(6071, () => retinaPage.goto(`${origin}/index.html`));
+await step(6072, () => retinaPage.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0));
+await step(6073, () => retinaPage.evaluate(() => document.getElementById("nav-knowledge").click()));
+await step(6074, () => retinaPage.waitForFunction(() => document.querySelector(".knowledge-view:not([hidden])") !== null,
+  null, { timeout: 8000 }));
 /* 이 판도 평면 지도의 모양을 잰다 — 우주(t-12443)가 아니라 평면을 고른 판으로 둔다. */
-await retinaPage.evaluate(() => {
+await step(6077, () => retinaPage.evaluate(() => {
   knowledgeDimension = "2d";
-});
+}));
 const pixelRuns = [await shapePixelsOn(glPage), await shapePixelsOn(retinaPage)];
 await retinaContext.close();
 const skipped = pixelRuns.find((run) => run.skip);
@@ -6074,15 +6156,15 @@ if (skipped) {
 }
 /* 우주 보기(t-12443) — WebGL2가 서는 판의 계약: 기본으로 서는가, 오가도 평면의 자리가 그대로인가, 기억·쉼·가림·
  * 문맥 잃음·해제. 평면 지도의 계약이 다 끝난 뒤에 묻는다(그 계약들은 평면을 고른 판에서 돈다). */
-await testKnowledgeUniverse(glPage, ok);
-await testKnowledgeUniverseGalaxies(glPage, ok);
-await testKnowledgeUniverseColour(glPage, ok);
-await testKnowledgeUniverseBodies(glPage, ok);
-await testKnowledgeUniverseFilaments(glPage, ok);
-await testKnowledgeUniverseFocus(glPage, ok);
-await testKnowledgeUniverseInspector(glPage, ok);
-await testKnowledgeUniverseLabels(glPage, ok);
-await testKnowledgeUniverseMotion(glPage, ok);
+await step(6124, () => testKnowledgeUniverse(glPage, ok));
+await step(6125, () => testKnowledgeUniverseGalaxies(glPage, ok));
+await step(6126, () => testKnowledgeUniverseColour(glPage, ok));
+await step(6127, () => testKnowledgeUniverseBodies(glPage, ok));
+await step(6128, () => testKnowledgeUniverseFilaments(glPage, ok));
+await step(6129, () => testKnowledgeUniverseFocus(glPage, ok));
+await step(6130, () => testKnowledgeUniverseInspector(glPage, ok));
+await step(6131, () => testKnowledgeUniverseLabels(glPage, ok));
+await step(6132, () => testKnowledgeUniverseMotion(glPage, ok));
 await glBrowser.close();
 
 console.log(`METRIC knowledge graph 1020 nodes: first paint ${brainScale.firstPaint}ms; `
