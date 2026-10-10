@@ -8028,8 +8028,12 @@ await test("non-default writes become canonical state before the second window b
   });
   await gestureAndWait(pageA, "A", "patch_editing_prefs", () =>
     pageA.check("#editing-editor-minimap"));
-  await gestureAndWait(pageA, "A", "patch_editing_prefs", () =>
-    pageA.uncheck("#editing-primary-selection-middle-click-paste"));
+  // The middle-click paste follows the platform until someone writes it (shell-term.js), and its default is off on
+  // Windows: flip the box from where it stands, so the write changes the canonical state on every platform.
+  await gestureAndWait(pageA, "A", "patch_editing_prefs", async () => {
+    const middle = "#editing-primary-selection-middle-click-paste";
+    await pageA.setChecked(middle, !(await pageA.isChecked(middle)));
+  });
   await gestureAndWait(pageA, "A", "patch_editing_prefs", () =>
     pageA.selectOption("#editing-diff-file-tree", "shown"));
   await gestureAndWait(pageA, "A", "set_diff_side_by_side", () =>
@@ -8193,6 +8197,7 @@ await test("the second boot paints every non-default before opening settings", a
     optionAsAlt: document.getElementById("term-option-as-alt")?.value,
     optionAsAltOptions: [...(document.getElementById("term-option-as-alt")?.options ?? [])]
       .map((option) => option.value),
+    optionAsAltHidden: document.getElementById("term-option-as-alt-field")?.hidden,
     jisYenToBackslash: document.getElementById("term-jis-yen-to-backslash")?.checked,
     jisYenHidden: document.getElementById("term-jis-yen-to-backslash-field")?.hidden,
     themeDark: document.getElementById("term-theme-dark")?.value,
@@ -8316,8 +8321,9 @@ await test("the second boot paints every non-default before opening settings", a
     fontFamily: "JetBrains Mono",
     ligatures: "on",
     ligaturesEffective: "on",
-    optionAsAlt: "left",
-    optionAsAltOptions: ["auto", "true", "left", "right", "false"],
+    optionAsAlt: TEST_PLATFORM === "darwin" ? "left" : "",
+    optionAsAltOptions: TEST_PLATFORM === "darwin" ? ["auto", "true", "left", "right", "false"] : [],
+    optionAsAltHidden: TEST_PLATFORM !== "darwin",
     jisYenToBackslash: true,
     jisYenHidden: TEST_PLATFORM !== "darwin",
     themeDark: "Dracula",
