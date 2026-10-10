@@ -287,6 +287,21 @@ const untilTurnResumes = async (page, camera) => {
   return { turned: false, waitedMs: ORBIT_TURN_RESUME_MAX_MS };
 };
 
+/* A shown view asks a frame while it has something to draw, and the counter has counted since the view was opened
+ * (openOrbit installs it first): the check reads the first frame asked as soon as it is asked, bounded. A runner that
+ * holds its frames for seconds (v1.1.54 Windows: 0 in a fixed 300 ms read, the view running) still gets its first frame.
+ * The hidden view keeps its fixed window: there the check is that nothing is asked. */
+const ORBIT_FIRST_FRAME_MAX_MS = 3_000; // the turn wait's bound: a view that asks no frame for three seconds has none to ask
+const untilFrameAsked = async (page) => {
+  for (let waited = 0; ; waited += ORBIT_STAND_STEP_MS) {
+    const rafs = await page.evaluate(() => window.__ORBIT_RAFS__);
+    if (rafs > 0 || waited >= ORBIT_FIRST_FRAME_MAX_MS) {
+      return { rafs, waitedMs: waited, handles: await page.evaluate(() => window.__ORBIT__()) };
+    }
+    await page.evaluate((ms) => window.__ORBIT_WAIT__(ms), ORBIT_STAND_STEP_MS);
+  }
+};
+
 /* 판의 빈 모서리 — 라벨이 서지 않는 자리(그림은 판 가운데에 맞춰 선다). 끌기와 두 번
  * 누르기가 여기서 시작한다. */
 const stageCorner = (page) => page.evaluate(() => {
@@ -1212,7 +1227,7 @@ async function testOrbitGates(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     await openOrbit(page);
-    const shown = await countOver(page, 300);
+    const shown = await untilFrameAsked(page);
     ok("gate control: the shown 3D view asks frames", shown.rafs > 0, JSON.stringify(shown));
 
     /* 에이전트의 라벨 — 워크스페이스의 키는 NUL을 품어 CSS 선택자로 잡히지 않는다. */
