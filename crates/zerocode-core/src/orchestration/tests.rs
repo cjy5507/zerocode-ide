@@ -407,6 +407,22 @@ impl Bench {
         planned
     }
 
+    /// The same as [`Self::at_argv`], with the files the window read for the
+    /// receipts the verb names (t-26587): `(path as named, text read)`. The
+    /// window reads them before the ledger judges, so the ledger never opens
+    /// a file itself; a verb that names none passes an empty list.
+    fn at_argv_reading(
+        &mut self,
+        pane: &str,
+        argv: Vec<String>,
+        readings: &[(&str, &str)],
+    ) -> Decided {
+        // Red: the plan does not take the readings yet, so they are dropped
+        // here and a named receipt is never looked at.
+        let _ = readings;
+        self.at_argv(pane, argv)
+    }
+
     fn run(&mut self, line: &str) -> Decided {
         self.at(agent_teams::LEADER_PANE, line)
     }
@@ -25121,6 +25137,9 @@ mod assign;
 /// (`tests/closed.rs`).
 mod closed;
 mod completion;
+/// t-26587: a success report must show the evidence of each pass condition
+/// its task wrote (`tests/evidence.rs`).
+mod evidence;
 /// t-34501: late landings told to the coordinator, a branch that ran away told to its worker
 /// (`tests/landing_watch.rs`).
 mod landing_watch;
