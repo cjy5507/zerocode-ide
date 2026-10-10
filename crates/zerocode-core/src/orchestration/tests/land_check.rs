@@ -11,6 +11,15 @@ use crate::orchestration::land_check::{
 const CHECKOUT: &str = "/r/checkout";
 const HEAD: &str = "abc1234def5678abc1234def5678abc1234def56";
 
+/// An absolute log path on either platform: `/abs/…` is no absolute path on Windows.
+fn abs_log(rest: &str) -> String {
+    if cfg!(windows) {
+        format!("C:/abs/{rest}")
+    } else {
+        format!("/abs/{rest}")
+    }
+}
+
 /// A run with one task that a seated worker handed in from [`CHECKOUT`] at `head`. Answers the task
 /// id and the worker's pane.
 fn handed_in(bench: &mut Bench, head: &str) -> (String, String) {
@@ -165,8 +174,9 @@ fn a_record_names_its_check_head_exit_code_log_and_time() {
     let (task, _pane) = handed_in(&mut bench, HEAD);
     let run = bench.ledger.runs()[0].id.clone();
     let check = format!("{CHECK_PREFIX}1700000000000-1");
+    let log = abs_log(&format!("land-check/logs/{check}.log"));
     let planned = bench.run(&format!(
-        "land-check --task {task} --head {HEAD} --record {check} --rc 0 --log /abs/land-check/logs/{check}.log --took-ms 1200"
+        "land-check --task {task} --head {HEAD} --record {check} --rc 0 --log {log} --took-ms 1200"
     ));
     assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
     assert_eq!(
@@ -177,7 +187,7 @@ fn a_record_names_its_check_head_exit_code_log_and_time() {
             head: HEAD.to_string(),
             check: check.clone(),
             rc: 0,
-            log: format!("/abs/land-check/logs/{check}.log"),
+            log,
             took_ms: Some(1200),
         }
     );
@@ -190,14 +200,15 @@ fn a_record_without_its_head_exit_code_or_absolute_log_is_refused() {
     let mut bench = Bench::new();
     let (task, _pane) = handed_in(&mut bench, HEAD);
     let check = format!("{CHECK_PREFIX}1700000000000-1");
+    let x_log = abs_log("x.log");
     // Each refusal names what it refused, so a refusal for some other reason does not pass.
     for (line, words) in [
         (
-            format!("land-check --task {task} --record {check} --rc 0 --log /abs/x.log"),
+            format!("land-check --task {task} --record {check} --rc 0 --log {x_log}"),
             "--head",
         ),
         (
-            format!("land-check --task {task} --head {HEAD} --record {check} --log /abs/x.log"),
+            format!("land-check --task {task} --head {HEAD} --record {check} --log {x_log}"),
             "--rc",
         ),
         (
@@ -208,13 +219,13 @@ fn a_record_without_its_head_exit_code_or_absolute_log_is_refused() {
         ),
         (
             format!(
-                "land-check --task {task} --head {HEAD} --record ../{check} --rc 0 --log /abs/x.log"
+                "land-check --task {task} --head {HEAD} --record ../{check} --rc 0 --log {x_log}"
             ),
             "--record",
         ),
         (
             format!(
-                "land-check --task {task} --head {HEAD} --record {check} --rc zero --log /abs/x.log"
+                "land-check --task {task} --head {HEAD} --record {check} --rc zero --log {x_log}"
             ),
             "--rc",
         ),
@@ -270,7 +281,7 @@ fn a_check_letter_reaches_the_coordinator_once_with_its_task_and_evidence() {
         "tree": "0123456789abcdef0123456789abcdef01234567",
         "rc": 0,
         "tookMs": 1200,
-        "log": format!("/abs/land-check/logs/{check}.log"),
+        "log": abs_log(&format!("land-check/logs/{check}.log")),
     })
     .to_string();
     let first = bench

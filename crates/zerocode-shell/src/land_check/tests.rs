@@ -54,8 +54,11 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().expect("a temporary folder");
-        // Canonical from the start: the folders the window makes are compared by their real names.
-        let base = std::fs::canonicalize(temp.path()).expect("a canonical folder");
+        // Canonical from the start: the folders the window makes are compared by their real names
+        // (plain ones — on Windows the verbatim prefix comes off as the store takes it off).
+        let base = without_verbatim_prefix(
+            std::fs::canonicalize(temp.path()).expect("a canonical folder"),
+        );
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).expect("the repository folder");
         git(&repo, &["init", "-q", "-b", "main"]);
@@ -756,6 +759,25 @@ fn a_record_whose_log_is_not_its_own_log_path_is_refused() {
 
 /// The stored words of a project become one policy: a blank command is none, a missing or zero
 /// limit is the default, and a blank pin is none.
+/// The store's root is a path git can take: a Windows verbatim prefix comes off a plain disk
+/// path, while a UNC path, a path too long for a classic one and a plain path are kept as they
+/// are.
+#[test]
+fn a_verbatim_windows_prefix_comes_off_a_plain_disk_root_only() {
+    assert_eq!(
+        without_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\dev\app")),
+        PathBuf::from(r"C:\Users\dev\app")
+    );
+    let unc = PathBuf::from(r"\\?\UNC\server\share\app");
+    assert_eq!(without_verbatim_prefix(unc.clone()), unc);
+    let long = PathBuf::from(format!(r"\\?\C:\{}", "x".repeat(CLASSIC_PATH_MAX)));
+    assert_eq!(without_verbatim_prefix(long.clone()), long);
+    assert_eq!(
+        without_verbatim_prefix(PathBuf::from("/Users/dev/app")),
+        PathBuf::from("/Users/dev/app")
+    );
+}
+
 #[test]
 fn the_stored_words_name_the_command_its_limit_and_its_pin() {
     let none = Policy::from_settings(None, None, None);

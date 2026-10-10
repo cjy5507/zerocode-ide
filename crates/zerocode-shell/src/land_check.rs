@@ -80,7 +80,9 @@ impl Store {
         }
         let root = fs::canonicalize(&root)
             .map_err(|why| format!("the land-check folder could not be named: {why}"))?;
-        Ok(Store { root })
+        Ok(Store {
+            root: without_verbatim_prefix(root),
+        })
     }
 
     /// The store's root, for the tests that name the folders they expect under it.
@@ -814,6 +816,32 @@ fn git_within(host: &Host, dir: &Path, args: &[&str], budget: Duration) -> Resul
         )),
     }
 }
+
+/// A canonical path as git reads it. On Windows `canonicalize` answers a verbatim path
+/// (`\\?\C:\…`), which git refuses as a worktree's folder ("could not create leading
+/// directories … Invalid argument"). A plain disk path loses the prefix when the plain form
+/// fits in a classic path; a UNC path and a path longer than that keep it, as the prefix is
+/// what makes them reachable (the rule of `dunce::simplified`). Any other path is answered as
+/// it came.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return path;
+    };
+    let mut letters = rest.chars();
+    let is_disk = letters.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && letters.next() == Some(':')
+        && letters.next() == Some('\\');
+    if is_disk && rest.len() < CLASSIC_PATH_MAX {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
+}
+
+/// The length a Windows path may have without the verbatim prefix (MAX_PATH, the terminating
+/// NUL included).
+const CLASSIC_PATH_MAX: usize = 260;
 
 /// The commit a word names in the repository, if git knows it as one.
 fn commit_of(host: &Host, repo: &Path, word: &str) -> Option<String> {
