@@ -1726,8 +1726,103 @@ impl TempSession {
 
 impl Drop for TempSession {
     fn drop(&mut self) {
+        // A test that fails while it holds its folder is looked at before the
+        // folder is removed. Unwinding is the only place the failure is known here.
+        if std::thread::panicking() {
+            report_folder_after_failure(&self.folder);
+        }
         let _ = fs::remove_dir_all(&self.folder);
     }
+}
+
+/// Test-only diagnostic for a failed test's folder, written straight to stderr so
+/// libtest's output capture cannot drop it. Prints the Win32 code of each open the
+/// writers make, and the folder's owner class and DACL shape. It prints classes,
+/// counts, booleans and codes only: no SID is printed or written here.
+#[cfg(windows)]
+fn report_folder_after_failure(folder: &Path) {
+    use std::io::Write as _;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    };
+
+    let mut lines = Vec::new();
+    for (name, rights) in [
+        ("open read", GENERIC_READ),
+        ("open read_control+write_dac", READ_CONTROL | WRITE_DAC),
+        ("open read_control+write_owner", READ_CONTROL | WRITE_OWNER),
+    ] {
+        let outcome = match std::fs::OpenOptions::new()
+            .access_mode(rights)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(folder)
+        {
+            Ok(_) => "ok".to_owned(),
+            Err(error) => format!("os {:?}", error.raw_os_error()),
+        };
+        lines.push(format!("[diag] {name}: {outcome}"));
+    }
+    let security = match std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(folder)
+    {
+        Ok(handle) => match describe_folder_security(&handle) {
+            Ok(text) => text,
+            Err(error) => format!("security query os {:?}", error.raw_os_error()),
+        },
+        Err(error) => format!("security handle os {:?}", error.raw_os_error()),
+    };
+    lines.push(format!("[diag] {security}"));
+    let mut stderr = std::io::stderr();
+    let _ = stderr.write_all(lines.join("\n").as_bytes());
+    let _ = stderr.write_all(b"\n");
+}
+
+#[cfg(not(windows))]
+fn report_folder_after_failure(_folder: &Path) {}
+
+/// The folder's owner class and DACL shape, as text with no SID in it.
+#[cfg(windows)]
+fn describe_folder_security(handle: &std::fs::File) -> std::io::Result<String> {
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+
+    let current = windows_permissions::utilities::current_process_sid()?;
+    let descriptor = windows_permissions::wrappers::GetSecurityInfo(
+        handle,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl,
+    )?;
+    let owner = if descriptor.owner() == Some(current.as_ref()) {
+        "current user"
+    } else {
+        "other"
+    };
+    let aces = descriptor.dacl().map_or(0, |dacl| dacl.len());
+    let sddl = windows_permissions::wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor(
+        &descriptor,
+        SecurityInformation::Dacl,
+    )?;
+    let sddl = sddl.to_string_lossy();
+    let user = current.to_string();
+    // Each ACE is `(type;flags;rights;;;sid)`; the rights are the third field.
+    let user_rights: Vec<&str> = sddl
+        .split(')')
+        .filter(|ace| ace.ends_with(user.as_str()))
+        .filter_map(|ace| ace.split(';').nth(2))
+        .collect();
+    let write_dac = user_rights
+        .iter()
+        .any(|rights| rights.contains("WD") || rights.contains("GA") || *rights == "FA");
+    let write_owner = user_rights
+        .iter()
+        .any(|rights| rights.contains("WO") || rights.contains("GA") || *rights == "FA");
+    Ok(format!(
+        "owner {owner}; dacl aces {aces}; user ace {}; user write_dac {write_dac}; user write_owner {write_owner}",
+        !user_rights.is_empty()
+    ))
 }
 
 impl std::ops::Deref for TempSession {
