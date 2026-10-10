@@ -67,8 +67,10 @@ export function standTasks(page) {
       tags: fields.tags ?? [], preview: { kind: "none" }, source: fields.source ?? "worker_evidence",
     });
     const bundleRows = {
-      "b-before": file("b-before", "screenshot", "drawer-before.png", 1.2, { origin: origin("t-501", "w-12", { worktree: kept, commit: beforeCommit }) }),
-      "b-after": file("b-after", "screenshot", "drawer-after.png", 1.1, { origin: origin("t-501", "w-12", { worktree: kept, commit: afterCommit }) }),
+      // The pair as a worker's hand-in keeps it (hand_in_keep.rs job_for): the pane as team/pane, the
+      // checkout, and the commit the report named — the only road by which a row carries a commit.
+      "b-before": file("b-before", "screenshot", "drawer-before.png", 1.2, { origin: origin("t-501", "w-12", { worktree: kept, commit: beforeCommit, pane: "team-5/%12" }) }),
+      "b-after": file("b-after", "screenshot", "drawer-after.png", 1.1, { origin: origin("t-501", "w-12", { worktree: kept, commit: afterCommit, pane: "team-5/%12" }) }),
       "b-single": file("b-single", "screenshot", "overview.png", 1.3),
       "b-red-log": file("b-red-log", "evidence", "red-rust.log", 1.5),
       "b-green-log": file("b-green-log", "evidence", "green-rust.log", 1.4),
@@ -311,10 +313,11 @@ async function testRemainders(page, ok) {
       && captions.some((one) => one.text === `전 · ${BEFORE_HASH}`) && captions.some((one) => one.text === `후 · ${AFTER_HASH}`),
     JSON.stringify(captions),
   );
-  // A pair whose rows name no commit (a picture the window took itself carries none) stands bare.
+  // A pair whose rows name no commit (a picture the window took itself carries none) stands bare: the
+  // two rows here are real rows of the bundle that name no commit.
   const bare = await page.evaluate(() => {
     const compare = artifactsView()?.querySelector(".artifact-compare") ?? null;
-    setArtifactCompareLabels(compare, "no-commit-before", "no-commit-after");
+    setArtifactCompareLabels(compare, "b-single", "b-red-log");
     return [...(compare?.querySelectorAll(".artifact-compare-label") ?? [])].map((one) => one.textContent.replace(/\s+/g, " ").trim());
   });
   ok(
