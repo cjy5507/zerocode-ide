@@ -694,14 +694,20 @@ fn consecutive_no_file_answers_wait_twice_as_long_each_time_up_to_the_cap() {
         let walks = disk.walks.get();
         disk.clock
             .set(Some(asked_at + wait - Duration::from_millis(1)));
-        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk);
+        assert_eq!(
+            bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk),
+            Err(Absent::NoSessionFile)
+        );
         assert_eq!(
             disk.walks.get(),
             walks,
             "the store is not listed before the {wait:?} wait is over"
         );
         disk.clock.set(Some(asked_at + wait));
-        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk);
+        assert_eq!(
+            bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk),
+            Err(Absent::NoSessionFile)
+        );
         assert_eq!(
             disk.walks.get(),
             walks + 1,
@@ -717,16 +723,25 @@ fn a_changed_question_waits_the_first_interval_again() {
     let memo = Mutex::new(Memo::<u32>::default());
     let mut asked_at = Instant::now();
     disk.clock.set(Some(asked_at));
-    bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk);
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk),
+        Err(Absent::NoSessionFile)
+    );
     for wait in [2, 4, 8, 16, 32, 60] {
         asked_at += Duration::from_secs(wait);
         disk.clock.set(Some(asked_at));
-        bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk);
+        assert_eq!(
+            bind_remembered(&memo, 7, "claude", None, Some("aaa"), &disk),
+            Err(Absent::NoSessionFile)
+        );
     }
     // A new session id is asked at once, and its next ask comes ABSENT_RECHECK later.
     let walks = disk.walks.get();
     disk.clock.set(Some(asked_at));
-    bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk);
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk),
+        Err(Absent::NoSessionFile)
+    );
     assert_eq!(
         disk.walks.get(),
         walks + 1,
@@ -734,14 +749,20 @@ fn a_changed_question_waits_the_first_interval_again() {
     );
     disk.clock
         .set(Some(asked_at + ABSENT_RECHECK - Duration::from_millis(1)));
-    bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk);
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk),
+        Err(Absent::NoSessionFile)
+    );
     assert_eq!(
         disk.walks.get(),
         walks + 1,
         "inside the first interval the new question is not asked again"
     );
     disk.clock.set(Some(asked_at + ABSENT_RECHECK));
-    bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk);
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, Some("bbb"), &disk),
+        Err(Absent::NoSessionFile)
+    );
     assert_eq!(
         disk.walks.get(),
         walks + 2,

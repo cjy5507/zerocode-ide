@@ -350,7 +350,7 @@ fn after_ask(
         Err(reason) => Kept {
             answer: previous
                 .and_then(|kept| found_and_there(kept, facts))
-                .map_or(Err(reason), Ok),
+                .ok_or(reason),
             asked_at: now,
             misses: previous.map_or(0, |kept| kept.misses) + 1,
         },
