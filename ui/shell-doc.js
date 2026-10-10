@@ -6034,6 +6034,11 @@ const ARTIFACT_PICK_ALL = Object.freeze({ key: "artifacts.pick.all", word: "전�
 /* 작업 고르개의 「작업에 연결 안 된 것」 칸의 값 — 작업 id(`t-…`)와 겹칠 수 없는 글자로 시작한다. */
 const ARTIFACT_TASK_UNLINKED = ":unlinked";
 const ARTIFACT_TASK_UNLINKED_WORD = Object.freeze({ key: "artifacts.task.unlinked", word: "작업에 연결 안 된 것" });
+/* ✕가 지우는 것의 이름 — 칩의 글이 빠진 뒤에도 ✕는 무엇을 지우는지 제 이름을 가진다(접근성 이름과 풍선). */
+const ARTIFACT_CLEAR_WORDS = Object.freeze({
+  task: { key: "artifacts.clearTask", word: "작업 거르기 지우기" },
+  origin: { key: "artifacts.clearOrigin", word: "출처 필터 지우기" },
+});
 /* 목차가 서는 보고서의 머리말 수 — 하나뿐이면 목차가 말할 것이 없다. */
 const ARTIFACT_OUTLINE_MIN_HEADS = 2;
 /* 카드 아래 줄의 표식 — claude.ai의 🌐(공유됨)/🔒(비공개)를 우리 뜻으로: 🌐는
@@ -7850,6 +7855,14 @@ function paintArtifactTier(view) {
   body.style.setProperty("--artifact-tier", tier);
 }
 
+/* 작업 고르개가 서 있고 이 거르개의 작업을 골라 둔 상태인가 — 그러면 칩의 글은 고르개가 이미 말한다.
+ * 작업별 탭에서는 고르개가 숨는다(칩이 유일한 이름이다). */
+function artifactOriginSaidByPicker(view, origin) {
+  if (origin.field !== "task") return false;
+  const pick = view.querySelector('[data-artifact-pick="task"]');
+  return !pick.parentElement.hidden && pick.value === (origin.value === "" ? ARTIFACT_TASK_UNLINKED : origin.value);
+}
+
 function paintArtifactHead(view) {
   paintArtifactStudio(view);
   const shownTabs = new Set(artifactVisibleTabs().map((row) => row.tab));
@@ -7882,8 +7895,13 @@ function paintArtifactHead(view) {
   const chip = view.querySelector(".artifacts-origin-chip");
   const clear = view.querySelector(".artifacts-origin-clear");
   const origin = artifactFilter.origin;
-  chip.hidden = !origin;
+  // 작업 고르개가 그 작업을 이미 고르고 서 있으면 칩의 글은 되풀이다 — 칩은 숨기고 ✕만 남긴다.
+  chip.hidden = !origin || artifactOriginSaidByPicker(view, origin);
   clear.hidden = !origin;
+  const clearWord = ARTIFACT_CLEAR_WORDS[origin?.field === "task" ? "task" : "origin"];
+  clear.dataset.i18nAria = clearWord.key;
+  clear.setAttribute("aria-label", t(clearWord.key, clearWord.word));
+  clear.dataset.tip = clear.getAttribute("aria-label");
   if (origin) {
     const field = ARTIFACT_ORIGIN_FIELDS.find((row) => row.field === origin.field);
     const fieldWord = field ? t(field.key, field.word) : origin.field;

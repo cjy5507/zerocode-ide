@@ -42,7 +42,7 @@ const NEW_KEYS = Object.freeze([
   "artifacts.bundle.reportsKept", "artifacts.bundle.pair", "artifacts.bundle.pairSaid", "artifacts.bundle.deleted",
   "artifacts.bundle.evidence", "artifacts.bundle.tally", "artifacts.bundle.intended", "artifacts.bundle.pages",
   "artifacts.bundle.steps", "artifacts.bundle.unread", "artifacts.tests.passed", "artifacts.tests.failed",
-  "artifacts.tests.ignored", "artifacts.tests.rc", "artifacts.landing.unknown", "artifacts.digest.tasked",
+  "artifacts.tests.ignored", "artifacts.tests.rc", "artifacts.landing.unknown", "artifacts.digest.tasked", "artifacts.clearTask",
 ]);
 
 /* The tasks of the synthetic catalog, laid over the rows `standCatalog` stands. */
@@ -284,11 +284,12 @@ async function testRemainders(page, ok) {
     const words = [];
     if (shown(pick) && pick.selectedOptions[0]?.textContent.includes("t-501")) words.push("picker");
     if (shown(chip) && chip.textContent.includes("t-501")) words.push("chip");
-    return { words, clear: shown(view.querySelector(".artifacts-origin-clear")) };
+    const clear = view.querySelector(".artifacts-origin-clear");
+    return { words, clear: shown(clear), name: clear?.getAttribute("aria-label") ?? null, tip: clear?.dataset.tip ?? null };
   });
   ok(
-    "a task filter names its task once in the head, and its ✕ stays to clear it",
-    named.words.length === 1 && named.clear,
+    "a task filter names its task once in the head, and its ✕ stays — named and tipped as the task filter's clearing",
+    named.words.length === 1 && named.clear && named.name === "작업 거르기 지우기" && named.tip === "작업 거르기 지우기",
     JSON.stringify(named),
   );
 
@@ -813,9 +814,14 @@ export async function testArtifactTasks(browser, origin, ok) {
       const view = artifactsView();
       view?.querySelector('.artifacts-loose [data-loose-tab="reports"]')?.click();
       await new Promise((done) => setTimeout(done, 200));
+      // The words that name the filter and show: the picker's chosen option, and the chip while it shows.
+      const shown = (node) => Boolean(node) && !node.closest("[hidden]") && node.getClientRects().length > 0;
+      const chip = view?.querySelector(".artifacts-origin-chip") ?? null;
+      const pick = view?.querySelector('[data-artifact-pick="task"]') ?? null;
       const seen = {
         tab: artifactFilter.tab,
-        chip: view?.querySelector(".artifacts-origin-chip")?.textContent ?? null,
+        named: [shown(pick) ? pick.selectedOptions[0]?.textContent ?? "" : "", shown(chip) ? chip.textContent : ""]
+          .filter((word) => word.includes("작업에 연결 안 된 것")),
         cards: [...(view?.querySelectorAll(".artifact-card") ?? [])].map((one) => one.dataset.id).sort().join(","),
       };
       view?.querySelector(".artifacts-origin-clear")?.click();
@@ -825,7 +831,7 @@ export async function testArtifactTasks(browser, origin, ok) {
     });
     ok(
       "pressing a line of the foot opens that tab filtered to what no task is linked to",
-      loose.tab === "reports" && (loose.chip ?? "").includes("작업에 연결 안 된 것") && loose.cards === "r-brief",
+      loose.tab === "reports" && loose.named.length === 1 && loose.cards === "r-brief",
       JSON.stringify(loose),
     );
 
