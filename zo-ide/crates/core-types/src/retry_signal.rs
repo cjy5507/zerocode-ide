@@ -301,6 +301,9 @@ pub fn is_transient_text(lower: &str) -> bool {
         || lower.contains("connection closed")
         || lower.contains("timed out")
         || lower.contains("timeout")
+        // A silent stream: the provider sent no response event within its stall
+        // window (`stream_startup_no_progress`). Transient, like a timeout.
+        || lower.contains("no response event within")
         || lower.contains("broken pipe")
         || lower.contains("eof")
         // reqwest/hyper mid-body drops. `error decoding response body` is
@@ -1034,6 +1037,13 @@ mod tests {
             retry_notice_label("api stream error (server_error): retry"),
             "provider error",
             "a fatal-by-text server error is not named as transient"
+        );
+        assert_eq!(
+            retry_notice_label(
+                "api stream error (stream_startup_no_progress): no response event within 120s after server_error x7; transport keep-alives are not progress"
+            ),
+            "transient provider error",
+            "a stall is transient, like an idle timeout"
         );
     }
 

@@ -2282,6 +2282,112 @@ async fn keepalive_only_stream_restarts_at_startup_progress_deadline() {
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
+/// Reasoning summary events are response-level events, so they are progress: a
+/// stream that keeps reasoning past two windows keeps its connection and answers
+/// on it. Before t-43970 the first reasoning delta granted one extension and the
+/// stream was cut at two windows, whatever came after. That cap on endless
+/// reasoning is gone by design (see the t-43970 report).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn continuous_reasoning_is_progress_and_keeps_its_connection() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let _guard = env_lock();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server_hits = hits.clone();
+
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        server_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut scratch = [0u8; 1024];
+        let _ = first.read(&mut scratch).await;
+        first
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+            .await
+            .unwrap();
+        first
+            .write_all(concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n",
+                "data: {\"type\":\"response.output_item.added\",\"output_index\":0,",
+                "\"item\":{\"type\":\"reasoning\"}}\n\n",
+            ).as_bytes())
+            .await
+            .unwrap();
+        // Forty reasoning summary deltas, 20 ms apart: eight windows of
+        // reasoning with no gap longer than one window.
+        for _ in 0..40 {
+            first
+                .write_all(concat!(
+                    "data: {\"type\":\"response.reasoning_summary_text.delta\",",
+                    "\"output_index\":0,\"delta\":\"still thinking\"}\n\n",
+                ).as_bytes())
+                .await
+                .unwrap();
+            first.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        first
+            .write_all(concat!(
+                "data: {\"type\":\"response.output_item.added\",\"output_index\":1,",
+                "\"item\":{\"type\":\"message\"}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,",
+                "\"delta\":\"reasoned for eight windows\"}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":1}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":",
+                "{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+            ).as_bytes())
+            .await
+            .unwrap();
+        first.flush().await.unwrap();
+    });
+
+    let startup_key = super::CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_ENV;
+    let restore_startup = std::env::var(startup_key).ok();
+    std::env::set_var(startup_key, "100");
+    let client = super::ChatGptBackendClient::new("token", None)
+        .with_base_url(format!("http://{addr}"))
+        .with_retry_policy(
+            1,
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_millis(20),
+        );
+    let mut stream = client
+        .stream_message(&request(vec![InputMessage::user_text("hi")], None, None))
+        .await
+        .expect("open stream");
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut text = String::new();
+        while let Some(event) = stream.next_event().await? {
+            if let StreamEvent::ContentBlockDelta(delta) = event {
+                if let ContentBlockDelta::TextDelta { text: chunk } = delta.delta {
+                    text.push_str(&chunk);
+                }
+            }
+        }
+        Ok::<_, ApiError>(text)
+    })
+    .await;
+    match restore_startup {
+        Some(value) => std::env::set_var(startup_key, value),
+        None => std::env::remove_var(startup_key),
+    }
+    server.await.unwrap();
+    let text = outcome
+        .expect("reasoning that keeps coming is progress: the stream must finish")
+        .expect("the first connection carries the answer");
+
+    assert_eq!(text, "reasoned for eight windows");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "no reconnect while reasoning keeps coming"
+    );
+}
+
 /// End-to-end proof that a pre-commit stall recovers over a real socket:
 /// the mock server's first connection sends only headers and then hangs
 /// (the silent-reasoning case), and the second connection serves a full SSE
