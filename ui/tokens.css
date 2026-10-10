@@ -2064,6 +2064,8 @@
      줄은 두 줄이고, 둘째 줄은 들어가는 만큼 보인다. 증거의 열은 탭이 1100px보다 넓을 때만 읽는
      칸 옆에 서고, 그보다 좁으면 머리 아래의 띠다. */
   --artifact-task-row-height: 56;
+  /* 줄 안의 칩 두 개(번호, 반영)는 두 줄에 함께 든다: 칩의 높이는 누르는 면의 28 px보다 작다. */
+  --artifact-task-chip-height: 24px;
   --artifact-task-strip-width: 200px;
   --artifact-tier-rail: 1100;
   --artifact-rail-width: 280px;

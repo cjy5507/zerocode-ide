@@ -45712,7 +45712,7 @@ button.jev-token:hover {
   column-gap: var(--space-2);
   row-gap: var(--space-1);
   box-sizing: border-box;
-  padding: var(--space-1) var(--space-4) var(--space-1) calc(var(--space-4) - var(--artifact-task-edge-width));
+  padding: 0 var(--space-4) 0 calc(var(--space-4) - var(--artifact-task-edge-width));
   border-bottom: var(--rule-width) solid var(--edge-rule);
   border-left: var(--artifact-task-edge-width) solid transparent;
   overflow: hidden;
@@ -45751,6 +45751,12 @@ button.jev-token:hover {
 .artifact-task-id,
 .artifact-task-landing {
   background: none;
+}
+
+/* 줄 안의 두 칩(번호, 반영)은 두 줄에 함께 든다 — 칩 높이는 줄의 토큰이고, 누르는 면의 28 px이 아니다. */
+.artifact-task-id,
+.artifact-task-landing {
+  height: var(--artifact-task-chip-height);
 }
 
 .artifact-task-title {
