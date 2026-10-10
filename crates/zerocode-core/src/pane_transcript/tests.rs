@@ -24,6 +24,8 @@ struct Disk {
     cut_short: bool,
     asked_open: Cell<bool>,
     asked_screen: Cell<bool>,
+    /// How many times the open files were asked.
+    open_asks: Cell<usize>,
     /// How many times the store was listed, and how many first lines were read.
     walks: Cell<usize>,
     first_line_reads: Cell<usize>,
@@ -63,6 +65,7 @@ impl Facts for Disk {
 
     fn open_files(&self) -> Vec<PathBuf> {
         self.asked_open.set(true);
+        self.open_asks.set(self.open_asks.get() + 1);
         self.open.clone()
     }
 
@@ -624,7 +627,11 @@ fn a_file_found_through_the_open_files_stands_while_nothing_is_open() {
         bind_remembered(&memo, 7, "claude", None, None, &on_a),
         Ok((claude("aaa"), Via::OpenFile))
     );
-    // Ten minutes with nothing open: every ask finds no file, and A stands at each.
+    // Ten minutes with nothing open: every ask finds no file, and A stands at
+    // each. The asks come no closer together than the open-file interval: a
+    // "no file" answer never brings the next ask forward.
+    let mut asks = 0;
+    let mut last_ask = 0;
     for second in 1..=600 {
         nothing_open
             .clock
@@ -634,7 +641,17 @@ fn a_file_found_through_the_open_files_stands_while_nothing_is_open() {
             Ok((claude("aaa"), Via::OpenFile)),
             "at {second} s, with nothing open, the file found earlier stands"
         );
+        if nothing_open.open_asks.get() > asks {
+            asks = nothing_open.open_asks.get();
+            assert!(
+                second - last_ask >= OPEN_FILE_RECHECK.as_secs(),
+                "the open files were asked at {last_ask} s and again at {second} s, \
+                 closer than the open-file interval"
+            );
+            last_ask = second;
+        }
     }
+    assert!(asks >= 1, "the open files were asked again at least once");
 }
 
 #[test]
@@ -674,6 +691,122 @@ fn a_file_found_through_the_screen_is_asked_again_after_its_interval() {
         bind_remembered(&memo, 7, "claude", None, None, &on_b),
         Ok((claude("bbb"), Via::ScreenMatch)),
         "at the interval the file that holds the new screen line is named"
+    );
+}
+
+#[test]
+fn a_file_found_through_the_screen_is_not_asked_before_its_interval_after_a_miss() {
+    let line_nowhere = "A line that no session file carries";
+    let listing = vec![claude("aaa")];
+    let texts = BTreeMap::from([(claude("aaa"), format!("user: {LINE}"))]);
+    let on_a = Disk {
+        texts: texts.clone(),
+        screen: vec![LINE.to_string()],
+        ..disk_of(listing.clone())
+    };
+    let off_a = Disk {
+        texts,
+        screen: vec![line_nowhere.to_string()],
+        ..disk_of(listing)
+    };
+    let memo = Mutex::new(Memo::<u32>::default());
+    let start = Instant::now();
+    on_a.clock.set(Some(start));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &on_a),
+        Ok((claude("aaa"), Via::ScreenMatch))
+    );
+    // At the interval the screen line is in no file: A stands.
+    off_a.clock.set(Some(start + SCREEN_RECHECK));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &off_a),
+        Ok((claude("aaa"), Via::ScreenMatch)),
+        "a no-file answer does not replace the file found earlier"
+    );
+    let walks = off_a.walks.get();
+    // That no-file answer does not bring the next ask forward: the store is not
+    // walked again before a whole screen interval has passed.
+    for since_miss in [
+        ABSENT_RECHECK,
+        ABSENT_RECHECK * 2,
+        ABSENT_RECHECK * 4,
+        SCREEN_RECHECK - Duration::from_millis(1),
+    ] {
+        off_a.clock.set(Some(start + SCREEN_RECHECK + since_miss));
+        assert_eq!(
+            bind_remembered(&memo, 7, "claude", None, None, &off_a),
+            Ok((claude("aaa"), Via::ScreenMatch))
+        );
+        assert_eq!(
+            off_a.walks.get(),
+            walks,
+            "{since_miss:?} after the miss the store is not walked again"
+        );
+    }
+    off_a.clock.set(Some(start + SCREEN_RECHECK * 2));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &off_a),
+        Ok((claude("aaa"), Via::ScreenMatch))
+    );
+    assert_eq!(
+        off_a.walks.get(),
+        walks + 1,
+        "at the next screen interval the store is walked once"
+    );
+}
+
+#[test]
+fn a_file_found_through_the_open_files_is_not_asked_before_its_interval_after_a_miss() {
+    let listing = vec![claude("aaa")];
+    let on_a = Disk {
+        open: vec![claude("aaa")],
+        ..disk_of(listing.clone())
+    };
+    let nothing_open = disk_of(listing);
+    let memo = Mutex::new(Memo::<u32>::default());
+    let start = Instant::now();
+    on_a.clock.set(Some(start));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &on_a),
+        Ok((claude("aaa"), Via::OpenFile))
+    );
+    // At the interval nothing is open: A stands, and the open files were asked once.
+    nothing_open.clock.set(Some(start + OPEN_FILE_RECHECK));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &nothing_open),
+        Ok((claude("aaa"), Via::OpenFile)),
+        "a no-file answer does not replace the file found earlier"
+    );
+    let asks = nothing_open.open_asks.get();
+    assert_eq!(asks, 1, "at the interval the open files are asked once");
+    // That no-file answer does not bring the next ask forward.
+    for since_miss in [
+        ABSENT_RECHECK,
+        ABSENT_RECHECK * 2,
+        OPEN_FILE_RECHECK - Duration::from_millis(1),
+    ] {
+        nothing_open
+            .clock
+            .set(Some(start + OPEN_FILE_RECHECK + since_miss));
+        assert_eq!(
+            bind_remembered(&memo, 7, "claude", None, None, &nothing_open),
+            Ok((claude("aaa"), Via::OpenFile))
+        );
+        assert_eq!(
+            nothing_open.open_asks.get(),
+            asks,
+            "{since_miss:?} after the miss the open files are not asked again"
+        );
+    }
+    nothing_open.clock.set(Some(start + OPEN_FILE_RECHECK * 2));
+    assert_eq!(
+        bind_remembered(&memo, 7, "claude", None, None, &nothing_open),
+        Ok((claude("aaa"), Via::OpenFile))
+    );
+    assert_eq!(
+        nothing_open.open_asks.get(),
+        asks + 1,
+        "at the next open-file interval the open files are asked once"
     );
 }
 
