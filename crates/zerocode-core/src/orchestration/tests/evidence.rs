@@ -347,7 +347,8 @@ fn the_board_reads_each_condition_from_the_last_report_that_named_the_task() {
 /// A task that writes no conditions has nothing on the board for its hand-in,
 /// and a report with no evidence leaves every condition `missing`.
 #[test]
-fn a_task_without_conditions_has_no_hand_in_view_and_a_bare_report_leaves_every_condition_missing() {
+fn a_task_without_conditions_has_no_hand_in_view_and_a_bare_report_leaves_every_condition_missing()
+{
     use crate::orchestration::evidence::{ConditionState, hand_in_of};
     let mut bench = Bench::new();
     bench.json("run-create --name evidence");
@@ -380,5 +381,116 @@ fn a_task_without_conditions_has_no_hand_in_view_and_a_bare_report_leaves_every_
     let run = &bench.ledger.runs()[0];
     let view = hand_in_of(run, run.task(&tested).expect("the task"));
     let states: Vec<ConditionState> = view.conditions.iter().map(|row| row.state).collect();
-    assert_eq!(states, vec![ConditionState::Missing, ConditionState::Missing]);
+    assert_eq!(
+        states,
+        vec![ConditionState::Missing, ConditionState::Missing]
+    );
+}
+
+/// Numbers for the report (t-26587), printed as one line beginning `NUMBERS`:
+/// how many success reports for tasks that write conditions the ledger takes
+/// with no evidence, and how long each refusal takes, measured around the
+/// report call in this test binary's build. Uses only the helpers the red set
+/// already had, so the same test measures the ledger before the gate and after
+/// it. Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement: prints a NUMBERS line; run with --ignored --nocapture"]
+fn the_numbers_of_the_gate_for_the_report() {
+    const TASKS: usize = 12;
+    let mut bench = Bench::new();
+    bench.json("run-create --name numbers");
+    let mut with_conditions = 0usize;
+    let mut taken_bare = 0usize;
+    let mut refusal_ms: Vec<f64> = Vec::new();
+    for index in 0..TASKS {
+        let writes_conditions = index % 2 == 0;
+        let spec = if writes_conditions {
+            TWO_CONDITIONS
+        } else {
+            NO_CONDITIONS
+        };
+        let task = written_task(&mut bench, spec);
+        let pane = worker_on(&mut bench, &task);
+        let body = serde_json::json!({"ok": true, "summary": "done"});
+        let started = std::time::Instant::now();
+        let planned = report(&mut bench, &pane, &body, None, &[], &format!("num-{index}"));
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if writes_conditions {
+            with_conditions += 1;
+            match planned.reply.exit_code {
+                0 => taken_bare += 1,
+                _ => refusal_ms.push(elapsed_ms),
+            }
+        }
+    }
+    let refused = refusal_ms.len();
+    let mean_ms = refusal_ms.iter().sum::<f64>() / refused.max(1) as f64;
+    let max_ms = refusal_ms.iter().copied().fold(0.0_f64, f64::max);
+    eprintln!(
+        "NUMBERS tasks={TASKS} with_conditions={with_conditions} taken_without_evidence={taken_bare} refused={refused} refusal_mean_ms={mean_ms:.3} refusal_max_ms={max_ms:.3}"
+    );
+}
+
+/// The board's share of the numbers (t-26587), printed as one line beginning
+/// `BOARD`: how many tasks show conditions in their hand-in view after a mix of
+/// reports, and how many condition rows stand in each state. Run with
+/// `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement: prints a BOARD line; run with --ignored --nocapture"]
+fn the_numbers_of_the_board_for_the_report() {
+    use crate::orchestration::evidence::{ConditionState, hand_in_of};
+    const TASKS: usize = 12;
+    let mut bench = Bench::new();
+    bench.json("run-create --name board-numbers");
+    let mut tasks = Vec::new();
+    for index in 0..TASKS {
+        let writes_conditions = index % 2 == 0;
+        let spec = if writes_conditions {
+            TWO_CONDITIONS
+        } else {
+            NO_CONDITIONS
+        };
+        let task = written_task(&mut bench, spec);
+        let pane = worker_on(&mut bench, &task);
+        let (body, payload) = if writes_conditions {
+            (
+                serde_json::json!({"ok": true, "evidence": [
+                    evidence_of(1, "tests", 0),
+                    evidence_of(2, "clippy", 0),
+                ]}),
+                Some(serde_json::json!({"evidencePaths": [TESTS_RECEIPT]})),
+            )
+        } else {
+            (serde_json::json!({"ok": true, "summary": "renamed"}), None)
+        };
+        let planned = report(
+            &mut bench,
+            &pane,
+            &body,
+            payload.as_ref(),
+            &[(TESTS_RECEIPT, "0\n")],
+            &format!("board-{index}"),
+        );
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        tasks.push(task);
+    }
+    let run = &bench.ledger.runs()[0];
+    let (mut rows, mut checked, mut claimed, mut missing) = (0usize, 0usize, 0usize, 0usize);
+    for task in &tasks {
+        let view = hand_in_of(run, run.task(task).expect("the task"));
+        if view.conditions.is_empty() {
+            continue;
+        }
+        rows += 1;
+        for row in &view.conditions {
+            match row.state {
+                ConditionState::Checked => checked += 1,
+                ConditionState::Claimed => claimed += 1,
+                ConditionState::Missing => missing += 1,
+            }
+        }
+    }
+    eprintln!(
+        "BOARD tasks={TASKS} rows_with_conditions={rows} checked={checked} claimed={claimed} missing={missing}"
+    );
 }

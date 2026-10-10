@@ -188,7 +188,11 @@ pub fn judge_success(
     let entries: &[Value] = match said.get(LIST_KEY) {
         None => &[],
         Some(Value::Array(list)) => list,
-        Some(_) => return Err(format!("{LIST_KEY} must be a list, one entry per condition")),
+        Some(_) => {
+            return Err(format!(
+                "{LIST_KEY} must be a list, one entry per condition"
+            ));
+        }
     };
     let named = receipts_named(payload);
     let mut shown = vec![false; written];
@@ -202,7 +206,10 @@ pub fn judge_success(
                 entry.job, entry.rc
             ));
         }
-        if let Some(path) = named.iter().find(|path| job_of_receipt(path) == Some(entry.job)) {
+        if let Some(path) = named
+            .iter()
+            .find(|path| job_of_receipt(path) == Some(entry.job))
+        {
             match receipts.get(path).map(|text| text.trim().parse::<i64>()) {
                 None => {
                     return Err(format!(

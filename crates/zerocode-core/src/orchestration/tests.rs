@@ -8,7 +8,10 @@ use super::*;
 /// fact and the commit.
 #[test]
 fn worker_briefings_require_root_workspace_clippy() {
-    for briefing in [worker_briefing("t-1", "lint", ""), federated_briefing("d-1")] {
+    for briefing in [
+        worker_briefing("t-1", "lint", ""),
+        federated_briefing("d-1"),
+    ] {
         assert!(briefing.contains("cargo clippy --all-targets -- -D warnings"));
         assert!(briefing.contains("repository root"));
     }
@@ -36,7 +39,10 @@ fn a_worker_briefing_names_zerocode_find_before_the_task() {
 /// the same thing, and no turn after it carries the sentence again.
 #[test]
 fn worker_briefings_ask_for_a_plain_report_by_the_skills_name() {
-    for briefing in [worker_briefing("t-1", "lint", ""), federated_briefing("d-1")] {
+    for briefing in [
+        worker_briefing("t-1", "lint", ""),
+        federated_briefing("d-1"),
+    ] {
         let (before, _) = briefing
             .split_once(BRIEFING_HANDS_OVER)
             .expect("the briefing hands over");

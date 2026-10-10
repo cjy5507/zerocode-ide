@@ -9173,7 +9173,8 @@ fn read_receipts(argv: &[String]) -> zerocode_core::orchestration::evidence::Rec
     if !crate::agent_tools_runtime::is_worker_done(argv) {
         return files;
     }
-    let payload = crate::agent_tools_runtime::orchestration_arg(argv, "--payload").unwrap_or_default();
+    let payload =
+        crate::agent_tools_runtime::orchestration_arg(argv, "--payload").unwrap_or_default();
     for path in zerocode_core::orchestration::evidence::receipts_named(payload) {
         if let Some(text) = read_receipt_text(&path) {
             files.insert(path, text);
