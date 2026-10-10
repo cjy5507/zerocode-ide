@@ -109,7 +109,7 @@ mod windows_owner_only {
 
     /// The options of an append. An explicit access mask replaces the append
     /// rights that `OpenOptions::append` would give, so the mask is the append-only
-    /// part of a write: FILE_GENERIC_WRITE without FILE_WRITE_DATA, as std and
+    /// part of a write: `FILE_GENERIC_WRITE` without `FILE_WRITE_DATA`, as std and
     /// cap-primitives use. Each write then goes to the end of the file.
     fn append_open_options() -> OpenOptions {
         entry_options_with(FILE_GENERIC_WRITE & !FILE_WRITE_DATA, true)
@@ -313,7 +313,7 @@ mod windows_owner_only {
 
     /// Create one entry under a fresh name and read the owner it was given. The
     /// probe is created only by this process. `create_new` refuses a name in
-    /// use, and FILE_FLAG_DELETE_ON_CLOSE removes the entry when the handle
+    /// use, and `FILE_FLAG_DELETE_ON_CLOSE` removes the entry when the handle
     /// closes, even if the process dies before the probe is dropped.
     fn probe_default_owner() -> io::Result<String> {
         use rand::Rng as _;
@@ -344,7 +344,7 @@ mod windows_owner_only {
             )?;
             return descriptor
                 .owner()
-                .map(|owner| owner.to_string())
+                .map(ToString::to_string)
                 .ok_or_else(|| io::Error::other("the probe entry has no owner"));
         }
         Err(io::Error::new(
