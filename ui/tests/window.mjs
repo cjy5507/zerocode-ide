@@ -12775,7 +12775,9 @@ const basedCards = await page.evaluate(() => {
     const row = document.querySelector(`.wt-row[data-worktree-path="${at}"]`);
     const chip = row?.querySelector(".wt-base");
     return {
-      branch: row?.querySelector(".wt-branch")?.firstChild?.textContent ?? null,
+      // The name is read from its own span: the branch line can begin with the
+      // task id (t-44016), so its first child is not always the name.
+      branch: row?.querySelector(".wt-branch-name")?.textContent ?? null,
       chip: chip?.textContent ?? null,
       tip: chip?.dataset.tip ?? null,
     };
