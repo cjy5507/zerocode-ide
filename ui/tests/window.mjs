@@ -1736,12 +1736,14 @@ const envRemedy = await page.evaluate(async () => {
   const acts = [...box.querySelectorAll(".integration-remedy-copy")];
   acts[0]?.click();
   await new Promise((done) => setTimeout(done, 40));
-  seen.findCopied =
-    window.__CLIPBOARD_WRITES__.at(-1) ===
-    "grep -RIn 'GH_TOKEN' ~/.zshrc ~/.zshenv ~/.bashrc ~/.bash_profile ~/.profile 2>/dev/null";
+  seen.findCopied = window.__CLIPBOARD_WRITES__.at(-1) === (usesWindowsPlatform
+    ? "Get-ChildItem Env:GH_TOKEN"
+    : "grep -RIn 'GH_TOKEN' ~/.zshrc ~/.zshenv ~/.bashrc ~/.bash_profile ~/.profile 2>/dev/null");
   acts[1]?.click();
   await new Promise((done) => setTimeout(done, 40));
-  seen.unsetCopied = window.__CLIPBOARD_WRITES__.at(-1) === "unset GH_TOKEN";
+  seen.unsetCopied = window.__CLIPBOARD_WRITES__.at(-1) === (usesWindowsPlatform
+    ? "Remove-Item Env:GH_TOKEN; [Environment]::SetEnvironmentVariable('GH_TOKEN', $null, 'User')"
+    : "unset GH_TOKEN");
   seen.summaryNamesVar = [
     ...document.querySelectorAll("#integration-github-accounts .integration-site-summary"),
   ].some((one) => one.textContent.includes("GH_TOKEN"));
@@ -13285,6 +13287,9 @@ ok(
 // A query nobody's settings answer says so where the section would have been.
 const searchedNothing = await page.evaluate(async () => {
   const field = document.getElementById("settings-search");
+  // A row for another platform stays hidden, so the rail is counted as it shows on this platform, before and after.
+  const railShown = () => [...document.querySelectorAll(".settings-rail-item")].filter((one) => !one.hidden).length;
+  const railBefore = railShown();
   field.value = "zzzznotasetting";
   field.dispatchEvent(new Event("input"));
   await new Promise((done) => setTimeout(done, 150));
@@ -13297,16 +13302,15 @@ const searchedNothing = await page.evaluate(async () => {
   field.value = "";
   field.dispatchEvent(new Event("input"));
   await new Promise((done) => setTimeout(done, 150));
-  said.backAfterClearing =
-    [...document.querySelectorAll(".settings-rail-item")].filter((one) => !one.hidden).length;
-  said.railTotal = document.querySelectorAll(".settings-rail-item").length;
+  said.backAfterClearing = railShown();
+  said.railBefore = railBefore;
   return said;
 });
 ok(
   "a query nothing answers says so, and clearing it brings the rail back",
   searchedNothing.rail === 0 && searchedNothing.shown === 0 &&
     searchedNothing.nothing && searchedNothing.said.includes("zzzznotasetting") &&
-    searchedNothing.backAfterClearing === searchedNothing.railTotal,
+    searchedNothing.backAfterClearing === searchedNothing.railBefore,
   JSON.stringify(searchedNothing),
 );
 
@@ -13395,6 +13399,7 @@ const menuBarIcon = await page.evaluate(async () => {
   await new Promise((done) => setTimeout(done, 60));
   return {
     mac,
+    windows: usesWindowsPlatform,
     windowsRowHidden: windowsRow.hidden,
     initial,
     afterToggle,
@@ -13403,7 +13408,7 @@ const menuBarIcon = await page.evaluate(async () => {
 });
 ok(
   "the menu-bar icon is macOS-only, starts on, patches immediately, and its native menu opens Settings",
-  menuBarIcon.windowsRowHidden && menuBarIcon.openedFromNativeMenu && (
+  menuBarIcon.windowsRowHidden === !menuBarIcon.windows && menuBarIcon.openedFromNativeMenu && (
     menuBarIcon.mac
       ? !menuBarIcon.initial.hidden && menuBarIcon.initial.checked &&
         !menuBarIcon.afterToggle.checked &&
@@ -24859,7 +24864,7 @@ const fileDrop = await page.evaluate(async () => {
   // separating space the next word needs.
   seen.imageRaw = pastes[0] === "/tmp/한 컷.png";
   seen.imageThenSpace = pastes[1] === " ";
-  seen.docQuoted = pastes[2] === "'/tmp/설계 노트.md' ";
+  seen.docQuoted = pastes[2] === (usesWindowsPlatform ? '"/tmp/설계 노트.md" ' : "'/tmp/설계 노트.md' ");
   seen.calmDocBare = pastes[3] === "/tmp/plan.md ";
   seen.onlyFour = pastes.length === 4;
   await fire({ payload: { paths: ["/tmp/nowhere.md"], position: { x: 1, y: 1 } } });
