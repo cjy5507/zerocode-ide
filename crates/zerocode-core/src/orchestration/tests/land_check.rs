@@ -190,21 +190,42 @@ fn a_record_without_its_head_exit_code_or_absolute_log_is_refused() {
     let mut bench = Bench::new();
     let (task, _pane) = handed_in(&mut bench, HEAD);
     let check = format!("{CHECK_PREFIX}1700000000000-1");
-    for line in [
-        format!("land-check --task {task} --record {check} --rc 0 --log /abs/x.log"),
-        format!("land-check --task {task} --head {HEAD} --record {check} --log /abs/x.log"),
-        format!(
-            "land-check --task {task} --head {HEAD} --record {check} --rc 0 --log relative.log"
+    // Each refusal names what it refused, so a refusal for some other reason does not pass.
+    for (line, words) in [
+        (
+            format!("land-check --task {task} --record {check} --rc 0 --log /abs/x.log"),
+            "--head",
         ),
-        format!(
-            "land-check --task {task} --head {HEAD} --record ../{check} --rc 0 --log /abs/x.log"
+        (
+            format!("land-check --task {task} --head {HEAD} --record {check} --log /abs/x.log"),
+            "--rc",
         ),
-        format!(
-            "land-check --task {task} --head {HEAD} --record {check} --rc zero --log /abs/x.log"
+        (
+            format!(
+                "land-check --task {task} --head {HEAD} --record {check} --rc 0 --log relative.log"
+            ),
+            "absolute",
+        ),
+        (
+            format!(
+                "land-check --task {task} --head {HEAD} --record ../{check} --rc 0 --log /abs/x.log"
+            ),
+            "--record",
+        ),
+        (
+            format!(
+                "land-check --task {task} --head {HEAD} --record {check} --rc zero --log /abs/x.log"
+            ),
+            "--rc",
         ),
     ] {
         let planned = bench.run(&line);
         assert_ne!(planned.reply.exit_code, 0, "`{line}` was not refused");
+        assert!(
+            planned.reply.stderr.contains(words),
+            "`{line}` was refused, but not for {words}: {}",
+            planned.reply.stderr
+        );
         assert!(
             matches!(planned.effect, Effect::None),
             "`{line}`: {:?}",

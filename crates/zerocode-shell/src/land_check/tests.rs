@@ -453,13 +453,14 @@ fn a_live_lease_is_never_swept() {
         }),
     );
     let (sink, _rx) = sink();
-    let _ = said(run(
+    let answer = said(run(
         &store,
         &|_| policy(None),
         &fixture.merge(&fixture.feature, false),
         1_000_000,
         &sink,
     ));
+    assert_eq!(answer["state"], "merged", "{answer}");
     assert!(
         folder.join("keep.txt").exists(),
         "a live check's folder was swept"
@@ -504,13 +505,14 @@ fn a_link_in_the_work_folder_never_takes_its_target_with_it() {
     std::fs::create_dir_all(store.root().join("work")).expect("the work folder");
     std::os::unix::fs::symlink(&outside, store.root().join("work").join("lc-1-4")).expect("a link");
     let (sink, _rx) = sink();
-    let _ = said(run(
+    let answer = said(run(
         &store,
         &|_| policy(None),
         &fixture.merge(&fixture.feature, false),
         1_000,
         &sink,
     ));
+    assert_eq!(answer["state"], "merged", "{answer}");
     assert!(
         outside.join("keep.txt").exists(),
         "the link's target was taken down"

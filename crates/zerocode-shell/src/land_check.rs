@@ -22,9 +22,12 @@ pub(crate) struct Store {
 }
 
 impl Store {
-    /// Make (or find) the store under `root` and answer its canonical path.
-    pub(crate) fn at(_root: &Path) -> Result<Store, String> {
-        unimplemented!("red stage: the store is not built yet")
+    /// Make (or find) the store under the data root and answer its path.
+    pub(crate) fn at(data_root: &Path) -> Result<Store, String> {
+        // RED STAGE (t-42447): the path is named, but nothing is made under it yet.
+        Ok(Store {
+            root: data_root.join("land-check"),
+        })
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -50,7 +53,13 @@ impl Policy {
         _timeout_secs: Option<u64>,
         _pinned_base: Option<&str>,
     ) -> Policy {
-        unimplemented!("red stage: the settings reading is not built yet")
+        // RED STAGE (t-42447): the stored words are not read yet; every project is merge-only.
+        Policy {
+            command: None,
+            timeout: DEFAULT_TIMEOUT,
+            pinned_base: None,
+            shell: PathBuf::from("/bin/bash"),
+        }
     }
 }
 
@@ -66,7 +75,9 @@ pub(crate) fn run(
     _now_ms: i64,
     _sink: &Sink,
 ) -> Result<String, String> {
-    unimplemented!("red stage: the window's check is not built yet")
+    // RED STAGE (t-42447): the check does not run yet. It answers a state no check can have, so
+    // each test fails at its own assertion about the state it expected.
+    Ok(serde_json::json!({ "state": "unbuilt" }).to_string())
 }
 
 #[cfg(test)]
