@@ -4884,6 +4884,9 @@ const SCENE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
 const SCENE_CEILING: std::time::Duration = std::time::Duration::from_millis(150);
 /// Slack on a scene's expected duration: scheduler and socket overhead.
 const SCENE_SLACK: std::time::Duration = std::time::Duration::from_millis(50);
+/// A reconnect backoff four ceilings long: even its lowest jitter outlasts the bundle, so a
+/// scene can show what a pause the bundle cannot afford does to the turn's end.
+const SCENE_LONG_BACKOFF: std::time::Duration = std::time::Duration::from_millis(600);
 /// Upper bound on one scene. A scene that reaches it has hung.
 const SCENE_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -5042,13 +5045,26 @@ async fn play_scene_script(mut socket: tokio::net::TcpStream, script: SceneScrip
 /// in milliseconds, the bundle ceiling scaled to the window, and the transport
 /// pinned so the environment cannot change which one a scene runs.
 fn scene_client(addr: std::net::SocketAddr, wire: SceneWire) -> super::ChatGptBackendClient {
-    let mut client = super::ChatGptBackendClient::new("token", None)
-        .with_base_url(format!("http://{addr}"))
-        .with_retry_policy(
-            super::DEFAULT_STREAM_MAX_RETRIES,
+    scene_client_backing_off(
+        addr,
+        wire,
+        (
             std::time::Duration::from_millis(1),
             std::time::Duration::from_millis(2),
-        );
+        ),
+    )
+}
+
+/// A scene client whose reconnects back off between `backoff.0` and `backoff.1` (jittered
+/// in between by the production spread), for the scene where the pause outlasts the ceiling.
+fn scene_client_backing_off(
+    addr: std::net::SocketAddr,
+    wire: SceneWire,
+    backoff: (std::time::Duration, std::time::Duration),
+) -> super::ChatGptBackendClient {
+    let mut client = super::ChatGptBackendClient::new("token", None)
+        .with_base_url(format!("http://{addr}"))
+        .with_retry_policy(super::DEFAULT_STREAM_MAX_RETRIES, backoff.0, backoff.1);
     client.max_restart_wallclock = SCENE_CEILING;
     match wire {
         SceneWire::Sse => client.with_transport(super::websocket::Transport::Sse),
@@ -5093,6 +5109,17 @@ async fn run_scene(
     wire: SceneWire,
     scripts: Vec<SceneScript>,
 ) -> (String, Option<ApiError>, usize, std::time::Duration) {
+    run_scene_backing_off(wire, scripts, None).await
+}
+
+/// [`run_scene`] with the reconnect backoff pinned to `backoff` when one is given; `None`
+/// is the scene client's millisecond backoff.
+#[allow(clippy::await_holding_lock)]
+async fn run_scene_backing_off(
+    wire: SceneWire,
+    scripts: Vec<SceneScript>,
+    backoff: Option<(std::time::Duration, std::time::Duration)>,
+) -> (String, Option<ApiError>, usize, std::time::Duration) {
     let _guard = env_lock();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -5106,7 +5133,10 @@ async fn run_scene(
     let key = super::CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_ENV;
     let restore = std::env::var(key).ok();
     std::env::set_var(key, SCENE_WINDOW.as_millis().to_string());
-    let client = scene_client(addr, wire);
+    let client = match backoff {
+        Some(backoff) => scene_client_backing_off(addr, wire, backoff),
+        None => scene_client(addr, wire),
+    };
     let started = std::time::Instant::now();
     let (text, error) = tokio::time::timeout(SCENE_LIMIT, play_scene_turn(&client))
         .await
@@ -5234,6 +5264,45 @@ async fn seven_server_errors_then_silence_names_the_bundle_and_ends_at_the_ceili
         elapsed <= SCENE_CEILING + SCENE_SLACK,
         "the silent eighth waits only the bundle's rest: {elapsed:?}"
     );
+}
+
+/// Scene S: a quick failure whose reconnect backoff outlasts the bundle's ceiling. The
+/// pause is cut to what the bundle has left, so the turn ends at the ceiling — not a whole
+/// backoff past it with "reconnecting" on screen the while.
+async fn check_a_backoff_past_the_ceiling_is_cut(wire: SceneWire, name: &str) {
+    let scripts = vec![
+        server_error_connection(),
+        silent_connection(),
+        answer("never reached"),
+    ];
+    let (text, error, connections, elapsed) = run_scene_backing_off(
+        wire,
+        scripts,
+        Some((SCENE_LONG_BACKOFF, SCENE_LONG_BACKOFF)),
+    )
+    .await;
+    report_scene(name, &text, error.as_ref(), connections, elapsed);
+    assert!(text.is_empty(), "nothing was answered: {text:?}");
+    let error = error.expect("the bundle ends the turn");
+    assert!(
+        matches!(error, ApiError::RetriesExhausted { attempts: 2, .. }),
+        "the failed first connection and the reconnect the ceiling cut short: {error}"
+    );
+    assert!(
+        elapsed <= SCENE_CEILING + SCENE_SLACK,
+        "the pause is cut to the bundle's rest, so the turn ends at the ceiling: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_backoff_past_the_ceiling_is_cut_to_the_bundles_rest_sse() {
+    check_a_backoff_past_the_ceiling_is_cut(SceneWire::Sse, "S-backoff-past-ceiling-sse").await;
+}
+
+#[tokio::test]
+async fn a_backoff_past_the_ceiling_is_cut_to_the_bundles_rest_websocket() {
+    check_a_backoff_past_the_ceiling_is_cut(SceneWire::WebSocket, "S-backoff-past-ceiling-ws")
+        .await;
 }
 
 /// Scene C: response-level events (`response.in_progress`) a third of a window
