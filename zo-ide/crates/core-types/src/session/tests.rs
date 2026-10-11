@@ -1800,7 +1800,7 @@ fn describe_folder_security(handle: &std::fs::File) -> std::io::Result<String> {
     } else {
         "other"
     };
-    let aces = descriptor.dacl().map_or(0, |dacl| dacl.len());
+    let aces = descriptor.dacl().map_or(0, windows_permissions::Acl::len);
     let sddl = windows_permissions::wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor(
         &descriptor,
         SecurityInformation::Dacl,
