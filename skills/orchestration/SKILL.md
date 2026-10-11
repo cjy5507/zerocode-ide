@@ -986,7 +986,13 @@ So:
   implementation is the briefing's failure.
 - `worker_done` is accepted only with red (failing before the fix) and green
   (passing after) receipts — command, sha, exit code, log path — and the
-  briefing's acceptance items ticked in the report.
+  briefing's acceptance items ticked in the report. When the task's spec writes
+  pass conditions (lines that begin `통과 전`), an `ok:true` report also needs
+  one `evidence` entry per condition (build-line job, exit code, numbers); the
+  ledger refuses it without them and the same `--retry-request` sends it again.
+  A job named as a condition's evidence ends with a non-zero exit code when that
+  condition fails — its last command is the check itself, never a closing
+  `exit 0` after printing the stages: the receipt is the script's last exit code.
 - Close in the same task: review findings are fixed by the same worker in the
   same checkout and merged once. "Accept with follow-ups" spawns no new task
   unless the follow-up is a different unit by design.

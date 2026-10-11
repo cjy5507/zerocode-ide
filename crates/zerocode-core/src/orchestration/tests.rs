@@ -8,7 +8,10 @@ use super::*;
 /// fact and the commit.
 #[test]
 fn worker_briefings_require_root_workspace_clippy() {
-    for briefing in [worker_briefing("t-1", "lint"), federated_briefing("d-1")] {
+    for briefing in [
+        worker_briefing("t-1", "lint", ""),
+        federated_briefing("d-1"),
+    ] {
         assert!(briefing.contains("cargo clippy --all-targets -- -D warnings"));
         assert!(briefing.contains("repository root"));
     }
@@ -20,7 +23,7 @@ fn worker_briefings_require_root_workspace_clippy() {
 /// sentence names the command as the window spells it.
 #[test]
 fn a_worker_briefing_names_zerocode_find_before_the_task() {
-    let briefing = worker_briefing("t-1", "lint");
+    let briefing = worker_briefing("t-1", "lint", "");
     let (before, _) = briefing
         .split_once(BRIEFING_HANDS_OVER)
         .expect("the briefing hands over");
@@ -36,7 +39,10 @@ fn a_worker_briefing_names_zerocode_find_before_the_task() {
 /// the same thing, and no turn after it carries the sentence again.
 #[test]
 fn worker_briefings_ask_for_a_plain_report_by_the_skills_name() {
-    for briefing in [worker_briefing("t-1", "lint"), federated_briefing("d-1")] {
+    for briefing in [
+        worker_briefing("t-1", "lint", ""),
+        federated_briefing("d-1"),
+    ] {
         let (before, _) = briefing
             .split_once(BRIEFING_HANDS_OVER)
             .expect("the briefing hands over");
@@ -368,6 +374,19 @@ impl Bench {
     /// `a_receipt_is_not_written_for_an_effect_that_never_happened`, which
     /// deliberately does not call this.
     fn at_argv(&mut self, pane: &str, argv: Vec<String>) -> Decided {
+        self.at_argv_reading(pane, argv, &[])
+    }
+
+    /// The same as [`Self::at_argv`], with the files the window read for the
+    /// receipts the verb names (t-26587): `(path as named, text read)`. The
+    /// window reads them before the ledger judges, so the ledger never opens a
+    /// file itself; a verb that names none passes an empty list.
+    fn at_argv_reading(
+        &mut self,
+        pane: &str,
+        argv: Vec<String>,
+        readings: &[(&str, &str)],
+    ) -> Decided {
         self.clock += 1;
         let argv = named_if_it_has_to_be(argv, self.clock);
         // Read before the team is borrowed for the call. A test actor is
@@ -377,7 +396,11 @@ impl Bench {
             .actor
             .clone()
             .unwrap_or_else(|| bench_actor(&self.team.id, pane));
-        let mut planned = plan(
+        let mut receipts = crate::orchestration::evidence::ReceiptFiles::default();
+        for (path, text) in readings {
+            receipts.insert(*path, *text);
+        }
+        let mut planned = plan_with_receipts(
             &mut self.ledger,
             &mut self.team,
             &self.launcher,
@@ -385,6 +408,7 @@ impl Bench {
             pane,
             self.clock,
             Some(&who),
+            &receipts,
         );
         if let Effect::WorkerTerminal {
             seat,
@@ -6511,7 +6535,7 @@ fn a_delivery_frame_distinguishes_operator_agent_and_ledger_mail() {
 #[test]
 fn a_worker_preamble_explains_message_trust_once() {
     for briefing in [
-        worker_briefing("t-1", "security"),
+        worker_briefing("t-1", "security", ""),
         federated_briefing("d-1"),
     ] {
         assert!(briefing.contains("source=agent trust=data"), "{briefing}");
@@ -6535,7 +6559,7 @@ fn a_worker_preamble_explains_message_trust_once() {
 fn report_paths_are_rendered_with_an_explicit_ephemeral_lifetime() {
     const EXAMPLE: &str = r#"--payload '{"reportPath":"/abs/path","lifetime":"ephemeral"}'"#;
     for briefing in [
-        worker_briefing("t-1", "security"),
+        worker_briefing("t-1", "security", ""),
         federated_briefing("d-1"),
     ] {
         assert!(
@@ -22543,7 +22567,7 @@ fn every_roster_row_leads_with_the_title_and_keeps_the_id() {
     let row = &roster["workers"].as_array().expect("workers")[0];
     assert_eq!(row["taskTitle"], "drain-gate", "the roster row is {row}");
     assert_eq!(row["taskId"], task.as_str());
-    let briefing = worker_briefing(&task, "drain-gate");
+    let briefing = worker_briefing(&task, "drain-gate", "");
     assert!(
         briefing.contains(&format!("carrying task drain-gate ({task})")),
         "the worker's own first sentence still leads with an internal key: {briefing}"
@@ -25122,6 +25146,9 @@ mod assign;
 /// (`tests/closed.rs`).
 mod closed;
 mod completion;
+/// t-26587: a success report must show the evidence of each pass condition
+/// its task wrote (`tests/evidence.rs`).
+mod evidence;
 /// t-34501 stage 3 (t-42447): `land-check` names the task, head and repository for the window, and
 /// the window's evidence comes back as the ledger's own letter (`tests/land_check.rs`).
 mod land_check;

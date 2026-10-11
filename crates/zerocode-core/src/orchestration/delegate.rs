@@ -144,7 +144,17 @@ pub(super) fn plan(
         }
     }
 
-    let started = plan_inner(ledger, team, launcher, &inner, pane, now_ms, Some(actor));
+    // The worker-start this plans names no receipt, so the window read none for it.
+    let started = plan_inner(
+        ledger,
+        team,
+        launcher,
+        &inner,
+        pane,
+        now_ms,
+        Some(actor),
+        &super::evidence::ReceiptFiles::default(),
+    );
     let mut decided = match started {
         Ok(decided) if decided.reply.exit_code == 0 => decided,
         Ok(refusal) => {

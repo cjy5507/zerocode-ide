@@ -9185,6 +9185,41 @@ fn run_from_seat(
     }
 }
 
+/// The receipt files a `worker_done` names, read here so the ledger judges what
+/// was read and not what the worker says it holds (t-26587). A receipt that is
+/// not a plain file (missing, a link, a folder) or does not read as text is left
+/// out, and the ledger refuses a report that names it.
+fn read_receipts(argv: &[String]) -> zerocode_core::orchestration::evidence::ReceiptFiles {
+    let mut files = zerocode_core::orchestration::evidence::ReceiptFiles::default();
+    if !crate::agent_tools_runtime::is_worker_done(argv) {
+        return files;
+    }
+    let payload =
+        crate::agent_tools_runtime::orchestration_arg(argv, "--payload").unwrap_or_default();
+    for path in zerocode_core::orchestration::evidence::receipts_named(payload) {
+        if let Some(text) = read_receipt_text(&path) {
+            files.insert(path, text);
+        }
+    }
+    files
+}
+
+/// The first bytes of one receipt, when it is a plain file that reads as text.
+/// A link is not followed: `symlink_metadata` describes the link itself.
+fn read_receipt_text(path: &str) -> Option<String> {
+    use std::io::Read;
+    if !std::fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(zerocode_core::orchestration::evidence::RECEIPT_BYTES_MAX)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
 fn run_seated(
     host: &dyn Host,
     overrides: Vec<(String, LaunchOverride)>,
@@ -9260,7 +9295,7 @@ fn run_seated(
         .and_then(|term| host.actor_for(term));
     let command =
         match PlanCommand::checked(argv.to_vec(), team_id, pane, pane_token, caller, now_ms) {
-            Ok(command) => command,
+            Ok(command) => command.with_receipts(read_receipts(argv)),
             Err(why) => return refused_by_runtime(why),
         };
     /* What comes back has already been carried out against the rows AND made
@@ -12018,3 +12053,6 @@ fn refused(why: impl std::fmt::Display) -> zerocode_hookd::TeamAnswer {
 
 #[cfg(test)]
 pub(crate) mod tests;
+// t-26587: the receipts a worker_done names, and the board's condition rows.
+#[cfg(test)]
+mod evidence_tests;
