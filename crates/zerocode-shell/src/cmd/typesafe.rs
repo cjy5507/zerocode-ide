@@ -24,15 +24,45 @@ pub(crate) fn typesafe_settings() -> Result<TypeSafeSettings, RouterRefusal> {
 
 /// Keep the key in the keychain item every zo reads.
 #[tauri::command(async)]
-pub(crate) fn save_typesafe_key(key: String) -> Result<TypeSafeSettings, RouterRefusal> {
-    typesafe_settings::save_key(&key, &Keychain::of_this_machine())?;
+pub(crate) fn save_typesafe_key(
+    key: String,
+    provider_identity: Option<String>,
+    provider: Option<judgment_provider::Provider>,
+) -> Result<TypeSafeSettings, RouterRefusal> {
+    if let Some(provider) = provider {
+        let provider = provider
+            .endpoint_validated()
+            .map_err(|reason| RouterRefusal::from(reason.to_string()))?;
+        if !provider.requires_auth {
+            return Err("provider_auth_not_required".to_string().into());
+        }
+        typesafe_settings::save_key_at(
+            &typesafe_settings::provider_keychain_service(&provider),
+            &key,
+            "API 키가 비어 있습니다",
+            &Keychain::of_this_machine(),
+        )?;
+    } else {
+        typesafe_settings::save_selected_key(
+            &settings_path()?,
+            provider_identity.as_deref(),
+            &key,
+            &Keychain::of_this_machine(),
+        )?;
+    }
     settings_now()
 }
 
 /// Forget the saved key.
 #[tauri::command(async)]
-pub(crate) fn remove_typesafe_key() -> Result<TypeSafeSettings, RouterRefusal> {
-    typesafe_settings::remove_key(&Keychain::of_this_machine())?;
+pub(crate) fn remove_typesafe_key(
+    provider_identity: Option<String>,
+) -> Result<TypeSafeSettings, RouterRefusal> {
+    typesafe_settings::remove_selected_key(
+        &settings_path()?,
+        provider_identity.as_deref(),
+        &Keychain::of_this_machine(),
+    )?;
     settings_now()
 }
 
@@ -144,30 +174,101 @@ pub(crate) fn set_jev_model(model: String) -> Result<TypeSafeSettings, RouterRef
     settings_now()
 }
 
+#[tauri::command(async)]
+pub(crate) fn set_judgment_provider(
+    provider: judgment_provider::Provider,
+) -> Result<TypeSafeSettings, RouterRefusal> {
+    typesafe_settings::set_provider(&settings_path()?, provider)?;
+    settings_now()
+}
+
+#[tauri::command]
+pub(crate) async fn judgment_models(
+    provider: judgment_provider::Provider,
+) -> Result<Vec<judgment_provider::Model>, String> {
+    use crate::api_routers::RouterKeys;
+
+    let provider = provider
+        .endpoint_validated()
+        .map_err(|reason| reason.to_string())?;
+    let builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none());
+    let builder = if provider.kind == judgment_provider::ProviderKind::Local {
+        builder.no_proxy()
+    } else {
+        builder
+    };
+    let client = builder.build().map_err(|_| "transport".to_string())?;
+    let mut request = client.get(provider.api_url("models"));
+    if provider.requires_auth {
+        let key = Keychain::of_this_machine()
+            .read(&typesafe_settings::provider_keychain_service(&provider))
+            .map_err(|reason| reason.message)?
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| "no_key".to_string())?;
+        request = request.bearer_auth(key.trim());
+    }
+    let mut response = request.send().await.map_err(|_| "transport".to_string())?;
+    if !response.status().is_success() {
+        return Err(crate::systemone::token_for(response.status().as_u16()));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "transport".to_string())?
+    {
+        if chunk.len() > judgment_provider::MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+            return Err(judgment_provider::Refusal::TooLarge.token().to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    judgment_provider::read_models(&bytes).map_err(|reason| reason.to_string())
+}
+
 /// Ask the installed zo whether System One answers with the key it would use:
 /// `zo decision-shadow check --json`, the shadow's own question about a task
 /// nobody wrote. A check nothing answered is still an answer (its failure
 /// token); only a zo that printed no answer at all is an error.
 #[tauri::command]
-pub(crate) async fn check_typesafe_key() -> Result<TypeSafeCheck, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub(crate) async fn check_typesafe_key(
+    provider_identity: Option<String>,
+) -> Result<TypeSafeCheck, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = settings_path().map_err(|error| error.message)?;
+        let provider =
+            typesafe_settings::selected_provider(&path).map_err(|error| error.message)?;
+        typesafe_settings::require_provider(&provider, provider_identity.as_deref())?;
         let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
         let bin = crate::zo_companion::zo_path_under(&home);
         if !bin.exists() {
             return Err(format!("zo not installed at {}", bin.display()));
         }
         let output = crate::proc::quiet_command(&bin)
-            .args(typesafe_settings::ZO_KEY_CHECK_ARGS)
+            .args(typesafe_settings::key_check_args(&provider))
             .output()
             .map_err(|error| error.to_string())?;
-        typesafe_settings::read_check(&output.stdout).ok_or_else(|| {
+        let check = typesafe_settings::read_check(&output.stdout).ok_or_else(|| {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if provider.kind != judgment_provider::ProviderKind::Jev
+                && stderr.contains("unknown argument")
+                && stderr.contains(typesafe_settings::ZO_CHECK_PROVIDER_FLAG)
+            {
+                return "provider_client_outdated".to_string();
+            }
             format!(
                 "zo {} exited {}: {}",
                 typesafe_settings::ZO_KEY_CHECK_ARGS.join(" "),
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                stderr.trim()
             )
-        })
+        })?;
+        let current = typesafe_settings::selected_provider(&path).map_err(|error| error.message)?;
+        if current != provider {
+            return Err("settings_changed".to_string());
+        }
+        typesafe_settings::checked_provider(&provider, check)
     })
     .await
     .map_err(|error| error.to_string())?

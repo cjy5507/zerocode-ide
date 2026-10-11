@@ -563,7 +563,11 @@ const JEV_TOKENS = Object.freeze({
   no_key: { key: "jev.token.noKey", word: "API 키 없음", fix: "key", saidKey: "settings.typesafe.noKey", said: "zo가 키를 찾지 못했습니다 — 키를 저장한 뒤 다시 확인하세요." },
   unauthorized: { key: "jev.token.unauthorized", word: "키 거절", fix: "key", saidKey: "settings.typesafe.unauthorized", said: "키가 거절되었습니다 — 키를 다시 확인하세요." },
   not_consented: { key: "jev.token.notConsented", word: "동의 안 된 폴더", fix: "consent" },
-  settings_changed: { key: "jev.token.settingsChanged", word: "설정 변경으로 취소됨" },
+  settings_changed: { key: "jev.token.settingsChanged", word: "설정 변경으로 취소됨", saidKey: "settings.judgment.changed", said: "판단 제공자 설정을 다시 확인하세요. 이전 모델의 응답은 사용하지 않았습니다." },
+  provider_settings: { key: "jev.token.providerSettings", word: "판단 제공자 설정 오류", saidKey: "settings.judgment.changed", said: "판단 제공자 설정을 다시 확인하세요. 이전 모델의 응답은 사용하지 않았습니다." },
+  provider_response_too_large: { key: "jev.token.responseTooLarge", word: "판단 응답 크기 초과" },
+  provider_context_truncated: { key: "jev.token.contextTruncated", word: "입력 일부 누락", saidKey: "settings.judgment.truncated", said: "모델이 입력 일부를 읽지 못했습니다. 더 긴 입력을 지원하는 판단 모델이나 서버 설정이 필요합니다." },
+  provider_client_outdated: { key: "jev.token.clientOutdated", word: "판단 클라이언트 업데이트 필요", saidKey: "settings.judgment.outdated", said: "판단 제공자를 지원하는 최신 zo가 필요합니다. 앱과 zo의 업데이트 상태를 확인하세요." },
   rules_unavailable: { key: "jev.token.rulesUnavailable", word: "규칙 정의를 확인하거나 다시 준비해야 함" },
   budget: { key: "jev.token.budget", word: "하루 한도 초과", fix: "budget" },
   timeout: { key: "jev.token.timeout", word: "시간 초과" },
@@ -573,6 +577,7 @@ const JEV_TOKENS = Object.freeze({
   rate_limited: { key: "jev.token.rateLimited", word: "요청 제한" },
   invalid_request: { key: "jev.token.invalidRequest", word: "잘못된 요청" },
   http: { key: "jev.token.http", word: "서버 오류" },
+  http_402: { key: "jev.token.paymentRequired", word: "결제·이용 한도", saidKey: "settings.judgment.paymentRequired", said: "제공자가 결제·이용 한도로 거절했습니다. 계정 상태를 확인하거나 다른 판단 제공자를 선택하세요." },
 });
 
 /* A token's row: its own, or its family's — a ledger keeps an unnamed HTTP
@@ -580,6 +585,7 @@ const JEV_TOKENS = Object.freeze({
  * refusal with the rule it broke (`schema_…`, the core's
  * `names_a_schema_failure`). `null` for a token no row words. */
 function jevTokenRow(token) {
+  if (Object.hasOwn(JEV_TOKENS, token)) return JEV_TOKENS[token];
   const family = token.startsWith("http_") ? "http" : token.startsWith("schema_") ? "schema" : token;
   return JEV_TOKENS[family] ?? null;
 }

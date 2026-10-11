@@ -2630,7 +2630,13 @@ pub const JEV_LEDGER_DIR: &str = "smart-router";
 /// Where a project's Jev ledgers live.
 #[must_use]
 pub fn jev_ledger_dir(cwd: &std::path::Path) -> PathBuf {
-    zo_project_state_dir(cwd).join(JEV_LEDGER_DIR)
+    judgment_evidence_dir(&zo_project_state_dir(cwd).join(JEV_LEDGER_DIR))
+}
+
+#[must_use]
+pub fn judgment_evidence_dir(base: &Path) -> PathBuf {
+    judgment_provider::Provider::read(&default_config_home().join("settings.json"))
+        .map_or_else(|_| base.join("provider-unconfigured"), |provider| provider.evidence_dir(base))
 }
 
 /// Whether `seat`'s own evidence has raised its `auto` to acting, read back

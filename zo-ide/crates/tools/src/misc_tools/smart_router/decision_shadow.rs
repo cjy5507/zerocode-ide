@@ -214,15 +214,23 @@ pub struct SystemOneCheck {
 /// carry. The memo is not consulted: a check that recalled an answer would
 /// prove nothing about the key.
 pub async fn check_system_one() -> SystemOneCheck {
-    let config = SystemOneConfig::from_env().ok();
-    let key_source = config.as_ref().map(SystemOneConfig::key_source);
+    check_system_one_for(None).await
+}
+
+pub async fn check_system_one_for(expected: Option<&str>) -> SystemOneCheck {
+    let config = SystemOneConfig::from_env_for(expected);
+    let key_source = config.as_ref().ok().and_then(SystemOneConfig::key_source);
     let unsent = |failure| SystemOneCheck {
         outcome: Err(failure),
         elapsed: Duration::ZERO,
         retries: 0,
         key_source,
     };
-    let client = config.map(SystemOneConfig::into_client);
+    let client = match config {
+        Ok(config) => Some(config.into_client()),
+        Err(SystemOneFailure::NoKey) => None,
+        Err(failure) => return unsent(CheckFailure::Wire(failure)),
+    };
     let state = runtime::routing_state(&runtime::rubric_task_whole("", KEY_CHECK_TASK), RoutingFacts::default());
     let request = runtime::routing_request(SYSTEMONE_MODEL, &state);
     let Some(body) = jev_gate::body_of(&request) else {

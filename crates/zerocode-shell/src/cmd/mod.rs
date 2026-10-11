@@ -146,6 +146,7 @@ pub(crate) use typesafe::{
     save_typesafe_key, set_jev_enabled, set_jev_model, set_jev_review_enabled,
     set_route_classifier, set_summon_profiles, typesafe_settings,
 };
+pub(crate) use typesafe::{judgment_models, set_judgment_provider};
 
 pub(crate) mod type_value;
 pub(crate) use type_value::{remove_type_value_key, save_type_value_key, type_value_keys};

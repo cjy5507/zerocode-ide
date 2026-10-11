@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 pub const USAGE: &str = "\
 zo decision-shadow eval --labels <file.jsonl> [--cwd <dir>] [--json]
-zo decision-shadow check [--json]
+zo decision-shadow check [--json] [--judgment-provider <identity>]
 
   eval: score the routing probe and the typed judgment recorded beside it
   (smart.decisionShadow) against labels a person wrote. One task per line:
@@ -32,17 +32,19 @@ zo decision-shadow check [--json]
   the judgment's distribution, and both confusion matrices.
 
   check: put the judgment's own questions about one fixed task (no words of
-  yours) to TypeSafe's System One with the key zo would use — TYPESAFE_API_KEY,
-  or the key saved in ZeroCode's settings — and print the model that answered,
+  yours) to the selected decision service, using its own key when required,
+  and print the model that answered,
   how long it took and which source the key came from (environment, adopted,
   window_keychain), or the token of why none did (no_key, unauthorized,
-  timeout, …). Bills one small request; exits 1 when nothing answered.
+  timeout, …). The provider may bill one small request; exits 1 when nothing
+  answered. --judgment-provider refuses a changed provider before reading
+  credentials or sending anything.
 ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Request {
     Eval { labels: PathBuf, cwd: Option<PathBuf>, json: bool },
-    Check { json: bool },
+    Check { json: bool, expected_provider: Option<String> },
 }
 
 fn parse(args: &[String]) -> Result<Request, String> {
@@ -54,18 +56,20 @@ fn parse(args: &[String]) -> Result<Request, String> {
     let mut labels = None;
     let mut cwd = None;
     let mut json = false;
+    let mut expected_provider = None;
     let mut words = args[1..].iter();
     while let Some(flag) = words.next() {
         let mut value = || words.next().cloned().ok_or_else(|| format!("{flag} requires a value"));
         match (verb, flag.as_str()) {
             ("eval", "--labels") => labels = Some(PathBuf::from(value()?)),
             ("eval", "--cwd") => cwd = Some(PathBuf::from(value()?)),
+            ("check", "--judgment-provider") => expected_provider = Some(value()?),
             (_, "--json") => json = true,
             (_, other) => return Err(format!("unknown argument `{other}`\n\n{USAGE}")),
         }
     }
     if verb == "check" {
-        return Ok(Request::Check { json });
+        return Ok(Request::Check { json, expected_provider });
     }
     let labels = labels.ok_or_else(|| format!("--labels is required\n\n{USAGE}"))?;
     Ok(Request::Eval { labels, cwd, json })
@@ -98,8 +102,10 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Report, String> {
                 answered: true,
             })
         }
-        Request::Check { json } => {
-            let check = api::sync_bridge::run_blocking(tools::check_system_one());
+        Request::Check { json, expected_provider } => {
+            let check = api::sync_bridge::run_blocking(async move {
+                tools::check_system_one_for(expected_provider.as_deref()).await
+            });
             Ok(Report {
                 text: if json { render_check_json(&check).to_string() } else { render_check_text(&check) },
                 answered: check.outcome.is_ok(),
@@ -245,8 +251,10 @@ mod tests {
         let Request::Eval { labels, json, .. } = request else { panic!("an eval") };
         assert_eq!(labels.to_str(), Some("labels.jsonl"));
         assert!(json);
-        assert_eq!(parse(&words("check --json")), Ok(Request::Check { json: true }));
-        assert_eq!(parse(&words("check")), Ok(Request::Check { json: false }));
+        assert_eq!(parse(&words("check --json")), Ok(Request::Check { json: true, expected_provider: None }));
+        assert_eq!(parse(&words("check")), Ok(Request::Check { json: false, expected_provider: None }));
+        assert_eq!(parse(&words("check --json --judgment-provider judgment-fixture")),
+            Ok(Request::Check { json: true, expected_provider: Some("judgment-fixture".to_string()) }));
         for word in ["eval", "check", "--labels", "--cwd", "--json"] {
             assert!(USAGE.contains(word), "{word} is parsed but not in USAGE");
         }

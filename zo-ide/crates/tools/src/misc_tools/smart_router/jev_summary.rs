@@ -206,7 +206,7 @@ pub fn deadline_ms_for(seat: &JevUse) -> Option<u64> {
 /// t-10916) — then the project's own state.
 #[must_use]
 pub fn ledger_roots(cwd: &Path) -> [PathBuf; 2] {
-    [runtime::default_config_home().join(REQUESTS_DIR), shadow_ledger_dir(cwd)]
+    [runtime::judgment_evidence_dir(&runtime::default_config_home().join(REQUESTS_DIR)), shadow_ledger_dir(cwd)]
 }
 
 /// The rows of one ledger, newest last, skipping lines that do not parse —
@@ -358,6 +358,12 @@ fn one_with(
     offset_s: i64,
     recent: usize,
 ) -> SeatReport {
+    let provider = judgment_provider::Provider::from_root(settings.unwrap_or(&Value::Null)).ok();
+    let uses_jev = provider.as_ref().is_some_and(|provider| provider.kind == judgment_provider::ProviderKind::Jev);
+    let legacy_sessions = uses_jev
+        && settings.and_then(|root| root.get("smart"))
+            .and_then(|smart| smart.get(judgment_provider::SETTINGS_KEY)).is_none();
+    let sessions = if legacy_sessions { sessions } else { None };
     let (found, rows) = rows_of(seat, roots, sessions);
     // The act line the product reads for the seat: the table beside the
     // ledger the rows came from (t-9468).
@@ -374,9 +380,9 @@ fn one_with(
     let agreement_week = summary::agreement_rows(version.marks.iter().copied(), week_since_ms);
     let not_compared_week = summary::not_compared_words(version.marks.iter().copied(), week_since_ms);
     let askers_week = summary::askers_since(version.rows.iter().copied(), week_since_ms);
-    let asked_model = zerocode_core::jev::model_in(settings.unwrap_or(&Value::Null)).to_string();
+    let asked_model = provider.map_or_else(String::new, |provider| provider.model);
     let billed = summary::summarize(&rows, week_since_ms);
-    let cost_usd = (billed.unmetered_requests == 0)
+    let cost_usd = (uses_jev && billed.unmetered_requests == 0)
         .then(|| cost_of(billed.input_tokens, &asked_model))
         .flatten();
     let asked_toward_judgment = version.asked();

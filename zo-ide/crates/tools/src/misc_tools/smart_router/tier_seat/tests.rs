@@ -23,11 +23,15 @@ const WORKSPACE: &str = "/work/zo";
 const NOW_MS: i64 = 1_791_680_000_000;
 
 fn door(home: &Path) -> JevDoor {
+    door_as(home, zerocode_core::jev::DEFAULT_MODEL)
+}
+
+fn door_as(home: &Path, backend_identity: &str) -> JevDoor {
     let settings = JevSettings {
         enabled: true,
         workspaces: vec![WORKSPACE.to_string()],
         daily_requests: None,
-        model: zerocode_core::jev::DEFAULT_MODEL.to_string(),
+        model: backend_identity.to_string(),
     };
     JevDoor::at(settings, Path::new(WORKSPACE), home)
 }
@@ -86,12 +90,28 @@ struct Rig {
 impl Rig {
     fn new() -> Self {
         let home = tempfile::tempdir().expect("a config home");
-        let kept = home.path().join(TIER_JUDGMENT_FILE);
+        let kept = tier_judgment_path_for(home.path(), zerocode_core::jev::DEFAULT_MODEL);
         Self { home, kept }
     }
 
     fn pass(&self, mock: Option<&Mock>, mode: JevMode, lineup: &[&ModelDescriptor]) -> TierSeatPass {
         self.pass_at(mock, mode, lineup, NOW_MS)
+    }
+
+    fn pass_as(&self, mock: &Mock, backend_identity: &str, lineup: &[&ModelDescriptor]) -> TierSeatPass {
+        let lineups = [("p".to_string(), lineup.to_vec())];
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let door = door_as(self.home.path(), backend_identity);
+        let kept_at = tier_judgment_path_for(self.home.path(), backend_identity);
+        let ask = TierAsk {
+            door: &door,
+            client: Some(&client),
+            mode: JevMode::On,
+            kept_at: &kept_at,
+            now_ms: NOW_MS,
+            wall: TIER_JUDGMENT_DEADLINE,
+        };
+        api::sync_bridge::run_blocking(judge_lineups(&ask, &lineups, &no_record))
     }
 
     /// One provider's lineup asked at `now_ms`.
@@ -115,6 +135,149 @@ impl Rig {
         let ask = TierAsk { door: &door, client: client.as_ref(), mode, kept_at: &self.kept, now_ms, wall };
         api::sync_bridge::run_blocking(judge_lineups(&ask, lineups, &no_record))
     }
+}
+
+fn backend_identity(base_url: &str, model: &str) -> String {
+    judgment_provider::Provider::from_root(&serde_json::json!({
+        "smart": {
+            "judgmentProvider": {
+                "kind": "local", "protocol": "system_one", "baseUrl": base_url,
+                "model": model, "requiresAuth": false,
+            }
+        }
+    }))
+    .expect("a valid local judgment backend")
+    .identity()
+}
+
+#[test]
+fn backend_switch_does_not_reuse_answers_or_cross_backend_fallbacks() {
+    let answering = Mock::serving(200, reply(&[3.0, 1.0]));
+    let refusing = Mock::serving(402, "{}".to_string());
+    let original = backend_identity(&answering.base_url, "decider");
+    let alternate = backend_identity(&refusing.base_url, "decider");
+    let rig = Rig::new();
+    let top = model("top", FRONTIER, 50_000_000);
+    let balanced = model("balanced", BALANCED, 25_000_000);
+    let lineup = [&top, &balanced];
+
+    let first = rig.pass_as(&answering, &original, &lineup);
+    assert_eq!(first.judgment.places.len(), 2);
+    let same = rig.pass_as(&answering, &original, &lineup);
+    assert!(same.rows.is_empty());
+    assert_eq!(same.judgment, first.judgment);
+    assert_eq!(answering.requests().len(), 1);
+
+    let changed = rig.pass_as(&refusing, &alternate, &lineup);
+    assert!(changed.judgment.places.is_empty(), "another backend's answer is not a fallback");
+    assert_eq!(changed.rows.len(), 1);
+    assert!(!changed.rows[0].applied);
+    assert_eq!(refusing.requests().len(), 1);
+    let refused_again = rig.pass_as(&refusing, &alternate, &lineup);
+    assert!(refused_again.rows.is_empty());
+    assert!(refused_again.judgment.places.is_empty());
+    assert_eq!(refusing.requests().len(), 1);
+
+    let restored = rig.pass_as(&answering, &original, &lineup);
+    assert!(restored.rows.is_empty());
+    assert_eq!(restored.judgment, first.judgment);
+    assert_eq!(answering.requests().len(), 1);
+}
+
+#[test]
+fn backend_switch_does_not_reuse_refusals_or_same_server_model_answers() {
+    let refusing = Mock::serving(402, "{}".to_string());
+    let answering = Mock::serving(200, reply(&[3.0, 2.0]));
+    let original = backend_identity(&refusing.base_url, "decider");
+    let alternate = backend_identity(&answering.base_url, "decider");
+    let renamed = backend_identity(&answering.base_url, "another-decider");
+    let rig = Rig::new();
+    let top = model("top", FRONTIER, 50_000_000);
+    let balanced = model("balanced", BALANCED, 25_000_000);
+    let lineup = [&top, &balanced];
+
+    let refused = rig.pass_as(&refusing, &original, &lineup);
+    assert_eq!(refused.rows.len(), 1);
+    assert!(refused.judgment.places.is_empty());
+    assert!(rig.pass_as(&refusing, &original, &lineup).rows.is_empty());
+    assert_eq!(refusing.requests().len(), 1);
+
+    let changed = rig.pass_as(&answering, &alternate, &lineup);
+    assert_eq!(changed.judgment.places.len(), 2);
+    assert_eq!(answering.requests().len(), 1, "another backend's refusal does not suppress this request");
+    assert!(rig.pass_as(&answering, &alternate, &lineup).rows.is_empty());
+    let new_model = rig.pass_as(&answering, &renamed, &lineup);
+    assert_eq!(new_model.judgment.places.len(), 2);
+    assert_eq!(answering.requests().len(), 2, "a changed model at the same server is asked separately");
+    assert!(rig.pass_as(&answering, &renamed, &lineup).rows.is_empty());
+    assert_eq!(answering.requests().len(), 2);
+}
+
+#[test]
+fn backend_identity_is_checked_inside_the_kept_file_as_well_as_its_path() {
+    let answering = Mock::serving(200, reply(&[3.0, 2.0]));
+    let refusing = Mock::serving(402, "{}".to_string());
+    let original = backend_identity(&answering.base_url, "decider");
+    let alternate = backend_identity(&refusing.base_url, "decider");
+    let rig = Rig::new();
+    let top = model("top", FRONTIER, 50_000_000);
+    let balanced = model("balanced", BALANCED, 25_000_000);
+    let lineup = [&top, &balanced];
+    assert_eq!(rig.pass_as(&answering, &original, &lineup).judgment.places.len(), 2);
+
+    let original_path = tier_judgment_path_for(rig.home.path(), &original);
+    let alternate_path = tier_judgment_path_for(rig.home.path(), &alternate);
+    std::fs::create_dir_all(alternate_path.parent().expect("a backend cache directory")).expect("create the directory");
+    std::fs::copy(&original_path, &alternate_path).expect("put the wrong backend's answer at the selected path");
+    let changed = rig.pass_as(&refusing, &alternate, &lineup);
+    assert!(changed.judgment.places.is_empty());
+    assert_eq!(refusing.requests().len(), 1, "a mismatched answer is ignored");
+
+    std::fs::copy(&alternate_path, &original_path).expect("put the wrong backend's refusal at the selected path");
+    let restored = rig.pass_as(&answering, &original, &lineup);
+    assert_eq!(restored.judgment.places.len(), 2);
+    assert_eq!(answering.requests().len(), 2, "a mismatched refusal is ignored");
+
+    let mut legacy: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&original_path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("backendIdentity");
+    std::fs::write(&original_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert!(read_kept(&original_path, &original).providers.is_empty(), "unattributed old answers are not adopted");
+    assert!(read_kept(&alternate_path, "").unanswered.is_empty(), "invalid settings inherit no refusal memory");
+}
+
+#[test]
+fn backend_cache_does_not_bypass_a_withdrawn_door() {
+    let answering = Mock::serving(200, reply(&[3.0, 2.0]));
+    let selected = backend_identity(&answering.base_url, "decider");
+    let rig = Rig::new();
+    let top = model("top", FRONTIER, 50_000_000);
+    let balanced = model("balanced", BALANCED, 25_000_000);
+    let lineup = [&top, &balanced];
+    assert_eq!(rig.pass_as(&answering, &selected, &lineup).judgment.places.len(), 2);
+    let kept_at = tier_judgment_path_for(rig.home.path(), &selected);
+    let lineups = [("p".to_string(), lineup.to_vec())];
+
+    for (enabled, consented) in [(false, true), (true, false)] {
+        let settings = JevSettings {
+            enabled,
+            workspaces: if consented { vec![WORKSPACE.to_string()] } else { Vec::new() },
+            daily_requests: None,
+            model: selected.clone(),
+        };
+        let door = JevDoor::at(settings, Path::new(WORKSPACE), rig.home.path());
+        let ask = TierAsk {
+            door: &door,
+            client: None,
+            mode: JevMode::On,
+            kept_at: &kept_at,
+            now_ms: NOW_MS,
+            wall: TIER_JUDGMENT_DEADLINE,
+        };
+        let pass = api::sync_bridge::run_blocking(judge_lineups(&ask, &lineups, &no_record));
+        assert!(pass.judgment.places.is_empty(), "stored answers cannot bypass current consent or enablement");
+        assert!(pass.rows.iter().all(|row| !row.applied));
+    }
+    assert_eq!(answering.requests().len(), 1);
 }
 
 /// One lineup is asked once; the same facts are answered from the kept file

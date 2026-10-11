@@ -29,6 +29,16 @@ use crate::api_routers::{RouterKeys, RouterRefusal};
 
 /// The zo command line that checks the saved key (`zo decision-shadow check`).
 pub const ZO_KEY_CHECK_ARGS: [&str; 3] = ["decision-shadow", "check", "--json"];
+pub const ZO_CHECK_PROVIDER_FLAG: &str = "--judgment-provider";
+
+#[must_use]
+pub fn key_check_args(provider: &judgment_provider::Provider) -> Vec<String> {
+    let mut args = ZO_KEY_CHECK_ARGS.map(str::to_string).to_vec();
+    if provider.kind != judgment_provider::ProviderKind::Jev {
+        args.extend([ZO_CHECK_PROVIDER_FLAG.to_string(), provider.identity()]);
+    }
+    args
+}
 
 /// The zo command line that counts every seat's ledger (`zo jev summary`).
 ///
@@ -233,6 +243,9 @@ impl JevSwitch {
 pub struct TypeSafeSettings {
     pub keys_kept_here: bool,
     pub key_saved: bool,
+    pub provider: judgment_provider::Provider,
+    pub provider_identity: String,
+    pub jev_provider: judgment_provider::Provider,
     /// The one switch: whether Jev is in use here.
     pub jev: JevSwitch,
     /// The model every seat's request names — the pin, or the alias.
@@ -290,17 +303,23 @@ pub fn read_settings(
     keys: &dyn RouterKeys,
     keys_kept_here: bool,
 ) -> Result<TypeSafeSettings, RouterRefusal> {
-    let key_saved = key_saved_at(&typesafe_keychain_service(), keys)?;
     let root = crate::api_routers::read_zo_settings_root(path)?;
     let classifier = classifier_in(&root);
     // Read by the core's own readers, as zo and the door read it: a seat
     // with no word of its own follows the switch (§6.1).
     let document = Value::Object(root.clone());
+    let provider = judgment_provider::Provider::from_root(&document)
+        .map_err(|reason| RouterRefusal::from(reason.token().to_string()))?;
+    let key_saved =
+        provider.requires_auth && key_saved_at(&provider_keychain_service(&provider), keys)?;
     let lineup = crate::summon_lineup::snapshot();
     let now_ms = crate::usage_runtime::epoch_ms_now();
     Ok(TypeSafeSettings {
         keys_kept_here,
         key_saved,
+        provider_identity: provider.identity(),
+        provider,
+        jev_provider: judgment_provider::Provider::jev(model_in(&document)),
         jev: JevSwitch::of(&document),
         model: ModelRow::of(&root),
         summon_profiles: zerocode_core::summon_difficulty::written_profiles(&document),
@@ -408,6 +427,88 @@ pub fn save_key(key: &str, keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
 /// A refused keychain deletion.
 pub fn remove_key(keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
     remove_key_at(&typesafe_keychain_service(), keys)
+}
+
+#[must_use]
+pub fn provider_keychain_service(provider: &judgment_provider::Provider) -> String {
+    format!("{SERVICE_KEYCHAIN_SERVICE_PREFIX}{}", provider.key_env())
+}
+
+pub fn selected_provider(path: &Path) -> Result<judgment_provider::Provider, RouterRefusal> {
+    let root = crate::api_routers::read_zo_settings_root(path)?;
+    judgment_provider::Provider::from_root(&Value::Object(root))
+        .map_err(|reason| RouterRefusal::from(reason.token().to_string()))
+}
+
+fn selected_key_service(path: &Path, expected: Option<&str>) -> Result<String, RouterRefusal> {
+    let provider = selected_provider(path)?;
+    require_provider(&provider, expected)?;
+    Ok(provider_keychain_service(&provider))
+}
+
+pub fn require_provider(
+    provider: &judgment_provider::Provider,
+    expected: Option<&str>,
+) -> Result<(), String> {
+    if expected.is_some_and(|identity| identity != provider.identity())
+        || (expected.is_none() && provider.kind != judgment_provider::ProviderKind::Jev)
+    {
+        return Err("settings_changed".to_string());
+    }
+    Ok(())
+}
+
+pub fn save_selected_key(
+    path: &Path,
+    expected: Option<&str>,
+    key: &str,
+    keys: &dyn RouterKeys,
+) -> Result<(), RouterRefusal> {
+    let service = selected_key_service(path, expected)?;
+    if service == typesafe_keychain_service() {
+        save_key(key, keys)
+    } else {
+        save_key_at(&service, key, "API 키가 비어 있습니다", keys)
+    }
+}
+
+pub fn remove_selected_key(
+    path: &Path,
+    expected: Option<&str>,
+    keys: &dyn RouterKeys,
+) -> Result<(), RouterRefusal> {
+    let service = selected_key_service(path, expected)?;
+    if service == typesafe_keychain_service() {
+        remove_key(keys)
+    } else {
+        remove_key_at(&service, keys)
+    }
+}
+
+pub fn set_provider(path: &Path, provider: judgment_provider::Provider) -> Result<(), String> {
+    let provider = provider.validated().map_err(|reason| reason.to_string())?;
+    if provider.kind == judgment_provider::ProviderKind::Jev
+        && zerocode_core::jev::pinned_model(&provider.model).is_none()
+    {
+        return Err("provider_model".to_string());
+    }
+    update_smart(path, |smart| {
+        if provider.kind == judgment_provider::ProviderKind::Jev {
+            if provider.model == DEFAULT_MODEL {
+                smart.remove(MODEL_SETTING);
+            } else {
+                smart.insert(
+                    MODEL_SETTING.to_string(),
+                    Value::String(provider.model.clone()),
+                );
+            }
+        }
+        smart.insert(
+            judgment_provider::SETTINGS_KEY.to_string(),
+            serde_json::to_value(&provider).map_err(|error| error.to_string())?,
+        );
+        Ok(())
+    })
 }
 
 /// Turn Jev on or off (§6.1) in zo's settings file, under the window's
@@ -555,6 +656,22 @@ pub struct TypeSafeCheck {
     pub elapsed_ms: u64,
 }
 
+pub fn checked_provider(
+    provider: &judgment_provider::Provider,
+    check: TypeSafeCheck,
+) -> Result<TypeSafeCheck, String> {
+    if check.answered
+        && provider.kind != judgment_provider::ProviderKind::Jev
+        && !check
+            .model
+            .as_deref()
+            .is_some_and(|model| model.starts_with(&format!("{}:", provider.identity())))
+    {
+        return Err("provider_client_outdated".to_string());
+    }
+    Ok(check)
+}
+
 /// The check's answer from zo's stdout — the one JSON object it prints, whether
 /// or not anything answered (zo exits 1 when nothing did). `None` when stdout
 /// holds no such object: a zo too old to know the verb, or one that crashed.
@@ -594,6 +711,9 @@ pub fn read_day(path: &Path) -> DayBudget {
         most: JevSettings::from_root(&root).daily_requests,
     }
 }
+
+#[cfg(test)]
+mod provider_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1058,7 +1178,8 @@ mod tests {
             .find("<template id=\"jev-features\">")
             .expect("the features follow the card")];
         assert_eq!(card.matches("data-jev-switch ").count(), 1, "one switch");
-        assert_eq!(card.matches("<select").count(), 1, "{card}");
+        assert_eq!(card.matches("<select").count(), 2, "{card}");
+        assert!(card.contains("id=\"judgment-provider-kind\""));
         let advanced = &card[card
             .find("<details class=\"settings-fold settings-jev-advanced\"")
             .expect("the advanced fold")..];
@@ -1086,6 +1207,7 @@ mod tests {
         // (`jev_summary`) are asked from the file both surfaces share.
         let pane = concat!(
             include_str!("../../../ui/shell-settings.js"),
+            include_str!("../../../ui/shell-judgment.js"),
             include_str!("../../../ui/shell-jev.js")
         );
         assert!(
@@ -1098,7 +1220,8 @@ mod tests {
             "remove_typesafe_key",
             "set_jev_enabled",
             "set_route_classifier",
-            "set_jev_model",
+            "set_judgment_provider",
+            "judgment_models",
             "check_typesafe_key",
             "jev_summary",
             "jev_day",

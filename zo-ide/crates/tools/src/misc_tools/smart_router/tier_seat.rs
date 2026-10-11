@@ -26,6 +26,7 @@ use runtime::{
     TierOutcomes,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zerocode_core::jev::door::Refused;
 use zerocode_core::jev::{JevMode, MODEL_TIERS};
 
@@ -54,7 +55,15 @@ pub const TIER_REFUSAL_MEMORY_MS: i64 = 60 * 60 * 1000;
 /// Where the lineups' judgments are kept: beside zo's model catalog cache.
 #[must_use]
 pub fn tier_judgment_path() -> PathBuf {
-    runtime::model_discovery::cache_dir().join(TIER_JUDGMENT_FILE)
+    let door = JevDoor::for_key_check();
+    tier_judgment_path_for(&runtime::model_discovery::cache_dir(), door.model())
+}
+
+fn tier_judgment_path_for(cache_dir: &Path, backend_identity: &str) -> PathBuf {
+    cache_dir
+        .join("judgment-backends")
+        .join(format!("{:x}", Sha256::digest(backend_identity.as_bytes())))
+        .join(TIER_JUDGMENT_FILE)
 }
 
 /// The kept file: every provider's last judgment, and its last question
@@ -64,6 +73,8 @@ pub fn tier_judgment_path() -> PathBuf {
 #[serde(rename_all = "camelCase")]
 struct Kept {
     rubric_version: u32,
+    #[serde(default)]
+    backend_identity: String,
     #[serde(default)]
     providers: BTreeMap<String, KeptLineup>,
     #[serde(default)]
@@ -107,13 +118,15 @@ struct KeptPlace {
     confidence_permille: u16,
 }
 
-fn read_kept(path: &Path) -> Kept {
+fn read_kept(path: &Path, backend_identity: &str) -> Kept {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str::<Kept>(&raw).ok())
         .filter(|kept| kept.rubric_version == zerocode_core::jev::questions::MODEL_TIERS_RUBRIC_VERSION)
+        .filter(|kept| !backend_identity.is_empty() && kept.backend_identity == backend_identity)
         .unwrap_or_else(|| Kept {
             rubric_version: zerocode_core::jev::questions::MODEL_TIERS_RUBRIC_VERSION,
+            backend_identity: backend_identity.to_string(),
             ..Kept::default()
         })
 }
@@ -266,7 +279,7 @@ pub async fn judge_lineups(
         return pass;
     }
     let (applies, now_ms) = (ask.mode.applies(), ask.now_ms);
-    let mut kept = read_kept(ask.kept_at);
+    let mut kept = read_kept(ask.kept_at, ask.door.model());
     let mut due: Vec<(&String, &[&ModelDescriptor], String)> = Vec::new();
     for (provider, models) in lineups.iter().filter(|(_, models)| !models.is_empty()) {
         let fingerprint = tier_fingerprint(provider, models, outcomes);
@@ -343,6 +356,12 @@ pub async fn judge_lineups(
     if changed {
         let _ = write_kept(ask.kept_at, &kept);
     }
+    if !ask.door.permits_application_now() {
+        pass.judgment = TierJudgment::default();
+        for row in &mut pass.rows {
+            row.applied = false;
+        }
+    }
     pass
 }
 
@@ -368,8 +387,8 @@ pub fn judgment_for(
         return TierJudgment::default();
     }
     let door = JevDoor::open(cwd);
-    let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
-    let kept_at = tier_judgment_path();
+    let client = SystemOneConfig::from_env_for(Some(door.model())).ok().map(SystemOneConfig::into_client);
+    let kept_at = tier_judgment_path_for(&runtime::model_discovery::cache_dir(), door.model());
     let ask = TierAsk {
         door: &door,
         client: client.as_ref(),

@@ -166,7 +166,7 @@ const _: () = assert!(
 /// command asked here and one asked in a pane are one series, one judge and
 /// one standing, and every project's reading counts them once.
 fn guard_ledger(seat: &JevUse) -> PathBuf {
-    runtime::default_config_home().join(REQUESTS_DIR).join(seat.ledger)
+    runtime::judgment_evidence_dir(&runtime::default_config_home().join(REQUESTS_DIR)).join(seat.ledger)
 }
 
 /// Where the command guard's ledger lives.
