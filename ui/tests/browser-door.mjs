@@ -882,9 +882,11 @@ await test("a_tab_nobody_looks_at_reads_and_fills_and_the_persons_tab_keeps_its_
 /* One eval, one step (`eval_script`): the expression reads the page's
  * fields, fills them by the words it read and says what is left — the
  * script the skill teaches, run as the door runs it. The times a date loads
- * are the next call's; `lateMs` holds them back past the scene's own 300 ms,
- * as a busy machine or a slow site does. */
+ * are the next call's, made when the page says they are in — never after a
+ * guessed pause; `lateMs` holds them back past the scene's own 300 ms, as a
+ * busy machine or a slow site does. */
 const SLOT_LIST_LATE_MS = 700;
+const SLOT_LIST_CAP_MS = 5_000;
 const oneEvalStep = async (lateMs) => {
   const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
   try {
@@ -917,7 +919,9 @@ const oneEvalStep = async (lateMs) => {
     assert(first.ok, "the one script ran", first);
     const notSet = first.value.statuses.filter((said) => !said.endsWith(":set"));
     assert(JSON.stringify(notSet) === JSON.stringify(["입차 시간:disabled"]), "all but the list a date loads took in one call", first.value);
-    await booking.waitForTimeout(350);
+    const loaded = await booking.waitForFunction(() => !document.getElementById("in-time").disabled, undefined,
+      { timeout: SLOT_LIST_CAP_MS }).then(() => true, () => false);
+    assert(loaded, `the page said within ${SLOT_LIST_CAP_MS} ms that the date's times were in`);
     const second = await evalJson(booking, evalFormScript(step));
     assert(second.value.statuses.every((said) => said.endsWith(":set") || said.endsWith(":same")), "the next call finishes it", second.value);
     return `${first.value.statuses.length} fields in one call`;
