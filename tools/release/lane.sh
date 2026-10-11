@@ -823,8 +823,8 @@ do_publish() {
 # other half and of the docs — the root gate's pii-check reads every tracked
 # file, core tests read zo-ide sources, the core build script turns skills/
 # into code and zo tests read the root fixtures at run time. Anything the lane
-# cannot tell — no install yet, git not answering, a path with a space in it —
-# runs the gate.
+# cannot tell — no install yet, git not answering, a path with a space or a
+# control character in it (git's list is read NUL-separated) — runs the gate.
 # Measured 2026-09-16 (three green runs): gate-root 1105–1615 s, gate-zo
 # 876–1296 s, on releases that each changed one tree.
 stamp_only() { # PATH SINCE — the file changed in version lines only
@@ -842,11 +842,12 @@ gate_owed() { # root|zo — 0 when the gate must run; otherwise SKIP says why an
   # The dry default names a shared crate, so every gate a stub run does not
   # speak about is owed — as before this rule existed.
   if is_dry; then changed=$(stub CHANGED_PATHS "crates/zerocode-core/src/lib.rs" | tr ' ' '\n')
-  else changed=$(git -C "$SCRATCH" diff --name-only "$since" "$SHA" 2>/dev/null) || return 0; fi
+  else changed=$(git -C "$SCRATCH" diff --name-only -z "$since" "$SHA" 2>/dev/null | tr '\n\0' '\001\n'
+                 exit "${PIPESTATUS[0]}") || return 0; fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     n=$(( n + 1 ))
-    case $path in *[[:space:]]*) return 0 ;; esac
+    case $path in *[[:space:]]*|*[[:cntrl:]]*) return 0 ;; esac
     case " $RELEASE_STAMP_FILES " in *" $path "*) stamp_only "$path" "$since" && continue ;; esac
     return 0
   done <<< "$changed"

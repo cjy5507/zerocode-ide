@@ -103,7 +103,8 @@ to a skill, a core fixture or a file one half reads from the other skipped a
 gate that read it.
 
 Anything the lane cannot tell — no install yet, git not answering, a stamp
-diff git cannot read, a path with a space in it — runs the gate.
+diff git cannot read, a path with a space or a control character in it (the
+lane reads git's list NUL-separated) — runs the gate.
 
 Measured before the rule (three green runs): gate-root 1105–1615 s, gate-zo
 876–1296 s, on releases that each changed one tree. `tests/test_lane.py

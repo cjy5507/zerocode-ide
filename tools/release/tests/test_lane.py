@@ -1893,6 +1893,11 @@ class GateOwedOnGit(unittest.TestCase):
         sha = self.commit("a name with a space")
         self.assertEqual(self.owed(sha), {"root", "zo"})
 
+    def test_a_path_with_a_newline_owes_both_gates(self):
+        self.write("Cargo.toml\nCargo.lock", 'version = "1.0.1"\n')
+        sha = self.commit("a name with a newline")
+        self.assertEqual(self.owed(sha), {"root", "zo"})
+
     def test_a_base_git_does_not_know_owes_both_gates(self):
         self.write("ui/shell.js", "two\n")
         sha = self.commit("change")
