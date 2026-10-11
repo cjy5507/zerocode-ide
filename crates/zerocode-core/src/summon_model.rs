@@ -717,6 +717,8 @@ mod tests {
             effort: "medium".into(),
             from: Source::Lineup,
             band: None,
+            tier_from: None,
+            tier_confidence_permille: None,
             effort_rule: lineup::EffortRule::Ladder,
             effort_clamped: None,
             candidates: vec![

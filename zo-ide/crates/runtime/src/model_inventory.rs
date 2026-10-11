@@ -54,13 +54,20 @@ pub fn connected_model_inventory(default_model: &str) -> ModelInventory {
 pub fn tier_assignments_of(
     models: &[(ProviderKind, &str)],
 ) -> Vec<crate::model_router::ModelTierAssignment> {
+    crate::model_router::classify_model_tiers(&tier_descriptors_of(models))
+}
+
+/// The descriptors [`tier_assignments_of`] classifies, one per listed id —
+/// what the tier seat (t-45961) reads the facts of before the classifier
+/// applies its judgment.
+#[must_use]
+pub fn tier_descriptors_of(models: &[(ProviderKind, &str)]) -> Vec<ModelDescriptor> {
     let mut named = std::collections::HashSet::new();
-    let descriptors: Vec<ModelDescriptor> = models
+    models
         .iter()
         .filter(|(_, id)| named.insert(*id))
         .map(|(provider, id)| descriptor_for(id, *provider))
-        .collect();
-    crate::model_router::classify_model_tiers(&descriptors)
+        .collect()
 }
 
 #[must_use]
@@ -121,6 +128,9 @@ fn descriptor_for(id: &str, kind: ProviderKind) -> ModelDescriptor {
     if let Some(context_window) = context_window_for_descriptor(id) {
         descriptor = descriptor.context_window(context_window);
     }
+    if let Some((input, output)) = list_price_for_descriptor(id) {
+        descriptor = descriptor.list_price_micro_usd(input, output);
+    }
     if id == "ollama" {
         descriptor = descriptor
             .source(ModelSource::LocalProvider)
@@ -143,6 +153,9 @@ fn descriptor_for_custom_model(provider: &str, id: &str) -> ModelDescriptor {
         .effort_ceiling(effort_ceiling_for_model(id));
     if let Some(context_window) = context_window_for_descriptor(id) {
         descriptor = descriptor.context_window(context_window);
+    }
+    if let Some((input, output)) = list_price_for_descriptor(id) {
+        descriptor = descriptor.list_price_micro_usd(input, output);
     }
     descriptor
 }
@@ -250,7 +263,7 @@ fn is_small_model_under(id: &str, priors: &api::RouterPriors) -> bool {
     // 서빙 티어 브래킷(`[fast]`)은 사이즈 신호가 아니다 — class_for_model과
     // 같은 이유로 벗기고 판정한다.
     let id = strip_service_tier_suffix(id);
-    has_any_token(id, &priors.small_tokens)
+    has_any_word_start(id, &priors.small_tokens)
         || largest_parameter_billion(id)
             .is_some_and(|size| size < priors.small_parameter_billion_below)
 }
@@ -259,6 +272,17 @@ fn is_small_model_under(id: &str, priors: &api::RouterPriors) -> bool {
 /// ([`api::router_priors`]); membership is a substring test on the bare id.
 fn has_any_token(id: &str, tokens: &[String]) -> bool {
     tokens.iter().any(|token| id.contains(token.as_str()))
+}
+
+/// [`has_any_token`] where the word must begin one of the id's words (the
+/// runs between `-`, `.`, `_`, `/`, `:`): a size word is a word of its own
+/// (`flash`, `mini`, `haiku`) or the head of one (`flash-lite`, `mini8`),
+/// never the tail of another — `gemini` is no `mini` (t-45961: every Gemini
+/// id, pro included, read as a small model through that tail, and only the
+/// flagship-name term the classifier no longer has hid it).
+fn has_any_word_start(id: &str, tokens: &[String]) -> bool {
+    id.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| tokens.iter().any(|token| !token.is_empty() && word.starts_with(token.as_str())))
 }
 
 /// `gpt-5.6-terra[fast]` → `gpt-5.6-terra`: 브래킷 서빙 티어 접미사를 벗긴
@@ -459,6 +483,34 @@ fn context_window_for_descriptor(id: &str) -> Option<u32> {
     u32::try_from(api::context_window_for_model(id)).ok()
 }
 
+/// The model's list price per million tokens (input, output), bridged from
+/// the shared price table ([`api::model_price`]) into the whole millionths of
+/// a dollar a descriptor compares. `None` when no row names the model — never
+/// zero, which would read as the cheapest model of all.
+fn list_price_for_descriptor(id: &str) -> Option<(u64, u64)> {
+    let price = api::model_price(id)?;
+    Some((micro_usd(price.input)?, micro_usd(price.output)?))
+}
+
+/// 2^53: every whole number below it is exact in an `f64`.
+const EXACT_F64_WHOLE_NUMBERS_BELOW: f64 = 9_007_199_254_740_992.0;
+
+/// A USD-per-million-token rate as whole millionths of a dollar; `None` for
+/// a rate that is not a finite, non-negative number.
+fn micro_usd(usd: f64) -> Option<u64> {
+    // A million is exact in an f64.
+    #[allow(clippy::cast_precision_loss)]
+    let micros = (usd * crate::model_router::MICRO_USD_PER_USD as f64).round();
+    if !(0.0..EXACT_F64_WHOLE_NUMBERS_BELOW).contains(&micros) {
+        return None;
+    }
+    // A non-negative whole number below 2^53 (the range check also refuses
+    // NaN and infinity): the cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let micros = micros as u64;
+    Some(micros)
+}
+
 /// The tier vector a provider-declared [`api::ModelClass`] maps to. This is
 /// the FIRST check in [`tiers_for_model`] — ahead of `is_small_model`, the
 /// `effort_ceiling == Ultra` promotion, and `is_deep_flagship` — because a
@@ -634,7 +686,8 @@ pub fn release_rank_for_model(id: &str) -> u32 {
         let run = &id[start..index];
         if let Some(major) = version_component_value(run, bytes.get(index).copied()) {
             let minor = minor_after_major(bytes, index).unwrap_or(0);
-            return major * 10 + minor.min(9);
+            let per_major = crate::model_router::RELEASE_RANKS_PER_MAJOR;
+            return major * per_major + minor.min(per_major - 1);
         }
     }
     0
@@ -762,7 +815,10 @@ mod release_rank_tests {
 
 #[cfg(test)]
 mod capability_table_tests {
-    use super::{capabilities_for_model, is_small_model, tiers_for_model as tiers_for_model_with_provenance, tiers_for_model_under};
+    use super::{
+        capabilities_for_model, is_small_model, is_small_model_under, tiers_for_model as tiers_for_model_with_provenance,
+        tiers_for_model_under,
+    };
     use crate::model_router::{ModelCapability, ModelTier};
 
     /// Test-only convenience: most existing assertions only care about the
@@ -855,6 +911,23 @@ mod capability_table_tests {
         // It is NOT promoted to Strong/Deep — haiku is fast/small, not a flagship.
         assert!(!tiers_for_model(id).contains(&ModelTier::Strong));
         assert!(!tiers_for_model(id).contains(&ModelTier::Deep));
+    }
+
+    /// t-45961: a size word counts at a word's start, never as another
+    /// word's tail — `gemini` is no `mini`, so a Gemini pro model is not a
+    /// small one, while its flash and lite siblings and every `-mini` stay
+    /// small.
+    #[test]
+    fn a_size_word_counts_only_at_a_words_start() {
+        // The shipped words, like `tiers_for_model` here: the publish
+        // `prior_tables_come_from_the_catalog` makes would otherwise reach
+        // this test beside it and take `flash` away (t-45961).
+        let shipped = api::shipped_router_priors();
+        assert!(!is_small_model_under("gemini-3.1-pro-preview", shipped), "gemini is no mini");
+        assert!(tiers_for_model("gemini-3.1-pro-preview").contains(&ModelTier::Deep));
+        for small in ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gpt-5.4-mini", "gpt-4o-mini", "claude-haiku-4-5"] {
+            assert!(is_small_model_under(small, shipped), "{small}");
+        }
     }
 
     #[test]
@@ -1183,16 +1256,14 @@ mod golden_parity_tests {
             // 인벤토리에 들어옴)의 분류는 strip_service_tier_suffix 정규화가
             // bare 기준으로 처리한다 — 카탈로그 행은 없다.
             Expected { id: "gpt-5.3-codex-spark", family: "gpt", class: "fast", rank: 53, ceiling: EffortCeiling::Xhigh, tiers: &[Fast, Balanced] }, // no declared class (unchanged)
-            // Pre-existing quirk (unrelated to Phase 1, left as-is — out of
-            // this phase's scope): "gemini" itself contains the substring
-            // "mini", which both `is_small_model` and `class_for_model` treat
-            // as the small/fast-model token. So every Gemini id — pro
-            // variants included — is classified small: class "fast",
-            // tiers [Fast,Balanced], never reaching the `is_deep_flagship`
-            // "pro" check at all.
-            Expected { id: "gemini-3.1-pro-preview", family: "gemini", class: "fast", rank: 31, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },
-            Expected { id: "gemini-3.1-pro-preview-customtools", family: "gemini", class: "fast", rank: 31, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },
-            Expected { id: "gemini-3-pro-preview", family: "gemini", class: "fast", rank: 30, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },
+            // "gemini" contains the substring "mini". The size words count
+            // only at a word's start now (t-45961), so a pro id reaches the
+            // `is_deep_flagship` "pro" prior; the marketing label
+            // (`class_for_model`, read only by selectors) still reads the
+            // substring and says "fast".
+            Expected { id: "gemini-3.1-pro-preview", family: "gemini", class: "fast", rank: 31, ceiling: EffortCeiling::High, tiers: &[Deep, Strong] },
+            Expected { id: "gemini-3.1-pro-preview-customtools", family: "gemini", class: "fast", rank: 31, ceiling: EffortCeiling::High, tiers: &[Deep, Strong] },
+            Expected { id: "gemini-3-pro-preview", family: "gemini", class: "fast", rank: 30, ceiling: EffortCeiling::High, tiers: &[Deep, Strong] },
             Expected { id: "gemini-3.5-flash", family: "gemini", class: "fast", rank: 35, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },
             Expected { id: "gemini-3.6-flash", family: "gemini", class: "fast", rank: 36, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },
             Expected { id: "gemini-3-flash", family: "gemini", class: "fast", rank: 30, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },

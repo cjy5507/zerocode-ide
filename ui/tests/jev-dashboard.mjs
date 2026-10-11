@@ -297,7 +297,11 @@ export function jevDashboardFixture(real = null) {
     keysKeptHere: true, keySaved: true, jev: { ...jev },
     // Every seat's comparison sample floor, the use table's
     // (`JevUse::agreement_rows_wanted`, a judgment window's worth).
-    switches: seats.map((id) => ({ id, setting: id, mode: modeOf[id], modes, written: true, agreementRowsWanted: 20 })),
+    // And the wall the model tier feature's paragraph names
+    // (`JevUse` → `worded_wall_ms`, t-45961), a number of this fixture's
+    // own so the page can only have read it from here.
+    switches: seats.map((id) => ({ id, setting: id, mode: modeOf[id], modes, written: true, agreementRowsWanted: 20,
+      wallMs: id === "model_tiers" ? 2_500 : null })),
     classifier: { setting: "autoClassifier", mode: "probed", probes: true, gates: seats[0],
       modes: [{ mode: "probed", runs: true, markers: false, probes: true }] },
   });
@@ -1420,6 +1424,22 @@ export async function testJevDashboard(browser, origin, ok) {
         && [...edges.row, ...edges.partial].every((gap) => Math.abs(gap) <= 1)
         && Math.abs(edges.word) <= 1 && Math.abs(edges.button) <= 1,
       JSON.stringify(edges));
+
+    // A feature's paragraph names its wall from the backend's row for it
+    // (`wallMs`, t-45961) — no catalog writes the number down — and a row
+    // that names none fills nothing in.
+    const wall = await page.evaluate(() => {
+      const hint = jevFeature("model_tiers").hint;
+      return {
+        said: t(hint.key, hint.source, jevHintVars(jevSeat(typesafeState ?? {}, "model_tiers"))),
+        source: hint.source,
+        none: jevHintVars(jevSeat(typesafeState ?? {}, "routing")),
+      };
+    });
+    ok("a feature's paragraph says the wall its backend row names, from no number written in the catalogs",
+      wall.source.includes("{{seconds}}초") && wall.said.includes("2.5초") && !wall.said.includes("{{")
+        && Object.keys(wall.none).length === 0,
+      JSON.stringify(wall));
 
     // The strip is read for its figures (t-6277 D10): each figure larger and
     // heavier than its label, and where the features stand set apart from

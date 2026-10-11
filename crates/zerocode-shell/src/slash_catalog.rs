@@ -88,6 +88,15 @@ const CATALOG_TTL: Duration = Duration::from_secs(300);
 /// The model catalog is zo's own cache with its own TTL; this only spares the
 /// process spawn on a menu opened again and again.
 const MODELS_TTL: Duration = Duration::from_secs(60);
+/// How long `zo models --json` may run before the window ends it and keeps
+/// the catalog it last read (t-45961: it had no limit, and a judgment
+/// service that never answered held the model menu and the lineup read with
+/// it). Past zo's own walls with room to spare — it asks its six model
+/// sources in turn, each under a 6-second timeout, then the tier seat's
+/// lineups together under one wall
+/// ([`zerocode_core::jev::MODEL_TIERS_DEADLINE_MS`]) — so only a zo that is
+/// stuck meets it, never one that is slow.
+const MODELS_WAIT: Duration = Duration::from_secs(60);
 /// How long the Claude Code announcement may take before the probe gives up.
 const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(15);
 /// The prompt the probe sends so the session starts; killed at the
@@ -586,22 +595,18 @@ pub fn agent_lineup(
     }
 }
 
-/// `zo models --json`, whole, cached for [`MODELS_TTL`]; `Null` when zo is
-/// missing or said nothing readable.
+/// `zo models --json`, whole, cached for [`MODELS_TTL`]. A zo that is
+/// missing, fails, says nothing readable or outlives [`MODELS_WAIT`] — killed
+/// then — leaves the catalog last read standing, or `Null` before any was.
 fn zo_models_catalog(home: &Path) -> serde_json::Value {
-    if let Ok(cache) = models_cache().lock()
-        && let Some((at, catalog)) = cache.as_ref()
-        && at.elapsed() < MODELS_TTL
-    {
+    let held = models_cache().lock().ok().and_then(|cache| cache.clone());
+    if let Some((_, catalog)) = held.as_ref().filter(|(at, _)| at.elapsed() < MODELS_TTL) {
         return catalog.clone();
     }
     let bin = crate::zo_companion::zo_path_under(home);
-    let catalog = crate::proc::quiet_command(&bin)
-        .args(["models", "--json"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+    let catalog = captured_lines(&bin, &["models", "--json"], MODELS_WAIT)
+        .and_then(|lines| serde_json::from_str::<serde_json::Value>(&lines.join("\n")).ok())
+        .or_else(|| held.map(|(_, catalog)| catalog))
         .unwrap_or_default();
     if let Ok(mut cache) = models_cache().lock() {
         *cache = Some((Instant::now(), catalog.clone()));

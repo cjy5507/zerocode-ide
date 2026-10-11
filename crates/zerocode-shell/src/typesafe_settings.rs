@@ -109,6 +109,11 @@ pub struct SwitchRow {
     /// sample rather than a share (t-6243 D2/D3). `None` for a seat that
     /// never rises.
     pub agreement_rows_wanted: Option<usize>,
+    /// The wall the feature's own words name, in milliseconds
+    /// ([`zerocode_core::jev::worded_wall_ms`]) — what a `{{seconds}}` in its
+    /// paragraph reads, so no catalog writes the number down (t-45961).
+    /// `None` for a feature whose words name none.
+    pub wall_ms: Option<u64>,
 }
 
 /// One word the routing classifier may hold, as the pane lists it: the word it
@@ -314,6 +319,7 @@ pub fn read_settings(
                 modes: choices(row),
                 written: row.word_in(&document).is_some(),
                 agreement_rows_wanted: row.agreement_rows_wanted,
+                wall_ms: zerocode_core::jev::worded_wall_ms(row),
             })
             .collect(),
         classifier: ClassifierRow {
@@ -781,6 +787,14 @@ mod tests {
         for (row, painted) in JEV_USES.iter().zip(&held.switches) {
             assert_eq!(painted.mode, row.recommended.key(), "{}", row.id);
             assert!(!painted.written, "{} kept its own word", row.id);
+            // The wall the feature's paragraph names comes from the table,
+            // never from its words (t-45961).
+            assert_eq!(
+                painted.wall_ms,
+                zerocode_core::jev::worded_wall_ms(row),
+                "{}",
+                row.id
+            );
         }
 
         set_enabled(&path, false).expect("off");

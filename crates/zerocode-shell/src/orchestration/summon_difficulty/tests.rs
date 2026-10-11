@@ -616,7 +616,7 @@ fn a_switch_left_on_carries_out_the_difficulty_answer_for_an_open_dial() {
 /// What the switch leaves alone: a summons whose coordinator named both
 /// dials applies no answer — the seat asks off the beat and the row says it
 /// was not carried out — and a person's own `off` for the seat asks nothing
-/// at all, the summons launching on the middle row as before.
+/// at all, the summons launching on the row for unjudged work.
 #[test]
 fn under_the_switch_a_pin_applies_no_answer_and_a_persons_off_asks_nothing() {
     let home = tempfile::tempdir().unwrap();
@@ -644,20 +644,20 @@ fn under_the_switch_a_pin_applies_no_answer_and_a_persons_off_asks_nothing() {
         Some(zerocode_core::jev::JevMode::Off.key()),
     );
     let (reply, prepared) = summoned(&wire, home.path(), "", "off");
-    let mid = difficulty::profile(&Value::Null, "claude", difficulty::FALLBACK_DIFFICULTY)
+    let unjudged = difficulty::profile(&Value::Null, "claude", difficulty::UNJUDGED_DIFFICULTY)
         .unwrap()
         .unwrap();
-    assert_eq!(reply["model"], json!(mid.model), "{reply}");
-    assert_eq!(reply["effort"], json!(mid.effort), "{reply}");
+    assert_eq!(reply["model"], json!(unjudged.model), "{reply}");
+    assert_eq!(reply["effort"], json!(unjudged.effort), "{reply}");
     assert!(recorded(&wire, &prepared, home.path()).is_empty());
     assert!(endpoint.asked().is_empty(), "a person's off sends nothing");
 }
 
 /// An answer that does not come back inside the seat's two seconds is no
-/// answer: the summons launches on the middle row within the wall, and the
-/// row says nothing was carried out.
+/// answer: the summons launches on the row for unjudged work (t-45961) within
+/// the wall, and the row says nothing was carried out.
 #[test]
-fn under_the_switch_a_late_answer_falls_back_to_the_middle_row_within_the_wall() {
+fn under_the_switch_a_late_answer_launches_the_unjudged_row_within_the_wall() {
     let home = tempfile::tempdir().unwrap();
     let endpoint = Endpoint::serving(
         "HTTP/1.1 200 OK",
@@ -668,11 +668,11 @@ fn under_the_switch_a_late_answer_falls_back_to_the_middle_row_within_the_wall()
     let began = Instant::now();
     let (reply, prepared) = summoned(&wire, home.path(), "", "late");
     assert!(began.elapsed() < Duration::from_millis(difficulty::APPLY_DEADLINE_MS + 400));
-    let mid = difficulty::profile(&Value::Null, "claude", difficulty::FALLBACK_DIFFICULTY)
+    let unjudged = difficulty::profile(&Value::Null, "claude", difficulty::UNJUDGED_DIFFICULTY)
         .unwrap()
         .unwrap();
-    assert_eq!(reply["model"], json!(mid.model), "{reply}");
-    assert_eq!(reply["effort"], json!(mid.effort), "{reply}");
+    assert_eq!(reply["model"], json!(unjudged.model), "{reply}");
+    assert_eq!(reply["effort"], json!(unjudged.effort), "{reply}");
     let receipt = prepared
         .difficulty_shadow
         .as_ref()
@@ -996,10 +996,10 @@ fn live_the_switch_carries_out_real_answers() {
             profile.model, profile.effort
         );
     } else {
-        let mid = row_of(difficulty::FALLBACK_DIFFICULTY);
+        let unjudged = row_of(difficulty::UNJUDGED_DIFFICULTY);
         assert_eq!(row["applied"], false, "{row}");
-        assert_eq!(reply["model"], json!(mid.model), "{reply}");
-        println!("difficulty: no answer inside the wall, so the middle row");
+        assert_eq!(reply["model"], json!(unjudged.model), "{reply}");
+        println!("difficulty: no answer inside the wall, so the row for unjudged work");
     }
 
     // The agent: `--agent auto`, and the seat's pick is the summons' agent.

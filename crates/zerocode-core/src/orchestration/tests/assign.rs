@@ -6,7 +6,7 @@
 use super::*;
 use crate::summon_assign::{AssignAsk, Receipts};
 use crate::summon_difficulty::lineup::{self, Lineup, Seen, row_at};
-use crate::summon_difficulty::{FALLBACK_DIFFICULTY, LADDER, PROFILES_SETTING};
+use crate::summon_difficulty::{LADDER, PROFILES_SETTING, UNJUDGED_DIFFICULTY};
 use crate::summon_model::{EFFORT_KEY, ModelRecord};
 use std::collections::BTreeMap;
 
@@ -206,29 +206,140 @@ fn a_challengers_turn_sends_the_difficulty_alone() {
     assert_eq!(model.receipt, None, "nothing was asked on the path for it");
 }
 
-/// A4: a late or broken answer leaves both defaults — the ladder's middle row
-/// — after one wall, where two were waited on.
+/// A4: a late or broken answer leaves both defaults — the row for unjudged
+/// work (t-45961) — after one wall, where two were waited on.
 #[test]
 fn a_late_answer_leaves_both_defaults_after_one_wall() {
     let launcher = Assigned::late();
     let (reply, prepared) = summon(&launcher);
     assert_eq!(launcher.asked.borrow().len(), 1, "one wall, never two");
-    let mid = row_at(
+    let unjudged = row_at(
         &serde_json::Value::Null,
         "claude",
-        FALLBACK_DIFFICULTY,
+        UNJUDGED_DIFFICULTY,
         Some(&lineup()),
         Some(&Seen::default()),
         0,
     )
     .unwrap()
     .unwrap();
-    assert_eq!(reply["model"], serde_json::json!(mid.model), "{reply}");
-    assert_eq!(reply["effort"], serde_json::json!(mid.effort), "{reply}");
-    assert_eq!(reply["dials"]["difficultyFrom"], "fallback");
+    assert_eq!(reply["model"], serde_json::json!(unjudged.model), "{reply}");
+    assert_eq!(
+        reply["effort"],
+        serde_json::json!(unjudged.effort),
+        "{reply}"
+    );
+    assert_eq!(reply["dials"]["difficulty"], UNJUDGED_DIFFICULTY);
+    assert_eq!(reply["dials"]["difficultyFrom"], "facts");
     assert_eq!(reply["dials"]["modelFrom"], "lineup");
     let model = prepared.model_shadow.unwrap();
     assert_eq!(model.receipt.unwrap()["applied"], false);
+}
+
+/// t-45961: a summons nobody judged runs the provider's top implementation
+/// model — the classifier's hard rung, `model-a` here — and never the
+/// ladder's middle row, which a misjudged lineup put on its weakest model
+/// (10-10~11: six summonses out of six on the cheapest model). The reply
+/// says the facts chose, not that nothing did.
+#[test]
+fn an_unjudged_summons_runs_the_top_implementer_and_says_who_chose() {
+    let launcher = Assigned::late();
+    let (reply, _) = summon(&launcher);
+    assert_eq!(reply["model"], "model-a", "{reply}");
+    assert_ne!(reply["dials"]["difficultyFrom"], "fallback", "{reply}");
+    assert_eq!(reply["dials"]["difficultyFrom"], "facts", "{reply}");
+    assert_eq!(reply["dials"]["modelFrom"], "lineup", "{reply}");
+    // And why no judgment chose, in a word and in words (the coordinator,
+    // 10-11: this machine's Jev requests come back refused).
+    assert_eq!(reply["dials"]["unjudged"]["why"], "timeout", "{reply}");
+    assert!(
+        reply["dials"]["unjudged"]["says"]
+            .as_str()
+            .is_some_and(|says| says.contains("time limit")),
+        "{reply}"
+    );
+}
+
+/// t-45961: agent-list says whether summonses are being judged and why not
+/// — here the judgment service refused the last request with HTTP 402 —
+/// and what a summons nobody judged runs; a host that cannot say says
+/// nothing.
+#[test]
+fn agent_list_says_why_summonses_go_unjudged() {
+    struct Refusing;
+    impl Launcher for Refusing {
+        fn command_for(
+            &self,
+            agent: &str,
+            prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            Catalog(&["claude"]).command_for(agent, prompt, tuning)
+        }
+        fn summon_judgment(&self) -> Option<SummonJudgment> {
+            Some(SummonJudgment {
+                mode: crate::jev::JevMode::Auto.key().to_string(),
+                last_outcome: Some("http_402".to_string()),
+                last_at_ms: Some(1),
+            })
+        }
+    }
+    let said = answered(&Refusing, "agent-list");
+    let seat = &said["summonJudgment"];
+    assert_eq!(seat["unjudged"]["why"], "http_402", "{said}");
+    assert!(
+        seat["unjudged"]["says"]
+            .as_str()
+            .is_some_and(|says| says.contains("HTTP 402")),
+        "{seat}"
+    );
+    assert_eq!(seat["unjudgedRuns"], UNJUDGED_DIFFICULTY);
+    assert!(
+        answered(&Catalog(&["claude"]), "agent-list")["summonJudgment"].is_null(),
+        "a host that cannot say says nothing"
+    );
+}
+
+/// t-45961: the dials say the difficulty as a word every time (it was null
+/// for a summons that names its model and leaves the effort open, with
+/// nothing judged): such a summons stands at the rung an unjudged summons
+/// stands at, and says that no difficulty ran — its CLI's own effort stands.
+#[test]
+fn a_named_model_with_its_effort_open_still_says_the_difficulty() {
+    let launcher = Assigned::late();
+    let mut bench = Bench::new();
+    bench.json("run-create --name assign");
+    let planned = planned_on(
+        &mut bench.ledger,
+        &mut bench.team,
+        &launcher,
+        "worker-start --agent claude --prompt translate-labels --model model-c",
+        bench.clock + 1,
+    );
+    assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+    let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+    assert_eq!(reply["model"], "model-c", "{reply}");
+    assert_eq!(reply["dials"]["difficulty"], UNJUDGED_DIFFICULTY, "{reply}");
+    assert_eq!(reply["dials"]["difficultyFrom"], "none", "{reply}");
+    assert_eq!(reply["dials"]["modelFrom"], "request", "{reply}");
+    assert!(reply["effort"].is_null(), "no difficulty ran: {reply}");
+}
+
+/// t-45961: the person's own row for unjudged work comes before the facts.
+#[test]
+fn an_unjudged_summons_runs_the_persons_row_before_the_facts() {
+    let mut launcher = Assigned::late();
+    launcher.settings = serde_json::json!({crate::jev::SMART_SETTINGS_KEY: {PROFILES_SETTING: {
+        "claude": {LADDER[2].0: {"model": "model-b", "effort": "high"}},
+    }}});
+    let (reply, _) = summon(&launcher);
+    assert_eq!(
+        (reply["model"].as_str(), reply["effort"].as_str()),
+        (Some("model-b"), Some("high")),
+        "{reply}"
+    );
+    assert_eq!(reply["dials"]["difficultyFrom"], "person", "{reply}");
+    assert_eq!(reply["dials"]["modelFrom"], "person", "{reply}");
 }
 
 /// A2, A4: the model question rides before the difficulty is known; when the

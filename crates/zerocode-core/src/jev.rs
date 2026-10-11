@@ -1950,6 +1950,90 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     ),
 };
 
+/// How long a lineup's question may take before its classification goes on
+/// without it (t-45961). A lineup is judged once when its facts change, on
+/// the `zo models` call that reads it — a background read the window
+/// repeats hourly, never a summons — so the wall is the routing seat's own
+/// order of patience rather than a step's. Not the row's apply wall: the
+/// seat never rises, so it names none (`apply_deadline_ms`), like the
+/// agent's own tool, whose wall is its own constant too.
+pub const MODEL_TIERS_DEADLINE_MS: u64 = 4_000;
+
+/// The wall a seat's own words name (`{{seconds}}` in its settings
+/// paragraph), read from the constant it is held to rather than written into
+/// five languages: the seat's apply wall, or — for the model tier seat, which
+/// never rises and so names none — the wall its question is held to
+/// ([`MODEL_TIERS_DEADLINE_MS`]).
+#[must_use]
+pub fn worded_wall_ms(row: &JevUse) -> Option<u64> {
+    row.apply_deadline_ms
+        .or_else(|| (row.id == MODEL_TIERS.id).then_some(MODEL_TIERS_DEADLINE_MS))
+}
+
+/// zo's model tier seat (t-45961): where each model of one provider's lineup
+/// stands — which work it can be trusted with, read off the catalog facts
+/// (declared class, list price, context window, release order, effort
+/// ceiling) and the outcomes recorded for it — so the classifier's bands and
+/// rungs come from a judgment and not from a table, and a model shipped
+/// tomorrow takes its place without an edit.
+///
+/// Asked once per provider when the lineup's facts change (a model arrives,
+/// a price or a class moves, the recorded outcomes cross a step) and kept in
+/// zo's catalog cache until then; under `off`, without an answer or past the
+/// wall, the fact rule places every model, and a model that arrived after
+/// the judgment stands provisionally by the facts. What is sent is catalog
+/// facts and counts — the provider, ids, classes, prices, windows, release
+/// order, effort ceilings and run counts. The provider and the ids are
+/// declared: a custom provider's name and its model ids are words a person
+/// wrote, cleared at the door like any other.
+///
+/// It records until a person turns it `on` (t-45961, the person and ZO,
+/// 10-11): no real request had been answered when it was built — this
+/// machine's account was refused with HTTP 402 — so applying by default would
+/// have applied an answer nobody had read.
+pub const MODEL_TIERS: JevUse = JevUse {
+    id: "model_tiers",
+    setting: "jevModelTiers",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On],
+    recommended: JevMode::Shadow,
+    repeat: None,
+    sends: &[
+        Sent {
+            at: "/state/provider",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/models/*/id",
+            cap: Cap::Uncut,
+        },
+    ],
+    ledger: "model-tiers.jsonl",
+    promotes: false,
+    answer_floor_permille: None,
+    press_floor_permille: None,
+    agreement_floor_permille: None,
+    apply_deadline_ms: None,
+    window_forgives: None,
+    agreement_rows_wanted: None,
+    agreement_kind: AgreementKind::Comparison,
+    // What places a model without the seat is the fact rule, but a seat that
+    // never rises compares against no baseline.
+    baseline: Baseline::None,
+    negatives_wanted: None,
+    confidence_bands: None,
+    reads_act_line: false,
+    rubric_version: questions::MODEL_TIERS_RUBRIC_VERSION,
+    request_name: &[],
+    names: Naming::Request,
+    label_part: &[],
+    follows: None,
+    regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "a score offers none; an unanswered model stands by the fact rule, provisionally",
+    ),
+};
+
 /// Which model a summons runs on when nobody named one: a closed choice over
 /// the agent's lineup today, with `abstain` (t-14437). Graded like the
 /// difficulty seat — by the work its answers launched — and, like it, it
@@ -4600,7 +4684,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 32] = [
+pub static JEV_USES: [JevUse; 33] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -4614,6 +4698,7 @@ pub static JEV_USES: [JevUse; 32] = [
     SUMMON,
     SUMMON_DIFFICULTY,
     SUMMON_MODEL,
+    MODEL_TIERS,
     STEP_EFFORT,
     ZO_STEP_EFFORT,
     COMPACTION,

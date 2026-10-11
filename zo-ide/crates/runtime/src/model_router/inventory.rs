@@ -24,6 +24,7 @@ pub struct ModelDescriptor {
     release_rank: u32,
     effort_ceiling: EffortCeiling,
     context_window: Option<u32>,
+    list_price: Option<ListPrice>,
     tiers_provenance: TiersProvenance,
     /// Stamped by the tier classifier when the inventory is built.
     band: ModelBand,
@@ -31,6 +32,24 @@ pub struct ModelDescriptor {
 }
 
 pub type UsableModel = ModelDescriptor;
+
+/// Release ranks per major version: a descriptor's release rank is the
+/// major version times this, plus the minor (`model_inventory::
+/// release_rank_for_model`) — so a generation is the rank divided by it.
+pub const RELEASE_RANKS_PER_MAJOR: u32 = 10;
+
+/// Millionths of a US dollar in one dollar: the unit a [`ListPrice`] is
+/// written in.
+pub const MICRO_USD_PER_USD: u64 = 1_000_000;
+
+/// A model's list price, in millionths of a US dollar per million tokens —
+/// whole numbers, so a descriptor stays comparable and hashable. `None` on a
+/// descriptor means nobody wrote the rate down, never that it is free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ListPrice {
+    pub input_micro_usd: u64,
+    pub output_micro_usd: u64,
+}
 
 impl ModelDescriptor {
     #[must_use]
@@ -47,6 +66,7 @@ impl ModelDescriptor {
             release_rank: 0,
             effort_ceiling: EffortCeiling::default(),
             context_window: None,
+            list_price: None,
             tiers_provenance: TiersProvenance::default(),
             band: ModelBand::default(),
             rungs: BTreeSet::new(),
@@ -98,6 +118,14 @@ impl ModelDescriptor {
     #[must_use]
     pub fn context_window(mut self, context_window: u32) -> Self {
         self.context_window = Some(context_window);
+        self
+    }
+
+    /// The list price per million tokens, input and output, in millionths of
+    /// a US dollar.
+    #[must_use]
+    pub fn list_price_micro_usd(mut self, input_micro_usd: u64, output_micro_usd: u64) -> Self {
+        self.list_price = Some(ListPrice { input_micro_usd, output_micro_usd });
         self
     }
 
@@ -156,6 +184,10 @@ impl ModelDescriptor {
     #[must_use]
     pub fn context_window_value(&self) -> Option<u32> { self.context_window }
 
+    /// The list price, when the price table names the model.
+    #[must_use]
+    pub fn list_price_value(&self) -> Option<ListPrice> { self.list_price }
+
     #[must_use]
     pub fn tiers_provenance_value(&self) -> TiersProvenance { self.tiers_provenance }
     /// The band the tier classifier placed this model in within its provider.
@@ -212,6 +244,7 @@ fn inherit_known_family_descriptor(main_model: &str, known: &[ModelDescriptor]) 
         release_rank: best.release_rank,
         effort_ceiling: best.effort_ceiling,
         context_window: best.context_window,
+        list_price: best.list_price,
         tiers_provenance: best.tiers_provenance,
         band: ModelBand::default(),
         rungs: BTreeSet::new(),

@@ -1059,7 +1059,7 @@ function paintJevViews() {
 function jevHintLead(id) {
   const hint = jevFeature(id).hint;
   if (!hint) return "";
-  const words = t(hint.key, hint.source);
+  const words = t(hint.key, hint.source, jevHintVars(jevSeat(typesafeState ?? {}, id)));
   const end = words.search(/[.!?](\s|$)|[。！？]/u);
   return end < 0 ? words : words.slice(0, end + 1).trim();
 }
@@ -1153,6 +1153,18 @@ function jevCount(value) {
 
 function jevMs(ms) {
   return ms === null || ms === undefined ? "—" : jevCount(ms);
+}
+
+/* Milliseconds in a second, for the wall a feature's words name in seconds. */
+const JEV_MS_PER_SECOND = 1_000;
+
+/* What a feature's paragraph fills in from the feature's own row of the
+ * backend's answer (`switches`): the wall its words name, in seconds, read
+ * from the constant it is held to (`wallMs`, t-45961) rather than written
+ * into five catalogs. Nothing for a row that names none. */
+function jevHintVars(row) {
+  const wall = row?.wallMs;
+  return Number.isFinite(wall) ? { seconds: String(wall / JEV_MS_PER_SECOND) } : {};
 }
 
 function jevCost(usd) {
@@ -2365,7 +2377,9 @@ function paintJevDrawer(view, id, held) {
   }
   jevFacts(part("version").querySelector("dl"), models);
 
-  part("sends").querySelector(".jev-drawer-text").textContent = feature.hint ? t(feature.hint.key, feature.hint.source) : "";
+  part("sends").querySelector(".jev-drawer-text").textContent = feature.hint
+    ? t(feature.hint.key, feature.hint.source, jevHintVars(standing))
+    : "";
 }
 
 /* Evidence is loaded on an explicit press, never on the dashboard's poll.

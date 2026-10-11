@@ -194,7 +194,11 @@ fn every_use_is_off_until_a_person_says_otherwise() {
 ///
 /// `shadow` for the seats that only ever record — the vault pair review,
 /// whose proposals a person reads at the weekly review and which never rises,
-/// and the mail triage, whose answers nothing carries out yet.
+/// the mail triage, whose answers nothing carries out yet, and zo's model
+/// tier seat, which records until a person has seen one of its judgments
+/// (t-45961, the person and ZO, 10-11: no real request had been answered —
+/// this machine's account was refused with HTTP 402 — so `on` would have
+/// applied an answer nobody had read).
 /// `off` only for a seat stopped on its own evidence until it is redesigned
 /// (docs/design/jev-engineering-review-20260923.md §7, t-6342): the patch
 /// review and the window's worker effort. Anywhere else a switch turned on
@@ -202,7 +206,7 @@ fn every_use_is_off_until_a_person_says_otherwise() {
 #[test]
 fn every_use_recommends_one_of_its_own_modes_and_off_only_where_stopped() {
     let stopped = [PATCH_REVIEW.id, STEP_EFFORT.id];
-    let recording = [VAULT_PAIRS.id, MAIL_TRIAGE.id];
+    let recording = [VAULT_PAIRS.id, MAIL_TRIAGE.id, MODEL_TIERS.id];
     for row in &JEV_USES {
         assert!(
             row.modes.contains(&row.recommended),
@@ -1721,7 +1725,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 32);
+    assert_eq!(JEV_USES.len(), 33);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -2023,7 +2027,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 32);
+    assert_eq!(JEV_USES.len(), 33);
     assert_eq!(JEV_USES.get(JEV_USES.len() - 4), Some(&FILE_PICK));
 }
 
@@ -3342,6 +3346,7 @@ fn every_seat_offers_no_option_without_the_words_that_say_what_it_means() {
                     PATCH_REVIEW.id,
                     CLAIM.id,
                     FILE_PICK.id,
+                    MODEL_TIERS.id,
                 ]
                 .contains(&id) =>
                 {
@@ -3530,4 +3535,47 @@ fn every_use_says_what_its_choices_offer_for_none_of_these() {
             );
         }
     }
+}
+
+/// zo's model tier seat (t-45961) sends catalog facts and counts, and the two
+/// strings in them a person may have written — a custom provider's name and
+/// its models' ids — are declared, so the door clears them like any other
+/// person's words. It records by default and applies only under `on`; under
+/// `off`, without an answer or past its wall, the fact rule places the
+/// lineup, so the seat neither promotes nor holds a baseline of its own. The
+/// wall its words name is its question's.
+#[test]
+fn the_model_tier_seat_sends_facts_and_applies_under_on() {
+    assert_eq!(jev_use("model_tiers"), Some(&MODEL_TIERS));
+    assert_eq!(MODEL_TIERS.setting, "jevModelTiers");
+    assert_eq!(MODEL_TIERS.recommended, JevMode::Shadow);
+    assert!(!MODEL_TIERS.modes.contains(&JevMode::Auto));
+    const { assert!(!MODEL_TIERS.promotes) };
+    assert_eq!(MODEL_TIERS.baseline, Baseline::None);
+    assert_eq!(
+        MODEL_TIERS.apply_deadline_ms, None,
+        "a seat that never rises names no apply wall"
+    );
+    const { assert!(MODEL_TIERS_DEADLINE_MS > 0) };
+    assert_eq!(worded_wall_ms(&MODEL_TIERS), Some(MODEL_TIERS_DEADLINE_MS));
+    for row in JEV_USES.iter().filter(|row| **row != MODEL_TIERS) {
+        assert_eq!(worded_wall_ms(row), row.apply_deadline_ms, "{}", row.id);
+    }
+    assert_eq!(
+        MODEL_TIERS.rubric_version,
+        questions::MODEL_TIERS_RUBRIC_VERSION
+    );
+    let sent: Vec<&str> = MODEL_TIERS.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(sent, ["/state/provider", "/state/models/*/id"]);
+    assert!(MODEL_TIERS.mode_of(Some(&json!("on"))).applies());
+    assert!(!MODEL_TIERS.mode_of(Some(&json!("shadow"))).applies());
+    let summons = JEV_USES
+        .iter()
+        .position(|row| *row == SUMMON_MODEL)
+        .unwrap();
+    assert_eq!(
+        JEV_USES[summons + 1],
+        MODEL_TIERS,
+        "beside the summons seats it serves"
+    );
 }

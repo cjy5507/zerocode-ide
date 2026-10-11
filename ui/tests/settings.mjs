@@ -113,6 +113,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "summon_difficulty", setting: "summonDifficulty", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "summon_model", setting: "summonModel", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "model_tiers", setting: "jevModelTiers", modes: "off shadow on", recommended: "shadow" }),
   Object.freeze({ id: "effort", setting: "stepEffort", modes: "off shadow on auto", recommended: "off" }),
   Object.freeze({ id: "step_effort", setting: "zoStepEffort", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "compaction", setting: "jevCompaction", modes: "off shadow on auto", recommended: "auto" }),
@@ -5581,6 +5582,24 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   await statusIs(await said("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."));
   await pageA.evaluate(() => refreshApiRouters());
   assertEqual(await profileModel.inputValue(), "gpt-test-profile");
+  // Who put a row's model in its tier, and how sure that was (t-45961): said
+  // in the row's note, never for a row the person wrote or one the lineup
+  // says nothing about.
+  const tierNotes = await pageA.evaluate(() => ({
+    jev: summonRowTier({ from: "lineup", tierFrom: "jev", tierConfidencePermille: 812 }),
+    facts: summonRowTier({ from: "lineup", tierFrom: "facts" }),
+    provisional: summonRowTier({ from: "lineup", tierFrom: "provisional" }),
+    person: summonRowTier({ from: "person", tierFrom: "jev", tierConfidencePermille: 900 }),
+    unsaid: summonRowTier({ from: "table" }),
+  }));
+  assertEqual(tierNotes.jev, await said("settings.typesafe.rowTierJev",
+    "이 모델의 등급은 Jev 판정입니다(확신도 {{confidence}}%).", { confidence: 81 }));
+  assertEqual(tierNotes.facts, await said("settings.typesafe.rowTierFacts",
+    "이 모델의 등급은 사실 규칙으로 정했습니다. Jev 판정은 없습니다."));
+  assertEqual(tierNotes.provisional, await said("settings.typesafe.rowTierProvisional",
+    "지난 판정 뒤에 들어온 모델이라, 다음 판정 때까지 사실 규칙에 따른 임시 등급입니다."));
+  assertEqual(tierNotes.person, "", "a written row says who placed its model");
+  assertEqual(tierNotes.unsaid, "", "a row the lineup says nothing about said a source");
   const modelInput = pageA.locator("#typesafe-model-input");
   assertEqual(await modelInput.inputValue(), "", "an unpinned card showed a pin");
   assertEqual(await modelInput.getAttribute("placeholder"), JEV_MODEL_ALIAS);

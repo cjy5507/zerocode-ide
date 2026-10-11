@@ -64,6 +64,18 @@ pub enum Rung {
 
 const RUNGS: [Rung; 3] = [Rung::Easy, Rung::Medium, Rung::Hard];
 
+/// Who placed a model in its provider's order, as the same classifier's row
+/// says (t-45961): the Jev seat's judgment of the lineup, the fact rule
+/// where no judgment stands, or the facts for a model that arrived after
+/// its provider's judgment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TierFrom {
+    Jev,
+    Facts,
+    Provisional,
+}
+
 impl Rung {
     fn difficulty(self) -> &'static str {
         LADDER[RUNGS.iter().position(|rung| *rung == self).unwrap_or(0)].0
@@ -88,6 +100,11 @@ pub struct LiveModel {
     /// classifier left out.
     pub band: Option<Band>,
     pub rungs: BTreeSet<Rung>,
+    /// Who placed it there; `None` when the row does not say (an older zo).
+    pub tier_from: Option<TierFrom>,
+    /// How sure the judgment that placed it was, in thousandths; `None`
+    /// when no judgment did.
+    pub tier_confidence_permille: Option<u16>,
     /// The efforts the model accepts, lowest first; `None` when unknown.
     pub efforts: Option<Vec<String>>,
     /// Shipped in the binary, as opposed to discovered after it was built.
@@ -245,6 +262,8 @@ impl Lineup {
                 provider: provider.to_string(),
                 band: None,
                 rungs: BTreeSet::new(),
+                tier_from: None,
+                tier_confidence_permille: None,
                 efforts: None,
                 builtin: true,
                 unlisted: false,
@@ -270,6 +289,13 @@ impl Lineup {
                     rungs: band
                         .and_then(|_| serde_json::from_value(row.get("rungs")?.clone()).ok())
                         .unwrap_or_default(),
+                    tier_from: row
+                        .get("tierFrom")
+                        .and_then(|from| serde_json::from_value(from.clone()).ok()),
+                    tier_confidence_permille: row
+                        .get("tierConfidencePermille")
+                        .and_then(Value::as_u64)
+                        .and_then(|permille| u16::try_from(permille).ok()),
                     efforts: row
                         .get("efforts")
                         .and_then(|efforts| {
@@ -473,6 +499,10 @@ pub struct Row {
     /// Where the provider's classifier ranks the row's model, when the
     /// lineup lists it — half of why this model runs here.
     pub band: Option<Band>,
+    /// Who placed the model in that rank (t-45961), when the lineup says.
+    pub tier_from: Option<TierFrom>,
+    /// How sure the judgment that placed it was, in thousandths.
+    pub tier_confidence_permille: Option<u16>,
     /// And why it runs at this effort.
     pub effort_rule: EffortRule,
     /// The ladder's effort, brought inside what the model accepts; for a
@@ -653,11 +683,12 @@ fn build(
                 .collect(),
             _ => Vec::new(),
         };
+        let held = lineup.and_then(|held| held.find(&model));
         rows.push(Row {
             difficulty,
-            band: lineup
-                .and_then(|held| held.find(&model))
-                .and_then(|held| held.band),
+            band: held.and_then(|held| held.band),
+            tier_from: held.and_then(|held| held.tier_from),
+            tier_confidence_permille: held.and_then(|held| held.tier_confidence_permille),
             model,
             effort,
             from,

@@ -14449,6 +14449,12 @@ pub trait Launcher {
         None
     }
 
+    /// The difficulty seat's mode and how its last recorded question ended
+    /// (t-45961). `None` when the host cannot say.
+    fn summon_judgment(&self) -> Option<SummonJudgment> {
+        None
+    }
+
     /// What the model question reads for `agent` under this summons's origin
     /// — lineup, book and records — or `None` when the host holds no lineup
     /// or the launch was sealed (t-14437).
@@ -17263,12 +17269,24 @@ fn dials_why(
         .map(|(model, _, _)| model.as_str())
         .or_else(|| row.map(|row| row.model.as_str()));
     let facts = turn.map(|(_, _, _, facts)| facts);
-    let band = model
-        .and_then(|model| facts?.lineup.find(model)?.band)
+    let held = model.and_then(|model| facts?.lineup.find(model));
+    let band = held
+        .and_then(|held| held.band)
         .or_else(|| row.and_then(|row| row.band));
+    // Who put the model in that band, and how sure that judgment was
+    // (t-45961): the Jev seat, the fact rule, or the facts for a model that
+    // arrived after the judgment.
+    let tier_from = held
+        .and_then(|held| held.tier_from)
+        .or_else(|| row.and_then(|row| row.tier_from));
+    let tier_confidence = held
+        .and_then(|held| held.tier_confidence_permille)
+        .or_else(|| row.and_then(|row| row.tier_confidence_permille));
     let jev = pick.is_some_and(|(_, _, from)| *from == DIALS_FROM_JEV);
     serde_json::json!({
         "band": band,
+        "tierFrom": tier_from,
+        "tierConfidencePermille": tier_confidence,
         "effortRule": if jev {
             serde_json::json!(DIALS_FROM_JEV)
         } else {
@@ -17286,8 +17304,92 @@ fn dials_why(
 
 /// `dials.difficultyFrom`: the difficulty seat's applied answer chose it.
 const DIALS_FROM_JEV: &str = "jev";
-/// `dials.difficultyFrom`: nobody chose; the ladder's middle stood.
-const DIALS_FROM_FALLBACK: &str = "fallback";
+/// `dials.difficultyFrom`: no answer, and the person's own row for unjudged
+/// work ([`crate::summon_difficulty::UNJUDGED_DIFFICULTY`]) stood (t-45961).
+const DIALS_FROM_PERSON: &str = "person";
+/// `dials.difficultyFrom`: no answer and no row of the person's: the
+/// lineup's hard rung — the provider's top implementation model as the
+/// classifier ordered it — ran (t-45961).
+const DIALS_FROM_FACTS: &str = "facts";
+/// `dials.difficultyFrom`: no answer, and no difficulty ran — the summons
+/// named its model, and its CLI's own effort stands. `dials.difficulty` then
+/// names the rung an unjudged summons stands at
+/// ([`crate::summon_difficulty::UNJUDGED_DIFFICULTY`]), so it is a word every
+/// time.
+const DIALS_FROM_NONE: &str = "none";
+/// `dials.unjudged.why`: the difficulty question was never asked (its
+/// switch off, or every dial named).
+const UNJUDGED_NOT_ASKED: &str = "not_asked";
+/// `dials.unjudged.why`: the question was answered, and the answer was only
+/// recorded.
+const UNJUDGED_NOT_APPLIED: &str = "not_applied";
+/// The status codes HTTP has: a refused request's outcome word carries one
+/// (`http_402`), which the plain sentence names.
+const HTTP_STATUS_CODES: std::ops::Range<u16> = 100..600;
+/// The window wire's word for a question whose answer missed its wall
+/// (`systemone::TIMEOUT` in the shell, which this crate cannot read).
+const UNJUDGED_TIMEOUT: &str = "timeout";
+
+/// Why a summons ran without the difficulty seat's answer (t-45961), as a
+/// word and as a sentence a person reads: the seat's own outcome word — a
+/// request the service refused carries its HTTP status (`http_402`), the
+/// door's refusal its own word (`off`, `no_key`, …), a wall passed
+/// `timeout` — or [`UNJUDGED_NOT_ASKED`], or [`UNJUDGED_NOT_APPLIED`] for an
+/// answer only recorded. Response codes and refusal words only: nothing here
+/// reads a key or a credential.
+fn unjudged_reason(outcome: Option<&str>) -> serde_json::Value {
+    use crate::jev::door::{ANSWERED_OUTCOME, Refused};
+    let why = match outcome {
+        None => UNJUDGED_NOT_ASKED,
+        Some(ANSWERED_OUTCOME) => UNJUDGED_NOT_APPLIED,
+        Some(word) => word,
+    };
+    let status = why
+        .rsplit_once('_')
+        .and_then(|(_, code)| code.parse::<u16>().ok())
+        .filter(|code| HTTP_STATUS_CODES.contains(code));
+    let says = match (why, status, Refused::from_token(why)) {
+        (UNJUDGED_NOT_ASKED, _, _) => {
+            "No difficulty judgment: it was not asked (its switch is off, or the summons named every dial).".to_string()
+        }
+        (UNJUDGED_NOT_APPLIED, _, _) => {
+            "The difficulty judgment answered, but its answer was only recorded, not applied.".to_string()
+        }
+        (_, Some(code), _) => {
+            format!("No difficulty judgment: the judgment service refused the request (HTTP {code}).")
+        }
+        (UNJUDGED_TIMEOUT, _, _) => {
+            "No difficulty judgment: no answer came within its time limit.".to_string()
+        }
+        (_, _, Some(Refused::Off)) => "No difficulty judgment: Jev is switched off.".to_string(),
+        (_, _, Some(Refused::NoKey)) => "No difficulty judgment: no Jev key is set.".to_string(),
+        (_, _, Some(Refused::NotConsented)) => {
+            "No difficulty judgment: this folder is not one Jev may read.".to_string()
+        }
+        (_, _, Some(Refused::Budget)) => {
+            "No difficulty judgment: today's Jev request budget is spent.".to_string()
+        }
+        (_, _, Some(Refused::SettingsChanged)) => {
+            "No difficulty judgment: the Jev settings changed while it was asked.".to_string()
+        }
+        (word, None, None) => format!("No difficulty judgment: the request ended `{word}`."),
+    };
+    serde_json::json!({ "why": why, "says": says })
+}
+
+/// The difficulty seat as agent-list shows it (t-45961): its mode, and how
+/// its last recorded question ended — what a coordinator reads to know
+/// whether summonses are being judged, and why not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummonJudgment {
+    /// The seat's mode word (`off`, `shadow`, `on`, `auto`).
+    pub mode: String,
+    /// The last recorded question's outcome word; `None` when none is
+    /// recorded.
+    pub last_outcome: Option<String>,
+    /// When that question was recorded.
+    pub last_at_ms: Option<i64>,
+}
 /// `dials.modelFrom`: the summons named its own `--model`.
 const DIALS_FROM_REQUEST: &str = "request";
 /// `dials.modelFrom`: a challenger's turn tried a model with too little
@@ -20757,6 +20859,18 @@ fn plan_inner(
                     )
                 })
                 .collect();
+            // Whether summonses are being judged now, and why not (t-45961):
+            // the difficulty seat's mode and its last recorded outcome, and
+            // what a summons nobody judged runs instead.
+            let judgment = launcher.summon_judgment().map(|seat| {
+                serde_json::json!({
+                    "mode": seat.mode,
+                    "lastOutcome": seat.last_outcome,
+                    "lastAtMs": seat.last_at_ms,
+                    "unjudged": unjudged_reason(seat.last_outcome.as_deref()),
+                    "unjudgedRuns": crate::summon_difficulty::UNJUDGED_DIFFICULTY,
+                })
+            });
             said(serde_json::json!({
                 "agents": agents,
                 // Said out loud rather than left to be inferred from the rows:
@@ -20764,6 +20878,7 @@ fn plan_inner(
                 // tell "this window cannot look" from "this window looked and
                 // found nothing", and thirty-six identical rows cannot.
                 "detected": measured.is_some(),
+                "summonJudgment": judgment,
             }))
         }
 
@@ -21058,7 +21173,7 @@ fn plan_inner(
             let profile = if model.is_none() && open {
                 launcher.difficulty_profile(
                     &agent,
-                    chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
+                    chosen.unwrap_or(crate::summon_difficulty::UNJUDGED_DIFFICULTY),
                     summons_origin,
                 )?
             } else {
@@ -21110,8 +21225,22 @@ fn plan_inner(
             // what else today's lineup offers at that difficulty (t-14437).
             let dials = (model.is_none() || effort.is_none()).then(|| {
                 serde_json::json!({
-                    "difficulty": chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
-                    "difficultyFrom": if chosen.is_some() { DIALS_FROM_JEV } else { DIALS_FROM_FALLBACK },
+                    // Always a word: the rung the answer chose, else the one
+                    // an unjudged summons stands at — `difficultyFrom` says
+                    // whether any dial ran at it (t-45961).
+                    "difficulty": chosen.unwrap_or(crate::summon_difficulty::UNJUDGED_DIFFICULTY),
+                    "difficultyFrom": match (chosen, &profile) {
+                        (Some(_), _) => DIALS_FROM_JEV,
+                        (None, Some(row)) if row.from == crate::summon_difficulty::lineup::Source::Person => {
+                            DIALS_FROM_PERSON
+                        }
+                        (None, Some(_)) => DIALS_FROM_FACTS,
+                        (None, None) => DIALS_FROM_NONE,
+                    },
+                    // Why no judgment chose, when none did (t-45961).
+                    "unjudged": chosen.is_none().then(|| unjudged_reason(
+                        difficulty_receipt.as_ref().and_then(|row| row["outcome"].as_str()),
+                    )),
                     "modelFrom": match (&model, &model_pick, &profile) {
                         (Some(_), _, _) => serde_json::json!(DIALS_FROM_REQUEST),
                         (None, Some((_, _, from)), _) => serde_json::json!(from),

@@ -2,7 +2,8 @@ use super::inventory::{ModelDescriptor, ModelInventory};
 use super::learned::LearnedSpecialtyHint;
 use super::outcome::RouteOutcomeSummary;
 use super::policy::{
-    auto_selectors_for_role, effective_specialty_adjustment, implementation_route_model_allowed, provider_allowlisted,
+    auto_selectors_for_role, automatic_choice_allowed, effective_specialty_adjustment, implementation_route_model_allowed,
+    provider_allowlisted,
     provider_anchor_adjustment, same_main_bonus, selector_matches_context, tier_match_bonus_for,
     ModelCapability, ModelTier, RouteFeedbackHint, RouteTaskComplexity, RouteTaskRisk, SmartPolicy,
     TiersProvenance, CAPABILITY_MATCH_BONUS,
@@ -309,6 +310,9 @@ fn best_model_for_role<'a>(
             // provider is never proposed, and an allowlist that excludes everything
             // surfaces the main-model fallback — exactly what the runtime does.
             .filter(|model| provider_allowlisted(&options.provider_allowlist, model.provider()))
+            // And the live route's own rule: an older release of a connected
+            // line is never proposed (t-45961).
+            .filter(|model| automatic_choice_allowed(model, inventory))
             .max_by_key(|model| {
                 score_model_for_role(model, &selector, role, inventory, options, feedback, learned)
             });

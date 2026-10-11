@@ -844,7 +844,7 @@ pub fn route_model(request: &RouteRequest, inventory: &ModelInventory) -> RouteD
         }
         Some(RoleOverride::Family(selector)) => {
             if let Some(model) = select_model(selector, inventory, |model| {
-                route_candidate_allowed(model, request)
+                route_candidate_allowed(model, request, inventory)
             }) {
                 return decision(
                     request,
@@ -1010,7 +1010,7 @@ fn ranked_route_candidates<'a>(
         Some(RoleOverride::Pin(_)) => Vec::new(),
         Some(RoleOverride::Family(selector)) => ranked_selector_candidates(selector, inventory)
             .into_iter()
-            .filter(|candidate| route_candidate_allowed(candidate.model, request))
+            .filter(|candidate| route_candidate_allowed(candidate.model, request, inventory))
             .collect(),
         Some(RoleOverride::Auto) | None => {
             if request.mode == RouterMode::Auto {
@@ -1103,7 +1103,7 @@ fn ranked_context_candidates<'a>(
             (natively || admitted).then_some((index, model, admitted))
         })
         .filter(|(_, model, _)| request.context.provider_allowed(model.provider()))
-        .filter(|(_, model, _)| route_candidate_allowed(model, request))
+        .filter(|(_, model, _)| route_candidate_allowed(model, request, inventory))
         .filter(|(_, model, _)| automatic_implementation_candidate_allowed(model, request, inventory))
         .map(|(index, model, admitted)| RankedCandidate {
             model,
@@ -1219,7 +1219,14 @@ fn automatic_implementation_candidate_allowed(model: &ModelDescriptor, request: 
         && (matches!(request.effective_role(), RouteRole::Coding | RouteRole::Debugging)
             || request.context.tool_need == RouteToolNeed::Write);
     let reserved = match request.context.policy {
-        SmartPolicy::Architect => matches!(model.band(), ModelBand::Top | ModelBand::Superseded),
+        // The top band is kept for planning and verifying, unless the
+        // classifier gave it the hard rung of a provider with one
+        // implementer (t-45961) — and a catalog-reserved orchestrator stays
+        // kept even then, as the spawn's own gate keeps it.
+        SmartPolicy::Architect => {
+            model.band() == ModelBand::Superseded
+                || (model.band() == ModelBand::Top && !top_takes_its_rung(model))
+        }
         SmartPolicy::Classic => is_reserved_orchestrator_model(model.id()),
     };
     !implementation_lane || (inventory.find(&request.main_model)
@@ -1227,25 +1234,60 @@ fn automatic_implementation_candidate_allowed(model: &ModelDescriptor, request: 
         && !reserved)
 }
 
-fn route_candidate_allowed(model: &ModelDescriptor, request: &RouteRequest) -> bool {
+/// Whether the router may stand `model` by its own choice — for any role,
+/// under either policy, as a pick, a fallback or a preview: never an older
+/// release of a connected line, one the classifier superseded
+/// ([`ModelBand::Superseded`]) while a newer release of its line stands in
+/// `inventory` (`claude-fable-5` beside `claude-fable-5-1`), whose tier that
+/// successor holds (t-45961: three reviewers ran on the older release, its
+/// record the longer one). A twin of the same release (`acme[blue]` beside
+/// `acme[green]`, two models a person configured) is no older and stays a
+/// choice. A person who wants an older release names it — an explicit
+/// model, a pin, the session's own model — and a named model never comes
+/// through here.
+pub(super) fn automatic_choice_allowed(model: &ModelDescriptor, inventory: &ModelInventory) -> bool {
+    model.band() != ModelBand::Superseded
+        || !inventory.models().iter().any(|newer| {
+            newer.release_rank_value() > model.release_rank_value() && super::tiering::same_line(newer, model)
+        })
+}
+
+/// Whether a top-band model implements on the rung the classifier gave it —
+/// the hard rung of a provider with one implementer below its top (t-45961).
+/// Never a catalog-reserved orchestrator: the spawn's own gate
+/// (`implementation_model_refusal`) declines one for implementation, so the
+/// router does not offer it there either, and the lone implementer keeps the
+/// hard work inside zo.
+fn top_takes_its_rung(model: &ModelDescriptor) -> bool {
+    !model.rungs().is_empty() && !is_reserved_orchestrator_model(model.id())
+}
+
+fn route_candidate_allowed(model: &ModelDescriptor, request: &RouteRequest, inventory: &ModelInventory) -> bool {
+    if !automatic_choice_allowed(model, inventory) {
+        return false;
+    }
     if !matches!(request.effective_role(), RouteRole::Coding | RouteRole::Debugging) {
         return true;
     }
     match request.context.policy {
         // Architect: the top band is the classifier's verdict on the connected
         // inventory — the same fact the ladder and the implementation lane
-        // read — and it implements only after the failures the contract asks.
+        // read — and it implements only after the failures the contract asks,
+        // or on the hard rung the classifier gave it (a provider with one
+        // implementer below its top, t-45961).
         SmartPolicy::Architect => {
             model.band() != ModelBand::Superseded
                 && (model.band() != ModelBand::Top
-                || implementation_escalation_allowed(
-                    escalate_complexity(request.context.complexity, request.context.prior_failures),
-                    request.context.prior_failures,
-                    request.context.policy,
-                ))
+                    || top_takes_its_rung(model)
+                    || implementation_escalation_allowed(
+                        escalate_complexity(request.context.complexity, request.context.prior_failures),
+                        request.context.prior_failures,
+                        request.context.policy,
+                    ))
         }
-        // Classic keeps the pre-contract rule, byte for byte: only the
-        // catalog's reserved models are held back, and a Large task admits them.
+        // Classic keeps the pre-contract rule, byte for byte past the older
+        // releases held out above: only the catalog's reserved models are
+        // held back, and a Large task admits them.
         SmartPolicy::Classic => implementation_route_model_allowed(
             model.id(),
             request.context.complexity,
