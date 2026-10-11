@@ -16,6 +16,10 @@ use std::collections::BTreeSet;
 
 use super::inventory::ModelDescriptor;
 use super::policy::{ModelCapability, ModelStatus, ModelTier};
+use super::tier_judgment::TierSource;
+
+#[cfg(test)]
+mod tests;
 
 /// Where a model stands within its provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -81,6 +85,12 @@ pub struct ModelTierAssignment {
     pub rank: usize,
     pub band: ModelBand,
     pub rungs: BTreeSet<ImplRung>,
+    /// Who placed it: the Jev seat's judgment, the fact rule, or the facts
+    /// for a model that arrived after its provider's judgment.
+    pub source: TierSource,
+    /// How sure the judgment was, in thousandths; `None` when no judgment
+    /// placed it.
+    pub confidence_permille: Option<u16>,
 }
 
 /// The capability order within a provider, most capable first. Every term is
@@ -174,6 +184,8 @@ pub fn classify_model_tiers(models: &[ModelDescriptor]) -> Vec<ModelTierAssignme
                 rank: rank + 1,
                 band,
                 rungs,
+                source: TierSource::FactRule,
+                confidence_permille: None,
             });
         }
         for model in superseded {
@@ -183,6 +195,8 @@ pub fn classify_model_tiers(models: &[ModelDescriptor]) -> Vec<ModelTierAssignme
                 rank: ordered.len() + 1,
                 band: ModelBand::Superseded,
                 rungs: BTreeSet::new(),
+                source: TierSource::FactRule,
+                confidence_permille: None,
             });
         }
     }

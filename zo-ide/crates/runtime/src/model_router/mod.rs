@@ -20,6 +20,7 @@ mod policy;
 mod probe;
 mod selector;
 mod target;
+mod tier_judgment;
 mod tiering;
 
 #[cfg(test)]
@@ -33,8 +34,9 @@ pub use assignment::{
     AssignmentSource, AutoAssignmentOptions, AutoAssignmentPlan, InventorySummary, TargetAssignment,
 };
 pub use inventory::{
-    ModelDescriptor, ModelInventory, ModelSource, UsableModel, UsableModelInventory,
+    ListPrice, ModelDescriptor, ModelInventory, ModelSource, UsableModel, UsableModelInventory,
 };
+pub use tier_judgment::{classify_model_tiers_judged, JudgedPlace, TierJudgment, TierSource};
 pub use tiering::{classify_model_tiers, ImplRung, ModelBand, ModelTierAssignment};
 pub use plan::{
     choose_plan, plan_candidates, plan_evidence_from_records, score_plan,

@@ -231,6 +231,38 @@ fn a_late_answer_leaves_both_defaults_after_one_wall() {
     assert_eq!(model.receipt.unwrap()["applied"], false);
 }
 
+/// t-45961: a summons nobody judged runs the provider's top implementation
+/// model — the classifier's hard rung, `model-a` here — and never the
+/// ladder's middle row, which a misjudged lineup put on its weakest model
+/// (10-10~11: six summonses out of six on the cheapest model). The reply
+/// says the facts chose, not that nothing did.
+#[test]
+fn an_unjudged_summons_runs_the_top_implementer_and_says_who_chose() {
+    let launcher = Assigned::late();
+    let (reply, _) = summon(&launcher);
+    assert_eq!(reply["model"], "model-a", "{reply}");
+    assert_ne!(reply["dials"]["difficultyFrom"], "fallback", "{reply}");
+    assert_eq!(reply["dials"]["difficultyFrom"], "facts", "{reply}");
+    assert_eq!(reply["dials"]["modelFrom"], "lineup", "{reply}");
+}
+
+/// t-45961: the person's own row for unjudged work comes before the facts.
+#[test]
+fn an_unjudged_summons_runs_the_persons_row_before_the_facts() {
+    let mut launcher = Assigned::late();
+    launcher.settings = serde_json::json!({crate::jev::SMART_SETTINGS_KEY: {PROFILES_SETTING: {
+        "claude": {LADDER[2].0: {"model": "model-b", "effort": "high"}},
+    }}});
+    let (reply, _) = summon(&launcher);
+    assert_eq!(
+        (reply["model"].as_str(), reply["effort"].as_str()),
+        (Some("model-b"), Some("high")),
+        "{reply}"
+    );
+    assert_eq!(reply["dials"]["difficultyFrom"], "person", "{reply}");
+    assert_eq!(reply["dials"]["modelFrom"], "person", "{reply}");
+}
+
 /// A2, A4: the model question rides before the difficulty is known; when the
 /// difficulty lands on a row the person wrote, the person's model runs and
 /// the model seat's row says its answer was not carried out.
