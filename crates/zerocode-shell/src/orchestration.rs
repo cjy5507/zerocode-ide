@@ -3277,6 +3277,10 @@ impl Launcher for LiveCatalog {
         summon_difficulty::rows(agent)
     }
 
+    fn summon_judgment(&self) -> Option<zerocode_core::orchestration::SummonJudgment> {
+        Some(summon_difficulty::judgment())
+    }
+
     fn model_facts(
         &self,
         agent: &str,

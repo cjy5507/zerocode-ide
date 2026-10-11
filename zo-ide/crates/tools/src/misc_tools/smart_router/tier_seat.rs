@@ -33,7 +33,7 @@ use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_
 pub const TIER_JUDGMENT_FILE: &str = "tier-judgment.json";
 
 /// The wall one lineup's judgment is held to.
-pub const TIER_JUDGMENT_DEADLINE: Duration = Duration::from_millis(zerocode_core::jev::MODEL_TIERS_APPLY_DEADLINE_MS);
+pub const TIER_JUDGMENT_DEADLINE: Duration = Duration::from_millis(zerocode_core::jev::MODEL_TIERS_DEADLINE_MS);
 
 /// Where the lineups' judgments are kept: beside zo's model catalog cache.
 #[must_use]

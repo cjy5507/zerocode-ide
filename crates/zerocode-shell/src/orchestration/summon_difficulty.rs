@@ -223,6 +223,26 @@ pub(super) fn model_facts(
     })
 }
 
+/// The difficulty seat as `agent-list` shows it (t-45961): its mode on this
+/// machine and how its last recorded question ended — the outcome word only
+/// (an HTTP status, a refusal, a wall), never a key.
+pub(super) fn judgment() -> zerocode_core::orchestration::SummonJudgment {
+    let wire = Wire::of_this_machine();
+    let last = crate::systemone::ledger_of(&wire, &SUMMON_DIFFICULTY)
+        .map(|path| crate::systemone::read_rows(&path))
+        .and_then(|rows| rows.last().cloned());
+    zerocode_core::orchestration::SummonJudgment {
+        mode: SUMMON_DIFFICULTY
+            .mode_in(&wire.settings_root())
+            .key()
+            .to_string(),
+        last_outcome: last
+            .as_ref()
+            .and_then(|row| row["outcome"].as_str().map(str::to_string)),
+        last_at_ms: last.as_ref().and_then(|row| row["at"].as_i64()),
+    }
+}
+
 /// Every difficulty's launch row for `agent` as the window reads today —
 /// `agent-list`'s peek (t-14437). `None` while no lineup has been read at
 /// all, which is "nobody looked" and not "no choices".

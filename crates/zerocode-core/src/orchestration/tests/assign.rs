@@ -249,6 +249,55 @@ fn an_unjudged_summons_runs_the_top_implementer_and_says_who_chose() {
     assert_ne!(reply["dials"]["difficultyFrom"], "fallback", "{reply}");
     assert_eq!(reply["dials"]["difficultyFrom"], "facts", "{reply}");
     assert_eq!(reply["dials"]["modelFrom"], "lineup", "{reply}");
+    // And why no judgment chose, in a word and in words (the coordinator,
+    // 10-11: this machine's Jev requests come back refused).
+    assert_eq!(reply["dials"]["unjudged"]["why"], "timeout", "{reply}");
+    assert!(
+        reply["dials"]["unjudged"]["says"]
+            .as_str()
+            .is_some_and(|says| says.contains("time limit")),
+        "{reply}"
+    );
+}
+
+/// t-45961: agent-list says whether summonses are being judged and why not
+/// — here the judgment service refused the last request with HTTP 402 —
+/// and what a summons nobody judged runs; a host that cannot say says
+/// nothing.
+#[test]
+fn agent_list_says_why_summonses_go_unjudged() {
+    struct Refusing;
+    impl Launcher for Refusing {
+        fn command_for(
+            &self,
+            agent: &str,
+            prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            Catalog(&["claude"]).command_for(agent, prompt, tuning)
+        }
+        fn summon_judgment(&self) -> Option<SummonJudgment> {
+            Some(SummonJudgment {
+                mode: crate::jev::JevMode::Auto.key().to_string(),
+                last_outcome: Some("http_402".to_string()),
+                last_at_ms: Some(1),
+            })
+        }
+    }
+    let said = answered(&Refusing, "agent-list");
+    let seat = &said["summonJudgment"];
+    assert_eq!(seat["unjudged"]["why"], "http_402", "{said}");
+    assert!(
+        seat["unjudged"]["says"]
+            .as_str()
+            .is_some_and(|says| says.contains("HTTP 402")),
+        "{seat}"
+    );
+    assert_eq!(seat["unjudgedRuns"], UNJUDGED_DIFFICULTY);
+    assert!(
+        answered(&Catalog(&["claude"]), "agent-list")["summonJudgment"].is_null(),
+        "a host that cannot say says nothing"
+    );
 }
 
 /// t-45961: the person's own row for unjudged work comes before the facts.

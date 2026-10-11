@@ -1950,12 +1950,14 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     ),
 };
 
-/// How long a lineup's judgment may take before its classification goes on
+/// How long a lineup's question may take before its classification goes on
 /// without it (t-45961). A lineup is judged once when its facts change, on
 /// the `zo models` call that reads it — a background read the window
 /// repeats hourly, never a summons — so the wall is the routing seat's own
-/// order of patience rather than a step's.
-pub const MODEL_TIERS_APPLY_DEADLINE_MS: u64 = 4_000;
+/// order of patience rather than a step's. Not the row's apply wall: the
+/// seat never rises, so it names none (`apply_deadline_ms`), like the
+/// agent's own tool, whose wall is its own constant too.
+pub const MODEL_TIERS_DEADLINE_MS: u64 = 4_000;
 
 /// zo's model tier seat (t-45961): where each model of one provider's lineup
 /// stands — which work it can be trusted with, read off the catalog facts
@@ -1986,12 +1988,13 @@ pub const MODEL_TIERS: JevUse = JevUse {
     answer_floor_permille: None,
     press_floor_permille: None,
     agreement_floor_permille: None,
-    apply_deadline_ms: Some(MODEL_TIERS_APPLY_DEADLINE_MS),
+    apply_deadline_ms: None,
     window_forgives: None,
     agreement_rows_wanted: None,
     agreement_kind: AgreementKind::Comparison,
-    // What places a model without the seat: the fact rule.
-    baseline: Baseline::TodaysRule,
+    // What places a model without the seat is the fact rule, but a seat that
+    // never rises compares against no baseline.
+    baseline: Baseline::None,
     negatives_wanted: None,
     confidence_bands: None,
     reads_act_line: false,

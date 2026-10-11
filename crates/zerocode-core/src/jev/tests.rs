@@ -3342,6 +3342,7 @@ fn every_seat_offers_no_option_without_the_words_that_say_what_it_means() {
                     PATCH_REVIEW.id,
                     CLAIM.id,
                     FILE_PICK.id,
+                    MODEL_TIERS.id,
                 ]
                 .contains(&id) =>
                 {
@@ -3543,11 +3544,12 @@ fn the_model_tier_seat_sends_facts_and_applies_under_on() {
     assert_eq!(MODEL_TIERS.recommended, JevMode::On);
     assert!(!MODEL_TIERS.modes.contains(&JevMode::Auto));
     const { assert!(!MODEL_TIERS.promotes) };
-    assert_eq!(MODEL_TIERS.baseline, Baseline::TodaysRule);
+    assert_eq!(MODEL_TIERS.baseline, Baseline::None);
     assert_eq!(
-        MODEL_TIERS.apply_deadline_ms,
-        Some(MODEL_TIERS_APPLY_DEADLINE_MS)
+        MODEL_TIERS.apply_deadline_ms, None,
+        "a seat that never rises names no apply wall"
     );
+    assert!(MODEL_TIERS_DEADLINE_MS > 0);
     assert_eq!(
         MODEL_TIERS.rubric_version,
         questions::MODEL_TIERS_RUBRIC_VERSION
