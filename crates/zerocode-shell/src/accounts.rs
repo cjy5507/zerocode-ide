@@ -1604,15 +1604,13 @@ fn run_login(program: &str, dir: &Path) -> Result<(), String> {
     use std::io::Read;
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     seed_scoped_keychain(dir)?;
-    let mut command = crate::proc::quiet_command(program);
     // The shell's PATH, when it has answered. `Command` resolves a bare program
     // name against the CHILD's PATH on unix, and a Finder-launched app's own
     // PATH has no homebrew and no npm on it — without this line, the add button
     // works from a terminal and fails from the Dock, which is exactly how the
-    // detection bug shipped. See `shell_path`.
-    if let Some(path) = crate::shell_path::hydrated() {
-        command.env("PATH", path);
-    }
+    // detection bug shipped. See `shell_path`. The door resolves the name on
+    // that PATH itself, so the spawn never forks the window (t-47141).
+    let mut command = crate::proc::quiet_command_on_path(program, crate::shell_path::hydrated());
     let mut child = command
         .args(["auth", "login", "--claudeai"])
         .env(zerocode_core::CONFIG_DIR_VAR, dir)
@@ -1787,10 +1785,7 @@ fn login_status_in(
     secure_storage_dir: &Path,
 ) -> Option<serde_json::Value> {
     seed_scoped_keychain(secure_storage_dir).ok()?;
-    let mut command = crate::proc::quiet_command(program);
-    if let Some(path) = crate::shell_path::hydrated() {
-        command.env("PATH", path);
-    }
+    let mut command = crate::proc::quiet_command_on_path(program, crate::shell_path::hydrated());
     let mut child = command
         .args(["auth", "status"])
         .env(zerocode_core::CONFIG_DIR_VAR, config_dir)

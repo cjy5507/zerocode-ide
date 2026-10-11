@@ -22479,9 +22479,8 @@ mod dock_launched_usage_probes {
             ),
         );
         let stand_in = std::env::current_exe().expect("this test binary");
-        let output = crate::proc::quiet_command(&stand_in)
+        let output = crate::proc::quiet_command_on_path(&stand_in, Some(LAUNCHD_PATH))
             .args(["--exact", STAND_IN_TEST, "--nocapture"])
-            .env("PATH", LAUNCHD_PATH)
             .env("HOME", &home)
             .env("SHELL", &shell)
             .env(ROOT_VAR, &config)

@@ -2974,10 +2974,9 @@ mod tests {
         std::fs::write(&script, body).expect("script");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("script mode");
-        let output = crate::proc::quiet_command("/bin/sh")
+        let output = crate::proc::quiet_command_on_path("/bin/sh", Some("/usr/bin:/bin"))
             .arg(&script)
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
             .env(zerocode_hookd::env_var::ENDPOINT, &endpoint)
             .env(zerocode_hookd::env_var::BROWSER_TOKEN_FILE, browser)
             .output()
@@ -4316,9 +4315,8 @@ mod tests {
         write_shim_dir(&shims, &mirror, &[("fake-agent".to_string(), real.clone())])
             .expect("write wrapper");
         let shim = shims.join("fake-agent");
-        let output = crate::proc::quiet_command(&shim)
+        let output = crate::proc::quiet_command_on_path(&shim, Some("/usr/bin:/bin"))
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
             .env(zerocode_hookd::env_var::ENDPOINT, &endpoint)
             .env(zerocode_hookd::env_var::TEAM_TOKEN_FILE, team_token.clone())
             .output()
@@ -4333,9 +4331,8 @@ mod tests {
         );
 
         std::fs::remove_file(&mirror).expect("remove mirror");
-        let output = crate::proc::quiet_command(&shim)
+        let output = crate::proc::quiet_command_on_path(&shim, Some("/usr/bin:/bin"))
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
             .env(zerocode_hookd::env_var::ENDPOINT, &endpoint)
             .env(zerocode_hookd::env_var::TEAM_TOKEN_FILE, team_token)
             .output()
@@ -4483,12 +4480,11 @@ mod tests {
             )],
         );
         let run = |pane_key: &str, file_var: Option<&Path>| {
-            let mut command = crate::proc::quiet_command("/bin/sh");
+            let mut command = crate::proc::quiet_command_on_path("/bin/sh", Some("/usr/bin:/bin"));
             command
                 .arg("-c")
                 .arg(&script)
                 .env_clear()
-                .env("PATH", "/usr/bin:/bin")
                 .env("ZEROCODE_HOOK_ENDPOINT", &endpoint)
                 .env("ZEROCODE_PANE_KEY", pane_key);
             if let Some(file) = file_var {
@@ -4519,11 +4515,10 @@ mod tests {
         // A Windows window hands the same path spelled with backslashes; the
         // loader reads the grant through it all the same.
         let backslashed = endpoint.to_string_lossy().replace('/', "\\");
-        let out = crate::proc::quiet_command("/bin/sh")
+        let out = crate::proc::quiet_command_on_path("/bin/sh", Some("/usr/bin:/bin"))
             .arg("-c")
             .arg(&script)
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
             .env("ZEROCODE_HOOK_ENDPOINT", &backslashed)
             .env("ZEROCODE_PANE_KEY", "term-7")
             .output()
@@ -4586,11 +4581,10 @@ mod tests {
             )],
         );
         let run = |pane_key: &str| {
-            let out = crate::proc::quiet_command("/bin/sh")
+            let out = crate::proc::quiet_command_on_path("/bin/sh", Some("/usr/bin:/bin"))
                 .arg("-c")
                 .arg(&script)
                 .env_clear()
-                .env("PATH", "/usr/bin:/bin")
                 .env("ZEROCODE_HOOK_ENDPOINT", &endpoint)
                 .env("ZEROCODE_PANE_KEY", pane_key)
                 .output()
@@ -4822,7 +4816,7 @@ mod tests {
             "zerocode-emulator",
             "zerocode-ssh",
         ] {
-            let out = crate::proc::quiet_command("powershell.exe")
+            let out = crate::proc::quiet_command_on_path("powershell.exe", Some(&path))
                 .args([
                     "-NoProfile",
                     "-NonInteractive",
@@ -4831,7 +4825,6 @@ mod tests {
                     "-Command",
                     &format!("{door} --help"),
                 ])
-                .env("PATH", &path)
                 .output()
                 .expect("powershell.exe");
             assert!(
@@ -4844,9 +4837,8 @@ mod tests {
                 String::from_utf8_lossy(&out.stdout).contains(door),
                 "{door} --help did not print its manual"
             );
-            let out = crate::proc::quiet_command("cmd.exe")
+            let out = crate::proc::quiet_command_on_path("cmd.exe", Some(&path))
                 .args(["/d", "/c", &format!("{door} --help")])
-                .env("PATH", &path)
                 .output()
                 .expect("cmd.exe");
             assert!(
@@ -4903,9 +4895,8 @@ mod tests {
             axis(
                 "door.cmd.powershell.help",
                 Box::new(move || {
-                    crate::proc::quiet_command("cmd.exe")
+                    crate::proc::quiet_command_on_path("cmd.exe", Some(&cmd_path))
                         .args(["/d", "/c", "zerocode-computer --help"])
-                        .env("PATH", &cmd_path)
                         .output()
                         .expect("cmd.exe")
                 }),

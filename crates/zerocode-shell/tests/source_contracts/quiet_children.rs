@@ -126,6 +126,38 @@ window flashes a console window on Windows (AO #5309):\n  {}",
     );
 }
 
+/// std 의 `Command::spawn` 은 프로그램이 경로이거나 명령이 `PATH` 를 건드리지
+/// 않았을 때만 `posix_spawn` 을 타고, 맨 이름에 제 `PATH` 를 준 명령은
+/// `fork` 로 떨어진다(`library/std/src/sys/process/unix`, `env_saw_path()
+/// && !program_is_path()`). 창의 fork 는 exec 전에 CEF/XPC 의 atfork 처리기
+/// 안에서 영원히 멈출 수 있고, 그 사이 쥔 잠금 하나가 세 시간 동안 모든
+/// 원장 명령을 「this window is busy」로 만들었다(t-47141). 그래서 자식에게
+/// 제 `PATH` 를 주는 자리는 그 `PATH` 위에서 이름을 먼저 푸는 문
+/// `proc::quiet_command_on_path` 하나뿐이고, 다른 소스는 자식에게 `PATH` 를
+/// 건네지 않는다.
+#[test]
+fn a_child_given_a_path_of_its_own_is_named_by_the_door_that_resolves_it() {
+    let mut offenders = Vec::new();
+    for (name, source) in shell_sources() {
+        if name == "proc.rs" {
+            continue;
+        }
+        let count = strip_rust_comments(&source)
+            .matches(".env(\"PATH\"")
+            .count();
+        if count > 0 {
+            offenders.push(format!("{name}: {count}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these sources hand a child a PATH outside `proc::quiet_command_on_path`, so a bare \
+program name there makes std fork the window, and a fork of the window can stop for good \
+before it execs (t-47141):\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
 #[test]
 fn the_flag_is_spelled_once_and_only_the_door_reaches_for_it() {
     let sources = shell_sources();
@@ -163,6 +195,10 @@ fn the_flag_is_spelled_once_and_only_the_door_reaches_for_it() {
 /// 116 곳을 한 문으로 모으는 일이 **동작을 바꾸지 않는다**는 것이 이 과업의
 /// 값이다. 문이 플래그 말고 아무것도 건드리지 않으면, 자식의 인자도 환경도
 /// cwd 도 stdio 도 부르는 쪽이 쓴 그대로다.
+///
+/// 세 번째 문 `quiet_command_on_path` 는 하나만 더 한다: 받은 `PATH` 를 자식의
+/// 환경에 그대로 세운다(`.env("PATH"` 한 번). 이름을 그 `PATH` 위에서 푸는
+/// 것은 `execvp` 가 했을 걸음이라 자식이 보는 것은 같고, fork 만 없다(t-47141).
 #[test]
 fn the_door_only_adds_a_flag() {
     let door = code_only(
@@ -170,6 +206,9 @@ fn the_door_only_adds_a_flag() {
             .expect("the door"),
     );
     let (shipped, _) = door.split_once("#[cfg(test)]").unwrap_or((&door, ""));
+    let (flag_doors, path_door) = shipped
+        .split_once("fn quiet_command_on_path(")
+        .expect("the PATH door follows the two flag doors");
     for forbidden in [
         ".arg(",
         ".args(",
@@ -183,9 +222,15 @@ fn the_door_only_adds_a_flag() {
         ".stderr(",
     ] {
         assert!(
-            !shipped.contains(forbidden),
+            !flag_doors.contains(forbidden),
             "the door touched `{forbidden}`: it may add a flag and nothing else, \
 or every call site quietly changed what it runs"
+        );
+        let allowed = forbidden == ".env(";
+        assert_eq!(
+            path_door.matches(forbidden).count(),
+            usize::from(allowed),
+            "the PATH door may set `PATH` once and touch nothing else, but it reached for `{forbidden}`"
         );
     }
 }

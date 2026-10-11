@@ -22829,7 +22829,8 @@ mod tests {
         let runner = strip_rust_comments(include_str!("../../src/vendor_cli.rs"));
         let shipped = runner.split("mod tests {").next().expect("a module body");
         assert!(
-            shipped.matches("proc::quiet_command(").count() == 1
+            shipped.matches("proc::quiet_command_on_path(").count() == 1
+                && !shipped.contains("proc::quiet_command(")
                 && shipped.contains("shell_path::hydrated()")
                 && shipped.contains("trait CliRunner"),
             "vendor CLI execution forked outside the injectable, shell-PATH-aware runner"
@@ -24704,12 +24705,13 @@ mod tests {
         );
 
         // The account login spawns `claude` by name too, and `Command` resolves
-        // a bare name against the CHILD's PATH — so it gets the hydrated one.
+        // a bare name against the CHILD's PATH — so it gets the hydrated one,
+        // through the door that resolves the name on it first (t-47141).
         let accounts = include_str!("../../src/accounts.rs");
         let logging_in = block_after(accounts, "fn run_login(");
         assert!(
-            logging_in.contains("shell_path::hydrated()")
-                && logging_in.contains("command.env(\"PATH\", path)"),
+            logging_in
+                .contains("proc::quiet_command_on_path(program, crate::shell_path::hydrated())"),
             "the account login no longer carries the shell's PATH:\n{logging_in}"
         );
         // And it runs the SUBCOMMAND, not the REPL. `/login` starts the

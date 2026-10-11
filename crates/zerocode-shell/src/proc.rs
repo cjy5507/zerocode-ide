@@ -47,6 +47,64 @@ pub(crate) fn quiet_tokio_command(program: impl AsRef<OsStr>) -> tokio::process:
     command
 }
 
+/// 자식에게 제 `PATH` 를 주는 문 — 이름은 그 `PATH` 위에서 먼저 풀린다.
+///
+/// std 의 `Command::spawn` 은 프로그램이 경로이거나 명령이 `PATH` 를 건드리지
+/// 않았을 때만 `posix_spawn` 을 타고, 맨 이름에 제 `PATH` 를 준 명령은
+/// `fork` 로 떨어진다(`library/std/src/sys/process/unix`: `env_saw_path()
+/// && !program_is_path()`). 창의 fork 는 exec 전에 CEF/XPC 의 atfork
+/// 처리기 안에서 영원히 멈출 수 있다(t-47141). 그래서 unix 에서는 맨 이름을
+/// `execvp` 가 했을 걸음 그대로 — `path` 의 디렉터리 차례로, 실행 비트가 선
+/// 보통 파일 — 절대 경로로 풀어 넘기고, 못 찾으면 첫 디렉터리 아래 그 이름을
+/// 넘겨 `posix_spawn` 이 `NotFound` 로 답하게 한다. 어느 쪽이든 fork 는 없다.
+/// windows 는 `CreateProcess` 라 이름을 그대로 둔다. `path` 가 `None` 이면
+/// 자식은 이 프로세스의 `PATH` 를 물려받는다 — `PATH` 를 건드리지 않았으니
+/// 그 길도 `posix_spawn` 이다.
+pub(crate) fn quiet_command_on_path(
+    program: impl AsRef<OsStr>,
+    path: Option<impl AsRef<OsStr>>,
+) -> std::process::Command {
+    let Some(path) = path else {
+        return quiet_command(program);
+    };
+    let path = path.as_ref();
+    #[cfg(unix)]
+    let mut command = quiet_command(resolve_on_path(program.as_ref(), path));
+    #[cfg(not(unix))]
+    let mut command = quiet_command(program);
+    command.env("PATH", path);
+    command
+}
+
+/// `execvp` 의 걸음: 이름에 `/` 가 있으면 그대로, 없으면 `path` 의 디렉터리
+/// 차례로 실행 비트가 선 보통 파일. 없으면 첫 디렉터리(없으면 루트) 아래
+/// 그 이름 — 존재하지 않는 절대 경로라 spawn 이 `NotFound` 로 답한다.
+#[cfg(unix)]
+fn resolve_on_path(program: &OsStr, path: &OsStr) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if program.as_bytes().contains(&b'/') {
+        return std::path::PathBuf::from(program);
+    }
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect();
+    dirs.iter()
+        .map(|dir| dir.join(program))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .map(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| {
+            dirs.first()
+                .cloned()
+                .unwrap_or_else(|| std::path::PathBuf::from("/"))
+                .join(program)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +179,66 @@ mod tests {
             bare / ROUNDS,
             door / ROUNDS
         );
+    }
+
+    /// 제 `PATH` 를 받은 자식은 OS 에 절대 경로로 넘어간다 — `execvp` 의
+    /// 걸음대로 `PATH` 차례의 첫 실행 파일이고, 실행 비트 없는 같은 이름은
+    /// 지나친다. 그래서 std 는 fork 가 아니라 `posix_spawn` 을 탄다(t-47141).
+    /// `PATH` 자체도 자식의 환경에 그대로 선다.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_given_a_path_is_named_by_the_first_executable_on_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("a temp dir");
+        let plain = root.path().join("plain");
+        let real = root.path().join("real");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(plain.join("zo-probe"), "#!/bin/sh\n").unwrap();
+        std::fs::write(real.join("zo-probe"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(
+            real.join("zo-probe"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let path = std::env::join_paths([plain.as_path(), real.as_path()]).unwrap();
+
+        let command = quiet_command_on_path("zo-probe", Some(&path));
+        assert_eq!(command.get_program(), real.join("zo-probe").as_os_str());
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == "PATH" && value == Some(path.as_os_str())),
+            "the child keeps the PATH it was given: {command:?}"
+        );
+    }
+
+    /// 이름이 `PATH` 어디에도 없으면 첫 디렉터리 아래 그 이름 — 존재하지
+    /// 않는 절대 경로다. spawn 은 `NotFound` 로 답하고, fork 는 없다. 이미
+    /// 경로인 프로그램은 손대지 않고, `PATH` 를 주지 않으면 문은 이름도
+    /// 환경도 그대로 둔다.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_not_on_the_path_still_becomes_an_absolute_path_and_a_path_stays_itself() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let path = std::env::join_paths([root.path()]).unwrap();
+
+        let mut missing = quiet_command_on_path("zo-nowhere", Some(&path));
+        assert_eq!(
+            missing.get_program(),
+            root.path().join("zo-nowhere").as_os_str()
+        );
+        assert!(matches!(
+            missing.output().map(|_| ()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+
+        let given = quiet_command_on_path("/bin/echo", Some(&path));
+        assert_eq!(given.get_program(), "/bin/echo");
+
+        let inherited = quiet_command_on_path("zo-nowhere", None::<&str>);
+        assert_eq!(inherited.get_program(), "zo-nowhere");
+        assert_eq!(inherited.get_envs().count(), 0);
     }
 }

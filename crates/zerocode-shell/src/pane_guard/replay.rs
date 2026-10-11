@@ -900,16 +900,18 @@ fn every_agents_turns_on_the_real_wire() {
 /// Run `script` with `payload` on its stdin, as its agent would, and time it.
 fn knock(script: &Path, env: &[(&str, String)], payload: &str) -> Duration {
     let began = Instant::now();
-    let mut child = crate::proc::quiet_command("/bin/sh")
-        .arg(script)
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .envs(env.iter().map(|(name, value)| (*name, value.as_str())))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the hook script");
+    let mut child = crate::proc::quiet_command_on_path(
+        "/bin/sh",
+        Some(std::env::var("PATH").unwrap_or_default()),
+    )
+    .arg(script)
+    .env_clear()
+    .envs(env.iter().map(|(name, value)| (*name, value.as_str())))
+    .stdin(Stdio::piped())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .expect("the hook script");
     if let Some(stdin) = child.stdin.as_mut() {
         let _ = stdin.write_all(payload.as_bytes());
     }
