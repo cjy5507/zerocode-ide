@@ -15372,6 +15372,37 @@ fn lift_told(run: &Run, dispatch_id: &str, wall_id: &str) -> bool {
     })
 }
 
+/* ---- the chip a walled worker wears (t-39771) — RED: the surface alone -- */
+
+/// The two facts about a walled worker only the window can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WallChipSeat {
+    pub worker_here: bool,
+    pub coordinator_here: bool,
+}
+
+/// What a worker standing at its quota wall is shown as (t-39771, RED).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct QuotaWallChip {
+    pub wall: String,
+    pub observed_at_ms: i64,
+    pub resets_at_ms: Option<i64>,
+    pub stands_until_ms: i64,
+    pub declared_alt: Option<Pinned>,
+    pub retry_refusal: Option<String>,
+    pub hand_over_refusal: Option<String>,
+}
+
+/// RED (t-39771): no worker wears a chip yet.
+pub fn wall_chip_for(
+    _run: &Run,
+    worker: &Worker,
+    _seat: WallChipSeat,
+    _now_ms: i64,
+) -> Result<QuotaWallChip, String> {
+    Err(format!("worker {} wears no quota-wall chip yet", worker.id))
+}
+
 /// Read one wall's lift off the agent's own words and the provider's number
 /// (t-6427) — two witnesses, the wall's own rule turned round. Words that
 /// moved past the wall are another silence; a number taken before the reset,
@@ -15484,6 +15515,24 @@ pub struct TransientErrorMarker {
 /// for the continuation it asks for, so [`resume_plan`] does not also ask for
 /// `--on-transient-error resume`; every other line of the plan still holds.
 pub const JEV_MARKER_SOURCE: &str = "jev";
+
+/// RED (t-39771): the press's words, and no press yet.
+pub const RESUME_IN_FLIGHT: &str = "a continuation is already being typed";
+pub const PERSON_MARKER_SOURCE: &str = "person";
+pub const WALL_RETRY_LINE: &str =
+    "The usage limit may have lifted; try again and continue from where you left off.";
+
+/// RED (t-39771): every continuation types the transient error's sentence.
+#[must_use]
+pub fn resume_line(_marker: &TransientErrorMarker) -> &'static str {
+    RESUME_LINE
+}
+
+/// RED (t-39771): no marker stands for a person's press yet.
+#[must_use]
+pub fn person_wall_marker(_run: &Run, _worker_id: &str) -> Option<TransientErrorMarker> {
+    None
+}
 
 /// One continuation the beat may type now — what [`resume_plan`] makes of a
 /// quiet worker, its marker and the run's declared order.

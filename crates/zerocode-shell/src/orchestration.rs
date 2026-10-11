@@ -41,6 +41,7 @@ mod summon_assign;
 mod summon_choice;
 mod summon_difficulty;
 mod summon_model;
+pub(crate) mod wall_press;
 mod writing_book;
 
 use std::path::{Path, PathBuf};
@@ -2107,6 +2108,8 @@ pub(crate) struct LedgerAgent {
     /// wall explains its silence. Standing is the reader's `now` against
     /// `stands_until_ms`.
     pub(crate) wall: Option<zerocode_core::orchestration::WallAt>,
+    /// The chip a walled worker wears (t-39771) — RED: never laid on yet.
+    pub(crate) quota_wall: Option<zerocode_core::orchestration::QuotaWallChip>,
     /// The last quiet turn its hook reported (`Worker::quiet_at`).
     pub(crate) quiet_at: Option<i64>,
     /// The reconciler's proof that its pane is gone (`Worker::pane_missing_since_ms`).
@@ -2652,6 +2655,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 asking: run.awaiting_reply(&worker.id),
                 wall: dispatch
                     .and_then(|one| zerocode_core::orchestration::newest_wall(run, &one.id)),
+                quota_wall: None,
                 quiet_at: worker.quiet_at,
                 pane_missing_since_ms: worker.pane_missing_since_ms,
                 cost: None,
@@ -8753,6 +8757,53 @@ pub(crate) fn walk_handover(
         handover,
         replacement,
     }
+}
+
+/// Step ②'s argv (t-39771, RED: built, and not yet the walk's own).
+pub(crate) fn handover_stop_argv(worker: &str, reason: &str, dispatch: &str) -> Vec<String> {
+    vec![
+        "worker-stop".to_string(),
+        "--worker".to_string(),
+        worker.to_string(),
+        "--reason".to_string(),
+        reason.to_string(),
+        "--retry-request".to_string(),
+        format!("handover-{dispatch}-stop"),
+    ]
+}
+
+/// Step ③'s argv (t-39771, RED: built, and not yet the walk's own).
+pub(crate) fn handover_start_argv(
+    to: &zerocode_core::orchestration::Pinned,
+    task: &str,
+    dispatch: &str,
+    prompt: String,
+) -> Vec<String> {
+    let mut argv = vec![
+        "worker-start".to_string(),
+        "--agent".to_string(),
+        to.agent.clone(),
+    ];
+    if let Some(model) = to.model.as_ref() {
+        argv.push("--model".to_string());
+        argv.push(model.clone());
+        if let Some(effort) = to.effort.as_ref() {
+            argv.push("--effort".to_string());
+            argv.push(effort.clone());
+        }
+    }
+    argv.extend([
+        "--task".to_string(),
+        task.to_string(),
+        "--retry-of".to_string(),
+        dispatch.to_string(),
+        "--inherit-checkout".to_string(),
+        "--retry-request".to_string(),
+        format!("handover-{dispatch}-start"),
+        "--prompt".to_string(),
+        prompt,
+    ]);
+    argv
 }
 
 /// The seat a run's coordinator holds, as a verb presents it to [`run`]:

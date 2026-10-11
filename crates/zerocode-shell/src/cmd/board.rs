@@ -359,6 +359,65 @@ pub(crate) async fn desk_ack(
     .map_err(|error| error.to_string())?
 }
 
+/// 「지금 다시 시도」 on a quota-wall chip (t-39771): type one continuation at a
+/// worker standing at its wall, through the ledger's resume road
+/// (`wall_press::retry`). The main window only, and only after the renderer's
+/// own confirm: no beat, hook or worker endpoint reaches this command, and a
+/// press the ledger no longer takes (the wall lifted, an account switch moved
+/// the worker) is refused here whatever the chip still shows.
+#[tauri::command]
+pub(crate) async fn quota_wall_retry(
+    app: AppHandle,
+    webview: tauri::Webview,
+    run: String,
+    worker: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = crate::agent_tools_runtime::TeamWindow { app };
+        crate::orchestration::wall_press::retry(&host, &run, &worker, crate::now_epoch_ms())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 「다른 에이전트로 넘기기」 on a quota-wall chip (t-39771): end the walled
+/// attempt and start `to` (`agent[:model[:effort]]`, or the alternative a
+/// standing order names when left out) on its task in the same checkout, with
+/// the verbs and request names the beat's own handover walks
+/// (`wall_press::hand_over`). The main window only, after the renderer's
+/// confirm, from the coordinator seat this window holds.
+#[tauri::command]
+pub(crate) async fn quota_wall_handover(
+    app: AppHandle,
+    webview: tauri::Webview,
+    run: String,
+    worker: String,
+    to: Option<String>,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let overrides: Vec<_> = {
+            let state = app.state::<AppState>();
+            crate::stored_launch_overrides(state.settings())
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        };
+        let host = crate::agent_tools_runtime::TeamWindow { app };
+        crate::orchestration::wall_press::hand_over(
+            &host,
+            &overrides,
+            &run,
+            &worker,
+            to.as_deref(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// The task board's worker roster's git facts (t-6588): commits past the
 /// base and changed files for each worker checkout this window catalogues
 /// (`desk_checkout_facts`). git is a process, so the blocking pool.

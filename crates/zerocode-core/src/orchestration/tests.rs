@@ -27585,3 +27585,341 @@ fn delegate_adds_what_the_wait_saw_to_the_first_answer_and_changes_nothing_else(
             .contains("check --wait")
     );
 }
+
+/* ---- a person's press at a quota wall (t-39771) -------------------------- */
+
+/// Both seats a press needs, held by the window that reads the chip.
+const HELD_HERE: WallChipSeat = WallChipSeat {
+    worker_here: true,
+    coordinator_here: true,
+};
+
+/// A press's plan refused, saying `says`.
+fn press_refused(plan: Result<ResumePlan, NotResumed>, says: &str) {
+    match plan {
+        Err(NotResumed::Refused(why)) => assert!(why.contains(says), "{why}"),
+        other => panic!("not refused for `{says}`: {other:?}"),
+    }
+}
+
+/// The chip `worker` of the bench's first run wears at `at`.
+fn chip_of(
+    bench: &Bench,
+    worker: &str,
+    seat: WallChipSeat,
+    at: i64,
+) -> Result<QuotaWallChip, String> {
+    let run = &bench.ledger.runs()[0];
+    wall_chip_for(run, run.worker(worker).expect("the worker"), seat, at)
+}
+
+/// The coordinator's fourth and second conditions on 「지금 다시 시도」
+/// (m-39799): the marker a press stands on is keyed by its attempt and its
+/// wall row — one wall episode, one key — and types the wall's own sentence;
+/// a press waives the two refusals the beat's continuation meets at a wall (no
+/// declared order, the standing wall) and nothing else: a continuation being
+/// typed, a key whose words may be on the line, the spacing and the ceiling
+/// all stand, a try that failed leaves its receipt for the next press to read,
+/// and a press names the wall the attempt stands at NOW — the next wall is a
+/// new key, and a wall that lifted takes no press.
+#[test]
+fn a_persons_press_is_keyed_by_its_wall_and_waives_only_the_order_and_the_wall() {
+    const NOW: i64 = 5_000_000;
+    let spacing = RESUME_POLICY.retry_after_ms;
+    let mut bench = Bench::new();
+    let (worker, _pane, _task, dispatch) = a_walled_claude_worker(&mut bench, NOW);
+    let run_id = bench.ledger.runs()[0].id.clone();
+    let wall = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the wall");
+    let marker = person_wall_marker(&bench.ledger.runs()[0], &worker).expect("a press");
+    assert_eq!(marker.source, PERSON_MARKER_SOURCE);
+    assert_eq!(marker.key, format!("person:{dispatch}:{}", wall.wall));
+    assert_eq!(resume_line(&marker), WALL_RETRY_LINE);
+    assert_eq!(resume_line(&a_transient_marker("k")), RESUME_LINE);
+
+    // No declared order: the beat's continuation is refused for it, and a
+    // press is its own order.
+    press_refused(
+        resume_plan(
+            &bench.ledger.runs()[0],
+            &worker,
+            &a_transient_marker("k1"),
+            NOW + 1,
+        ),
+        "--on-transient-error resume",
+    );
+    resume_plan(&bench.ledger.runs()[0], &worker, &marker, NOW + 1)
+        .expect("a press stands for its own order");
+    // A declared order: the beat's continuation is refused AT the wall, and a
+    // press is asked at it.
+    bench.json("handover-policy --on-transient-error resume");
+    press_refused(
+        resume_plan(
+            &bench.ledger.runs()[0],
+            &worker,
+            &a_transient_marker("k1"),
+            NOW + 1,
+        ),
+        "quota wall",
+    );
+    let plan = resume_plan(&bench.ledger.runs()[0], &worker, &marker, NOW + 1)
+        .expect("a press at the wall");
+    assert_eq!(plan.attempt, 1);
+
+    // Reserved before the words, the wall's sentence on its receipt; pressed
+    // again while it is typed, the same row's and never a second.
+    let first = bench.ledger.resume_begin(&plan, NOW + 1).expect("reserved");
+    let body = resume_receipt(&bench, &first);
+    assert_eq!(body["status"], RESUME_TYPING);
+    assert_eq!(body["marker"]["source"], PERSON_MARKER_SOURCE);
+    assert_eq!(body["marker"]["key"], marker.key.as_str());
+    assert_eq!(body["line"], WALL_RETRY_LINE);
+    assert_eq!(
+        resume_plan(&bench.ledger.runs()[0], &worker, &marker, NOW + spacing),
+        Err(NotResumed::InFlight)
+    );
+    assert!(
+        bench.ledger.resume_begin(&plan, NOW + 2).is_err(),
+        "reserved twice"
+    );
+    // Typed and not seen entered: the receipt stays, and this wall is never
+    // typed at again however long the person waits.
+    let unreported = ResumeOutcome {
+        submitted: false,
+        typed: true,
+        detail: Text::from("no prompt report"),
+    };
+    bench
+        .ledger
+        .resume_settled(&run_id, &first, &unreported, NOW + 2)
+        .expect("settled");
+    press_refused(
+        resume_plan(
+            &bench.ledger.runs()[0],
+            &worker,
+            &marker,
+            NOW + 10 * spacing,
+        ),
+        "already typed",
+    );
+
+    // The next wall, once this one stopped standing: a new key, and the old
+    // key names a wall the attempt no longer stands at.
+    let later = wall.stands_until_ms + 1;
+    let witness = quota_wall_witness(
+        &worker,
+        Some(a_wall_marker("screen", "You've hit your limit")),
+        Some(&gauge(
+            "claude",
+            99,
+            later - 60_000,
+            Some(later + 60 * 60_000),
+        )),
+        later,
+    )
+    .expect("two witnesses");
+    assert_eq!(bench.ledger.workers_quota_walled(&[witness], later), 1);
+    let next = person_wall_marker(&bench.ledger.runs()[0], &worker).expect("the next press");
+    assert_ne!(next.key, marker.key, "two walls, one key");
+    press_refused(
+        resume_plan(&bench.ledger.runs()[0], &worker, &marker, later),
+        "does not stand at now",
+    );
+    let plan = resume_plan(&bench.ledger.runs()[0], &worker, &next, later)
+        .expect("a press at the next wall");
+    assert_eq!(plan.attempt, 2);
+    // A door that typed nothing lets the same wall go again — after the
+    // spacing, and the ceiling counts every try.
+    let second = bench.ledger.resume_begin(&plan, later).expect("reserved");
+    let untyped = ResumeOutcome {
+        submitted: false,
+        typed: false,
+        detail: Text::from("nothing was typed"),
+    };
+    bench
+        .ledger
+        .resume_settled(&run_id, &second, &untyped, later + 1)
+        .expect("settled");
+    press_refused(
+        resume_plan(&bench.ledger.runs()[0], &worker, &next, later + 2),
+        "ms ago",
+    );
+    let plan = resume_plan(&bench.ledger.runs()[0], &worker, &next, later + spacing)
+        .expect("the same wall, nothing typed at it");
+    assert_eq!(plan.attempt, RESUME_POLICY.attempts_max);
+    let third = bench
+        .ledger
+        .resume_begin(&plan, later + spacing)
+        .expect("reserved");
+    bench
+        .ledger
+        .resume_settled(&run_id, &third, &untyped, later + spacing + 1)
+        .expect("settled");
+    press_refused(
+        resume_plan(&bench.ledger.runs()[0], &worker, &next, later + 2 * spacing),
+        "ceiling",
+    );
+    // And a wall that lifted takes no press at all.
+    let lifted = newest_wall(&bench.ledger.runs()[0], &dispatch)
+        .expect("the next wall")
+        .stands_until_ms;
+    press_refused(
+        resume_plan(&bench.ledger.runs()[0], &worker, &next, lifted),
+        "does not stand at now",
+    );
+}
+
+/// The coordinator's second condition, and the third's second half (m-39799):
+/// the chip a walled worker wears is the press's own reading, asked again when
+/// a button is pressed. It stands only while the wall does, for a live worker
+/// in a pane this window holds that is not the person's; an account switch
+/// that rests the worker (asleep) or seats it again after the wall takes it
+/// down; and what each button may do is its road's own rule in the ledger's
+/// words — a question the worker waits on, a pane another worker now holds, a
+/// continuation being typed (which holds a handover back too), the
+/// coordinator's seat held elsewhere.
+#[test]
+fn a_walled_workers_chip_stands_only_while_a_press_would_be_taken() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    let (worker, _pane, _task, dispatch) = a_walled_claude_worker(&mut bench, NOW);
+    let wall = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the wall");
+    let chip = chip_of(&bench, &worker, HELD_HERE, NOW + 1).expect("a chip");
+    assert_eq!(chip.wall, wall.wall);
+    assert_eq!(chip.resets_at_ms, Some(NOW + 3 * 60 * 60_000));
+    assert_eq!(chip.stands_until_ms, wall.stands_until_ms);
+    assert_eq!(chip.declared_alt, None);
+    assert_eq!(chip.retry_refusal, None);
+    assert_eq!(chip.hand_over_refusal, None);
+    let elsewhere = WallChipSeat {
+        worker_here: true,
+        coordinator_here: false,
+    };
+    let chip = chip_of(&bench, &worker, elsewhere, NOW + 1).expect("a chip");
+    assert_eq!(chip.retry_refusal, None);
+    assert!(
+        chip.hand_over_refusal
+            .as_deref()
+            .is_some_and(|why| why.contains("coordinator seat")),
+        "{chip:?}"
+    );
+    let not_here = WallChipSeat {
+        worker_here: false,
+        coordinator_here: true,
+    };
+    let refused = chip_of(&bench, &worker, not_here, NOW + 1).unwrap_err();
+    assert!(refused.contains("holds no pane"), "{refused}");
+    let refused = chip_of(&bench, &worker, HELD_HERE, wall.stands_until_ms).unwrap_err();
+    assert!(refused.contains("lifted"), "{refused}");
+    bench.json("handover-policy --on-quota-wall codex");
+    let chip = chip_of(&bench, &worker, HELD_HERE, NOW + 1).expect("a chip");
+    assert_eq!(
+        chip.declared_alt.as_ref().map(|alt| alt.agent.as_str()),
+        Some("codex")
+    );
+
+    // A pane another worker now holds: the seat's own rule, by name.
+    let marker = person_wall_marker(&bench.ledger.runs()[0], &worker).expect("a press");
+    let mut usurped = bench.ledger.runs()[0].clone();
+    let mut usurper = usurped.worker(&worker).expect("the worker").clone();
+    usurper.id = "w-usurper".to_string();
+    usurper.dispatch = None;
+    usurped.workers.insert(0, usurper);
+    press_refused(
+        resume_plan(&usurped, &worker, &marker, NOW + 1),
+        "no longer holds its seat",
+    );
+
+    // A continuation being typed: the retry is that row's, and a handover
+    // waits until it settles.
+    let plan = resume_plan(&bench.ledger.runs()[0], &worker, &marker, NOW + 1).expect("a press");
+    bench.ledger.resume_begin(&plan, NOW + 1).expect("reserved");
+    let chip = chip_of(&bench, &worker, HELD_HERE, NOW + 2).expect("a chip");
+    assert_eq!(chip.retry_refusal.as_deref(), Some(RESUME_IN_FLIGHT));
+    assert!(
+        chip.hand_over_refusal
+            .as_deref()
+            .is_some_and(|why| why.contains("being typed")),
+        "{chip:?}"
+    );
+
+    // The worker's own question: the chip stands, the retry says why not.
+    let mut asking = Bench::new();
+    let (worker, pane_of, _, _) = a_walled_claude_worker(&mut asking, NOW);
+    asking.json_at(&pane_of, "send --type question --body which-branch?");
+    let chip = chip_of(&asking, &worker, HELD_HERE, NOW + 1).expect("a chip");
+    assert!(
+        chip.retry_refusal
+            .as_deref()
+            .is_some_and(|why| why.contains("waiting on an answer")),
+        "{chip:?}"
+    );
+
+    // The person's pane: no chip, and no press.
+    let mut taken = Bench::new();
+    let (worker, pane_of, _, _) = a_walled_claude_worker(&mut taken, NOW);
+    let marker = person_wall_marker(&taken.ledger.runs()[0], &worker).expect("a press");
+    assert!(taken.ledger.worker_taken_over(("team-1", &pane_of)));
+    let refused = chip_of(&taken, &worker, HELD_HERE, NOW + 1).unwrap_err();
+    assert!(refused.contains("taken over"), "{refused}");
+    press_refused(
+        resume_plan(&taken.ledger.runs()[0], &worker, &marker, NOW + 1),
+        "taken over",
+    );
+
+    // Rested for an account switch: asleep, no chip; seated again on the new
+    // account: the wall was the old account's, no chip.
+    let mut moving = Bench::new();
+    let (worker, pane_of, _, _) = a_walled_claude_worker(&mut moving, NOW);
+    let marker = person_wall_marker(&moving.ledger.runs()[0], &worker).expect("a press");
+    moving
+        .ledger
+        .worker_rested_for_account_switch(&approval(&moving, &worker, SWITCHING_SESSION), NOW + 1)
+        .expect("rested");
+    let refused = chip_of(&moving, &worker, HELD_HERE, NOW + 2).unwrap_err();
+    assert!(refused.contains("sleeping"), "{refused}");
+    press_refused(
+        resume_plan(&moving.ledger.runs()[0], &worker, &marker, NOW + 2),
+        "sleeping",
+    );
+    moving.team.record_split(
+        "%9",
+        909,
+        agent_teams::LEADER_PANE,
+        agent_teams::Direction::Vertical,
+    );
+    moving
+        .ledger
+        .worker_reseated(&worker, ("team-1", "%9"), NOW + 3)
+        .expect("reseated");
+    assert!(
+        chip_of(&moving, &worker, HELD_HERE, NOW + 4).is_ok(),
+        "the wall still stands for the same attempt until the receipt says it moved"
+    );
+    let receipt = AccountSwitchReceipt {
+        key: format!("switch-{worker}-1"),
+        agent: "claude".to_string(),
+        moved: AccountMove::Pane {
+            worker: worker.clone(),
+            from_pane: pane_of.clone(),
+            to_pane: "%9".to_string(),
+        },
+        from_account: Some("a1-fixture".to_string()),
+        to_account: Some("a2-fixture".to_string()),
+        by: "auto".to_string(),
+        reason: "walled".to_string(),
+        observed_percent: Some(98),
+        observed_window: Some("weekly".to_string()),
+        generation: Some(1),
+        panes_moved: 1,
+        panes_pending: 0,
+        panes_at_turn_end: 0,
+        panes_person: 0,
+        panes_left: 0,
+    };
+    moving
+        .ledger
+        .account_switched(&receipt, NOW + 5)
+        .expect("a receipt");
+    let refused = chip_of(&moving, &worker, HELD_HERE, NOW + 6).unwrap_err();
+    assert!(refused.contains("another account"), "{refused}");
+}
