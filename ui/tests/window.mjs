@@ -32,6 +32,7 @@ import { testWaitingList } from "./waiting-list.mjs";
 import { testAccountSwitch } from "./account-switch.mjs";
 import { testTaskBoard } from "./task-board.mjs";
 import { testScmHealth } from "./scm-health.mjs";
+import { testScmNoticeWindow } from "./scm-notice-window.mjs";
 import { testArtifactPreferences } from "./artifact-preferences.mjs";
 import { testArtifactCards } from "./artifact-cards.mjs";
 import { testArtifactTasks } from "./artifact-tasks.mjs";
@@ -253,6 +254,7 @@ suite("explain", ({ browser, origin, ok }) => testExplain(browser, origin, ok));
 // Vault state stays local to this fixture, just like the explorer fixture.
 suite("task-board", ({ browser, origin, ok }) => testTaskBoard(browser, origin, ok));
 suite("scm-health", ({ browser, origin, ok }) => testScmHealth(browser, origin, ok));
+suite("scm-notice-window", ({ browser, origin, ok }) => testScmNoticeWindow(browser, origin, ok));
 suite("artifact-preferences", ({ browser, origin, ok }) => testArtifactPreferences(browser, origin, ok));
 suite("artifact-cards", ({ browser, origin, ok }) => testArtifactCards(browser, origin, ok));
 suite("artifact-tasks", ({ browser, origin, ok }) => testArtifactTasks(browser, origin, ok));

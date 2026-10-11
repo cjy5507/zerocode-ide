@@ -821,4 +821,97 @@ mod tests {
             "the already accepted comment was filed twice under different cursor revisions"
         );
     }
+
+    #[test]
+    fn rearming_clears_the_marks_of_the_occurrence_that_resolved() {
+        let active = Reaction {
+            kind: FactKind::Mergeable,
+            hash: "conflict".into(),
+            body: None,
+            review_ids: Vec::new(),
+            ci_head: None,
+            ci_signature: None,
+            active: true,
+            terminal: false,
+        };
+        let resolved = Reaction {
+            active: false,
+            ..active.clone()
+        };
+        let mut record = Record::default();
+        record.acknowledge(&active, 1);
+        let notice = record.notices.get_mut(&FactKind::Mergeable).unwrap();
+        notice.shown_at = Some(2);
+        notice.dismissed_at = Some(3);
+        record.acknowledge(&resolved, 4);
+        let resolved_notice = &record.notices[&FactKind::Mergeable];
+        assert_eq!(resolved_notice.resolved_at, Some(4));
+        assert_eq!(
+            resolved_notice.shown_at,
+            Some(2),
+            "resolving keeps the marks"
+        );
+        record.acknowledge(&active, 5);
+        let rearmed = &record.notices[&FactKind::Mergeable];
+        assert_eq!(
+            (
+                rearmed.opened_at,
+                rearmed.resolved_at,
+                rearmed.shown_at,
+                rearmed.dismissed_at
+            ),
+            (5, None, None, None),
+            "a new occurrence starts unmarked"
+        );
+    }
+
+    #[test]
+    fn a_ledger_written_before_the_marks_reads_as_unmarked() {
+        let old: Notice = serde_json::from_str(r#"{"opened_at":1,"resolved_at":null}"#).unwrap();
+        assert_eq!(
+            (
+                old.opened_at,
+                old.resolved_at,
+                old.shown_at,
+                old.dismissed_at
+            ),
+            (1, None, None, None)
+        );
+    }
+
+    #[test]
+    fn a_mark_lands_on_the_occurrence_named_and_keeps_its_first_time() {
+        let subject = subject(4);
+        let key = subject.key();
+        let mut book = Book::default();
+        let mut host = Host::default();
+        book.discover(std::slice::from_ref(&subject), &mut host)
+            .unwrap();
+        book.subjects.get_mut(&key).unwrap().record.notices.insert(
+            FactKind::Ci,
+            Notice {
+                opened_at: 10,
+                resolved_at: None,
+                shown_at: None,
+                dismissed_at: None,
+            },
+        );
+        let id = notice_id(&key, FactKind::Ci);
+        assert!(
+            book.mark_notice(&id, 10, NoticeMark::Shown, 20, &mut host)
+                .unwrap()
+        );
+        assert!(
+            book.mark_notice(&id, 10, NoticeMark::Shown, 30, &mut host)
+                .unwrap()
+        );
+        assert!(
+            !book
+                .mark_notice(&id, 9, NoticeMark::Dismissed, 40, &mut host)
+                .unwrap(),
+            "an older occurrence is not marked"
+        );
+        let notice = &book.subjects[&key].record.notices[&FactKind::Ci];
+        assert_eq!((notice.shown_at, notice.dismissed_at), (Some(20), None));
+    }
 }

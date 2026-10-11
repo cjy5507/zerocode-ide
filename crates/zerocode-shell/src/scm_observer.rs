@@ -953,4 +953,45 @@ mod tests {
             "the one subject slot went to the detached checkout instead of the PR"
         );
     }
+
+    #[test]
+    fn a_mark_is_written_to_the_ledger_file_and_the_row_carries_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scm-observer.json");
+        let subject = Subject {
+            root: "/wt/topic".into(),
+            repo: "o/r".into(),
+            number: 4,
+            url: "https://github.com/o/r/pull/4".into(),
+            head: "a".into(),
+            branch: "topic".into(),
+        };
+        let key = subject.key();
+        let mut book = Book::default();
+        book.subjects.insert(
+            key.clone(),
+            core::Tracked {
+                subject,
+                record: core::Record::default(),
+            },
+        );
+        book.subjects.get_mut(&key).unwrap().record.notices.insert(
+            FactKind::Ci,
+            core::Notice {
+                opened_at: 10,
+                resolved_at: None,
+                shown_at: None,
+                dismissed_at: None,
+            },
+        );
+        std::fs::write(&path, serde_json::to_vec(&book).unwrap()).unwrap();
+        let id = core::notice_id(&key, FactKind::Ci);
+        assert!(mark_notice_at(&path, &id, 10, core::NoticeMark::Dismissed, 20).unwrap());
+        let saved: Book = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let rows = notice_rows(&saved, &[PathBuf::from("/wt/topic")]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].checkout, "topic");
+        assert_eq!(rows[0].root, "/wt/topic");
+        assert_eq!((rows[0].shown_at, rows[0].dismissed_at), (None, Some(20)));
+    }
 }
