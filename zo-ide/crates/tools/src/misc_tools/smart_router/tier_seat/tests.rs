@@ -108,9 +108,9 @@ impl Rig {
 fn a_lineup_is_asked_once_and_kept_until_its_facts_move() {
     let mock = Mock::serving(200, reply(&[3.0, 1.0, 2.0]));
     let rig = Rig::new();
-    let (a, b, c) = (model("a", FRONTIER, 50_000_000), model("b", BALANCED, 25_000_000), model("c", BALANCED, 15_000_000));
+    let (top, dear, cheap) = (model("a", FRONTIER, 50_000_000), model("b", BALANCED, 25_000_000), model("c", BALANCED, 15_000_000));
 
-    let first = rig.pass(Some(&mock), JevMode::On, &[&a, &b, &c]);
+    let first = rig.pass(Some(&mock), JevMode::On, &[&top, &dear, &cheap]);
     assert_eq!(mock.requests().len(), 1, "one request for the lineup");
     assert_eq!(first.rows.len(), 1);
     assert_eq!(first.rows[0].outcome, OUTCOME_ANSWERED, "{:?}", first.rows[0]);
@@ -121,20 +121,20 @@ fn a_lineup_is_asked_once_and_kept_until_its_facts_move() {
     assert_eq!(body["state"]["models"][1]["id"], "b");
     assert!(body["questions"][runtime::tier_question_id(2)]["instructions"].as_str().unwrap().contains("models[2]"));
 
-    let models = [a.clone(), b.clone(), c.clone()];
+    let models = [top.clone(), dear.clone(), cheap.clone()];
     let tiers = classify_model_tiers_judged(&models, Some(&first.judgment));
     let of = |id: &str| tiers.iter().find(|entry| entry.id == id).expect("classified");
     assert_eq!(of("c").rungs.iter().copied().collect::<Vec<_>>(), vec![ImplRung::Hard], "{tiers:?}");
     assert_eq!(of("c").source, TierSource::Judged);
     assert_eq!(of("c").confidence_permille, Some(800));
 
-    let again = rig.pass(Some(&mock), JevMode::On, &[&a, &b, &c]);
+    let again = rig.pass(Some(&mock), JevMode::On, &[&top, &dear, &cheap]);
     assert_eq!(mock.requests().len(), 1, "the same facts send nothing");
     assert!(again.rows.is_empty());
     assert_eq!(again.judgment, first.judgment);
 
-    let d = model("d", BALANCED, 20_000_000);
-    let moved = rig.pass(Some(&mock), JevMode::On, &[&a, &b, &d, &c]);
+    let late = model("d", BALANCED, 20_000_000);
+    let moved = rig.pass(Some(&mock), JevMode::On, &[&top, &dear, &late, &cheap]);
     assert_eq!(mock.requests().len(), 2, "a model arrived: the lineup is asked again");
     assert_eq!(moved.rows.len(), 1);
 }
@@ -144,8 +144,8 @@ fn a_lineup_is_asked_once_and_kept_until_its_facts_move() {
 fn under_shadow_the_lineup_is_asked_and_kept_and_nothing_applies() {
     let mock = Mock::serving(200, reply(&[3.0, 2.0]));
     let rig = Rig::new();
-    let (a, b) = (model("a", FRONTIER, 50_000_000), model("b", BALANCED, 25_000_000));
-    let pass = rig.pass(Some(&mock), JevMode::Shadow, &[&a, &b]);
+    let (top, dear) = (model("a", FRONTIER, 50_000_000), model("b", BALANCED, 25_000_000));
+    let pass = rig.pass(Some(&mock), JevMode::Shadow, &[&top, &dear]);
     assert_eq!(mock.requests().len(), 1);
     assert!(pass.judgment.places.is_empty(), "shadow applies nothing");
     assert!(!pass.rows[0].applied);
@@ -158,17 +158,17 @@ fn under_shadow_the_lineup_is_asked_and_kept_and_nothing_applies() {
 fn an_unanswered_lineup_keeps_its_last_judgment_and_a_new_model_is_provisional() {
     let answering = Mock::serving(200, reply(&[3.0, 1.0, 2.0]));
     let rig = Rig::new();
-    let (a, b, c) = (model("a", FRONTIER, 50_000_000), model("b", BALANCED, 25_000_000), model("c", BALANCED, 15_000_000));
-    let first = rig.pass(Some(&answering), JevMode::On, &[&a, &b, &c]);
+    let (top, dear, cheap) = (model("a", FRONTIER, 50_000_000), model("b", BALANCED, 25_000_000), model("c", BALANCED, 15_000_000));
+    let first = rig.pass(Some(&answering), JevMode::On, &[&top, &dear, &cheap]);
     assert_eq!(first.judgment.places.len(), 3);
 
     let failing = Mock::serving(500, "{}".to_string());
-    let d = model("d", BALANCED, 20_000_000);
-    let pass = rig.pass(Some(&failing), JevMode::On, &[&a, &b, &d, &c]);
+    let late = model("d", BALANCED, 20_000_000);
+    let pass = rig.pass(Some(&failing), JevMode::On, &[&top, &dear, &late, &cheap]);
     assert_ne!(pass.rows[0].outcome, OUTCOME_ANSWERED, "{:?}", pass.rows[0]);
     assert!(pass.rows[0].applied, "the last judgment is what stands");
     assert_eq!(pass.judgment, first.judgment);
-    let models = [a, b, c, d];
+    let models = [top, dear, cheap, late];
     let tiers = classify_model_tiers_judged(&models, Some(&pass.judgment));
     let new = tiers.iter().find(|entry| entry.id == "d").expect("classified");
     assert_eq!(new.source, TierSource::Provisional, "{tiers:?}");
@@ -181,12 +181,12 @@ fn an_unanswered_lineup_keeps_its_last_judgment_and_a_new_model_is_provisional()
 fn off_sends_nothing_and_without_a_key_the_fact_rule_stands() {
     let mock = Mock::serving(200, reply(&[3.0, 2.0]));
     let rig = Rig::new();
-    let (a, b) = (model("a", FRONTIER, 50_000_000), model("b", BALANCED, 25_000_000));
-    let off = rig.pass(Some(&mock), JevMode::Off, &[&a, &b]);
+    let (top, dear) = (model("a", FRONTIER, 50_000_000), model("b", BALANCED, 25_000_000));
+    let off = rig.pass(Some(&mock), JevMode::Off, &[&top, &dear]);
     assert!(off.rows.is_empty() && off.judgment.places.is_empty());
     assert!(mock.requests().is_empty(), "off sends nothing");
 
-    let keyless = rig.pass(None, JevMode::On, &[&a, &b]);
+    let keyless = rig.pass(None, JevMode::On, &[&top, &dear]);
     assert!(keyless.judgment.places.is_empty());
     assert_eq!(keyless.rows[0].outcome, zerocode_core::jev::door::Refused::NoKey.token());
     assert!(mock.requests().is_empty());
