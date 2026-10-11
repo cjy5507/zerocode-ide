@@ -56,7 +56,7 @@ pub struct TierJudgment {
     pub places: BTreeMap<String, JudgedPlace>,
 }
 
-/// [`classify_model_tiers`] with a judgment applied where one stands.
+/// [`classify_model_tiers`](super::tiering::classify_model_tiers) with a judgment applied where one stands.
 #[must_use]
 pub fn classify_model_tiers_judged(
     models: &[ModelDescriptor],
