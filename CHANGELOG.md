@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.57] — 2026-10-11
+- A PR notice toast says its condition once and leaves on its own; closing it is remembered across restarts, and a standing condition lives in a status-bar mark (PR 조건 N) whose tooltip names the PR and the checkout. The "mail not typed into terminal N" toast also fires once per condition (t-45801).
+- A Claude account switch moves every worker pane to the new account without a window restart: idle panes move at once, working panes at their next turn end, a pane the person took over stays and is marked 「사람이 쓰는 중」; the status bar shows the default account and each sidebar row its pane's account and share (t-46106).
+- The app no longer dies to a TCC Bluetooth violation: the usage descriptions CEF's paired-device lookup needs are declared, and the built-in browser turns Web Bluetooth off (t-45873).
+- The sidebar's role chips say who seated a pane — 코디 or 워커 — and a worker pane the person took over keeps 워커 with a dashed outline and a tooltip instead of reading 사람.
+- zo gives Opus 5.5 the thinking rules of the 5.1 generation (always thinking, thinking blocks kept together, forced tool choice refused) from the catalog row, not a name check (t-45843).
+- The new-terminal door (⌘T, run command, new terminal, the empty-stage invite) opens a tab instead of splitting the tab in front (t-45285).
+- Tests: the evidence tests name an absolute receipt path on Windows too; the browser-door test waits for the page's own signal instead of a fixed 350 ms.
+
 ## [1.1.56] — 2026-10-11
 
 - macOS background Computer Use adds window-addressed clicks and scrolling, Unicode input, and field-specific text editing without using the shared pointer or clipboard.
