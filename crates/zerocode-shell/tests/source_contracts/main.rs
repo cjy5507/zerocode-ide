@@ -9200,6 +9200,36 @@ mod tests {
         );
     }
 
+    /// The Bluetooth usage descriptions (t-45873). The embedded Chromium reads
+    /// the devices paired with this Mac through IOBluetooth, and macOS ends a
+    /// process that does so without `NSBluetoothAlwaysUsageDescription` (a TCC
+    /// abort seen on 2026-10-11). Both keys sit in the main bundle's Info.plist,
+    /// the file tauri-bundler merges. build.rs writes another bundle's plist (the
+    /// Computer Use helper's), so the keys must not appear there.
+    #[test]
+    fn the_main_bundle_declares_the_bluetooth_usage_descriptions() {
+        let plist = include_str!("../../Info.plist");
+        let helper_plist = include_str!("../../build.rs");
+        for key in [
+            "NSBluetoothAlwaysUsageDescription",
+            "NSBluetoothPeripheralUsageDescription",
+        ] {
+            let text = plist
+                .split_once(&format!("<key>{key}</key>"))
+                .and_then(|(_, rest)| rest.split_once("<string>"))
+                .and_then(|(_, rest)| rest.split_once("</string>"))
+                .map_or("", |(body, _)| body.trim());
+            assert!(
+                text.split_whitespace().count() >= 8 && text.ends_with('.'),
+                "`{key}` is missing from Info.plist or is not a sentence a person can read: `{text}`"
+            );
+            assert!(
+                !helper_plist.contains(key),
+                "`{key}` belongs to one plist only: build.rs writes the Computer Use helper's"
+            );
+        }
+    }
+
     /// The features the embedded Chromium is started with turned off, as the
     /// one named constant spells them.
     fn disabled_chromium_features(chromium: &str) -> Vec<&str> {

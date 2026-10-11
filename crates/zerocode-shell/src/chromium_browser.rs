@@ -1639,4 +1639,19 @@ mod tests {
         );
         assert!(HELPER_APP.starts_with("ZeroCode Helper.app/Contents/MacOS/"));
     }
+
+    /// Web Bluetooth is off beside the https features. A page that asks for a
+    /// Bluetooth device is the road that opens the adapter, which reads the
+    /// devices paired with this Mac, so the feature stays off by name on the
+    /// same command line (t-45873).
+    #[test]
+    fn the_engine_starts_with_web_bluetooth_off_beside_the_https_features() {
+        let disabled: Vec<&str> = CEF_DISABLED_FEATURES.split(',').collect();
+        for feature in ["HttpsUpgrades", "HttpsFirstBalancedMode", "WebBluetooth"] {
+            assert!(
+                disabled.contains(&feature),
+                "`{feature}` is not turned off in the engine's command line: {CEF_DISABLED_FEATURES}"
+            );
+        }
+    }
 }
