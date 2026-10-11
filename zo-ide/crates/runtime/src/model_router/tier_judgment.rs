@@ -485,6 +485,32 @@ mod tests {
         ));
     }
 
+    /// A model's record counts the runs that ended, its completions and the
+    /// failures that were its own — a provider's error is not — with the
+    /// mean output and length of its runs; a run still going is no record.
+    #[test]
+    fn a_models_record_counts_its_own_failures_and_its_means() {
+        let run = |model: &str, status: &str, tokens: u64, millis: Option<u64>| RouteOutcomeRecord {
+            output_tokens: tokens,
+            duration_ms: millis,
+            ..RouteOutcomeRecord::new("subagent", "Coding", model, status)
+        };
+        let mut provider_down = run("a", OUTCOME_FAILED, 0, None);
+        provider_down.provider_error_class = Some("overloaded".to_string());
+        let records = [
+            run("a", OUTCOME_COMPLETED, 3_000, Some(120_000)),
+            run("a", OUTCOME_FAILED, 1_000, Some(60_000)),
+            provider_down,
+            run("b", "still_running", 9_000, None),
+        ];
+        let outcomes = tier_outcomes_of(&records);
+        let a = outcomes["a"];
+        assert_eq!((a.runs, a.completed, a.failed), (3, 1, 1), "{a:?}");
+        assert_eq!(a.mean_output_tokens, Some(4_000 / 3));
+        assert_eq!(a.mean_minutes, Some((120_000 + 60_000) / 2 / MS_PER_MINUTE));
+        assert!(!outcomes.contains_key("b"), "a run still going is no record");
+    }
+
     /// The tier question's words are pinned to its version: a changed level,
     /// instruction or key changes the fingerprint, and the version must move
     /// with it.
