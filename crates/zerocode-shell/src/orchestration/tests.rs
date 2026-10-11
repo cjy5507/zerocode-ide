@@ -5985,6 +5985,27 @@ fn a_resume_settlement_keeps_its_observed_result_until_the_store_accepts_it() {
         );
         super::pane_prompt_submitted(stood.host.worker_term);
         *stood.host.busy.lock().unwrap() = true;
+        if submitted {
+            let worker = the_rows()
+                .workers
+                .into_iter()
+                .find(|worker| worker.id == stood.worker)
+                .unwrap();
+            let capability =
+                crate::agent_teams::current_pane_capability(&worker.team, &worker.pane).unwrap();
+            let done = run(
+                &stood.host,
+                Vec::new(),
+                &worker.team,
+                &worker.pane,
+                &capability,
+                &words(
+                    r#"send --type worker_done --retry-request resume-settlement-done --body {"ok":true}"#,
+                ),
+                at(14_000 + budget - 1),
+            );
+            assert_eq!(done.exit_code, 0, "{}", done.stderr);
+        }
         tick(&stood.host, &[], at(14_000 + budget));
         let settled = stood.news("resumed", at(14_001 + budget));
         assert_eq!(

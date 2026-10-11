@@ -227,15 +227,15 @@ pub(super) fn departed(
     queue: &mut HashMap<TermId, VecDeque<QueuedPrompt>>,
 ) {
     let delivery = deliveries.remove(&term);
-    if let Some(waiting) = waiters.remove(&term) {
-        if let Some(delivery) = delivery {
-            let outcome = if delivery.pasted() {
-                DeliveryOutcome::Unsubmitted(Refusal::LaunchChanged)
-            } else {
-                DeliveryOutcome::Refused(Refusal::LaunchChanged)
-            };
-            let _ = waiting.send(outcome);
-        }
+    if let Some(waiting) = waiters.remove(&term)
+        && let Some(delivery) = delivery
+    {
+        let outcome = if delivery.pasted() {
+            DeliveryOutcome::Unsubmitted(Refusal::LaunchChanged)
+        } else {
+            DeliveryOutcome::Refused(Refusal::LaunchChanged)
+        };
+        let _ = waiting.send(outcome);
     }
     queue.remove(&term);
 }
