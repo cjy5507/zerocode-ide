@@ -458,7 +458,7 @@ mod tests {
         assert!(tier_questions(3)[&tier_question_id(2)].instructions.contains("`models[2]`"));
     }
 
-    fn response(answers: serde_json::Value) -> SystemOneResponse {
+    fn response(answers: &serde_json::Value) -> SystemOneResponse {
         serde_json::from_value(json!({
             "model": "jev-test",
             "answers": answers,
@@ -480,12 +480,12 @@ mod tests {
     /// is left to the facts; a score off the scale refuses the response.
     #[test]
     fn an_answer_is_read_as_places_and_an_unanswered_model_is_left_to_the_facts() {
-        let judged = read_tier_answers(&response(json!({ "place_0": score(1.5, 0.8) })), &["a", "b"]).expect("judged");
+        let judged = read_tier_answers(&response(&json!({ "place_0": score(1.5, 0.8) })), &["a", "b"]).expect("judged");
         assert_eq!(judged.places.get("a"), Some(&JudgedPlace { score_permille: 500, confidence_permille: 800 }));
         assert!(!judged.places.contains_key("b"));
-        assert_eq!(read_tier_answers(&response(json!({})), &["a"]), Err(TierRefusal::Empty));
+        assert_eq!(read_tier_answers(&response(&json!({})), &["a"]), Err(TierRefusal::Empty));
         assert!(matches!(
-            read_tier_answers(&response(json!({ "place_0": score(4.0, 0.8) })), &["a"]),
+            read_tier_answers(&response(&json!({ "place_0": score(4.0, 0.8) })), &["a"]),
             Err(TierRefusal::Schema(_))
         ));
     }
@@ -512,7 +512,7 @@ mod tests {
         let a = outcomes["a"];
         assert_eq!((a.runs, a.completed, a.failed), (3, 1, 1), "{a:?}");
         assert_eq!(a.mean_output_tokens, Some(4_000 / 3));
-        assert_eq!(a.mean_minutes, Some((120_000 + 60_000) / 2 / MS_PER_MINUTE));
+        assert_eq!(a.mean_minutes, Some(u64::midpoint(120_000, 60_000) / MS_PER_MINUTE));
         assert!(!outcomes.contains_key("b"), "a run still going is no record");
     }
 

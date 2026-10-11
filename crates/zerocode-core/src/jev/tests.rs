@@ -3549,7 +3549,7 @@ fn the_model_tier_seat_sends_facts_and_applies_under_on() {
         MODEL_TIERS.apply_deadline_ms, None,
         "a seat that never rises names no apply wall"
     );
-    assert!(MODEL_TIERS_DEADLINE_MS > 0);
+    const { assert!(MODEL_TIERS_DEADLINE_MS > 0) };
     assert_eq!(
         MODEL_TIERS.rubric_version,
         questions::MODEL_TIERS_RUBRIC_VERSION

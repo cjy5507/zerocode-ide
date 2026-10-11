@@ -160,12 +160,12 @@ pub(super) struct FactRule {
 
 impl FactRule {
     /// The rule for the lineup `models` (one provider's).
-    pub(super) fn of<'a>(models: impl IntoIterator<Item = &'a ModelDescriptor> + Clone) -> Self {
+    pub(super) fn of(models: &[&ModelDescriptor]) -> Self {
         let every = |has: fn(&ModelDescriptor) -> bool| -> BTreeSet<u8> {
-            let classes: BTreeSet<u8> = models.clone().into_iter().map(class_rank).collect();
+            let classes: BTreeSet<u8> = models.iter().map(|model| class_rank(model)).collect();
             classes
                 .into_iter()
-                .filter(|class| models.clone().into_iter().filter(|model| class_rank(model) == *class).all(has))
+                .filter(|class| models.iter().filter(|model| class_rank(model) == *class).all(|model| has(model)))
                 .collect()
         };
         Self {
@@ -235,7 +235,7 @@ pub(super) fn classify_model_tiers_with(
             .iter()
             .filter(|model| usable(model) && model.provider() == provider)
             .collect();
-        let rule = FactRule::of(candidates.iter().copied());
+        let rule = FactRule::of(&candidates);
         candidates.sort_by(|left, right| {
             (right.release_rank_value(), rule.key(right)).cmp(&(left.release_rank_value(), rule.key(left)))
         });
