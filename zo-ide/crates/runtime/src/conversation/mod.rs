@@ -2327,7 +2327,7 @@ where
         if already_called {
             return;
         }
-        // Claude Fable 5.1 / Mythos 5.1 return 400 on a forced `tool_choice`
+        // Claude Fable 5.1, Mythos 5.1 and Opus 5.5 return 400 on a forced `tool_choice`
         // (`tool` and `any`). There the requirement rides the transcript — a
         // harness system message, append-only so the thinking blocks behind
         // it stay bound to their prefix — and the call is left to `auto`; the

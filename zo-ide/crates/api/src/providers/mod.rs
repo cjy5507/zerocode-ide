@@ -3503,42 +3503,50 @@ pub fn uses_adaptive_thinking(model: &str) -> bool {
 
 /// Whether `model` thinks on every request and cannot be told not to.
 ///
-/// Fable and Mythos run adaptive thinking whether or not the request carries a
-/// `thinking` field; `{type: "disabled"}` and a `budget_tokens` budget both
-/// return 400. So a request to them with no `thinking` field is still a
+/// Fable, Mythos and Opus 5.5 run adaptive thinking whether or not the request
+/// carries a `thinking` field; `{type: "disabled"}` and a `budget_tokens` budget
+/// both return 400. So a request to them with no `thinking` field is still a
 /// thinking request, and the reasoning blocks in its history are valid.
 #[must_use]
 pub fn thinking_always_on(model: &str) -> bool {
-    let canonical = resolve_catalog_alias(model).to_ascii_lowercase();
-    canonical.contains("fable") || canonical.contains("mythos")
+    let id = thinking_lookup_id(model);
+    model_has_capability(&id, "thinking_always_on") || unlisted_mythos_generation(&id)
 }
 
 /// Whether `model` returns 400 on a forced tool choice (`tool_choice:
-/// {type: "any"}` or `{type: "tool", name}`) — Claude Fable 5.1 and Mythos
-/// 5.1, as Mythos Preview did. `auto` and `none` are unchanged there.
+/// {type: "any"}` or `{type: "tool", name}`): the 5.1 generation and Opus 5.5.
+/// `auto` and `none` are unchanged there.
 #[must_use]
 pub fn rejects_forced_tool_choice(model: &str) -> bool {
-    preserved_thinking_generation(model)
+    let id = thinking_lookup_id(model);
+    model_has_capability(&id, "rejects_forced_tool_choice") || unlisted_mythos_generation(&id)
 }
 
-/// Whether `model` is the Fable/Mythos 5.1 generation, which binds each
-/// thinking block to the model and the conversation prefix that produced it
-/// (`thinking.block_binding`) and refuses forced tool use.
+/// Whether `model` binds each thinking block to the model and the conversation
+/// prefix that produced it (`thinking.block_binding`). The 5.1 generation and
+/// Opus 5.5 do; each declares it on its catalog row.
 #[must_use]
 pub fn preserved_thinking_generation(model: &str) -> bool {
-    let canonical = resolve_catalog_alias(model).to_ascii_lowercase();
-    let bare = canonical
-        .split('[')
-        .next()
-        .unwrap_or_default()
-        .replace('.', "-");
-    [
-        "claude-fable-5-1",
-        "claude-mythos-5-1",
-        "claude-mythos-preview",
-    ]
-    .iter()
-    .any(|generation| model_id_matches_prefix_segment(&bare, generation))
+    let id = thinking_lookup_id(model);
+    model_has_capability(&id, "thinking_block_binding") || unlisted_mythos_generation(&id)
+}
+
+/// `model` as the catalog's id matcher reads it: resolved through the alias
+/// table, lower-cased, and with dots read as dashes, so `claude-fable-5.1`
+/// finds the row of `claude-fable-5-1`.
+fn thinking_lookup_id(model: &str) -> String {
+    resolve_catalog_alias(model)
+        .to_ascii_lowercase()
+        .replace('.', "-")
+}
+
+/// Mythos 5.1 has no row in the shipped catalog (its access is vetted, so zo
+/// does not list it), so its id is the only place its facts are stated.
+fn unlisted_mythos_generation(id: &str) -> bool {
+    let bare = id.split('[').next().unwrap_or_default();
+    ["claude-mythos-5-1", "claude-mythos-preview"]
+        .iter()
+        .any(|generation| model_id_matches_prefix_segment(bare, generation))
 }
 
 fn adaptive_thinking_for_canonical(canonical_lower: &str) -> bool {
@@ -4548,7 +4556,10 @@ pub(crate) fn prompt_cache_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{preserved_thinking_generation, rejects_forced_tool_choice, thinking_always_on};
+    use super::{
+        declared_capabilities, preserved_thinking_generation, rejects_forced_tool_choice,
+        thinking_always_on,
+    };
     use super::{
         BandDifficulty, EXPERIMENTAL_PROVIDERS_ENV, MODEL_CLASSES_ENV, MODEL_CONTEXT_WINDOWS_ENV,
         MODEL_EFFORT_CEILINGS_ENV,
@@ -7752,6 +7763,33 @@ mod tests {
         }
         for model in ["claude-opus-5", "claude-opus-4-8", "claude-sonnet-5", "gpt-5.6-sol"] {
             assert!(!thinking_always_on(model), "{model}");
+        }
+    }
+
+    /// Opus 5.5 carries the 5.1 generation's facts, declared on its catalog
+    /// row rather than named in code: thinking is always on (`disabled` and a
+    /// manual budget both return 400), forced tool use is refused, and a
+    /// thinking block binds to the prefix that produced it. Opus 5 has none.
+    #[test]
+    fn opus_5_5_declares_the_thinking_facts_its_catalog_row_states() {
+        let model = "claude-opus-5-5";
+        assert!(thinking_always_on(model), "{model}");
+        assert!(rejects_forced_tool_choice(model), "{model}");
+        assert!(preserved_thinking_generation(model), "{model}");
+        for fact in [
+            "thinking_always_on",
+            "thinking_block_binding",
+            "rejects_forced_tool_choice",
+        ] {
+            assert!(
+                declared_capabilities(model).iter().any(|declared| declared == fact),
+                "{model} does not declare {fact}"
+            );
+        }
+        for model in ["claude-opus-5", "claude-opus-4-8"] {
+            assert!(!thinking_always_on(model), "{model}");
+            assert!(!rejects_forced_tool_choice(model), "{model}");
+            assert!(!preserved_thinking_generation(model), "{model}");
         }
     }
 }

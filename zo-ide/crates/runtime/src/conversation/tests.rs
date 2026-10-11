@@ -9437,6 +9437,75 @@ fn fable_5_1_asks_for_the_structured_output_call_instead_of_forcing_it() {
     );
 }
 
+/// The same guarantee on Claude Opus 5.5, which refuses a forced `tool_choice`
+/// as Fable 5.1 does: the requirement rides the transcript and the final turn
+/// goes out as `auto`.
+#[test]
+fn opus_5_5_asks_for_the_structured_output_call_instead_of_forcing_it() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct ForceApi {
+        requests: Rc<RefCell<Vec<ApiRequest>>>,
+    }
+    impl ApiClient for ForceApi {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            let n = self.requests.borrow().len();
+            self.requests.borrow_mut().push(request);
+            if n == 0 {
+                Ok(vec![
+                    AssistantEvent::TextDelta("here is my analysis".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            } else {
+                Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "so-1".to_string(),
+                        name: "StructuredOutput".to_string(),
+                        input: "{\"verdict\":\"ok\"}".to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+    }
+
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        ForceApi {
+            requests: Rc::clone(&requests),
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_structured_output_tool("StructuredOutput");
+    runtime.set_context_model("claude-opus-5-5");
+
+    runtime.run_turn("analyze it", None).expect("turn");
+
+    let recorded = requests.borrow();
+    assert_eq!(recorded.len(), 2, "a final turn still ran");
+    assert_eq!(
+        recorded[1].tool_choice,
+        Some(::api::ToolChoice::Auto),
+        "Opus 5.5 never receives a forced tool choice"
+    );
+    let asked = recorded[1].messages.iter().rev().any(|message| {
+        message.blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text }
+                if text.contains("`StructuredOutput` tool call is required"))
+        })
+    });
+    assert!(
+        asked,
+        "the requirement did not reach the transcript: {:?}",
+        recorded[1].messages
+    );
+}
+
 #[test]
 fn no_structured_output_tool_means_no_forced_turn() {
     use std::cell::RefCell;
