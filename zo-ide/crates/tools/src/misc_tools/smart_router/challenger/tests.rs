@@ -2391,7 +2391,7 @@ fn the_arms_rows_fill_the_window_its_row_is_judged_on_and_a_new_question_opens_a
     for n in 0..marks {
         let preferred = if n < misses { Preferred::Incumbent } else { Preferred::Challenger };
         let at = i64::try_from(asked + n).expect("small");
-        file(&priced(arm::label_row(&format!("before-{n}#1"), &receipted(Receipt::Failed), preferred, at)));
+        file(&priced_row(arm::label_row(&format!("before-{n}#1"), &receipted(Receipt::Failed), preferred, at)));
     }
 
     // Every row the arm wrote is in the window the table's row reads today …
@@ -2429,7 +2429,7 @@ fn the_arms_rows_fill_the_window_its_row_is_judged_on_and_a_new_question_opens_a
 /// The cost and latency a label's pair carries (ADR-150, t-26584): the same on
 /// both sides, so the bar reads the rise on quality alone. The arm's writer
 /// carries no cost of its own yet (decision 2); these rows stand in for it.
-fn priced(mut row: Value) -> Value {
+fn priced_row(mut row: Value) -> Value {
     for (cost, current) in [("inputTokens", "currentInputTokens"), ("elapsedMs", "currentElapsedMs")] {
         row[cost] = json!(100);
         row[current] = json!(100);
@@ -2463,7 +2463,7 @@ fn marks_of_labels_that_name_no_source_never_raise_the_seat() {
             let at = i64::try_from(requests + n).expect("small");
             let attempt = format!("seat-{n}#1");
             let label = if sourced {
-                priced(arm::label_row(&attempt, &receipted(Receipt::Failed), preferred, at))
+                priced_row(arm::label_row(&attempt, &receipted(Receipt::Failed), preferred, at))
             } else {
                 unsourced_label(&attempt, Receipt::Failed, preferred, at)
             };
