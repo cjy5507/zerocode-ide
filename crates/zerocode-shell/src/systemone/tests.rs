@@ -588,6 +588,73 @@ fn a_second_warm_up_inside_the_pools_idle_window_opens_no_socket() {
     assert_eq!(asked.len(), 1, "a live socket was warmed twice: {asked:?}");
 }
 
+/// A request as the placement window's writer files it: named by the worker
+/// it placed, the name its later label repeats, and stamped with the words the
+/// seat asks (t-6877).
+fn placement_request(at: i64) -> serde_json::Value {
+    serde_json::json!({"at": at, "placement": format!("placement-{at}"), "outcome": "answered",
+           "elapsedMs": 300, "requests": 1, "applied": true,
+           "rubricVersion": zerocode_core::jev::PLACEMENT.rubric_version})
+}
+
+/// Fills the placement seat's window to its first judgment boundary and
+/// returns that boundary. The requests come first, one short of a boundary, so
+/// the window's first judgment finds no mark in yet; then the marks the seat's
+/// own later facts wrote, each naming the placement it grades and labelled
+/// `source`: the three the label said no to (t-6342), enough agreeing ones to
+/// bound above its budget with those inside, and today's room beside each.
+fn fill_placement_window(
+    ledger: &std::path::Path,
+    source: zerocode_core::jev::provenance::LabelSource,
+) -> i64 {
+    use serde_json::json;
+    use zerocode_core::jev::PLACEMENT;
+    use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for};
+    use zerocode_core::jev::summary::{JUDGED_EVERY_ROWS, LABEL_SOURCE};
+
+    let wanted = window_wanted_for(&PLACEMENT).expect("placement rises");
+    let misses = PLACEMENT.negatives_wanted.expect("placement rises");
+    let marks = marks_that_can_clear(&PLACEMENT).expect("a width the budget can be cleared on");
+    // Enough requests for every mark to name its own, the count one short of
+    // a judgment boundary.
+    let asked =
+        wanted + marks.saturating_sub(wanted).div_ceil(JUDGED_EVERY_ROWS) * JUDGED_EVERY_ROWS;
+    for at in 0..asked as i64 - 1 {
+        record_rows(&PLACEMENT, ledger, &[placement_request(at)], at);
+    }
+    let labels: Vec<serde_json::Value> = (0..marks)
+        .map(|n| {
+            json!({"at": asked, "label": format!("placement-{n}"), LABEL_SOURCE.canonical: source.token(),
+                   "agreed": n >= misses, "baselineAgreed": n % 2 == 0})
+        })
+        .collect();
+    record_rows(&PLACEMENT, ledger, &labels, asked as i64);
+    asked as i64
+}
+
+/// The placement seat with the marks it really writes: proxies (t-26584, ①).
+/// A proxy raises nothing however many it writes (ADR-171), so the boundary
+/// judges the window and the seat holds on the proxy line.
+#[test]
+fn a_placement_seat_holds_on_its_own_proxy_marks() {
+    use zerocode_core::jev::PLACEMENT;
+    use zerocode_core::jev::promote::{ROSE, Stand, stand_from};
+    use zerocode_core::jev::provenance::LabelSource;
+
+    let home = tempfile::tempdir().expect("a zo home");
+    let ledger = home.path().join(PLACEMENT.ledger);
+    let asked = fill_placement_window(&ledger, LabelSource::Proxy);
+    record_rows(&PLACEMENT, &ledger, &[placement_request(asked - 1)], asked);
+    let rows = read_rows(&ledger);
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row["transition"] == serde_json::json!(ROSE)),
+        "proxy marks raised the placement seat"
+    );
+    assert_eq!(stand_from(&rows), Stand::Recording);
+}
+
 /// The whole road, end to end: a seat left on `auto` records, is judged by
 /// its own writer at its own cadence, writes the rise into the ledger it was
 /// decided on, and is read back as acting — the claim `auto` makes, held
@@ -597,51 +664,25 @@ fn a_second_warm_up_inside_the_pools_idle_window_opens_no_socket() {
 /// The placement seat, because it is the one whose rows say what the road is
 /// for: 38 real requests, one timeout, and marks that are hindsight — the
 /// pane left where it was put — which the seat waits a window of before it
-/// may rise (t-6155 F1): its own rows alone never carry it up.
+/// may rise (t-6155 F1). Those marks are proxies (t-26584, ①), which raise
+/// nothing (ADR-171), so this rise is the same window with marks that name
+/// themselves executed; the proxy twin above holds.
 #[test]
-fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
+fn a_seat_on_auto_rises_on_executed_marks_and_is_read_back_as_acting() {
     use serde_json::json;
-    use zerocode_core::jev::promote::{
-        ROSE, Stand, marks_that_can_clear, stand_from, window_wanted_for,
-    };
-    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+    use zerocode_core::jev::promote::{ROSE, Stand, stand_from, window_wanted_for};
+    use zerocode_core::jev::provenance::LabelSource;
     use zerocode_core::jev::{JevMode, PLACEMENT};
 
     let home = tempfile::tempdir().expect("a zo home");
     let ledger = home.path().join(PLACEMENT.ledger);
     let wanted = window_wanted_for(&PLACEMENT).expect("placement rises");
-    // A request as the window's writer files it: named by the worker it
-    // placed, the name its later label repeats, and stamped with the words
-    // the seat asks (t-6877).
-    let answered = |at: i64| {
-        json!({"at": at, "placement": format!("placement-{at}"), "outcome": "answered",
-               "elapsedMs": 300, "requests": 1, "applied": true,
-               "rubricVersion": PLACEMENT.rubric_version})
-    };
-    let misses = PLACEMENT.negatives_wanted.expect("placement rises");
-    let marks = marks_that_can_clear(&PLACEMENT).expect("a width the budget can be cleared on");
-    // Enough requests for every mark to name its own, the count one short of
-    // a judgment boundary: judged at the window's first boundary with no mark
-    // in yet, the seat held and wrote nothing.
-    let asked =
-        wanted + marks.saturating_sub(wanted).div_ceil(JUDGED_EVERY_ROWS) * JUDGED_EVERY_ROWS;
-    for at in 0..asked as i64 - 1 {
-        record_rows(&PLACEMENT, &ledger, &[answered(at)], at);
-    }
-    // The marks the seat's own later facts wrote, each naming the placement
-    // it grades and dated inside the window: the three the label said no to
-    // (t-6342), enough agreeing ones to bound above its budget with those
-    // inside, and today's room beside each.
-    let labels: Vec<serde_json::Value> = (0..marks)
-        .map(|n| json!({"at": asked, "label": format!("placement-{n}"), "agreed": n >= misses, "baselineAgreed": n % 2 == 0}))
-        .collect();
-    record_rows(&PLACEMENT, &ledger, &labels, asked as i64);
+    let asked = fill_placement_window(&ledger, LabelSource::Executed);
     assert_eq!(
         stand_from(&read_rows(&ledger)),
         Stand::Recording,
         "marks alone do not fill the window"
     );
-    assert_eq!(stand_from(&read_rows(&ledger)), Stand::Recording);
     assert!(
         !read_rows(&ledger)
             .iter()
@@ -650,17 +691,12 @@ fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
 
     // The row that lands on the boundary: the writer judges, and the rise is
     // written beside the rows it was decided on.
-    record_rows(
-        &PLACEMENT,
-        &ledger,
-        &[answered(asked as i64 - 1)],
-        asked as i64,
-    );
+    record_rows(&PLACEMENT, &ledger, &[placement_request(asked - 1)], asked);
     let rows = read_rows(&ledger);
     let rose = rows
         .iter()
         .find(|row| row["transition"] == json!(ROSE))
-        .expect("the seat rose on its own rows");
+        .expect("the seat rose on executed marks");
     assert_eq!(rose["rows"], json!(wanted));
     assert_eq!(rose["answered"], json!(wanted));
     assert_eq!(stand_from(&rows), Stand::Applying);
