@@ -1469,7 +1469,8 @@ pub fn run(
         Effect::CaptureSeat { .. }
         | Effect::WorkerTerminal { .. }
         | Effect::WorktreeEvidence { .. }
-        | Effect::WorkerTranscript { .. } => answer(zerocode_core::agent_teams::Reply::refused(
+        | Effect::WorkerTranscript { .. }
+        | Effect::LandCheck(..) => answer(zerocode_core::agent_teams::Reply::refused(
             "the tmux road reads its own panes only",
         )),
         Effect::Focus { term } => {

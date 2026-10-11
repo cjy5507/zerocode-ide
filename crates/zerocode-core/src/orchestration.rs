@@ -38,6 +38,7 @@
 mod completion;
 pub mod coordinator_handover;
 pub mod delegate;
+pub mod land_check;
 pub mod landing_watch;
 mod session_history;
 pub mod task_cost;
@@ -528,6 +529,14 @@ pub enum MessageKind {
     /// the worker, not the coordinator. The road that writes it is
     /// [`Ledger::landing_watch`].
     BranchDrifted,
+    /// Nobody said this either: the LEDGER's receipt of one landing check (t-34501 stage 3) —
+    /// a task's head merged into the compare ref in a throwaway checkout, and what came of it:
+    /// a clash and its files, a clean merge and its tree, or the project's check command with
+    /// its exit code, time and log. Written only from the window's own check road, once per
+    /// check id, to the run's coordinator with the task named; never from a peer's `send`: a
+    /// body wearing this kind from a worker would be a pass nobody saw. The road that writes it
+    /// is [`Ledger::land_checked`].
+    LandCheck,
 }
 
 impl MessageKind {
@@ -554,6 +563,7 @@ impl MessageKind {
             Self::GateJudged => "gate_judged",
             Self::LandingStalled => "landing_stalled",
             Self::BranchDrifted => "branch_drifted",
+            Self::LandCheck => "land_check",
         }
     }
 
@@ -582,6 +592,7 @@ impl MessageKind {
                 | Self::GateJudged
                 | Self::LandingStalled
                 | Self::BranchDrifted
+                | Self::LandCheck
         )
     }
 }
@@ -612,6 +623,7 @@ impl std::str::FromStr for MessageKind {
             "gate_judged" => Self::GateJudged,
             "landing_stalled" => Self::LandingStalled,
             "branch_drifted" => Self::BranchDrifted,
+            "land_check" => Self::LandCheck,
             _ => return Err(format!("unknown message type: {word}")),
         })
     }
@@ -14346,6 +14358,7 @@ const BOOL_FLAGS: &[&str] = &[
     "--apply",
     "--wip-commit",
     "--inherit-checkout",
+    "--prepare",
 ];
 
 /* ---- what the ledger cannot know ------------------------------------- */
@@ -17788,6 +17801,16 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::FreshRead,
     ),
     (
+        land_check::LAND_CHECK_VERB,
+        "--task <id> [--head <sha>] [--prepare] | --task <id> --head <sha> --record <check> \
+         --rc <n> --log <path> [--took-ms <ms>] · merge a task's head into the compare ref in \
+         a throwaway checkout — never the worker's — and run the project's landing check there; \
+         the verdict reaches this run's mail as the task's evidence (`land_check`). --prepare \
+         stops after the merge and keeps the folder for a check run elsewhere; --record writes \
+         that check's end and removes the folder",
+        Doing::Mutation,
+    ),
+    (
         "send",
         "--to <address> --type <kind> [--body <text>] [--task <id>] [--dispatch <id>] \
          · groups: @all @idle @<agent> @worktree:<checkout>",
@@ -18288,6 +18311,7 @@ impl std::fmt::Debug for Decided {
             Effect::CaptureSeat { .. } => "capture-seat",
             Effect::WorktreeEvidence { .. } => "worktree-evidence",
             Effect::WorkerTranscript { .. } => "worker-transcript",
+            Effect::LandCheck(..) => "land-check",
             Effect::WorkerTerminal { .. } => "worker-terminal",
             Effect::Focus { .. } => "focus",
             Effect::Close { .. } => "close",
@@ -19479,6 +19503,12 @@ const BOUNDED_INPUT: &[(&str, Destination)] = &[
     ("--declaration", Destination::Name),
     ("--marker", Destination::Prose),
     ("--marker-source", Destination::Name),
+    // A landing check's words (t-34501 stage 3): a commit, a check id, numbers, a log path.
+    ("--head", Destination::Name),
+    ("--record", Destination::Name),
+    ("--rc", Destination::Name),
+    ("--took-ms", Destination::Name),
+    ("--log", Destination::Prose),
 ];
 
 /// Refuse an oversized field before anything happens, not while saving.
@@ -22033,6 +22063,18 @@ fn plan_inner(
             planned.reply = Reply::ok("\u{0}");
             planned.effect = Effect::WorktreeEvidence { checkout };
             return Ok(planned);
+        }
+
+        /* A landing check (t-34501 stage 3). The ledger chooses the task, the head and the
+         * repository and refuses a worker's pane; the window merges in a throwaway checkout,
+         * runs the project's check and writes the evidence back (`Ledger::land_checked`). The
+         * reply is the window's, written once the merge has been judged. */
+        land_check::LAND_CHECK_VERB => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            let ask = land_check::ask(ledger, &run_id, &team.id, pane, &words)?;
+            let mut planned = said(serde_json::Value::Null);
+            planned.effect = Effect::LandCheck(ask);
+            planned
         }
 
         "send" => {

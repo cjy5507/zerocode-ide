@@ -1652,6 +1652,25 @@ pub(crate) fn watched_checkouts() -> Vec<String> {
     paths.into_iter().map(str::to_string).collect()
 }
 
+/// The orchestration's own data root: where a landing check keeps its folders, rows and logs.
+fn land_check_root() -> Option<std::path::PathBuf> {
+    BLACKBOX.get().cloned()
+}
+
+/// One landing check's evidence, written as the ledger's own letter (t-34501 stage 3). Rings the
+/// bell when the letter is new; a repeat of a check id writes nothing.
+pub(crate) fn record_land_check(
+    receipt: zerocode_core::orchestration::land_check::LandCheckReceipt,
+    now_ms: i64,
+) {
+    let Some(held) = runtime() else {
+        return;
+    };
+    if let Ok((moved, _)) = held.actor.land_checked(receipt, now_ms) {
+        rang(moved);
+    }
+}
+
 /// Hand the ledger what the window saw of git, so it can write what is late. A pass that finds
 /// nothing writes nothing; one that wrote rings the bell for whoever sleeps on the mail.
 pub(crate) fn watch_landings(
@@ -5149,6 +5168,8 @@ pub(crate) fn window_exiting(
     road: crate::exit_runtime::ExitRoad,
     census: &dyn Fn() -> restart_census::RestartCensus,
 ) {
+    // A landing check the window still runs goes with it; its row waits for the next sweep.
+    crate::land_check::stop_running();
     let taken = census();
     // Once per exit for the road, and whenever there are workers to name:
     // the first call is the one that finds them, before they sleep.
@@ -10418,6 +10439,28 @@ fn carried(
                     answer(reply)
                 }
                 None => refused("worker is gone"),
+            }
+        }
+        /* A landing check (t-34501 stage 3). The window merges the head in a throwaway checkout
+         * of the compare ref and runs the project's check there. The verb answers the first
+         * word the check has — the merge's evidence, or `started` when the check runs on — and
+         * the evidence follows as the ledger's letter. The answer is filed as the receipt, so
+         * a retry with the same name is told the same thing and nothing runs twice. */
+        Effect::LandCheck(ask) => {
+            let Some(root) = land_check_root() else {
+                return refused("the orchestration data root is not open");
+            };
+            match crate::land_check::carry(&root, &ask, now_ms) {
+                Ok(said) => {
+                    let text = format!("{said}\n");
+                    if let Some(key) = decided.receipt.clone()
+                        && let Err(why) = actor.remember_served(key, text.clone(), now_ms)
+                    {
+                        return refused_by_runtime(why);
+                    }
+                    answer(zerocode_core::agent_teams::Reply::ok(text))
+                }
+                Err(why) => refused(why),
             }
         }
         /* One checkout's evidence, assembled where the sources live.
