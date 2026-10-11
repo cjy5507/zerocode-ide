@@ -134,7 +134,7 @@ fn normalize_thinking_for_wire(request: &MessageRequest) -> std::borrow::Cow<'_,
 fn strip_thinking_blocks_when_disabled(
     request: std::borrow::Cow<'_, MessageRequest>,
 ) -> std::borrow::Cow<'_, MessageRequest> {
-    // Fable and Mythos cannot turn thinking off, so a request to them with no
+    // Fable, Mythos and Opus 5.5 cannot turn thinking off, so a request to them with no
     // `thinking` field is still a thinking request and its replayed blocks are
     // valid — and on the 5.1 generation, taking them out would edit the
     // history every later block is bound to.
@@ -176,7 +176,7 @@ const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 
 /// A forced tool choice never reaches a model that returns 400 for it.
 ///
-/// Claude Fable 5.1 / Mythos 5.1: `tool_choice: type "tool" and "any" are not
+/// Claude Fable 5.1, Mythos 5.1 and Opus 5.5: `tool_choice: type "tool" and "any" are not
 /// supported for this model`. The runtime has already put the requirement in
 /// the transcript (`force_structured_output_call`); this is the wire's own
 /// guard, so no path — sub-agent, workflow, gateway — can 400 on it. `auto`
@@ -196,7 +196,7 @@ fn normalize_tool_choice_for_wire(
     std::borrow::Cow::Owned(rewritten)
 }
 
-/// Preserved thinking on the 5.1 generation: bind the request's thinking so a
+/// Preserved thinking (the 5.1 generation and Opus 5.5): bind the request's thinking so a
 /// replayed block whose conversation prefix changed is dropped and reported
 /// (`input_transformations`) rather than failing the request.
 ///
@@ -1407,7 +1407,7 @@ impl AnthropicClient {
         // thinking config on the request 400s and wedges the session.
         let normalized = strip_thinking_blocks_when_disabled(normalized);
         let normalized = normalize_tool_choice_for_wire(normalized);
-        // Preserved thinking (Fable/Mythos 5.1): the field and its beta header
+        // Preserved thinking (Fable/Mythos 5.1, Opus 5.5): the field and its beta header
         // travel together — see `bind_thinking_for_wire` and `wire_beta_header`.
         let bind_thinking =
             gateway.is_none() && super::preserved_thinking_generation(&request.model);

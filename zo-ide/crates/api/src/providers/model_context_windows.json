@@ -133,7 +133,28 @@
     {
       "provider": "anthropic",
       "ids": [
-        "claude-fable-5-1",
+        "claude-fable-5-1"
+      ],
+      "context_window": 1000000,
+      "max_request_bytes": 33554432,
+      "class": "frontier",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "capabilities": [
+        "thinking_always_on",
+        "thinking_block_binding",
+        "rejects_forced_tool_choice"
+      ],
+      "source": "Anthropic public positioning: Fable 5.1 (2026-08-28) heads the Mythos-class tier above Opus; Fable 5 stays served beside it. Fable 5.1 refuses forced tool_choice, binds thinking blocks to model+prefix (thinking.block_binding), and reads its cache at $0.25/MTok. context_window is LIVE: context_window_for_canonical consults the declared sources (custom-provider declaration, then this catalog) before the name-shape guesses, so this row is authoritative. Its value equals what the legacy claude-family guess returned, so the reorder moved no built-in window. | Request BODY byte ceiling (NOT the token context window): Anthropic Messages API documents a 32MB maximum request size; a 413 request_too_large is returned above it. PROVENANCE: assistant knowledge, NOT user-confirmed — correct this figure if the documented limit differs. Consumed by request_too_large_preflight in providers/anthropic.rs to reject an oversized body before upload; an absent value simply disables the preflight."
+    },
+    {
+      "provider": "anthropic",
+      "ids": [
         "claude-fable-5"
       ],
       "context_window": 1000000,
@@ -146,7 +167,32 @@
         "xhigh",
         "max"
       ],
-      "source": "Anthropic public positioning: Fable 5.1 (2026-08-28) heads the Mythos-class tier above Opus; Fable 5 stays served beside it. Fable 5.1 refuses forced tool_choice, binds thinking blocks to model+prefix (thinking.block_binding), and reads its cache at $0.25/MTok. context_window is LIVE: context_window_for_canonical consults the declared sources (custom-provider declaration, then this catalog) before the name-shape guesses, so this row is authoritative. Its value equals what the legacy claude-family guess returned, so the reorder moved no built-in window. | Request BODY byte ceiling (NOT the token context window): Anthropic Messages API documents a 32MB maximum request size; a 413 request_too_large is returned above it. PROVENANCE: assistant knowledge, NOT user-confirmed — correct this figure if the documented limit differs. Consumed by request_too_large_preflight in providers/anthropic.rs to reject an oversized body before upload; an absent value simply disables the preflight."
+      "capabilities": [
+        "thinking_always_on"
+      ],
+      "source": "Fable 5, the generation before 5.1, still served beside it: thinking is always on and adaptive-only. It declares no thinking.block_binding control and does not refuse forced tool_choice; claude-fable-5-1 is the row for those. The request byte ceiling is the same documented figure, noted on that row."
+    },
+    {
+      "provider": "anthropic",
+      "ids": [
+        "claude-opus-5-5"
+      ],
+      "context_window": 1000000,
+      "max_request_bytes": 33554432,
+      "class": "balanced",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "capabilities": [
+        "thinking_always_on",
+        "thinking_block_binding",
+        "rejects_forced_tool_choice"
+      ],
+      "source": "Anthropic 'What's new in Claude Opus 5.5' (read 2026-10-11): thinking is always on, so a request with thinking disabled or a manual budget returns 400 (omit thinking or send adaptive); tool_choice any or tool returns 400; thinking blocks bind to the model and the prefix that produced them (thinking.block_binding, beta thinking-binding-controls-2026-08-01, on accounts created after 2026-08-31). Context window, class and effort levels are the Opus 5 row's, as before this row existed; the request byte ceiling is the same documented figure noted on claude-fable-5-1."
     },
     {
       "provider": "anthropic",
