@@ -1715,11 +1715,16 @@ class Publish(LaneCase):
 
 
 class GateOwed(LaneCase):
-    """A gate judges one tree. A sha that left that tree exactly as the last
-    green install of that half was built from — apart from the release stamp
-    and the docs — owes it nothing, and the phase line says so (lane.sh
-    `gate_owed`). Measured 2026-09-16: gate-root 1105–1615 s, gate-zo 876–1296 s
-    on releases that each changed one tree."""
+    """A gate judges a tree. A sha that left the tree exactly as the last green
+    install of that half was built from — apart from version lines in the
+    release stamp — owes it nothing, and the phase line says so (lane.sh
+    `gate_owed`). Any other changed path owes both gates: each gate reads files
+    of the other half and of the docs (the root gate's pii-check reads every
+    tracked file, core tests read zo-ide sources, the core build script compiles
+    skills/, zo tests read the root fixtures), so no path is known to lie
+    outside either."""
+
+    STAMP = "Cargo.toml Cargo.lock crates/zerocode-shell/tauri.conf.json zo-ide/Cargo.toml zo-ide/Cargo.lock"
 
     def seed_installed(self, sha):
         (self.lane.home / "installed.json").write_text(
@@ -1732,77 +1737,66 @@ class GateOwed(LaneCase):
         skipped = {l.split(" gate ")[1].split()[0] for l in lines if "not owed" in l}
         return ran, skipped
 
-    def test_a_window_only_sha_owes_the_root_gate_alone(self):
+    def owed(self, changed, **stubs):
         self.seed_installed(SHA_C)
         self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS="ui/shell.js crates/zerocode-shell/src/main.rs Cargo.toml Cargo.lock "
-                                        "zo-ide/Cargo.toml zo-ide/Cargo.lock CHANGELOG.md")
+        r = self.lane.run(CHANGED_PATHS=changed, **stubs)
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.gates(SHA_A), ({"root"}, {"zo"}))
+        return self.gates(SHA_A)
+
+    def test_a_stamp_only_sha_owes_no_gate_and_still_installs(self):
+        self.assertEqual(self.owed(self.STAMP), (set(), {"root", "zo"}))
         zo = self.lane.phase("gate-zo")
         self.assertEqual((zo["rc"], zo["secs"]), (0, 0))
         self.assertIn(f"zo tree unchanged since {SHA_C[:8]}", zo["skipped"])
         self.assertEqual(self.lane.status()["outcome"], "green")
+        self.assertEqual(self.lane.installed()["app"]["sha"], SHA_A)
         self.assertEqual(self.lane.installed()["zo"]["sha"], SHA_A, "the skipped half is still built and installed")
         log = (self.lane.home / "out" / f"lane-{SHA_A[:8]}.log").read_text()
         self.assertIn("gate-zo rc=0 0s", log)
         self.assertIn("skipped: zo tree unchanged", log)
 
-    def test_a_zo_only_sha_owes_the_zo_gate_alone(self):
-        self.seed_installed(SHA_C)
-        self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS="zo-ide/crates/api/src/lib.rs zo-ide/Cargo.lock Cargo.toml "
-                                        "docs/design/zo-autonomous-routing-review-20260915.md")
-        self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.gates(SHA_A), ({"zo"}, {"root"}))
-        self.assertIn(f"root tree unchanged since {SHA_C[:8]}", self.lane.phase("gate-root")["skipped"])
+    def test_a_window_only_sha_owes_both_gates(self):
+        self.assertEqual(self.owed("ui/shell.js crates/zerocode-shell/src/main.rs " + self.STAMP + " CHANGELOG.md"),
+                         ({"root", "zo"}, set()))
+
+    def test_a_zo_only_sha_owes_both_gates(self):
+        self.assertEqual(self.owed("zo-ide/crates/api/src/lib.rs zo-ide/Cargo.lock Cargo.toml"),
+                         ({"root", "zo"}, set()))
+
+    def test_a_skill_the_core_compiles_owes_both_gates(self):
+        self.assertEqual(self.owed("skills/orchestration/SKILL.md"), ({"root", "zo"}, set()))
+
+    def test_a_core_fixture_written_in_markdown_owes_both_gates(self):
+        self.assertEqual(self.owed("crates/zerocode-core/fixtures/plain-text/before.ko.md"), ({"root", "zo"}, set()))
+
+    def test_a_file_the_core_reads_from_outside_its_folder_owes_both_gates(self):
+        self.assertEqual(self.owed("ui/knowledge-export.html"), ({"root", "zo"}, set()))
+
+    def test_a_zo_source_the_core_tests_read_owes_both_gates(self):
+        self.assertEqual(self.owed("zo-ide/crates/runtime/src/model_router/policy.rs"), ({"root", "zo"}, set()))
+
+    def test_a_root_fixture_zo_tests_read_owes_both_gates(self):
+        self.assertEqual(self.owed("fixtures/quality-baseline/baseline.json"), ({"root", "zo"}, set()))
+
+    def test_a_docs_only_sha_owes_both_gates(self):
+        self.assertEqual(self.owed("docs/design/x.md README.md CHANGELOG.md"), ({"root", "zo"}, set()))
+
+    def test_a_real_change_in_a_stamp_file_owes_both_gates(self):
+        self.assertEqual(self.owed("Cargo.toml", STAMP_REAL_CHANGES="Cargo.toml"), ({"root", "zo"}, set()))
 
     def test_a_shared_crate_owes_both_gates(self):
-        self.seed_installed(SHA_C)
-        self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS="crates/zerocode-core/src/agent.rs")
-        self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.gates(SHA_A), ({"root", "zo"}, set()))
+        self.assertEqual(self.owed("crates/zerocode-core/src/agent.rs"), ({"root", "zo"}, set()))
 
     def test_a_shared_gate_policy_change_owes_both_gates(self):
-        self.seed_installed(SHA_C)
-        self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS="tools/release/verify-every-recipe.sh")
-        self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.gates(SHA_A), ({"root", "zo"}, set()))
+        self.assertEqual(self.owed("tools/release/verify-every-recipe.sh"), ({"root", "zo"}, set()))
 
     def test_the_gate_planner_change_owes_both_gates(self):
-        self.seed_installed(SHA_C)
-        self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS="tools/release/lane.sh")
-        self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.gates(SHA_A), ({"root", "zo"}, set()))
-
-    def test_a_real_change_in_a_stamp_file_owes_its_gate(self):
-        self.seed_installed(SHA_C)
-        self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS="Cargo.toml", STAMP_REAL_CHANGES="Cargo.toml")
-        self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.gates(SHA_A), ({"root"}, {"zo"}))
-
-    def test_a_docs_only_sha_owes_no_gate_and_still_installs(self):
-        self.seed_installed(SHA_C)
-        self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS="docs/design/x.md README.md CHANGELOG.md")
-        self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.gates(SHA_A), (set(), {"root", "zo"}))
-        self.assertEqual(self.lane.installed()["app"]["sha"], SHA_A)
+        self.assertEqual(self.owed("tools/release/lane.sh"), ({"root", "zo"}, set()))
 
     def test_a_first_install_owes_both_gates(self):
         self.lane.enqueue(SHA_A)
         r = self.lane.run(CHANGED_PATHS="ui/shell.js")
-        self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.gates(SHA_A), ({"root", "zo"}, set()))
-
-    def test_when_cargo_cannot_name_the_shared_crates_both_gates_run(self):
-        self.seed_installed(SHA_C)
-        self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS="ui/shell.js", ZO_SHARED_PATHS="-")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(self.gates(SHA_A), ({"root", "zo"}, set()))
 
@@ -1813,9 +1807,10 @@ class GateOwed(LaneCase):
             '{"app":{"sha":"%s","at":"2026-09-16T00:00:00Z","version":"1.3.89"},'
             '"zo":{"sha":"%s","at":"2026-09-16T00:00:00Z","version":"1.3.90"}}\n' % (SHA_B, SHA_C))
         self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS="zo-ide/crates/api/src/lib.rs")
+        r = self.lane.run(CHANGED_PATHS=self.STAMP)
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn(f"root tree unchanged since {SHA_B[:8]}", self.lane.phase("gate-root")["skipped"])
+        self.assertIn(f"zo tree unchanged since {SHA_C[:8]}", self.lane.phase("gate-zo")["skipped"])
 
 
 if __name__ == "__main__":
