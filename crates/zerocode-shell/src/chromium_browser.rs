@@ -66,6 +66,15 @@ const CEF_SWITCH_USE_MOCK_KEYCHAIN: &str = "use-mock-keychain";
 /// never loads. This browser exists for exactly those signed-in company pages,
 /// so the address a person types is the address the pane loads.
 ///
+/// `WebBluetooth` is off as well (t-45873). One road that opens the Bluetooth
+/// adapter is a page asking for a Bluetooth device, and the adapter reads the
+/// devices paired with this Mac, the call macOS ends the window for without a
+/// usage description. With the feature off, pages do not get
+/// `navigator.bluetooth`. CEF 152 has no `disable-bluetooth` switch (checked
+/// against the framework's strings), so this list is where the feature goes.
+/// The trigger of the 2026-10-11 crash was not traced; the usage description
+/// covers any other road that reaches the adapter.
+///
 /// `MacAppCodeSignClone` is deliberately NOT in this list (t-20243). At every
 /// start Chromium copies the whole app bundle into the per-user `X` folder
 /// (`<bundle id>.code_sign_clone`) and hard-links the running executable into
@@ -78,7 +87,7 @@ const CEF_SWITCH_USE_MOCK_KEYCHAIN: &str = "use-mock-keychain";
 /// copies nothing runs are swept instead, once the window has painted
 /// (`code_sign_clone::sweep_after_first_paint`).
 const CEF_SWITCH_DISABLE_FEATURES: &str = "disable-features";
-const CEF_DISABLED_FEATURES: &str = "HttpsUpgrades,HttpsFirstBalancedMode";
+const CEF_DISABLED_FEATURES: &str = "HttpsUpgrades,HttpsFirstBalancedMode,WebBluetooth";
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static EXIT_PENDING: AtomicBool = AtomicBool::new(false);
 static LOADED: AtomicBool = AtomicBool::new(false);
@@ -1638,5 +1647,20 @@ mod tests {
                 .contains("Contents/MacOS/../Frameworks/Chromium Embedded Framework.framework")
         );
         assert!(HELPER_APP.starts_with("ZeroCode Helper.app/Contents/MacOS/"));
+    }
+
+    /// Web Bluetooth is off beside the https features. A page that asks for a
+    /// Bluetooth device is the road that opens the adapter, which reads the
+    /// devices paired with this Mac, so the feature stays off by name on the
+    /// same command line (t-45873).
+    #[test]
+    fn the_engine_starts_with_web_bluetooth_off_beside_the_https_features() {
+        let disabled: Vec<&str> = CEF_DISABLED_FEATURES.split(',').collect();
+        for feature in ["HttpsUpgrades", "HttpsFirstBalancedMode", "WebBluetooth"] {
+            assert!(
+                disabled.contains(&feature),
+                "`{feature}` is not turned off in the engine's command line: {CEF_DISABLED_FEATURES}"
+            );
+        }
     }
 }

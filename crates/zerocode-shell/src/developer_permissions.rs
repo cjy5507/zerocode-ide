@@ -587,13 +587,12 @@ impl Prompt {
     }
 }
 
-/// Whether this build carries the usage description a capture dialog needs.
+/// Whether the running app's Info dictionary carries `key`.
 ///
 /// A `cargo run` window has no bundle at all, and a bundle that lost the
-/// merge would have no key either. Either way macOS would kill us for asking,
-/// so the row quietly falls back to its System Settings pane instead.
+/// merge has no key either.
 #[cfg(target_os = "macos")]
-fn can_ask_for(kind: MediaKind) -> bool {
+fn bundle_declares(key: &str) -> bool {
     use objc2::runtime::{AnyClass, AnyObject};
 
     let Some(class) = AnyClass::get(c"NSBundle") else {
@@ -607,10 +606,20 @@ fn can_ask_for(kind: MediaKind) -> bool {
         if bundle.is_null() {
             return false;
         }
-        let key = objc2_foundation::NSString::from_str(kind.usage_description_key());
-        let value: *mut AnyObject = objc2::msg_send![bundle, objectForInfoDictionaryKey: &*key];
+        let name = objc2_foundation::NSString::from_str(key);
+        let value: *mut AnyObject = objc2::msg_send![bundle, objectForInfoDictionaryKey: &*name];
         !value.is_null()
     }
+}
+
+/// Whether this build carries the usage description a capture dialog needs.
+///
+/// A `cargo run` window has no bundle at all, and a bundle that lost the
+/// merge would have no key either. Either way macOS would kill us for asking,
+/// so the row quietly falls back to its System Settings pane instead.
+#[cfg(target_os = "macos")]
+fn can_ask_for(kind: MediaKind) -> bool {
+    bundle_declares(kind.usage_description_key())
 }
 
 #[cfg(target_os = "macos")]
@@ -944,6 +953,24 @@ mod tests {
                 can_ask_for(kind),
                 "{} did not reach this binary's Info.plist",
                 kind.usage_description_key()
+            );
+        }
+    }
+
+    /// The Bluetooth usage descriptions reach this binary too (t-45873). The
+    /// embedded Chromium reads the devices paired with this Mac, and macOS ends
+    /// a process that does so without a key, so the merge is checked here the
+    /// same way the capture test checks it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_bluetooth_usage_descriptions_reach_this_binary() {
+        for key in [
+            "NSBluetoothAlwaysUsageDescription",
+            "NSBluetoothPeripheralUsageDescription",
+        ] {
+            assert!(
+                bundle_declares(key),
+                "{key} did not reach this binary's Info.plist"
             );
         }
     }
