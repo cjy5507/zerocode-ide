@@ -1597,10 +1597,7 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   color: var(--ink-mist);
 }
 
-.wt-agent-role.is-person {
-  color: var(--signal-wait-ink);
-  background: color-mix(in srgb, var(--signal-wait) 12%, transparent);
-}
+.wt-agent-role.is-taken { outline: 1px dashed currentColor; outline-offset: 1px; }
 
 /* Settled history under an agent, folded to one line — "완료 N개". Quieter
  * than a live row: it is a count, not a session, and opens into the rows

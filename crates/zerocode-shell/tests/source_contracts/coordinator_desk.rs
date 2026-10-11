@@ -529,7 +529,8 @@ fn a_completed_task_nothing_can_review_reads_no_review_record_and_never_awaiting
     );
 }
 
-/// Who is the coordinator is said in one vocabulary on every surface (t-45938):
+/// Who is the coordinator is said in one vocabulary on every surface (t-45938;
+/// a taken-over worker stays 워커 and no chip reads 사람, 10-11):
 /// the role words come off one table (`PANE_ROLES`), the sidebar's row wears
 /// its role as a chip between the state dot and the face (a ring on the
 /// coordinator's face when the row is folded), the workspace line and the
@@ -539,11 +540,7 @@ fn a_completed_task_nothing_can_review_reads_no_review_record_and_never_awaiting
 fn the_role_words_come_off_one_table_on_every_surface() {
     let window = window_source();
     let table = block_after(window, "const PANE_ROLES = Object.freeze({");
-    for key in [
-        "\"agent.role.coordinator\"",
-        "\"agent.role.worker\"",
-        "\"agent.role.person\"",
-    ] {
+    for key in ["\"agent.role.coordinator\"", "\"agent.role.worker\""] {
         assert!(table.contains(key), "the role table lost {key}:\n{table}");
     }
     let row = block_after(window, "function makeAgentRow(row, gutter = false) {");

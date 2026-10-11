@@ -14,8 +14,10 @@ import { coordinatorDeskFixture } from "./coordinator-desk.mjs";
  *   ① each agent row wears its role after the state dot and before the face —
  *      코디 (the pane sitting in a run's live coordinator seat, its tip naming the
  *      run and the generation), 워커 (a pane the ledger summoned, its tip naming
- *      the worker and the task), 사람 (a worker pane the person took over) — and a
- *      pane the ledger never seated wears none;
+ *      the worker and the task — still 워커 when the person took the pane over,
+ *      the chip then wearing is-taken and its tip saying so; 10-11 「사람이
+ *      소환한 게 아닌데 사람이라 표시됨」) — and a pane the ledger never seated
+ *      wears none;
  *   ② two runs' coordinators in one window both read 코디;
  *   ③ a vacated seat takes the chip off, and 「코디 (비어 있음)」 stands once on
  *      a workspace line; a handed-over seat moves the chip to its new pane;
@@ -114,7 +116,8 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
           term: Number(node.dataset.term),
           folded: node.classList.contains("is-folded-summary"),
           chip: chip ? chip.textContent : null,
-          kind: chip ? [...chip.classList].find((name) => name.startsWith("is-"))?.slice(3) ?? "" : null,
+          kind: chip ? [...chip.classList].find((name) => name.startsWith("is-") && name !== "is-taken")?.slice(3) ?? "" : null,
+          taken: chip?.classList.contains("is-taken") ?? false,
           tip: chip?.dataset.tip ?? "",
           titled: chip?.hasAttribute("title") ?? false,
           tag: chip?.tagName ?? null,
@@ -148,7 +151,6 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
       window.__WORDS__ = () => ({
         coordinator: t("agent.role.coordinator", "코디"),
         worker: t("agent.role.worker", "워커"),
-        person: t("agent.role.person", "사람"),
         vacant: t("agent.role.coordinatorVacant", "코디 (비어 있음)"),
         handedIn: t("worktree.stage.handedIn", "넘김 끝 · 검토 대기"),
       });
@@ -161,14 +163,14 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
     /* ① — one of each, in its place, with its tip. */
     const kinds = new Set(chips.filter((one) => one.chip !== null).map((one) => one.kind));
     ok(
-      "a fake ledger with a coordinator, a worker and a person draws the three role chips once each — 코디, 워커, 사람 — and none on a pane the ledger never seated",
+      "a fake ledger draws the role chips by who the ledger seated — 코디 on the seat, 워커 on both summoned workers (the one the person took over keeps 워커 and wears is-taken), none on the pane the ledger never seated, and no chip ever reads 사람",
       at(9501)?.chip === words.coordinator && at(9501)?.kind === "coordinator" &&
-        at(9502)?.chip === words.worker && at(9502)?.kind === "worker" &&
-        at(9503)?.chip === words.person && at(9503)?.kind === "person" &&
+        at(9502)?.chip === words.worker && at(9502)?.kind === "worker" && !at(9502)?.taken &&
+        at(9503)?.chip === words.worker && at(9503)?.kind === "worker" && at(9503)?.taken &&
         at(9504) !== null && at(9504).chip === null &&
         chips.filter((one) => one.kind === "coordinator").length === 1 &&
-        chips.filter((one) => one.kind === "worker").length === 1 &&
-        chips.filter((one) => one.kind === "person").length === 1,
+        chips.filter((one) => one.kind === "worker").length === 2 &&
+        chips.every((one) => one.chip !== "사람"),
       JSON.stringify({ kindsDrawn: kinds.size, chips }),
     );
     ok(
@@ -177,20 +179,20 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
       JSON.stringify(chips),
     );
     ok(
-      "the coordinator chip's tip names the run and the seat's generation; a worker's names the worker and its task; the person's names the worker they took over — and the row says its role to a screen reader",
+      "the coordinator chip's tip names the run and the seat's generation; a worker's names the worker and its task (and that the person took it over); the person's says they opened it — and the row says its role to a screen reader",
       at(9501)?.tip.includes(RUN_A.name) && at(9501)?.tip.includes(String(RUN_A.generation)) &&
         at(9502)?.tip.includes("w-9502") && at(9502)?.tip.includes("역할 칩 과업") &&
-        at(9503)?.tip.includes("w-9503") &&
+        at(9503)?.tip.includes("w-9503") && at(9503)?.tip !== at(9502)?.tip.replace("w-9502", "w-9503") &&
         at(9501)?.aria.startsWith(words.coordinator) && at(9502)?.aria.startsWith(words.worker) &&
-        at(9503)?.aria.startsWith(words.person),
+        at(9503)?.aria.startsWith(words.worker),
       JSON.stringify(chips.map(({ term, tip, aria }) => ({ term, tip, aria }))),
     );
     /* The numbers the report quotes. Before this change no row drew a role, so the sidebar could not say
      * who the coordinator was: the person opened the board and read its desk (two presses). */
     const presses = at(9501)?.kind === "coordinator" ? 0 : 2;
     ok(
-      "the sidebar alone says who the coordinator is — 0 presses — and draws the coordinator's, a worker's and the person's panes three different ways",
-      presses === 0 && kinds.size === 3,
+      "the sidebar alone says who the coordinator is — 0 presses — and draws the coordinator's and the workers' panes two different ways",
+      presses === 0 && kinds.size === 2,
       JSON.stringify({ presses, kindsDrawn: kinds.size }),
     );
 
@@ -200,7 +202,7 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
       "a workspace line says who works there: 코디 where the coordinator's pane stands, 워커 w-… for a summoned worker, 사람 w-… where the person took it over, nothing for a pane nobody seated",
       lines["/r/main"]?.worker === words.coordinator &&
         lines["/r/w-work"]?.worker === `${words.worker} w-9502` &&
-        lines["/r/w-person"]?.worker === `${words.person} w-9503` &&
+        lines["/r/w-person"]?.worker === `${words.worker} w-9503` &&
         lines["/r/w-own"]?.worker === "",
       JSON.stringify(lines),
     );
@@ -222,10 +224,10 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
       return read;
     }, [9501, 9502, 9503, 9504]);
     ok(
-      "a tab leads with the same role word as its row — 코디 ·, 워커 ·, 사람 · — and a tab nobody seated keeps its plain name",
+      "a tab leads with the same role word as its row — 코디 ·, 워커 · (also for the taken-over worker) — and a tab nobody seated keeps its plain name",
       strip[9501]?.startsWith(`${words.coordinator} · `) && strip[9502]?.startsWith(`${words.worker} · `) &&
-        strip[9503]?.startsWith(`${words.person} · `) && strip[9504] !== null &&
-        ![words.coordinator, words.worker, words.person].some((word) => strip[9504].startsWith(`${word} · `)),
+        strip[9503]?.startsWith(`${words.worker} · `) && strip[9504] !== null &&
+        ![words.coordinator, words.worker].some((word) => strip[9504].startsWith(`${word} · `)),
       JSON.stringify(strip),
     );
 
@@ -301,7 +303,7 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
     ok(
       "a checkout whose work was handed in keeps its stage word and names no role on its line, while its pane's row still reads 워커",
       handedIn.row?.kind === "worker" && handedIn.line?.stage === words.handedIn &&
-        ![words.worker, words.coordinator, words.person].some((word) => handedIn.line.worker.includes(word)),
+        ![words.worker, words.coordinator].some((word) => handedIn.line.worker.includes(word)),
       JSON.stringify(handedIn),
     );
 
@@ -310,10 +312,9 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
       const KEYS = {
         "agent.role.coordinator": "코디",
         "agent.role.worker": "워커",
-        "agent.role.person": "사람",
         "agent.role.coordinatorTip": "코디네이터 · 런 {{run}} · {{generation}}세대",
         "agent.role.workerTip": "워커 {{worker}}",
-        "agent.role.personTip": "사람이 넘겨받은 판 · 워커 {{worker}}",
+        "agent.role.workerTakenTip": "사람이 넘겨받은 판 · 워커 {{worker}}",
         "agent.role.coordinatorVacant": "코디 (비어 있음)",
         "agent.role.coordinatorVacantTip": "{{runs}} 런의 코디 자리가 비어 있습니다 — 코디가 다시 앉으면 사라집니다",
       };
@@ -345,16 +346,16 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
       for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: Date.now() });
       const read = () => Object.fromEntries([...document.querySelectorAll('#board-view [data-desk-block="workers"] .board-desk-worker')]
         .map((row) => [row.dataset.worker.split("/")[1], row.querySelector(".board-desk-worker-id")?.textContent ?? ""]));
-      const person = t("agent.role.person", "사람");
       // Bounded: on a window without role words the head never changes, and the check below says so.
-      for (let tries = 0; tries < 120 && read()["w-2"] !== `${person} w-2`; tries += 1) {
+      const worker = t("agent.role.worker", "워커");
+      for (let tries = 0; tries < 120 && read()["w-2"] !== `${worker} w-2`; tries += 1) {
         await new Promise((done) => setTimeout(done, 25));
       }
-      return { heads: read(), worker: t("agent.role.worker", "워커"), person };
+      return { heads: read(), worker };
     });
     ok(
-      "the desk's worker heads lead with the same role words — 워커 w-… for a summoned worker, 사람 w-… for one the person took over",
-      heads.heads["w-1"] === `${heads.worker} w-1` && heads.heads["w-2"] === `${heads.person} w-2`,
+      "the desk's worker heads lead with the same role word — 워커 w-… for a summoned worker, taken over by the person or not",
+      heads.heads["w-1"] === `${heads.worker} w-1` && heads.heads["w-2"] === `${heads.worker} w-2`,
       JSON.stringify(heads),
     );
   } finally {

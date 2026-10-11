@@ -9965,13 +9965,13 @@ function agentRowSpoken(tip, status, ago, role = null) {
  * ledger holds it — the word its agent row, its workspace line, its tab and the
  * desk lead with, out of this one table: the pane sitting in a run's live
  * coordinator seat is 코디 (two runs' coordinators in one window are two), a
- * pane the ledger summoned a worker into is 워커, and 사람 once the person took
- * that pane over. A pane the ledger never seated plays none — a person's own
- * agent is not 사람, which names a takeover. */
+ * pane the ledger summoned a worker into is 워커 — still 워커 once the person
+ * took that pane over: a takeover is a state the chip's tip names, not a role
+ * (10-11 「사람이 소환한 게 아닌데 사람이라 표시됨」). A pane the ledger never
+ * seated wears none. */
 const PANE_ROLES = Object.freeze({
   coordinator: { key: "agent.role.coordinator", word: "코디" },
   worker: { key: "agent.role.worker", word: "워커" },
-  person: { key: "agent.role.person", word: "사람" },
 });
 
 function paneRole(term) {
@@ -9984,7 +9984,7 @@ function paneRole(term) {
 /* A ledger worker's role, from its row alone — the desk's rows name workers
  * this window may hold no terminal for. */
 function ledgerWorkerRole(facts) {
-  return { kind: facts.takenOver ? "person" : "worker", facts };
+  return { kind: "worker", facts, takenOver: facts.takenOver === true };
 }
 
 function paneRoleWord(role) {
@@ -9993,16 +9993,16 @@ function paneRoleWord(role) {
 }
 
 /* What a role says when pointed at: the run and the seat's generation for a
- * coordinator (one line a run), the worker and its task for a worker or for
- * the person who took one over. */
+ * coordinator (one line a run), the worker and its task for a worker — and
+ * that the person took it over, when they did. */
 function paneRoleTip(role) {
   if (role.kind === "coordinator") {
     return role.seats.map((seat) => t("agent.role.coordinatorTip", "코디네이터 · 런 {{run}} · {{generation}}세대", {
       run: seat.name || seat.run, generation: seat.generation,
     })).join(" / ");
   }
-  const who = role.kind === "person"
-    ? t("agent.role.personTip", "사람이 넘겨받은 판 · 워커 {{worker}}", { worker: role.facts.worker })
+  const who = role.takenOver
+    ? t("agent.role.workerTakenTip", "사람이 넘겨받은 판 · 워커 {{worker}}", { worker: role.facts.worker })
     : t("agent.role.workerTip", "워커 {{worker}}", { worker: role.facts.worker });
   const task = role.facts.task?.trim() || role.facts.taskId || "";
   return task ? `${who} · ${task}` : who;
@@ -10032,7 +10032,7 @@ function agentRowRoleSaid(row) {
  * the one button, and the chip is words, not a second press. */
 function agentRoleChip(role) {
   const chip = document.createElement("span");
-  chip.className = `wt-agent-role is-${role.kind}`;
+  chip.className = `wt-agent-role is-${role.kind}${role.takenOver ? " is-taken" : ""}`;
   chip.textContent = paneRoleWord(role);
   chip.dataset.tip = paneRoleTip(role);
   return chip;
@@ -10490,7 +10490,7 @@ function worktreeRoleWords(path) {
   for (const term of worktreeTerms(path)) {
     const role = paneRole(term);
     if (role?.kind === "coordinator") return paneRoleWord(role);
-    if (worker === null && role && !role.facts.reported) worker = role;
+    if (worker === null && role?.kind === "worker" && !role.facts.reported) worker = role;
   }
   return worker ? workerRoleWords(worker) : "";
 }
