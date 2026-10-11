@@ -4710,6 +4710,7 @@ struct Stopped {
     transcript: std::path::PathBuf,
     busy: Mutex<bool>,
     refusing: Mutex<bool>,
+    point_refusal: Mutex<Option<Box<dyn Fn() + Send>>>,
     sent: Mutex<Vec<(u32, String)>>,
     /// The worker pane's visible screen.
     screen: Mutex<String>,
@@ -4757,6 +4758,27 @@ impl Host for Stopped {
             .unwrap_or_else(|held| held.into_inner())
             .push((term, text.to_string()));
         true
+    }
+    fn point(
+        &self,
+        term: u32,
+        line: &str,
+        submit: bool,
+    ) -> Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>> {
+        if let Some(refuse) = self.point_refusal.lock().unwrap().take() {
+            refuse();
+            return None;
+        }
+        let landed = self.send(term, line) && (!submit || self.send(term, "\r"));
+        let (settled, receipt) = std::sync::mpsc::sync_channel(1);
+        settled
+            .send(if landed {
+                zerocode_pty::DeliveryOutcome::Delivered
+            } else {
+                zerocode_pty::DeliveryOutcome::TimedOut
+            })
+            .unwrap();
+        Some(receipt)
     }
     fn pane_exists(&self, _term: u32) -> bool {
         true
@@ -4854,6 +4876,7 @@ impl StoppedWorker {
                 .join("d4e81823-3b9a-4bf1-a54b-b4366117b514.jsonl"),
             busy: Mutex::new(false),
             refusing: Mutex::new(false),
+            point_refusal: Mutex::new(None),
             sent: Mutex::new(Vec::new()),
             screen: Mutex::new(String::new()),
             jev: Mutex::new(None),
@@ -5910,6 +5933,129 @@ fn a_refused_readings_switches_wait_and_land_before_the_rotation_is_read() {
         (placed(&rotated), None),
         "an unchanged file moved the cursor"
     );
+}
+
+#[test]
+fn a_resume_settlement_keeps_its_observed_result_until_the_store_accepts_it() {
+    use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    for submitted in [false, true] {
+        let stood = StoppedWorker::stand(96_360, "--on-transient-error resume", Vec::new());
+        let at = |elapsed| stood.began + elapsed;
+        let record = transient_record_keyed("settlement-refused");
+        stood.stops_on(
+            &[CLAUDE_PLAIN_RECORD, &record, CLAUDE_TURN_DURATION],
+            at(9_000),
+        );
+        tick(&stood.host, &[], at(10_000));
+        let rows = the_rows();
+        let receipt = rows.runs[0]
+            .messages
+            .iter()
+            .find(|message| message.kind == MessageKind::Resumed)
+            .expect("the durable reservation")
+            .id
+            .clone();
+        super::settle_resumes(at(11_000));
+        if submitted {
+            super::pane_prompt_submitted(stood.host.worker_term);
+        }
+        let budget = i64::try_from(zerocode_pty::ready::SUBMIT_ACK_TIMEOUT.as_millis()).unwrap();
+        let connection = stood._store.fault_connection_for_tests().unwrap();
+        connection.execute_batch(REFUSE_LEDGER_WRITES).unwrap();
+        super::settle_resumes(at(12_000 + budget));
+        super::settle_resumes(at(13_000 + budget));
+        connection
+            .execute_batch("DROP TRIGGER refuse_writes;")
+            .unwrap();
+        let refused = the_rows();
+        let body: serde_json::Value = serde_json::from_str(
+            refused.runs[0]
+                .messages
+                .iter()
+                .find(|message| message.id == receipt)
+                .expect("the refused settlement's reservation")
+                .body
+                .as_str(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["status"], "typing",
+            "the target settlement was not refused"
+        );
+        super::pane_prompt_submitted(stood.host.worker_term);
+        *stood.host.busy.lock().unwrap() = true;
+        tick(&stood.host, &[], at(14_000 + budget));
+        let settled = stood.news("resumed", at(14_001 + budget));
+        assert_eq!(
+            settled.len(),
+            1,
+            "the observed result was lost after storage refusal"
+        );
+        assert_eq!(
+            settled[0]["status"],
+            if submitted {
+                "submitted"
+            } else {
+                "not_submitted"
+            }
+        );
+        assert_eq!(settled[0]["typed"], true);
+        assert!(
+            the_rows().runs[0]
+                .messages
+                .iter()
+                .any(|message| message.id == receipt)
+        );
+        tick(&stood.host, &[], at(15_000 + budget));
+        assert_eq!(stood.news("resumed", at(15_001 + budget)), settled);
+        assert_eq!(stood.host.typed_at(stood.host.worker_term).len(), 2);
+    }
+}
+
+#[test]
+fn an_unaddressable_resume_keeps_its_untyped_result_until_the_store_accepts_it() {
+    use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    let stood = StoppedWorker::stand(96_370, "--on-transient-error resume", Vec::new());
+    let at = |elapsed| stood.began + elapsed;
+    let record = transient_record_keyed("unaddressable-settlement");
+    stood.stops_on(
+        &[CLAUDE_PLAIN_RECORD, &record, CLAUDE_TURN_DURATION],
+        at(9_000),
+    );
+    let fault = stood._store.fault_connection_for_tests().unwrap();
+    *stood.host.point_refusal.lock().unwrap() = Some(Box::new(move || {
+        fault.execute_batch(REFUSE_LEDGER_WRITES).unwrap();
+    }));
+    tick(&stood.host, &[], at(10_000));
+    let connection = stood._store.fault_connection_for_tests().unwrap();
+    connection
+        .execute_batch("DROP TRIGGER refuse_writes;")
+        .unwrap();
+    let rows = the_rows();
+    let body: serde_json::Value = serde_json::from_str(
+        rows.runs[0]
+            .messages
+            .iter()
+            .find(|message| message.kind == MessageKind::Resumed)
+            .expect("the reservation preceded the injected refusal")
+            .body
+            .as_str(),
+    )
+    .unwrap();
+    assert_eq!(body["status"], "typing");
+    *stood.host.busy.lock().unwrap() = true;
+    tick(&stood.host, &[], at(11_000));
+    let settled = stood.news("resumed", at(11_001));
+    assert_eq!(
+        settled.len(),
+        1,
+        "the untyped result was lost after storage refusal"
+    );
+    assert_eq!(settled[0]["status"], "not_submitted");
+    assert_eq!(settled[0]["typed"], false);
+    tick(&stood.host, &[], at(12_000));
+    assert_eq!(stood.news("resumed", at(12_001)), settled);
+    assert!(stood.host.typed_at(stood.host.worker_term).is_empty());
 }
 
 /// The whole road, attempt by attempt. The declaration reads back with its
