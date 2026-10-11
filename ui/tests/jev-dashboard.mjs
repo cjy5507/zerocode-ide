@@ -532,7 +532,7 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
 
     await page.setViewportSize(oneScreen);
 
-    // The settings card: one switch, the key, and a line to the dashboard
+    // The settings card: one switch, the provider selector, the key, and a line to the dashboard
     // (§6.1) — no choice of mode in sight.
     for (const theme of ["dark", "light"]) {
       await setQualityTheme(page, theme);
@@ -544,16 +544,18 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
         card.scrollIntoView({ block: "start" });
         return {
           faults: window.__JEV_TEXT_FAULTS__(card),
-          visibleSelects: [...card.querySelectorAll("select")]
-            .filter((one) => !one.closest("details:not([open])") && one.getClientRects().length > 0).length,
+          visibleSelectIds: [...card.querySelectorAll("select")]
+            .filter((select) => !select.closest("details:not([open])") && select.getClientRects().length > 0)
+            .map((select) => select.id),
           switches: card.querySelectorAll("[data-jev-switch]").length,
         };
       });
       const path = join(EVIDENCE_DIR, `jev-settings-card-${theme}.png`);
       await page.locator("#typesafe-card").screenshot({ path });
       await page.evaluate(() => setSettingsOpen(false));
-      ok(`the ${theme} settings card is one switch and the key, with no text cut, clipped or overlapping`,
-        card.faults.length === 0 && card.visibleSelects === 0 && card.switches === 1,
+      ok(`the ${theme} settings card has one switch, the provider selector and the key, with no text cut, clipped or overlapping`,
+        card.faults.length === 0 && card.visibleSelectIds.length === 1
+          && card.visibleSelectIds[0] === "judgment-provider-kind" && card.switches === 1,
         JSON.stringify({ ...card, faults: card.faults.slice(0, 6), path, counted }));
     }
     ok("the evidence pages raised no renderer fault", faults.length === 0, faults.join(" | "));
