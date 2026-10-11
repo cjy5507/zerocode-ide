@@ -4,6 +4,8 @@ import { openWindowTestPage } from "./window-boot.mjs";
 // A toast still up after this long is standing, not passing through.
 const TOAST_WAIT_MS = 10000;
 const POLL_MS = 100;
+// The poll's own slack on top of the toast's lifetime before a leave is late.
+const LEAVE_ALLOWANCE_MS = 1000;
 const conflict = { id: "pr:mergeable", root: "/wt/topic", checkout: "topic", number: 12, kind: "mergeable", opened_at: 1, resolved_at: null };
 
 // The PR condition toasts and their status bar mark, in a window that was laid
@@ -51,7 +53,7 @@ export async function testScmNoticeWindow(browser, origin, ok) {
     const left = await leftAlone(first);
     console.log(`MEASURE toast_lifetime=${left === null ? `still up after ${TOAST_WAIT_MS} ms` : `${left} ms (TOAST_MS ${toastMs})`}`);
     ok("a condition is said as one toast", said === 1, `said=${said}`);
-    ok("the toast leaves on its own within TOAST_MS", left !== null && left <= toastMs + 1000, `left=${left}`);
+    ok("the toast leaves on its own within TOAST_MS", left !== null && left <= toastMs + LEAVE_ALLOWANCE_MS, `left=${left}`);
     const marks = await ledger(first);
     ok("showing the toast records the mark in the ledger",
       marks.some((mark) => mark.cmd === "shown" && mark.id === conflict.id && mark.openedAt === conflict.opened_at), JSON.stringify(marks));
