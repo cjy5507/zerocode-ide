@@ -353,6 +353,7 @@ const WORK_STAGES = Object.freeze({
   working: { key: "", word: "", phase: "", landing: null, live: "dispatched" },
   report_only: { key: "board.awaitingReview", word: "검증 대기", phase: "review", landing: "handedIn", live: "reported" },
   stale: { key: "board.staleReview", word: "다시 검토 대기", phase: "review", landing: "handedIn", live: "stale" },
+  superseded: { key: "board.superseded", word: "다음 시도로 넘어감", phase: "superseded", landing: null, live: "superseded" },
   failed: { key: "board.desk.stageFailed", word: "실패", phase: "", landing: "failed", live: "failed" },
   unreviewable: { key: "board.noReviewRecord", word: "종료 — 검토 자료 없음", phase: "unreviewable", landing: "failed", live: "unreviewable" },
   verified: { key: "board.verified", word: "검증됨", phase: "vouched", landing: "landWait", live: "verified" },
@@ -417,7 +418,7 @@ function ledgerVouched(facts) {
  * coordinator vouches for, and not waiting, which it would still have to look at.
  * One set, read by a checkout's mark (`worktreeMark`) and by the fold of a
  * finished child pane (`ledgerAwaitsCoordinator`). */
-const LEDGER_AT_REST_PHASES = new Set(["closed", "unreviewable"]);
+const LEDGER_AT_REST_PHASES = new Set(["closed", "unreviewable", "superseded"]);
 
 /* Whether the ledger still holds something for a coordinator to do on this seat's
  * work: a task nobody vouched for — a report to look at, a claim to check, an
@@ -10517,7 +10518,7 @@ function worktreeWorkerWords(path) {
  * in it. With several the one still waiting wins, and anything unresolved
  * outranks what is settled, so a worker's verified report cannot hide
  * another's that nobody has looked at. */
-const WORKTREE_PHASE_RANK = Object.freeze({ "": 0, closed: 1, unreviewable: 2, vouched: 3, unsettled: 4, review: 5 });
+const WORKTREE_PHASE_RANK = Object.freeze({ "": 0, closed: 1, superseded: 1, unreviewable: 2, vouched: 3, unsettled: 4, review: 5 });
 
 function worktreeReviewPhase(path) {
   if (paneLedger.size === 0 && checkoutLedger.size === 0) return "";

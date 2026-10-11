@@ -566,7 +566,9 @@ const fn completed_stage(work: WorkStage) -> &'static str {
         WorkStage::Unreviewable => "unreviewable",
         WorkStage::NothingToLand => "nothing_to_land",
         WorkStage::Closed => "closed",
-        WorkStage::Working | WorkStage::Failed | WorkStage::Unknown => "unknown",
+        WorkStage::Working | WorkStage::Failed | WorkStage::Superseded | WorkStage::Unknown => {
+            "unknown"
+        }
     }
 }
 

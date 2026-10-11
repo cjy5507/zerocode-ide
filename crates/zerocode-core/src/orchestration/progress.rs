@@ -38,9 +38,13 @@ pub enum WorkStage {
     /// Completed, and every attempt ended handing nothing in: no review can
     /// ever be written ([`ReviewFacts::unreviewable`]). Over, not verified.
     Unreviewable,
-    /// A coordinator reviewed another attempt, or another commit than the one
-    /// this attempt handed in: the review does not stand for this work.
+    /// A coordinator reviewed an earlier attempt, or an earlier commit than the
+    /// one this attempt handed in, naming what it read: the review does not
+    /// stand for this work.
     Stale,
+    /// An earlier attempt the task has moved past: a newer attempt carries the
+    /// work, so this one neither waits for a review nor wears the newer one's.
+    Superseded,
     /// Verified against its source, and nothing says it landed.
     Verified,
     /// Verified, with no code to land.
@@ -58,12 +62,13 @@ pub enum WorkStage {
 
 impl WorkStage {
     /// Every stage, each once.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Working,
         Self::ReportOnly,
         Self::Failed,
         Self::Unreviewable,
         Self::Stale,
+        Self::Superseded,
         Self::Verified,
         Self::NothingToLand,
         Self::Merged,
@@ -81,6 +86,7 @@ impl WorkStage {
             Self::Failed => "failed",
             Self::Unreviewable => "unreviewable",
             Self::Stale => "stale",
+            Self::Superseded => "superseded",
             Self::Verified => "verified",
             Self::NothingToLand => "nothing_to_land",
             Self::Merged => "merged",
@@ -123,9 +129,9 @@ pub struct WorkProgress {
     /// named.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviewed: Option<String>,
-    /// A command to read or check the work with from here, its ids quoted for
-    /// a POSIX shell — shown to a person, never run, and never one that writes
-    /// a review.
+    /// A command to read or check the work with from here, scoped to its run
+    /// and its ids quoted for a POSIX shell — shown to a person, never run, and
+    /// never one that writes a review.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
 }
@@ -145,6 +151,8 @@ impl Run {
     /// already read with [`Run::review_of`] — read once per row. `task` is
     /// `None` where a sweep compacted the task away and the attempt is all
     /// the ledger has left: the attempt's own end is then all there is to say.
+    /// An attempt older than the task's newest reads by its own end, never by
+    /// the review of another attempt.
     #[must_use]
     pub fn progress_from(
         &self,
@@ -152,7 +160,8 @@ impl Run {
         review: &ReviewFacts,
         attempt: Option<&Dispatch>,
     ) -> WorkProgress {
-        let (stage, claimed) = stage_of(task, review, attempt);
+        let newest = task.and_then(|task| self.newest_attempt(&task.id));
+        let (stage, claimed) = stage_of(task, review, attempt, newest);
         let (attempt_id, source) = if stage.reviewed() {
             (review.attempt.clone(), review.source.clone())
         } else {
@@ -164,7 +173,7 @@ impl Run {
         WorkProgress {
             stage,
             claimed,
-            next: self.next_step(task, stage, attempt, review),
+            next: self.next_step(task, stage, attempt, newest, review),
             attempt: attempt_id,
             source,
             merge_head: review.merge_head.clone().filter(|_| stage.reviewed()),
@@ -180,44 +189,45 @@ impl Run {
         task: Option<&Task>,
         stage: WorkStage,
         attempt: Option<&Dispatch>,
+        newest: Option<&Dispatch>,
         review: &ReviewFacts,
     ) -> Option<String> {
         let task = task?;
-        let newest = self.newest_attempt(&task.id)?;
+        let newest = newest?;
         let current = attempt.filter(|one| one.id == newest.id);
-        let argv: Vec<String> = match stage {
+        let (verb, words): (&str, Vec<String>) = match stage {
             // What the checkout can prove: its changes, its runs, its receipts.
-            WorkStage::ReportOnly | WorkStage::Stale => vec![
-                WORKTREE_EVIDENCE_VERB.into(),
-                "--worker".into(),
-                current?.worker.clone(),
-            ],
+            WorkStage::ReportOnly | WorkStage::Stale => (
+                WORKTREE_EVIDENCE_VERB,
+                vec!["--worker".into(), current?.worker.clone()],
+            ),
             // The attempt's own words, to read why it ended.
-            WorkStage::Failed => vec![
-                WORKER_TRANSCRIPT_VERB.into(),
-                "--worker".into(),
-                current?.worker.clone(),
-            ],
+            WorkStage::Failed => (
+                WORKER_TRANSCRIPT_VERB,
+                vec!["--worker".into(), current?.worker.clone()],
+            ),
             // The landing check of the head the review named — a commit; a review of a report
             // has no head to merge.
             WorkStage::Verified => {
                 let head = review.source.as_deref().and_then(super::commit_named)?;
-                vec![
-                    LAND_CHECK_VERB.into(),
-                    "--task".into(),
-                    task.id.clone(),
-                    "--head".into(),
-                    head,
-                ]
+                (
+                    LAND_CHECK_VERB,
+                    vec!["--task".into(), task.id.clone(), "--head".into(), head],
+                )
             }
             WorkStage::Working
             | WorkStage::Unreviewable
+            | WorkStage::Superseded
             | WorkStage::NothingToLand
             | WorkStage::Merged
             | WorkStage::Deployed
             | WorkStage::Closed
             | WorkStage::Unknown => return None,
         };
+        let argv = [verb.to_string(), "--run".to_string(), self.id.clone()]
+            .into_iter()
+            .chain(words)
+            .collect();
         Some(command_line(argv, &task.id))
     }
 }
@@ -242,17 +252,34 @@ fn command_line(mut argv: Vec<String>, task: &str) -> String {
         .join(" ")
 }
 
-/// The stage, and the worker's claim beside a report. Closed first; then a
-/// coordinator's facts, in the order they supersede each other, believed only
-/// with the source they were written against; then what no review can be
-/// written for; then the attempt itself.
+/// The stage, and the worker's claim beside a report. Closed first; then an
+/// attempt older than `newest`, by its own end alone; then a coordinator's
+/// facts, in the order they supersede each other, believed only with the
+/// source they were written against; then what no review can be written for;
+/// then the attempt itself. A review that no longer stands reads stale only
+/// where the coordinator's record carried review keys and named what it read:
+/// one that named nothing is unknown, and a note that carries no review leaves
+/// the report waiting.
 fn stage_of(
     task: Option<&Task>,
     review: &ReviewFacts,
     attempt: Option<&Dispatch>,
+    newest: Option<&Dispatch>,
 ) -> (WorkStage, Option<WorkStage>) {
     if task.is_some_and(|task| task.status == TaskStatus::Closed || task.closed.is_some()) {
         return (WorkStage::Closed, None);
+    }
+    if let Some(older) = attempt.filter(|one| newest.is_some_and(|newest| newest.id != one.id)) {
+        let stage = if review.unreviewable {
+            WorkStage::Unreviewable
+        } else if older.is_open() {
+            WorkStage::Working
+        } else if older.succeeded != Some(true) {
+            WorkStage::Failed
+        } else {
+            WorkStage::Superseded
+        };
+        return (stage, None);
     }
     let fact = [
         (review.deployed, WorkStage::Deployed),
@@ -285,8 +312,21 @@ fn stage_of(
     // withheld its facts, and kept the ids that say why.
     if review.author == ReviewAuthor::Coordinator
         && (review.superseded_by.is_some() || review.source_now.is_some())
+        && task.is_some_and(|task| ReviewFacts::from_result(task.result.as_str()).written)
     {
-        return (WorkStage::Stale, None);
+        let named = review.attempt.is_some()
+            || review
+                .source
+                .as_deref()
+                .is_some_and(|named| !named.trim().is_empty());
+        return (
+            if named {
+                WorkStage::Stale
+            } else {
+                WorkStage::Unknown
+            },
+            None,
+        );
     }
     let claim = [
         (review.claimed_deployed, WorkStage::Deployed),

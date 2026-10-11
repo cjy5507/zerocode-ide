@@ -105,7 +105,7 @@ const TALL = 2400;
  * stage the ledger learns tomorrow makes this suite red instead of falling
  * through the sidebar unplaced. */
 const WANT_PHASE = {
-  working: "", report_only: "review", stale: "review", failed: "", unreviewable: "unreviewable",
+  working: "", report_only: "review", stale: "review", superseded: "superseded", failed: "", unreviewable: "unreviewable",
   verified: "vouched", nothing_to_land: "vouched", merged: "vouched", deployed: "vouched", closed: "closed",
   unknown: "",
 };

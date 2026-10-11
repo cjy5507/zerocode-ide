@@ -61,6 +61,7 @@ fn read(bench: &Bench, task: &str, dispatch: &str) -> (WorkProgress, WorkProgres
 fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     let mut bench = Bench::new();
     bench.json("run-create --name progress");
+    let run_id = bench.ledger.runs()[0].id.clone();
 
     // Working: the attempt is open.
     let working = task_of(&mut bench, "working");
@@ -82,7 +83,7 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     assert_eq!(row.source.as_deref(), Some(HEAD_A));
     assert_eq!(
         row.next.as_deref(),
-        Some(format!("zerocode-orc worktree-evidence --worker {worker}").as_str())
+        Some(format!("zerocode-orc worktree-evidence --run {run_id} --worker {worker}").as_str())
     );
 
     // A worker's own word is a claim beside the report, never the stage — and its word that there
@@ -106,7 +107,7 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     assert_eq!(row.stage, WorkStage::Failed);
     assert_eq!(
         row.next.as_deref(),
-        Some(format!("zerocode-orc worker-transcript --worker {worker}").as_str())
+        Some(format!("zerocode-orc worker-transcript --run {run_id} --worker {worker}").as_str())
     );
 
     // Unreviewable: done by hand, and no attempt ever handed anything in. Over, and nothing to read.
@@ -152,7 +153,7 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
         whole.next.as_deref(),
         Some(
             format!(
-                "zerocode-orc land-check --task {verified} --head {HEAD_A} --retry-request land-check-{verified}-{}",
+                "zerocode-orc land-check --run {run_id} --task {verified} --head {HEAD_A} --retry-request land-check-{verified}-{}",
                 &HEAD_A[..12]
             )
             .as_str()
@@ -214,16 +215,16 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     assert_eq!(whole.source.as_deref(), Some(HEAD_A));
     assert_eq!(whole.attempt.as_deref(), Some(dispatch.as_str()));
 
-    // Stale: a review of one attempt, and a retry started after it. The old attempt's row no longer
-    // stands verified, and offers nothing to read for an attempt the task moved past; the retry is
-    // at work.
+    // A review of one attempt, and a retry started after it: the old attempt's row is superseded —
+    // no longer verified, and nothing to read for an attempt the task moved past; the retry is at
+    // work.
     let (stale, _, first) = handed_in(&mut bench, "stale", HEAD_A, "");
     review(&mut bench, &stale, "{\"verified\":true}", &first, HEAD_A);
     bench.json(&format!("task-update --task {stale} --status ready"));
     let (_, _, second) = attempt_on(&mut bench, &stale);
     let (old, whole) = read(&bench, &stale, &first);
-    assert_eq!(old.stage, WorkStage::Stale);
-    assert_eq!(old.reviewed.as_deref(), Some(HEAD_A));
+    assert_eq!(old.stage, WorkStage::Superseded);
+    assert_eq!(old.source.as_deref(), Some(HEAD_A));
     assert_eq!(old.next, None);
     assert_eq!(whole.stage, WorkStage::Working);
     assert_eq!(read(&bench, &stale, &second).0.stage, WorkStage::Working);
@@ -263,7 +264,13 @@ fn a_review_of_an_older_commit_on_the_same_attempt_reads_stale_and_names_both() 
     assert_eq!(whole.source.as_deref(), Some(HEAD_B));
     assert_eq!(
         whole.next.as_deref(),
-        Some(format!("zerocode-orc worktree-evidence --worker {worker}").as_str())
+        Some(
+            format!(
+                "zerocode-orc worktree-evidence --run {} --worker {worker}",
+                run.id
+            )
+            .as_str()
+        )
     );
 }
 

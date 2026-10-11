@@ -857,6 +857,7 @@ const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
   { stage: "claimed-verified", flag: "claimed_verified", key: "board.claimedVerified", word: "검증됐다 함" },
   { stage: "unreviewable", flag: "unreviewable", key: "board.noReviewRecord", word: "종료 — 검토 자료 없음" },
   { stage: "stale", flag: "progress", key: "board.staleReview", word: "다시 검토 대기" },
+  { stage: "superseded", flag: "progress", key: "board.superseded", word: "다음 시도로 넘어감" },
   { stage: "unknown", flag: "progress", key: "board.stageUnknown", word: "상태 모름" },
   { stage: "failed", flag: "failed", key: "board.desk.stageFailed", word: "실패" },
   { stage: "reported", flag: "reported", key: "board.awaitingReview", word: "검증 대기" },
