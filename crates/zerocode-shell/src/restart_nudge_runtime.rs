@@ -1082,7 +1082,7 @@ pub(crate) fn arm_left_unsent(
 
 /// The row a reseat's continuation waits in, and its delivery's answer to
 /// be heard first, when that answer left the words unsent (t-17037).
-fn left_unsent(
+pub(super) fn left_unsent(
     words: LeftUnsent<'_>,
     outcome: DeliveryOutcome,
 ) -> Option<(PendingNudge, std::sync::mpsc::Receiver<DeliveryOutcome>)> {
