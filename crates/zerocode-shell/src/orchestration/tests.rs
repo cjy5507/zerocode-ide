@@ -5938,6 +5938,7 @@ fn a_refused_readings_switches_wait_and_land_before_the_rotation_is_read() {
 #[test]
 fn a_resume_settlement_keeps_its_observed_result_until_the_store_accepts_it() {
     use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    use zerocode_core::orchestration::MessageKind;
     for submitted in [false, true] {
         let stood = StoppedWorker::stand(96_360, "--on-transient-error resume", Vec::new());
         let at = |elapsed| stood.began + elapsed;
@@ -6015,6 +6016,7 @@ fn a_resume_settlement_keeps_its_observed_result_until_the_store_accepts_it() {
 #[test]
 fn an_unaddressable_resume_keeps_its_untyped_result_until_the_store_accepts_it() {
     use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    use zerocode_core::orchestration::MessageKind;
     let stood = StoppedWorker::stand(96_370, "--on-transient-error resume", Vec::new());
     let at = |elapsed| stood.began + elapsed;
     let record = transient_record_keyed("unaddressable-settlement");
