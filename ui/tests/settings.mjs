@@ -2113,6 +2113,9 @@ class StatefulBackend {
       // 원장이 아는 좌석 — 이 창이 판을 쥐지 않은 워커까지 보드가 그리려면
       // 세 번째 출처가 필요하다(1-t1103). 카드 없는 창에서는 빈 목록이다.
       case "ledger_agents": return [];
+      // 런마다 코디 자리(t-45938: 역할 칩) — 런이 없는 창은 실제 백엔드가 빈
+      // 목록으로 답한다(`cmd::board::coordinator_seats`).
+      case "coordinator_seats": return [];
       case "board_columns": return [];
       // 그래프 보드가 묻는 스냅샷 — 열 없음·주의 0·전체 0은 실제 백엔드가 카드
       // 없는 창에 답하는 그대로(`zerocode_core::board::snapshot`).
