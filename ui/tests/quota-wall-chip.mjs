@@ -154,15 +154,17 @@ export async function testQuotaWallChip({ browser, origin, ok, faults: shared })
         wall: "m-wall-4", observed_at_ms: now - 5 * minute, resets_at_ms: now + 45 * minute,
         stands_until_ms: now + 48 * minute, declared_alt: null, retry_refusal: null, hand_over_refusal: null, ...over,
       });
+      /* One ledger answer, the way the desk takes it: the rows change, the desk reads them again and
+       * paints. Settled when the desk holds THIS chip, no read is in flight and no paint is pending —
+       * a strip already standing from the last chip proves nothing about the next. */
       window.__SET_CHIP__ = async (chip) => {
         window.__LEDGER__ = window.__LEDGER__.map((row) => (row.worker === "w-4" ? { ...row, quota_wall: chip } : row));
         const started = performance.now();
         refreshDeskLedger();
-        const strip = () => document.querySelector('#board-view [data-worker="run-desk/w-4"] .board-desk-worker-wall');
-        const want = chip !== null;
+        const want = JSON.stringify(chip);
+        const held = () => JSON.stringify(deskAgents.find((row) => row.worker === "w-4")?.quota_wall ?? null);
         for (let frame = 0; frame < 300; frame += 1) {
-          const node = strip();
-          if (node && node.hidden === !want && (!want || node.textContent !== "")) break;
+          if (held() === want && !deskLedgerAsking && deskPaintFrame === null) break;
           await new Promise((done) => requestAnimationFrame(done));
         }
         await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
@@ -194,8 +196,9 @@ export async function testQuotaWallChip({ browser, origin, ok, faults: shared })
         window.__SENT__.push({ command: "quota_wall_handover", ...args });
         return { ended: "dp-4", replacement: "w-9", dispatch: "dp-9", agent: "codex" };
       };
-      const plain = document.querySelector('#board-view [data-worker="run-desk/w-2"] .board-desk-worker-wall');
       const ms = await window.__SET_CHIP__(window.__CHIP__());
+      // Read after the desk painted its roster: the idle worker's row stands, and wears no strip.
+      const plain = document.querySelector('#board-view [data-worker="run-desk/w-2"] .board-desk-worker-wall');
       return { ms, read: window.__READ_STRIP__(), plainHidden: plain ? plain.hidden : null };
     }, { now: deskNow, minute: MINUTE });
     measured.deskStripMs = strip.ms;
