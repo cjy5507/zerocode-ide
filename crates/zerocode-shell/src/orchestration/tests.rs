@@ -26846,3 +26846,229 @@ fn a_worker_a_delegate_is_still_seating_is_not_reported_as_seatless() {
         "a worker is seated, or the carrying failed, once the flight ends"
     );
 }
+
+/* ---- a person's press at a quota wall (t-39771) -------------------------- */
+
+/// The run `worker` sits in, by the ledger's own rows.
+fn run_of(worker: &str) -> String {
+    super::with_ledger_seats(|ledger, _| {
+        ledger
+            .runs()
+            .iter()
+            .find(|run| run.worker(worker).is_some())
+            .map(|run| run.id.clone())
+    })
+    .flatten()
+    .expect("the worker's run")
+}
+
+/// The continuation receipts `dispatch` holds, typing or settled, parsed.
+fn resumed_rows(dispatch: &str) -> Vec<serde_json::Value> {
+    the_rows()
+        .messages
+        .iter()
+        .filter(|row| {
+            row.kind == zerocode_core::orchestration::MessageKind::Resumed
+                && row.dispatch.as_deref() == Some(dispatch)
+        })
+        .map(|row| serde_json::from_str(row.body.as_str()).expect("json"))
+        .collect()
+}
+
+/// The coordinator's conditions on 「지금 다시 시도」, through the window's own
+/// road (t-39771, m-39799). The board's row carries the chip the press reads;
+/// a composer the window never heard at rest refuses before anything is
+/// reserved; a press reserves ONE continuation keyed by the attempt and its
+/// wall and types the wall's own sentence through the pointer's door; pressed
+/// again while it is typed it is that row's, and a handover waits until it
+/// settles; settled, the same wall takes no second press — the receipt stands
+/// for the next one; and a wall that lifted refuses by name.
+#[test]
+fn a_persons_retry_press_types_once_per_wall_and_holds_a_handover_back() {
+    use zerocode_core::orchestration::{RESUME_IN_FLIGHT, WALL_RETRY_LINE};
+    const LEADER_TERM: u32 = 85_960;
+    let stood = Walled::stand(LEADER_TERM, crate::test_host::existing_directory(), "");
+    stood.wall_it();
+    let run_id = run_of(&stood.worker);
+    let term = LEADER_TERM + 1;
+    let at = stood.began + 20_000;
+    let rows = super::with_ledger_seats(super::ledger_agents_for_seats).expect("the rows");
+    let row = rows
+        .iter()
+        .find(|row| row.worker == stood.worker)
+        .expect("the worker's row");
+    let chip = row
+        .quota_wall
+        .as_ref()
+        .expect("the walled worker wears a chip");
+    assert_eq!(
+        Some(chip.wall.as_str()),
+        row.wall.as_ref().map(|wall| wall.wall.as_str())
+    );
+    assert_eq!(chip.retry_refusal, None, "{chip:?}");
+    assert_eq!(chip.hand_over_refusal, None, "{chip:?}");
+
+    let refused = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at).unwrap_err();
+    assert!(refused.contains("composer is not at rest"), "{refused}");
+    assert!(resumed_rows(&stood.dispatch).is_empty());
+
+    super::pane_turn_ended(term, at - 1, false, at);
+    let said = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at).expect("typed");
+    assert_eq!(said["line"], WALL_RETRY_LINE);
+    let typed = resumed_rows(&stood.dispatch);
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert_eq!(typed[0]["status"], "typing");
+    assert_eq!(typed[0]["marker"]["source"], "person");
+    let wall = row.wall.as_ref().expect("the wall");
+    assert_eq!(
+        typed[0]["marker"]["key"],
+        format!("person:{}:{}", stood.dispatch, wall.wall)
+    );
+    assert_eq!(typed[0]["line"], WALL_RETRY_LINE);
+
+    let again = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at + 1).unwrap_err();
+    assert_eq!(again, RESUME_IN_FLIGHT);
+    let held_back = super::wall_press::hand_over(
+        &stood.host,
+        &[],
+        &run_id,
+        &stood.worker,
+        Some("claude"),
+        at + 2,
+    )
+    .unwrap_err();
+    assert!(held_back.contains("being typed"), "{held_back}");
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    assert_eq!(resumed_rows(&stood.dispatch).len(), 1);
+
+    super::pane_prompt_submitted(term);
+    super::settle_resumes(at + 3);
+    let settled = resumed_rows(&stood.dispatch);
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(settled[0]["status"], "submitted");
+    let once = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at + 4).unwrap_err();
+    assert!(once.contains("already typed"), "{once}");
+    let lifted =
+        super::wall_press::retry(&stood.host, &run_id, &stood.worker, wall.stands_until_ms)
+            .unwrap_err();
+    assert!(lifted.contains("lifted"), "{lifted}");
+    assert_eq!(resumed_rows(&stood.dispatch).len(), 1, "a refusal typed");
+}
+
+/// The coordinator's third condition, through the window's own road
+/// (t-39771, m-39799): a press hands a walled worker over with the walk's own
+/// two verbs — `worker-stop … --reason quota-wall`, then `worker-start
+/// --retry-of … --inherit-checkout` under `handover-<attempt>-stop|start` —
+/// from the coordinator's seat, to the agent the person chose (never one the
+/// press picks: with none named it refuses by name); a worker at work again
+/// is not handed over; ONE replacement sits in the same checkout, linked to
+/// the ended attempt; pressed again it is refused, and the walk's two request
+/// names asked again answer once — no second worker.
+#[test]
+fn a_persons_handover_press_walks_the_beats_verbs_and_seats_one_replacement() {
+    const LEADER_TERM: u32 = 85_980;
+    let stood = Walled::stand(LEADER_TERM, crate::test_host::existing_directory(), "");
+    stood.wall_it();
+    let run_id = run_of(&stood.worker);
+    let at = stood.began + 20_000;
+    let unnamed = super::wall_press::hand_over(&stood.host, &[], &run_id, &stood.worker, None, at)
+        .unwrap_err();
+    assert!(unnamed.contains("no alternative is named"), "{unnamed}");
+    *stood
+        .host
+        .busy
+        .lock()
+        .unwrap_or_else(|held| held.into_inner()) = true;
+    let working =
+        super::wall_press::hand_over(&stood.host, &[], &run_id, &stood.worker, Some("claude"), at)
+            .unwrap_err();
+    assert!(working.contains("at work again"), "{working}");
+    *stood
+        .host
+        .busy
+        .lock()
+        .unwrap_or_else(|held| held.into_inner()) = false;
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+
+    let said = super::wall_press::hand_over(
+        &stood.host,
+        &[],
+        &run_id,
+        &stood.worker,
+        Some("claude"),
+        at + 1,
+    )
+    .expect("handed over");
+    assert_eq!(said["ended"], stood.dispatch.as_str());
+    let replacement = said["replacement"]
+        .as_str()
+        .expect("a replacement")
+        .to_string();
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    assert_eq!(stood.worker_state(&replacement), "Active");
+    let linked = || {
+        the_rows()
+            .dispatches
+            .iter()
+            .filter(|one| one.retry_of.as_deref() == Some(stood.dispatch.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let seated = linked();
+    assert_eq!(seated.len(), 1, "{seated:?}");
+    assert_eq!(seated[0].task, stood.task);
+    let rows = the_rows();
+    let sits = rows
+        .workers
+        .iter()
+        .find(|one| one.id == replacement)
+        .expect("the replacement");
+    assert_eq!(sits.agent, "claude");
+    assert_eq!(sits.checkout.as_deref(), Some(stood.host.checkout));
+    assert!(
+        stood.receipts(at + 2).is_empty(),
+        "a press reserved the standing order's receipt"
+    );
+
+    let again = super::wall_press::hand_over(
+        &stood.host,
+        &[],
+        &run_id,
+        &stood.worker,
+        Some("claude"),
+        at + 3,
+    )
+    .unwrap_err();
+    assert!(again.contains("released"), "{again}");
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let stop = run(
+        &stood.host,
+        Vec::new(),
+        &stood.team,
+        leader,
+        TEST_CAPABILITY,
+        &super::handover_stop_argv(&stood.worker, "quota-wall", &stood.dispatch),
+        at + 4,
+    );
+    assert_eq!(
+        stop.exit_code, 0,
+        "the stop's name answers again: {}",
+        stop.stderr
+    );
+    let to = zerocode_core::orchestration::parse_on_quota_wall("claude").expect("an agent");
+    let start = run(
+        &stood.host,
+        Vec::new(),
+        &stood.team,
+        leader,
+        TEST_CAPABILITY,
+        &super::handover_start_argv(&to, &stood.task, &stood.dispatch, "again".to_string()),
+        at + 5,
+    );
+    assert_ne!(
+        start.exit_code, 0,
+        "a second start under the walk's name ran"
+    );
+    assert_eq!(linked().len(), 1, "two replacements for one attempt");
+    assert_eq!(stood.worker_state(&replacement), "Active");
+}

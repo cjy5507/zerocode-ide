@@ -962,7 +962,7 @@ function deskWorkerRow(view) {
     const term = row.__term;
     if (term != null) selectTaskBoardMember(view, `agent:term:${term}`);
   };
-  row.append(button);
+  row.append(button, deskWallStrip(view, row));
   return row;
 }
 
@@ -1006,12 +1006,193 @@ function paintDeskWorkers(block, now, view) {
       [row.task || row.task_id, review, ledgerClosedReason(row.closed)].filter(Boolean).join(" · "));
     writeTextContent(node.querySelector(".board-desk-worker-facts"), deskWorkerFacts(row, now));
     paintDeskGate(node.querySelector(".board-desk-worker-gate"), row.gate);
+    paintDeskWall(node, row, now);
     paintDeskKept(node.querySelector(".board-desk-worker-kept"), row.kept, null);
     const main = node.querySelector(".board-desk-worker-main");
     writeDisabled(main, node.__term == null);
     return node;
   }));
   return true;
+}
+
+/* ---- 한도 벽 칩 (t-39771) ----------------------------------------------------
+ *
+ * 한도 벽에 선 워커가 다는 칩과 그 곁의 두 단추. 사실은 모두 원장의 것이다 — 칩은 행의
+ * `quota_wall`(`wall_chip_for`)이고, 단추를 눌렀을 때 받아들여질지, 아니라면 왜인지도 같은
+ * 읽기가 정한다. 여기는 낱말과 차례뿐이다. 원장이 재개 시각을 모르면 모른다고 적고 시각을
+ * 지어내지 않는다. 사이드바의 행(`dressWorktreeWall`)이 같은 문장을 쓴다. */
+
+/* 칩이 지금 서 있는가: 원장이 실어 보냈고, 그 벽이 아직 침묵을 설명할 때. */
+function quotaWallStanding(chip, now) {
+  return Boolean(chip) && now < chip.stands_until_ms;
+}
+
+/* 사람의 현지 시각, 시:분. */
+function quotaWallClock(ms) {
+  const at = new Date(ms);
+  return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+}
+
+/* 칩의 문장 — 재개 시각을 알면 그 시각을, 모르면 모른다고. */
+function quotaWallWords(chip) {
+  return Number.isFinite(chip.resets_at_ms)
+    ? t("quotaWall.chipAt", "한도 대기 · {{time}} 재개 예정", { time: quotaWallClock(chip.resets_at_ms) })
+    : t("quotaWall.chipUnknown", "한도 대기 · 재개 시각 모름");
+}
+
+/* 벽은 원장의 박자가 아니라 시계로 끝난다. 가장 가까운 끝에 타이머 하나를 걸어, 칩을 다는
+ * 두 표면(사이드바의 행과 이 데스크의 워커 줄)을 그때 다시 그린다. */
+let quotaWallExpiry = { at: Infinity, timer: 0 };
+function noteQuotaWallUntil(until) {
+  if (!Number.isFinite(until) || until >= quotaWallExpiry.at) return;
+  clearTimeout(quotaWallExpiry.timer);
+  quotaWallExpiry = {
+    at: until,
+    timer: setTimeout(() => {
+      quotaWallExpiry = { at: Infinity, timer: 0 };
+      scheduleAgentPaint(["cards"]);
+      scheduleDeskPaint();
+    }, Math.max(0, until - Date.now()) + 50),
+  };
+}
+
+/* 누른 결과, 워커마다 그 벽 하나에 대해: 보내는 중, 됨, 안 됨과 그 까닭. 원장이 다음 벽의
+ * 칩을 실어 보내면 벽의 행 id가 바뀌므로 지난 벽의 말은 저절로 내려간다. */
+const deskWallSaid = new Map();
+
+/* 넘길 곳의 선택지: 원장이 아는 선언된 대안이 먼저, 그 뒤로 이 기계에 깔린 에이전트 가운데 그
+ * 워커 자신의 것이 아닌 것. 누름은 에이전트를 대신 고르지 않는다 — 고르는 것은 사람이다. */
+function quotaWallTargets(row, chip) {
+  const declared = chip.declared_alt;
+  const spelled = declared ? [declared.agent, declared.model, declared.effort].filter(Boolean).join(":") : "";
+  const listed = spelled
+    ? [{ value: spelled, label: t("quotaWall.declared", "{{agent}} (지정된 대안)", { agent: spelled }) }]
+    : [];
+  for (const agent of installedAgents()) {
+    if (agent.id === row.agent || agent.id === declared?.agent) continue;
+    listed.push({ value: agent.id, label: agentSaidName(agent.id) });
+  }
+  return listed;
+}
+
+function paintQuotaWallTargets(select, row, chip) {
+  const targets = quotaWallTargets(row, chip);
+  const said = targets.map((one) => `${one.value}=${one.label}`).join("|");
+  if (select.dataset.said !== said) {
+    const kept = select.value;
+    select.replaceChildren(...targets.map((one) => {
+      const option = document.createElement("option");
+      option.value = one.value;
+      option.textContent = one.label;
+      return option;
+    }));
+    if (targets.some((one) => one.value === kept)) select.value = kept;
+    select.dataset.said = said;
+  }
+  writeHidden(select, targets.length === 0);
+  writeAttribute(select, "aria-label", t("quotaWall.target", "넘길 에이전트"));
+  return targets.length;
+}
+
+/* 줄 밑의 띠: 칩, 지금 다시 시도, 넘길 곳, 넘기기, 안 되는 까닭, 누른 결과. 단추는 데스크의
+ * 줄 단추(`board-desk-worker-main`) 밖에 선다 — 단추 안의 단추는 없다. */
+function deskWallStrip(view, row) {
+  const strip = deskElement("div", "board-desk-worker-wall");
+  strip.hidden = true;
+  const retry = deskElement("button", "board-desk-letter-act board-desk-worker-wall-retry");
+  retry.type = "button";
+  retry.onclick = () => void pressQuotaWall(view, row.__wallRow, "retry", null);
+  const to = deskElement("select", "board-desk-worker-wall-to");
+  const hand = deskElement("button", "board-desk-letter-act board-desk-worker-wall-handover");
+  hand.type = "button";
+  hand.onclick = () => void pressQuotaWall(view, row.__wallRow, "handover", to.value);
+  strip.append(deskElement("strong", "board-desk-worker-wall-chip"), retry, to, hand,
+    deskElement("span", "board-desk-worker-wall-why"), deskElement("span", "board-desk-worker-wall-said"));
+  return strip;
+}
+
+function paintDeskWall(node, row, now) {
+  const strip = node.querySelector(".board-desk-worker-wall");
+  const chip = quotaWallStanding(row.quota_wall, now) ? row.quota_wall : null;
+  writeHidden(strip, !chip);
+  if (!chip) return;
+  node.__wallRow = row;
+  noteQuotaWallUntil(chip.stands_until_ms);
+  writeTextContent(strip.querySelector(".board-desk-worker-wall-chip"), quotaWallWords(chip));
+  const held = deskWallSaid.get(`${row.run}/${row.worker}`);
+  const mine = held?.wall === chip.wall ? held : null;
+  const sending = mine?.sending === true;
+  const retry = strip.querySelector(".board-desk-worker-wall-retry");
+  writeTextContent(retry, t("quotaWall.retry", "지금 다시 시도"));
+  writeDisabled(retry, sending || Boolean(chip.retry_refusal));
+  writeAttribute(retry, "data-tip", t("quotaWall.retryTip", "입력 칸에 이어서 하라는 한 줄을 넣습니다 — 이 벽에서는 한 번만"));
+  const targets = paintQuotaWallTargets(strip.querySelector(".board-desk-worker-wall-to"), row, chip);
+  const hand = strip.querySelector(".board-desk-worker-wall-handover");
+  writeTextContent(hand, t("quotaWall.handOver", "다른 에이전트로 넘기기"));
+  writeDisabled(hand, sending || Boolean(chip.hand_over_refusal) || targets === 0);
+  writeAttribute(hand, "data-tip", t("quotaWall.handOverTip", "이 워커를 멈추고 같은 체크아웃에서 고른 에이전트에게 과업을 넘깁니다"));
+  const why = [
+    chip.retry_refusal ? t("quotaWall.retryRefused", "다시 시도 안 됨 — {{why}}", { why: chip.retry_refusal }) : "",
+    chip.hand_over_refusal
+      ? t("quotaWall.handOverRefused", "넘기기 안 됨 — {{why}}", { why: chip.hand_over_refusal })
+      : targets === 0 ? t("quotaWall.noTarget", "넘길 에이전트가 이 기계에 없음") : "",
+  ].filter(Boolean).join(" · ");
+  const whyLine = strip.querySelector(".board-desk-worker-wall-why");
+  writeTextContent(whyLine, why);
+  writeHidden(whyLine, why === "");
+  const saidLine = strip.querySelector(".board-desk-worker-wall-said");
+  writeTextContent(saidLine, mine?.text ?? "");
+  writeHidden(saidLine, !mine);
+  writeAttribute(saidLine, "data-tone", mine ? (mine.sending ? "sending" : mine.ok ? "ok" : "refused") : "");
+}
+
+/* 칩 곁의 두 단추. 사람이 확인 창에서 「예」라고 해야만 창의 명령을 부른다 — 그 명령은 주
+ * 창에서만 받고, 눌린 때의 원장을 다시 읽어 거절할 것은 거절한다. 답은 그 벽에 대한 말로 띠에
+ * 남고(안 됐으면 원장의 까닭 그대로), 원장을 다시 읽는다. */
+async function pressQuotaWall(view, row, act, to) {
+  const chip = row?.quota_wall;
+  if (!chip) return;
+  const key = `${row.run}/${row.worker}`;
+  if (deskWallSaid.get(key)?.sending) return;
+  const worker = row.worker;
+  const agent = act === "handover" ? agentSaidName(String(to ?? "").split(":")[0]) : "";
+  const said = await askConfirm(act === "retry"
+    ? {
+      title: t("quotaWall.retryTitle", "지금 다시 시도할까요?"),
+      body: t("quotaWall.retryBody", "이 워커({{worker}})의 입력 칸에 이어서 하라는 한 줄을 넣습니다. 한도가 아직 풀리지 않았으면 다시 멈출 수 있고, 이 벽에서는 한 번만 넣습니다.", { worker }),
+      confirm: t("quotaWall.retry", "지금 다시 시도"),
+      deny: t("app.cancel", "취소"),
+      cancel: false,
+    }
+    : {
+      title: t("quotaWall.handOverTitle", "다른 에이전트로 넘길까요?"),
+      body: t("quotaWall.handOverBody", "이 워커({{worker}})를 멈추고 같은 체크아웃에서 {{agent}}에게 과업을 넘깁니다. 커밋하지 않은 변경은 그대로 남습니다.", { worker, agent }),
+      confirm: t("quotaWall.handOver", "다른 에이전트로 넘기기"),
+      deny: t("app.cancel", "취소"),
+      danger: true,
+      cancel: false,
+    });
+  if (said !== true) return;
+  const held = { wall: chip.wall, sending: true, ok: false, text: t("quotaWall.sending", "보내는 중…") };
+  deskWallSaid.set(key, held);
+  paintCoordinatorDesk(view);
+  try {
+    const answer = act === "retry"
+      ? await invoke("quota_wall_retry", { run: row.run, worker })
+      : await invoke("quota_wall_handover", { run: row.run, worker, to });
+    held.ok = true;
+    held.text = act === "retry"
+      ? t("quotaWall.retried", "이어서 하라는 한 줄을 넣었습니다")
+      : answer?.already
+        ? t("quotaWall.handedOverAlready", "이미 {{worker}}에게 넘어갔습니다", { worker: String(answer?.replacement ?? "") })
+        : t("quotaWall.handedOver", "{{worker}}에게 넘겼습니다", { worker: String(answer?.replacement ?? "") });
+    refreshDeskLedger();
+  } catch (error) {
+    held.text = t("quotaWall.refused", "안 됨 — {{why}}", { why: String(error) });
+  } finally {
+    held.sending = false;
+    paintCoordinatorDesk(view);
+  }
 }
 
 /* ---- 과업이 든 비용 (t-9470) --------------------------------------------------
