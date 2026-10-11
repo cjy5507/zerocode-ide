@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 mod windows_owner_only {
     use std::ffi::OsString;
     use std::io;
-    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::io::{AsHandle, AsRawHandle};
     use std::path::{Component, Path, PathBuf};
 
     use cap_fs_ext::{
@@ -27,7 +27,7 @@ mod windows_owner_only {
     use cap_std::fs::{Dir, File, OpenOptions, OpenOptionsExt as _};
     use cap_std::ambient_authority;
     use windows_permissions::constants::{
-        AccessRights, AceType, SeObjectType, SecurityInformation,
+        AccessRights, AceFlags, AceType, SeObjectType, SecurityInformation,
     };
     use windows_permissions::{LocalBox, Sid, SecurityDescriptor};
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
@@ -185,13 +185,57 @@ mod windows_owner_only {
         restrict_handle(&mut handle)
     }
 
-    fn owner_only_descriptor() -> io::Result<LocalBox<SecurityDescriptor>> {
-        let owner = windows_permissions::utilities::current_process_sid()?;
-        format!("D:P(A;;FA;;;{owner})").parse()
+    /// What the policy restricts: a directory's one entry inherits to whatever
+    /// is inside it, a file's does not.
+    #[derive(Clone, Copy)]
+    enum EntryKind {
+        Directory,
+        File,
     }
 
-    pub(super) fn restrict_handle<H: AsRawHandle>(handle: &mut H) -> io::Result<()> {
+    impl EntryKind {
+        /// Read off a duplicate of the handle, which std can ask for metadata —
+        /// the only road from a raw handle to "is this a directory" without
+        /// `unsafe`.
+        fn of<H: AsHandle>(handle: &H) -> io::Result<Self> {
+            let twin = std::fs::File::from(handle.as_handle().try_clone_to_owned()?);
+            Ok(if twin.metadata()?.is_dir() {
+                Self::Directory
+            } else {
+                Self::File
+            })
+        }
+
+        /// The inheritance a kind's one entry carries. A directory's entry is
+        /// handed down to the entries already inside it and to the ones made
+        /// later (t-43412): the system re-derives inherited entries the moment
+        /// a container's DACL is set, so a protected DACL that hands nothing
+        /// down leaves an existing child — a lock file's neighbour, the team
+        /// inbox database — with no entry at all.
+        fn ace_flags(self) -> AceFlags {
+            match self {
+                Self::Directory => AceFlags::ObjectInherit | AceFlags::ContainerInherit,
+                Self::File => AceFlags::empty(),
+            }
+        }
+
+        fn sddl_flags(self) -> &'static str {
+            match self {
+                Self::Directory => "OICI",
+                Self::File => "",
+            }
+        }
+    }
+
+    fn owner_only_descriptor(kind: EntryKind) -> io::Result<LocalBox<SecurityDescriptor>> {
+        let owner = windows_permissions::utilities::current_process_sid()?;
+        let flags = kind.sddl_flags();
+        format!("D:P(A;{flags};FA;;;{owner})").parse()
+    }
+
+    pub(super) fn restrict_handle<H: AsRawHandle + AsHandle>(handle: &mut H) -> io::Result<()> {
         let current = windows_permissions::utilities::current_process_sid()?;
+        let kind = EntryKind::of(handle)?;
         let owner = owner_class(handle, &current)?;
         if owner == OwnerClass::Other {
             return Err(io::Error::new(
@@ -199,7 +243,7 @@ mod windows_owner_only {
                 "refusing to change the DACL of a Windows entry owned by another SID",
             ));
         }
-        let descriptor = owner_only_descriptor()?;
+        let descriptor = owner_only_descriptor(kind)?;
         let dacl = descriptor
             .dacl()
             .ok_or_else(|| invalid_path("owner-only Windows descriptor has no DACL"))?;
@@ -238,8 +282,9 @@ mod windows_owner_only {
         }
     }
 
-    pub(super) fn is_handle_owner_only<H: AsRawHandle>(handle: &H) -> io::Result<bool> {
+    pub(super) fn is_handle_owner_only<H: AsRawHandle + AsHandle>(handle: &H) -> io::Result<bool> {
         let current = windows_permissions::utilities::current_process_sid()?;
+        let kind = EntryKind::of(handle)?;
         let descriptor = windows_permissions::wrappers::GetSecurityInfo(
             handle,
             SeObjectType::SE_FILE_OBJECT,
@@ -259,7 +304,7 @@ mod windows_owner_only {
             return Ok(false);
         };
         if ace.ace_type() != AceType::ACCESS_ALLOWED_ACE_TYPE
-            || !ace.flags().is_empty()
+            || ace.flags() != kind.ace_flags()
             || ace.mask() != AccessRights::FileAllAccess
             || ace.sid() != Some(current.as_ref())
         {
@@ -709,7 +754,9 @@ fn state_base_from(override_dir: Option<std::ffi::OsString>, cwd: &Path) -> Path
 /// This is the single source of truth for the permission policy that the
 /// credential store, session persistence, and turn-trace writers all share.
 /// Windows applies a protected DACL containing exactly one full-control ACE
-/// for the current process SID. The handle is opened without following any
+/// for the current process SID; on a directory that ACE inherits to the
+/// entries inside it, so what was already there keeps the user's access
+/// (t-43412). The handle is opened without following any
 /// symlink or junction component and the DACL is read back before success is
 /// reported. Platforms where neither property can be established fail closed.
 ///
@@ -799,7 +846,9 @@ pub fn permissions_are_owner_only(path: &Path) -> std::io::Result<bool> {
 /// file or directory handle. This is used by capability-style callers so the
 /// ACL update cannot be redirected by replacing a pathname after validation.
 #[cfg(windows)]
-pub fn restrict_windows_handle_owner_only<H: std::os::windows::io::AsRawHandle>(
+pub fn restrict_windows_handle_owner_only<
+    H: std::os::windows::io::AsRawHandle + std::os::windows::io::AsHandle,
+>(
     handle: &mut H,
 ) -> std::io::Result<()> {
     windows_owner_only::restrict_handle(handle)
@@ -807,9 +856,14 @@ pub fn restrict_windows_handle_owner_only<H: std::os::windows::io::AsRawHandle>(
 
 /// Verify the Windows owner-only DACL policy on an already retained handle.
 /// `Ok(false)` is the fail-closed result for an owner mismatch, inherited or
-/// additional ACE, unprotected DACL, or non-full-control owner ACE.
+/// additional ACE, unprotected DACL, or non-full-control owner ACE. A
+/// directory's one ACE must inherit to what is inside it and a file's must
+/// not, so a directory restricted the old, non-inheriting way reads `Ok(false)`
+/// until it is restricted again (t-43412).
 #[cfg(windows)]
-pub fn windows_handle_is_owner_only<H: std::os::windows::io::AsRawHandle>(
+pub fn windows_handle_is_owner_only<
+    H: std::os::windows::io::AsRawHandle + std::os::windows::io::AsHandle,
+>(
     handle: &H,
 ) -> std::io::Result<bool> {
     windows_owner_only::is_handle_owner_only(handle)
