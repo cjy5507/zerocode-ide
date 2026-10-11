@@ -209,7 +209,8 @@ impl Triage {
 ///   a merge that is ready, a handoff or a dispatch, and the orchestration's
 ///   receipts of what it did for the coordinator (a standing order's
 ///   handover, a model its CLI switched to) and what its gate judged of a
-///   worker still running (t-26583).
+///   worker still running (t-26583), and a landing check it ran because the
+///   coordinator asked (t-34501).
 /// - No look: a silence (the orchestration tells it again every five
 ///   minutes while it lasts), a heartbeat, a continuation it typed itself, an
 ///   account it moved.
@@ -232,7 +233,8 @@ pub const fn kind_rule(kind: MessageKind) -> Triage {
         | MessageKind::ModelDeviated
         | MessageKind::GateJudged
         | MessageKind::LandingStalled
-        | MessageKind::BranchDrifted => Triage::CanWait,
+        | MessageKind::BranchDrifted
+        | MessageKind::LandCheck => Triage::CanWait,
         MessageKind::WentQuiet
         | MessageKind::Heartbeat
         | MessageKind::Resumed

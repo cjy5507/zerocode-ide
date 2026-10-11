@@ -90,7 +90,8 @@ LEDGER_ITSELF = "ledger"
 # what it did about it (t-26583) — news as well, not an ending; and a
 # `landing_stalled` or `branch_drifted` row is the ledger telling the coordinator
 # what landed late and a live worker that its branch ran away (t-34501 stage 2)
-# — news too.
+# — news too; and a `land_check` row is the ledger's receipt of one landing check
+# (t-34501 stage 3) — news as well.
 LEDGERS_OWN_KINDS = (
     "went_quiet",
     "deadlocked",
@@ -104,6 +105,7 @@ LEDGERS_OWN_KINDS = (
     "gate_judged",
     "landing_stalled",
     "branch_drifted",
+    "land_check",
 )
 
 # `STALL_JUDGED_REASON` there.

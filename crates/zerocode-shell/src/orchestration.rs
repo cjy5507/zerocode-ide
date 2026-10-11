@@ -1652,6 +1652,25 @@ pub(crate) fn watched_checkouts() -> Vec<String> {
     paths.into_iter().map(str::to_string).collect()
 }
 
+/// The orchestration's own data root: where a landing check keeps its folders, rows and logs.
+fn land_check_root() -> Option<std::path::PathBuf> {
+    BLACKBOX.get().cloned()
+}
+
+/// One landing check's evidence, written as the ledger's own letter (t-34501 stage 3). Rings the
+/// bell when the letter is new; a repeat of a check id writes nothing.
+pub(crate) fn record_land_check(
+    receipt: zerocode_core::orchestration::land_check::LandCheckReceipt,
+    now_ms: i64,
+) {
+    let Some(held) = runtime() else {
+        return;
+    };
+    if let Ok((moved, _)) = held.actor.land_checked(receipt, now_ms) {
+        rang(moved);
+    }
+}
+
 /// Hand the ledger what the window saw of git, so it can write what is late. A pass that finds
 /// nothing writes nothing; one that wrote rings the bell for whoever sleeps on the mail.
 pub(crate) fn watch_landings(
@@ -5168,6 +5187,8 @@ pub(crate) fn window_exiting(
     road: crate::exit_runtime::ExitRoad,
     census: &dyn Fn() -> restart_census::RestartCensus,
 ) {
+    // A landing check the window still runs goes with it; its row waits for the next sweep.
+    crate::land_check::stop_running();
     let taken = census();
     // Once per exit for the road, and whenever there are workers to name:
     // the first call is the one that finds them, before they sleep.
@@ -9198,6 +9219,41 @@ fn run_from_seat(
     }
 }
 
+/// The receipt files a `worker_done` names, read here so the ledger judges what
+/// was read and not what the worker says it holds (t-26587). A receipt that is
+/// not a plain file (missing, a link, a folder) or does not read as text is left
+/// out, and the ledger refuses a report that names it.
+fn read_receipts(argv: &[String]) -> zerocode_core::orchestration::evidence::ReceiptFiles {
+    let mut files = zerocode_core::orchestration::evidence::ReceiptFiles::default();
+    if !crate::agent_tools_runtime::is_worker_done(argv) {
+        return files;
+    }
+    let payload =
+        crate::agent_tools_runtime::orchestration_arg(argv, "--payload").unwrap_or_default();
+    for path in zerocode_core::orchestration::evidence::receipts_named(payload) {
+        if let Some(text) = read_receipt_text(&path) {
+            files.insert(path, text);
+        }
+    }
+    files
+}
+
+/// The first bytes of one receipt, when it is a plain file that reads as text.
+/// A link is not followed: `symlink_metadata` describes the link itself.
+fn read_receipt_text(path: &str) -> Option<String> {
+    use std::io::Read;
+    if !std::fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(zerocode_core::orchestration::evidence::RECEIPT_BYTES_MAX)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
 fn run_seated(
     host: &dyn Host,
     overrides: Vec<(String, LaunchOverride)>,
@@ -9273,7 +9329,7 @@ fn run_seated(
         .and_then(|term| host.actor_for(term));
     let command =
         match PlanCommand::checked(argv.to_vec(), team_id, pane, pane_token, caller, now_ms) {
-            Ok(command) => command,
+            Ok(command) => command.with_receipts(read_receipts(argv)),
             Err(why) => return refused_by_runtime(why),
         };
     /* What comes back has already been carried out against the rows AND made
@@ -10452,6 +10508,28 @@ fn carried(
                     answer(reply)
                 }
                 None => refused("worker is gone"),
+            }
+        }
+        /* A landing check (t-34501 stage 3). The window merges the head in a throwaway checkout
+         * of the compare ref and runs the project's check there. The verb answers the first
+         * word the check has — the merge's evidence, or `started` when the check runs on — and
+         * the evidence follows as the ledger's letter. The answer is filed as the receipt, so
+         * a retry with the same name is told the same thing and nothing runs twice. */
+        Effect::LandCheck(ask) => {
+            let Some(root) = land_check_root() else {
+                return refused("the orchestration data root is not open");
+            };
+            match crate::land_check::carry(&root, &ask, now_ms) {
+                Ok(said) => {
+                    let text = format!("{said}\n");
+                    if let Some(key) = decided.receipt.clone()
+                        && let Err(why) = actor.remember_served(key, text.clone(), now_ms)
+                    {
+                        return refused_by_runtime(why);
+                    }
+                    answer(zerocode_core::agent_teams::Reply::ok(text))
+                }
+                Err(why) => refused(why),
             }
         }
         /* One checkout's evidence, assembled where the sources live.
@@ -12009,3 +12087,6 @@ fn refused(why: impl std::fmt::Display) -> zerocode_hookd::TeamAnswer {
 
 #[cfg(test)]
 pub(crate) mod tests;
+// t-26587: the receipts a worker_done names, and the board's condition rows.
+#[cfg(test)]
+mod evidence_tests;

@@ -710,11 +710,14 @@ export async function testJevDashboard(browser, origin, ok) {
         // rows of that height must fit under the charts.
         room: Math.round(bottom - rows[0].getBoundingClientRect().top),
         tallest: Math.round(Math.max(...rows.map((row) => row.getBoundingClientRect().height))),
-        // Which cell holds the tallest row up, for the reader of a failure.
+        // Which cell holds the tallest row up, for the reader of a failure: each cell's own box, and its children's boxes in
+        // brackets — a cell that wraps shows its extra line there (the first child alone hides it).
         tallestCells: (() => {
           const row = rows.reduce((a, b) => (b.getBoundingClientRect().height > a.getBoundingClientRect().height ? b : a));
-          return [row.dataset.jevDashRow, ...[...row.querySelectorAll("td")]
-            .map((td) => `${td.dataset.jevCell}:${Math.round(td.firstElementChild?.getBoundingClientRect().height ?? td.getBoundingClientRect().height)}`)];
+          return [row.dataset.jevDashRow, ...[...row.querySelectorAll("td")].map((td) => {
+            const kids = [...td.children].map((kid) => Math.round(kid.getBoundingClientRect().height));
+            return `${td.dataset.jevCell}:${Math.round(td.getBoundingClientRect().height)}${kids.length > 0 ? `[${kids.join(",")}]` : ""}`;
+          })];
         })(),
       };
     });
@@ -752,8 +755,10 @@ export async function testJevDashboard(browser, origin, ok) {
           height: Math.round(view.querySelector('[data-jev-dash-row="placement"]').getBoundingClientRect().height),
           tallest: Math.round(tallest.getBoundingClientRect().height),
           // Which cell holds the tallest row up, for the reader of a failure.
-          tallestCells: [tallest.dataset.jevDashRow, ...[...tallest.querySelectorAll("td")].map((td) =>
-            `${td.dataset.jevCell}:${Math.round(td.firstElementChild?.getBoundingClientRect().height ?? td.getBoundingClientRect().height)}/${Math.round(td.getBoundingClientRect().width)}`)],
+          tallestCells: [tallest.dataset.jevDashRow, ...[...tallest.querySelectorAll("td")].map((td) => {
+            const kids = [...td.children].map((kid) => Math.round(kid.getBoundingClientRect().height));
+            return `${td.dataset.jevCell}:${Math.round(td.getBoundingClientRect().height)}${kids.length > 0 ? `[${kids.join(",")}]` : ""}/${Math.round(td.getBoundingClientRect().width)}`;
+          })],
         };
       };
       const held = async (line, notComparedBy) => {

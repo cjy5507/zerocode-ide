@@ -559,11 +559,18 @@
   --field-lg: 34ch;
   --field-full: 100%;
 
-  /* And the words beside it keep the measure the settings screen already
-   * reads sentences at — `.settings-subhead-desc`'s 52ch. Named here
-   * because two rules now share it: the label column of a field row and
-   * the label of a switch row. */
-  --field-copy: 52ch;
+  /* And the words beside it keep the measure the settings screen reads
+   * sentences at (`.settings-subhead-desc` still reads its own 52ch). Named
+   * here because two rules now share it: the label column of a field row
+   * and the label of a switch row.
+   *
+   * The measure is in em, not ch. A `ch` is the zero of the first face in
+   * the chain, and on Windows no face ships, so the chain lands on Segoe UI
+   * or Malgun Gothic, whose digits are narrower: the same 52ch wrapped
+   * Korean status copy onto two lines there. 33em is a width that does not
+   * depend on the face: 33 times the words' own size, about 52 digits of
+   * the UI face on macOS. */
+  --field-copy: 33em;
 
   /* Shape — Orca's own scale, measured: `--radius: .625rem` with `sm` at 60%
    * and `xs` at `.125rem` (I18nProvider-DPbv01TU.css). We had 3px on the

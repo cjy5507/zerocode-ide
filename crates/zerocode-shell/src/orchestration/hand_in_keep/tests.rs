@@ -113,6 +113,7 @@ fn desk_row(message: &str) -> DeskTask {
         cost: None,
         writing: None,
         kept: None,
+        hand_in: Default::default(),
     }
 }
 

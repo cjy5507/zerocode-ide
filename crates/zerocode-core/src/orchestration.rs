@@ -38,6 +38,8 @@
 mod completion;
 pub mod coordinator_handover;
 pub mod delegate;
+pub mod evidence;
+pub mod land_check;
 pub mod landing_watch;
 mod session_history;
 pub mod task_cost;
@@ -528,6 +530,14 @@ pub enum MessageKind {
     /// the worker, not the coordinator. The road that writes it is
     /// [`Ledger::landing_watch`].
     BranchDrifted,
+    /// Nobody said this either: the LEDGER's receipt of one landing check (t-34501 stage 3) —
+    /// a task's head merged into the compare ref in a throwaway checkout, and what came of it:
+    /// a clash and its files, a clean merge and its tree, or the project's check command with
+    /// its exit code, time and log. Written only from the window's own check road, once per
+    /// check id, to the run's coordinator with the task named; never from a peer's `send`: a
+    /// body wearing this kind from a worker would be a pass nobody saw. The road that writes it
+    /// is [`Ledger::land_checked`].
+    LandCheck,
 }
 
 impl MessageKind {
@@ -554,6 +564,7 @@ impl MessageKind {
             Self::GateJudged => "gate_judged",
             Self::LandingStalled => "landing_stalled",
             Self::BranchDrifted => "branch_drifted",
+            Self::LandCheck => "land_check",
         }
     }
 
@@ -582,6 +593,7 @@ impl MessageKind {
                 | Self::GateJudged
                 | Self::LandingStalled
                 | Self::BranchDrifted
+                | Self::LandCheck
         )
     }
 }
@@ -612,6 +624,7 @@ impl std::str::FromStr for MessageKind {
             "gate_judged" => Self::GateJudged,
             "landing_stalled" => Self::LandingStalled,
             "branch_drifted" => Self::BranchDrifted,
+            "land_check" => Self::LandCheck,
             _ => return Err(format!("unknown message type: {word}")),
         })
     }
@@ -14346,6 +14359,7 @@ const BOOL_FLAGS: &[&str] = &[
     "--apply",
     "--wip-commit",
     "--inherit-checkout",
+    "--prepare",
 ];
 
 /* ---- what the ledger cannot know ------------------------------------- */
@@ -17788,6 +17802,16 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::FreshRead,
     ),
     (
+        land_check::LAND_CHECK_VERB,
+        "--task <id> [--head <sha>] [--prepare] | --task <id> --head <sha> --record <check> \
+         --rc <n> --log <path> [--took-ms <ms>] · merge a task's head into the compare ref in \
+         a throwaway checkout — never the worker's — and run the project's landing check there; \
+         the verdict reaches this run's mail as the task's evidence (`land_check`). --prepare \
+         stops after the merge and keeps the folder for a check run elsewhere; --record writes \
+         that check's end and removes the folder",
+        Doing::Mutation,
+    ),
+    (
         "send",
         "--to <address> --type <kind> [--body <text>] [--task <id>] [--dispatch <id>] \
          · groups: @all @idle @<agent> @worktree:<checkout>",
@@ -18288,6 +18312,7 @@ impl std::fmt::Debug for Decided {
             Effect::CaptureSeat { .. } => "capture-seat",
             Effect::WorktreeEvidence { .. } => "worktree-evidence",
             Effect::WorkerTranscript { .. } => "worker-transcript",
+            Effect::LandCheck(..) => "land-check",
             Effect::WorkerTerminal { .. } => "worker-terminal",
             Effect::Focus { .. } => "focus",
             Effect::Close { .. } => "close",
@@ -18401,13 +18426,19 @@ pub const BRIEFING_HANDS_OVER: &str = "Now do this:";
 /// Only for a worker that carries a task: there is nothing to report about
 /// work nobody wrote down, and an agent summoned to look at something would
 /// only be confused by being told how to close a dispatch it does not have.
-pub fn worker_briefing(task: &str, title: &str) -> String {
+pub fn worker_briefing(task: &str, title: &str, spec: &str) -> String {
     let carrying = if title.is_empty() || title == task {
         task.to_string()
     } else {
         format!("{title} ({task})")
     };
     let trust = message_trust_briefing();
+    // The pass conditions the spec writes, and the evidence each one owes; empty
+    // for a task that writes none, so its briefing is the one it always was.
+    let conditions = match evidence::briefing_paragraph(spec) {
+        paragraph if paragraph.is_empty() => String::new(),
+        paragraph => format!("{paragraph}\n\n"),
+    };
     format!(
         "You are a worker in this window's orchestration, carrying task {carrying}. \
 When your work is done, run: zerocode-orc send --type worker_done \
@@ -18433,7 +18464,8 @@ values masked, {cap_mb} MB at most). An intended failure is evidence too — nam
 name — and a report that is not a plain report says what it is: `\"{report_kind}\":\"review\"` \
 (one of {kinds}). Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
-a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{conditions}{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+        conditions = conditions,
         evidence = crate::hand_in::EVIDENCE_KEY,
         expect = crate::hand_in::EXPECT_KEY,
         report_kind = crate::hand_in::REPORT_KIND_KEY,
@@ -18456,8 +18488,8 @@ a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{
 }
 
 /// Add the provider-specific facts that wrap the shared worker protocol.
-fn worker_briefing_for(agent: &str, task: &str, title: &str) -> String {
-    let shared = worker_briefing(task, title);
+fn worker_briefing_for(agent: &str, task: &str, title: &str, spec: &str) -> String {
+    let shared = worker_briefing(task, title, spec);
     if agent != crate::agent::AgentKind::Zo.slug() {
         return shared;
     }
@@ -18665,7 +18697,7 @@ fn brief_spec(spec: &str) -> (String, bool) {
 pub fn dispatch_preamble(task: &Task) -> String {
     format!(
         "{}{}",
-        worker_briefing(&task.id, task.display_name()),
+        worker_briefing(&task.id, task.display_name(), task.spec.as_str()),
         task.spec.as_str()
     )
 }
@@ -19346,7 +19378,35 @@ pub fn plan(
     now_ms: i64,
     actor: Option<&str>,
 ) -> Decided {
-    match plan_inner(ledger, team, launcher, argv, pane, now_ms, actor) {
+    plan_with_receipts(
+        ledger,
+        team,
+        launcher,
+        argv,
+        pane,
+        now_ms,
+        actor,
+        &evidence::ReceiptFiles::default(),
+    )
+}
+
+/// [`plan`], with the receipt files the window read for the verb (t-26587).
+///
+/// The window reads a `worker_done`'s named receipts before the ledger judges
+/// the report, so the decision sees exactly what was read. A verb that names no
+/// receipt passes an empty set, and [`plan`] is this with nothing read.
+#[allow(clippy::too_many_arguments)] // Each argument is one fact the decision rests on.
+pub fn plan_with_receipts(
+    ledger: &mut Ledger,
+    team: &mut Team,
+    launcher: &dyn Launcher,
+    argv: &[String],
+    pane: &str,
+    now_ms: i64,
+    actor: Option<&str>,
+    receipts: &evidence::ReceiptFiles,
+) -> Decided {
+    match plan_inner(ledger, team, launcher, argv, pane, now_ms, actor, receipts) {
         Ok(decided) => decided,
         Err(why) => Decided {
             answered_from: None,
@@ -19479,6 +19539,12 @@ const BOUNDED_INPUT: &[(&str, Destination)] = &[
     ("--declaration", Destination::Name),
     ("--marker", Destination::Prose),
     ("--marker-source", Destination::Name),
+    // A landing check's words (t-34501 stage 3): a commit, a check id, numbers, a log path.
+    ("--head", Destination::Name),
+    ("--record", Destination::Name),
+    ("--rc", Destination::Name),
+    ("--took-ms", Destination::Name),
+    ("--log", Destination::Prose),
 ];
 
 /// Refuse an oversized field before anything happens, not while saving.
@@ -19552,6 +19618,7 @@ fn plan_inner(
     pane: &str,
     now_ms: i64,
     actor: Option<&str>,
+    receipts: &evidence::ReceiptFiles,
 ) -> Result<Decided, String> {
     let (verb, rest) = argv
         .split_first()
@@ -21066,7 +21133,11 @@ fn plan_inner(
                 asked.is_empty(),
             ) {
                 (Some(id), Some(title), false, false) => {
-                    format!("{}{asked}", worker_briefing_for(&agent, id, title))
+                    let spec = ledger
+                        .run(&run_id)
+                        .and_then(|run| run.task(id))
+                        .map_or("", |held| held.spec.as_str());
+                    format!("{}{asked}", worker_briefing_for(&agent, id, title, spec))
                 }
                 _ => asked.to_string(),
             };
@@ -22035,6 +22106,18 @@ fn plan_inner(
             return Ok(planned);
         }
 
+        /* A landing check (t-34501 stage 3). The ledger chooses the task, the head and the
+         * repository and refuses a worker's pane; the window merges in a throwaway checkout,
+         * runs the project's check and writes the evidence back (`Ledger::land_checked`). The
+         * reply is the window's, written once the merge has been judged. */
+        land_check::LAND_CHECK_VERB => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            let ask = land_check::ask(ledger, &run_id, &team.id, pane, &words)?;
+            let mut planned = said(serde_json::Value::Null);
+            planned.effect = Effect::LandCheck(ask);
+            planned
+        }
+
         "send" => {
             let run_id = bound(ledger, &words, &caller, &seat)?;
             let kind = words
@@ -22214,6 +22297,29 @@ fn plan_inner(
                     .map(str::to_string)
                     .or_else(|| carried.1.clone()),
             };
+            /* A success report owes the evidence of each pass condition its
+             * task wrote (t-26587), and the ledger judges it before anything is
+             * written: a refusal leaves the attempt open and files no receipt,
+             * so the same --retry-request sends the evidence again.
+             *
+             * Asked on this verb and not in `Ledger::send`, because a relayed
+             * report comes back through `send` with no evidence of its own.
+             * Only a task that writes conditions is judged, so a task that
+             * writes none is taken exactly as before. */
+            if kind == MessageKind::WorkerDone
+                && worker_done_succeeded(draft.body.as_str()).is_ok_and(|ok| ok)
+                && let Some(task) = draft
+                    .task
+                    .as_deref()
+                    .and_then(|id| ledger.run(&run_id).and_then(|run| run.task(id)))
+            {
+                evidence::judge_success(
+                    task.spec.as_str(),
+                    draft.body.as_str(),
+                    draft.payload.as_str(),
+                    receipts,
+                )?;
+            }
             let id = ledger.post_as(&run_id, draft, Some(&seat), now_ms)?;
             said(serde_json::json!({ "messageId": id }))
         }

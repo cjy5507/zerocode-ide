@@ -1274,6 +1274,14 @@ pub(super) struct ProjectSettings {
     /// [`resolve_create_base`] drops it the moment the ref stops existing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) worktree_base_ref: Option<String>,
+    /// The command a landing check runs in its throwaway checkout after a clean merge (t-34501
+    /// stage 3). Missing or blank means the check only merges and says what it merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) landing_check_command: Option<String>,
+    /// How long that command may run, in seconds, before its process group is killed. Missing or
+    /// zero means the default limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) landing_check_timeout_secs: Option<u64>,
 }
 
 /// Whether nobody has said anything about this project's external worktrees.
@@ -1310,6 +1318,8 @@ impl ProjectSettings {
             && self.mark_color.is_none()
             && self.added_at.is_none()
             && self.worktree_base_ref.is_none()
+            && self.landing_check_command.is_none()
+            && self.landing_check_timeout_secs.is_none()
             && untouched_visibility(&self.external_worktrees)
     }
 }
