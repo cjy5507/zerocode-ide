@@ -1219,7 +1219,12 @@ fn automatic_implementation_candidate_allowed(model: &ModelDescriptor, request: 
         && (matches!(request.effective_role(), RouteRole::Coding | RouteRole::Debugging)
             || request.context.tool_need == RouteToolNeed::Write);
     let reserved = match request.context.policy {
-        SmartPolicy::Architect => matches!(model.band(), ModelBand::Top | ModelBand::Superseded),
+        // The top band is kept for planning and verifying, unless the
+        // classifier gave it the hard rung of a provider with one
+        // implementer (t-45961).
+        SmartPolicy::Architect => {
+            model.band() == ModelBand::Superseded || (model.band() == ModelBand::Top && model.rungs().is_empty())
+        }
         SmartPolicy::Classic => is_reserved_orchestrator_model(model.id()),
     };
     !implementation_lane || (inventory.find(&request.main_model)
@@ -1227,25 +1232,42 @@ fn automatic_implementation_candidate_allowed(model: &ModelDescriptor, request: 
         && !reserved)
 }
 
+/// Whether the router may stand `model` by its own choice — for any role,
+/// under either policy, as a pick, a fallback or a preview: never an older
+/// release of a connected line ([`ModelBand::Superseded`], `claude-fable-5`
+/// beside `claude-fable-5-1`), whose tier its successor holds (t-45961: three
+/// reviewers ran on the older release, its record the longer one). A person
+/// who wants it names it — an explicit model, a pin, the session's own
+/// model — and a named model never comes through here.
+pub(super) fn automatic_choice_allowed(model: &ModelDescriptor) -> bool {
+    model.band() != ModelBand::Superseded
+}
+
 fn route_candidate_allowed(model: &ModelDescriptor, request: &RouteRequest) -> bool {
+    if !automatic_choice_allowed(model) {
+        return false;
+    }
     if !matches!(request.effective_role(), RouteRole::Coding | RouteRole::Debugging) {
         return true;
     }
     match request.context.policy {
         // Architect: the top band is the classifier's verdict on the connected
         // inventory — the same fact the ladder and the implementation lane
-        // read — and it implements only after the failures the contract asks.
+        // read — and it implements only after the failures the contract asks,
+        // or on the hard rung the classifier gave it (a provider with one
+        // implementer below its top, t-45961).
         SmartPolicy::Architect => {
-            model.band() != ModelBand::Superseded
-                && (model.band() != ModelBand::Top
+            model.band() != ModelBand::Top
+                || !model.rungs().is_empty()
                 || implementation_escalation_allowed(
                     escalate_complexity(request.context.complexity, request.context.prior_failures),
                     request.context.prior_failures,
                     request.context.policy,
-                ))
+                )
         }
-        // Classic keeps the pre-contract rule, byte for byte: only the
-        // catalog's reserved models are held back, and a Large task admits them.
+        // Classic keeps the pre-contract rule, byte for byte past the older
+        // releases held out above: only the catalog's reserved models are
+        // held back, and a Large task admits them.
         SmartPolicy::Classic => implementation_route_model_allowed(
             model.id(),
             request.context.complexity,

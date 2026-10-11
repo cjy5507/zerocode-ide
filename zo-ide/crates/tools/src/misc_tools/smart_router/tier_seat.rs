@@ -8,9 +8,13 @@
 //! again, and nothing else does. A lineup asked and left unanswered (the
 //! seat off, no key, the wall passed, a refused or malformed answer) keeps
 //! its last judgment, under which a model that arrived since stands
-//! provisionally by the facts, or none — the fact rule. Under `shadow` the
-//! lineup is asked and kept and its row written, and nothing is applied.
-//! What leaves is catalog facts and counts, never a word a person wrote.
+//! provisionally by the facts, or none — the fact rule; and when its
+//! question went out and came back unanswered, the same facts are not asked
+//! again for [`TIER_REFUSAL_MEMORY_MS`]. The lineups due a question are asked
+//! together, each under the one wall. Under `shadow` the lineup is asked and
+//! kept and its row written, and nothing is applied. What leaves is catalog
+//! facts and counts; the one string a person may have written in it — a
+//! custom provider's name or model id — passes the door as declared.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,7 +36,8 @@ use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_
 /// The file the lineups' judgments are kept in, beside the discovery cache.
 pub const TIER_JUDGMENT_FILE: &str = "tier-judgment.json";
 
-/// The wall one lineup's judgment is held to.
+/// The wall each lineup's question is held to. The lineups due a question
+/// are asked together, so it is also the longest one pass waits on them.
 pub const TIER_JUDGMENT_DEADLINE: Duration = Duration::from_millis(zerocode_core::jev::MODEL_TIERS_DEADLINE_MS);
 
 /// How long a lineup's question that went out and came back unanswered —
@@ -52,14 +57,38 @@ pub fn tier_judgment_path() -> PathBuf {
     runtime::model_discovery::cache_dir().join(TIER_JUDGMENT_FILE)
 }
 
-/// The kept file: every provider's last judgment, under the question's
-/// version — a judgment asked under another version is never applied.
+/// The kept file: every provider's last judgment, and its last question
+/// that went out unanswered, under the question's version — a judgment asked
+/// under another version is never applied.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Kept {
     rubric_version: u32,
     #[serde(default)]
     providers: BTreeMap<String, KeptLineup>,
+    #[serde(default)]
+    unanswered: BTreeMap<String, KeptUnanswered>,
+}
+
+/// A lineup's question that went out and came back unanswered: the facts it
+/// was asked under, when, and what came back instead (`http_402`,
+/// `timeout`, …).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeptUnanswered {
+    fingerprint: String,
+    asked_at_ms: i64,
+    outcome: String,
+}
+
+impl Kept {
+    /// Whether `provider`'s lineup was asked under `fingerprint` and left
+    /// unanswered within the memory before `now_ms`.
+    fn left_unanswered(&self, provider: &str, fingerprint: &str, now_ms: i64) -> bool {
+        self.unanswered.get(provider).is_some_and(|last| {
+            last.fingerprint == fingerprint && now_ms.saturating_sub(last.asked_at_ms) < TIER_REFUSAL_MEMORY_MS
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +114,7 @@ fn read_kept(path: &Path) -> Kept {
         .filter(|kept| kept.rubric_version == zerocode_core::jev::questions::MODEL_TIERS_RUBRIC_VERSION)
         .unwrap_or_else(|| Kept {
             rubric_version: zerocode_core::jev::questions::MODEL_TIERS_RUBRIC_VERSION,
-            providers: BTreeMap::new(),
+            ..Kept::default()
         })
 }
 
@@ -220,8 +249,12 @@ async fn ask_lineup(
 
 /// The judgment that stands over `lineups` under `ask.mode`, read from and
 /// written to the kept file at `ask.kept_at`. Each lineup is answered from
-/// the kept file when its fingerprint stands there; else, under a mode that
-/// asks, it is asked once inside the wall; unanswered, it keeps its last
+/// the kept file when its fingerprint stands there; it is asked nothing when
+/// its question under the same fingerprint went out and came back
+/// unanswered within [`TIER_REFUSAL_MEMORY_MS`]; else, under a mode that
+/// asks, it is asked once — every lineup due a question at the same moment,
+/// each under `ask.wall`, so a service that never answers holds the pass for
+/// one wall and not for one per provider. Unanswered, a lineup keeps its last
 /// judgment. Only `on` applies what stands.
 pub async fn judge_lineups(
     ask: &TierAsk<'_>,
@@ -234,7 +267,7 @@ pub async fn judge_lineups(
     }
     let (applies, now_ms) = (ask.mode.applies(), ask.now_ms);
     let mut kept = read_kept(ask.kept_at);
-    let mut changed = false;
+    let mut due: Vec<(&String, &[&ModelDescriptor], String)> = Vec::new();
     for (provider, models) in lineups.iter().filter(|(_, models)| !models.is_empty()) {
         let fingerprint = tier_fingerprint(provider, models, outcomes);
         let standing = kept.providers.get(provider).filter(|lineup| lineup.fingerprint == fingerprint);
@@ -242,43 +275,68 @@ pub async fn judge_lineups(
             if applies {
                 pass.judgment.places.extend(places_of(lineup));
             }
-            continue;
+        } else if kept.left_unanswered(provider, &fingerprint, now_ms) {
+            // Asked under these facts a short while ago and left unanswered:
+            // nothing is sent, and the last judgment stands as it would have.
+            if let Some(last) = kept.providers.get(provider).filter(|_| applies) {
+                pass.judgment.places.extend(places_of(last));
+            }
+        } else {
+            due.push((provider, models.as_slice(), fingerprint));
         }
-        let (answer, mut row) = ask_lineup(ask.door, ask.client, provider, models, outcomes, ask.wall).await;
+    }
+    let asked = due.iter().map(|(provider, models, _)| ask_lineup(ask.door, ask.client, provider, models, outcomes, ask.wall));
+    let answers = futures_util::future::join_all(asked).await;
+    let mut changed = false;
+    for ((provider, _, fingerprint), (answer, mut row)) in due.into_iter().zip(answers) {
         row.at_ms = now_ms;
         row.fingerprint.clone_from(&fingerprint);
-        if let Ok((judgment, model)) = answer {
-            row.applied = applies;
-            if applies {
-                pass.judgment.places.extend(judgment.places.iter().map(|(id, place)| (id.clone(), *place)));
+        match answer {
+            Ok((judgment, model)) => {
+                row.applied = applies;
+                if applies {
+                    pass.judgment.places.extend(judgment.places.iter().map(|(id, place)| (id.clone(), *place)));
+                }
+                kept.unanswered.remove(provider);
+                changed = true;
+                kept.providers.insert(
+                    provider.clone(),
+                    KeptLineup {
+                        fingerprint,
+                        judged_at_ms: now_ms,
+                        model,
+                        places: judgment
+                            .places
+                            .into_iter()
+                            .map(|(id, place)| {
+                                (
+                                    id,
+                                    KeptPlace {
+                                        score_permille: place.score_permille,
+                                        confidence_permille: place.confidence_permille,
+                                    },
+                                )
+                            })
+                            .collect(),
+                    },
+                );
             }
-            kept.providers.insert(
-                provider.clone(),
-                KeptLineup {
-                    fingerprint,
-                    judged_at_ms: now_ms,
-                    model,
-                    places: judgment
-                        .places
-                        .into_iter()
-                        .map(|(id, place)| {
-                            (
-                                id,
-                                KeptPlace {
-                                    score_permille: place.score_permille,
-                                    confidence_permille: place.confidence_permille,
-                                },
-                            )
-                        })
-                        .collect(),
-                },
-            );
-            changed = true;
-        } else if let Some(last) = kept.providers.get(provider).filter(|_| applies) {
-            // The last judgment still places the models it covered; a model
-            // that arrived since stands provisionally by the facts.
-            row.applied = true;
-            pass.judgment.places.extend(places_of(last));
+            Err(outcome) => {
+                // Only a question that left zo is remembered: a refusal at
+                // the door (no key, no consent, the day's budget) sent
+                // nothing, and is asked again as soon as it would pass.
+                if row.requests > 0 {
+                    kept.unanswered
+                        .insert(provider.clone(), KeptUnanswered { fingerprint, asked_at_ms: now_ms, outcome });
+                    changed = true;
+                }
+                if let Some(last) = kept.providers.get(provider).filter(|_| applies) {
+                    // The last judgment still places the models it covered; a
+                    // model that arrived since stands provisionally by the facts.
+                    row.applied = true;
+                    pass.judgment.places.extend(places_of(last));
+                }
+            }
         }
         pass.rows.push(row);
     }

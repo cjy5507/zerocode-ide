@@ -17268,7 +17268,10 @@ const DIALS_FROM_PERSON: &str = "person";
 /// classifier ordered it — ran (t-45961).
 const DIALS_FROM_FACTS: &str = "facts";
 /// `dials.difficultyFrom`: no answer, and no difficulty ran — the summons
-/// named its model, and its CLI's own effort stands.
+/// named its model, and its CLI's own effort stands. `dials.difficulty` then
+/// names the rung an unjudged summons stands at
+/// ([`crate::summon_difficulty::UNJUDGED_DIFFICULTY`]), so it is a word every
+/// time.
 const DIALS_FROM_NONE: &str = "none";
 /// `dials.unjudged.why`: the difficulty question was never asked (its
 /// switch off, or every dial named).
@@ -21178,9 +21181,10 @@ fn plan_inner(
             // what else today's lineup offers at that difficulty (t-14437).
             let dials = (model.is_none() || effort.is_none()).then(|| {
                 serde_json::json!({
-                    "difficulty": chosen.or_else(|| {
-                        profile.as_ref().map(|_| crate::summon_difficulty::UNJUDGED_DIFFICULTY)
-                    }),
+                    // Always a word: the rung the answer chose, else the one
+                    // an unjudged summons stands at — `difficultyFrom` says
+                    // whether any dial ran at it (t-45961).
+                    "difficulty": chosen.unwrap_or(crate::summon_difficulty::UNJUDGED_DIFFICULTY),
                     "difficultyFrom": match (chosen, &profile) {
                         (Some(_), _) => DIALS_FROM_JEV,
                         (None, Some(row)) if row.from == crate::summon_difficulty::lineup::Source::Person => {

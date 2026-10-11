@@ -92,9 +92,11 @@ pub fn render(refresh: bool, json: bool) -> Result<String, String> {
 /// The classifier's answer over `listed`, with the tier seat's judgment
 /// applied where one stands (t-45961): each provider's lineup — its models
 /// in the fact rule's order, superseded releases left out — is asked when its
-/// facts or its record moved and answered from the kept file otherwise. Under
-/// a seat that asks nothing (`off`, or Jev switched off) this is the fact
-/// rule, and no record is read.
+/// facts or its record moved and answered from the kept file otherwise; the
+/// lineups due a question are asked together under one wall, and one whose
+/// question went out unanswered (HTTP 402, a timeout) is not asked again for
+/// the same facts within the seat's memory. Under a seat that asks nothing
+/// (`off`, or Jev switched off) this is the fact rule, and no record is read.
 fn judged_tiers(listed: &[(api::ProviderKind, &str)], now_secs: u64) -> Vec<ModelTierAssignment> {
     let descriptors = runtime::tier_descriptors_of(listed);
     let by_facts = runtime::classify_model_tiers(&descriptors);
@@ -104,7 +106,7 @@ fn judged_tiers(listed: &[(api::ProviderKind, &str)], now_secs: u64) -> Vec<Mode
     }
     let lineups = runtime::tier_lineups_of(&descriptors, &by_facts);
     let outcomes = runtime::tier_outcomes_of(&runtime::read_route_outcomes_across_projects());
-    let now_ms = i64::try_from(now_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
+    let now_ms = i64::try_from(std::time::Duration::from_secs(now_secs).as_millis()).unwrap_or(i64::MAX);
     let judgment = tools::tier_judgment_for(&cwd, &lineups, &|id: &str| outcomes.get(id).copied(), now_ms);
     runtime::classify_model_tiers_judged(&descriptors, Some(&judgment))
 }

@@ -1961,10 +1961,13 @@ pub const MODEL_TIERS_DEADLINE_MS: u64 = 4_000;
 
 /// The wall a seat's own words name (`{{seconds}}` in its settings
 /// paragraph), read from the constant it is held to rather than written into
-/// five languages: the seat's apply wall.
+/// five languages: the seat's apply wall, or — for the model tier seat, which
+/// never rises and so names none — the wall its question is held to
+/// ([`MODEL_TIERS_DEADLINE_MS`]).
 #[must_use]
-pub const fn worded_wall_ms(row: &JevUse) -> Option<u64> {
+pub fn worded_wall_ms(row: &JevUse) -> Option<u64> {
     row.apply_deadline_ms
+        .or_else(|| (row.id == MODEL_TIERS.id).then_some(MODEL_TIERS_DEADLINE_MS))
 }
 
 /// zo's model tier seat (t-45961): where each model of one provider's lineup
@@ -1979,18 +1982,31 @@ pub const fn worded_wall_ms(row: &JevUse) -> Option<u64> {
 /// zo's catalog cache until then; under `off`, without an answer or past the
 /// wall, the fact rule places every model, and a model that arrived after
 /// the judgment stands provisionally by the facts. What is sent is catalog
-/// facts and counts — ids, classes, prices, windows, release order, effort
-/// ceilings and run counts — never a word a person wrote.
+/// facts and counts — the provider, ids, classes, prices, windows, release
+/// order, effort ceilings and run counts. The provider and the ids are
+/// declared: a custom provider's name and its model ids are words a person
+/// wrote, cleared at the door like any other.
+///
+/// It records until a person turns it `on` (t-45961, the person and ZO,
+/// 10-11): no real request had been answered when it was built — this
+/// machine's account was refused with HTTP 402 — so applying by default would
+/// have applied an answer nobody had read.
 pub const MODEL_TIERS: JevUse = JevUse {
     id: "model_tiers",
     setting: "jevModelTiers",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On],
-    recommended: JevMode::On,
+    recommended: JevMode::Shadow,
     repeat: None,
-    sends: &[Sent {
-        at: "/state/models/*/id",
-        cap: Cap::Uncut,
-    }],
+    sends: &[
+        Sent {
+            at: "/state/provider",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/models/*/id",
+            cap: Cap::Uncut,
+        },
+    ],
     ledger: "model-tiers.jsonl",
     promotes: false,
     answer_floor_permille: None,

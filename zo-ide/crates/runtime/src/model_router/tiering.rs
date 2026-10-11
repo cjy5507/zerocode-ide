@@ -4,7 +4,9 @@
 //! The rule it serves: the most capable model of each provider plans,
 //! verifies and takes the hard escalation; the next-best model of each
 //! provider does the hard implementation; everything below does ordinary and
-//! easy work, easy work on the least capable model that is still current.
+//! easy work, easy work on the least capable model that is still current. A
+//! provider with one current implementer below its top leaves the hard work
+//! to the top, so no provider's hard work lands on its only light model.
 //! Nothing here names a model. A model's place comes from one of two
 //! sources: the Jev seat's judgment of the provider's lineup, read off the
 //! catalog facts and the recorded outcomes ([`super::tier_judgment`]), or —
@@ -31,7 +33,8 @@ mod tests;
 pub enum ModelBand {
     /// The provider's most capable model, and it reaches the Deep tier: it
     /// plans, verifies and takes the hard escalation, never ordinary
-    /// implementation.
+    /// implementation — and the hard rung as well when one implementer below
+    /// it would serve every rung.
     Top,
     /// The next-best model of the provider: hard implementation.
     Second,
@@ -65,7 +68,8 @@ pub enum ImplRung {
     Easy,
     /// Ordinary work: the best model below the second band, current release.
     Medium,
-    /// Large work: the provider's second band.
+    /// Large work: the provider's second band, or its top model when the
+    /// second band is its one current implementer.
     Hard,
 }
 
@@ -303,7 +307,12 @@ pub(super) fn classify_model_tiers_with(
 /// serves no rung, a point release of a stronger line (6.1 beside 6) ages
 /// nobody, and a newer release of a weaker class never pushes a stronger
 /// class off the ladder. A rung with no distinct model falls onto the rung
-/// above it, so a provider with one implementer serves every rung with it.
+/// above it, so a provider with one implementer would serve every rung with
+/// it — and there the top band, when it can code, takes the hard rung, so a
+/// provider's hard work never falls to its one light model (t-45961, the
+/// person and ZO, 10-11: Google's Pro became the top band once a size word
+/// stopped matching inside `gemini`, and its one current Flash took hard
+/// work from it).
 fn implementation_rungs(ordered: &[&ModelDescriptor], bands: &[ModelBand]) -> Vec<BTreeSet<ImplRung>> {
     let implementers: Vec<usize> = ordered
         .iter()
@@ -331,6 +340,11 @@ fn implementation_rungs(ordered: &[&ModelDescriptor], bands: &[ModelBand]) -> Ve
         .copied()
         .unwrap_or(hard);
     let easy = implementers.iter().rev().find(current).copied().unwrap_or(hard);
+    let hard = bands
+        .iter()
+        .position(|band| *band == ModelBand::Top)
+        .filter(|&top| ordered[top].has_capability(ModelCapability::Coding) && hard == medium && medium == easy)
+        .unwrap_or(hard);
     rungs[hard].insert(ImplRung::Hard);
     rungs[medium].insert(ImplRung::Medium);
     rungs[easy].insert(ImplRung::Easy);
