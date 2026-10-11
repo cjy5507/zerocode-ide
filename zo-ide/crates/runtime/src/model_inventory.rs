@@ -472,10 +472,6 @@ fn context_window_for_descriptor(id: &str) -> Option<u32> {
     u32::try_from(api::context_window_for_model(id)).ok()
 }
 
-/// Millionths of a US dollar in one dollar: the unit a descriptor carries a
-/// list price in.
-const MICRO_USD_PER_USD: f64 = 1_000_000.0;
-
 /// The model's list price per million tokens (input, output), bridged from
 /// the shared price table ([`api::model_price`]) into the whole millionths of
 /// a dollar a descriptor compares. `None` when no row names the model — never
@@ -491,7 +487,9 @@ const EXACT_F64_WHOLE_NUMBERS_BELOW: f64 = 9_007_199_254_740_992.0;
 /// A USD-per-million-token rate as whole millionths of a dollar; `None` for
 /// a rate that is not a finite, non-negative number.
 fn micro_usd(usd: f64) -> Option<u64> {
-    let micros = (usd * MICRO_USD_PER_USD).round();
+    // A million is exact in an f64.
+    #[allow(clippy::cast_precision_loss)]
+    let micros = (usd * crate::model_router::MICRO_USD_PER_USD as f64).round();
     if !(0.0..EXACT_F64_WHOLE_NUMBERS_BELOW).contains(&micros) {
         return None;
     }

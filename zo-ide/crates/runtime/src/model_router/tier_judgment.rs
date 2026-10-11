@@ -213,9 +213,10 @@ fn provenance_word(provenance: TiersProvenance) -> &'static str {
 
 /// US dollars per million tokens from a descriptor's millionths.
 fn usd(micro_usd: u64) -> Value {
-    // A list price is a few hundred dollars at most: exact in an f64.
+    // A list price is a few hundred dollars at most, and a million is a
+    // million: both exact in an f64.
     #[allow(clippy::cast_precision_loss)]
-    let dollars = micro_usd as f64 / 1_000_000.0;
+    let dollars = micro_usd as f64 / super::inventory::MICRO_USD_PER_USD as f64;
     json!(dollars)
 }
 
@@ -364,11 +365,15 @@ pub enum TierRefusal {
     Empty,
 }
 
+/// Thousandths in a whole: the unit a judged place and its confidence are
+/// written in.
+const PERMILLE_PER_WHOLE: f64 = 1000.0;
+
 /// A share in thousandths.
 fn permille(share: f64) -> u16 {
     // Clamped to 0..=1 first: the product is a whole number in 0..=1000.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let permille = (share.clamp(0.0, 1.0) * 1000.0).round() as u16;
+    let permille = (share.clamp(0.0, 1.0) * PERMILLE_PER_WHOLE).round() as u16;
     permille
 }
 

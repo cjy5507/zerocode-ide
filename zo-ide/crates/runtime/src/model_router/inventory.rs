@@ -33,6 +33,10 @@ pub struct ModelDescriptor {
 
 pub type UsableModel = ModelDescriptor;
 
+/// Millionths of a US dollar in one dollar: the unit a [`ListPrice`] is
+/// written in.
+pub const MICRO_USD_PER_USD: u64 = 1_000_000;
+
 /// A model's list price, in millionths of a US dollar per million tokens —
 /// whole numbers, so a descriptor stays comparable and hashable. `None` on a
 /// descriptor means nobody wrote the rate down, never that it is free.

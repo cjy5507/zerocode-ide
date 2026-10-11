@@ -6661,10 +6661,11 @@ function summonRowNote(row) {
  * Jev seat's judgment, the fact rule, or — for a model that arrived after
  * the judgment — the fact rule until the next one. A row the person wrote,
  * or one the lineup says nothing about, says nothing here. */
+const PERMILLE_PER_PERCENT = 10;
 function summonRowTier(row) {
   if (row.from === "person") return "";
   if (row.tierFrom === "jev") {
-    const confidence = Math.round((row.tierConfidencePermille ?? 0) / 10);
+    const confidence = Math.round((row.tierConfidencePermille ?? 0) / PERMILLE_PER_PERCENT);
     return t("settings.typesafe.rowTierJev", "이 모델의 등급은 Jev 판정입니다(확신도 {{confidence}}%).", { confidence });
   }
   if (row.tierFrom === "provisional") {

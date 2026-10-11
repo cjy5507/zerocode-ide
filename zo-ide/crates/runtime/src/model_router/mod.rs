@@ -34,7 +34,7 @@ pub use assignment::{
     AssignmentSource, AutoAssignmentOptions, AutoAssignmentPlan, InventorySummary, TargetAssignment,
 };
 pub use inventory::{
-    ListPrice, ModelDescriptor, ModelInventory, ModelSource, UsableModel, UsableModelInventory,
+    ListPrice, ModelDescriptor, ModelInventory, ModelSource, UsableModel, UsableModelInventory, MICRO_USD_PER_USD,
 };
 pub use tier_judgment::{
     classify_model_tiers_judged, tier_lineups_of, tier_outcomes_of, read_tier_answers, tier_fingerprint, tier_levels, tier_question_id, tier_questions, tier_rubric_words, tier_state, TierOutcomes, TierRefusal, JudgedPlace, TierJudgment, TierSource,
