@@ -1114,6 +1114,17 @@ pub trait Host {
         false
     }
 
+    /// Whether words this window typed at the pane on its own are still on
+    /// their way (t-46106): a guarded delivery the pump is carrying, or one
+    /// queued behind it — a mail pointer's line, a continuation, an effort
+    /// step. Until the program reports taking them, the hooks have not heard
+    /// of the turn they start, and the pane still looks between turns; an
+    /// account switch that closed it then would throw the words away. Hosts
+    /// with no typing door of their own type nothing.
+    fn typing_in_flight(&self, _term: u32) -> bool {
+        false
+    }
+
     /// [`Self::between_turns`], observed under the locks that can change the
     /// answer — the fence an account switch rests a following worker in
     /// (t-46106). Call `commit` at most once, only while the pane is between

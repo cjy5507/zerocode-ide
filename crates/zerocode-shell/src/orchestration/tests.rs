@@ -22279,6 +22279,9 @@ struct Switching {
     /// Panes that run another agent than Claude — the zo pane — which no
     /// Claude account census counts (t-46106).
     not_claude: Mutex<std::collections::HashSet<u32>>,
+    /// Panes the window typed at on its own whose words the program has not
+    /// taken yet — a test takes them out (t-46106).
+    typed: Mutex<std::collections::HashSet<u32>>,
     sessions: Mutex<std::collections::HashMap<u32, zerocode_core::ProviderSession>>,
     accounts: Mutex<std::collections::HashMap<u32, crate::agent_teams::PaneLogin>>,
     /// The account a pane opened NOW runs as — the window's selection.
@@ -22319,6 +22322,7 @@ impl Switching {
             busy: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
             drafts: Mutex::new(std::collections::HashSet::new()),
             not_claude: Mutex::new(std::collections::HashSet::new()),
+            typed: Mutex::new(std::collections::HashSet::new()),
             sessions: Mutex::new(std::collections::HashMap::new()),
             accounts: Mutex::new(std::collections::HashMap::new()),
             selected: std::sync::Arc::new(Mutex::new(Some("a-fixture".to_string()))),
@@ -22428,6 +22432,23 @@ impl Host for Switching {
     }
     fn send(&self, _term: u32, _text: &str) -> bool {
         true
+    }
+    /// A guarded delivery the program has not taken yet, as the window's
+    /// pump carries one: the words are on their way until a test takes them
+    /// (t-46106).
+    fn point(
+        &self,
+        term: u32,
+        _line: &str,
+        _submit: bool,
+    ) -> Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>> {
+        self.typed.lock().unwrap().insert(term);
+        let (settled, receipt) = std::sync::mpsc::sync_channel(1);
+        let _ = settled.send(zerocode_pty::DeliveryOutcome::Delivered);
+        Some(receipt)
+    }
+    fn typing_in_flight(&self, term: u32) -> bool {
+        self.typed.lock().unwrap().contains(&term)
     }
     fn paste(&self, term: u32, text: &str) -> bool {
         self.pasted.lock().unwrap().push((term, text.to_string()));
@@ -23575,6 +23596,77 @@ fn a_pane_that_takes_its_next_turn_at_the_fence_moves_at_the_end_of_that_turn() 
         Some("b-fixture")
     );
     assert_eq!(stood.died(at + 30), 0);
+    for term in [stood.leader + 100, stood.leader + 101] {
+        crate::agent_teams::forget_term(term);
+    }
+}
+
+/// t-46106 (ZO's adversarial read, m-46917): words this window has just
+/// typed at a pane on its own — a transient error's continuation, the mail
+/// pointer's line — are on their way before any hook says the pane took
+/// them, and in that gap the pane still looks between turns. A switch that
+/// meets it then does not close it, on the beat's road or on the person's
+/// pick: the pane is owed its move at the end of the turn those words
+/// start, the words are not thrown away, and the census says so.
+#[test]
+fn a_pane_the_window_just_typed_at_is_not_closed_by_a_switch_but_moves_at_that_turns_end() {
+    use crate::account_switch::Stance;
+    let stood = WalledClaude::near_limit(93_300, 2, 0);
+    let at = stood.began + 20_000;
+    let (typed, typed_term) = stood.walled_more[0].clone();
+    // The beat's continuation goes to the pane: registered, not taken yet.
+    assert!(
+        stood
+            .host
+            .point(typed_term, "Continue where you stopped.", true)
+            .is_some()
+    );
+    let plan = stood.plan(at);
+    stood.host.seating_onto(stood.leader + 100);
+    let applied =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+            .expect("applied");
+    assert!(
+        !stood.host.closed().contains(&typed_term),
+        "the switch closed a pane the window had just typed at: {applied:?}"
+    );
+    assert_eq!(
+        applied.census,
+        crate::account_switch::SwitchCensus {
+            moved: 1,
+            at_turn_end: 1,
+            person: 0,
+            left: 0,
+        },
+        "{applied:?}"
+    );
+    assert_eq!(term_now(&typed), typed_term);
+    assert_eq!(
+        stood
+            .plan(at + 1)
+            .panes
+            .iter()
+            .find(|pane| pane.term == typed_term)
+            .map(|pane| pane.stance),
+        Some(Stance::TurnEnd)
+    );
+    // While the words are on their way, no beat moves it.
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 2),
+        0
+    );
+    assert!(!stood.host.closed().contains(&typed_term));
+    // The words are taken, their turn runs and ends: now it moves.
+    stood.host.typed.lock().unwrap().remove(&typed_term);
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 3),
+        1
+    );
+    assert_eq!(
+        stood.host.pane_account(term_now(&typed)).as_deref(),
+        Some("b-fixture")
+    );
+    assert_eq!(stood.died(at + 4), 0);
     for term in [stood.leader + 100, stood.leader + 101] {
         crate::agent_teams::forget_term(term);
     }
