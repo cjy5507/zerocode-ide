@@ -348,8 +348,8 @@ pub fn tier_outcomes_of(records: &[RouteOutcomeRecord]) -> BTreeMap<String, Tier
     sums.into_iter()
         .map(|(model, sum)| {
             let mut seen = sum.seen;
-            seen.mean_output_tokens = (seen.runs > 0).then(|| sum.tokens / seen.runs);
-            seen.mean_minutes = (sum.timed > 0).then(|| sum.millis / sum.timed / MS_PER_MINUTE);
+            seen.mean_output_tokens = sum.tokens.checked_div(seen.runs);
+            seen.mean_minutes = sum.millis.checked_div(sum.timed).map(|millis| millis / MS_PER_MINUTE);
             (model, seen)
         })
         .collect()
