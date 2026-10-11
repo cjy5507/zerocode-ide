@@ -71,7 +71,7 @@ pub fn render(refresh: bool, json: bool) -> Result<String, String> {
     // beside the shipped ones.
     let listed: Vec<(api::ProviderKind, &str)> =
         rows.iter().map(|row| (row.provider.kind(), row.id.as_str())).collect();
-    let tiers = runtime::tier_assignments_of(&listed);
+    let tiers = judged_tiers(&listed, now);
     let report = Report {
         policy,
         catalog: &catalog,
@@ -87,6 +87,26 @@ pub fn render(refresh: bool, json: bool) -> Result<String, String> {
     } else {
         Ok(report.text())
     }
+}
+
+/// The classifier's answer over `listed`, with the tier seat's judgment
+/// applied where one stands (t-45961): each provider's lineup — its models
+/// in the fact rule's order, superseded releases left out — is asked when its
+/// facts or its record moved and answered from the kept file otherwise. Under
+/// a seat that asks nothing (`off`, or Jev switched off) this is the fact
+/// rule, and no record is read.
+fn judged_tiers(listed: &[(api::ProviderKind, &str)], now_secs: u64) -> Vec<ModelTierAssignment> {
+    let descriptors = runtime::tier_descriptors_of(listed);
+    let by_facts = runtime::classify_model_tiers(&descriptors);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if !tools::tier_seat_mode(&cwd).asks() {
+        return by_facts;
+    }
+    let lineups = runtime::tier_lineups_of(&descriptors, &by_facts);
+    let outcomes = runtime::tier_outcomes_of(&runtime::read_route_outcomes_across_projects());
+    let now_ms = i64::try_from(now_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
+    let judgment = tools::tier_judgment_for(&cwd, &lineups, &|id: &str| outcomes.get(id).copied(), now_ms);
+    runtime::classify_model_tiers_judged(&descriptors, Some(&judgment))
 }
 
 /// One answer, rendered two ways.

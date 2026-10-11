@@ -14,7 +14,8 @@ use zerocode_core::summon_difficulty::{lineup::CHALLENGE_MIN_SAMPLES, LADDER};
 
 use super::inventory::ModelDescriptor;
 use super::policy::{EffortCeiling, ModelTier, TiersProvenance};
-use super::tiering::{class_word, classify_model_tiers_with, FactRule, ModelTierAssignment};
+use super::outcome::{is_terminal_outcome_status, RouteOutcomeRecord, OUTCOME_COMPLETED, OUTCOME_FAILED};
+use super::tiering::{class_word, classify_model_tiers_with, FactRule, ModelBand, ModelTierAssignment};
 
 /// Who placed a model in its provider's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -283,6 +284,75 @@ pub fn tier_fingerprint(
         "{}\n{state}",
         zerocode_core::jev::questions::MODEL_TIERS_RUBRIC_VERSION
     ))
+}
+
+/// Each provider's lineup as the tier seat asks it: its models in the fact
+/// rule's order (`by_facts`, the classifier's assignments over `models`),
+/// superseded releases left out.
+#[must_use]
+pub fn tier_lineups_of<'a>(
+    models: &'a [ModelDescriptor],
+    by_facts: &[ModelTierAssignment],
+) -> Vec<(String, Vec<&'a ModelDescriptor>)> {
+    let mut lineups: Vec<(String, Vec<(usize, &'a ModelDescriptor)>)> = Vec::new();
+    for entry in by_facts.iter().filter(|entry| entry.band != ModelBand::Superseded) {
+        let Some(model) = models.iter().find(|model| model.id() == entry.id) else {
+            continue;
+        };
+        match lineups.iter_mut().find(|(provider, _)| *provider == entry.provider) {
+            Some((_, lineup)) => lineup.push((entry.rank, model)),
+            None => lineups.push((entry.provider.clone(), vec![(entry.rank, model)])),
+        }
+    }
+    lineups
+        .into_iter()
+        .map(|(provider, mut lineup)| {
+            lineup.sort_by_key(|(rank, _)| *rank);
+            (provider, lineup.into_iter().map(|(_, model)| model).collect())
+        })
+        .collect()
+}
+
+/// Milliseconds in a minute, for a run's mean length.
+const MS_PER_MINUTE: u64 = 60_000;
+
+/// What each model's recorded runs say — `records` are zo's route outcomes,
+/// every project's — for the tier seat's state: the runs that ended, how
+/// many completed, how many failed on the model's own account (a provider's
+/// error is not the model's), and their mean output and length.
+#[must_use]
+pub fn tier_outcomes_of(records: &[RouteOutcomeRecord]) -> BTreeMap<String, TierOutcomes> {
+    #[derive(Default)]
+    struct Sums {
+        seen: TierOutcomes,
+        tokens: u64,
+        millis: u64,
+        timed: u64,
+    }
+    let mut sums: BTreeMap<String, Sums> = BTreeMap::new();
+    for record in records.iter().filter(|record| is_terminal_outcome_status(&record.status)) {
+        let sum = sums.entry(record.selected_model.clone()).or_default();
+        sum.seen.runs += 1;
+        if record.status == OUTCOME_COMPLETED {
+            sum.seen.completed += 1;
+        }
+        if record.status == OUTCOME_FAILED && record.provider_error_class.is_none() {
+            sum.seen.failed += 1;
+        }
+        sum.tokens = sum.tokens.saturating_add(record.output_tokens);
+        if let Some(millis) = record.duration_ms {
+            sum.millis = sum.millis.saturating_add(millis);
+            sum.timed += 1;
+        }
+    }
+    sums.into_iter()
+        .map(|(model, sum)| {
+            let mut seen = sum.seen;
+            seen.mean_output_tokens = (seen.runs > 0).then(|| sum.tokens / seen.runs);
+            seen.mean_minutes = (sum.timed > 0).then(|| sum.millis / sum.timed / MS_PER_MINUTE);
+            (model, seen)
+        })
+        .collect()
 }
 
 /// Why an answer was not taken as a judgment.

@@ -54,13 +54,20 @@ pub fn connected_model_inventory(default_model: &str) -> ModelInventory {
 pub fn tier_assignments_of(
     models: &[(ProviderKind, &str)],
 ) -> Vec<crate::model_router::ModelTierAssignment> {
+    crate::model_router::classify_model_tiers(&tier_descriptors_of(models))
+}
+
+/// The descriptors [`tier_assignments_of`] classifies, one per listed id —
+/// what the tier seat (t-45961) reads the facts of before the classifier
+/// applies its judgment.
+#[must_use]
+pub fn tier_descriptors_of(models: &[(ProviderKind, &str)]) -> Vec<ModelDescriptor> {
     let mut named = std::collections::HashSet::new();
-    let descriptors: Vec<ModelDescriptor> = models
+    models
         .iter()
         .filter(|(_, id)| named.insert(*id))
         .map(|(provider, id)| descriptor_for(id, *provider))
-        .collect();
-    crate::model_router::classify_model_tiers(&descriptors)
+        .collect()
 }
 
 #[must_use]

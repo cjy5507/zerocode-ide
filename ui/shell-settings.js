@@ -6650,9 +6650,30 @@ function summonRowNote(row) {
       ? `${auto} ${t("settings.typesafe.rowHighest", "쉬운 일과 보통 일은 한 등급 아래 모델을 그 모델의 가장 높은 사고 깊이로 씁니다.")}`
       : auto;
   const fresh = (row.candidates ?? []).filter((candidate) => candidate.fresh).map((candidate) => candidate.model);
+  const placed = summonRowTier(row);
+  const told = placed ? `${said} ${placed}` : said;
   return fresh.length
-    ? `${said} ${t("settings.typesafe.rowFresh", "새로 들어온 모델: {{models}}", { models: fresh.join(", ") })}`
-    : said;
+    ? `${told} ${t("settings.typesafe.rowFresh", "새로 들어온 모델: {{models}}", { models: fresh.join(", ") })}`
+    : told;
+}
+
+/* Who put the row's model in its tier, and how sure that was (t-45961): the
+ * Jev seat's judgment, the fact rule, or — for a model that arrived after
+ * the judgment — the fact rule until the next one. A row the person wrote,
+ * or one the lineup says nothing about, says nothing here. */
+function summonRowTier(row) {
+  if (row.from === "person") return "";
+  if (row.tierFrom === "jev") {
+    const confidence = Math.round((row.tierConfidencePermille ?? 0) / 10);
+    return t("settings.typesafe.rowTierJev", "이 모델의 등급은 Jev 판정입니다(확신도 {{confidence}}%).", { confidence });
+  }
+  if (row.tierFrom === "provisional") {
+    return t("settings.typesafe.rowTierProvisional", "지난 판정 뒤에 들어온 모델이라, 다음 판정 때까지 사실 규칙에 따른 임시 등급입니다.");
+  }
+  if (row.tierFrom === "facts") {
+    return t("settings.typesafe.rowTierFacts", "이 모델의 등급은 사실 규칙으로 정했습니다. Jev 판정은 없습니다.");
+  }
+  return "";
 }
 
 /* One seat's row of the backend's answer, by the use's own name. The words a

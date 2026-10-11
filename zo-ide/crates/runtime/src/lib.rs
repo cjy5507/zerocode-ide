@@ -247,7 +247,7 @@ pub use mcp_stdio::{
 };
 pub use mcp_ws::{connect_mcp_ws, McpWsProcess};
 pub use model_inventory::{
-    connected_model_inventory, tier_assignments_of, model_inventory_from_authorized_providers,
+    connected_model_inventory, tier_assignments_of, tier_descriptors_of, model_inventory_from_authorized_providers,
 };
 pub use model_router::{
     agent_preference_adjustment, agent_stats_for_route, completion_ceiling_for, completion_loop_step,
@@ -255,7 +255,7 @@ pub use model_router::{
     orchestration_accuracy,
     preferred_agent_for_route, read_orchestration_accuracy,
     classify_model_tiers, classify_model_tiers_judged, JudgedPlace, ListPrice, TierJudgment, TierSource,
-    read_tier_answers, tier_fingerprint, tier_levels, tier_question_id, tier_questions, tier_rubric_words, tier_state, TierOutcomes, TierRefusal,
+    tier_lineups_of, tier_outcomes_of, read_tier_answers, tier_fingerprint, tier_levels, tier_question_id, tier_questions, tier_rubric_words, tier_state, TierOutcomes, TierRefusal,
     deep_tier_model_matches, default_deep_tier_models, default_difficulty_tier,
     dynamic_deep_tier_models,
     exploration_slot_for_route, ImplRung, ModelBand, ModelTierAssignment,

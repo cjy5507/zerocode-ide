@@ -93,8 +93,7 @@ pub use decision_shadow::{
 };
 pub use probe_exec::task_fingerprint;
 pub use tier_seat::{
-    judge_lineups, judgment_for, tier_judgment_path, tier_seat_mode, Lineup as TierLineup, TierRow, TierSeatPass,
-    OUTCOME_KEPT, TIER_JUDGMENT_DEADLINE, TIER_JUDGMENT_FILE,
+    judgment_for as tier_judgment_for, tier_judgment_path, tier_seat_mode, TierRow, TIER_JUDGMENT_FILE,
 };
 pub use rerank_shadow::{
     note_recall_read, rerank_shadow_path, Judged, RerankLabelRow, RerankShadow, RerankShadowRow, ShownNote,

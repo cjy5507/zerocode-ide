@@ -128,6 +128,7 @@ pub use misc_tools::{
     PatchReviewLabelRow, PatchReviewRow, JEV_PATCH_REVIEW_SETTING, PATCH_REVIEW_DEADLINE,
     PATCH_REVIEW_FILE, PATCH_REVIEW_OUTCOME_ANSWERED,
 };
+pub use misc_tools::{tier_judgment_for, tier_judgment_path, tier_seat_mode, TierRow, TIER_JUDGMENT_FILE};
 pub use misc_tools::{
     file_pick_path, jev_file_pick_mode_from, note_file_pick_turn, FilePickJudge,
     FilePickLabelRow, FilePickRow, JEV_FILE_PICK_SETTING, FILE_PICK_FILE,
