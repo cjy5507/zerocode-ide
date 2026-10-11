@@ -2296,6 +2296,183 @@ mod tests {
         assert!(finished(held, held.task(&research).expect("a task")));
     }
 
+    /// Where finished work stands is told apart on the desk as the ledger knows it (t-47538): a task
+    /// verified and not landed is 검증됨, never 보고됨; one deployed is 배포됨, never 병합; one whose
+    /// review names an older commit than its attempt handed in waits for a review again (`stale`),
+    /// never 보고됨 as though nobody had looked; and a task completed with no attempt at all, or on a
+    /// coordinator's record that names no source it reviewed, is `unknown` — never a success stage.
+    /// Reported, merged and unreviewable work keep the stages they had, and every one of them is
+    /// finished work the desk costs.
+    #[test]
+    fn verified_deployed_stale_and_unknown_work_each_stand_in_their_own_stage() {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("stages", 1);
+        let coordinator = |attempt: Option<&str>, source: Option<&str>| ResultAuthor::Coordinator {
+            seat: "team-s/%1".to_string(),
+            generation: Some(1),
+            attempt: attempt.map(str::to_string),
+            source: source.map(str::to_string),
+            completed_ms: None,
+            verified_ms: None,
+        };
+        let handed_in = |ledger: &mut Ledger, title: &str, at: i64, head: &str| {
+            let task = ledger
+                .create_task(&run, "x".into(), title.into(), vec![], None, at)
+                .expect("a task");
+            // A pane of its own: two workers still looked for in one pane is a ledger no rebuild reads.
+            let pane = format!("%{at}");
+            let started = ledger
+                .start_worker(
+                    &run,
+                    "claude",
+                    ("team-s", pane.as_str()),
+                    Some(&task),
+                    at + 1,
+                )
+                .expect("a worker");
+            ledger
+                .post(
+                    &run,
+                    Draft {
+                        from: worker_address(&started.worker),
+                        to: ledger.run(&run).expect("the run").address(),
+                        kind: MessageKind::WorkerDone,
+                        body: Text::from(format!(r#"{{"ok":true,"head":"{head}"}}"#)),
+                        subject: Text::default(),
+                        priority: Priority::Normal,
+                        payload: Text::default(),
+                        thread: None,
+                        task: Some(task.clone()),
+                        dispatch: started.dispatch.clone(),
+                    },
+                    at + 2,
+                )
+                .expect("the report");
+            (task, started.dispatch.expect("an attempt"))
+        };
+        let review = |ledger: &mut Ledger, task: &str, attempt: &str, head: &str, keys: &str| {
+            ledger
+                .update_task(
+                    &run,
+                    task,
+                    None,
+                    Some(keys.to_string()),
+                    coordinator(Some(attempt), Some(head)),
+                    100,
+                )
+                .expect("a review");
+        };
+        let (reported, _) = handed_in(&mut ledger, "reported", 10, "1111111");
+        let (verified, attempt) = handed_in(&mut ledger, "verified", 20, "2222222");
+        review(
+            &mut ledger,
+            &verified,
+            &attempt,
+            "2222222",
+            r#"{"verified":true}"#,
+        );
+        let (merged, attempt) = handed_in(&mut ledger, "merged", 30, "3333333");
+        review(
+            &mut ledger,
+            &merged,
+            &attempt,
+            "3333333",
+            r#"{"verified":true,"mergeHead":"3333333"}"#,
+        );
+        let (deployed, attempt) = handed_in(&mut ledger, "deployed", 40, "4444444");
+        review(
+            &mut ledger,
+            &deployed,
+            &attempt,
+            "4444444",
+            r#"{"verified":true,"merged":true,"deployed":true}"#,
+        );
+        let (stale, stale_attempt) = handed_in(&mut ledger, "stale", 50, "5555555");
+        review(
+            &mut ledger,
+            &stale,
+            &stale_attempt,
+            "5555555",
+            r#"{"verified":true}"#,
+        );
+        // Done by hand: no attempt ever carried it.
+        let by_hand = ledger
+            .create_task(&run, "x".into(), "by hand".into(), vec![], None, 60)
+            .expect("a task");
+        ledger
+            .update_task(
+                &run,
+                &by_hand,
+                Some(TaskStatus::Completed),
+                None,
+                coordinator(None, None),
+                61,
+            )
+            .expect("done by hand");
+        // A coordinator's record from before a review named the source it read.
+        let unbound = ledger
+            .create_task(&run, "x".into(), "unbound".into(), vec![], None, 70)
+            .expect("a task");
+        ledger
+            .update_task(
+                &run,
+                &unbound,
+                Some(TaskStatus::Completed),
+                Some(r#"{"merged":true}"#.to_string()),
+                coordinator(None, None),
+                71,
+            )
+            .expect("an old record");
+        // The stale one's attempt now names a newer commit than the one the review read.
+        let mut moved = ledger.export();
+        moved
+            .dispatches
+            .iter_mut()
+            .find(|row| row.id == stale_attempt)
+            .expect("the attempt")
+            .source = Some("6666666".to_string());
+        let ledger = Ledger::rebuild(moved).expect("a readable ledger");
+
+        let desk = desk_snapshot(&ledger, |_| None, no_cost);
+        let stage = |id: &str| {
+            desk.tasks
+                .iter()
+                .find(|one| one.id == id)
+                .map(|one| one.stage)
+                .unwrap_or_else(|| panic!("{id} missing"))
+        };
+        for (id, word) in [
+            (&reported, "reported"),
+            (&verified, "verified"),
+            (&merged, "merged"),
+            (&deployed, "deployed"),
+            (&stale, "stale"),
+            (&by_hand, "unknown"),
+            (&unbound, "unknown"),
+        ] {
+            assert_eq!(stage(id), word, "{id}");
+        }
+        for word in [
+            "reported", "verified", "merged", "deployed", "stale", "unknown",
+        ] {
+            assert!(
+                STAGES.contains(&word) && FINISHED_STAGES.contains(&word),
+                "{word} is not a finished stage the desk sends"
+            );
+            assert_eq!(
+                desk.stages.iter().filter(|one| one.stage == word).count(),
+                1,
+                "{word} is counted more than once, or not at all"
+            );
+        }
+        let held = ledger.run(&run).expect("the run");
+        for id in [
+            &reported, &verified, &merged, &deployed, &stale, &by_hand, &unbound,
+        ] {
+            assert!(finished(held, held.task(id).expect("a task")), "{id}");
+        }
+    }
+
     /// A stage carries at most [`STAGE_ROWS`] rows and its count carries the
     /// rest; open stages list oldest first (the order work is handed out in),
     /// endings newest first.

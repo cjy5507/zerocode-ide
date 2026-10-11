@@ -556,6 +556,41 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       JSON.stringify(turning),
     );
 
+    /* A review that names an older attempt or commit than the work handed in no
+     * longer stands (t-47538): the row says the work waits for a review again,
+     * in a word of its own, and it still waits. */
+    const stale = await page.evaluate(async () => {
+      const row = () => document.querySelector('.wt-agents[data-worktree-path="/r/left"] .wt-agent');
+      const read = () => ({
+        glyph: row()?.querySelector(".wt-agent-dot use")?.getAttribute("href") ?? null,
+        said: row()?.querySelector(".wt-agent-state")?.textContent ?? "",
+        state: window.__READ__.mark("/r/left").state,
+      });
+      const settle = async (until) => {
+        for (let tries = 0; tries < 80 && !until(); tries += 1) await new Promise((done) => setTimeout(done, 25));
+        await window.__PAINTED__();
+        await window.__PAINTED__();
+      };
+      const held = window.__LEDGER__;
+      window.__LEDGER__ = held.map((one) => one.worker === "w-left" ? { ...one,
+        review: { verified: false, merged: false, deployed: false, written: false, author: "coordinator",
+          attempt: "dp-old", source: "1111111", superseded_by: "dp-left" },
+        progress: { stage: "stale", attempt: "dp-left", reviewed: "1111111" } } : one);
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 13 });
+      await settle(() => paneLedger.get(8109)?.progress?.stage === "stale");
+      const stood = read();
+      window.__LEDGER__ = held;
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 14 });
+      await settle(() => paneLedger.get(8109)?.progress?.stage === "report_only");
+      return { stood, back: read(), stale: t("board.staleReview", "다시 검토 대기"), awaiting: t("board.awaitingReview", "검증 대기") };
+    });
+    ok(
+      "a review that names an older attempt or commit than the work handed in reads 다시 검토 대기 on the row — never the plain 검증 대기 of a review nobody wrote — and the work still waits, hourglassed, in its lane",
+      stale.stood.said === stale.stale && stale.stood.said !== stale.awaiting &&
+        stale.stood.glyph === "#i-hourglass" && stale.stood.state === "review" && stale.back.said === stale.awaiting,
+      JSON.stringify(stale),
+    );
+
     /* ---- 5. five languages ------------------------------------------------ */
     const languages = {};
     for (const code of LOCALES) {
