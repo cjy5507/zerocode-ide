@@ -296,6 +296,21 @@ pub(crate) fn board_desk() -> std::sync::Arc<crate::orchestration::desk::DeskSna
     std::sync::Arc::clone(&crate::orchestration::board_ledger_snapshot().desk)
 }
 
+/// Who holds each run's coordinator seat (t-45938): the desk's run list alone —
+/// the runs in play, the terminal of this window sitting in each one's live
+/// seat, the seat's generation and when it was left empty — from the same
+/// published board snapshot. The sidebar reads it beside `ledger_agents` on
+/// every ledger beat to say 코디; `board_desk` would also carry every task and
+/// letter, which that repaint has no use for.
+#[tauri::command]
+pub(crate) fn coordinator_seats() -> Vec<crate::orchestration::desk::DeskRun> {
+    let _crumb = crate::crumbs::Command::enter("coordinator_seats");
+    crate::orchestration::board_ledger_snapshot()
+        .desk
+        .runs
+        .clone()
+}
+
 /// Answer, from the task board, a question put to a run's coordinator —
 /// as that seat, which this window must hold (t-6588, `desk::reply`). The
 /// main window only: a popped-out board shows the letter and leaves the

@@ -242,11 +242,16 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
       await window.__PAINTED__();
       await new Promise((done) => setTimeout(done, 200));
       await window.__PAINTED__();
-      return { term, folder, before, after: node()?.textContent ?? null, seated: paneLedger.has(term) };
+      // The row makes the pane a worker's, so the strip leads with that role (t-45938).
+      return {
+        term, folder, before, after: node()?.textContent ?? null, seated: paneLedger.has(term),
+        role: t("agent.role.worker", "워커"),
+      };
     });
     ok(
       "a tab painted before its ledger row arrived takes the task's name when the row comes — the strip repaints on the task alone, with no hook, title or manual render in between",
-      lateTab.seated && lateTab.before !== null && lateTab.before === lateTab.folder && lateTab.after === "늦게 온 과업",
+      lateTab.seated && lateTab.before !== null && lateTab.before === lateTab.folder &&
+        lateTab.after === `${lateTab.role} · 늦게 온 과업`,
       JSON.stringify(lateTab),
     );
 

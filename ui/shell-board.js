@@ -990,7 +990,10 @@ function paintDeskWorkers(block, now, view) {
     writeAttribute(node, "data-worker", `${row.run}/${row.worker}`);
     writeClassName(node, `board-desk-worker is-${health.id}`);
     dressAgentGraphStateMark(node.querySelector(".agent-graph-node-state"), health.state);
-    writeTextContent(node.querySelector(".board-desk-worker-id"), row.worker);
+    // The worker's head leads with its role, in the sidebar's own words (t-45938): 워커, or 사람 once
+    // the person took its pane over.
+    writeTextContent(node.querySelector(".board-desk-worker-id"),
+      workerRoleWords(ledgerWorkerRole({ worker: row.worker, takenOver: row.taken_over === true })));
     const word = t(health.key, health.word);
     const reset = health.id === "walled" && Number.isFinite(row.wall?.resets_at_ms)
       ? usageCountdown(row.wall.resets_at_ms - now) : "";

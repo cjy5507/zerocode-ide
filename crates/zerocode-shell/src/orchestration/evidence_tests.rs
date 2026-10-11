@@ -154,7 +154,7 @@ fn a_task_with_conditions_shows_their_states_and_its_last_reports_notes_on_the_d
         .expect("the report");
 
     let mut book = CostBook::default();
-    let desk = desk_snapshot(&ledger, |_| false, |run, task| book.cost(run, task));
+    let desk = desk_snapshot(&ledger, |_| None, |run, task| book.cost(run, task));
     let row = desk
         .tasks
         .iter()

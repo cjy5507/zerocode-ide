@@ -1574,17 +1574,61 @@ fn a_workers_row_carries_its_question_its_wall_and_its_pane() {
 
 /// The desk calls a run's coordinator seat this window's only where the pane
 /// the seat names (`team/pane`) is in this window's pane table (t-6588) —
-/// the seat a reply from the board is written as.
+/// the seat a reply from the board is written as — and names the terminal
+/// sitting in it, the pane the sidebar calls 코디 (t-45938).
 #[test]
 fn a_seat_is_held_only_where_this_window_holds_its_pane() {
     let seats = super::TeamSeatIndex::from([(
         "team-1".to_string(),
         std::collections::HashMap::from([("%0".to_string(), 7_u32)]),
     )]);
-    assert!(super::seat_is_held(&seats, "team-1/%0"));
-    assert!(!super::seat_is_held(&seats, "team-1/%2"));
-    assert!(!super::seat_is_held(&seats, "team-2/%0"));
-    assert!(!super::seat_is_held(&seats, "team-1"));
+    assert_eq!(super::seat_term(&seats, "team-1/%0"), Some(7));
+    assert_eq!(super::seat_term(&seats, "team-1/%2"), None);
+    assert_eq!(super::seat_term(&seats, "team-2/%0"), None);
+    assert_eq!(super::seat_term(&seats, "team-1"), None);
+}
+
+/// A worker whose pane the person took over is the person's (t-45938): its
+/// board row says so, the fact `worker-list` prints as `takenOver`, so the
+/// sidebar and the desk can name it 사람 — and a worker nobody touched still
+/// reads as a worker.
+#[test]
+fn a_worker_the_person_took_over_says_so_on_its_board_row() {
+    use zerocode_core::orchestration::Ledger;
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("taken over", 1);
+    let taken_task = ledger
+        .create_task(&run, "a".into(), "a".into(), vec![], None, 2)
+        .unwrap();
+    let left_task = ledger
+        .create_task(&run, "b".into(), "b".into(), vec![], None, 2)
+        .unwrap();
+    let taken = ledger
+        .start_worker(&run, "claude", ("team", "%2"), Some(&taken_task), 3)
+        .unwrap()
+        .worker;
+    let left = ledger
+        .start_worker(&run, "claude", ("team", "%3"), Some(&left_task), 3)
+        .unwrap()
+        .worker;
+    assert!(
+        ledger.worker_taken_over(("team", "%2")),
+        "a hand on the pane"
+    );
+    let rows = super::ledger_agents_for_seats(&ledger, &super::TeamSeatIndex::new());
+    let row = |id: &str| {
+        rows.iter()
+            .find(|row| row.worker == id)
+            .unwrap_or_else(|| panic!("no row for {id}: {rows:?}"))
+    };
+    assert!(
+        row(&taken).taken_over,
+        "the worker the person took over reads as a worker"
+    );
+    assert!(
+        !row(&left).taken_over,
+        "a worker nobody touched reads as taken over"
+    );
 }
 
 /// What the board's ledger readings cost, on this window's real shape.
