@@ -655,80 +655,43 @@ fn a_placement_seat_holds_on_its_own_proxy_marks() {
     assert_eq!(stand_from(&rows), Stand::Recording);
 }
 
-/// The whole road, end to end: a seat left on `auto` records, is judged by
-/// its own writer at its own cadence, writes the rise into the ledger it was
-/// decided on, and is read back as acting — the claim `auto` makes, held
-/// here because until 2026-09-22 no ledger on this machine carried a single
-/// transition row in 1,147 requests (t-5875).
-///
-/// The placement seat, because it is the one whose rows say what the road is
-/// for: 38 real requests, one timeout, and marks that are hindsight — the
-/// pane left where it was put — which the seat waits a window of before it
-/// may rise (t-6155 F1). Those marks are proxies (t-26584, ①), which raise
-/// nothing (ADR-171), so this rise is the same window with marks that name
-/// themselves executed; the proxy twin above holds.
+/// Executed marks count toward the placement seat, and marks alone do not rise
+/// it (t-26584, ①②③④). The seat's own marks were proxies and raised nothing
+/// (ADR-171); named executed, they fill the window, and the boundary judges
+/// every one of them. A rise also needs the act line's calibration record,
+/// the person's pinned bundle and the paired bar (ADR-150, ADR-176), none of
+/// which this fixture writes, so the seat holds. The proxy twin above holds
+/// the same seat with the same marks withheld from the count.
 #[test]
-fn a_seat_on_auto_rises_on_executed_marks_and_is_read_back_as_acting() {
-    use serde_json::json;
-    use zerocode_core::jev::promote::{ROSE, Stand, stand_from, window_wanted_for};
+fn executed_marks_count_toward_a_seat_and_do_not_rise_it_alone() {
+    use zerocode_core::jev::PLACEMENT;
+    use zerocode_core::jev::promote::{ROSE, Stand, marks_that_can_clear, stand_from};
     use zerocode_core::jev::provenance::LabelSource;
-    use zerocode_core::jev::{JevMode, PLACEMENT};
+    use zerocode_core::jev::summary::agreement_since;
 
     let home = tempfile::tempdir().expect("a zo home");
     let ledger = home.path().join(PLACEMENT.ledger);
-    let wanted = window_wanted_for(&PLACEMENT).expect("placement rises");
+    let marks = marks_that_can_clear(&PLACEMENT).expect("a width the budget can be cleared on");
     let asked = fill_placement_window(&ledger, LabelSource::Executed);
     assert_eq!(
         stand_from(&read_rows(&ledger)),
         Stand::Recording,
         "marks alone do not fill the window"
     );
-    assert!(
-        !read_rows(&ledger)
-            .iter()
-            .any(|row| row["transition"] == json!(ROSE))
-    );
 
-    // The row that lands on the boundary: the writer judges, and the rise is
-    // written beside the rows it was decided on.
+    // The row that lands on the boundary: the writer judges the window, and
+    // every executed mark is in the count it judged.
     record_rows(&PLACEMENT, &ledger, &[placement_request(asked - 1)], asked);
     let rows = read_rows(&ledger);
-    let rose = rows
-        .iter()
-        .find(|row| row["transition"] == json!(ROSE))
-        .expect("the seat rose on executed marks");
-    assert_eq!(rose["rows"], json!(wanted));
-    assert_eq!(rose["answered"], json!(wanted));
-    assert_eq!(stand_from(&rows), Stand::Applying);
-    assert!(JevMode::Auto.applies_with(true), "and `auto` acts on it");
+    let counted = agreement_since(&rows, i64::MIN);
+    assert_eq!(counted.compared, marks, "every executed mark counts");
+    assert_eq!(counted.proxied, 0, "none of them is withheld");
     assert!(
-        !JevMode::Shadow.applies_with(true),
-        "a person's word outranks it"
+        !rows
+            .iter()
+            .any(|row| row["transition"] == serde_json::json!(ROSE)),
+        "marks alone raised the seat"
     );
-
-    // One miss inside the window is forgiven; three failures running are not,
-    // and an acting seat does not wait for the next cadence to stop.
-    record_rows(
-        &PLACEMENT,
-        &ledger,
-        &[json!({"at": 1, "outcome": "timeout", "requests": 1,
-                 "rubricVersion": PLACEMENT.rubric_version})],
-        1,
-    );
-    assert_eq!(stand_from(&read_rows(&ledger)), Stand::Applying);
-    for at in 2..4 {
-        record_rows(
-            &PLACEMENT,
-            &ledger,
-            &[json!({"at": at, "outcome": "timeout", "requests": 1,
-                     "rubricVersion": PLACEMENT.rubric_version})],
-            at,
-        );
-    }
-    let rows = read_rows(&ledger);
-    let fell = rows.last().expect("a row");
-    assert_eq!(fell["transition"], json!(zerocode_core::jev::promote::FELL));
-    assert_eq!(fell["line"], json!("fallbacks"));
     assert_eq!(stand_from(&rows), Stand::Recording);
 }
 
