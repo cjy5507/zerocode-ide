@@ -399,5 +399,12 @@ pub fn briefing_paragraph(spec: &str) -> String {
          and a receipt that says another exit code refuses the report. A success report without the evidence of every condition \
          is refused and the task stays open: send the same --retry-request again with the evidence."
     ));
+    lines.push(
+        "The job you name as a condition's evidence ends with a non-zero exit code when that condition fails: \
+         its last command is the check itself (or `exit $rc` with that check's code), never a closing `exit 0` \
+         after printing the stages — the receipt is the script's last exit code, and a 0 after a failed stage \
+         would show the condition as checked."
+            .to_string(),
+    );
     lines.join("\n")
 }
