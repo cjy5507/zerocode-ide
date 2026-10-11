@@ -123,11 +123,19 @@ export async function assertAppBundle(app) {
  * 「macOS 권한」 page. macOS terminates any process that asks without the
  * matching usage description, so the merge of crates/zerocode-shell/Info.plist
  * is not cosmetic — if it silently stopped happening, the button would kill
- * the window. Proven here on the built bundle, not on the source file. */
+ * the window. Proven here on the built bundle, not on the source file.
+ * The Bluetooth keys (t-45873) are checked the same way: the embedded Chromium
+ * reads paired devices through IOBluetooth, and macOS ends the window without
+ * the key. */
 async function assertPrivacyUsageDescriptions(app) {
   const plist = join(app, "Contents", "Info.plist");
   const info = await readFile(plist, "utf8");
-  for (const key of ["NSMicrophoneUsageDescription", "NSCameraUsageDescription"]) {
+  for (const key of [
+    "NSMicrophoneUsageDescription",
+    "NSCameraUsageDescription",
+    "NSBluetoothAlwaysUsageDescription",
+    "NSBluetoothPeripheralUsageDescription",
+  ]) {
     if (!new RegExp(`<key>${key}</key>\\s*<string>[^<]+</string>`).test(info)) {
       throw new Error(`${key} did not reach the bundle: ${plist}`);
     }

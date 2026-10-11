@@ -9,6 +9,12 @@
   description, so the 「macOS 권한」 page's microphone and camera buttons
   would kill the window instead of asking. The window asks on behalf of the
   tools its panes launch — it is their responsible process.
+
+  The two Bluetooth keys are the same kind of guard (t-45873). The embedded
+  Chromium reads the devices paired with this Mac through IOBluetooth, and
+  macOS terminates a process that does so without
+  NSBluetoothAlwaysUsageDescription. The Peripheral key is the name older
+  macOS releases read.
 -->
 <plist version="1.0">
 <dict>
@@ -16,5 +22,9 @@
     <string>ZeroCode asks on behalf of the developer tools you launch from its terminals, so they can record and transcribe audio.</string>
     <key>NSCameraUsageDescription</key>
     <string>ZeroCode asks on behalf of the developer tools you launch from its terminals, so they can capture video from a camera.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>ZeroCode's built-in browser runs Chromium, which may read the Bluetooth devices paired with this Mac.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>ZeroCode's built-in browser runs Chromium, which may read the Bluetooth devices paired with this Mac.</string>
 </dict>
 </plist>
