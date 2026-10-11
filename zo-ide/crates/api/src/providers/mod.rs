@@ -4548,7 +4548,10 @@ pub(crate) fn prompt_cache_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{preserved_thinking_generation, rejects_forced_tool_choice, thinking_always_on};
+    use super::{
+        declared_capabilities, preserved_thinking_generation, rejects_forced_tool_choice,
+        thinking_always_on,
+    };
     use super::{
         BandDifficulty, EXPERIMENTAL_PROVIDERS_ENV, MODEL_CLASSES_ENV, MODEL_CONTEXT_WINDOWS_ENV,
         MODEL_EFFORT_CEILINGS_ENV,
@@ -7752,6 +7755,33 @@ mod tests {
         }
         for model in ["claude-opus-5", "claude-opus-4-8", "claude-sonnet-5", "gpt-5.6-sol"] {
             assert!(!thinking_always_on(model), "{model}");
+        }
+    }
+
+    /// Opus 5.5 carries the 5.1 generation's facts, declared on its catalog
+    /// row rather than named in code: thinking is always on (`disabled` and a
+    /// manual budget both return 400), forced tool use is refused, and a
+    /// thinking block binds to the prefix that produced it. Opus 5 has none.
+    #[test]
+    fn opus_5_5_declares_the_thinking_facts_its_catalog_row_states() {
+        let model = "claude-opus-5-5";
+        assert!(thinking_always_on(model), "{model}");
+        assert!(rejects_forced_tool_choice(model), "{model}");
+        assert!(preserved_thinking_generation(model), "{model}");
+        for fact in [
+            "thinking_always_on",
+            "thinking_block_binding",
+            "rejects_forced_tool_choice",
+        ] {
+            assert!(
+                declared_capabilities(model).iter().any(|declared| declared == fact),
+                "{model} does not declare {fact}"
+            );
+        }
+        for model in ["claude-opus-5", "claude-opus-4-8"] {
+            assert!(!thinking_always_on(model), "{model}");
+            assert!(!rejects_forced_tool_choice(model), "{model}");
+            assert!(!preserved_thinking_generation(model), "{model}");
         }
     }
 }

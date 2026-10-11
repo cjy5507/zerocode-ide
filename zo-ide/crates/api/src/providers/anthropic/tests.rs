@@ -2265,6 +2265,65 @@ fn fable_5_1_binds_its_thinking_on_first_party_requests_only() {
     ));
 }
 
+/// Opus 5.5 refuses a forced tool choice as Fable 5.1 does: the wire carries
+/// `auto`, and the runtime's transcript reminder does the asking.
+#[test]
+fn a_forced_tool_choice_never_reaches_opus_5_5() {
+    let mut request = req("claude-opus-5-5", None);
+    request.tool_choice = Some(ToolChoice::Tool {
+        name: "StructuredOutput".to_string(),
+    });
+    let wire = normalize_tool_choice_for_wire(std::borrow::Cow::Borrowed(&request));
+    assert_eq!(wire.tool_choice, Some(ToolChoice::Auto));
+
+    request.tool_choice = Some(ToolChoice::Any);
+    let wire = normalize_tool_choice_for_wire(std::borrow::Cow::Borrowed(&request));
+    assert_eq!(wire.tool_choice, Some(ToolChoice::Auto));
+}
+
+/// Opus 5.5 always thinks, so with no `thinking` field on the request its
+/// replayed thinking blocks are still valid and must travel unchanged.
+#[test]
+fn opus_5_5_keeps_its_replayed_thinking_blocks() {
+    let mut request = req("claude-opus-5-5", None);
+    request.messages.push(InputMessage {
+        role: "assistant".to_string(),
+        content: vec![
+            InputContentBlock::Thinking {
+                thinking: String::new(),
+                signature: "sig".to_string(),
+            },
+            InputContentBlock::Text {
+                text: "done".to_string(),
+                cache_control: None,
+            },
+        ],
+        thought_signature: None,
+        reasoning_replay: None,
+    });
+    let kept = strip_thinking_blocks_when_disabled(std::borrow::Cow::Borrowed(&request));
+    assert!(
+        matches!(kept, std::borrow::Cow::Borrowed(_)),
+        "an Opus 5.5 request was rewritten"
+    );
+    assert_eq!(kept.messages[1].content.len(), 2);
+}
+
+/// Opus 5.5 binds its thinking as Fable 5.1 does: a first-party request
+/// carries `block_binding: drop_block`, and the beta header travels with it.
+#[test]
+fn opus_5_5_binds_its_thinking_on_first_party_requests_only() {
+    let request = req("claude-opus-5-5", None);
+    let bound = bind_thinking_for_wire(std::borrow::Cow::Borrowed(&request), true);
+    let thinking = bound.thinking.as_ref().expect("thinking attached");
+    assert_eq!(thinking.kind, "adaptive");
+    assert_eq!(thinking.block_binding, Some(BlockBinding::drop_block()));
+    assert!(matches!(
+        bind_thinking_for_wire(std::borrow::Cow::Borrowed(&request), false),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}
+
 #[test]
 fn the_binding_beta_joins_the_header_once() {
     assert_eq!(
