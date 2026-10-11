@@ -4512,7 +4512,9 @@ fn the_tier_classifier_bands_each_provider_by_its_own_signals_not_by_a_list() {
     );
     // Rungs: hard is the second band; medium the best of the rest on the
     // current release; easy the cheapest on the current release. An older
-    // release (haiku 4.5, spark 5.3, flash-lite 3.1) serves no rung.
+    // release (haiku 4.5, spark 5.3, flash-lite 3.1) serves no rung. A
+    // provider whose one current implementer would serve every rung (Google
+    // here) leaves the hard rung to its top model (t-45961).
     assert_eq!(rungs_of(&inventory, "claude-opus-5"), vec![ImplRung::Hard]);
     assert_eq!(rungs_of(&inventory, "claude-sonnet-5"), vec![ImplRung::Easy, ImplRung::Medium]);
     assert!(rungs_of(&inventory, "claude-haiku-4-5-20251001").is_empty(), "a past release is filtered out");
@@ -4520,7 +4522,8 @@ fn the_tier_classifier_bands_each_provider_by_its_own_signals_not_by_a_list() {
     assert_eq!(rungs_of(&inventory, "gpt-5.6-terra"), vec![ImplRung::Medium]);
     assert_eq!(rungs_of(&inventory, "gpt-5.6-luna"), vec![ImplRung::Easy]);
     assert!(rungs_of(&inventory, "gpt-5.3-codex-spark").is_empty());
-    assert_eq!(rungs_of(&inventory, "gemini-3.8-flash"), vec![ImplRung::Easy, ImplRung::Medium, ImplRung::Hard]);
+    assert_eq!(rungs_of(&inventory, "gemini-3.1-pro-preview"), vec![ImplRung::Hard], "the lone implementer's hard rung");
+    assert_eq!(rungs_of(&inventory, "gemini-3.8-flash"), vec![ImplRung::Easy, ImplRung::Medium]);
     assert!(rungs_of(&inventory, "gemini-3.1-flash-lite").is_empty());
     assert!(rungs_of(&inventory, "gpt-6-astra").is_empty(), "the top band never implements");
     assert!(rungs_of(&inventory, "deepseek-v4-pro").is_empty(), "a lone top model has no implementer");
@@ -4529,8 +4532,9 @@ fn the_tier_classifier_bands_each_provider_by_its_own_signals_not_by_a_list() {
 #[test]
 fn a_newly_discovered_flagship_takes_the_top_band_and_the_old_top_falls_to_second() {
     // Before the discovery there is one Deep model on the provider: it is the
-    // top. After it, the newer release is the top and the old top implements
-    // hard work — no edit, no list.
+    // top, and with one implementer below it it takes the hard work too
+    // (t-45961). After it, the newer release is the top and the old top
+    // implements hard work — no edit, no list.
     let caps = [ModelCapability::Default, ModelCapability::Coding];
     let sol = || {
         ModelDescriptor::new("gpt-5.6-sol", "openai", "sol")
@@ -4552,7 +4556,8 @@ fn a_newly_discovered_flagship_takes_the_top_band_and_the_old_top_falls_to_secon
     };
     let before = ModelInventory::new("gpt-5.6-terra", vec![sol(), terra()]);
     assert_eq!(band_of(&before, "gpt-5.6-sol"), ModelBand::Top);
-    assert_eq!(rungs_of(&before, "gpt-5.6-terra"), vec![ImplRung::Easy, ImplRung::Medium, ImplRung::Hard]);
+    assert_eq!(rungs_of(&before, "gpt-5.6-sol"), vec![ImplRung::Hard]);
+    assert_eq!(rungs_of(&before, "gpt-5.6-terra"), vec![ImplRung::Easy, ImplRung::Medium]);
 
     let astra = ModelDescriptor::new("gpt-6-astra", "openai", "astra")
         .source(ModelSource::EnabledBuiltinProvider)
@@ -4603,7 +4608,10 @@ fn implementation_walks_the_provider_ladder_by_the_tasks_complexity() {
     assert_eq!(route("claude-fable-5-1", X::Small, R::Low, 0), "claude-sonnet-5");
     assert_eq!(route("claude-fable-5-1", X::Medium, R::Low, 0), "claude-sonnet-5");
     assert_eq!(route("claude-fable-5-1", X::Large, R::Low, 0), "claude-opus-5", "opus implements large work");
-    assert_eq!(route("gemini-3.8-flash", X::Large, R::Low, 0), "gemini-3.8-flash");
+    // One implementer below Google's top: the top takes the large work, the
+    // implementer the rest (t-45961).
+    assert_eq!(route("gemini-3.8-flash", X::Large, R::Low, 0), "gemini-3.1-pro-preview");
+    assert_eq!(route("gemini-3.8-flash", X::Medium, R::Low, 0), "gemini-3.8-flash");
     assert_eq!(route("gemini-3.8-flash", X::Small, R::Low, 0), "gemini-3.8-flash");
 }
 
@@ -4727,4 +4735,119 @@ fn an_older_release_of_a_connected_lineage_is_superseded_and_never_implements() 
         ..neutral_route_context(false)
     });
     assert_eq!(route_model(&request, &inventory).resolved_model, "claude-opus-5");
+}
+
+/// A made-up lineup with an older release beside its successor: `a-5` and
+/// `a-5-1` share a line and a tier, `b-5` and `c-5` implement below them.
+/// Every model can do every job and no id names a vendor, so nothing but the
+/// router's own rule can keep the older release out (t-45961).
+fn superseded_lineup(main: &str) -> ModelInventory {
+    let caps = [
+        ModelCapability::Default,
+        ModelCapability::ToolUse,
+        ModelCapability::Coding,
+        ModelCapability::Debugging,
+        ModelCapability::Verification,
+        ModelCapability::Analysis,
+        ModelCapability::Writing,
+        ModelCapability::Design,
+        ModelCapability::Fast,
+    ];
+    let row = |id: &str, tiers: [ModelTier; 2], rank| {
+        ModelDescriptor::new(id, "p", id.split('-').next().unwrap_or(id))
+            .source(if id == main { ModelSource::CurrentMainModel } else { ModelSource::EnabledBuiltinProvider })
+            .capabilities(caps)
+            .tiers(tiers)
+            .tiers_provenance(TiersProvenance::ProviderDeclared)
+            .effort_ceiling(EffortCeiling::Max)
+            .release_rank(rank)
+    };
+    ModelInventory::new(
+        main,
+        vec![
+            row("a-5-1", [ModelTier::Deep, ModelTier::Strong], 51),
+            row("a-5", [ModelTier::Deep, ModelTier::Strong], 50),
+            row("b-5", [ModelTier::Balanced, ModelTier::Strong], 50),
+            row("c-5", [ModelTier::Fast, ModelTier::Balanced], 50),
+        ],
+    )
+}
+
+/// t-45961 (ZO, 10-11: three reviewers ran on `claude-fable-5` beside
+/// `claude-fable-5-1`, and the router had chosen it): an older release of a
+/// line is never the router's own choice — no role, policy, risk or
+/// complexity, no fallback slot and no dashboard preview stands it, even
+/// where its record is the better one — and the tier it shared goes to the
+/// newest release.
+#[test]
+fn the_router_never_picks_a_superseded_release_by_itself() {
+    use RouteTaskComplexity as X;
+    use RouteTaskRisk as R;
+    let inventory = superseded_lineup("c-5");
+    assert_eq!(band_of(&inventory, "a-5"), ModelBand::Superseded);
+    assert_eq!(band_of(&inventory, "a-5-1"), ModelBand::Top);
+    let mut picks: Vec<String> = Vec::new();
+    for role in RouteRole::all().iter().copied() {
+        // The older release's record is the better one, for every role.
+        let learned = LearnedSpecialtyHint::default().with_entry(role, "a-5", 90, 1000);
+        for policy in [SmartPolicy::Architect, SmartPolicy::Classic] {
+            for (risk, complexity) in [(R::High, X::Large), (R::Unknown, X::Unknown), (R::Low, X::Small)] {
+                let request = RouteRequest::new(role, "c-5").with_context(RoutePolicyContext {
+                    risk,
+                    complexity,
+                    policy,
+                    learned_specialty: learned.clone(),
+                    ..neutral_route_context(false)
+                });
+                let chosen = route_model(&request, &inventory).resolved_model;
+                let fallbacks = route_model_fallback_candidates(&request, &inventory, &chosen, 8);
+                for id in std::iter::once(chosen).chain(fallbacks) {
+                    if id == "a-5" {
+                        picks.push(format!("{role:?} {policy:?} {risk:?} {complexity:?}"));
+                    }
+                }
+            }
+            let options = AutoAssignmentOptions { policy, ..AutoAssignmentOptions::default() };
+            for preview in recommend_role_fallbacks_with_learned_specialty(&inventory, &options, &learned) {
+                if preview.selected_model == "a-5" {
+                    picks.push(format!("dashboard {role:?} {policy:?} {:?}", preview.target));
+                }
+            }
+        }
+    }
+    assert!(picks.is_empty(), "the router stood the superseded release {} time(s): {picks:#?}", picks.len());
+
+    let reviewer = RouteRequest::new(RouteRole::Reviewer, "c-5").with_context(RoutePolicyContext {
+        risk: R::High,
+        complexity: X::Large,
+        policy: SmartPolicy::Architect,
+        learned_specialty: LearnedSpecialtyHint::default().with_entry(RouteRole::Reviewer, "a-5", 90, 1000),
+        ..neutral_route_context(false)
+    });
+    assert_eq!(route_model(&reviewer, &inventory).resolved_model, "a-5-1", "the shared tier goes to the newest release");
+}
+
+/// t-45961: what a person names runs as named. An older release written as
+/// the explicit model or as a role's pin is what launches, and a session the
+/// person runs on it stays on it — the router never moves a person's choice
+/// to the newest release (ZO, 10-11: pointing an old id's alias at its
+/// successor would have run a person's `claude-fable-5` as 5.1 without a
+/// word).
+#[test]
+fn a_superseded_release_the_person_names_runs_as_named() {
+    let inventory = superseded_lineup("c-5");
+    let mut explicit = RouteRequest::new(RouteRole::Reviewer, "c-5");
+    explicit.explicit_model = Some("a-5".to_string());
+    let decision = route_model(&explicit, &inventory);
+    assert_eq!((decision.resolved_model.as_str(), decision.source), ("a-5", RouteDecisionSource::Explicit));
+
+    let mut pinned = RouteRequest::new(RouteRole::Reviewer, "c-5");
+    pinned.override_rule = Some(RoleOverride::Pin("a-5".to_string()));
+    let decision = route_model(&pinned, &inventory);
+    assert_eq!((decision.resolved_model.as_str(), decision.source), ("a-5", RouteDecisionSource::Pinned));
+
+    let on_it = superseded_lineup("a-5");
+    let mut main_only = RouteRequest::new(RouteRole::Reviewer, "a-5");
+    main_only.mode = RouterMode::MainOnly;
+    assert_eq!(route_model(&main_only, &on_it).resolved_model, "a-5");
 }

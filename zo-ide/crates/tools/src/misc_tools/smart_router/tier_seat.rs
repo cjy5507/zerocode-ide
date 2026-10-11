@@ -35,6 +35,17 @@ pub const TIER_JUDGMENT_FILE: &str = "tier-judgment.json";
 /// The wall one lineup's judgment is held to.
 pub const TIER_JUDGMENT_DEADLINE: Duration = Duration::from_millis(zerocode_core::jev::MODEL_TIERS_DEADLINE_MS);
 
+/// How long a lineup's question that went out and came back unanswered —
+/// refused (HTTP 402 on an account without credit), failed, late or
+/// malformed — is remembered for the facts it was asked under: inside it,
+/// `zo models` asks that lineup nothing and places it as an unanswered one.
+/// An hour is the window's own lineup cadence (it reads `zo models` in the
+/// background once an hour, and its model menu at most once a minute), so a
+/// refusal costs one request an hour instead of one a minute, and an account
+/// put right is asked again within the hour — at once when its lineup's facts
+/// move, since a new fingerprint is a new question.
+pub const TIER_REFUSAL_MEMORY_MS: i64 = 60 * 60 * 1000;
+
 /// Where the lineups' judgments are kept: beside zo's model catalog cache.
 #[must_use]
 pub fn tier_judgment_path() -> PathBuf {
@@ -117,6 +128,18 @@ pub struct TierRow {
 /// and retired releases left out).
 pub type Lineup<'a> = (String, Vec<&'a ModelDescriptor>);
 
+/// What one pass over the lineups asks with: the door and the client, the
+/// seat's mode, the kept file, the moment, and the wall every question of the
+/// pass is held to.
+pub struct TierAsk<'a> {
+    pub door: &'a JevDoor,
+    pub client: Option<&'a api::SystemOneClient>,
+    pub mode: JevMode,
+    pub kept_at: &'a Path,
+    pub now_ms: i64,
+    pub wall: Duration,
+}
+
 /// What the seat did over every lineup: the judgment to apply, and a row per
 /// lineup it asked or answered from the kept file.
 #[derive(Debug, Clone, Default)]
@@ -134,13 +157,14 @@ fn places_of(kept: &KeptLineup) -> impl Iterator<Item = (String, JudgedPlace)> +
     })
 }
 
-/// Ask one lineup and say what came back.
+/// Ask one lineup, inside `wall`, and say what came back.
 async fn ask_lineup(
     door: &JevDoor,
     client: Option<&api::SystemOneClient>,
     provider: &str,
     models: &[&ModelDescriptor],
     outcomes: &dyn Fn(&str) -> Option<TierOutcomes>,
+    wall: Duration,
 ) -> (Result<(TierJudgment, String), String>, TierRow) {
     let mut row = TierRow {
         at_ms: 0,
@@ -170,7 +194,7 @@ async fn ask_lineup(
             return (Err(row.outcome.clone()), row);
         }
     };
-    let call = jev_gate::send(client, cleared, TIER_JUDGMENT_DEADLINE, None).await;
+    let call = jev_gate::send(client, cleared, wall, None).await;
     row.elapsed_ms = jev_gate::millis(call.elapsed);
     row.retries = call.retries;
     row.requests = call.requests;
@@ -194,26 +218,22 @@ async fn ask_lineup(
     }
 }
 
-/// The judgment that stands over `lineups` under `mode`, read from and
-/// written to the kept file at `kept_at`. Each lineup is answered from the
-/// kept file when its fingerprint stands there; else, under a mode that asks,
-/// it is asked once inside the wall; unanswered, it keeps its last judgment.
-/// Only `on` applies what stands.
+/// The judgment that stands over `lineups` under `ask.mode`, read from and
+/// written to the kept file at `ask.kept_at`. Each lineup is answered from
+/// the kept file when its fingerprint stands there; else, under a mode that
+/// asks, it is asked once inside the wall; unanswered, it keeps its last
+/// judgment. Only `on` applies what stands.
 pub async fn judge_lineups(
-    door: &JevDoor,
-    client: Option<&api::SystemOneClient>,
-    mode: JevMode,
-    kept_at: &Path,
+    ask: &TierAsk<'_>,
     lineups: &[Lineup<'_>],
     outcomes: &dyn Fn(&str) -> Option<TierOutcomes>,
-    now_ms: i64,
 ) -> TierSeatPass {
     let mut pass = TierSeatPass::default();
-    if !mode.asks() {
+    if !ask.mode.asks() {
         return pass;
     }
-    let applies = mode.applies();
-    let mut kept = read_kept(kept_at);
+    let (applies, now_ms) = (ask.mode.applies(), ask.now_ms);
+    let mut kept = read_kept(ask.kept_at);
     let mut changed = false;
     for (provider, models) in lineups.iter().filter(|(_, models)| !models.is_empty()) {
         let fingerprint = tier_fingerprint(provider, models, outcomes);
@@ -224,7 +244,7 @@ pub async fn judge_lineups(
             }
             continue;
         }
-        let (answer, mut row) = ask_lineup(door, client, provider, models, outcomes).await;
+        let (answer, mut row) = ask_lineup(ask.door, ask.client, provider, models, outcomes, ask.wall).await;
         row.at_ms = now_ms;
         row.fingerprint.clone_from(&fingerprint);
         if let Ok((judgment, model)) = answer {
@@ -263,7 +283,7 @@ pub async fn judge_lineups(
         pass.rows.push(row);
     }
     if changed {
-        let _ = write_kept(kept_at, &kept);
+        let _ = write_kept(ask.kept_at, &kept);
     }
     pass
 }
@@ -291,15 +311,16 @@ pub fn judgment_for(
     }
     let door = JevDoor::open(cwd);
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
-    let pass = api::sync_bridge::run_blocking(judge_lineups(
-        &door,
-        client.as_ref(),
+    let kept_at = tier_judgment_path();
+    let ask = TierAsk {
+        door: &door,
+        client: client.as_ref(),
         mode,
-        &tier_judgment_path(),
-        lineups,
-        outcomes,
+        kept_at: &kept_at,
         now_ms,
-    ));
+        wall: TIER_JUDGMENT_DEADLINE,
+    };
+    let pass = api::sync_bridge::run_blocking(judge_lineups(&ask, lineups, outcomes));
     let ledger = shadow_ledger_path(cwd, MODEL_TIERS.ledger);
     for row in &pass.rows {
         let _ = append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES);

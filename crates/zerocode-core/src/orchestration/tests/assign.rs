@@ -300,6 +300,31 @@ fn agent_list_says_why_summonses_go_unjudged() {
     );
 }
 
+/// t-45961: the dials say the difficulty as a word every time (it was null
+/// for a summons that names its model and leaves the effort open, with
+/// nothing judged): such a summons stands at the rung an unjudged summons
+/// stands at, and says that no difficulty ran — its CLI's own effort stands.
+#[test]
+fn a_named_model_with_its_effort_open_still_says_the_difficulty() {
+    let launcher = Assigned::late();
+    let mut bench = Bench::new();
+    bench.json("run-create --name assign");
+    let planned = planned_on(
+        &mut bench.ledger,
+        &mut bench.team,
+        &launcher,
+        "worker-start --agent claude --prompt translate-labels --model model-c",
+        bench.clock + 1,
+    );
+    assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+    let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+    assert_eq!(reply["model"], "model-c", "{reply}");
+    assert_eq!(reply["dials"]["difficulty"], UNJUDGED_DIFFICULTY, "{reply}");
+    assert_eq!(reply["dials"]["difficultyFrom"], "none", "{reply}");
+    assert_eq!(reply["dials"]["modelFrom"], "request", "{reply}");
+    assert!(reply["effort"].is_null(), "no difficulty ran: {reply}");
+}
+
 /// t-45961: the person's own row for unjudged work comes before the facts.
 #[test]
 fn an_unjudged_summons_runs_the_persons_row_before_the_facts() {

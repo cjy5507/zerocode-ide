@@ -1959,6 +1959,14 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
 /// agent's own tool, whose wall is its own constant too.
 pub const MODEL_TIERS_DEADLINE_MS: u64 = 4_000;
 
+/// The wall a seat's own words name (`{{seconds}}` in its settings
+/// paragraph), read from the constant it is held to rather than written into
+/// five languages: the seat's apply wall.
+#[must_use]
+pub const fn worded_wall_ms(row: &JevUse) -> Option<u64> {
+    row.apply_deadline_ms
+}
+
 /// zo's model tier seat (t-45961): where each model of one provider's lineup
 /// stands — which work it can be trusted with, read off the catalog facts
 /// (declared class, list price, context window, release order, effort

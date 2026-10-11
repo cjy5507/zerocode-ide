@@ -240,3 +240,29 @@ fn without_a_judgment_every_place_is_the_fact_rules() {
         assert_eq!(entry.confidence_permille, None, "{entry:?}");
     }
 }
+
+/// A provider whose rungs would all fall onto one implementer leaves the
+/// hard rung to its top model, so no provider's hard work lands below where
+/// it stood (t-45961, the person and ZO, 10-11: with the size word fixed,
+/// Google's Pro became the top band and its one current Flash took easy,
+/// ordinary and hard work alike). The lone implementer keeps the easy and
+/// ordinary rungs; an older release of its class serves none. Where two
+/// implementers serve, the top band stays out of the rungs.
+#[test]
+fn a_lone_implementer_leaves_the_hard_rung_to_the_top_model() {
+    let lone = [row("a", "p", FRONTIER, 31), row("b", "p", FAST, 38), row("c", "p", FAST, 31)];
+    let tiers = classify_model_tiers(&lone);
+    assert_eq!(placed(&tiers, "a").band, ModelBand::Top, "{tiers:?}");
+    assert_eq!(rungs(&tiers, "a"), vec![ImplRung::Hard], "{tiers:?}");
+    assert_eq!(rungs(&tiers, "b"), vec![ImplRung::Easy, ImplRung::Medium], "{tiers:?}");
+    assert!(rungs(&tiers, "c").is_empty(), "an older release of the same class serves no rung: {tiers:?}");
+
+    let two = [row("a", "p", FRONTIER, 1), row("b", "p", BALANCED, 1), row("c", "p", FAST, 1)];
+    let tiers = classify_model_tiers(&two);
+    assert!(rungs(&tiers, "a").is_empty(), "two implementers serve: the top plans and verifies: {tiers:?}");
+    assert_eq!(rungs(&tiers, "b"), vec![ImplRung::Hard], "{tiers:?}");
+    assert_eq!(rungs(&tiers, "c"), vec![ImplRung::Easy, ImplRung::Medium], "{tiers:?}");
+
+    let alone = [row("a", "p", FRONTIER, 1)];
+    assert!(rungs(&classify_model_tiers(&alone), "a").is_empty(), "a top model with no implementer below it stays the top");
+}

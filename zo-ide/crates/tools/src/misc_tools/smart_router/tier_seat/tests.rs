@@ -5,6 +5,7 @@
 //! models carry no vendor word.
 
 use std::path::Path;
+use std::time::Instant;
 
 use api::SystemOneClient;
 use runtime::{
@@ -32,7 +33,11 @@ fn door(home: &Path) -> JevDoor {
 }
 
 fn model(id: &str, tiers: [ModelTier; 2], output_micro_usd: u64) -> ModelDescriptor {
-    ModelDescriptor::new(id, "p", id)
+    model_of("p", id, tiers, output_micro_usd)
+}
+
+fn model_of(provider: &str, id: &str, tiers: [ModelTier; 2], output_micro_usd: u64) -> ModelDescriptor {
+    ModelDescriptor::new(id, provider, id)
         .capabilities([ModelCapability::Default, ModelCapability::Coding])
         .tiers(tiers)
         .tiers_provenance(TiersProvenance::ProviderDeclared)
@@ -86,17 +91,29 @@ impl Rig {
     }
 
     fn pass(&self, mock: Option<&Mock>, mode: JevMode, lineup: &[&ModelDescriptor]) -> TierSeatPass {
-        let client = mock.map(|mock| SystemOneClient::new(&mock.base_url, "test-key"));
+        self.pass_at(mock, mode, lineup, NOW_MS)
+    }
+
+    /// One provider's lineup asked at `now_ms`.
+    fn pass_at(&self, mock: Option<&Mock>, mode: JevMode, lineup: &[&ModelDescriptor], now_ms: i64) -> TierSeatPass {
         let lineups = [("p".to_string(), lineup.to_vec())];
-        api::sync_bridge::run_blocking(judge_lineups(
-            &door(self.home.path()),
-            client.as_ref(),
-            mode,
-            &self.kept,
-            &lineups,
-            &no_record,
-            NOW_MS,
-        ))
+        self.pass_lineups(mock, mode, &lineups, now_ms, TIER_JUDGMENT_DEADLINE)
+    }
+
+    /// Every lineup of `lineups` asked at `now_ms`, each question held to
+    /// `wall`.
+    fn pass_lineups(
+        &self,
+        mock: Option<&Mock>,
+        mode: JevMode,
+        lineups: &[Lineup<'_>],
+        now_ms: i64,
+        wall: Duration,
+    ) -> TierSeatPass {
+        let client = mock.map(|mock| SystemOneClient::new(&mock.base_url, "test-key"));
+        let door = door(self.home.path());
+        let ask = TierAsk { door: &door, client: client.as_ref(), mode, kept_at: &self.kept, now_ms, wall };
+        api::sync_bridge::run_blocking(judge_lineups(&ask, lineups, &no_record))
     }
 }
 
@@ -190,4 +207,69 @@ fn off_sends_nothing_and_without_a_key_the_fact_rule_stands() {
     assert!(keyless.judgment.places.is_empty());
     assert_eq!(keyless.rows[0].outcome, zerocode_core::jev::door::Refused::NoKey.token());
     assert!(mock.requests().is_empty());
+}
+
+/// A lineup whose question went out and came back unanswered — here refused
+/// with HTTP 402, the answer this machine's account gets — is not asked
+/// again for the same facts until the memory ends: the next pass sends
+/// nothing, writes no row and leaves the fact rule standing (t-45961: every
+/// `zo models` call asked every provider again). New facts are a new
+/// question, memory or not.
+#[test]
+fn a_refused_lineup_is_not_asked_again_until_its_memory_ends() {
+    let refusing = Mock::serving(402, "{\"error\":\"refused\"}".to_string());
+    let rig = Rig::new();
+    let (top, dear) = (model("a", FRONTIER, 50_000_000), model("b", BALANCED, 25_000_000));
+
+    let first = rig.pass(Some(&refusing), JevMode::On, &[&top, &dear]);
+    assert_eq!(refusing.requests().len(), 1, "the lineup is asked once");
+    assert_eq!(first.rows.len(), 1);
+    assert_ne!(first.rows[0].outcome, OUTCOME_ANSWERED, "{:?}", first.rows[0]);
+    assert!(first.judgment.places.is_empty(), "nothing judged: the facts stand");
+
+    let again = rig.pass_at(Some(&refusing), JevMode::On, &[&top, &dear], NOW_MS + 1);
+    assert_eq!(refusing.requests().len(), 1, "the same facts, refused a moment ago: nothing is sent");
+    assert!(again.rows.is_empty(), "nothing asked, no row: {:?}", again.rows);
+    assert!(again.judgment.places.is_empty());
+
+    let later = rig.pass_at(Some(&refusing), JevMode::On, &[&top, &dear], NOW_MS + TIER_REFUSAL_MEMORY_MS);
+    assert_eq!(refusing.requests().len(), 2, "the memory ended: the lineup is asked again");
+    assert_eq!(later.rows.len(), 1);
+
+    let late = model("d", BALANCED, 20_000_000);
+    let moved = rig.pass_at(Some(&refusing), JevMode::On, &[&top, &dear, &late], NOW_MS + TIER_REFUSAL_MEMORY_MS + 1);
+    assert_eq!(refusing.requests().len(), 3, "a model arrived: new facts are asked inside the memory");
+    assert_eq!(moved.rows.len(), 1);
+}
+
+/// Every lineup due a question is asked at once, each under the one wall, so
+/// a service that never answers holds a pass for one wall and not for one
+/// wall per provider (t-45961: three providers asked in turn held `zo models`
+/// three walls); and the next pass asks none of them again.
+#[test]
+fn the_lineups_due_a_question_are_asked_together_under_one_wall() {
+    let silent = Mock::silent();
+    let rig = Rig::new();
+    let wall = TIER_JUDGMENT_DEADLINE / 4;
+    let owned: Vec<(String, [ModelDescriptor; 2])> = ["p1", "p2", "p3"]
+        .into_iter()
+        .map(|provider| {
+            let top = model_of(provider, &format!("{provider}-top"), FRONTIER, 50_000_000);
+            let dear = model_of(provider, &format!("{provider}-dear"), BALANCED, 25_000_000);
+            (provider.to_string(), [top, dear])
+        })
+        .collect();
+    let lineups: Vec<Lineup<'_>> = owned.iter().map(|(provider, models)| (provider.clone(), models.iter().collect())).collect();
+
+    let started = Instant::now();
+    let first = rig.pass_lineups(Some(&silent), JevMode::On, &lineups, NOW_MS, wall);
+    let took = started.elapsed();
+    assert_eq!(first.rows.len(), 3, "{:?}", first.rows);
+    assert!(first.rows.iter().all(|row| row.outcome != OUTCOME_ANSWERED), "{:?}", first.rows);
+    assert!(took < wall * 2, "three lineups held the pass {took:?}, more than one wall of {wall:?}");
+
+    let started = Instant::now();
+    let second = rig.pass_lineups(Some(&silent), JevMode::On, &lineups, NOW_MS + 1, wall);
+    assert!(second.rows.is_empty(), "nothing is asked again: {:?}", second.rows);
+    assert!(started.elapsed() < wall, "the second pass waits on nothing");
 }
