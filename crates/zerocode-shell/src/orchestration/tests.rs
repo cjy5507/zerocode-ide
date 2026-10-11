@@ -6059,6 +6059,60 @@ fn an_unaddressable_resume_keeps_its_untyped_result_until_the_store_accepts_it()
     assert!(stood.host.typed_at(stood.host.worker_term).is_empty());
 }
 
+#[test]
+fn a_resume_settlement_releases_only_a_matching_already_recorded_result() {
+    use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    for mismatched in [false, true] {
+        let stood = StoppedWorker::stand(96_380, "--on-transient-error resume", Vec::new());
+        let at = |elapsed| stood.began + elapsed;
+        let record = transient_record_keyed("already-recorded");
+        stood.stops_on(
+            &[CLAUDE_PLAIN_RECORD, &record, CLAUDE_TURN_DURATION],
+            at(9_000),
+        );
+        tick(&stood.host, &[], at(10_000));
+        super::settle_resumes(at(11_000));
+        super::pane_prompt_submitted(stood.host.worker_term);
+        let (run_id, receipt, observed) = {
+            let flying = super::resumes_in_flight().lock().unwrap();
+            let (receipt, pending) = flying
+                .iter()
+                .find(|(_, pending)| pending.term == stood.host.worker_term)
+                .unwrap();
+            (
+                pending.run.clone(),
+                receipt.clone(),
+                super::resume_outcome(pending, at(12_000)).unwrap(),
+            )
+        };
+        let stored = if mismatched {
+            zerocode_core::orchestration::ResumeOutcome {
+                detail: "a different recorded observation".to_string().into(),
+                ..observed
+            }
+        } else {
+            observed
+        };
+        assert!(
+            super::runtime()
+                .unwrap()
+                .actor
+                .resume_settle(run_id, receipt.clone(), stored, at(12_000))
+                .unwrap()
+                .0
+        );
+        super::settle_resumes(at(13_000));
+        let mut flying = super::resumes_in_flight().lock().unwrap();
+        assert_eq!(
+            flying.contains_key(&receipt),
+            mismatched,
+            "Ok(false) did not compare the recorded result"
+        );
+        flying.remove(&receipt);
+        assert_eq!(stood.host.typed_at(stood.host.worker_term).len(), 2);
+    }
+}
+
 /// The whole road, attempt by attempt. The declaration reads back with its
 /// ceiling; a continuation settles `submitted` only on the provider's own
 /// prompt report and its receipt reaches the coordinator then; a later stop

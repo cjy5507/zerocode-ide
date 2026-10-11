@@ -39,9 +39,9 @@
 
 use super::*;
 use zerocode_core::orchestration::{
-    HandoverPlan, NotResumed, QuotaWallChip, RESUME_IN_FLIGHT, ResumeOutcome, ResumePlan,
-    WALL_RETRY_LINE, handover_paragraph, handover_recap, newest_wall, parse_on_quota_wall,
-    person_wall_marker, resume_plan, wall_cause, wall_chip_for,
+    HandoverPlan, NotResumed, QuotaWallChip, RESUME_IN_FLIGHT, ResumePlan, WALL_RETRY_LINE,
+    handover_paragraph, handover_recap, newest_wall, parse_on_quota_wall, person_wall_marker,
+    resume_plan, wall_cause, wall_chip_for,
 };
 
 /// Said when an account switch holds its line: the press is not lost, only
@@ -152,30 +152,19 @@ pub(crate) fn retry(
         else {
             return Err(reservation_refused(&held, &plan, now_ms));
         };
-        let Some(delivery) = host.point(term, WALL_RETRY_LINE, true) else {
-            let outcome = ResumeOutcome {
-                submitted: false,
-                typed: false,
-                detail: NOT_ADDRESSED.to_string().into(),
-            };
-            let _ = held
-                .actor
-                .resume_settle(ledger_run, receipt, outcome, now_ms);
-            return Err(NOT_ADDRESSED.to_string());
-        };
+        let delivery = host.point(term, WALL_RETRY_LINE, true);
+        let not_addressed = delivery.is_none();
         resumes_in_flight()
             .lock()
             .unwrap_or_else(|held| held.into_inner())
             .insert(
                 receipt.clone(),
-                Resuming {
-                    run: ledger_run,
-                    term,
-                    delivery,
-                    answered: None,
-                    prompt_seen: false,
-                },
+                Resuming::new(ledger_run, term, delivery, NOT_ADDRESSED),
             );
+        if not_addressed {
+            settle_resumes(now_ms);
+            return Err(NOT_ADDRESSED.to_string());
+        }
         Ok(serde_json::json!({ "receipt": receipt, "line": WALL_RETRY_LINE }))
     })
     .unwrap_or_else(|| Err(SWITCH_IN_FLIGHT.to_string()))

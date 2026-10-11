@@ -7034,11 +7034,37 @@ fn record_scanned_switches(
 struct Resuming {
     run: String,
     term: u32,
-    delivery: std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>,
+    delivery: Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>>,
     /// The delivery's answer, and when this beat first read it.
     answered: Option<(Option<zerocode_pty::DeliveryOutcome>, i64)>,
     /// A prompt event arrived at the pane after the words went to the door.
     prompt_seen: bool,
+    outcome: Option<zerocode_core::orchestration::ResumeOutcome>,
+}
+
+impl Resuming {
+    fn new(
+        run: String,
+        term: u32,
+        delivery: Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>>,
+        not_addressed: &str,
+    ) -> Self {
+        let outcome = delivery
+            .is_none()
+            .then(|| zerocode_core::orchestration::ResumeOutcome {
+                submitted: false,
+                typed: false,
+                detail: not_addressed.to_string().into(),
+            });
+        Self {
+            run,
+            term,
+            delivery,
+            answered: None,
+            prompt_seen: false,
+            outcome,
+        }
+    }
 }
 
 /// The continuations being typed, by receipt row id. In memory on purpose:
@@ -7082,7 +7108,7 @@ fn resume_stalled_workers(
     quiet: &mut Vec<(String, i64)>,
     now_ms: i64,
 ) -> bool {
-    use zerocode_core::orchestration::{NotResumed, RESUME_LINE, ResumeOutcome, resume_plan};
+    use zerocode_core::orchestration::{NotResumed, RESUME_LINE, resume_plan};
     if stopped.is_empty() {
         return false;
     }
@@ -7128,30 +7154,23 @@ fn resume_stalled_workers(
             continue;
         };
         moved = true;
-        let Some(delivery) = host.point(one.term, RESUME_LINE, true) else {
-            let outcome = ResumeOutcome {
-                submitted: false,
-                typed: false,
-                detail: "the pane could not be addressed; nothing was typed"
-                    .to_string()
-                    .into(),
-            };
-            let _ = actor.resume_settle(run, receipt, outcome, now_ms);
-            continue;
-        };
+        let delivery = host.point(one.term, RESUME_LINE, true);
+        let not_addressed = delivery.is_none();
         resumes_in_flight()
             .lock()
             .unwrap_or_else(|held| held.into_inner())
             .insert(
                 receipt,
-                Resuming {
+                Resuming::new(
                     run,
-                    term: one.term,
+                    one.term,
                     delivery,
-                    answered: None,
-                    prompt_seen: false,
-                },
+                    "the pane could not be addressed; nothing was typed",
+                ),
             );
+        if not_addressed {
+            settle_resumes(now_ms);
+        }
     }
     moved
 }
@@ -7228,29 +7247,86 @@ fn settle_resumes(now_ms: i64) {
             .lock()
             .unwrap_or_else(|held| held.into_inner());
         let mut settled = Vec::new();
-        flying.retain(|receipt, one| {
-            if one.answered.is_none() {
-                one.answered = match one.delivery.try_recv() {
-                    Ok(answer) => Some((Some(answer), now_ms)),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some((None, now_ms)),
-                };
-            }
-            match resume_outcome(one, now_ms) {
-                Some(outcome) => {
-                    settled.push((one.run.clone(), receipt.clone(), outcome));
-                    false
+        for (receipt, one) in flying.iter_mut() {
+            if one.outcome.is_none() {
+                if one.answered.is_none() {
+                    one.answered =
+                        one.delivery
+                            .as_ref()
+                            .and_then(|delivery| match delivery.try_recv() {
+                                Ok(answer) => Some((Some(answer), now_ms)),
+                                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    Some((None, now_ms))
+                                }
+                            });
                 }
-                None => true,
+                one.outcome = resume_outcome(one, now_ms);
             }
-        });
+            if let Some(outcome) = &one.outcome {
+                settled.push((one.run.clone(), receipt.clone(), outcome.clone()));
+            }
+        }
         settled
     };
     for (run, receipt, outcome) in settled {
-        if let Ok((moved, _)) = held.actor.resume_settle(run, receipt, outcome, now_ms) {
-            rang(moved);
+        let accepted =
+            match held
+                .actor
+                .resume_settle(run.clone(), receipt.clone(), outcome.clone(), now_ms)
+            {
+                Ok((moved, _)) => {
+                    rang(moved);
+                    moved || resume_settlement_recorded(&held, &run, &receipt, &outcome)
+                }
+                Err(_) => false,
+            };
+        if accepted {
+            let mut flying = resumes_in_flight()
+                .lock()
+                .unwrap_or_else(|held| held.into_inner());
+            if flying
+                .get(&receipt)
+                .is_some_and(|one| one.run == run && one.outcome.as_ref() == Some(&outcome))
+            {
+                flying.remove(&receipt);
+            }
         }
     }
+}
+
+fn resume_settlement_recorded(
+    held: &LiveRuntime,
+    run: &str,
+    receipt: &str,
+    outcome: &zerocode_core::orchestration::ResumeOutcome,
+) -> bool {
+    let Ok(image) = held.actor.view() else {
+        return false;
+    };
+    image
+        .projection()
+        .messages
+        .iter()
+        .filter(|message| {
+            message.run == run
+                && message.id == receipt
+                && message.kind == zerocode_core::orchestration::MessageKind::Resumed
+        })
+        .any(|message| {
+            let Ok(body) = serde_json::from_str::<serde_json::Value>(message.body.as_str()) else {
+                return false;
+            };
+            let status = if outcome.submitted {
+                "submitted"
+            } else {
+                "not_submitted"
+            };
+            body["status"] == status
+                && body["typed"] == outcome.typed
+                && body["detail"] == outcome.detail.as_str()
+                && body["settledMs"].as_i64().is_some()
+        })
 }
 
 pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_ms: i64) -> usize {
