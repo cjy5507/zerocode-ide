@@ -97,6 +97,7 @@ import { testSidebarAgents } from "./sidebar-agents.mjs";
 import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
 import { testSidebarActivity } from "./sidebar-activity.mjs";
+import { testSidebarRoles } from "./sidebar-roles.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
 import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
@@ -334,6 +335,8 @@ suite("sidebar-review-state", testSidebarReviewState);
 suite("sidebar-landing-state", testSidebarLandingState);
 // What each sidebar row and tab says of the work it holds (t-44016).
 suite("sidebar-activity", testSidebarActivity);
+// Who is the coordinator, a worker or the person, read off the sidebar, the tabs and the desk (t-45938).
+suite("sidebar-roles", testSidebarRoles);
 suite("landing-alerts", testLandingAlerts);
 suite("land-check-letter", testLandCheckLetter);
 /* The conversation view against the Claude Code extension's own webview
