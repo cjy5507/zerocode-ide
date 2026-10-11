@@ -8345,12 +8345,14 @@ function relabelTerminalViews() {
  * `splitDirection ?? "horizontal"` (`addSplitLeafToLayout`,
  * index-ftls8Hg_.js:725832). Everything that does not ask gets a tab.
  *
- * We go one step past that, on the product owner's decision: a terminal
- * opened in the workspace already in front of somebody DIVIDES the stage
+ * We go one step past that, on the product owner's decision: a terminal a
+ * LAUNCH seats in the workspace already in front of somebody DIVIDES the stage
  * rather than hiding what is on it ("orca처럼 여러 창이 열리면서 보여야 함 —
  * 터미널이 여러 개 열리면 화면에 맞게 분할됨"). A strip of tabs shows one
  * shell at a time, and the reason to open a second one beside a working agent
- * is almost always to watch both at once.
+ * is almost always to watch both at once. The new-terminal doors (⌘T, the
+ * 명령 실행 button, the ＋ row, the empty stage) are the person asking for a
+ * new terminal by hand: they open a tab (`openTermTab`, the "terminal" door).
  *
  * Three boundaries, and each of them is a thing somebody would otherwise
  * cross without meaning to:
@@ -8598,6 +8600,14 @@ async function openTermTab({ placement, door = "agent" } = {}) {
   // doors: the terminal command setting for "terminal", a bare shell for
   // "command". The agent list may not have loaded yet when this is the first
   // thing pressed — ask once, the way the notes menu already does.
+  //
+  // WHERE it goes. The "terminal" door is a TAB (`createTab`, above): it never
+  // divides the tab in front of the person. Before this, the chord, the 명령 실행
+  // button and the ＋ row all ran through the stage's division rule and opened a
+  // second terminal inside the first one's tab. Only a launch the stage seats
+  // beside the work keeps the division rule (`tilePlacement`), and the agent door
+  // keeps the default it always had.
+  const where = placement ?? (door === "terminal" ? "tab" : undefined);
   if (door === "agent" && defaultAgentChosen()) {
     if (agentRows.length === 0) await refreshAgents();
     const chosen = installedAgents().find((row) => row.id === defaultAgentId());
@@ -8611,9 +8621,9 @@ async function openTermTab({ placement, door = "agent" } = {}) {
         const term = await launchAgentTab({
           agent: chosen.id,
           prompt: "",
-          ...spawnGrid({ placement }),
+          ...spawnGrid({ placement: where }),
         });
-        mountTermTab(term, { agent: chosen.name }, { placement });
+        mountTermTab(term, { agent: chosen.name }, { placement: where });
         if (already > 0) markFirstRun("ran_second_agent");
         return term;
       } catch (error) {
@@ -8625,7 +8635,7 @@ async function openTermTab({ placement, door = "agent" } = {}) {
   let term;
   try {
     term = await invoke("open_term_tab", {
-      ...spawnGrid({ placement }),
+      ...spawnGrid({ placement: where }),
       // A tab that is about to be TYPED INTO is a bare shell whatever the
       // terminal command says; the other two doors keep asking the agent
       // setting only in the one place the original does.
@@ -8635,7 +8645,7 @@ async function openTermTab({ placement, door = "agent" } = {}) {
     showError(error);
     return null;
   }
-  mountTermTab(term, {}, { placement });
+  mountTermTab(term, {}, { placement: where });
   return term;
 }
 
