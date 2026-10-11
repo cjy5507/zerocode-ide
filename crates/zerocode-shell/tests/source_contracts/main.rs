@@ -34597,6 +34597,16 @@ mod tests {
             markup.contains("id=\"sb-codex-route\"") && window.contains("paintCodexPtyFallbacks()"),
             "the fallback has no persistent, reviewable status surface"
         );
+        assert!(
+            markup.contains("id=\"sb-scm-notices\"") && window.contains("paintScmMark()"),
+            "a PR condition that stands has no status bar mark"
+        );
+        let registered = include_str!("../../src/main.rs");
+        assert!(
+            registered.contains("scm_observer_shown,")
+                && registered.contains("scm_observer_dismiss,"),
+            "the PR notice marks are not registered as window commands"
+        );
     }
 
     /// A launch prompt and every ledger worker carry one provider-neutral

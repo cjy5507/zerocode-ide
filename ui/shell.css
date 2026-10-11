@@ -12528,19 +12528,34 @@ body.is-dragging-pane {
   color: var(--ink-chalk);
 }
 
-.sb-codex-route {
-  color: var(--signal-wait-ink);
+/* The two marks share one shape; only the ink says what they are about. The
+ * PR mark is halt ink, because a red check or a conflict is a failure (t-45801). */
+.sb-codex-route,
+.sb-scm-notices {
   white-space: nowrap;
   transition: color var(--motion-fast) var(--ease-standard);
 }
 
-.sb-codex-route .icon {
+.sb-codex-route {
+  color: var(--signal-wait-ink);
+}
+
+.sb-codex-route .icon,
+.sb-scm-notices .icon {
   width: 11px;
   height: 11px;
 }
 
 .sb-codex-route:hover {
   color: var(--signal-wait);
+}
+
+.sb-scm-notices {
+  color: var(--signal-halt-ink);
+}
+
+.sb-scm-notices:hover {
+  color: var(--signal-halt);
 }
 
 /* The usage rail's glyphs, dots and dividers stay on the bar's muted ink even

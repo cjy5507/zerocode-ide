@@ -85,6 +85,26 @@ impl Observation {
 pub struct Notice {
     pub opened_at: i64,
     pub resolved_at: Option<i64>,
+    /// When the window first showed this occurrence's toast. The ledger keeps
+    /// it, so a restarted window does not say the same condition again.
+    #[serde(default)]
+    pub shown_at: Option<i64>,
+    /// When the person closed this occurrence's toast.
+    #[serde(default)]
+    pub dismissed_at: Option<i64>,
+}
+
+/// What the window reports about one notice: its toast was shown, or the
+/// person closed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeMark {
+    Shown,
+    Dismissed,
+}
+
+/// The name a notice goes by in the window and in the notice commands.
+pub fn notice_id(subject: &str, kind: FactKind) -> String {
+    format!("{subject}:{kind:?}")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,10 +154,13 @@ impl Record {
         } else if reaction.active {
             let notice = self.notices.entry(reaction.kind).or_insert(Notice {
                 opened_at: now_ms,
-                resolved_at: None,
+                ..Notice::default()
             });
             if notice.resolved_at.take().is_some() {
+                // A new occurrence: nothing the resolved one was marked with carries over.
                 notice.opened_at = now_ms;
+                notice.shown_at = None;
+                notice.dismissed_at = None;
             }
         } else if let Some(notice) = self.notices.get_mut(&reaction.kind) {
             notice.resolved_at.get_or_insert(now_ms);
@@ -381,6 +404,36 @@ impl Book {
                 });
         }
         self.commit(staged, effects)
+    }
+
+    /// Marks the occurrence the window named. A name for an older occurrence
+    /// marks nothing: the condition re-armed since, and its toast is new.
+    /// Returns whether the named occurrence exists.
+    pub fn mark_notice(
+        &mut self,
+        id: &str,
+        opened_at: i64,
+        mark: NoticeMark,
+        now_ms: i64,
+        effects: &mut impl Effects,
+    ) -> Result<bool, String> {
+        let mut staged = self.clone();
+        let mut found = false;
+        for (key, tracked) in &mut staged.subjects {
+            for (kind, notice) in &mut tracked.record.notices {
+                if notice_id(key, *kind) != id || notice.opened_at != opened_at {
+                    continue;
+                }
+                found = true;
+                let slot = match mark {
+                    NoticeMark::Shown => &mut notice.shown_at,
+                    NoticeMark::Dismissed => &mut notice.dismissed_at,
+                };
+                slot.get_or_insert(now_ms);
+            }
+        }
+        self.commit(staged, effects)?;
+        Ok(found)
     }
 
     fn commit(&mut self, staged: Self, effects: &mut impl Effects) -> Result<(), String> {

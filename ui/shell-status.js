@@ -4187,12 +4187,15 @@ document.body.append(toastLayer);
  *
  * `kind` is the role the message plays — "halt" for a failure, absent for a
  * plain report — and it selects a token rather than a colour. */
-function toast(words, kind = "", { action = null, sticky = false, aux = "" } = {}) {
+function toast(words, kind = "", { action = null, sticky = false, aux = "", tip = "" } = {}) {
   const said = String(words ?? "").trim();
   if (said === "") return null;
   const note = document.createElement("div");
   note.className = "toast";
   if (kind) note.dataset.kind = kind;
+  // `tip` is what a shortened sentence leaves out — the full path behind a
+  // checkout's folder name — and the hover says it (t-45801).
+  if (tip) note.dataset.tip = tip;
   // `aux` is a dim word after the sentence — the sha beside 「새 버전
   // {{version}}」 (t-3237) — inside the words' node, so the button is still
   // its own thing and the sentence is still read first.
@@ -4223,50 +4226,99 @@ function toast(words, kind = "", { action = null, sticky = false, aux = "" } = {
   return note;
 }
 
-/* PR conditions share the sticky toast surface. Dismissal is local UI state;
- * only a fetched resolving fact closes the durable notification. */
-const scmNotices = new Map();
-const scmDismissed = new Map();
+/* PR conditions. A condition is said once per occurrence: the first time the
+ * window sees it unmarked. The ledger keeps that mark (shown_at), so a
+ * restarted window does not say it again, and closing the toast writes
+ * dismissed_at the same way. A condition that still stands is a mark on the
+ * status bar until the fetched facts resolve it, whether or not its toast is
+ * still up (t-45801). */
+const scmToasts = new Map();
+const scmSaid = new Map();
+let scmStanding = [];
+
+function scmWords(row) {
+  const values = { number: row.number, checkout: row.checkout };
+  return row.kind === "mergeable"
+    ? t("checks.observe.conflict", "PR #{{number}} 병합 충돌 · {{checkout}}", values)
+    : t("checks.observe.ci", "PR #{{number}} CI 실패 · {{checkout}}", values);
+}
+
+function forgetScmNotice(id) {
+  scmToasts.get(id)?.remove();
+  scmToasts.delete(id);
+  scmSaid.delete(id);
+}
+
+function sayScmNotice(row) {
+  const { id, opened_at: openedAt } = row;
+  scmToasts.get(id)?.remove();
+  scmSaid.set(id, openedAt);
+  // It leaves on its own like any toast; the condition stays on the status bar.
+  const notice = toast(scmWords(row), "halt", {
+    tip: row.root,
+    action: {
+      label: t("checks.observe.dismiss", "닫기", {}),
+      run: () => {
+        notice?.remove();
+        scmToasts.delete(id);
+        invoke("scm_observer_dismiss", { id, openedAt }).catch(() => {});
+      },
+    },
+  });
+  if (notice) scmToasts.set(id, notice);
+  // A mark that did not land only means this toast may be said once more after a restart.
+  invoke("scm_observer_shown", { id, openedAt }).catch(() => {});
+}
 
 function paintScmNotices(rows) {
-  const active = new Set();
+  const present = new Set();
+  const standing = [];
   for (const row of rows ?? []) {
     if (!row || typeof row.id !== "string") continue;
     if (row.resolved_at != null) {
-      scmNotices.get(row.id)?.remove();
-      scmNotices.delete(row.id);
-      scmDismissed.delete(row.id);
+      forgetScmNotice(row.id);
       continue;
     }
-    active.add(row.id);
-    if (scmNotices.has(row.id) || scmDismissed.get(row.id) === row.opened_at) continue;
-    const words = row.kind === "mergeable"
-      ? t("checks.observe.conflict", "PR #{{number}} 병합 충돌 · {{root}}", row)
-      : t("checks.observe.ci", "PR #{{number}} CI 실패 · {{root}}", row);
-    const notice = toast(words, "halt", {
-      sticky: true,
-      action: {
-        label: t("checks.observe.dismiss", "닫기", {}),
-        run: () => {
-          scmDismissed.set(row.id, row.opened_at);
-          scmNotices.get(row.id)?.remove();
-          scmNotices.delete(row.id);
-        },
-      },
-    });
-    if (notice) scmNotices.set(row.id, notice);
+    present.add(row.id);
+    standing.push(row);
+    if (scmSaid.get(row.id) === row.opened_at) continue;
+    if (row.shown_at != null || row.dismissed_at != null) {
+      scmSaid.set(row.id, row.opened_at);
+      continue;
+    }
+    sayScmNotice(row);
   }
-  for (const [id, notice] of scmNotices) {
-    if (active.has(id)) continue;
-    notice.remove();
-    scmNotices.delete(id);
+  for (const id of [...scmSaid.keys(), ...scmToasts.keys()]) {
+    if (!present.has(id)) forgetScmNotice(id);
   }
-  for (const id of scmDismissed.keys()) {
-    if (!active.has(id)) scmDismissed.delete(id);
+  scmStanding = standing;
+  paintScmMark();
+}
+
+/* The status bar mark for conditions that stand: how many, what each one is,
+ * and a click that opens the Checks panel. */
+function paintScmMark() {
+  const mark = el("sb-scm-notices");
+  mark.hidden = scmStanding.length === 0;
+  if (mark.hidden) {
+    delete mark.dataset.tip;
+    mark.removeAttribute("aria-label");
+    return;
   }
+  el("sb-scm-notices-label").textContent = t("checks.observe.mark", "PR 조건 {{count}}", { count: scmStanding.length });
+  const tip = scmStanding.map(scmWords).join(" / ");
+  mark.dataset.tip = tip;
+  mark.setAttribute("aria-label", tip);
 }
 
 listen("scm:notices", (event) => paintScmNotices(event.payload));
+
+el("sb-scm-notices").addEventListener("click", () => {
+  const row = scmStanding[0];
+  if (!row) return;
+  if (row.root !== activeWorktreePath) selectWorktree(row.root);
+  setActivityItem("checks");
+});
 
 /* Today's model lineup moved (t-14437): one line per agent, said once — a
  * model that arrived is chosen without anybody typing it, and one that

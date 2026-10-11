@@ -58,10 +58,10 @@ export async function testScmNoticeWindow(browser, origin, ok) {
     const standing = await markState(first);
     ok("the standing condition is a status bar mark naming its PR and checkout",
       standing.exists && !standing.hidden && standing.tip.includes("PR #12") && standing.tip.includes("topic"), JSON.stringify(standing));
-    ok("the mark's words never carry the checkout's full path", !standing.tip.includes("/wt/"), standing.tip);
+    ok("the mark's words never carry the checkout's full path", standing.exists && !standing.tip.includes("/wt/"), standing.tip);
     if (standing.exists && !standing.hidden) await first.click("#sb-scm-notices");
     const opened = await first.evaluate(() => document.querySelector(".files")?.dataset.activity ?? "");
-    ok("one click on the mark opens source control", opened === "scm", `activity=${opened}`);
+    ok("one click on the mark opens the Checks panel", opened === "checks", `activity=${opened}`);
 
     const second = await openPage();
     await deliver(second, [{ ...conflict, shown_at: 7 }]);
