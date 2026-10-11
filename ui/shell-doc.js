@@ -8050,7 +8050,9 @@ function dressArtifactCard(node, row, selected) {
     node._landingGeneration = artifactLandingGeneration;
     const landing = node.querySelector(".artifact-card-landing");
     dressArtifactLanding(landing, artifactLandingSay(row));
-    node.querySelector(".artifact-card-chips").hidden = row.kind !== "report" && !row.origin?.task && landing.hidden;
+    // 글이 얼굴인 카드는 종류 낱말이 이 줄에 서므로 줄이 비는 일이 없다; 얼굴 있는 카드만 작업도
+    // 반영 상태도 없을 때 줄을 접는다(t-47423).
+    node.querySelector(".artifact-card-chips").hidden = !artifactKindPlain(row.kind) && !row.origin?.task && landing.hidden;
   }
   // 바뀐 것만 쓴다: 같은 글자와 같은 값을 다시 쓰는 것도 쓰기라, 고른 표시만 옮기는 그리기가
   // 보이는 카드마다 글자 노드를 갈고 속성을 다시 세우게 된다(t-40649).

@@ -337,6 +337,36 @@ export async function testArtifactCards(browser, origin, ok) {
       JSON.stringify({ face: cards.final.faceShown, title: cards.final.title, height: cards.final.height }),
     );
 
+    /* ---- an evidence card that belongs to no task still says what it is (t-47423) ------------ */
+    // Evidence and screenshots became word-faced cards with t-43931: their kind word moved into the
+    // chip row, beside the task chip. The chip row's own rule still hid itself for a card with no
+    // task and no landed state — which is every computer-use capture — so those cards lost the one
+    // word that says what they are. The report card kept its word only because the rule named it.
+    const loose = await page.evaluate(async () => {
+      const view = artifactsView();
+      view?.querySelector('[data-artifact-tab="evidence"]')?.click();
+      await new Promise((done) => setTimeout(done, 150));
+      const shown = (node) => Boolean(node) && !node.hidden && node.getClientRects().length > 0;
+      const text = (node) => (shown(node) ? node.textContent.trim() : null);
+      const read = (id) => {
+        const node = view?.querySelector(`.artifact-card[data-id="${id}"]`) ?? null;
+        return {
+          subtype: text(node?.querySelector(".artifact-card-subtype")),
+          task: text(node?.querySelector(".artifact-card-task")),
+          faceShown: shown(node?.querySelector(".artifact-card-face")),
+          kindShown: shown(node?.querySelector(".artifact-card-kind")),
+        };
+      };
+      return { steps: read("e-steps"), shot: read("s-shot") };
+    });
+    ok(
+      "an evidence card with no task still wears its kind word — 증거, 스크린샷 — in the chip row, with no task chip, no icon face and no second kind line",
+      loose.steps.subtype === "증거" && loose.shot.subtype === "스크린샷"
+        && loose.steps.task === null && loose.shot.task === null
+        && loose.steps.faceShown === false && loose.steps.kindShown === false,
+      JSON.stringify(loose),
+    );
+
     /* ---- the drawer: one head row, details folded, the body flowing (item 4) ---------------- */
     const drawer = await page.evaluate(async () => {
       const view = artifactsView();
