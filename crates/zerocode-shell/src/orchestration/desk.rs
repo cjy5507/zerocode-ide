@@ -2749,4 +2749,130 @@ mod tests {
         assert_eq!(said["room"], "tight");
         assert_eq!(said["free"], "21.0 GB");
     }
+
+    /// What the desk and the board's ledger rows cost over one synthetic ledger (t-47538): four
+    /// hundred tasks in every stage a run holds — waiting, carried, failed, reported, verified,
+    /// merged and deployed — timed two hundred times each, and the bytes each answer carries to the
+    /// window. The same test runs on the base and on the change; it reads no ledger of the person's.
+    ///
+    /// ```sh
+    /// cargo test -p zerocode-shell --bin zerocode-shell \
+    ///   orchestration::desk::tests::the_desk_and_the_rows_over_one_synthetic_ledger -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement, printed; not a check"]
+    fn the_desk_and_the_rows_over_one_synthetic_ledger() {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("measure", 1);
+        let coordinator = |attempt: &str, source: &str| ResultAuthor::Coordinator {
+            seat: "team-m/%0".to_string(),
+            generation: Some(1),
+            attempt: Some(attempt.to_string()),
+            source: Some(source.to_string()),
+            completed_ms: None,
+            verified_ms: None,
+        };
+        for n in 0..400_i64 {
+            let task = ledger
+                .create_task(&run, "x".into(), format!("t{n}"), vec![], None, 10 + n)
+                .expect("a task");
+            if n % 8 == 0 {
+                continue;
+            }
+            let pane = format!("%{}", 100 + n);
+            let started = ledger
+                .start_worker(
+                    &run,
+                    "claude",
+                    ("team-m", pane.as_str()),
+                    Some(&task),
+                    1_000 + n,
+                )
+                .expect("a worker");
+            let attempt = started.dispatch.clone().expect("an attempt");
+            match n % 8 {
+                1 => continue,
+                7 => {
+                    ledger
+                        .end_attempt(&started.worker, Ending::Stopped, "lost", 2_000 + n)
+                        .expect("the attempt ends");
+                    continue;
+                }
+                _ => {}
+            }
+            let head = format!("{n:07x}abcdef");
+            ledger
+                .post(
+                    &run,
+                    Draft {
+                        from: worker_address(&started.worker),
+                        to: ledger.run(&run).expect("the run").address(),
+                        kind: MessageKind::WorkerDone,
+                        body: Text::from(format!(r#"{{"ok":true,"head":"{head}"}}"#)),
+                        subject: Text::default(),
+                        priority: Priority::Normal,
+                        payload: Text::default(),
+                        thread: None,
+                        task: Some(task.clone()),
+                        dispatch: Some(attempt.clone()),
+                    },
+                    3_000 + n,
+                )
+                .expect("the report");
+            let keys = match n % 8 {
+                3 => r#"{"verified":true}"#.to_string(),
+                4 => format!(r#"{{"verified":true,"mergeHead":"{head}"}}"#),
+                5 => r#"{"verified":true,"merged":true,"deployed":true}"#.to_string(),
+                _ => continue,
+            };
+            ledger
+                .update_task(
+                    &run,
+                    &task,
+                    None,
+                    Some(keys),
+                    coordinator(&attempt, &head),
+                    4_000 + n,
+                )
+                .expect("a review");
+        }
+        let seats = super::super::TeamSeatIndex::new();
+        let spread = |mut took: Vec<u128>| {
+            took.sort_unstable();
+            serde_json::json!({ "p50": took[took.len() / 2], "p95": took[took.len() * 95 / 100] })
+        };
+        let timed = |work: &dyn Fn()| {
+            (0..200)
+                .map(|_| {
+                    let from = std::time::Instant::now();
+                    work();
+                    from.elapsed().as_micros()
+                })
+                .collect::<Vec<_>>()
+        };
+        let desk = timed(&|| {
+            std::hint::black_box(desk_snapshot(&ledger, |_| None, no_cost));
+        });
+        let rows = timed(&|| {
+            std::hint::black_box(super::super::ledger_agents_for_seats(&ledger, &seats));
+        });
+        let desk_bytes = serde_json::to_vec(&desk_snapshot(&ledger, |_| None, no_cost))
+            .expect("the desk serializes")
+            .len();
+        let listed = super::super::ledger_agents_for_seats(&ledger, &seats);
+        let row_bytes = serde_json::to_vec(&listed)
+            .expect("the rows serialize")
+            .len();
+        println!(
+            "{}",
+            serde_json::json!({
+                "tasks": 400,
+                "rows": listed.len(),
+                "deskMicros": spread(desk),
+                "rowsMicros": spread(rows),
+                "deskBytes": desk_bytes,
+                "rowBytes": row_bytes,
+            })
+        );
+    }
 }
