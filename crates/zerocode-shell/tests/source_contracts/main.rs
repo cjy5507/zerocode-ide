@@ -18649,12 +18649,15 @@ mod tests {
             "function plannedPlacement(placement, worktree) {",
             "  const host = placement === \"tab\" ? null : activeTabIn(focusedPane);",
             "  const shape = activePaneShape(host);",
-            "  const where = tilePlacement({",
-            "    sameWorktree: host !== null && host.worktree === worktree,",
-            "    activeIsTermTab: host?.kind === \"term\",",
-            "    ...shape,",
-            "  });",
-            "  return { host, shape, where };",
+            "  const where = placement?.tab === true",
+            "    ? { split: null }",
+            "    : tilePlacement({",
+            "        sameWorktree: host !== null && host.worktree === worktree,",
+            "        activeIsTermTab: host?.kind === \"term\",",
+            "        ...shape,",
+            "      });",
+            "  const beside = host?.kind === \"browser\" && host.worktree === worktree;",
+            "  return { host, shape, where, beside };",
             "}",
         ]
         .join("\n");
@@ -18664,7 +18667,7 @@ mod tests {
              group's tab and the measured shape"
         );
         let gateway = [
-            "  const { host, where } = plannedPlacement(placement, worktree);",
+            "  const { host, where, beside: besideBrowser } = plannedPlacement(placement, worktree);",
             "  if (where.split) return tileTermPane(host, term, extra, where.split, focus);",
         ]
         .join("\n");
@@ -18675,7 +18678,7 @@ mod tests {
         );
         assert!(
             block_after(window, "function spawnGrid(")
-                .contains("({ shape, where } = plannedPlacement(placement, worktree));"),
+                .contains("({ shape, where, beside } = plannedPlacement(placement, worktree));"),
             "a shell is no longer sized by the placement it will be seated by"
         );
         for (needle, count) in [
