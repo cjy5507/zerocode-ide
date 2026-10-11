@@ -1241,7 +1241,7 @@ mod tests {
     /// new DACL and takes back the ones they inherited before, so a protected
     /// DACL whose one entry does not inherit leaves them with no entry at all
     /// and their next open is refused. Main's Windows CI never got this far
-    /// (its read-only handle took no DACL); PR #4's did, and the team_inbox
+    /// (its read-only handle took no DACL); PR #4's did, and the `team_inbox`
     /// test read 「injected」 where it expected 「failed」.
     #[cfg(windows)]
     #[test]
