@@ -4713,24 +4713,24 @@ function accountUsedPercent(id) {
  * 여기서는 낱말과 호버만 고른다. 기본 계정에 선 판에는 자리 낱말을 붙이지 않는다. */
 const PANE_STANCE_WORDS = Object.freeze({
   turn_end: {
-    key: "usage.paneTurnEnd", word: "턴 끝에 옮김",
-    tipKey: "usage.paneTurnEndTip", tip: "일하는 중이라 이 턴이 끝나면 같은 워커·같은 대화로 새 기본 계정에 옮깁니다",
+    said: { key: "usage.paneTurnEnd", word: "턴 끝에 옮김" },
+    tip: { key: "usage.paneTurnEndTip", word: "일하는 중이라 이 턴이 끝나면 같은 워커·같은 대화로 새 기본 계정에 옮깁니다" },
   },
   moving: {
-    key: "usage.paneMoving", word: "옮기는 중",
-    tipKey: "usage.paneMovingTip", tip: "턴 사이라 곧 같은 워커·같은 대화로 새 기본 계정에 옮깁니다",
+    said: { key: "usage.paneMoving", word: "옮기는 중" },
+    tip: { key: "usage.paneMovingTip", word: "턴 사이라 곧 같은 워커·같은 대화로 새 기본 계정에 옮깁니다" },
   },
   person: {
-    key: "usage.panePerson", word: "사람이 쓰는 중",
-    tipKey: "usage.panePersonTip", tip: "사람이 쓰는 판이라 옮기지 않습니다 — 새 계정으로 쓰려면 판을 새로 여세요",
+    said: { key: "usage.panePerson", word: "사람이 쓰는 중" },
+    tip: { key: "usage.panePersonTip", word: "사람이 쓰는 판이라 옮기지 않습니다 — 새 계정으로 쓰려면 판을 새로 여세요" },
   },
   walled: {
-    key: "usage.paneWalled", word: "한도 벽",
-    tipKey: "usage.paneWalledTip", tip: "한도 벽에 섰습니다 — 여유 있는 계정이 있으면 옮기고, 리셋이 가까우면 기다립니다",
+    said: { key: "usage.paneWalled", word: "한도 벽" },
+    tip: { key: "usage.paneWalledTip", word: "한도 벽에 섰습니다 — 여유 있는 계정이 있으면 옮기고, 리셋이 가까우면 기다립니다" },
   },
   left: {
-    key: "usage.paneLeft", word: "옛 계정에 남음",
-    tipKey: "usage.paneLeftTip", tip: "새 기본 계정으로 옮길 수 없어 이 계정에 남았습니다 — 까닭은 창의 로그에 있습니다",
+    said: { key: "usage.paneLeft", word: "옛 계정에 남음" },
+    tip: { key: "usage.paneLeftTip", word: "새 기본 계정으로 옮길 수 없어 이 계정에 남았습니다 — 까닭은 창의 로그에 있습니다" },
   },
 });
 
@@ -4760,7 +4760,10 @@ function paneAccountWords(term) {
     figure,
   });
   return stance
-    ? { words: `${head} — ${t(stance.key, stance.word)}`, tip: `${tip} · ${t(stance.tipKey, stance.tip)}` }
+    ? {
+      words: `${head} — ${t(stance.said.key, stance.said.word)}`,
+      tip: `${tip} · ${t(stance.tip.key, stance.tip.word)}`,
+    }
     : { words: head, tip };
 }
 
