@@ -1233,6 +1233,59 @@ mod tests {
         assert!(owner_only, "default_owner_is_user={default_is_user}");
     }
 
+    /// Windows only (t-43412). A folder the policy restricts may already hold
+    /// entries that reach it only by inheritance — the session store's
+    /// `team_inbox/team_inbox.sqlite3`, a lock file's neighbour. Restricting
+    /// the folder must leave the user in those entries: `SetSecurityInfo`
+    /// gives a container's existing children the inheritable entries of the
+    /// new DACL and takes back the ones they inherited before, so a protected
+    /// DACL whose one entry does not inherit leaves them with no entry at all
+    /// and their next open is refused. Main's Windows CI never got this far
+    /// (its read-only handle took no DACL); PR #4's did, and the team_inbox
+    /// test read 「injected」 where it expected 「failed」.
+    #[cfg(windows)]
+    #[test]
+    fn restricting_a_folder_keeps_the_user_in_the_entries_already_inside_it() {
+        use rand::Rng as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "zo-owner-inherit-{}-{:032x}",
+            std::process::id(),
+            rand::rng().random::<u128>()
+        ));
+        let store = root.join("store");
+        let nested = store.join("team_inbox");
+        std::fs::create_dir_all(&nested).unwrap();
+        let inner = nested.join("team_inbox.sqlite3");
+        std::fs::write(&inner, b"rows").unwrap();
+        let neighbour = store.join("session.jsonl");
+        std::fs::write(&neighbour, b"{}").unwrap();
+
+        ensure_windows_owner_only_dir_no_follow(&store).unwrap();
+
+        let store_owner_only = permissions_are_owner_only(&store);
+        let inner_reopened = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&inner)
+            .map(drop);
+        let neighbour_read = std::fs::read(&neighbour);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            matches!(store_owner_only, Ok(true)),
+            "the restricted folder is not owner-only: {store_owner_only:?}"
+        );
+        assert!(
+            inner_reopened.is_ok(),
+            "a plain file two levels inside the restricted folder lost the user's access: {inner_reopened:?}"
+        );
+        assert_eq!(
+            neighbour_read.as_deref().ok(),
+            Some(&b"{}"[..]),
+            "a plain neighbour of the lock file lost the user's access: {neighbour_read:?}"
+        );
+    }
+
     #[test]
     fn normalize_collapses_dot_and_parent_components() {
         assert_eq!(
