@@ -25155,6 +25155,8 @@ mod land_check;
 /// t-34501: late landings told to the coordinator, a branch that ran away told to its worker
 /// (`tests/landing_watch.rs`).
 mod landing_watch;
+/// t-47538: one reading of where a task's work stands (`tests/progress.rs`).
+mod progress;
 /// t-7812: the window restart restore transitions (`tests/restore.rs`).
 mod restore;
 /// t-7812: the transitions those roads added (`tests/restore_seams.rs`).

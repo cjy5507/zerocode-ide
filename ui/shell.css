@@ -33412,10 +33412,31 @@ details.task-board-section > summary {
 }
 
 .board-desk-task-note,
+.board-desk-task-work,
+.board-desk-task-owner,
 .board-desk-task-cost,
 .board-desk-task-writing {
   grid-column: 2;
   color: var(--ink-label);
+  overflow-wrap: anywhere;
+}
+
+.board-desk-task-next {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+  margin: 0;
+  color: var(--ink-label);
+}
+
+.board-desk-task-next-command {
+  min-width: 0;
+  color: var(--ink-chalk);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
   overflow-wrap: anywhere;
 }
 
@@ -33498,7 +33519,8 @@ details.task-board-section > summary {
   overflow-wrap: anywhere;
 }
 
-.board-desk-kept-door {
+.board-desk-kept-door,
+.board-desk-task-next-copy {
   min-height: var(--control-height-sm);
   padding: 0 var(--space-3);
   border: var(--rule-width) solid var(--edge-rule);
@@ -33513,18 +33535,21 @@ details.task-board-section > summary {
     border-color var(--motion-fast) var(--ease-standard);
 }
 
-.board-desk-kept-door:hover {
+.board-desk-kept-door:hover,
+.board-desk-task-next-copy:hover {
   border-color: var(--edge-mark);
   background: var(--row-hover);
 }
 
-.board-desk-kept-door:focus-visible {
+.board-desk-kept-door:focus-visible,
+.board-desk-task-next-copy:focus-visible {
   outline: var(--rule-width) solid var(--ink-chalk);
   outline-offset: var(--space-1);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .board-desk-kept-door {
+  .board-desk-kept-door,
+  .board-desk-task-next-copy {
     transition: none;
   }
 }
@@ -33537,6 +33562,11 @@ details.task-board-section > summary {
 
 .board-desk-tasks[hidden],
 .board-desk-task-note[hidden],
+.board-desk-task-work[hidden],
+.board-desk-task-owner[hidden],
+.board-desk-task-next[hidden],
+.board-desk-task-next-command[hidden],
+.board-desk-task-next-copy[hidden],
 .board-desk-task-cost[hidden],
 .board-desk-task-writing[hidden],
 .board-desk-task-kept[hidden],

@@ -16,8 +16,8 @@ use serde::Serialize;
 use zerocode_core::orchestration::evidence::{TaskHandIn, hand_in_of};
 use zerocode_core::orchestration::task_cost::TaskCost;
 use zerocode_core::orchestration::{
-    Closure, Delivery, Ledger, Message, MessageKind, Run, Task, TaskStatus, WorktreeRoom,
-    worktree_room,
+    Closure, Delivery, Ledger, Message, MessageKind, Run, Task, TaskStatus, WorkProgress,
+    WorkStage, WorktreeRoom, worktree_room,
 };
 use zerocode_core::plain_text::TextLint;
 
@@ -455,6 +455,11 @@ pub(crate) struct DeskTask {
     /// task that writes no conditions and whose report left no notes.
     #[serde(skip_serializing_if = "TaskHandIn::is_empty")]
     pub(crate) hand_in: TaskHandIn,
+    /// Where the task's work stands, as the ledger reads it once (t-47538, [`Run::progress_of`]): the
+    /// sources a review named and a command to read or check the work with. Asked of the rows the desk
+    /// sends, and read once for a completed task, whose stage it decides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) progress: Option<WorkProgress>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -471,22 +476,28 @@ pub(crate) struct StageCount {
 
 /// The pipeline's stages in the order the board draws them — a task's one
 /// word. The flow reads left to right (written down with its dependencies
-/// unmet, ready, carried, reported, merged); the five after it are where a
-/// task stands still or is over: a decision in front of it, held back, failed,
-/// completed with nothing a coordinator could ever review
-/// (`ReviewFacts::unreviewable`), closed (over without being done or failed —
-/// `TaskStatus::Closed`).
-pub(crate) const STAGES: [&str; 11] = [
+/// unmet, ready, carried, reported, verified, merged, deployed); the ones after
+/// it are where a task stands still or is over: a decision in front of it, held
+/// back, a review that names an older attempt or commit than the work handed in
+/// (t-47538), failed, completed with nothing a coordinator could ever review
+/// (`ReviewFacts::unreviewable`), verified with nothing to land, completed on
+/// what the ledger cannot read as any of these (`WorkStage::Unknown`), closed
+/// (over without being done or failed — `TaskStatus::Closed`).
+pub(crate) const STAGES: [&str; 15] = [
     "pending",
     "ready",
     "dispatched",
     "reported",
+    "verified",
     "merged",
+    "deployed",
     "gate",
     "blocked",
+    "stale",
     "failed",
     "unreviewable",
     "nothing_to_land",
+    "unknown",
     "closed",
 ];
 
@@ -494,60 +505,77 @@ pub(crate) const STAGES: [&str; 11] = [
 /// the ledger hands work out in. The rest are endings, listed newest first.
 const OPEN_STAGES: [&str; 5] = ["pending", "ready", "dispatched", "gate", "blocked"];
 
-/// The stages a finished task stands in — reported, merged, and completed with
-/// nothing a coordinator could review — the ones whose rows carry the task's
-/// cost (t-9470).
-pub(super) const FINISHED_STAGES: [&str; 4] =
-    ["reported", "unreviewable", "nothing_to_land", "merged"];
+/// The stages a completed task stands in — every one [`completed_stage`]
+/// answers — the ones whose rows carry the task's cost (t-9470).
+pub(super) const FINISHED_STAGES: [&str; 8] = [
+    "reported",
+    "verified",
+    "merged",
+    "deployed",
+    "stale",
+    "unreviewable",
+    "nothing_to_land",
+    "unknown",
+];
 
 /// The most rows one stage carries across the wire. Its count carries the
 /// rest: a run of two hundred finished tasks is two hundred numbers nobody
 /// reads one by one, and the newest two dozen are what a coordinator checks.
 pub(crate) const STAGE_ROWS: usize = 24;
 
-/// A task's one stage word. A standing decision outranks everything — the
-/// task will not move until it is answered — and a task waiting on a
-/// dependency that failed is held back, not merely pending: it will never
-/// become ready by itself. A completed task is merged only where a
-/// coordinator wrote so against the task's newest attempt
-/// (`Run::review_of`, `ReviewFacts::merged`); a worker's report alone —
-/// whatever keys its body carries — is "reported", which is the board's
-/// 검증 대기 and holds only what a coordinator can still review. One that
-/// nothing was handed in on can take no review record for ever, and the
-/// ledger says so (`ReviewFacts::unreviewable`): it is its own stage, never
-/// "reported" (t-19328).
-fn stage_of(run: &Run, task: &Task) -> &'static str {
+/// A task's one stage word, and — for a completed task, whose stage it decides —
+/// where its work stands. A standing decision outranks everything — the task
+/// will not move until it is answered — and a task waiting on a dependency that
+/// failed is held back, not merely pending: it will never become ready by
+/// itself. Those, and a task carried, failed or closed, are the task's own
+/// status. Where a completed task's work stands is the ledger's one reading
+/// (`Run::progress_of`, t-47538), never a second one here: a worker's report
+/// alone is "reported", which is the board's 검증 대기; verified, merged and
+/// deployed only on a coordinator's review of the newest attempt and the source
+/// it handed in; work nothing was handed in on is its own stage (t-19328).
+fn staged(run: &Run, task: &Task) -> (&'static str, Option<WorkProgress>) {
     if run.pending_gate_on(&task.id).is_some() {
-        return "gate";
+        return ("gate", None);
     }
-    match task.status {
+    let stage = match task.status {
         TaskStatus::Pending if run.blocked_by(task).is_empty() => "pending",
         TaskStatus::Pending | TaskStatus::Blocked => "blocked",
         TaskStatus::Ready => "ready",
         TaskStatus::Dispatched => "dispatched",
         TaskStatus::Completed => {
-            let review = run.review_of(task);
-            if review.merged {
-                "merged"
-            } else if review.unreviewable {
-                "unreviewable"
-            } else if review.nothing_to_land {
-                // The coordinator wrote that there is no code to land (t-34501): a review of research, a
-                // design, a check.
-                // Never 병합: nothing went into main. A worker's claim is not here — only the
-                // coordinator's fact is `nothing_to_land`.
-                "nothing_to_land"
-            } else {
-                "reported"
-            }
+            let progress = run.progress_of(task);
+            return (completed_stage(progress.stage), Some(progress));
         }
         TaskStatus::Failed => "failed",
         TaskStatus::Closed => "closed",
+    };
+    (stage, None)
+}
+
+/// A completed task's stage, out of where its work stands. Completed is the
+/// coordinator's word that the task is done, so a newest attempt still open or
+/// ended without a report does not move it back into 진행 or 실패: the ledger
+/// cannot say where the work stands, and the desk says so.
+const fn completed_stage(work: WorkStage) -> &'static str {
+    match work {
+        WorkStage::ReportOnly => "reported",
+        WorkStage::Verified => "verified",
+        WorkStage::Merged => "merged",
+        WorkStage::Deployed => "deployed",
+        WorkStage::Stale => "stale",
+        WorkStage::Unreviewable => "unreviewable",
+        WorkStage::NothingToLand => "nothing_to_land",
+        WorkStage::Closed => "closed",
+        WorkStage::Working | WorkStage::Failed | WorkStage::Unknown => "unknown",
     }
 }
 
-/// Whether a task is finished: reported, merged, or completed with nothing a
-/// coordinator could review ([`FINISHED_STAGES`]).
+fn stage_of(run: &Run, task: &Task) -> &'static str {
+    staged(run, task).0
+}
+
+/// Whether a task is finished: completed, in any of the stages that reads as
+/// ([`FINISHED_STAGES`]).
 pub(crate) fn finished(run: &Run, task: &Task) -> bool {
     FINISHED_STAGES.contains(&stage_of(run, task))
 }
@@ -573,7 +601,7 @@ pub(crate) fn desk_snapshot(
 ) -> DeskSnapshot {
     let now_ms = crate::now_epoch_ms();
     let mut runs = Vec::new();
-    let mut staged: Vec<(&Run, &Task, DeskTask)> = Vec::new();
+    let mut staged_tasks: Vec<(&Run, &Task, DeskTask)> = Vec::new();
     let mut mail = Vec::new();
     let mut news = Vec::new();
     let mut folded = 0;
@@ -599,8 +627,8 @@ pub(crate) fn desk_snapshot(
             vacated_ms: chair.and_then(|held| held.vacated_ms),
         });
         for task in &run.tasks {
-            let stage = stage_of(run, task);
-            staged.push((
+            let (stage, progress) = staged(run, task);
+            staged_tasks.push((
                 run,
                 task,
                 DeskTask {
@@ -608,6 +636,7 @@ pub(crate) fn desk_snapshot(
                     id: task.id.clone(),
                     title: task.display_name().to_string(),
                     stage,
+                    progress,
                     gate: run.pending_gate_on(&task.id).map(|gate| DeskGate {
                         id: gate.id.clone(),
                         question: gate.question.as_str().to_string(),
@@ -626,7 +655,7 @@ pub(crate) fn desk_snapshot(
     let mut stages = Vec::with_capacity(STAGES.len());
     let mut tasks = Vec::new();
     for stage in STAGES {
-        let mut rows: Vec<&(&Run, &Task, DeskTask)> = staged
+        let mut rows: Vec<&(&Run, &Task, DeskTask)> = staged_tasks
             .iter()
             .filter(|(_, _, row)| row.stage == stage)
             .collect();
@@ -644,10 +673,12 @@ pub(crate) fn desk_snapshot(
         // other — a stage of two hundred is two dozen rows and a count.
         let finished = FINISHED_STAGES.contains(&stage);
         // The hand-in view is read from the ledger's own message, so it is asked
-        // of the rows the desk sends too — the same rule as the cost above.
+        // of the rows the desk sends too — the same rule as the cost above; and
+        // where the work stands, read for a completed task already, likewise.
         tasks.extend(rows.into_iter().map(|(run, task, row)| DeskTask {
             cost: finished.then(|| cost(run, task)),
             hand_in: hand_in_of(run, task),
+            progress: row.progress.clone().or_else(|| Some(run.progress_of(task))),
             ..row.clone()
         }));
     }
@@ -1556,10 +1587,11 @@ mod tests {
             }
         }
         let said = serde_json::to_value(&desk).expect("the desk serializes");
+        // Completed by the ledger with no attempt: finished, and the ledger cannot say how (t-47538).
         let costed = said["tasks"]
             .as_array()
-            .and_then(|rows| rows.iter().find(|one| one["stage"] == "reported"))
-            .expect("a reported row");
+            .and_then(|rows| rows.iter().find(|one| one["stage"] == "unknown"))
+            .expect("a finished row");
         assert_eq!(costed["cost"]["attempts"], 7, "{costed}");
         assert!(
             costed["cost"]["generation"]["sessionsKnown"].is_u64(),
@@ -1929,9 +1961,53 @@ mod tests {
                 22,
             )
             .expect("the worker's report");
+        /* Reported and merged by the roads a report and a review take (t-47538): a worker hands its
+         * head in, and the merged one's review names that attempt and that head — a coordinator's
+         * record naming no source it read is not believed as merged. */
+        let handed = |ledger: &mut Ledger, id: &str, pane: &str, head: &str, at: i64| {
+            let started = ledger
+                .start_worker(&run, "claude", ("team-desk", pane), Some(id), at)
+                .expect("a worker carries it");
+            ledger
+                .post(
+                    &run,
+                    Draft {
+                        from: worker_address(&started.worker),
+                        to: ledger.run(&run).expect("the run").address(),
+                        kind: MessageKind::WorkerDone,
+                        body: Text::from(format!(r#"{{"ok":true,"head":"{head}"}}"#)),
+                        subject: Text::default(),
+                        priority: Priority::Normal,
+                        payload: Text::default(),
+                        thread: None,
+                        task: Some(id.to_string()),
+                        dispatch: started.dispatch.clone(),
+                    },
+                    at + 1,
+                )
+                .expect("the report");
+            started.dispatch.expect("an attempt")
+        };
+        handed(&mut ledger, &reported, "%4", "1234567", 23);
+        let landed = handed(&mut ledger, &merged, "%5", "89abcde", 25);
+        ledger
+            .update_task(
+                &run,
+                &merged,
+                None,
+                Some(r#"{"verified":true,"mergeHead":"89abcde"}"#.to_string()),
+                ResultAuthor::Coordinator {
+                    seat: "team-desk/%1".to_string(),
+                    generation: Some(1),
+                    attempt: Some(landed),
+                    source: Some("89abcde".to_string()),
+                    completed_ms: None,
+                    verified_ms: None,
+                },
+                27,
+            )
+            .expect("a review");
         for (id, status, result) in [
-            (&reported, TaskStatus::Completed, "{}"),
-            (&merged, TaskStatus::Completed, r#"{"merged":true}"#),
             (&failed, TaskStatus::Failed, ""),
             (&held, TaskStatus::Blocked, ""),
         ] {
@@ -2031,12 +2107,16 @@ mod tests {
                 ("ready", 1),
                 ("dispatched", 1),
                 ("reported", 2),
+                ("verified", 0),
                 ("merged", 1),
+                ("deployed", 0),
                 ("gate", 1),
                 ("blocked", 2),
+                ("stale", 0),
                 ("failed", 1),
                 ("unreviewable", 0),
                 ("nothing_to_land", 0),
+                ("unknown", 0),
                 ("closed", 1),
             ]
         );
@@ -2521,14 +2601,15 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].created_ms <= pair[1].created_ms)
         );
-        let reported: Vec<&DeskTask> = desk
+        // Completed with no attempt: an ending the ledger cannot read further (t-47538).
+        let finished: Vec<&DeskTask> = desk
             .tasks
             .iter()
-            .filter(|one| one.stage == "reported")
+            .filter(|one| one.stage == "unknown")
             .collect();
-        assert_eq!(count("reported"), Some(10));
+        assert_eq!(count("unknown"), Some(10));
         assert!(
-            reported
+            finished
                 .windows(2)
                 .all(|pair| pair[0].created_ms >= pair[1].created_ms)
         );

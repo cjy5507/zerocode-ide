@@ -3799,10 +3799,10 @@ function worktreeLedgerMerged(path) {
   for (const tab of tabs) {
     if (tab.kind !== "term" || tab.worktree !== path) continue;
     for (const term of paneLeaves(tab.layout)) {
-      if (paneLedger.get(term)?.review?.merged) return true;
+      if (ledgerLandingStage(paneLedger.get(term)) === "landed") return true;
     }
   }
-  return checkoutLedger.get(checkoutKey(path))?.review?.merged === true;
+  return ledgerLandingStage(checkoutLedger.get(checkoutKey(path))) === "landed";
 }
 
 /* The part of a landing that moves the rows: a change of it rebuilds them. The

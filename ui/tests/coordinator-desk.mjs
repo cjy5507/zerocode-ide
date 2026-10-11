@@ -92,6 +92,8 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
         ? { verified: false, merged: false, deployed: false, written: false,
           claimed_verified: true, claimed_merged: true, claimed_deployed: false, author: "worker" }
         : { verified: false, merged: false, deployed: false, written: false },
+      progress: n === 1 ? { stage: "report_only", claimed: "merged", attempt: `dp-${n}` }
+        : word === "idle" ? { stage: "report_only", attempt: `dp-${n}` } : { stage: "working", attempt: `dp-${n}` },
       term: seated ? term : null, at: now - (40 + n) * minute,
       model: models[(n - 1) % models.length], effort: n % 2 ? "max" : "xhigh", pane: `%${n}`,
       asking: word === "asking",
@@ -150,10 +152,18 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
   }
   /* The run's tasks by the pipeline's own stage words, sixty by default. */
   const stages = [
-    ["pending", 6], ["ready", 20], ["dispatched", 5], ["reported", 6],
-    ["merged", 18], ["gate", 2], ["blocked", 2], ["failed", 1], ["unreviewable", 0], ["nothing_to_land", 0],
-    ["closed", 0],
+    ["pending", 6], ["ready", 20], ["dispatched", 5], ["reported", 6], ["verified", 0],
+    ["merged", 18], ["deployed", 0], ["gate", 2], ["blocked", 2], ["stale", 0], ["failed", 1], ["unreviewable", 0],
+    ["nothing_to_land", 0], ["unknown", 0], ["closed", 0],
   ];
+  /* Where each task's work stands, as the desk row carries the ledger's reading (`progress`, t-47538). */
+  const head = (n) => n.toString(16).padStart(7, "0").repeat(6).slice(0, 40);
+  const progressOf = (stage, n) => stage === "reported"
+    ? { stage: "report_only", attempt: `dp-${100 + n}`, source: head(n), next: `zerocode-orc worktree-evidence --worker w-${100 + n}` }
+    : stage === "merged" ? { stage: "merged", attempt: `dp-${100 + n}`, source: head(n), merge_head: head(n + 1) }
+    : stage === "failed" ? { stage: "failed", attempt: `dp-${100 + n}`, next: `zerocode-orc worker-transcript --worker w-${100 + n}` }
+    : stage === "dispatched" ? { stage: "working", attempt: `dp-${100 + n}` }
+    : { stage: "unknown" };
   const total = stages.reduce((sum, [, count]) => sum + count, 0);
   /* What a finished task cost, as `task_cost` hands it over (t-9470): one in
    * four ran on an agent with no usage ledger, one in five is still open to
@@ -189,6 +199,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
         blocked_by: stage === "blocked" ? [`t-${100 + at - 1}`] : [],
         created_ms: now - (tasks - at) * 3 * minute,
         cost: stage === "reported" || stage === "merged" ? cost(at) : null,
+        progress: progressOf(stage, at),
         writing: stage === "reported" ? writing(at) : null,
         ...(stage === "reported" && keptOf(at) ? { kept: keptOf(at) } : {}),
       });
@@ -678,27 +689,34 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     /* ---- 검토 기록을 받을 수 없는 일 (t-19328): 워커 줄도 검증 대기라 하지 않는다 ---- */
     const restate = (change) => page.evaluate(async (changed) => {
       const w2 = window.__LEDGER__.find((row) => row.worker === "w-2");
-      // The row as an older ledger sent it carries no such key at all.
-      const { unreviewable, ...rest } = w2.review ?? {};
-      w2.review = changed.unreviewable ? { ...rest, unreviewable: true } : rest;
+      const { unreviewable, superseded_by, author, attempt, source, ...rest } = w2.review ?? {};
+      w2.review = changed.stage === "unreviewable" ? { ...rest, unreviewable: true }
+        : changed.stage === "stale" ? { ...rest, author: "coordinator", attempt: "dp-old", source: "1111111", superseded_by: "dp-2" }
+        : rest;
+      w2.progress = changed.stage === "stale" ? { stage: "stale", attempt: "dp-2", reviewed: "1111111" }
+        : changed.stage ? { stage: changed.stage, attempt: "dp-2" } : undefined;
       w2.failed = changed.failed === true;
       refreshDeskLedger();
       await new Promise((done) => setTimeout(done, 0));
       return true;
     }, change);
-    await restate({ unreviewable: true });
+    await restate({ stage: "unreviewable" });
     await settleMail();
     const unrecorded = await readWorkers();
-    await restate({ unreviewable: true, failed: true });
+    await restate({ stage: "unreviewable", failed: true });
     await settleMail();
     const unrecordedAfterFailure = await readWorkers();
     await restate({});
     await settleMail();
-    const older = await readWorkers();
-    ok("a worker whose task was done by hand with nothing handed in reads 완료 — 검토 기록 없음, never 검증 대기 and never 실패; a row from an older ledger, without the fact, reads as it did",
-      unrecorded.rows["w-2"].task === "데스크 과업 2 · 완료 — 검토 기록 없음" &&
-      unrecordedAfterFailure.rows["w-2"].task === "데스크 과업 2 · 완료 — 검토 기록 없음" &&
-      older.rows["w-2"].task === "데스크 과업 2 · 검증 대기", JSON.stringify({ unrecorded, unrecordedAfterFailure, older }));
+    const unread = await readWorkers();
+    await restate({ stage: "report_only" });
+    await settleMail();
+    const reportedAgain = await readWorkers();
+    ok("a worker whose task was done by hand with nothing handed in reads 종료 — 검토 자료 없음, never 검증 대기 and never 실패; a row the ledger sent no reading for says no stage at all",
+      unrecorded.rows["w-2"].task === "데스크 과업 2 · 종료 — 검토 자료 없음" &&
+      unrecordedAfterFailure.rows["w-2"].task === "데스크 과업 2 · 종료 — 검토 자료 없음" &&
+      unread.rows["w-2"].task === "데스크 과업 2" && reportedAgain.rows["w-2"].task === "데스크 과업 2 · 검증 대기",
+      JSON.stringify({ unrecorded, unrecordedAfterFailure, unread, reportedAgain }));
 
     /* ---- 옛 커밋을 가리키는 검토 (t-47538): 워커 줄이 그냥 검증 대기라 하지 않는다 ---- */
     const heldW2 = await page.evaluate(async () => {
@@ -749,8 +767,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last",
       pipeline.shown && pipeline.head === "과업 흐름 · 60" &&
       pipeline.chips.map((chip) => chip.split(":").slice(0, 2).join(":")).join() ===
-        "pending:6,ready:20,dispatched:5,reported:6,merged:18,gate:2,blocked:2,failed:1,unreviewable:0,nothing_to_land:0,closed:0" &&
-      pipeline.words.join() === "선행 대기,준비,진행,보고됨,병합,게이트,막힘,실패,완료 — 검토 기록 없음,완료 — 착지할 것 없음,닫힘",
+        "pending:6,ready:20,dispatched:5,reported:6,verified:0,merged:18,deployed:0,gate:2,blocked:2,stale:0,failed:1,unreviewable:0,nothing_to_land:0,unknown:0,closed:0" &&
+      pipeline.words.join() === "선행 대기,준비,진행,보고됨,검증됨,병합,배포됨,게이트,막힘,다시 검토 대기,실패,종료 — 검토 자료 없음,완료 — 착지할 것 없음,상태 모름,닫힘",
       JSON.stringify(pipeline));
     ok("a stuck stage with tasks wears its signal and opens first, naming the gate and its question",
       pipeline.chips.includes("gate:2:true:is-wait") && pipeline.chips.includes("failed:1:false:is-halt") &&
@@ -822,7 +840,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const noRecordChip = await page.$('#board-view [data-desk-block="pipeline"] [data-stage="unreviewable"]');
     if (noRecordChip) await noRecordChip.click();
     const noRecordStage = await readPipeline();
-    ok("work nothing can review stands in its own stage — 완료 — 검토 기록 없음, not 보고됨 (검증 대기), not counted as open, in no signal tone — and its rows say what the task cost",
+    ok("work nothing can review stands in its own stage — 종료 — 검토 자료 없음, not 보고됨 (검증 대기), not counted as open, in no signal tone — and its rows say what the task cost",
       noRecordStage.head === "과업 흐름 · 84" && noRecordStage.chips.includes("unreviewable:3:true:") &&
       noRecordStage.chips.includes("reported:6:false:is-flow") && noRecordStage.chips.includes("closed:3:false:") &&
       noRecordStage.rows.length === 3 && noRecordStage.rows.every((row) => row.note === ""),
