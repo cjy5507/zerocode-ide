@@ -258,6 +258,9 @@ async function refreshPaneLedger() {
         // worker handed in ride along, so a row can say which agent did the work and what it handed in.
         asking: row?.asking === true,
         wall: row?.wall ?? null,
+        // The chip a walled worker wears and what its two buttons may do (t-39771): the ledger's own
+        // reading (`wall_chip_for`), null when the wall lifted or the worker was moved off it.
+        quotaWall: row?.quota_wall ?? null,
         model: row?.model ?? null,
         handed_in: row?.handed_in ?? null,
         at: Number(row?.at) || 0,
@@ -332,7 +335,7 @@ function paneLedgerSaid(map) {
       `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${f.failed ? 1 : 0}` +
       `:${JSON.stringify(f.review)}:${JSON.stringify(f.closed)}:${f.review_since_ms ?? ""}` +
       `:${f.asking ? 1 : 0}:${f.wall?.stands_until_ms ?? ""}:${f.handed_in ?? ""}:${f.model ?? ""}` +
-      `:${f.worker}:${f.takenOver ? 1 : 0}`)
+      `:${f.worker}:${f.takenOver ? 1 : 0}:${JSON.stringify(f.quotaWall)}`)
     .join(",");
 }
 
@@ -10592,6 +10595,20 @@ function worktreeWaitingSince(path) {
   }
   read(checkoutLedger.get(checkoutKey(path)));
   return found;
+}
+
+/* The seat of one checkout that stands at its quota wall now (t-39771), read the
+ * way `worktreeWaitingSince` reads the checkout's seats: its terminal, its
+ * worker and the chip the ledger laid on it. */
+function worktreeQuotaWall(path, now) {
+  for (const tab of tabs) {
+    if (tab.kind !== "term" || tab.worktree !== path) continue;
+    for (const term of paneLeaves(tab.layout)) {
+      const facts = paneLedger.get(term);
+      if (quotaWallStanding(facts?.quotaWall, now)) return { term, worker: facts.worker, chip: facts.quotaWall };
+    }
+  }
+  return null;
 }
 
 /* Whether this row IS the pane on stage — Orca's `isFocusedPane`, which fills
