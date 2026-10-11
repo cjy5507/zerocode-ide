@@ -317,6 +317,124 @@ fn a_review_of_a_report_offers_no_landing_check() {
     assert_eq!((whole.stage, whole.next), (WorkStage::Verified, None));
 }
 
+/// A shown command names the run its work is in, so a caller bound to another run reads that work
+/// and not its own run's.
+#[test]
+fn a_shown_command_names_its_run_so_a_caller_bound_elsewhere_reads_the_right_work() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name first");
+    let first = bench.ledger.runs()[0].id.clone();
+    let task = task_of(&mut bench, "evidence");
+    let (_, pane, _) = attempt_on(&mut bench, &task);
+    bench.json_at(
+        &pane,
+        &format!("send --type worker_done --body {{\"ok\":true,\"head\":\"{HEAD_A}\"}}"),
+    );
+    assert!(
+        bench
+            .ledger
+            .worker_seated(("team-1", &pane), "/checkouts/first")
+    );
+    let next = {
+        let run = &bench.ledger.runs()[0];
+        run.progress_of(run.task(&task).expect("the task"))
+            .next
+            .expect("a command to read the work with")
+    };
+    bench.json("run-create --name second");
+    assert!(next.contains(&format!("--run {first}")), "{next}");
+    let read = bench.run(next.strip_prefix("zerocode-orc ").expect("the program"));
+    assert_eq!(read.reply.exit_code, 0, "{}", read.reply.stderr);
+    assert_eq!(
+        read.effect,
+        Effect::WorktreeEvidence {
+            checkout: Some("/checkouts/first".to_string())
+        }
+    );
+}
+
+/// An older attempt never wears the review of a newer one: once a retry handed in and was verified,
+/// the first attempt's own row says it was superseded, with its own attempt and commit and nothing to
+/// run — whether the retry handed in another commit or the same one — and a first attempt that failed
+/// still says it failed.
+#[test]
+fn an_older_attempt_never_wears_the_review_of_a_newer_one() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name attempts");
+    let retried = |bench: &mut Bench, spec: &str, first_body: &str, second_head: &str| {
+        let task = task_of(bench, spec);
+        let (_, pane, first) = attempt_on(bench, &task);
+        bench.json_at(
+            &pane,
+            &format!("send --type worker_done --body {first_body}"),
+        );
+        if bench.ledger.runs()[0].task(&task).map(|held| held.status) != Some(TaskStatus::Ready) {
+            bench.json(&format!("task-update --task {task} --status ready"));
+        }
+        let (_, pane, second) = attempt_on(bench, &task);
+        bench.json_at(
+            &pane,
+            &format!("send --type worker_done --body {{\"ok\":true,\"head\":\"{second_head}\"}}"),
+        );
+        review(bench, &task, "{\"verified\":true}", &second, second_head);
+        (task, first, second)
+    };
+    let cases = [
+        (
+            "another-head",
+            format!("{{\"ok\":true,\"head\":\"{HEAD_A}\"}}"),
+            HEAD_B,
+            "superseded",
+        ),
+        (
+            "same-head",
+            format!("{{\"ok\":true,\"head\":\"{HEAD_A}\"}}"),
+            HEAD_A,
+            "superseded",
+        ),
+        (
+            "failed-first",
+            "{\"ok\":false}".to_string(),
+            HEAD_B,
+            "failed",
+        ),
+    ];
+    for (spec, first_body, second_head, said) in cases {
+        let (task, first, second) = retried(&mut bench, spec, &first_body, second_head);
+        let (old, whole) = read(&bench, &task, &first);
+        let (new, _) = read(&bench, &task, &second);
+        assert_eq!(old.stage.word(), said, "{spec}: {old:?}");
+        assert_eq!(
+            old.attempt.as_deref(),
+            Some(first.as_str()),
+            "{spec}: {old:?}"
+        );
+        assert_eq!(old.next, None, "{spec}: {old:?}");
+        assert_eq!(old.merge_head, None, "{spec}: {old:?}");
+        if said == "superseded" {
+            assert_eq!(old.source.as_deref(), Some(HEAD_A), "{spec}: {old:?}");
+        }
+        assert_eq!(new.stage.word(), "verified", "{spec}: {new:?}");
+        assert_eq!(whole.stage.word(), "verified", "{spec}: {whole:?}");
+        assert_eq!(new.source.as_deref(), Some(second_head), "{spec}: {new:?}");
+    }
+}
+
+/// A coordinator's result that carries no review — a note — is not a review of an older commit: the
+/// report it sits beside still waits for one.
+#[test]
+fn a_coordinators_note_that_is_no_review_leaves_the_report_waiting() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name note");
+    let (task, _, dispatch) = handed_in(&mut bench, "noted", HEAD_A, "");
+    bench.json(&format!(
+        "task-update --task {task} --result {{\"note\":\"later\"}}"
+    ));
+    let (row, whole) = read(&bench, &task, &dispatch);
+    assert_eq!(row.stage.word(), "report_only", "{row:?}");
+    assert_eq!(whole.stage.word(), "report_only", "{whole:?}");
+}
+
 /// The wire names are the window's keys: one per stage, none shared.
 #[test]
 fn every_stage_has_its_own_wire_name() {
