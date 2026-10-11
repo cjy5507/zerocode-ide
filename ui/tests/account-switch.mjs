@@ -14,6 +14,10 @@
 //   3. the window never moves a pane itself: the backend's answer names the
 //      one walled pane it moved, and the window's launch/close counters
 //      stay at zero.
+//   4. (t-46106) every Claude pane says which account it runs as and that
+//      account's share — the bar the default's, each sidebar row its own
+//      login's — and a pane on another account says where it stands; a
+//      switch's toast says what became of the panes in four counts.
 export async function testAccountSwitch(browser, origin, standBackend, ok) {
   const page = await browser.newPage();
   await standBackend(page);
@@ -66,7 +70,7 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
     return said;
   }, accounts);
   ok(
-    "a manual switch keeps working panes too: seven claude panes, a switch, and not one launch or close from the window",
+    "a manual switch moves no pane from the window: seven claude panes, a switch, and not one launch or close from the window — following the default is the backend's road (t-46106)",
     manual.launches === 0 && manual.closed === 0 && manual.active === "b-fixture" &&
       manual.queue === "undefined" && manual.panes === 7,
     JSON.stringify(manual),
@@ -299,8 +303,11 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
   // withdrawn when C arrives; C's own button applies C, once. A mode change
   // retires C's button the same way.
   const bound = await page.evaluate(async ({ b, c, off }) => {
+    // A proposal's notice — not a switch's receipt, whose one button opens the
+    // accounts and applies nothing (t-46106).
     const noticeOf = (who) => [...document.querySelectorAll(".toast")]
-      .find((one) => one.querySelector(".toast-action") && one.textContent.includes(who)) ?? null;
+      .find((one) => one.querySelector(".toast-action") && !one.dataset.switchReceipt &&
+        one.textContent.includes(who)) ?? null;
     window.__SWITCH_APPLIES__ = [];
     const errors = [];
     const showing = window.showError;
@@ -444,6 +451,163 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
     unrecorded.errors.length === 2 &&
       unrecorded.errors.every((said) => said.includes("NotDurable")),
     JSON.stringify(unrecorded),
+  );
+
+  // ---- 7. every pane says its account and share (t-46106) ----------------
+  // The bar names the default by its short id; each Claude pane's row names
+  // its own login's account and share; a pane left on the old account says
+  // where it stands — the person's pane in a person's hands, a working one
+  // moving at its turn's end. A pane the plan does not count (not Claude's)
+  // wears nothing.
+  const NEW = "acct-fixture-0554";
+  const OLD = "acct-fixture-6252";
+  const census = (panes, active = NEW) => ({
+    accounts: [
+      { id: NEW, organization_type: "claude_team", active: active === NEW,
+        usage: { provider: "claude", session: { used_percent: 12, window_minutes: 300, resets_at: Date.now() + 3_600_000 }, weekly: { used_percent: 25, window_minutes: 10080, resets_at: Date.now() + 6 * 86_400_000 }, fable_weekly: null, updated_at: Date.now(), error: null, status: "ok", account: NEW },
+        fetching: false },
+      { id: OLD, organization_type: "claude_max", active: active === OLD,
+        usage: { provider: "claude", session: { used_percent: 98, window_minutes: 300, resets_at: Date.now() + 3_600_000 }, weekly: { used_percent: 60, window_minutes: 10080, resets_at: Date.now() + 6 * 86_400_000 }, fable_weekly: null, updated_at: Date.now(), error: null, status: "ok", account: OLD },
+        fetching: false },
+    ],
+    plan: {
+      mode: "auto", active, decision: { kind: "stay", why: "cooldown" }, landing: active,
+      fitness: [
+        { id: NEW, room_percent: 75, unfit: null, next_reset_ms: null },
+        { id: OLD, room_percent: 0, unfit: "blocked", next_reset_ms: Date.now() + 3_600_000 },
+      ],
+      next: null, walled: [], panes, last_switch_ms: Date.now() - 60_000,
+      cooldown_until_ms: Date.now() + 4 * 60_000, failed_recently: [], token: `tok-census-${panes.length}`,
+      now_ms: Date.now(),
+    },
+    sent: 0, fetching: false,
+  });
+  const shown = await page.evaluate(async ({ report, NEW }) => {
+    window.__ACCOUNTS__ = { ...window.__ACCOUNTS__, active: NEW };
+    accountReport = window.__ACCOUNTS__;
+    window.__ACCOUNT_USAGE__ = report;
+    window.__SWITCH_APPLIES__ = [];
+    await refreshClaudeAccountUsage(false);
+    claudeUsage = { ...report.accounts[0].usage };
+    paintUsageSegments();
+    const bar = document.getElementById("sb-claude-account");
+    const chipOf = (term, agent = "claude") => makeAgentRow({
+      term, state: "done", agent, depth: 0, tab: { worktree: null, id: `t-${term}` },
+    }).querySelector(".wt-agent-account");
+    const said = (term, agent) => {
+      const chip = chipOf(term, agent);
+      return chip ? { words: chip.textContent, tip: chip.dataset.tip ?? "" } : null;
+    };
+    const live = makeAgentRow({
+      term: 4602, state: "working", agent: "claude", depth: 0, tab: { worktree: null, id: "t-4602" },
+    }).querySelector(".wt-agent-meta .wt-agent-account");
+    return {
+      bar: bar.textContent, barShown: !bar.hidden, barTip: bar.dataset.tip ?? "",
+      current: said(4601), turnEnd: said(4602), person: said(4603), left: said(4604),
+      notCounted: said(4609, "codex"), liveInMeta: Boolean(live),
+      next: document.getElementById("sb-claude-next").textContent,
+      applies: window.__SWITCH_APPLIES__.length,
+    };
+  }, {
+    report: census([
+      { term: 4601, worker: "w-1", account: NEW, stance: "current" },
+      { term: 4602, worker: "w-2", account: OLD, stance: "turn_end" },
+      { term: 4603, worker: "w-3", account: OLD, stance: "person" },
+      { term: 4604, worker: null, account: null, stance: "left" },
+    ]),
+    NEW,
+  });
+  ok(
+    "the bar names the default account by its short id, each Claude pane's row says its own login's account and share, a pane on the old account says where it stands — the person's in a person's hands, a working one at its turn's end — and every chip explains itself on hover",
+    shown.barShown && shown.bar === "a…0554" && shown.barTip.includes(NEW) &&
+      // The fullest window is the share a pane is held to — the week's 25%,
+      // over the session's 12%, as the bar's own figure picks.
+      shown.current?.words === "a…0554 25%" && shown.current.tip.includes(NEW) &&
+      shown.turnEnd?.words === "옛 계정 a…6252 98% — 턴 끝에 옮김" && shown.turnEnd.tip.includes(OLD) &&
+      shown.person?.words === "옛 계정 a…6252 98% — 사람이 쓰는 중" && shown.person.tip.length > 0 &&
+      shown.left?.words === "계정 모름" && shown.left.tip.length > 0 &&
+      shown.notCounted === null && shown.liveInMeta &&
+      /옛 계정 판 2|old accounts 2/.test(shown.next) && shown.applies === 0,
+    JSON.stringify(shown),
+  );
+
+  // Two accounts whose ids end alike are told apart: the short name grows
+  // until it is one account's alone.
+  const alike = await page.evaluate(() => {
+    window.__ACCOUNTS__ = {
+      ...window.__ACCOUNTS__,
+      accounts: [{ id: "acct-one-0554" }, { id: "acct-two-0554" }],
+    };
+    accountReport = window.__ACCOUNTS__;
+    accountUsageReport = null;
+    return [accountShortId("acct-one-0554"), accountShortId("acct-two-0554"), accountShortId("a-1")];
+  });
+  ok(
+    "two account ids that end alike get short names that still tell them apart, and a short id is shown whole",
+    alike[0] !== alike[1] && alike[0].startsWith("a…") && alike[0].endsWith("0554") && alike[2] === "a-1",
+    JSON.stringify(alike),
+  );
+
+  // ---- 8. a switch's receipt says its four counts (t-46106) ---------------
+  // The beat's switch and the person's pick say the same thing: what moved,
+  // what moves at its turn's end, what is the person's, what is left — the
+  // meaning on hover, and one real button that opens the accounts.
+  const receipt = await page.evaluate(async ({ report, accounts, NEW, OLD }) => {
+    const receipts = () => [...document.querySelectorAll(".toast[data-switch-receipt]")];
+    for (const one of receipts()) one.remove();
+    window.__ACCOUNTS__ = { ...accounts, accounts: [...accounts.accounts, { id: NEW }, { id: OLD }], active: OLD };
+    accountReport = window.__ACCOUNTS__;
+    window.__ACCOUNT_USAGE__ = report;
+    window.__SWITCH_APPLIES__ = [];
+    window.__SWITCH_APPLIED__ = {
+      key: "switch-1", from: OLD, to: NEW, switched_default: true, default_ms: 3,
+      panes: [], census: { moved: 5, at_turn_end: 2, person: 1, left: 0 }, receipts: 6, total_ms: 40,
+    };
+    await refreshClaudeAccountUsage(false);
+    await new Promise((done) => setTimeout(done, 80));
+    const beat = receipts().at(-1) ?? null;
+    const button = beat?.querySelector(".toast-action") ?? null;
+    const said = {
+      words: beat?.querySelector(".toast-text")?.textContent ?? "",
+      tip: beat?.dataset.tip ?? "",
+      button: button?.tagName ?? null,
+      buttonType: button?.getAttribute("type") ?? null,
+      buttonTip: button?.dataset.tip ?? "",
+    };
+    button?.click();
+    await new Promise((done) => setTimeout(done, 80));
+    said.opened = !document.getElementById("settings-view")?.hidden && settingsPane === "provider-accounts";
+    // The person's pick says the same four counts, out of the pick's answer.
+    for (const one of receipts()) one.remove();
+    window.__ACCOUNTS__ = { ...window.__ACCOUNTS__, active: OLD };
+    accountReport = window.__ACCOUNTS__;
+    const picked = window.__ACCOUNTS__;
+    window.__ACCOUNTS__ = { ...picked, switched: { moved: 2, at_turn_end: 1, person: 0, left: 1 } };
+    accountReport = { ...picked };
+    await pickClaudeAccount(NEW);
+    const pick = receipts().at(-1) ?? null;
+    said.pick = pick?.querySelector(".toast-text")?.textContent ?? "";
+    delete window.__SWITCH_APPLIED__;
+    return said;
+  }, {
+    report: (() => {
+      const switching = census([], OLD);
+      switching.plan.decision = { kind: "switch", from: OLD, to: NEW, reason: { near_limit: { window: "session", used_percent: 92 } } };
+      switching.plan.landing = NEW;
+      switching.plan.token = "tok-census-switch";
+      return switching;
+    })(),
+    accounts,
+    NEW,
+    OLD,
+  });
+  ok(
+    "a switch's receipt says what became of the panes in four counts — moved, at their turn's end, the person's, left — with what each means on hover and a real button that opens the accounts; the person's pick says the same",
+    /옮긴 판 5 · 턴 끝에 옮길 판 2 · 사람 판 1 · 남은 판 0/.test(receipt.words) &&
+      receipt.tip.includes("턴 끝에 옮길 판") && receipt.button === "BUTTON" && receipt.buttonType === "button" &&
+      receipt.buttonTip.length > 0 && receipt.opened &&
+      /옮긴 판 2 · 턴 끝에 옮길 판 1 · 사람 판 0 · 남은 판 1/.test(receipt.pick),
+    JSON.stringify(receipt),
   );
 
   await page.close();

@@ -1604,6 +1604,7 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 
 .wt-agent.is-here .wt-agent-said,
 .wt-agent.is-here .wt-agent-model,
+.wt-agent.is-here .wt-agent-account,
 .wt-agent.is-here .wt-agent-when {
   color: color-mix(in srgb, var(--ink-chalk) 70%, transparent);
 }
@@ -1851,6 +1852,7 @@ svg.wt-agent-dot {
  * (the chip's 96px ceiling is the one-line row's, where it competes with the
  * words for one truncating span). */
 .wt-agent-meta .wt-agent-model,
+.wt-agent-meta .wt-agent-account,
 .wt-agent-meta .wt-agent-said {
   display: inline;
   max-width: none;
@@ -17164,6 +17166,20 @@ button.helper-sib:hover {
   white-space: nowrap;
 }
 
+/* The account the pane's login is, and its share (t-46106) — the model
+ * chip's own type beside it: muted mono, one line, never squeezing the
+ * words out of the row. */
+.wt-agent-account {
+  flex: none;
+  max-width: 160px;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  color: var(--ink-mist);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* + 버튼의 팔레트 — Orca's TabBarCreateEntry (1-fs), measured: a magnifier
  * leading the search row (`-mx-1 px-3`, input h-9 text-xs, hairline under
  * the whole row), rows `h-6 rounded-[7px] gap-1.5 text-[11px]` beneath with
@@ -21384,6 +21400,14 @@ button.helper-sib:hover {
 /* The next account's word beside the selected one's figure: dimmer, so the
  * selected account's number stays the figure a glance reads. */
 .sb-claude-next {
+  opacity: 0.7;
+}
+
+/* Whose the figure is — the default account's short id before it (t-46106):
+ * a mono word, dim like the next account's, so the number stays what a
+ * glance reads. */
+.sb-claude-account {
+  font-family: var(--font-mono);
   opacity: 0.7;
 }
 

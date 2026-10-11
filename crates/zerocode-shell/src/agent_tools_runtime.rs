@@ -689,6 +689,14 @@ pub(super) fn shell_in_front_of(state: &AppState, term: TermId) -> bool {
     front == Some(true)
 }
 
+/// Whether `term`'s last turn ended at rest with its agent in front, as the
+/// mail pointer reads it ([`crate::orchestration::turn_rests`]), and no
+/// person's words wait on its line — the two halves of "between turns" that
+/// the hook card's `done` does not say (t-46106).
+fn turn_rests_on_an_empty_line(host: &dyn agent_teams::Host, term: TermId) -> bool {
+    crate::orchestration::turn_rests(host, term) && !crate::human_input::line_of(term).0
+}
+
 impl TeamWindow {
     /// Hand `observe` a quiet worker pane's screen, read under the activity
     /// locks that can invalidate it — the fence a handover's stop is judged
@@ -829,6 +837,57 @@ impl agent_teams::Host for TeamWindow {
             .pane_accounts()
             .get(&term)
             .cloned()
+    }
+
+    /// Every Claude pane's recorded login (t-46106): the login records, read
+    /// once, kept for the panes whose launch record names `claude`.
+    fn claude_pane_logins(&self) -> Vec<(TermId, agent_teams::PaneLogin)> {
+        let state = self.app.state::<AppState>();
+        let logins: Vec<(TermId, agent_teams::PaneLogin)> = state
+            .pane_accounts()
+            .iter()
+            .map(|(term, login)| (*term, login.clone()))
+            .collect();
+        let agents = state.agent_terms();
+        logins
+            .into_iter()
+            .filter(|(term, _)| {
+                agents.get(term).copied() == Some(zerocode_core::AgentKind::Claude.slug())
+            })
+            .collect()
+    }
+
+    fn between_turns(&self, term: TermId) -> bool {
+        let state = self.app.state::<AppState>();
+        let done = state
+            .pane_states()
+            .get(&term)
+            .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done);
+        done && turn_rests_on_an_empty_line(self, term)
+    }
+
+    /// The hook's word held still while it is read and while `commit` runs:
+    /// a report that the pane took a prompt or a tool waits on the same lock
+    /// the hook road writes `pane_states` under (t-46106).
+    fn with_between_turns_observation(&self, term: TermId, commit: &mut dyn FnMut()) {
+        let state = self.app.state::<AppState>();
+        let states = state.pane_states();
+        let done = states
+            .get(&term)
+            .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done);
+        if done && turn_rests_on_an_empty_line(self, term) {
+            commit();
+        }
+        drop(states);
+    }
+
+    fn follow_account_switch(&self, now_ms: i64) {
+        let state = self.app.state::<AppState>();
+        crate::account_switch::follow_with(
+            self,
+            &crate::account_switch::WindowDoors { state: &state },
+            now_ms,
+        );
     }
 
     /// The checkout this window put the pane in, read off the same two

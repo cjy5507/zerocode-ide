@@ -1209,6 +1209,9 @@ function paintProviderGlyph(provider) {
 
 function paintProviderSegment(provider) {
   paintProviderGlyph(provider);
+  // Claude's figure says whose it is: the default account's short id before
+  // it, whatever the figure says now (t-46106).
+  if (provider.id === "claude" && typeof paintClaudeBarAccount === "function") paintClaudeBarAccount();
   const { usage, fetching } = provider.read();
   const state = usageRosterState(usage, fetching, providerSections(usage));
   const signedOut = state.kind === "sign-in";
@@ -4187,12 +4190,15 @@ document.body.append(toastLayer);
  *
  * `kind` is the role the message plays — "halt" for a failure, absent for a
  * plain report — and it selects a token rather than a colour. */
-function toast(words, kind = "", { action = null, sticky = false, aux = "" } = {}) {
+function toast(words, kind = "", { action = null, sticky = false, aux = "", tip = "" } = {}) {
   const said = String(words ?? "").trim();
   if (said === "") return null;
   const note = document.createElement("div");
   note.className = "toast";
   if (kind) note.dataset.kind = kind;
+  // `tip` is what the words mean, on hover — the switch receipt's four
+  // counts say theirs there (t-46106).
+  if (tip) note.dataset.tip = tip;
   // `aux` is a dim word after the sentence — the sha beside 「새 버전
   // {{version}}」 (t-3237) — inside the words' node, so the button is still
   // its own thing and the sentence is still read first.
@@ -4209,6 +4215,7 @@ function toast(words, kind = "", { action = null, sticky = false, aux = "" } = {
     button.type = "button";
     button.className = "btn toast-action";
     button.textContent = action.label;
+    if (action.tip) button.dataset.tip = action.tip;
     button.addEventListener("click", () => action.run());
     note.append(text, button);
   } else {

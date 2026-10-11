@@ -1096,6 +1096,38 @@ pub trait Host {
         self.pane_login(term).map(|held| held.account)
     }
 
+    /// Every Claude pane this window launched as a managed login, with that
+    /// login (t-46106) — what an account switch counts besides the workers
+    /// the ledger names: the person's own panes, which no worker holds.
+    /// Hosts that record no login hold none.
+    fn claude_pane_logins(&self) -> Vec<(u32, PaneLogin)> {
+        Vec::new()
+    }
+
+    /// Whether this pane is between turns now (t-46106): its last turn ended
+    /// at rest — not cut short by a person's hand, no work it left running,
+    /// no question parked in it — its agent is still in front, and no
+    /// person's words wait on its line. An account switch moves a pane like
+    /// that at once, and a pane at work at its turn's end. Hosts without
+    /// hook facts never claim it, so they move no pane that way.
+    fn between_turns(&self, _term: u32) -> bool {
+        false
+    }
+
+    /// [`Self::between_turns`], observed under the locks that can change the
+    /// answer — the fence an account switch rests a following worker in
+    /// (t-46106). Call `commit` at most once, only while the pane is between
+    /// turns, and keep the locks until it returns; implementations must not
+    /// call the actor or the team table. Hosts without such a fence never
+    /// commit.
+    fn with_between_turns_observation(&self, _term: u32, _commit: &mut dyn FnMut()) {}
+
+    /// Move one worker an account switch still owes a move to, now that its
+    /// turn has ended (t-46106) — on the beat, before the mail pointer can
+    /// start its next turn. The window's own host walks its switch journal;
+    /// other hosts owe nothing.
+    fn follow_account_switch(&self, _now_ms: i64) {}
+
     /// Publish a restored worker only after its durable seat has moved. Fake
     /// hosts need no renderer surface and therefore default to doing nothing.
     fn announce_reseated_worker(

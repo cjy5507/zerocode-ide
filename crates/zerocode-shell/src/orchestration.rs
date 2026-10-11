@@ -51,8 +51,8 @@ use zerocode_core::agent_teams::{Effect, capture_reply};
 use zerocode_core::launch::{LaunchOverride, join_command_line, launch_plan};
 use zerocode_core::orchestration::{
     CONVERSATION_FILE_GONE, Decided, Launcher, Ledger, LedgerProjectionV1, NO_SESSION_RECORDED,
-    RESEAT_GRACE_MS, RESUME_UNSUPPORTED, RebuildError, Restarted, VERBS, WAIT_SECONDS, Worker,
-    WorkerState,
+    RESEAT_GRACE_MS, RESUME_UNSUPPORTED, RebuildError, RestCause, Restarted, VERBS, WAIT_SECONDS,
+    Worker, WorkerState,
 };
 use zerocode_orchestrator::effect_journal::{
     BeginEffect, EffectPermit, EffectRequest, EffectSettlement, HostEffectFailure, HostEffectKind,
@@ -912,9 +912,11 @@ pub(crate) struct SwitchMark {
 /// roads that bring a sleeper back read them ([`reseat_nudge`] and the
 /// door's `wake_conversation`) and spend them once they may have reached a
 /// pane — and a window that restarts before that carries them on, like any
-/// word a sleeper is still owed. The switch's key marks this window's
-/// reseat of it.
-pub(crate) fn switch_rested(worker: &str, words: String, occasion: &str) {
+/// word a sleeper is still owed. A worker moved between turns is owed no
+/// words (t-46106): its turn had ended, and the note says so instead, so
+/// its resumed pane is at the same rest and its mail is pointed at as
+/// before. The switch's key marks this window's reseat of it.
+pub(crate) fn switch_rested(worker: &str, words: Option<String>, occasion: &str) {
     if let Some(root) = BLACKBOX.get() {
         restart_census::leave_switch_words(root, worker, words);
     }
@@ -1061,41 +1063,35 @@ pub(crate) fn held_by_an_unseen_exit(
         .find(|worker| !exit_hold_lifted(worker, seen)))
 }
 
-/// One Claude worker standing at its quota wall — as the ledger holds it
-/// (a live worker in its own seat, an open attempt, its newest
-/// `quota_walled` row still standing) AND as the window sees it now (its
-/// pane quiet, its own words at the wall, its account's number at the
-/// wall). The switch road moves these and nothing else.
+/// One live Claude worker in its own seat, with the terminal its seat
+/// resolves to — the list both of an account switch's moves are read from
+/// (t-46106): the walled workers ([`walled_claude_workers`]) and the ones
+/// that follow the default to another account. A worker the person took
+/// over is on it, and says so: a switch counts it and never moves it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct WalledWorker {
+pub(crate) struct ClaudeWorkerSeat {
     pub(crate) run: String,
     pub(crate) worker: String,
     pub(crate) team: String,
     pub(crate) pane: String,
     pub(crate) term: u32,
-    pub(crate) dispatch: String,
+    /// The open attempt it carries — `None` for a worker between attempts,
+    /// which no switch can move: its conversation belongs to no dispatch.
+    pub(crate) dispatch: Option<String>,
     pub(crate) generation: Option<u32>,
     pub(crate) checkout: Option<String>,
     /// The model the row says the worker runs — the summons' word, or the
     /// pane's own once observed.
     pub(crate) model: Option<String>,
+    pub(crate) taken_over: bool,
 }
 
-/// Every walled Claude worker right now, with the terminal its seat
-/// resolves to. Empty for a window with no durable runtime.
-///
-/// A standing row is where the list starts, not what it ends on (astra
-/// R2): the row says the two witnesses met ONCE, and a worker that went
-/// back to work after it keeps the row until the wall's time runs out.
-/// So each is asked the stall sweep's own two questions again, now — the
-/// pane quiet ([`Host::quiet_since`]), its words at the wall
-/// ([`Host::quota_wall_marker`]), the gauge of the account the pane runs
-/// as at the wall ([`quota_wall_witness`]) — and a worker that no longer
-/// answers both is not on the list, nor a trigger for the default. The
-/// rest itself asks once more, at the fence ([`rest_worker_for_switch`]).
-///
-/// [`quota_wall_witness`]: zerocode_core::orchestration::quota_wall_witness
-pub(crate) fn walled_claude_workers(host: &dyn Host, now_ms: i64) -> Vec<WalledWorker> {
+/// Every [`ClaudeWorkerSeat`] right now that `keep` keeps — asked with the
+/// run and the row it was read off. Empty for a window with no durable
+/// runtime.
+fn claude_worker_seats(
+    mut keep: impl FnMut(&zerocode_core::orchestration::Run, &Worker, &ClaudeWorkerSeat) -> bool,
+) -> Vec<ClaudeWorkerSeat> {
     let Some(held) = runtime() else {
         return Vec::new();
     };
@@ -1108,51 +1104,90 @@ pub(crate) fn walled_claude_workers(host: &dyn Host, now_ms: i64) -> Vec<WalledW
     let teams = crate::agent_teams::teams();
     let seats = index_team_seats(&teams);
     drop(teams);
+    let mut kept = Vec::new();
+    for run in ledger.runs() {
+        for worker in &run.workers {
+            if worker.agent != zerocode_core::AgentKind::Claude.slug()
+                || !worker.state.is_live()
+                || !worker.state.may_occupy_pane()
+            {
+                continue;
+            }
+            if run
+                .worker_in_pane(&worker.team, &worker.pane)
+                .is_none_or(|current| current.id != worker.id)
+            {
+                continue;
+            }
+            let dispatch = worker
+                .dispatch
+                .as_deref()
+                .and_then(|id| run.dispatch(id))
+                .filter(|dispatch| dispatch.is_open())
+                .map(|dispatch| dispatch.id.clone());
+            let Some(term) = seats
+                .get(worker.team.as_str())
+                .and_then(|team| team.get(worker.pane.as_str()))
+                .copied()
+            else {
+                continue;
+            };
+            let seat = ClaudeWorkerSeat {
+                run: run.id.clone(),
+                worker: worker.id.clone(),
+                team: worker.team.clone(),
+                pane: worker.pane.clone(),
+                term,
+                dispatch,
+                generation: run.coordinator_live().map(|seat| seat.generation),
+                checkout: worker.checkout.clone(),
+                model: worker.model.clone(),
+                taken_over: worker.taken_over,
+            };
+            if keep(run, worker, &seat) {
+                kept.push(seat);
+            }
+        }
+    }
+    kept
+}
+
+/// Every live Claude worker in its own seat right now (t-46106): the census
+/// an account switch reads its followers off.
+pub(crate) fn claude_workers_seated() -> Vec<ClaudeWorkerSeat> {
+    claude_worker_seats(|_, _, _| true)
+}
+
+/// Every walled Claude worker right now — as the ledger holds it (its own
+/// seat, an open attempt, its newest `quota_walled` row still standing, not
+/// the person's) AND as the window sees it now (its pane quiet, its own words
+/// at the wall, its account's number at the wall). The switch's wall road
+/// moves these and nothing else. Empty for a window with no durable runtime.
+///
+/// A standing row is where the list starts, not what it ends on (astra
+/// R2): the row says the two witnesses met ONCE, and a worker that went
+/// back to work after it keeps the row until the wall's time runs out.
+/// So each is asked the stall sweep's own two questions again, now — the
+/// pane quiet ([`Host::quiet_since`]), its words at the wall
+/// ([`Host::quota_wall_marker`]), the gauge of the account the pane runs
+/// as at the wall ([`quota_wall_witness`]) — and a worker that no longer
+/// answers both is not on the list, nor a trigger for the default. The
+/// rest itself asks once more, at the fence ([`rest_worker_for_switch`]).
+///
+/// [`quota_wall_witness`]: zerocode_core::orchestration::quota_wall_witness
+pub(crate) fn walled_claude_workers(host: &dyn Host, now_ms: i64) -> Vec<ClaudeWorkerSeat> {
+    let Some(held) = runtime() else {
+        return Vec::new();
+    };
     let usage = &held.usage;
-    ledger
-        .runs()
-        .iter()
-        .flat_map(|run| {
-            let seats = &seats;
-            run.workers.iter().filter_map(move |worker| {
-                if worker.agent != "claude"
-                    || !worker.state.is_live()
-                    || !worker.state.may_occupy_pane()
-                    || worker.taken_over
-                {
-                    return None;
-                }
-                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-                if !dispatch.is_open()
-                    || run
-                        .worker_in_pane(&worker.team, &worker.pane)
-                        .is_none_or(|current| current.id != worker.id)
-                    || !zerocode_core::orchestration::newest_wall(run, &dispatch.id)
-                        .is_some_and(|wall| wall.stands(now_ms))
-                {
-                    return None;
-                }
-                let term = seats
-                    .get(worker.team.as_str())?
-                    .get(worker.pane.as_str())
-                    .copied()?;
-                if !wall_seen_now(host, usage, worker, term, now_ms) {
-                    return None;
-                }
-                Some(WalledWorker {
-                    run: run.id.clone(),
-                    worker: worker.id.clone(),
-                    team: worker.team.clone(),
-                    pane: worker.pane.clone(),
-                    term,
-                    dispatch: dispatch.id.clone(),
-                    generation: run.coordinator_live().map(|seat| seat.generation),
-                    checkout: worker.checkout.clone(),
-                    model: worker.model.clone(),
-                })
+    claude_worker_seats(|run, worker, seat| {
+        !seat.taken_over
+            && seat.dispatch.as_deref().is_some_and(|dispatch| {
+                zerocode_core::orchestration::newest_wall(run, dispatch)
+                    .is_some_and(|wall| wall.stands(now_ms))
             })
-        })
-        .collect()
+            && wall_seen_now(host, usage, worker, seat.term, now_ms)
+    })
 }
 
 /// Whether the window sees `worker`'s wall NOW, by the stall sweep's own
@@ -1185,7 +1220,11 @@ fn wall_seen_now(
 
 /// Put one walled worker to sleep so its pane may close without settling
 /// it (t-7538) — and only while its wall stands NOW and its approval still
-/// stands (astra R2).
+/// stands (astra R2). A worker that follows its default to another account
+/// (t-46106) is put to sleep only while its pane is between turns NOW, read
+/// at the same fence through [`Host::with_between_turns_observation`]: a
+/// pane that took its next prompt, or holds a person's words, stays exactly
+/// where it is, and its move waits for the next end of a turn.
 ///
 /// A `quota_walled` row says the two witnesses met once; a worker that
 /// went back to work after it keeps that row until the wall's time runs
@@ -1242,7 +1281,7 @@ pub(crate) fn rest_worker_for_switch(
         .ok_or_else(|| format!("worker {}'s pane is not in this window", rest.worker))?;
     let capability = crate::agent_teams::current_pane_capability(&team, &pane)
         .ok_or_else(|| format!("worker {}'s pane holds no capability", rest.worker))?;
-    let walled = std::cell::Cell::new(false);
+    let witnessed = std::cell::Cell::new(false);
     let withdrawn = std::cell::RefCell::new(None);
     let rested = held.actor.worker_rested_for_switch_fenced(
         rest.clone(),
@@ -1250,33 +1289,43 @@ pub(crate) fn rest_worker_for_switch(
         term,
         capability,
         now_ms,
-        |commit| {
-            host.with_quota_wall_observation(term, started_ms, &agent, &mut |marker| {
+        |commit| match rest.cause {
+            RestCause::Walled => {
+                host.with_quota_wall_observation(term, started_ms, &agent, &mut |marker| {
+                    if let Err(why) = approved() {
+                        withdrawn.replace(Some(why));
+                        return;
+                    }
+                    with_usage_headroom_of_account(
+                        &held.usage,
+                        &agent,
+                        Some(rest.model.as_str()),
+                        Some(pane_login),
+                        |headroom| {
+                            let at_ms = time_of_use();
+                            if zerocode_core::orchestration::quota_wall_witness(
+                                &rest.worker,
+                                Some(marker),
+                                headroom.as_ref(),
+                                at_ms,
+                            )
+                            .is_some()
+                            {
+                                witnessed.set(true);
+                                commit(at_ms);
+                            }
+                        },
+                    );
+                });
+            }
+            RestCause::Follows => host.with_between_turns_observation(term, &mut || {
                 if let Err(why) = approved() {
                     withdrawn.replace(Some(why));
                     return;
                 }
-                with_usage_headroom_of_account(
-                    &held.usage,
-                    &agent,
-                    Some(rest.model.as_str()),
-                    Some(pane_login),
-                    |headroom| {
-                        let at_ms = time_of_use();
-                        if zerocode_core::orchestration::quota_wall_witness(
-                            &rest.worker,
-                            Some(marker),
-                            headroom.as_ref(),
-                            at_ms,
-                        )
-                        .is_some()
-                        {
-                            walled.set(true);
-                            commit(at_ms);
-                        }
-                    },
-                );
-            });
+                witnessed.set(true);
+                commit(time_of_use());
+            }),
         },
     );
     if rested.is_err()
@@ -1286,17 +1335,29 @@ pub(crate) fn rest_worker_for_switch(
     }
     match rested {
         Ok(_) => Ok(()),
-        Err(_) if !walled.get() => Err(format!(
-            "worker {} is not at its wall now — its pane went back to work, or its words or \
-             its account's number no longer say so — not moved",
-            rest.worker
-        )),
+        Err(_) if !witnessed.get() => Err(match rest.cause {
+            RestCause::Walled => format!(
+                "worker {} is not at its wall now — its pane went back to work, or its words \
+                 or its account's number no longer say so — not moved",
+                rest.worker
+            ),
+            RestCause::Follows => format!(
+                "worker {} {NOT_BETWEEN_TURNS} — its pane took its next turn, or a person's \
+                 words wait on its line — not moved yet",
+                rest.worker
+            ),
+        }),
         Err(why) => Err(format!(
             "원장이 {}의 쉼을 거절했습니다: {why:?}",
             rest.worker
         )),
     }
 }
+
+/// What a following worker's refused rest says when the window did not see
+/// its pane between turns at the fence (t-46106) — the one refusal that
+/// leaves the move owed for the pane's next turn end rather than given up.
+pub(crate) const NOT_BETWEEN_TURNS: &str = "is not between turns now";
 
 /// Everything the switch must know holds BEFORE it touches a pane
 /// (t-7538, astra B2): the ledger would rest this worker on this approval
@@ -3083,6 +3144,20 @@ fn composer_at_rest(
         Some(PaneTurn::Running { .. }) => Err(A_TURN_IS_RUNNING),
         None => Err(NOTHING_WAS_EVER_HEARD),
     }
+}
+
+/// Whether `term`'s last turn ended at rest by the window's own measure — the
+/// reading [`composer_at_rest`] gives the two producers that type unasked,
+/// asked by the third that acts between turns: an account switch moving a
+/// pane to the account its default moved to (t-46106). The turn as heard,
+/// never as a silent screen would guess it: a pane is closed on this answer.
+pub(crate) fn turn_rests(host: &dyn Host, term: u32) -> bool {
+    let heard = pane_turns()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .get(&term)
+        .copied();
+    composer_at_rest(host, term, heard).is_ok()
 }
 
 /// The one pane table, as the actor borrows it: the process-global team
@@ -7151,6 +7226,9 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // And the placement seat's quiet labels: a pane the person left where
     // the seat put it for the whole window is graded on this beat (t-5806).
     crate::cmd::worker_room::sweep(host, now_ms);
+    // A worker an account switch found at work is moved at its first turn
+    // end — here, before the pointer below can start its next turn
+    // (t-46106).
     point_at_waiting_mail(host, now_ms);
     // The readiness sweep, on the beat that already exists: the sounds heard
     // since the last one retire their windows, and whoever stayed silent past

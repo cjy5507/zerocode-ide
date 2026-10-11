@@ -20060,6 +20060,49 @@ mod tests {
         );
     }
 
+    /// t-46106: every Claude pane says which account it runs as, where the
+    /// pane is said, and a switch says what became of the panes. A sidebar
+    /// row and the status bar each read the plan's census through ONE
+    /// function — a row cannot name one account while the bar names another
+    /// for the same reading — a row's account is part of what the row says
+    /// (or the row freezes on the account it was first drawn with), the
+    /// bar names the account its own reading is of, and both switch roads —
+    /// the beat's apply and the person's pick — say the same four counts.
+    #[test]
+    fn every_pane_says_its_account_and_a_switch_says_what_became_of_the_panes() {
+        let window = window_source();
+        let row = block_after(window, "function agentRowAccount(row) {");
+        assert!(
+            row.contains("paneAccountWords(row.term)"),
+            "a sidebar row reads its account off something else than the census:\n{row}"
+        );
+        let said = block_after(window, "function agentRowsSaid(rows) {");
+        assert!(
+            said.contains("agentRowAccount(row)"),
+            "a row's account is not part of what the row says, so it freezes:\n{said}"
+        );
+        let bar = block_after(window, "function paintClaudeBarAccount() {");
+        assert!(
+            bar.contains("claudeUsage?.account") && bar.contains("accountShortId("),
+            "the bar names an account other than its reading's own:\n{bar}"
+        );
+        for road in [
+            "async function applyAccountSwitch(by, token) {",
+            "async function pickClaudeAccount(id) {",
+        ] {
+            let body = block_after(window, road);
+            assert!(
+                body.contains("saySwitchCensus("),
+                "`{road}` no longer says what became of the panes:\n{body}"
+            );
+        }
+        let picked = block_after(shipped_backend(), "async fn person_switched(");
+        assert!(
+            picked.contains("report.switched = Some(applied.census);"),
+            "the person's pick no longer carries its census to the window:\n{picked}"
+        );
+    }
+
     /// A checkout cut for a worker or an automation says what it was cut from,
     /// the way one the dialog cut already does — a summoned `wt/t-3` said
     /// nothing about whether it left `main` or a feature branch ("어떤 기반의
