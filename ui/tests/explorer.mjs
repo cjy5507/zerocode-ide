@@ -144,22 +144,47 @@ export async function testExplorer(page, ok, primaryEvent, capture) {
     const entries = [];
     const rgb = (value) => value.match(/[\d.]+/g).slice(0, 3).map(Number);
     const luminance = (values) => values.map((v) => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+    // A theme swap moves the input's background over a 140 ms transition while its placeholder
+    // colour moves at once, so a reading taken on a fixed timer can land mid-transition when the
+    // first frame after the swap comes late (a loaded runner painting a larger sidebar read 4.4
+    // against the final 5.9). The reading is taken once the colours have held still for four frames.
+    // A frame that does not come within SETTLE_FRAME_WAIT_MS counts as one, so a page whose frames
+    // stopped (seen on a Windows runner) cannot hold the suite; the whole wait is bounded by
+    // SETTLE_FRAME_CAP frames, and a reading that never settled says so instead of a number.
+    const SETTLE_STILL_FRAMES = 4;
+    const SETTLE_FRAME_CAP = 180;
+    const SETTLE_FRAME_WAIT_MS = 100;
+    const nextFrame = () => new Promise((done) => {
+      const late = setTimeout(done, SETTLE_FRAME_WAIT_MS);
+      requestAnimationFrame(() => { clearTimeout(late); done(); });
+    });
+    const settled = async (read) => {
+      let last = read(), still = 0, frames = 0;
+      while (frames < SETTLE_FRAME_CAP && still < SETTLE_STILL_FRAMES) {
+        await nextFrame();
+        frames += 1;
+        const now = read();
+        still = now === last ? still + 1 : 0;
+        last = now;
+      }
+      return { settled: still >= SETTLE_STILL_FRAMES, frames };
+    };
     for (const theme of ['dark', 'light']) {
       document.documentElement.dataset.theme = theme;
       setFileSearchMode('text');
-      await new Promise((done) => setTimeout(done, 250));
       const input = el('file-filter-include');
+      const rest = await settled(() => [getComputedStyle(input).color, getComputedStyle(input).backgroundColor, getComputedStyle(input, '::placeholder').color].join(' '));
       const style = getComputedStyle(input);
       const values = [luminance(rgb(style.color)), luminance(rgb(style.backgroundColor))].sort((a,b) => b-a);
       const placeholder = getComputedStyle(input, '::placeholder');
       const muted = [luminance(rgb(placeholder.color)), luminance(rgb(style.backgroundColor))].sort((a,b) => b-a);
       const box = el('file-search-filters').getBoundingClientRect();
-      entries.push({ theme, ratio: (values[0] + .05) / (values[1] + .05), placeholderRatio: (muted[0] + .05) / (muted[1] + .05), fits: box.width <= el('activity-files').getBoundingClientRect().width });
+      entries.push({ theme, settled: rest.settled, settleFrames: rest.frames, ratio: (values[0] + .05) / (values[1] + .05), placeholderRatio: (muted[0] + .05) / (muted[1] + .05), fits: box.width <= el('activity-files').getBoundingClientRect().width });
     }
     document.documentElement.dataset.theme = prior;
     return entries;
   });
-  ok('explorer filter text has readable contrast in both themes and fits its panel', contrast.every((sample) => sample.ratio >= 4.5 && sample.placeholderRatio >= 4.5 && sample.fits), JSON.stringify(contrast));
+  ok('explorer filter text has readable contrast in both themes and fits its panel', contrast.every((sample) => sample.settled && sample.ratio >= 4.5 && sample.placeholderRatio >= 4.5 && sample.fits), JSON.stringify(contrast));
   if (capture) {
     await page.evaluate(async () => {
       document.documentElement.dataset.theme = 'light'; setFileSearchMode('text'); fileSearch.value = 'needle';

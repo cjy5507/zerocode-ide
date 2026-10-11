@@ -2282,15 +2282,14 @@ async fn keepalive_only_stream_restarts_at_startup_progress_deadline() {
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
-/// Reasoning is useful startup activity, but it is not a task action. The first
-/// delta grants one extension; a backend that then streams reasoning forever
-/// must still be restarted when the extended deadline expires. This exercises
-/// the real `emitted == true` path rather than the keepalive-only branch above.
-// end-to-end reasoning-restart test; body exceeds the 100-line lint threshold
-#[allow(clippy::too_many_lines)]
+/// Reasoning summary events are response-level events, so they are progress: a
+/// stream that keeps reasoning past two windows keeps its connection and answers
+/// on it. Before t-43970 the first reasoning delta granted one extension and the
+/// stream was cut at two windows, whatever came after. That cap on endless
+/// reasoning is gone by design (see the t-43970 report).
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn continuous_reasoning_restarts_after_single_startup_extension() {
+async fn continuous_reasoning_is_progress_and_keeps_its_connection() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -2317,46 +2316,32 @@ async fn continuous_reasoning_restarts_after_single_startup_extension() {
             ).as_bytes())
             .await
             .unwrap();
+        // Forty reasoning summary deltas, 20 ms apart: eight windows of
+        // reasoning with no gap longer than one window.
+        for _ in 0..40 {
+            first
+                .write_all(concat!(
+                    "data: {\"type\":\"response.reasoning_summary_text.delta\",",
+                    "\"output_index\":0,\"delta\":\"still thinking\"}\n\n",
+                ).as_bytes())
+                .await
+                .unwrap();
+            first.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        first
+            .write_all(concat!(
+                "data: {\"type\":\"response.output_item.added\",\"output_index\":1,",
+                "\"item\":{\"type\":\"message\"}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,",
+                "\"delta\":\"reasoned for eight windows\"}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":1}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":",
+                "{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+            ).as_bytes())
+            .await
+            .unwrap();
         first.flush().await.unwrap();
-        tokio::spawn(async move {
-            for _ in 0..100 {
-                if first
-                    .write_all(concat!(
-                        "data: {\"type\":\"response.reasoning_summary_text.delta\",",
-                        "\"output_index\":0,\"delta\":\"still thinking\"}\n\n",
-                    ).as_bytes())
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                if first.flush().await.is_err() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        });
-
-        let (mut second, _) = listener.accept().await.unwrap();
-        server_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let _ = second.read(&mut scratch).await;
-        let body = concat!(
-            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r2\"}}\n\n",
-            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,",
-            "\"item\":{\"type\":\"message\"}}\n\n",
-            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,",
-            "\"delta\":\"recovered after bounded reasoning\"}\n\n",
-            "data: {\"type\":\"response.output_item.done\",\"output_index\":0}\n\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":",
-            "{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
-        );
-        let head = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n",
-            body.len()
-        );
-        second.write_all(head.as_bytes()).await.unwrap();
-        second.write_all(body.as_bytes()).await.unwrap();
-        second.flush().await.unwrap();
     });
 
     let startup_key = super::CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_ENV;
@@ -2374,7 +2359,7 @@ async fn continuous_reasoning_restarts_after_single_startup_extension() {
         .await
         .expect("open stream");
 
-    let outcome = tokio::time::timeout(std::time::Duration::from_millis(900), async {
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut text = String::new();
         while let Some(event) = stream.next_event().await? {
             if let StreamEvent::ContentBlockDelta(delta) = event {
@@ -2390,16 +2375,17 @@ async fn continuous_reasoning_restarts_after_single_startup_extension() {
         Some(value) => std::env::set_var(startup_key, value),
         None => std::env::remove_var(startup_key),
     }
-    if outcome.is_err() {
-        server.abort();
-    }
-    let text = outcome
-        .expect("continuous reasoning must not bypass the extended startup deadline")
-        .expect("restart should recover");
     server.await.unwrap();
+    let text = outcome
+        .expect("reasoning that keeps coming is progress: the stream must finish")
+        .expect("the first connection carries the answer");
 
-    assert_eq!(text, "recovered after bounded reasoning");
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(text, "reasoned for eight windows");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "no reconnect while reasoning keeps coming"
+    );
 }
 
 /// End-to-end proof that a pre-commit stall recovers over a real socket:
@@ -4855,3 +4841,641 @@ async fn a_continuation_the_server_no_longer_holds_is_sent_whole_on_a_fresh_conn
     );
 }
 
+
+#[test]
+fn only_response_level_events_are_progress() {
+    assert!(super::is_response_level_event(
+        &json!({"type":"response.created","response":{"id":"r"}})
+    ));
+    assert!(super::is_response_level_event(
+        &json!({"type":"response.reasoning_summary_text.delta","delta":"x"})
+    ));
+    assert!(super::is_response_level_event(
+        &json!({"type":"response.completed"})
+    ));
+    assert!(
+        !super::is_response_level_event(&json!({"type":"response.failed"})),
+        "a failed response ends; it does not progress"
+    );
+    assert!(!super::is_response_level_event(
+        &json!({"type":"response.incomplete"})
+    ));
+    assert!(!super::is_response_level_event(
+        &json!({"type":"error","code":"server_error"})
+    ));
+    assert!(!super::is_response_level_event(
+        &json!({"type":"codex.rate_limits"})
+    ));
+    assert!(!super::is_response_level_event(&json!({})));
+}
+
+// --- Stall-window scenes (t-43970) ------------------------------------------
+//
+// Each scene plays a scripted backend against the real stream: one script per
+// accepted connection, each beat after its pause. The stall window is scaled
+// from the production 240 s to SCENE_WINDOW, and the bundle ceiling keeps
+// production's ratio (120 s of 240 s) as SCENE_CEILING. A bundle is a run of
+// failed attempts with no response-level event between them. The `eprintln!`
+// lines are the measurements the report quotes; run with `--nocapture`.
+
+/// The production stall window (240 s), scaled down for these scenes.
+const SCENE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
+/// The production bundle ceiling (120 s), at the same ratio to the window.
+const SCENE_CEILING: std::time::Duration = std::time::Duration::from_millis(150);
+/// Slack on a scene's expected duration: scheduler and socket overhead.
+const SCENE_SLACK: std::time::Duration = std::time::Duration::from_millis(50);
+/// A reconnect backoff four ceilings long: even its lowest jitter outlasts the bundle, so a
+/// scene can show what a pause the bundle cannot afford does to the turn's end.
+const SCENE_LONG_BACKOFF: std::time::Duration = std::time::Duration::from_millis(600);
+/// Upper bound on one scene. A scene that reaches it has hung.
+const SCENE_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SceneWire {
+    Sse,
+    WebSocket,
+}
+
+/// What the scripted backend does on one connection.
+#[derive(Clone)]
+enum SceneBeat {
+    /// A transport keep-alive: an SSE comment line, or a WebSocket ping.
+    KeepAlive,
+    /// One decoded Responses event.
+    Event(serde_json::Value),
+    /// Refuse the request with a 503 before any stream opens (SSE only).
+    Refuse,
+}
+
+/// `(pause before the beat, beat)` pairs, played in order on one connection.
+type SceneScript = Vec<(std::time::Duration, SceneBeat)>;
+
+fn keep_alives(count: usize, every: std::time::Duration) -> SceneScript {
+    (0..count).map(|_| (every, SceneBeat::KeepAlive)).collect()
+}
+
+/// Keep-alives and no events for about two windows, so the stall fires first.
+fn silent_connection() -> SceneScript {
+    keep_alives(100, std::time::Duration::from_millis(20))
+}
+
+fn in_progress_beats(count: usize, every: std::time::Duration) -> SceneScript {
+    (0..count)
+        .map(|_| {
+            (
+                every,
+                SceneBeat::Event(json!({"type":"response.in_progress","response":{"id":"resp_scene"}})),
+            )
+        })
+        .collect()
+}
+
+/// A complete text answer; its first frame (`response.created`) arrives after
+/// `first_after`, and the rest follow at once.
+fn answer_after(first_after: std::time::Duration, text: &str) -> SceneScript {
+    text_response_frames("resp_scene", text)
+        .into_iter()
+        .enumerate()
+        .map(|(index, frame)| {
+            let pause = if index == 0 {
+                first_after
+            } else {
+                std::time::Duration::ZERO
+            };
+            (pause, SceneBeat::Event(frame))
+        })
+        .collect()
+}
+
+fn answer(text: &str) -> SceneScript {
+    answer_after(std::time::Duration::ZERO, text)
+}
+
+/// A retryable failure frame, the shape a backend sends when it drops a response.
+/// The code rides both places a backend puts it: top level (SSE `error` events)
+/// and under `error` (the WebSocket error frame).
+fn server_error_connection() -> SceneScript {
+    vec![(
+        std::time::Duration::ZERO,
+        SceneBeat::Event(json!({
+            "type": "error",
+            "code": "server_error",
+            "message": "retry",
+            "error": {"code": "server_error", "message": "retry"},
+        })),
+    )]
+}
+
+/// A reconnect the backend refuses at the door: its own open fails.
+fn refused_connection() -> SceneScript {
+    vec![(std::time::Duration::ZERO, SceneBeat::Refuse)]
+}
+
+/// Serve one script per accepted connection. Each connection gets its own task,
+/// so a client that drops one never holds up the next accept.
+async fn serve_scene_scripts(
+    listener: tokio::net::TcpListener,
+    scripts: Vec<SceneScript>,
+    wire: SceneWire,
+    connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    for script in scripts {
+        let Ok((socket, _)) = listener.accept().await else {
+            return;
+        };
+        connections.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::spawn(play_scene_script(socket, script, wire));
+    }
+}
+
+async fn play_scene_script(mut socket: tokio::net::TcpStream, script: SceneScript, wire: SceneWire) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::AsyncWriteExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    match wire {
+        SceneWire::Sse => {
+            let _ = read_http_request(&mut socket).await;
+            if matches!(script.first(), Some((_, SceneBeat::Refuse))) {
+                let _ = socket
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+                return;
+            }
+            let head = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+            if socket.write_all(head).await.is_err() {
+                return;
+            }
+            for (pause, beat) in script {
+                tokio::time::sleep(pause).await;
+                let line = match beat {
+                    SceneBeat::KeepAlive => ": keepalive\n\n".to_string(),
+                    SceneBeat::Event(frame) => format!("data: {frame}\n\n"),
+                    SceneBeat::Refuse => return,
+                };
+                if socket.write_all(line.as_bytes()).await.is_err()
+                    || socket.flush().await.is_err()
+                {
+                    return;
+                }
+            }
+        }
+        SceneWire::WebSocket => {
+            let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else {
+                return;
+            };
+            // The `response.create` frame; the script answers it.
+            let _ = ws.next().await;
+            for (pause, beat) in script {
+                tokio::time::sleep(pause).await;
+                let message = match beat {
+                    SceneBeat::KeepAlive => Message::Ping(Vec::new()),
+                    SceneBeat::Event(frame) => Message::Text(frame.to_string()),
+                    SceneBeat::Refuse => return,
+                };
+                if ws.send(message).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// The client a scene runs against: the production restart policy with backoff
+/// in milliseconds, the bundle ceiling scaled to the window, and the transport
+/// pinned so the environment cannot change which one a scene runs.
+fn scene_client(addr: std::net::SocketAddr, wire: SceneWire) -> super::ChatGptBackendClient {
+    scene_client_backing_off(
+        addr,
+        wire,
+        (
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(2),
+        ),
+    )
+}
+
+/// A scene client whose reconnects back off between `backoff.0` and `backoff.1` (jittered
+/// in between by the production spread), for the scene where the pause outlasts the ceiling.
+fn scene_client_backing_off(
+    addr: std::net::SocketAddr,
+    wire: SceneWire,
+    backoff: (std::time::Duration, std::time::Duration),
+) -> super::ChatGptBackendClient {
+    let mut client = super::ChatGptBackendClient::new("token", None)
+        .with_base_url(format!("http://{addr}"))
+        .with_retry_policy(super::DEFAULT_STREAM_MAX_RETRIES, backoff.0, backoff.1);
+    client.max_restart_wallclock = SCENE_CEILING;
+    match wire {
+        SceneWire::Sse => client.with_transport(super::websocket::Transport::Sse),
+        SceneWire::WebSocket => client.with_transport(super::websocket::Transport::Websocket),
+    }
+}
+
+/// Drive one turn to its end: the text it produced and the error that ended it.
+async fn play_scene_turn(client: &super::ChatGptBackendClient) -> (String, Option<ApiError>) {
+    let message_request = request(vec![InputMessage::user_text("hi")], None, None);
+    let mut stream = match client.stream_message(&message_request).await {
+        Ok(stream) => stream,
+        Err(error) => return (String::new(), Some(error)),
+    };
+    let mut text = String::new();
+    loop {
+        match stream.next_event().await {
+            Ok(Some(StreamEvent::ContentBlockDelta(delta))) => {
+                if let ContentBlockDelta::TextDelta { text: chunk } = delta.delta {
+                    text.push_str(&chunk);
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return (text, None),
+            Err(error) => return (text, Some(error)),
+        }
+    }
+}
+
+fn restore_env(key: &str, value: Option<String>) {
+    match value {
+        Some(value) => std::env::set_var(key, value),
+        None => std::env::remove_var(key),
+    }
+}
+
+/// Run one turn of `scripts` against a scripted backend with the scene window.
+/// Returns the text, the error that ended the turn, the connections the backend
+/// accepted (one per request sent), and the turn's wall-clock time.
+#[allow(clippy::await_holding_lock)]
+async fn run_scene(
+    wire: SceneWire,
+    scripts: Vec<SceneScript>,
+) -> (String, Option<ApiError>, usize, std::time::Duration) {
+    run_scene_backing_off(wire, scripts, None).await
+}
+
+/// [`run_scene`] with the reconnect backoff pinned to `backoff` when one is given; `None`
+/// is the scene client's millisecond backoff.
+#[allow(clippy::await_holding_lock)]
+async fn run_scene_backing_off(
+    wire: SceneWire,
+    scripts: Vec<SceneScript>,
+    backoff: Option<(std::time::Duration, std::time::Duration)>,
+) -> (String, Option<ApiError>, usize, std::time::Duration) {
+    let _guard = env_lock();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server = tokio::spawn(serve_scene_scripts(
+        listener,
+        scripts,
+        wire,
+        connections.clone(),
+    ));
+    let key = super::CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_ENV;
+    let restore = std::env::var(key).ok();
+    std::env::set_var(key, SCENE_WINDOW.as_millis().to_string());
+    let client = match backoff {
+        Some(backoff) => scene_client_backing_off(addr, wire, backoff),
+        None => scene_client(addr, wire),
+    };
+    let started = std::time::Instant::now();
+    let (text, error) = tokio::time::timeout(SCENE_LIMIT, play_scene_turn(&client))
+        .await
+        .expect("a scene ends within its limit");
+    let elapsed = started.elapsed();
+    restore_env(key, restore);
+    server.abort();
+    let connections = connections.load(std::sync::atomic::Ordering::SeqCst);
+    (text, error, connections, elapsed)
+}
+
+fn report_scene(
+    name: &str,
+    text: &str,
+    error: Option<&ApiError>,
+    connections: usize,
+    elapsed: std::time::Duration,
+) {
+    let error = error.map_or_else(|| "none".to_string(), ToString::to_string);
+    eprintln!(
+        "[t-43970 scene {name}] connections={connections} elapsed_ms={} text={text:?} error={error}",
+        elapsed.as_millis(),
+    );
+}
+
+/// The stream error type a turn ended with, looking through the retry wrapper.
+fn scene_error_type(error: &ApiError) -> Option<&str> {
+    match error {
+        ApiError::RetriesExhausted { last_error, .. } => scene_error_type(last_error),
+        ApiError::StreamApi { error_type, .. } => error_type.as_deref(),
+        _ => None,
+    }
+}
+
+/// Scene A: the backend keeps the socket alive and never answers. The first
+/// window ends one connection; the bundle allows one reconnect, which may run
+/// only to the bundle ceiling, so the turn ends after window + ceiling.
+async fn check_silent_backend_gives_up(wire: SceneWire, name: &str) {
+    let scripts = vec![silent_connection(), silent_connection(), silent_connection()];
+    let (text, error, connections, elapsed) = run_scene(wire, scripts).await;
+    report_scene(name, &text, error.as_ref(), connections, elapsed);
+    assert!(text.is_empty(), "nothing was answered: {text:?}");
+    let error = error.expect("a backend that never answers must end the turn");
+    assert_eq!(scene_error_type(&error), Some("stream_startup_no_progress"), "{error}");
+    assert!(
+        matches!(error, ApiError::RetriesExhausted { attempts: 2, .. }),
+        "two connections were tried: {error}"
+    );
+    assert_eq!(connections, 2, "one silent connection, one reconnect, then the turn ends");
+    assert!(
+        elapsed <= SCENE_WINDOW + SCENE_CEILING + SCENE_SLACK,
+        "the reconnect may run only to the bundle ceiling: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn silent_backend_gives_up_at_the_bundle_ceiling_sse() {
+    check_silent_backend_gives_up(SceneWire::Sse, "A-silent-sse").await;
+}
+
+#[tokio::test]
+async fn silent_backend_gives_up_at_the_bundle_ceiling_websocket() {
+    check_silent_backend_gives_up(SceneWire::WebSocket, "A-silent-ws").await;
+}
+
+/// Scene B: three quick failures, then a silent connection. The bundle opened at
+/// the first failure has a ceiling, and the silent connection may wait only the
+/// rest of it: it ends the turn at the ceiling, not after a full window.
+async fn check_quick_failures_then_silence(wire: SceneWire, name: &str) {
+    let scripts = vec![
+        server_error_connection(),
+        server_error_connection(),
+        server_error_connection(),
+        silent_connection(),
+        answer("never reached"),
+    ];
+    let (text, error, connections, elapsed) = run_scene(wire, scripts).await;
+    report_scene(name, &text, error.as_ref(), connections, elapsed);
+    assert!(text.is_empty(), "nothing was answered: {text:?}");
+    let error = error.expect("the silent fourth connection ends the turn");
+    assert_eq!(scene_error_type(&error), Some("stream_startup_no_progress"), "{error}");
+    assert!(
+        matches!(error, ApiError::RetriesExhausted { attempts: 4, .. }),
+        "four connections were tried: {error}"
+    );
+    assert_eq!(connections, 4, "three quick failures and the silent fourth");
+    assert!(
+        elapsed <= SCENE_CEILING + SCENE_SLACK,
+        "the silent wait is bounded by the bundle ceiling: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn quick_failures_then_silence_end_at_the_ceiling_sse() {
+    check_quick_failures_then_silence(SceneWire::Sse, "B-quick-then-silent-sse").await;
+}
+
+#[tokio::test]
+async fn quick_failures_then_silence_end_at_the_ceiling_websocket() {
+    check_quick_failures_then_silence(SceneWire::WebSocket, "B-quick-then-silent-ws").await;
+}
+
+/// Scene R: seven server errors in a row, then silence: the shape of the
+/// reported turn. The eighth connection waits only the bundle's rest, and the
+/// final error names the seven server errors that came before it.
+#[tokio::test]
+async fn seven_server_errors_then_silence_names_the_bundle_and_ends_at_the_ceiling() {
+    let mut scripts: Vec<SceneScript> = (0..7).map(|_| server_error_connection()).collect();
+    scripts.push(silent_connection());
+    scripts.push(answer("never reached"));
+    let (text, error, connections, elapsed) = run_scene(SceneWire::Sse, scripts).await;
+    report_scene("R-seven-errors-then-silence-sse", &text, error.as_ref(), connections, elapsed);
+    assert!(text.is_empty(), "nothing was answered: {text:?}");
+    let error = error.expect("the silent eighth connection ends the turn");
+    assert!(
+        matches!(error, ApiError::RetriesExhausted { attempts: 8, .. }),
+        "eight connections were tried: {error}"
+    );
+    assert_eq!(connections, 8, "seven server errors and the silent eighth");
+    assert!(
+        error.to_string().contains("server_error x7"),
+        "the final error names the bundle's seven server errors: {error}"
+    );
+    assert!(
+        elapsed <= SCENE_CEILING + SCENE_SLACK,
+        "the silent eighth waits only the bundle's rest: {elapsed:?}"
+    );
+}
+
+/// Scene S: a quick failure whose reconnect backoff outlasts the bundle's ceiling. The
+/// pause is cut to what the bundle has left, so the turn ends at the ceiling — not a whole
+/// backoff past it with "reconnecting" on screen the while.
+async fn check_a_backoff_past_the_ceiling_is_cut(wire: SceneWire, name: &str) {
+    let scripts = vec![
+        server_error_connection(),
+        silent_connection(),
+        answer("never reached"),
+    ];
+    let (text, error, connections, elapsed) = run_scene_backing_off(
+        wire,
+        scripts,
+        Some((SCENE_LONG_BACKOFF, SCENE_LONG_BACKOFF)),
+    )
+    .await;
+    report_scene(name, &text, error.as_ref(), connections, elapsed);
+    assert!(text.is_empty(), "nothing was answered: {text:?}");
+    let error = error.expect("the bundle ends the turn");
+    assert!(
+        matches!(error, ApiError::RetriesExhausted { attempts: 2, .. }),
+        "the failed first connection and the reconnect the ceiling cut short: {error}"
+    );
+    assert!(
+        elapsed <= SCENE_CEILING + SCENE_SLACK,
+        "the pause is cut to the bundle's rest, so the turn ends at the ceiling: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_backoff_past_the_ceiling_is_cut_to_the_bundles_rest_sse() {
+    check_a_backoff_past_the_ceiling_is_cut(SceneWire::Sse, "S-backoff-past-ceiling-sse").await;
+}
+
+#[tokio::test]
+async fn a_backoff_past_the_ceiling_is_cut_to_the_bundles_rest_websocket() {
+    check_a_backoff_past_the_ceiling_is_cut(SceneWire::WebSocket, "S-backoff-past-ceiling-ws")
+        .await;
+}
+
+/// Scene C: response-level events (`response.in_progress`) a third of a window
+/// apart for three windows, with no text. The server is working on this
+/// response, so the window must not end the connection.
+async fn check_response_events_keep_the_window_open(wire: SceneWire, name: &str) {
+    let frames = text_response_frames("resp_scene", "kept alive");
+    let mut first: SceneScript = vec![(
+        std::time::Duration::ZERO,
+        SceneBeat::Event(frames[0].clone()),
+    )];
+    first.extend(in_progress_beats(9, SCENE_WINDOW / 3));
+    first.extend(
+        frames[1..]
+            .iter()
+            .cloned()
+            .map(|frame| (std::time::Duration::ZERO, SceneBeat::Event(frame))),
+    );
+    let (text, error, connections, elapsed) =
+        run_scene(wire, vec![first, answer("reconnected")]).await;
+    report_scene(name, &text, error.as_ref(), connections, elapsed);
+    assert!(error.is_none(), "the turn must not end: {error:?}");
+    assert_eq!(text, "kept alive", "the first connection carries the answer");
+    assert_eq!(connections, 1, "no reconnect while the server reports progress");
+}
+
+#[tokio::test]
+async fn response_events_keep_the_window_open_sse() {
+    check_response_events_keep_the_window_open(SceneWire::Sse, "C-response-events-sse").await;
+}
+
+#[tokio::test]
+async fn response_events_keep_the_window_open_websocket() {
+    check_response_events_keep_the_window_open(SceneWire::WebSocket, "C-response-events-ws").await;
+}
+
+/// Scene D: a reasoning summary that keeps arriving for four windows, with a
+/// gap of a third of a window between deltas. Each delta is progress, so the
+/// reasoning finishes on its first connection.
+#[tokio::test]
+async fn reasoning_summary_deltas_keep_one_connection_alive_sse() {
+    let frames = text_response_frames("resp_scene", "finished reasoning");
+    let mut first: SceneScript = vec![
+        (std::time::Duration::ZERO, SceneBeat::Event(frames[0].clone())),
+        (
+            std::time::Duration::ZERO,
+            SceneBeat::Event(json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_scene"}})),
+        ),
+    ];
+    first.extend((0..12).map(|_| {
+        (
+            SCENE_WINDOW / 3,
+            SceneBeat::Event(json!({"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"thinking"})),
+        )
+    }));
+    first.extend(
+        frames[1..]
+            .iter()
+            .cloned()
+            .map(|frame| (std::time::Duration::ZERO, SceneBeat::Event(frame))),
+    );
+    let (text, error, connections, elapsed) =
+        run_scene(SceneWire::Sse, vec![first, answer("reconnected")]).await;
+    report_scene("D-reasoning-sse", &text, error.as_ref(), connections, elapsed);
+    assert!(error.is_none(), "the turn must not end: {error:?}");
+    assert_eq!(text, "finished reasoning", "the reasoning kept its first connection");
+    assert_eq!(connections, 1, "no reconnect while reasoning deltas keep arriving");
+}
+
+/// Scene E: the server accepts the response (`response.created`), then goes
+/// silent with keep-alives only. The window must still end that connection, so a
+/// response-level event never switches the window off for good.
+#[tokio::test]
+async fn silence_after_a_response_event_still_ends_the_connection_sse() {
+    let frames = text_response_frames("resp_scene", "unused");
+    let mut first: SceneScript = vec![(
+        std::time::Duration::ZERO,
+        SceneBeat::Event(frames[0].clone()),
+    )];
+    first.extend(silent_connection());
+    let (text, error, connections, elapsed) =
+        run_scene(SceneWire::Sse, vec![first, answer("reconnected after a dead tail")]).await;
+    report_scene("E-dead-tail-sse", &text, error.as_ref(), connections, elapsed);
+    assert!(error.is_none(), "the reconnect must answer: {error:?}");
+    assert_eq!(text, "reconnected after a dead tail");
+    assert_eq!(connections, 2, "the dead tail ends its connection");
+}
+
+/// Scene G: progress closes the bundle. The silent first connection opens a
+/// bundle; the reconnect answers its `response.created` (progress) and then
+/// fails fast, after more than the ceiling since the bundle opened. That failure
+/// is not part of the old bundle, so one more reconnect answers.
+#[tokio::test]
+async fn progress_closes_the_bundle_so_a_later_failure_gets_a_fresh_one_sse() {
+    let frames = text_response_frames("resp_scene", "unused");
+    let mut second: SceneScript = vec![(
+        std::time::Duration::ZERO,
+        SceneBeat::Event(frames[0].clone()),
+    )];
+    second.extend(keep_alives(9, std::time::Duration::from_millis(20)));
+    second.extend(server_error_connection());
+    let scripts = vec![silent_connection(), second, answer("fresh bundle after progress")];
+    let (text, error, connections, elapsed) = run_scene(SceneWire::Sse, scripts).await;
+    report_scene("G-progress-closes-bundle-sse", &text, error.as_ref(), connections, elapsed);
+    assert!(error.is_none(), "the later failure must be retried: {error:?}");
+    assert_eq!(text, "fresh bundle after progress");
+    assert_eq!(connections, 3, "silent, progress then a fast failure, the answer");
+}
+
+/// Scene H: a reconnect the backend refuses at the door (503 before any stream)
+/// is one more failed attempt, and the turn goes on to the next one.
+#[tokio::test]
+async fn a_refused_reconnect_is_one_more_attempt_sse() {
+    let scripts = vec![
+        server_error_connection(),
+        refused_connection(),
+        answer("recovered after a refused reconnect"),
+    ];
+    let (text, error, connections, elapsed) = run_scene(SceneWire::Sse, scripts).await;
+    report_scene("H-refused-reconnect-sse", &text, error.as_ref(), connections, elapsed);
+    assert!(error.is_none(), "the refused reconnect must be retried: {error:?}");
+    assert_eq!(text, "recovered after a refused reconnect");
+    assert_eq!(connections, 3, "a server error, the refusal, the answer");
+}
+
+/// Scene F: a reconnect that answers inside the bundle's budget succeeds, and the
+/// next turn starts on a new connection with nothing carried over.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn reconnect_inside_the_bundle_answers_and_the_next_turn_starts_clean_sse() {
+    let _guard = env_lock();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let scripts = vec![
+        silent_connection(),
+        answer_after(SCENE_WINDOW / 5, "answered inside the bundle"),
+        answer("second turn"),
+    ];
+    let server = tokio::spawn(serve_scene_scripts(
+        listener,
+        scripts,
+        SceneWire::Sse,
+        connections.clone(),
+    ));
+    let key = super::CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_ENV;
+    let restore = std::env::var(key).ok();
+    std::env::set_var(key, SCENE_WINDOW.as_millis().to_string());
+    let client = scene_client(addr, SceneWire::Sse);
+
+    let started = std::time::Instant::now();
+    let (first_text, first_error) = tokio::time::timeout(SCENE_LIMIT, play_scene_turn(&client))
+        .await
+        .expect("the first turn ends within its limit");
+    let first_elapsed = started.elapsed();
+    let after_first = connections.load(std::sync::atomic::Ordering::SeqCst);
+
+    let started = std::time::Instant::now();
+    let (second_text, second_error) = tokio::time::timeout(SCENE_LIMIT, play_scene_turn(&client))
+        .await
+        .expect("the second turn ends within its limit");
+    let second_elapsed = started.elapsed();
+    let total = connections.load(std::sync::atomic::Ordering::SeqCst);
+
+    restore_env(key, restore);
+    server.abort();
+    report_scene("F-reconnect-inside-bundle", &first_text, first_error.as_ref(), after_first, first_elapsed);
+    report_scene("F-next-turn", &second_text, second_error.as_ref(), total, second_elapsed);
+    assert!(first_error.is_none(), "the reconnect answers in its budget: {first_error:?}");
+    assert_eq!(first_text, "answered inside the bundle");
+    assert_eq!(after_first, 2, "the silent connection and its reconnect");
+    assert!(second_error.is_none(), "the next turn starts clean: {second_error:?}");
+    assert_eq!(second_text, "second turn");
+    assert_eq!(total, 3, "the next turn opens its own connection");
+    assert!(second_elapsed < SCENE_WINDOW, "the next turn answers at once: {second_elapsed:?}");
+}

@@ -104,6 +104,16 @@ pub(crate) struct DeskMail {
     /// and how long its CLI keeps it (`session`, `local`).
     pub(crate) switched_to: Option<String>,
     pub(crate) scope: Option<String>,
+    /// A landing check's verdict, in the window's word (`passed`, `merged`, `conflict`, `failed`,
+    /// `timed_out`, `unstartable`, `abandoned`, `error`). Only on a `land_check` letter (t-42447).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) verdict: Option<String>,
+    /// A landing check's exit code, where its command ran to an end (t-42447).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rc: Option<i64>,
+    /// How many files a landing check's merge clashed on (t-42447).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) clashes: Option<u64>,
     pub(crate) created_ms: i64,
     /// Where the letter stands in the coordinator's inbox: `pending` (not
     /// yet handed over), `delivered` (in the batch the coordinator holds,
@@ -135,7 +145,7 @@ struct NewsTable {
     /// them, and the one night that filled the desk with 46 letters was a
     /// seven-hour gap. What is older is history, and `inbox` reads history.
     stands_ms: i64,
-    kinds: [(MessageKind, NewsLine); 7],
+    kinds: [(MessageKind, NewsLine); 8],
     /// Where a folded notice can still be acknowledged from the desk: in the
     /// batch its coordinator holds open, handed over and not acknowledged
     /// (t-9548) — the folded count then offers that whole batch, as a line
@@ -170,6 +180,7 @@ const DESK_NEWS: NewsTable = NewsTable {
         (MessageKind::ClassifierDeclined, NewsLine::PerNotice),
         (MessageKind::ModelDeviated, NewsLine::PerNotice),
         (MessageKind::LandingStalled, NewsLine::PerNotice),
+        (MessageKind::LandCheck, NewsLine::PerNotice),
     ],
     folded_ack: "delivered",
 };
@@ -336,6 +347,12 @@ fn mail_row(run: &Run, message: &Message, inbox: &InboxState) -> DeskMail {
     } else {
         serde_json::from_str(message.body.as_str()).unwrap_or_default()
     };
+    // A landing check's evidence is the letter's payload; its body is the one line an agent reads.
+    let evidence: serde_json::Value = if message.kind == MessageKind::LandCheck {
+        serde_json::from_str(message.payload.as_str()).unwrap_or_default()
+    } else {
+        serde_json::Value::Null
+    };
     let worker = message
         .from
         .strip_prefix(zerocode_core::orchestration::WORKER_ADDRESS_PREFIX)
@@ -370,6 +387,9 @@ fn mail_row(run: &Run, message: &Message, inbox: &InboxState) -> DeskMail {
         rung: said["rung"].as_str().map(str::to_string),
         switched_to: said["to"].as_str().map(str::to_string),
         scope: said["scope"].as_str().map(str::to_string),
+        verdict: evidence["state"].as_str().map(str::to_string),
+        rc: evidence["rc"].as_i64(),
+        clashes: evidence["conflicts"]["total"].as_u64(),
         created_ms: message.created_ms,
         delivery,
         delivery_id: batch.filter(|_| delivered).map(|held| held.id.clone()),
@@ -1262,6 +1282,57 @@ mod tests {
                 .any(|one| one.id == old),
             "folding took the notice out of the inbox"
         );
+    }
+
+    /// t-42447: a landing check's letter is news on the desk, and it carries its verdict, its exit
+    /// code and the number of files its merge clashed on — so the screen says the outcome without
+    /// reading the ledger's JSON. Other letters carry none of those three keys.
+    #[test]
+    fn a_land_check_letter_is_news_with_its_verdict_its_exit_code_and_its_clashes() {
+        let now = crate::now_epoch_ms();
+        let mut ledger = Ledger::new();
+        let (run_id, _) = a_worker_carrying_a_task(&mut ledger, now - HOUR_MS);
+        let mut passed = a_notice(
+            &run_id,
+            MessageKind::LandCheck,
+            "land-check t-1: passed · rc 0",
+        );
+        passed.payload = Text::from(r#"{"state":"passed","rc":0,"check":"lc-1-1","task":"t-1"}"#);
+        let passed = ledger
+            .post(&run_id, passed, now - 2_000)
+            .expect("a passed check's letter");
+        let mut clash = a_notice(&run_id, MessageKind::LandCheck, "land-check t-1: conflict");
+        clash.payload = Text::from(
+            r#"{"state":"conflict","conflicts":{"total":2,"files":["a.txt","b.txt"]},"check":"lc-1-2","task":"t-1"}"#,
+        );
+        let clash = ledger
+            .post(&run_id, clash, now - 1_000)
+            .expect("a clash's letter");
+        let worker = a_notice(&run_id, MessageKind::WorkerDied, r#"{"workerId":"w-gone"}"#);
+        let died = ledger
+            .post(&run_id, worker, now - 500)
+            .expect("a death's letter");
+        let desk = desk_json(&ledger);
+        let lines = drawn(&desk);
+        let of = |id: &str| {
+            lines
+                .iter()
+                .find(|one| one["id"].as_str() == Some(id))
+                .cloned()
+                .unwrap_or_else(|| panic!("the letter {id} is not drawn: {desk}"))
+        };
+        let passed_line = of(&passed);
+        assert_eq!(passed_line["kind"], "land_check", "{passed_line}");
+        assert_eq!(passed_line["verdict"], "passed", "{passed_line}");
+        assert_eq!(passed_line["rc"], 0, "{passed_line}");
+        assert!(passed_line.get("clashes").is_none(), "{passed_line}");
+        let clash_line = of(&clash);
+        assert_eq!(clash_line["verdict"], "conflict", "{clash_line}");
+        assert_eq!(clash_line["clashes"], 2, "{clash_line}");
+        assert!(clash_line.get("rc").is_none(), "{clash_line}");
+        let died_line = of(&died);
+        assert!(died_line.get("verdict").is_none(), "{died_line}");
+        assert!(died_line.get("clashes").is_none(), "{died_line}");
     }
 
     /// One quiet episode is one line with one name (t-9548): a silence told

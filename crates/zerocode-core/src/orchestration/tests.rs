@@ -6842,6 +6842,7 @@ fn a_worker_cannot_speak_as_the_ledger_by_naming_its_notice() {
         MessageKind::ModelDeviated,
         MessageKind::AccountSwitched,
         MessageKind::GateJudged,
+        MessageKind::LandCheck,
     ] {
         assert!(kind.is_the_ledgers_own(), "{}", kind.as_str());
         let typed = bench.at(
@@ -25148,6 +25149,9 @@ mod completion;
 /// t-26587: a success report must show the evidence of each pass condition
 /// its task wrote (`tests/evidence.rs`).
 mod evidence;
+/// t-34501 stage 3 (t-42447): `land-check` names the task, head and repository for the window, and
+/// the window's evidence comes back as the ledger's own letter (`tests/land_check.rs`).
+mod land_check;
 /// t-34501: late landings told to the coordinator, a branch that ran away told to its worker
 /// (`tests/landing_watch.rs`).
 mod landing_watch;

@@ -390,6 +390,20 @@ const DESK_MAIL = Object.freeze({
   classifier_declined: { state: "needs-attention", key: "board.desk.mailDeclined", word: "분류기 거절" },
   model_deviated: { state: "needs-attention", key: "board.desk.mailDeviated", word: "모델 바뀜" },
   landing_stalled: { state: "needs-attention", key: "board.desk.mailLanding", word: "착지 점검" },
+  land_check: { state: "needs-attention", key: "board.desk.mailLandCheck", word: "착지 전 점검" },
+});
+
+/* 착지 전 점검의 판정 — 창이 준 증거의 낱말마다 한 줄(t-42447). 표에 없는 낱말은 합치기가 끝나지
+ * 않은 것으로 읽는다: 통과로 읽지 않는다. */
+const DESK_LAND_CHECK = Object.freeze({
+  passed: { key: "board.desk.landCheckPassed", word: "점검 통과 (rc {{rc}})" },
+  merged: { key: "board.desk.landCheckMerged", word: "충돌 없이 합쳐짐 — 점검 명령은 없음" },
+  conflict: { key: "board.desk.landCheckConflict", word: "충돌 {{count}}개 — 합치면 겹쳐요" },
+  failed: { key: "board.desk.landCheckFailed", word: "점검 실패 (rc {{rc}})" },
+  timed_out: { key: "board.desk.landCheckTimedOut", word: "점검 시간 초과 — 프로세스를 멈췄어요" },
+  unstartable: { key: "board.desk.landCheckUnstartable", word: "점검을 시작하지 못했어요" },
+  abandoned: { key: "board.desk.landCheckAbandoned", word: "창이 끝나 점검이 중간에 끊겼어요" },
+  error: { key: "board.desk.landCheckError", word: "합치기를 끝내지 못했어요" },
 });
 
 /* 늦은 착지의 다섯 까닭(t-22105) — 원장의 낱말마다. 표에 없는 낱말은 원장의 말 그대로 선다. */
@@ -466,6 +480,10 @@ function deskLetterDetail(letter, now) {
     const since = Number.isFinite(letter.since_ms) && now - letter.since_ms >= 60_000
       ? t("board.desk.landingSince", "{{time}}째", { time: agoWord(letter.since_ms, now) }) : "";
     return [reason, since].filter(Boolean).join(" · ");
+  }
+  if (letter.kind === "land_check") {
+    const held = Object.hasOwn(DESK_LAND_CHECK, letter.verdict) ? DESK_LAND_CHECK[letter.verdict] : DESK_LAND_CHECK.error;
+    return t(held.key, held.word, { count: letter.clashes ?? 0, rc: letter.rc ?? "?" });
   }
   if (letter.kind === "worker_died") return t("board.desk.mailDiedCopy", "보고 전에 판이 끝났어요");
   if (letter.kind === "deadlocked") return t("board.desk.mailDeadlockedCopy", "서로의 답을 기다리는 고리에 들었어요");
