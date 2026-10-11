@@ -528,3 +528,47 @@ fn a_completed_task_nothing_can_review_reads_no_review_record_and_never_awaiting
         "board.noReviewRecord is not in every language but the source's own Korean"
     );
 }
+
+/// Who is the coordinator is said in one vocabulary on every surface (t-45938):
+/// the role words come off one table (`PANE_ROLES`), the sidebar's row wears
+/// its role as a chip between the state dot and the face (a ring on the
+/// coordinator's face when the row is folded), the workspace line and the
+/// desk's worker heads name the worker after its role, and the strip leads a
+/// tab with it. The seats are read with the ledger's workers, on the same beat.
+#[test]
+fn the_role_words_come_off_one_table_on_every_surface() {
+    let window = window_source();
+    let table = block_after(window, "const PANE_ROLES = Object.freeze({");
+    for key in [
+        "\"agent.role.coordinator\"",
+        "\"agent.role.worker\"",
+        "\"agent.role.person\"",
+    ] {
+        assert!(table.contains(key), "the role table lost {key}:\n{table}");
+    }
+    let row = block_after(window, "function makeAgentRow(row, gutter = false) {");
+    assert!(
+        row.contains("const chip = role ? agentRoleChip(role) : null;")
+            && row.contains("[fold, dot, chip, face, body, uses, status, when, peek]")
+            && row.contains("[fold, dot, chip, face, body, wears, uses, status, when, peek]")
+            && row.contains("face?.classList.add(\"is-coordinator\")"),
+        "the row's role left its place between the dot and the face:\n{row}"
+    );
+    assert!(
+        block_after(window, "function agentRowsSaid(rows) {").contains("agentRowRoleSaid(row)"),
+        "the repaint guard is blind to the row's role — a moved seat keeps its old chip"
+    );
+    assert!(
+        block_after(window, "function worktreeWorkerWords(path) {")
+            .contains("worktreeRoleWords(path)")
+            && block_after(window, "function tabStripWords(tab) {").contains("paneRoleWord(role)")
+            && block_after(window, "function paintDeskWorkers(")
+                .contains("workerRoleWords(ledgerWorkerRole("),
+        "a surface names the role in words of its own"
+    );
+    let refresh = block_after(window, "async function refreshPaneLedger() {");
+    assert!(
+        refresh.contains("readLedgerAgents()") && refresh.contains("invoke(\"coordinator_seats\")"),
+        "the seats are read apart from the workers' beat:\n{refresh}"
+    );
+}

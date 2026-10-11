@@ -577,16 +577,19 @@ pub(crate) fn desk_snapshot(
         news.extend(owed.news);
         folded += owed.folded;
         folded_batches.extend(owed.folded_batch);
+        // The seat as the ledger keeps it: the live one names its pane, an
+        // empty one keeps its generation and when its holder was proven gone.
+        let chair = run.coordinator.as_ref();
+        let live = run.coordinator_live();
+        let term = live.and_then(|held| seat_term(&held.seat));
         runs.push(DeskRun {
             run: run.id.clone(),
             name: run.name.clone(),
-            seat: run
-                .coordinator_live()
-                .is_some_and(|seat| seat_term(&seat.seat).is_some()),
-            term: None,
-            held: false,
-            generation: 0,
-            vacated_ms: None,
+            seat: term.is_some(),
+            term,
+            held: live.is_some(),
+            generation: chair.map_or(0, |held| held.generation),
+            vacated_ms: chair.and_then(|held| held.vacated_ms),
         });
         for task in &run.tasks {
             let stage = stage_of(run, task);

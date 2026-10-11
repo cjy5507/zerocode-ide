@@ -1500,6 +1500,21 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   color: var(--ink-mist);
 }
 
+/* A run's empty coordinator seat, said once on a line of its work (t-45938): the stage cell's shape, in the
+ * waiting ink — nobody reads the workers' reports until a coordinator sits again. */
+.wt-coordinator-vacant {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  margin-inline-start: var(--space-1);
+  overflow: hidden;
+  color: var(--signal-wait-ink);
+  font-size: var(--text-2xs);
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .wt-agent {
   position: relative;
   display: flex;
@@ -1549,6 +1564,42 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   border: var(--rule-width) solid var(--nav-plane-rule);
   border-radius: 50%;
   background: var(--nav-plane);
+}
+
+/* A folded summary wears no role chip: the coordinator's face is ringed
+ * instead, so a folded card still says who leads it (t-45938). */
+.wt-agent.is-folded-summary .agent-ico.is-coordinator {
+  border-color: var(--signal-ready-ink);
+  box-shadow: 0 0 0 var(--rule-width) var(--signal-ready-ink);
+}
+
+/* Who an agent row is (t-45938): 코디, 워커 or 사람, between the state dot and
+ * the face. A word in a hairline box, not a colour alone — the three read
+ * apart in either treatment and to a reader who sees no colour — and a box
+ * no taller than the row's line, so a row with a chip is as tall as one
+ * without. */
+.wt-agent-role {
+  flex: none;
+  padding: 0 var(--space-1);
+  border: var(--rule-width) solid currentColor;
+  border-radius: var(--radius-xs);
+  font-size: var(--text-3xs);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.wt-agent-role.is-coordinator {
+  color: var(--signal-ready-ink);
+  background: color-mix(in srgb, var(--signal-ready) 14%, transparent);
+}
+
+.wt-agent-role.is-worker {
+  color: var(--ink-mist);
+}
+
+.wt-agent-role.is-person {
+  color: var(--signal-wait-ink);
+  background: color-mix(in srgb, var(--signal-wait) 12%, transparent);
 }
 
 /* Settled history under an agent, folded to one line — "완료 N개". Quieter
@@ -21329,7 +21380,7 @@ button.helper-sib:hover {
  * is the calm one, "read it and fix it" wears the halt colour. */
 .hook-state {
   flex: none;
-  padding: 1px var(--space-1);
+  padding: 0 var(--space-1);
   border-radius: var(--radius-xs);
   background: var(--row-hover);
   color: var(--ink-mist);
@@ -21627,7 +21678,7 @@ button.helper-sib:hover {
  * the quiet ink a settings row would otherwise give it. */
 .agent-perm {
   flex: none;
-  padding: 1px var(--space-1);
+  padding: 0 var(--space-1);
   border-radius: var(--radius-xs);
   font-size: var(--text-3xs);
   font-weight: 600;
@@ -21675,7 +21726,7 @@ button.helper-sib:hover {
 
 .agent-launch-reset {
   flex: none;
-  padding: 1px var(--space-1);
+  padding: 0 var(--space-1);
   border: 0;
   border-radius: var(--radius-xs);
   background: none;
@@ -39948,7 +39999,7 @@ details.task-board-section > summary {
 
 .knowledge-save-phrase {
   font-size: var(--text-xs);
-  padding: 1px var(--space-1);
+  padding: 0 var(--space-1);
   color: var(--ink-label);
 }
 

@@ -4526,6 +4526,18 @@ function dressWorktreeWork(row, path) {
   set(row.querySelector(".wt-task-id"), worktreeWorkFacts(path)?.taskId ?? "");
   set(row.querySelector(".wt-stage"), landingStageWord(worktreeStageOf(path)));
   set(row.querySelector(".wt-worker"), worktreeWorkerWords(path));
+  // A run whose coordinator seat nobody holds, said once, on this line when it is that run's (t-45938).
+  const vacant = coordinatorVacancyAt(path);
+  const empty = row.querySelector(".wt-coordinator-vacant");
+  set(empty, vacant.length > 0 ? t("agent.role.coordinatorVacant", "코디 (비어 있음)") : "");
+  if (empty) {
+    const tip = vacant.length > 0
+      ? t("agent.role.coordinatorVacantTip", "{{runs}} 런의 코디 자리가 비어 있습니다 — 코디가 다시 앉으면 사라집니다", {
+        runs: vacant.map((seat) => seat.name || seat.run).join(", "),
+      })
+      : "";
+    if ((empty.dataset.tip ?? "") !== tip) empty.dataset.tip = tip;
+  }
 }
 
 function makeWorktreeNode(worktree, held) {
@@ -4769,8 +4781,12 @@ function makeWorktreeNode(worktree, held) {
   const worker = document.createElement("span");
   worker.className = "wt-worker";
   worker.hidden = true;
+  // And the empty coordinator seat of a run whose work is here (t-45938) — said on one line of that run's work.
+  const vacant = document.createElement("span");
+  vacant.className = "wt-coordinator-vacant";
+  vacant.hidden = true;
   branch.prepend(taskId);
-  branch.append(stage, worker);
+  branch.append(stage, worker, vacant);
   branch.appendChild(unseated);
   // A workspace can be carried straight from the rail into a board lane. If
   // the board was closed, the drag opens a preview sheet; a successful drop

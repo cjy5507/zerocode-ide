@@ -2587,7 +2587,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 model: worker.model.clone(),
                 effort: worker.effort.clone(),
                 pane: worker.pane.clone(),
-                taken_over: false,
+                taken_over: worker.taken_over,
                 asking: run.awaiting_reply(&worker.id),
                 wall: dispatch
                     .and_then(|one| zerocode_core::orchestration::newest_wall(run, &one.id)),

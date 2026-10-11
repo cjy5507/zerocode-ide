@@ -8967,6 +8967,26 @@ const TAB_GLYPH = {
   emulator: "phone",
 };
 
+/* What the strip writes on a tab (t-45938): its name, after the role its pane
+ * plays — 「코디 · …」, 「워커 · …」, 「사람 · …」 — the word its sidebar row
+ * wears, so the strip tells the coordinator's tab from a worker's without the
+ * board. A tab holding the coordinator's pane is the coordinator's, whatever
+ * else is split into it; any other tab speaks for its one pane. Only the strip
+ * leads with the role: everything else that names a tab (a crumb, a sentence)
+ * names the work. */
+function tabStripWords(tab) {
+  const label = tabLabel(tab);
+  const role = tabRole(tab);
+  return role ? t("agent.role.tab", "{{role}} · {{label}}", { role: paneRoleWord(role), label }) : label;
+}
+
+function tabRole(tab) {
+  if (tab.kind !== "term" || tab.asleep) return null;
+  const leaves = paneLeaves(tab.layout);
+  const roles = leaves.map(paneRole).filter(Boolean);
+  return roles.find((role) => role.kind === "coordinator") ?? (leaves.length === 1 ? roles[0] ?? null : null);
+}
+
 function tabLabel(tab) {
   // 표와 노트북은 그 파일 자체이지 파생된 판이 아니다 — 이름만 단다(1-g39·1-g40).
   if (

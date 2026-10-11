@@ -4626,7 +4626,7 @@ function paintTabNode(node, tab) {
   const turn = tab.asleep && tab.wakeOrder
     ? ` \u00b7 ${t("tab.wakingOrder", "깨우는 중 — {{n}}번째", { n: tab.wakeOrder })}`
     : "";
-  const wording = tabLabel(tab) + turn;
+  const wording = tabStripWords(tab) + turn;
   if (label.textContent !== wording) label.textContent = wording;
   // 이 탭의 판이 발행하고 아직 아무도 열지 않은 페이지(t-11958).
   paintTabUnseen(node, tab);

@@ -345,12 +345,12 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
       for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: Date.now() });
       const read = () => Object.fromEntries([...document.querySelectorAll('#board-view [data-desk-block="workers"] .board-desk-worker')]
         .map((row) => [row.dataset.worker.split("/")[1], row.querySelector(".board-desk-worker-id")?.textContent ?? ""]));
-      for (let tries = 0; tries < 120; tries += 1) {
-        const now = read();
-        if (Object.keys(now).length >= 5 && now["w-2"] !== "w-2") break;
+      const person = t("agent.role.person", "사람");
+      // Bounded: on a window without role words the head never changes, and the check below says so.
+      for (let tries = 0; tries < 120 && read()["w-2"] !== `${person} w-2`; tries += 1) {
         await new Promise((done) => setTimeout(done, 25));
       }
-      return { heads: read(), worker: t("agent.role.worker", "워커"), person: t("agent.role.person", "사람") };
+      return { heads: read(), worker: t("agent.role.worker", "워커"), person };
     });
     ok(
       "the desk's worker heads lead with the same role words — 워커 w-… for a summoned worker, 사람 w-… for one the person took over",

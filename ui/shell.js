@@ -214,15 +214,33 @@ const paneLedger = new Map();
  * path, the one identity a workspace has here; the ledger sends at most one
  * row per checkout (`settled_workers`). */
 const checkoutLedger = new Map();
+/* Who holds each run's coordinator seat (t-45938) — the desk's run list, as
+ * `coordinator_seats` reads it off the same published snapshot: the runs in
+ * play, the terminal of this window sitting in each one's live seat, and the
+ * seats nobody holds. Read with the workers above, on the same beat. */
+let coordinatorSeats = [];
+/* And the checkouts each run's work stands in, seated, asleep or released —
+ * the lines an empty seat can be said on. */
+const runCheckouts = new Map();
 let paneLedgerAsking = false;
 async function refreshPaneLedger() {
   if (paneLedgerAsking) return;
   paneLedgerAsking = true;
   try {
-    const rows = await readLedgerAgents();
+    // A seat read that fails keeps the seats it had: the workers' rows are the
+    // part a failure must not freeze, and they are read the way they always were.
+    const [rows, seats] = await Promise.all([
+      readLedgerAgents(),
+      invoke("coordinator_seats").catch(() => null),
+    ]);
     const next = new Map();
     const settled = new Map();
+    const worked = new Map();
     for (const row of rows ?? []) {
+      if (row?.run && row.checkout) {
+        if (!worked.has(row.run)) worked.set(row.run, new Set());
+        worked.get(row.run).add(checkoutKey(row.checkout));
+      }
       const facts = {
         run: row?.run ?? "",
         worker: row?.worker ?? "",
@@ -243,6 +261,8 @@ async function refreshPaneLedger() {
         model: row?.model ?? null,
         handed_in: row?.handed_in ?? null,
         at: Number(row?.at) || 0,
+        // The person took this worker's pane over (t-45938): the pane is theirs, 사람 rather than 워커.
+        takenOver: row?.taken_over === true,
       };
       if (typeof row?.term === "number") next.set(row.term, facts);
       else if (row?.settled === true && row.checkout) {
@@ -251,13 +271,24 @@ async function refreshPaneLedger() {
         });
       }
     }
+    const nextSeats = seats === null ? coordinatorSeats : (Array.isArray(seats) ? seats : []).map((seat) => ({
+      run: String(seat?.run ?? ""),
+      name: String(seat?.name ?? ""),
+      term: Number.isInteger(seat?.term) ? seat.term : null,
+      held: seat?.held === true,
+      generation: Number(seat?.generation) || 0,
+      vacatedMs: Number.isFinite(seat?.vacated_ms) ? seat.vacated_ms : null,
+    }));
     // Replaced whole, so a seat the ledger released stops wearing its old
     // task — and only a real change costs a repaint.
     const moved = paneLedgerSaid(next) !== paneLedgerSaid(paneLedger);
     const kept = JSON.stringify([...settled]) !== JSON.stringify([...checkoutLedger]);
+    // Who sits where moves the chips, the workspace lines and the tab names at once.
+    const reseated = JSON.stringify(nextSeats) !== JSON.stringify(coordinatorSeats) ||
+      runCheckoutsSaid(worked) !== runCheckoutsSaid(runCheckouts);
     // The strip reads a pane's task as its tab's name (`tabLabel`, t-44016), so a task that
     // arrives after the tab was painted is the strip's news too — not only the cards'.
-    const renamed = moved && paneTaskWords(next) !== paneTaskWords(paneLedger);
+    const renamed = reseated || (moved && paneTaskWords(next) !== paneTaskWords(paneLedger));
     if (moved) {
       paneLedger.clear();
       for (const [term, facts] of next) paneLedger.set(term, facts);
@@ -266,7 +297,12 @@ async function refreshPaneLedger() {
       checkoutLedger.clear();
       for (const [checkout, facts] of settled) checkoutLedger.set(checkout, facts);
     }
-    if (moved || kept) scheduleAgentPaint(renamed ? ["tabs", "cards", "board"] : ["cards", "board"]);
+    if (reseated) {
+      coordinatorSeats = nextSeats;
+      runCheckouts.clear();
+      for (const [run, checkouts] of worked) runCheckouts.set(run, checkouts);
+    }
+    if (moved || kept || reseated) scheduleAgentPaint(renamed ? ["tabs", "cards", "board"] : ["cards", "board"]);
   } catch {
     // The ledger may be unavailable in this window; the rows then say what
     // the hooks say, which is what they said before this map existed.
@@ -274,11 +310,19 @@ async function refreshPaneLedger() {
     paneLedgerAsking = false;
   }
 }
-/* The words a tab can take from the ledger, per pane — the part of the map whose change renames a tab. */
+/* The words a tab can take from the ledger, per pane — the part of the map whose change renames a tab: its
+ * task, and the role its pane plays (t-45938). */
 function paneTaskWords(map) {
   return [...map.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([term, f]) => `${term}:${f.task}`)
+    .map(([term, f]) => `${term}:${f.task}:${f.worker}:${f.takenOver ? 1 : 0}`)
+    .join(",");
+}
+/* The checkouts each run's work stands in, as one string — the repaint compares it. */
+function runCheckoutsSaid(map) {
+  return [...map.entries()]
+    .map(([run, checkouts]) => `${run}:${[...checkouts].sort().join("|")}`)
+    .sort()
     .join(",");
 }
 function paneLedgerSaid(map) {
@@ -287,7 +331,8 @@ function paneLedgerSaid(map) {
     .map(([term, f]) =>
       `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${f.failed ? 1 : 0}` +
       `:${JSON.stringify(f.review)}:${JSON.stringify(f.closed)}:${f.review_since_ms ?? ""}` +
-      `:${f.asking ? 1 : 0}:${f.wall?.stands_until_ms ?? ""}:${f.handed_in ?? ""}:${f.model ?? ""}`)
+      `:${f.asking ? 1 : 0}:${f.wall?.stands_until_ms ?? ""}:${f.handed_in ?? ""}:${f.model ?? ""}` +
+      `:${f.worker}:${f.takenOver ? 1 : 0}`)
     .join(",");
 }
 
@@ -9848,7 +9893,9 @@ function agentRowsSaid(rows) {
         `:${row.sub && row.subHost === undefined ? "" : JSON.stringify(paneAutonomyValue(row.term))}` +
         `:${agentRowHere(row) ? 1 : 0}` +
         // What the row waits for is what it says too: the answer, the wall and the review come from the ledger.
-        `:${row.sub ? "" : agentWaitWordOf(row, agentRowState(row))}`,
+        `:${row.sub ? "" : agentWaitWordOf(row, agentRowState(row))}` +
+        // And who it is (t-45938): a seat that moves or a pane the person takes over changes the row's chip.
+        `:${agentRowRoleSaid(row)}`,
     )
     .join(",");
 }
@@ -9893,12 +9940,90 @@ function agentRowTip(primary, secondary, uses) {
   return `${primary}${secondary ? ` - ${secondary}` : ""}${uses ? ` · ${uses}` : ""}`;
 }
 
-/* And what the row says to a screen reader — the tooltip's words, then the
- * status and the clock the row shows at its right edge, as one sentence
- * (t-11827). Without it the row's name was its text run together with the
- * reading hand's label. Spelled once for the same two roads as the tip. */
-function agentRowSpoken(tip, status, ago) {
-  return [tip, status, ago].filter(Boolean).join(" · ");
+/* And what the row says to a screen reader — its role, the tooltip's words,
+ * then the status and the clock the row shows at its right edge, as one
+ * sentence (t-11827, t-45938). Without it the row's name was its text run
+ * together with the reading hand's label. Spelled once for the same two roads
+ * as the tip. */
+function agentRowSpoken(tip, status, ago, role = null) {
+  return [role ? paneRoleWord(role) : "", tip, status, ago].filter(Boolean).join(" · ");
+}
+
+/* The role a terminal plays in this window's orchestration (t-45938), as the
+ * ledger holds it — the word its agent row, its workspace line, its tab and the
+ * desk lead with, out of this one table: the pane sitting in a run's live
+ * coordinator seat is 코디 (two runs' coordinators in one window are two), a
+ * pane the ledger summoned a worker into is 워커, and 사람 once the person took
+ * that pane over. A pane the ledger never seated plays none — a person's own
+ * agent is not 사람, which names a takeover. */
+const PANE_ROLES = Object.freeze({
+  coordinator: { key: "agent.role.coordinator", word: "코디" },
+  worker: { key: "agent.role.worker", word: "워커" },
+  person: { key: "agent.role.person", word: "사람" },
+});
+
+function paneRole(term) {
+  const seats = coordinatorSeats.filter((seat) => seat.term === term);
+  if (seats.length > 0) return { kind: "coordinator", seats };
+  const facts = paneLedger.get(term);
+  return facts?.worker ? ledgerWorkerRole(facts) : null;
+}
+
+/* A ledger worker's role, from its row alone — the desk's rows name workers
+ * this window may hold no terminal for. */
+function ledgerWorkerRole(facts) {
+  return { kind: facts.takenOver ? "person" : "worker", facts };
+}
+
+function paneRoleWord(role) {
+  const said = PANE_ROLES[role.kind];
+  return t(said.key, said.word);
+}
+
+/* What a role says when pointed at: the run and the seat's generation for a
+ * coordinator (one line a run), the worker and its task for a worker or for
+ * the person who took one over. */
+function paneRoleTip(role) {
+  if (role.kind === "coordinator") {
+    return role.seats.map((seat) => t("agent.role.coordinatorTip", "코디네이터 · 런 {{run}} · {{generation}}세대", {
+      run: seat.name || seat.run, generation: seat.generation,
+    })).join(" / ");
+  }
+  const who = role.kind === "person"
+    ? t("agent.role.personTip", "사람이 넘겨받은 판 · 워커 {{worker}}", { worker: role.facts.worker })
+    : t("agent.role.workerTip", "워커 {{worker}}", { worker: role.facts.worker });
+  const task = role.facts.task?.trim() || role.facts.taskId || "";
+  return task ? `${who} · ${task}` : who;
+}
+
+/* 「워커 w-45802」 — a worker's role with the worker it names: the workspace
+ * line's cell and the desk's head say it so. */
+function workerRoleWords(role) {
+  return t("agent.role.named", "{{role}} {{id}}", { role: paneRoleWord(role), id: role.facts.worker });
+}
+
+/* The role an agent row wears: its pane's. A helper's roster row rides its
+ * parent's terminal and is not its parent, and a history line is a count —
+ * neither wears one. */
+function agentRowRole(row) {
+  if (row.history || (row.sub && row.subHost === undefined)) return null;
+  return paneRole(row.term);
+}
+
+/* What the role says on a row, as one string — the repaint compares it. */
+function agentRowRoleSaid(row) {
+  const role = agentRowRole(row);
+  return role ? `${role.kind}|${paneRoleTip(role)}` : "";
+}
+
+/* The role chip, after the state dot and before the face. A span: the row is
+ * the one button, and the chip is words, not a second press. */
+function agentRoleChip(role) {
+  const chip = document.createElement("span");
+  chip.className = `wt-agent-role is-${role.kind}`;
+  chip.textContent = paneRoleWord(role);
+  chip.dataset.tip = paneRoleTip(role);
+  return chip;
 }
 
 /* The keyboard's road through one card's agent rows (t-11827). Up and down
@@ -10326,15 +10451,65 @@ function worktreeStageOf(path) {
   return stage;
 }
 
-/* What the work in one checkout says on its row, as one string — the repaint compares it (t-44016). */
+/* What the work in one checkout says on its row, as one string — the repaint compares it (t-44016). The empty
+ * coordinator seat said on the line is part of it (t-45938). */
 function worktreeWorkSaid(path) {
-  return [worktreeWorkFacts(path)?.taskId ?? "", landingStageWord(worktreeStageOf(path)), worktreeWorkerWords(path)].join("|");
+  const vacant = coordinatorVacancyAt(path);
+  return [worktreeWorkFacts(path)?.taskId ?? "", landingStageWord(worktreeStageOf(path)), worktreeWorkerWords(path),
+    vacant.map((seat) => seat.run).join(",")].join("|");
 }
 
-/* The agent that did the work in one checkout, once it has ended (t-44016): its name, its model and when it
- * ended — 「(vendor name) · (its model) · 끝 (time)」. A live seat speaks for itself on its own row, so nothing
- * is said here for it. */
+/* The terminals standing in one checkout: its tabs' panes, and the agents parked off the stage there. */
+function worktreeTerms(path) {
+  const held = [];
+  for (const tab of tabs) {
+    if (tab.kind === "term" && tab.worktree === path) held.push(...paneLeaves(tab.layout));
+  }
+  for (const [term, worktree] of detachedAgents) if (worktree === path) held.push(term);
+  return held;
+}
+
+/* Who works in one checkout, by role (t-45938): 코디 where a pane sitting in a run's coordinator seat stands,
+ * 「워커 w-45802」 where a worker the ledger summoned still carries its task, 「사람 w-…」 once the person took that
+ * pane over. Work handed in names no role: the stage beside it says where the work stands, and the coordinator
+ * landing it does not sit here. */
+function worktreeRoleWords(path) {
+  let worker = null;
+  for (const term of worktreeTerms(path)) {
+    const role = paneRole(term);
+    if (role?.kind === "coordinator") return paneRoleWord(role);
+    if (worker === null && role && !role.facts.reported) worker = role;
+  }
+  return worker ? workerRoleWords(worker) : "";
+}
+
+/* The runs whose empty coordinator seat is said on this workspace line (t-45938) — once a run: on the main line
+ * of the project its work stands in, else on the first line of that work, in the catalog's order. A run in play
+ * whose seat nobody holds is what a restart leaves until a coordinator sits again; a seat held in another
+ * window is held. */
+function coordinatorVacancyAt(path) {
+  if (!coordinatorSeats.some((seat) => !seat.held)) return [];
+  const here = checkoutKey(path);
+  return coordinatorSeats.filter((seat) => !seat.held && coordinatorVacancyLine(seat) === here);
+}
+
+function coordinatorVacancyLine(seat) {
+  const work = runCheckouts.get(seat.run);
+  if (!work?.size) return null;
+  for (const project of projects) {
+    const shown = shownWorktrees(project);
+    const holding = shown.find((one) => work.has(checkoutKey(one.path)));
+    if (holding) return checkoutKey((shown.find((one) => one.is_main) ?? holding).path);
+  }
+  return null;
+}
+
+/* The agent that did the work in one checkout (t-44016, t-45938): who works there now, by role, while a live
+ * seat carries its task; once it has ended, its name, its model and when it ended — 「(vendor name) · (its
+ * model) · 끝 (time)」. */
 function worktreeWorkerWords(path) {
+  const role = worktreeRoleWords(path);
+  if (role) return role;
   const work = checkoutLedger.get(checkoutKey(path));
   if (!work?.agent || !(work.at > 0)) return "";
   const ended = new Date(work.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -10485,12 +10660,15 @@ function agentFoldLabel(row) {
 }
 
 /* What a folded summary row says: identity, the state's word, and the
- * disclosure — the tip carries the first two, the label all three. */
+ * disclosure — the tip carries the first two, the label all three. The role
+ * the folded row draws as a ring, or not at all, leads both (t-45938). */
 function foldedSummaryWords(row, state, fold) {
   // The row's own status word (`agentRowStatusWord`): 검증 대기 or the ledger's
   // other word where a coordinator has been told, else the state's.
   const stateWord = agentRowStatusWord(row, state);
-  const identity = row.agent ? agentName(row.agent) : stateWord;
+  const role = agentRowRole(row);
+  const agent = row.agent ? agentName(row.agent) : stateWord;
+  const identity = role ? `${paneRoleWord(role)} · ${agent}` : agent;
   const disclosure = fold?.getAttribute("aria-label") ?? "";
   return {
     tip: `${identity} · ${stateWord}`,
@@ -10505,10 +10683,13 @@ function foldedSummaryWords(row, state, fold) {
 function fittedAgentRowWords(node, row) {
   const state = agentRowState(row);
   const foldedSummary = row.kids > 0 && !row.kidsShown;
+  // A role that comes, goes or changes kind is a chip (or a ring) to build (t-45938).
+  const role = agentRowRole(row);
   if (
     node.dataset.term !== String(row.term) ||
     (node.dataset.sub ?? "") !== (row.sub?.id ?? "") ||
     (node.dataset.agent ?? "") !== (row.agent ?? "") ||
+    (node.dataset.role ?? "") !== (role?.kind ?? "") ||
     (node.dataset.history ?? "") !== (row.history ? String(row.history) : "") ||
     node.className !== agentRowClasses(state, agentRowHere(row), foldedSummary, row)
   ) return null;
@@ -10521,8 +10702,10 @@ function fittedAgentRowWords(node, row) {
   const fold = node.querySelector(":scope > .wt-agent-fold:not(.is-quiet)");
   if ((row.kids > 0) !== (fold !== null)) return null;
   if (fold !== null && fold.getAttribute("aria-expanded") !== String(row.kidsShown)) return null;
-  const fit = { node, row, state, foldedSummary, fold };
+  const fit = { node, row, state, foldedSummary, fold, role };
   if (!foldedSummary) {
+    fit.chip = node.querySelector(":scope > .wt-agent-role");
+    if ((role !== null) !== (fit.chip !== null)) return null;
     fit.primary = agentRowPrimary(row, state);
     fit.secondary = agentRowSecondary(row, state, fit.primary);
     fit.name = node.querySelector(".wt-agent-name");
@@ -10582,11 +10765,16 @@ function redressAgentRows(host, rows) {
       if (fit.wears.dataset.tip !== modelTip) fit.wears.dataset.tip = modelTip;
     }
     if (fit.usesNode !== null) writeTextContent(fit.usesNode, fit.uses);
+    if (fit.chip !== null) {
+      writeTextContent(fit.chip, paneRoleWord(fit.role));
+      const roleTip = paneRoleTip(fit.role);
+      if (fit.chip.dataset.tip !== roleTip) fit.chip.dataset.tip = roleTip;
+    }
     writeTextContent(fit.stateNode, fit.status);
     writeTextContent(node.querySelector(".wt-agent-when"), agentRowAgo(row));
     const tip = agentRowTip(fit.primary, fit.secondary, fit.uses);
     if (node.dataset.tip !== tip) node.dataset.tip = tip;
-    writeAttribute(node, "aria-label", agentRowSpoken(tip, fit.status, agentRowAgo(row)));
+    writeAttribute(node, "aria-label", agentRowSpoken(tip, fit.status, agentRowAgo(row), fit.role));
   }
   return true;
 }
@@ -10683,8 +10871,11 @@ function makeAgentRow(row, gutter = false) {
     return node;
   }
   // Which agent the row was built for, on the row: `redressAgentRows` reads
-  // it back to know whether the face it built still belongs.
+  // it back to know whether the face it built still belongs. And which role
+  // (t-45938), for the same reason: a chip that comes or goes is a new shape.
   node.dataset.agent = row.agent ?? "";
+  const role = agentRowRole(row);
+  node.dataset.role = role?.kind ?? "";
   node.dataset.depth = String(row.depth ?? 0);
   if (row.sub) node.dataset.sub = row.sub.id;
   if (row.depth > 0) node.style.setProperty("--card-depth", String(row.depth));
@@ -10766,7 +10957,10 @@ function makeAgentRow(row, gutter = false) {
   // Orca's collapsed compact summary is identity, not a shortened sentence:
   // one state shape and the actual running agent's icon, with the disclosure
   // at the far edge. Names, model, clock and +N return only when expanded.
+  // The role chip waits for the expansion too; the coordinator's face is
+  // ringed instead, so the folded card still says who leads it (t-45938).
   if (foldedSummary) {
+    if (role?.kind === "coordinator") face?.classList.add("is-coordinator");
     node.append(...[dot, face, fold].filter(Boolean));
     node.insertBefore(activityBorder, fold);
     const words = foldedSummaryWords(row, state, fold);
@@ -10858,13 +11052,16 @@ function makeAgentRow(row, gutter = false) {
   } else if (said) {
     body.appendChild(said);
   }
+  // Who the row is (t-45938) — 코디, 워커 or 사람 — between the state dot and
+  // the face, so the coordinator's row is told from a worker's at a glance.
+  const chip = role ? agentRoleChip(role) : null;
   const parts = (live
-    ? [fold, dot, face, body, uses, status, when, peek]
-    : [fold, dot, face, body, wears, uses, status, when, peek]
+    ? [fold, dot, chip, face, body, uses, status, when, peek]
+    : [fold, dot, chip, face, body, wears, uses, status, when, peek]
   ).filter(Boolean);
   node.append(...parts, activityBorder);
   node.dataset.tip = agentRowTip(primary, secondary, usesWords);
-  node.setAttribute("aria-label", agentRowSpoken(node.dataset.tip, status.textContent, when.textContent));
+  node.setAttribute("aria-label", agentRowSpoken(node.dataset.tip, status.textContent, when.textContent, role));
   return node;
 }
 
@@ -11567,7 +11764,7 @@ function writeTermTitleLeaves(term) {
   const fit = fittedAgentRowWords(rowNode, rows[at]);
   if (fit === null || fit.foldedSummary) return false;
 
-  writeTextContent(label, tabLabel(tab));
+  writeTextContent(label, tabStripWords(tab));
   writeTextContent(fit.name, fit.primary);
   if (fit.said !== null) writeTextContent(fit.said, fit.secondary);
   return true;
