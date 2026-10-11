@@ -549,9 +549,13 @@ pub fn suppressed(
     pane_worktree: &str,
     active_worktree: &str,
     window_focused: bool,
-    _on_stage: Option<bool>,
+    on_stage: Option<bool>,
 ) -> bool {
-    window_focused && !pane_worktree.is_empty() && pane_worktree == active_worktree
+    window_focused
+        && match on_stage {
+            Some(shown) => shown,
+            None => !pane_worktree.is_empty() && pane_worktree == active_worktree,
+        }
 }
 
 #[cfg(test)]

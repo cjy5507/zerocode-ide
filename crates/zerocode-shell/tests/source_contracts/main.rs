@@ -21700,7 +21700,7 @@ mod tests {
         // the notify seat between the two; a watched screen is not asked).
         let ringing = block_after(shipped, "fn ring_now(");
         let suppressing = ringing
-            .find("notify::suppressed(worktree, &active, focused)")
+            .find("notify::suppressed(worktree, &active, focused, stage.shows(term))")
             .expect("the ring no longer asks whether the person is watching");
         let returning = ringing
             .find("if watched {\n        return;\n    }")
