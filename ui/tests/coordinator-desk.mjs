@@ -156,7 +156,6 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
     ["merged", 18], ["deployed", 0], ["gate", 2], ["blocked", 2], ["stale", 0], ["failed", 1], ["unreviewable", 0],
     ["nothing_to_land", 0], ["unknown", 0], ["closed", 0],
   ];
-  /* Where each task's work stands, as the desk row carries the ledger's reading (`progress`, t-47538). */
   const head = (n) => n.toString(16).padStart(7, "0").repeat(6).slice(0, 40);
   const progressOf = (stage, n) => stage === "reported"
     ? { stage: "report_only", attempt: `dp-${100 + n}`, source: head(n), next: `zerocode-orc worktree-evidence --worker w-${100 + n}` }

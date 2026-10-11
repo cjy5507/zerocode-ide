@@ -39,8 +39,8 @@ pub enum WorkStage {
     /// ever be written ([`ReviewFacts::unreviewable`]). Over, not verified.
     Unreviewable,
     /// A coordinator reviewed an earlier attempt, or an earlier commit than the
-    /// one this attempt handed in, naming what it read: the review does not
-    /// stand for this work.
+    /// one this attempt handed in, naming the source it read: the review does
+    /// not stand for this work.
     Stale,
     /// An earlier attempt the task has moved past: a newer attempt carries the
     /// work, so this one neither waits for a review nor wears the newer one's.
@@ -196,18 +196,14 @@ impl Run {
         let newest = newest?;
         let current = attempt.filter(|one| one.id == newest.id);
         let (verb, words): (&str, Vec<String>) = match stage {
-            // What the checkout can prove: its changes, its runs, its receipts.
             WorkStage::ReportOnly | WorkStage::Stale => (
                 WORKTREE_EVIDENCE_VERB,
                 vec!["--worker".into(), current?.worker.clone()],
             ),
-            // The attempt's own words, to read why it ended.
             WorkStage::Failed => (
                 WORKER_TRANSCRIPT_VERB,
                 vec!["--worker".into(), current?.worker.clone()],
             ),
-            // The landing check of the head the review named — a commit; a review of a report
-            // has no head to merge.
             WorkStage::Verified => {
                 let head = review.source.as_deref().and_then(super::commit_named)?;
                 (
@@ -257,9 +253,9 @@ fn command_line(mut argv: Vec<String>, task: &str) -> String {
 /// facts, in the order they supersede each other, believed only with the
 /// source they were written against; then what no review can be written for;
 /// then the attempt itself. A review that no longer stands reads stale only
-/// where the coordinator's record carried review keys and named what it read:
-/// one that named nothing is unknown, and a note that carries no review leaves
-/// the report waiting.
+/// where the coordinator's record carried review keys and named the source it
+/// read: one that named no source is unknown, whatever attempt it named, and a
+/// note that carries no review leaves the report waiting.
 fn stage_of(
     task: Option<&Task>,
     review: &ReviewFacts,
@@ -308,17 +304,14 @@ fn stage_of(
     if attempt.succeeded != Some(true) {
         return (WorkStage::Failed, None);
     }
-    // A coordinator's review whose attempt or source moved on: `review_of`
-    // withheld its facts, and kept the ids that say why.
     if review.author == ReviewAuthor::Coordinator
         && (review.superseded_by.is_some() || review.source_now.is_some())
         && task.is_some_and(|task| ReviewFacts::from_result(task.result.as_str()).written)
     {
-        let named = review.attempt.is_some()
-            || review
-                .source
-                .as_deref()
-                .is_some_and(|named| !named.trim().is_empty());
+        let named = review
+            .source
+            .as_deref()
+            .is_some_and(|named| !named.trim().is_empty());
         return (
             if named {
                 WorkStage::Stale

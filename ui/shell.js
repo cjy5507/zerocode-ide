@@ -348,7 +348,6 @@ listen("ledger:changed", () => {
   void refreshArtifactCounts();
 });
 
-/* The ledger's one reading of a row's work (`progress`, core `WorkStage`, t-47538), as each surface says it. */
 const WORK_STAGES = Object.freeze({
   working: { key: "", word: "", phase: "", landing: null, live: "dispatched" },
   report_only: { key: "board.awaitingReview", word: "검증 대기", phase: "review", landing: "handedIn", live: "reported" },

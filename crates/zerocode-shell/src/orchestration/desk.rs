@@ -675,8 +675,7 @@ pub(crate) fn desk_snapshot(
         // other — a stage of two hundred is two dozen rows and a count.
         let finished = FINISHED_STAGES.contains(&stage);
         // The hand-in view is read from the ledger's own message, so it is asked
-        // of the rows the desk sends too — the same rule as the cost above; and
-        // where the work stands, read for a completed task already, likewise.
+        // of the rows the desk sends too — the same rule as the cost above.
         tasks.extend(rows.into_iter().map(|(run, task, row)| DeskTask {
             cost: finished.then(|| cost(run, task)),
             hand_in: hand_in_of(run, task),
@@ -1589,7 +1588,6 @@ mod tests {
             }
         }
         let said = serde_json::to_value(&desk).expect("the desk serializes");
-        // Completed by the ledger with no attempt: finished, and the ledger cannot say how (t-47538).
         let costed = said["tasks"]
             .as_array()
             .and_then(|rows| rows.iter().find(|one| one["stage"] == "unknown"))
@@ -1963,9 +1961,6 @@ mod tests {
                 22,
             )
             .expect("the worker's report");
-        /* Reported and merged by the roads a report and a review take (t-47538): a worker hands its
-         * head in, and the merged one's review names that attempt and that head — a coordinator's
-         * record naming no source it read is not believed as merged. */
         let handed = |ledger: &mut Ledger, id: &str, pane: &str, head: &str, at: i64| {
             let started = ledger
                 .start_worker(&run, "claude", ("team-desk", pane), Some(id), at)
@@ -2401,7 +2396,6 @@ mod tests {
             let task = ledger
                 .create_task(&run, "x".into(), title.into(), vec![], None, at)
                 .expect("a task");
-            // A pane of its own: two workers still looked for in one pane is a ledger no rebuild reads.
             let pane = format!("%{at}");
             let started = ledger
                 .start_worker(
@@ -2477,7 +2471,6 @@ mod tests {
             "5555555",
             r#"{"verified":true}"#,
         );
-        // Done by hand: no attempt ever carried it.
         let by_hand = ledger
             .create_task(&run, "x".into(), "by hand".into(), vec![], None, 60)
             .expect("a task");
@@ -2491,7 +2484,6 @@ mod tests {
                 61,
             )
             .expect("done by hand");
-        // A coordinator's record from before a review named the source it read.
         let unbound = ledger
             .create_task(&run, "x".into(), "unbound".into(), vec![], None, 70)
             .expect("a task");
@@ -2505,7 +2497,6 @@ mod tests {
                 71,
             )
             .expect("an old record");
-        // The stale one's attempt now names a newer commit than the one the review read.
         let mut moved = ledger.export();
         moved
             .dispatches
@@ -2603,7 +2594,6 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].created_ms <= pair[1].created_ms)
         );
-        // Completed with no attempt: an ending the ledger cannot read further (t-47538).
         let finished: Vec<&DeskTask> = desk
             .tasks
             .iter()

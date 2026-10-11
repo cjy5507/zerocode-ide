@@ -63,7 +63,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     bench.json("run-create --name progress");
     let run_id = bench.ledger.runs()[0].id.clone();
 
-    // Working: the attempt is open.
     let working = task_of(&mut bench, "working");
     let (_, _, open) = attempt_on(&mut bench, &working);
     let (row, whole) = read(&bench, &working, &open);
@@ -73,7 +72,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     );
     assert_eq!(row.next, None);
 
-    // Report only: handed in, nobody reviewed it. The next look is what the checkout proves.
     let (reported, worker, dispatch) = handed_in(&mut bench, "reported", HEAD_A, "");
     let (row, whole) = read(&bench, &reported, &dispatch);
     assert_eq!(
@@ -86,8 +84,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
         Some(format!("zerocode-orc worktree-evidence --run {run_id} --worker {worker}").as_str())
     );
 
-    // A worker's own word is a claim beside the report, never the stage — and its word that there
-    // is nothing to land leaves the work waiting for a review.
     let (claimed, _, dispatch) = handed_in(&mut bench, "claimed", HEAD_A, ",\"merged\":true");
     let (row, _) = read(&bench, &claimed, &dispatch);
     assert_eq!(
@@ -99,7 +95,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     let (row, _) = read(&bench, &unlanded, &dispatch);
     assert_eq!((row.stage, row.claimed), (WorkStage::ReportOnly, None));
 
-    // Failed: the attempt ended without a successful report. The next look is its own words.
     let failed = task_of(&mut bench, "failed");
     let (worker, pane, dispatch) = attempt_on(&mut bench, &failed);
     bench.json_at(&pane, "send --type worker_done --body {\"ok\":false}");
@@ -110,7 +105,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
         Some(format!("zerocode-orc worker-transcript --run {run_id} --worker {worker}").as_str())
     );
 
-    // Unreviewable: done by hand, and no attempt ever handed anything in. Over, and nothing to read.
     let unreviewable = task_of(&mut bench, "unreviewable");
     let (worker, _, dispatch) = attempt_on(&mut bench, &unreviewable);
     bench
@@ -127,15 +121,12 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     );
     assert_eq!(whole.next, None);
 
-    // Unknown: completed by hand with no attempt at all — not unreviewable, and not a report.
     let by_hand = task_of(&mut bench, "by-hand");
     bench.json(&format!("task-update --task {by_hand} --status completed"));
     let run = &bench.ledger.runs()[0];
     let whole = run.progress_of(run.task(&by_hand).expect("the task"));
     assert_eq!((whole.stage, whole.next), (WorkStage::Unknown, None));
 
-    // Verified, not merged: the next check is the landing check of the reviewed head, named so that
-    // pasting it twice is one request.
     let (verified, _, dispatch) = handed_in(&mut bench, "verified", HEAD_A, "");
     review(
         &mut bench,
@@ -160,7 +151,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
         )
     );
 
-    // Verified with no code to land.
     let (nothing, _, dispatch) = handed_in(&mut bench, "nothing", HEAD_A, "");
     review(
         &mut bench,
@@ -173,7 +163,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
         read(&bench, &nothing, &dispatch).1.stage,
         WorkStage::NothingToLand
     );
-    // A merge written beside the mark wins: the work is in main.
     let (both, _, dispatch) = handed_in(&mut bench, "both", HEAD_A, "");
     review(
         &mut bench,
@@ -184,7 +173,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     );
     assert_eq!(read(&bench, &both, &dispatch).1.stage, WorkStage::Merged);
 
-    // Merged, not deployed: the commit it landed as rides along.
     let (merged, _, dispatch) = handed_in(&mut bench, "merged", HEAD_A, "");
     review(
         &mut bench,
@@ -198,7 +186,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     assert_eq!(whole.merge_head.as_deref(), Some(HEAD_B));
     assert_eq!(whole.next, None);
 
-    // Deployed, with the attempt and the source the review named.
     let (deployed, _, dispatch) = handed_in(&mut bench, "deployed", HEAD_A, "");
     review(
         &mut bench,
@@ -215,9 +202,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     assert_eq!(whole.source.as_deref(), Some(HEAD_A));
     assert_eq!(whole.attempt.as_deref(), Some(dispatch.as_str()));
 
-    // A review of one attempt, and a retry started after it: the old attempt's row is superseded —
-    // no longer verified, and nothing to read for an attempt the task moved past; the retry is at
-    // work.
     let (stale, _, first) = handed_in(&mut bench, "stale", HEAD_A, "");
     review(&mut bench, &stale, "{\"verified\":true}", &first, HEAD_A);
     bench.json(&format!("task-update --task {stale} --status ready"));
@@ -229,7 +213,6 @@ fn every_stage_the_ledger_can_say_is_told_apart_by_one_reading() {
     assert_eq!(whole.stage, WorkStage::Working);
     assert_eq!(read(&bench, &stale, &second).0.stage, WorkStage::Working);
 
-    // Closed outranks every review.
     let (closed, _, dispatch) = handed_in(&mut bench, "closed", HEAD_A, "");
     bench.json(&format!(
         "task-update --task {closed} --status closed --closed-as outdated --why replaced"
@@ -504,6 +487,25 @@ fn a_record_that_names_no_source_reads_unknown_whatever_attempt_it_names() {
         assert_eq!(row.stage.word(), "unknown", "{task}: {row:?}");
         assert_eq!(whole.stage.word(), "unknown", "{task}: {whole:?}");
     }
+}
+
+/// A task a sweep compacted away leaves its attempt: a failed one still reads failed, a reported one
+/// still reads reported, and nothing is offered to run without the task to name.
+#[test]
+fn an_attempt_whose_task_was_compacted_away_reads_by_its_own_end() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name compacted");
+    let failed = task_of(&mut bench, "failed");
+    let (_, pane, lost) = attempt_on(&mut bench, &failed);
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":false}");
+    let (_, _, handed) = handed_in(&mut bench, "reported", HEAD_A, "");
+    let run = &bench.ledger.runs()[0];
+    let none = ReviewFacts::default();
+    let lost = run.progress_from(None, &none, run.dispatch(&lost));
+    let handed = run.progress_from(None, &none, run.dispatch(&handed));
+    assert_eq!((lost.stage, lost.next), (WorkStage::Failed, None));
+    assert_eq!((handed.stage, handed.next), (WorkStage::ReportOnly, None));
+    assert_eq!(handed.source.as_deref(), Some(HEAD_A));
 }
 
 /// The wire names are the window's keys: one per stage, none shared.
