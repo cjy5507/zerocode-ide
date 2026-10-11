@@ -42,7 +42,7 @@ const NEW_KEYS = Object.freeze([
   "artifacts.bundle.reportsKept", "artifacts.bundle.pair", "artifacts.bundle.pairSaid", "artifacts.bundle.deleted",
   "artifacts.bundle.evidence", "artifacts.bundle.tally", "artifacts.bundle.intended", "artifacts.bundle.pages",
   "artifacts.bundle.steps", "artifacts.bundle.unread", "artifacts.tests.passed", "artifacts.tests.failed",
-  "artifacts.tests.ignored", "artifacts.tests.rc", "artifacts.landing.unknown", "artifacts.digest.tasked",
+  "artifacts.tests.ignored", "artifacts.tests.rc", "artifacts.landing.unknown", "artifacts.digest.tasked", "artifacts.clearTask",
 ]);
 
 /* The tasks of the synthetic catalog, laid over the rows `standCatalog` stands. */
@@ -54,6 +54,9 @@ export function standTasks(page) {
     const gone = "/tmp/zerocode-window-test/wt-gone";
     const landedCommit = "89abcdef0123456789abcdef0123456789abcdef";
     const strangerCommit = "fedcba9876543210fedcba9876543210fedcba98";
+    // The two pictures of the before-and-after pair were taken at these commits (t-43931).
+    const beforeCommit = "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d";
+    const afterCommit = "9f8e7d6c5b4a39281706f5e4d3c2b1a098f7e6d5";
     const parts = (held = {}) => ({ reports: 0, pages: 0, files: 0, pictures: 0, logs: 0, other: 0, missing: 0, ...held });
     const origin = (task, worker, more = {}) => ({
       run: "run-9", task, worker, agent: "claude", model: "claude-sonnet-5-5", work_summary: "큐 닫기", ...more,
@@ -64,8 +67,10 @@ export function standTasks(page) {
       tags: fields.tags ?? [], preview: { kind: "none" }, source: fields.source ?? "worker_evidence",
     });
     const bundleRows = {
-      "b-before": file("b-before", "screenshot", "drawer-before.png", 1.2),
-      "b-after": file("b-after", "screenshot", "drawer-after.png", 1.1),
+      // The pair as a worker's hand-in keeps it (hand_in_keep.rs job_for): the pane as team/pane, the
+      // checkout, and the commit the report named — the only road by which a row carries a commit.
+      "b-before": file("b-before", "screenshot", "drawer-before.png", 1.2, { origin: origin("t-501", "w-12", { worktree: kept, commit: beforeCommit, pane: "team-5/%12" }) }),
+      "b-after": file("b-after", "screenshot", "drawer-after.png", 1.1, { origin: origin("t-501", "w-12", { worktree: kept, commit: afterCommit, pane: "team-5/%12" }) }),
       "b-single": file("b-single", "screenshot", "overview.png", 1.3),
       "b-red-log": file("b-red-log", "evidence", "red-rust.log", 1.5),
       "b-green-log": file("b-green-log", "evidence", "green-rust.log", 1.4),
@@ -94,6 +99,11 @@ export function standTasks(page) {
       {
         task: "t-503", work: "옛 작업", modified_ms: now - 6 * hour, lead: "r-old", title: "옛 빌드가 적은 보고서",
         parts: parts({ reports: 1 }), attempts: 1, sessions: 0, commit: strangerCommit,
+      },
+      {
+        // A task number of the ledger's real length (seven characters): its number box must stay in the fixed column.
+        task: "t-45392", work: "일곱 자리 번호", modified_ms: now - 4 * hour, lead: null, title: "일곱 자리 번호 줄",
+        parts: parts({ reports: 1 }), attempts: 1, sessions: 0,
       },
     ];
     for (let at = 0; at < fillers; at += 1) {
@@ -128,7 +138,7 @@ export function standTasks(page) {
         unread: 0, pages: ["p-demo"], rowIds: ["p-demo"], missing: [],
       },
     };
-    const seen = (window.__TASKS__ = { asks: [], bundles: [], commits: [], lines: lines.length });
+    const seen = (window.__TASKS__ = { asks: [], bundles: [], commits: [], lines: lines.length, last: lines.at(-1).task });
     // The runtime's listing by task, in small: the words are asked of the line.
     window.__ANSWER__.artifact_tasks = (args) => {
       const filter = args?.filter ?? {};
@@ -204,6 +214,318 @@ async function openTask(page, task) {
     await window.__PAINTED__();
     await new Promise((done) => setTimeout(done, 300));
   }, task);
+}
+
+/* The remainders of the tab (t-43931), each read as a person sees it at the real width: a line's
+ * height and how many lines stand on the list; the evidence band's reach; a task filter named once
+ * in the head, its ✕ kept; the compare's captions above the pictures, with the short commit of each
+ * picture; the model's whole name in the maker's tooltip, the maker a plain span with no aria-label.
+ * A line is at most two lines of text: a taller line holds three. The hashes are the first seven
+ * characters of the commits the fixture gives the pair. */
+const LINE_MAX_PX = 56;
+const BEFORE_HASH = "1a2b3c4";
+const AFTER_HASH = "9f8e7d6";
+
+async function testRemainders(page, ok) {
+  await openFresh(page);
+  const lines = await page.evaluate(() => {
+    const view = artifactsView();
+    const frame = view?.querySelector(".artifacts-tasks")?.getBoundingClientRect() ?? { top: 0, bottom: 0, height: 0 };
+    const onList = [...(view?.querySelectorAll(".artifact-task") ?? [])]
+      .map((one) => ({ one, box: one.getBoundingClientRect() }))
+      .filter(({ box }) => box.height > 0 && box.top >= frame.top - 0.5 && box.bottom <= frame.bottom + 0.5);
+    const kept = onList.every(({ one }) => [".artifact-task-title", ".artifact-task-when", ".artifact-task-parts"]
+      .every((part) => (one.querySelector(part)?.textContent ?? "") !== ""));
+    return { height: Math.round(onList[0]?.box.height ?? 0), onList: onList.length, listHeight: Math.round(frame.height), kept };
+  });
+  ok(
+    `a line of a task is at most ${LINE_MAX_PX} px tall, the list at 1440×900 holds as many whole lines as fit at that height, and every line keeps its title, its time and its counts`,
+    lines.height > 0 && lines.height <= LINE_MAX_PX && lines.onList >= Math.floor(lines.listHeight / LINE_MAX_PX) && lines.kept,
+    JSON.stringify(lines),
+  );
+
+  // The state chip is the last thing in a line's second line, so no state word moves a title. The words
+  // are the product's own: worktreeLandingSay in each of the five languages, every state word put in the
+  // real chip on the first line; the titles and each line's number box are measured again after each word.
+  const aligned = await page.evaluate(() => {
+    const saved = locale;
+    const view = artifactsView();
+    const frame = view?.querySelector(".artifacts-tasks")?.getBoundingClientRect() ?? { top: 0, bottom: 0 };
+    const onList = () => [...(view?.querySelectorAll(".artifact-task") ?? [])].filter((one) => {
+      const box = one.getBoundingClientRect();
+      return box.height > 0 && box.top >= frame.top - 0.5 && box.bottom <= frame.bottom + 0.5;
+    });
+    const starts = () => onList().map((one) => Math.round(one.querySelector(".artifact-task-title").getBoundingClientRect().left * 2) / 2);
+    const idWidths = () => onList().map((one) => Math.round(one.querySelector(".artifact-task-id").getBoundingClientRect().width));
+    const idInLead = onList().every((one) => one.querySelector(".artifact-task-id").getBoundingClientRect().right
+      <= one.querySelector(".artifact-task-title").getBoundingClientRect().left + 0.5);
+    const chip = onList()[0]?.querySelector(".artifact-task-landing") ?? null;
+    const original = chip ? { text: chip.textContent, tip: chip.dataset.tip, landing: chip.dataset.landing, hidden: chip.hidden } : null;
+    const landings = [
+      { state: "unlanded", compare_ref: "origin/main", ahead: 12, behind: 9, far_behind: true, conflict: { total: 3, files: ["ui/shell.css"] }, dirty: false, ignored: false },
+      { state: "landed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: true, ignored: true },
+      { state: "no_ref", compare_ref: "", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "no_commits", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "failed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "pending", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+    ];
+    const before = starts();
+    const idsBefore = idWidths();
+    const moved = [];
+    let idsSame = true;
+    const words = {};
+    for (const code of ["ko", "en", "ja", "zh", "es"]) {
+      locale = code;
+      const says = landings.map((landing) => worktreeLandingSay(landing, {})).filter(Boolean);
+      words[code] = says.length;
+      for (const say of says) {
+        if (chip) dressArtifactLanding(chip, say);
+        moved.push(...starts());
+        // Each line's number box is compared with its own width from before the word.
+        const after = idWidths();
+        if (after.length !== idsBefore.length || after.some((w, at) => w !== idsBefore[at])) idsSame = false;
+      }
+    }
+    locale = saved;
+    if (chip && original) {
+      chip.textContent = original.text;
+      chip.dataset.tip = original.tip;
+      chip.dataset.landing = original.landing;
+      chip.hidden = original.hidden;
+    }
+    return {
+      rows: before.length,
+      start: before[0] ?? null,
+      sameStart: before.length > 1 && before.every((x) => x === before[0]),
+      stays: moved.length > 0 && moved.every((x) => x === before[0]),
+      idsSame,
+      idInLead,
+      words,
+    };
+  });
+  ok(
+    "every line's title starts at the same x, no state word of the five languages moves a title or a number box (every word tried in the real chip), and every number box stays in its fixed column, a seven-character task number included",
+    aligned.rows > 1 && aligned.sameStart && aligned.stays && aligned.idsSame && aligned.idInLead,
+    JSON.stringify(aligned),
+  );
+
+  await openTask(page, "t-501");
+  // The keyboard walks the band: the first card takes the focus, then one Tab for each card after it.
+  const count = await page.evaluate(() => {
+    const cards = [...(artifactsView()?.querySelectorAll(".artifact-bundle-cards .artifact-evidence") ?? [])];
+    cards[0]?.focus({ preventScroll: true });
+    return cards.length;
+  });
+  for (let at = 1; at < count; at += 1) await page.keyboard.press("Tab");
+  const band = await page.evaluate(() => {
+    const view = artifactsView();
+    const strip = view?.querySelector(".artifact-bundle-cards") ?? null;
+    const frame = strip?.getBoundingClientRect() ?? { top: 0, bottom: 0, left: 0, right: 0 };
+    const cards = [...(strip?.querySelectorAll(".artifact-evidence") ?? [])];
+    const past = cards.filter((one) => {
+      const box = one.getBoundingClientRect();
+      return box.left < frame.left - 0.5 || box.right > frame.right + 0.5;
+    }).length;
+    const last = cards.at(-1) ?? null;
+    const at = last?.getBoundingClientRect();
+    const reached = document.activeElement === last && Boolean(at)
+      && at.left >= frame.left - 0.5 && at.right <= frame.right + 0.5
+      && at.top >= frame.top - 0.5 && at.bottom <= frame.bottom + 0.5;
+    return { cards: cards.length, past, overflowX: Math.round((strip?.scrollWidth ?? 0) - (strip?.clientWidth ?? 0)), reached, focused: document.activeElement?.className ?? null };
+  });
+  ok(
+    "the evidence of a task reaches its last card without a sideways run: no card runs past the band's edge, the band has no sideways overflow, and the keyboard reaches the last card",
+    band.cards >= 5 && band.past === 0 && band.overflowX <= 0 && band.reached,
+    JSON.stringify(band),
+  );
+
+  // In the band (200 px) the second line holds the state chip only: a count or a time that cannot stand
+  // whole stands nowhere, so no count is ever cut to a letter (the counts and the time stay in the reader).
+  const strip = await page.evaluate(() => {
+    const view = artifactsView();
+    const rows = [...(view?.querySelectorAll(".artifact-task") ?? [])].filter((one) => one.getClientRects().length > 0);
+    const shownDisplay = (node) => (node ? getComputedStyle(node).display !== "none" : false);
+    return {
+      open: view?.classList.contains("is-task-open") ?? false,
+      rows: rows.length,
+      countsShown: rows.filter((one) => shownDisplay(one.querySelector(".artifact-task-parts"))).length,
+      timeShown: rows.filter((one) => shownDisplay(one.querySelector(".artifact-task-when"))).length,
+      landingShown: rows.filter((one) => shownDisplay(one.querySelector(".artifact-task-landing"))).length,
+    };
+  });
+  ok(
+    "in the band a line's second line shows its state chip and no count or time, so no count is cut to a letter — the three lines of the fixture that have a state each show their chip",
+    strip.open && strip.rows > 0 && strip.countsShown === 0 && strip.timeShown === 0 && strip.landingShown === 3,
+    JSON.stringify(strip),
+  );
+
+  // In the band every state word of the five languages (the product's own words, in the real chip) stays
+  // inside its row. The whole word is the chip's text and the first line of its tooltip; a word wider than
+  // the chip is cut with an ellipsis, and the Spanish no-reference word is one of them.
+  const inBand = await page.evaluate(() => {
+    const saved = locale;
+    const view = artifactsView();
+    const row = [...(view?.querySelectorAll(".artifact-task") ?? [])].find((one) => one.getClientRects().length > 0) ?? null;
+    const chip = row?.querySelector(".artifact-task-landing") ?? null;
+    const original = chip ? { text: chip.textContent, tip: chip.dataset.tip, landing: chip.dataset.landing, hidden: chip.hidden } : null;
+    const landings = [
+      { state: "unlanded", compare_ref: "origin/main", ahead: 12, behind: 9, far_behind: true, conflict: { total: 3, files: ["ui/shell.css"] }, dirty: false, ignored: false },
+      { state: "landed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: true, ignored: true },
+      { state: "no_ref", compare_ref: "", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "no_commits", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "failed", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+      { state: "pending", compare_ref: "origin/main", ahead: 0, behind: 0, far_behind: false, conflict: null, dirty: false, ignored: false },
+    ];
+    const seen = [];
+    for (const code of ["ko", "en", "ja", "zh", "es"]) {
+      locale = code;
+      const says = landings.map((landing) => worktreeLandingSay(landing, {})).filter(Boolean);
+      says.forEach((say, at) => {
+        if (chip) dressArtifactLanding(chip, say);
+        const rowBox = row?.getBoundingClientRect();
+        const padRight = row ? parseFloat(getComputedStyle(row).paddingRight) : 0;
+        const chipBox = chip?.getBoundingClientRect();
+        seen.push({
+          code,
+          word: say.head,
+          noRef: at === 2,
+          inside: Boolean(rowBox && chipBox) && chipBox.right <= rowBox.right - padRight + 0.5 && chipBox.left >= rowBox.left - 0.5,
+          whole: chip?.textContent === say.head,
+          tipLeads: (chip?.dataset.tip ?? "").split("\n")[0] === say.head,
+          cut: chip ? chip.scrollWidth > chip.clientWidth + 0.5 : false,
+        });
+      });
+    }
+    const ellipsis = chip ? getComputedStyle(chip).textOverflow === "ellipsis" : false;
+    locale = saved;
+    if (chip && original) {
+      chip.textContent = original.text;
+      chip.dataset.tip = original.tip;
+      chip.dataset.landing = original.landing;
+      chip.hidden = original.hidden;
+    }
+    return { row: Boolean(row), chip: Boolean(chip), ellipsis, seen };
+  });
+  ok(
+    "in the band every state word of the five languages stays inside its row, its whole text is the chip's text and the first tooltip line, the chip's text runs out with an ellipsis, and the Spanish no-reference word is cut there",
+    inBand.row && inBand.chip && inBand.ellipsis && inBand.seen.length === 30
+      && inBand.seen.every((one) => one.inside && one.whole && one.tipLeads)
+      && inBand.seen.some((one) => one.noRef && one.code === "es" && one.cut),
+    JSON.stringify({
+      row: inBand.row,
+      chip: inBand.chip,
+      ellipsis: inBand.ellipsis,
+      words: inBand.seen.length,
+      cut: inBand.seen.filter((one) => one.cut).map((one) => `${one.code}:${one.word}`),
+      outside: inBand.seen.filter((one) => !(one.inside && one.whole && one.tipLeads)).map((one) => `${one.code}:${one.word}`),
+    }),
+  );
+
+  await openFresh(page);
+  await page.evaluate(async () => {
+    artifactsView().querySelector('[data-artifact-tab="reports"]')?.click();
+    await new Promise((done) => setTimeout(done, 250));
+  });
+  const named = await page.evaluate(async () => {
+    const view = artifactsView();
+    const pick = view.querySelector('[data-artifact-pick="task"]');
+    pick.value = "t-501";
+    pick.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((done) => setTimeout(done, 300));
+    const shown = (node) => Boolean(node) && !node.closest("[hidden]") && node.getClientRects().length > 0;
+    const chip = view.querySelector(".artifacts-origin-chip");
+    const words = [];
+    if (shown(pick) && pick.selectedOptions[0]?.textContent.includes("t-501")) words.push("picker");
+    if (shown(chip) && chip.textContent.includes("t-501")) words.push("chip");
+    const clear = view.querySelector(".artifacts-origin-clear");
+    return { words, clear: shown(clear), name: clear?.getAttribute("aria-label") ?? null, tip: clear?.dataset.tip ?? null };
+  });
+  ok(
+    "a task filter names its task once in the head, and its ✕ stays — named and tipped as the task filter's clearing",
+    named.words.length === 1 && named.clear && named.name === "작업 거르기 지우기" && named.tip === "작업 거르기 지우기",
+    JSON.stringify(named),
+  );
+
+  await openFresh(page);
+  await openTask(page, "t-501");
+  const captions = await page.evaluate(async () => {
+    const view = artifactsView();
+    view.querySelector(".artifact-bundle-cards button[data-before]")?.click();
+    await new Promise((done) => setTimeout(done, 400));
+    const compare = view.querySelector(".artifact-compare");
+    const frame = compare?.querySelector(".artifact-compare-stage")?.getBoundingClientRect() ?? null;
+    return [...(compare?.querySelectorAll(".artifact-compare-label") ?? [])].map((one) => ({
+      text: one.textContent.replace(/\s+/g, " ").trim(),
+      above: Boolean(frame) && one.getBoundingClientRect().bottom <= frame.top + 0.5,
+    }));
+  });
+  ok(
+    `the compare names each picture above it, outside the picture, with the short commit of its pair: 「전 · ${BEFORE_HASH}」 and 「후 · ${AFTER_HASH}」`,
+    captions.length === 2 && captions.every((one) => one.above)
+      && captions.some((one) => one.text === `전 · ${BEFORE_HASH}`) && captions.some((one) => one.text === `후 · ${AFTER_HASH}`),
+    JSON.stringify(captions),
+  );
+  // A pair whose rows name no commit (a picture the window took itself carries none) stands bare: the
+  // two rows here are real rows of the bundle that name no commit.
+  const bare = await page.evaluate(() => {
+    const compare = artifactsView()?.querySelector(".artifact-compare") ?? null;
+    setArtifactCompareLabels(compare, "b-single", "b-red-log");
+    return [...(compare?.querySelectorAll(".artifact-compare-label") ?? [])].map((one) => one.textContent.replace(/\s+/g, " ").trim());
+  });
+  ok(
+    "a pair whose rows name no commit stands its captions bare — 「전」 and 「후」, with no hash made up",
+    bare.length === 2 && bare[0] === "전" && bare[1] === "후",
+    JSON.stringify(bare),
+  );
+
+  await openFresh(page);
+  await page.evaluate(async () => {
+    artifactsView().querySelector('[data-artifact-tab="reports"]')?.click();
+    await new Promise((done) => setTimeout(done, 250));
+  });
+  const maker = await page.evaluate(async () => {
+    const view = artifactsView();
+    view.querySelector('.artifact-card[data-id="r-final"]')?.click();
+    await new Promise((done) => setTimeout(done, 300));
+    const node = view.querySelector(".artifact-detail-maker");
+    return {
+      shown: Boolean(node) && !node.hidden && node.getClientRects().length > 0,
+      text: node?.textContent ?? "",
+      tip: node?.dataset.tip ?? "",
+      truncated: node ? node.scrollWidth > node.clientWidth + 0.5 : false,
+      labelled: node ? node.hasAttribute("aria-label") : true,
+    };
+  });
+  // The maker is a plain span: its text keeps the model's last part whole even where the head cuts it to the eye,
+  // and the whole name is in its tooltip, so no aria-label is set on it.
+  ok(
+    "the model's name stands whole in the drawer's maker: its text keeps sonnet-5-5 even where the head cuts it, its tooltip holds claude-sonnet-5-5, and the maker carries no aria-label",
+    maker.shown && maker.text.includes("sonnet-5-5") && maker.tip.includes("claude-sonnet-5-5") && maker.labelled === false,
+    JSON.stringify(maker),
+  );
+
+  await openFresh(page);
+  await page.evaluate(async () => {
+    artifactsView().querySelector('[data-artifact-tab="evidence"]')?.click();
+    await new Promise((done) => setTimeout(done, 250));
+  });
+  const faces = await page.evaluate(() => {
+    const view = artifactsView();
+    const plainHeight = parseFloat(getComputedStyle(view).getPropertyValue("--artifact-card-plain-height"));
+    const cards = [...(view?.querySelectorAll(".artifact-card") ?? [])]
+      .filter((one) => one.getClientRects().length > 0 && ["screenshot", "evidence"].includes(one.dataset.kind));
+    return {
+      plainHeight,
+      count: cards.length,
+      heights: cards.slice(0, 4).map((one) => Math.round(one.getBoundingClientRect().height)),
+      emptyFaces: cards.filter((one) => one.querySelector(".artifact-card-face")?.getClientRects().length > 0).length,
+    };
+  });
+  ok(
+    "an evidence card that has no picture to show stands at the plain card's height, with no empty face beneath its name",
+    faces.count > 0 && faces.heights.every((height) => height <= faces.plainHeight + 2) && faces.emptyFaces === 0,
+    JSON.stringify(faces),
+  );
 }
 
 export async function testArtifactTasks(browser, origin, ok) {
@@ -334,10 +656,14 @@ export async function testArtifactTasks(browser, origin, ok) {
       seen.halt = colorOf("--signal-halt-ink");
       seen.ready = colorOf("--signal-ready-ink");
       probe.remove();
-      // The strip: the cards stand in one row under the head, above the report.
+      // The band: the cards stand in a grid under the head, above the report, each inside the band's width.
       const strip = bundle?.querySelector(".artifact-bundle-cards") ?? null;
-      const tops = new Set(cards.map((one) => Math.round(one.getBoundingClientRect().top)));
-      seen.oneRow = tops.size === 1;
+      const bandBox = box(strip) ?? { left: 0, right: 0 };
+      seen.inBand = cards.every((one) => {
+        const at = one.getBoundingClientRect();
+        return at.left >= bandBox.left - 0.5 && at.right <= bandBox.right + 0.5;
+      });
+      seen.rows = new Set(cards.map((one) => Math.round(one.getBoundingClientRect().top))).size;
       seen.stripAboveBody = (box(strip)?.bottom ?? Infinity) <= (box(drawer?.querySelector(".artifact-preview"))?.top ?? -Infinity) + 1;
       seen.rail = view?.classList.contains("is-rail") ?? null;
       seen.pages = [...(bundle?.querySelectorAll(".artifact-bundle-page") ?? [])].filter(shown).map((one) => one.textContent);
@@ -374,11 +700,11 @@ export async function testArtifactTasks(browser, origin, ok) {
     const card = (name) => reader.cards.find((one) => one.name.includes(name)) ?? null;
     ok(
       "the task's evidence stands under the head as a strip of cards, every file its own card with a plain status word beside its numbers",
-      reader.bundleShown === true && reader.cards.length === 5 && reader.oneRow === true && reader.stripAboveBody === true && reader.rail === false
+      reader.bundleShown === true && reader.cards.length === 5 && reader.inBand === true && reader.stripAboveBody === true && reader.rail === false
         && reader.cards.every((one) => one.tag === "BUTTON" && one.height >= PRESS_MIN_PX)
         && (card("green-rust.log")?.said ?? "").startsWith("✓ 통과") && (card("green-rust.log")?.said ?? "").includes("통과 12")
         && (card("green-rust.log")?.said ?? "").includes("무시됨 1") && card("green-rust.log")?.color === reader.ready,
-      JSON.stringify({ shown: reader.bundleShown, cards: reader.cards, oneRow: reader.oneRow, above: reader.stripAboveBody, rail: reader.rail }),
+      JSON.stringify({ shown: reader.bundleShown, cards: reader.cards, inBand: reader.inBand, rows: reader.rows, above: reader.stripAboveBody, rail: reader.rail }),
     );
     ok(
       "a failure the run was for is a grey ✕ 「의도한 실패」 with its exit code — never the red of a failure",
@@ -656,9 +982,14 @@ export async function testArtifactTasks(browser, origin, ok) {
       const view = artifactsView();
       view?.querySelector('.artifacts-loose [data-loose-tab="reports"]')?.click();
       await new Promise((done) => setTimeout(done, 200));
+      // The words that name the filter and show: the picker's chosen option, and the chip while it shows.
+      const shown = (node) => Boolean(node) && !node.closest("[hidden]") && node.getClientRects().length > 0;
+      const chip = view?.querySelector(".artifacts-origin-chip") ?? null;
+      const pick = view?.querySelector('[data-artifact-pick="task"]') ?? null;
       const seen = {
         tab: artifactFilter.tab,
-        chip: view?.querySelector(".artifacts-origin-chip")?.textContent ?? null,
+        named: [shown(pick) ? pick.selectedOptions[0]?.textContent ?? "" : "", shown(chip) ? chip.textContent : ""]
+          .filter((word) => word.includes("작업에 연결 안 된 것")),
         cards: [...(view?.querySelectorAll(".artifact-card") ?? [])].map((one) => one.dataset.id).sort().join(","),
       };
       view?.querySelector(".artifacts-origin-clear")?.click();
@@ -668,7 +999,7 @@ export async function testArtifactTasks(browser, origin, ok) {
     });
     ok(
       "pressing a line of the foot opens that tab filtered to what no task is linked to",
-      loose.tab === "reports" && (loose.chip ?? "").includes("작업에 연결 안 된 것") && loose.cards === "r-brief",
+      loose.tab === "reports" && loose.named.length === 1 && loose.cards === "r-brief",
       JSON.stringify(loose),
     );
 
@@ -873,7 +1204,7 @@ export async function testArtifactTasks(browser, origin, ok) {
       return {
         made: artifactTaskRowCreations - before,
         nodes: view.querySelectorAll(".artifact-task").length,
-        bottom: [...view.querySelectorAll(".artifact-task")].some((one) => one.dataset.task === `t-${700 + window.__TASKS__.lines - 5}`),
+        bottom: [...view.querySelectorAll(".artifact-task")].some((one) => one.dataset.task === window.__TASKS__.last),
         top: lastShown.includes("t-501"),
       };
     });
@@ -919,6 +1250,7 @@ export async function testArtifactTasks(browser, origin, ok) {
       catalogs.length === 0,
       JSON.stringify(catalogs.slice(0, 12)) + (catalogs.length > 12 ? ` … ${catalogs.length}` : ""),
     );
+    await testRemainders(page, ok);
     ok("the window raised no errors", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();

@@ -10,7 +10,7 @@ from fixture_reflex import write_atomic
 SUPPORT = pathlib.Path(__file__).with_name('FixtureSupport.swift')
 
 
-def prepare(folder, executable_name, source, bundle_prefix):
+def prepare(folder, executable_name, source, bundle_prefix, additional_sources=()):
     folder.mkdir(mode=0o700, parents=False, exist_ok=False)
     owner = uuid.uuid4().hex[:12]
     app = folder / f'{executable_name}-{owner}.app'
@@ -25,7 +25,8 @@ def prepare(folder, executable_name, source, bundle_prefix):
                       'CFBundleName': f'{executable_name}-{owner}', 'CFBundlePackageType': 'APPL',
                       'NSHighResolutionCapable': True}, handle)
     built = subprocess.run(['swiftc', '-O', '-swift-version', '6', '-warnings-as-errors', '-parse-as-library',
-                            str(SUPPORT), str(source), '-o', str(executable)])
+                            str(SUPPORT), str(source), *(str(path) for path in additional_sources),
+                            '-o', str(executable)])
     write_atomic(folder / 'session.json', {'owner': owner, 'app': str(app), 'executable': str(executable),
                                          'bundle': bundle, 'swiftc': built.returncode})
     return built.returncode

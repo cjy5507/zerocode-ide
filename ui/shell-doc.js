@@ -6002,9 +6002,10 @@ const ARTIFACT_VERDICT_WORDS = Object.freeze({
  * `Filter.kinds`의 낱말이다. */
 const ARTIFACT_TABS = Object.freeze([
   { tab: "tasks", kinds: [], key: "artifacts.tab.tasks", word: "작업별" },
-  // 보고서 카드는 글이 얼굴이다: 아이콘 얼굴 없이 칩·제목·만든 이 세 줄로 선다(`plain`).
+  // 글이 얼굴인 탭: 그림이 없는 종류의 카드는 아이콘 얼굴 없이 글 세 줄로 선다(`plain`). 보고서와
+  // 증거(스크린샷 포함)는 그림을 띄우지 못하니 얼굴이 빈 자리였다(t-43931).
   { tab: "reports", kinds: ["report"], key: "artifacts.kind.report", word: "보고서", plain: true },
-  { tab: "evidence", kinds: ["screenshot", "evidence"], key: "artifacts.kind.evidence", word: "증거" },
+  { tab: "evidence", kinds: ["screenshot", "evidence"], key: "artifacts.kind.evidence", word: "증거", plain: true },
   { tab: "pages", kinds: ["page", "document", "web"], key: "artifacts.tab.pages", word: "페이지·문서" },
   { tab: "other", kinds: ["export", "transcript", "other"], key: "artifacts.kind.other", word: "기타" },
 ]);
@@ -6034,6 +6035,11 @@ const ARTIFACT_PICK_ALL = Object.freeze({ key: "artifacts.pick.all", word: "전�
 /* 작업 고르개의 「작업에 연결 안 된 것」 칸의 값 — 작업 id(`t-…`)와 겹칠 수 없는 글자로 시작한다. */
 const ARTIFACT_TASK_UNLINKED = ":unlinked";
 const ARTIFACT_TASK_UNLINKED_WORD = Object.freeze({ key: "artifacts.task.unlinked", word: "작업에 연결 안 된 것" });
+/* ✕가 지우는 것의 이름 — 칩의 글이 빠진 뒤에도 ✕는 무엇을 지우는지 제 이름을 가진다(접근성 이름과 풍선). */
+const ARTIFACT_CLEAR_WORDS = Object.freeze({
+  task: { key: "artifacts.clearTask", word: "작업 거르기 지우기" },
+  origin: { key: "artifacts.clearOrigin", word: "출처 필터 지우기" },
+});
 /* 목차가 서는 보고서의 머리말 수 — 하나뿐이면 목차가 말할 것이 없다. */
 const ARTIFACT_OUTLINE_MIN_HEADS = 2;
 /* 카드 아래 줄의 표식 — claude.ai의 🌐(공유됨)/🔒(비공개)를 우리 뜻으로: 🌐는
@@ -6541,7 +6547,10 @@ function dressArtifactLanding(chip, say) {
   chip.hidden = !say;
   if (!say) return;
   if (chip.dataset.landing !== say.tone) chip.dataset.landing = say.tone;
-  if (chip.dataset.tip !== say.tip) chip.dataset.tip = say.tip;
+  // 칩의 말이 말줄임으로 줄면 온전한 말은 칩의 글과 풍선의 첫 줄에 있다(t-43931). 칩은 역할 없는 글 상자라 aria-label을 달지 않는다.
+  const whole = say.head ?? "";
+  const tip = [whole, say.tip].filter(Boolean).join("\n");
+  if (chip.dataset.tip !== tip) chip.dataset.tip = tip;
 }
 
 /* 작업 칩 하나의 옷 — 카드와 서랍이 같은 옷을 입는다. 풍선의 첫 줄은 그 작업의 이름이다:
@@ -7850,6 +7859,14 @@ function paintArtifactTier(view) {
   body.style.setProperty("--artifact-tier", tier);
 }
 
+/* 작업 고르개가 서 있고 이 거르개의 작업을 골라 둔 상태인가 — 그러면 칩의 글은 고르개가 이미 말한다.
+ * 작업별 탭에서는 고르개가 숨는다(칩이 유일한 이름이다). */
+function artifactOriginSaidByPicker(view, origin) {
+  if (origin.field !== "task") return false;
+  const pick = view.querySelector('[data-artifact-pick="task"]');
+  return !pick.parentElement.hidden && pick.value === (origin.value === "" ? ARTIFACT_TASK_UNLINKED : origin.value);
+}
+
 function paintArtifactHead(view) {
   paintArtifactStudio(view);
   const shownTabs = new Set(artifactVisibleTabs().map((row) => row.tab));
@@ -7882,8 +7899,13 @@ function paintArtifactHead(view) {
   const chip = view.querySelector(".artifacts-origin-chip");
   const clear = view.querySelector(".artifacts-origin-clear");
   const origin = artifactFilter.origin;
-  chip.hidden = !origin;
+  // 작업 고르개가 그 작업을 이미 고르고 서 있으면 칩의 글은 되풀이다 — 칩은 숨기고 ✕만 남긴다.
+  chip.hidden = !origin || artifactOriginSaidByPicker(view, origin);
   clear.hidden = !origin;
+  const clearWord = ARTIFACT_CLEAR_WORDS[origin?.field === "task" ? "task" : "origin"];
+  clear.dataset.i18nAria = clearWord.key;
+  clear.setAttribute("aria-label", t(clearWord.key, clearWord.word));
+  clear.dataset.tip = clear.getAttribute("aria-label");
   if (origin) {
     const field = ARTIFACT_ORIGIN_FIELDS.find((row) => row.field === origin.field);
     const fieldWord = field ? t(field.key, field.word) : origin.field;
@@ -7964,6 +7986,12 @@ function artifactColumns(view) {
   return Math.max(1, Math.floor(width / (tuning.cardMin + tuning.gap)));
 }
 
+/* 얼굴 없는 카드의 종류: 「글이 얼굴인」 탭(`plain`)에 속한 종류다. 그 탭의 카드 높이와 카드의
+ * 얼굴이 같은 말을 해야 한다 — 종류 하나가 한쪽만 바꾸면 빈 얼굴이나 빈 높이가 남는다. */
+function artifactKindPlain(kind) {
+  return ARTIFACT_TABS.some((row) => row.plain === true && row.kinds.includes(kind));
+}
+
 /* 카드 한 장의 옷 — 제자리에서. 노드는 풀의 것이고 id만 갈아입는다. */
 function dressArtifactCard(node, row, selected) {
   if (node._artifactRow !== row) {
@@ -7975,8 +8003,8 @@ function dressArtifactCard(node, row, selected) {
     // 발행한 페이지의 설명은 제목의 풍선이다 — 카드의 셋째 줄은 만든 이의 것이다.
     title.dataset.tip = row.description ?? "";
     node.classList.toggle("is-missing", artifactMissing.has(row.id));
-    // 보고서 카드는 글이 얼굴이다: 종류 칩이 서고, 아래 줄은 같은 낱말을 되풀이하지 않는다.
-    const plain = row.kind === "report";
+    // 얼굴 없는 카드(글이 얼굴인 탭의 종류)는 종류 칩 대신 낱말 한 줄로 선다 — 탭의 높이와 같은 말.
+    const plain = artifactKindPlain(row.kind);
     node.classList.toggle("is-plain", plain);
     const subtype = node.querySelector(".artifact-card-subtype");
     subtype.textContent = plain ? artifactKindWord(row) : "";
@@ -8627,7 +8655,7 @@ function paintArtifactBar(drawer, row, landed) {
     { what: artifactKindWord(row), time: artifactClockWords(row.modified_ms) },
   ));
   // 만든 이: 에이전트와 모델을 한 낱말씩. 모델 이름이 에이전트 이름으로 시작하면 되풀이하지
-  // 않는다(`claude` + `claude-sonnet-5-5` → 「claude sonnet-5-5」). 온전한 값은 세부 정보에 있다.
+  // 않는다(`claude` + `claude-sonnet-5-5` → 「claude sonnet-5-5」). 온전한 값은 풍선과 세부 정보에 있다.
   const maker = bar.querySelector(".artifact-detail-maker");
   const agent = row.origin?.agent ?? "";
   const model = row.origin?.model ?? "";

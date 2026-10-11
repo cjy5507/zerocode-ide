@@ -574,6 +574,16 @@ export async function testArtifactCards(browser, origin, ok) {
         name, tab(name)?.querySelector(".artifacts-tab-count")?.textContent ?? null,
       ]));
       const settle = () => new Promise((done) => setTimeout(done, 150));
+      // The words that name a task in the head, as a person sees them: the picker's chosen option and the
+      // chip, each only while it shows. A filter says its name once (t-43931: the chip hides beside a picker).
+      const naming = (word) => {
+        const pickNode = view?.querySelector('[data-artifact-pick="task"]') ?? null;
+        const chipNode = view?.querySelector(".artifacts-origin-chip") ?? null;
+        const words = [];
+        if (shown(pickNode) && (pickNode.selectedOptions[0]?.textContent ?? "").includes(word)) words.push("picker");
+        if (shown(chipNode) && (chipNode.textContent ?? "").includes(word)) words.push("chip");
+        return words;
+      };
       const seen = { asksBefore: window.__CARDS__.asks.length };
       tab("reports")?.click();
       await settle();
@@ -582,6 +592,8 @@ export async function testArtifactCards(browser, origin, ok) {
       seen.afterChip = counts();
       seen.asksOnChip = window.__CARDS__.asks.length - seen.asksBefore;
       seen.chip = text(view?.querySelector(".artifacts-origin-chip"));
+      seen.namedChip = naming("t-501");
+      seen.clearChip = shown(view?.querySelector(".artifacts-origin-clear"));
       const pick = view?.querySelector('[data-artifact-pick="task"]') ?? null;
       seen.pickTag = pick?.tagName ?? null;
       seen.pickValue = pick?.value ?? null;
@@ -600,6 +612,7 @@ export async function testArtifactCards(browser, origin, ok) {
       await settle();
       seen.unlinkedIds = [...artifactOrder].sort();
       seen.unlinkedChip = text(view?.querySelector(".artifacts-origin-chip"));
+      seen.namedUnlinked = naming("작업에 연결 안 된 것");
       seen.unlinkedCounts = counts();
       // The same filter from the keyboard's road: the head's select, with the drawer never opened.
       if (pick) {
@@ -609,6 +622,7 @@ export async function testArtifactCards(browser, origin, ok) {
       await settle();
       seen.afterPick = counts();
       seen.pickChip = text(view?.querySelector(".artifacts-origin-chip"));
+      seen.namedPick = naming("t-502");
       view?.querySelector(".artifacts-origin-clear")?.click();
       await settle();
       seen.afterClear = counts();
@@ -616,11 +630,11 @@ export async function testArtifactCards(browser, origin, ok) {
       return seen;
     });
     ok(
-      "pressing a card's task chip filters every tab to that task without asking the runtime, and each tab says its count",
+      "pressing a card's task chip filters every tab to that task without asking the runtime, each tab says its count, and the head names the task once, with its ✕ kept",
       filtered.afterChip.pages === "1" && filtered.afterChip.reports === "2" && filtered.afterChip.evidence === "0"
-        && filtered.asksOnChip === 0 && typeof filtered.chip === "string" && filtered.chip.includes("t-501")
+        && filtered.asksOnChip === 0 && filtered.namedChip.length === 1 && filtered.clearChip === true
         && filtered.reportIds.join(",") === "r-final,r-first",
-      JSON.stringify({ counts: filtered.afterChip, asks: filtered.asksOnChip, chip: filtered.chip, rows: filtered.reportIds }),
+      JSON.stringify({ counts: filtered.afterChip, asks: filtered.asksOnChip, named: filtered.namedChip, clear: filtered.clearChip, rows: filtered.reportIds }),
     );
     ok(
       "a tab the task emptied says what is not linked — 「작업에 연결 안 된 것 4」 with 「보기」 — instead of an empty list, and 「보기」 shows those rows",
@@ -628,20 +642,20 @@ export async function testArtifactCards(browser, origin, ok) {
         && filtered.emptiedLine.includes("작업에 연결 안 된 것") && filtered.emptyBlock === false
         && filtered.showTag === "BUTTON" && filtered.showHeight >= PRESS_MIN_PX
         && filtered.unlinkedIds.join(",") === "e-log,e-state,e-steps,s-shot"
-        && typeof filtered.unlinkedChip === "string" && filtered.unlinkedChip.includes("작업에 연결 안 된 것")
+        && filtered.namedUnlinked.length === 1
         && filtered.unlinkedCounts.reports === "1" && filtered.unlinkedCounts.pages === "2",
       JSON.stringify({
         line: filtered.emptiedLine, emptyBlock: filtered.emptyBlock, show: [filtered.showTag, filtered.showHeight],
-        rows: filtered.unlinkedIds, chip: filtered.unlinkedChip, counts: filtered.unlinkedCounts,
+        rows: filtered.unlinkedIds, named: filtered.namedUnlinked, counts: filtered.unlinkedCounts,
       }),
     );
     ok(
-      "the same filter is reached from the keyboard without the drawer: the head's 작업 select lists every task with its count and the rows no task is linked to, and follows the chip",
+      "the same filter is reached from the keyboard without the drawer: the head's 작업 select lists every task with its count and the rows no task is linked to, and names the filter once, in the select",
       filtered.pickTag === "SELECT" && filtered.pickValue === "t-501"
         && filtered.pickOptions.some((one) => one.includes("t-501") && one.includes("3"))
         && filtered.pickOptions.some((one) => one.includes("작업에 연결 안 된 것"))
-        && filtered.afterPick.reports === "1" && typeof filtered.pickChip === "string" && filtered.pickChip.includes("t-502"),
-      JSON.stringify({ value: filtered.pickValue, options: filtered.pickOptions, afterPick: filtered.afterPick, chip: filtered.pickChip }),
+        && filtered.afterPick.reports === "1" && filtered.namedPick.length === 1 && filtered.namedPick[0] === "picker",
+      JSON.stringify({ value: filtered.pickValue, options: filtered.pickOptions, afterPick: filtered.afterPick, named: filtered.namedPick }),
     );
     ok(
       "✕ clears the task and every tab counts all of its rows again",

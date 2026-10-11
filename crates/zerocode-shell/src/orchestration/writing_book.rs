@@ -158,7 +158,7 @@ mod tests {
     }
 
     fn desk_of(ledger: &Ledger) -> DeskSnapshot {
-        desk::desk_snapshot(ledger, |_| false, |_, _| TaskCost::default())
+        desk::desk_snapshot(ledger, |_| None, |_, _| TaskCost::default())
     }
 
     /// A worker row of `run` carrying `task`, as the board lists it.

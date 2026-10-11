@@ -391,7 +391,7 @@ use cmd::{
 };
 use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
-    claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs,
+    claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs, coordinator_seats,
     set_coordinator_handover,
 };
 use emulator::{
@@ -3001,6 +3001,7 @@ fn main() -> ExitCode {
             machine_load,
             coordinator_handover_status,
             coordinator_seat_runs,
+            coordinator_seats,
             claim_coordinator_seat,
             set_coordinator_handover,
             pane_subagents,

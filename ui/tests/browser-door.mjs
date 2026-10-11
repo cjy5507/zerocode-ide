@@ -881,11 +881,26 @@ await test("a_tab_nobody_looks_at_reads_and_fills_and_the_persons_tab_keeps_its_
 
 /* One eval, one step (`eval_script`): the expression reads the page's
  * fields, fills them by the words it read and says what is left — the
- * script the skill teaches, run as the door runs it. */
-await test("one_eval_reads_fills_and_checks_a_step_by_the_words_it_read", async () => {
+ * script the skill teaches, run as the door runs it. The times a date loads
+ * are the next call's, made when the page says they are in — never after a
+ * guessed pause; `lateMs` holds them back past the scene's own 300 ms, as a
+ * busy machine or a slow site does. */
+const SLOT_LIST_LATE_MS = 700;
+const SLOT_LIST_CAP_MS = 5_000;
+const oneEvalStep = async (lateMs) => {
   const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
   try {
     await booking.setContent(await scene("A"));
+    if (lateMs) {
+      // The door's scripts set no timer, so the page's next one is the times its date starts.
+      await booking.evaluate((ms) => {
+        const onTime = window.setTimeout;
+        window.setTimeout = (run, wait = 0, ...rest) => {
+          window.setTimeout = onTime;
+          return onTime(run, wait + ms, ...rest);
+        };
+      }, lateMs);
+    }
     const card = JSON.parse(await readFile(resolve(SCENES, "A", "card.json"), "utf8"));
     const step = `(() => {
       const card = ${JSON.stringify(Object.fromEntries(card.facts.map((fact) => [fact.says, fact.value])))};
@@ -904,12 +919,16 @@ await test("one_eval_reads_fills_and_checks_a_step_by_the_words_it_read", async 
     assert(first.ok, "the one script ran", first);
     const notSet = first.value.statuses.filter((said) => !said.endsWith(":set"));
     assert(JSON.stringify(notSet) === JSON.stringify(["입차 시간:disabled"]), "all but the list a date loads took in one call", first.value);
-    await booking.waitForTimeout(350);
+    const loaded = await booking.waitForFunction(() => !document.getElementById("in-time").disabled, undefined,
+      { timeout: SLOT_LIST_CAP_MS }).then(() => true, () => false);
+    assert(loaded, `the page said within ${SLOT_LIST_CAP_MS} ms that the date's times were in`);
     const second = await evalJson(booking, evalFormScript(step));
     assert(second.value.statuses.every((said) => said.endsWith(":set") || said.endsWith(":same")), "the next call finishes it", second.value);
     return `${first.value.statuses.length} fields in one call`;
   } finally { await booking.close(); }
-});
+};
+await test("one_eval_reads_fills_and_checks_a_step_by_the_words_it_read", () => oneEvalStep(0));
+await test("one_eval_finishes_a_list_that_loads_late_on_the_next_call", () => oneEvalStep(SLOT_LIST_LATE_MS));
 
 /* A fill is held to the form its agent read (m-40824): a field renamed
  * after the read, and the whole bundle is refused unwritten — on the door's

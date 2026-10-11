@@ -54,6 +54,7 @@ tools-test:
     python3 tools/signing/tests/test_sign_app_bundle.py
     python3 tools/scoreboard/tests/test_scoreboard_launchd.py
     python3 tools/computer-bench/test_batch_rtt.py
+    python3 tools/computer-bench/test_background_input.py
     python3 tools/computer-bench/test_tally.py
     python3 tools/computer-bench/test_onboarding.py
     python3 tools/computer-bench/test_scenarios.py

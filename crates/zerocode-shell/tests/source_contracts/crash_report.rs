@@ -249,6 +249,12 @@ fn board_ledger_reads_do_not_wait_for_the_authority_on_the_main_thread() {
     );
     let pane = super::support::block_after(&board, "pub(crate) fn pane_agents(");
     assert!(pane.contains("ledger_states_by_term()"));
+    // The sidebar's coordinator seats ride every ledger beat beside `ledger_agents` (t-45938).
+    let seats = super::support::block_after(&board, "pub(crate) fn coordinator_seats(");
+    assert!(
+        seats.contains("board_ledger_snapshot()"),
+        "coordinator_seats still waits for actor.view on the main thread"
+    );
     let orchestration = std::fs::read_to_string(src.join("orchestration.rs")).unwrap();
     let states =
         super::support::block_after(&orchestration, "pub(crate) fn ledger_states_by_term()");
@@ -264,7 +270,7 @@ fn board_ledger_reads_do_not_wait_for_the_authority_on_the_main_thread() {
     ] {
         assert!(!snapshot.contains(forbidden));
     }
-    for body in [command, pane] {
+    for body in [command, pane, seats] {
         for forbidden in [
             "with_ledger_seats",
             "WorkflowStore",

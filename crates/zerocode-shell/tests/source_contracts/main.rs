@@ -15590,9 +15590,11 @@ mod tests {
             "a title change draws the strip on the frame path again:\n{naming}"
         );
         let leaves = block_after(window, "function writeTermTitleLeaves(term) {");
+        // The strip's words for a tab are its name after its pane's role (t-45938),
+        // written by the strip's own painter and by this guarded leaf alike.
         assert!(
             leaves.contains("if (agentPaintDue.tabs || agentPaintDue.cards) return false;")
-                && leaves.contains("writeTextContent(label, tabLabel(tab));")
+                && leaves.contains("writeTextContent(label, tabStripWords(tab));")
                 && leaves.contains("writeTextContent(fit.name, fit.primary);")
                 && !leaves.contains("renderTabs()")
                 && !leaves.contains("paintWorktreeAgents()"),

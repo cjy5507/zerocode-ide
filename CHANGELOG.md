@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.56] — 2026-10-11
+
+- macOS background Computer Use adds window-addressed clicks and scrolling, Unicode input, and field-specific text editing without using the shared pointer or clipboard.
+- Native keys require a verified receiver in the requested window. Ambiguous focus, unsupported controls and foreground conflicts refuse without activating the app; secret-entry, confirmation and stop guards remain enforced.
+- Native request reads are buffered and bounded, with temporary objects released after each request to reduce retained memory.
+- Background-only, browser and emulator recipes continue when the user's pointer moves; recipes borrowing the shared desktop retain the handoff guard.
+- macOS background clicks and scrolls have a non-interactive virtual pointer on visible target windows, without taking focus or moving the hardware cursor.
+- Guarded background clicks refuse unreadable controls instead of treating a window title as the target's label while accessibility initializes.
+- Sidebar actions return to existing worker terminals and show current task activity.
+- ChatGPT-backed zo conversations keep bounded reconnect attempts instead of ending on a refused reconnect.
+
+Background input is not a separate desktop. Use pinned field operations when native keys cannot be isolated; Windows background input remains unsupported.
+
 ## [1.1.55] — 2026-10-10
 
 ### Computer Use

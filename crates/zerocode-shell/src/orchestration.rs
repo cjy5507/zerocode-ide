@@ -2034,6 +2034,10 @@ pub(crate) struct LedgerAgent {
     /// The pane id inside its team (`%3`) — the half of the seat a person
     /// types `worker-read` with when this window holds no terminal for it.
     pub(crate) pane: String,
+    /// Whether the person took its pane over (`Worker::taken_over`, the
+    /// `takenOver` `worker-list` prints): the pane is then the person's, and
+    /// the sidebar and the desk name it 사람 rather than 워커 (t-45938).
+    pub(crate) taken_over: bool,
     /// Whether it asked a question nobody has answered yet
     /// (`Run::awaiting_reply`, the silence the stall sweep keeps quiet).
     pub(crate) asking: bool,
@@ -2387,7 +2391,7 @@ pub(crate) fn refresh_board_ledger() {
                 ledger,
                 desk::desk_snapshot(
                     ledger,
-                    |seat| seat_is_held(seats, seat),
+                    |seat| seat_term(seats, seat),
                     |run, task| costs.cost(run, task),
                 ),
             )),
@@ -2583,6 +2587,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 model: worker.model.clone(),
                 effort: worker.effort.clone(),
                 pane: worker.pane.clone(),
+                taken_over: worker.taken_over,
                 asking: run.awaiting_reply(&worker.id),
                 wall: dispatch
                     .and_then(|one| zerocode_core::orchestration::newest_wall(run, &one.id)),
@@ -2610,13 +2615,12 @@ pub(crate) fn ledger_revision() -> Option<u64> {
 
 type TeamSeatIndex = std::collections::HashMap<String, std::collections::HashMap<String, u32>>;
 
-/// Whether this window holds the pane a seat names (`team/pane`).
-fn seat_is_held(seats: &TeamSeatIndex, seat: &str) -> bool {
-    seat.split_once('/').is_some_and(|(team, pane)| {
-        seats
-            .get(team)
-            .is_some_and(|panes| panes.contains_key(pane))
-    })
+/// The terminal of this window that the pane a seat names (`team/pane`) is,
+/// or `None` where this window does not hold that pane — whether this window
+/// holds the seat, and which of its panes sits in it (t-45938).
+fn seat_term(seats: &TeamSeatIndex, seat: &str) -> Option<u32> {
+    let (team, pane) = seat.split_once('/')?;
+    seats.get(team)?.get(pane).copied()
 }
 
 fn index_team_seats(

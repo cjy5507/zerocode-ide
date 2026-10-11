@@ -351,7 +351,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
     });
     // A walk's own fields: what the CLI's walk takes, and nothing it lacks.
     let walk = json!({
-        "background": { "type": "boolean", "description": "App walk: AX only." },
+        "background": { "type": "boolean", "description": "App walk only." },
         "goal": { "type": "string", "maxLength": GOAL_CHAR_CAP },
         "pane": { "type": "string" },
         "platform": { "type": "string" },
