@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use crate::jev::provenance::counts_toward_agreement;
+
 /// How many new rows stand between one auto judgment and the next (§4).
 ///
 /// The judgment is not made at the end of every turn: a bound that moves on
@@ -186,6 +188,32 @@ pub const NOT_COMPARED: LedgerKey = LedgerKey {
 /// ([`crate::jev::promote::Line::Baseline`]).
 pub const BASELINE_AGREED: LedgerKey = LedgerKey {
     canonical: "baselineAgreed",
+    also: &[],
+};
+/// Where a label's verdict came from, as a word — one of
+/// [`crate::jev::provenance::LabelSource`]'s (t-26584, ①). A label that names
+/// no source is no label for a rise: the judge reads only the marks whose
+/// source may raise a seat ([`crate::jev::provenance::counts_toward_agreement`]).
+pub const LABEL_SOURCE: LedgerKey = LedgerKey {
+    canonical: "labelSource",
+    also: &[],
+};
+/// Which writer put a label row in the ledger (t-26584, ①): the seat or
+/// program that saw what came next and wrote the label.
+pub const LABEL_AUTHOR: LedgerKey = LedgerKey {
+    canonical: "labelAuthor",
+    also: &[],
+};
+/// The input tokens the current judgment spent on the request a paired row
+/// grades, beside the candidate's [`INPUT_TOKENS`] (t-26584, ②, ADR-150).
+pub const CURRENT_INPUT_TOKENS: LedgerKey = LedgerKey {
+    canonical: "currentInputTokens",
+    also: &[],
+};
+/// The current judgment's wall time on that request, beside the candidate's
+/// [`ELAPSED_MS`] (t-26584, ②, ADR-150).
+pub const CURRENT_ELAPSED_MS: LedgerKey = LedgerKey {
+    canonical: "currentElapsedMs",
     also: &[],
 };
 
@@ -733,7 +761,9 @@ pub fn marks_from<'a>(
     // Read the way [`agreement_rows`] reads a mark's time.
     let mut marked: Vec<i64> = rows
         .into_iter()
-        .filter(|row| AGREED.read(row).and_then(Value::as_bool).is_some())
+        .filter(|row| {
+            AGREED.read(row).and_then(Value::as_bool).is_some() && counts_toward_agreement(row)
+        })
         .map(|row| AT.read(row).and_then(Value::as_i64).unwrap_or(0))
         .collect();
     if marked.iter().filter(|at| **at >= since_ms).count() >= wanted {
@@ -752,22 +782,55 @@ pub fn agreement_rows<'a>(
     rows: impl IntoIterator<Item = &'a Value>,
     since_ms: i64,
 ) -> crate::jev::promote::Agreement {
+    agreement_over(rows, since_ms, true)
+}
+
+/// [`agreement_rows`] counting every mark, proxies and unsourced labels
+/// included — the reading the judge gave before labels carried a source
+/// (t-26584). Beside the sourced reading, it is the "before" a dashboard names.
+#[must_use]
+pub fn agreement_rows_counting_all<'a>(
+    rows: impl IntoIterator<Item = &'a Value>,
+    since_ms: i64,
+) -> crate::jev::promote::Agreement {
+    agreement_over(rows, since_ms, false)
+}
+
+fn agreement_over<'a>(
+    rows: impl IntoIterator<Item = &'a Value>,
+    since_ms: i64,
+    by_source: bool,
+) -> crate::jev::promote::Agreement {
     let mut agreement = crate::jev::promote::Agreement::default();
     for row in rows {
         if !at_or_after(row, since_ms) {
             continue;
         }
-        if let Some(agreed) = AGREED.read(row).and_then(Value::as_bool) {
-            agreement.compared += 1;
-            agreement.agreed += usize::from(agreed);
+        let agreed = AGREED.read(row).and_then(Value::as_bool);
+        let baseline = BASELINE_AGREED.read(row).and_then(Value::as_bool);
+        if by_source && !counts_toward_agreement(row) {
+            agreement.proxied += usize::from(agreed.is_some() || baseline.is_some());
+        } else {
+            if let Some(agreed) = agreed {
+                agreement.compared += 1;
+                agreement.agreed += usize::from(agreed);
+            }
+            if let Some(baseline) = baseline {
+                agreement.baseline_compared += 1;
+                agreement.baseline_agreed += usize::from(baseline);
+            }
         }
         agreement.not_compared += usize::from(withheld(row).is_some());
-        if let Some(baseline) = BASELINE_AGREED.read(row).and_then(Value::as_bool) {
-            agreement.baseline_compared += 1;
-            agreement.baseline_agreed += usize::from(baseline);
-        }
     }
     agreement
+}
+
+/// Whether `row` is a label: a mark that grades another request ([`LABEL`])
+/// and is no request itself. A request's own mark — the seat's judgment set
+/// against the reader it replaces — is not a label.
+#[must_use]
+pub fn grades_a_request(row: &Value) -> bool {
+    LABEL.read(row).is_some() && asked_something(row).is_none()
 }
 
 /// How many of the requests at or after `since_ms` each asker made

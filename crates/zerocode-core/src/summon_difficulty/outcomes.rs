@@ -373,6 +373,34 @@ mod integration_tests {
         rows
     }
 
+    /// The judgment of a seat that acts from a drawn line (t-26584, ③④): each
+    /// answer carries the confidence the line acts on, and the ledger carries
+    /// the human bundle the line is pinned to.
+    fn judged_on(seat: &crate::jev::JevUse, rows: &[Value]) -> Option<promote::Judged> {
+        let mut all: Vec<Value> = rows
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                row["confidence"] = serde_json::json!(0.9);
+                row
+            })
+            .collect();
+        let person: Vec<Value> = (0..60)
+            .map(|n| {
+                serde_json::json!({
+                    "at": 1,
+                    "label": format!("person-{n}"),
+                    "labelSource": "person",
+                    "agreed": true,
+                })
+            })
+            .collect();
+        let pin = crate::jev::provenance::bundle_pin_for(&person, seat.id);
+        all.extend(person);
+        all.push(pin);
+        promote::judge_seat_in(seat, &all, Some(500))
+    }
+
     /// A fall of the words the seat asks now, as the judge writes one.
     fn fell() -> Value {
         promote::transition_row(
@@ -392,7 +420,7 @@ mod integration_tests {
         // Recording: the seat fell once, so the rows are what it rises on.
         let mut rows = vec![fell()];
         rows.extend(executions(true, false));
-        let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &rows).unwrap();
+        let judged = judged_on(&SUMMON_DIFFICULTY, &rows).unwrap();
         assert_eq!(judged.agreement.compared, n);
         assert_eq!(judged.verdict, promote::Verdict::Rise);
         for row in &mut rows {
@@ -401,9 +429,7 @@ mod integration_tests {
             row["baselineAgreed"] = json!(false);
         }
         assert_ne!(
-            promote::judge_seat(&SUMMON_DIFFICULTY, &rows)
-                .unwrap()
-                .verdict,
+            judged_on(&SUMMON_DIFFICULTY, &rows).unwrap().verdict,
             promote::Verdict::Rise
         );
     }
@@ -425,7 +451,7 @@ mod integration_tests {
             promote::Stand::Applying,
             "the difficulty seat acts until its judge says otherwise"
         );
-        let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &rows).unwrap();
+        let judged = judged_on(&SUMMON_DIFFICULTY, &rows).unwrap();
         assert_eq!(
             judged.verdict,
             promote::Verdict::Fall(promote::Line::ExecutionQuality)
@@ -451,7 +477,7 @@ mod integration_tests {
             .into_iter()
             .filter(|row| row.get(KEY).is_none())
             .collect();
-        let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &asked).unwrap();
+        let judged = judged_on(&SUMMON_DIFFICULTY, &asked).unwrap();
         assert_eq!(judged.verdict, promote::Verdict::Keep, "{judged:?}");
         let mut unmeasured = executions(true, true);
         for row in unmeasured
@@ -460,7 +486,7 @@ mod integration_tests {
         {
             row[KEY]["taskTokens"] = serde_json::Value::Null;
         }
-        let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &unmeasured).unwrap();
+        let judged = judged_on(&SUMMON_DIFFICULTY, &unmeasured).unwrap();
         assert_eq!(judged.verdict, promote::Verdict::Keep, "{judged:?}");
     }
 
@@ -480,15 +506,13 @@ mod integration_tests {
             row["outcome"] = serde_json::json!("timeout");
             row.as_object_mut().unwrap().remove("chosen");
         }
-        let judged = promote::judge_seat(&SUMMON_DIFFICULTY, &asked).unwrap();
+        let judged = judged_on(&SUMMON_DIFFICULTY, &asked).unwrap();
         assert_eq!(judged.verdict, promote::Verdict::Keep, "{judged:?}");
         assert!(!promote::judgment_due(&SUMMON_DIFFICULTY, &asked));
         let mut fallen = vec![fell()];
         fallen.extend(asked);
         assert!(matches!(
-            promote::judge_seat(&SUMMON_DIFFICULTY, &fallen)
-                .unwrap()
-                .verdict,
+            judged_on(&SUMMON_DIFFICULTY, &fallen).unwrap().verdict,
             promote::Verdict::Hold(promote::Line::Answered { .. })
         ));
     }

@@ -120,6 +120,10 @@ use serde_json::{Value, json};
 use crate::jev::questions::UNVERSIONED_RUBRIC;
 use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, JevUse, Naming};
 
+use crate::jev::provenance::{
+    Acted, BarMiss, Bundle, BundleMiss, CalibrationMiss, HUMAN_BUNDLE, PROMOTION_BAR, PairTally,
+    bar_miss, bundle_miss, bundle_of, calibration_miss, counts_toward_agreement, pair_tally,
+};
 use crate::jev::summary::{
     AGREED, ANSWERED, AT, BASELINE_AGREED, JUDGED_EVERY_ROWS, LABEL, MODEL, NOT_COMPARED,
     REQUEST_AT, RUBRIC_VERSION, RUBRIC_VERSIONS, TRANSITION, Tally, WILSON_Z_95, asked_something,
@@ -165,6 +169,12 @@ pub struct Judged {
     /// `None` for a seat judged on every mark, as every seat was before its
     /// labels drew one.
     pub act_line: Option<u16>,
+    /// The verdict the judge gave before the evidence rules of t-26584: every
+    /// mark counted, and no bar, calibration or human bundle read. The screen
+    /// names what changed from it.
+    pub before: Verdict,
+    /// The gate that holds the seat on [`Self::verdict`], when one does.
+    pub basis: Option<Line>,
 }
 
 /// A ledger read as one seat's current series (t-6877) from its newest
@@ -276,6 +286,7 @@ impl<'rows> OnVersion<'rows> {
         self.marks
             .iter()
             .zip(&self.mark_confidences)
+            .filter(|(row, _)| counts_toward_agreement(row))
             .filter_map(|(row, confidence)| {
                 Some(Graded {
                     confidence: *confidence,
@@ -756,6 +767,81 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
     judge_seat_in(seat, rows, None)
 }
 
+/// The three gates a rise is read on besides the judge's own lines
+/// (t-26584, ②③④), read off one series and one window by [`gates_for`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gates {
+    pub calibrating: Calibrating,
+    pub pairs: PairTally,
+    pub bar_reads: bool,
+    pub bundle: Option<Bundle>,
+}
+
+/// The gates of `seat` on the series `version` and the window of
+/// `window_wanted` requests the judge reads, for the act `line` it acts
+/// from. One reader: `judge_seat_at` takes its gates here, and so does
+/// every caller that judges a seat on a window of its own.
+#[must_use]
+pub fn gates_for(
+    seat: &JevUse,
+    version: &OnVersion<'_>,
+    rows: &[Value],
+    window_wanted: usize,
+    line: Option<u16>,
+) -> Gates {
+    // A seat graded by its executions reads its own lines (quality, cost
+    // and wall time); no answer confidence, paired mark or person bundle
+    // applies to it (t-26584, ②③④).
+    if graded_by_executions(seat) {
+        return Gates {
+            calibrating: Calibrating::NotRead,
+            pairs: PairTally::default(),
+            bar_reads: false,
+            bundle: None,
+        };
+    }
+    let sample_floor = seat
+        .agreement_rows_wanted
+        .unwrap_or(A_WINDOW_OF_COMPARISONS);
+    let held: Vec<&Value> = version
+        .window(window_wanted)
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect();
+    let since_ms = held
+        .first()
+        .and_then(|row| AT.read(row).and_then(Value::as_i64))
+        .unwrap_or(i64::MIN);
+    let marks = version.marks_from_line(line);
+    let reach = marks_that_can_clear(seat).unwrap_or(sample_floor);
+    // The bar reads at least its own sample of pairs (ADR-150), reached back
+    // within the series the way the agreement's sample is.
+    let pair_reach = reach.max(PROMOTION_BAR.min_pairs);
+    let pairs_since = crate::jev::summary::marks_from(marks.iter().copied(), since_ms, pair_reach);
+    Gates {
+        calibrating: if seat.reads_act_line {
+            Calibrating::Read {
+                line,
+                acted: line.map_or_else(Acted::default, |line| {
+                    Acted::of(line, &version.answered(), &version.graded())
+                }),
+                baseline_binds: seat.baseline.binds(),
+            }
+        } else {
+            Calibrating::NotRead
+        },
+        pairs: pair_tally(marks.iter().copied().filter(|row| {
+            AT.read(row)
+                .and_then(Value::as_i64)
+                .is_some_and(|at| at >= pairs_since)
+        })),
+        bar_reads: !graded_by_executions(seat),
+        bundle: seat
+            .reads_act_line
+            .then(|| bundle_of(rows, seat.id, &HUMAN_BUNDLE)),
+    }
+}
+
 /// [`judge_seat`] for a seat acting from `line` ([`judge_seat_at`]).
 #[must_use]
 pub fn judge_seat_in(seat: &JevUse, rows: &[Value], line: Option<u16>) -> Option<Judged> {
@@ -818,6 +904,7 @@ pub fn judge_seat_at(
     // The label's whole record on this version, not the window's: a seat
     // that is right almost every time is not held for being right lately.
     let record = crate::jev::summary::agreement_rows(marks.iter().copied(), i64::MIN);
+    let gates = gates_for(seat, version, rows, window_wanted, line);
     let evidence = Evidence {
         window: &window,
         floor_permille: floor,
@@ -832,6 +919,10 @@ pub fn judge_seat_at(
         disagreed_on_record: record.disagreed(),
         baseline: seat.baseline,
         apply_share: apply_share_of(held_with.iter().copied(), line),
+        calibrating: gates.calibrating,
+        pairs: gates.pairs,
+        bar_reads: gates.bar_reads,
+        bundle: gates.bundle,
     };
     let stand = standing(seat, rows);
     let verdict = if graded_by_executions(seat) {
@@ -845,10 +936,33 @@ pub fn judge_seat_at(
                 .or_else(|| execution_health(&evidence))
                 .or(broken)
         };
-        verdict_on(stand, broken)
+        verdict_on(stand, broken.or_else(|| gate_line(&evidence)))
     } else {
         judge_as(seat, stand, &evidence)
     };
+    let before = if graded_by_executions(seat) {
+        verdict
+    } else {
+        let counted = Evidence {
+            agreement: crate::jev::summary::agreement_rows_counting_all(
+                marks.iter().copied(),
+                marks_since,
+            ),
+            disagreed_on_record: crate::jev::summary::agreement_rows_counting_all(
+                marks.iter().copied(),
+                i64::MIN,
+            )
+            .disagreed(),
+            calibrating: Calibrating::NotRead,
+            pairs: PairTally::default(),
+            bar_reads: false,
+            bundle: None,
+            ..evidence
+        };
+        judge_without_gates(seat, stand, &counted)
+    };
+    // The last read of `evidence` (it borrows `window`), before `window` moves.
+    let basis = first_broken_line(&evidence).filter(|line| line.is_gate());
     Some(Judged {
         verdict,
         window,
@@ -859,6 +973,8 @@ pub fn judge_seat_at(
         model: version.model.map(str::to_string),
         cut: version.cut.map(str::to_string),
         act_line: line,
+        before,
+        basis,
     })
 }
 
@@ -1082,6 +1198,9 @@ pub struct Agreement {
     /// ([`crate::jev::summary::NOT_COMPARED`]) — a recall turn that touched no
     /// note, a pane nobody was in front of, a move nobody carried.
     pub not_compared: usize,
+    /// Marks a proxy or an unsourced label made, which no rise may read
+    /// (t-26584, ①): counted here, never in [`Self::compared`].
+    pub proxied: usize,
 }
 
 impl Agreement {
@@ -1174,6 +1293,33 @@ pub struct Evidence<'window> {
     /// How much of the window a seat acting from an act line acts on
     /// ([`apply_share_of`], t-9468) — `None` for a seat with no line.
     pub apply_share: Option<ApplyShare>,
+    /// The act line's record for a seat that reads one (t-26584, ③).
+    pub calibrating: Calibrating,
+    /// The paired records the rise bar is read on (ADR-150, t-26584, ②).
+    pub pairs: PairTally,
+    /// Whether the rise bar applies: not to a seat graded by its executions,
+    /// which carry their own cost and latency lines.
+    pub bar_reads: bool,
+    /// The person-judged rows, for a seat that reads an act line (ADR-176,
+    /// t-26584, ④).
+    pub bundle: Option<Bundle>,
+}
+
+/// Whether a seat reads an act line, and what the line's record says
+/// (t-26584, ③).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Calibrating {
+    /// The seat acts from no line.
+    NotRead,
+    /// The seat reads a line: the one drawn for its words, if any, and what
+    /// the answers it acts on say.
+    Read {
+        line: Option<u16>,
+        acted: Acted,
+        /// Whether the seat is read against a baseline at all: a seat with
+        /// none has no cheapest reader to beat (t-26584, ③).
+        baseline_binds: bool,
+    },
 }
 
 /// Why a seat may not act, in the order §4 asks.
@@ -1234,6 +1380,16 @@ pub enum Line {
         share_permille: u16,
         floor_permille: u16,
     },
+    /// The agreement rests on labels no rise may read: a proxy, or a label
+    /// that names no source (ADR-171, t-26584, ①).
+    ProxyOnly { withheld: usize },
+    /// The act line is not drawn, or its record does not clear the check
+    /// (t-26584, ③).
+    Calibration { miss: CalibrationMiss },
+    /// The paired records do not clear the rise bar (ADR-150, t-26584, ②).
+    Bar { miss: BarMiss },
+    /// The human bundle does not hold the rise (ADR-176, t-26584, ④).
+    Bundle { miss: BundleMiss },
 }
 
 /// What the judgment decided.
@@ -1305,7 +1461,9 @@ fn execution_health(evidence: &Evidence) -> Option<Line> {
 /// it clears them all.
 #[must_use]
 pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
-    execution_health(evidence).or_else(|| marks_line(evidence))
+    execution_health(evidence)
+        .or_else(|| marks_line(evidence))
+        .or_else(|| gate_line(evidence))
 }
 
 /// The first line the seat's marks do not clear, in §4's order — every line
@@ -1331,6 +1489,11 @@ fn marks_line(evidence: &Evidence) -> Option<Line> {
     // compares nothing has no label at all, which is a different sentence.
     let agreement = evidence.agreement;
     if agreement.compared < evidence.agreement_rows_wanted {
+        if agreement.compared == 0 && agreement.proxied > 0 {
+            return Some(Line::ProxyOnly {
+                withheld: agreement.proxied,
+            });
+        }
         if agreement.compared == 0 && agreement.not_compared > 0 {
             return Some(Line::Unlabeled {
                 withheld: agreement.not_compared,
@@ -1456,6 +1619,44 @@ const fn on_its_marks_alone(seat: &JevUse, stand: Stand) -> bool {
     )
 }
 
+/// The lines a rise is held to once the seat's own marks clear the judge's
+/// (t-26584, ②③④): the act line's record and checks, then the human bundle,
+/// then the paired bar. Each one holds a rise; none takes an acting seat back.
+fn gate_line(evidence: &Evidence) -> Option<Line> {
+    let calibration = match evidence.calibrating {
+        Calibrating::Read {
+            line,
+            acted,
+            baseline_binds,
+        } => calibration_miss(line, &acted, baseline_binds).map(|miss| Line::Calibration { miss }),
+        Calibrating::NotRead => None,
+    };
+    let bundle = evidence
+        .bundle
+        .and_then(|bundle| bundle_miss(&bundle, &HUMAN_BUNDLE))
+        .map(|miss| Line::Bundle { miss });
+    let bar = evidence
+        .bar_reads
+        .then(|| bar_miss(&evidence.pairs, &PROMOTION_BAR).map(|miss| Line::Bar { miss }))
+        .flatten();
+    calibration.or(bundle).or(bar)
+}
+
+/// `judge_as` with no gate: the verdict the judge gave before the evidence
+/// rules of t-26584, on the same window and the same rows.
+pub fn judge_without_gates(seat: &JevUse, stand: Stand, evidence: &Evidence) -> Verdict {
+    if on_its_marks_alone(seat, stand) {
+        return verdict_on(stand, marks_line(evidence));
+    }
+    if let Some(line) = fallback_line(stand, evidence) {
+        return Verdict::Fall(line);
+    }
+    verdict_on(
+        stand,
+        execution_health(evidence).or_else(|| marks_line(evidence)),
+    )
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -1493,6 +1694,22 @@ impl Line {
                 | Self::ApplyShare { .. }
                 | Self::OneSided { .. }
                 | Self::ExecutionCostsMissing
+                | Self::ProxyOnly { .. }
+                | Self::Calibration { .. }
+                | Self::Bar { .. }
+                | Self::Bundle { .. }
+        )
+    }
+
+    /// Whether this line is one of the t-26584 evidence gates.
+    #[must_use]
+    pub const fn is_gate(self) -> bool {
+        matches!(
+            self,
+            Self::ProxyOnly { .. }
+                | Self::Calibration { .. }
+                | Self::Bar { .. }
+                | Self::Bundle { .. }
         )
     }
 
@@ -1517,6 +1734,10 @@ impl Line {
             Self::ExecutionQuality => "execution_quality",
             Self::ExecutionCostsMissing => "execution_costs_missing",
             Self::ExecutionSavings => "execution_savings",
+            Self::ProxyOnly { .. } => "proxy_only",
+            Self::Calibration { .. } => "calibration",
+            Self::Bar { .. } => "bar",
+            Self::Bundle { .. } => "bundle",
         }
     }
 }
@@ -1918,6 +2139,7 @@ pub fn transition_row(
         "answered": window.answered,
         "answeredLowerBoundPermille": window.answered_lower_bound().map(permille),
         "p95Ms": window.p95_ms,
+        "decidedBy": "judge",
     });
     if let Some(line) = line {
         row[ON_LINE] = Value::from(line.token());

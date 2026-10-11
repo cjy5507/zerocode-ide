@@ -81,11 +81,13 @@ fn a_label_marks_the_baseline_only_where_the_host_can_say_what_it_fenced() {
         assert_eq!(browser_label.get("baselineAgreed"), None, "{browser_label}");
         // The ignored block proves no order either way: no mark for the
         // verdict or the rule (t-10916).
+        // The file block's mark is a later observation: a proxy, withheld from
+        // the agreement and the rule's baseline alike (t-26584, ①).
         let agreement = agreement_since(&labels, i64::MIN);
         assert_eq!(
-            (agreement.compared, agreement.baseline_compared, agreement.baseline_agreed, agreement.not_compared),
-            (1, 1, 0, 1),
-            "the judge counts one mark of each, and the rule's disagreed"
+            (agreement.compared, agreement.baseline_compared, agreement.baseline_agreed, agreement.not_compared, agreement.proxied),
+            (0, 0, 0, 1, 1),
+            "the proxy mark is withheld, and the ignored block is not compared"
         );
     });
 }
@@ -203,8 +205,10 @@ fn a_series_the_host_cannot_vouch_for_does_not_rise_on_marks_it_never_had() {
         assert_eq!(transitions_in(&ledger), Vec::<Value>::new(), "no rise on a rule graded on nothing");
         let rows: Vec<Value> = read_shadow_rows(&ledger);
         let judged = promote::judge_seat(&TOOL_TEXT_GUARD, &rows).expect("the guard is judged");
+        // Its marks are proxies, so the judge says so before it counts a baseline
+        // (t-26584, ①): no mark may raise the guard.
         assert!(
-            matches!(judged.verdict, promote::Verdict::Hold(Line::TooFewBaseline { compared: 0, .. })),
+            matches!(judged.verdict, promote::Verdict::Hold(Line::ProxyOnly { .. })),
             "{:?} on {:?}",
             judged.verdict,
             judged.agreement
@@ -216,22 +220,23 @@ fn a_series_the_host_cannot_vouch_for_does_not_rise_on_marks_it_never_had() {
     });
 }
 
-/// The positive control: the same series read off this runtime's own file
-/// tool — the rule graded on every block, plain, and wrong wherever the next
-/// step carried one out — rises on its own marks, and the guard's `auto`
-/// acts. The hold above is the missing marks, not a seat that can never rise.
+/// The same series read off this runtime's own file tool — the rule graded on
+/// every block, plain, and wrong wherever the next step carried one out — is
+/// still a proxy: the next step's order is a later observation, not an
+/// execution the guard's own decision produced, so the series holds on the
+/// proxy line and the guard's `auto` does not act on it (t-26584, ①).
 #[test]
-fn a_series_graded_on_the_hosts_word_rises_on_its_own_marks() {
+fn a_series_graded_on_the_hosts_word_is_a_proxy_and_raises_nothing() {
     let misses = TOOL_TEXT_GUARD.negatives_wanted.expect("the guard's negatives");
     let mock = missing_the_first(misses);
     machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), &mock.base_url, |cwd| {
         forget_waiting(cwd);
         let ledger = a_graded_series(cwd, "read_file", ORDER);
         let rose: Vec<Value> = transitions_in(&ledger).into_iter().filter(|row| TRANSITION.read(row) == Some(&Value::from(promote::ROSE))).collect();
-        assert!(!rose.is_empty(), "{:?}", read_shadow_rows::<Value>(&ledger).last());
-        assert!(guard_applies(&TOOL_TEXT_GUARD), "the ledger's standing: applying");
+        assert!(rose.is_empty(), "a proxy series writes no rise: {:?}", read_shadow_rows::<Value>(&ledger).last());
+        assert!(!guard_applies(&TOOL_TEXT_GUARD), "the ledger's standing: recording");
         refresh_standing(&TOOL_TEXT_GUARD, &tool_text_guard_path());
-        assert!(raised(&TEXT), "the guard's cached auto: acting");
+        assert!(!raised(&TEXT), "the guard's cached auto: recording");
         forget_waiting(cwd);
     });
 }

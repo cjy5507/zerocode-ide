@@ -199,6 +199,10 @@ fn judged_key(ask: &PatchAsk) -> u64 {
 #[serde(rename_all = "camelCase")]
 pub struct PatchReviewLabelRow {
     pub kind: String,
+    /// Set only where the row's own evidence is an execution — a receipt
+    /// (t-26584, ①); otherwise the seat's source stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_source: Option<String>,
     pub at: u64,
     /// The row this grades — its `judged` fingerprint, spelled as text.
     pub label: String,
@@ -582,6 +586,8 @@ fn write_labels(ledger: &Path, done: Vec<Waiting>) -> usize {
             let (verdict, hindsight) = (one.verdict?, one.decided?);
             Some(PatchReviewLabelRow {
                 kind: runtime::LABEL_ROW_KIND.to_string(),
+                label_source: matches!(hindsight, Hindsight::Stood { receipt: true })
+                    .then(|| "executed".to_string()),
                 at,
                 label: one.label,
                 path: fingerprint_of(&one.watched.path),

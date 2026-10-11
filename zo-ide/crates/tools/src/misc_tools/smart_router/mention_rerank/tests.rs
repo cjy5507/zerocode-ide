@@ -580,8 +580,8 @@ fn a_pick_against_another_ticket_labels_nothing() {
 /// next page armed under `auto` takes the judgment's order — where the page
 /// before the rise stood.
 #[test]
-fn auto_rises_on_its_own_labels_and_the_next_page_takes_the_judgments_order() {
-    use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Verdict, ROSE};
+fn its_own_proxy_labels_hold_the_seat_and_a_raised_seat_takes_the_judgments_order() {
+    use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Line, Verdict, ROSE};
     let mock = Mock::serving(200, reply(&[0.1, 0.7, 0.2]));
     machine(JevMode::Auto.key(), &mock.base_url, |cwd| {
         let (seat, rx) = seat(cwd);
@@ -621,11 +621,29 @@ fn auto_rises_on_its_own_labels_and_the_next_page_takes_the_judgments_order() {
             append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
         }
         let verdict = judge_ledger(&ledger, i64::try_from(now + 9_000).expect("a clock"));
-        assert_eq!(verdict, Some(Verdict::Rise), "the labels did not raise the seat");
+        // The seat's own labels are proxies (ADR-171, t-26584 ①): they hold the
+        // seat on the proxy line and raise it on nothing.
+        assert!(
+            matches!(verdict, Some(Verdict::Hold(Line::ProxyOnly { .. }))),
+            "its own proxy labels must not raise the seat: {verdict:?}"
+        );
         let rose = super::super::jev_summary::read_rows(&ledger)
             .iter()
             .any(|row| zerocode_core::jev::summary::TRANSITION.read(row) == Some(&serde_json::json!(ROSE)));
-        assert!(rose, "the rise was not written in the seat's own ledger");
+        assert!(!rose, "a proxy-only seat writes no rise");
+        // The raise is the judge's to write, on evidence it can read. This test
+        // stands on the transition the judge would write, to read the order a
+        // raised seat takes.
+        append_shadow_row(
+            &ledger,
+            &serde_json::json!({
+                "at": now + 9_500,
+                (zerocode_core::jev::summary::TRANSITION.canonical): ROSE,
+                "rubricVersions": [MENTION_RERANK.rubric_version],
+            }),
+            SHADOW_LEDGER_MAX_BYTES,
+        )
+        .expect("a rise");
         // Raised: the next page armed under `auto` takes the judgment's order.
         seat.disarm();
         seat.arm_now();

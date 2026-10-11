@@ -20,6 +20,7 @@
 //! written in ([`Facts`]) — and used on it only when that premise is the
 //! reading's own.
 
+use crate::jev::provenance::{LabelSource, stamp_label};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
@@ -1248,6 +1249,7 @@ pub fn label_row(
         }
         Err(word) => row[NOT_COMPARED.canonical] = json!(word),
     }
+    stamp_label(&mut row, LabelSource::Executed, "reflex");
     row
 }
 

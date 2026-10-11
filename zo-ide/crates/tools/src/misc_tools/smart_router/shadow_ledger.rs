@@ -76,7 +76,9 @@ pub fn append_shadow_row<T: Serialize>(path: &Path, row: &T, max_bytes: u64) -> 
     if fs::metadata(path).is_ok_and(|meta| meta.len() > max_bytes) {
         keep_newer_half(path)?;
     }
-    let mut line = serde_json::to_string(row).map_err(io::Error::other)?;
+    let mut value = serde_json::to_value(row).map_err(io::Error::other)?;
+    zerocode_core::jev::provenance::stamp_for_ledger(path, &mut value);
+    let mut line = serde_json::to_string(&value).map_err(io::Error::other)?;
     line.push('\n');
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(line.as_bytes())
@@ -357,7 +359,7 @@ mod tests {
         // The arm on the day its words move to the next version.
         let today = JevUse { rubric_version: CHALLENGER.rubric_version + 1, ..CHALLENGER };
         let wanted = window_wanted_for(&CHALLENGER).expect("the challenger rises");
-        let marks = marks_that_can_clear(&CHALLENGER).expect("a width");
+        let marks = marks_that_can_clear(&CHALLENGER).expect("a width").max(zerocode_core::jev::provenance::PROMOTION_BAR.min_pairs);
         let misses = CHALLENGER.negatives_wanted.expect("negatives");
         let thin = JUDGED_EVERY_ROWS;
         assert!(thin < wanted, "a judgment's worth of requests is short of a window");
@@ -377,10 +379,14 @@ mod tests {
             (0..asked).map(|n| comparison(n, format!("before-{n}"), CHALLENGER_RUBRIC_VERSION)).collect();
         // Each receipt's label: the challenger's word vindicated where the
         // incumbent's was not, but on the three it must hold inside.
+        // Each receipt is an executed source, priced the same on both sides
+        // (t-26584): the rise is read on quality and on its pairs alone.
         before.extend((0..marks).map(|n| {
             json!({
                 AT.canonical: asked + n, LABEL.canonical: format!("before-{n}"),
                 AGREED.canonical: n >= misses, BASELINE_AGREED.canonical: n < misses,
+                "labelSource": "executed", "inputTokens": 100, "currentInputTokens": 100,
+                "elapsedMs": 100, "currentElapsedMs": 100,
             })
         }));
         let dir = tempfile::tempdir().expect("a scratch folder");

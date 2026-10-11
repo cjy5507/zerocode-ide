@@ -808,6 +808,16 @@ fn the_seat_judge_reads_the_rows_this_module_writes_and_raises_the_seat_on_recei
         ));
     }
 
+    // A rise is read on priced pairs (ADR-150, t-26584): without the cost and
+    // latency each label carries, the same receipts hold the seat.
+    let unpriced = judge_seat(&CHALLENGER, &rows).expect("the seat is judged");
+    assert!(matches!(unpriced.verdict, Verdict::Hold(_)), "{unpriced:?}");
+    for row in rows.iter_mut().filter(|row| row.get("label").is_some()) {
+        row["inputTokens"] = json!(100);
+        row["currentInputTokens"] = json!(100);
+        row["elapsedMs"] = json!(100);
+        row["currentElapsedMs"] = json!(100);
+    }
     let judged = judge_seat(&CHALLENGER, &rows).expect("the seat promotes");
     assert_eq!(judged.agreement.compared, labels);
     assert_eq!(judged.agreement.agreed, labels - misses);
@@ -1210,4 +1220,14 @@ fn the_challenger_rows_this_machine_wrote_replayed() {
         );
     }
     println!("{}", json!({ "until": seed["until"], "pairs": table }));
+}
+
+/// A receipt's label names where its verdict came from (`labelSource`) and
+/// which writer put it in the ledger (`labelAuthor`), so a judge can tell an
+/// executed outcome from a proxy (t-26584, ①).
+#[test]
+fn a_receipt_label_names_its_source_and_its_author() {
+    let row = label_row("dp-7", &on(Receipt::Passed, ""), Preferred::Challenger, 5);
+    assert_eq!(row["labelSource"], json!("executed"));
+    assert_eq!(row["labelAuthor"], json!("challenger"));
 }

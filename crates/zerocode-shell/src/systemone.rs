@@ -347,7 +347,13 @@ fn append_rows_inner(ledger: &Path, rows: &[Value], durable: bool) -> std::io::R
     }
     let mut said = String::new();
     for row in rows {
-        said.push_str(&row.to_string());
+        if zerocode_core::jev::provenance::needs_source(row) {
+            let mut stamped = row.clone();
+            zerocode_core::jev::provenance::stamp_for_ledger(ledger, &mut stamped);
+            said.push_str(&stamped.to_string());
+        } else {
+            said.push_str(&row.to_string());
+        }
         said.push('\n');
     }
     ledger

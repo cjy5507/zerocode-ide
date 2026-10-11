@@ -627,8 +627,19 @@ fn the_rows_land_in_the_seats_own_ledger_and_are_read_back_as_one_agreement() {
     let rows = crate::systemone::read_rows(&ledger);
     assert_eq!(rows.len(), 2);
     assert!(ledger.ends_with(BROWSER_READ.ledger));
+    // A read's label is a proxy (SEAT_LABEL_SOURCE, t-26584 ①): it names its
+    // read and joins it by that name, but raises no agreement.
     let agreement = zerocode_core::jev::summary::agreement_since(&rows, 0);
-    assert_eq!((agreement.compared, agreement.agreed), (1, 0));
+    assert_eq!(
+        (agreement.compared, agreement.agreed, agreement.proxied),
+        (0, 0, 1)
+    );
+    let joined = zerocode_core::jev::summary::agreement_rows_counting_all(rows.iter(), 0);
+    assert_eq!(
+        (joined.compared, joined.agreed),
+        (1, 0),
+        "the label still joins its read by name"
+    );
     let tally = zerocode_core::jev::summary::summarize(&rows, 0);
     assert_eq!(
         (tally.rows, tally.answered),

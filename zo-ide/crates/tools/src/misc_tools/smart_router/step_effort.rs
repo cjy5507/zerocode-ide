@@ -520,8 +520,9 @@ mod tests {
             .collect();
         assert_eq!(asked.len(), 1, "only the judgment row is a request");
         assert_eq!(asked[0]["kind"], JUDGMENT_ROW_KIND);
+        // The step's mark is a later observation: a proxy, withheld from the agreement (t-26584, ①).
         let agreement = zerocode_core::jev::summary::agreement_since(&rows, i64::MIN);
-        assert_eq!((agreement.compared, agreement.agreed), (1, 1));
+        assert_eq!((agreement.compared, agreement.agreed, agreement.proxied), (0, 0, 1));
         assert!(!super::super::jev_summary::raised_in(&ZO_STEP_EFFORT, &ledger));
     }
 
@@ -557,7 +558,9 @@ mod tests {
         let judged = seat.judged.as_ref().expect("the step seat rises");
         let turns = usize::try_from(TURNS).expect("a few turns");
         assert_eq!(judged.window.rows, turns);
-        assert_eq!((judged.agreement.compared, judged.agreement.agreed), (turns, turns));
+        // Every mark is a later observation, a proxy: all of them are withheld, and
+        // counted as withheld whatever model the steps ran on (t-26584, ①).
+        assert_eq!((judged.agreement.compared, judged.agreement.proxied), (0, turns));
         assert_eq!(judged.cut, None);
     }
 

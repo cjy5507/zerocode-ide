@@ -2747,6 +2747,12 @@ pub struct SeatVerdict {
     /// of version, beside the line it holds on (t-6187).
     #[serde(default)]
     pub cut_model: Option<String>,
+    /// The verdict before the evidence rules of t-26584, when it differs.
+    #[serde(default)]
+    pub before: Option<String>,
+    /// The gate that holds the seat on this verdict (t-26584), when one does.
+    #[serde(default)]
+    pub basis: Option<String>,
 }
 
 /// One window of a seat's ledger, counted.

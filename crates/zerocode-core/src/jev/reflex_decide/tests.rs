@@ -1193,3 +1193,17 @@ fn only_an_answer_whose_grounds_stood_is_held_for_the_next_reading() {
     );
     assert!(!holdable(&failed));
 }
+
+/// An executed-outcome label names its source and its writer (t-26584, ①):
+/// what the hand measured after the answer is an execution, not a proxy.
+#[test]
+fn an_executed_outcome_label_names_its_source_and_its_author() {
+    let measured = Share::Screen {
+        pressed: 4,
+        missed: 0,
+    }
+    .json();
+    let label = label_row("rx-9-3", 2, 1_000, measured, Ok((true, Some(true))));
+    assert_eq!(label["labelSource"], json!("executed"));
+    assert_eq!(label["labelAuthor"], json!("reflex"));
+}

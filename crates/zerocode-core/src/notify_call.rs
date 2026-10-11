@@ -673,18 +673,20 @@ mod tests {
         };
         let mut rows = vec![
             request(10),
-            json!({"at": 70_010, "label": "3@10", "call": NOTIFY_BATCH,
+            json!({"at": 70_010, "label": "3@10", "labelSource": "proxy", "call": NOTIFY_BATCH,
                 "attendance": "present", "reacted": false, "agreed": true}),
             request(20),
-            json!({"at": 70_020, "label": "3@20", "call": NOTIFY_BATCH,
+            json!({"at": 70_020, "label": "3@20", "labelSource": "proxy", "call": NOTIFY_BATCH,
                 "attendance": "away", "reacted": true, "agreed": false}),
         ];
         let written = crate::jev::promote::on_the_newest_version(&crate::jev::NOTIFY, &rows);
         let before = crate::jev::summary::agreement_rows(written.marks.iter().copied(), i64::MIN);
+        // The hindsight labels are the person's own hand, a structural proxy
+        // (t-26584, ①): neither the seat nor its baseline counts them.
         assert_eq!(
-            (before.compared, before.baseline_compared),
-            (2, 0),
-            "as written: two marks, no baseline beside either"
+            (before.compared, before.baseline_compared, before.proxied),
+            (0, 0, 2),
+            "as written: two proxy marks, withheld from agreement"
         );
         crate::jev::NOTIFY.marked_now(&mut rows);
         let now = crate::jev::promote::on_the_newest_version(&crate::jev::NOTIFY, &rows);
@@ -697,7 +699,7 @@ mod tests {
                 after.baseline_agreed,
                 after.not_compared
             ),
-            (1, 1, 1, 0, 1)
+            (0, 0, 0, 0, 1)
         );
     }
 

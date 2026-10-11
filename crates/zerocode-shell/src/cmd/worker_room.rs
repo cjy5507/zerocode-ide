@@ -39,6 +39,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use zerocode_core::jev::provenance::{LabelSource, stamp_label};
 
 use serde_json::{Value, json};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
@@ -359,6 +360,7 @@ fn label_row(
         }
         Err(why) => label[NOT_COMPARED.canonical] = json!(why),
     }
+    stamp_label(&mut label, LabelSource::Proxy, "placement");
     label
 }
 
@@ -1058,12 +1060,14 @@ mod tests {
             stayed[NOT_COMPARED.canonical],
             json!(worker_placement::UNSEEN)
         );
-        // The judge reads the marks as the seat's agreement, and the labels
-        // are not requests.
+        // The labels are not requests. They are the seat's hindsight, a
+        // structural proxy (t-26584, ①): the judge counts them as withheld and
+        // never as the agreement a rise may read.
         let every = rows(&ledger);
         let judged =
-            zerocode_core::jev::promote::judge_seat(&PLACEMENT, &every).expect("placement rises");
-        assert_eq!((judged.agreement.compared, judged.agreement.agreed), (2, 0));
+            zerocode_core::jev::promote::judge_seat(&PLACEMENT, &every).expect("placement judged");
+        assert_eq!((judged.agreement.compared, judged.agreement.agreed), (0, 0));
+        assert_eq!(judged.agreement.proxied, 2, "both hindsight marks withheld");
         assert_eq!(judged.window.rows, 3, "a label was counted as a request");
     }
 

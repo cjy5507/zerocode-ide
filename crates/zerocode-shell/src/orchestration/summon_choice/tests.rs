@@ -255,6 +255,7 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
             baseline_compared: 0,
             baseline_agreed: 0,
             not_compared: 0,
+            proxied: 0,
         },
         "a marked row is the one comparison the seat rises on"
     );

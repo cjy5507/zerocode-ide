@@ -355,6 +355,10 @@ const JEV_LINES = Object.freeze({
   execution_costs_missing: { key: "settings.typesafe.lineExecutionCostsMissing", word: "비교할 실행의 토큰·시간 측정이 부족합니다" },
   execution_savings: { key: "settings.typesafe.lineExecutionSavings", word: "첫 시도 성공률을 유지하며 토큰과 시간을 줄인 증거가 부족합니다" },
   apply_share: { key: "settings.typesafe.lineApplyShare", word: "확신도 기준을 넘는 답이 너무 적습니다" },
+  proxy_only: { key: "settings.typesafe.lineProxyOnly", word: "정확도가 대용 라벨이나 출처 없는 라벨에만 기대고 있습니다", compares: true },
+  calibration: { key: "settings.typesafe.lineCalibration", word: "행동 기준선이 아직 보정되지 않았거나 기록이 부족합니다" },
+  bar: { key: "settings.typesafe.lineBar", word: "짝 기록이 승격 기준(표본·품질·비용·지연)을 넘지 못했습니다" },
+  bundle: { key: "settings.typesafe.lineBundle", word: "고정된 사람 묶음이 없거나 고정되지 않았거나 카나리가 맞지 않습니다" },
 });
 
 function jevLineWords(line) {
@@ -1999,7 +2003,11 @@ function jevStatusCell(held, choice, standing, head) {
  * says whose doing that is and what the judge would have said — except where
  * the samples still owed are `counting`: the bar says that, once. */
 function jevStatusReason(held, status, choice, counting) {
-  const because = held.verdict ? jevLineWords(held.verdict.line) : "";
+  // The gate that holds the seat says why (t-26584); the line says it otherwise.
+  const because = held.verdict ? jevLineWords(held.verdict.basis ?? held.verdict.line) : "";
+  // A rise the evidence rules now hold says so beside the reason.
+  const ruleHeld = held.verdict?.before === "rise" && held.verdict?.verdict !== "rise"
+    ? t("jev.ruleHeld", "증거 규칙 전에는 승격이었지만 지금은 보류됩니다") : "";
   if (status === "dormant") {
     return held.week.rows > 0 ? t("jev.switchedOff", "꺼져 있어 새 판단을 요청하지 않습니다") : "";
   }
@@ -2024,7 +2032,7 @@ function jevStatusReason(held, status, choice, counting) {
       ? t("jev.byHand", "직접 켰습니다 — {{because}}", { because })
       : t("jev.byHandClear", "직접 켰습니다 — 자동 적용 기준도 넘었습니다");
   }
-  if (because) return counting ? "" : because;
+  if (because) return counting ? "" : [ruleHeld, because].filter(Boolean).join(" · ");
   if (!held.verdict) return t("jev.neverRises", "자동 적용 대상이 아니라 기록만 합니다");
   // The judge found nothing to hold it on: it acts at the next judgment
   // under `auto`, and never under a switch that only records.
