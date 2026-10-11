@@ -978,7 +978,8 @@ pub(crate) async fn relogin_claude_account(
 
 /// The person's pick. The one switch road (`account_switch::switch_by_person`):
 /// the verified selection, the zo panes' login reload, one `account_switched`
-/// receipt `by: person` — and no pane touched, working or resting (t-7538).
+/// receipt `by: person` — and the Claude workers left on another account
+/// follow it, between turns now and at work when their turn ends (t-46106).
 /// Selection and verified runtime materialization have completed before the
 /// UI receives success, so the next worker and the usage bar cannot observe
 /// different accounts.
@@ -1016,6 +1017,9 @@ async fn person_switched(app: AppHandle, to: Option<String>) -> Result<AccountsR
     // The pick happened; a receipt the ledger refused is said with it, not
     // dropped here (astra R4) — the journal keeps it owed.
     report.switch_unrecorded = applied.receipt_error;
+    // And what became of the panes on the account it left (t-46106) — said
+    // beside the list, in the toast's four counts.
+    report.switched = Some(applied.census);
     Ok(report)
 }
 

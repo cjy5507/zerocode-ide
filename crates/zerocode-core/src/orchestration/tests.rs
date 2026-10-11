@@ -25586,6 +25586,7 @@ fn approval(bench: &Bench, worker: &str, session: &str) -> SwitchRest {
         model: "claude-opus-5-5".to_string(),
         effort: "xhigh".to_string(),
         exit: None,
+        cause: RestCause::Walled,
     }
 }
 
@@ -25765,6 +25766,103 @@ fn a_switch_rests_only_a_walled_worker_in_its_own_seat() {
             )
             .is_err()
     );
+}
+
+/// t-46106: a worker that follows its default to another account is rested
+/// with no wall at all — its witness is the window's, at the fence: the pane
+/// between turns — and every other guard of the rest still holds. A
+/// person's pane is never the ledger's to move, a worker with no
+/// conversation would start empty, another attempt is another situation.
+/// The walled cause still asks for its wall. Rested, the worker keeps its
+/// attempt, and its pane's close settles nothing.
+#[test]
+fn a_following_worker_is_rested_without_a_wall_and_under_every_other_guard() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name following");
+    let task = bench.json("task-create --spec keep-going")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    assert!(
+        bench
+            .ledger
+            .worker_seated(("team-1", &pane), "/wt/following")
+    );
+    let follows = |bench: &Bench| SwitchRest {
+        cause: RestCause::Follows,
+        ..approval(bench, &worker, SWITCHING_SESSION)
+    };
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(&follows(&bench), NOW)
+        .unwrap_err();
+    assert!(refused.contains("no conversation"), "{refused}");
+    assert!(bench.ledger.worker_session_reported(
+        ("team-1", &pane),
+        ProviderSession {
+            key: SessionKey::SessionId,
+            id: SWITCHING_SESSION.to_string(),
+            transcript_path: None,
+        }
+    ));
+    // The walled cause on a worker at no wall: refused for that.
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(&approval(&bench, &worker, SWITCHING_SESSION), NOW)
+        .unwrap_err();
+    assert!(refused.contains("quota wall"), "{refused}");
+    // A person's hand on it.
+    let at = bench.ledger.locate(&worker).expect("the worker");
+    bench.ledger.runs[at.0].workers[at.1].taken_over = true;
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(&follows(&bench), NOW)
+        .unwrap_err();
+    assert!(refused.contains("taken over"), "{refused}");
+    bench.ledger.runs[at.0].workers[at.1].taken_over = false;
+    // Another attempt than the switch saw.
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(
+            &SwitchRest {
+                dispatch: "dp-another-attempt".to_string(),
+                ..follows(&bench)
+            },
+            NOW,
+        )
+        .unwrap_err();
+    assert!(refused.contains("approved for"), "{refused}");
+    assert_eq!(
+        bench.ledger.runs()[0]
+            .worker(&worker)
+            .expect("the worker")
+            .state,
+        WorkerState::Active
+    );
+    // The follow as it stands: asleep on its attempt, on the pane's tuning.
+    let dispatch = bench.ledger.runs()[0]
+        .worker(&worker)
+        .and_then(|held| held.dispatch.clone())
+        .expect("the dispatch");
+    assert_eq!(
+        bench
+            .ledger
+            .worker_rested_for_account_switch(&follows(&bench), NOW + 1)
+            .as_deref(),
+        Ok(dispatch.as_str())
+    );
+    {
+        let run = &bench.ledger.runs()[0];
+        let held = run.worker(&worker).expect("the worker");
+        assert_eq!(held.state, WorkerState::Sleeping);
+        assert_eq!(held.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(held.effort.as_deref(), Some("xhigh"));
+        assert!(run.dispatch(&dispatch).is_some_and(Dispatch::is_open));
+    }
+    assert_eq!(bench.ledger.terminal_gone("team-1", &pane, NOW + 2), None);
+    assert_eq!(bench.json("check --peek --types worker_died")["count"], 0);
 }
 
 /// The rest is of exactly what the switch was approved for (astra R2) and
@@ -25976,6 +26074,9 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
         generation: Some(1),
         panes_moved: 1,
         panes_pending: 0,
+        panes_at_turn_end: 0,
+        panes_person: 0,
+        panes_left: 0,
     };
     let written = bench
         .ledger
@@ -26024,10 +26125,15 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
 
     // A default move concerns the runs holding live workers of the agent:
     // this run has one, so one row; and the same key again writes none.
+    // t-46106: the default's receipt counts every pane the switch found on
+    // another account, by what became of it.
     let moved_default = AccountSwitchReceipt {
         key: "default-1".to_string(),
         moved: AccountMove::Default,
-        panes_moved: 0,
+        panes_moved: 5,
+        panes_at_turn_end: 2,
+        panes_person: 1,
+        panes_left: 0,
         reason: "near_limit".to_string(),
         ..receipt.clone()
     };
@@ -26059,7 +26165,10 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
         .iter()
         .find(|body| body["moved"] == "default")
         .expect("the default move's receipt");
-    assert_eq!(body["panesMoved"], 0);
+    assert_eq!(body["panesMoved"], 5);
+    assert_eq!(body["panesAtTurnEnd"], 2);
+    assert_eq!(body["panesPerson"], 1);
+    assert_eq!(body["panesLeft"], 0);
     // An empty key is refused; a peer typing the kind is refused.
     assert!(
         bench

@@ -2481,6 +2481,11 @@ pub(super) struct AccountsReport {
     /// dropped (t-7538, astra R4). Only the pick road sets it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) switch_unrecorded: Option<String>,
+    /// What the pick did with the panes left on another account (t-46106):
+    /// moved now, owed at their turn's end, the person's, left — the
+    /// toast's four counts. Only the pick road sets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) switched: Option<crate::account_switch::SwitchCensus>,
 }
 
 #[derive(Serialize)]
@@ -2556,6 +2561,7 @@ pub(super) fn accounts_report(config_root: &Path, local_data_root: &Path) -> Acc
         active,
         can_add: claude_program().is_some(),
         switch_unrecorded: None,
+        switched: None,
     }
 }
 

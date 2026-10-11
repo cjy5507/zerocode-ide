@@ -1,20 +1,25 @@
 //! Which Claude account the window should run the NEXT launch as, and when a
-//! pane standing at its quota wall should be seated again on another account
-//! — one table and one pure judgment, read by the window's beat (t-7538).
+//! pane should be seated again on another account — one table and pure
+//! judgments, read by the window's beat (t-7538).
 //!
 //! **What this is not.** It never reads a credential, never names an email,
-//! and never decides that a working pane should be touched: a pane that is
-//! working keeps its own login until the provider refuses it (the
-//! two-witness wall, [`crate::orchestration::quota_wall_witness`]). The only
-//! things it chooses are (1) the account new launches use — the window's
-//! default — and (2) the account a walled pane continues on.
+//! and never cuts a turn: a pane at work keeps its login until its turn ends
+//! or the provider refuses it (the two-witness wall,
+//! [`crate::orchestration::quota_wall_witness`]). The things it chooses are
+//! (1) the account new launches use — the window's default — (2) the
+//! account a walled pane continues on, and (3) whether a pane left on
+//! another account when the default moved can follow it ([`judge_follower`],
+//! t-46106). Before (3), a near-limit switch moved the default alone and
+//! seven workers stayed on the old login until each one met its wall, and
+//! only a window restart brought them over (2026-10-11).
 //!
 //! **Why the thresholds are the summons table's.** The summons gate already
 //! says what "at the wall" and "near it" mean for this window
 //! (`QUOTA_POLICY.wall_percent` 97, `warn_percent` 90); a second pair of
 //! numbers with the same meaning was the duplication the briefing forbade.
-//! The default moves at the warn line ("한도 앞에서") and a pane moves at
-//! the wall — both read off that one table.
+//! The default moves at the warn line ("한도 앞에서"), a walled pane moves at
+//! the wall, and every other pane follows the default between turns — the
+//! lines read off that one table.
 //!
 //! The person's own account ids are the only identity this module speaks
 //! about, and they stay opaque strings; the organisation type is a word the
@@ -300,6 +305,9 @@ pub enum SwitchReason {
     NearLimit { window: String, used_percent: u8 },
     /// A pane on the source stands at its two-witness wall.
     Walled,
+    /// A pane runs as an account the default has moved away from: it
+    /// follows the default (t-46106).
+    Follows,
 }
 
 impl SwitchReason {
@@ -309,6 +317,7 @@ impl SwitchReason {
         match self {
             Self::NearLimit { .. } => "near_limit",
             Self::Walled => "walled",
+            Self::Follows => "follows",
         }
     }
 }
@@ -323,7 +332,8 @@ pub enum Decision {
     /// `unknown` (the source is not a managed account), `unread` (the
     /// source's own reading cannot be trusted), `off` (the person said no),
     /// `unattributed` (a walled pane this window cannot name the account of
-    /// — never presumed to be the selected one, astra A4).
+    /// — never presumed to be the selected one, astra A4), `landed` (a pane
+    /// that already runs as the account it would follow to, t-46106).
     Stay { why: &'static str },
     /// Every window that crossed the line resets within the table's near
     /// window: wait for it rather than move.
@@ -542,6 +552,46 @@ pub fn judge_pane(
         from: pane_account.to_string(),
         to: landing.to_string(),
         reason: SwitchReason::Walled,
+    }
+}
+
+/// Whether a pane that is NOT at its wall follows the default to `landing`
+/// (t-46106): the account new launches run as once the default has moved.
+/// It follows whatever its own gauge says — it goes because the default
+/// went, not because of a number of its own — unless `landing` is its own
+/// login under another row (a move that moves nothing), or a window that
+/// limits the pane's model is blocked there: following the default onto a
+/// wall is a move to a refusal. A landing whose reading is unknown or old
+/// does not hold it back: new launches already run there, and a pane left
+/// behind is the very mismatch the person saw — the status bar on the new
+/// account at 0%, seven panes on the old one at 98% (2026-10-11).
+#[must_use]
+pub fn judge_follower(
+    pane_account: &str,
+    pane_model: Option<&str>,
+    landing: &str,
+    gauges: &[AccountGauge],
+    now_ms: i64,
+) -> Decision {
+    if landing == pane_account {
+        return Decision::Stay { why: "landed" };
+    }
+    let own = gauges.iter().find(|gauge| gauge.id == pane_account);
+    let target = gauges.iter().find(|gauge| gauge.id == landing);
+    if own
+        .zip(target)
+        .is_some_and(|(own, target)| own.same_login_as(target))
+        || target
+            .is_some_and(|target| fitness(target, pane_model, now_ms).unfit == Some(Unfit::Blocked))
+    {
+        return Decision::Stay {
+            why: "no_candidate",
+        };
+    }
+    Decision::Switch {
+        from: pane_account.to_string(),
+        to: landing.to_string(),
+        reason: SwitchReason::Follows,
     }
 }
 
@@ -1060,6 +1110,89 @@ mod tests {
                 minutes: 3
             }
         );
+    }
+
+    /// t-46106: a pane left on another account when the default moved
+    /// follows the default whatever its own gauge says — at the move line or
+    /// far under it — and whatever the landing's reading is, unless the
+    /// landing is the pane's own login under another row or blocked for the
+    /// pane's model. The lines are the table's, not this test's.
+    #[test]
+    fn a_pane_off_the_default_follows_it_unless_the_landing_is_its_own_login_or_its_wall() {
+        let policy = &CLAUDE_ACCOUNT_AUTOSWITCH;
+        let near = policy.default_moves_at_percent + 2;
+        let gauges = [
+            gauge(
+                "a",
+                "claude_max",
+                &[("session", near, HOUR), ("weekly", 25, DAYS6)],
+            ),
+            gauge(
+                "b",
+                "claude_team",
+                &[("session", 0, None), ("weekly", 25, DAYS6)],
+            ),
+        ];
+        let follows = Decision::Switch {
+            from: "a".into(),
+            to: "b".into(),
+            reason: SwitchReason::Follows,
+        };
+        assert_eq!(judge_follower("a", None, "b", &gauges, NOW), follows);
+        // Far under the line, the pane follows all the same: the person's
+        // pick moved the default, and the pane goes where launches go.
+        let mut roomy = gauges.clone();
+        roomy[0].windows[0].used_percent = 10;
+        assert_eq!(judge_follower("a", None, "b", &roomy, NOW), follows);
+        // Already there.
+        assert_eq!(
+            judge_follower("b", None, "b", &gauges, NOW),
+            Decision::Stay { why: "landed" }
+        );
+        // The landing is the pane's own login under another row.
+        let mut twin = gauges.clone();
+        twin[1].identity = twin[0].identity.clone();
+        assert_eq!(
+            judge_follower("a", None, "b", &twin, NOW),
+            Decision::Stay {
+                why: "no_candidate"
+            }
+        );
+        // The landing is blocked for every model.
+        let mut walled = gauges.clone();
+        walled[1].windows[1].used_percent = policy.blocked_at_percent;
+        assert_eq!(
+            judge_follower("a", None, "b", &walled, NOW),
+            Decision::Stay {
+                why: "no_candidate"
+            }
+        );
+        // A landing nobody could read, or nobody has read yet, does not hold
+        // the pane back: new launches already run there.
+        let mut unread = gauges.clone();
+        unread[1].status = "error".to_string();
+        unread[1].windows.clear();
+        assert_eq!(judge_follower("a", None, "b", &unread, NOW), follows);
+        assert_eq!(judge_follower("a", None, "b", &gauges[..1], NOW), follows);
+        // A Fable-only week at the blocked line stops a Fable pane and
+        // nothing else.
+        let mut fable = gauges.clone();
+        fable[1].windows.push(GaugeWindow {
+            kind: "fable_weekly".to_string(),
+            used_percent: policy.blocked_at_percent,
+            resets_at_ms: DAYS6,
+        });
+        assert_eq!(
+            judge_follower("a", Some("claude-opus-5-5"), "b", &fable, NOW),
+            follows
+        );
+        assert_eq!(
+            judge_follower("a", Some("claude-fable-5-1"), "b", &fable, NOW),
+            Decision::Stay {
+                why: "no_candidate"
+            }
+        );
+        assert_eq!(SwitchReason::Follows.word(), "follows");
     }
 
     #[test]

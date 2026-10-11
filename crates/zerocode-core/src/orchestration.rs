@@ -13484,9 +13484,10 @@ impl Ledger {
         Ok(state)
     }
 
-    /// Put a walled worker to sleep so the window can seat it again on
-    /// another account — same worker id, same dispatch, same conversation
-    /// (t-7538).
+    /// Put a walled worker — or one that follows its default to another
+    /// account between turns (t-46106) — to sleep so the window can seat it
+    /// again on another account: same worker id, same dispatch, same
+    /// conversation (t-7538).
     ///
     /// The transition a window restart makes for every live worker
     /// ([`Self::window_exiting`]), made for ONE worker on the window's word
@@ -13501,9 +13502,9 @@ impl Ledger {
     /// The ledger is the authority on WHETHER, not the caller
     /// ([`Self::may_rest_for_account_switch`]): only the worker, attempt and
     /// coordinator generation the switch was approved for, live in its own
-    /// seat, with a checkout to return to, whose newest `quota_walled` row
-    /// still stands. Refusals name the state; a caller that hears one closes
-    /// nothing.
+    /// seat, not the person's, with a checkout to return to — and, for a
+    /// walled move, whose newest `quota_walled` row still stands. Refusals
+    /// name the state; a caller that hears one closes nothing.
     ///
     /// The pane's model and effort ride in the SAME transition (astra R5):
     /// the row the restore launches from carries what the pane really ran,
@@ -13565,7 +13566,8 @@ impl Ledger {
     /// `/clear` the hook has not reported yet — would resume the wrong one.
     /// And the model and effort are words a launch can carry: a relaunch
     /// the restore road would refuse after the pane is gone is refused
-    /// here, before it closes.
+    /// here, before it closes. A walled move asks for the standing wall row;
+    /// a following move does not (t-46106) — its witness is the window's.
     pub fn may_rest_for_account_switch(
         &self,
         rest: &SwitchRest,
@@ -13659,10 +13661,17 @@ impl Ledger {
                  ({why}) — not moved"
             )
         })?;
-        if !newest_wall(run, &dispatch_id).is_some_and(|wall| wall.stands(now_ms)) {
+        // A walled worker is moved on the wall the ledger witnessed; a
+        // following one on the window's observation at the fence that its
+        // pane is between turns (t-46106) — the ledger has no witness of a
+        // turn's end to ask, and a wall is exactly what following avoids.
+        if rest.cause == RestCause::Walled
+            && !newest_wall(run, &dispatch_id).is_some_and(|wall| wall.stands(now_ms))
+        {
             return Err(format!(
-                "worker {worker_id} stands at no quota wall the ledger has witnessed — only a \
-                 walled worker is moved to another account; a working one keeps its own"
+                "worker {worker_id} stands at no quota wall the ledger has witnessed — a \
+                 walled move needs one; a worker that follows the default moves between \
+                 turns instead"
             ));
         }
         Ok(dispatch_id)
@@ -15087,12 +15096,24 @@ fn exit_unconfirmed_refusal(worker_id: &str) -> String {
     )
 }
 
+/// Why an account switch rests a worker (t-46106) — the two moves one rest
+/// serves. A walled worker's provider refused it, and the ledger asks for
+/// its standing `quota_walled` row. A following worker's default moved to
+/// another account while it ran: it follows between turns, and the window's
+/// observation at the fence (the pane between turns) is the witness, so no
+/// wall is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestCause {
+    Walled,
+    Follows,
+}
+
 /// What an account switch was approved to move (t-7538), carried to the
-/// ledger's rest of ONE walled worker so the rest is of exactly that: the
-/// worker, the attempt it carried and the coordinator generation its run
-/// had when the plan was made (astra R2), the conversation the window sees
-/// in its pane, and the model and effort the pane really runs — read off
-/// the pane's own transcript at the move, never filled in from the summons
+/// ledger's rest of ONE worker so the rest is of exactly that: the worker,
+/// the attempt it carried and the coordinator generation its run had when
+/// the plan was made (astra R2), the conversation the window sees in its
+/// pane, and the model and effort the pane really runs — read off the
+/// pane's own transcript at the move, never filled in from the summons
 /// (astra R5), and written onto the row in the same transition that rests
 /// it ([`Ledger::worker_rested_for_account_switch`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15107,6 +15128,8 @@ pub struct SwitchRest {
     /// on the row by the same transition ([`Worker::exit_unconfirmed`]) until
     /// a look sees it leave. `None` for a pane the window saw no program in.
     pub exit: Option<ExitWitness>,
+    /// Which move this rest is for (t-46106).
+    pub cause: RestCause,
 }
 
 /// One account move, as the window reports it for the receipt row.
@@ -15145,6 +15168,20 @@ pub struct AccountSwitchReceipt {
     /// receipt of its own when it lands, so a default's receipt counts what
     /// has moved so far and says how many are still coming (astra R4).
     pub panes_pending: u32,
+    /// Worker panes on another account that were working when the default
+    /// moved: each follows at its turn's end, with a receipt of its own
+    /// (t-46106).
+    #[serde(default)]
+    pub panes_at_turn_end: u32,
+    /// Panes on another account that are the person's — a worker they took
+    /// over, or a pane no worker holds: never moved (t-46106).
+    #[serde(default)]
+    pub panes_person: u32,
+    /// Panes left on another account for any other reason — a login the
+    /// window never recorded, a pane it could not move faithfully, a landing
+    /// at its wall (t-46106).
+    #[serde(default)]
+    pub panes_left: u32,
 }
 
 impl AccountSwitchReceipt {
@@ -15161,6 +15198,9 @@ impl AccountSwitchReceipt {
             "generation": self.generation,
             "panesMoved": self.panes_moved,
             "panesPending": self.panes_pending,
+            "panesAtTurnEnd": self.panes_at_turn_end,
+            "panesPerson": self.panes_person,
+            "panesLeft": self.panes_left,
             "policy": crate::account_autoswitch::POLICY_WORD,
             "switchedAtMs": now_ms,
         });
@@ -15168,8 +15208,12 @@ impl AccountSwitchReceipt {
             AccountMove::Default => {
                 body["moved"] = serde_json::json!("default");
                 body["next"] = serde_json::json!(
-                    "your panes keep running on the login they were started with; every \
-                     new summons runs as `toAccount`"
+                    "every new summons runs as `toAccount`, and a worker pane on another \
+                     account follows it as the same worker in the same conversation: \
+                     `panesMoved` were between turns and moved now, `panesAtTurnEnd` move \
+                     when their turn ends, `panesPerson` are the person's and keep their \
+                     login, `panesLeft` could not be moved; each moved pane writes a \
+                     receipt of its own"
                 );
             }
             AccountMove::Pane {

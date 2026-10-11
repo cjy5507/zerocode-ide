@@ -4622,22 +4622,26 @@ async function pickClaudeAccount(id) {
   switchingAccount = null;
   claudeLoginMoved();
   sayUnrecordedPick();
-  // And nothing else: the panes already running claude keep the login they
-  // were started with (see the block below). A person who wants a pane on
-  // the new account opens a new one.
+  // The workers left on the old account follow the pick in the backend
+  // (t-46106) — this says what became of them, in the switch's own four
+  // counts. The window moves no pane itself (see the block below).
+  if (accountReport?.switched && !accountReport.switch_unrecorded) {
+    saySwitchCensus(t("settings.accounts.switched", "계정을 {{to}}(으)로 바꿨습니다", { to: accountBadge(id) }),
+      accountReport.switched);
+  }
 }
 
 /* ---- 계정 전환과 산 판 ----
  *
- * 전환의 나머지 반쪽은 이제 백엔드의 것이다(t-7538). 새로 여는 터미널은 이미
- * 새 계정이다 — `launch_env_for`가 launch마다 materialize한다. 이미 떠 있는
- * claude 판은 **건드리지 않는다**: 일하는 판도, 쉬는 판도, 제 로그인(계정별
- * 키체인 항목)으로 계속한다. 옛 길은 전환 순간 모든 claude 판을 큐에 넣고
- * `done`에 닿는 숨마다 `--resume`으로 다시 세우며 옛 셸을 닫았는데, 그 닫힘이
- * 원장에 `worker_died`로 닿아 워커 다섯이 「끝남」이 되고 새 자리를 만들어야
- * 했다(09-24 21:2x, 함정 410). 한도 벽에 선 판만 움직이고, 그것도 원장이
- * 워커를 먼저 재운 뒤 같은 worker id·dispatch로 다시 앉히는 백엔드의
- * `claude_autoswitch_apply`가 한다 — 창은 그 결과를 그리기만 한다. */
+ * 전환의 나머지 반쪽은 백엔드의 것이다(t-7538). 새로 여는 터미널은 이미 새
+ * 계정이다 — `launch_env_for`가 launch마다 materialize한다. 이미 떠 있는 claude
+ * 워커 판은 백엔드가 새 계정으로 옮긴다(t-46106): 턴 사이의 판은 전환하는 그
+ * 자리에서, 일하는 판은 턴이 끝나는 첫 틈에, 원장이 워커를 먼저 재운 뒤 같은
+ * worker id·dispatch·대화로 다시 앉힌다. 사람이 넘겨받은 판과 워커가 아닌 사람의
+ * 판은 옮기지 않는다. 옛 길은 창이 모든 claude 판을 큐에 넣고 `done`에 닿는
+ * 숨마다 `--resume`으로 다시 세우며 옛 셸을 닫았는데, 그 닫힘이 원장에
+ * `worker_died`로 닿아 워커 다섯이 「끝남」이 되었다(09-24 21:2x, 함정 410) —
+ * 그래서 창은 판을 옮기지 않고, 결과를 그리기만 한다. */
 
 /* 계정별 사용량과 자동 전환 계획(t-7538): `claude_account_usage`의 답을 들고
  * 계정 목록의 게이지 칸, 아래의 제안 줄, 상태 바의 「다음」 낱말을 그린다.
@@ -4674,6 +4678,111 @@ function accountBadge(id) {
   )?.replace(/^claude_/, "");
   const type = CLAUDE_ORGANIZATION_TYPES.get(kind)?.() ?? "";
   return [type, id].filter(Boolean).join(" ");
+}
+
+/* 새 표면이 계정을 짧게 부르는 이름(t-46106) — 계정 id의 앞 글자와 끝 몇 글자,
+ * 「a…6252」. id는 뜻을 읽지 않는 문자열이라 자르기만 하고, 끝은 창이 아는 다른
+ * 계정과 겹치지 않을 만큼 늘린다. 상태 막대·사이드바 행·토스트가 같은 이름을 쓴다. */
+const ACCOUNT_ID_HEAD = 1;
+const ACCOUNT_ID_TAIL = 4;
+
+function accountShortId(id) {
+  const whole = String(id ?? "");
+  const head = whole.slice(0, ACCOUNT_ID_HEAD);
+  const others = [
+    ...(accountReport.accounts ?? []).map((row) => row.id),
+    ...(accountUsageReport?.accounts ?? []).map((row) => row.id),
+  ].filter((other) => other && other !== whole);
+  for (let tail = ACCOUNT_ID_TAIL; ACCOUNT_ID_HEAD + tail < whole.length; tail += 1) {
+    const end = whole.slice(-tail);
+    if (!others.some((other) => other.startsWith(head) && other.endsWith(end))) return `${head}…${end}`;
+  }
+  return whole;
+}
+
+/* 한 계정이 지금 쓴 몫 — 그 계정 자신의 로그인으로 읽은 것에서 가장 많이 쓴 창,
+ * 막대가 고르는 것과 같은 `tightestUsage`. 읽은 것이 없으면 null: 0%로 감추지
+ * 않는다. */
+function accountUsedPercent(id) {
+  const usage = accountUsageRow(id)?.usage ?? null;
+  const tight = usage ? tightestUsage(usage) : null;
+  return tight ? Math.round(tight.window.used_percent) : null;
+}
+
+/* 판의 자리(t-46106) — 계획의 판 목록(`plan.panes`)이 그 판이 어디 섰는지 말하고,
+ * 여기서는 낱말과 호버만 고른다. 기본 계정에 선 판에는 자리 낱말을 붙이지 않는다. */
+const PANE_STANCE_WORDS = Object.freeze({
+  turn_end: {
+    said: { key: "usage.paneTurnEnd", word: "턴 끝에 옮김" },
+    tip: { key: "usage.paneTurnEndTip", word: "일하는 중이라 이 턴이 끝나면 같은 워커·같은 대화로 새 기본 계정에 옮깁니다" },
+  },
+  moving: {
+    said: { key: "usage.paneMoving", word: "옮기는 중" },
+    tip: { key: "usage.paneMovingTip", word: "턴 사이라 곧 같은 워커·같은 대화로 새 기본 계정에 옮깁니다" },
+  },
+  person: {
+    said: { key: "usage.panePerson", word: "사람이 쓰는 중" },
+    tip: { key: "usage.panePersonTip", word: "사람이 쓰는 판이라 옮기지 않습니다 — 새 계정으로 쓰려면 판을 새로 여세요" },
+  },
+  walled: {
+    said: { key: "usage.paneWalled", word: "한도 벽" },
+    tip: { key: "usage.paneWalledTip", word: "한도 벽에 섰습니다 — 여유 있는 계정이 있으면 옮기고, 리셋이 가까우면 기다립니다" },
+  },
+  left: {
+    said: { key: "usage.paneLeft", word: "옛 계정에 남음" },
+    tip: { key: "usage.paneLeftTip", word: "새 기본 계정으로 옮길 수 없어 이 계정에 남았습니다 — 까닭은 창의 로그에 있습니다" },
+  },
+});
+
+/* 판 하나가 도는 계정과 그 몫(t-46106): 「a…0554 12%」, 기본이 아닌 계정이면
+ * 「옛 계정 a…6252 98% — 턴 끝에 옮김」. 행은 그 판의 로그인을, 막대는 기본 계정을
+ * 말한다. 계획에 없는 판(Claude가 아닌 판, 헬퍼)은 null — 아무것도 그리지 않는다. */
+function paneAccountWords(term) {
+  const plan = accountUsageReport?.plan ?? null;
+  const pane = (plan?.panes ?? []).find((one) => one.term === term) ?? null;
+  if (!pane) return null;
+  if (!pane.account) {
+    return {
+      words: t("usage.paneAccountUnknown", "계정 모름"),
+      tip: t("usage.paneAccountUnknownTip", "이 판이 어느 계정으로 떴는지 창이 적어 두지 않았습니다 — 계정 전환이 이 판을 옮기지 않습니다"),
+    };
+  }
+  const used = accountUsedPercent(pane.account);
+  const figure = used == null ? t("usage.paneAccountUnread", "읽지 못함") : `${used}%`;
+  const account = accountShortId(pane.account);
+  const current = pane.account === plan.active;
+  const head = current
+    ? t("usage.paneAccount", "{{account}} {{figure}}", { account, figure })
+    : t("usage.paneAccountOld", "옛 계정 {{account}} {{figure}}", { account, figure });
+  const stance = current && pane.stance !== "walled" ? null : PANE_STANCE_WORDS[pane.stance] ?? null;
+  const tip = t("usage.paneAccountTip", "이 판의 로그인: {{badge}} · 가장 많이 쓴 창 {{figure}}", {
+    badge: accountBadge(pane.account),
+    figure,
+  });
+  return stance
+    ? {
+      words: `${head} — ${t(stance.said.key, stance.said.word)}`,
+      tip: `${tip} · ${t(stance.tip.key, stance.tip.word)}`,
+    }
+    : { words: head, tip };
+}
+
+/* 상태 막대의 Claude 조각 머리에 그 숫자의 계정(t-46106). 막대의 숫자는 기본 계정
+ * 자신의 로그인 — CLI가 갱신하는 저장소 — 으로 읽은 것이고(`usage.account`), 새로
+ * 여는 판이 이 계정으로 뜬다. 읽은 계정이 없으면 서지 않는다. */
+function paintClaudeBarAccount() {
+  const chip = document.getElementById("sb-claude-account");
+  if (!chip) return;
+  const id = claudeUsage?.account ?? null;
+  const words = id ? accountShortId(id) : "";
+  if (chip.textContent !== words) chip.textContent = words;
+  const tip = id
+    ? t("usage.barAccountTip", "기본 계정 {{badge}} — 막대의 숫자는 이 계정의 것이고, 새로 여는 판이 이 계정으로 뜹니다", {
+      badge: accountBadge(id),
+    })
+    : "";
+  if (chip.dataset.tip !== tip) chip.dataset.tip = tip;
+  if (chip.hidden !== !id) chip.hidden = !id;
 }
 
 /* 한 계정의 게이지 낱말: 창마다 「이름 N% · 리셋까지」, 뒤에 표의 판정(남은 몫·
@@ -4769,6 +4878,14 @@ function accountSwitchProposal(plan) {
   if (moves.length > 0) {
     parts.push(t("settings.accounts.switchPanes", "벽에 선 판 {{count}}개는 같은 대화로 이어집니다", { count: moves.length }));
   }
+  // The workers on the account the default leaves follow it (t-46106): the
+  // yes is for them too, so the proposal says so before it is given.
+  const following = decision.kind === "switch"
+    ? (plan.panes ?? []).filter((pane) => pane.worker && pane.stance === "current").length
+    : 0;
+  if (following > 0) {
+    parts.push(t("settings.accounts.switchFollowers", "워커 판 {{count}}개도 같은 대화로 따라갑니다 — 일하는 판은 턴이 끝나면", { count: following }));
+  }
   return parts.join(" ");
 }
 
@@ -4851,6 +4968,10 @@ function paintClaudeNext() {
     }));
   }
   if (moves.length > 0) parts.push(t("usage.nextWalled", "벽 판 {{count}}", { count: moves.length }));
+  // Panes still on another account than the default (t-46106): the ones a
+  // switch moves at their turn's end, the person's, and the ones left.
+  const away = (plan.panes ?? []).filter((pane) => pane.account && pane.account !== plan.active).length;
+  if (away > 0) parts.push(t("usage.nextAway", "옛 계정 판 {{count}}", { count: away }));
   parts.push({
     off: t("settings.accounts.autoSwitchOff", "끔"),
     ask: t("settings.accounts.autoSwitchAsk", "물어보기"),
@@ -4877,6 +4998,10 @@ async function refreshClaudeAccountUsage(force = false) {
   paintClaudeAccounts();
   paintAccountSwitchNote();
   paintClaudeNext();
+  paintClaudeBarAccount();
+  // Each Claude pane's row says its own account and share (t-46106); the
+  // rows repaint only where their words moved.
+  if (typeof paintWorktreeAgents === "function") paintWorktreeAgents();
   offerAccountSwitch();
   // 읽기가 나가 있는 동안은 다시 묻는다 — 백엔드의 마루가 물음을 공짜로 만든다.
   clearTimeout(accountUsageAskTimer.handle);
@@ -4934,16 +5059,40 @@ async function applyAccountSwitch(by, token) {
     }));
     return;
   }
-  const moved = (applied?.panes ?? []).filter((pane) => pane.ok).length;
-  const stuck = (applied?.panes ?? []).length - moved;
-  const words = [
+  saySwitchCensus(
     applied?.switched_default
       ? t("settings.accounts.switched", "계정을 {{to}}(으)로 바꿨습니다", { to: accountBadge(applied?.to ?? "") })
       : t("settings.accounts.switchedPanes", "벽에 선 판을 {{to}}(으)로 옮겼습니다", { to: accountBadge(applied?.to ?? "") }),
-    t("settings.accounts.switchedMoved", "판 {{count}}개 이어짐", { count: moved }),
-  ];
-  if (stuck > 0) words.push(t("settings.accounts.switchedStuck", "{{count}}개는 그대로", { count: stuck }));
-  toast(words.join(" · "));
+    applied?.census ?? null,
+  );
+}
+
+/* 전환의 영수증 한 줄(t-46106): 무엇을 바꿨는지, 그리고 다른 계정에 있던 판의 네
+ * 수 — 지금 옮긴 판, 턴이 끝나면 옮길 판, 사람의 판, 옮기지 못하고 남은 판. 수마다
+ * 뜻은 호버가 말하고, 단추 하나가 계정 화면을 연다. 박자의 전환과 사람의 선택이
+ * 같은 말을 한다. */
+function saySwitchCensus(head, census) {
+  const words = [head];
+  if (census) {
+    words.push(t("settings.accounts.switchedCensus", "옮긴 판 {{moved}} · 턴 끝에 옮길 판 {{turnEnd}} · 사람 판 {{person}} · 남은 판 {{left}}", {
+      moved: census.moved ?? 0,
+      turnEnd: census.at_turn_end ?? 0,
+      person: census.person ?? 0,
+      left: census.left ?? 0,
+    }));
+  }
+  const note = toast(words.join(" · "), "", {
+    tip: t("settings.accounts.switchedCensusTip", "옮긴 판: 지금 새 계정으로 이어진 판 · 턴 끝에 옮길 판: 일하는 중이라 턴이 끝나면 옮길 판 · 사람 판: 사람이 쓰는 판이라 옮기지 않는 판 · 남은 판: 옮길 수 없어 옛 계정에 남은 판"),
+    action: {
+      label: t("settings.accounts.switchedOpen", "계정 보기"),
+      tip: t("settings.accounts.switchedOpenTip", "계정마다 남은 몫과 자동 전환을 엽니다"),
+      run: () => showProviderAccounts(),
+    },
+  });
+  // A receipt, not a proposal: its button opens the accounts and applies
+  // nothing, and a proposal's notice is never mistaken for it.
+  if (note) note.dataset.switchReceipt = "true";
+  return note;
 }
 
 el("account-switch-now").addEventListener("click", () =>

@@ -937,7 +937,9 @@ fn all_ledger_image_readers_use_the_revision_cache() {
         // account switch holds the restore line across it (t-7538); the
         // switch's own readers take the same door.
         "reseat_sleeping_in_line(",
-        "walled_claude_workers(",
+        // Both of the switch's lists — the walled workers and the ones that
+        // follow the default (t-46106) — are read off this one.
+        "claude_worker_seats(",
         "rest_worker_for_switch(",
         "switch_move_ready(",
         "worker_now(",
@@ -22298,6 +22300,14 @@ struct Switching {
         Mutex<std::collections::HashMap<u32, zerocode_core::orchestration::QuotaWallMarker>>,
     >,
     busy: std::sync::Arc<Mutex<std::collections::HashSet<u32>>>,
+    /// Panes with a person's unsent words on their line (t-46106).
+    drafts: Mutex<std::collections::HashSet<u32>>,
+    /// Panes that run another agent than Claude — the zo pane — which no
+    /// Claude account census counts (t-46106).
+    not_claude: Mutex<std::collections::HashSet<u32>>,
+    /// Panes the window typed at on its own whose words the program has not
+    /// taken yet — a test takes them out (t-46106).
+    typed: Mutex<std::collections::HashSet<u32>>,
     sessions: Mutex<std::collections::HashMap<u32, zerocode_core::ProviderSession>>,
     accounts: Mutex<std::collections::HashMap<u32, crate::agent_teams::PaneLogin>>,
     /// The account a pane opened NOW runs as — the window's selection.
@@ -22336,6 +22346,9 @@ impl Switching {
             checkout,
             markers: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
             busy: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
+            drafts: Mutex::new(std::collections::HashSet::new()),
+            not_claude: Mutex::new(std::collections::HashSet::new()),
+            typed: Mutex::new(std::collections::HashSet::new()),
             sessions: Mutex::new(std::collections::HashMap::new()),
             accounts: Mutex::new(std::collections::HashMap::new()),
             selected: std::sync::Arc::new(Mutex::new(Some("a-fixture".to_string()))),
@@ -22446,6 +22459,23 @@ impl Host for Switching {
     fn send(&self, _term: u32, _text: &str) -> bool {
         true
     }
+    /// A guarded delivery the program has not taken yet, as the window's
+    /// pump carries one: the words are on their way until a test takes them
+    /// (t-46106).
+    fn point(
+        &self,
+        term: u32,
+        _line: &str,
+        _submit: bool,
+    ) -> Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>> {
+        self.typed.lock().unwrap().insert(term);
+        let (settled, receipt) = std::sync::mpsc::sync_channel(1);
+        let _ = settled.send(zerocode_pty::DeliveryOutcome::Delivered);
+        Some(receipt)
+    }
+    fn typing_in_flight(&self, term: u32) -> bool {
+        self.typed.lock().unwrap().contains(&term)
+    }
     fn paste(&self, term: u32, text: &str) -> bool {
         self.pasted.lock().unwrap().push((term, text.to_string()));
         true
@@ -22533,6 +22563,35 @@ impl Host for Switching {
     }
     fn pane_login(&self, term: u32) -> Option<crate::agent_teams::PaneLogin> {
         self.accounts.lock().unwrap().get(&term).cloned()
+    }
+    /// Every pane the fixture opened or named runs Claude — the person's own
+    /// pane a test names with [`Switching::persons_pane`] among them.
+    fn claude_pane_logins(&self) -> Vec<(u32, crate::agent_teams::PaneLogin)> {
+        let closed = self.closed();
+        let not_claude = self.not_claude.lock().unwrap().clone();
+        let mut panes: Vec<(u32, crate::agent_teams::PaneLogin)> = self
+            .accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(term, _)| !closed.contains(term) && !not_claude.contains(term))
+            .map(|(term, login)| (*term, login.clone()))
+            .collect();
+        panes.sort_by_key(|(term, _)| *term);
+        panes
+    }
+    /// Between turns: not busy, and no person's words on its line.
+    fn between_turns(&self, term: u32) -> bool {
+        !self.busy.lock().unwrap().contains(&term) && !self.drafts.lock().unwrap().contains(&term)
+    }
+    fn with_between_turns_observation(&self, term: u32, commit: &mut dyn FnMut()) {
+        let moving = self.during_observation.lock().unwrap().take();
+        if let Some(moving) = moving {
+            moving();
+        }
+        if self.between_turns(term) {
+            commit();
+        }
     }
     fn actor_for(&self, term: u32) -> Option<String> {
         Some(test_actor(term))
@@ -22652,6 +22711,7 @@ impl crate::account_switch::SwitchDoors for SwitchWorld {
             last_switch_ms: *self.last_switch.lock().unwrap(),
             failures: self.failures.lock().unwrap().clone(),
             logins,
+            owed: crate::account_switch::owed_followers(self.journal.path()),
             now_ms,
         })
     }
@@ -22730,6 +22790,22 @@ fn digest_of(path: &Path) -> String {
     format!("{}:{:016x}", bytes.len(), hasher.finish())
 }
 
+/// The usage cache of a switch test's window: `a-fixture`'s session at
+/// `claude_used`, resetting three hours after `began`, its week at 40%.
+fn switch_fixture_gauges(
+    began: i64,
+    claude_used: u8,
+) -> Vec<(&'static str, crate::usage::ProviderUsage)> {
+    let mut snapshot = usage_snapshot(
+        "claude",
+        Some((claude_used, Some(began + 3 * 60 * 60_000))),
+        Some((40, None)),
+        began - 60_000,
+    );
+    snapshot.account = Some("a-fixture".to_string());
+    vec![("claude", snapshot)]
+}
+
 /// A private window with one CLAUDE worker at its wall in `checkout`, in a
 /// conversation it reported, summoned as Fable at max — the two witnesses
 /// written by the stall sweep against the gauge of the account its pane
@@ -22785,16 +22861,7 @@ impl WalledClaude {
         let dir = tempfile::tempdir().expect("a checkout");
         let checkout: &'static str =
             Box::leak(dir.path().to_string_lossy().into_owned().into_boxed_str());
-        let gauges = |claude_used: u8| {
-            let mut snapshot = usage_snapshot(
-                "claude",
-                Some((claude_used, Some(began + 3 * 60 * 60_000))),
-                Some((40, None)),
-                began - 60_000,
-            );
-            snapshot.account = Some("a-fixture".to_string());
-            vec![("claude", snapshot)]
-        };
+        let gauges = |claude_used: u8| switch_fixture_gauges(began, claude_used);
         let (window, store) = PrivateWindow::boot_with_usage(gauges(40));
         let beat = one_beat_at_a_time();
         let team = format!("team-switch-{leader_term}");
@@ -22880,6 +22947,7 @@ impl WalledClaude {
                 .to_string();
             // At the same wall as the Claude pane: zo's quota is its model's.
             host.screen_says(term, "You've hit your limit · resets 3am");
+            host.not_claude.lock().unwrap().insert(term);
             (id, term)
         });
         let mut walled_more = Vec::new();
@@ -23059,6 +23127,53 @@ impl WalledClaude {
             .map(|told| serde_json::from_str(told["body"].as_str().expect("a body")).expect("json"))
             .collect()
     }
+
+    /// 2026-10-11 on the fixture (t-46106): `between` Claude workers between
+    /// turns and `working` at work, each in a conversation of its own, all
+    /// on `a-fixture` — whose session reads past the move line and under the
+    /// wall, both the table's — and `b-fixture` with room. Nobody stands at
+    /// a wall: the words that put the first ones there are gone.
+    fn near_limit(leader_term: u32, between: usize, working: usize) -> Self {
+        assert!(between > 0, "the fixture's first worker is between turns");
+        let stood = Self::stand_full(leader_term, working, false, between - 1);
+        let used = zerocode_core::account_autoswitch::CLAUDE_ACCOUNT_AUTOSWITCH
+            .default_moves_at_percent
+            + 2;
+        assert!(used < zerocode_core::orchestration::QUOTA_POLICY.wall_percent);
+        stood.host.markers.lock().unwrap().clear();
+        stood
+            ._window
+            .set_usage(switch_fixture_gauges(stood.began, used));
+        stood.world.reads(used, 10, stood.began + 10_000);
+        for (at, (_, term)) in stood.working.iter().enumerate() {
+            stood.in_its_own_conversation(
+                *term,
+                &format!("5a1e0000-0000-4000-8000-{:012}", 46_106_000 + at),
+            );
+        }
+        stood
+    }
+
+    /// Every Claude worker of the fixture, `(worker, the term it was
+    /// summoned into)`: the first, the walled ones beside it, the working
+    /// ones.
+    fn claude_workers(&self) -> Vec<(String, u32)> {
+        std::iter::once((self.worker.clone(), self.leader + 1))
+            .chain(self.walled_more.iter().cloned())
+            .chain(self.working.iter().cloned())
+            .collect()
+    }
+
+    /// How many of `workers` run as `account` now, wherever the ledger
+    /// seats them.
+    fn on(&self, workers: &[(String, u32)], account: &str) -> usize {
+        workers
+            .iter()
+            .filter(|(worker, _)| {
+                self.host.pane_account(term_now(worker)).as_deref() == Some(account)
+            })
+            .count()
+    }
 }
 
 /// The trigger a test puts on the ledger's revision head so every write
@@ -23111,59 +23226,496 @@ fn the_old_handoff_road_killed_every_pane_it_closed() {
     }
 }
 
-/// Today's incident, on the road as it stands: five Claude workers busy in
-/// their panes (one of them later at rest), a walled one beside them, and
-/// the PERSON switches the account. Every pane keeps its login, nobody is
-/// closed or launched, nobody dies, and the switch leaves one receipt in
-/// the ledger's voice, `by: person`, zero panes moved. The beats after it
-/// — the stall sweep, the grace — move nothing either.
+/// Today's incident on the old road (t-7538), and the panes that follow the
+/// person's pick (t-46106): five Claude workers busy in their panes, one at
+/// rest at its wall beside them, and the PERSON switches the account. No
+/// turn is cut — no working pane is closed or launched at the pick, and
+/// nobody dies — but the pane between turns follows the pick at once, and a
+/// working one follows when its turn ends, on the beat, as the same worker
+/// in the same conversation; the others wait for theirs. One receipt for the
+/// default in the ledger's voice, `by: person`, counting what became of
+/// every pane, and one for each pane moved.
 #[test]
-fn a_manual_switch_keeps_working_panes_too() {
+fn a_manual_switch_cuts_no_turn_and_its_panes_follow_it() {
     let stood = WalledClaude::stand(87_100, 5);
     let at = stood.began + 20_000;
+    for (step, (_, term)) in (0_u64..).zip(&stood.working) {
+        stood.in_its_own_conversation(
+            *term,
+            &format!("5a1e0000-0000-4000-8000-{:012}", 87_100_000 + step),
+        );
+    }
     let before: Vec<(String, String)> = stood
         .working
         .iter()
         .map(|(id, _)| (id.clone(), stood.row(id).pane))
         .collect();
+    stood.host.seating_onto(stood.leader + 100);
     let applied =
         crate::account_switch::switch_by_person(&stood.host, &stood.world, Some("b-fixture"), at)
             .expect("a person's switch");
     assert!(applied.switched_default);
-    assert!(applied.panes.is_empty(), "a person's pick moves no pane");
     assert_eq!(stood.world.selects(), vec![Some("b-fixture".to_string())]);
-    // One of the working turns ends — the old road's drain point — and the
-    // beat runs over all of it.
-    stood.host.busy.lock().unwrap().remove(&stood.working[0].1);
-    notify_stalled_workers(&stood.host, at + 1_000);
-    assert!(stood.host.closed().is_empty(), "{:?}", stood.host.closed());
-    assert!(stood.host.splits.lock().unwrap().is_empty());
-    assert_eq!(stood.died(at + 2_000), 0);
+    assert_eq!(
+        applied.census,
+        crate::account_switch::SwitchCensus {
+            moved: 1,
+            at_turn_end: 5,
+            person: 0,
+            left: 0,
+        },
+        "{applied:?}"
+    );
+    assert_eq!(applied.panes.len(), 1, "{applied:?}");
+    assert!(applied.panes[0].ok, "{applied:?}");
+    assert_eq!(applied.panes[0].worker, stood.worker);
+    assert_eq!(stood.host.closed(), vec![stood.leader + 1]);
     for (id, pane) in &before {
         let row = stood.row(id);
         assert_eq!(row.state, WorkerState::Active, "{id}");
-        assert_eq!(&row.pane, pane, "{id} moved");
+        assert_eq!(&row.pane, pane, "the pick cut {id}'s turn");
     }
-    // The walled worker is not the person's pick's to move either.
-    assert_eq!(stood.row(&stood.worker).state, WorkerState::Active);
-    let mail = stood.json("check --peek --types account_switched", at + 3_000);
-    assert_eq!(mail["count"], 1, "{mail}");
-    let body: serde_json::Value =
-        serde_json::from_str(mail["messages"][0]["body"].as_str().expect("a body")).expect("json");
-    assert_eq!(body["by"], "person");
-    assert_eq!(body["reason"], "picked");
-    assert_eq!(body["moved"], "default");
-    assert_eq!(body["fromAccount"], "a-fixture");
-    assert_eq!(body["toAccount"], "b-fixture");
-    assert_eq!(body["panesMoved"], 0);
-    assert!(!mail.to_string().contains('@'));
-    // The journal was written and taken away.
-    assert!(
-        std::fs::read_dir(stood.world.journal.path())
-            .expect("the journal dir")
-            .next()
-            .is_none()
+    // One of the working turns ends — the old road's drain point — and the
+    // beat runs over all of it: the stall sweep closes nothing, and the
+    // follow moves that one pane, once.
+    let (first, first_term) = stood.working[0].clone();
+    stood.host.busy.lock().unwrap().remove(&first_term);
+    notify_stalled_workers(&stood.host, at + 1_000);
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 1_000),
+        1
     );
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 1_001),
+        0
+    );
+    assert_eq!(stood.host.closed(), vec![stood.leader + 1, first_term]);
+    assert_eq!(stood.died(at + 2_000), 0);
+    let moved = stood.row(&first);
+    assert_eq!(moved.state, WorkerState::Active);
+    assert_ne!(moved.pane, before[0].1);
+    assert_eq!(
+        stood.host.pane_account(term_now(&first)).as_deref(),
+        Some("b-fixture")
+    );
+    for (id, pane) in &before[1..] {
+        let row = stood.row(id);
+        assert_eq!(row.state, WorkerState::Active, "{id}");
+        assert_eq!(&row.pane, pane, "{id} moved mid-turn");
+    }
+    let bodies = stood.receipts(at + 3_000);
+    let default = bodies
+        .iter()
+        .find(|body| body["moved"] == "default")
+        .expect("the default's receipt");
+    assert_eq!(default["by"], "person");
+    assert_eq!(default["reason"], "picked");
+    assert_eq!(default["fromAccount"], "a-fixture");
+    assert_eq!(default["toAccount"], "b-fixture");
+    assert_eq!(default["panesMoved"], 1);
+    assert_eq!(default["panesAtTurnEnd"], 5);
+    assert_eq!(default["panesPerson"], 0);
+    assert_eq!(default["panesLeft"], 0);
+    let panes: Vec<&serde_json::Value> = bodies
+        .iter()
+        .filter(|body| body["moved"] == "pane")
+        .collect();
+    assert_eq!(panes.len(), 2, "{bodies:?}");
+    assert!(
+        panes
+            .iter()
+            .all(|body| body["by"] == "person" && body["toAccount"] == "b-fixture"),
+        "{bodies:?}"
+    );
+    assert!(!format!("{bodies:?}").contains('@'));
+    // What is left in the journal is the four moves still owed.
+    assert_eq!(
+        crate::account_switch::owed_followers(stood.world.journal.path()).len(),
+        4
+    );
+    for term in [stood.leader + 100, stood.leader + 101] {
+        crate::agent_teams::forget_term(term);
+    }
+}
+
+/// t-46106, the acceptance case: 2026-10-11 11:15 replayed on the fixture.
+/// Seven Claude workers on `a-fixture` — five between turns, two at work —
+/// its session past the move line, nobody at a wall, and the beat's own
+/// near-limit switch to `b-fixture`. Before: the default moved alone, seven
+/// workers stayed on the old login until each met its wall, and only a
+/// window restart brought them over. Now: the five move in the switch
+/// itself, the two when their turns end, each as the same worker in the
+/// same conversation — no window restart, no wall move, nobody dies, and
+/// the old account ends with no worker on it.
+#[test]
+fn a_near_limit_switch_moves_every_worker_to_the_new_account_without_a_restart() {
+    const BETWEEN: usize = 5;
+    const WORKING: usize = 2;
+    let count = |many: usize| u32::try_from(many).expect("a small count");
+    let stood = WalledClaude::near_limit(93_000, BETWEEN, WORKING);
+    let at = stood.began + 20_000;
+    let workers = stood.claude_workers();
+    assert_eq!(workers.len(), BETWEEN + WORKING);
+    assert_eq!(stood.on(&workers, "a-fixture"), BETWEEN + WORKING);
+    let plan = stood.plan(at);
+    assert!(
+        matches!(
+            plan.decision,
+            zerocode_core::account_autoswitch::Decision::Switch {
+                ref to,
+                reason: zerocode_core::account_autoswitch::SwitchReason::NearLimit { .. },
+                ..
+            } if to == "b-fixture"
+        ),
+        "{plan:?}"
+    );
+    assert!(plan.walled.is_empty(), "{:?}", plan.walled);
+    stood.host.seating_onto(stood.leader + 100);
+    let switching = std::time::Instant::now();
+    let applied =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+            .expect("applied");
+    let switch_ms = switching.elapsed().as_millis();
+    assert_eq!(
+        applied.census,
+        crate::account_switch::SwitchCensus {
+            moved: count(BETWEEN),
+            at_turn_end: count(WORKING),
+            person: 0,
+            left: 0,
+        },
+        "{applied:?}"
+    );
+    assert!(applied.panes.iter().all(|pane| pane.ok), "{applied:?}");
+    assert_eq!(stood.on(&workers, "b-fixture"), BETWEEN);
+    for (worker, term) in &stood.working {
+        assert_eq!(term_now(worker), *term, "{worker} was moved mid-turn");
+    }
+    // Moved between turns, a worker is told nothing: its turn had ended.
+    for (worker, _) in workers.iter().take(BETWEEN) {
+        assert!(
+            pasted_into(&stood.host, term_now(worker)).is_empty(),
+            "{worker} was typed at"
+        );
+    }
+    // The beat finds nobody between turns yet: nothing moves. Then each
+    // working turn ends, and the next beat moves that pane.
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 30),
+        0
+    );
+    let mut follow_ms = Vec::new();
+    for (step, (worker, term)) in (0_i64..).zip(&stood.working) {
+        stood.host.busy.lock().unwrap().remove(term);
+        let following = std::time::Instant::now();
+        assert_eq!(
+            crate::account_switch::follow_with(&stood.host, &stood.world, at + 40 + step),
+            1,
+            "{worker}"
+        );
+        follow_ms.push(following.elapsed().as_millis());
+    }
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 60),
+        0
+    );
+    assert_eq!(stood.on(&workers, "a-fixture"), 0);
+    assert_eq!(stood.on(&workers, "b-fixture"), BETWEEN + WORKING);
+    for (worker, _) in &workers {
+        let row = stood.row(worker);
+        assert_eq!(row.state, WorkerState::Active, "{worker}");
+        assert!(row.dispatch.is_some(), "{worker} lost its attempt");
+    }
+    assert_eq!(stood.died(at + 70), 0);
+    let bodies = stood.receipts(at + 80);
+    let default = bodies
+        .iter()
+        .find(|body| body["moved"] == "default")
+        .expect("the default's receipt");
+    assert_eq!(default["by"], "auto");
+    assert_eq!(default["reason"], "near_limit");
+    assert_eq!(
+        default["panesMoved"],
+        u64::try_from(BETWEEN).expect("a count")
+    );
+    assert_eq!(
+        default["panesAtTurnEnd"],
+        u64::try_from(WORKING).expect("a count")
+    );
+    let panes: Vec<&serde_json::Value> = bodies
+        .iter()
+        .filter(|body| body["moved"] == "pane")
+        .collect();
+    assert_eq!(panes.len(), BETWEEN + WORKING, "{bodies:?}");
+    assert!(
+        bodies.iter().all(|body| body["reason"] != "walled"),
+        "a pane waited for its wall: {bodies:?}"
+    );
+    assert!(stood.journal_text().is_empty(), "{}", stood.journal_text());
+    let per_pane: Vec<u128> = applied.panes.iter().map(|pane| pane.ms).collect();
+    eprintln!(
+        "ACCOUNT_FOLLOW_NEAR_LIMIT workers={} on_old_before={} on_old_after=0 window_restarts=0 \
+         wall_moves=0 switch_total={switch_ms}ms between_turns_per_pane={per_pane:?}ms \
+         turn_end_per_pane={follow_ms:?}ms",
+        BETWEEN + WORKING,
+        BETWEEN + WORKING,
+    );
+    for step in 0..u32::try_from(BETWEEN + WORKING).expect("a count") {
+        crate::agent_teams::forget_term(stood.leader + 100 + step);
+    }
+}
+
+/// t-46106: a pane is the person's, and keeps its login. A worker they took
+/// over, and a Claude pane no worker holds, stay on the old account through
+/// the switch and every beat after it, and are counted as theirs — the plan
+/// says each one is the person's, on which account. A worker between turns
+/// with a person's unsent words on its line is not moved under them: it
+/// moves once the line is empty. The census says where every pane stands.
+#[test]
+fn a_persons_panes_keep_their_login_and_a_line_with_their_words_waits() {
+    use crate::account_switch::Stance;
+    let stood = WalledClaude::near_limit(93_100, 2, 1);
+    let at = stood.began + 20_000;
+    let (taken, taken_term) = (stood.worker.clone(), stood.leader + 1);
+    let (drafted, drafted_term) = stood.walled_more[0].clone();
+    let (working, working_term) = stood.working[0].clone();
+    super::pane_taken_over(taken_term, at - 1);
+    assert!(stood.row(&taken).taken_over);
+    stood.host.drafts.lock().unwrap().insert(drafted_term);
+    // The person's own Claude pane, no worker's.
+    let own = stood.leader + 60;
+    stood.host.runs_as(own, "a-fixture");
+    let plan = stood.plan(at);
+    let stance = |plan: &crate::account_switch::SwitchPlan, term: u32| {
+        plan.panes
+            .iter()
+            .find(|pane| pane.term == term)
+            .map(|pane| (pane.stance, pane.account.clone()))
+    };
+    assert_eq!(
+        stance(&plan, taken_term),
+        Some((Stance::Person, Some("a-fixture".to_string())))
+    );
+    assert_eq!(
+        stance(&plan, working_term),
+        Some((Stance::Current, Some("a-fixture".to_string())))
+    );
+    stood.host.seating_onto(stood.leader + 100);
+    let applied =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+            .expect("applied");
+    assert_eq!(
+        applied.census,
+        crate::account_switch::SwitchCensus {
+            moved: 0,
+            at_turn_end: 2,
+            person: 2,
+            left: 0,
+        },
+        "{applied:?}"
+    );
+    assert!(stood.host.closed().is_empty(), "{:?}", stood.host.closed());
+    let after = stood.plan(at + 1);
+    assert_eq!(
+        stance(&after, taken_term),
+        Some((Stance::Person, Some("a-fixture".to_string())))
+    );
+    assert_eq!(
+        stance(&after, own),
+        Some((Stance::Person, Some("a-fixture".to_string())))
+    );
+    assert_eq!(
+        stance(&after, drafted_term),
+        Some((Stance::TurnEnd, Some("a-fixture".to_string())))
+    );
+    assert_eq!(
+        stance(&after, working_term),
+        Some((Stance::TurnEnd, Some("a-fixture".to_string())))
+    );
+    // Beats go by: nothing of the person's moves, nor a line with words.
+    for step in 0..3 {
+        assert_eq!(
+            crate::account_switch::follow_with(&stood.host, &stood.world, at + 10 + step),
+            0
+        );
+    }
+    // The words are sent and the turn they started ends: that pane moves.
+    stood.host.drafts.lock().unwrap().remove(&drafted_term);
+    assert_eq!(
+        stance(&stood.plan(at + 19), drafted_term),
+        Some((Stance::Moving, Some("a-fixture".to_string())))
+    );
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 20),
+        1
+    );
+    assert_eq!(
+        stood.host.pane_account(term_now(&drafted)).as_deref(),
+        Some("b-fixture")
+    );
+    assert_eq!(
+        stance(&stood.plan(at + 21), term_now(&drafted)),
+        Some((Stance::Current, Some("b-fixture".to_string())))
+    );
+    // The person's pane and the person's worker are where they were.
+    assert_eq!(stood.host.closed(), vec![drafted_term]);
+    assert_eq!(term_now(&taken), taken_term);
+    assert_eq!(
+        stood.host.pane_account(taken_term).as_deref(),
+        Some("a-fixture")
+    );
+    assert_eq!(stood.host.pane_account(own).as_deref(), Some("a-fixture"));
+    assert_eq!(term_now(&working), working_term);
+    let default = stood
+        .receipts(at + 30)
+        .into_iter()
+        .find(|body| body["moved"] == "default")
+        .expect("the default's receipt");
+    assert_eq!(default["panesPerson"], 2);
+    assert_eq!(default["panesAtTurnEnd"], 2);
+    assert_eq!(stood.died(at + 40), 0);
+    for term in [own, stood.leader + 100] {
+        crate::agent_teams::forget_term(term);
+    }
+}
+
+/// t-46106: the first gap after a turn is taken at its fence, and only
+/// there. A pane that takes its next prompt between the beat's look and
+/// the rest — the mail pointer's line, a person's Enter — is not rested:
+/// the refusal leaves its move owed, and the end of THAT turn moves it.
+#[test]
+fn a_pane_that_takes_its_next_turn_at_the_fence_moves_at_the_end_of_that_turn() {
+    let stood = WalledClaude::near_limit(93_200, 1, 1);
+    let at = stood.began + 20_000;
+    let (worker, term) = stood.working[0].clone();
+    let plan = stood.plan(at);
+    stood.host.seating_onto(stood.leader + 100);
+    let applied =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+            .expect("applied");
+    assert_eq!(applied.census.at_turn_end, 1, "{applied:?}");
+    // Its turn ends; at the fence, its next one starts.
+    stood.host.busy.lock().unwrap().remove(&term);
+    let busy = std::sync::Arc::clone(&stood.host.busy);
+    *stood.host.during_observation.lock().unwrap() = Some(Box::new(move || {
+        busy.lock().unwrap().insert(term);
+    }));
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 10),
+        0
+    );
+    assert_eq!(term_now(&worker), term);
+    assert_eq!(stood.row(&worker).state, WorkerState::Active);
+    assert!(!stood.host.closed().contains(&term));
+    assert_eq!(
+        crate::account_switch::owed_followers(stood.world.journal.path()),
+        vec![worker.clone()]
+    );
+    // That turn ends too: now it moves.
+    stood.host.busy.lock().unwrap().remove(&term);
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 20),
+        1
+    );
+    assert_eq!(
+        stood.host.pane_account(term_now(&worker)).as_deref(),
+        Some("b-fixture")
+    );
+    assert_eq!(stood.died(at + 30), 0);
+    for term in [stood.leader + 100, stood.leader + 101] {
+        crate::agent_teams::forget_term(term);
+    }
+}
+
+/// t-46106 (ZO's adversarial read, m-46917): words this window has just
+/// typed at a pane on its own — a transient error's continuation, the mail
+/// pointer's line — are on their way before any hook says the pane took
+/// them, and in that gap the pane still looks between turns. A switch that
+/// meets it then does not close it, on the beat's road or on the person's
+/// pick: the pane is owed its move at the end of the turn those words
+/// start, the words are not thrown away, and the census says so.
+#[test]
+fn a_pane_the_window_just_typed_at_is_not_closed_by_a_switch_but_moves_at_that_turns_end() {
+    use crate::account_switch::Stance;
+    let stood = WalledClaude::near_limit(93_300, 2, 0);
+    let at = stood.began + 20_000;
+    let (typed, typed_term) = stood.walled_more[0].clone();
+    // The beat's continuation goes to the pane: registered, not taken yet.
+    assert!(
+        stood
+            .host
+            .point(typed_term, "Continue where you stopped.", true)
+            .is_some()
+    );
+    let plan = stood.plan(at);
+    stood.host.seating_onto(stood.leader + 100);
+    let applied =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+            .expect("applied");
+    assert!(
+        !stood.host.closed().contains(&typed_term),
+        "the switch closed a pane the window had just typed at: {applied:?}"
+    );
+    assert_eq!(
+        applied.census,
+        crate::account_switch::SwitchCensus {
+            moved: 1,
+            at_turn_end: 1,
+            person: 0,
+            left: 0,
+        },
+        "{applied:?}"
+    );
+    assert_eq!(term_now(&typed), typed_term);
+    assert_eq!(
+        stood
+            .plan(at + 1)
+            .panes
+            .iter()
+            .find(|pane| pane.term == typed_term)
+            .map(|pane| pane.stance),
+        Some(Stance::TurnEnd)
+    );
+    // While the words are on their way, no beat moves it.
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 2),
+        0
+    );
+    assert!(!stood.host.closed().contains(&typed_term));
+    // The words are taken, their turn runs and ends: now it moves.
+    stood.host.typed.lock().unwrap().remove(&typed_term);
+    assert_eq!(
+        crate::account_switch::follow_with(&stood.host, &stood.world, at + 3),
+        1
+    );
+    assert_eq!(
+        stood.host.pane_account(term_now(&typed)).as_deref(),
+        Some("b-fixture")
+    );
+    assert_eq!(stood.died(at + 4), 0);
+    for term in [stood.leader + 100, stood.leader + 101] {
+        crate::agent_teams::forget_term(term);
+    }
+}
+
+/// t-46106: the beat moves a worker a switch still owes a move to BEFORE
+/// the mail pointer can start that worker's next turn — the order is the
+/// first gap after a turn, kept by the source.
+#[test]
+fn the_beat_moves_a_following_pane_before_the_pointer_types() {
+    let shipped = include_str!("../orchestration.rs");
+    let start = shipped
+        .find("pub(crate) fn tick(")
+        .expect("the beat's tick");
+    let tick = &shipped[start..];
+    let tick = &tick[..tick.find("\n}\n").expect("the end of the tick")];
+    let follow = tick
+        .find("host.follow_account_switch(now_ms);")
+        .expect("the beat follows the default");
+    let point = tick
+        .find("point_at_waiting_mail(host, now_ms);")
+        .expect("the beat points at mail");
+    assert!(follow < point, "the pointer types before the follow moves");
 }
 
 /// GREEN of the red above, for the one pane that SHOULD move: under
@@ -23651,6 +24203,8 @@ fn a_switch_that_died_halfway_finishes_its_receipts_once() {
         generation: None,
         panes: Vec::new(),
         moved: 0,
+        person: 0,
+        left: 0,
         began_ms: at,
     };
     std::fs::write(
@@ -23743,10 +24297,13 @@ fn two_applies_of_one_plan_move_once() {
 /// out, and the old plan listed it and moved it on the row alone. Now the
 /// plan asks the pane now: busy with the words still on screen, quiet with
 /// the words gone, or both, the worker is not on the moving list; the
-/// default still moves on its own numbers, and nothing is rested, closed
-/// or seated. And a pane that goes back to work WHILE the default is being
-/// selected is not moved either: its last door reads the plan again. The
-/// same wall still standing moves — the green road above.
+/// default still moves on its own numbers, and no pane at work is rested,
+/// closed or seated — it is owed its move at its turn's end (t-46106). The
+/// quiet one, between turns, follows the default at once as a pane that
+/// left no wall: told nothing, its receipt the default's reason. And a pane
+/// that goes back to work WHILE the default is being selected is not moved
+/// either: its last door reads the plan again. The same wall still standing
+/// moves — the green road above.
 #[test]
 fn a_pane_back_at_work_after_its_wall_is_not_moved_by_the_wall_it_left() {
     let unmoved = |stood: &WalledClaude, seat: &str, case: &str, at: i64| {
@@ -23785,8 +24342,31 @@ fn a_pane_back_at_work_after_its_wall_is_not_moved_by_the_wall_it_left() {
             crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
                 .expect("the default moves on its own numbers");
         assert!(applied.switched_default, "{case}: {applied:?}");
-        assert!(applied.panes.is_empty(), "{case}: {applied:?}");
-        unmoved(&stood, &seat, &case, at);
+        if busy {
+            assert!(applied.panes.is_empty(), "{case}: {applied:?}");
+            assert_eq!(applied.census.at_turn_end, 1, "{case}: {applied:?}");
+            unmoved(&stood, &seat, &case, at);
+            continue;
+        }
+        // Between turns: it follows the default, and left no wall.
+        assert_eq!(applied.panes.len(), 1, "{case}: {applied:?}");
+        assert!(applied.panes[0].ok, "{case}: {applied:?}");
+        let moved = term_now(&stood.worker);
+        assert_eq!(moved, stood.leader + 2, "{case}");
+        assert_eq!(
+            stood.host.pane_account(moved).as_deref(),
+            Some("b-fixture"),
+            "{case}"
+        );
+        assert!(pasted_into(&stood.host, moved).is_empty(), "{case}");
+        let receipt = stood
+            .receipts(at + 10)
+            .into_iter()
+            .find(|body| body["moved"] == "pane")
+            .expect("the pane's receipt");
+        assert_eq!(receipt["reason"], "near_limit", "{case}");
+        assert_eq!(stood.died(at + 20), 0, "{case}");
+        crate::agent_teams::forget_term(moved);
     }
     // Back to work while the default is being selected.
     let stood = WalledClaude::stand(89_250, 0);
@@ -23836,6 +24416,7 @@ fn a_rest_is_written_only_while_the_window_sees_the_wall_now() {
         model: "claude-opus-5-5".to_string(),
         effort: "xhigh".to_string(),
         exit: None,
+        cause: zerocode_core::orchestration::RestCause::Walled,
     };
     let as_a = stood
         .host
@@ -25012,11 +25593,27 @@ fn a_moved_panes_receipt_is_the_move_it_saw_whatever_the_worker_does_next() {
         assert_eq!(panes[0]["toPane"], moved.pane, "{scene}");
         assert_eq!(panes[0]["fromAccount"], "a-fixture", "{scene}");
         assert_eq!(panes[0]["toAccount"], "b-fixture", "{scene}");
-        assert!(
-            stood.journal_text().is_empty(),
-            "{scene}: {}",
-            stood.journal_text()
-        );
+        // No receipt is owed any more. The worker beside it, at work through
+        // all of it on the old account, is owed its move at its turn's end
+        // (t-46106) — unless a restart already seated it again elsewhere.
+        let owed = crate::account_switch::owed_followers(stood.world.journal.path());
+        if moves_on {
+            assert!(
+                stood.journal_text().is_empty(),
+                "{scene}: {}",
+                stood.journal_text()
+            );
+        } else {
+            assert_eq!(owed, vec![stood.working[0].0.clone()], "{scene}");
+            let book: crate::account_switch::JournalBook =
+                serde_json::from_str(&stood.journal_text()).expect("a book");
+            assert!(
+                book.switches
+                    .iter()
+                    .all(|held| !held.default && held.panes.iter().all(|pane| pane.follows)),
+                "{scene}: a receipt is still owed: {book:?}"
+            );
+        }
     }
 }
 

@@ -5,18 +5,26 @@
 //! model, effort and ledger seat intact.
 //!
 //! Three roads, one policy, one line. The person's picker
-//! ([`switch_by_person`]) moves the default and touches no pane. The beat's
-//! proposal (`ask`) is a [`SwitchPlan`] the window shows and the person
-//! accepts BY TOKEN — an acceptance for a proposal that has since changed is
-//! refused, not re-aimed. The beat's own move (`auto`) applies the same plan
-//! without asking. All three hold [`SWITCH_LINE`], so two windows, or a press
-//! and a beat, converge on one default move and one move per pane.
+//! ([`switch_by_person`]) moves the default. The beat's proposal (`ask`) is
+//! a [`SwitchPlan`] the window shows and the person accepts BY TOKEN — an
+//! acceptance for a proposal that has since changed is refused, not
+//! re-aimed. The beat's own move (`auto`) applies the same plan without
+//! asking. All three hold [`SWITCH_LINE`], so two windows, or a press and a
+//! beat, converge on one default move and one move per pane.
 //!
-//! In every case a working pane keeps the login it was started with: the
-//! only pane that moves is one whose two wall witnesses the ledger has
-//! written down AND the window still sees at the moment of the move (astra
-//! R2), and it moves by the restore road a window restart already uses —
-//! the ledger rests it, the pane closes and its process group is gone,
+//! A pane moves for one of two reasons. A WALLED pane moves when its two
+//! wall witnesses the ledger has written down are still seen at the moment
+//! of the move (astra R2). Every other worker pane FOLLOWS the default
+//! (t-46106): when any road moves the default, the Claude workers left on
+//! another account move with it — one between turns at once, one at work
+//! at the first end of its turn, never mid-turn — and a pane the person
+//! took over, or that no worker holds, keeps its login and is counted as
+//! the person's. Before, the default moved alone: on 2026-10-11 a near-limit
+//! switch left seven workers on the old login at 97–98%, and only a window
+//! restart brought them over.
+//!
+//! Both kinds move by the restore road a window restart already uses — the
+//! ledger rests the worker, the pane closes and its process group is gone,
 //! `reseat_one_in_line` opens the new pane with `--resume` — all in the
 //! restore line, so neither another restore nor the grace can walk the
 //! worker between its rest and its new pane. The program in the pane is
@@ -43,12 +51,18 @@ use crate::agent_teams::{Host, PaneExit, PaneLogin};
 use zerocode_core::LaunchOverride;
 use zerocode_core::account_autoswitch::{
     AccountGauge, AutoSwitchMode, CLAUDE_ACCOUNT_AUTOSWITCH, Decision, Fitness, Question,
-    SwitchReason, best_candidate, decide, fitness_table, judge_pane,
+    SwitchReason, best_candidate, decide, fitness_table, judge_follower, judge_pane,
 };
-use zerocode_core::orchestration::{AccountMove, AccountSwitchReceipt, SwitchRest, WorkerState};
+use zerocode_core::orchestration::{
+    AccountMove, AccountSwitchReceipt, RestCause, SwitchRest, WorkerState,
+};
 
 /// Every switch and every reading-back of a journal, one at a time.
 static SWITCH_LINE: Mutex<()> = Mutex::new(());
+
+/// The receipt's `by` for the settings picker — the one road that asks no
+/// setting, and whose following panes do not either (t-46106).
+const PERSON: &str = "person";
 
 /// When the window's default last moved, and to whom — the cooldown's
 /// clock. Window memory: a restart ends the cooldown, which is the same
@@ -81,6 +95,10 @@ pub(crate) struct Situation {
     /// so a yes given while an id named one login is refused once it names
     /// another (astra R6); never shown, never written.
     pub(crate) logins: Vec<(String, String)>,
+    /// The workers a switch's journal still owes a move to the default
+    /// ([`owed_followers`], t-46106) — what the plan's census says of a pane
+    /// left on another account: moving, or left.
+    pub(crate) owed: Vec<String>,
     pub(crate) now_ms: i64,
 }
 
@@ -161,6 +179,7 @@ impl SwitchDoors for WindowDoors<'_> {
                 .iter()
                 .map(|account| (account.id.clone(), claude_login_key(account)))
                 .collect(),
+            owed: owed_followers(&self.journal_dir()),
             now_ms,
         })
     }
@@ -344,7 +363,9 @@ fn relaunch_keeps_permission(
     }
 }
 
-/// One walled pane as the plan lists it, with what the table made of it.
+/// One walled pane as the plan lists it, with what the table made of it —
+/// and the same shape for a pane that follows the default, when a switch
+/// moves one (t-46106).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct WalledRow {
     pub(crate) worker: String,
@@ -361,9 +382,45 @@ pub(crate) struct WalledRow {
     pub(crate) verdict: Decision,
 }
 
+/// Where one Claude pane stands against the account new launches run as
+/// (t-46106) — the plan's census, which the status bar and the sidebar's
+/// agent rows say in words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Stance {
+    /// It runs as the default.
+    Current,
+    /// It stands at its wall; the wall road moves it, or waits.
+    Walled,
+    /// On another account between turns, and a switch owes it a move: the
+    /// next look moves it.
+    Moving,
+    /// On another account at work, and a switch owes it a move at the end of
+    /// its turn.
+    TurnEnd,
+    /// The person's: a worker they took over, or a pane no worker holds —
+    /// on whichever account. Never moved.
+    Person,
+    /// On another account, or on none the window recorded, and nothing will
+    /// move it.
+    Left,
+}
+
+/// One Claude pane in the plan's census (t-46106): its terminal, the worker
+/// in it when the ledger has one, the account its login is — and `None`
+/// for a launch that named no managed store — and where it stands.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PaneAccount {
+    pub(crate) term: u32,
+    pub(crate) worker: Option<String>,
+    pub(crate) account: Option<String>,
+    pub(crate) stance: Stance,
+}
+
 /// What the beat would do right now, and everything the window needs to
 /// show or to apply it: the table's rows, the default's decision, the
-/// walled panes and where each goes, and a token that names exactly this.
+/// walled panes and where each goes, every Claude pane's account, and a
+/// token that names exactly this.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct SwitchPlan {
     pub(crate) mode: AutoSwitchMode,
@@ -377,6 +434,10 @@ pub(crate) struct SwitchPlan {
     /// bar's "next", chosen by the table and nowhere else.
     pub(crate) next: Option<Fitness>,
     pub(crate) walled: Vec<WalledRow>,
+    /// Every Claude pane this window holds, and the account it runs as —
+    /// a read only: the token does not name it, so a pane that moves is not
+    /// a new proposal (t-46106).
+    pub(crate) panes: Vec<PaneAccount>,
     pub(crate) last_switch_ms: Option<i64>,
     /// When the cooldown after the last switch ends, while it runs.
     pub(crate) cooldown_until_ms: Option<i64>,
@@ -453,6 +514,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         last_switch_ms,
         failures,
         logins,
+        owed,
         now_ms,
     } = situation;
     let failed_recently: Vec<String> = failures
@@ -477,7 +539,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
                 .or(one.model),
             worker: one.worker,
             term: one.term,
-            dispatch: one.dispatch,
+            dispatch: one.dispatch.unwrap_or_default(),
             generation: one.generation,
             verdict: Decision::Stay { why: "off" },
         })
@@ -516,6 +578,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         }
     }
     let token = token_of(mode, active.as_deref(), &decision, &walled, &logins);
+    let panes = census(host, active.as_deref(), &walled, &owed);
     let next = active.as_deref().and_then(|source| {
         best_candidate(
             source,
@@ -533,6 +596,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         fitness: fitness_table(&gauges, now_ms),
         next,
         walled,
+        panes,
         last_switch_ms,
         cooldown_until_ms,
         failed_recently,
@@ -540,6 +604,60 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         logins,
         now_ms,
     }
+}
+
+/// Every Claude pane this window holds, and where it stands against
+/// `active`, the account new launches run as (t-46106): the workers the
+/// ledger seats, then the panes no worker holds — the person's own. A read
+/// of the ledger, the pane records and the journal's owed moves; nothing is
+/// asked of a provider and nothing moves.
+fn census(
+    host: &dyn Host,
+    active: Option<&str>,
+    walled: &[WalledRow],
+    owed: &[String],
+) -> Vec<PaneAccount> {
+    let seated = crate::orchestration::claude_workers_seated();
+    let mut panes: Vec<PaneAccount> = seated
+        .iter()
+        .map(|seat| {
+            let account = host.pane_account(seat.term);
+            let stance = if walled.iter().any(|row| row.term == seat.term) {
+                Stance::Walled
+            } else if seat.taken_over {
+                Stance::Person
+            } else if account.is_some() && account.as_deref() == active {
+                Stance::Current
+            } else if owed.contains(&seat.worker) {
+                if rests_for_a_move(host, seat.term) {
+                    Stance::Moving
+                } else {
+                    Stance::TurnEnd
+                }
+            } else {
+                Stance::Left
+            };
+            PaneAccount {
+                term: seat.term,
+                worker: Some(seat.worker.clone()),
+                account,
+                stance,
+            }
+        })
+        .collect();
+    panes.extend(
+        host.claude_pane_logins()
+            .into_iter()
+            .filter(|(term, _)| seated.iter().all(|seat| seat.term != *term))
+            .map(|(term, login)| PaneAccount {
+                term,
+                worker: None,
+                account: Some(login.account),
+                stance: Stance::Person,
+            }),
+    );
+    panes.sort_by_key(|pane| pane.term);
+    panes
 }
 
 /// The login `id` names in `logins`, when it names one.
@@ -577,9 +695,12 @@ impl<'a> Approval<'a> {
     }
 
     /// Whether this approval still holds under `mode`, with every account
-    /// id naming `logins`.
+    /// id naming `logins`. A person's own pick asks no setting — the picker
+    /// works whatever the beat may do — so the panes that follow it do not
+    /// either (t-46106); the logins they were shown still stand or fall.
     fn stands(&self, mode: AutoSwitchMode, logins: &[(String, String)]) -> Result<(), String> {
         match (self.by, mode) {
+            (PERSON, _) => {}
             (_, AutoSwitchMode::Off) => {
                 return Err(
                     "the switch was turned off before this pane moved — not moved".to_string(),
@@ -648,6 +769,13 @@ pub(crate) struct Journal {
     /// default's receipt counts.
     #[serde(default)]
     pub(crate) moved: u32,
+    /// Panes on another account this switch found the person's, and panes
+    /// it could not move — what the default's receipt counts beside the
+    /// moved ones (t-46106).
+    #[serde(default)]
+    pub(crate) person: u32,
+    #[serde(default)]
+    pub(crate) left: u32,
     pub(crate) began_ms: i64,
 }
 
@@ -664,6 +792,12 @@ pub(crate) struct JournalPane {
     #[serde(default)]
     pub(crate) session: String,
     pub(crate) from_pane: String,
+    /// The team `from_pane` is a pane of (t-46106): a window that restarts
+    /// seats its workers again under another team, where the same pane id
+    /// can come round again, and a pane id alone would say the worker never
+    /// left.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) from_team: String,
     pub(crate) from_account: String,
     /// The ledger rested the worker for THIS switch — written down before
     /// its pane is closed. Only a rested pane is this switch's move: one
@@ -671,6 +805,12 @@ pub(crate) struct JournalPane {
     /// to sleep and seated again, was moved by the restart.
     #[serde(default)]
     pub(crate) rested: bool,
+    /// The pane follows the default rather than leaving a wall (t-46106):
+    /// found at work when the default moved, it is owed its move — not
+    /// rested yet — for as long as its worker sits in `from_pane`, and the
+    /// first look that finds it between turns makes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) follows: bool,
     /// Where it continues, once it does — kept while its receipt is owed.
     /// Written ONCE, the first time a look sees the move complete, and
     /// never read again off the worker after that (astra R4): what the
@@ -680,6 +820,16 @@ pub(crate) struct JournalPane {
     pub(crate) to_pane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) to_account: Option<String>,
+}
+
+impl JournalPane {
+    /// Whether the worker still sits where the switch found it — live, in
+    /// the same pane of the same team (t-46106).
+    fn still_in(&self, now: &crate::orchestration::WorkerNow) -> bool {
+        now.state.is_live()
+            && now.pane == self.from_pane
+            && (self.from_team.is_empty() || now.team == self.from_team)
+    }
 }
 
 fn journal_file(dir: &Path) -> PathBuf {
@@ -848,6 +998,9 @@ impl Journal {
             generation: self.generation,
             panes_moved,
             panes_pending,
+            panes_at_turn_end: 0,
+            panes_person: 0,
+            panes_left: 0,
         }
     }
 
@@ -889,6 +1042,21 @@ fn observe_moves(host: &dyn Host, doors: &dyn SwitchDoors, journal: &mut Journal
             return true;
         }
         let now = crate::orchestration::worker_now(&pane.worker);
+        // A pane owed its move at its turn's end (t-46106) is owed it for as
+        // long as its worker sits where the switch found it; seated
+        // elsewhere — a restart's restore, the wall road — or ended, it is
+        // not this switch's to move any more.
+        if pane.follows && !pane.rested {
+            let waits = now.as_ref().is_some_and(|now| pane.still_in(now));
+            if !waits {
+                doors.log(&format!(
+                    "account-switch: journal {key} lets worker {} go — it no longer sits in the \
+                     pane the switch found it in: its move is not this switch's any more",
+                    pane.worker
+                ));
+            }
+            return waits;
+        }
         let same = pane.rested
             && now.as_ref().is_some_and(|now| {
                 now.dispatch.as_deref() == Some(pane.dispatch.as_str())
@@ -968,21 +1136,25 @@ fn send_receipts(
             }
         }
     }
-    let pending = u32::try_from(kept.iter().filter(|pane| pane.to_pane.is_none()).count())
-        .unwrap_or(u32::MAX);
+    let count = |which: &dyn Fn(&JournalPane) -> bool| {
+        u32::try_from(kept.iter().filter(|pane| which(pane)).count()).unwrap_or(u32::MAX)
+    };
+    let pending = count(&|pane| pane.to_pane.is_none() && pane.rested);
+    let at_turn_end = count(&|pane| pane.follows && !pane.rested);
     journal.panes = kept;
     if journal.default {
         if journal.landed || active == journal.to.as_deref() {
             journal.landed = true;
-            match doors.record(
-                journal.receipt(
-                    AccountMove::Default,
-                    journal.default_key(),
-                    journal.moved,
-                    pending,
-                ),
-                now_ms,
-            ) {
+            let mut receipt = journal.receipt(
+                AccountMove::Default,
+                journal.default_key(),
+                journal.moved,
+                pending,
+            );
+            receipt.panes_at_turn_end = at_turn_end;
+            receipt.panes_person = journal.person;
+            receipt.panes_left = journal.left;
+            match doors.record(receipt, now_ms) {
                 Ok(written) => {
                     settled.written += usize::from(written);
                     journal.default = false;
@@ -1099,12 +1271,46 @@ pub(crate) struct Applied {
     pub(crate) switched_default: bool,
     pub(crate) default_ms: u128,
     pub(crate) panes: Vec<MovedPane>,
+    /// What became of every pane the switch found on another account
+    /// (t-46106) — the four counts the toast says.
+    pub(crate) census: SwitchCensus,
     pub(crate) receipts: usize,
     /// The ledger refused a receipt, or the journal could not be written:
     /// the switch happened and the window says so, but not as a success —
     /// what is owed stays in the journal for the next look.
     pub(crate) receipt_error: Option<String>,
     pub(crate) total_ms: u128,
+}
+
+/// What one switch did with the panes on accounts other than its landing
+/// (t-46106), counted the way its toast says them: moved now, owed a move at
+/// their turn's end, the person's, and left where they are.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct SwitchCensus {
+    pub(crate) moved: u32,
+    pub(crate) at_turn_end: u32,
+    pub(crate) person: u32,
+    pub(crate) left: u32,
+}
+
+impl SwitchCensus {
+    /// The census of a switch whose moves made `panes`, as its journal
+    /// stands once they are settled.
+    fn of(panes: &[MovedPane], journal: &Journal) -> Self {
+        let count = |many: usize| u32::try_from(many).unwrap_or(u32::MAX);
+        Self {
+            moved: count(panes.iter().filter(|pane| pane.ok).count()),
+            at_turn_end: count(
+                journal
+                    .panes
+                    .iter()
+                    .filter(|pane| pane.follows && !pane.rested)
+                    .count(),
+            ),
+            person: journal.person,
+            left: journal.left,
+        }
+    }
 }
 
 /// The source's fullest window and percentage, for the receipt.
@@ -1205,14 +1411,18 @@ pub(crate) fn apply_with(
                     dispatch: row.dispatch.clone(),
                     session: now.session?,
                     from_pane: now.pane,
+                    from_team: now.team,
                     from_account: row.account.clone()?,
                     rested: false,
+                    follows: false,
                     to_pane: None,
                     to_account: None,
                 })
             })
             .collect(),
         moved: 0,
+        person: 0,
+        left: 0,
         began_ms: now_ms,
     };
     // Written down before the first effect, beside whatever an earlier
@@ -1260,6 +1470,7 @@ pub(crate) fn apply_with(
             host,
             doors,
             row,
+            RestCause::Walled,
             approval.as_ref(),
             &key,
             now_ms,
@@ -1291,10 +1502,29 @@ pub(crate) fn apply_with(
         ));
         panes.push(moved);
     }
+    // ②b Every other worker pane the default left on another account
+    // follows it (t-46106): between turns now, at work when its turn ends.
+    if switched_default && let Some(landing) = to.as_deref() {
+        let gauges = doors
+            .situation(doors.now_ms())
+            .map(|now| now.gauges)
+            .unwrap_or_default();
+        panes.extend(follow_the_default(
+            host,
+            doors,
+            &mut book,
+            &mut journal,
+            landing,
+            &gauges,
+            &plan.logins,
+            now_ms,
+        ));
+    }
     // ③ The receipts, through the one settling a later look uses: a move
     // seen complete is written down first (astra R4-1), then a moved pane's
-    // receipt, then the default's with the count of what moved and what is
-    // still asleep. What the ledger refuses stays owed in the journal, and a
+    // receipt, then the default's with the count of what moved, what is
+    // still asleep, what moves at its turn's end, what is the person's and
+    // what is left. What the ledger refuses stays owed in the journal, and a
     // journal that refuses a write stays this window's to write again.
     let settled = settle(
         host,
@@ -1316,6 +1546,7 @@ pub(crate) fn apply_with(
         to,
         switched_default,
         default_ms,
+        census: SwitchCensus::of(&panes, &journal),
         panes,
         receipts: settled.written,
         receipt_error,
@@ -1369,6 +1600,461 @@ fn still_moves(
     }
 }
 
+/* ---- following the default (t-46106) ---- */
+
+/// What each switch's yes was given to, by its journal key: which login every
+/// account id named when its default moved (t-46106). A move owed at a
+/// pane's turn end is held to it at the pane's last door, as a walled move
+/// is to the plan's (astra R2). Window memory, never written — logins never
+/// are: a window that restarts seats every worker again on its default, so
+/// no follow survives it owed.
+fn follow_logins() -> &'static Mutex<FollowLogins> {
+    static HELD: std::sync::OnceLock<Mutex<FollowLogins>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Which login every account id named, by the key of the switch whose yes
+/// it was (t-46106).
+type FollowLogins = HashMap<String, Vec<(String, String)>>;
+
+/// The workers a switch in the book at `dir` still owes a move to the
+/// default (t-46106): found at work when it moved, not rested yet. A look
+/// only — the book this window could not write first, then the file; a
+/// book nobody can read owes nothing here, and the road that settles it
+/// sets it aside and says so.
+pub(crate) fn owed_followers(dir: &Path) -> Vec<String> {
+    unwritten_book(dir)
+        .or_else(|| read_book(dir).ok())
+        .unwrap_or_default()
+        .switches
+        .iter()
+        .flat_map(|journal| journal.panes.iter())
+        .filter(|pane| pane.follows && !pane.rested && pane.to_pane.is_none())
+        .map(|pane| pane.worker.clone())
+        .collect()
+}
+
+/// Whether a switch may move the pane in `term` now (t-46106): the host
+/// sees it between turns, and no words this window typed at it on its own
+/// are still on their way — words the hooks have not heard taken would be
+/// thrown away with the pane, and the turn they start is the one whose end
+/// moves it (ZO's read, m-46917). The one reading for every place a switch
+/// decides "now or at the turn's end": the enlisting, the census, the
+/// beat's search and the last door.
+fn rests_for_a_move(host: &dyn Host, term: u32) -> bool {
+    host.between_turns(term) && !host.typing_in_flight(term)
+}
+
+/// The panes a switch found on accounts other than its landing once its
+/// default landed (t-46106), by what it can do with each.
+#[derive(Default)]
+struct Followers {
+    /// Between turns: this switch moves them now.
+    now: Vec<WalledRow>,
+    /// At work: owed their move at the end of their turn.
+    owed: Vec<WalledRow>,
+    /// The person's: a worker they took over, or a pane no worker holds.
+    person: u32,
+    /// Left where they are, each worker with why.
+    left: Vec<(String, String)>,
+}
+
+/// Every Claude pane on an account other than `landing`, sorted by what a
+/// switch can do with it (t-46106). The walled panes this switch moved are
+/// asleep or already on the landing by now, so they are not among them; a
+/// walled pane it could not move is, and may still follow.
+fn followers_of(host: &dyn Host, landing: &str, gauges: &[AccountGauge], now_ms: i64) -> Followers {
+    let mut found = Followers::default();
+    let seated = crate::orchestration::claude_workers_seated();
+    for seat in &seated {
+        let Some(account) = host.pane_account(seat.term) else {
+            found.left.push((
+                seat.worker.clone(),
+                "the window recorded no login for its pane, and an unknown login is never \
+                 presumed to be one the default left"
+                    .to_string(),
+            ));
+            continue;
+        };
+        if account == landing {
+            continue;
+        }
+        if seat.taken_over {
+            found.person = found.person.saturating_add(1);
+            continue;
+        }
+        let Some(dispatch) = seat.dispatch.clone() else {
+            found.left.push((
+                seat.worker.clone(),
+                "it carries no open attempt, and only an attempt is seated again".to_string(),
+            ));
+            continue;
+        };
+        let model = pane_tuning(host, seat.term)
+            .and_then(|tuning| tuning.model)
+            .or_else(|| seat.model.clone());
+        let verdict = judge_follower(&account, model.as_deref(), landing, gauges, now_ms);
+        if !matches!(verdict, Decision::Switch { .. }) {
+            found.left.push((
+                seat.worker.clone(),
+                format!(
+                    "the table keeps it where it is ({})",
+                    serde_json::to_string(&verdict).unwrap_or_default()
+                ),
+            ));
+            continue;
+        }
+        let row = WalledRow {
+            worker: seat.worker.clone(),
+            term: seat.term,
+            account: Some(account),
+            model,
+            dispatch,
+            generation: seat.generation,
+            verdict,
+        };
+        if rests_for_a_move(host, seat.term) {
+            found.now.push(row);
+        } else {
+            found.owed.push(row);
+        }
+    }
+    let persons = host
+        .claude_pane_logins()
+        .into_iter()
+        .filter(|(term, login)| {
+            login.account != landing && seated.iter().all(|seat| seat.term != *term)
+        })
+        .count();
+    found.person = found
+        .person
+        .saturating_add(u32::try_from(persons).unwrap_or(u32::MAX));
+    found
+}
+
+/// Follow the default that just landed on `landing` (t-46106): every Claude
+/// worker pane left on another account is written into `journal` before any
+/// of them is touched; the ones between turns move now, by the road a
+/// walled pane takes, and the ones at work stay owed for the beat to move
+/// at their turn's end ([`follow_with`]). A move an older switch still owed
+/// a pane is this one's now. `logins` are the ones the switch was approved
+/// under. Answers the moves made.
+#[allow(clippy::too_many_arguments)]
+fn follow_the_default(
+    host: &dyn Host,
+    doors: &dyn SwitchDoors,
+    book: &mut JournalBook,
+    journal: &mut Journal,
+    landing: &str,
+    gauges: &[AccountGauge],
+    logins: &[(String, String)],
+    now_ms: i64,
+) -> Vec<MovedPane> {
+    let found = followers_of(host, landing, gauges, now_ms);
+    for (worker, why) in &found.left {
+        doors.log(&format!(
+            "account-switch: {} leaves worker {worker} on its account — {why}",
+            journal.key
+        ));
+    }
+    journal.person = journal.person.saturating_add(found.person);
+    journal.left = journal
+        .left
+        .saturating_add(u32::try_from(found.left.len()).unwrap_or(u32::MAX));
+    let enlisted: Vec<&str> = found
+        .now
+        .iter()
+        .chain(&found.owed)
+        .map(|row| row.worker.as_str())
+        .collect();
+    for row in found.now.iter().chain(&found.owed) {
+        let Some(now) = crate::orchestration::worker_now(&row.worker) else {
+            continue;
+        };
+        journal.panes.push(JournalPane {
+            worker: row.worker.clone(),
+            dispatch: row.dispatch.clone(),
+            session: now.session.unwrap_or_default(),
+            from_pane: now.pane,
+            from_team: now.team,
+            from_account: row.account.clone().unwrap_or_default(),
+            rested: false,
+            follows: true,
+            to_pane: None,
+            to_account: None,
+        });
+    }
+    for older in &mut book.switches {
+        if older.key != journal.key {
+            older.panes.retain(|pane| {
+                !(pane.follows && !pane.rested && enlisted.contains(&pane.worker.as_str()))
+            });
+        }
+    }
+    follow_logins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(journal.key.clone(), logins.to_vec());
+    keep_in(book, journal);
+    if let Err(why) = write_book(&doors.journal_dir(), book) {
+        doors.log(&format!("account-switch: {why}"));
+    }
+    found
+        .now
+        .iter()
+        .map(|row| move_follower(host, doors, book, journal, row, logins, now_ms))
+        .collect()
+}
+
+/// Move ONE pane that follows the default to `journal`'s landing (t-46106),
+/// by the walled pane's road: rested at the fence only while it is between
+/// turns, closed, seated again as the same worker in the same conversation.
+/// A pane that took its next turn before its rest stays owed — the end of
+/// that turn moves it. One that cannot be moved faithfully is let go, said
+/// in the log, and counted left.
+fn move_follower(
+    host: &dyn Host,
+    doors: &dyn SwitchDoors,
+    book: &mut JournalBook,
+    journal: &mut Journal,
+    row: &WalledRow,
+    logins: &[(String, String)],
+    now_ms: i64,
+) -> MovedPane {
+    let by = journal.by.clone();
+    let key = journal.key.clone();
+    let landing = journal.to.clone().unwrap_or_default();
+    let from = row.account.clone().unwrap_or_default();
+    let approval = Approval {
+        by: &by,
+        from: &from,
+        from_login: login_of(logins, &from),
+        landing: &landing,
+        to_login: login_of(logins, &landing),
+    };
+    let session = crate::orchestration::worker_now(&row.worker).and_then(|now| now.session);
+    let dir = doors.journal_dir();
+    let moved = move_pane(
+        host,
+        doors,
+        row,
+        RestCause::Follows,
+        Some(&approval),
+        &key,
+        now_ms,
+        &mut || {
+            // The attempt and the conversation it is rested on are the ones
+            // its receipt is the move of (astra R4) — a worker given another
+            // attempt in the same pane since the switch still follows.
+            if let Some(entry) = journal
+                .panes
+                .iter_mut()
+                .find(|entry| entry.worker == row.worker && entry.follows)
+            {
+                entry.rested = true;
+                entry.dispatch.clone_from(&row.dispatch);
+                if let Some(session) = &session {
+                    entry.session.clone_from(session);
+                }
+            }
+            keep_in(book, journal);
+            write_book(&dir, book)
+        },
+    );
+    doors.log(&format!(
+        "account-switch: follows pane {} worker {} {from}→{landing} {}ms ok={}{}",
+        row.term,
+        row.worker,
+        moved.ms,
+        moved.ok,
+        moved
+            .why
+            .as_deref()
+            .map(|why| format!(" ({why})"))
+            .unwrap_or_default()
+    ));
+    let rested = journal
+        .panes
+        .iter()
+        .any(|entry| entry.worker == row.worker && entry.follows && entry.rested);
+    let at_work_again = moved
+        .why
+        .as_deref()
+        .is_some_and(|why| why.contains(crate::orchestration::NOT_BETWEEN_TURNS));
+    if !moved.ok && !rested && !at_work_again {
+        journal
+            .panes
+            .retain(|entry| entry.worker != row.worker || !entry.follows || entry.rested);
+        journal.left = journal.left.saturating_add(1);
+    }
+    moved
+}
+
+/// The policy as it stands NOW for a pane that follows the default
+/// (t-46106), asked at its last door: the approval stands — the setting
+/// allows its road, its logins are the ones it was given under — the
+/// default is still where the pane is going, the worker still sits in the
+/// term and on the attempt it is moved on, not the person's, still runs as
+/// the account it leaves, the table still sends it, and its pane is between
+/// turns.
+fn still_follows(
+    host: &dyn Host,
+    doors: &dyn SwitchDoors,
+    row: &WalledRow,
+    approval: &Approval<'_>,
+) -> Result<(), String> {
+    let now = doors.situation(doors.now_ms())?;
+    approval.stands(now.mode, &now.logins)?;
+    let landing = approval.landing;
+    if now.active.as_deref() != Some(landing) {
+        return Err(format!(
+            "the default is no longer {landing} — this pane is not moved there"
+        ));
+    }
+    let seat = crate::orchestration::claude_workers_seated()
+        .into_iter()
+        .find(|seat| seat.worker == row.worker)
+        .ok_or("the worker no longer sits in a seat of its own")?;
+    if seat.term != row.term
+        || seat.dispatch.as_deref() != Some(row.dispatch.as_str())
+        || seat.generation != row.generation
+    {
+        return Err(
+            "the worker moved seats, or carries another attempt, since it was read — not moved"
+                .to_string(),
+        );
+    }
+    if seat.taken_over {
+        return Err("the person took the pane over — theirs, not moved".to_string());
+    }
+    if host.pane_account(row.term).as_deref() != Some(approval.from) {
+        return Err(format!(
+            "the pane no longer runs as {} — not moved",
+            approval.from
+        ));
+    }
+    if !matches!(
+        judge_follower(
+            approval.from,
+            row.model.as_deref(),
+            landing,
+            &now.gauges,
+            now.now_ms
+        ),
+        Decision::Switch { .. }
+    ) {
+        return Err(format!(
+            "the table no longer sends this pane to {landing} — not moved"
+        ));
+    }
+    if !rests_for_a_move(host, row.term) {
+        return Err(format!(
+            "worker {} {} — not moved yet",
+            row.worker,
+            crate::orchestration::NOT_BETWEEN_TURNS
+        ));
+    }
+    Ok(())
+}
+
+/// The beat's half of following the default (t-46106): ONE pane a switch
+/// still owes a move to — found at work when its default moved — moved as
+/// soon as the window sees it between turns, before the mail pointer can
+/// start its next turn; then what that leaves owed is settled. A window
+/// whose journal owes nothing does nothing but look; a switch in flight is
+/// left to finish its own (the line is tried, never waited on). A move whose
+/// yes this window never heard — its memory is a newer process's — is let
+/// go. Answers the panes moved.
+pub(crate) fn follow_with(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64) -> usize {
+    let dir = doors.journal_dir();
+    if owed_followers(&dir).is_empty() {
+        return 0;
+    }
+    let _line = match SWITCH_LINE.try_lock() {
+        Ok(held) => held,
+        Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return 0,
+    };
+    let mut book = match open_book(doors) {
+        Ok(book) => book,
+        Err(why) => {
+            doors.log(&format!("account-switch: {why}"));
+            return 0;
+        }
+    };
+    let ready = book.switches.iter().enumerate().find_map(|(at, journal)| {
+        journal.panes.iter().find_map(|pane| {
+            if !pane.follows || pane.rested || pane.to_pane.is_some() {
+                return None;
+            }
+            let now = crate::orchestration::worker_now(&pane.worker)?;
+            let term = now.term.filter(|_| pane.still_in(&now))?;
+            rests_for_a_move(host, term).then(|| (at, pane.clone(), term, now))
+        })
+    });
+    let Some((at, pane, term, now)) = ready else {
+        return 0;
+    };
+    let mut journal = book.switches[at].clone();
+    let approved = follow_logins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&journal.key)
+        .cloned();
+    let Some(logins) = approved else {
+        doors.log(&format!(
+            "account-switch: journal {} lets worker {} go — the yes its move was owed under \
+             is not this window's to read",
+            journal.key, pane.worker
+        ));
+        journal
+            .panes
+            .retain(|entry| entry.worker != pane.worker || !entry.follows || entry.rested);
+        keep_in(&mut book, &journal);
+        if let Err(why) = write_book(&dir, &book) {
+            doors.log(&format!("account-switch: {why}"));
+        }
+        return 0;
+    };
+    let landing = journal.to.clone().unwrap_or_default();
+    let row = WalledRow {
+        worker: pane.worker.clone(),
+        term,
+        account: Some(pane.from_account.clone()),
+        model: pane_tuning(host, term)
+            .and_then(|tuning| tuning.model)
+            .or(now.model),
+        dispatch: now.dispatch.unwrap_or_default(),
+        generation: now.generation,
+        verdict: Decision::Switch {
+            from: pane.from_account,
+            to: landing,
+            reason: SwitchReason::Follows,
+        },
+    };
+    let moved = move_follower(host, doors, &mut book, &mut journal, &row, &logins, now_ms);
+    let active = doors.situation(now_ms).ok().and_then(|now| now.active);
+    let settled = settle(
+        host,
+        doors,
+        &mut book,
+        &mut journal,
+        active.as_deref(),
+        doors.now_ms(),
+    );
+    keep_in(&mut book, &journal);
+    if let Err(why) = write_book(&dir, &book) {
+        doors.log(&format!("account-switch: {why}"));
+    }
+    if let Some(why) = settled.refused {
+        doors.log(&format!(
+            "account-switch: journal {} keeps a receipt owed — {why}",
+            journal.key
+        ));
+    }
+    usize::from(moved.ok)
+}
+
 /// What the rest and the close left, inside the restore line.
 enum Walked {
     /// The old pane's program is gone, and the restore road seated this
@@ -1392,10 +2078,18 @@ enum Walked {
 /// worker again once the old program is gone. A program that outlives the
 /// wait stays held on the row, against every restore, until a look sees it
 /// gone. A pane that fails a check is left exactly as it was.
+///
+/// A pane that follows the default (`cause` [`RestCause::Follows`], t-46106)
+/// walks the same road with its own last door ([`still_follows`]) and its
+/// own fence: the window must see it between turns at the rest, where a
+/// walled pane's must see its wall. It is owed no words in its new pane —
+/// its turn had ended, and its resumed pane is at the same rest.
+#[allow(clippy::too_many_arguments)]
 fn move_pane(
     host: &dyn Host,
     doors: &dyn SwitchDoors,
     row: &WalledRow,
+    cause: RestCause,
     approval: Option<&Approval<'_>>,
     key: &str,
     now_ms: i64,
@@ -1440,9 +2134,13 @@ fn move_pane(
             model: relaunch_model(now.model.as_deref(), &model),
             effort,
             exit: host.exit_witness(term),
+            cause,
         };
         crate::orchestration::switch_move_ready(&rest, now_ms)?;
-        still_moves(host, doors, row, approval)?;
+        match cause {
+            RestCause::Walled => still_moves(host, doors, row, approval)?,
+            RestCause::Follows => still_follows(host, doors, row, approval)?,
+        }
         Ok((leader, rest, pane, approval))
     })();
     let (leader, rest, pane, approval) = match checked {
@@ -1478,7 +2176,11 @@ fn move_pane(
         if let Err(why) = note() {
             doors.log(&format!("account-switch: {why}"));
         }
-        crate::orchestration::switch_rested(&row.worker, switch_nudge(landing), key);
+        let words = match cause {
+            RestCause::Walled => Some(switch_nudge(landing)),
+            RestCause::Follows => None,
+        };
+        crate::orchestration::switch_rested(&row.worker, words, key);
         // The old pane goes only now: the ledger has the worker asleep, so
         // its exit settles nothing — and the new one opens only once the old
         // program is gone, so the conversation never has two writers.
@@ -1533,11 +2235,14 @@ fn move_pane(
 }
 
 /// The person's own pick (t-7538): the default moves — or goes back to the
-/// machine's own login when `to` is `None` — and NO pane is touched, working
-/// or walled, busy or resting: every open pane keeps the login it was
-/// started with. One receipt, in the ledger's voice, `by: person`; a
-/// receipt the ledger refuses stays owed in the journal and the answer
-/// says so (astra R4).
+/// machine's own login when `to` is `None` — and the Claude workers left on
+/// another account follow it (t-46106): between turns now, at work when
+/// their turn ends, the person's own panes never. The pick asks no setting,
+/// and neither do its followers. One receipt for the default, in the
+/// ledger's voice, `by: person`, and one for each moved pane; a receipt the
+/// ledger refuses stays owed in the journal and the answer says so (astra
+/// R4). The machine's own login is no account a pane can be seated as, so
+/// a pick of it moves the default alone.
 pub(crate) fn switch_by_person(
     host: &dyn Host,
     doors: &dyn SwitchDoors,
@@ -1561,7 +2266,7 @@ pub(crate) fn switch_by_person(
     let dir = doors.journal_dir();
     let mut journal = Journal {
         key: format!("person-{now_ms}-{}", to.unwrap_or("system")),
-        by: "person".to_string(),
+        by: PERSON.to_string(),
         reason: "picked".to_string(),
         from,
         to: to.map(str::to_string),
@@ -1572,6 +2277,8 @@ pub(crate) fn switch_by_person(
         generation: None,
         panes: Vec::new(),
         moved: 0,
+        person: 0,
+        left: 0,
         began_ms: now_ms,
     };
     let mut book = open_book(doors)?;
@@ -1586,18 +2293,47 @@ pub(crate) fn switch_by_person(
     }
     doors.selected(to, now_ms);
     journal.landed = true;
+    keep_in(&mut book, &journal);
+    if let Err(why) = write_book(&dir, &book) {
+        doors.log(&format!("account-switch: {why}"));
+    }
     let default_ms = began.elapsed().as_millis();
+    let panes = match to {
+        Some(landing) => {
+            let gauges = doors
+                .situation(doors.now_ms())
+                .map(|now| now.gauges)
+                .unwrap_or_default();
+            follow_the_default(
+                host,
+                doors,
+                &mut book,
+                &mut journal,
+                landing,
+                &gauges,
+                &situation.logins,
+                now_ms,
+            )
+        }
+        None => Vec::new(),
+    };
     let settled = settle(host, doors, &mut book, &mut journal, to, doors.now_ms());
     keep_in(&mut book, &journal);
     let mut receipt_error = settled.refused;
     if let Err(why) = write_book(&dir, &book) {
         receipt_error.get_or_insert(why);
     }
+    let census = SwitchCensus::of(&panes, &journal);
     doors.log(&format!(
-        "account-switch: person picked {}→{} ({}ms) receipts={} owed={}",
+        "account-switch: person picked {}→{} ({}ms) moved={} at_turn_end={} person={} left={} \
+         receipts={} owed={}",
         journal.from.as_deref().unwrap_or("system"),
         to.unwrap_or("system"),
         default_ms,
+        census.moved,
+        census.at_turn_end,
+        census.person,
+        census.left,
         settled.written,
         journal.owes()
     ));
@@ -1607,7 +2343,8 @@ pub(crate) fn switch_by_person(
         to: journal.to.clone(),
         switched_default: true,
         default_ms,
-        panes: Vec::new(),
+        panes,
+        census,
         receipts: settled.written,
         receipt_error,
         total_ms: began.elapsed().as_millis(),

@@ -1209,6 +1209,9 @@ function paintProviderGlyph(provider) {
 
 function paintProviderSegment(provider) {
   paintProviderGlyph(provider);
+  // Claude's figure says whose it is: the default account's short id before
+  // it, whatever the figure says now (t-46106).
+  if (provider.id === "claude" && typeof paintClaudeBarAccount === "function") paintClaudeBarAccount();
   const { usage, fetching } = provider.read();
   const state = usageRosterState(usage, fetching, providerSections(usage));
   const signedOut = state.kind === "sign-in";
@@ -4194,7 +4197,8 @@ function toast(words, kind = "", { action = null, sticky = false, aux = "", tip 
   note.className = "toast";
   if (kind) note.dataset.kind = kind;
   // `tip` is what a shortened sentence leaves out — the full path behind a
-  // checkout's folder name — and the hover says it (t-45801).
+  // checkout's folder name — and the hover says it (t-45801); the switch
+  // receipt's four counts say theirs there too (t-46106).
   if (tip) note.dataset.tip = tip;
   // `aux` is a dim word after the sentence — the sha beside 「새 버전
   // {{version}}」 (t-3237) — inside the words' node, so the button is still
@@ -4212,6 +4216,7 @@ function toast(words, kind = "", { action = null, sticky = false, aux = "", tip 
     button.type = "button";
     button.className = "btn toast-action";
     button.textContent = action.label;
+    if (action.tip) button.dataset.tip = action.tip;
     button.addEventListener("click", () => action.run());
     note.append(text, button);
   } else {

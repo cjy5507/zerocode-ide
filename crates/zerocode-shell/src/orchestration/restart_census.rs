@@ -675,13 +675,18 @@ pub(crate) fn peek_cut(root: &Path, worker: &str) -> Cut {
 /// `words` in place of whatever a goodbye cut of it — the switch is the last
 /// thing that happened to it. Written into this process's book, read off the
 /// disk first like [`peek_cut`], and so read, spent and carried to the next
-/// window by the same rules as a goodbye's own word.
-pub(crate) fn leave_switch_words(root: &Path, worker: &str, words: String) {
+/// window by the same rules as a goodbye's own word. A switch that moved the
+/// worker between turns (t-46106) owes it no words: what it leaves is the
+/// rest the turn had ended at, written back down when the pane is seated
+/// again ([`Cut::rest`]).
+pub(crate) fn leave_switch_words(root: &Path, worker: &str, words: Option<String>) {
+    let ended = words.is_none().then_some(Ended::default());
     let mut book = cut_book().lock().unwrap_or_else(|held| held.into_inner());
     book_for(&mut book, root).insert(
         worker.to_string(),
         Cut {
-            switched: Some(words),
+            switched: words,
+            ended,
             ..Cut::default()
         },
     );
