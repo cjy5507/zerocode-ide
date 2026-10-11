@@ -6035,8 +6035,7 @@ fn an_unaddressable_resume_keeps_its_untyped_result_until_the_store_accepts_it()
         .unwrap();
     let rows = the_rows();
     let body: serde_json::Value = serde_json::from_str(
-        rows
-            .messages
+        rows.messages
             .iter()
             .find(|message| message.kind == MessageKind::Resumed)
             .expect("the reservation preceded the injected refusal")
