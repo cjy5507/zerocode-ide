@@ -629,7 +629,7 @@ fn census(
             } else if account.is_some() && account.as_deref() == active {
                 Stance::Current
             } else if owed.contains(&seat.worker) {
-                if host.between_turns(seat.term) {
+                if rests_for_a_move(host, seat.term) {
                     Stance::Moving
                 } else {
                     Stance::TurnEnd
@@ -1634,6 +1634,17 @@ pub(crate) fn owed_followers(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Whether a switch may move the pane in `term` now (t-46106): the host
+/// sees it between turns, and no words this window typed at it on its own
+/// are still on their way — words the hooks have not heard taken would be
+/// thrown away with the pane, and the turn they start is the one whose end
+/// moves it (ZO's read, m-46917). The one reading for every place a switch
+/// decides "now or at the turn's end": the enlisting, the census, the
+/// beat's search and the last door.
+fn rests_for_a_move(host: &dyn Host, term: u32) -> bool {
+    host.between_turns(term) && !host.typing_in_flight(term)
+}
+
 /// The panes a switch found on accounts other than its landing once its
 /// default landed (t-46106), by what it can do with each.
 #[derive(Default)]
@@ -1702,7 +1713,7 @@ fn followers_of(host: &dyn Host, landing: &str, gauges: &[AccountGauge], now_ms:
             generation: seat.generation,
             verdict,
         };
-        if host.between_turns(seat.term) {
+        if rests_for_a_move(host, seat.term) {
             found.now.push(row);
         } else {
             found.owed.push(row);
@@ -1936,7 +1947,7 @@ fn still_follows(
             "the table no longer sends this pane to {landing} — not moved"
         ));
     }
-    if !host.between_turns(row.term) {
+    if !rests_for_a_move(host, row.term) {
         return Err(format!(
             "worker {} {} — not moved yet",
             row.worker,
@@ -1978,8 +1989,7 @@ pub(crate) fn follow_with(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64)
             }
             let now = crate::orchestration::worker_now(&pane.worker)?;
             let term = now.term.filter(|_| pane.still_in(&now))?;
-            host.between_turns(term)
-                .then(|| (at, pane.clone(), term, now))
+            rests_for_a_move(host, term).then(|| (at, pane.clone(), term, now))
         })
     });
     let Some((at, pane, term, now)) = ready else {

@@ -20105,6 +20105,65 @@ mod tests {
         );
     }
 
+    /// t-46106 (ZO's read, m-46917): the window never calls a pane between
+    /// turns while words it typed there on its own are on their way. It reads
+    /// the typing door's own record — the delivery the pump carries and the
+    /// queue behind it — at the switch's every look and FIRST at the rest's
+    /// fence (outside the hook state's lock, so the two locks never nest), and
+    /// it waits for the output to settle as the pointer does. A switch asks
+    /// both questions through one function.
+    #[test]
+    fn a_pane_with_words_on_their_way_is_never_between_turns_for_a_switch() {
+        let backend = shipped_backend();
+        let typing = block_after(
+            backend,
+            "    fn typing_in_flight(&self, term: TermId) -> bool {",
+        );
+        assert!(
+            typing.contains("state.deliveries().contains_key(&term)")
+                && typing.contains(".prompt_queue()"),
+            "the window no longer reads its typing door for words on their way:\n{typing}"
+        );
+        let between = block_after(
+            backend,
+            "    fn between_turns(&self, term: TermId) -> bool {",
+        );
+        assert!(
+            between.contains("output_settled(&state, term)"),
+            "a pane is called between turns before its output settles:\n{between}"
+        );
+        let fence = block_after(
+            backend,
+            "    fn with_between_turns_observation(&self, term: TermId, commit: &mut dyn FnMut()) {",
+        );
+        let asked = fence
+            .find("self.typing_in_flight(term)")
+            .expect("the fence no longer asks for words on their way");
+        let locked = fence
+            .find("state.pane_states()")
+            .expect("the fence no longer holds the hook state");
+        assert!(
+            asked < locked && fence.contains("output_settled(&state, term)"),
+            "the fence asks for words on their way under the hook state's lock, or \
+             skips the settle:\n{fence}"
+        );
+        let switch = include_str!("../../src/account_switch.rs");
+        let rests = block_after(
+            switch,
+            "fn rests_for_a_move(host: &dyn Host, term: u32) -> bool {",
+        );
+        assert!(
+            rests.contains("host.between_turns(term) && !host.typing_in_flight(term)"),
+            "a switch decides \"now\" without asking for words on their way:\n{rests}"
+        );
+        assert_eq!(
+            switch.matches("host.between_turns(").count(),
+            1,
+            "a switch asks \"between turns\" around the one function that also asks for \
+             words on their way"
+        );
+    }
+
     /// A checkout cut for a worker or an automation says what it was cut from,
     /// the way one the dialog cut already does — a summoned `wt/t-3` said
     /// nothing about whether it left `main` or a feature branch ("어떤 기반의

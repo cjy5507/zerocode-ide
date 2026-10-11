@@ -697,6 +697,21 @@ fn turn_rests_on_an_empty_line(host: &dyn agent_teams::Host, term: TermId) -> bo
     crate::orchestration::turn_rests(host, term) && !crate::human_input::line_of(term).0
 }
 
+/// Whether `term`'s output has stood still for the pointer's own rest settle
+/// ([`crate::orchestration::PROMPT_REST_SETTLE_MS`]) — a composer that just
+/// took typed words redraws, and a turn's last lines are still being drawn
+/// right after its end (t-46106). A pane that never wrote is still; a pane
+/// that is gone is no pane to move.
+fn output_settled(state: &AppState, term: TermId) -> bool {
+    let Some(held) = state.terminals().handle(term) else {
+        return false;
+    };
+    let last = lock_pty(&held).last_output_epoch_ms();
+    last.is_none_or(|at| {
+        now_epoch_ms().saturating_sub(at) >= crate::orchestration::PROMPT_REST_SETTLE_MS
+    })
+}
+
 impl TeamWindow {
     /// Hand `observe` a quiet worker pane's screen, read under the activity
     /// locks that can invalidate it — the fence a handover's stop is judged
@@ -863,19 +878,37 @@ impl agent_teams::Host for TeamWindow {
             .pane_states()
             .get(&term)
             .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done);
-        done && turn_rests_on_an_empty_line(self, term)
+        done && turn_rests_on_an_empty_line(self, term) && output_settled(&state, term)
+    }
+
+    /// The typing door's own record (`type_prompt_at_term`): a delivery the
+    /// pump is carrying for this pane, or one queued behind it. Each map is
+    /// asked under its own lock and let go before the next (t-46106).
+    fn typing_in_flight(&self, term: TermId) -> bool {
+        let state = self.app.state::<AppState>();
+        let delivering = state.deliveries().contains_key(&term);
+        delivering
+            || state
+                .prompt_queue()
+                .get(&term)
+                .is_some_and(|queued| !queued.is_empty())
     }
 
     /// The hook's word held still while it is read and while `commit` runs:
     /// a report that the pane took a prompt or a tool waits on the same lock
-    /// the hook road writes `pane_states` under (t-46106).
+    /// the hook road writes `pane_states` under (t-46106). Words on their way
+    /// are asked first, under the typing door's locks and outside this one,
+    /// so the two never nest.
     fn with_between_turns_observation(&self, term: TermId, commit: &mut dyn FnMut()) {
+        if self.typing_in_flight(term) {
+            return;
+        }
         let state = self.app.state::<AppState>();
         let states = state.pane_states();
         let done = states
             .get(&term)
             .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done);
-        if done && turn_rests_on_an_empty_line(self, term) {
+        if done && turn_rests_on_an_empty_line(self, term) && output_settled(&state, term) {
             commit();
         }
         drop(states);
