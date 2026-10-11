@@ -3184,7 +3184,7 @@ struct HandoverCandidate<'a> {
 
 /// Who a stopped worker's task goes to for the `news` it stopped on, and
 /// whether step ① may commit its tree: a wall's standing order
-/// ([`standing_order`]), or the run's `--on-classifier-decline` with the
+/// (`standing_order`), or the run's `--on-classifier-decline` with the
 /// parts it left out filled from the declined worker's own ([`inherited`]).
 fn effective_handover_order(
     run: &Run,
@@ -15416,8 +15416,8 @@ pub struct WallChipSeat {
 ///
 /// **Nothing here is a new fact.** It is the newest `quota_walled` row of the
 /// worker's open attempt ([`newest_wall`]), the run's standing order
-/// ([`standing_order`]) and the two rules the buttons' roads already keep —
-/// [`resume_plan`] and [`handover_eligible`] — read once, in one place, so the
+/// (`standing_order`) and the two rules the buttons' roads already keep —
+/// [`resume_plan`] and `handover_eligible` — read once, in one place, so the
 /// chip and the road behind its button cannot disagree about whether a press
 /// would be taken. The window reads the same function again when a button is
 /// pressed.
@@ -15545,7 +15545,7 @@ pub fn wall_chip_for(
 
 /// The briefing paragraph's cause for a wall the ledger wrote: the provider,
 /// the percentage and the reset as the `quota_walled` row said them
-/// ([`handover_cause`]), for a handover a person asked for. `None` when the
+/// (`handover_cause`), for a handover a person asked for. `None` when the
 /// row is gone.
 #[must_use]
 pub fn wall_cause(run: &Run, wall: &WallAt) -> Option<HandoverCause> {
