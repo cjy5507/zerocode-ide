@@ -9291,7 +9291,7 @@ const CATALOG = {
     "board.closedFolded": "統合 → {{target}}",
     "board.closedHandedOver": "引き渡し → {{target}}",
     "board.closedOutdated": "古い",
-    "board.noReviewRecord": "終了 — 検証できる資料なし",
+    "board.noReviewRecord": "終了 — 検証資料なし",
     "board.nothingToLand": "完了 — 着地するものなし",
     "board.staleReview": "再検証待ち",
     "board.superseded": "後の試行に移行",

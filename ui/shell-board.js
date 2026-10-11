@@ -1504,6 +1504,7 @@ function deskTaskNextLine() {
   const line = deskElement("p", "board-desk-task-next");
   const copy = deskElement("button", "board-desk-task-next-copy");
   copy.type = "button";
+  copy.dataset.keyboardOwner = "true";
   copy.onclick = async () => {
     const command = line.__command;
     if (!command || !(await clipboardText.write(command))) return;
