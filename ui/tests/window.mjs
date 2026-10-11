@@ -1,5 +1,6 @@
 import { endRun } from "./end-run.mjs";
 import "./scm-notices.mjs";
+import "./mail-waiting.mjs";
 import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 import { createRunner } from "./window-runner.mjs";
 /* The window, driven for real.
