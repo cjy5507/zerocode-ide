@@ -2453,6 +2453,7 @@ mod tests {
                 .collect(),
             incoming,
             capped: false,
+            pages_read: 0,
         }
     }
 
@@ -3087,6 +3088,7 @@ mod tests {
             .into_iter()
             .collect(),
             capped: false,
+            pages_read: 0,
         };
         let retriever = LexicalMemoryRetriever::from_index_markdown(INDEX).with_corpus(scan);
 

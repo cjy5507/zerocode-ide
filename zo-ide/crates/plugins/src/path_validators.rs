@@ -152,11 +152,20 @@ pub(crate) fn run_lifecycle_commands(
             )));
         }
 
-        let mut process = if cfg!(windows) {
+        #[cfg(windows)]
+        let mut process = {
+            use std::os::windows::process::CommandExt as _;
+
+            // Same quoting as the hook runner: cmd keeps the command text as written.
             let mut process = Command::new("cmd");
-            process.arg("/C").arg(command);
             process
-        } else {
+                .raw_arg("/S")
+                .raw_arg("/C")
+                .raw_arg(format!("\"{command}\""));
+            process
+        };
+        #[cfg(not(windows))]
+        let mut process = {
             let mut process = Command::new("sh");
             process.arg(command);
             process

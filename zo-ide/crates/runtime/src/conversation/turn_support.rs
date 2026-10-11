@@ -969,6 +969,7 @@ mod bench_fixture_tests {
 fn the_reminder_bench_fixture_keeps_its_pitfall_out_of_the_recall_section() {
     use crate::memory::LexicalMemoryRetriever;
     use core_types::MemoryRetriever as _;
+    crate::test_diag("body enter");
 
     let vault_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../bench/tasks/17-pipe-exit-code/vault");

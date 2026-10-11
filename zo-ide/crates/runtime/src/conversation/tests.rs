@@ -6457,6 +6457,7 @@ fn todo_lifecycle_hooks_diff_against_the_turn_entry_baseline() {
             Ok(vec![AssistantEvent::MessageStop])
         }
     }
+    crate::test_diag("body enter");
 
     // Pinned (and the crate env lock held) for the whole body: the runtime
     // reads `ZO_TODO_STORE` on every turn, and another test's pin landing
@@ -10802,7 +10803,7 @@ fn anthropic_output_tokens_details_reach_persisted_assistant_session_row() {
     }
 
     let path = temp_session_path("anthropic-output-token-details");
-    let session = Session::new().with_persistence_path(path.clone());
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     let mut runtime = ConversationRuntime::new(
         session,
         AnthropicDetailsApi,
@@ -10858,7 +10859,7 @@ fn non_anthropic_usage_omits_output_tokens_details_from_session_row() {
     }
 
     let path = temp_session_path("non-anthropic-output-token-details");
-    let session = Session::new().with_persistence_path(path.clone());
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     let mut runtime = ConversationRuntime::new(
         session,
         OpenAiCompatApi,
@@ -10898,7 +10899,7 @@ fn persists_conversation_turn_messages_to_jsonl_session() {
     }
 
     let path = temp_session_path("persisted-turn");
-    let session = Session::new().with_persistence_path(path.clone());
+    let session = Session::new().with_persistence_path(path.to_path_buf());
     let mut runtime = ConversationRuntime::new(
         session,
         SimpleApi,
@@ -10949,12 +10950,36 @@ fn forks_runtime_session_without_mutating_original() {
     assert!(runtime.session().fork.is_none());
 }
 
-fn temp_session_path(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("runtime-conversation-{label}-{nanos}.json"))
+/// A file in a folder this test made for itself. The shared temp root can belong
+/// to another user, and the owner-only policy refuses to change a folder that
+/// another user owns, so a session file never goes there directly. The folder is
+/// removed when the value is dropped; a removal Windows refuses is ignored.
+struct TempSession {
+    _folder: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl std::ops::Deref for TempSession {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::path::Path> for TempSession {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+fn temp_session_path(label: &str) -> TempSession {
+    let folder = tempfile::tempdir().expect("temp session folder should be created");
+    let path = folder.path().join(format!("runtime-conversation-{label}.json"));
+    TempSession {
+        _folder: folder,
+        path,
+    }
 }
 
 #[cfg(windows)]
@@ -16491,6 +16516,7 @@ fn the_plan_is_not_re_anchored_while_the_model_can_still_see_it() {
 
 #[test]
 fn todo_progress_reminder_reflects_pending_plan_and_clears_when_done() {
+    crate::test_diag("body enter");
     // The mid-turn re-anchor reminder is built from the persisted plan: present
     // (and prefix-tagged, so it refreshes without accumulating) while work is in
     // progress, and `None` once every item is complete so it is cleared.
@@ -20591,6 +20617,7 @@ fn a_surfaced_decline_ends_when_a_turn_does_not_surface_it_again() {
 /// that got through are the way out the notice names.
 #[test]
 fn words_the_classifier_lets_through_after_a_standing_decline_go_through() {
+    crate::test_diag("body enter");
     let _todo_store = HermeticTodoStore::pin();
     let cwd = temp_workspace("refusal-standing-lets-through");
     fs::create_dir_all(&cwd).expect("cwd");

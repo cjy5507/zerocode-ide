@@ -372,9 +372,23 @@ pub use worker_boot::{
     WorkerPromptTarget, WorkerReadySnapshot, WorkerRegistry, WorkerStatus, WorkerTrustResolution,
 };
 
+/// Writes one diagnostic line straight to stderr, past libtest's output capture, so
+/// the line is on record even when the test is killed while it waits (t-43412).
+#[cfg(test)]
+pub(crate) fn test_diag(event: &str) {
+    use std::io::Write as _;
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let secs = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
+    let thread = std::thread::current();
+    let name = thread.name().unwrap_or("unnamed");
+    let line = format!("zo-diag +{secs:.3}s [{name}] {event}\n");
+    let _ = std::io::stderr().write_all(line.as_bytes());
+}
+
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    test_diag("lock wait");
     let guard = LOCK.get_or_init(|| {
         // Compaction-tier assertions must measure the model's window, not the
         // host's. A zo test run launched from inside a Claude Code session
@@ -388,6 +402,7 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     })
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner);
+    test_diag("lock held");
     // The ZeroCode window exports the second-brain vault into every pane it
     // opens, so a test run from inside one would index the developer's REAL
     // vault: recall fixtures would see hits nobody put in them, and a

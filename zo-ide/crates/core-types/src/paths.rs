@@ -29,12 +29,15 @@ mod windows_owner_only {
     use windows_permissions::constants::{
         AccessRights, AceType, SeObjectType, SecurityInformation,
     };
-    use windows_permissions::{LocalBox, SecurityDescriptor};
+    use windows_permissions::{LocalBox, Sid, SecurityDescriptor};
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        READ_CONTROL, WRITE_DAC,
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES,
+        FILE_WRITE_DATA, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     };
+
+    use super::{classify_owner, private_open_intent, restrictable_directory, OwnerClass};
 
     const PRIVATE_DACL_PREFIX: &str = "D:P";
 
@@ -100,10 +103,27 @@ mod windows_owner_only {
     }
 
     fn entry_open_options(write: bool) -> OpenOptions {
-        let mut options = OpenOptions::new();
         let data_access = if write { GENERIC_WRITE } else { GENERIC_READ };
+        entry_options_with(data_access, write)
+    }
+
+    /// The options of an append. An explicit access mask replaces the append
+    /// rights that `OpenOptions::append` would give, so the mask is the append-only
+    /// part of a write: `FILE_GENERIC_WRITE` without `FILE_WRITE_DATA`, as std and
+    /// cap-primitives use. Each write then goes to the end of the file.
+    fn append_open_options() -> OpenOptions {
+        entry_options_with(FILE_GENERIC_WRITE & !FILE_WRITE_DATA, true)
+    }
+
+    fn entry_options_with(data_access: u32, write: bool) -> OpenOptions {
+        let mut options = OpenOptions::new();
+        // A handle that may restrict an entry also asks for WRITE_OWNER, which
+        // moves an entry created under the token's default owner to the user.
+        let owner_access = if write { WRITE_OWNER } else { 0 };
         options
-            .access_mode(data_access | READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES)
+            .access_mode(
+                data_access | READ_CONTROL | WRITE_DAC | owner_access | FILE_READ_ATTRIBUTES,
+            )
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
             .follow(FollowSymlinks::No)
             .maybe_dir(true);
@@ -126,28 +146,42 @@ mod windows_owner_only {
         use cap_fs_ext::DirExt as _;
 
         let (root, names) = root_and_names(path)?;
-        if names.is_empty() {
+        let Some((leaf, parents)) = names.split_last() else {
             return Err(invalid_path("refusing to modify a Windows volume root"));
-        }
+        };
         let mut dir = Dir::open_ambient_dir(root, ambient_authority())?;
-        for name in names {
-            dir = match dir.open_dir_nofollow(&name) {
+        for name in parents {
+            dir = match dir.open_dir_nofollow(name) {
                 Ok(child) => child,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    match dir.create_dir(&name) {
+                    match dir.create_dir(name) {
                         Ok(()) => {}
                         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                         Err(error) => return Err(error),
                     }
                     // A concurrent junction plant loses this no-follow open;
                     // the walk never continues through the attacker's target.
-                    dir.open_dir_nofollow(&name)?
+                    dir.open_dir_nofollow(name)?
                 }
                 Err(error) => return Err(error),
             };
         }
-        // Apply and verify the protected DACL through the retained leaf handle.
-        let mut handle = dir.try_clone()?.into_std_file();
+        match dir.create_dir(leaf) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        // The leaf is reopened with the rights the policy needs: a read-only
+        // handle cannot take a DACL. The open does not follow a reparse point,
+        // so a junction planted at the leaf shows up in the metadata and is refused.
+        let opened = dir.open_with(leaf, &entry_open_options(true))?;
+        let metadata = opened.metadata()?;
+        if !restrictable_directory(metadata.is_dir(), metadata.is_symlink()) {
+            return Err(invalid_path(
+                "secure Windows directory leaf is a symlink, junction, or non-directory",
+            ));
+        }
+        let mut handle = opened.into_std();
         restrict_handle(&mut handle)
     }
 
@@ -157,7 +191,9 @@ mod windows_owner_only {
     }
 
     pub(super) fn restrict_handle<H: AsRawHandle>(handle: &mut H) -> io::Result<()> {
-        if !is_handle_current_user_owned(handle)? {
+        let current = windows_permissions::utilities::current_process_sid()?;
+        let owner = owner_class(handle, &current)?;
+        if owner == OwnerClass::Other {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "refusing to change the DACL of a Windows entry owned by another SID",
@@ -167,11 +203,27 @@ mod windows_owner_only {
         let dacl = descriptor
             .dacl()
             .ok_or_else(|| invalid_path("owner-only Windows descriptor has no DACL"))?;
+        // An entry the token's default owner created moves to the token user in
+        // the same call that applies the DACL. The owner check below accepts
+        // only the token user, so the entry is left owned the way it is checked.
+        let (security_info, new_owner) = if owner == OwnerClass::TokenDefault {
+            (
+                SecurityInformation::Owner
+                    | SecurityInformation::Dacl
+                    | SecurityInformation::ProtectedDacl,
+                Some(current.as_ref()),
+            )
+        } else {
+            (
+                SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+                None,
+            )
+        };
         windows_permissions::wrappers::SetSecurityInfo(
             handle,
             SeObjectType::SE_FILE_OBJECT,
-            SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-            None,
+            security_info,
+            new_owner,
             None,
             Some(dacl),
             None,
@@ -222,12 +274,83 @@ mod windows_owner_only {
 
     pub(super) fn is_handle_current_user_owned<H: AsRawHandle>(handle: &H) -> io::Result<bool> {
         let current = windows_permissions::utilities::current_process_sid()?;
+        Ok(owner_class(handle, &current)? != OwnerClass::Other)
+    }
+
+    /// Classify a retained handle's owner as the policy sees it. An entry with
+    /// no owner SID is refused like one owned by another principal. The token's
+    /// default owner is read only for an entry the token user does not own.
+    fn owner_class<H: AsRawHandle>(handle: &H, current: &Sid) -> io::Result<OwnerClass> {
         let descriptor = windows_permissions::wrappers::GetSecurityInfo(
             handle,
             SeObjectType::SE_FILE_OBJECT,
             SecurityInformation::Owner,
         )?;
-        Ok(descriptor.owner() == Some(current.as_ref()))
+        let Some(owner) = descriptor.owner() else {
+            return Ok(OwnerClass::Other);
+        };
+        let owner = owner.to_string();
+        let current = current.to_string();
+        if owner == current {
+            return Ok(OwnerClass::CurrentUser);
+        }
+        let default_owner = token_default_owner()?;
+        Ok(classify_owner(owner.as_str(), current.as_str(), default_owner))
+    }
+
+    /// The token's default owner as SID text: the owner Windows gives every entry
+    /// this process creates without an explicit descriptor. The entry itself is
+    /// not reachable without `unsafe`, so the owner is read from a probe entry.
+    /// Only a successful read is kept, for the rest of the process.
+    pub(super) fn token_default_owner() -> io::Result<&'static str> {
+        static DEFAULT_OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        if let Some(owner) = DEFAULT_OWNER.get() {
+            return Ok(owner.as_str());
+        }
+        let owner = probe_default_owner()?;
+        Ok(DEFAULT_OWNER.get_or_init(|| owner).as_str())
+    }
+
+    /// Create one entry under a fresh name and read the owner it was given. The
+    /// probe is created only by this process. `create_new` refuses a name in
+    /// use, and `FILE_FLAG_DELETE_ON_CLOSE` removes the entry when the handle
+    /// closes, even if the process dies before the probe is dropped.
+    fn probe_default_owner() -> io::Result<String> {
+        use rand::Rng as _;
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        const PROBE_ATTEMPTS: usize = 8;
+        for _ in 0..PROBE_ATTEMPTS {
+            let name = format!(
+                "zo-owner-probe-{}-{:032x}.tmp",
+                std::process::id(),
+                rand::rng().random::<u128>()
+            );
+            let probe = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .access_mode(DELETE | READ_CONTROL)
+                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+                .open(std::env::temp_dir().join(name))
+            {
+                Ok(probe) => probe,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            };
+            let descriptor = windows_permissions::wrappers::GetSecurityInfo(
+                &probe,
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Owner,
+            )?;
+            return descriptor
+                .owner()
+                .map(ToString::to_string)
+                .ok_or_else(|| io::Error::other("the probe entry has no owner"));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no unused name for the owner probe",
+        ))
     }
 
     pub(super) fn restrict_path(path: &Path) -> io::Result<()> {
@@ -254,11 +377,17 @@ mod windows_owner_only {
         truncate: bool,
     ) -> io::Result<File> {
         let (parent, leaf) = open_parent_no_follow(path)?;
-        let mut options = entry_open_options(true);
+        let intent = private_open_intent(append, truncate);
+        let mut options = if intent.data_write {
+            entry_open_options(true)
+        } else {
+            append_open_options()
+        };
         options
-            .create(true)
-            .append(append)
-            .truncate(truncate && !append);
+            .write(intent.write)
+            .create(intent.create)
+            .append(intent.append)
+            .truncate(intent.truncate);
         let mut file = parent.open_with(leaf, &options)?;
         let metadata = file.metadata()?;
         if !metadata.is_file() || metadata.is_symlink() || metadata.nlink() != 1 {
@@ -272,7 +401,11 @@ mod windows_owner_only {
 
     pub(super) fn open_existing_private_file(path: &Path, append: bool) -> io::Result<File> {
         let (parent, leaf) = open_parent_no_follow(path)?;
-        let mut options = entry_open_options(append);
+        let mut options = if append {
+            append_open_options()
+        } else {
+            entry_open_options(false)
+        };
         options.read(!append).append(append);
         let file = parent.open_with(leaf, &options)?;
         let metadata = file.metadata()?;
@@ -323,6 +456,77 @@ mod windows_owner_only {
                 && held_metadata.ino() == named_metadata.ino(),
         )
     }
+}
+
+/// Who owns an entry, as the owner-only policy sees it. Windows gives a new
+/// entry the owner of the token that created it: the token's user for an
+/// ordinary token, but the Administrators group for an elevated one.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerClass {
+    /// The token's user SID (`TokenUser`).
+    CurrentUser,
+    /// The token's default owner (`TokenOwner`), which the token stamps on
+    /// every entry it creates.
+    TokenDefault,
+    /// Any other principal. Its entries are refused, never restricted.
+    Other,
+}
+
+/// Classify an entry's owner against the current token's user and default
+/// owner. The comparison does not touch Windows, so the policy's decision can
+/// be tested on every platform.
+#[cfg(any(windows, test))]
+fn classify_owner<T: PartialEq + ?Sized>(
+    owner: &T,
+    current_user: &T,
+    token_default_owner: &T,
+) -> OwnerClass {
+    if owner == current_user {
+        OwnerClass::CurrentUser
+    } else if owner == token_default_owner {
+        OwnerClass::TokenDefault
+    } else {
+        OwnerClass::Other
+    }
+}
+
+/// What a private-file open asks the OS for, decided without touching Windows
+/// so the rule can be tested everywhere. A create or a truncate needs write
+/// intent: cap-primitives refuses one without it (`ERROR_INVALID_PARAMETER`).
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // each bool is one independent flag of the open, not a state machine
+struct PrivateOpenIntent {
+    write: bool,
+    /// Whether the open takes the rights to overwrite data. An append takes only
+    /// the append rights: with overwrite rights the position starts at 0 and the
+    /// write replaces the file's first bytes instead of extending the file.
+    data_write: bool,
+    append: bool,
+    create: bool,
+    truncate: bool,
+}
+
+/// The open `open_private_file` makes: it always creates, truncates only when
+/// it is not appending, and it writes.
+#[cfg(any(windows, test))]
+fn private_open_intent(append: bool, truncate: bool) -> PrivateOpenIntent {
+    PrivateOpenIntent {
+        write: true,
+        data_write: !append,
+        append,
+        create: true,
+        truncate: truncate && !append,
+    }
+}
+
+/// Whether an opened directory may take the owner-only policy. A symlink or a
+/// junction is refused even though its handle opens, because the policy would
+/// then restrict the link itself. Platform-free so the rule is tested everywhere.
+#[cfg(any(windows, test))]
+fn restrictable_directory(is_dir: bool, is_link: bool) -> bool {
+    is_dir && !is_link
 }
 
 /// Environment variable naming the highest-priority zo home.
@@ -612,8 +816,10 @@ pub fn windows_handle_is_owner_only<H: std::os::windows::io::AsRawHandle>(
 }
 
 /// Verify that an already retained Windows file or directory handle is owned
-/// by the current process SID. This is separate from DACL privacy so callers
-/// can classify an owner-owned but overly broad entry before tightening it.
+/// by the current token's user or by its default owner (the Administrators
+/// group for an elevated token), the two owners the policy can restrict. Any
+/// other owner is refused. This is separate from DACL privacy so callers can
+/// classify an owner-owned but overly broad entry before tightening it.
 #[cfg(windows)]
 pub fn windows_handle_is_current_user_owned<H: std::os::windows::io::AsRawHandle>(
     handle: &H,
@@ -923,6 +1129,109 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn restrictable_directories_are_plain_directories_only() {
+        assert!(restrictable_directory(true, false));
+        assert!(!restrictable_directory(true, true), "a junction must be refused");
+        assert!(!restrictable_directory(false, false), "a file is not a directory");
+    }
+
+    #[test]
+    fn an_append_open_does_not_take_overwrite_rights() {
+        assert!(
+            !private_open_intent(true, false).data_write,
+            "an append with overwrite rights writes from offset 0"
+        );
+        assert!(private_open_intent(false, true).data_write);
+    }
+
+    /// Windows only. Two appends to one private file keep both rows in order. The
+    /// flag in the message says whether the probed default owner is the token user.
+    #[cfg(windows)]
+    #[test]
+    fn two_private_appends_keep_both_rows_in_order() {
+        use rand::Rng as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "zo-append-rows-{}-{:032x}",
+            std::process::id(),
+            rand::rng().random::<u128>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("rows.jsonl");
+        append_private_file(&path, b"first\n").unwrap();
+        append_private_file(&path, b"second\n").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let token_user = windows_permissions::utilities::current_process_sid()
+            .unwrap()
+            .to_string();
+        let default_is_user = windows_owner_only::token_default_owner().unwrap() == token_user;
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(text, "first\nsecond\n", "default_owner_is_user={default_is_user}");
+    }
+
+    #[test]
+    fn private_creating_opens_ask_for_write_intent() {
+        for (append, truncate) in [(false, true), (false, false), (true, true), (true, false)] {
+            let intent = private_open_intent(append, truncate);
+            assert_eq!(intent.append, append, "{intent:?}");
+            assert!(intent.create, "{intent:?}");
+            assert!(
+                intent.write,
+                "a create without write intent is refused on Windows: {intent:?}"
+            );
+        }
+        assert!(!private_open_intent(true, true).truncate, "an append never truncates");
+    }
+
+    #[test]
+    fn owner_classes_accept_the_token_user_and_the_token_default_owner_only() {
+        // An ordinary token's default owner is its own user.
+        assert_eq!(classify_owner(&"user", &"user", &"user"), OwnerClass::CurrentUser);
+        // An elevated token stamps Administrators, its default owner, on the
+        // entries it creates, while its user stays the account. Those are ours.
+        assert_eq!(
+            classify_owner(&"administrators", &"user", &"administrators"),
+            OwnerClass::TokenDefault
+        );
+        // Any other principal's entry is refused.
+        assert_eq!(
+            classify_owner(&"other", &"user", &"administrators"),
+            OwnerClass::Other
+        );
+        // An ordinary token meeting an Administrators-owned entry has no
+        // default-owner match, so that entry is refused too.
+        assert_eq!(
+            classify_owner(&"administrators", &"user", &"user"),
+            OwnerClass::Other
+        );
+    }
+
+    /// Windows only. An entry this process creates is restricted to the token
+    /// user, whichever owner Windows gave it. The flag in the message says whether
+    /// the probed default owner is the token user, so a failure shows which case ran.
+    #[cfg(windows)]
+    #[test]
+    fn a_restricted_entry_ends_owned_by_the_token_user() {
+        use rand::Rng as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "zo-owner-normalize-{}-{:032x}",
+            std::process::id(),
+            rand::rng().random::<u128>()
+        ));
+        let entry = root.join("entry");
+        std::fs::create_dir_all(&entry).unwrap();
+        restrict_permissions_owner_only(&entry).unwrap();
+        let token_user = windows_permissions::utilities::current_process_sid()
+            .unwrap()
+            .to_string();
+        let default_is_user = windows_owner_only::token_default_owner().unwrap() == token_user;
+        let owner_only = permissions_are_owner_only(&entry).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(owner_only, "default_owner_is_user={default_is_user}");
+    }
 
     #[test]
     fn normalize_collapses_dot_and_parent_components() {
