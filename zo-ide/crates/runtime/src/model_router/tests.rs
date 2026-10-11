@@ -4558,6 +4558,21 @@ fn a_newly_discovered_flagship_takes_the_top_band_and_the_old_top_falls_to_secon
     assert_eq!(band_of(&before, "gpt-5.6-sol"), ModelBand::Top);
     assert_eq!(rungs_of(&before, "gpt-5.6-sol"), vec![ImplRung::Hard]);
     assert_eq!(rungs_of(&before, "gpt-5.6-terra"), vec![ImplRung::Easy, ImplRung::Medium]);
+    // The top holds the hard rung, but a catalog-reserved orchestrator never
+    // implements inside zo — the spawn's own gate would decline it — so zo's
+    // large work stays on the lone implementer.
+    let large = RouteRequest::for_target(
+        RoutingTarget::WorkflowPhase { phase_id: "implement".to_string(), subagent: None },
+        RouteRole::Coding,
+        "gpt-5.6-terra",
+    )
+    .with_context(RoutePolicyContext {
+        complexity: RouteTaskComplexity::Large,
+        policy: SmartPolicy::Architect,
+        ..neutral_route_context(false)
+    });
+    assert!(is_reserved_orchestrator_model("gpt-5.6-sol"));
+    assert_eq!(route_model(&large, &before).resolved_model, "gpt-5.6-terra");
 
     let astra = ModelDescriptor::new("gpt-6-astra", "openai", "astra")
         .source(ModelSource::EnabledBuiltinProvider)

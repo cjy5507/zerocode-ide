@@ -1221,9 +1221,11 @@ fn automatic_implementation_candidate_allowed(model: &ModelDescriptor, request: 
     let reserved = match request.context.policy {
         // The top band is kept for planning and verifying, unless the
         // classifier gave it the hard rung of a provider with one
-        // implementer (t-45961).
+        // implementer (t-45961) — and a catalog-reserved orchestrator stays
+        // kept even then, as the spawn's own gate keeps it.
         SmartPolicy::Architect => {
-            model.band() == ModelBand::Superseded || (model.band() == ModelBand::Top && model.rungs().is_empty())
+            model.band() == ModelBand::Superseded
+                || (model.band() == ModelBand::Top && !top_takes_its_rung(model))
         }
         SmartPolicy::Classic => is_reserved_orchestrator_model(model.id()),
     };
@@ -1243,6 +1245,16 @@ pub(super) fn automatic_choice_allowed(model: &ModelDescriptor) -> bool {
     model.band() != ModelBand::Superseded
 }
 
+/// Whether a top-band model implements on the rung the classifier gave it —
+/// the hard rung of a provider with one implementer below its top (t-45961).
+/// Never a catalog-reserved orchestrator: the spawn's own gate
+/// (`implementation_model_refusal`) declines one for implementation, so the
+/// router does not offer it there either, and the lone implementer keeps the
+/// hard work inside zo.
+fn top_takes_its_rung(model: &ModelDescriptor) -> bool {
+    !model.rungs().is_empty() && !is_reserved_orchestrator_model(model.id())
+}
+
 fn route_candidate_allowed(model: &ModelDescriptor, request: &RouteRequest) -> bool {
     if !automatic_choice_allowed(model) {
         return false;
@@ -1258,7 +1270,7 @@ fn route_candidate_allowed(model: &ModelDescriptor, request: &RouteRequest) -> b
         // implementer below its top, t-45961).
         SmartPolicy::Architect => {
             model.band() != ModelBand::Top
-                || !model.rungs().is_empty()
+                || top_takes_its_rung(model)
                 || implementation_escalation_allowed(
                     escalate_complexity(request.context.complexity, request.context.prior_failures),
                     request.context.prior_failures,

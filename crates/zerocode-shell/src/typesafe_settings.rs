@@ -787,6 +787,14 @@ mod tests {
         for (row, painted) in JEV_USES.iter().zip(&held.switches) {
             assert_eq!(painted.mode, row.recommended.key(), "{}", row.id);
             assert!(!painted.written, "{} kept its own word", row.id);
+            // The wall the feature's paragraph names comes from the table,
+            // never from its words (t-45961).
+            assert_eq!(
+                painted.wall_ms,
+                zerocode_core::jev::worded_wall_ms(row),
+                "{}",
+                row.id
+            );
         }
 
         set_enabled(&path, false).expect("off");
