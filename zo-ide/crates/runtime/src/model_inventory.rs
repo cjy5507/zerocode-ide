@@ -263,7 +263,7 @@ fn is_small_model_under(id: &str, priors: &api::RouterPriors) -> bool {
     // 서빙 티어 브래킷(`[fast]`)은 사이즈 신호가 아니다 — class_for_model과
     // 같은 이유로 벗기고 판정한다.
     let id = strip_service_tier_suffix(id);
-    has_any_token(id, &priors.small_tokens)
+    has_any_word_start(id, &priors.small_tokens)
         || largest_parameter_billion(id)
             .is_some_and(|size| size < priors.small_parameter_billion_below)
 }
@@ -272,6 +272,17 @@ fn is_small_model_under(id: &str, priors: &api::RouterPriors) -> bool {
 /// ([`api::router_priors`]); membership is a substring test on the bare id.
 fn has_any_token(id: &str, tokens: &[String]) -> bool {
     tokens.iter().any(|token| id.contains(token.as_str()))
+}
+
+/// [`has_any_token`] where the word must begin one of the id's words (the
+/// runs between `-`, `.`, `_`, `/`, `:`): a size word is a word of its own
+/// (`flash`, `mini`, `haiku`) or the head of one (`flash-lite`, `mini8`),
+/// never the tail of another — `gemini` is no `mini` (t-45961: every Gemini
+/// id, pro included, read as a small model through that tail, and only the
+/// flagship-name term the classifier no longer has hid it).
+fn has_any_word_start(id: &str, tokens: &[String]) -> bool {
+    id.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| tokens.iter().any(|token| !token.is_empty() && word.starts_with(token.as_str())))
 }
 
 /// `gpt-5.6-terra[fast]` → `gpt-5.6-terra`: 브래킷 서빙 티어 접미사를 벗긴
@@ -675,7 +686,8 @@ pub fn release_rank_for_model(id: &str) -> u32 {
         let run = &id[start..index];
         if let Some(major) = version_component_value(run, bytes.get(index).copied()) {
             let minor = minor_after_major(bytes, index).unwrap_or(0);
-            return major * 10 + minor.min(9);
+            let per_major = crate::model_router::RELEASE_RANKS_PER_MAJOR;
+            return major * per_major + minor.min(per_major - 1);
         }
     }
     0
@@ -896,6 +908,19 @@ mod capability_table_tests {
         // It is NOT promoted to Strong/Deep — haiku is fast/small, not a flagship.
         assert!(!tiers_for_model(id).contains(&ModelTier::Strong));
         assert!(!tiers_for_model(id).contains(&ModelTier::Deep));
+    }
+
+    /// t-45961: a size word counts at a word's start, never as another
+    /// word's tail — `gemini` is no `mini`, so a Gemini pro model is not a
+    /// small one, while its flash and lite siblings and every `-mini` stay
+    /// small.
+    #[test]
+    fn a_size_word_counts_only_at_a_words_start() {
+        assert!(!is_small_model("gemini-3.1-pro-preview"), "gemini is no mini");
+        assert!(tiers_for_model("gemini-3.1-pro-preview").contains(&ModelTier::Deep));
+        for small in ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gpt-5.4-mini", "gpt-4o-mini", "claude-haiku-4-5"] {
+            assert!(is_small_model(small), "{small}");
+        }
     }
 
     #[test]
@@ -1224,16 +1249,14 @@ mod golden_parity_tests {
             // 인벤토리에 들어옴)의 분류는 strip_service_tier_suffix 정규화가
             // bare 기준으로 처리한다 — 카탈로그 행은 없다.
             Expected { id: "gpt-5.3-codex-spark", family: "gpt", class: "fast", rank: 53, ceiling: EffortCeiling::Xhigh, tiers: &[Fast, Balanced] }, // no declared class (unchanged)
-            // Pre-existing quirk (unrelated to Phase 1, left as-is — out of
-            // this phase's scope): "gemini" itself contains the substring
-            // "mini", which both `is_small_model` and `class_for_model` treat
-            // as the small/fast-model token. So every Gemini id — pro
-            // variants included — is classified small: class "fast",
-            // tiers [Fast,Balanced], never reaching the `is_deep_flagship`
-            // "pro" check at all.
-            Expected { id: "gemini-3.1-pro-preview", family: "gemini", class: "fast", rank: 31, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },
-            Expected { id: "gemini-3.1-pro-preview-customtools", family: "gemini", class: "fast", rank: 31, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },
-            Expected { id: "gemini-3-pro-preview", family: "gemini", class: "fast", rank: 30, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },
+            // "gemini" contains the substring "mini". The size words count
+            // only at a word's start now (t-45961), so a pro id reaches the
+            // `is_deep_flagship` "pro" prior; the marketing label
+            // (`class_for_model`, read only by selectors) still reads the
+            // substring and says "fast".
+            Expected { id: "gemini-3.1-pro-preview", family: "gemini", class: "fast", rank: 31, ceiling: EffortCeiling::High, tiers: &[Deep, Strong] },
+            Expected { id: "gemini-3.1-pro-preview-customtools", family: "gemini", class: "fast", rank: 31, ceiling: EffortCeiling::High, tiers: &[Deep, Strong] },
+            Expected { id: "gemini-3-pro-preview", family: "gemini", class: "fast", rank: 30, ceiling: EffortCeiling::High, tiers: &[Deep, Strong] },
             Expected { id: "gemini-3.5-flash", family: "gemini", class: "fast", rank: 35, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },
             Expected { id: "gemini-3.6-flash", family: "gemini", class: "fast", rank: 36, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },
             Expected { id: "gemini-3-flash", family: "gemini", class: "fast", rank: 30, ceiling: EffortCeiling::High, tiers: &[Fast, Balanced] },

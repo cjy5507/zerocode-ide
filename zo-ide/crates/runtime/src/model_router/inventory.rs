@@ -33,6 +33,11 @@ pub struct ModelDescriptor {
 
 pub type UsableModel = ModelDescriptor;
 
+/// Release ranks per major version: a descriptor's release rank is the
+/// major version times this, plus the minor (`model_inventory::
+/// release_rank_for_model`) — so a generation is the rank divided by it.
+pub const RELEASE_RANKS_PER_MAJOR: u32 = 10;
+
 /// Millionths of a US dollar in one dollar: the unit a [`ListPrice`] is
 /// written in.
 pub const MICRO_USD_PER_USD: u64 = 1_000_000;

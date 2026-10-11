@@ -19,7 +19,7 @@
 
 use std::collections::BTreeSet;
 
-use super::inventory::ModelDescriptor;
+use super::inventory::{ModelDescriptor, RELEASE_RANKS_PER_MAJOR};
 use super::policy::{ModelCapability, ModelStatus, ModelTier};
 use super::tier_judgment::{judged_order, TierJudgment, TierSource};
 
@@ -297,11 +297,13 @@ pub(super) fn classify_model_tiers_with(
 /// Rungs for one provider's ladder (`ordered` most capable first, `bands`
 /// aligned): hard is the second band; medium is the best current model of
 /// the rest band, easy the least capable current implementer. A model is
-/// current unless an implementer of its class or a stronger one is a newer
-/// release — so an older line (`haiku-4-5` beside `sonnet-5`) serves no rung,
-/// while a newer release of a weaker class never pushes a stronger class off
-/// the ladder. A rung with no distinct model falls onto the rung above it, so
-/// a provider with one implementer serves every rung with it.
+/// current unless an implementer of its own class is a newer release, or one
+/// of a stronger class is a newer generation (major version) — so an older
+/// line (`haiku-4-5` beside `sonnet-5`, `flash-lite` 3.1 beside `flash` 3.8)
+/// serves no rung, a point release of a stronger line (6.1 beside 6) ages
+/// nobody, and a newer release of a weaker class never pushes a stronger
+/// class off the ladder. A rung with no distinct model falls onto the rung
+/// above it, so a provider with one implementer serves every rung with it.
 fn implementation_rungs(ordered: &[&ModelDescriptor], bands: &[ModelBand]) -> Vec<BTreeSet<ImplRung>> {
     let implementers: Vec<usize> = ordered
         .iter()
@@ -313,11 +315,13 @@ fn implementation_rungs(ordered: &[&ModelDescriptor], bands: &[ModelBand]) -> Ve
     let Some(&hard) = implementers.first() else {
         return rungs;
     };
+    let generation = |model: &ModelDescriptor| model.release_rank_value() / RELEASE_RANKS_PER_MAJOR;
     let current = |index: &&usize| {
         let model = ordered[**index];
-        !implementers.iter().any(|&other| {
-            class_rank(ordered[other]) >= class_rank(model)
-                && ordered[other].release_rank_value() > model.release_rank_value()
+        !implementers.iter().map(|&other| ordered[other]).any(|other| {
+            let (theirs, mine) = (class_rank(other), class_rank(model));
+            (theirs == mine && other.release_rank_value() > model.release_rank_value())
+                || (theirs > mine && generation(other) > generation(model))
         })
     };
     let medium = implementers

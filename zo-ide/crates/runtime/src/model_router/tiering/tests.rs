@@ -70,6 +70,20 @@ fn the_rungs_follow_the_fact_order_not_the_newest_release() {
     assert_eq!(rungs(&tiers, "d"), vec![ImplRung::Easy], "{tiers:?}");
 }
 
+/// A point release of a stronger line ages nobody — a fast model of the
+/// same generation keeps its rungs beside a frontier `.1` — while a newer
+/// generation of a stronger class does (t-45961: `gpt-6-luna` lost its
+/// rungs to `gpt-6.1-sol` on this machine's lineup).
+#[test]
+fn a_point_release_ages_nobody_and_a_new_generation_does() {
+    let models = [row("a", "p", FRONTIER, 60), row("b", "p", FRONTIER, 61), row("c", "p", FAST, 60)];
+    let tiers = classify_model_tiers(&models);
+    assert_eq!(rungs(&tiers, "c"), vec![ImplRung::Easy, ImplRung::Medium], "{tiers:?}");
+    let older = [row("a", "p", FRONTIER, 60), row("b", "p", FRONTIER, 61), row("c", "p", FAST, 50)];
+    let tiers = classify_model_tiers(&older);
+    assert!(rungs(&tiers, "c").is_empty(), "a past generation serves no rung: {tiers:?}");
+}
+
 /// The one rule that stands when no judgment does: declared class, then the
 /// list price, then the context window, then the release order, then the
 /// effort ceiling. Each provider below is a pair that differs in one fact
