@@ -195,6 +195,10 @@ fn the_flag_is_spelled_once_and_only_the_door_reaches_for_it() {
 /// 116 곳을 한 문으로 모으는 일이 **동작을 바꾸지 않는다**는 것이 이 과업의
 /// 값이다. 문이 플래그 말고 아무것도 건드리지 않으면, 자식의 인자도 환경도
 /// cwd 도 stdio 도 부르는 쪽이 쓴 그대로다.
+///
+/// 세 번째 문 `quiet_command_on_path` 는 하나만 더 한다: 받은 `PATH` 를 자식의
+/// 환경에 그대로 세운다(`.env("PATH"` 한 번). 이름을 그 `PATH` 위에서 푸는
+/// 것은 `execvp` 가 했을 걸음이라 자식이 보는 것은 같고, fork 만 없다(t-47141).
 #[test]
 fn the_door_only_adds_a_flag() {
     let door = code_only(
@@ -202,6 +206,9 @@ fn the_door_only_adds_a_flag() {
             .expect("the door"),
     );
     let (shipped, _) = door.split_once("#[cfg(test)]").unwrap_or((&door, ""));
+    let (flag_doors, path_door) = shipped
+        .split_once("fn quiet_command_on_path(")
+        .expect("the PATH door follows the two flag doors");
     for forbidden in [
         ".arg(",
         ".args(",
@@ -215,9 +222,15 @@ fn the_door_only_adds_a_flag() {
         ".stderr(",
     ] {
         assert!(
-            !shipped.contains(forbidden),
+            !flag_doors.contains(forbidden),
             "the door touched `{forbidden}`: it may add a flag and nothing else, \
 or every call site quietly changed what it runs"
+        );
+        let allowed = forbidden == ".env(";
+        assert_eq!(
+            path_door.matches(forbidden).count(),
+            usize::from(allowed),
+            "the PATH door may set `PATH` once and touch nothing else, but it reached for `{forbidden}`"
         );
     }
 }

@@ -960,15 +960,12 @@ pub(super) fn spawn_open_in_application(
         .find(|application| application.id == application_id)
         .ok_or_else(|| "Open in 앱을 찾을 수 없습니다".to_string())?;
     let launch = open_in_application_launch(application, target)?;
-    let mut opener = crate::proc::quiet_command(&launch.program);
+    let mut opener = crate::proc::quiet_command_on_path(&launch.program, shell_path::hydrated());
     opener
         .args(&launch.arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(path) = shell_path::hydrated() {
-        opener.env("PATH", path);
-    }
     if zerocode_core::reap::spawn_forgotten(opener).is_ok() {
         return Ok(());
     }

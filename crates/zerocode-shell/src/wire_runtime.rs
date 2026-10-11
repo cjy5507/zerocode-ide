@@ -2408,16 +2408,14 @@ impl WireRuntime {
             zerocode_core::agent::wire_road(agent).ok_or_else(|| format!("{agent} has no wire"))?;
         let protocol = Protocol::named(road.protocol)
             .ok_or_else(|| format!("unknown wire {}", road.protocol))?;
-        let mut command = crate::proc::quiet_command(binary);
+        let mut command =
+            crate::proc::quiet_command_on_path(binary, crate::shell_path::launch_path());
         command
             .args(wire_argv(agent, &road, resume)?)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        if let Some(path) = crate::shell_path::launch_path() {
-            command.env("PATH", path);
-        }
         // A wire child is not a pane: the hook environment that names panes
         // must not name it, or its own hooks would report as somebody's pane.
         for (key, _) in std::env::vars_os() {

@@ -742,7 +742,7 @@ pub(crate) fn run_once(
 ) -> Result<Once, OnceFailure> {
     use std::io::{Read, Write};
     let deadline = std::time::Instant::now() + wall;
-    let mut command = crate::proc::quiet_command(program);
+    let mut command = crate::proc::quiet_command_on_path(program, shell_path::hydrated());
     command
         .args(argv)
         .stdin(Stdio::piped())
@@ -750,9 +750,6 @@ pub(crate) fn run_once(
         .stderr(Stdio::piped());
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
-    }
-    if let Some(path) = shell_path::hydrated() {
-        command.env("PATH", path);
     }
     for name in crate::hooks::PANE_COORDINATES {
         command.env_remove(name);

@@ -1310,10 +1310,7 @@ fn shell_quote(word: &str) -> String {
 /// both pipes taken, so a prompt cannot hang the window and a pipe nobody
 /// reads cannot fill.
 pub(crate) fn command(program: &str, home_var: &str, home: &Path) -> Command {
-    let mut command = crate::proc::quiet_command(program);
-    if let Some(path) = crate::shell_path::hydrated() {
-        command.env("PATH", path);
-    }
+    let mut command = crate::proc::quiet_command_on_path(program, crate::shell_path::hydrated());
     command
         .env(home_var, home)
         .stdin(std::process::Stdio::null())

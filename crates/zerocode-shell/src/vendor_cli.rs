@@ -71,16 +71,16 @@ pub(crate) struct ProcessRunner;
 
 impl ProcessRunner {
     fn command(cli: VendorCli, call: &CliCall<'_>) -> Command {
-        let mut command = crate::proc::quiet_command(cli.binary);
+        // GUI apps inherit launchd/Explorer's small PATH. Every vendor CLI
+        // road uses the login shell's hydrated value, including availability
+        // probes, so "installed" has one meaning throughout the window. The
+        // door resolves the bare binary name on that PATH first, so the spawn
+        // never forks the window (t-47141).
+        let mut command =
+            crate::proc::quiet_command_on_path(cli.binary, crate::shell_path::hydrated());
         command.args(call.args);
         if let Some(cwd) = call.cwd {
             command.current_dir(cwd);
-        }
-        // GUI apps inherit launchd/Explorer's small PATH. Every vendor CLI
-        // road uses the login shell's hydrated value, including availability
-        // probes, so "installed" has one meaning throughout the window.
-        if let Some(path) = crate::shell_path::hydrated() {
-            command.env("PATH", path);
         }
         command
     }
