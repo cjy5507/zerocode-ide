@@ -197,9 +197,10 @@ pub(crate) use scm::{
     conflict_card, create_pull_request, delete_untracked, discard_paths, file_diff,
     generate_branch_name, generate_commit_message, generate_pull_request, git_history,
     hosted_review_eligibility, open_commit_remote, pull_request_seed, scm_fetch, scm_numstat,
-    scm_observer_health, scm_observer_retry, scm_pull, scm_push, scm_status,
-    set_worktree_compare_base, source_control_compare_context, stage_path, stage_paths,
-    submodule_status, unstage_path, unstage_paths, upstream_status, worktree_committed_diff,
+    scm_observer_dismiss, scm_observer_health, scm_observer_retry, scm_observer_shown, scm_pull,
+    scm_push, scm_status, set_worktree_compare_base, source_control_compare_context, stage_path,
+    stage_paths, submodule_status, unstage_path, unstage_paths, upstream_status,
+    worktree_committed_diff,
 };
 
 pub(crate) use system::{build_stamp, release_status};

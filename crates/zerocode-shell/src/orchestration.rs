@@ -4439,6 +4439,18 @@ enum Standing {
     Asking,
 }
 
+impl Standing {
+    /// Whether the person was told at this pane that mail waits unpointed, and
+    /// that line still stands: the window said it once for the whole condition
+    /// (t-45801), so the condition ends when this mark goes.
+    fn told_not_typed(self) -> bool {
+        matches!(
+            self,
+            Standing::Withheld | Standing::HeldByADraft | Standing::PaneTaken
+        )
+    }
+}
+
 fn pointed() -> &'static Mutex<std::collections::HashMap<(String, String), Pointed>> {
     static POINTED: OnceLock<Mutex<std::collections::HashMap<(String, String), Pointed>>> =
         OnceLock::new();
@@ -4518,10 +4530,12 @@ fn advice_standing(
     Some(Some(match stood {
         zerocode_pty::DeliveryOutcome::Delivered => {
             note_delivered(run, address, newest);
+            host.mail_waiting_cleared(term);
             Standing::Delivered
         }
         zerocode_pty::DeliveryOutcome::Unsubmitted(_) => {
             note_pointer_withheld(run, address, term, stood);
+            host.mail_waiting_cleared(term);
             Standing::Unsubmitted
         }
         zerocode_pty::DeliveryOutcome::Refused(why) => {
@@ -4555,6 +4569,11 @@ fn advice_standing(
 /// its agent and was not typed (t-21017). Its words are the window's own
 /// table (`term.mailWaiting.*`), keyed by the guard's token.
 pub(crate) const MAIL_WAITING_NOT_TYPED_EVENT: &str = "term:mail-waiting";
+
+/// The window event that ends the condition named by
+/// [`MAIL_WAITING_NOT_TYPED_EVENT`] at a pane: its pointer landed there, or no
+/// mail waits for it any longer (t-45801).
+pub(crate) const MAIL_WAITING_CLEARED_EVENT: &str = "term:mail-waiting-cleared";
 
 /// The receipt a sender's "filed, not pointed" letter is filed under, so one
 /// held message costs its sender one letter however many beats offer it.
@@ -7512,7 +7531,12 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
             for (address, term) in taken {
                 let key = (run.id.clone(), address.clone());
                 let Some(newest) = run.newest_pending(&address) else {
-                    marks.remove(&key);
+                    if marks
+                        .remove(&key)
+                        .is_some_and(|stood| stood.standing.told_not_typed())
+                    {
+                        host.mail_waiting_cleared(term);
+                    }
                     continue;
                 };
                 let said = marks.get(&key).is_some_and(|stood| {
@@ -7695,7 +7719,12 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * counts only the queue: mid-turn the holder may be reading
                  * that batch right now. */
                 let Some(newest) = run.newest_unread(&address).map(str::to_owned) else {
-                    marks.remove(&key);
+                    if marks
+                        .remove(&key)
+                        .is_some_and(|stood| stood.standing.told_not_typed())
+                    {
+                        host.mail_waiting_cleared(term);
+                    }
                     continue;
                 };
                 let standing = marks
@@ -7769,7 +7798,12 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     continue;
                 }
                 let Some(count) = run.unread_wanted(&address, Some(&seat)) else {
-                    marks.remove(&key);
+                    if marks
+                        .remove(&key)
+                        .is_some_and(|stood| stood.standing.told_not_typed())
+                    {
+                        host.mail_waiting_cleared(term);
+                    }
                     continue;
                 };
                 /* Nothing may be typed here, and no beat will change that on

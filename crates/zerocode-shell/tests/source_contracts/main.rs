@@ -34599,6 +34599,35 @@ mod tests {
             markup.contains("id=\"sb-codex-route\"") && window.contains("paintCodexPtyFallbacks()"),
             "the fallback has no persistent, reviewable status surface"
         );
+        assert!(
+            markup.contains("id=\"sb-scm-notices\"") && window.contains("paintScmMark()"),
+            "a PR condition that stands has no status bar mark"
+        );
+        let registered = include_str!("../../src/main.rs");
+        assert!(
+            registered.contains("scm_observer_shown,")
+                && registered.contains("scm_observer_dismiss,"),
+            "the PR notice marks are not registered as window commands"
+        );
+    }
+
+    #[test]
+    fn a_waiting_mail_the_window_could_not_type_is_said_once_per_condition() {
+        let orchestration = include_str!("../../src/orchestration.rs");
+        let delivered = block_after(
+            orchestration,
+            "zerocode_pty::DeliveryOutcome::Delivered => {",
+        );
+        assert!(
+            delivered.contains("host.mail_waiting_cleared(term)"),
+            "a pointer that landed no longer ends the waiting condition the window was told about:\n{delivered}"
+        );
+        let terminal = include_str!("../../../../ui/shell-term.js");
+        assert!(
+            terminal.contains("mailWaitingSaid.get(term) === reason")
+                && terminal.contains("listen(\"term:mail-waiting-cleared\""),
+            "the same reason on the same pane is said once per condition, and the condition's end is heard"
+        );
     }
 
     /// A launch prompt and every ledger worker carry one provider-neutral

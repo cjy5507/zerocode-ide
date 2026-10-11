@@ -23,6 +23,51 @@ pub(crate) async fn scm_observer_retry(
         .map_err(|error| error.to_string())?
 }
 
+/// The window showed a PR condition's toast, or the person closed it: the mark
+/// goes into the ledger, so a restarted window does not say the condition again.
+async fn record_notice_mark(
+    app: AppHandle,
+    id: String,
+    opened_at: i64,
+    mark: zerocode_core::scm_observer::NoticeMark,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        scm_observer::set_notice_mark(&app, &id, opened_at, mark)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn scm_observer_shown(
+    app: AppHandle,
+    id: String,
+    opened_at: i64,
+) -> Result<(), String> {
+    record_notice_mark(
+        app,
+        id,
+        opened_at,
+        zerocode_core::scm_observer::NoticeMark::Shown,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn scm_observer_dismiss(
+    app: AppHandle,
+    id: String,
+    opened_at: i64,
+) -> Result<(), String> {
+    record_notice_mark(
+        app,
+        id,
+        opened_at,
+        zerocode_core::scm_observer::NoticeMark::Dismissed,
+    )
+    .await
+}
+
 #[tauri::command]
 pub(crate) async fn scm_status(
     state: State<'_, AppState>,

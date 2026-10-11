@@ -4650,6 +4650,10 @@ fn a_running_terminal_is_measured_and_its_answer_survives_restart() {
             && exited.contains("dropTermView(term);"),
         "a managed terminal can exit without leaving both lists:\n{exited}"
     );
+    assert!(
+        exited.contains("forgetMailWaiting(term);"),
+        "a pane that exits keeps its mail condition, so its next one is never said:\n{exited}"
+    );
 
     let measuring = block_after(
         window,

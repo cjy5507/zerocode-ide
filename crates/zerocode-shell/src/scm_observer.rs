@@ -121,6 +121,43 @@ impl Observer {
         self.times.clear();
         Ok(())
     }
+
+    /// Marks one notice in the observer's own book, the same book the poll
+    /// saves: a second copy read from the file could drop the poll's latest write.
+    fn mark_notice(
+        &mut self,
+        path: &Path,
+        id: &str,
+        opened_at: i64,
+        mark: core::NoticeMark,
+        now_ms: i64,
+    ) -> Result<bool, String> {
+        self.load(path)?;
+        self.book.mark_notice(
+            id,
+            opened_at,
+            mark,
+            now_ms,
+            &mut WindowEffects { path, now_ms },
+        )
+    }
+}
+
+/// The window showed a condition's toast, or the person closed it. The mark
+/// goes into the ledger, so a restarted window reads it back.
+pub(crate) fn set_notice_mark(
+    app: &AppHandle,
+    id: &str,
+    opened_at: i64,
+    mark: core::NoticeMark,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let path = state_path(&state);
+    let mut held = checks_runtime::remembered()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.mark_notice(&path, id, opened_at, mark, crate::now_epoch_ms())?;
+    Ok(())
 }
 
 fn state_path(state: &AppState) -> PathBuf {
@@ -528,14 +565,17 @@ pub(crate) fn note_checks(
 struct NoticeRow<'a> {
     id: String,
     root: &'a str,
+    /// The checkout's folder name: the words say this, and the full path is the tooltip.
+    checkout: String,
     number: u64,
     kind: FactKind,
     opened_at: i64,
     resolved_at: Option<i64>,
+    shown_at: Option<i64>,
+    dismissed_at: Option<i64>,
 }
-fn publish_notices(app: &AppHandle, book: &Book, roots: &[PathBuf]) {
-    let rows: Vec<_> = book
-        .subjects
+fn notice_rows<'a>(book: &'a Book, roots: &[PathBuf]) -> Vec<NoticeRow<'a>> {
+    book.subjects
         .iter()
         .filter(|(_, held)| {
             roots
@@ -547,16 +587,27 @@ fn publish_notices(app: &AppHandle, book: &Book, roots: &[PathBuf]) {
                 .notices
                 .iter()
                 .map(move |(kind, notice)| NoticeRow {
-                    id: format!("{key}:{kind:?}"),
+                    id: core::notice_id(key, *kind),
                     root: &held.subject.root,
+                    checkout: checkout_name(Path::new(&held.subject.root)),
                     number: held.subject.number,
                     kind: *kind,
                     opened_at: notice.opened_at,
                     resolved_at: notice.resolved_at,
+                    shown_at: notice.shown_at,
+                    dismissed_at: notice.dismissed_at,
                 })
         })
-        .collect();
-    let _ = app.emit("scm:notices", rows);
+        .collect()
+}
+fn checkout_name(root: &Path) -> String {
+    root.file_name()
+        .unwrap_or(root.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+fn publish_notices(app: &AppHandle, book: &Book, roots: &[PathBuf]) {
+    let _ = app.emit("scm:notices", notice_rows(book, roots));
     let _ = app.emit("scm:health", book.health.rows());
 }
 
@@ -952,5 +1003,50 @@ mod tests {
             5,
             "the one subject slot went to the detached checkout instead of the PR"
         );
+    }
+
+    #[test]
+    fn a_mark_is_written_to_the_ledger_file_and_the_row_carries_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scm-observer.json");
+        let subject = Subject {
+            root: "/wt/topic".into(),
+            repo: "o/r".into(),
+            number: 4,
+            url: "https://github.com/o/r/pull/4".into(),
+            head: "a".into(),
+            branch: "topic".into(),
+        };
+        let key = subject.key();
+        let mut book = Book::default();
+        book.subjects.insert(
+            key.clone(),
+            core::Tracked {
+                subject,
+                record: core::Record::default(),
+            },
+        );
+        book.subjects.get_mut(&key).unwrap().record.notices.insert(
+            FactKind::Ci,
+            core::Notice {
+                opened_at: 10,
+                resolved_at: None,
+                shown_at: None,
+                dismissed_at: None,
+            },
+        );
+        std::fs::write(&path, serde_json::to_vec(&book).unwrap()).unwrap();
+        let id = core::notice_id(&key, FactKind::Ci);
+        let mut held = Observer::default();
+        assert!(
+            held.mark_notice(&path, &id, 10, core::NoticeMark::Dismissed, 20)
+                .unwrap()
+        );
+        let saved: Book = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let rows = notice_rows(&saved, &[PathBuf::from("/wt/topic")]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].checkout, "topic");
+        assert_eq!(rows[0].root, "/wt/topic");
+        assert_eq!((rows[0].shown_at, rows[0].dismissed_at), (None, Some(20)));
     }
 }

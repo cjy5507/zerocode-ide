@@ -1162,6 +1162,15 @@ const stubBackend = ({ boot, pollers }) => {
       if (window.__SCM_OBSERVER_RETRY_HOLD__) return new Promise((done) => { window.__SCM_OBSERVER_RETRY_FINISH__ = done; });
       return window.__SCM_OBSERVER_HEALTH__;
     },
+    // A PR condition's toast was shown or closed (t-45801): the ledger's mark, recorded for the test to read.
+    scm_observer_shown: ({ id, openedAt }) => {
+      (window.__SCM_NOTICE_MARKS__ ??= []).push({ cmd: "shown", id, openedAt });
+      return null;
+    },
+    scm_observer_dismiss: ({ id, openedAt }) => {
+      (window.__SCM_NOTICE_MARKS__ ??= []).push({ cmd: "dismissed", id, openedAt });
+      return null;
+    },
     // The tree's scoped question after an agent's write ends (t-31715): nothing changed.
     scm_numstat: () => [],
     scm_tree_rows: (args) => scmTreeRows(args.area, args.paths, args.folded ?? []),

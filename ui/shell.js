@@ -16259,6 +16259,7 @@ listen("term:exited", (event) => {
   const { term } = event.payload;
   forgetManagedTerminalSession(term);
   forgetCodexPtyFallback(term);
+  forgetMailWaiting(term);
   paneUsage.delete(term);
   orphanWorkersOf(term);
   if (term === FLOAT_TERM) {
