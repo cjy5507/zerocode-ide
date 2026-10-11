@@ -5949,7 +5949,7 @@ fn a_resume_settlement_keeps_its_observed_result_until_the_store_accepts_it() {
         );
         tick(&stood.host, &[], at(10_000));
         let rows = the_rows();
-        let receipt = rows.runs[0]
+        let receipt = rows
             .messages
             .iter()
             .find(|message| message.kind == MessageKind::Resumed)
@@ -5970,7 +5970,7 @@ fn a_resume_settlement_keeps_its_observed_result_until_the_store_accepts_it() {
             .unwrap();
         let refused = the_rows();
         let body: serde_json::Value = serde_json::from_str(
-            refused.runs[0]
+            refused
                 .messages
                 .iter()
                 .find(|message| message.id == receipt)
@@ -6002,7 +6002,7 @@ fn a_resume_settlement_keeps_its_observed_result_until_the_store_accepts_it() {
         );
         assert_eq!(settled[0]["typed"], true);
         assert!(
-            the_rows().runs[0]
+            the_rows()
                 .messages
                 .iter()
                 .any(|message| message.id == receipt)
@@ -6035,7 +6035,7 @@ fn an_unaddressable_resume_keeps_its_untyped_result_until_the_store_accepts_it()
         .unwrap();
     let rows = the_rows();
     let body: serde_json::Value = serde_json::from_str(
-        rows.runs[0]
+        rows
             .messages
             .iter()
             .find(|message| message.kind == MessageKind::Resumed)
