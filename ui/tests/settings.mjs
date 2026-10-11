@@ -5487,7 +5487,7 @@ await test("판단 설정은 적용된 모델과 아직 연결하지 않은 선�
     assert((await pageA.locator("#judgment-active-model").textContent()).includes(applied.model), "a draft replaced the active-model summary");
     assertEqual(backend.typesafeSettings().provider, applied, "choosing a setup path applied it");
   } finally {
-    await pageA.click("#judgment-revert-provider");
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
   }
   return "applied model separate from draft · next connection step named";
 });
