@@ -2903,8 +2903,8 @@ pub(super) fn ring_now(app: &AppHandle, notice: RingNotice<'_>) {
     if !ring_gates_open(app, ring) {
         return;
     }
-    let (active, focused) = watching(app);
-    let watched = zerocode_core::notify::suppressed(worktree, &active, focused);
+    let (active, focused, stage) = watching(app);
+    let watched = zerocode_core::notify::suppressed(worktree, &active, focused, stage.shows(term));
     // The notify seat is asked HERE — after the switches, before the
     // cooldown — at the one point today's table decides "ring or not"
     // (t-6043, `zerocode_core::jev::NOTIFY`). A watched screen is today's
@@ -2955,8 +2955,8 @@ pub(super) fn ring_held(
     if !ring_gates_open(app, ring) {
         return;
     }
-    let (active, focused) = watching(app);
-    if zerocode_core::notify::suppressed(worktree, &active, focused) {
+    let (active, focused, stage) = watching(app);
+    if zerocode_core::notify::suppressed(worktree, &active, focused, stage.shows(term)) {
         return;
     }
     ring_composed(app, worktree, term, folded);
@@ -3004,15 +3004,35 @@ fn ring_gates_open(app: &AppHandle, ring: zerocode_core::notify::Ring) -> bool {
     true
 }
 
-/// The two facts the watched-screen rule reads: the active worktree and
-/// whether the main window has focus.
-fn watching(app: &AppHandle) -> (String, bool) {
-    let active = app.state::<AppState>().active_root().display().to_string();
+/// The facts the watched-screen rule reads: the active worktree, whether the
+/// main window has focus, and the stage — the shells that window last declared
+/// it is drawing (`set_watched_terms`), which is what says whether the ringing
+/// pane is in front of the person or behind another tab (t-47525).
+fn watching(app: &AppHandle) -> (String, bool, Stage) {
+    let state = app.state::<AppState>();
+    let active = state.active_root().display().to_string();
     let focused = app
         .get_webview_window("main")
         .and_then(|window| window.is_focused().ok())
         .unwrap_or(false);
-    (active, focused)
+    let stage = Stage(
+        state
+            .watched_terms()
+            .get("main")
+            .cloned()
+            .unwrap_or_default(),
+    );
+    (active, focused, stage)
+}
+
+/// The shells the main window is drawing right now.
+struct Stage(HashSet<TermId>);
+impl Stage {
+    /// Whether the ringing pane is one of them; a ring with no pane has no
+    /// answer here and keeps the worktree rule.
+    fn shows(&self, term: Option<TermId>) -> Option<bool> {
+        term.map(|term| self.0.contains(&term))
+    }
 }
 
 /// The ladder's last rungs: the cooldown, then the OS, then the address a

@@ -578,7 +578,7 @@ fn off_is_todays_bytes_and_the_seat_sits_where_the_table_decides() {
     let bell = include_str!("../pane_runtime.rs");
     let ringing = crate::tests::block_after(bell, "fn ring_now(");
     let suppressed = ringing
-        .find("zerocode_core::notify::suppressed(worktree, &active, focused)")
+        .find("zerocode_core::notify::suppressed(worktree, &active, focused, stage.shows(term))")
         .expect("the watched-screen rule");
     let asked = ringing
         .find("notify_call::call_at_the_bell(app, &bell)")

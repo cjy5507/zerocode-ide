@@ -536,11 +536,26 @@ impl RingLedger {
 
 /// Is this ring about the screen the person is already watching?
 ///
-/// Both facts at once: the pane's worktree is the active one AND the window
-/// has focus. Active-but-unfocused still rings — the person is in another app
-/// and cannot see the pane, however active its worktree is.
-pub fn suppressed(pane_worktree: &str, active_worktree: &str, window_focused: bool) -> bool {
-    window_focused && !pane_worktree.is_empty() && pane_worktree == active_worktree
+/// Two facts at once: the window has focus AND the pane is on the stage the
+/// person is looking at. `on_stage` is what the window last declared it is
+/// drawing (`set_watched_terms`): `Some(false)` is a pane behind another tab,
+/// which rings however active its worktree is — a coordinator, its workers and
+/// the person's own shell all live in one checkout, so the worktree alone says
+/// nothing about which pane is in front (t-47525). A ring with no pane
+/// (`None`) keeps the worktree rule: the pane's worktree is the active one.
+/// Active-but-unfocused still rings — the person is in another app and cannot
+/// see the pane, however active its worktree is.
+pub fn suppressed(
+    pane_worktree: &str,
+    active_worktree: &str,
+    window_focused: bool,
+    on_stage: Option<bool>,
+) -> bool {
+    window_focused
+        && match on_stage {
+            Some(shown) => shown,
+            None => !pane_worktree.is_empty() && pane_worktree == active_worktree,
+        }
 }
 
 #[cfg(test)]
@@ -678,14 +693,32 @@ mod tests {
     /// Suppressed only at the screen being watched — both facts at once.
     #[test]
     fn the_screen_you_are_watching_never_rings() {
-        assert!(suppressed("/w/a", "/w/a", true));
+        assert!(suppressed("/w/a", "/w/a", true, None));
         // Same worktree, window in the background: the person cannot see it.
-        assert!(!suppressed("/w/a", "/w/a", false));
+        assert!(!suppressed("/w/a", "/w/a", false, None));
         // Another worktree, however focused the window: they are not looking
         // at this pane.
-        assert!(!suppressed("/w/b", "/w/a", true));
+        assert!(!suppressed("/w/b", "/w/a", true, None));
         // A pane whose worktree nobody recorded matches nothing.
-        assert!(!suppressed("", "", true));
+        assert!(!suppressed("", "", true, None));
+    }
+
+    /// One checkout holds the coordinator, its workers and the person's own
+    /// shell, so the worktree says nothing about which pane is in front: the
+    /// pane behind another tab rings, the one on the stage does not (t-47525).
+    #[test]
+    fn a_pane_behind_another_tab_rings_however_active_its_worktree_is() {
+        // Same worktree, window focused, the pane is on the stage: watched.
+        assert!(suppressed("/w/a", "/w/a", true, Some(true)));
+        // Same worktree, window focused, the pane is behind another tab: it
+        // rings — this was the bell that stayed silent.
+        assert!(!suppressed("/w/a", "/w/a", true, Some(false)));
+        // On the stage, window in the background: the person is in another
+        // app and cannot see it.
+        assert!(!suppressed("/w/a", "/w/a", false, Some(true)));
+        // A ring with no pane keeps the worktree rule.
+        assert!(suppressed("/w/a", "/w/a", true, None));
+        assert!(!suppressed("/w/b", "/w/a", true, None));
     }
 
     /// The words are Orca's sentence, and the question beats the last answer
