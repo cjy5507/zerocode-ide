@@ -126,6 +126,38 @@ window flashes a console window on Windows (AO #5309):\n  {}",
     );
 }
 
+/// std 의 `Command::spawn` 은 프로그램이 경로이거나 명령이 `PATH` 를 건드리지
+/// 않았을 때만 `posix_spawn` 을 타고, 맨 이름에 제 `PATH` 를 준 명령은
+/// `fork` 로 떨어진다(`library/std/src/sys/process/unix`, `env_saw_path()
+/// && !program_is_path()`). 창의 fork 는 exec 전에 CEF/XPC 의 atfork 처리기
+/// 안에서 영원히 멈출 수 있고, 그 사이 쥔 잠금 하나가 세 시간 동안 모든
+/// 원장 명령을 「this window is busy」로 만들었다(t-47141). 그래서 자식에게
+/// 제 `PATH` 를 주는 자리는 그 `PATH` 위에서 이름을 먼저 푸는 문
+/// `proc::quiet_command_on_path` 하나뿐이고, 다른 소스는 자식에게 `PATH` 를
+/// 건네지 않는다.
+#[test]
+fn a_child_given_a_path_of_its_own_is_named_by_the_door_that_resolves_it() {
+    let mut offenders = Vec::new();
+    for (name, source) in shell_sources() {
+        if name == "proc.rs" {
+            continue;
+        }
+        let count = strip_rust_comments(&source)
+            .matches(".env(\"PATH\"")
+            .count();
+        if count > 0 {
+            offenders.push(format!("{name}: {count}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these sources hand a child a PATH outside `proc::quiet_command_on_path`, so a bare \
+program name there makes std fork the window, and a fork of the window can stop for good \
+before it execs (t-47141):\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
 #[test]
 fn the_flag_is_spelled_once_and_only_the_door_reaches_for_it() {
     let sources = shell_sources();
