@@ -737,19 +737,63 @@ pub(crate) fn reseat_nudge(worker: &str, checkout: Option<&str>) -> String {
 /// and one the goodbye saw at rest is written down at rest again
 /// ([`resumed_at_rest`]), so its mail is pointed at like any pane's.
 ///
-/// The goodbye's note these words came from is spent here, whatever the
-/// paste answered (t-7812 R2): handed to a seated pane, the words may have
-/// landed, and words that may have landed are never said a second time.
-pub(crate) fn deliver_continuation(host: &dyn Host, term: u32, words: &str, worker: &str) -> bool {
+/// The goodbye's note is spent when the words reached the pane or their
+/// delivery is unknown. A delivery known to have typed nothing keeps it.
+pub(crate) fn deliver_continuation(
+    host: &dyn Host,
+    term: u32,
+    words: &str,
+    worker: &str,
+) -> Option<zerocode_pty::DeliveryOutcome> {
     let idle = words.trim().is_empty();
-    let delivered = idle || host.paste_continuation(term, words);
+    let delivered = if idle {
+        Some(zerocode_pty::DeliveryOutcome::Delivered)
+    } else {
+        host.paste_continuation(term, words, worker)
+    };
     if let Some(root) = BLACKBOX.get() {
         if idle {
             resumed_at_rest(root, term, worker);
         }
-        crate::restart_nudge_runtime::nudge_spent(root, worker);
+        if idle || delivered.is_none_or(zerocode_pty::DeliveryOutcome::pasted) {
+            crate::restart_nudge_runtime::nudge_spent(root, worker);
+        }
     }
     delivered
+}
+
+fn continuation_answer(
+    mut reply: zerocode_core::agent_teams::Reply,
+    outcome: Option<zerocode_pty::DeliveryOutcome>,
+) -> zerocode_hookd::TeamAnswer {
+    use zerocode_pty::{DeliveryOutcome, ready::Refusal};
+    let (status, reason) = match outcome {
+        Some(DeliveryOutcome::Delivered) => ("submitted", None),
+        Some(DeliveryOutcome::TimedOut) => ("not_typed", Some("not_ready")),
+        Some(DeliveryOutcome::Refused(why)) => ("not_typed", Some(why.token())),
+        Some(DeliveryOutcome::Unsubmitted(why @ (Refusal::NotTaken | Refusal::LaunchChanged))) => {
+            ("unknown", Some(why.token()))
+        }
+        Some(DeliveryOutcome::Unsubmitted(why)) => ("pasted", Some(why.token())),
+        None => ("unknown", Some("delivery_unknown")),
+    };
+    if let Ok(mut body) = serde_json::from_str::<serde_json::Value>(&reply.stdout)
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert(
+            "continuation".to_string(),
+            serde_json::json!({
+                "status": status,
+                "pasted": outcome.map(DeliveryOutcome::pasted),
+                "reason": reason,
+            }),
+        );
+        reply.stdout = format!("{body}\n");
+    }
+    if status == "unknown" {
+        reply.stderr = "the continuation's delivery is unknown; observe the restored worker or confirm with a person before sending more input\n".to_string();
+    }
+    answer(reply)
 }
 
 /// A resumed pane the last goodbye saw at rest is at rest again (t-11548).
@@ -10546,19 +10590,15 @@ fn carried(
                          * may it see the interrupted work. A tiny task can run
                          * `worker_done` synchronously from this callback; that
                          * is the adversarial ordering this fence exists for. */
-                        if !deliver_continuation(host, term, &prepared.prompt, &prepared.worker) {
-                            host.close(term);
-                            return refused(
-                                "the restored worker became unreachable before its continuation was delivered",
-                            );
-                        }
+                        let continuation =
+                            deliver_continuation(host, term, &prepared.prompt, &prepared.worker);
                         host.announce_reseated_worker(
                             term,
                             &prepared.checkout,
                             &prepared.agent,
                             prepared.resumed,
                         );
-                        return answer(decided.reply);
+                        return continuation_answer(decided.reply, continuation);
                     }
                     /* The judgment's row, beside what was actually summoned
                      * (t-4711). Here rather than at the plan, because a

@@ -226,9 +226,16 @@ pub(super) fn departed(
     waiters: &mut HashMap<TermId, std::sync::mpsc::SyncSender<DeliveryOutcome>>,
     queue: &mut HashMap<TermId, VecDeque<QueuedPrompt>>,
 ) {
-    deliveries.remove(&term);
+    let delivery = deliveries.remove(&term);
     if let Some(waiting) = waiters.remove(&term) {
-        let _ = waiting.send(DeliveryOutcome::TimedOut);
+        if let Some(delivery) = delivery {
+            let outcome = if delivery.pasted() {
+                DeliveryOutcome::Unsubmitted(Refusal::LaunchChanged)
+            } else {
+                DeliveryOutcome::Refused(Refusal::LaunchChanged)
+            };
+            let _ = waiting.send(outcome);
+        }
     }
     queue.remove(&term);
 }

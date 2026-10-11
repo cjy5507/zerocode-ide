@@ -3581,8 +3581,6 @@ pub(super) fn pump_loop(app: &AppHandle) {
                     &mut state.delivery_waiters(),
                     &mut state.prompt_queue(),
                 );
-                // A dead shell answers no more prompts; what was parked for
-                // it goes too, or the map holds text addressed to nobody.
             }
             // Where each shell sits in the snapshot. Both questions below —
             // which entry a death carries the evidence of, and whether a frame
