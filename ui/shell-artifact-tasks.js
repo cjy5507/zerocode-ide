@@ -36,6 +36,8 @@ const ARTIFACT_COMPARE_MODES = Object.freeze([
 /* 경계의 처음 자리(%)와 화살표 한 번의 걸음(%) — 막대와 손잡이가 같은 값을 읽는다. */
 const ARTIFACT_COMPARE_START = 50;
 const ARTIFACT_COMPARE_STEP = 2;
+/* 꼬리표의 짧은 해시 — 짝 그림이 든 커밋의 앞 글자 수(git의 짧은 해시와 같은 길이). */
+const ARTIFACT_HASH_SHORT = 7;
 /* 한 번에 묻는 커밋의 수(런타임의 `COMMITS_ASKED_MAX`보다 작게: 보이는 줄의 것만 묻는다)와,
  * 물었던 커밋을 기억하는 수 — 넘으면 가장 오래전에 본 것부터 잊는다. */
 const ARTIFACT_COMMITS_PER_ASK = 64;
@@ -347,6 +349,22 @@ function buildArtifactCompare() {
   close.setAttribute("aria-label", t("artifacts.compare.close", "비교 닫기"));
   head.append(name, modes, close);
 
+  // 꼬리표는 그림 밖 위에 선다: 전은 왼쪽, 후는 오른쪽. 해시는 짝이 든 커밋을 알 때만 붙는다.
+  const labels = document.createElement("div");
+  labels.className = "artifact-compare-labels";
+  for (const side of ["before", "after"]) {
+    const label = document.createElement("span");
+    label.className = `artifact-compare-label is-${side}`;
+    const word = document.createElement("span");
+    word.dataset.i18n = side === "before" ? "artifacts.compare.before" : "artifacts.compare.after";
+    word.textContent = side === "before" ? t("artifacts.compare.before", "전") : t("artifacts.compare.after", "후");
+    const hash = document.createElement("span");
+    hash.className = "artifact-compare-hash";
+    hash.hidden = true;
+    label.append(word, hash);
+    labels.appendChild(label);
+  }
+
   const stage = document.createElement("div");
   stage.className = "artifact-compare-stage";
   for (const side of ["after", "before"]) {
@@ -357,10 +375,7 @@ function buildArtifactCompare() {
     // 그림은 끌려 나가지 않는다: 그림 위의 끌기는 경계를 옮기는 손이고, 그림을 집어 드는 끌기가
     // 시작되면 포인터가 취소되어 경계가 첫 걸음에서 멈춘다.
     picture.draggable = false;
-    const caption = document.createElement("figcaption");
-    caption.dataset.i18n = side === "before" ? "artifacts.compare.before" : "artifacts.compare.after";
-    caption.textContent = side === "before" ? t("artifacts.compare.before", "전") : t("artifacts.compare.after", "후");
-    figure.append(picture, caption);
+    figure.append(picture);
     stage.appendChild(figure);
   }
   // 손잡이는 끄는 것이다 — 키보드의 길은 아래 막대라, 탭 순서와 읽는 기계에서는 뺀다.
@@ -381,7 +396,7 @@ function buildArtifactCompare() {
   const trouble = document.createElement("p");
   trouble.className = "artifact-compare-trouble";
   trouble.hidden = true;
-  compare.append(head, stage, range, trouble);
+  compare.append(head, labels, stage, range, trouble);
   return compare;
 }
 
@@ -801,6 +816,7 @@ function paintArtifactBundleLists(view, box, bundle) {
 
 function setArtifactCompareMode(compare, mode) {
   compare.querySelector(".artifact-compare-stage").dataset.compareMode = mode;
+  compare.querySelector(".artifact-compare-labels").dataset.compareMode = mode;
   // 눌린 표시는 단추의 것이다 — 그림 자리도 같은 이름의 속성으로 제 방식을 적으니 단추만 고른다.
   for (const one of compare.querySelectorAll(".artifact-compare-mode")) {
     const on = one.dataset.compareMode === mode;
@@ -818,6 +834,19 @@ function setArtifactCompareAt(compare, at) {
   if (Number(range.value) !== held) range.value = String(held);
 }
 
+/* 꼬리표의 해시: 짝 행이 든 커밋의 앞 글자들이다. 행이 커밋을 모르면 해시 없이 글자만 선다 —
+ * 지어내지 않는다. 온전한 커밋은 꼬리표의 풍선에 있다. */
+function setArtifactCompareLabels(compare, before, after) {
+  for (const [side, id] of [["before", before], ["after", after]]) {
+    const commit = artifactRows.get(id)?.origin?.commit ?? "";
+    const label = compare.querySelector(`.artifact-compare-label.is-${side}`);
+    const hash = label.querySelector(".artifact-compare-hash");
+    hash.textContent = commit === "" ? "" : ` · ${commit.slice(0, ARTIFACT_HASH_SHORT)}`;
+    hash.hidden = commit === "";
+    label.dataset.tip = commit;
+  }
+}
+
 /* 짝의 카드를 눌렀다: 두 그림을 불러 비교를 연다. 그림을 읽지 못하면(표 상한보다 크다) 그렇게
  * 말한다 — 빈 상자를 보이지 않는다. */
 async function openArtifactCompare(view, card) {
@@ -826,6 +855,7 @@ async function openArtifactCompare(view, card) {
   compare.dataset.pair = asked;
   compare.hidden = false;
   compare.querySelector(".artifact-compare-name").textContent = t("artifacts.compare.name", "전·후 비교 · {{name}}", { name: card.dataset.name || card.querySelector(".artifact-evidence-name").textContent });
+  setArtifactCompareLabels(compare, card.dataset.before, card.dataset.after);
   setArtifactCompareMode(compare, compare.querySelector(".artifact-compare-stage").dataset.compareMode || ARTIFACT_COMPARE_MODES[0].mode);
   setArtifactCompareAt(compare, ARTIFACT_COMPARE_START);
   const [before, after] = await Promise.all([askArtifactPreview(card.dataset.before), askArtifactPreview(card.dataset.after)]);
