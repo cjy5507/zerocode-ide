@@ -294,6 +294,23 @@ fn a_worker_briefing_for_a_task_with_conditions_names_them_and_the_evidence_shap
     );
 }
 
+/// The briefing also says what a named job must do (review of t-26587): a job
+/// named as a condition's evidence ends with a non-zero exit code when that
+/// condition fails — a job that records its stages and then `exit 0` would
+/// leave a receipt of 0 and a false "checked" on the board.
+#[test]
+fn a_briefing_says_an_evidence_job_must_end_non_zero_when_its_condition_fails() {
+    let briefing = worker_briefing("t-1", "parser", TWO_CONDITIONS);
+    assert!(
+        briefing.contains("ends with a non-zero exit code when that condition fails"),
+        "the briefing does not say the job must fail with its condition: {briefing}"
+    );
+    assert!(
+        briefing.contains("never a closing `exit 0`"),
+        "the briefing does not warn against a closing exit 0: {briefing}"
+    );
+}
+
 /// A spec line is a condition when it begins with the mark, after its spaces
 /// and an optional list marker, and the mark ends at a space, a colon or the
 /// end of the line. `통과 전체` is not one.
