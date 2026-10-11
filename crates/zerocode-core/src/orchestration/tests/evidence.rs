@@ -18,7 +18,14 @@ const TWO_CONDITIONS: &str = "Fix the parser.\n통과 전 cargo test -p zerocode
 const NO_CONDITIONS: &str = "Rename the helper.";
 
 /// The receipt a build line leaves beside its log, named the way a worker names it.
+/// A receipt path that is absolute on the platform the test runs on: the
+/// product names only absolute evidence paths (`hand_in::named`), and the
+/// Unix spelling has no drive, so on Windows it named nothing and the four
+/// receipt tests saw neither a refusal nor a check (main CI 38106014444).
+#[cfg(not(windows))]
 const TESTS_RECEIPT: &str = "/Users/dev/receipts/tests.rc";
+#[cfg(windows)]
+const TESTS_RECEIPT: &str = r"C:\Users\dev\receipts\tests.rc";
 
 /// One condition's evidence, as a worker writes it in the `evidence` list.
 fn evidence_of(condition: u64, job: &str, rc: i64) -> serde_json::Value {

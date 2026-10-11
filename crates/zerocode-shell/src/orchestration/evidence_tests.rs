@@ -13,6 +13,13 @@ use super::cost_book::CostBook;
 use super::desk::desk_snapshot;
 use super::read_receipts;
 
+/// A receipt path that is absolute on this platform (the product names only
+/// absolute evidence paths; the Unix spelling has no drive on Windows).
+#[cfg(not(windows))]
+const TESTS_RECEIPT: &str = "/Users/dev/receipts/tests.rc";
+#[cfg(windows)]
+const TESTS_RECEIPT: &str = r"C:\Users\dev\receipts\tests.rc";
+
 const TEAM: &str = "team-evidence";
 
 /// The argv a worker's `send --type worker_done` arrives as, with `payload`.
@@ -133,7 +140,7 @@ fn a_task_with_conditions_shows_their_states_and_its_last_reports_notes_on_the_d
         {"condition": 1, "job": "tests", "rc": 0, "numbers": "412 passed"},
         {"condition": 2, "job": "clippy", "rc": 0, "numbers": "0 warnings"},
     ]});
-    let payload = naming(&[Path::new("/Users/dev/receipts/tests.rc")]);
+    let payload = naming(&[Path::new(TESTS_RECEIPT)]);
     ledger
         .post(
             &run,
