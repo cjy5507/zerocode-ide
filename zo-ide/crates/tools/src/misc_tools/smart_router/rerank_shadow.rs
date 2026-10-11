@@ -2913,8 +2913,8 @@ mod tests {
     /// this ledger, and the very next recall under `auto` reads the
     /// judgment's order — where the recall before the rise read recall's own.
     #[test]
-    fn auto_rises_on_its_own_labels_and_the_next_recall_reads_the_judgments_order() {
-        use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Verdict, ROSE};
+    fn its_own_proxy_labels_hold_the_seat_and_a_raised_recall_reads_the_judgments_order() {
+        use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Line, Verdict, ROSE};
         let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
         let hits = three();
         let (before, verdict, rose, after, applied) = machine(zerocode_core::jev::JevMode::Auto.key(), &mock.base_url, |cwd| {
@@ -2973,14 +2973,31 @@ mod tests {
             let rose = super::super::jev_summary::read_rows(&ledger)
                 .iter()
                 .any(|row| zerocode_core::jev::summary::TRANSITION.read(row) == Some(&serde_json::json!(ROSE)));
+            // The raise is the judge's to write: the transition it would write
+            // stands here, so the next recall reads the judgment's order.
+            append_shadow_row(
+                &ledger,
+                &serde_json::json!({
+                    "at": after_the_window + 10_000_000,
+                    (zerocode_core::jev::summary::TRANSITION.canonical): ROSE,
+                    "rubricVersions": [RECALL.rubric_version],
+                }),
+                SHADOW_LEDGER_MAX_BYTES,
+            )
+            .expect("a rise");
             // Raised: the next recall under `auto` reads the judgment's order.
             let after = settle(cwd, "which note answers this (auto, after)", hits.to_vec());
             let applied = rows(cwd).last().map(|row| row.applied);
             (before, verdict, rose, after, applied)
         });
         assert_eq!(slugs(&before), slugs(&hits), "a recording seat reads recall's order");
-        assert_eq!(verdict, Some(Verdict::Rise), "the labels did not raise the seat");
-        assert!(rose, "the rise was not written in the seat's own ledger");
+        // The seat's own labels are proxies (ADR-171, t-26584 ①): the seat holds
+        // on the proxy line, and the judge writes no rise for it.
+        assert!(
+            matches!(verdict, Some(Verdict::Hold(Line::ProxyOnly { .. }))),
+            "its own proxy labels must not raise the seat: {verdict:?}"
+        );
+        assert!(!rose, "a proxy-only seat writes no rise of its own");
         assert_eq!(slugs(&after), ["wiki/b", "wiki/c", "wiki/a"], "the raised seat did not act");
         assert_eq!(applied, Some(true), "the row of the raised seat's reading does not say it applied");
     }
@@ -3164,11 +3181,13 @@ mod tests {
             .expect("the label row");
         let series = zerocode_core::jev::promote::on_the_newest_version(&RECALL, &values);
         assert!(series.marks.contains(&named), "the label graded no asking: {named}");
-        let judged = zerocode_core::jev::promote::judge_seat(&RECALL, &values).expect("recall rises");
+        // The first note read is hindsight, a structural proxy (t-26584, ①): the
+        // judge counts the turn's label once, withheld, and never as agreement.
+        let judged = zerocode_core::jev::promote::judge_seat(&RECALL, &values).expect("recall judged");
         assert_eq!(
-            (judged.agreement.compared, judged.agreement.agreed),
-            (1, 1),
-            "the judge compared the turn's label once: {named}"
+            (judged.agreement.compared, judged.agreement.agreed, judged.agreement.proxied),
+            (0, 0, 1),
+            "the judge withheld the turn's label once: {named}"
         );
         // The asking it grades is the one its reading settled on: of the two
         // askings of these words over these notes, the later — and neither is

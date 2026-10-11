@@ -60,6 +60,7 @@
     <script defer src="./shell-update.js"></script>
     <script defer src="./shell-computer.js"></script>
     <script defer src="./shell-settings.js"></script>
+    <script defer src="./shell-judgment.js"></script>
     <script defer src="./shell-jev.js"></script>
     <script defer src="./shell-flow.js"></script>
     <script defer src="./shell-remote.js"></script>
@@ -4197,14 +4198,48 @@
         <div class="settings-card" id="typesafe-card">
           <div class="settings-subhead settings-subhead--acts">
             <div>
-              <h3 class="settings-subhead-title" data-i18n="settings.typesafe.title">TypeSafe (Jev)</h3>
-              <p class="settings-subhead-desc" data-i18n="settings.typesafe.about">
-                Jev(TypeSafe System One)에 판단을 요청할 때 쓰는 API 키입니다. 키는 이 컴퓨터의 키체인에만 저장되고, ZeroCode가 띄운 zo든 터미널에서 직접 실행한 zo든 같은 키를 읽습니다.
+              <h3 class="settings-subhead-title" data-i18n="settings.judgment.title">판단 모델</h3>
+              <p class="settings-subhead-desc" data-i18n="settings.judgment.about">
+                선택·점수·참/거짓을 반환하는 판단 모델을 고릅니다. 컴퓨터 유즈와 라우팅을 포함한 모든 판단 기능이 같은 선택을 사용합니다. 일반 채팅 모델은 지원하지 않습니다.
               </p>
             </div>
             <span class="settings-state" id="typesafe-key-state" data-state="unchecked"
                   role="status" aria-live="polite"></span>
           </div>
+          <section id="judgment-provider-editor" aria-label="판단 모델 연결">
+            <label class="settings-field" data-field="md" for="judgment-provider-kind">
+              <span class="settings-field-copy">
+                <span class="settings-label" data-i18n="settings.judgment.provider">제공자</span>
+              </span>
+              <select class="settings-input" id="judgment-provider-kind" disabled>
+                <option value="jev">Jev · TypeSafe</option>
+                <option value="local" data-i18n="settings.judgment.local">로컬 판단 모델</option>
+                <option value="remote" data-i18n="settings.judgment.remote">다른 판단 서버</option>
+              </select>
+            </label>
+            <label class="settings-field" data-field="lg" id="judgment-endpoint-field" for="judgment-endpoint" hidden>
+              <span class="settings-field-copy">
+                <span class="settings-label" data-i18n="settings.judgment.endpoint">판단 서버 주소</span>
+                <span class="settings-row-desc" data-i18n="settings.judgment.endpointHint">System One 호환 판단 인터페이스를 사용합니다. 로컬은 이 컴퓨터의 주소만, 원격은 HTTPS만 허용합니다.</span>
+              </span>
+              <input class="settings-input" id="judgment-endpoint" type="url" maxlength="8192" autocomplete="off" spellcheck="false" disabled />
+            </label>
+            <label class="settings-field" data-field="md" for="typesafe-model-input">
+              <span class="settings-field-copy">
+                <span class="settings-label" data-i18n="settings.judgment.model">판단 모델</span>
+                <span class="settings-row-desc" data-i18n="settings.judgment.modelHint">서버의 모델 목록에서 고르거나 모델 ID를 직접 입력합니다. 목록을 새로 읽어도 선택은 사라지지 않습니다.</span>
+              </span>
+              <input class="settings-input" id="typesafe-model-input" list="judgment-model-options" type="text" maxlength="256" autocomplete="off" spellcheck="false" disabled />
+              <datalist id="judgment-model-options"></datalist>
+            </label>
+            <label class="settings-check" id="judgment-auth-field" for="judgment-requires-auth" hidden>
+              <input type="checkbox" id="judgment-requires-auth" disabled />
+              <span data-i18n="settings.judgment.authentication">이 서버는 API 키가 필요합니다</span>
+            </label>
+            <p class="settings-row-desc" id="judgment-provider-scope"></p>
+            <p class="settings-notice" id="judgment-provider-dirty" data-i18n="settings.judgment.unapplied" hidden>아직 적용하지 않은 선택입니다. 적용한 뒤 연결을 확인하세요.</p>
+            <p class="settings-row-desc" id="judgment-model-status" role="status" aria-live="polite"></p>
+          </section>
           <!-- The one switch (`smart.jev.enabled`, `set_jev_enabled`). On:
                every folder consented and every feature at its table's
                recommended mode; off: nothing is sent. The dashboard wears
@@ -4213,9 +4248,9 @@
             <label class="settings-check" for="jev-enabled">
               <input type="checkbox" role="switch" id="jev-enabled" data-jev-switch />
               <span>
-                <span class="settings-label" data-i18n="settings.typesafe.use">Jev 사용</span>
-                <span class="settings-row-desc" data-i18n="settings.typesafe.useAbout">
-                  켜면 열린 프로젝트의 요청 내용(파일 이름·명령·화면의 글)이 Jev 서비스로 보내집니다. 끄면 아무것도 보내지 않습니다.
+                <span class="settings-label" data-i18n="settings.judgment.use">판단 기능 사용</span>
+                <span class="settings-row-desc" data-i18n="settings.judgment.useAbout">
+                  켜면 동의한 프로젝트의 요청과 화면의 글로 선택한 모델에 판단을 요청합니다. 끄면 판단 요청을 보내지 않습니다.
                 </span>
               </span>
             </label>
@@ -4250,20 +4285,6 @@
                feature is asked at all. -->
           <details class="settings-fold settings-jev-advanced" id="typesafe-advanced">
             <summary data-i18n="settings.typesafe.advanced">고급</summary>
-            <!-- The model every Jev request names (`smart.jevModel`, t-6187):
-                 empty is the vendor's alias, a version pins it. The alias the
-                 placeholder shows is the backend's (`model.alias`), set by
-                 `paintTypeSafe`; this file spells no model. -->
-            <label class="settings-field" data-field="md" for="typesafe-model-input">
-              <span class="settings-field-copy">
-                <span class="settings-label" data-i18n="settings.typesafe.model">사용할 모델 버전</span>
-                <span class="settings-row-desc" data-i18n="settings.typesafe.modelSummary">
-                  비워 두면 늘 최신 버전을 씁니다. 버전을 적으면 그 버전으로 고정해, 새 버전이 나와도 같은 모델로 정확도를 계속 잽니다.
-                </span>
-              </span>
-              <input class="settings-input" id="typesafe-model-input" type="text"
-                     autocomplete="off" spellcheck="false" />
-            </label>
             <section aria-labelledby="summon-profiles-title">
               <h4 id="summon-profiles-title" data-i18n="settings.typesafe.profiles">난이도별 워커 모델·사고 깊이</h4>
               <p class="settings-row-desc" data-i18n="settings.typesafe.profilesHint">비워 둔 칸은 오늘 쓸 수 있는 모델 가운데서 자동으로 고릅니다(흐린 글씨가 지금 뜨는 모델입니다). 적은 칸만 그대로 쓰고, 소환에서 직접 지정한 값은 언제나 먼저입니다.</p>
@@ -4323,10 +4344,13 @@
 
           <div class="settings-status" id="typesafe-status" role="status" aria-live="polite"></div>
 
-          <div class="settings-action-row">
+          <div class="settings-action-row settings-judgment-actions">
+            <button class="btn" id="judgment-refresh-models" type="button" data-i18n="settings.judgment.refresh" disabled>모델 목록 새로고침</button>
             <button class="btn" id="typesafe-check-btn" type="button" disabled data-i18n="settings.typesafe.check">연결 확인</button>
             <button class="btn" id="typesafe-remove-btn" type="button" disabled data-i18n="settings.typesafe.remove">키 지우기</button>
-            <button class="btn btn--primary" id="typesafe-save-btn" type="button" disabled data-i18n="settings.typesafe.save">저장</button>
+            <button class="btn" id="typesafe-save-btn" type="button" disabled data-i18n="settings.judgment.saveKey">키 저장</button>
+            <button class="btn" id="judgment-revert-provider" type="button" data-i18n="settings.judgment.revert" disabled>변경 취소</button>
+            <button class="btn btn--primary" id="judgment-save-provider" type="button" data-i18n="settings.judgment.apply" disabled>판단 모델 적용</button>
           </div>
         </div>
 

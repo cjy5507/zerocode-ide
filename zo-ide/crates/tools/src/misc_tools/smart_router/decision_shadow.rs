@@ -46,6 +46,7 @@ use super::probe_exec::{remember_bounded, ProbeSlot, ProbeUse, PROBE_TIMEOUT};
 use super::settings::{decision_shadow_mode_from, DecisionShadowMode};
 use zerocode_core::jev::ROUTING;
 use zerocode_core::jev::promote::{self, Verdict};
+use zerocode_core::jev::provenance::{counts_toward_agreement, PairTally};
 use zerocode_core::jev::summary::{self as jev_ledger};
 
 use super::shadow_ledger::{append_shadow_row, last_shadow_lines, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
@@ -214,15 +215,23 @@ pub struct SystemOneCheck {
 /// carry. The memo is not consulted: a check that recalled an answer would
 /// prove nothing about the key.
 pub async fn check_system_one() -> SystemOneCheck {
-    let config = SystemOneConfig::from_env().ok();
-    let key_source = config.as_ref().map(SystemOneConfig::key_source);
+    check_system_one_for(None).await
+}
+
+pub async fn check_system_one_for(expected: Option<&str>) -> SystemOneCheck {
+    let config = SystemOneConfig::from_env_for(expected);
+    let key_source = config.as_ref().ok().and_then(SystemOneConfig::key_source);
     let unsent = |failure| SystemOneCheck {
         outcome: Err(failure),
         elapsed: Duration::ZERO,
         retries: 0,
         key_source,
     };
-    let client = config.map(SystemOneConfig::into_client);
+    let client = match config {
+        Ok(config) => Some(config.into_client()),
+        Err(SystemOneFailure::NoKey) => None,
+        Err(failure) => return unsent(CheckFailure::Wire(failure)),
+    };
     let state = runtime::routing_state(&runtime::rubric_task_whole("", KEY_CHECK_TASK), RoutingFacts::default());
     let request = runtime::routing_request(SYSTEMONE_MODEL, &state);
     let Some(body) = jev_gate::body_of(&request) else {
@@ -983,6 +992,10 @@ const LABEL_LOOKBACK_ROWS: usize = 256;
 #[serde(rename_all = "camelCase")]
 pub struct RouteLabelRow {
     pub at: u64,
+    /// Set where the turn stood on its route — it ran to its end (t-26584, ①);
+    /// a switch leaves the seat's source to stand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_source: Option<String>,
     /// The attempt this label grades — the value every routing row of that
     /// turn carries as `attempt`.
     pub label: String,
@@ -1076,6 +1089,7 @@ pub fn note_route_followed(
         agreed: None,
         baseline_agreed: None,
         not_compared: Some(UNANSWERED.to_string()),
+        label_source: unseated.is_none().then(|| "executed".to_string()),
     };
     if let Some(turn) = turn {
         grade(&mut row, turn, tail.iter().filter(|row| of_attempt(row)));
@@ -1277,26 +1291,42 @@ fn judge_rows_on(
     // The label's whole record on this version, as every seat's is read
     // (`promote::judge_seat`, t-6342).
     let record = agreement_in(&marks);
-    let verdict = promote::judge(
-        promote::standing(&ROUTING, rows),
-        &promote::Evidence {
-            window: &window,
-            floor_permille: floor,
-            deadline_ms,
-            agreement_floor_permille: agreement_floor,
-            agreement,
-            agreement_rows_wanted: ROUTING
-                .agreement_rows_wanted
-                .unwrap_or(zerocode_core::jev::A_WINDOW_OF_COMPARISONS),
-            window_forgives: ROUTING.window_forgives.unwrap_or(0),
-            labels: labels_standing(settings, &version.requests),
-            fallbacks_in_a_row: jev_ledger::failures_in_a_row_of(version.requests.iter().copied()),
-            negatives_wanted: ROUTING.negatives_wanted.unwrap_or(0),
-            disagreed_on_record: record.disagreed(),
-            baseline: ROUTING.baseline,
-            apply_share: promote::apply_share_of(held_with.iter().copied(), line),
-        },
-    );
+    let stand = promote::standing(&ROUTING, rows);
+    let gates = promote::gates_for(&ROUTING, version, rows, window_wanted, line);
+    let evidence = promote::Evidence {
+        window: &window,
+        floor_permille: floor,
+        deadline_ms,
+        agreement_floor_permille: agreement_floor,
+        agreement,
+        agreement_rows_wanted: ROUTING
+            .agreement_rows_wanted
+            .unwrap_or(zerocode_core::jev::A_WINDOW_OF_COMPARISONS),
+        window_forgives: ROUTING.window_forgives.unwrap_or(0),
+        labels: labels_standing(settings, &version.requests),
+        calibrating: gates.calibrating,
+        pairs: gates.pairs,
+        bar_reads: gates.bar_reads,
+        bundle: gates.bundle,
+        fallbacks_in_a_row: jev_ledger::failures_in_a_row_of(version.requests.iter().copied()),
+        negatives_wanted: ROUTING.negatives_wanted.unwrap_or(0),
+        disagreed_on_record: record.disagreed(),
+        baseline: ROUTING.baseline,
+        apply_share: promote::apply_share_of(held_with.iter().copied(), line),
+    };
+    // The reading before the evidence rules: every mark counted, no gate read.
+    let counted = promote::Evidence {
+        agreement: agreement_counting_all(&compared),
+        disagreed_on_record: agreement_counting_all(&marks).disagreed(),
+        calibrating: promote::Calibrating::NotRead,
+        pairs: PairTally::default(),
+        bar_reads: false,
+        bundle: None,
+        ..evidence
+    };
+    let verdict = promote::judge(stand, &evidence);
+    let before = promote::judge_without_gates(&ROUTING, stand, &counted);
+    let basis = promote::first_broken_line(&evidence).filter(|line| line.is_gate());
     Some(Judged {
         verdict,
         window,
@@ -1307,6 +1337,8 @@ fn judge_rows_on(
         model: version.model.map(str::to_string),
         cut: version.cut.map(str::to_string),
         act_line: line,
+        before,
+        basis,
     })
 }
 
@@ -1368,9 +1400,25 @@ fn with_control_rows<'a>(
 /// comparison is.
 #[must_use]
 pub fn agreement_in(rows: &[&serde_json::Value]) -> promote::Agreement {
+    agreement_over(rows, true)
+}
+
+/// [`agreement_in`] counting every mark, a proxy's and an unsourced label's
+/// included: the reading before the evidence rules (t-26584), beside it.
+fn agreement_counting_all(rows: &[&serde_json::Value]) -> promote::Agreement {
+    agreement_over(rows, false)
+}
+
+fn agreement_over(rows: &[&serde_json::Value], by_source: bool) -> promote::Agreement {
     let mut agreement = promote::Agreement::default();
     for row in rows {
         if let Some(agreed) = jev_ledger::AGREED.read(row).and_then(serde_json::Value::as_bool) {
+            // A mark a proxy or an unsourced label made is withheld from the
+            // agreement a rise may read (t-26584, ①).
+            if by_source && !counts_toward_agreement(row) {
+                agreement.proxied += 1;
+                continue;
+            }
             agreement.compared += 1;
             agreement.agreed += usize::from(agreed);
             if let Some(baseline) = jev_ledger::BASELINE_AGREED.read(row).and_then(serde_json::Value::as_bool) {

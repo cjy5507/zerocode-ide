@@ -4051,6 +4051,23 @@ function dressWorktreeLanding(row, state, phase) {
   }
 }
 
+/* One row's quota-wall chip (t-39771): a worker in this checkout stands at its
+ * wall, in the words the task board's row says it — the reset in the person's
+ * own clock, or that the wall did not say. Written only when it changed, like
+ * the git chip beside it; the chip goes when the wall stops standing, on the
+ * clock the board's strip keeps (`noteQuotaWallUntil`). */
+function dressWorktreeWall(row) {
+  const chip = row.querySelector(".wt-wall");
+  if (!chip) return;
+  const walled = worktreeQuotaWall(row.dataset.worktreePath, Date.now());
+  writeHidden(chip, !walled);
+  if (!walled) return;
+  noteQuotaWallUntil(walled.chip.stands_until_ms);
+  writeTextContent(chip, quotaWallWords(walled.chip));
+  writeAttribute(chip, "data-term", String(walled.term));
+  writeAttribute(chip, "data-tip", t("quotaWall.sidebarTip", "워커({{worker}})가 사용 한도에 걸려 멈춰 있습니다 — 눌러서 작업 상황판에서 다시 시도하거나 다른 에이전트로 넘기세요", { worker: walled.worker }));
+}
+
 /* When a lane became itself, in wall-clock ms — the ordering that answers
  * "which of these is the last one".
  *
@@ -4294,6 +4311,7 @@ function dressWorktreeDot(row, state) {
     }
   }
   dressWorktreeLanding(row, state, phase);
+  dressWorktreeWall(row);
   if (dot.dataset.state === indicator && dot.dataset.tip === label) return;
   dot.dataset.state = indicator;
   dot.className = `wt-dot is-${indicator}`;
@@ -4560,7 +4578,8 @@ function makeWorktreeNode(worktree, held) {
     '<span class="wt-titlebox">' +
     '<span class="wt-topline"><span class="wt-title"></span><span class="wt-default"></span>' +
     '<span class="wt-phase" aria-hidden="true"></span>' +
-    '<span class="wt-landing" aria-hidden="true"></span></span>' +
+    '<span class="wt-landing" aria-hidden="true"></span>' +
+    '<button class="wt-wall" type="button" hidden></button></span>' +
     '<span class="wt-branch"></span>' +
     '</span>';
 
@@ -4571,6 +4590,13 @@ function makeWorktreeNode(worktree, held) {
     if (!event.currentTarget.dataset.cleanable) return;
     event.stopPropagation();
     openCleanup();
+  });
+  // 한도 대기 is the way to the worker on the task board, where its two
+  // buttons are (t-39771) — never a press of its own.
+  row.querySelector(".wt-wall").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const term = Number(event.currentTarget.dataset.term);
+    if (Number.isInteger(term)) void revealTaskBoardPane(term);
   });
   const branch = row.querySelector(".wt-branch");
   // Always, not only when a custom label differs: Orca's card carries its

@@ -365,10 +365,11 @@ fn a_label_row_is_not_counted_as_a_request() {
     let tally = summary::summarize(&rows, 0);
     assert_eq!(tally.rows, 3, "three requests, three labels");
     assert_eq!(tally.answered, 3);
-    // And the judge still reads every mark.
-    let judged = zerocode_core::jev::promote::judge_seat(&SKILLS, &rows).expect("a rising seat");
-    assert_eq!(judged.agreement.compared, 3);
-    assert_eq!(judged.agreement.agreed, 2);
+    // The judge reads every mark, and a skill's first load is a comparison, a
+    // structural proxy (t-26584, ①): all three are withheld, none agreed.
+    let judged = zerocode_core::jev::promote::judge_seat(&SKILLS, &rows).expect("a judged seat");
+    assert_eq!(judged.agreement.compared, 0);
+    assert_eq!(judged.agreement.proxied, 3);
 }
 
 /// The path is the use table's: a ledger the summary looks for by name.
@@ -519,7 +520,7 @@ fn ledger_with(path: &Path, rows: &[Value]) {
 }
 
 #[test]
-fn a_search_label_that_completes_the_evidence_records_its_rise() {
+fn a_search_label_that_completes_the_evidence_is_a_proxy_and_raises_nothing() {
     let root = tempfile::tempdir().expect("a temp root");
     let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
     let cwd = root.path().canonicalize().expect("a canonical root");
@@ -543,12 +544,13 @@ fn a_search_label_that_completes_the_evidence_records_its_rise() {
     note_search_answer(&cwd, &[String::from("docx")], &baseline, 1, request);
     note_loaded_skill(&cwd, "docx");
 
-    assert!(runtime::jev_seat_applies(&cwd, &SKILLS), "the writer must judge the evidence it completed");
+    // The completing label is the search's own, a proxy: it completes nothing (ADR-171).
+    assert!(!runtime::jev_seat_applies(&cwd, &SKILLS), "a proxy label raises no seat");
     assert!(!runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION));
 }
 
 #[test]
-fn a_suggestion_label_that_completes_the_evidence_records_its_own_rise() {
+fn a_suggestion_label_that_completes_the_evidence_is_a_proxy_and_raises_nothing() {
     let root = tempfile::tempdir().expect("a temp root");
     let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
     let cwd = root.path().canonicalize().expect("a canonical root");
@@ -568,7 +570,7 @@ fn a_suggestion_label_that_completes_the_evidence_records_its_own_rise() {
     note_loaded_skill(&cwd, "docx");
     finish_turn_suggestion(&cwd, &[]);
 
-    assert!(runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION), "the writer must judge its own seat");
+    assert!(!runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION), "a proxy label raises no seat");
     assert!(!runtime::jev_seat_applies(&cwd, &SKILLS));
 }
 
@@ -758,7 +760,7 @@ fn a_rise_decided_on_two_questions_stands_for_neither() {
 /// take it up through the one judge, and the rise it writes names its
 /// words alone.
 #[test]
-fn the_suggestion_rises_on_its_own_ledger_and_stands_on_nothing_of_the_searchs() {
+fn the_suggestion_holds_on_its_own_proxy_ledger_and_stands_on_nothing_of_the_searchs() {
     use zerocode_core::jev::promote::{Verdict, ROSE};
     use zerocode_core::jev::summary::TRANSITION;
     let root = tempfile::tempdir().expect("a temp root");
@@ -781,13 +783,15 @@ fn the_suggestion_rises_on_its_own_ledger_and_stands_on_nothing_of_the_searchs()
     // Its own full window and marks: judged, and up.
     std::fs::remove_file(&ledger).expect("start over");
     ledger_with(&ledger, &skills_window_that_rises(&SKILL_SUGGESTION, SKILL_SUGGESTION.rubric_version, 1_000, 10_000));
+    // Its marks are proxies: the suggestion's own window holds it and writes no rise (ADR-171).
     let verdict = super::super::shadow_ledger::judge_seat_ledger(&SKILL_SUGGESTION, &ledger, 99_999);
-    assert_eq!(verdict, Some(Verdict::Rise), "the suggestion's own window and marks");
+    assert!(
+        matches!(verdict, Some(Verdict::Hold(zerocode_core::jev::promote::Line::ProxyOnly { .. }))),
+        "the suggestion's own proxy window and marks: {verdict:?}"
+    );
     let rows = super::super::jev_summary::read_rows(&ledger);
-    let written: Vec<&Value> = rows.iter().filter(|row| TRANSITION.read(row).is_some()).collect();
-    assert_eq!(written.len(), 1);
-    assert_eq!(written[0]["rubricVersions"], json!([SKILL_SUGGESTION.rubric_version]), "the rise names the suggestion's words");
-    assert!(runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION));
+    assert!(rows.iter().all(|row| TRANSITION.read(row).is_none()), "a proxy-only seat writes no rise");
+    assert!(!runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION));
     assert!(runtime::jev_seat_applies(&cwd, &SKILLS), "and the search stands where it stood");
 }
 
@@ -876,8 +880,10 @@ fn judging_a_skill_label_does_not_invent_a_missing_baseline() {
     note_search_answer(&cwd, &[String::from("docx")], &[String::from("docx")], 1, request);
     note_loaded_skill(&cwd, "docx");
     let recorded = super::super::jev_summary::read_rows(&ledger);
+    // The completing label is a proxy (ADR-171), so the judge holds on the
+    // proxy line before any baseline is read.
     assert!(matches!(judge_seat(&SKILLS, &recorded).expect("judged").verdict,
-        Verdict::Hold(Line::TooFewBaseline { compared: 1, .. })));
+        Verdict::Hold(Line::ProxyOnly { .. })));
     assert!(!runtime::jev_seat_applies(&cwd, &SKILLS));
 }
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.58] — 2026-10-12
+- A request from a pane the person is not looking at rings again: the watched-screen rule now asks whether the ringing pane is on the main window's stage, so another tab of the same worktree no longer silences the bell (t-47525).
+- A worker at a quota wall wears a 「한도 대기 · HH:MM 재개 예정」 chip in the sidebar and on the board, and the person can press 「지금 다시 시도」 or 「다른 에이전트로 넘기기」 after a confirmation; the press re-reads the wall and never seats two replacements (T3 stage 5, t-42448).
+- The judgment provider — Jev, a local model or a remote server — is chosen in settings; keys stay in the keychain, and the tier judgment's kept memory is isolated per backend so a change of backend asks again instead of reusing an old answer or a 402 (t-47023).
+- A terminal asked for while a browser is in front stands beside it instead of opening as a far tab, so ⌘T and the new-terminal door no longer show two terminals at once (t-45285).
+- Jev's judgments carry their evidence: a label from a proxy or with no source cannot raise a seat, a rise needs thirty paired records with calibration, and the false-on rate in the synthetic ledger goes 6/8 → 0/8 (t-26584).
+- An artifact evidence card without a task keeps its kind word (t-47423).
+- The window never forks a child: one given a PATH of its own is named by the door that resolves it on that PATH, so the three-hour "this window is busy" from a fork stuck in CEF's atfork handler cannot recur (t-47141).
+- zo-ide's Windows verify leg runs again and a protected owner-only folder DACL inherits, so what is already inside keeps the user's access; a batch of Windows-only fixes rode along — paths, globs, hook quoting, append at the end of a file (t-43412).
+- Model tiers and summons difficulty are judged instead of hard-coded: Jev ranks models from facts and outcomes, a declined judgment is remembered for an hour by its facts, a new model places itself, and a summons without a judgment no longer falls silently to Haiku (t-45961).
+- Tests: the Jev settings card contract counts the provider selector; the quota-wall desk check reads the row after the roster painted.
+
 ## [1.1.57] — 2026-10-11
 - A PR notice toast says its condition once and leaves on its own; closing it is remembered across restarts, and a standing condition lives in a status-bar mark (PR 조건 N) whose tooltip names the PR and the checkout. The "mail not typed into terminal N" toast also fires once per condition (t-45801).
 - A Claude account switch moves every worker pane to the new account without a window restart: idle panes move at once, working panes at their next turn end, a pane the person took over stays and is marked 「사람이 쓰는 중」; the status bar shows the default account and each sidebar row its pane's account and share (t-46106).

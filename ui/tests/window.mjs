@@ -42,6 +42,7 @@ import { testArtifactCards } from "./artifact-cards.mjs";
 import { testArtifactTasks } from "./artifact-tasks.mjs";
 import { testAgentSupport } from "./agent-support.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
+import { testQuotaWallChip } from "./quota-wall-chip.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
 import { testBoardLive } from "./board-live.mjs";
@@ -258,6 +259,7 @@ suite("artifact-tasks", ({ browser, origin, ok }) => testArtifactTasks(browser, 
 suite("agent-support", ({ browser, origin, ok }) => testAgentSupport(browser, origin, ok));
 // The coordinator's desk above the task list (t-6588, docs/design/agent-board-round4.md).
 suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));
+suite("quota-wall-chip", testQuotaWallChip);
 suite("coordinator-desk-layout", ({ browser, origin, ok }) => testCoordinatorDeskLayout(browser, origin, ok));
 suite("agent-relations", async ({ browser, origin, ok }) => {
   await testAgentRelations(browser, origin, ok);

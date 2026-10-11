@@ -130,10 +130,13 @@ fn the_places_a_command_names_outside_its_task_are_the_ones_stamped() {
         cwd,
         cwd,
     );
-    assert_eq!(
-        outside,
-        vec![home.join("scratch"), cwd.join("../sibling/keep"), PathBuf::from("/etc/zo.log")]
-    );
+    // The shared temporary folder is scratch (the rule above): a home that sits
+    // under it, as a build job's temporary home does, has its own `scratch` there.
+    let mut expected = vec![home.join("scratch"), cwd.join("../sibling/keep"), PathBuf::from("/etc/zo.log")];
+    if home.starts_with(zerocode_core::jev::tool_guard::SHARED_TEMP_DIR) {
+        expected.remove(0);
+    }
+    assert_eq!(outside, expected);
     assert_eq!(
         named_places("echo x 2>>'/etc/a b' > out.txt; ls -la"),
         vec!["x".to_string(), "/etc/a".to_string(), "b".to_string(), "out.txt".to_string()]
@@ -936,8 +939,8 @@ fn a_rubric_change_returns_a_risen_seat_to_recording() {
 /// says rise, and the transition it writes names the rubric it was decided
 /// on.
 #[test]
-fn todays_words_rise_again_on_their_own_sample() {
-    use zerocode_core::jev::promote::{Verdict, ROSE};
+fn todays_words_do_not_rise_on_their_own_proxy_sample() {
+    use zerocode_core::jev::promote::{Line, Verdict, ROSE};
     use zerocode_core::jev::summary::TRANSITION;
     let (today, before) = today_and_before();
     machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |_| {
@@ -945,13 +948,16 @@ fn todays_words_rise_again_on_their_own_sample() {
         rows.push(serde_json::json!({"at": 5_000, (TRANSITION.canonical): ROSE, "rubricVersions": [before]}));
         rows.extend(guard_window_that_rises(today, 1_000, 10_000));
         let ledger = guard_ledger_with(&rows);
+        // Today's marks are the guard's later observations: proxies, which hold
+        // the guard and raise it on nothing (ADR-171, t-26584 ①).
         let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
-        assert_eq!(verdict, Some(Verdict::Rise), "today's own window and marks");
+        assert!(
+            matches!(verdict, Some(Verdict::Hold(Line::ProxyOnly { .. }))),
+            "today's own window and proxy marks: {verdict:?}"
+        );
         let written = transitions_in(&ledger);
-        assert_eq!(written.len(), 2, "the older words' rise, and now today's");
-        assert_eq!(TRANSITION.read(&written[1]).and_then(Value::as_str), Some(ROSE));
-        assert_eq!(written[1]["rubricVersions"], serde_json::json!([today]), "the transition names its rubric");
-        assert!(guard_applies(&TOOL_TEXT_GUARD));
+        assert_eq!(written.len(), 1, "only the older words' rise is written");
+        assert!(!guard_applies(&TOOL_TEXT_GUARD), "the older words' rise does not stand for today's");
     });
 }
 

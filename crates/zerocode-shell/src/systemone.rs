@@ -30,6 +30,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jev_socket::{Lent, Socket};
+use judgment_provider::{MAX_RESPONSE_BYTES, Prepared, Provider, ProviderKind};
 use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
@@ -45,6 +46,7 @@ use crate::api_routers::{Keychain, RouterKeys};
 /// built with it, and the door writes the person's pin over it
 /// ([`door::may_send`]).
 pub const SYSTEMONE_BASE_URL: &str = "https://api.typesafe.ai";
+#[cfg(test)]
 pub const SYSTEMONE_PATH: &str = "/v1/systemone";
 pub const SYSTEMONE_MODEL: &str = zerocode_core::jev::DEFAULT_MODEL;
 
@@ -133,7 +135,12 @@ pub fn ledger_of(wire: &Wire, row: &JevUse) -> Option<PathBuf> {
 /// is kept.
 #[must_use]
 pub fn requests_file(wire: &Wire, name: &str) -> Option<PathBuf> {
-    Some(wire.config_home()?.join(count::REQUESTS_DIR).join(name))
+    Some(
+        wire.provider()
+            .ok()?
+            .evidence_dir(&wire.config_home()?.join(count::REQUESTS_DIR))
+            .join(name),
+    )
 }
 
 /// Where zo keeps one project's rows of a seat it keeps per project — the
@@ -145,14 +152,13 @@ pub fn requests_file(wire: &Wire, name: &str) -> Option<PathBuf> {
 /// rows land in the file zo writes from the same folder.
 #[must_use]
 pub fn project_ledger_of(wire: &Wire, row: &JevUse, workspace: &Path) -> Option<PathBuf> {
-    Some(
-        wire.config_home()?
-            .join(crate::jev_scope::ZO_PROJECTS_DIR)
-            .join(zerocode_core::zo_project::project_slug(workspace))
-            .join(crate::jev_scope::ZO_PROJECT_STATE_DIR)
-            .join(crate::jev_scope::JEV_LEDGER_DIR)
-            .join(row.ledger),
-    )
+    let base = wire
+        .config_home()?
+        .join(crate::jev_scope::ZO_PROJECTS_DIR)
+        .join(zerocode_core::zo_project::project_slug(workspace))
+        .join(crate::jev_scope::ZO_PROJECT_STATE_DIR)
+        .join(crate::jev_scope::JEV_LEDGER_DIR);
+    Some(wire.provider().ok()?.evidence_dir(&base).join(row.ledger))
 }
 
 /// Where the judgment memo lives: one file beside the seats' ledgers and the
@@ -341,7 +347,13 @@ fn append_rows_inner(ledger: &Path, rows: &[Value], durable: bool) -> std::io::R
     }
     let mut said = String::new();
     for row in rows {
-        said.push_str(&row.to_string());
+        if zerocode_core::jev::provenance::needs_source(row) {
+            let mut stamped = row.clone();
+            zerocode_core::jev::provenance::stamp_for_ledger(ledger, &mut stamped);
+            said.push_str(&stamped.to_string());
+        } else {
+            said.push_str(&row.to_string());
+        }
         said.push('\n');
     }
     ledger
@@ -506,7 +518,7 @@ pub struct Asked {
 #[derive(Clone)]
 enum KeySource {
     /// Read already, when the wire was made.
-    Read(Option<String>),
+    Read { name: String, key: Option<String> },
     /// This machine's keychain, read only when a question is asked — a beat
     /// that builds a wire and asks nothing never touches the keychain.
     Keychain,
@@ -558,17 +570,30 @@ impl Wire {
     /// empty item are both "no key": nothing is sent either way.
     #[must_use]
     pub fn new(keys: &dyn RouterKeys) -> Self {
-        Self {
-            keys: KeySource::Read(trimmed(
-                keys.read(&crate::typesafe_settings::typesafe_keychain_service())
-                    .ok()
-                    .flatten(),
-            )),
+        let mut wire = Self {
+            keys: KeySource::Read {
+                name: String::new(),
+                key: None,
+            },
             base: base_url(),
             settings: crate::api_routers::zo_settings_path(),
             socket: &SOCKET,
             review_origin: None,
+        };
+        if let Ok(provider) = wire.provider() {
+            let name = provider.key_env().into_owned();
+            let service = format!(
+                "{}{name}",
+                zerocode_harness::SERVICE_KEYCHAIN_SERVICE_PREFIX
+            );
+            let key = if provider.requires_auth {
+                trimmed(keys.read(&service).ok().flatten())
+            } else {
+                None
+            };
+            wire.keys = KeySource::Read { name, key };
         }
+        wire
     }
 
     /// This machine's wire, reading nothing yet: the keychain when a question
@@ -590,13 +615,23 @@ impl Wire {
     #[cfg(test)]
     #[must_use]
     pub fn at(base: &str, key: &str, settings: Option<PathBuf>) -> Self {
-        Self {
-            keys: KeySource::Read(trimmed(Some(key.to_string()))),
+        let mut wire = Self {
+            keys: KeySource::Read {
+                name: String::new(),
+                key: None,
+            },
             base: base.trim().to_string(),
             settings,
             socket: &SOCKET,
             review_origin: None,
+        };
+        if let Ok(provider) = wire.provider() {
+            wire.keys = KeySource::Read {
+                name: provider.key_env().into_owned(),
+                key: trimmed(Some(key.to_string())),
+            };
         }
+        wire
     }
 
     /// This wire, riding `socket` rather than the window's: how a test
@@ -609,14 +644,40 @@ impl Wire {
         self
     }
 
-    /// The key, read now.
-    #[must_use]
-    pub fn key(&self) -> Option<String> {
+    fn socket_for(&self, provider: &Provider) -> &'static Socket<reqwest::Client> {
+        if provider.kind == ProviderKind::Local && std::ptr::eq(self.socket, &SOCKET) {
+            &LOCAL_SOCKET
+        } else {
+            self.socket
+        }
+    }
+
+    fn provider(&self) -> Result<Provider, judgment_provider::Refusal> {
+        let mut provider = self
+            .settings
+            .as_deref()
+            .map_or_else(|| Provider::from_root(&Value::Null), Provider::read)?;
+        if provider.kind == ProviderKind::Jev {
+            provider.base_url.clone_from(&self.base);
+        }
+        Ok(provider)
+    }
+
+    fn key_for(&self, provider: &Provider) -> Option<String> {
+        if !provider.requires_auth {
+            return None;
+        }
+        let wanted = provider.key_env();
         match &self.keys {
-            KeySource::Read(key) => key.clone(),
+            KeySource::Read { name, key } => {
+                (name == wanted.as_ref()).then(|| key.clone()).flatten()
+            }
             KeySource::Keychain => trimmed(
                 Keychain::of_this_machine()
-                    .read(&crate::typesafe_settings::typesafe_keychain_service())
+                    .read(&format!(
+                        "{}{wanted}",
+                        zerocode_harness::SERVICE_KEYCHAIN_SERVICE_PREFIX
+                    ))
                     .ok()
                     .flatten(),
             ),
@@ -626,7 +687,8 @@ impl Wire {
     /// Whether this wire can ask at all.
     #[must_use]
     pub fn armed(&self) -> bool {
-        self.key().is_some()
+        self.provider()
+            .is_ok_and(|provider| provider.ready_with_key(self.key_for(&provider).as_deref()))
     }
 
     /// The person's settings document, read now — `Null` when there is no
@@ -732,17 +794,20 @@ impl Wire {
     /// nothing — also remembers nothing, and the first warm-up after a key
     /// is finally typed is not skipped as though it had already run.
     pub fn warm(&self) {
-        if self.key().is_none() {
-            return;
-        }
-        let Some(lent) = self.socket.lend() else {
+        let Ok(provider) = self.provider() else {
             return;
         };
-        let base = self.origin().to_string();
+        if !provider.ready_with_key(self.key_for(&provider).as_deref()) {
+            return;
+        }
+        let socket = self.socket_for(&provider);
+        let Some(lent) = socket.lend() else {
+            return;
+        };
+        let base = provider.base_url;
         if !warm_due(&base) {
             return;
         }
-        let socket = self.socket;
         tauri::async_runtime::spawn(async move {
             let warmed = lent
                 .client
@@ -756,11 +821,6 @@ impl Wire {
                 let_go(socket, &lent, &base);
             }
         });
-    }
-
-    /// The origin this wire asks, as the pool and the warm-up record key it.
-    fn origin(&self) -> &str {
-        self.base.trim_end_matches('/')
     }
 
     /// One question of `row`'s about words from `workspace`, whole: the door,
@@ -876,16 +936,33 @@ impl Wire {
             memo: None,
             waited: began.elapsed(),
         };
-        let key = self.key();
-        let passed = match self.pass(row, key.is_some(), workspace, body, memo) {
+        let provider = match self.provider() {
+            Ok(provider) => provider,
+            Err(reason) => {
+                return Asked {
+                    answer: Err(reason.token().to_string()),
+                    spent: Spent::default(),
+                    request_bytes: 0,
+                    memo: None,
+                    waited: began.elapsed(),
+                };
+            }
+        };
+        let key = self.key_for(&provider);
+        let passed = match self.pass(
+            row,
+            provider.ready_with_key(key.as_deref()),
+            workspace,
+            body,
+            memo,
+        ) {
             Ok(passed) => passed,
             Err(refusal) => return refused(refusal),
         };
-        // The door refuses a keyless request before anything else it asks.
-        let Some(key) = key else {
-            return refused(Refused::NoKey);
-        };
         let (Passed { cleared, memo }, allowed, mode) = passed;
+        if allowed.model != provider.identity() {
+            return refused(Refused::SettingsChanged);
+        }
         let request_bytes = cleared.bytes().len();
         let redacted_lines = cleared.withheld_lines();
         if let Some(remembered) = memo
@@ -918,8 +995,28 @@ impl Wire {
         // off the beat has a thread of its own — and blocks on the window's
         // runtime the same way.
         let review = cleared.prepare_review();
-        let (answer, version) =
-            tauri::async_runtime::block_on(self.ask_once(&key, cleared, deadline));
+        let prepared = match provider.prepare(cleared.into_bytes()) {
+            Ok(prepared) => prepared,
+            Err(reason) => {
+                return Asked {
+                    answer: Err(reason.token().to_string()),
+                    spent: Spent {
+                        redacted_lines,
+                        ..Spent::default()
+                    },
+                    request_bytes,
+                    memo,
+                    waited: began.elapsed(),
+                };
+            }
+        };
+        let request_bytes = prepared.body.len();
+        let (answer, version) = tauri::async_runtime::block_on(self.ask_once(
+            &provider,
+            key.as_deref(),
+            prepared,
+            deadline,
+        ));
         if let (Some(review), Ok(body)) = (review, &answer)
             && let Ok(response) = serde_json::from_str::<Value>(body)
         {
@@ -970,54 +1067,80 @@ impl Wire {
     /// response came back on — `None` when none came back.
     async fn ask_once(
         &self,
-        key: &str,
-        cleared: door::Cleared,
+        provider: &Provider,
+        key: Option<&str>,
+        mut prepared: Prepared,
         deadline: Instant,
     ) -> (Result<String, String>, Option<String>) {
         if Instant::now() >= deadline {
             return (Err(TIMEOUT.to_string()), None);
         }
-        let Some(lent) = self.socket.lend() else {
+        let Some(lent) = self.socket_for(provider).lend() else {
             return (Err(TRANSPORT.to_string()), None);
         };
-        let url = format!("{}{SYSTEMONE_PATH}", self.origin());
+        let url = provider.request_url();
         // Key/consent checks, runtime startup and client construction spend
         // this call's budget too; the socket never starts a fresh deadline.
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return (Err(TIMEOUT.to_string()), None);
         };
-        let sent = lent
+        let request = lent
             .client
             .post(&url)
             .timeout(remaining)
-            .header("Authorization", format!("Bearer {key}"))
             .header("Content-Type", "application/json")
-            .body(cleared.into_bytes())
-            .send()
-            .await;
-        let answer = match sent {
+            .body(std::mem::take(&mut prepared.body));
+        let request = if let Some(key) = key {
+            request.bearer_auth(key)
+        } else {
+            request
+        };
+        let sent = request.send().await;
+        let mut answer = match sent {
             Ok(answer) => answer,
-            Err(err) => return (Err(self.unanswered(&lent, &err)), None),
+            Err(err) => return (Err(self.unanswered(&lent, &err, provider)), None),
         };
         let version = Some(version_word(answer.version()));
         let status = answer.status();
         if !status.is_success() {
             return (Err(token_for(status.as_u16())), version);
         }
-        // The body is read inside the same deadline the request was given.
-        let body = answer
-            .text()
-            .await
-            .map_err(|err| self.unanswered(&lent, &err));
-        (body, version)
+        let mut bytes = Vec::new();
+        loop {
+            let chunk = match answer.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    return (Err(self.unanswered(&lent, &error, provider)), version);
+                }
+            };
+            if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+                return (
+                    Err(judgment_provider::Refusal::TooLarge.token().to_string()),
+                    version,
+                );
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        (
+            provider
+                .decode(&prepared, bytes)
+                .map_err(|reason| reason.token().to_string()),
+            version,
+        )
     }
 
     /// The word a question nothing came back for is refused with — its
     /// deadline passed or its socket broke — having let go of the client it
     /// rode, so the question after it opens a connection of its own. A
     /// status, any status, is an answer from the server and never lands here.
-    fn unanswered(&self, lent: &Lent<reqwest::Client>, err: &reqwest::Error) -> String {
-        let_go(self.socket, lent, self.origin());
+    fn unanswered(
+        &self,
+        lent: &Lent<reqwest::Client>,
+        err: &reqwest::Error,
+        provider: &Provider,
+    ) -> String {
+        let_go(self.socket_for(provider), lent, &provider.base_url);
         failure(err)
     }
 }
@@ -1099,16 +1222,23 @@ fn let_go(socket: &Socket<reqwest::Client>, lent: &Lent<reqwest::Client>, origin
 /// go ([`let_go`]), and the next one opens a connection of its own. No client
 /// at all, one that cannot be built, is refused as `transport`.
 static SOCKET: Socket<reqwest::Client> = Socket::new(built);
+static LOCAL_SOCKET: Socket<reqwest::Client> = Socket::new(local_built);
 
 /// A client as the wire's socket builds one. Its idle window is
 /// [`POOL_IDLE`], named rather than inherited so a warm-up can be skipped on
 /// the same number the socket lives by.
 fn builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().pool_idle_timeout(POOL_IDLE)
+    reqwest::Client::builder()
+        .pool_idle_timeout(POOL_IDLE)
+        .redirect(reqwest::redirect::Policy::none())
 }
 
 fn built() -> Option<reqwest::Client> {
     builder().build().ok()
+}
+
+fn local_built() -> Option<reqwest::Client> {
+    builder().no_proxy().build().ok()
 }
 
 /// An HTTP version as a row keeps it: the `http` crate's own spelling

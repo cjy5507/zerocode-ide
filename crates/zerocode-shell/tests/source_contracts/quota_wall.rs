@@ -252,8 +252,10 @@ fn the_handover_walk_is_three_argv_steps_through_the_one_door_in_order() {
     // The recap is read while the walled pane still stands: ② closes it, and
     // with it the window's record of which transcript was the worker's.
     let recapped = at(".predecessor_tail(plan)");
-    let stopped = at("\"worker-stop\".to_string()");
-    let started = at("\"worker-start\".to_string()");
+    // ② and ③ are built by the two builders a person's press on a quota-wall
+    // chip builds them with too (t-39771): one spelling of each verb.
+    let stopped = at("handover_stop_argv(");
+    let started = at("handover_start_argv(");
     // The LAST settle: the first is the `failed` closure, defined before the
     // steps so a refused step can settle without repeating itself.
     let settled = walk
@@ -268,16 +270,38 @@ fn the_handover_walk_is_three_argv_steps_through_the_one_door_in_order() {
         "the steps are out of order:\n{walk}"
     );
     for needed in [
-        "\"--retry-of\".to_string()",
-        "\"--inherit-checkout\".to_string()",
-        "\"--reason\".to_string()",
-        "plan.cause.reason().to_string()",
-        "\"--retry-request\".to_string()",
+        "plan.cause.reason()",
         "handover_paragraph(plan,",
         "actor.handover_step(",
         "HANDOVER_STEPS",
     ] {
         assert!(walk.contains(needed), "the handover walk lost `{needed}`");
+    }
+    let stop = super::support::block_after(&orchestration, "pub(crate) fn handover_stop_argv(");
+    for needed in [
+        "\"worker-stop\".to_string()",
+        "\"--reason\".to_string()",
+        "reason.to_string()",
+        "\"--retry-request\".to_string()",
+        "format!(\"handover-{dispatch}-stop\")",
+    ] {
+        assert!(
+            stop.contains(needed),
+            "the stop's argv lost `{needed}`:\n{stop}"
+        );
+    }
+    let start = super::support::block_after(&orchestration, "pub(crate) fn handover_start_argv(");
+    for needed in [
+        "\"worker-start\".to_string()",
+        "\"--retry-of\".to_string()",
+        "\"--inherit-checkout\".to_string()",
+        "\"--retry-request\".to_string()",
+        "format!(\"handover-{dispatch}-start\")",
+    ] {
+        assert!(
+            start.contains(needed),
+            "the start's argv lost `{needed}`:\n{start}"
+        );
     }
     for forbidden in [
         ".end_attempt(",
@@ -326,12 +350,23 @@ fn the_handover_walk_is_three_argv_steps_through_the_one_door_in_order() {
             && reasons.contains("Self::ClassifierDecline { .. } => \"classifier-decline\""),
         "a handover's stop lost its cause's word:\n{reasons}"
     );
-    let plan = super::support::block_after(&core, "fn handover_candidate<");
+    // What every handover keeps — the beat's walk and a person's press on a
+    // quota-wall chip alike (t-39771) — in the one rule both read.
+    let eligible = super::support::block_after(&core, "fn handover_eligible<");
     for needed in [
         "dispatch.is_open()",
         "worker.taken_over",
         "handover_consumes_attempt",
         "QUOTA_POLICY.handover_max",
+    ] {
+        assert!(
+            eligible.contains(needed),
+            "the eligibility rule lost `{needed}`:\n{eligible}"
+        );
+    }
+    let plan = super::support::block_after(&core, "fn handover_candidate<");
+    for needed in [
+        "handover_eligible(run, dispatch_id)?",
         // The ladder's earlier rungs hold it (t-6427) — the wait rung is a
         // wall's own, so a classifier decline skips it (t-6747).
         "news == MessageKind::QuotaWalled",
@@ -668,4 +703,205 @@ fn the_pointer_reads_a_panes_wall_once_where_it_would_type_a_fresh_line() {
         window.contains("wall_window(observed_at_ms, resets_at_ms)"),
         "the pane's wall no longer reads the ledger row's window:\n{window}"
     );
+}
+
+/// Every Rust source under `dir` a build ships — test files and `tests/`
+/// folders left out — as `(path, text)`, the path with `/` separators.
+fn shipped_rust_sources(dir: &Path, into: &mut Vec<(String, String)>) {
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|why| panic!("{}: {why}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("a directory entry").path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if path.is_dir() {
+            if name != "tests" && name != "target" {
+                shipped_rust_sources(&path, into);
+            }
+        } else if name.ends_with(".rs") && name != "tests.rs" && !name.ends_with("_tests.rs") {
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|why| panic!("{}: {why}", path.display()));
+            into.push((path.to_string_lossy().replace('\\', "/"), text));
+        }
+    }
+}
+
+/// t-39771, the coordinator's conditions on a person's press at a quota wall
+/// (m-39799). ① The marker a press stands on is the window's press's alone:
+/// its source, its builder and its key are named in the core's definition and
+/// in the press's own file, and in no other shipped source — no verb the CLI
+/// plans, no beat, no hook and no worker endpoint can build one — and the two
+/// commands that press are the main window's, called by the renderer only
+/// after the person's yes. ③ A press hands over with the walk's own two verbs
+/// from the builders the walk uses, and a retry is licensed, planned and
+/// reserved before it types through the pointer's door; both stand in the
+/// account switch's line without waiting inside it.
+#[test]
+fn a_persons_press_at_a_wall_is_the_main_windows_alone_and_walks_the_beats_verbs() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut sources = Vec::new();
+    shipped_rust_sources(&crates, &mut sources);
+    assert!(
+        sources.len() > 100,
+        "the walk read {} sources — it is not reading the workspace",
+        sources.len()
+    );
+    let allowed = [
+        "zerocode-core/src/orchestration.rs",
+        "zerocode-shell/src/orchestration/wall_press.rs",
+    ];
+    let mut named = 0;
+    for (path, text) in &sources {
+        let code = super::support::strip_rust_comments(text);
+        for name in ["PERSON_MARKER_SOURCE", "person_wall_marker", "\"person:"] {
+            if !code.contains(name) {
+                continue;
+            }
+            named += 1;
+            assert!(
+                allowed.iter().any(|one| path.ends_with(one)),
+                "`{name}` is named in {path}: a person's marker is built by the window's press alone"
+            );
+        }
+    }
+    assert!(
+        named >= 4,
+        "the marker's names are gone from the core and the press"
+    );
+    let core = core_source("orchestration.rs");
+    let planner = super::support::block_after(&core, "fn plan_inner(");
+    for forbidden in [
+        "TransientErrorMarker",
+        "resume_begin(",
+        "PERSON_MARKER_SOURCE",
+    ] {
+        assert!(
+            !planner.contains(forbidden),
+            "a verb the CLI plans reaches `{forbidden}`:\n{planner}"
+        );
+    }
+    let built = super::support::block_after(&core, "fn person_marker_at(");
+    assert!(
+        built.contains("source: PERSON_MARKER_SOURCE.to_string()")
+            && built.contains("person_wall_key(dispatch_id, &wall.wall)"),
+        "the marker's key no longer names its attempt and its wall:\n{built}"
+    );
+    let plan = super::support::block_after(&core, "pub fn resume_plan(");
+    assert!(
+        plan.contains("person_wall_key(&dispatch.id, &wall.wall) != marker.key"),
+        "a press is honoured for a wall the attempt does not stand at now:\n{plan}"
+    );
+
+    let orchestration = shell_source("orchestration.rs");
+    let tick = super::support::block_after(&orchestration, "pub(crate) fn tick(");
+    assert!(
+        !tick.contains("wall_press") && !tick.contains("quota_wall_retry"),
+        "the beat reaches a person's press:\n{tick}"
+    );
+    for (path, text) in &sources {
+        if text.contains("wall_press::") {
+            assert!(
+                path.ends_with("zerocode-shell/src/cmd/board.rs"),
+                "a person's press is reached from {path}, not from the window's two commands"
+            );
+        }
+    }
+    let board = shell_source("cmd/board.rs");
+    for door in [
+        "pub(crate) async fn quota_wall_retry(",
+        "pub(crate) async fn quota_wall_handover(",
+    ] {
+        let body = super::support::block_after(&board, door);
+        let main_only = body
+            .find("crate::from_the_main_webview(&webview)?")
+            .unwrap_or_else(|| panic!("`{door}` is open beyond the main window:\n{body}"));
+        let pressed = body.find("wall_press::").expect("the press");
+        assert!(
+            main_only < pressed && body.contains("spawn_blocking"),
+            "`{door}` presses before it proves the main window, or on the main thread:\n{body}"
+        );
+    }
+
+    let press = shell_source("orchestration/wall_press.rs");
+    let retry = super::support::block_after(&press, "pub(crate) fn retry(");
+    let at = |needle: &str| {
+        retry
+            .find(needle)
+            .unwrap_or_else(|| panic!("the retry lost `{needle}`:\n{retry}"))
+    };
+    let chip = at("standing_chip(run_id, worker_id, now_ms)?");
+    let licensed = at("composer_at_rest(host, term, heard)");
+    let planned = at("resume_plan(walled, worker_id, &marker, now_ms)");
+    let lined = at("crate::account_switch::unless_switching(");
+    let reserved = at(".resume_begin(plan.clone(), now_ms)");
+    let typed = at("host.point(term, WALL_RETRY_LINE, true)");
+    assert!(
+        chip < licensed
+            && licensed < planned
+            && planned < lined
+            && lined < reserved
+            && reserved < typed,
+        "the retry types before it is read again, licensed, planned or reserved:\n{retry}"
+    );
+    for forbidden in [".send(", ".paste(", "type_prompt_at_term("] {
+        assert!(
+            !retry.contains(forbidden),
+            "the retry types around the pointer's guarded door: `{forbidden}`"
+        );
+    }
+    let hand = super::support::block_after(&press, "pub(crate) fn hand_over(");
+    let at = |needle: &str| {
+        hand.find(needle)
+            .unwrap_or_else(|| panic!("the handover lost `{needle}`:\n{hand}"))
+    };
+    let chip = at("standing_chip(run_id, worker_id, now_ms)?");
+    let quiet = at("host.quiet_since(term, worker.started_ms, now_ms)");
+    let recapped = at(".predecessor_tail(&plan)");
+    let lined = at("crate::account_switch::unless_switching(");
+    let stopped = at("handover_stop_argv(&plan.worker, plan.cause.reason(), &plan.dispatch)");
+    let started = at("handover_start_argv(&plan.to, &plan.task, &plan.dispatch, brief)");
+    assert!(
+        chip < quiet
+            && quiet < recapped
+            && recapped < lined
+            && lined < stopped
+            && stopped < started,
+        "the handover acts before it reads the chip and the pane again:\n{hand}"
+    );
+    assert!(
+        !hand.contains("wip_commit: true") && !hand.contains(".handover_begin("),
+        "a press commits the worker's tree, or reserves the standing order's receipt:\n{hand}"
+    );
+    let switch = shell_source("account_switch.rs");
+    let line = super::support::block_after(&switch, "pub(crate) fn unless_switching<");
+    assert!(
+        line.contains("SWITCH_LINE.try_lock()") && !line.contains(".lock()"),
+        "a press waits inside an account switch:\n{line}"
+    );
+
+    let window = super::support::window_source();
+    let pressing = super::support::block_after(window, "async function pressQuotaWall(");
+    let asked = pressing
+        .find("await askConfirm(")
+        .expect("the press asks the person first");
+    let answered = pressing
+        .find("if (said !== true) return;")
+        .expect("a press without a yes does nothing");
+    let invoked = pressing
+        .find("invoke(")
+        .expect("the press reaches the window");
+    assert!(
+        asked < answered && answered < invoked,
+        "the renderer presses before the person said yes:\n{pressing}"
+    );
+    for command in ["\"quota_wall_retry\"", "\"quota_wall_handover\""] {
+        assert_eq!(
+            window.matches(command).count(),
+            1,
+            "{command} is invoked from more than the one press"
+        );
+        assert!(pressing.contains(command), "the press lost {command}");
+    }
 }

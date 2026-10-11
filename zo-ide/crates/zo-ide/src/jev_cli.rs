@@ -540,6 +540,10 @@ fn render_json(seats: &[SeatReport], act_lines: bool) -> Value {
                     "cutModel": judged.cut,
                     // The act line the marks were read at (t-9468).
                     "actLine": judged.act_line,
+                    // What the judge said before the evidence rules of t-26584, and the
+                    // gate that holds the seat on this verdict.
+                    "before": judged.before.token(),
+                    "basis": judged.basis.map(tools::jev_summary::line_token),
                 })),
                 // What the seat's labels say of its act line, and the line
                 // the product reads now (t-9468).

@@ -140,6 +140,32 @@ fn a_screen_seats_rows_are_counted_across_its_session_folders() {
 }
 
 #[test]
+fn explicit_providers_do_not_borrow_unscoped_session_history() {
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().join("no-provider-ledger")];
+    let sessions = home.path().join("sessions");
+    let seat = &zerocode_core::jev::BROWSER;
+    write(
+        &sessions.join("historical-walk"),
+        seat.ledger,
+        &[asked_by(seat, json!({"at": 10, "outcome": "answered", "requests": 1}))],
+    );
+    let local = judgment_provider::Provider {
+        kind: judgment_provider::ProviderKind::Local,
+        protocol: judgment_provider::Protocol::SystemOne,
+        base_url: "http://127.0.0.1:1234".to_string(),
+        model: "acme/decision-model".to_string(),
+        requires_auth: false,
+    };
+    for provider in [local, judgment_provider::Provider::jev(judgment_provider::JEV_DEFAULT_MODEL)] {
+        let settings = json!({"smart": {(judgment_provider::SETTINGS_KEY): provider}});
+        let report = one(seat, &roots, Some(&sessions), Some(&settings), 1_000, 0);
+        assert_eq!(report.week.rows, 0);
+        assert_eq!(report.found, None);
+    }
+}
+
+#[test]
 fn a_screen_seat_is_counted_once_when_its_root_ledger_holds_what_a_session_copied() {
     // Both places hold the same rows (§4, decision 3). The root is the one
     // counted: a counter that added them would say a walk that answered
@@ -202,11 +228,12 @@ fn the_machines_place_is_asked_before_the_projects() {
 }
 
 /// The rows a walk writes under `~/.zo/jev` are read by the same counter the
-/// orchestration seats' are, and they carry the seat all the way to a rise
-/// (§4, decision 3 and 5) — here from a fall, since a screen seat left at
-/// `auto` starts pressing (t-13091) and a fall is its one road to recording.
+/// orchestration seats' are, and they carry the seat to the line that holds
+/// it (§4, decision 3 and 5). A screen seat has no baseline and no pairs
+/// (ADR-150), and its act line has no calibration record (t-26584, ③), so
+/// the card names that line and draws no rise.
 #[test]
-fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
+fn a_screen_seats_root_ledger_carries_it_to_the_line_that_holds_it_and_the_card_names_it() {
     use zerocode_core::jev::promote::FELL;
     use zerocode_core::jev::summary::TRANSITION;
     let home = tempfile::tempdir().expect("tmp");
@@ -239,7 +266,12 @@ fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
     let judged = report.judged.as_ref().expect("a rising seat is judged");
     assert_eq!(judged.window_wanted, wanted, "a screen seat's own width, not routing's");
     assert_eq!(judged.window.asked(), wanted);
-    assert_eq!(report.verdict(), Some(Verdict::Rise));
+    assert_eq!(
+        report.verdict(),
+        Some(Verdict::Hold(zerocode_core::jev::promote::Line::Calibration {
+            miss: zerocode_core::jev::provenance::CalibrationMiss::NoRecord,
+        }))
+    );
     assert_eq!(report.clears_rise_floor, Some(true));
     assert_eq!(report.rows_to_next_judgment(), Some(JUDGED_EVERY_ROWS), "a full window owes a full cadence");
     // It has not risen yet — nothing has written the transition — so the card
@@ -795,7 +827,7 @@ fn a_seats_days_are_seven_local_days_counted_by_the_weeks_own_counter() {
         json!({"at": today + 5, "outcome": "not_consented"}),
         json!({"at": today - 6 * MS_PER_DAY + 10, "outcome": "answered", "elapsedMs": 50, "agreed": false}),
         json!({"at": today - 7 * MS_PER_DAY, "outcome": "answered", "elapsedMs": 999}),
-        json!({"at": today + 3, "label": "k", "agreed": false}),
+        json!({"at": today + 3, "label": "k", "agreed": false, "labelSource": "executed"}),
     ];
     let days = days_of(&rows.iter().collect::<Vec<_>>(), now_ms, offset);
     assert_eq!(days.len(), usize::try_from(WINDOW_DAYS).expect("days"));
@@ -1028,8 +1060,10 @@ fn a_turn_label_is_one_comparison_in_the_window_of_the_turn_it_grades() {
     let roots = [home.path().to_path_buf()];
     let seat = &zerocode_core::jev::ROUTING;
     let mut rows: Vec<Value> = (0..25).map(|at| attempted(at, &format!("s@{}", at / 5))).collect();
+    // The labels name their executed source here: this test is about which
+    // turn a label grades, and the source rule is tested in provenance (ADR-171).
     let label = |at: i64, attempt: &str, agreed: bool| {
-        json!({"at": at, "label": attempt, "attempt": attempt, "followed": if agreed { "stood" } else { "quota" }, "agreed": agreed})
+        json!({"at": at, "label": attempt, "attempt": attempt, "followed": if agreed { "stood" } else { "quota" }, "agreed": agreed, "labelSource": "executed"})
     };
     rows.push(label(100, "s@0", true));
     rows.push(label(101, "s@4", false));
@@ -1068,11 +1102,11 @@ fn a_seats_week_of_marks_is_counted_beside_its_judged_window() {
             // Older than the week, still in the window: its mark is the
             // window's and not the week's.
             json!({"at": old, "query": 5, "notes": 6, "outcome": "answered", "elapsed_ms": 5, "applied": true}),
-            json!({"at": old + 1, "label": "5:6", "requestAt": old, "query": 5, "notes": 6, "applied": true, "agreed": false}),
+            json!({"at": old + 1, "label": "5:6", "requestAt": old, "query": 5, "notes": 6, "applied": true, "agreed": false, "labelSource": "executed"}),
             json!({"at": 1, "query": 1, "notes": 2, "outcome": "answered", "elapsed_ms": 5, "applied": false}),
             json!({"at": 2, "query": 3, "notes": 4, "outcome": "answered", "elapsed_ms": 5, "applied": true}),
-            json!({"at": 3, "label": "1:2", "requestAt": 1, "query": 1, "notes": 2, "applied": false, "agreed": true, "rank": 0}),
-            json!({"at": 4, "label": "3:4", "requestAt": 2, "query": 3, "notes": 4, "applied": true, "agreed": false}),
+            json!({"at": 3, "label": "1:2", "requestAt": 1, "query": 1, "notes": 2, "applied": false, "agreed": true, "rank": 0, "labelSource": "executed"}),
+            json!({"at": 4, "label": "3:4", "requestAt": 2, "query": 3, "notes": 4, "applied": true, "agreed": false, "labelSource": "executed"}),
         ],
     );
     let report = one(seat, &roots, None, None, 1_000, 0);
@@ -1323,14 +1357,14 @@ fn a_recall_label_naming_no_time_does_not_overwrite_the_one_naming_its_asking() 
         &[
             asking(10),
             asking(20),
-            json!({"at": 21, "label": "7:9", "requestAt": 20, "agreed": false, "baselineAgreed": true}),
-            json!({"at": 22, "label": "7:9", "agreed": true, "baselineAgreed": false}),
+            json!({"at": 21, "label": "7:9", "requestAt": 20, "agreed": false, "baselineAgreed": true, "labelSource": "executed"}),
+            json!({"at": 22, "label": "7:9", "agreed": true, "baselineAgreed": false, "labelSource": "executed"}),
         ],
     );
     let report = one(seat, &roots, None, None, 1_000, 0);
     assert_eq!(
         report.judged.as_ref().map(|judged| judged.agreement),
-        Some(Agreement { compared: 1, agreed: 0, baseline_compared: 1, baseline_agreed: 1, not_compared: 0 }),
+        Some(Agreement { compared: 1, agreed: 0, baseline_compared: 1, baseline_agreed: 1, not_compared: 0, proxied: 0 }),
         "the label naming 20 stands, and the one naming no time grades neither asking"
     );
 }

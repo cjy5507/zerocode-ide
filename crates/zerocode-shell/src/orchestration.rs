@@ -41,6 +41,7 @@ mod summon_assign;
 mod summon_choice;
 mod summon_difficulty;
 mod summon_model;
+pub(crate) mod wall_press;
 mod writing_book;
 
 use std::path::{Path, PathBuf};
@@ -268,6 +269,10 @@ fn runtime_cell() -> &'static Mutex<Option<LiveRuntime>> {
     static RUNTIME: OnceLock<Mutex<Option<LiveRuntime>>> = OnceLock::new();
     RUNTIME.get_or_init(|| Mutex::new(None))
 }
+
+/// What a verb, or a press on a chip, is told in a window whose runtime never
+/// came up.
+const NO_RUNTIME: &str = "orchestration is unavailable in this window — the runtime never started";
 
 /// The runtime, if this window has one.
 fn runtime() -> Option<LiveRuntime> {
@@ -2111,6 +2116,14 @@ pub(crate) struct LedgerAgent {
     /// wall explains its silence. Standing is the reader's `now` against
     /// `stands_until_ms`.
     pub(crate) wall: Option<zerocode_core::orchestration::WallAt>,
+    /// The chip the worker wears while it stands at that wall, and what its two
+    /// buttons may do (t-39771, [`zerocode_core::orchestration::wall_chip_for`]):
+    /// the sidebar row's and the task board's. `None` when the wall lifted, when
+    /// the worker is not live in a pane this window holds (asleep for an account
+    /// move included), when the person took its pane, or when an account switch
+    /// seated it again after the wall — no chip then, and no button. Read from
+    /// the same rows as [`Self::wall`]; nothing here is a fact of its own.
+    pub(crate) quota_wall: Option<zerocode_core::orchestration::QuotaWallChip>,
     /// The last quiet turn its hook reported (`Worker::quiet_at`).
     pub(crate) quiet_at: Option<i64>,
     /// The reconciler's proof that its pane is gone (`Worker::pane_missing_since_ms`).
@@ -2529,7 +2542,45 @@ fn latest_worker_dispatches(
     latest
 }
 
+/// The terminal of this window `worker` sits in NOW. Pane names are reusable,
+/// so a seat only belongs to the worker occupying it now — the same filter
+/// `worker-list` applies for the same reason: a historical row that kept the
+/// pane name must not borrow its replacement's terminal. One reading for the
+/// board's rows and for a press on a quota-wall chip (t-39771).
+fn seated_term(
+    run: &zerocode_core::orchestration::Run,
+    worker: &Worker,
+    seats: &TeamSeatIndex,
+) -> Option<u32> {
+    seats
+        .get(worker.team.as_str())
+        .and_then(|team| team.get(worker.pane.as_str()))
+        .copied()
+        .filter(|_| {
+            run.worker_in_pane(&worker.team, &worker.pane)
+                .is_some_and(|current| current.id == worker.id)
+        })
+}
+
+/// What this window holds of a walled worker's two seats (t-39771): its pane,
+/// and the run's live coordinator seat the handover's verbs are presented from
+/// — one reading for the row a chip is drawn on and for the press made on it.
+fn wall_chip_seat(
+    run: &zerocode_core::orchestration::Run,
+    worker_term: Option<u32>,
+    seats: &TeamSeatIndex,
+) -> zerocode_core::orchestration::WallChipSeat {
+    zerocode_core::orchestration::WallChipSeat {
+        worker_here: worker_term.is_some(),
+        coordinator_here: run
+            .coordinator_live()
+            .is_some_and(|held| seat_term(seats, &held.seat).is_some()),
+    }
+}
+
 fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<LedgerAgent> {
+    // A wall's chip stands only while the wall does: one clock for the list.
+    let now_ms = crate::now_epoch_ms();
     let mut listed = Vec::new();
     // The released workers whose work may still stand (t-10993), by run and
     // worker; which of them does is asked below, once their run is in play.
@@ -2550,21 +2601,8 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
             {
                 continue;
             }
-            /* Pane names are reusable, so a seat only belongs to the worker
-             * occupying it NOW — the same filter `worker-list` applies for
-             * the same reason. A historical row that kept the pane name must
-             * not borrow its replacement's terminal. A released worker has
-             * no seat: its pane went with it. */
-            let term = seats
-                .get(worker.team.as_str())
-                .and_then(|team| team.get(worker.pane.as_str()))
-                .copied()
-                .filter(|_| {
-                    !finished
-                        && run
-                            .worker_in_pane(&worker.team, &worker.pane)
-                            .is_some_and(|current| current.id == worker.id)
-                });
+            // A released worker has no seat: its pane went with it.
+            let term = seated_term(run, worker, seats).filter(|_| !finished);
             let dispatch = worker
                 .dispatch
                 .as_ref()
@@ -2602,6 +2640,18 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 (true, Some(_)) if !review.merged && !review.nothing_to_land => review.verified_ms,
                 _ => None,
             };
+            let wall =
+                dispatch.and_then(|one| zerocode_core::orchestration::newest_wall(run, &one.id));
+            // Asked only of a row with a wall: the chip is that wall's.
+            let quota_wall = wall.as_ref().and_then(|_| {
+                zerocode_core::orchestration::wall_chip_for(
+                    run,
+                    worker,
+                    wall_chip_seat(run, term, seats),
+                    now_ms,
+                )
+                .ok()
+            });
             listed.push(LedgerAgent {
                 run: run.id.clone(),
                 worker: worker.id.clone(),
@@ -2657,8 +2707,8 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 pane: worker.pane.clone(),
                 taken_over: worker.taken_over,
                 asking: run.awaiting_reply(&worker.id),
-                wall: dispatch
-                    .and_then(|one| zerocode_core::orchestration::newest_wall(run, &one.id)),
+                wall,
+                quota_wall,
                 quiet_at: worker.quiet_at,
                 pane_missing_since_ms: worker.pane_missing_since_ms,
                 cost: None,
@@ -8590,7 +8640,6 @@ pub(crate) fn walk_handover(
             at: at.to_string(),
         }
     };
-    let first_line = |said: &str| said.lines().next().unwrap_or_default().to_string();
     let [wip, stop, start] = HANDOVER_STEPS;
     let authorized = || {
         door.current_wall(plan, current_time())
@@ -8658,15 +8707,7 @@ pub(crate) fn walk_handover(
         &plan.team,
         &plan.pane,
         capability,
-        &[
-            "worker-stop".to_string(),
-            "--worker".to_string(),
-            plan.worker.clone(),
-            "--reason".to_string(),
-            plan.cause.reason().to_string(),
-            "--retry-request".to_string(),
-            format!("handover-{}-stop", plan.dispatch),
-        ],
+        &handover_stop_argv(&plan.worker, plan.cause.reason(), &plan.dispatch),
         current_time(),
         (plan, &wall),
     );
@@ -8690,34 +8731,16 @@ pub(crate) fn walk_handover(
     );
     // ③ The replacement, in the same checkout, linked to the ended attempt,
     // briefed as a continuation.
-    let mut argv = vec![
-        "worker-start".to_string(),
-        "--agent".to_string(),
-        plan.to.agent.clone(),
-    ];
-    if let Some(model) = plan.to.model.as_ref() {
-        argv.push("--model".to_string());
-        argv.push(model.clone());
-        if let Some(effort) = plan.to.effort.as_ref() {
-            argv.push("--effort".to_string());
-            argv.push(effort.clone());
-        }
-    }
-    argv.extend([
-        "--task".to_string(),
-        plan.task.clone(),
-        "--retry-of".to_string(),
-        plan.dispatch.clone(),
-        "--inherit-checkout".to_string(),
-        "--retry-request".to_string(),
-        format!("handover-{}-start", plan.dispatch),
-        "--prompt".to_string(),
+    let argv = handover_start_argv(
+        &plan.to,
+        &plan.task,
+        &plan.dispatch,
         format!(
             "{}{}",
             handover_paragraph(plan, wip_sha.as_deref(), recap.as_ref(), now_ms),
             plan.spec.as_str()
         ),
-    ]);
+    );
     if !handover_order_still_current(actor, plan, capability, true) {
         step(
             start,
@@ -8764,6 +8787,63 @@ pub(crate) fn walk_handover(
         handover,
         replacement,
     }
+}
+
+/// The first line of a verb's refusal — the sentence, not the usage after it.
+fn first_line(said: &str) -> String {
+    said.lines().next().unwrap_or_default().to_string()
+}
+
+/// Step ②'s argv (§2.3): the attempt's stop, with its cause's own reason word
+/// and the request name that answers a stop asked twice once. One builder for
+/// the beat's walk and for a person's press on a quota-wall chip (t-39771), so
+/// the two cannot come to name one attempt's stop apart.
+pub(crate) fn handover_stop_argv(worker: &str, reason: &str, dispatch: &str) -> Vec<String> {
+    vec![
+        "worker-stop".to_string(),
+        "--worker".to_string(),
+        worker.to_string(),
+        "--reason".to_string(),
+        reason.to_string(),
+        "--retry-request".to_string(),
+        format!("handover-{dispatch}-stop"),
+    ]
+}
+
+/// Step ③'s argv (§2.3): `to` on the task, in the ended attempt's checkout,
+/// linked to it and briefed with `prompt` — under the request name that
+/// answers a start asked twice once, for the walk and for a press alike.
+pub(crate) fn handover_start_argv(
+    to: &zerocode_core::orchestration::Pinned,
+    task: &str,
+    dispatch: &str,
+    prompt: String,
+) -> Vec<String> {
+    let mut argv = vec![
+        "worker-start".to_string(),
+        "--agent".to_string(),
+        to.agent.clone(),
+    ];
+    if let Some(model) = to.model.as_ref() {
+        argv.push("--model".to_string());
+        argv.push(model.clone());
+        if let Some(effort) = to.effort.as_ref() {
+            argv.push("--effort".to_string());
+            argv.push(effort.clone());
+        }
+    }
+    argv.extend([
+        "--task".to_string(),
+        task.to_string(),
+        "--retry-of".to_string(),
+        dispatch.to_string(),
+        "--inherit-checkout".to_string(),
+        "--retry-request".to_string(),
+        format!("handover-{dispatch}-start"),
+        "--prompt".to_string(),
+        prompt,
+    ]);
+    argv
 }
 
 /// The seat a run's coordinator holds, as a verb presents it to [`run`]:
@@ -9393,7 +9473,7 @@ fn run_seated(
         return refused(why);
     }
     let Some(held) = runtime() else {
-        return refused("orchestration is unavailable in this window — the runtime never started");
+        return refused(NO_RUNTIME);
     };
     let (actor, live_overrides) = (&held.actor, &held.overrides);
     // The launcher reads these at plan time, inside the actor; written before

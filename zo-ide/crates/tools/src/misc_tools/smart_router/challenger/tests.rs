@@ -2380,7 +2380,7 @@ fn the_arms_rows_fill_the_window_its_row_is_judged_on_and_a_new_question_opens_a
     // A window's worth of them and a receipt's label on every one the judge needs, ending on a
     // judgment's boundary; the judge got the first few wrong.
     let wanted = window_wanted_for(&CHALLENGER).expect("the challenger rises");
-    let marks = marks_that_can_clear(&CHALLENGER).expect("a width");
+    let marks = marks_that_can_clear(&CHALLENGER).expect("a width").max(zerocode_core::jev::provenance::PROMOTION_BAR.min_pairs);
     let misses = CHALLENGER.negatives_wanted.expect("negatives");
     let thin = JUDGED_EVERY_ROWS;
     assert!(thin < wanted, "a judgment's worth of requests is short of a window");
@@ -2391,7 +2391,7 @@ fn the_arms_rows_fill_the_window_its_row_is_judged_on_and_a_new_question_opens_a
     for n in 0..marks {
         let preferred = if n < misses { Preferred::Incumbent } else { Preferred::Challenger };
         let at = i64::try_from(asked + n).expect("small");
-        file(&arm::label_row(&format!("before-{n}#1"), &receipted(Receipt::Failed), preferred, at));
+        file(&priced_row(arm::label_row(&format!("before-{n}#1"), &receipted(Receipt::Failed), preferred, at)));
     }
 
     // Every row the arm wrote is in the window the table's row reads today …
@@ -2426,6 +2426,17 @@ fn the_arms_rows_fill_the_window_its_row_is_judged_on_and_a_new_question_opens_a
     assert_eq!(rose(&rig.rows()), 1, "no rise is written on the evidence of the words before");
 }
 
+/// The cost and latency a label's pair carries (ADR-150, t-26584): the same on
+/// both sides, so the bar reads the rise on quality alone. The arm's writer
+/// carries no cost of its own yet (decision 2); these rows stand in for it.
+fn priced_row(mut row: Value) -> Value {
+    for (cost, current) in [("inputTokens", "currentInputTokens"), ("elapsedMs", "currentElapsedMs")] {
+        row[cost] = json!(100);
+        row[current] = json!(100);
+    }
+    row
+}
+
 /// source 없는 라벨의 합의 표식은 자리를 세우지 못한다(t-6263 R4c): 자리 판정기가 세울 원장이라도 라벨이 source를 적지
 /// 않았으면 그 표식은 판정에 들지 않아 자리는 오르지 않는다; 같은 원장의 라벨이 source를 적었으면 오른다.
 #[test]
@@ -2452,7 +2463,7 @@ fn marks_of_labels_that_name_no_source_never_raise_the_seat() {
             let at = i64::try_from(requests + n).expect("small");
             let attempt = format!("seat-{n}#1");
             let label = if sourced {
-                arm::label_row(&attempt, &receipted(Receipt::Failed), preferred, at)
+                priced_row(arm::label_row(&attempt, &receipted(Receipt::Failed), preferred, at))
             } else {
                 unsourced_label(&attempt, Receipt::Failed, preferred, at)
             };

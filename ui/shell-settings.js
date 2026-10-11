@@ -6655,6 +6655,7 @@ let typesafeChecked = null;
 function initTypeSafeEvents() {
   if (typesafeInitialized) return;
   typesafeInitialized = true;
+  judgmentProviderController.init();
   el("typesafe-key-input")?.addEventListener("input", paintTypeSafeSave);
   el("typesafe-save-btn")?.addEventListener("click", () => {
     void saveTypeSafeKey();
@@ -6662,7 +6663,7 @@ function initTypeSafeEvents() {
   el("typesafe-remove-btn")?.addEventListener("click", () => {
     void runTypeSafe(() => {
       typesafeChecked = null;
-      return invoke("remove_typesafe_key");
+      return invoke("remove_typesafe_key", { providerIdentity: typesafeState?.providerIdentity });
     }, () => t("settings.typesafe.removed", "저장된 키를 지웠습니다."));
   });
   el("typesafe-check-btn")?.addEventListener("click", () => {
@@ -6706,27 +6707,13 @@ function initTypeSafeEvents() {
     void runTypeSafe(() => invoke("set_summon_profiles", { profiles }), () =>
       t("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."));
   });
-  // The model pin (`smart.jevModel`): an empty field unpins. The backend
-  // refuses a pin its door would not read, and the refusal is said here.
-  el("typesafe-model-input")?.addEventListener("change", (event) => {
-    const model = event.target.value;
-    void runTypeSafe(() => invoke("set_jev_model", { model }), (state) =>
-      state.model?.pinned
-        ? t("settings.typesafe.modelPinned", "{{model}} 버전으로 고정했습니다. 다음 요청부터 이 버전을 씁니다.",
-          { model: state.model.model })
-        : t("settings.typesafe.modelUnpinned", "고정을 풀었습니다. 늘 최신 버전을 씁니다."));
-  });
 }
 
 /* The model field as the backend answered it: the pin when there is one,
  * empty with the alias behind it when there is none. A field somebody is
  * typing in is left alone. */
 function paintTypeSafeModel(state) {
-  const input = el("typesafe-model-input");
-  if (!input || !state.model) return;
-  input.placeholder = state.model.alias;
-  if (document.activeElement !== input) input.value = state.model.pinned ? state.model.model : "";
-  input.disabled = typesafeBusy;
+  judgmentProviderController.paint(state);
 }
 
 /* What each difficulty runs today, and what a person may write over it
@@ -6890,6 +6877,10 @@ async function refreshTypeSafe() {
   try {
     paintTypeSafe(await invoke("typesafe_settings"));
   } catch (error) {
+    typesafeState = null;
+    typesafeChecked = null;
+    judgmentProviderController.paint({});
+    paintSettingsStanding(el("typesafe-key-state"), "failed");
     paintTypeSafeStatus(typesafeRefusal(error), typesafeRefusalEvidence(error));
   }
   // A dashboard on stage refreshes its numbers with its recent rows; the
@@ -6902,10 +6893,11 @@ async function refreshTypeSafe() {
  * asked since the key was saved, and otherwise whether there is a key at all.
  * A saved key is a saved key until somebody asks TypeSafe about it. */
 function typesafeStanding(state) {
-  return typesafeChecked ?? keyStanding(state.keySaved);
+  return typesafeChecked ?? (state.provider && !state.provider.requiresAuth ? "unchecked" : keyStanding(state.keySaved));
 }
 
 function paintTypeSafe(state) {
+  if (typesafeState?.providerIdentity !== state.providerIdentity) typesafeChecked = null;
   typesafeState = state;
   paintSettingsStanding(el("typesafe-key-state"), typesafeStanding(state));
   paintKeyField(el("typesafe-key-input"), { busy: typesafeBusy, kept: state.keysKeptHere });
@@ -6928,7 +6920,8 @@ function paintTypeSafe(state) {
 function paintTypeSafeSave() {
   const save = el("typesafe-save-btn");
   if (save) {
-    save.disabled = typesafeBusy || !typesafeState?.keysKeptHere ||
+    const provider = judgmentProviderController.current();
+    save.disabled = typesafeBusy || !typesafeState?.keysKeptHere || !provider?.requiresAuth || !provider.baseUrl ||
       !(el("typesafe-key-input")?.value.trim());
   }
 }
@@ -6961,37 +6954,47 @@ async function saveTypeSafeKey() {
   const input = el("typesafe-key-input");
   const key = input?.value.trim() ?? "";
   if (!key) return;
+  const provider = judgmentProviderController.current();
   await runTypeSafe(async () => {
     // A different key is a different question: what the last check answered
     // was about the key that is being replaced.
     typesafeChecked = null;
-    const state = await invoke("save_typesafe_key", { key });
+    const state = await invoke("save_typesafe_key", { key, provider, providerIdentity: typesafeState?.providerIdentity });
     if (input) input.value = "";
     return state;
   }, () => t("settings.typesafe.saved", "키를 키체인에 저장했습니다. zo가 다음에 필요할 때 읽습니다."));
 }
 
 async function checkTypeSafeKey() {
-  if (typesafeBusy) return;
+  if (typesafeBusy || judgmentProviderController.dirty()) return;
+  const identity = typesafeState?.providerIdentity;
   typesafeBusy = true;
   if (typesafeState) paintTypeSafe(typesafeState);
-  paintTypeSafeStatus(t("settings.typesafe.checking", "TypeSafe에 묻는 중…"));
+  paintTypeSafeStatus(t("settings.judgment.checking", "선택한 판단 모델에 묻는 중…"));
   try {
-    const check = await invoke("check_typesafe_key");
+    const check = await invoke("check_typesafe_key", { providerIdentity: identity });
+    if (identity !== typesafeState?.providerIdentity) {
+      paintTypeSafeStatus(judgmentProviderController.failure("settings_changed"));
+      return;
+    }
     typesafeChecked = check.answered ? "connected" : "failed";
     paintTypeSafeStatus(
       check.answered
         ? t("settings.typesafe.answered", "응답했습니다 — {{model}}, {{ms}} ms", {
-          model: check.model,
+          model: check.model?.startsWith(`${identity}:`) ? check.model.slice(identity.length + 1) : check.model,
           ms: check.elapsedMs,
         })
         : typesafeCheckFailure(check.failure),
       { standing: typesafeChecked, raw: check.answered ? null : check.failure },
     );
   } catch (error) {
+    if (identity !== typesafeState?.providerIdentity) {
+      paintTypeSafeStatus(judgmentProviderController.failure("settings_changed"));
+      return;
+    }
     typesafeChecked = "failed";
     paintTypeSafeStatus(
-      t("settings.typesafe.unreachable", "확인하지 못했습니다 — zo가 답하지 않았습니다."),
+      judgmentProviderController.failure(String(error)) ?? t("settings.typesafe.unreachable", "확인하지 못했습니다 — zo가 답하지 않았습니다."),
       { standing: "failed", raw: String(error) },
     );
   } finally {

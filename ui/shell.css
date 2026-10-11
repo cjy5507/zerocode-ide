@@ -2202,6 +2202,7 @@ svg.wt-agent-dot {
  * tooltip). Empty, it is not there — a row at work, or asking, or bare, has
  * nothing to add. */
 .wt-landing,
+.wt-wall,
 .wt-phase {
   /* The name gives way first and the word does not: it is the news, and a name
    * cut to an ellipsis is still a name. Half the line is the most it takes, so
@@ -2273,6 +2274,18 @@ svg.wt-agent-dot {
 
 .wt-landing[data-cleanable="1"] {
   cursor: pointer;
+}
+
+/* A worker in this checkout stands at its quota wall (t-39771): the chip above
+ * in the wait ink, and a real button — it opens the task board, where the
+ * worker's row carries the two buttons and the reasons they would refuse. */
+.wt-wall {
+  color: var(--signal-wait-ink);
+  cursor: pointer;
+}
+
+.wt-wall[hidden] {
+  display: none;
 }
 
 /* Where a branch came from, said on the branch line itself — `← main` after
@@ -20739,6 +20752,10 @@ button.helper-sib:hover {
   border-top: var(--rule-width) solid var(--edge-rule);
 }
 
+.settings-judgment-actions {
+  flex-wrap: wrap;
+}
+
 .settings-steps {
   display: grid;
   gap: var(--space-2);
@@ -33300,6 +33317,51 @@ details.task-board-section > summary {
   color: var(--ink-label);
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
+}
+
+/* 한도 벽 칩 (t-39771): 워커 줄 밑, 줄 단추 밖의 띠. 칩은 기다림의 잉크, 두 단추는 데스크의
+ * 편지 단추(`.board-desk-letter-act`)를 그대로 입고, 안 되는 까닭과 누른 결과는 조용한 글씨로
+ * 그 아래에 선다 — 안 됐으면 멈춤의 잉크. */
+.board-desk-worker-wall {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  padding: var(--space-1) var(--space-3) 0;
+  font-size: var(--text-2xs);
+}
+
+.board-desk-worker-wall[hidden],
+.board-desk-worker-wall [hidden] {
+  display: none;
+}
+
+.board-desk-worker-wall-chip {
+  color: var(--signal-wait-ink);
+  font-weight: 600;
+}
+
+.board-desk-worker-wall-to {
+  min-height: var(--control-height-sm);
+  max-width: 14em;
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface-well);
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-xs);
+}
+
+.board-desk-worker-wall-why,
+.board-desk-worker-wall-said {
+  flex-basis: 100%;
+  color: var(--ink-label);
+  overflow-wrap: anywhere;
+}
+
+.board-desk-worker-wall-said[data-tone="refused"] {
+  color: var(--signal-halt-ink);
 }
 
 /* 과업 흐름: 흐름의 다섯 단계는 작은 꺾쇠로 이어지고, 멈춰 선 셋은 한 칸 떨어져

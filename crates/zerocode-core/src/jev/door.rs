@@ -201,7 +201,13 @@ impl JevSettings {
     /// not one word is no pin.
     #[must_use]
     pub fn from_root(root: &Value) -> Self {
-        let model = super::model_in(root).to_string();
+        let model = match judgment_provider::Provider::from_root(root) {
+            Ok(provider) if provider.kind != judgment_provider::ProviderKind::Jev => {
+                provider.identity()
+            }
+            Ok(_) => super::model_in(root).to_string(),
+            Err(_) => String::new(),
+        };
         let Some(jev) = root
             .get(SMART_SETTINGS_KEY)
             .and_then(|smart| smart.get(JEV_SETTINGS_KEY))

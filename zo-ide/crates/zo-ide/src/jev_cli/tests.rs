@@ -370,7 +370,9 @@ fn the_act_line_the_labels_draw_is_the_line_the_seat_reads_once_the_table_keeps_
         .collect();
     rows.extend((0..100).map(|n| {
         let agreed = if n % 2 == 0 { n % 34 != 0 } else { n % 4 == 1 };
-        serde_json::json!({"at": 2_000 + n, "label": format!("r-{n}"), "agreed": agreed, "baselineAgreed": false})
+        // The labels name their executed source: this test reads the act line
+        // the labels draw, and the source rule is tested in provenance (ADR-171).
+        serde_json::json!({"at": 2_000 + n, "label": format!("r-{n}"), "agreed": agreed, "baselineAgreed": false, "labelSource": "executed"})
     }));
     let ledger = home.path().join(seat.ledger);
     std::fs::write(&ledger, rows.iter().map(|row| row.to_string() + "\n").collect::<String>()).expect("write");
@@ -412,7 +414,10 @@ fn the_act_line_the_labels_draw_is_the_line_the_seat_reads_once_the_table_keeps_
     assert_eq!(after["applyShare"], 0.5);
     assert_eq!(after["appliedErrorPermille"], 60, "three of the fifty it acts on");
     assert_eq!(after["baselineErrorPermille"], 1_000);
-    assert_eq!(after["verdict"]["verdict"], "rise", "{}", after["verdict"]);
+    // The line acts on half the answers, above the abstain ceiling of a third: the
+    // calibration holds it, however the pinned table reads (t-26584, ③).
+    assert_eq!(after["verdict"]["verdict"], "hold", "{}", after["verdict"]);
+    assert_eq!(after["verdict"]["line"], "calibration", "{}", after["verdict"]);
     assert_eq!(after["verdict"]["actLine"], 300);
     assert_eq!(after["judged"]["agreement"]["compared"], 50);
 }

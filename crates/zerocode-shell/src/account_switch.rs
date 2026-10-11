@@ -64,6 +64,25 @@ static SWITCH_LINE: Mutex<()> = Mutex::new(());
 /// setting, and whose following panes do not either (t-46106).
 const PERSON: &str = "person";
 
+/// Runs `act` only while no switch holds [`SWITCH_LINE`], and answers `None`
+/// when one does (t-39771).
+///
+/// The two buttons on a quota-wall chip end or type at a worker the beat may
+/// be moving to another account at that very moment: a press and a move
+/// converge on one outcome by standing in the same line. It is a `try_lock`,
+/// never a wait — a move can take seconds and holds the ledger and the host
+/// inside it, and a press that queued behind it would answer a wall that has
+/// since been left. The caller says "a move is in flight" and the person asks
+/// again.
+pub(crate) fn unless_switching<T>(act: impl FnOnce() -> T) -> Option<T> {
+    let _line = match SWITCH_LINE.try_lock() {
+        Ok(line) => line,
+        Err(std::sync::TryLockError::Poisoned(line)) => line.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    Some(act())
+}
+
 /// When the window's default last moved, and to whom — the cooldown's
 /// clock. Window memory: a restart ends the cooldown, which is the same
 /// answer the gauges give (they are read again at boot).

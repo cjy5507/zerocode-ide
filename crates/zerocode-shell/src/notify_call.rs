@@ -29,6 +29,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+use zerocode_core::jev::provenance::{LabelSource, stamp_label};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -254,6 +255,7 @@ fn label_row(one: &Waiting, reacted: bool, now_ms: i64) -> Value {
         "afterMs": now_ms.saturating_sub(one.asked_ms),
     });
     notify_call::grade(&mut label, one.call, one.attendance, reacted);
+    stamp_label(&mut label, LabelSource::Proxy, "notify");
     label
 }
 

@@ -355,6 +355,10 @@ const JEV_LINES = Object.freeze({
   execution_costs_missing: { key: "settings.typesafe.lineExecutionCostsMissing", word: "비교할 실행의 토큰·시간 측정이 부족합니다" },
   execution_savings: { key: "settings.typesafe.lineExecutionSavings", word: "첫 시도 성공률을 유지하며 토큰과 시간을 줄인 증거가 부족합니다" },
   apply_share: { key: "settings.typesafe.lineApplyShare", word: "확신도 기준을 넘는 답이 너무 적습니다" },
+  proxy_only: { key: "settings.typesafe.lineProxyOnly", word: "정확도가 대용 라벨이나 출처 없는 라벨에만 기대고 있습니다", compares: true },
+  calibration: { key: "settings.typesafe.lineCalibration", word: "행동 기준선이 아직 보정되지 않았거나 기록이 부족합니다" },
+  bar: { key: "settings.typesafe.lineBar", word: "짝 기록이 승격 기준(표본·품질·비용·지연)을 넘지 못했습니다" },
+  bundle: { key: "settings.typesafe.lineBundle", word: "고정된 사람 묶음이 없거나 고정되지 않았거나 카나리가 맞지 않습니다" },
 });
 
 function jevLineWords(line) {
@@ -563,7 +567,11 @@ const JEV_TOKENS = Object.freeze({
   no_key: { key: "jev.token.noKey", word: "API 키 없음", fix: "key", saidKey: "settings.typesafe.noKey", said: "zo가 키를 찾지 못했습니다 — 키를 저장한 뒤 다시 확인하세요." },
   unauthorized: { key: "jev.token.unauthorized", word: "키 거절", fix: "key", saidKey: "settings.typesafe.unauthorized", said: "키가 거절되었습니다 — 키를 다시 확인하세요." },
   not_consented: { key: "jev.token.notConsented", word: "동의 안 된 폴더", fix: "consent" },
-  settings_changed: { key: "jev.token.settingsChanged", word: "설정 변경으로 취소됨" },
+  settings_changed: { key: "jev.token.settingsChanged", word: "설정 변경으로 취소됨", saidKey: "settings.judgment.changed", said: "판단 제공자 설정을 다시 확인하세요. 이전 모델의 응답은 사용하지 않았습니다." },
+  provider_settings: { key: "jev.token.providerSettings", word: "판단 제공자 설정 오류", saidKey: "settings.judgment.changed", said: "판단 제공자 설정을 다시 확인하세요. 이전 모델의 응답은 사용하지 않았습니다." },
+  provider_response_too_large: { key: "jev.token.responseTooLarge", word: "판단 응답 크기 초과" },
+  provider_context_truncated: { key: "jev.token.contextTruncated", word: "입력 일부 누락", saidKey: "settings.judgment.truncated", said: "모델이 입력 일부를 읽지 못했습니다. 더 긴 입력을 지원하는 판단 모델이나 서버 설정이 필요합니다." },
+  provider_client_outdated: { key: "jev.token.clientOutdated", word: "판단 클라이언트 업데이트 필요", saidKey: "settings.judgment.outdated", said: "판단 제공자를 지원하는 최신 zo가 필요합니다. 앱과 zo의 업데이트 상태를 확인하세요." },
   rules_unavailable: { key: "jev.token.rulesUnavailable", word: "규칙 정의를 확인하거나 다시 준비해야 함" },
   budget: { key: "jev.token.budget", word: "하루 한도 초과", fix: "budget" },
   timeout: { key: "jev.token.timeout", word: "시간 초과" },
@@ -573,6 +581,7 @@ const JEV_TOKENS = Object.freeze({
   rate_limited: { key: "jev.token.rateLimited", word: "요청 제한" },
   invalid_request: { key: "jev.token.invalidRequest", word: "잘못된 요청" },
   http: { key: "jev.token.http", word: "서버 오류" },
+  http_402: { key: "jev.token.paymentRequired", word: "결제·이용 한도", saidKey: "settings.judgment.paymentRequired", said: "제공자가 결제·이용 한도로 거절했습니다. 계정 상태를 확인하거나 다른 판단 제공자를 선택하세요." },
 });
 
 /* A token's row: its own, or its family's — a ledger keeps an unnamed HTTP
@@ -580,6 +589,7 @@ const JEV_TOKENS = Object.freeze({
  * refusal with the rule it broke (`schema_…`, the core's
  * `names_a_schema_failure`). `null` for a token no row words. */
 function jevTokenRow(token) {
+  if (Object.hasOwn(JEV_TOKENS, token)) return JEV_TOKENS[token];
   const family = token.startsWith("http_") ? "http" : token.startsWith("schema_") ? "schema" : token;
   return JEV_TOKENS[family] ?? null;
 }
@@ -1993,7 +2003,11 @@ function jevStatusCell(held, choice, standing, head) {
  * says whose doing that is and what the judge would have said — except where
  * the samples still owed are `counting`: the bar says that, once. */
 function jevStatusReason(held, status, choice, counting) {
-  const because = held.verdict ? jevLineWords(held.verdict.line) : "";
+  // The gate that holds the seat says why (t-26584); the line says it otherwise.
+  const because = held.verdict ? jevLineWords(held.verdict.basis ?? held.verdict.line) : "";
+  // A rise the evidence rules now hold says so beside the reason.
+  const ruleHeld = held.verdict?.before === "rise" && held.verdict?.verdict !== "rise"
+    ? t("jev.ruleHeld", "증거 규칙 전에는 승격이었지만 지금은 보류됩니다") : "";
   if (status === "dormant") {
     return held.week.rows > 0 ? t("jev.switchedOff", "꺼져 있어 새 판단을 요청하지 않습니다") : "";
   }
@@ -2018,7 +2032,7 @@ function jevStatusReason(held, status, choice, counting) {
       ? t("jev.byHand", "직접 켰습니다 — {{because}}", { because })
       : t("jev.byHandClear", "직접 켰습니다 — 자동 적용 기준도 넘었습니다");
   }
-  if (because) return counting ? "" : because;
+  if (because) return counting ? "" : [ruleHeld, because].filter(Boolean).join(" · ");
   if (!held.verdict) return t("jev.neverRises", "자동 적용 대상이 아니라 기록만 합니다");
   // The judge found nothing to hold it on: it acts at the next judgment
   // under `auto`, and never under a switch that only records.

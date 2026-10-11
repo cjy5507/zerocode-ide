@@ -43,6 +43,7 @@ pub mod memo;
 pub mod noul;
 pub mod project_rules;
 pub mod promote;
+pub mod provenance;
 pub mod questions;
 pub mod recent;
 pub mod reflex_decide;

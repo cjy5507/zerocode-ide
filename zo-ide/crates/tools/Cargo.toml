@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 zerocode-core = { path = "../../../crates/zerocode-core" }
 api = { path = "../api" }
+judgment-provider = { path = "../../../crates/judgment-provider" }
 codegraph = { path = "../codegraph" }
 core-types = { path = "../core-types" }
 decision-core = { path = "../decision-core" }

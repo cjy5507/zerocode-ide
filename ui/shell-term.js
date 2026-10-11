@@ -8354,6 +8354,13 @@ function relabelTerminalViews() {
  * 명령 실행 button, the ＋ row, the empty stage) are the person asking for a
  * new terminal by hand: they open a tab (`openTermTab`, the "terminal" door).
  *
+ * The decision, as the person made it (「2개 터미열리 버그」 → 「원인 찾아서 고쳐줘」
+ * → 「새 탭으로 열기 (권장)」): agents keep dividing the stage as launches do,
+ * and a bare shell opens as a tab. The one exception is a browser in front: a
+ * terminal stands beside that browser (the stage's own split, `standBesideFocused`)
+ * rather than in a far-away tab. The door asks for `TERMINAL_TAB` for that reason —
+ * "tab" would look nowhere ahead and never see the browser.
+ *
  * Three boundaries, and each of them is a thing somebody would otherwise
  * cross without meaning to:
  *
@@ -8479,27 +8486,35 @@ function tileTermPane(tab, term, extra, side, focus, source = activePaneOf(tab))
  * `tilePlacement` picks for it. Asked twice per shell, by `spawnGrid` before
  * the pty exists to size it and by `mountTermTab` after to seat it, so the
  * two can never disagree. */
+// The answer the "terminal" door gives: a TAB that still looks ahead. It is not
+// "tab" — that word is the command doors' "look nowhere ahead" (a shell typed
+// into, seated beside nothing), and a terminal that looked nowhere ahead could
+// never stand beside a browser in front (the far-away tab of 2026-08-14).
+const TERMINAL_TAB = Object.freeze({ tab: true });
+
 function plannedPlacement(placement, worktree) {
   const host = placement === "tab" ? null : activeTabIn(focusedPane);
   const shape = activePaneShape(host);
-  const where = tilePlacement({
-    sameWorktree: host !== null && host.worktree === worktree,
-    activeIsTermTab: host?.kind === "term",
-    ...shape,
-  });
-  return { host, shape, where };
+  const where = placement?.tab === true
+    ? { split: null }
+    : tilePlacement({
+        sameWorktree: host !== null && host.worktree === worktree,
+        activeIsTermTab: host?.kind === "term",
+        ...shape,
+      });
+  const beside = host?.kind === "browser" && host.worktree === worktree;
+  return { host, shape, where, beside };
 }
 
 function mountTermTab(term, extra = {}, { focus = true, placement = "auto" } = {}) {
   const worktree = extra.worktree ?? activeWorktreePath;
-  const { host, where } = plannedPlacement(placement, worktree);
+  const { host, where, beside: besideBrowser } = plannedPlacement(placement, worktree);
   if (where.split) return tileTermPane(host, term, extra, where.split, focus);
   // A terminal asked for while a BROWSER is in front stands beside it — the
   // stage's own split, because a shell cannot tile INTO a native page the way
   // it tiles into another shell (live report 2026-08-14: + over NAVER opened
   // a far-away tab). Doc tabs keep Orca's tab road.
-  const beside =
-    host?.kind === "browser" && host.worktree === worktree ? standBesideFocused() : null;
+  const beside = besideBrowser ? standBesideFocused() : null;
   const tab = {
     id: termTabId(term),
     kind: "term",
@@ -8607,7 +8622,9 @@ async function openTermTab({ placement, door = "agent" } = {}) {
   // second terminal inside the first one's tab. Only a launch the stage seats
   // beside the work keeps the division rule (`tilePlacement`), and the agent door
   // keeps the default it always had.
-  const where = placement ?? (door === "terminal" ? "tab" : undefined);
+  // With a browser in front the terminal stands beside it (TERMINAL_TAB looks
+  // ahead, unlike "tab"), so the person's new terminal is never a far-away tab.
+  const where = placement ?? (door === "terminal" ? TERMINAL_TAB : undefined);
   if (door === "agent" && defaultAgentChosen()) {
     if (agentRows.length === 0) await refreshAgents();
     const chosen = installedAgents().find((row) => row.id === defaultAgentId());
@@ -8900,6 +8917,7 @@ function spawnGrid({ placement = "auto", worktree = activeWorktreePath, divide =
   if (!ruler) return fallback;
   let where;
   let shape;
+  let beside = false;
   if (divide) {
     // ⌘D and the orchestrator name the pane they cut and the direction; the
     // room is that pane's, halved the way `addPane` halves it.
@@ -8910,10 +8928,13 @@ function spawnGrid({ placement = "auto", worktree = activeWorktreePath, divide =
     shape = { paneWidth: box?.width ?? 0, paneHeight: box?.height ?? 0 };
     where = { split: divide.direction === "vertical" ? "right" : "down" };
   } else {
-    ({ shape, where } = plannedPlacement(placement, worktree));
+    ({ shape, where, beside } = plannedPlacement(placement, worktree));
   }
+  // A terminal that stands beside a browser is seated in a split, so it gets a
+  // split's room (the browser's pane halved) rather than the whole tab's.
+  const split = where.split ?? (beside ? "right" : null);
   let room;
-  if (where.split) {
+  if (split) {
     const grip =
       parseFloat(
         getComputedStyle(document.documentElement).getPropertyValue("--term-divider-hit-size"),
@@ -8922,7 +8943,7 @@ function spawnGrid({ placement = "auto", worktree = activeWorktreePath, divide =
     const baseWidth = shape.paneWidth > 0 ? shape.paneWidth : expected.width;
     const baseHeight = shape.paneHeight > 0 ? shape.paneHeight : expected.height;
     room =
-      where.split === "right"
+      split === "right"
         ? { width: Math.max(0, (baseWidth - grip) / 2), height: baseHeight }
         : { width: baseWidth, height: Math.max(0, (baseHeight - grip) / 2) };
   } else {

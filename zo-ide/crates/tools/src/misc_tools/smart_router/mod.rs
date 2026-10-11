@@ -87,7 +87,7 @@ pub use decision_report::{
     AxisEvaluation, DecisionShadowSummary, LabelEvaluation, BASIS_POINTS,
 };
 pub use decision_shadow::{
-    check_system_one, decision_shadow_path, note_route_followed, route_unseated_by, CheckFailure,
+    check_system_one, check_system_one_for, decision_shadow_path, note_route_followed, route_unseated_by, CheckFailure,
     DecisionShadowRow, JudgedAxis, ProbeCell, RouteLabelRow, SystemOneCheck, DECISION_SHADOW_FILE,
     KEY_CHECK_TASK, OUTCOME_ANSWERED, ROUTE_STOOD,
 };

@@ -350,10 +350,11 @@ fn a_dropped_block_read_again_inside_the_window_is_regret_and_the_rest_agree_at_
         assert_eq!(label.label, row.judged.to_string());
         assert!(label.applied);
     }
-    // Counted as marks: two compared, one agreed.
+    // Counted as marks: the labels are later observations, proxies, so none
+    // compares and all three are withheld from the agreement (t-26584, ①).
     let read = super::super::jev_summary::read_rows(&ledger);
     let agreement = zerocode_core::jev::summary::agreement_since(&read, i64::MIN);
-    assert_eq!((agreement.compared, agreement.agreed), (3, 1));
+    assert_eq!((agreement.compared, agreement.agreed, agreement.proxied), (0, 0, 3));
     assert!(
         read.iter().all(|row| zerocode_core::jev::summary::asked_something(row).is_none()),
         "a label is not a request"
@@ -365,8 +366,12 @@ fn a_dropped_block_read_again_inside_the_window_is_regret_and_the_rest_agree_at_
     let mut judged_rows = vec![serde_json::to_value(&row).expect("the row")];
     judged_rows.extend(read.iter().cloned());
     let series = zerocode_core::jev::promote::on_the_newest_version(&zerocode_core::jev::COMPACTION, &judged_rows);
-    let marked = zerocode_core::jev::summary::agreement_rows(series.marks.iter().copied(), i64::MIN);
+    let marked = zerocode_core::jev::summary::agreement_rows_counting_all(series.marks.iter().copied(), i64::MIN);
     assert_eq!((marked.compared, marked.agreed), (3, 1), "{series:?}");
+    // What may promote the seat: the compaction seat is a proxy, so its marks
+    // are withheld from the sourced agreement (ADR-171).
+    let sourced = zerocode_core::jev::summary::agreement_rows(series.marks.iter().copied(), i64::MIN);
+    assert_eq!((sourced.compared, sourced.agreed), (0, 0), "{series:?}");
 }
 
 /// The same call made again — not a read, a re-run — is regret too.

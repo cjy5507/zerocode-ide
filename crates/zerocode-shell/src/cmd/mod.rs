@@ -122,9 +122,10 @@ pub(crate) use board::{
     coordinator_seats, create_untitled_markdown, delete_untitled_markdown, desk_ack,
     desk_checkouts, desk_reply, hooks_report, install_hooks, ledger_agents, machine_load,
     open_board_popout, orchestration_accuracy, pane_activities, pane_agents, pane_sessions,
-    pane_subagents, release_untitled_markdown, resume_line, resume_session, reveal_board_agent,
-    save_clipboard_image, set_coordinator_handover, set_dock_badge, set_hooks_enabled,
-    set_previewed_terms, set_watched_terms, term_pull, term_snapshot, worker_screen,
+    pane_subagents, quota_wall_handover, quota_wall_retry, release_untitled_markdown, resume_line,
+    resume_session, reveal_board_agent, save_clipboard_image, set_coordinator_handover,
+    set_dock_badge, set_hooks_enabled, set_previewed_terms, set_watched_terms, term_pull,
+    term_snapshot, worker_screen,
 };
 
 pub(crate) use review::{
@@ -146,6 +147,7 @@ pub(crate) use typesafe::{
     save_typesafe_key, set_jev_enabled, set_jev_model, set_jev_review_enabled,
     set_route_classifier, set_summon_profiles, typesafe_settings,
 };
+pub(crate) use typesafe::{judgment_models, set_judgment_provider};
 
 pub(crate) mod type_value;
 pub(crate) use type_value::{remove_type_value_key, save_type_value_key, type_value_keys};
