@@ -442,6 +442,70 @@ fn a_coordinators_note_that_is_no_review_leaves_the_report_waiting() {
     assert_eq!(whole.stage.word(), "report_only", "{whole:?}");
 }
 
+/// A coordinator's record that carries review keys but names no source it read is unknown once the
+/// attempt has handed something in — whether the record named the same attempt or an earlier one. It
+/// is never read as a review of an older commit.
+#[test]
+fn a_record_that_names_no_source_reads_unknown_whatever_attempt_it_names() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name legacy");
+    let run_id = bench.ledger.runs()[0].id.clone();
+    let unbound = |attempt: &str| ResultAuthor::Coordinator {
+        seat: "team-1/%0".to_string(),
+        generation: Some(1),
+        attempt: Some(attempt.to_string()),
+        source: None,
+        completed_ms: None,
+        verified_ms: None,
+    };
+    let (same, _, attempt) = handed_in(&mut bench, "same-attempt", HEAD_A, "");
+    bench
+        .ledger
+        .update_task(
+            &run_id,
+            &same,
+            None,
+            Some("{\"verified\":true}".to_string()),
+            unbound(&attempt),
+            bench.clock,
+        )
+        .expect("an old record on the same attempt");
+    let earlier = task_of(&mut bench, "earlier-attempt");
+    let (worker, _, first) = attempt_on(&mut bench, &earlier);
+    bench
+        .ledger
+        .end_attempt(&worker, Ending::Stopped, "lost", bench.clock)
+        .expect("the first attempt ends");
+    if bench.ledger.runs()[0]
+        .task(&earlier)
+        .map(|held| held.status)
+        != Some(TaskStatus::Ready)
+    {
+        bench.json(&format!("task-update --task {earlier} --status ready"));
+    }
+    let (_, pane, second) = attempt_on(&mut bench, &earlier);
+    bench.json_at(
+        &pane,
+        &format!("send --type worker_done --body {{\"ok\":true,\"head\":\"{HEAD_B}\"}}"),
+    );
+    bench
+        .ledger
+        .update_task(
+            &run_id,
+            &earlier,
+            None,
+            Some("{\"verified\":true}".to_string()),
+            unbound(&first),
+            bench.clock,
+        )
+        .expect("an old record on the earlier attempt");
+    for (task, dispatch) in [(&same, &attempt), (&earlier, &second)] {
+        let (row, whole) = read(&bench, task, dispatch);
+        assert_eq!(row.stage.word(), "unknown", "{task}: {row:?}");
+        assert_eq!(whole.stage.word(), "unknown", "{task}: {whole:?}");
+    }
+}
+
 /// The wire names are the window's keys: one per stage, none shared.
 #[test]
 fn every_stage_has_its_own_wire_name() {
