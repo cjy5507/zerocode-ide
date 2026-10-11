@@ -1073,6 +1073,12 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       // 한 번의 emit이 여러 개를 싣고 온다: 백엔드가 카드마다 100ms에 하나만
       // 보내고 그 사이의 것을 모아 붙이기 때문이다. 창은 이어 붙이고 **마지막**을
       // 그린다.
+      // The clock stands while the round trips are counted: a poll tick that lands inside this paint on a slower runner
+      // is a round trip of its own, not the window's. The thousand-page test holds the clock the same way (t-2412 rule 2).
+      // Two frames first, so a call the previous step left in flight is not counted here.
+      await window.__PAINTED__();
+      await window.__PAINTED__();
+      window.__HOLD_POLLERS__ = true;
       window.__COUNTS__ = {};
       tell("hook:activity", {
         pane: `term:${term}`,
@@ -1083,6 +1089,10 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       });
       await window.__PAINTED__();
       seen.asked = Object.keys(window.__COUNTS__).length;
+      // The names of the commands that were counted, so a failure says which call came in.
+      seen.askedNames = Object.keys(window.__COUNTS__);
+      window.__HOLD_POLLERS__ = false;
+      window.__RELEASE_POLLERS__();
       seen.working = said();
 
       // 헬퍼의 도구 호출은 헬퍼의 행에만 닿는다. 헬퍼는 자기 판이 없어서 부모의

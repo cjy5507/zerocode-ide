@@ -905,11 +905,27 @@ async function redesignNoWorkPerToken(browser, origin, ok) {
       await frame();
       await new Promise((done) => setTimeout(done, 120));
       const atFoot = paints();
+      // What the following window moved, for a failure: which facts of the stack changed (a token moves the words; a poll
+      // moves the checkout, the `git` fact), and the poll commands the clock sent inside the window. The clock is not held
+      // here: whether a poll's value moved is read from this detail first.
+      const factsBefore = stack?.__said ?? null;
+      const callsBefore = { ...(window.__COUNTS__ ?? {}) };
       await feed(50);
       const following = paints();
+      const factsAfter = stack?.__said ?? null;
+      const callsAfter = window.__COUNTS__ ?? {};
+      const moved = (was, now) => {
+        if (was === null || now === null) return was === now ? [] : ["unpainted"];
+        const [facts] = JSON.parse(was);
+        const [later] = JSON.parse(now);
+        return Object.keys(later).filter((key) => JSON.stringify(facts[key]) !== JSON.stringify(later[key]));
+      };
       return {
         before, away, stands: Boolean(rail) && Boolean(stack),
         followingRail: following.rail - atFoot.rail, followingStack: following.stack - atFoot.stack,
+        factsMoved: moved(factsBefore, factsAfter),
+        pollsSent: Object.keys(callsAfter).filter((name) => window.__POLLERS__?.has(name)
+          && (callsAfter[name] ?? 0) > (callsBefore[name] ?? 0)),
       };
     });
     ok(

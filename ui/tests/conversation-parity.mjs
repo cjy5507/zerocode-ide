@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
 import { FIXTURE_PNG, MIXED_STREAM_FENCES, conversationFixture, openFixtureConversation, streamingAnswer, webkitType } from "./conversation-perf.mjs";
+import { frameBudgetHolds } from "./machine-load.mjs";
 
 /* A wire session's page opened on `history` — the page with the most roads
  * on it (turns, a live answer, the composer's wire) — painted once. */
@@ -66,14 +67,20 @@ export async function testConversationFont(browser, origin, ok) {
     ]);
     await page.evaluate(async () => {
       const list = document.querySelector("#worker-view .helper-turns");
+      // The platform's sans is the product's own chain (`--font-ui`) with a face nobody has installed in front of it:
+      // the fall-through this test checks. The tool row is semibold, and on Windows a semibold face has its own name,
+      // so the control takes the row's weight as well.
+      const toolWeight = getComputedStyle(document.querySelector("#worker-view .helper-step-kind")).fontWeight;
+      document.documentElement.style.setProperty("--font-ui-choice", "\"No Such Face 6323\"");
       const controls = [
-        ["conversation-font-engine", "\"No Such Face 6323 Control\""],
-        ["conversation-font-system", "-apple-system, BlinkMacSystemFont, sans-serif"],
+        ["conversation-font-engine", "\"No Such Face 6323 Control\"", ""],
+        ["conversation-font-system", "var(--font-ui)", toolWeight],
       ];
-      for (const [id, face] of controls) {
+      for (const [id, face, weight] of controls) {
         const control = document.createElement("span");
         control.id = id;
         control.style.fontFamily = face;
+        control.style.fontWeight = weight;
         control.textContent = "Lookup";
         list.prepend(control);
       }
@@ -112,8 +119,9 @@ export async function testConversationFont(browser, origin, ok) {
       // Hangul.
       const latinInSans = drawn.tool?.join() === system?.join() &&
         [drawn.prose, drawn.user].every((faces) => faces?.includes(system?.[0]) === true);
-      const fellToEngine = engine?.[0] !== system?.[0] &&
-        Object.values(drawn).some((faces) => faces?.[0] === engine?.[0]);
+      // The Latin row says whether a face fell to the engine's default: the words may open with Hangul, which the
+      // engine's default (Malgun Gothic under lang=ko on Windows) draws too, so the first face of prose proves nothing.
+      const fellToEngine = engine?.[0] !== system?.[0] && drawn.tool?.[0] === engine?.[0];
       // The declared list ends in the platform's sans whatever came first.
       const chained = [declared.prose, declared.tool].every((list) =>
         list.includes("-apple-system") && /sans-serif\s*$/.test(list));
@@ -122,6 +130,9 @@ export async function testConversationFont(browser, origin, ok) {
     ok(
       "A0: the conversation draws its Latin words in the platform's sans whatever face the person chose — the default Geist (a name, not a shipped file), none, a face this machine lacks, the same typed in quotes, and a typed list all fall through to the system sans, never to the engine's default face (WebKit: Times / AppleMyungjo); the declared list keeps the system chain after the choice, a quoted name is that name, and a typed list stays a list",
       engine?.length > 0 && system?.length > 0 &&
+        // The platform's sans is not the engine's default face (Times or AppleMyungjo on macOS and WebKit, Malgun
+        // Gothic under lang=ko on Windows): a chain that collapsed to the engine default would pass the cases below.
+        engine?.[0] !== system?.[0] &&
         Object.values(cases).every((one) => one.latinInSans && !one.fellToEngine && one.chained) &&
         cases.quoted.declared.choice === cases.missing.declared.choice &&
         cases.listed.declared.choice.split(",").length === 2,
@@ -523,14 +534,24 @@ export async function testConversationKeys(browser, origin, ok) {
       const term = await openTermTab({ placement: "tab" });
       paneAgents.set(term, "claude");
       hookStates.set(term, "working");
+      const paneSetAt = { calls: { ...(window.__COUNTS__ ?? {}) } };
       window.__ANSWER__.pane_log = () => ({ found: true, next: 1, skipped: false, more: false, folded: false,
         turns: [{ role: "user", text: "판의 부탁" }] });
       await setPaneChat(term, true);
       for (let beat = 0; beat < 4; beat += 1) await window.__PAINTED__();
       const held = paneChats.get(term);
       const keysFor = () => calls("term_key").filter((args) => args.term === term).map((args) => args.press);
-      press(held.host.querySelector(".helper-turns"), "Escape");
+      // What the key met, for a failure: the pane's word at the press and after it, whether the conversation's Escape road
+      // is on this page, whether a listener before it took the key (its default prevented, so the road returns), and the
+      // poll commands the clock sent from the set to the settle after the key. A poll that moved the word is the clock's,
+      // not the key's — the detail says which, before any clock is held.
+      seen.paneWord = hookStates.get(term) ?? null;
+      seen.paneRoad = held.host.__interruptKeys === true;
+      seen.paneEscPrevented = press(held.host.querySelector(".helper-turns"), "Escape") === false;
       await settle();
+      seen.paneWordAfter = hookStates.get(term) ?? null;
+      seen.pollsSinceSet = Object.keys(window.__COUNTS__ ?? {}).filter((name) => window.__POLLERS__?.has(name)
+        && ((window.__COUNTS__ ?? {})[name] ?? 0) > (paneSetAt.calls[name] ?? 0));
       seen.paneEsc = JSON.stringify(keysFor());
       held.host.querySelector(".worker-composer-send.is-stop")?.click();
       await settle();
@@ -4771,7 +4792,8 @@ export async function testConversationCodeColours(browser, origin, ok) {
     );
     ok(
       "P1: the colouring ran in slices, and none of them — nor the colours laid as a fence is drawn — held the main thread past `CODE_COLOUR.sliceMs`",
-      seen.line !== null && seen.slices > 0 && seen.sliceMax <= seen.line && seen.inlineMax <= seen.line,
+      seen.line !== null && seen.slices > 0
+        && frameBudgetHolds(seen.sliceMax, seen.line) && frameBudgetHolds(seen.inlineMax, seen.line),
       JSON.stringify({ slices: seen.slices, sliceMax: seen.sliceMax, inlineMax: seen.inlineMax, line: seen.line }),
     );
     ok("P1: the 400-turn page raised no page errors", long.faults.length === 0, long.faults.join("\n"));

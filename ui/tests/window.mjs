@@ -2,6 +2,8 @@ import { endRun } from "./end-run.mjs";
 import "./scm-notices.mjs";
 import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 import { createRunner } from "./window-runner.mjs";
+import { reportedPlatformScript, TEST_PLATFORM } from "./test-platform.mjs";
+import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
 /* The window, driven for real.
  *
  * The Rust gates read this window's source; they cannot lay it out. Anything
@@ -139,32 +141,22 @@ const ATTACH_LIMITS = await (async () => {
   const read = (name) => Number(block.match(new RegExp(`\\b${name}: ([\\d_]+)`))?.[1]?.replace(/_/g, ""));
   return { chips: read("chips"), pathChars: read("pathChars"), shown: read("shown"), menuRows: read("menuRows") };
 })();
-const PRIMARY_KEY = process.platform === "darwin" ? "Meta" : "Control";
-const PRIMARY_COMMA_LABEL = process.platform === "darwin" ? "⌘," : "Ctrl+,";
-const PRIMARY_TERMINAL_LABEL = process.platform === "darwin" ? "⌘T" : "Ctrl+T";
-const PRIMARY_SUBMIT_LABEL = process.platform === "darwin" ? "⌘↵" : "Ctrl+Enter";
+const PRIMARY_KEY = TEST_PLATFORM === "darwin" ? "Meta" : "Control";
+const PRIMARY_COMMA_LABEL = TEST_PLATFORM === "darwin" ? "⌘," : "Ctrl+,";
+const PRIMARY_TERMINAL_LABEL = TEST_PLATFORM === "darwin" ? "⌘T" : "Ctrl+T";
+const PRIMARY_SUBMIT_LABEL = TEST_PLATFORM === "darwin" ? "⌘↵" : "Ctrl+Enter";
 const IDLE_TICK_WINDOW_MS = 2500;
-const EXPECTED_TERMINAL_FONT = process.platform === "win32"
+const EXPECTED_TERMINAL_FONT = TEST_PLATFORM === "win32"
   ? "Cascadia Mono"
-  : process.platform === "darwin"
+  : TEST_PLATFORM === "darwin"
     ? "SF Mono"
     : "DejaVu Sans Mono";
 
 const primaryPress = (...keys) => [PRIMARY_KEY, ...keys].join("+");
 
-const addReportedPlatform = (page, platform) => page.addInitScript((reported) => {
-  // `shell.js` prefers userAgentData and falls back to navigator.platform.
-  // Override both before it loads so a Windows shortcut test remains Windows
-  // even when this harness itself runs on macOS or Linux.
-  Object.defineProperty(Navigator.prototype, "userAgentData", {
-    configurable: true,
-    get: () => ({ platform: reported }),
-  });
-  Object.defineProperty(Navigator.prototype, "platform", {
-    configurable: true,
-    get: () => reported,
-  });
-}, platform);
+// Both halves of the reported platform (`shell.js` prefers userAgentData and falls back to navigator.platform): a
+// Windows shortcut test stays Windows even when this harness itself runs on macOS or Linux.
+const addReportedPlatform = (page, platform) => page.addInitScript(reportedPlatformScript, platform);
 
 /* The window asks the backend for everything it draws, so the backend is
  * stubbed down to the answers a first frame needs. Anything missing here does
@@ -1755,12 +1747,14 @@ const envRemedy = await page.evaluate(async () => {
   const acts = [...box.querySelectorAll(".integration-remedy-copy")];
   acts[0]?.click();
   await new Promise((done) => setTimeout(done, 40));
-  seen.findCopied =
-    window.__CLIPBOARD_WRITES__.at(-1) ===
-    "grep -RIn 'GH_TOKEN' ~/.zshrc ~/.zshenv ~/.bashrc ~/.bash_profile ~/.profile 2>/dev/null";
+  seen.findCopied = window.__CLIPBOARD_WRITES__.at(-1) === (usesWindowsPlatform
+    ? "Get-ChildItem Env:GH_TOKEN"
+    : "grep -RIn 'GH_TOKEN' ~/.zshrc ~/.zshenv ~/.bashrc ~/.bash_profile ~/.profile 2>/dev/null");
   acts[1]?.click();
   await new Promise((done) => setTimeout(done, 40));
-  seen.unsetCopied = window.__CLIPBOARD_WRITES__.at(-1) === "unset GH_TOKEN";
+  seen.unsetCopied = window.__CLIPBOARD_WRITES__.at(-1) === (usesWindowsPlatform
+    ? "Remove-Item Env:GH_TOKEN; [Environment]::SetEnvironmentVariable('GH_TOKEN', $null, 'User')"
+    : "unset GH_TOKEN");
   seen.summaryNamesVar = [
     ...document.querySelectorAll("#integration-github-accounts .integration-site-summary"),
   ].some((one) => one.textContent.includes("GH_TOKEN"));
@@ -13306,6 +13300,9 @@ ok(
 // A query nobody's settings answer says so where the section would have been.
 const searchedNothing = await page.evaluate(async () => {
   const field = document.getElementById("settings-search");
+  // A row for another platform stays hidden, so the rail is counted as it shows on this platform, before and after.
+  const railShown = () => [...document.querySelectorAll(".settings-rail-item")].filter((one) => !one.hidden).length;
+  const railBefore = railShown();
   field.value = "zzzznotasetting";
   field.dispatchEvent(new Event("input"));
   await new Promise((done) => setTimeout(done, 150));
@@ -13318,16 +13315,15 @@ const searchedNothing = await page.evaluate(async () => {
   field.value = "";
   field.dispatchEvent(new Event("input"));
   await new Promise((done) => setTimeout(done, 150));
-  said.backAfterClearing =
-    [...document.querySelectorAll(".settings-rail-item")].filter((one) => !one.hidden).length;
-  said.railTotal = document.querySelectorAll(".settings-rail-item").length;
+  said.backAfterClearing = railShown();
+  said.railBefore = railBefore;
   return said;
 });
 ok(
   "a query nothing answers says so, and clearing it brings the rail back",
   searchedNothing.rail === 0 && searchedNothing.shown === 0 &&
     searchedNothing.nothing && searchedNothing.said.includes("zzzznotasetting") &&
-    searchedNothing.backAfterClearing === searchedNothing.railTotal,
+    searchedNothing.backAfterClearing === searchedNothing.railBefore,
   JSON.stringify(searchedNothing),
 );
 
@@ -13416,6 +13412,7 @@ const menuBarIcon = await page.evaluate(async () => {
   await new Promise((done) => setTimeout(done, 60));
   return {
     mac,
+    windows: usesWindowsPlatform,
     windowsRowHidden: windowsRow.hidden,
     initial,
     afterToggle,
@@ -13424,7 +13421,7 @@ const menuBarIcon = await page.evaluate(async () => {
 });
 ok(
   "the menu-bar icon is macOS-only, starts on, patches immediately, and its native menu opens Settings",
-  menuBarIcon.windowsRowHidden && menuBarIcon.openedFromNativeMenu && (
+  menuBarIcon.windowsRowHidden === !menuBarIcon.windows && menuBarIcon.openedFromNativeMenu && (
     menuBarIcon.mac
       ? !menuBarIcon.initial.hidden && menuBarIcon.initial.checked &&
         !menuBarIcon.afterToggle.checked &&
@@ -13797,6 +13794,11 @@ const terminalAppearance = await page.evaluate(async () => {
   const inactiveCaret = inactive.querySelector(".term-caret");
   const grip = host.querySelector(":scope > .pane-grip");
   const pseudo = (node) => getComputedStyle(node, "::after");
+  // A fade or an ease still running is a value in the middle of its way: wait for the transitions under the split to
+  // end (their `finished`), not for a fixed time that a slower runner can miss.
+  const transitionsEnded = (node) => Promise.all(node.getAnimations({ subtree: true })
+    .filter((one) => one.transitionProperty)
+    .map((one) => one.finished.catch(() => {})));
   // The strip itself is the hit target now — Orca sizes the divider element
   // to the whole reach and lets the panes flex around it, so the first read
   // is the grip's own width rather than an overlay's.
@@ -13814,6 +13816,7 @@ const terminalAppearance = await page.evaluate(async () => {
   setTermPrefs({ inactive_pane_opacity: 0.5 });
   setTermPrefs({ divider_thickness_px: 7 });
   await new Promise((done) => setTimeout(done, 180));
+  await transitionsEnded(host);
   seen.bar = {
     widths: [pseudo(activeCaret).width, pseudo(inactiveCaret).width],
     shadows: [pseudo(activeCaret).boxShadow, pseudo(inactiveCaret).boxShadow],
@@ -13822,6 +13825,7 @@ const terminalAppearance = await page.evaluate(async () => {
   };
   setTermPrefs({ cursor_style: "underline" });
   await new Promise((done) => setTimeout(done, 40));
+  await transitionsEnded(host);
   seen.underline = {
     heights: [pseudo(activeCaret).height, pseudo(inactiveCaret).height],
     shadows: [pseudo(activeCaret).boxShadow, pseudo(inactiveCaret).boxShadow],
@@ -22407,7 +22411,7 @@ const previewFind = await page.evaluate(async () => {
   };
   const commandF = async () => {
     document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true, cancelable: true }),
+      new KeyboardEvent("keydown", { key: "f", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }),
     );
     await new Promise((done) => setTimeout(done, 80));
   };
@@ -22485,7 +22489,7 @@ const diffFind = await page.evaluate(async () => {
   const bar = view.querySelector(".doc-findbar");
   seen.barStands = bar !== null && bar.hidden === true;
   document.dispatchEvent(
-    new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true, cancelable: true }),
+    new KeyboardEvent("keydown", { key: "f", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }),
   );
   await new Promise((done) => setTimeout(done, 80));
   const input = view.querySelector(".doc-find-input");
@@ -22526,7 +22530,7 @@ const mergeFind = await page.evaluate(async () => {
   const seed = editor.state.sliceDoc(first.from, Math.min(first.from + 2, first.to));
   editor.dispatch({ selection: { anchor: first.from, head: first.from + seed.length } });
   document.dispatchEvent(
-    new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true, cancelable: true }),
+    new KeyboardEvent("keydown", { key: "f", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }),
   );
   await new Promise((done) => setTimeout(done, 80));
   const bar = view.querySelector(".doc-findbar");
@@ -24753,10 +24757,10 @@ const floatDoor = await page.evaluate(async () => {
   rebuildBound();
   seen.bothDefaultsBound = BOUND.get("mod+alt+a")?.id === "terminal.toggle" &&
     BOUND.get("mod+`")?.id === "terminal.toggle";
-  document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", altKey: true, metaKey: true, bubbles: true, cancelable: true }));
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", altKey: true, ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }));
   await settle();
   seen.chordOpens = !termFloat.hidden;
-  document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", altKey: true, metaKey: true, bubbles: true, cancelable: true }));
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", altKey: true, ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }));
   await settle();
   seen.chordCloses = termFloat.hidden;
   if (hadOverride) keybindingOverrides["terminal.toggle"] = previous;
@@ -24821,7 +24825,7 @@ const floatPrefs = await page.evaluate(async () => {
   delete keybindingOverrides["terminal.toggle"];
   rebuildBound();
   document.dispatchEvent(new KeyboardEvent("keydown", {
-    key: "a", altKey: true, metaKey: true, bubbles: true, cancelable: true,
+    key: "a", altKey: true, ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
   }));
   await settle();
   seen.chordClaimsNothing = termFloat.hidden;
@@ -24880,7 +24884,7 @@ const fileDrop = await page.evaluate(async () => {
   // separating space the next word needs.
   seen.imageRaw = pastes[0] === "/tmp/한 컷.png";
   seen.imageThenSpace = pastes[1] === " ";
-  seen.docQuoted = pastes[2] === "'/tmp/설계 노트.md' ";
+  seen.docQuoted = pastes[2] === (usesWindowsPlatform ? '"/tmp/설계 노트.md" ' : "'/tmp/설계 노트.md' ");
   seen.calmDocBare = pastes[3] === "/tmp/plan.md ";
   seen.onlyFour = pastes.length === 4;
   await fire({ payload: { paths: ["/tmp/nowhere.md"], position: { x: 1, y: 1 } } });
@@ -50430,7 +50434,7 @@ const editorZoom = await page.evaluate(async () => {
   const before = parseFloat(root.style.getPropertyValue("--editor-font-size"));
   document.dispatchEvent(
     new KeyboardEvent("keydown", {
-      key: "=", code: "Equal", metaKey: true, bubbles: true, cancelable: true,
+      key: "=", code: "Equal", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
     }),
   );
   await new Promise((done) => setTimeout(done, 30));
@@ -50446,7 +50450,7 @@ const editorZoom = await page.evaluate(async () => {
   ];
   document.dispatchEvent(
     new KeyboardEvent("keydown", {
-      key: "0", code: "Digit0", metaKey: true, bubbles: true, cancelable: true,
+      key: "0", code: "Digit0", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
     }),
   );
   await new Promise((done) => setTimeout(done, 30));
@@ -50482,7 +50486,7 @@ const termZoom = await page.evaluate(async () => {
   const view = termViews.get(made);
   const dial = (key, code) =>
     document.dispatchEvent(
-      new KeyboardEvent("keydown", { key, code, metaKey: true, bubbles: true, cancelable: true }),
+      new KeyboardEvent("keydown", { key, code, ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true }),
     );
   dial("=", "Equal");
   await new Promise((done) => setTimeout(done, 30));
@@ -50522,7 +50526,7 @@ const uiZoomKeys = await page.evaluate(async () => {
   const writesBefore = window.__UI_ZOOM_WRITES__.length;
   document.dispatchEvent(
     new KeyboardEvent("keydown", {
-      key: "=", code: "Equal", metaKey: true, bubbles: true, cancelable: true,
+      key: "=", code: "Equal", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
     }),
   );
   await new Promise((done) => setTimeout(done, 30));
@@ -50530,7 +50534,7 @@ const uiZoomKeys = await page.evaluate(async () => {
   seen.hudKind = el("zoom-overlay").querySelector(".zoom-overlay-kind").textContent;
   document.dispatchEvent(
     new KeyboardEvent("keydown", {
-      key: "0", code: "Digit0", metaKey: true, bubbles: true, cancelable: true,
+      key: "0", code: "Digit0", ...window.__TEST_PRIMARY_EVENT__, bubbles: true, cancelable: true,
     }),
   );
   await new Promise((done) => setTimeout(done, 30));
@@ -53825,6 +53829,11 @@ const brainScale = await page.evaluate(async () => {
 });
 const brainLeast = (key) => Math.min(...brainScale.map((one) => one[key]));
 const brainFirst = brainScale[0];
+/* 천 쪽 시험이 시간으로 재는 두 벽(밀리초, 조용한 기계 기준). 값은 이 시험이 원래 쓰던 그대로이고 이름만 달았다.
+ * frameBudgetHolds(machine-load.mjs)는 이 기계에서 판정할 수 없으면 — 부하가 코어 수를 넘거나, 부하를 읽을 수 없는
+ * 플랫폼(win32)이면 — 판정하지 않고 기록만 한다(loadNote가 그렇게 말한다). */
+const SETTLE_FRAME_BUDGET_MS = 16 * 8;
+const FIRST_PAINT_BUDGET_MS = 300;
 ok(
   "a thousand pages draw their first picture inside the budget and lay out deterministically",
   brainScale.length === 5 &&
@@ -53839,7 +53848,7 @@ ok(
       one.laidOut > 0 && one.samples >= 10 && one.laidOut / one.samples < 40) &&
     brainFirst.asked === 1 && brainFirst.nodes === 1020 && brainFirst.edges > 1500 &&
     brainLeast("firstPaint") > 0 &&
-    brainLeast("firstPaint") < 300 &&
+    frameBudgetHolds(brainLeast("firstPaint"), FIRST_PAINT_BUDGET_MS) &&
     /* 그리고 그 걸음이 무거워졌는가 — 이쪽은 시간으로만 물을 수 있다. 벽은
      * 폭발을 잡는 것이지 10ms 표류를 잡는 것이 아니다: 이 창의 정착 프레임은
      * 이 기계에서 원래 80~90ms이고(다섯 라운드 최소값 실측 73·84, 라운드 하나로는
@@ -53847,8 +53856,9 @@ ok(
      * 바닥 위에 절반의 여유를 두고 선다 — 그 아래로 좁히면 재는 것은 그림이
      * 아니라 그날의 부하고, 그보다 넓히면 폭발을 놓친다. 최소값 위에 선 벽이므로
      * 넘겼다면 그것은 위상이 아니라 그림이다. 첫 그림이 서는 프레임은
-     * `firstPaint`가 따로 재고 있다. */
-    brainLeast("worstGap") < 16 * 8 &&
+     * `firstPaint`가 따로 재고 있다. 이 벽은 SETTLE_FRAME_BUDGET_MS이고, 판정은
+     * frameBudgetHolds가 한다(부하를 읽을 수 없는 win32에서는 기록만). */
+    frameBudgetHolds(brainLeast("worstGap"), SETTLE_FRAME_BUDGET_MS) &&
     brainScale.every((one) => one.spread > 400 && one.spread < 6000) &&
     // 천 개의 제목을 한 화면에 겹쳐 쓰지 않는다 — 이름은 격자가 나눠 준
     // 예산 안에서만 선다(09-16).
@@ -53862,7 +53872,7 @@ console.log(`      knowledge graph: 1000 pages, first paint `
   + `${brainScale.map((one) => one.firstPaint).join("/")}ms (least ${brainLeast("firstPaint")}), `
   + `${brainFirst.nodes} nodes / ${brainFirst.edges} edges, worst frame gap `
   + `${brainScale.map((one) => one.worstGap).join("/")}ms (least ${brainLeast("worstGap")}), `
-  + `layout steps ${brainFirst.layoutRuns}`);
+  + `layout steps ${brainFirst.layoutRuns}, ${loadNote()}`);
 
 /* 라이브 층(t-2931): 워처의 다시 읽기·회상 고리·BUS LOG·활동 렌즈·merge 후보.
  * 절은 제 파일에 있고(`knowledge-live.mjs`), `KNOWLEDGE_LIVE_ONLY=1`로 혼자 돈다. */

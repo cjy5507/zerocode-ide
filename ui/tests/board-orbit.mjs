@@ -253,6 +253,60 @@ const countOver = (page, ms) => page.evaluate(async (wait) => {
     handles: window.__ORBIT__() };
 }, ms);
 
+/* The camera is read until what the test waits for has happened, not for a fixed time a slower runner can outrun.
+ * Each wait has a named limit: past it the caller records a failure with the values it saw, and asserts nothing more
+ * on a camera it could not wait for. */
+const ORBIT_STAND_STEP_MS = 50;
+const ORBIT_GLIDE_TIME_CONSTANTS = 25;  // a glide decays by ORBIT.camera.glideMs per time constant; twenty-five is at rest
+const ORBIT_TURN_RESUME_MAX_MS = 3_000; // a turn that has not started again in three seconds is the failure
+
+/* A released camera glides and then stands. The glide moves the camera only on a frame, and a frame can come as rarely as
+ * the runner draws: the unfocused check measured 2.4 fps on this runner, so two reads 50 ms apart can fall between two
+ * frames and agree while the glide goes on. The camera stands when it has not moved for ORBIT_STAND_QUIET_STEPS reads in
+ * a row (500 ms, longer than one frame at 2 fps). The bound is read from the page's own glide constant, so a retuned glide
+ * keeps the same number of time constants. */
+const ORBIT_STAND_QUIET_STEPS = 10;
+const untilCameraStands = async (page, camera) => {
+  const bound = ORBIT_GLIDE_TIME_CONSTANTS * await page.evaluate(() => ORBIT.camera.glideMs);
+  let previous = await camera();
+  let quiet = 0;
+  for (let waited = ORBIT_STAND_STEP_MS; waited <= bound; waited += ORBIT_STAND_STEP_MS) {
+    await page.evaluate((ms) => window.__ORBIT_WAIT__(ms), ORBIT_STAND_STEP_MS);
+    const now = await camera();
+    quiet = Math.abs(now.yaw - previous.yaw) < 1e-6 && Math.abs(now.pitch - previous.pitch) < 1e-6 ? quiet + 1 : 0;
+    if (quiet === ORBIT_STAND_QUIET_STEPS) return { camera: now, settled: true, waitedMs: waited };
+    previous = now;
+  }
+  return { camera: previous, settled: false, waitedMs: bound };
+};
+
+/* A hand that leaves a label turns the camera again: wait for the camera to move, which is what a person sees. */
+const untilTurnResumes = async (page, camera) => {
+  const at = await camera();
+  for (let waited = ORBIT_STAND_STEP_MS; waited <= ORBIT_TURN_RESUME_MAX_MS; waited += ORBIT_STAND_STEP_MS) {
+    await page.evaluate((ms) => window.__ORBIT_WAIT__(ms), ORBIT_STAND_STEP_MS);
+    const now = await camera();
+    if (now.yaw !== at.yaw || now.pitch !== at.pitch) return { turned: true, waitedMs: waited };
+  }
+  return { turned: false, waitedMs: ORBIT_TURN_RESUME_MAX_MS };
+};
+
+/* A shown view asks a frame while it has something to draw, and the counter has counted since the view was opened
+ * (openOrbit installs it first): the check reads the first frame asked as soon as it is asked, bounded. A runner that
+ * holds its frames for seconds (v1.1.54 Windows: 0 in a fixed 300 ms read, the view running) still gets its first frame.
+ * `since` is the count the check starts from: a check after an earlier phase passes its own snapshot. The hidden view
+ * keeps its fixed window: there the check is that nothing is asked. */
+const ORBIT_FIRST_FRAME_MAX_MS = 3_000; // the turn wait's bound: a view that asks no frame for three seconds has none to ask
+const untilFrameAsked = async (page, since = 0) => {
+  for (let waited = 0; ; waited += ORBIT_STAND_STEP_MS) {
+    const rafs = (await page.evaluate(() => window.__ORBIT_RAFS__)) - since;
+    if (rafs > 0 || waited >= ORBIT_FIRST_FRAME_MAX_MS) {
+      return { rafs, waitedMs: waited, handles: await page.evaluate(() => window.__ORBIT__()) };
+    }
+    await page.evaluate((ms) => window.__ORBIT_WAIT__(ms), ORBIT_STAND_STEP_MS);
+  }
+};
+
 /* 판의 빈 모서리 — 라벨이 서지 않는 자리(그림은 판 가운데에 맞춰 선다). 끌기와 두 번
  * 누르기가 여기서 시작한다. */
 const stageCorner = (page) => page.evaluate(() => {
@@ -724,6 +778,15 @@ const orbitOverlaps = (page) => page.evaluate(() => {
       .map((tag) => tag.key), width: state.width };
 });
 
+/* The label facts a fold is judged by, for a failure: the stage's size and chip, the labels and how many stand named, and
+ * the labels' own widths. A wider face makes each name wider, so fewer find a clear place and fold into a chip. */
+const orbitLabelFacts = (page) => page.evaluate(() => {
+  const state = window.__ORBIT_STATE__();
+  const widths = [...state.host.children].map((label) => label.offsetWidth).sort((a, b) => a - b);
+  return { stage: [state.width, state.height], chip: state.chip, labels: widths.length, named: state.named,
+    widths: { min: widths[0] ?? 0, median: widths[Math.floor(widths.length / 2)] ?? 0, max: widths.at(-1) ?? 0 } };
+});
+
 /* 여는 카메라의 화면에서: 판의 윗면(네 모서리)끼리 겹치는가, 로봇이 제 판의 윗면 안에 서는가,
  * 로봇(발에서 머리까지)이 다른 판의 윗면을 덮는가, 판이 판 밖이나 흐름 한 줄·범례에 걸리는가,
  * 이름표가 판의 윗면에 서는가. 반 픽셀 안의 닿음은 겹침이 아니다. */
@@ -1077,7 +1140,7 @@ async function testOrbitSpace(browser, origin, ok) {
         return window.__ORBIT_FRAMES__(4);
       });
       crowds.push({ size, ...(await orbitOverlaps(one.page)), viewport: width, clear: await orbitClearance(one.page),
-        faults: one.faults.length });
+        faults: one.faults.length, facts: await orbitLabelFacts(one.page) });
     } finally {
       await one.page.close();
     }
@@ -1093,7 +1156,7 @@ async function testOrbitSpace(browser, origin, ok) {
     crowds.length === 4 && crowds.every((one) => one.unnamed.length === 0
       && one.named >= one.labels * floors[`${one.size}:${one.viewport}`]),
     JSON.stringify(crowds.map((one) => ({ size: one.size, viewport: one.viewport, named: `${one.named}/${one.labels}`,
-      floor: floors[`${one.size}:${one.viewport}`], unnamed: one.unnamed }))));
+      floor: floors[`${one.size}:${one.viewport}`], unnamed: one.unnamed, facts: one.facts }))));
   const clearOf = (pick) => JSON.stringify(crowds.map((one) => ({ size: one.size, viewport: one.viewport,
     fit: one.clear.fit, ...pick(one.clear) })));
   ok("on the screen no two platform tops overlap, every robot stands inside its own platform's top, and no robot "
@@ -1140,13 +1203,14 @@ async function testOrbitCamera(browser, origin, ok) {
       dragged.spin === false && Math.abs((dragged.yaw - before.yaw) - 120 * turn) < 120 * turn * 0.25
         && Math.abs((dragged.pitch - before.pitch) - 80 * turn) < 1e-6,
       JSON.stringify({ before, dragged, turn }));
-    await page.evaluate(() => window.__ORBIT_WAIT__(1_500));
-    const glided = await camera();
+    const still = await untilCameraStands(page, camera);
+    const glided = still.camera;
     const settled = await countOver(page, 500);
     const stood = await camera();
     ok("let go, the camera glides and stands where it was left, asking no frames",
-      glided.yaw !== dragged.yaw && stood.yaw === glided.yaw && stood.spin === false
-        && settled.rafs === 0 && settled.frames === 0, JSON.stringify({ dragged, glided, stood, settled }));
+      still.settled && glided.yaw !== dragged.yaw && stood.yaw === glided.yaw && stood.spin === false
+        && settled.rafs === 0 && settled.frames === 0,
+      JSON.stringify({ dragged, glided, stood, settled, standsWithinMs: still.waitedMs, standsSettled: still.settled }));
 
     await page.mouse.move(corner.x, corner.y);
     await page.mouse.down();
@@ -1159,10 +1223,12 @@ async function testOrbitCamera(browser, origin, ok) {
     await page.evaluate(() => window.__ORBIT_FRAMES__(3));
     const fitted = await page.evaluate(() => ({ ...window.__ORBIT__().camera, zoom: agentGraphZoom,
       pitchWanted: ORBIT.camera.pitch }));
-    const turning = await countOver(page, 300);
+    /* 「카메라가 다시 돈다」는 움직임을 기다린다. 300 ms 동안 rAF를 세면 그 구간이 멈춘 러너에서 0이 된다
+     * (v1.1.54 Windows: turning 0). 손을 뗀 뒤의 시험과 같은 기다림이다. */
+    const turning = await untilTurnResumes(page, camera);
     ok("a double click fits: zoom 1, the table's pitch, and the camera turns again",
       fitted.zoom === 1 && fitted.spin === true && Math.abs(fitted.pitch - fitted.pitchWanted) < 1e-9
-        && turning.rafs > 0, JSON.stringify({ fitted, turning: turning.rafs }));
+        && turning.turned, JSON.stringify({ fitted, turning }));
     ok("the camera page raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
@@ -1175,7 +1241,7 @@ async function testOrbitGates(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     await openOrbit(page);
-    const shown = await countOver(page, 300);
+    const shown = await untilFrameAsked(page);
     ok("gate control: the shown 3D view asks frames", shown.rafs > 0, JSON.stringify(shown));
 
     /* 에이전트의 라벨 — 워크스페이스의 키는 NUL을 품어 CSS 선택자로 잡히지 않는다. */
@@ -1187,8 +1253,11 @@ async function testOrbitGates(browser, origin, ok) {
     ok("a hand on a label holds the 3D view still and asks no frames",
       held.rafs === 0 && held.frames === 0 && held.handles?.paused === true, JSON.stringify(held));
     await page.mouse.move(1, 1);
+    const cameraNow = () => page.evaluate(() => window.__ORBIT__().camera);
+    const resumed = await untilTurnResumes(page, cameraNow);
     const released = await countOver(page, 300);
-    ok("the hand leaving turns it again", released.rafs > 0, JSON.stringify(released));
+    ok("the hand leaving turns it again", resumed.turned && released.rafs > 0,
+      JSON.stringify({ released, turnsWithinMs: resumed.waitedMs, turned: resumed.turned }));
 
     await page.evaluate(async () => {
       document.querySelector('#board-view [data-board-mode="tasks"]').click();
@@ -1197,11 +1266,14 @@ async function testOrbitGates(browser, origin, ok) {
     const tasks = await countOver(page, 400);
     ok("the task list stops the 3D view's frames", tasks.rafs === 0 && tasks.frames === 0, JSON.stringify(tasks));
 
+    const framesBeforeGraph = await page.evaluate(() => window.__ORBIT_RAFS__);
     await page.evaluate(async () => {
       document.querySelector('#board-view [data-board-mode="graph"]').click();
       await window.__BOARD_SETTLED__();
     });
-    const back = await countOver(page, 300);
+    /* The return asks its first frame when the stage is measured again, bounded (see untilFrameAsked), not in a fixed
+     * 300 ms window. */
+    const back = await untilFrameAsked(page, framesBeforeGraph);
     ok("returning to the relations tab starts the 3D view again", back.rafs > 0, JSON.stringify(back));
 
     await page.evaluate(async () => {
@@ -1230,11 +1302,13 @@ async function testOrbitGates(browser, origin, ok) {
     });
     const docHidden = await countOver(page, 400);
     ok("a hidden document asks no 3D frames", docHidden.rafs === 0 && docHidden.frames === 0, JSON.stringify(docHidden));
+    const framesBeforeReturn = await page.evaluate(() => window.__ORBIT_RAFS__);
     await page.evaluate(() => {
       Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
       document.dispatchEvent(new Event("visibilitychange"));
     });
-    const woke = await countOver(page, 300);
+    /* The return asks its first frame when it is read, bounded (see untilFrameAsked), not in a fixed 300 ms window. */
+    const woke = await untilFrameAsked(page, framesBeforeReturn);
     ok("the document coming back starts the 3D view again", woke.rafs > 0, JSON.stringify(woke));
 
     /* 초점 없는 창: 그림은 30 fps 이하 — 박자는 돌되 그림을 건너뛴다. */
