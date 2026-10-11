@@ -1740,8 +1740,8 @@ class GateOwed(LaneCase):
     def owed(self, changed, **stubs):
         self.seed_installed(SHA_C)
         self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS=changed, **stubs)
-        self.assertEqual(r.returncode, 0, r.stdout)
+        result = self.lane.run(CHANGED_PATHS=changed, **stubs)
+        self.assertEqual(result.returncode, 0, result.stdout)
         return self.gates(SHA_A)
 
     def test_a_stamp_only_sha_owes_no_gate_and_still_installs(self):
@@ -1807,10 +1807,97 @@ class GateOwed(LaneCase):
             '{"app":{"sha":"%s","at":"2026-09-16T00:00:00Z","version":"1.3.89"},'
             '"zo":{"sha":"%s","at":"2026-09-16T00:00:00Z","version":"1.3.90"}}\n' % (SHA_B, SHA_C))
         self.lane.enqueue(SHA_A)
-        r = self.lane.run(CHANGED_PATHS=self.STAMP)
-        self.assertEqual(r.returncode, 0, r.stdout)
+        result = self.lane.run(CHANGED_PATHS=self.STAMP)
+        self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn(f"root tree unchanged since {SHA_B[:8]}", self.lane.phase("gate-root")["skipped"])
         self.assertIn(f"zo tree unchanged since {SHA_C[:8]}", self.lane.phase("gate-zo")["skipped"])
+
+
+class GateOwedOnGit(unittest.TestCase):
+    """gate_owed and stamp_only on a real repository, with git's own diff: a
+    stamp diff git cannot read is a real change, and a path git lists with a
+    space in it owes the gate."""
+
+    FUNCTIONS = ('eval "$(grep \'^RELEASE_STAMP_FILES=\' "$0")"; '
+                 'eval "$(sed -n -e \'/^is_dry()/p\' -e \'/^installed_part()/,/^}/p\' '
+                 '-e \'/^stamp_only()/,/^}/p\' -e \'/^gate_owed()/,/^}/p\' "$0")"; '
+                 'RELEASE_DRY_RUN=0 SCRATCH=$1 SHA=$2 INSTALLED=$3; ')
+    BUMPED = '[package]\nname = "t"\nversion = "1.0.1"\n'
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="lane-git-"))
+        self.repo = self.tmp / "repo"
+        self.env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp), "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
+                    "GIT_COMMITTER_EMAIL": "t@x"}
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True, env=self.env)
+        self.write("Cargo.toml", '[package]\nname = "t"\nversion = "1.0.0"\n')
+        self.write("ui/shell.js", "one\n")
+        self.since = self.commit("base")
+        self.installed = self.tmp / "installed.json"
+        self.installed.write_text(
+            '{"app":{"sha":"%s","at":"2026-10-12T00:00:00Z","version":"1.0.0"},'
+            '"zo":{"sha":"%s","at":"2026-10-12T00:00:00Z","version":"1.0.0"}}\n' % (self.since, self.since))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.repo), *args], env=self.env,
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def write(self, name, text):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def commit(self, subject):
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", subject)
+        return self.git("rev-parse", "HEAD")
+
+    def commit_bump(self):
+        self.write("Cargo.toml", self.BUMPED)
+        return self.commit("bump")
+
+    def judge(self, call, sha):
+        result = subprocess.run(["bash", "-c", self.FUNCTIONS + call, str(LANE), str(self.repo), sha,
+                                 str(self.installed)], env=self.env, capture_output=True, text=True)
+        return result.stdout.strip()
+
+    def owed(self, sha):
+        return {lane for lane in ("root", "zo") if self.judge(f'gate_owed {lane}; echo $?', sha) == "0"}
+
+    def lose_the_base_blob(self, name):
+        blob = self.git("rev-parse", f"{self.since}:{name}")
+        (self.repo / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
+
+    def test_a_version_line_alone_owes_no_gate(self):
+        sha = self.commit_bump()
+        self.assertEqual(self.judge(f'stamp_only Cargo.toml {self.since}; echo $?', sha), "0")
+        self.assertEqual(self.owed(sha), set())
+
+    def test_a_stamp_diff_git_cannot_read_is_a_real_change(self):
+        sha = self.commit_bump()
+        self.lose_the_base_blob("Cargo.toml")
+        self.assertEqual(self.git("diff", "--name-only", self.since, sha), "Cargo.toml")
+        self.assertEqual(self.judge(f'stamp_only Cargo.toml {self.since}; echo $?', sha), "1")
+
+    def test_a_stamp_diff_git_cannot_read_owes_both_gates(self):
+        sha = self.commit_bump()
+        self.lose_the_base_blob("Cargo.toml")
+        self.assertEqual(self.owed(sha), {"root", "zo"})
+
+    def test_a_path_with_a_space_owes_both_gates(self):
+        self.write("Cargo.toml Cargo.lock", 'version = "1.0.1"\n')
+        sha = self.commit("a name with a space")
+        self.assertEqual(self.owed(sha), {"root", "zo"})
+
+    def test_a_base_git_does_not_know_owes_both_gates(self):
+        self.write("ui/shell.js", "two\n")
+        sha = self.commit("change")
+        self.installed.write_text(self.installed.read_text().replace(self.since, "d" * 40))
+        self.assertEqual(self.owed(sha), {"root", "zo"})
 
 
 if __name__ == "__main__":
