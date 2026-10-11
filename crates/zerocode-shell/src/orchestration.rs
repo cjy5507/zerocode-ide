@@ -7229,6 +7229,7 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // A worker an account switch found at work is moved at its first turn
     // end — here, before the pointer below can start its next turn
     // (t-46106).
+    host.follow_account_switch(now_ms);
     point_at_waiting_mail(host, now_ms);
     // The readiness sweep, on the beat that already exists: the sounds heard
     // since the last one retire their windows, and whoever stayed silent past

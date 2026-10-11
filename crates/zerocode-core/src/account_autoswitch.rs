@@ -573,11 +573,6 @@ pub fn judge_follower(
     gauges: &[AccountGauge],
     now_ms: i64,
 ) -> Decision {
-    // RED (t-46106): the default moves alone.
-    let _ = (pane_account, pane_model, landing, gauges, now_ms);
-    return Decision::Stay {
-        why: "no_candidate",
-    };
     if landing == pane_account {
         return Decision::Stay { why: "landed" };
     }

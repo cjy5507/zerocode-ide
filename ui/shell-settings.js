@@ -4738,7 +4738,6 @@ const PANE_STANCE_WORDS = Object.freeze({
  * 「옛 계정 a…6252 98% — 턴 끝에 옮김」. 행은 그 판의 로그인을, 막대는 기본 계정을
  * 말한다. 계획에 없는 판(Claude가 아닌 판, 헬퍼)은 null — 아무것도 그리지 않는다. */
 function paneAccountWords(term) {
-  return null; // RED (t-46106)
   const plan = accountUsageReport?.plan ?? null;
   const pane = (plan?.panes ?? []).find((one) => one.term === term) ?? null;
   if (!pane) return null;
@@ -4771,7 +4770,6 @@ function paneAccountWords(term) {
 function paintClaudeBarAccount() {
   const chip = document.getElementById("sb-claude-account");
   if (!chip) return;
-  if (chip) return; // RED (t-46106)
   const id = claudeUsage?.account ?? null;
   const words = id ? accountShortId(id) : "";
   if (chip.textContent !== words) chip.textContent = words;
@@ -5071,7 +5069,6 @@ async function applyAccountSwitch(by, token) {
  * 뜻은 호버가 말하고, 단추 하나가 계정 화면을 연다. 박자의 전환과 사람의 선택이
  * 같은 말을 한다. */
 function saySwitchCensus(head, census) {
-  census = null; // RED (t-46106)
   const words = [head];
   if (census) {
     words.push(t("settings.accounts.switchedCensus", "옮긴 판 {{moved}} · 턴 끝에 옮길 판 {{turnEnd}} · 사람 판 {{person}} · 남은 판 {{left}}", {

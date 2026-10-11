@@ -13665,7 +13665,9 @@ impl Ledger {
         // following one on the window's observation at the fence that its
         // pane is between turns (t-46106) — the ledger has no witness of a
         // turn's end to ask, and a wall is exactly what following avoids.
-        if !newest_wall(run, &dispatch_id).is_some_and(|wall| wall.stands(now_ms)) {
+        if rest.cause == RestCause::Walled
+            && !newest_wall(run, &dispatch_id).is_some_and(|wall| wall.stands(now_ms))
+        {
             return Err(format!(
                 "worker {worker_id} stands at no quota wall the ledger has witnessed — a \
                  walled move needs one; a worker that follows the default moves between \
