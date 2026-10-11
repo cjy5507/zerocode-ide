@@ -5473,6 +5473,53 @@ await test("키체인이 없는 컴퓨터: 판이 키체인을 약속하지 않�
   return reason;
 });
 
+await test("판단 설정은 적용된 모델과 아직 연결하지 않은 선택을 분리한다", async () => {
+  await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => refreshApiRouters());
+  const applied = clone(backend.typesafeSettings().provider);
+  try {
+    assert(await pageA.locator("#judgment-active-model").isVisible(), "the active model has no separate summary");
+    assert((await pageA.locator("#judgment-active-model").textContent()).includes(applied.model), "the summary does not name the applied model");
+    await pageA.selectOption("#judgment-provider-kind", "remote");
+    await pageA.fill("#judgment-endpoint", "");
+    assertEqual(await pageA.locator("#judgment-setup-hint").getAttribute("data-step"), "connection", "the next step does not ask for a server");
+    assert((await pageA.locator("#judgment-setup-hint").textContent()).trim(), "the next step has no instructions");
+    assert((await pageA.locator("#judgment-active-model").textContent()).includes(applied.model), "a draft replaced the active-model summary");
+    assertEqual(backend.typesafeSettings().provider, applied, "choosing a setup path applied it");
+  } finally {
+    await pageA.click("#judgment-revert-provider");
+  }
+  return "applied model separate from draft · next connection step named";
+});
+
+await test("판단 모델 연결 동작은 기능별 진단보다 먼저 보인다", async () => {
+  await openSettings(pageA, "api-routers");
+  const order = await pageA.evaluate(() => {
+    const editor = document.getElementById("judgment-provider-editor");
+    const actions = document.querySelector(".settings-judgment-actions");
+    const diagnostics = document.querySelector("#typesafe-card [data-jev-standings]");
+    return {
+      keyInsideConnection: editor.contains(document.getElementById("typesafe-key-input")),
+      actionsBeforeDiagnostics: Boolean(actions.compareDocumentPosition(diagnostics) & Node.DOCUMENT_POSITION_FOLLOWING),
+      modelInsideConnection: editor.contains(document.getElementById("typesafe-model-input")),
+    };
+  });
+  assertEqual(order, { keyInsideConnection: true, actionsBeforeDiagnostics: true, modelInsideConnection: true }, "connection controls are scattered around diagnostics");
+  return "credentials and model together · apply before diagnostics";
+});
+
+await test("판단 기능별 진단은 기본으로 접고 사용자가 펼친다", async () => {
+  await openSettings(pageA, "api-routers");
+  const details = pageA.locator("#judgment-feature-details");
+  assertEqual(await details.count(), 1, "the feature diagnostics have no fold");
+  assert(!(await details.evaluate((element) => element.open)), "diagnostics are expanded before setup");
+  await details.locator("summary").click();
+  assert(await details.evaluate((element) => element.open), "the diagnostics fold did not open");
+  assertEqual(await details.locator("[data-jev-standings]").count(), 1, "the existing feature diagnostics were removed");
+  await details.locator("summary").click();
+  return "diagnostic details retained and opt-in";
+});
+
 await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 켜고 끈다 — 카드에 고를 모드는 없다", async () => {
   await openSettings(pageA, "api-routers");
   backend.keychain.delete(TYPESAFE_SERVICE);
