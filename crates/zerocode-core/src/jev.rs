@@ -1950,6 +1950,63 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     ),
 };
 
+/// How long a lineup's judgment may take before its classification goes on
+/// without it (t-45961). A lineup is judged once when its facts change, on
+/// the `zo models` call that reads it — a background read the window
+/// repeats hourly, never a summons — so the wall is the routing seat's own
+/// order of patience rather than a step's.
+pub const MODEL_TIERS_APPLY_DEADLINE_MS: u64 = 4_000;
+
+/// zo's model tier seat (t-45961): where each model of one provider's lineup
+/// stands — which work it can be trusted with, read off the catalog facts
+/// (declared class, list price, context window, release order, effort
+/// ceiling) and the outcomes recorded for it — so the classifier's bands and
+/// rungs come from a judgment and not from a table, and a model shipped
+/// tomorrow takes its place without an edit.
+///
+/// Asked once per provider when the lineup's facts change (a model arrives,
+/// a price or a class moves, the recorded outcomes cross a step) and kept in
+/// zo's catalog cache until then; under `off`, without an answer or past the
+/// wall, the fact rule places every model, and a model that arrived after
+/// the judgment stands provisionally by the facts. What is sent is catalog
+/// facts and counts — ids, classes, prices, windows, release order, effort
+/// ceilings and run counts — never a word a person wrote.
+pub const MODEL_TIERS: JevUse = JevUse {
+    id: "model_tiers",
+    setting: "jevModelTiers",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On],
+    recommended: JevMode::On,
+    repeat: None,
+    sends: &[Sent {
+        at: "/state/models/*/id",
+        cap: Cap::Uncut,
+    }],
+    ledger: "model-tiers.jsonl",
+    promotes: false,
+    answer_floor_permille: None,
+    press_floor_permille: None,
+    agreement_floor_permille: None,
+    apply_deadline_ms: Some(MODEL_TIERS_APPLY_DEADLINE_MS),
+    window_forgives: None,
+    agreement_rows_wanted: None,
+    agreement_kind: AgreementKind::Comparison,
+    // What places a model without the seat: the fact rule.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: None,
+    confidence_bands: None,
+    reads_act_line: false,
+    rubric_version: questions::MODEL_TIERS_RUBRIC_VERSION,
+    request_name: &[],
+    names: Naming::Request,
+    label_part: &[],
+    follows: None,
+    regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Lacks(
+        "a score offers none; an unanswered model stands by the fact rule, provisionally",
+    ),
+};
+
 /// Which model a summons runs on when nobody named one: a closed choice over
 /// the agent's lineup today, with `abstain` (t-14437). Graded like the
 /// difficulty seat — by the work its answers launched — and, like it, it
@@ -4600,7 +4657,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 32] = [
+pub static JEV_USES: [JevUse; 33] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -4614,6 +4671,7 @@ pub static JEV_USES: [JevUse; 32] = [
     SUMMON,
     SUMMON_DIFFICULTY,
     SUMMON_MODEL,
+    MODEL_TIERS,
     STEP_EFFORT,
     ZO_STEP_EFFORT,
     COMPACTION,

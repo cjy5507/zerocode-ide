@@ -1721,7 +1721,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 32);
+    assert_eq!(JEV_USES.len(), 33);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -2023,7 +2023,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 32);
+    assert_eq!(JEV_USES.len(), 33);
     assert_eq!(JEV_USES.get(JEV_USES.len() - 4), Some(&FILE_PICK));
 }
 
@@ -3530,4 +3530,39 @@ fn every_use_says_what_its_choices_offer_for_none_of_these() {
             );
         }
     }
+}
+
+/// zo's model tier seat (t-45961) sends catalog facts and counts — no word a
+/// person wrote — and applies under `on` as the person's switch recommends;
+/// under `off`, without an answer or past its wall, the fact rule places the
+/// lineup, so the seat neither promotes nor holds a baseline of its own.
+#[test]
+fn the_model_tier_seat_sends_facts_and_applies_under_on() {
+    assert_eq!(jev_use("model_tiers"), Some(&MODEL_TIERS));
+    assert_eq!(MODEL_TIERS.setting, "jevModelTiers");
+    assert_eq!(MODEL_TIERS.recommended, JevMode::On);
+    assert!(!MODEL_TIERS.modes.contains(&JevMode::Auto));
+    const { assert!(!MODEL_TIERS.promotes) };
+    assert_eq!(MODEL_TIERS.baseline, Baseline::TodaysRule);
+    assert_eq!(
+        MODEL_TIERS.apply_deadline_ms,
+        Some(MODEL_TIERS_APPLY_DEADLINE_MS)
+    );
+    assert_eq!(
+        MODEL_TIERS.rubric_version,
+        questions::MODEL_TIERS_RUBRIC_VERSION
+    );
+    assert_eq!(MODEL_TIERS.sends.len(), 1);
+    assert_eq!(MODEL_TIERS.sends[0].at, "/state/models/*/id");
+    assert!(MODEL_TIERS.mode_of(Some(&json!("on"))).applies());
+    assert!(!MODEL_TIERS.mode_of(Some(&json!("shadow"))).applies());
+    let summons = JEV_USES
+        .iter()
+        .position(|row| *row == SUMMON_MODEL)
+        .unwrap();
+    assert_eq!(
+        JEV_USES[summons + 1],
+        MODEL_TIERS,
+        "beside the summons seats it serves"
+    );
 }

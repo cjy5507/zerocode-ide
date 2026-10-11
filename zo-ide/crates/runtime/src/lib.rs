@@ -255,6 +255,7 @@ pub use model_router::{
     orchestration_accuracy,
     preferred_agent_for_route, read_orchestration_accuracy,
     classify_model_tiers, classify_model_tiers_judged, JudgedPlace, ListPrice, TierJudgment, TierSource,
+    read_tier_answers, tier_fingerprint, tier_levels, tier_question_id, tier_questions, tier_rubric_words, tier_state, TierOutcomes, TierRefusal,
     deep_tier_model_matches, default_deep_tier_models, default_difficulty_tier,
     dynamic_deep_tier_models,
     exploration_slot_for_route, ImplRung, ModelBand, ModelTierAssignment,

@@ -113,6 +113,16 @@ const CLASS_UNDECLARED: u8 = 1;
 /// A provider's fast, affordable model.
 const CLASS_FAST: u8 = 0;
 
+/// The word the tier seat's state names a class by ([`class_rank`]).
+pub(super) fn class_word(model: &ModelDescriptor) -> &'static str {
+    match class_rank(model) {
+        CLASS_FRONTIER => "frontier",
+        CLASS_BALANCED => "balanced",
+        CLASS_FAST => "fast",
+        _ => "undeclared",
+    }
+}
+
 fn class_rank(model: &ModelDescriptor) -> u8 {
     if model.has_tier(ModelTier::Deep) {
         CLASS_FRONTIER

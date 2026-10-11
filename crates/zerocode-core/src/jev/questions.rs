@@ -85,6 +85,15 @@ pub const FILE_PICK_RUBRIC_VERSION: u32 = 1;
 /// that name the state's keys.
 pub const ZO_STEP_EFFORT_RUBRIC_VERSION: u32 = 2;
 
+/// zo's model tier seat ([`crate::jev::MODEL_TIERS`], t-45961): which work
+/// each model of one provider's lineup can be trusted with, read off the
+/// catalog facts and the recorded outcomes. Its words are zo's
+/// `runtime::model_router::tier_judgment::tier_rubric_words` — the levels are
+/// the summons' difficulty ladder's own meanings
+/// ([`crate::summon_difficulty::LADDER`]) and one above them for planning and
+/// verifying — and are pinned there (`the_version_is_pinned_to_the_words`).
+pub const MODEL_TIERS_RUBRIC_VERSION: u32 = 1;
+
 /// The keys both skills seats' state carries (t-10010): the task, and the
 /// skills — the explicit search's shard, or the suggestion's whole catalog
 /// — each by its name and its description. Spelled once for the two seats,
