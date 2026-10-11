@@ -56,23 +56,49 @@ left to the normal editing commands rather than truncated and replaced.
 Desktop walks also offer bounded Tab, Shift+Tab, Escape, Find and Select All
 actions, tied to the observed window, not model-written key strings.
 For concurrent use on macOS, add `--background` to an app walk or to
-app-scoped observation, click, scroll and set-value commands (zo's Computer
-tool: `background: true` on an app `walk`). This is a
-semantic accessibility mode, not a separate computer: it never raises or
-moves a window, focuses a text field, sends synthetic keys or pointer events,
-or changes the clipboard. Use pinned `set-value` for fields. Clicks need an
-advertised semantic action; scrolling needs an unambiguous accessible
-container and moves one page per observation. Coordinate/OCR clicks, global
-keys and unsupported controls return `requires_foreground`, without a
-fallback. Do not remove the flag to recover automatically.
+app-scoped observation, click, scroll, set-value, type-text, paste-text,
+press-key and hotkey commands (zo's Computer tool: `background: true` on an
+app `walk`). This is local app/window-scoped input, not a separate computer.
+Semantic actions remain preferred. Otherwise clicks, scrolling and keyboard
+events use the observed window and a private input source, without moving
+the person's pointer, raising the window or suppressing their input. A click
+may focus a field inside the inactive target window. Prefer pinned
+`set-value` for verified field replacement. `paste-text` sends its supplied
+text directly, never through the shared clipboard; clipboard shortcuts are
+refused. Text replacement and Select All prefer field-specific accessibility
+operations. Native keys require the app's actual keyboard receiver to belong
+to the requested window: an event's window number alone is not enough. If
+that receiver cannot be verified, use observed, pinned field operations;
+never activate the app or guess another receiver. Global keys, drags, unsupported windows and stale geometry are
+refused without a desktop fallback. Never remove the flag automatically.
 
 Background input pauses when the person is using the target app or its
 foreground state cannot be read. An app can still activate itself in response
 to its own action: the receipt reports `action.background.foregroundUnchanged`,
 and a walk stops taking actions when that receipt is missing or false.
 Avoid using the same app concurrently. Old helpers and Windows currently
-refuse this mode rather than claiming isolation; arbitrary visual apps need
-an explicitly separate desktop/VM or a foreground handoff.
+refuse unsupported background verbs rather than claiming isolation. Check
+the resulting state: event delivery alone does not prove the task completed.
+Guarded background clicks require a readable control label, not merely a
+window title. If accessibility has not exposed that control, observe or wait
+for it before retrying; do not turn confirmation off or switch to the shared
+mouse to force the action through.
+Apps that activate themselves or do not accept window-scoped events need an
+explicitly separate desktop/VM or a foreground handoff.
+
+Recipes containing only built-in browser, emulator or explicitly background
+app steps do not watch the shared pointer and continue when the person moves
+it. A recipe containing a foreground desktop step retains the person's
+pointer handoff. Do not mix a foreground fallback into a background task.
+
+Accepted macOS background clicks and scrolls update a separate purple pointer
+on the visible part of the target window. It cannot take keyboard focus or
+receive mouse input. Target visibility and geometry are checked before it is
+shown; stopping or changing the foreground clears it, and it expires when
+idle. The helper status reports its latest accepted
+window-local point separately from the point actually displayed; neither is
+the person's hardware cursor. This indicator is not a separate desktop or a
+claim that the task succeeded.
 
 App observation with `--no-screenshot` reads only the accessibility tree
 when neither OCR, a pixel diff nor settling was requested. Marked looks retain
@@ -870,8 +896,9 @@ Recording permission the screenshots use — no new prompt.
     (refused, or its work did not happen — a `run` that failed, a `launch`
     with no window, a `quit` that did not quit), `nothing_changed` (a
     click changed nothing about its point), `person_moved` (a hand moved
-    the pointer while a step ran — `handWatched: false` says the pointer
-    could not be read), `budget` (the next step would outlast the call;
+    the pointer during a recipe that borrows the shared desktop —
+    `handWatched: false` means an isolated recipe or an unreadable pointer),
+    `budget` (the next step would outlast the call;
     nothing is cut short), `stopped`, `money_step` (the step marked
     `— money`: a `dry` Flow rehearses up to it and never presses it; a
     `guarded` Flow presses it only after the person confirms the

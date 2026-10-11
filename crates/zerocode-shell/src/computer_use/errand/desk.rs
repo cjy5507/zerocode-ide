@@ -779,7 +779,13 @@ where
         }
         match self.aim {
             Aim::Pane { .. } => &Navigation::PAGE,
-            Aim::App { .. } if self.background && self.scroll_window.is_some() => &Navigation::PAGE,
+            Aim::App { .. }
+                if self.background
+                    && (!cfg!(target_os = "macos") || self.pixels)
+                    && self.scroll_window.is_some() =>
+            {
+                &Navigation::PAGE
+            }
             Aim::App { .. } if self.scroll_window.is_some() => {
                 if cfg!(target_os = "macos") && !self.pixels {
                     &Navigation::ALL

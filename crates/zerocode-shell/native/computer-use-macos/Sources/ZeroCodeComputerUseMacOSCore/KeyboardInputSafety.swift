@@ -21,6 +21,10 @@ public struct KeyboardGuardConfig: Equatable, Sendable {
 }
 
 public enum KeyboardInputSafety {
+    public static func containsControlCharacters(_ text: String) -> Bool {
+        text.unicodeScalars.contains { $0.properties.generalCategory == .control }
+    }
+
     /// What the helper does with keys it is about to post — the shared Rust
     /// core's `validate::secret_entry`, run against the same case table
     /// (`computer_use_protocol/cases/secret_entry.tsv`).
@@ -90,6 +94,18 @@ public enum KeyboardInputSafety {
         return printable && modifiers.allSatisfy({ textModifierNames.contains($0) }) ? .character : .nothing
     }
 
+    public static func usesClipboard(_ spec: String) -> Bool {
+        let parts = spec.lowercased().split(separator: "+").map(String.init)
+        if parts.contains(where: { primaryModifierNames.contains($0) }),
+           parts.contains(where: { ["c", "x", "v"].contains($0) }) {
+            return true
+        }
+        let shift = parts.contains("shift")
+        let control = parts.contains(where: { otherModifierNames.contains($0) })
+        return ((shift || control) && parts.contains(where: { ["insert", "ins"].contains($0) }))
+            || (shift && parts.contains(where: { ["delete", "del"].contains($0) }))
+    }
+
     /// Why a text is not typed as one — the core's `TextEntryRefusal`.
     public enum TextEntryRefusal: String, Error, Equatable {
         case lineBreak = "line_break"
@@ -125,6 +141,7 @@ public enum KeyboardInputSafety {
 
     /// Text cut after every focus-moving character, each piece keeping it.
     public static func focusMovingPieces(_ text: String) -> [String] {
+        guard movesTheFocus(text) else { return text.isEmpty ? [] : [text] }
         var pieces: [String] = []
         var current = String.UnicodeScalarView()
         for scalar in text.unicodeScalars {

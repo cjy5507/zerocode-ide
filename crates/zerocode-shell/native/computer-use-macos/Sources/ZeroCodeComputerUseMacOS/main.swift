@@ -281,7 +281,7 @@ final class Provider {
             restoresWindow: params["restoreWindow"]?.bool == true,
             hasApp: params["app"]?.string?.isEmpty == false
         ) {
-            throw ProviderError.coded(refusal.rawValue, "background input requires a scoped semantic action; no foreground fallback was attempted")
+            throw ProviderError.coded(refusal.rawValue, "background input requires an app-scoped action; no foreground fallback was attempted")
         }
         guard Self.actingMethods.contains(method) else { return try dispatch(method: method, params: params) }
         // One hand (realtime v1 §5.4): an acting request holds it from its
@@ -1119,21 +1119,47 @@ final class Provider {
         let modifiers = try KeyMap.parseModifiers(params["modifiers"]?.string)
         if params["background"]?.bool == true {
             try admitBackgroundTarget(snapshot)
+            if let requested = params["ocrPin"] {
+                try validatePixelTarget(requested, snapshot: snapshot)
+            }
             let query = readingQuery(params)
             let index = try optionalInteger(params, "elementIndex")
                 ?? (query.isEmpty ? nil : chosenIndex(query, in: snapshot))
-            guard let index else { throw backgroundUnavailable() }
-            let record = try element(snapshot, index)
-            guard let action = BackgroundInput.clickAction(
-                actions: record.actions,
-                textEntry: MarkPin.textEntryRoles.contains(record.role),
-                plainLeftClick: modifiers.isEmpty && count == 1 && button == .left
-            ) else { throw backgroundUnavailable() }
-            try requireOnTop(record, in: snapshot, background: true)
-            guard performAction(record.element, action) else {
-                throw ProviderError.coded("accessibility_error", "the background semantic action failed; no fallback was attempted")
+            let requestedPoint = try index == nil ? coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot) : nil
+            let record = try index.map { try element(snapshot, $0) }
+                ?? requestedPoint.flatMap { backgroundClickRecord(at: $0, in: snapshot) }
+            if let record,
+               let action = BackgroundInput.clickAction(
+                   actions: record.actions,
+                   textEntry: MarkPin.textEntryRoles.contains(record.role),
+                   plainLeftClick: modifiers.isEmpty && count == 1 && button == .left
+               ) {
+                try requireOnTop(record, in: snapshot, background: true, at: requestedPoint)
+                guard performAction(record.element, action) else {
+                    throw ProviderError.coded("accessibility_error", "the background semantic action failed; no fallback was attempted")
+                }
+                if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
+                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
+                }
+                return actionMetadata(path: "accessibility", actionName: action)
             }
-            return actionMetadata(path: "accessibility", actionName: action)
+            let point: CGPoint
+            if let requestedPoint {
+                point = requestedPoint
+            } else if let record {
+                guard let center = center(record.visible ?? record.localFrame, in: snapshot.windowBounds) else {
+                    throw ProviderError.coded("element_not_clickable", "the background control has no visible frame")
+                }
+                point = center
+            } else {
+                point = try coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot)
+            }
+            try Input.windowClick(at: point, button: button, count: count, modifiers: modifiers, snapshot: snapshot) {
+                try self.requireBackgroundWindow(snapshot, at: point)
+                if let record { try self.requireOnTop(record, in: snapshot, background: true, at: point) }
+            }
+            BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
+            return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
         }
         // Why: agents expect a click into a target app to make the next
         // keyboard action safe, even when the click uses an AX action path.
@@ -1270,6 +1296,25 @@ final class Provider {
         return false
     }
 
+    private func backgroundClickRecord(at point: CGPoint, in snapshot: Snapshot) -> ElementRecord? {
+        var hit: AXUIElement?
+        let application = AXUIElementCreateApplication(snapshot.app.pid)
+        guard AXUIElementCopyElementAtPosition(application, Float(point.x), Float(point.y), &hit) == .success else { return nil }
+        var fallback: ElementRecord?
+        for _ in 0..<MarkPin.hitDepth {
+            guard let current = hit else { break }
+            if let record = snapshot.elements.values.first(where: { CFEqual($0.element, current) }) {
+                if fallback == nil { fallback = record }
+                if MarkPin.textEntryRoles.contains(record.role)
+                    || BackgroundInput.clickAction(actions: record.actions, textEntry: false, plainLeftClick: true) != nil {
+                    return record
+                }
+            }
+            hit = copyElement(current, kAXParentAttribute as String)
+        }
+        return fallback
+    }
+
     private func performClickAction(record: ElementRecord, mouseButton: MouseButtonSelection) throws -> String? {
         if mouseButton == .right {
             return performAction(record.element, "AXShowMenu") ? "AXShowMenu" : nil
@@ -1346,6 +1391,9 @@ final class Provider {
     private func typeText(params: [String: JSONValue]) throws -> [String: Any] {
         let snapshot = try currentKeyboardSnapshot(params: params)
         let text = try requiredString(params, "text")
+        if params["background"]?.bool == true {
+            return try backgroundTypeText(text, snapshot: snapshot, config: keyboardGuardConfig(params))
+        }
         let focused = focusedRecord(snapshot)?.element
         let secureInput = try gateSecretEntry(writesText: true, pastes: false, focused: keyTargets(snapshot), receiver: snapshot.app.pid)
         if let focused, case .applied(let verification) = TextInput.replaceSelection(focused, with: text) {
@@ -1359,6 +1407,9 @@ final class Provider {
     private func pressKey(params: [String: JSONValue]) throws -> [String: Any] {
         let snapshot = try currentKeyboardSnapshot(params: params)
         let key = try requiredString(params, "key")
+        if params["background"]?.bool == true {
+            return try backgroundKey(key, snapshot: snapshot)
+        }
         let writes = KeyboardInputSafety.chordWrites(key)
         _ = try gateSecretEntry(writesText: writes == .character, pastes: writes == .clipboard, focused: keyTargets(snapshot), receiver: snapshot.app.pid)
         try requireTargetWindowFocused(snapshot, restoreWindowRequested: params["restoreWindow"]?.bool == true)
@@ -1375,6 +1426,9 @@ final class Provider {
     private func hotkey(params: [String: JSONValue]) throws -> [String: Any] {
         let snapshot = try currentKeyboardSnapshot(params: params)
         let key = try requiredString(params, "key")
+        if params["background"]?.bool == true {
+            return try backgroundKey(key, snapshot: snapshot)
+        }
         let writes = KeyboardInputSafety.chordWrites(key)
         _ = try gateSecretEntry(writesText: writes == .character, pastes: writes == .clipboard, focused: keyTargets(snapshot), receiver: snapshot.app.pid)
         if isSelectAllHotkey(key), let focused = focusedRecord(snapshot), TextInput.selectAll(focused.element) {
@@ -1397,6 +1451,9 @@ final class Provider {
     private func pasteText(params: [String: JSONValue]) throws -> [String: Any] {
         let snapshot = try currentKeyboardSnapshot(params: params)
         let text = try requiredString(params, "text")
+        if params["background"]?.bool == true {
+            return try backgroundTypeText(text, snapshot: snapshot, config: keyboardGuardConfig(params), pasting: true)
+        }
         let focused = focusedRecord(snapshot)?.element
         _ = try gateSecretEntry(writesText: true, pastes: false, focused: keyTargets(snapshot), receiver: snapshot.app.pid)
         if let focused, case .applied(let verification) = TextInput.replaceSelection(focused, with: text) {
@@ -1466,8 +1523,13 @@ final class Provider {
     /// in one field is read back after the settle and judged (the core's
     /// `judge_typed`). Both need the window's keyboard table. Answers the
     /// verification and the keyboard's secure mode.
-    private func typeWatched(_ text: String, pid: pid_t, receiver: pid_t?, config: KeyboardGuardConfig?) throws -> ([String: Any], SecureInputState) {
-        var focus = systemWideFocusedElement()
+    private func typeWatched(_ text: String, pid: pid_t, receiver: pid_t?, config: KeyboardGuardConfig?, background: Snapshot? = nil) throws -> ([String: Any], SecureInputState) {
+        func readFocus() -> AXUIElement? {
+            if case .some = background { return appFocusedElement(pid) }
+            return systemWideFocusedElement()
+        }
+        var focus = readFocus()
+        if let background { try requireBackgroundFocus(focus, in: background) }
         let pieces: [String]
         switch KeyboardInputSafety.textEntryPlan(text, multiLine: focus.map(isMultiLineText) ?? false) {
         case let .success(planned):
@@ -1484,7 +1546,7 @@ final class Provider {
         var landing: TextInput.Landing?
         for (at, piece) in pieces.enumerated() {
             if at > 0, let config {
-                focus = settledFocus(after: focus, config: config)
+                focus = settledFocus(after: focus, config: config, readFocus: readFocus)
             }
             state = try gateSecretEntry(
                 writesText: true,
@@ -1496,7 +1558,20 @@ final class Provider {
             if pieces.count == 1, let config, let focus {
                 landing = TextInput.landingStart(focus, typing: text, maxChars: config.maxChars)
             }
-            try Input.typeText(piece, pid: pid)
+            if let background {
+                let expectedFocus = focus
+                try Input.windowText(piece, snapshot: background) {
+                    try self.requireBackgroundWindow(background)
+                    let current = readFocus()
+                    try self.requireBackgroundFocus(current, in: background)
+                    guard let expectedFocus, let current, CFEqual(expectedFocus, current) else {
+                        throw ProviderError.coded("focus_changed", "background text stopped because its field changed; observe before retrying")
+                    }
+                    _ = try self.gateSecretEntry(writesText: true, pastes: false, focused: [current], receiver: pid)
+                }
+            } else {
+                try Input.typeText(piece, pid: pid)
+            }
             typed += piece.unicodeScalars.count
         }
         guard let config, let landing else {
@@ -1509,13 +1584,13 @@ final class Provider {
     /// Where the focus settled after a piece that moved it: read every poll
     /// until it is somewhere new and two reads agree, or the settle passes —
     /// a browser's focus follows its renderer, a beat behind the keys.
-    private func settledFocus(after before: AXUIElement?, config: KeyboardGuardConfig) -> AXUIElement? {
+    private func settledFocus(after before: AXUIElement?, config: KeyboardGuardConfig, readFocus: () -> AXUIElement? = systemWideFocusedElement) -> AXUIElement? {
         var waited = 0
         var last: AXUIElement?
         while waited < config.settleMs {
             usleep(useconds_t(config.pollMs * 1_000))
             waited += config.pollMs
-            guard let now = systemWideFocusedElement(), !(before.map { CFEqual($0, now) } ?? false) else {
+            guard let now = readFocus(), !(before.map { CFEqual($0, now) } ?? false) else {
                 last = nil
                 continue
             }
@@ -1524,7 +1599,7 @@ final class Provider {
             }
             last = now
         }
-        return systemWideFocusedElement()
+        return readFocus()
     }
 
     private func scroll(params: [String: JSONValue]) throws -> [String: Any] {
@@ -1556,7 +1631,7 @@ final class Provider {
     }
 
     private func backgroundUnavailable() -> ProviderError {
-        .coded("requires_foreground", "this control has no supported background path; no foreground or synthetic fallback was attempted")
+        .coded("requires_foreground", "this control has no supported background path; no desktop fallback was attempted")
     }
 
     private func admitBackgroundTarget(_ snapshot: Snapshot) throws {
@@ -1565,15 +1640,126 @@ final class Provider {
         }
     }
 
+    private func requireBackgroundWindow(_ snapshot: Snapshot, at point: CGPoint? = nil) throws {
+        try admitBackgroundTarget(snapshot)
+        guard let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            throw ProviderError.coded("window_stale", "background window ownership is unavailable")
+        }
+        for row in rows where row[kCGWindowOwnerPID as String] as? Int32 == snapshot.app.pid {
+            guard let bounds = row[kCGWindowBounds as String] as? [String: Any],
+                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary)
+            else { throw ProviderError.coded("window_stale", "a background window has unreadable bounds") }
+            if row[kCGWindowNumber as String] as? UInt32 == snapshot.windowId {
+                guard frame == snapshot.windowBounds else {
+                    throw ProviderError.coded("window_stale", "the background window moved or resized; observe before retrying")
+                }
+                return
+            }
+            if let point, frame.contains(point), (row[kCGWindowAlpha as String] as? Double ?? 1) > 0 {
+                throw ProviderError.coded("element_not_found", "another window of the target app covers the background point")
+            }
+        }
+        throw ProviderError.coded("window_stale", "the background target window is no longer available")
+    }
+
+    private func requireBackgroundFocus(_ focus: AXUIElement?, in snapshot: Snapshot) throws {
+        guard let focus, let root = snapshot.elements[0]?.element,
+              copyElement(focus, kAXWindowAttribute as String).map({ CFEqual($0, root) }) == true || reaches(focus, root)
+        else {
+            throw ProviderError.coded("focus_changed", "the background keyboard receiver cannot be verified in the target window")
+        }
+    }
+
+    private func backgroundFocusedElement(_ snapshot: Snapshot) -> AXUIElement? {
+        let actual = appFocusedElement(snapshot.app.pid)
+        let candidates = snapshot.elements.values.lazy.compactMap { record -> Int? in
+            guard MarkPin.textEntryRoles.contains(record.role),
+                  actual.map({ CFEqual($0, record.element) }) == true
+                    || boolAttribute(record.element, kAXFocusedAttribute as String) == true
+            else { return nil }
+            return record.index
+        }
+        switch BackgroundInput.focus(among: candidates) {
+        case let .one(index): return snapshot.elements[index]?.element
+        case .ambiguous: return nil
+        case .none:
+            return (try? requireBackgroundFocus(actual, in: snapshot)) != nil ? actual : nil
+        }
+    }
+
+    private func requireBackgroundField(_ focus: AXUIElement, in snapshot: Snapshot) throws {
+        guard let record = snapshot.elements.values.first(where: { CFEqual($0.element, focus) }) else {
+            throw ProviderError.coded("focus_changed", "the background field is not in the current observation")
+        }
+        try requireOnTop(record, in: snapshot, background: true)
+    }
+
+    private func backgroundTypeText(_ text: String, snapshot: Snapshot, config: KeyboardGuardConfig?, pasting: Bool = false) throws -> [String: Any] {
+        try requireBackgroundWindow(snapshot)
+        let focus = backgroundFocusedElement(snapshot)
+        try requireBackgroundFocus(focus, in: snapshot)
+        guard let focus, MarkPin.textEntryRoles.contains(rawStringAttribute(focus, kAXRoleAttribute as String) ?? "") else {
+            throw ProviderError.coded("focus_changed", "background text requires a readable text field in its target window")
+        }
+        try requireBackgroundField(focus, in: snapshot)
+        if pasting || isMultiLineText(focus) || !KeyboardInputSafety.movesTheFocus(text), isSettable(focus, kAXValueAttribute as String) {
+            let state = try gateSecretEntry(writesText: true, pastes: false, focused: [focus], receiver: snapshot.app.pid)
+            switch TextInput.replaceSelection(focus, with: text) {
+            case let .applied(verification):
+                return withSecureInput(actionMetadata(path: "accessibility", actionName: "AXReplaceSelection", verification: verification), state)
+            case .unavailable:
+                throw ProviderError.coded("value_not_settable", "background text replacement failed; no synthetic retry was attempted")
+            }
+        }
+        if pasting && KeyboardInputSafety.containsControlCharacters(text) {
+            throw ProviderError.coded("requires_foreground", "background paste with control characters requires a field-specific value writer; no keys were sent")
+        }
+        try requireBackgroundKeyboard(snapshot, expected: focus)
+        let (verification, state) = try typeWatched(text, pid: snapshot.app.pid, receiver: snapshot.app.pid, config: config, background: snapshot)
+        return withSecureInput(actionMetadata(path: "window", actionName: "typeText", verification: verification), state)
+    }
+
+    private func requireBackgroundKeyboard(_ snapshot: Snapshot, expected: AXUIElement) throws {
+        try requireBackgroundWindow(snapshot)
+        let actual = appFocusedElement(snapshot.app.pid)
+        try requireBackgroundFocus(actual, in: snapshot)
+        guard let actual, CFEqual(actual, expected) else {
+            throw ProviderError.coded("focus_changed", "the app's native keyboard receiver is not the selected background control")
+        }
+    }
+
+    private func backgroundKey(_ key: String, snapshot: Snapshot) throws -> [String: Any] {
+        guard !KeyboardInputSafety.usesClipboard(key) else {
+            throw ProviderError.coded("requires_foreground", "background keys never use the shared clipboard; pass text directly instead")
+        }
+        try requireBackgroundWindow(snapshot)
+        let focus = backgroundFocusedElement(snapshot)
+        try requireBackgroundFocus(focus, in: snapshot)
+        guard let focus else { throw backgroundUnavailable() }
+        if isSelectAllHotkey(key), !looksLikeSecret(focus) {
+            try requireBackgroundField(focus, in: snapshot)
+            if TextInput.selectAll(focus) {
+                return actionMetadata(path: "accessibility", actionName: "AXSelectAll", verification: TextInput.selectionVerification(focus))
+            }
+        }
+        try requireBackgroundKeyboard(snapshot, expected: focus)
+        let writes = KeyboardInputSafety.chordWrites(key)
+        var state = SecureInputState.now()
+        try Input.windowKey(key, snapshot: snapshot) {
+            try self.requireBackgroundKeyboard(snapshot, expected: focus)
+            state = try self.gateSecretEntry(writesText: writes == .character, pastes: false, focused: [focus], receiver: snapshot.app.pid)
+        }
+        return withSecureInput(actionMetadata(path: "window", actionName: "pressKey", verification: unverifiedAction(reason: "synthetic_input")), state)
+    }
+
     private func backgroundScroll(params: [String: JSONValue], snapshot: Snapshot, direction: String, pages: Double) throws -> [String: Any] {
         try admitBackgroundTarget(snapshot)
-        guard pages == 1 else { throw backgroundUnavailable() }
         let action = "AXScroll\(direction.capitalized)ByPage"
-        let index: Int
+        let index: Int?
         let point: CGPoint
         if let requested = try optionalInteger(params, "elementIndex") {
             index = requested
-            let record = try element(snapshot, index)
+            let record = try element(snapshot, requested)
             guard let visiblePoint = center(record.visible ?? record.localFrame, in: snapshot.windowBounds) else {
                 throw backgroundUnavailable()
             }
@@ -1585,16 +1771,28 @@ final class Provider {
                 guard record.actions.contains(action), let frame = record.localFrame else { return nil }
                 return BackgroundInput.Scroller(index: record.index, frame: record.visible.map { frame.intersection($0) } ?? frame)
             }
-            guard let chosen = BackgroundInput.scrollTarget(at: local, among: candidates) else { throw backgroundUnavailable() }
-            index = chosen
+            index = BackgroundInput.scrollTarget(at: local, among: candidates)
         }
-        let record = try element(snapshot, index)
-        guard record.actions.contains(action) else { throw backgroundUnavailable() }
-        try requireOnTop(record, in: snapshot, background: true, at: point)
-        guard performAction(record.element, action) else {
-            throw ProviderError.coded("accessibility_error", "the background scroll failed; no fallback was attempted")
+        let record = try index.map { try element(snapshot, $0) }
+        if let record {
+            try requireOnTop(record, in: snapshot, background: true, at: point)
+            if pages == 1 && record.actions.contains(action) {
+                guard performAction(record.element, action) else {
+                    throw ProviderError.coded("accessibility_error", "the background scroll failed; no fallback was attempted")
+                }
+                BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
+                return actionMetadata(path: "accessibility", actionName: action)
+            }
         }
-        return actionMetadata(path: "accessibility", actionName: action)
+        let viewport = record?.visible ?? record?.localFrame ?? snapshot.windowBounds
+        let extent = direction == "up" || direction == "down" ? viewport.height : viewport.width
+        guard let delta = boundedInteger(max(1, (extent * pages).rounded()), as: Int32.self) else {
+            throw ProviderError.coded("invalid_argument", "pages is out of range")
+        }
+        try requireBackgroundWindow(snapshot, at: point)
+        try Input.windowScroll(at: point, direction: direction, delta: delta, snapshot: snapshot)
+        BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
+        return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
     }
 
     private func drag(params: [String: JSONValue]) throws -> [String: Any] {
@@ -3494,6 +3692,60 @@ private func resizePng(_ image: CGImage, scale: CGFloat) -> BoundedPNG? {
 }
 
 private enum Input {
+    static let windowClickHoldNanoseconds: UInt64 = 20_000_000
+
+    static func windowClick(
+        at point: CGPoint, button: MouseButtonSelection, count: Int, modifiers: [KeyModifier],
+        snapshot: Snapshot, validate: () throws -> Void
+    ) throws {
+        guard snapshot.windowBounds.contains(point) else {
+            throw ProviderError.coded("invalid_argument", "the background point is outside its target window")
+        }
+        let route = HandRoute.window(pid: snapshot.app.pid, id: snapshot.windowId)
+        let local = CGPoint(x: point.x - snapshot.windowBounds.minX, y: point.y - snapshot.windowBounds.minY)
+        let flags = modifiers.reduce(into: CGEventFlags()) { $0.insert($1.flag) }.rawValue
+        for press in 1...count {
+            try validate()
+            try OperatorHandHost.post(HandEvent(.buttonDown(button, clickState: Int64(press)), x: local.x, y: local.y, flags: flags, route: route))
+            try OperatorHandHost.sleep(nanoseconds: windowClickHoldNanoseconds)
+            try OperatorHandHost.post(HandEvent(.buttonUp(button, clickState: Int64(press)), x: local.x, y: local.y, flags: flags, route: route))
+        }
+    }
+
+    static func windowText(_ text: String, snapshot: Snapshot, validate: () throws -> Void) throws {
+        let route = HandRoute.window(pid: snapshot.app.pid, id: snapshot.windowId)
+        for chunk in WindowTextChunks(text) {
+            try validate()
+            try OperatorHandHost.post(HandEvent(.unicode(chunk, down: true), route: route))
+            try OperatorHandHost.post(HandEvent(.unicode(chunk, down: false), route: route))
+        }
+    }
+
+    static func windowScroll(at point: CGPoint, direction: String, delta: Int32, snapshot: Snapshot) throws {
+        guard snapshot.windowBounds.contains(point) else {
+            throw ProviderError.coded("invalid_argument", "the background point is outside its target window")
+        }
+        let wheel1: Int32 = direction == "up" ? delta : direction == "down" ? -delta : 0
+        let wheel2: Int32 = direction == "left" ? delta : direction == "right" ? -delta : 0
+        try OperatorHandHost.post(HandEvent(
+            .scroll(wheel1: wheel1, wheel2: wheel2),
+            x: point.x - snapshot.windowBounds.minX, y: point.y - snapshot.windowBounds.minY,
+            route: .window(pid: snapshot.app.pid, id: snapshot.windowId)
+        ))
+    }
+
+    static func windowKey(_ key: String, snapshot: Snapshot, validate: () throws -> Void) throws {
+        let route = HandRoute.window(pid: snapshot.app.pid, id: snapshot.windowId)
+        let stroke = try KeyMap.parse(key).stroke
+        let releases = stroke.ups(route: route)
+        defer { for release in releases { try? OperatorHandHost.post(release) } }
+        for press in stroke.downs(route: route) {
+            try validate()
+            try OperatorHandHost.post(press)
+        }
+        for release in releases { try OperatorHandHost.post(release) }
+    }
+
     static func click(
         at point: CGPoint,
         button: MouseButtonSelection,
@@ -4996,54 +5248,63 @@ private final class SocketListener: @unchecked Sendable {
         }
         let authorizedPeer = peerProcessId(fd).map(isAuthorizedAgentPeer) == true
         let decoder = JSONDecoder()
-        while let line = readLine(from: fd) {
-            guard let data = line.data(using: .utf8),
-                  let request = try? decoder.decode(Request.self, from: data)
-            else {
-                continue
-            }
-            if !registeredSession && isAuthenticatedAgentSession(
-                expectedToken: token,
-                requestToken: request.token,
-                authorizedPeer: authorizedPeer
-            ) {
-                let monitor: AuthenticatedConnectionHangupMonitor
-                do {
-                    monitor = try AuthenticatedConnectionHangupMonitor(
-                        fileDescriptor: fd,
-                        onHangup: { [weak self] in
-                            self?.disconnectSession(connectionID)
-                        }
+        var reader = BoundedLineReader()
+        while let data = try? reader.next(read: { buffer in
+            var count: Int
+            repeat { count = read(fd, buffer.baseAddress, buffer.count) } while count < 0 && errno == EINTR
+            if count < 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            return count
+        }) {
+            let keepReading = autoreleasepool { () -> Bool in
+                guard let request = try? decoder.decode(Request.self, from: data)
+                else {
+                    return true
+                }
+                if !registeredSession && isAuthenticatedAgentSession(
+                    expectedToken: token,
+                    requestToken: request.token,
+                    authorizedPeer: authorizedPeer
+                ) {
+                    let monitor: AuthenticatedConnectionHangupMonitor
+                    do {
+                        monitor = try AuthenticatedConnectionHangupMonitor(
+                            fileDescriptor: fd,
+                            onHangup: { [weak self] in
+                                self?.disconnectSession(connectionID)
+                            }
+                        )
+                    } catch {
+                        fputs("computer-use owner monitor failed: \(error)\n", stderr)
+                        return false
+                    }
+                    sessionLock.lock()
+                    let registration = sessionOwnership.registerConnection(
+                        connectionID,
+                        authenticated: true
                     )
-                } catch {
-                    fputs("computer-use owner monitor failed: \(error)\n", stderr)
-                    return
+                    sessionLock.unlock()
+                    guard registration != .rejected else {
+                        monitor.cancel()
+                        return false
+                    }
+                    registeredSession = true
+                    hangupMonitor = monitor
+                    monitor.start()
+                    if registration == .claimed {
+                        onSessionClaimed()
+                    }
                 }
-                sessionLock.lock()
-                let registration = sessionOwnership.registerConnection(
-                    connectionID,
-                    authenticated: true
+                let response = handleRequest(
+                    provider: provider,
+                    lock: providerLock,
+                    request: request,
+                    expectedToken: token,
+                    authorizedPeer: authorizedPeer
                 )
-                sessionLock.unlock()
-                guard registration != .rejected else {
-                    monitor.cancel()
-                    return
-                }
-                registeredSession = true
-                hangupMonitor = monitor
-                monitor.start()
-                if registration == .claimed {
-                    onSessionClaimed()
-                }
+                writeJSON(response, to: fd)
+                return true
             }
-            let response = handleRequest(
-                provider: provider,
-                lock: providerLock,
-                request: request,
-                expectedToken: token,
-                authorizedPeer: authorizedPeer
-            )
-            writeJSON(response, to: fd)
+            if !keepReading { return }
         }
     }
 
@@ -5268,24 +5529,6 @@ private func receiptNumber(_ params: [String: JSONValue], _ key: String) throws 
     let number = try requiredInteger(params, key)
     guard number >= 0 else { throw ProviderError.coded("invalid_argument", "\(key) is a receipt number from 0") }
     return UInt64(number)
-}
-
-private func readLine(from fd: Int32) -> String? {
-    var bytes: [UInt8] = []
-    var byte: UInt8 = 0
-    while true {
-        let count = read(fd, &byte, 1)
-        if count == 0 {
-            return bytes.isEmpty ? nil : String(bytes: bytes, encoding: .utf8)
-        }
-        if count < 0 {
-            return nil
-        }
-        if byte == 10 {
-            return String(bytes: bytes, encoding: .utf8)
-        }
-        bytes.append(byte)
-    }
 }
 
 private func writeJSON(_ object: Any, to fd: Int32?) {
@@ -5886,7 +6129,13 @@ extension Input {
 /// tag (`eventSourceUserData`) so the input monitor knows it for the hand's
 /// own, and posts it to the HID tap or to one process.
 struct CGEventHandPoster: HandPoster {
+    private let windowPoster = LockedWindowEventPoster()
+
     func post(_ event: HandEvent, tag: Int64) throws {
+        if case .window = event.route {
+            try windowPoster.post(event, tag: tag)
+            return
+        }
         let made = try make(event)
         made.setIntegerValueField(.eventSourceUserData, value: tag)
         switch event.route {
@@ -5894,6 +6143,8 @@ struct CGEventHandPoster: HandPoster {
             made.post(tap: .cghidEventTap)
         case let .process(pid):
             made.postToPid(pid)
+        case .window:
+            throw ProviderError.coded("background_input_unavailable", "window-scoped input requires its private event source")
         }
     }
 
@@ -5940,6 +6191,8 @@ struct CGEventHandPoster: HandPoster {
             var char = unit
             made.keyboardSetUnicodeString(stringLength: 1, unicodeString: &char)
             return made
+        case .unicode:
+            throw ProviderError.coded("invalid_argument", "Unicode chunks require a window-scoped input route")
         }
     }
 
@@ -6294,6 +6547,7 @@ enum OperatorGuardHost {
         lock.lock()
         ledger.stop(reason: reason)
         lock.unlock()
+        BackgroundPointerOverlay.hide()
         fputs("computer-use operator stopped: \(reason) (let go of \(release.released.count), unconfirmed \(release.unconfirmed.count))\n", stderr)
         ReflexRuntimeHost.operatorStopped(reason: reason)
     }
@@ -6367,6 +6621,12 @@ enum OperatorGuardHost {
         return budget?.rendered ?? NSNull()
     }
 
+    static func isStopped() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ledger.isStopped
+    }
+
     static func status() -> [String: Any] {
         lock.lock()
         let snapshot = ledger
@@ -6375,6 +6635,7 @@ enum OperatorGuardHost {
         let now = Date().timeIntervalSince1970
         return [
             "stopped": snapshot.isStopped,
+            "backgroundPointer": BackgroundPointerOverlay.status(),
             "reason": jsonNullable(snapshot.stoppedReason),
             "actions": snapshot.actions,
             "actionsLastMinute": snapshot.actionsInLastMinute(now: now),
@@ -6507,7 +6768,7 @@ enum DesktopSelf {
     /// ZeroCode's own window (t-12979). The walk is `DesktopFrontOwner`'s.
     static func ownerPid(at point: CGPoint) -> pid_t? {
         guard let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return nil }
-        return DesktopFrontOwner.pid(at: point, infos: infos, displays: DesktopScreen.displays().map(\.bounds)) { point in
+        return DesktopFrontOwner.pid(at: point, infos: infos.filter { !BackgroundPointerOverlay.owns($0) }, displays: DesktopScreen.displays().map(\.bounds)) { point in
             var hit: AXUIElement?
             guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
                   let hit else { return nil }
@@ -6588,24 +6849,39 @@ extension Provider {
     /// The label a press is about to land on, by method — nil when the press
     /// has no readable target (a bare key, a point over nothing).
     func confirmTarget(method: String, params: [String: JSONValue], snapshot loadSnapshot: () throws -> Snapshot) throws -> String? {
+        func label(_ record: ElementRecord?) throws -> String? {
+            if params["background"]?.bool == true {
+                guard let record,
+                      let text = ConfirmationTarget.backgroundLabel(role: record.role, actions: record.actions,
+                                                                    label: faceLabel(record.element)) else {
+                    throw ProviderError.coded("element_not_found", "the background confirmation target is not a readable control; observe again before retrying; no input was sent")
+                }
+                return text
+            }
+            return record.flatMap { faceLabel($0.element) }
+        }
         switch method {
         case "click", "performSecondaryAction":
             let snapshot = try loadSnapshot()
             if let index = try optionalInteger(params, "elementIndex") {
-                return faceLabel(try element(snapshot, index).element)
+                return try label(element(snapshot, index))
             }
             // A click by reading is held for what it would press; one that
             // cannot choose is refused by the press itself, not asked about.
             let query = readingQuery(params)
             if method == "click", !query.isEmpty {
                 guard let index = try? chosenIndex(query, in: snapshot) else { return nil }
-                return faceLabel(try element(snapshot, index).element)
+                return try label(element(snapshot, index))
             }
             // A click at a window's point presses whatever is under it — read
             // it there, as a desktop click is read: a saved coordinate click
             // on "Place order" is the person's last step too.
             guard method == "click" else { return nil }
-            return faceLabelAtPoint(try coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot), in: snapshot.app.pid)
+            let point = try coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot)
+            if params["background"]?.bool == true {
+                return try label(backgroundClickRecord(at: point, in: snapshot))
+            }
+            return faceLabelAtPoint(point, in: snapshot.app.pid)
         case "mouseClick":
             return faceLabelAtPoint(try desktopPoint(params, "x", "y"))
         case "mouseDrag":
@@ -6614,15 +6890,18 @@ extension Provider {
             return faceLabelAtPoint(try desktopPoint(params, "toX", "toY"))
         case "key", "holdKey", "pressKey", "hotkey":
             guard let chord = params["key"]?.string, firesDefaultButton(chord) else { return nil }
-            if let focused = systemWideFocusedElement() {
-                if let label = faceLabel(focused) { return label }
-                if let window = containingWindow(focused),
-                   let button = copyElement(window, kAXDefaultButtonAttribute as String),
-                   let label = faceLabel(button) {
-                    return label
-                }
+            let focused: AXUIElement?
+            let window: AXUIElement?
+            if method == "pressKey" || method == "hotkey" {
+                let snapshot = try loadSnapshot()
+                focused = params["background"]?.bool == true ? backgroundFocusedElement(snapshot) : focusedRecord(snapshot)?.element
+                window = snapshot.elements[0]?.element
+            } else {
+                focused = systemWideFocusedElement()
+                window = focused.flatMap(containingWindow)
             }
-            return nil
+            let button = window.flatMap { copyElement($0, kAXDefaultButtonAttribute as String) }
+            return ConfirmationTarget.labels(focused: focused.flatMap { faceLabel($0) }, defaultButton: button.flatMap { faceLabel($0) })
         default:
             return nil
         }
