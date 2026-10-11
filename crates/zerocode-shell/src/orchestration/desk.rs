@@ -404,6 +404,20 @@ pub(crate) struct DeskRun {
     /// Whether this window holds the run's live coordinator seat — the seat
     /// an answer from the desk is written as.
     pub(crate) seat: bool,
+    /// Which terminal of this window sits in that seat — the pane the sidebar,
+    /// the tab strip and the desk call 코디 (t-45938). `None` where this window
+    /// holds no live seat of the run.
+    pub(crate) term: Option<u32>,
+    /// Whether anybody sits in the run's coordinator seat, in this window or
+    /// another. A run in play with nobody seated is the empty seat the sidebar
+    /// says once, until a coordinator sits again.
+    pub(crate) held: bool,
+    /// The seat's generation — how many coordinators have sat in this run, the
+    /// last one included; 0 where none ever has.
+    pub(crate) generation: u32,
+    /// When the last holder's pane was proven gone (a leader exit or a window
+    /// restart), while nobody has sat since.
+    pub(crate) vacated_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -542,12 +556,12 @@ pub(crate) fn in_play(run: &Run) -> bool {
             .any(|worker| worker.state.still_summoned())
 }
 
-/// The desk's reading of `ledger`. `holds_seat` answers whether this window
-/// holds a coordinator seat named `team/pane`; `cost` what a finished task
-/// cost, asked only of the rows the desk carries.
+/// The desk's reading of `ledger`. `seat_term` answers which terminal of this
+/// window holds a coordinator seat named `team/pane`, `None` where none does;
+/// `cost` what a finished task cost, asked only of the rows the desk carries.
 pub(crate) fn desk_snapshot(
     ledger: &Ledger,
-    holds_seat: impl Fn(&str) -> bool,
+    seat_term: impl Fn(&str) -> Option<u32>,
     mut cost: impl FnMut(&Run, &Task) -> TaskCost,
 ) -> DeskSnapshot {
     let now_ms = crate::now_epoch_ms();
@@ -568,7 +582,11 @@ pub(crate) fn desk_snapshot(
             name: run.name.clone(),
             seat: run
                 .coordinator_live()
-                .is_some_and(|seat| holds_seat(&seat.seat)),
+                .is_some_and(|seat| seat_term(&seat.seat).is_some()),
+            term: None,
+            held: false,
+            generation: 0,
+            vacated_ms: None,
         });
         for task in &run.tasks {
             let stage = stage_of(run, task);
@@ -886,8 +904,7 @@ mod tests {
     /// The desk as the window serializes it. The red tests below read the
     /// JSON the screen reads, so they speak to any shape of the snapshot.
     fn desk_json(ledger: &Ledger) -> serde_json::Value {
-        serde_json::to_value(desk_snapshot(ledger, |_| false, no_cost))
-            .expect("the desk serializes")
+        serde_json::to_value(desk_snapshot(ledger, |_| None, no_cost)).expect("the desk serializes")
     }
 
     /// Every letter the desk draws, in either of its lists.
@@ -1405,7 +1422,7 @@ mod tests {
             Ledger::rebuild(projected).expect("a batch handed over")
         };
 
-        let unread = desk_snapshot(&ledger, |_| true, no_cost);
+        let unread = desk_snapshot(&ledger, |_| Some(1), no_cost);
         assert_eq!(unread.counts.folded, 2);
         assert!(
             unread.folded_batches.is_empty(),
@@ -1413,7 +1430,7 @@ mod tests {
             unread.folded_batches
         );
 
-        let held = desk_snapshot(&handed(&ledger, &[&old_a, &old_b]), |_| true, no_cost);
+        let held = desk_snapshot(&handed(&ledger, &[&old_a, &old_b]), |_| Some(1), no_cost);
         assert_eq!(held.counts.folded, 2);
         assert!(held.news.is_empty(), "{:?}", held.news);
         assert_eq!(
@@ -1445,7 +1462,7 @@ mod tests {
             .expect("a question");
         let asked = desk_snapshot(
             &handed(&ledger, &[&old_a, &old_b, &question]),
-            |_| true,
+            |_| Some(1),
             no_cost,
         );
         assert_eq!(asked.mail.len(), 1, "{:?}", asked.mail);
@@ -1459,7 +1476,7 @@ mod tests {
         let fresh = notice(&mut ledger, now - HOUR_MS);
         let standing = desk_snapshot(
             &handed(&ledger, &[&old_a, &old_b, &question, &fresh]),
-            |_| true,
+            |_| Some(1),
             no_cost,
         );
         assert_eq!(standing.news.len(), 1, "{:?}", standing.news);
@@ -1502,7 +1519,7 @@ mod tests {
         let mut asked = Vec::new();
         let desk = desk_snapshot(
             &ledger,
-            |_| false,
+            |_| None,
             |_, task| {
                 asked.push(task.id.clone());
                 TaskCost {
@@ -1737,6 +1754,107 @@ mod tests {
         assert_eq!(owed.news[0].delivery, "pending");
     }
 
+    /// Who sits in each run's coordinator seat, as the desk's run list says it
+    /// (t-45938) — the facts the sidebar's role chips and its 「코디 (비어 있음)」
+    /// read: the terminal of this window in a live seat and the seat's
+    /// generation; a seat held in another window, held and not this window's; a
+    /// run in play whose seat a restart left empty, held by nobody since then;
+    /// and the same run once a coordinator sits again, in another pane.
+    #[test]
+    fn the_run_list_names_the_terminal_in_each_live_seat_and_a_seat_left_empty() {
+        let mut ledger = Ledger::new();
+        let seated = ledger.create_run("seated", 1);
+        ledger
+            .seat_coordinator(&seated, "team-a/%1", None, 2)
+            .expect("a seat");
+        let task = ledger
+            .create_task(&seated, "work".into(), "work".into(), vec![], None, 3)
+            .expect("a task");
+        ledger
+            .start_worker(&seated, "claude", ("team-a", "%2"), Some(&task), 4)
+            .expect("a worker");
+        // The checkout lets the restart keep the worker asleep, so the run stays in play.
+        assert!(ledger.worker_seated(("team-a", "%2"), "/Users/dev/acme/work"));
+        let elsewhere = ledger.create_run("elsewhere", 1);
+        ledger
+            .seat_coordinator(&elsewhere, "team-b/%1", None, 2)
+            .expect("a seat in another window");
+        let terms = |seat: &str| (seat == "team-a/%1").then_some(7);
+        let run_of = |desk: &DeskSnapshot, id: &str| {
+            desk.runs
+                .iter()
+                .find(|one| one.run == id)
+                .cloned()
+                .unwrap_or_else(|| panic!("no run {id}: {:?}", desk.runs))
+        };
+
+        let desk = desk_snapshot(&ledger, terms, no_cost);
+        let here = run_of(&desk, &seated);
+        assert_eq!(
+            (
+                here.term,
+                here.seat,
+                here.held,
+                here.generation,
+                here.vacated_ms
+            ),
+            (Some(7), true, true, 1, None),
+            "the live seat names the terminal sitting in it: {here:?}"
+        );
+        let there = run_of(&desk, &elsewhere);
+        assert_eq!(
+            (there.term, there.seat, there.held),
+            (None, false, true),
+            "a seat held in another window: {there:?}"
+        );
+        let json = serde_json::to_value(&desk).expect("the desk serializes");
+        let wire = json["runs"]
+            .as_array()
+            .and_then(|runs| runs.iter().find(|one| one["run"] == seated.as_str()))
+            .cloned()
+            .expect("the run on the wire");
+        assert_eq!(
+            (
+                &wire["term"],
+                &wire["held"],
+                &wire["generation"],
+                &wire["vacated_ms"]
+            ),
+            (
+                &serde_json::json!(7),
+                &serde_json::json!(true),
+                &serde_json::json!(1),
+                &serde_json::Value::Null
+            ),
+            "the window reads these keys: {wire}"
+        );
+
+        let _restarted = ledger.window_restarted(50);
+        let left = run_of(&desk_snapshot(&ledger, terms, no_cost), &seated);
+        assert_eq!(
+            (
+                left.term,
+                left.seat,
+                left.held,
+                left.generation,
+                left.vacated_ms
+            ),
+            (None, false, false, 1, Some(50)),
+            "a restart leaves the seat empty, and says since when: {left:?}"
+        );
+
+        ledger
+            .seat_coordinator(&seated, "team-c/%1", None, 60)
+            .expect("a coordinator sits again");
+        let back = desk_snapshot(&ledger, |seat| (seat == "team-c/%1").then_some(9), no_cost);
+        let again = run_of(&back, &seated);
+        assert_eq!(
+            (again.term, again.held, again.generation, again.vacated_ms),
+            (Some(9), true, 2, None),
+            "the new pane in the seat, the next generation: {again:?}"
+        );
+    }
+
     /// A run in play with one task in every stage, and a finished run nobody
     /// is at: the desk carries the first and not the second, counts every
     /// task by the one stage word the ledger's own facts give it, and says
@@ -1835,7 +1953,7 @@ mod tests {
             .create_task(&finished, "old".into(), "old".into(), vec![], None, 3)
             .expect("an old task");
 
-        let desk = desk_snapshot(&ledger, |_| false, no_cost);
+        let desk = desk_snapshot(&ledger, |_| None, no_cost);
         assert_eq!(desk.runs.len(), 1, "{:?}", desk.runs);
         assert!(!desk.runs[0].seat, "a seat this window does not hold");
         let stage = |id: &str| {
@@ -2020,7 +2138,7 @@ mod tests {
             handed.push(task);
         }
 
-        let desk = desk_snapshot(&ledger, |_| false, no_cost);
+        let desk = desk_snapshot(&ledger, |_| None, no_cost);
         let count = |stage: &str| {
             desk.stages
                 .iter()
@@ -2141,7 +2259,7 @@ mod tests {
             "0123456",
             r#"{"verified":true,"mergeHead":"0123456","nothingToLand":true}"#,
         );
-        let desk = desk_snapshot(&ledger, |_| false, no_cost);
+        let desk = desk_snapshot(&ledger, |_| None, no_cost);
         let stage = |id: &str| {
             desk.tasks
                 .iter()
@@ -2193,7 +2311,7 @@ mod tests {
                 )
                 .expect("done");
         }
-        let desk = desk_snapshot(&ledger, |_| true, no_cost);
+        let desk = desk_snapshot(&ledger, |_| Some(1), no_cost);
         let ready: Vec<&DeskTask> = desk
             .tasks
             .iter()
@@ -2308,7 +2426,7 @@ mod tests {
         let mut took: Vec<u128> = (0..200)
             .map(|_| {
                 let from = std::time::Instant::now();
-                std::hint::black_box(desk_snapshot(&ledger, |_| false, no_cost));
+                std::hint::black_box(desk_snapshot(&ledger, |_| None, no_cost));
                 from.elapsed().as_micros()
             })
             .collect();

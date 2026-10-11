@@ -544,7 +544,7 @@ fn the_rows_carry_a_finished_tasks_cost_and_no_conversation_path_or_directory() 
         &[],
     );
     let desk =
-        super::super::desk::desk_snapshot(&ledger, |_| false, |run, task| book.cost(run, task));
+        super::super::desk::desk_snapshot(&ledger, |_| None, |run, task| book.cost(run, task));
     let rows = super::super::ledger_agents_for_seats(&ledger, &super::super::TeamSeatIndex::new());
     let rows = book.dress(&ledger, rows);
     book.end();
@@ -760,7 +760,7 @@ fn the_costs_over_the_ledger_and_the_transcripts_that_already_happened() {
             book.memo.clear();
         }
         let desk =
-            super::super::desk::desk_snapshot(&ledger, |_| false, |run, task| book.cost(run, task));
+            super::super::desk::desk_snapshot(&ledger, |_| None, |run, task| book.cost(run, task));
         book.end();
         desk
     };
@@ -786,7 +786,7 @@ fn the_costs_over_the_ledger_and_the_transcripts_that_already_happened() {
             let from = Instant::now();
             std::hint::black_box(super::super::desk::desk_snapshot(
                 &ledger,
-                |_| false,
+                |_| None,
                 |_, _| TaskCost::default(),
             ));
             from.elapsed().as_micros()
