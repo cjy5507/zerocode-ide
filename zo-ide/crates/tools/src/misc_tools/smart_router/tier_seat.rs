@@ -184,16 +184,13 @@ async fn ask_lineup(
     row.model = Some(response.model.clone());
     row.input_tokens = Some(response.usage.input_tokens);
     let ids: Vec<&str> = models.iter().map(|model| model.id()).collect();
-    match read_tier_answers(&response, &ids) {
-        Ok(judgment) => {
-            row.outcome = OUTCOME_ANSWERED.to_string();
-            row.judged = judgment.places.len();
-            (Ok((judgment, response.model)), row)
-        }
-        Err(_) => {
-            row.outcome = SystemOneFailure::Schema.ledger_token();
-            (Err(row.outcome.clone()), row)
-        }
+    if let Ok(judgment) = read_tier_answers(&response, &ids) {
+        row.outcome = OUTCOME_ANSWERED.to_string();
+        row.judged = judgment.places.len();
+        (Ok((judgment, response.model)), row)
+    } else {
+        row.outcome = SystemOneFailure::Schema.ledger_token();
+        (Err(row.outcome.clone()), row)
     }
 }
 
@@ -230,43 +227,38 @@ pub async fn judge_lineups(
         let (answer, mut row) = ask_lineup(door, client, provider, models, outcomes).await;
         row.at_ms = now_ms;
         row.fingerprint.clone_from(&fingerprint);
-        match answer {
-            Ok((judgment, model)) => {
-                row.applied = applies;
-                if applies {
-                    pass.judgment.places.extend(judgment.places.iter().map(|(id, place)| (id.clone(), *place)));
-                }
-                kept.providers.insert(
-                    provider.clone(),
-                    KeptLineup {
-                        fingerprint,
-                        judged_at_ms: now_ms,
-                        model,
-                        places: judgment
-                            .places
-                            .into_iter()
-                            .map(|(id, place)| {
-                                (
-                                    id,
-                                    KeptPlace {
-                                        score_permille: place.score_permille,
-                                        confidence_permille: place.confidence_permille,
-                                    },
-                                )
-                            })
-                            .collect(),
-                    },
-                );
-                changed = true;
+        if let Ok((judgment, model)) = answer {
+            row.applied = applies;
+            if applies {
+                pass.judgment.places.extend(judgment.places.iter().map(|(id, place)| (id.clone(), *place)));
             }
-            Err(_) => {
-                // The last judgment still places the models it covered; a
-                // model that arrived since stands provisionally by the facts.
-                if let Some(last) = kept.providers.get(provider).filter(|_| applies) {
-                    row.applied = true;
-                    pass.judgment.places.extend(places_of(last));
-                }
-            }
+            kept.providers.insert(
+                provider.clone(),
+                KeptLineup {
+                    fingerprint,
+                    judged_at_ms: now_ms,
+                    model,
+                    places: judgment
+                        .places
+                        .into_iter()
+                        .map(|(id, place)| {
+                            (
+                                id,
+                                KeptPlace {
+                                    score_permille: place.score_permille,
+                                    confidence_permille: place.confidence_permille,
+                                },
+                            )
+                        })
+                        .collect(),
+                },
+            );
+            changed = true;
+        } else if let Some(last) = kept.providers.get(provider).filter(|_| applies) {
+            // The last judgment still places the models it covered; a model
+            // that arrived since stands provisionally by the facts.
+            row.applied = true;
+            pass.judgment.places.extend(places_of(last));
         }
         pass.rows.push(row);
     }
