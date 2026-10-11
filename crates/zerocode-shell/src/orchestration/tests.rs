@@ -6983,7 +6983,7 @@ fn a_prompt_arrives_as_one_argument_however_it_is_written() {
         // would start with half a protocol on its command line.
         &format!(
             "{}파서를 고쳐라",
-            zerocode_core::orchestration::worker_briefing("t-7", "parser repair")
+            zerocode_core::orchestration::worker_briefing("t-7", "parser repair", "")
         ),
     ] {
         let line = catalog

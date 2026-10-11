@@ -89,6 +89,10 @@ pub struct PlanCommand {
     worker_incarnation: Option<zerocode_core::agent_teams::PaneIncarnation>,
     actor: Option<String>,
     now_ms: i64,
+    /// The receipt files the window read for the verb's named evidence, read
+    /// before the actor is asked and judged by the plan (t-26587). Empty for
+    /// every verb that names none.
+    receipts: zerocode_core::orchestration::evidence::ReceiptFiles,
 }
 
 impl std::fmt::Debug for PlanCommand {
@@ -125,6 +129,7 @@ impl PlanCommand {
             worker_incarnation: None,
             actor,
             now_ms,
+            receipts: Default::default(),
         };
         if held.argv.is_empty()
             || held.argv.len() > MAX_COMMAND_WORDS
@@ -143,6 +148,22 @@ impl PlanCommand {
             return Err(RuntimeError::InvalidInput);
         }
         Ok(held)
+    }
+
+    /// The same command, carrying the receipt files the window read for it.
+    #[must_use]
+    pub fn with_receipts(
+        mut self,
+        receipts: zerocode_core::orchestration::evidence::ReceiptFiles,
+    ) -> Self {
+        self.receipts = receipts;
+        self
+    }
+
+    /// The receipt files the window read for this command.
+    #[must_use]
+    pub fn receipts(&self) -> &zerocode_core::orchestration::evidence::ReceiptFiles {
+        &self.receipts
     }
 
     /// Internal standing-order fence, carried through the ordinary verb door.
@@ -5671,7 +5692,7 @@ impl RuntimeState {
             command.presented(),
             &mut |team| {
                 if let Some(team) = team {
-                    planned = Some(zerocode_core::orchestration::plan(
+                    planned = Some(zerocode_core::orchestration::plan_with_receipts(
                         ledger,
                         team,
                         launcher,
@@ -5679,6 +5700,7 @@ impl RuntimeState {
                         command.pane(),
                         command.now_ms(),
                         command.actor(),
+                        command.receipts(),
                     ));
                 }
             },

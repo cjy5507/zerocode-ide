@@ -1226,12 +1226,56 @@ function deskStageChip(host, stage, counts, view) {
   return chip;
 }
 
+/* ---- 통과 조건과 넘김 메모 (t-26587) ----------------------------------------------
+ * 백엔드(`hand_in`)가 과업의 마지막 worker_done에서 읽어 준 것을 그린다: 조건마다 번호·글·상태
+ * (증거 없음·주장·확인됨), 그리고 넘김 글이 남긴 메모(결정·막힌 것·다음). 세지도 판정하지도
+ * 않는다 — 상태는 원장이 정했고, 여기서는 그 낱말만 고른다. */
+const DESK_CONDITION_WORDS = {
+  missing: { key: "board.desk.condition.missing", word: "증거 없음" },
+  claimed: { key: "board.desk.condition.claimed", word: "주장" },
+  checked: { key: "board.desk.condition.checked", word: "확인됨" },
+};
+
+function paintDeskConditions(list, conditions) {
+  writeHidden(list, conditions.length === 0);
+  // Rebuilt only when the rows changed: writing the same rows again would be a mutation every quiet poll leaves behind.
+  const signature = conditions.map((condition) => `${condition.number}|${condition.state}|${condition.text}`).join("\n");
+  if (list.__signature === signature) return;
+  list.__signature = signature;
+  if (conditions.length === 0) {
+    list.replaceChildren();
+    return;
+  }
+  writeAttribute(list, "aria-label", t("board.desk.conditions", "통과 조건 · {{count}}", { count: conditions.length }));
+  list.replaceChildren(...conditions.map((condition) => {
+    const item = deskElement("li", "board-desk-condition");
+    writeAttribute(item, "data-state", condition.state);
+    const text = deskElement("span", "board-desk-condition-text");
+    writeTextContent(text, `${condition.number}. ${condition.text}`);
+    const mark = deskElement("span", "board-desk-condition-state");
+    const word = DESK_CONDITION_WORDS[condition.state];
+    writeTextContent(mark, word ? t(word.key, word.word) : String(condition.state));
+    item.append(text, mark);
+    return item;
+  }));
+}
+
+function deskHandInWords(handIn) {
+  if (!handIn) return "";
+  return [
+    handIn.decisions ? t("board.desk.handIn.decisions", "결정: {{text}}", { text: handIn.decisions }) : "",
+    handIn.blocked ? t("board.desk.handIn.blocked", "막힌 것: {{text}}", { text: handIn.blocked }) : "",
+    handIn.next ? t("board.desk.handIn.next", "다음: {{text}}", { text: handIn.next }) : "",
+  ].filter(Boolean).join(" · ");
+}
+
 function deskTaskRow(held, task, runs) {
   const row = held ?? deskElement("li", "board-desk-task");
   if (!held) row.append(deskElement("code", "board-desk-task-id"), deskElement("span", "board-desk-task-title"),
     deskElement("span", "board-desk-task-note"), deskElement("span", "board-desk-task-cost"),
-    deskElement("span", "board-desk-task-writing"), deskKeptLine("board-desk-task-kept", true));
-  const [, title, noteLine, costLine, writingLine, keptLine] = row.children;
+    deskElement("span", "board-desk-task-writing"), deskElement("ol", "board-desk-task-conditions"),
+    deskElement("p", "board-desk-task-handin"), deskKeptLine("board-desk-task-kept", true));
+  const [, title, noteLine, costLine, writingLine, conditionsLine, handInLine, keptLine] = row.children;
   writeAttribute(row, "data-task", `${task.run}/${task.id}`);
   writeTextContent(row.firstElementChild, task.id);
   writeTextContent(title, runs > 1 ? `${task.title} · ${task.run}` : task.title);
@@ -1254,6 +1298,11 @@ function deskTaskRow(held, task, runs) {
   writeTextContent(writingLine, writing?.text ?? "");
   writeAttribute(writingLine, "data-tip", writing?.tip ?? "");
   writeHidden(writingLine, writing === null);
+  // 과업의 통과 조건과 마지막 넘김 글의 메모(t-26587): 원장이 읽어 준 것을 그대로 그린다.
+  paintDeskConditions(conditionsLine, task.hand_in?.conditions ?? []);
+  const handIn = deskHandInWords(task.hand_in);
+  writeTextContent(handInLine, handIn);
+  writeHidden(handInLine, handIn === "");
   // 워커가 밝힌 보고서와 증거를 원장이 남겼으면 한 줄과 그것을 여는 문(t-32798).
   paintDeskKept(keptLine, task.kept, task);
   return row;

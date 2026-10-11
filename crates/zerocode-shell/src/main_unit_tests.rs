@@ -14010,7 +14010,7 @@ fn only_a_hex_object_name_passes_the_history_door() {
 #[test]
 fn a_worker_briefing_says_its_purpose_before_the_contract_and_only_once() {
     for briefing in [
-        zerocode_core::orchestration::worker_briefing("t-1", "a task"),
+        zerocode_core::orchestration::worker_briefing("t-1", "a task", ""),
         zerocode_core::orchestration::federated_briefing("dp-1"),
     ] {
         let purpose = briefing
