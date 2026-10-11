@@ -903,11 +903,15 @@ pub trait Host {
     }
     /// Tell the person at this pane that mail is waiting for its agent and
     /// was not typed (t-21017), naming why by the guard's token
-    /// ([`zerocode_pty::ready::Refusal::token`]). Said once per waiting
-    /// message by the pointer's beat. The window words it in the person's
-    /// language from its own table; hosts without a screen — tmux-only,
-    /// tests — say nothing.
+    /// ([`zerocode_pty::ready::Refusal::token`]). The pointer's beat offers it
+    /// once per waiting message; the window says it once per condition at a
+    /// pane (t-45801). The window words it in the person's language from its
+    /// own table; hosts without a screen — tmux-only, tests — say nothing.
     fn mail_waiting_not_typed(&self, _term: u32, _why: &str) {}
+    /// The condition [`Host::mail_waiting_not_typed`] named at this pane is
+    /// over: its pointer landed there, or no mail waits for it any longer, so
+    /// the next one the pane raises is said afresh (t-45801).
+    fn mail_waiting_cleared(&self, _term: u32) {}
     /// Whether this window still holds the pane behind `term`.
     ///
     /// The default keeps small and test-only hosts source-compatible. The

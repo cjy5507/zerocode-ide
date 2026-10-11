@@ -5901,11 +5901,26 @@ const MAIL_WAITING_WORDS = Object.freeze({
       { term },
     ),
 });
+/* One line per pane and reason. The mail a pane could not be typed into is one
+ * condition however many mails wait behind it: the reason stays said until the
+ * pointer lands there (`term:mail-waiting-cleared`), no mail waits for the pane
+ * any longer, or the pane exits. A different reason is a different condition
+ * (t-45801). */
+const mailWaitingSaid = new Map();
+function forgetMailWaiting(term) {
+  mailWaitingSaid.delete(term);
+}
 listen("term:mail-waiting", (event) => {
   const { term, why } = event.payload ?? {};
   if (typeof term !== "number") return;
   const known = Object.prototype.hasOwnProperty.call(MAIL_WAITING_WORDS, why);
-  toast(MAIL_WAITING_WORDS[known ? why : "other"](term));
+  const reason = known ? why : "other";
+  if (mailWaitingSaid.get(term) === reason) return;
+  mailWaitingSaid.set(term, reason);
+  toast(MAIL_WAITING_WORDS[reason](term));
+});
+listen("term:mail-waiting-cleared", (event) => {
+  forgetMailWaiting(event.payload?.term);
 });
 
 /* 백엔드가 이 셸의 꼬리를 보냈다.

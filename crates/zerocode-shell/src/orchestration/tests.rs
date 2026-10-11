@@ -13899,9 +13899,19 @@ struct BesideADraft {
     /// Every notice the person at a pane was given that mail waits unpointed
     /// (t-21017): the terminal and the guard's token.
     told: Mutex<Vec<(u32, String)>>,
+    /// Every pane whose waiting condition ended: its line landed there
+    /// (t-45801).
+    cleared: Mutex<Vec<u32>>,
 }
 
 impl BesideADraft {
+    fn cleared(&self) -> Vec<u32> {
+        self.cleared
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
+    }
+
     fn offers(&self) -> (usize, usize) {
         let offered = self.offered.lock().unwrap_or_else(|held| held.into_inner());
         let here: Vec<_> = offered.iter().filter(|(at, _)| *at == self.term).collect();
@@ -13972,6 +13982,12 @@ impl Host for BesideADraft {
             .unwrap_or_else(|held| held.into_inner())
             .push((term, why.to_string()));
     }
+    fn mail_waiting_cleared(&self, term: u32) {
+        self.cleared
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push(term);
+    }
 }
 
 /// Mail waiting behind a person's draft is offered once per watermark, and
@@ -13999,6 +14015,7 @@ fn mail_behind_a_persons_draft_is_offered_once_per_watermark_until_the_draft_goe
         term: LEADER,
         offered: Mutex::new(Vec::new()),
         told: Mutex::new(Vec::new()),
+        cleared: Mutex::new(Vec::new()),
     };
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");
@@ -14059,6 +14076,10 @@ fn mail_behind_a_persons_draft_is_offered_once_per_watermark_until_the_draft_goe
         (2, 2),
         "new mail behind the same draft was not offered exactly once more"
     );
+    assert!(
+        host.cleared().is_empty(),
+        "a refused line ended its pane's condition before any line landed"
+    );
 
     // The person sends their words and the provider reports taking them:
     // the line is theirs no longer, and the pointer speaks — once.
@@ -14069,6 +14090,11 @@ fn mail_behind_a_persons_draft_is_offered_once_per_watermark_until_the_draft_goe
         host.offers(),
         (3, 2),
         "the draft went and the line was not offered, or offered more than once"
+    );
+    assert_eq!(
+        host.cleared(),
+        vec![LEADER],
+        "the line landed at its pane, and that pane's condition ended once"
     );
 
     super::pane_turn_began(LEADER, clock());
@@ -25718,6 +25744,7 @@ fn an_unpointed_message_is_told_to_the_person_and_to_its_sender_once() {
         term: LEADER,
         offered: Mutex::new(Vec::new()),
         told: Mutex::new(Vec::new()),
+        cleared: Mutex::new(Vec::new()),
     };
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");

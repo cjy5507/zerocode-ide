@@ -1624,6 +1624,13 @@ impl agent_teams::Host for TeamWindow {
         );
     }
 
+    fn mail_waiting_cleared(&self, term: TermId) {
+        let _ = self.app.emit(
+            crate::orchestration::MAIL_WAITING_CLEARED_EVENT,
+            serde_json::json!({ "term": term }),
+        );
+    }
+
     fn point(
         &self,
         term: TermId,
