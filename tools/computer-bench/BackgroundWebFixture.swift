@@ -14,18 +14,22 @@ final class BackgroundWebWindow: NSWindow {
 @MainActor
 final class BackgroundWebFixture: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
     let output: URL
+    let showWindows: Bool
     var windows: [NSWindow] = []
     var views: [WKWebView] = []
     var readings: [Int: [String: Any]] = [:]
     var timer: Timer?
     var activationCount = 0
     var events: [[String: Any]] = []
+    let pointerObserver = BackgroundPointerObserver()
 
-    init(output: URL) {
+    init(output: URL, showWindows: Bool) {
         self.output = output
+        self.showWindows = showWindows
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        pointerObserver.start()
         for index in 0..<2 {
             let window = BackgroundWebWindow(contentRect: CGRect(x: 40 + index * 420, y: 100, width: 400, height: 380),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
@@ -38,16 +42,19 @@ final class BackgroundWebFixture: NSObject, NSApplicationDelegate, WKScriptMessa
             window.contentView = view
             window.makeFirstResponder(view)
             window.received = { [weak self, weak window] event in
-                guard let self, let window, event.cgEvent?.getIntegerValueField(.eventSourceUserData) != 0 else { return }
+                guard let self, let window, let raw = event.cgEvent,
+                      raw.getIntegerValueField(.eventSourceUserData) != 0 else { return }
                 if events.count == 64 { events.removeFirst() }
                 events.append(["window": index, "type": event.type.rawValue,
+                               "sourcePid": raw.getIntegerValueField(.eventSourceUnixProcessID),
+                               "targetPid": raw.getIntegerValueField(.eventTargetUnixProcessID),
                                "x": event.locationInWindow.x, "y": event.locationInWindow.y,
                                "key": window.isKeyWindow, "active": NSApp.isActive])
             }
             windows.append(window)
             views.append(view)
             view.loadHTMLString(Self.page(index), baseURL: nil)
-            window.orderBack(nil)
+            if showWindows { window.orderFrontRegardless() } else { window.orderBack(nil) }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.write() }
@@ -57,6 +64,10 @@ final class BackgroundWebFixture: NSObject, NSApplicationDelegate, WKScriptMessa
     func applicationDidBecomeActive(_ notification: Notification) {
         activationCount += 1
         write()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        pointerObserver.stop()
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -92,14 +103,16 @@ final class BackgroundWebFixture: NSObject, NSApplicationDelegate, WKScriptMessa
             }
             rows.append(row)
         }
-        let cursor = CGEvent(source: nil)?.location ?? .zero
+        let cursor = CGEvent(source: nil)?.location
+        pointerObserver.sample(cursor)
         let state: [String: Any] = [
             "pid": getpid(), "bundleId": Bundle.main.bundleIdentifier ?? "", "windows": rows,
             "events": events,
             "active": NSApp.isActive, "activationCount": activationCount,
+            "sharedPointer": pointerObserver.snapshot,
             "clipboardChanges": NSPasteboard.general.changeCount,
             "foreground": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1,
-            "cursorX": cursor.x, "cursorY": cursor.y, "updatedNs": DispatchTime.now().uptimeNanoseconds,
+            "cursorX": cursor?.x ?? 0, "cursorY": cursor?.y ?? 0, "updatedNs": DispatchTime.now().uptimeNanoseconds,
         ]
         if let data = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]) {
             try? data.write(to: output, options: .atomic)
@@ -147,6 +160,7 @@ final class BackgroundWebFixture: NSObject, NSApplicationDelegate, WKScriptMessa
                 report();
             });
         }
+        report();
         requestAnimationFrame(report);
         </script>
         """
@@ -157,10 +171,11 @@ final class BackgroundWebFixture: NSObject, NSApplicationDelegate, WKScriptMessa
 struct BackgroundWebFixtureEntry {
     @MainActor
     static func main() {
-        guard CommandLine.arguments.count == 2 else { exit(2) }
+        guard CommandLine.arguments.count == 2 || (CommandLine.arguments.count == 3 && CommandLine.arguments[2] == "--show-windows") else { exit(2) }
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
-        let fixture = BackgroundWebFixture(output: URL(fileURLWithPath: CommandLine.arguments[1]))
+        let fixture = BackgroundWebFixture(output: URL(fileURLWithPath: CommandLine.arguments[1]),
+                                           showWindows: CommandLine.arguments.count == 3)
         application.delegate = fixture
         withExtendedLifetime(fixture) { application.run() }
     }

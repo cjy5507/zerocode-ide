@@ -1138,6 +1138,9 @@ final class Provider {
                 guard performAction(record.element, action) else {
                     throw ProviderError.coded("accessibility_error", "the background semantic action failed; no fallback was attempted")
                 }
+                if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
+                    BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
+                }
                 return actionMetadata(path: "accessibility", actionName: action)
             }
             let point: CGPoint
@@ -1155,6 +1158,7 @@ final class Provider {
                 try self.requireBackgroundWindow(snapshot, at: point)
                 if let record { try self.requireOnTop(record, in: snapshot, background: true, at: point) }
             }
+            BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
             return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
         }
         // Why: agents expect a click into a target app to make the next
@@ -1776,6 +1780,7 @@ final class Provider {
                 guard performAction(record.element, action) else {
                     throw ProviderError.coded("accessibility_error", "the background scroll failed; no fallback was attempted")
                 }
+                BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
                 return actionMetadata(path: "accessibility", actionName: action)
             }
         }
@@ -1786,6 +1791,7 @@ final class Provider {
         }
         try requireBackgroundWindow(snapshot, at: point)
         try Input.windowScroll(at: point, direction: direction, delta: delta, snapshot: snapshot)
+        BackgroundPointerOverlay.show(pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds, point: point)
         return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
     }
 
@@ -6541,6 +6547,7 @@ enum OperatorGuardHost {
         lock.lock()
         ledger.stop(reason: reason)
         lock.unlock()
+        BackgroundPointerOverlay.hide()
         fputs("computer-use operator stopped: \(reason) (let go of \(release.released.count), unconfirmed \(release.unconfirmed.count))\n", stderr)
         ReflexRuntimeHost.operatorStopped(reason: reason)
     }
@@ -6614,6 +6621,12 @@ enum OperatorGuardHost {
         return budget?.rendered ?? NSNull()
     }
 
+    static func isStopped() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ledger.isStopped
+    }
+
     static func status() -> [String: Any] {
         lock.lock()
         let snapshot = ledger
@@ -6622,6 +6635,7 @@ enum OperatorGuardHost {
         let now = Date().timeIntervalSince1970
         return [
             "stopped": snapshot.isStopped,
+            "backgroundPointer": BackgroundPointerOverlay.status(),
             "reason": jsonNullable(snapshot.stoppedReason),
             "actions": snapshot.actions,
             "actionsLastMinute": snapshot.actionsInLastMinute(now: now),
@@ -6754,7 +6768,7 @@ enum DesktopSelf {
     /// ZeroCode's own window (t-12979). The walk is `DesktopFrontOwner`'s.
     static func ownerPid(at point: CGPoint) -> pid_t? {
         guard let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return nil }
-        return DesktopFrontOwner.pid(at: point, infos: infos, displays: DesktopScreen.displays().map(\.bounds)) { point in
+        return DesktopFrontOwner.pid(at: point, infos: infos.filter { !BackgroundPointerOverlay.owns($0) }, displays: DesktopScreen.displays().map(\.bounds)) { point in
             var hit: AXUIElement?
             guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
                   let hit else { return nil }
@@ -6835,26 +6849,37 @@ extension Provider {
     /// The label a press is about to land on, by method — nil when the press
     /// has no readable target (a bare key, a point over nothing).
     func confirmTarget(method: String, params: [String: JSONValue], snapshot loadSnapshot: () throws -> Snapshot) throws -> String? {
+        func label(_ record: ElementRecord?) throws -> String? {
+            if params["background"]?.bool == true {
+                guard let record,
+                      let text = ConfirmationTarget.backgroundLabel(role: record.role, actions: record.actions,
+                                                                    label: faceLabel(record.element)) else {
+                    throw ProviderError.coded("element_not_found", "the background confirmation target is not a readable control; observe again before retrying; no input was sent")
+                }
+                return text
+            }
+            return record.flatMap { faceLabel($0.element) }
+        }
         switch method {
         case "click", "performSecondaryAction":
             let snapshot = try loadSnapshot()
             if let index = try optionalInteger(params, "elementIndex") {
-                return faceLabel(try element(snapshot, index).element)
+                return try label(element(snapshot, index))
             }
             // A click by reading is held for what it would press; one that
             // cannot choose is refused by the press itself, not asked about.
             let query = readingQuery(params)
             if method == "click", !query.isEmpty {
                 guard let index = try? chosenIndex(query, in: snapshot) else { return nil }
-                return faceLabel(try element(snapshot, index).element)
+                return try label(element(snapshot, index))
             }
             // A click at a window's point presses whatever is under it — read
             // it there, as a desktop click is read: a saved coordinate click
             // on "Place order" is the person's last step too.
             guard method == "click" else { return nil }
             let point = try coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot)
-            if params["background"]?.bool == true, let record = backgroundClickRecord(at: point, in: snapshot) {
-                return faceLabel(record.element)
+            if params["background"]?.bool == true {
+                return try label(backgroundClickRecord(at: point, in: snapshot))
             }
             return faceLabelAtPoint(point, in: snapshot.app.pid)
         case "mouseClick":

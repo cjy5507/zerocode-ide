@@ -8,6 +8,69 @@ import background_input
 
 
 class BackgroundAdmissionTests(unittest.TestCase):
+    def test_calibration_needs_real_cursor_change_and_a_hearing_observer(self):
+        initial = {'sharedPointer': {'mouseMoves': 4, 'cursorChanges': 2}}
+        current = {'sharedPointer': {'ready': True, 'overflow': False, 'cursorReadable': True,
+                                     'mouseMoves': 5, 'cursorChanges': 3}}
+        self.assertTrue(background_input.pointer_motion_since(initial, current))
+        current['sharedPointer']['mouseMoves'] = 4
+        self.assertFalse(background_input.pointer_motion_since(initial, current))
+        current['sharedPointer']['mouseMoves'] = 5
+        current['sharedPointer']['cursorChanges'] = 2
+        self.assertFalse(background_input.pointer_motion_since(initial, current))
+        current['sharedPointer']['overflow'] = True
+        with self.assertRaises(RuntimeError):
+            background_input.pointer_motion_since(initial, current)
+
+    def test_concurrent_input_uses_the_provenance_oracle_without_running_a_latency_benchmark(self):
+        for executable_name, test_name, show_windows, concurrent in [
+            ('BackgroundFixture', 'window_scoped_input_while_the_person_moves_the_pointer', False, True),
+            ('BackgroundFixture', 'window_scoped_input_while_the_person_moves_the_pointer', True, True),
+            ('BackgroundWebFixture', 'background_accessibility_while_the_person_moves_the_pointer', False, True),
+            ('BackgroundWebFixture', 'background_accessibility_while_the_person_moves_the_pointer', True, True),
+            ('BackgroundFixture', 'window_pointer_is_visible_without_taking_focus', True, False),
+            ('BackgroundWebFixture', 'accessibility_pointer_is_visible_without_taking_focus', True, False),
+        ]:
+            with self.subTest(engine=executable_name, visible=show_windows, concurrent=concurrent), tempfile.TemporaryDirectory() as directory:
+                folder = pathlib.Path(directory)
+                executable = folder / executable_name
+                executable.touch()
+                helper = folder / 'helper.app'
+                helper.mkdir()
+                binary = folder / 'test-bin'
+                binary.touch()
+                bundle = 'dev.zerocode.bench.background-input.test'
+                (folder / 'session.json').write_text(json.dumps({
+                    'swiftc': 0, 'executable': str(executable), 'bundle': bundle, 'app': 'fixture.app',
+                }))
+                state = {'pid': 123, 'bundleId': bundle}
+
+                def prepared(path, expected_bundle):
+                    self.assertEqual(expected_bundle, bundle)
+                    path.write_text(json.dumps(state))
+                    return state
+
+                with patch.object(background_input, 'ready'), \
+                        patch('builtins.print'), \
+                        patch.object(background_input, 'wait_external_pointer', return_value=state), \
+                        patch.object(background_input, 'wait_state', side_effect=prepared), \
+                        patch.object(background_input, 'computer', return_value={'windows': []}) as computer, \
+                        patch.object(background_input, 'run_program', side_effect=[
+                            {'exitCode': 0},
+                            {'exitCode': 0, 'stdout': 'test result: ok. 1 passed;'},
+                        ]) as launch:
+                    background_input.run(folder, binary, helper, concurrent_input=concurrent, show_windows=show_windows)
+                opening = launch.call_args_list[0].args[2]
+                self.assertIn('-g', opening)
+                self.assertEqual('--show-windows' in opening, show_windows)
+                environment = launch.call_args_list[1].args[3]
+                self.assertEqual(environment['ZEROCODE_BACKGROUND_POINTER_VISIBLE'], '1' if show_windows else '0')
+                arguments = launch.call_args_list[1].args[2]
+                self.assertEqual(arguments, [str(binary), 'computer_use::macos::background_tests::' + test_name,
+                                             '--ignored', '--nocapture', '--test-threads=1'])
+                self.assertEqual(computer.call_args_list[-1].args, ('quit', '--app', 'pid:123'))
+                self.assertEqual(len(computer.call_args_list), 2 if show_windows else 1)
+
     def test_each_action_needs_a_fresh_authorized_operator_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = pathlib.Path(directory)

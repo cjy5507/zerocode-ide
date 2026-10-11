@@ -5,8 +5,25 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import fixture_support
+
+
+class PrepareTests(unittest.TestCase):
+    def test_additional_sources_are_compiler_arguments_not_shell_words(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            extra = root / 'observer with spaces.swift'
+            source = root / 'fixture.swift'
+            with patch.object(fixture_support.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as compiler:
+                result = fixture_support.prepare(root / 'prepared', 'Fixture', source,
+                                                 'dev.zerocode.bench.test', [extra])
+            self.assertEqual(result, 0)
+            arguments = compiler.call_args.args[0]
+            self.assertEqual(arguments[arguments.index(str(source)) + 1], str(extra))
+            self.assertEqual(arguments.count(str(extra)), 1)
+            self.assertFalse(compiler.call_args.kwargs.get('shell', False))
 
 
 @unittest.skipUnless(sys.platform == 'darwin', 'native fixture support runs on macOS')

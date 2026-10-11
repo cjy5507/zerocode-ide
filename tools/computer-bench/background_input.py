@@ -14,6 +14,8 @@ import time
 import fixture_support
 from fixture_reflex import write_atomic
 
+CONCURRENT_READY_SECONDS = 20
+
 
 def decoded(returncode, stdout, stderr):
     value = json.loads(stdout or stderr)
@@ -70,6 +72,28 @@ def answer_gate(folder, previous):
     return request
 
 
+def pointer_motion_since(initial, current):
+    before = initial.get('sharedPointer', {})
+    after = current.get('sharedPointer', {})
+    if not after.get('ready') or after.get('overflow') or not after.get('cursorReadable'):
+        raise RuntimeError('the concurrent pointer observer is unavailable or incomplete')
+    return (after.get('mouseMoves', 0) > before.get('mouseMoves', 0)
+            and after.get('cursorChanges', 0) > before.get('cursorChanges', 0))
+
+
+def wait_external_pointer(path, initial):
+    deadline = time.monotonic() + CONCURRENT_READY_SECONDS
+    print('Concurrent fixture ready; waiting for external mouse movement before input.', flush=True)
+    while time.monotonic() < deadline:
+        current = json.loads(path.read_text())
+        if current.get('pid') != initial.get('pid') or current.get('bundleId') != initial.get('bundleId') or current.get('active'):
+            raise RuntimeError('fixture ownership or background state changed during calibration')
+        if pointer_motion_since(initial, current):
+            return current
+        time.sleep(.05)
+    raise RuntimeError('external pointer motion was not independently observed; no input trial started')
+
+
 def run_program(folder, name, argv, environment, timeout, gate=False):
     runner = folder / (name + '.py')
     runner.write_text('#!/usr/bin/env python3\nimport os\n'
@@ -90,7 +114,7 @@ def run_program(folder, name, argv, environment, timeout, gate=False):
                 previous = answer_gate(folder, previous)
 
 
-def run(folder, binary, helper, observation_only=False, input_only=False):
+def run(folder, binary, helper, observation_only=False, input_only=False, concurrent_input=False, show_windows=False):
     session = json.loads((folder / 'session.json').read_text())
     if session.get('swiftc') != 0 or not pathlib.Path(session['executable']).is_file():
         raise RuntimeError('the owned fixture must compile successfully before it can launch')
@@ -100,25 +124,43 @@ def run(folder, binary, helper, observation_only=False, input_only=False):
     if not binary.is_file() or not helper.is_dir():
         raise RuntimeError('the test binary and staged helper must exist')
     ready()
-    launch = run_program(folder, 'launch', ['/usr/bin/open', '-g', '-n', session['app'], '--args', str(state_path)], {}, 5000)
+    arguments = ['/usr/bin/open', '-g', '-n', session['app'], '--args', str(state_path)]
+    if show_windows:
+        arguments.append('--show-windows')
+    launch = run_program(folder, 'launch', arguments, {}, 5000)
     if launch.get('exitCode') != 0 or launch.get('timedOut'):
         raise RuntimeError('fixture launch failed')
     state = None
     try:
         state = wait_state(state_path, session['bundle'])
+        if show_windows:
+            visibility = computer('list-all-windows', '--all-layers')
+            (folder / 'visibility-start.json').write_text(json.dumps(visibility, indent=2) + '\n')
+        if concurrent_input:
+            state = wait_external_pointer(state_path, state)
+        (folder / 'fixture-start.json').write_text(json.dumps(state, indent=2) + '\n')
         ready()
         prefix = 'computer_use::macos::background_tests::'
         action = ('background_accessibility_preserves_the_persons_desktop'
                   if pathlib.Path(session['executable']).name == 'BackgroundWebFixture'
                   else 'window_scoped_input_preserves_the_persons_desktop')
+        if concurrent_input:
+            action = ('background_accessibility_while_the_person_moves_the_pointer'
+                      if pathlib.Path(session['executable']).name == 'BackgroundWebFixture'
+                      else 'window_scoped_input_while_the_person_moves_the_pointer')
+        elif show_windows:
+            action = ('accessibility_pointer_is_visible_without_taking_focus'
+                      if pathlib.Path(session['executable']).name == 'BackgroundWebFixture'
+                      else 'window_pointer_is_visible_without_taking_focus')
         tests = [prefix + action, prefix + 'background_observation_memory_and_latency']
         if observation_only:
             tests = tests[1:]
-        elif input_only:
+        elif input_only or concurrent_input or show_windows:
             tests = tests[:1]
         environment = {'ZEROCODE_BACKGROUND_FIXTURE_STATE': str(state_path),
                        'ZEROCODE_COMPUTER_MACOS_HELPER_APP_PATH': str(helper),
-                       'ZEROCODE_BACKGROUND_OPERATOR_GATE': str(folder)}
+                       'ZEROCODE_BACKGROUND_OPERATOR_GATE': str(folder),
+                       'ZEROCODE_BACKGROUND_POINTER_VISIBLE': '1' if show_windows else '0'}
         result = run_program(folder, 'test', [str(binary), *tests, '--ignored', '--nocapture', '--test-threads=1'],
                              environment, 120000, gate=True)
         (folder / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
@@ -147,17 +189,22 @@ def main():
     execute.add_argument('folder', type=pathlib.Path)
     execute.add_argument('--test-bin', type=pathlib.Path, required=True)
     execute.add_argument('--helper', type=pathlib.Path, required=True)
+    execute.add_argument('--show-windows', action='store_true',
+                         help='show owned windows without activating them; assert and capture the virtual pointer')
     selected = execute.add_mutually_exclusive_group()
     selected.add_argument('--observation-only', action='store_true')
     selected.add_argument('--input-only', action='store_true')
+    selected.add_argument('--concurrent-input', action='store_true')
     arguments = parser.parse_args()
     folder = arguments.folder.resolve()
     if arguments.command == 'prepare':
         name = 'BackgroundWebFixture' if arguments.engine == 'webkit' else 'BackgroundFixture'
         return fixture_support.prepare(folder, name,
                                        pathlib.Path(__file__).with_name(name + '.swift'),
-                                       'dev.zerocode.bench.background-input')
-    run(folder, arguments.test_bin.resolve(), arguments.helper.resolve(), arguments.observation_only, arguments.input_only)
+                                       'dev.zerocode.bench.background-input',
+                                       [pathlib.Path(__file__).with_name('BackgroundPointerObserver.swift')])
+    run(folder, arguments.test_bin.resolve(), arguments.helper.resolve(), arguments.observation_only,
+        arguments.input_only, arguments.concurrent_input, arguments.show_windows)
     return 0
 
 

@@ -14,6 +14,7 @@ final class BackgroundFixtureWindow: NSWindow {
 @MainActor
 final class BackgroundFixture: NSObject, NSApplicationDelegate {
     let output: URL
+    let showWindows: Bool
     var windows: [BackgroundFixtureWindow] = []
     var inputs: [NSTextField] = []
     var buttons: [NSButton] = []
@@ -22,12 +23,15 @@ final class BackgroundFixture: NSObject, NSApplicationDelegate {
     var events: [[String: Any]] = []
     var timer: Timer?
     var activationCount = 0
+    let pointerObserver = BackgroundPointerObserver()
 
-    init(output: URL) {
+    init(output: URL, showWindows: Bool) {
         self.output = output
+        self.showWindows = showWindows
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        pointerObserver.start()
         let menu = NSMenu()
         let edit = NSMenu(title: "Edit")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
@@ -66,7 +70,7 @@ final class BackgroundFixture: NSObject, NSApplicationDelegate {
             buttons.append(button)
             inputs.append(input)
             scrollers.append(scroll)
-            window.orderBack(nil)
+            if showWindows { window.orderFrontRegardless() } else { window.orderBack(nil) }
         }
         write()
         timer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] _ in
@@ -84,6 +88,10 @@ final class BackgroundFixture: NSObject, NSApplicationDelegate {
         write()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        pointerObserver.stop()
+    }
+
     func record(_ event: NSEvent, index: Int) {
         guard let raw = event.cgEvent, raw.getIntegerValueField(.eventSourceUserData) != 0 else { return }
         if events.count == 64 { events.removeFirst() }
@@ -91,6 +99,8 @@ final class BackgroundFixture: NSObject, NSApplicationDelegate {
             "windowIndex": index, "windowNumber": event.windowNumber, "type": event.type.rawValue,
             "localX": event.locationInWindow.x, "localY": event.locationInWindow.y,
             "source": raw.getIntegerValueField(.eventSourceStateID),
+            "sourcePid": raw.getIntegerValueField(.eventSourceUnixProcessID),
+            "targetPid": raw.getIntegerValueField(.eventTargetUnixProcessID),
             "flags": event.modifierFlags.rawValue,
             "physicalLeftDown": CGEventSource.buttonState(.hidSystemState, button: .left),
             "tag": raw.getIntegerValueField(.eventSourceUserData),
@@ -118,13 +128,15 @@ final class BackgroundFixture: NSObject, NSApplicationDelegate {
                 "clicks": counts[index], "text": inputs[index].stringValue, "visible": window.isVisible,
             ]
         }
-        let cursor = CGEvent(source: nil)?.location ?? .zero
+        let cursor = CGEvent(source: nil)?.location
+        pointerObserver.sample(cursor)
         let state: [String: Any] = [
             "pid": getpid(), "bundleId": Bundle.main.bundleIdentifier ?? "", "windows": rows, "events": events,
             "active": NSApp.isActive, "activationCount": activationCount,
+            "sharedPointer": pointerObserver.snapshot,
             "clipboardChanges": NSPasteboard.general.changeCount,
             "foreground": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1,
-            "cursorX": cursor.x, "cursorY": cursor.y, "updatedNs": DispatchTime.now().uptimeNanoseconds,
+            "cursorX": cursor?.x ?? 0, "cursorY": cursor?.y ?? 0, "updatedNs": DispatchTime.now().uptimeNanoseconds,
         ]
         if let data = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]) {
             try? data.write(to: output, options: .atomic)
@@ -136,10 +148,11 @@ final class BackgroundFixture: NSObject, NSApplicationDelegate {
 struct BackgroundFixtureEntry {
     @MainActor
     static func main() {
-        guard CommandLine.arguments.count == 2 else { exit(2) }
+        guard CommandLine.arguments.count == 2 || (CommandLine.arguments.count == 3 && CommandLine.arguments[2] == "--show-windows") else { exit(2) }
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
-        let fixture = BackgroundFixture(output: URL(fileURLWithPath: CommandLine.arguments[1]))
+        let fixture = BackgroundFixture(output: URL(fileURLWithPath: CommandLine.arguments[1]),
+                                        showWindows: CommandLine.arguments.count == 3)
         application.delegate = fixture
         withExtendedLifetime(fixture) { application.run() }
     }
