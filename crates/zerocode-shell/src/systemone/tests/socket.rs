@@ -247,7 +247,14 @@ fn posted(wire: &Wire, wall: Duration) -> (Result<String, String>, Option<String
         &json!({}),
     )
     .expect("a key check carries no workspace words");
-    tauri::async_runtime::block_on(wire.ask_once("test-key", cleared, Instant::now() + wall))
+    let provider = wire.provider().expect("provider");
+    let prepared = provider.prepare(cleared.into_bytes()).expect("request");
+    tauri::async_runtime::block_on(wire.ask_once(
+        &provider,
+        Some("test-key"),
+        prepared,
+        Instant::now() + wall,
+    ))
 }
 
 /// Before t-13199 a question that ran out of time left its client standing,

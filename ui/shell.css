@@ -20752,6 +20752,10 @@ button.helper-sib:hover {
   border-top: var(--rule-width) solid var(--edge-rule);
 }
 
+.settings-judgment-actions {
+  flex-wrap: wrap;
+}
+
 .settings-steps {
   display: grid;
   gap: var(--space-2);

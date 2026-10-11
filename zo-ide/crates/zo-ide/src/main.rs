@@ -26,6 +26,11 @@ fn main() -> ExitCode {
     // its own requests leave the environment, so no MCP server, tool shell or
     // hook it spawns inherits them (api reads them from its own table).
     api::adopt_launch_keys(zo_ide::ide::ROUTER_KEY_ENV_PREFIX);
+    api::adopt_launch_keys(api::JUDGMENT_KEY_ENV_PREFIX);
+    api::find_router_keys_in_keychain(
+        api::JUDGMENT_KEY_ENV_PREFIX,
+        zo_ide::ide::SERVICE_KEYCHAIN_SERVICE_PREFIX,
+    );
     // A zo the window did not launch (typed into a shell pane) was handed no
     // router keys; one it needs is read from the window's keychain item into
     // the same table, when first needed — nothing is read here.

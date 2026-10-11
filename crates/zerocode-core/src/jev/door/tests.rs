@@ -898,6 +898,38 @@ fn a_cleared_request_names_the_model_the_person_pinned() {
 }
 
 #[test]
+fn changing_a_decision_server_changes_the_door_and_memo_identity() {
+    let mut root = json!({"smart":{
+        "jev":{"workspaces":[APP]},
+        "judgmentProvider":{"kind":"local","protocol":"system_one",
+            "baseUrl":"http://127.0.0.1:1234","model":"acme/decision-model","requiresAuth":false}
+    }});
+    let mut keys = std::collections::HashSet::new();
+    for address in ["http://127.0.0.1:1234", "http://127.0.0.1:4321"] {
+        root["smart"]["judgmentProvider"]["baseUrl"] = json!(address);
+        let settings = JevSettings::from_root(&root);
+        let provider = judgment_provider::Provider::from_root(&root).expect("provider");
+        let cleared = may_send(
+            &ROUTING,
+            &asking(&settings, Some(APP), 0),
+            routing_body("rename a variable"),
+        )
+        .expect("request");
+        let checked = may_check_key(
+            &asking(&settings, None, 0),
+            &routing_body("check connection"),
+        )
+        .expect("check");
+        for body in [cleared.bytes(), checked.bytes()] {
+            let body: Value = serde_json::from_slice(body).expect("JSON");
+            assert_eq!(body["model"], provider.identity());
+        }
+        keys.insert(memo::key_of(&ROUTING, cleared.bytes()));
+    }
+    assert_eq!(keys.len(), 2);
+}
+
+#[test]
 fn the_door_counts_only_what_it_lets_through_and_the_last_place_goes_once() {
     let home = tempfile::tempdir().expect("a config home");
     let requests = count::requests_path(home.path(), "2026-09-17");

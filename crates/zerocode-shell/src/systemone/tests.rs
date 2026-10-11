@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use super::*;
 
+mod providers;
+
 /// The version a fake endpoint's answers name as the one that answered: what
 /// the real endpoint says for a request that asked the alias — a version, not
 /// the alias (docs.typesafe.ai/api; every one of the 3,179 zo rows on this
@@ -185,6 +187,15 @@ fn a_status_is_refused_by_the_one_table_of_words() {
     // A status the contract does not name keeps its number in the row.
     assert_eq!(token_for(503), "http_503");
     assert_eq!(token_for(500), "http_500");
+    assert_eq!(token_for(402), "http_402");
+}
+
+#[test]
+fn the_shared_provider_keeps_the_existing_jev_route() {
+    assert_eq!(
+        Provider::jev(SYSTEMONE_MODEL).request_url(),
+        format!("{SYSTEMONE_BASE_URL}{SYSTEMONE_PATH}")
+    );
 }
 
 #[test]
@@ -203,8 +214,14 @@ fn an_expired_call_opens_no_socket() {
     )
     .expect("a key check carries no workspace words");
 
-    let (answer, version) =
-        tauri::async_runtime::block_on(wire.ask_once("test-key", cleared, Instant::now()));
+    let provider = wire.provider().expect("provider");
+    let prepared = provider.prepare(cleared.into_bytes()).expect("request");
+    let (answer, version) = tauri::async_runtime::block_on(wire.ask_once(
+        &provider,
+        Some("test-key"),
+        prepared,
+        Instant::now(),
+    ));
     assert_eq!(answer, Err(TIMEOUT.to_string()));
     assert_eq!(version, None, "nothing came back");
     assert!(
@@ -225,7 +242,8 @@ fn the_door_is_the_only_road_to_the_wire_in_the_window() {
         .next()
         .unwrap_or(wire);
     assert_eq!(product.matches(".post(").count(), 1);
-    assert!(product.contains(".body(cleared.into_bytes())"));
+    assert!(product.contains("provider.prepare(cleared.into_bytes())"));
+    assert!(product.contains(".body(std::mem::take(&mut prepared.body))"));
     assert!(
         !product.contains(".json("),
         "a typed body would skip the door"

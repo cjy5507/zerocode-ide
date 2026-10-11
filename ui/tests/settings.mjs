@@ -2858,11 +2858,11 @@ class StatefulBackend {
         if (this.routerKeychainUnavailable) {
           throw { kind: "keychain-unavailable", message: "no keychain for keys" };
         }
-        this.keychain.set(TYPESAFE_SERVICE, key);
+        this.keychain.set(this.judgmentService(args.provider ?? this.typesafeSettings().provider), key);
         return this.typesafeSettings();
       }
       case "remove_typesafe_key":
-        this.keychain.delete(TYPESAFE_SERVICE);
+        this.keychain.delete(this.judgmentService(this.typesafeSettings().provider));
         return this.typesafeSettings();
       case "set_jev_enabled": {
         // Mirrors `zerocode_core::jev::door::switch_on` / `switch_off`: on is
@@ -2918,7 +2918,37 @@ class StatefulBackend {
         this.zoSettings.smart = smart;
         return this.typesafeSettings();
       }
-      case "check_typesafe_key": return clone(this.typesafeCheck);
+      case "set_judgment_provider": {
+        if (this.typesafeSetFailure) throw { kind: "failed", message: "fixture refused the model" };
+        const provider = clone(args.provider);
+        if (!provider.model?.trim() || provider.protocol !== "system_one") {
+          throw { kind: "failed", message: "invalid decision provider" };
+        }
+        const endpoint = new URL(provider.baseUrl);
+        if (provider.kind === "local" && !["localhost", "127.0.0.1", "[::1]"].includes(endpoint.hostname)) {
+          throw { kind: "failed", message: "provider_not_loopback" };
+        }
+        if (provider.kind === "remote" && endpoint.protocol !== "https:") {
+          throw { kind: "failed", message: "provider_https_required" };
+        }
+        const smart = { ...(this.zoSettings.smart ?? {}) };
+        if (provider.kind === "jev") {
+          const pin = jevModelPin(provider.model);
+          if (!pin) throw { kind: "failed", message: "not a model" };
+          if (pin === JEV_MODEL_ALIAS) delete smart[JEV_MODEL_SETTING];
+          else smart[JEV_MODEL_SETTING] = pin;
+        }
+        smart.judgmentProvider = provider;
+        this.zoSettings.smart = smart;
+        return this.typesafeSettings();
+      }
+      case "judgment_models": return clone(await (this.judgmentModelsWait ?? this.judgmentModels ?? [{ id: "fixture-decision-a" }, { id: "fixture-decision-b" }]));
+      case "check_typesafe_key": {
+        if (args.providerIdentity && args.providerIdentity !== this.typesafeSettings().providerIdentity) {
+          throw "settings_changed";
+        }
+        return clone(await (this.typesafeCheckWait ?? this.typesafeCheck));
+      }
       // Mirrors `type_value_keys.rs`: a name no walk reads is refused before
       // the key is looked at, an empty key is refused, a machine with no
       // keychain refuses by kind, and the key is kept trimmed in the item the
@@ -2992,6 +3022,10 @@ class StatefulBackend {
     };
   }
 
+  judgmentService(provider) {
+    return provider.kind === "jev" ? TYPESAFE_SERVICE : `fixture-decision-key:${provider.protocol}:${provider.baseUrl}`;
+  }
+
   typesafeSettings() {
     const smart = this.zoSettings.smart ?? {};
     const jev = smart[JEV_SETTINGS_KEY];
@@ -3029,9 +3063,15 @@ class StatefulBackend {
     const folders = roots.filter((root) => root !== JEV_EVERY_WORKSPACE).length;
     const asks = switches.some((row) => row.modes.find((choice) => choice.mode === row.mode)?.asks);
     const pin = jevModelPin(smart[JEV_MODEL_SETTING]);
+    const jevProvider = { kind: "jev", protocol: "system_one", baseUrl: "https://api.typesafe.ai", model: pin ?? JEV_MODEL_ALIAS, requiresAuth: true };
+    const provider = smart.judgmentProvider && smart.judgmentProvider.kind !== "jev"
+      ? clone(smart.judgmentProvider) : jevProvider;
     return {
       keysKeptHere: !this.routerKeychainUnavailable,
-      keySaved: Boolean(this.keychain.get(TYPESAFE_SERVICE)?.trim()),
+      keySaved: provider.requiresAuth && Boolean(this.keychain.get(this.judgmentService(provider))?.trim()),
+      provider,
+      providerIdentity: `fixture-provider:${JSON.stringify(provider)}`,
+      jevProvider,
       jev: { on: enabled && asks && (everywhere || folders > 0), everywhere, folders },
       // The rows a person wrote, and what each difficulty runs (t-14437):
       // a written row, else the shipped table's — this harness reads no
@@ -5473,7 +5513,7 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
     total: all.length,
     visible: all.filter((one) => !one.closest("details:not([open])") && one.getClientRects().length > 0).length,
   }));
-  assertEqual(selects, { total: 1, visible: 0 }, "the card offers a choice of mode");
+  assertEqual(selects, { total: 2, visible: 1 }, "the provider is visible while the classifier stays folded");
   assert(!(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)), "고급 starts open");
 
   // A save sends the trimmed key once, clears the field, and paints the answer.
@@ -5601,27 +5641,30 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assertEqual(tierNotes.person, "", "a written row says who placed its model");
   assertEqual(tierNotes.unsaid, "", "a row the lineup says nothing about said a source");
   const modelInput = pageA.locator("#typesafe-model-input");
-  assertEqual(await modelInput.inputValue(), "", "an unpinned card showed a pin");
+  assertEqual(await modelInput.inputValue(), JEV_MODEL_ALIAS, "the active alias was not shown");
   assertEqual(await modelInput.getAttribute("placeholder"), JEV_MODEL_ALIAS);
   const pinAt = backend.calls.length;
   await modelInput.fill("jev-1.13.0");
   await modelInput.dispatchEvent("change");
-  assertEqual((await backend.waitForCall("A", "set_jev_model", pinAt)).args.model, "jev-1.13.0");
-  await statusIs(await said("settings.typesafe.modelPinned", "{{model}} 버전으로 고정했습니다. 다음 요청부터 이 버전을 씁니다.",
-    { model: "jev-1.13.0" }));
+  assert(!backend.calls.slice(pinAt).some((call) => call.command === "set_judgment_provider"), "editing applied a provider");
+  await pageA.click("#judgment-save-provider");
+  assertEqual((await backend.waitForCall("A", "set_judgment_provider", pinAt)).args.provider.model, "jev-1.13.0");
+  await statusIs(await said("settings.judgment.applied", "판단 모델을 적용했습니다. 연결 확인은 정확도 검증과 별개입니다."));
   assertEqual(backend.zoSettings.smart[JEV_MODEL_SETTING], "jev-1.13.0");
   await pageA.evaluate(() => refreshApiRouters());
   assertEqual(await modelInput.inputValue(), "jev-1.13.0", "a reopened card lost the pin");
   const slipAt = backend.calls.length;
   await modelInput.fill("jev 1.13");
   await modelInput.dispatchEvent("change");
-  await backend.waitForCall("A", "set_jev_model", slipAt);
+  await pageA.click("#judgment-save-provider");
+  await backend.waitForCall("A", "set_judgment_provider", slipAt);
   assertEqual(backend.zoSettings.smart[JEV_MODEL_SETTING], "jev-1.13.0", "a refused pin was written");
   const unpinAt = backend.calls.length;
   await modelInput.fill("");
   await modelInput.dispatchEvent("change");
-  await backend.waitForCall("A", "set_jev_model", unpinAt);
-  await statusIs(await said("settings.typesafe.modelUnpinned", "고정을 풀었습니다. 늘 최신 버전을 씁니다."));
+  await pageA.click("#judgment-save-provider");
+  await backend.waitForCall("A", "set_judgment_provider", unpinAt);
+  await statusIs(await said("settings.judgment.applied", "판단 모델을 적용했습니다. 연결 확인은 정확도 검증과 별개입니다."));
   assert(!(JEV_MODEL_SETTING in backend.zoSettings.smart), "an unpin left the key in the file");
   await pageA.locator("#typesafe-advanced > summary").click();
 
@@ -5651,7 +5694,118 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   }
   await pageA.evaluate(() => refreshApiRouters());
   assert(!(await pageA.locator("#typesafe-key-input").isDisabled()), "a machine with a keychain was left without the key field");
-  return `one switch · ${selects.total} select under 고급 · 0 visible`;
+  return `one switch · ${selects.total} selects · ${selects.visible} visible`;
+});
+
+await test("판단 모델은 명시적으로 적용하고 로컬 연결은 Jev 키를 쓰지 않는다", async () => {
+  await openSettings(pageA, "api-routers");
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousCheck = clone(backend.typesafeCheck);
+  backend.zoSettings.smart = { [JEV_MODEL_SETTING]: "jev-held", [JEV_SETTINGS_KEY]: { enabled: false, workspaces: ["/work/acme"] } };
+  backend.keychain.set(TYPESAFE_SERVICE, "cloud-fixture");
+  try {
+    await pageA.evaluate(() => refreshApiRouters());
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.fill("#judgment-endpoint", "http://127.0.0.1:1234");
+    await pageA.fill("#typesafe-model-input", "acme/new-decision-model");
+    assert(await pageA.locator("#typesafe-check-btn").isDisabled(), "an unapplied provider offered a connection check");
+    assert(await pageA.locator("#typesafe-key-input").isHidden(), "an anonymous local server asked for a key");
+    assertEqual(backend.typesafeSettings().provider.kind, "jev", "typing silently changed the active provider");
+    const listingAt = backend.calls.length;
+    await pageA.click("#judgment-refresh-models");
+    const listing = await backend.waitForCall("A", "judgment_models", listingAt);
+    assertEqual(listing.args.provider.model, "acme/new-decision-model");
+    await pageA.waitForFunction(() => document.querySelectorAll("#judgment-model-options option").length === 2);
+    assertEqual(await pageA.inputValue("#typesafe-model-input"), "acme/new-decision-model", "refresh replaced the selected ID");
+    const appliedAt = backend.calls.length;
+    await pageA.click("#judgment-save-provider");
+    await backend.waitForCall("A", "set_judgment_provider", appliedAt);
+    await pageA.waitForFunction(() => !document.getElementById("typesafe-check-btn").disabled);
+    const provider = backend.typesafeSettings().provider;
+    assertEqual(provider, { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:1234", model: "acme/new-decision-model", requiresAuth: false });
+    assertEqual(backend.zoSettings.smart[JEV_MODEL_SETTING], "jev-held");
+    assertEqual(backend.zoSettings.smart[JEV_SETTINGS_KEY], { enabled: false, workspaces: ["/work/acme"] });
+    assertEqual(backend.keychain.get(TYPESAFE_SERVICE), "cloud-fixture");
+    if (process.env.JUDGMENT_SHOTS) {
+      for (const theme of ["light", "dark"]) {
+        await pageA.evaluate((selected) => { document.documentElement.dataset.theme = selected; }, theme);
+        await renderSettled(pageA);
+        await pageA.locator("#typesafe-card").screenshot({ path: resolve(process.env.JUDGMENT_SHOTS, `judgment-local-${theme}.png`), animations: "disabled" });
+      }
+      await pageA.evaluate(() => { delete document.documentElement.dataset.theme; });
+    }
+    const identity = backend.typesafeSettings().providerIdentity;
+    backend.typesafeCheck = { answered: true, model: `${identity}:actual-decision-model`, elapsedMs: 42 };
+    const checkedAt = backend.calls.length;
+    await pageA.click("#typesafe-check-btn");
+    assertEqual((await backend.waitForCall("A", "check_typesafe_key", checkedAt)).args.providerIdentity, identity);
+    await pageA.waitForFunction(() => document.querySelector("#typesafe-status .settings-status-said")?.textContent.includes("actual-decision-model"));
+    assert(!(await statusSaid(pageA, "typesafe-status")).includes(identity), "a machine identity was displayed as the model");
+    let finishCheck;
+    backend.typesafeCheckWait = new Promise((resolve) => { finishCheck = resolve; });
+    const delayedAt = backend.calls.length;
+    await pageA.click("#typesafe-check-btn");
+    await backend.waitForCall("A", "check_typesafe_key", delayedAt);
+    backend.zoSettings.smart.judgmentProvider.model = "another-windows-selection";
+    await pageA.evaluate(() => refreshTypeSafe());
+    finishCheck({ answered: true, model: `${identity}:old-model`, elapsedMs: 10 });
+    delete backend.typesafeCheckWait;
+    await pageA.waitForFunction(() => !typesafeBusy);
+    assertEqual(await pageA.locator("#typesafe-key-state").textContent(), await standingWord(pageA, "unchecked"), "a late connection check approved a different model");
+    assert(!(await statusSaid(pageA, "typesafe-status")).includes("old-model"));
+    await pageA.selectOption("#judgment-provider-kind", "jev");
+    assertEqual(await pageA.inputValue("#typesafe-model-input"), "jev-held", "returning to Jev lost its pin");
+    await pageA.click("#judgment-save-provider");
+    await pageA.waitForFunction(() => document.getElementById("judgment-save-provider").disabled);
+    assertEqual(backend.typesafeSettings().provider.kind, "jev");
+  } finally {
+    backend.zoSettings.smart = previous;
+    backend.typesafeCheck = previousCheck;
+    delete backend.typesafeCheckWait;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "Jev pin kept · anonymous local check · exact ID kept · no chat adapter";
+});
+
+await test("다른 서버의 키를 모델 선택 전에 저장하고 늦은 목록은 새 선택을 덮지 않는다", async () => {
+  await openSettings(pageA, "api-routers");
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  let finishListing;
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "remote");
+    await pageA.fill("#judgment-endpoint", "https://decisions.example.com");
+    await pageA.fill("#typesafe-model-input", "");
+    await pageA.fill("#typesafe-key-input", "remote-fixture");
+    const keyAt = backend.calls.length;
+    await pageA.click("#typesafe-save-btn");
+    const saved = await backend.waitForCall("A", "save_typesafe_key", keyAt);
+    assertEqual(saved.args.provider.model, "", "the key required a model before discovery");
+    assertEqual(backend.keychain.get(backend.judgmentService(saved.args.provider)), "remote-fixture");
+    assertEqual(backend.typesafeSettings().provider.kind, "jev", "saving a draft key activated its provider");
+    assert(await pageA.locator("#judgment-provider-dirty").isVisible(), "saving a key discarded the draft");
+    backend.judgmentModelsWait = new Promise((resolve) => { finishListing = resolve; });
+    const listAt = backend.calls.length;
+    await pageA.click("#judgment-refresh-models");
+    await backend.waitForCall("A", "judgment_models", listAt);
+    await pageA.fill("#typesafe-key-input", "unsaved-fixture");
+    await pageA.fill("#judgment-endpoint", "https://other.example.com");
+    assertEqual(await pageA.inputValue("#typesafe-key-input"), "", "an unsaved key followed a different server");
+    await pageA.fill("#typesafe-model-input", "new-head");
+    finishListing([{ id: "old-server-head" }]);
+    delete backend.judgmentModelsWait;
+    await renderSettled(pageA);
+    assertEqual(await pageA.locator("#judgment-model-options option").count(), 0, "a stale list filled a different server");
+    assertEqual(await pageA.inputValue("#typesafe-model-input"), "new-head");
+    await pageA.click("#judgment-revert-provider");
+    assertEqual(await pageA.inputValue("#judgment-provider-kind"), "jev");
+    assert(await pageA.locator("#judgment-provider-dirty").isHidden());
+  } finally {
+    finishListing?.([]);
+    delete backend.judgmentModelsWait;
+    backend.zoSettings.smart = previous;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "server-scoped credential before discovery · stale catalog discarded";
 });
 
 // While Jev is on, the card says for each feature whether it acts or still
@@ -11633,7 +11787,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
     );
 
     // ---- 6. one thing to finish, and it is the only filled button --------
-    for (const [card, finish] of [["router-card", "router-save-btn"], ["typesafe-card", "typesafe-save-btn"]]) {
+    for (const [card, finish] of [["router-card", "router-save-btn"], ["typesafe-card", "judgment-save-provider"]]) {
       const bottom = await pageA.evaluate((id) => {
         const box = document.getElementById(id);
         const last = box.lastElementChild;

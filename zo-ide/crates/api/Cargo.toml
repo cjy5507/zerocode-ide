@@ -10,6 +10,7 @@ default = []
 model-fit-hints = []
 
 [dependencies]
+judgment-provider = { path = "../../../crates/judgment-provider" }
 core-types = { path = "../core-types" }
 # The window's app-data folder, resolved by the same rules Tauri uses, so a zo
 # outside a pane can find the account the window is signed in to (t-5777).

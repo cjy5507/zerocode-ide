@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use jev_socket::Socket;
+use judgment_provider::{MAX_RESPONSE_BYTES, Prepared, Provider, ProviderKind};
 use serde::{Deserialize, Serialize};
 
 /// The public endpoint's origin.
@@ -87,6 +88,9 @@ pub enum SystemOneFailure {
     Schema,
     /// No key is configured; nothing was sent.
     NoKey,
+    Configuration,
+    ResponseTooLarge,
+    ContextTruncated,
 }
 
 impl SystemOneFailure {
@@ -105,6 +109,9 @@ impl SystemOneFailure {
             Self::Timeout => "timeout",
             Self::Schema => "schema",
             Self::NoKey => "no_key",
+            Self::Configuration => "provider_settings",
+            Self::ResponseTooLarge => "provider_response_too_large",
+            Self::ContextTruncated => "provider_context_truncated",
         }
     }
 
@@ -444,9 +451,14 @@ fn millis(elapsed: Duration) -> u64 {
 /// not a chat stream's. Built with the shared pool's tuning; a client that
 /// cannot be built is `transport`, and the next request tries again.
 static SOCKET: Socket<reqwest::Client> = Socket::new(built);
+static LOCAL_SOCKET: Socket<reqwest::Client> = Socket::new(local_built);
 
 fn built() -> Option<reqwest::Client> {
-    crate::providers::tuned_http_builder().build().ok()
+    crate::providers::tuned_http_builder().redirect(reqwest::redirect::Policy::none()).build().ok()
+}
+
+fn local_built() -> Option<reqwest::Client> {
+    crate::providers::tuned_http_builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build().ok()
 }
 
 /// A System One client bound to one origin and one key.
@@ -457,6 +469,8 @@ pub struct SystemOneClient {
     socket: &'static Socket<reqwest::Client>,
     endpoint: String,
     api_key: String,
+    provider: Provider,
+    expected_model: Option<String>,
 }
 
 impl std::fmt::Debug for SystemOneClient {
@@ -475,7 +489,8 @@ impl std::fmt::Debug for SystemOneClient {
 pub struct SystemOneConfig {
     base_url: String,
     api_key: String,
-    key_source: crate::providers::KeySource,
+    key_source: Option<crate::providers::KeySource>,
+    provider: Provider,
 }
 
 impl std::fmt::Debug for SystemOneConfig {
@@ -510,28 +525,61 @@ impl SystemOneConfig {
     /// # Errors
     /// [`SystemOneFailure::NoKey`] when no rung has one.
     pub fn from_env() -> Result<Self, SystemOneFailure> {
-        let (api_key, key_source) = crate::providers::read_env_key(SYSTEMONE_API_KEY_ENV)
-            .ok()
-            .flatten()
-            .ok_or(SystemOneFailure::NoKey)?;
-        let base_url = std::env::var(SYSTEMONE_BASE_URL_ENV)
-            .ok()
-            .map(|url| url.trim().to_string())
-            .filter(|url| !url.is_empty())
-            .unwrap_or_else(|| SYSTEMONE_BASE_URL.to_string());
-        Ok(Self { base_url, api_key, key_source })
+        Self::from_env_for(None)
+    }
+
+    pub fn from_env_for(expected: Option<&str>) -> Result<Self, SystemOneFailure> {
+        let settings_path = core_types::paths::default_config_home().join("settings.json");
+        let provider = Provider::read(&settings_path).map_err(|_| SystemOneFailure::Configuration)?;
+        Self::from_provider(provider, expected)
+    }
+
+    #[cfg(test)]
+    fn from_root(root: &serde_json::Value) -> Result<Self, SystemOneFailure> {
+        let provider = Provider::from_root(root).map_err(|_| SystemOneFailure::Configuration)?;
+        Self::from_provider(provider, None)
+    }
+
+    fn from_provider(mut provider: Provider, expected: Option<&str>) -> Result<Self, SystemOneFailure> {
+        if expected.is_some_and(|identity| identity != provider.identity()) {
+            return Err(SystemOneFailure::Configuration);
+        }
+        let credential = if provider.requires_auth {
+            Some(crate::providers::read_env_key(&provider.key_env())
+                .ok()
+                .flatten()
+                .ok_or(SystemOneFailure::NoKey)?)
+        } else {
+            None
+        };
+        if provider.kind == ProviderKind::Jev {
+            provider.base_url = std::env::var(SYSTEMONE_BASE_URL_ENV)
+                .ok()
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty())
+                .unwrap_or_else(|| SYSTEMONE_BASE_URL.to_string());
+        }
+        let (api_key, key_source) = credential.map_or((String::new(), None), |(key, source)| (key, Some(source)));
+        Ok(Self { base_url: provider.base_url.clone(), api_key, key_source, provider })
     }
 
     /// Which rung of that ladder this configuration's key came from.
     #[must_use]
-    pub const fn key_source(&self) -> crate::providers::KeySource {
+    pub const fn key_source(&self) -> Option<crate::providers::KeySource> {
         self.key_source
     }
 
     /// The client this configuration names.
     #[must_use]
     pub fn into_client(self) -> SystemOneClient {
-        SystemOneClient::new(&self.base_url, self.api_key)
+        let expected_model = Some(self.provider.identity());
+        SystemOneClient {
+            socket: if self.provider.kind == ProviderKind::Local { &LOCAL_SOCKET } else { &SOCKET },
+            endpoint: self.provider.request_url(),
+            api_key: self.api_key,
+            provider: self.provider,
+            expected_model,
+        }
     }
 }
 
@@ -540,10 +588,14 @@ impl SystemOneClient {
     /// System One socket.
     #[must_use]
     pub fn new(base_url: &str, api_key: impl Into<String>) -> Self {
+        let mut provider = Provider::jev(SYSTEMONE_MODEL);
+        provider.base_url = base_url.trim_end_matches('/').to_string();
         Self {
             socket: &SOCKET,
             endpoint: format!("{}{SYSTEMONE_PATH}", base_url.trim_end_matches('/')),
             api_key: api_key.into(),
+            provider,
+            expected_model: None,
         }
     }
 
@@ -610,6 +662,28 @@ impl SystemOneClient {
         max_retries: u32,
     ) -> SystemOneCall {
         let opened = Instant::now();
+        let refused = |failure| SystemOneCall {
+            outcome: Err(failure),
+            retries: 0,
+            elapsed: opened.elapsed(),
+            requests: 0,
+            hedge: None,
+        };
+        if body.len() > MAX_RESPONSE_BYTES {
+            return refused(SystemOneFailure::ResponseTooLarge);
+        }
+        if let Some(expected) = self.expected_model.as_ref().filter(|_| self.provider.kind == ProviderKind::Jev) {
+            let matches = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|body| body.get("model").and_then(serde_json::Value::as_str).map(str::to_string))
+                .is_some_and(|model| model == *expected);
+            if !matches {
+                return refused(SystemOneFailure::Configuration);
+            }
+        }
+        let Ok(prepared) = self.provider.prepare(body) else {
+            return refused(SystemOneFailure::Configuration);
+        };
         // Shared, because a loser is dropped without being read: a copy that
         // is thrown away has still spent what it sent, and the count of what
         // left has to say so.
@@ -621,8 +695,9 @@ impl SystemOneClient {
             requests: requests.load(Ordering::Relaxed),
             hedge: ran,
         };
-        let first = self.attempts(&body, deadline, opened, &requests, max_retries);
+        let first = self.attempts(&prepared, deadline, opened, &requests, max_retries);
         tokio::pin!(first);
+        let hedge = if self.provider.kind == ProviderKind::Local { None } else { hedge };
         let Some(delay) = hedge else {
             return done(first.await, None);
         };
@@ -636,7 +711,7 @@ impl SystemOneClient {
         } {
             return done(run, None);
         }
-        let second = self.attempts(&body, deadline, opened, &requests, max_retries);
+        let second = self.attempts(&prepared, deadline, opened, &requests, max_retries);
         tokio::pin!(second);
         // Whichever answers first is the call's answer. The loser is then
         // read once without waiting: already finished, its latency is worth a
@@ -666,7 +741,7 @@ impl SystemOneClient {
     /// so the number holds even for a sequence nobody ever reads.
     async fn attempts(
         &self,
-        body: &[u8],
+        prepared: &Prepared,
         deadline: Duration,
         opened: Instant,
         requests: &AtomicU32,
@@ -683,7 +758,7 @@ impl SystemOneClient {
                 return finish(Err(SystemOneFailure::Transport), retries);
             };
             requests.fetch_add(1, Ordering::Relaxed);
-            let failure = match tokio::time::timeout(remaining, self.send_once(&lent.client, body)).await {
+            let failure = match tokio::time::timeout(remaining, self.send_once(&lent.client, prepared)).await {
                 Ok(Ok(response)) => return finish(Ok(response), retries),
                 Ok(Err(failure)) => failure,
                 Err(_) => SystemOneFailure::Timeout,
@@ -705,12 +780,17 @@ impl SystemOneClient {
         }
     }
 
-    async fn send_once(&self, http: &reqwest::Client, body: &[u8]) -> Result<SystemOneResponse, SystemOneFailure> {
-        let response = http
+    async fn send_once(&self, http: &reqwest::Client, prepared: &Prepared) -> Result<SystemOneResponse, SystemOneFailure> {
+        let request = http
             .post(&self.endpoint)
-            .bearer_auth(&self.api_key)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_vec())
+            .body(prepared.body.clone());
+        let request = if self.provider.requires_auth {
+            request.bearer_auth(&self.api_key)
+        } else {
+            request
+        };
+        let mut response = request
             .send()
             .await
             .map_err(|_| SystemOneFailure::Transport)?;
@@ -718,8 +798,19 @@ impl SystemOneClient {
         if !status.is_success() {
             return Err(SystemOneFailure::from_status(status.as_u16()));
         }
-        let bytes = response.bytes().await.map_err(|_| SystemOneFailure::Transport)?;
-        serde_json::from_slice(&bytes).map_err(|_| SystemOneFailure::Schema)
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| SystemOneFailure::Transport)? {
+            if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+                return Err(SystemOneFailure::ResponseTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let decoded = self.provider.decode(prepared, bytes).map_err(|reason| match reason {
+            judgment_provider::Refusal::TooLarge => SystemOneFailure::ResponseTooLarge,
+            judgment_provider::Refusal::Truncated => SystemOneFailure::ContextTruncated,
+            _ => SystemOneFailure::Schema,
+        })?;
+        serde_json::from_str(&decoded).map_err(|_| SystemOneFailure::Schema)
     }
 }
 
@@ -731,6 +822,93 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_local_decision_model_is_called_without_a_cloud_key() {
+        let answer = serde_json::json!({
+            "model":"fixture-decider",
+            "answers":{"ready":{"type":"noul","noul":0.99}},
+            "usage":{"input_tokens":10,"output_tokens":0}
+        }).to_string();
+        let mock = MockSystemOne::serving(vec![Reply::now(200, answer)]).await;
+        let root = serde_json::json!({"smart":{"judgmentProvider":{
+            "kind":"local","protocol":"system_one","baseUrl":mock.base_url,
+            "model":"fixture-decider","requiresAuth":false
+        }}});
+        let config = SystemOneConfig::from_root(&root).expect("anonymous local provider");
+        assert_eq!(config.key_source(), None);
+        let model = config.provider.identity();
+        let client = config.into_client();
+        let body = serde_json::json!({
+            "model":model,"state":"The page is ready.",
+            "questions":{"ready":{"type":"noul","instructions":"Is the page ready?"}}
+        }).to_string().into_bytes();
+        let call = client.decide_body_once(body, UNHURRIED).await;
+        assert!(call.outcome.is_ok(), "{:?}", call.outcome);
+        assert_eq!(call.requests, 1);
+        let seen = mock.seen();
+        assert_eq!(seen.len(), 1);
+        assert!(!seen[0].head.to_ascii_lowercase().contains("authorization:"));
+        let sent: serde_json::Value = serde_json::from_str(&seen[0].body).expect("native request");
+        assert_eq!(sent["model"], "fixture-decider");
+        assert!(sent.get("messages").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stale_cloud_client_cannot_send_a_new_local_goal_to_jev() {
+        let mock = MockSystemOne::serving(vec![Reply::now(200, contract_answer())]).await;
+        let mut client = SystemOneClient::new(&mock.base_url, "test-key");
+        client.expected_model = Some(SYSTEMONE_MODEL.to_string());
+        let provider = Provider {
+            kind: ProviderKind::Local,
+            protocol: judgment_provider::Protocol::SystemOne,
+            base_url: mock.base_url.clone(),
+            model: "fixture-decider".to_string(),
+            requires_auth: false,
+        };
+        let body = serde_json::json!({
+            "model":provider.identity(),"state":"The page is ready.",
+            "questions":{"ready":{"type":"noul","instructions":"Is it ready?"}}
+        }).to_string().into_bytes();
+        let call = client.decide_body_once(body, UNHURRIED).await;
+        assert_eq!(call.outcome, Err(SystemOneFailure::Configuration));
+        assert_eq!(call.requests, 0);
+        assert!(mock.seen().is_empty());
+    }
+
+    #[test]
+    fn a_local_profile_cannot_silently_become_a_remote_request() {
+        let root = serde_json::json!({"smart":{"judgmentProvider":{
+            "kind":"local","protocol":"system_one","baseUrl":"https://example.com",
+            "model":"fixture-decider","requiresAuth":false
+        }}});
+        assert_eq!(SystemOneConfig::from_root(&root), Err(SystemOneFailure::Configuration));
+    }
+
+    #[test]
+    fn a_provider_mismatch_is_refused_before_any_credentials_are_read() {
+        assert_eq!(SystemOneConfig::from_provider(Provider::jev(SYSTEMONE_MODEL), Some("another-provider")),
+            Err(SystemOneFailure::Configuration));
+    }
+
+    #[tokio::test]
+    async fn a_local_inference_is_not_duplicated_by_a_network_hedge() {
+        let response = serde_json::json!({"model":"fixture-decider",
+            "answers":{"ready":{"type":"noul","noul":0.99}},
+            "usage":{"input_tokens":10,"output_tokens":0}}).to_string();
+        let mock = MockSystemOne::serving(vec![Reply { status: 200, body: response, delay: Duration::from_millis(80) }]).await;
+        let config = SystemOneConfig::from_root(&serde_json::json!({"smart":{"judgmentProvider":{
+            "kind":"local","protocol":"system_one","baseUrl":mock.base_url,
+            "model":"fixture-decider","requiresAuth":false
+        }}})).expect("local provider");
+        let body = serde_json::json!({"model":config.provider.identity(),"state":"Ready",
+            "questions":{"ready":{"type":"noul","instructions":"Is the page ready?"}}}).to_string().into_bytes();
+        let call = config.into_client().decide_body(body, UNHURRIED, Some(Duration::from_millis(1))).await;
+        assert!(call.outcome.is_ok(), "{:?}", call.outcome);
+        assert_eq!(call.requests, 1);
+        assert_eq!(call.hedge, None);
+        assert_eq!(mock.seen().len(), 1);
+    }
 
     /// A deadline far past any scripted delay, for the cases that are not
     /// about time.
@@ -1272,6 +1450,9 @@ mod tests {
             SystemOneFailure::Timeout,
             SystemOneFailure::Schema,
             SystemOneFailure::NoKey,
+            SystemOneFailure::Configuration,
+            SystemOneFailure::ResponseTooLarge,
+            SystemOneFailure::ContextTruncated,
         ];
         let mut tokens: Vec<&str> = failures.iter().map(|failure| failure.token()).collect();
         tokens.sort_unstable();

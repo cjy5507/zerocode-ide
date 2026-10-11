@@ -42,6 +42,7 @@ telemetry = { package = "zo-telemetry", path = "../telemetry" }
 tempfile = "3"
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "time"] }
 zerocode-core = { path = "../../../crates/zerocode-core" }
+judgment-provider = { path = "../../../crates/judgment-provider" }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 pdf-extract = "0.10.0"
 

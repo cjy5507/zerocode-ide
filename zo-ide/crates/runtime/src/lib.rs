@@ -130,6 +130,7 @@ pub use zerocode_core::compact_diff::{
 };
 pub use config::{
     conventional_config_home, default_config_home, durable_traces_armed, jev_ledger_dir,
+    judgment_evidence_dir,
     jev_seat_applies, project_slug,
     relocate_traces_out_of_tree, traces_base,
     zo_global_config_roots,

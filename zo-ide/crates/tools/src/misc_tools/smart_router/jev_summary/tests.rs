@@ -140,6 +140,32 @@ fn a_screen_seats_rows_are_counted_across_its_session_folders() {
 }
 
 #[test]
+fn explicit_providers_do_not_borrow_unscoped_session_history() {
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().join("no-provider-ledger")];
+    let sessions = home.path().join("sessions");
+    let seat = &zerocode_core::jev::BROWSER;
+    write(
+        &sessions.join("historical-walk"),
+        seat.ledger,
+        &[asked_by(seat, json!({"at": 10, "outcome": "answered", "requests": 1}))],
+    );
+    let local = judgment_provider::Provider {
+        kind: judgment_provider::ProviderKind::Local,
+        protocol: judgment_provider::Protocol::SystemOne,
+        base_url: "http://127.0.0.1:1234".to_string(),
+        model: "acme/decision-model".to_string(),
+        requires_auth: false,
+    };
+    for provider in [local, judgment_provider::Provider::jev(judgment_provider::JEV_DEFAULT_MODEL)] {
+        let settings = json!({"smart": {(judgment_provider::SETTINGS_KEY): provider}});
+        let report = one(seat, &roots, Some(&sessions), Some(&settings), 1_000, 0);
+        assert_eq!(report.week.rows, 0);
+        assert_eq!(report.found, None);
+    }
+}
+
+#[test]
 fn a_screen_seat_is_counted_once_when_its_root_ledger_holds_what_a_session_copied() {
     // Both places hold the same rows (§4, decision 3). The root is the one
     // counted: a counter that added them would say a walk that answered

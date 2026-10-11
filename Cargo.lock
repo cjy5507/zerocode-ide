@@ -3151,6 +3151,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "judgment-provider"
+version = "1.1.57"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "url",
+]
+
+[[package]]
 name = "keccak"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8051,6 +8061,7 @@ name = "zerocode-core"
 version = "1.1.57"
 dependencies = [
  "criterion",
+ "judgment-provider",
  "model-prices",
  "regex",
  "serde",
@@ -8172,6 +8183,7 @@ dependencies = [
  "http",
  "ignore",
  "jev-socket",
+ "judgment-provider",
  "keyring-core",
  "libc",
  "model-prices",

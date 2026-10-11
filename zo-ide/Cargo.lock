@@ -99,6 +99,7 @@ dependencies = [
  "h2",
  "http",
  "jev-socket",
+ "judgment-provider",
  "memchr",
  "model-prices",
  "nix 0.29.0",
@@ -1779,6 +1780,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "judgment-provider"
+version = "1.1.57"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+]
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3045,6 +3056,7 @@ dependencies = [
  "glob",
  "ignore",
  "image",
+ "judgment-provider",
  "nix 0.29.0",
  "nucleo",
  "pdf-extract",
@@ -3819,6 +3831,7 @@ dependencies = [
  "decision-core",
  "futures-util",
  "image",
+ "judgment-provider",
  "nix 0.29.0",
  "plugins",
  "pulldown-cmark",
@@ -4892,6 +4905,7 @@ dependencies = [
 name = "zerocode-core"
 version = "1.1.57"
 dependencies = [
+ "judgment-provider",
  "model-prices",
  "regex",
  "serde",

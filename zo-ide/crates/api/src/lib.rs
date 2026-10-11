@@ -138,6 +138,7 @@ pub use providers::{
     wire_model_for_effort, wire_model_id,
 };
 pub use sse::{SseParser, parse_frame};
+pub use judgment_provider::CUSTOM_KEY_ENV_PREFIX as JUDGMENT_KEY_ENV_PREFIX;
 pub use systemone::{
     HedgeRan, SystemOneCall, SystemOneChoiceAnswer, SystemOneClient, SystemOneConfig, SystemOneContrast,
     SystemOneCriteria, SystemOneFailure, SystemOneQuestion, SystemOneQuestionKind, SystemOneRequest,
