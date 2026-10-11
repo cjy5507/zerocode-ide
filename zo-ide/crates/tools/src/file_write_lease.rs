@@ -321,10 +321,13 @@ fn release_lease_if_owned(lease_path: &Path, owner: &str) {
     else {
         return;
     };
-    if lock_lease(&file).is_ok()
+    let ours = lock_lease(&file).is_ok()
         && lease_path_still_names(&file, lease_path).unwrap_or(false)
-        && read_lease(&mut file).is_ok_and(|lease| lease.owner == owner)
-    {
+        && read_lease(&mut file).is_ok_and(|lease| lease.owner == owner);
+    // Windows does not delete a file this process still has open, and the delete
+    // failure below is discarded, so the handle is closed before the unlink.
+    drop(file);
+    if ours {
         let _ = fs::remove_file(lease_path);
     }
 }

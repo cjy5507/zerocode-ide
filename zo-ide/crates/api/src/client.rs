@@ -804,6 +804,18 @@ fn openai_oauth_expired(tokens: &OpenAiOAuthTokens) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The running test's name, as a part of a scratch directory name. A test path
+    /// joins its modules with `::`, which a Windows file name cannot hold.
+    fn thread_tag() -> String {
+        std::thread::current().name().unwrap_or("test").replace("::", "-")
+    }
+
+    #[test]
+    fn scratch_directory_names_hold_no_windows_forbidden_characters() {
+        let tag = thread_tag();
+        assert!(!tag.contains(':'), "a Windows file name cannot hold `:`: {tag}");
+    }
+
     /// 죽은 로그인을 고치는 길은 그 로그인이 **누구 것이냐**에 달렸다: 창의
     /// 계정이면 다시 로그인이 답이지만, 제 저장소가 죽은 것이라면 한 걸음
     /// 옆의 창에 살아 있는 계정이 있다 — 그 사실을 말하지 않는 문구가 사람을
@@ -1027,7 +1039,7 @@ mod tests {
         let temp_home = std::env::temp_dir().join(format!(
             "zo-google-oauth-priority-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = std::fs::remove_dir_all(&temp_home);
         let temp_home_str = temp_home.to_str().expect("utf-8 temp path").to_string();
@@ -1087,7 +1099,7 @@ mod tests {
         let temp_home = std::env::temp_dir().join(format!(
             "zo-forced-oauth-route-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = std::fs::remove_dir_all(&temp_home);
         std::fs::create_dir_all(&temp_home).unwrap();
@@ -1139,7 +1151,7 @@ mod tests {
         let temp_home = std::env::temp_dir().join(format!(
             "zo-forced-exact-route-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = std::fs::remove_dir_all(&temp_home);
         std::fs::create_dir_all(&temp_home).unwrap();
@@ -1246,7 +1258,7 @@ mod tests {
         let temp_home = std::env::temp_dir().join(format!(
             "zo-oauth-rebuild-needed-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = std::fs::remove_dir_all(&temp_home);
         std::fs::create_dir_all(&temp_home).expect("temp home");

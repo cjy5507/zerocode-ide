@@ -16,7 +16,7 @@
 //! * **Per vault** — [`MAX_INDEXED_PAGES`] pages, in a deterministic walk
 //!   order, so a runaway vault degrades to a prefix instead of a stall.
 //!
-//! A process-wide `PAGE_CACHE` keyed by path and stamped with each file's
+//! A process-wide `PAGE_CACHE` keyed by wiki root and path, and stamped with each file's
 //! `(mtime, len)` makes every scan after the first almost free — which matters
 //! because one session rebuilds its runtime several times (`/model`, `/resume`)
 //! and each rebuild would otherwise re-read and re-tokenize the whole vault.
@@ -237,6 +237,8 @@ pub struct CorpusScan {
     pub incoming: BTreeMap<String, Vec<(RelationKind, String)>>,
     /// Whether [`MAX_INDEXED_PAGES`] cut the walk short.
     pub capped: bool,
+    /// Pages this scan read from disk; the rest came from the page cache.
+    pub pages_read: usize,
 }
 
 /// One page as it was last read: the stamp that says whether the file moved,
@@ -277,11 +279,14 @@ enum PendingSource {
     Cached(Arc<IndexedCorpusPage>),
 }
 
-/// Last reading of every page, keyed by absolute path.
+/// Last reading of every page, keyed by wiki root and then by absolute path.
 ///
-/// Rebuilt (not merely updated) by each scan, so a deleted page's tokens are
-/// dropped instead of accumulating for the life of the process.
-static PAGE_CACHE: Mutex<Option<BTreeMap<PathBuf, CachedPage>>> = Mutex::new(None);
+/// Each root's map is rebuilt (not merely updated) by each of its scans, so a
+/// deleted page's tokens are dropped instead of accumulating for the life of the
+/// process. A scan of one vault leaves every other root's map alone: scans of two
+/// vaults, in turn or in parallel, used to evict each other's pages.
+static PAGE_CACHE: Mutex<BTreeMap<PathBuf, BTreeMap<PathBuf, CachedPage>>> =
+    Mutex::new(BTreeMap::new());
 
 /// Walk `wiki/**/*.md` and return the indexed corpus.
 ///
@@ -296,7 +301,7 @@ pub fn scan(vault: &SecondBrain) -> CorpusScan {
     let mut previous = PAGE_CACHE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .take()
+        .remove(&wiki)
         .unwrap_or_default();
 
     let mut pending = Vec::new();
@@ -304,7 +309,10 @@ pub fn scan(vault: &SecondBrain) -> CorpusScan {
     walk(&wiki, &wiki, 0, &mut previous, &mut pending, &mut capped);
 
     let (scan, fresh) = resolve(pending, capped);
-    *PAGE_CACHE.lock().unwrap_or_else(PoisonError::into_inner) = Some(fresh);
+    PAGE_CACHE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(wiki, fresh);
     scan
 }
 
@@ -460,6 +468,10 @@ fn written_relations(frontmatter: &str, body: &str) -> Vec<(RelationKind, String
 /// the sorted walk together make "which page did `[[design]]` mean" the same
 /// answer twice.
 fn resolve(pending: Vec<PendingPage>, capped: bool) -> (CorpusScan, BTreeMap<PathBuf, CachedPage>) {
+    let pages_read = pending
+        .iter()
+        .filter(|page| matches!(page.source, PendingSource::Fresh { .. }))
+        .count();
     let mut by_id: BTreeSet<&str> = BTreeSet::new();
     let mut by_stem: BTreeMap<&str, &str> = BTreeMap::new();
     let mut by_folded: BTreeMap<String, &str> = BTreeMap::new();
@@ -542,6 +554,7 @@ fn resolve(pending: Vec<PendingPage>, capped: bool) -> (CorpusScan, BTreeMap<Pat
             pages,
             incoming,
             capped,
+            pages_read,
         },
         fresh,
     )

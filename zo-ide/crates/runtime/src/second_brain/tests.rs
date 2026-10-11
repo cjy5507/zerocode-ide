@@ -291,6 +291,28 @@ fn an_unchanged_page_is_reused_and_a_touched_one_is_reread() {
     );
 }
 
+/// The page cache is process-wide, and a scan of one vault must not evict the
+/// pages of another: parallel tests scan their own vaults in the same process.
+#[test]
+fn a_scan_of_another_vault_leaves_this_vaults_pages_cached() {
+    let ours = World::new("corpus-cache-ours");
+    ours.page("kept.md", "---\ntitle: kept\n---\n\nbody\n");
+    // A second `World` would wait for the env lock this one holds, so the other
+    // vault is a plain directory under this world's root.
+    let other = ours.root.join("other-vault");
+    let other_page = other.join(super::WIKI_DIR).join("elsewhere.md");
+    fs::create_dir_all(other_page.parent().expect("other wiki dir")).expect("other wiki");
+    fs::write(&other_page, "---\ntitle: elsewhere\n---\n\nbody\n").expect("other page");
+
+    let first = corpus::scan(&ours.brain()).pages;
+    let _ = corpus::scan(&SecondBrain::at(&other));
+    let again = corpus::scan(&ours.brain()).pages;
+    assert!(
+        Arc::ptr_eq(&first[0], &again[0]),
+        "a scan of another vault evicted this vault's page, which was read again"
+    );
+}
+
 #[test]
 fn the_walk_stops_at_the_page_cap_and_says_so() {
     let world = World::new("corpus-cap");
@@ -1150,8 +1172,9 @@ fn indexing_a_thousand_pages_stays_under_the_startup_budget() {
          ({key_bytes}B of keys against {read_bytes}B read) — a regression here means \
          page bodies started living in the index"
     );
-    assert!(
-        warm < cold,
-        "the mtime cache must make a rebuild cheaper than the first read (cold {cold:?}, warm {warm:?})"
+    assert_eq!(scan.pages_read, PAGES, "the first scan reads every page from disk");
+    assert_eq!(
+        warm_scan.pages_read, 0,
+        "an unchanged vault is served from the page cache, not read again"
     );
 }

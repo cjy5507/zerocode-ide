@@ -48,6 +48,22 @@ struct FileSnapshot {
     hash: u64,
 }
 
+/// How old a modified time must be when it is observed before the fast path may
+/// trust it. A rewrite in the same clock tick can leave the modified time where it
+/// was, so a time inside the window is not kept (git's racy-clean rule). The
+/// window is the coarsest clock this registry meets: FAT keeps two seconds, and the
+/// Windows clock ticks about every 15.6 ms, which is finer.
+pub const RACY_WINDOW: Duration = Duration::from_secs(2);
+
+/// Whether a modified time was at least [`RACY_WINDOW`] old when it was observed.
+/// A time inside the window, or after the observation, is not settled.
+#[must_use]
+pub fn mtime_is_settled(mtime: SystemTime, observed: SystemTime) -> bool {
+    observed
+        .duration_since(mtime)
+        .is_ok_and(|age| age >= RACY_WINDOW)
+}
+
 /// Extension of the session sidecar this registry persists to
 /// (`<session>.file-reads.json`). Single source for every binding host.
 pub const FILE_READS_SIDECAR_EXTENSION: &str = "file-reads.json";
@@ -114,7 +130,11 @@ impl FileReadRegistry {
         let key = Self::key(path);
         match fs::read(&key) {
             Ok(bytes) => {
-                let mtime = fs::metadata(&key).and_then(|meta| meta.modified()).ok();
+                let observed = SystemTime::now();
+                let mtime = fs::metadata(&key)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .filter(|mtime| mtime_is_settled(*mtime, observed));
                 self.entries.insert(
                     key,
                     FileSnapshot {
@@ -292,6 +312,33 @@ mod tests {
 
         std::fs::write(&path, "content").expect("seed");
         assert_eq!(registry.check(&path), FileFreshness::NeverRead);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A rewrite of the same length in the same clock tick as the record leaves
+    /// the modified time where it was. The test puts that time back, as a coarse
+    /// clock would, so only the content can tell the two versions apart.
+    #[test]
+    fn a_same_length_rewrite_in_the_recorded_tick_is_still_modified() {
+        let mut registry = FileReadRegistry::new();
+        let path = temp_path("same-tick.txt");
+        std::fs::write(&path, "v1").expect("seed");
+        registry.record_from_disk(&path);
+        let recorded = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .expect("recorded modified time");
+
+        std::fs::write(&path, "v2").expect("same-length rewrite");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(recorded))
+            .expect("put the modified time back");
+        assert_eq!(
+            registry.check(&path),
+            FileFreshness::ModifiedSinceRead,
+            "a same-length rewrite in the recorded tick was called fresh"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

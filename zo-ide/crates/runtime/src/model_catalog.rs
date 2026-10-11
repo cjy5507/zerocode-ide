@@ -760,6 +760,18 @@ pub fn model_family_label(model: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The running test's name, as a part of a scratch directory name. A test path
+    /// joins its modules with `::`, which a Windows file name cannot hold.
+    fn thread_tag() -> String {
+        std::thread::current().name().unwrap_or("test").replace("::", "-")
+    }
+
+    #[test]
+    fn scratch_directory_names_hold_no_windows_forbidden_characters() {
+        let tag = thread_tag();
+        assert!(!tag.contains(':'), "a Windows file name cannot hold `:`: {tag}");
+    }
+
     /// A settings-declared model carries the ids its provider serves it under,
     /// and those survive a round trip through the file — this is what lets a
     /// model the binary predates be reachable without a rebuild.
@@ -937,7 +949,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!(
             "zo-model-catalog-{name}-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_tag()
         ));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
