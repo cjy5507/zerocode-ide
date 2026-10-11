@@ -815,7 +815,10 @@ mod release_rank_tests {
 
 #[cfg(test)]
 mod capability_table_tests {
-    use super::{capabilities_for_model, is_small_model, tiers_for_model as tiers_for_model_with_provenance, tiers_for_model_under};
+    use super::{
+        capabilities_for_model, is_small_model, is_small_model_under, tiers_for_model as tiers_for_model_with_provenance,
+        tiers_for_model_under,
+    };
     use crate::model_router::{ModelCapability, ModelTier};
 
     /// Test-only convenience: most existing assertions only care about the
@@ -916,10 +919,14 @@ mod capability_table_tests {
     /// small.
     #[test]
     fn a_size_word_counts_only_at_a_words_start() {
-        assert!(!is_small_model("gemini-3.1-pro-preview"), "gemini is no mini");
+        // The shipped words, like `tiers_for_model` here: the publish
+        // `prior_tables_come_from_the_catalog` makes would otherwise reach
+        // this test beside it and take `flash` away (t-45961).
+        let shipped = api::shipped_router_priors();
+        assert!(!is_small_model_under("gemini-3.1-pro-preview", shipped), "gemini is no mini");
         assert!(tiers_for_model("gemini-3.1-pro-preview").contains(&ModelTier::Deep));
         for small in ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gpt-5.4-mini", "gpt-4o-mini", "claude-haiku-4-5"] {
-            assert!(is_small_model(small), "{small}");
+            assert!(is_small_model_under(small, shipped), "{small}");
         }
     }
 

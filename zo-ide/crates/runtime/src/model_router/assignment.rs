@@ -312,7 +312,7 @@ fn best_model_for_role<'a>(
             .filter(|model| provider_allowlisted(&options.provider_allowlist, model.provider()))
             // And the live route's own rule: an older release of a connected
             // line is never proposed (t-45961).
-            .filter(|model| automatic_choice_allowed(model))
+            .filter(|model| automatic_choice_allowed(model, inventory))
             .max_by_key(|model| {
                 score_model_for_role(model, &selector, role, inventory, options, feedback, learned)
             });

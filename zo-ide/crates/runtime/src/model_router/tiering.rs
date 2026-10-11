@@ -207,6 +207,12 @@ fn lineage(model: &ModelDescriptor) -> String {
         .to_ascii_lowercase()
 }
 
+/// Whether `left` and `right` are releases of one line of one provider — the
+/// pair the classifier keeps one place for, the newest release standing.
+pub(super) fn same_line(left: &ModelDescriptor, right: &ModelDescriptor) -> bool {
+    left.provider() == right.provider() && lineage(left) == lineage(right)
+}
+
 /// Classify every usable model of `models` by provider, by the fact rule.
 /// The result is in input order so a caller can zip it back onto the
 /// descriptors.
