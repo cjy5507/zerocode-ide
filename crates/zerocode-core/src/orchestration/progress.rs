@@ -198,9 +198,10 @@ impl Run {
                 "--worker".into(),
                 current?.worker.clone(),
             ],
-            // The landing check of the head the review named.
+            // The landing check of the head the review named — a commit; a review of a report
+            // has no head to merge.
             WorkStage::Verified => {
-                let head = review.source.clone()?;
+                let head = review.source.as_deref().and_then(super::commit_named)?;
                 vec![
                     LAND_CHECK_VERB.into(),
                     "--task".into(),
@@ -217,7 +218,7 @@ impl Run {
             | WorkStage::Closed
             | WorkStage::Unknown => return None,
         };
-        Some(command_line(argv, task))
+        Some(command_line(argv, &task.id))
     }
 }
 
@@ -225,9 +226,9 @@ impl Run {
 /// while it is shell-plain and quoted when it is not — with the request name
 /// the ledger asks of a verb that writes, named after the task and its words so
 /// that pasting it twice is one request.
-fn command_line(mut argv: Vec<String>, task: &Task) -> String {
+fn command_line(mut argv: Vec<String>, task: &str) -> String {
     if super::needs_a_retry_name(&argv) {
-        let named = format!("{}-{}", argv[0], task.id);
+        let named = format!("{}-{task}", argv[0]);
         let last = argv.last().cloned().unwrap_or_default();
         argv.push(super::RETRY_REQUEST.to_string());
         argv.push(format!(
@@ -295,4 +296,41 @@ fn stage_of(
     .into_iter()
     .find_map(|(holds, stage)| holds.then_some(stage));
     (WorkStage::ReportOnly, claim)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A command shown for a person to paste quotes every word a shell would split or expand,
+    /// and a verb that writes carries the one request name that makes pasting it twice one request.
+    #[test]
+    fn a_shown_command_quotes_what_a_shell_would_read_twice() {
+        let read = command_line(
+            vec![
+                WORKTREE_EVIDENCE_VERB.into(),
+                "--worker".into(),
+                "w-1; rm -rf x".into(),
+            ],
+            "t-1",
+        );
+        assert_eq!(
+            read,
+            "zerocode-orc worktree-evidence --worker 'w-1; rm -rf x'"
+        );
+        let check = command_line(
+            vec![
+                LAND_CHECK_VERB.into(),
+                "--task".into(),
+                "t-1".into(),
+                "--head".into(),
+                "abcdef1234567890".into(),
+            ],
+            "t-1",
+        );
+        assert_eq!(
+            check,
+            "zerocode-orc land-check --task t-1 --head abcdef1234567890 --retry-request land-check-t-1-abcdef123456"
+        );
+    }
 }

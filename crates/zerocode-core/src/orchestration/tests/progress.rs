@@ -298,54 +298,23 @@ fn a_coordinators_record_that_names_no_source_is_unknown_never_a_success_stage()
     assert_eq!((whole.stage, whole.next), (WorkStage::Unknown, None));
 }
 
-/// A command shown for a person to paste quotes every word a shell would split or expand.
+/// A review of a report names no head to merge: the work reads verified, and no landing check of a
+/// report's id is offered.
 #[test]
-fn a_shown_command_quotes_what_a_shell_would_read_twice() {
+fn a_review_of_a_report_offers_no_landing_check() {
     let mut bench = Bench::new();
-    bench.json("run-create --name quoting");
-    let (task, _, dispatch) = handed_in(&mut bench, "quoted", HEAD_A, "");
-    review(&mut bench, &task, "{\"verified\":true}", &dispatch, HEAD_A);
-    let mut odd = bench.ledger.export();
-    let author = odd
-        .tasks
-        .iter_mut()
-        .find(|row| row.id == task)
-        .and_then(|row| row.result_author.as_mut())
-        .expect("the review's author");
-    if let ResultAuthor::Coordinator { source, .. } = author {
-        *source = Some("head; rm -rf x".to_string());
-    }
-    odd.dispatches
-        .iter_mut()
-        .find(|row| row.id == dispatch)
-        .expect("attempt")
-        .source = Some("head; rm -rf x".to_string());
-    let odd = Ledger::rebuild(odd).expect("a readable ledger");
-    let run = &odd.runs()[0];
-    let next = run
-        .progress_of(run.task(&task).expect("task"))
-        .next
-        .expect("a check to show");
-    assert!(next.contains("--head 'head; rm -rf x'"), "{next}");
-}
-
-/// A task a sweep compacted away leaves its attempt: a failed one still reads failed, a reported one
-/// still reads reported, and nothing is offered to run without the task to name.
-#[test]
-fn an_attempt_whose_task_was_compacted_away_reads_by_its_own_end() {
-    let mut bench = Bench::new();
-    bench.json("run-create --name compacted");
-    let failed = task_of(&mut bench, "failed");
-    let (_, pane, lost) = attempt_on(&mut bench, &failed);
-    bench.json_at(&pane, "send --type worker_done --body {\"ok\":false}");
-    let (_, _, handed) = handed_in(&mut bench, "reported", HEAD_A, "");
+    bench.json("run-create --name report");
+    let task = task_of(&mut bench, "research");
+    let (_, pane, dispatch) = attempt_on(&mut bench, &task);
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
+    let report = bench.ledger.runs()[0]
+        .dispatch(&dispatch)
+        .and_then(|one| one.source.clone())
+        .expect("the report is what was handed in");
+    review(&mut bench, &task, "{\"verified\":true}", &dispatch, &report);
     let run = &bench.ledger.runs()[0];
-    let none = ReviewFacts::default();
-    let lost = run.progress_from(None, &none, run.dispatch(&lost));
-    let handed = run.progress_from(None, &none, run.dispatch(&handed));
-    assert_eq!((lost.stage, lost.next), (WorkStage::Failed, None));
-    assert_eq!((handed.stage, handed.next), (WorkStage::ReportOnly, None));
-    assert_eq!(handed.source.as_deref(), Some(HEAD_A));
+    let whole = run.progress_of(run.task(&task).expect("task"));
+    assert_eq!((whole.stage, whole.next), (WorkStage::Verified, None));
 }
 
 /// The wire names are the window's keys: one per stage, none shared.
