@@ -4,19 +4,24 @@
 //! The rule it serves: the most capable model of each provider plans,
 //! verifies and takes the hard escalation; the next-best model of each
 //! provider does the hard implementation; everything below does ordinary and
-//! easy work, easy work on the cheapest model of the current release. Nothing
-//! here names a model. A model's place comes from the catalog's own signals —
-//! whether it reaches the Deep tier (a declared frontier class or an Ultra
-//! effort ceiling), its effort ceiling, the flagship token the vendor put in
-//! its name, its release recency, its declared class — so a model shipped
-//! tomorrow lands in its band without an edit, and two providers' second-best
-//! models are peers because they are each second, not because a list says so.
+//! easy work, easy work on the least capable model that is still current.
+//! Nothing here names a model. A model's place comes from one of two
+//! sources: the Jev seat's judgment of the provider's lineup, read off the
+//! catalog facts and the recorded outcomes ([`super::tier_judgment`]), or —
+//! where no judgment stands — one rule over the catalog's own facts
+//! ([`FactRule`]): the provider's declared class, then the list price,
+//! then the context window, then the release order, then the effort ceiling.
+//! A model shipped tomorrow lands in its band without an edit, and two
+//! providers' second-best models are peers because they are each second, not
+//! because a list says so (t-45961: the rule read a marketing label before,
+//! and a fast model whose name the label table did not know outranked the
+//! provider's balanced one).
 
 use std::collections::BTreeSet;
 
 use super::inventory::ModelDescriptor;
 use super::policy::{ModelCapability, ModelStatus, ModelTier};
-use super::tier_judgment::TierSource;
+use super::tier_judgment::{judged_order, TierJudgment, TierSource};
 
 #[cfg(test)]
 mod tests;
@@ -93,31 +98,86 @@ pub struct ModelTierAssignment {
     pub confidence_permille: Option<u16>,
 }
 
-/// The capability order within a provider, most capable first. Every term is
-/// a catalog fact carried on the descriptor; the vendor's flagship token is
-/// the one name-derived term and it comes from the catalog's prior table.
-fn capability_key(model: &ModelDescriptor) -> impl Ord {
-    let class_rank = match model.class_label() {
-        Some("frontier") => 3_u8,
-        Some("balanced") => 2,
-        Some("fast") => 0,
-        _ => 1,
-    };
-    (
-        model.has_tier(ModelTier::Deep),
-        model.effort_ceiling_value(),
-        has_flagship_token(model.id()),
-        model.release_rank_value(),
-        class_rank,
-    )
+/// A declared class as a rank in [`FactRule`], strongest first. The
+/// class is read off the tier set the catalog gave the model — the
+/// provider's own declaration where there is one, else the labelled
+/// cold-start derivation (an Ultra ceiling, a size token, a flagship token)
+/// — so a name-derived prior is one fact among the others, never a term of
+/// its own.
+const CLASS_FRONTIER: u8 = 3;
+/// A provider's everyday model.
+const CLASS_BALANCED: u8 = 2;
+/// Nothing declared and nothing derived: a custom endpoint zo knows nothing
+/// about stands between the balanced and the fast class.
+const CLASS_UNDECLARED: u8 = 1;
+/// A provider's fast, affordable model.
+const CLASS_FAST: u8 = 0;
+
+fn class_rank(model: &ModelDescriptor) -> u8 {
+    if model.has_tier(ModelTier::Deep) {
+        CLASS_FRONTIER
+    } else if model.has_tier(ModelTier::Fast) {
+        CLASS_FAST
+    } else if model.has_tier(ModelTier::Strong) {
+        CLASS_BALANCED
+    } else {
+        CLASS_UNDECLARED
+    }
 }
 
-fn has_flagship_token(id: &str) -> bool {
-    let lower = id.to_ascii_lowercase();
-    api::router_priors()
-        .deep_flagship_tokens
-        .iter()
-        .any(|token| lower.contains(token.as_str()))
+/// The fact rule: the capability order within one provider's lineup when no
+/// judgment stands, compared most capable first. Each term is a catalog
+/// fact, and an earlier term always outweighs every later one:
+///
+/// 1. the declared class ([`class_rank`]);
+/// 2. the list price, input plus output — a vendor prices its stronger
+///    model higher;
+/// 3. the context window;
+/// 4. the release order — a newer model, not a stronger one, so it never
+///    outweighs the class;
+/// 5. the effort ceiling.
+///
+/// A fact some model of a class lacks (a release the price table does not
+/// name yet) is compared within that class by nobody: one missing price must
+/// not sink a new flagship below its priced elders, and comparing it only
+/// where both sides have it would not be an order at all (a > b > c > a).
+pub(super) struct FactRule {
+    /// The classes every model of which carries a list price.
+    priced: BTreeSet<u8>,
+    /// The classes every model of which carries a context window.
+    windowed: BTreeSet<u8>,
+}
+
+impl FactRule {
+    /// The rule for the lineup `models` (one provider's).
+    pub(super) fn of<'a>(models: impl IntoIterator<Item = &'a ModelDescriptor> + Clone) -> Self {
+        let every = |has: fn(&ModelDescriptor) -> bool| -> BTreeSet<u8> {
+            let classes: BTreeSet<u8> = models.clone().into_iter().map(class_rank).collect();
+            classes
+                .into_iter()
+                .filter(|class| models.clone().into_iter().filter(|model| class_rank(model) == *class).all(has))
+                .collect()
+        };
+        Self {
+            priced: every(|model| model.list_price_value().is_some()),
+            windowed: every(|model| model.context_window_value().is_some()),
+        }
+    }
+
+    /// `model`'s place under the rule; the greater key is the more capable.
+    pub(super) fn key(&self, model: &ModelDescriptor) -> impl Ord {
+        let class = class_rank(model);
+        (
+            class,
+            model
+                .list_price_value()
+                .filter(|_| self.priced.contains(&class))
+                .map(|price| price.input_micro_usd.saturating_add(price.output_micro_usd)),
+            model.context_window_value().filter(|_| self.windowed.contains(&class)),
+            model.release_rank_value(),
+            model.effort_ceiling_value(),
+        )
+    }
 }
 
 fn usable(model: &ModelDescriptor) -> bool {
@@ -133,10 +193,22 @@ fn lineage(model: &ModelDescriptor) -> String {
         .to_ascii_lowercase()
 }
 
-/// Classify every usable model of `models` by provider. The result is in
-/// input order so a caller can zip it back onto the descriptors.
+/// Classify every usable model of `models` by provider, by the fact rule.
+/// The result is in input order so a caller can zip it back onto the
+/// descriptors.
 #[must_use]
 pub fn classify_model_tiers(models: &[ModelDescriptor]) -> Vec<ModelTierAssignment> {
+    classify_model_tiers_with(models, None)
+}
+
+/// [`classify_model_tiers`] with a judgment applied to every provider it
+/// covers ([`super::tier_judgment::judged_order`]); `None` is the fact rule
+/// throughout.
+#[must_use]
+pub(super) fn classify_model_tiers_with(
+    models: &[ModelDescriptor],
+    judgment: Option<&TierJudgment>,
+) -> Vec<ModelTierAssignment> {
     let mut providers: Vec<&str> = Vec::new();
     for model in models.iter().filter(|model| usable(model)) {
         if !providers.contains(&model.provider()) {
@@ -146,15 +218,16 @@ pub fn classify_model_tiers(models: &[ModelDescriptor]) -> Vec<ModelTierAssignme
     let mut assignments: Vec<ModelTierAssignment> = Vec::with_capacity(models.len());
     for provider in providers {
         // One place per lineage: of the releases of one line the newest
-        // stands (release recency, then the capability key) and the older
-        // ones are superseded — an old model is filtered out, never a
-        // second-band twin of its own successor.
+        // stands (release recency, then the fact rule) and the older ones are
+        // superseded — an old model is filtered out, never a second-band twin
+        // of its own successor.
         let mut candidates: Vec<&ModelDescriptor> = models
             .iter()
             .filter(|model| usable(model) && model.provider() == provider)
             .collect();
+        let rule = FactRule::of(candidates.iter().copied());
         candidates.sort_by(|left, right| {
-            (right.release_rank_value(), capability_key(right)).cmp(&(left.release_rank_value(), capability_key(left)))
+            (right.release_rank_value(), rule.key(right)).cmp(&(left.release_rank_value(), rule.key(left)))
         });
         let mut ordered: Vec<&ModelDescriptor> = Vec::new();
         let mut superseded: Vec<&ModelDescriptor> = Vec::new();
@@ -165,7 +238,9 @@ pub fn classify_model_tiers(models: &[ModelDescriptor]) -> Vec<ModelTierAssignme
                 ordered.push(model);
             }
         }
-        ordered.sort_by_key(|model| std::cmp::Reverse(capability_key(model)));
+        ordered.sort_by_key(|model| std::cmp::Reverse(rule.key(model)));
+        let placed = judged_order(ordered, &rule, judgment);
+        let ordered: Vec<&ModelDescriptor> = placed.iter().map(|place| place.model).collect();
         let top_is_deep = ordered.first().is_some_and(|best| best.has_tier(ModelTier::Deep));
         let bands: Vec<ModelBand> = ordered
             .iter()
@@ -177,15 +252,15 @@ pub fn classify_model_tiers(models: &[ModelDescriptor]) -> Vec<ModelTierAssignme
             })
             .collect();
         let rungs = implementation_rungs(&ordered, &bands);
-        for ((rank, model), (band, rungs)) in ordered.iter().enumerate().zip(bands.into_iter().zip(rungs)) {
+        for ((rank, place), (band, rungs)) in placed.iter().enumerate().zip(bands.into_iter().zip(rungs)) {
             assignments.push(ModelTierAssignment {
-                id: model.id().to_string(),
+                id: place.model.id().to_string(),
                 provider: provider.to_string(),
                 rank: rank + 1,
                 band,
                 rungs,
-                source: TierSource::FactRule,
-                confidence_permille: None,
+                source: place.source,
+                confidence_permille: place.confidence_permille,
             });
         }
         for model in superseded {
@@ -210,11 +285,13 @@ pub fn classify_model_tiers(models: &[ModelDescriptor]) -> Vec<ModelTierAssignme
 }
 
 /// Rungs for one provider's ladder (`ordered` most capable first, `bands`
-/// aligned): hard is the second band; the current release is the newest
-/// release among the non-top implementers; medium is the best model of the
-/// rest band on that release, easy the least capable non-top model on it.
-/// A rung with no distinct model falls onto the rung above it, so a provider
-/// with one implementer serves every rung with it.
+/// aligned): hard is the second band; medium is the best current model of
+/// the rest band, easy the least capable current implementer. A model is
+/// current unless an implementer of its class or a stronger one is a newer
+/// release — so an older line (`haiku-4-5` beside `sonnet-5`) serves no rung,
+/// while a newer release of a weaker class never pushes a stronger class off
+/// the ladder. A rung with no distinct model falls onto the rung above it, so
+/// a provider with one implementer serves every rung with it.
 fn implementation_rungs(ordered: &[&ModelDescriptor], bands: &[ModelBand]) -> Vec<BTreeSet<ImplRung>> {
     let implementers: Vec<usize> = ordered
         .iter()
@@ -226,19 +303,20 @@ fn implementation_rungs(ordered: &[&ModelDescriptor], bands: &[ModelBand]) -> Ve
     let Some(&hard) = implementers.first() else {
         return rungs;
     };
-    let current_release = implementers
-        .iter()
-        .map(|&index| ordered[index].release_rank_value())
-        .max()
-        .unwrap_or(0);
-    let on_current = |index: &&usize| ordered[**index].release_rank_value() == current_release;
+    let current = |index: &&usize| {
+        let model = ordered[**index];
+        !implementers.iter().any(|&other| {
+            class_rank(ordered[other]) >= class_rank(model)
+                && ordered[other].release_rank_value() > model.release_rank_value()
+        })
+    };
     let medium = implementers
         .iter()
         .filter(|index| bands[**index] == ModelBand::Rest)
-        .find(on_current)
+        .find(current)
         .copied()
         .unwrap_or(hard);
-    let easy = implementers.iter().rev().find(on_current).copied().unwrap_or(hard);
+    let easy = implementers.iter().rev().find(current).copied().unwrap_or(hard);
     rungs[hard].insert(ImplRung::Hard);
     rungs[medium].insert(ImplRung::Medium);
     rungs[easy].insert(ImplRung::Easy);

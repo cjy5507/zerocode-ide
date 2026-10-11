@@ -17218,12 +17218,24 @@ fn dials_why(
         .map(|(model, _, _)| model.as_str())
         .or_else(|| row.map(|row| row.model.as_str()));
     let facts = turn.map(|(_, _, _, facts)| facts);
-    let band = model
-        .and_then(|model| facts?.lineup.find(model)?.band)
+    let held = model.and_then(|model| facts?.lineup.find(model));
+    let band = held
+        .and_then(|held| held.band)
         .or_else(|| row.and_then(|row| row.band));
+    // Who put the model in that band, and how sure that judgment was
+    // (t-45961): the Jev seat, the fact rule, or the facts for a model that
+    // arrived after the judgment.
+    let tier_from = held
+        .and_then(|held| held.tier_from)
+        .or_else(|| row.and_then(|row| row.tier_from));
+    let tier_confidence = held
+        .and_then(|held| held.tier_confidence_permille)
+        .or_else(|| row.and_then(|row| row.tier_confidence_permille));
     let jev = pick.is_some_and(|(_, _, from)| *from == DIALS_FROM_JEV);
     serde_json::json!({
         "band": band,
+        "tierFrom": tier_from,
+        "tierConfidencePermille": tier_confidence,
         "effortRule": if jev {
             serde_json::json!(DIALS_FROM_JEV)
         } else {
@@ -17241,8 +17253,16 @@ fn dials_why(
 
 /// `dials.difficultyFrom`: the difficulty seat's applied answer chose it.
 const DIALS_FROM_JEV: &str = "jev";
-/// `dials.difficultyFrom`: nobody chose; the ladder's middle stood.
-const DIALS_FROM_FALLBACK: &str = "fallback";
+/// `dials.difficultyFrom`: no answer, and the person's own row for unjudged
+/// work ([`crate::summon_difficulty::UNJUDGED_DIFFICULTY`]) stood (t-45961).
+const DIALS_FROM_PERSON: &str = "person";
+/// `dials.difficultyFrom`: no answer and no row of the person's: the
+/// lineup's hard rung — the provider's top implementation model as the
+/// classifier ordered it — ran (t-45961).
+const DIALS_FROM_FACTS: &str = "facts";
+/// `dials.difficultyFrom`: no answer, and no difficulty ran — the summons
+/// named its model, and its CLI's own effort stands.
+const DIALS_FROM_NONE: &str = "none";
 /// `dials.modelFrom`: the summons named its own `--model`.
 const DIALS_FROM_REQUEST: &str = "request";
 /// `dials.modelFrom`: a challenger's turn tried a model with too little
@@ -20977,7 +20997,7 @@ fn plan_inner(
             let profile = if model.is_none() && open {
                 launcher.difficulty_profile(
                     &agent,
-                    chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
+                    chosen.unwrap_or(crate::summon_difficulty::UNJUDGED_DIFFICULTY),
                     summons_origin,
                 )?
             } else {
@@ -21029,8 +21049,17 @@ fn plan_inner(
             // what else today's lineup offers at that difficulty (t-14437).
             let dials = (model.is_none() || effort.is_none()).then(|| {
                 serde_json::json!({
-                    "difficulty": chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
-                    "difficultyFrom": if chosen.is_some() { DIALS_FROM_JEV } else { DIALS_FROM_FALLBACK },
+                    "difficulty": chosen.or_else(|| {
+                        profile.as_ref().map(|_| crate::summon_difficulty::UNJUDGED_DIFFICULTY)
+                    }),
+                    "difficultyFrom": match (chosen, &profile) {
+                        (Some(_), _) => DIALS_FROM_JEV,
+                        (None, Some(row)) if row.from == crate::summon_difficulty::lineup::Source::Person => {
+                            DIALS_FROM_PERSON
+                        }
+                        (None, Some(_)) => DIALS_FROM_FACTS,
+                        (None, None) => DIALS_FROM_NONE,
+                    },
                     "modelFrom": match (&model, &model_pick, &profile) {
                         (Some(_), _, _) => serde_json::json!(DIALS_FROM_REQUEST),
                         (None, Some((_, _, from)), _) => serde_json::json!(from),

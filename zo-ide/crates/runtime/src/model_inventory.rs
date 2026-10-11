@@ -121,6 +121,9 @@ fn descriptor_for(id: &str, kind: ProviderKind) -> ModelDescriptor {
     if let Some(context_window) = context_window_for_descriptor(id) {
         descriptor = descriptor.context_window(context_window);
     }
+    if let Some((input, output)) = list_price_for_descriptor(id) {
+        descriptor = descriptor.list_price_micro_usd(input, output);
+    }
     if id == "ollama" {
         descriptor = descriptor
             .source(ModelSource::LocalProvider)
@@ -143,6 +146,9 @@ fn descriptor_for_custom_model(provider: &str, id: &str) -> ModelDescriptor {
         .effort_ceiling(effort_ceiling_for_model(id));
     if let Some(context_window) = context_window_for_descriptor(id) {
         descriptor = descriptor.context_window(context_window);
+    }
+    if let Some((input, output)) = list_price_for_descriptor(id) {
+        descriptor = descriptor.list_price_micro_usd(input, output);
     }
     descriptor
 }
@@ -457,6 +463,36 @@ fn effort_ceiling_for_model(id: &str) -> EffortCeiling {
 /// any real catalog entry).
 fn context_window_for_descriptor(id: &str) -> Option<u32> {
     u32::try_from(api::context_window_for_model(id)).ok()
+}
+
+/// Millionths of a US dollar in one dollar: the unit a descriptor carries a
+/// list price in.
+const MICRO_USD_PER_USD: f64 = 1_000_000.0;
+
+/// The model's list price per million tokens (input, output), bridged from
+/// the shared price table ([`api::model_price`]) into the whole millionths of
+/// a dollar a descriptor compares. `None` when no row names the model — never
+/// zero, which would read as the cheapest model of all.
+fn list_price_for_descriptor(id: &str) -> Option<(u64, u64)> {
+    let price = api::model_price(id)?;
+    Some((micro_usd(price.input)?, micro_usd(price.output)?))
+}
+
+/// 2^53: every whole number below it is exact in an `f64`.
+const EXACT_F64_WHOLE_NUMBERS_BELOW: f64 = 9_007_199_254_740_992.0;
+
+/// A USD-per-million-token rate as whole millionths of a dollar; `None` for
+/// a rate that is not a finite, non-negative number.
+fn micro_usd(usd: f64) -> Option<u64> {
+    let micros = (usd * MICRO_USD_PER_USD).round();
+    if !(0.0..EXACT_F64_WHOLE_NUMBERS_BELOW).contains(&micros) {
+        return None;
+    }
+    // A non-negative whole number below 2^53 (the range check also refuses
+    // NaN and infinity): the cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let micros = micros as u64;
+    Some(micros)
 }
 
 /// The tier vector a provider-declared [`api::ModelClass`] maps to. This is

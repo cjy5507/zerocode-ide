@@ -4413,8 +4413,10 @@ fn route_task_complexity_labels_round_trip() {
 
 /// The connected inventory the tier classifier reads: three providers with
 /// their current lineups, a discovered newer flagship whose Deep tier is
-/// inferred from its Ultra ceiling, an older cheap release, and a
-/// custom-provider model whose Deep tier is only a name guess.
+/// inferred from its Ultra ceiling (and which no price row names yet), an
+/// older cheap release, and a custom-provider model whose Deep tier is only a
+/// name guess. The list prices are the shared price table's (USD per million
+/// tokens, input and output) — facts the order reads, like the rest.
 fn top_tier_probe_inventory(main: &str) -> ModelInventory {
     use EffortCeiling as C;
     use TiersProvenance as P;
@@ -4441,19 +4443,27 @@ fn top_tier_probe_inventory(main: &str) -> ModelInventory {
     ModelInventory::new(
         main,
         vec![
-            row("gpt-5.6-terra", "openai", "terra", strong, P::ProviderDeclared, C::Ultra, 56),
-            row("claude-opus-5", "anthropic", "opus", strong, P::ProviderDeclared, C::Max, 50),
+            row("gpt-5.6-terra", "openai", "terra", strong, P::ProviderDeclared, C::Ultra, 56)
+                .list_price_micro_usd(2_500_000, 15_000_000),
+            row("claude-opus-5", "anthropic", "opus", strong, P::ProviderDeclared, C::Max, 50)
+                .list_price_micro_usd(5_000_000, 25_000_000),
             row("gpt-6-astra", "openai", "astra", deep, P::ColdStartPrior, C::Ultra, 60),
-            row("claude-haiku-4-5-20251001", "anthropic", "haiku", fast, P::ProviderDeclared, C::Xhigh, 45),
+            row("claude-haiku-4-5-20251001", "anthropic", "haiku", fast, P::ProviderDeclared, C::Xhigh, 45)
+                .list_price_micro_usd(1_000_000, 5_000_000),
             row("deepseek-v4-pro", "deepseek", "deepseek", deep, P::Fallback, C::High, 40)
                 .source(ModelSource::CustomProvider),
-            row("gpt-5.6-sol", "openai", "sol", deep, P::ProviderDeclared, C::Ultra, 56),
+            row("gpt-5.6-sol", "openai", "sol", deep, P::ProviderDeclared, C::Ultra, 56)
+                .list_price_micro_usd(5_000_000, 30_000_000),
             row("gemini-3.8-flash", "google", "gemini", fast, P::Fallback, C::High, 38),
-            row("claude-sonnet-5", "anthropic", "sonnet", strong, P::ProviderDeclared, C::Max, 50),
-            row("gpt-5.6-luna", "openai", "luna", fast, P::ProviderDeclared, C::Max, 56),
-            row("claude-fable-5-1", "anthropic", "fable", deep, P::ProviderDeclared, C::Max, 51),
+            row("claude-sonnet-5", "anthropic", "sonnet", strong, P::ProviderDeclared, C::Max, 50)
+                .list_price_micro_usd(3_000_000, 15_000_000),
+            row("gpt-5.6-luna", "openai", "luna", fast, P::ProviderDeclared, C::Max, 56)
+                .list_price_micro_usd(1_000_000, 6_000_000),
+            row("claude-fable-5-1", "anthropic", "fable", deep, P::ProviderDeclared, C::Max, 51)
+                .list_price_micro_usd(10_000_000, 50_000_000),
             row("gemini-3.1-pro-preview", "google", "gemini", deep, P::Fallback, C::High, 31),
-            row("gpt-5.3-codex-spark", "openai", "spark", fast, P::Fallback, C::Xhigh, 53),
+            row("gpt-5.3-codex-spark", "openai", "spark", fast, P::Fallback, C::Xhigh, 53)
+                .list_price_micro_usd(1_750_000, 14_000_000),
             row("gemini-3.1-flash-lite", "google", "gemini", fast, P::Fallback, C::High, 31),
         ],
     )
@@ -4689,11 +4699,11 @@ fn an_older_release_of_a_connected_lineage_is_superseded_and_never_implements() 
     let inventory = ModelInventory::new(
         "claude-fable-5",
         vec![
-            row("claude-fable-5-1", deep, EffortCeiling::Max, 51),
-            row("claude-fable-5", deep, EffortCeiling::Max, 50),
-            row("claude-opus-5", strong, EffortCeiling::Max, 50),
-            row("claude-opus-4-8", strong, EffortCeiling::Max, 48),
-            row("claude-sonnet-5", strong, EffortCeiling::Max, 50),
+            row("claude-fable-5-1", deep, EffortCeiling::Max, 51).list_price_micro_usd(10_000_000, 50_000_000),
+            row("claude-fable-5", deep, EffortCeiling::Max, 50).list_price_micro_usd(10_000_000, 50_000_000),
+            row("claude-opus-5", strong, EffortCeiling::Max, 50).list_price_micro_usd(5_000_000, 25_000_000),
+            row("claude-opus-4-8", strong, EffortCeiling::Max, 48).list_price_micro_usd(5_000_000, 25_000_000),
+            row("claude-sonnet-5", strong, EffortCeiling::Max, 50).list_price_micro_usd(3_000_000, 15_000_000),
         ],
     );
     assert_eq!(band_of(&inventory, "claude-fable-5-1"), ModelBand::Top);

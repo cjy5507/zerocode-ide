@@ -6,7 +6,7 @@
 use super::*;
 use crate::summon_assign::{AssignAsk, Receipts};
 use crate::summon_difficulty::lineup::{self, Lineup, Seen, row_at};
-use crate::summon_difficulty::{FALLBACK_DIFFICULTY, LADDER, PROFILES_SETTING};
+use crate::summon_difficulty::{LADDER, PROFILES_SETTING, UNJUDGED_DIFFICULTY};
 use crate::summon_model::{EFFORT_KEY, ModelRecord};
 use std::collections::BTreeMap;
 
@@ -206,26 +206,31 @@ fn a_challengers_turn_sends_the_difficulty_alone() {
     assert_eq!(model.receipt, None, "nothing was asked on the path for it");
 }
 
-/// A4: a late or broken answer leaves both defaults — the ladder's middle row
-/// — after one wall, where two were waited on.
+/// A4: a late or broken answer leaves both defaults — the row for unjudged
+/// work (t-45961) — after one wall, where two were waited on.
 #[test]
 fn a_late_answer_leaves_both_defaults_after_one_wall() {
     let launcher = Assigned::late();
     let (reply, prepared) = summon(&launcher);
     assert_eq!(launcher.asked.borrow().len(), 1, "one wall, never two");
-    let mid = row_at(
+    let unjudged = row_at(
         &serde_json::Value::Null,
         "claude",
-        FALLBACK_DIFFICULTY,
+        UNJUDGED_DIFFICULTY,
         Some(&lineup()),
         Some(&Seen::default()),
         0,
     )
     .unwrap()
     .unwrap();
-    assert_eq!(reply["model"], serde_json::json!(mid.model), "{reply}");
-    assert_eq!(reply["effort"], serde_json::json!(mid.effort), "{reply}");
-    assert_eq!(reply["dials"]["difficultyFrom"], "fallback");
+    assert_eq!(reply["model"], serde_json::json!(unjudged.model), "{reply}");
+    assert_eq!(
+        reply["effort"],
+        serde_json::json!(unjudged.effort),
+        "{reply}"
+    );
+    assert_eq!(reply["dials"]["difficulty"], UNJUDGED_DIFFICULTY);
+    assert_eq!(reply["dials"]["difficultyFrom"], "facts");
     assert_eq!(reply["dials"]["modelFrom"], "lineup");
     let model = prepared.model_shadow.unwrap();
     assert_eq!(model.receipt.unwrap()["applied"], false);

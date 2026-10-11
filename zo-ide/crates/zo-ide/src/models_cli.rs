@@ -136,6 +136,12 @@ impl Report<'_> {
                 "unlistedSince": self.unlisted_since(row),
                 "band": self.tier(row).map(|tier| tier.band.key()),
                 "rungs": self.tier(row).map(|tier| tier.rungs.iter().map(|rung| rung.key()).collect::<Vec<_>>()),
+                // Who placed the model in its band — the Jev seat's judgment,
+                // the fact rule, or the facts for a model that arrived after
+                // its provider's judgment — and how sure the judgment was, in
+                // thousandths (t-45961).
+                "tierFrom": self.tier(row).map(|tier| tier.source.key()),
+                "tierConfidencePermille": self.tier(row).and_then(|tier| tier.confidence_permille),
                 "efforts": api::accepted_efforts(&row.id)
                     .map(|levels| levels.iter().map(|level| level.key()).collect::<Vec<_>>()),
             })).collect::<Vec<_>>(),
@@ -569,8 +575,9 @@ mod tests {
     }
 
     /// t-14437: every row carries what zo's tier classifier made of it over
-    /// the whole catalog, and the efforts it accepts — the facts the window's
-    /// summons reads instead of keeping a model table of its own.
+    /// the whole catalog — the band, the rungs, who placed it and how sure
+    /// that was (t-45961) — and the efforts it accepts: the facts the
+    /// window's summons reads instead of keeping a model table of its own.
     #[test]
     fn every_row_carries_its_band_rungs_and_accepted_efforts() {
         use runtime::model_catalog::ModelCatalog;
@@ -607,6 +614,9 @@ mod tests {
             assert!(words.contains(&row["band"].as_str().unwrap()), "{id}");
             let rungs: Vec<&str> = tier.rungs.iter().map(|rung| rung.key()).collect();
             assert_eq!(row["rungs"], serde_json::json!(rungs), "{id}");
+            // t-45961: and who placed it there, and how sure that was.
+            assert_eq!(row["tierFrom"], tier.source.key(), "{id}");
+            assert_eq!(row["tierConfidencePermille"], serde_json::json!(tier.confidence_permille), "{id}");
             match api::accepted_efforts(id) {
                 Some(levels) => {
                     let words: Vec<&str> = levels.iter().map(|level| level.key()).collect();

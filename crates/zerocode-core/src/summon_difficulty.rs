@@ -10,7 +10,13 @@ pub mod lineup;
 pub mod outcomes;
 pub const PROFILES_SETTING: &str = "summonProfiles";
 pub const DEFAULT_PROFILES: &str = include_str!("summon-profiles.json");
-pub const FALLBACK_DIFFICULTY: &str = LADDER[1].0;
+/// The difficulty a summons nobody judged runs at (t-45961): the ladder's
+/// top, whose row is the person's own where they wrote one and otherwise the
+/// lineup's hard rung — the provider's top implementation model. Never the
+/// middle: an unjudged summons cannot tell easy work from hard, and a
+/// misread lineup put its weakest model on the middle row (10-10~11: six
+/// unjudged summonses out of six on the cheapest model).
+pub const UNJUDGED_DIFFICULTY: &str = LADDER[2].0;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
