@@ -6025,6 +6025,8 @@ mod tests {
     #[cfg(unix)]
     mod outside_reader;
 
+    #[cfg(unix)]
+    mod gate_reuse;
     /// t-34501 stage 3 (t-42447): the window's evidence reaches the ledger through the actor.
     mod land_check;
 

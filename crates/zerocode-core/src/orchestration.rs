@@ -40,6 +40,7 @@ mod completion;
 pub mod coordinator_handover;
 pub mod delegate;
 pub mod evidence;
+pub mod gate_reuse;
 pub mod land_check;
 pub mod landing_watch;
 mod session_history;
@@ -18228,6 +18229,21 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::Mutation,
     ),
     (
+        gate_reuse::REGISTER,
+        "--task <id> --attempt <dispatch|none> --body <inputs-json> · register one gate before execution from the authenticated coordinator session",
+        Doing::Mutation,
+    ),
+    (
+        gate_reuse::RECORD,
+        "--task <id> --attempt <dispatch|none> (--start <registration> --lease <id> --body <inputs-json> | --cancel <registration> --lease <id> | --body <metadata-json>) · start once, cancel, or attest one execution and bind all metadata bytes and the log digest immutably",
+        Doing::Mutation,
+    ),
+    (
+        gate_reuse::REUSE,
+        "--task <id> --attempt <dispatch|none> --body <observations-json> · check current ledger evidence and record a hit or miss without a new execution",
+        Doing::Mutation,
+    ),
+    (
         "send",
         "--to <address> --type <kind> [--body <text>] [--task <id>] [--dispatch <id>] \
          · groups: @all @idle @<agent> @worktree:<checkout>",
@@ -20196,6 +20212,15 @@ fn plan_inner(
              * a retry that cannot be given the FIRST answer must not be given
              * a second one that merely resembles it. */
             let answer = answer.replay(ledger)?;
+            if matches!(
+                verb.as_str(),
+                gate_reuse::REGISTER | gate_reuse::RECORD | gate_reuse::REUSE
+            ) {
+                let run_id = bound(ledger, &words, &caller, &seat)?;
+                gate_reuse::validate_replay(
+                    ledger, team, &run_id, verb, &words, pane, actor, now_ms, &answer,
+                )?;
+            }
             return Ok(Decided {
                 answered_from: None,
                 effect: Effect::None,
@@ -22557,6 +22582,11 @@ fn plan_inner(
          * repository and refuses a worker's pane; the window merges in a throwaway checkout,
          * runs the project's check and writes the evidence back (`Ledger::land_checked`). The
          * reply is the window's, written once the merge has been judged. */
+        gate_reuse::REGISTER | gate_reuse::RECORD | gate_reuse::REUSE => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            gate_reuse::decide(ledger, team, &run_id, verb, &words, pane, actor, now_ms)?
+        }
+
         land_check::LAND_CHECK_VERB => {
             let run_id = bound(ledger, &words, &caller, &seat)?;
             let ask = land_check::ask(ledger, &run_id, &team.id, pane, &words)?;

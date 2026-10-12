@@ -25151,6 +25151,7 @@ mod completion;
 /// t-26587: a success report must show the evidence of each pass condition
 /// its task wrote (`tests/evidence.rs`).
 mod evidence;
+mod gate_reuse;
 /// t-34501 stage 3 (t-42447): `land-check` names the task, head and repository for the window, and
 /// the window's evidence comes back as the ledger's own letter (`tests/land_check.rs`).
 mod land_check;
