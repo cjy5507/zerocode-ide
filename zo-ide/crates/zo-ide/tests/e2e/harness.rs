@@ -1097,8 +1097,10 @@ pub fn visible_row_occupancy(capture: &[u8], rows: usize) -> Vec<bool> {
 }
 
 /// A styled row ends on its colour resets. A row with no style of its own
-/// sends none: it is its erase and its text, and ends where the next
-/// row, the scroll-region reset or the end of the frame begins.
+/// sends none: it is `\r\n`, its erase and its text, which holds no escape of
+/// its own, so the text ends at the first escape or the next row, whatever
+/// that escape begins (a reset of the scroll region, the next insertion's
+/// region, the end of the frame).
 fn scan_history_rows(capture: &[u8]) -> Vec<Vec<u8>> {
     const ERASE_LINE: &[u8] = b"\x1b[K";
     const LINE_TAIL: &[u8] = b"\x1b[39m\x1b[49m\x1b[0m";
@@ -1126,10 +1128,11 @@ fn scan_history_rows(capture: &[u8]) -> Vec<Vec<u8>> {
             }
             None => {
                 let body = &rest[..plain_end];
-                if !body.contains(&0x1b) {
-                    rows.push(body.to_vec());
+                let text_end = body.iter().position(|byte| *byte == 0x1b).unwrap_or(body.len());
+                if erase_relative == 0 {
+                    rows.push(body[..text_end].to_vec());
                 }
-                cursor = body_start + plain_end;
+                cursor = body_start + text_end;
             }
         }
     }
