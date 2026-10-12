@@ -293,6 +293,9 @@ use cmd::{
     list_automation_runs, list_automations, list_branches, list_claude_sessions, list_diff_notes,
     list_dir, list_quick_commands, list_run_evidence, list_skills, list_system_fonts,
     list_worktrees, listening_ports, log_window_error, logout_codex_login, machine_load,
+    managed_judgment_apply, managed_judgment_cancel, managed_judgment_check,
+    managed_judgment_install, managed_judgment_prepare_runtime, managed_judgment_remove,
+    managed_judgment_start, managed_judgment_status, managed_judgment_stop,
     mark_default_tabs_applied, mark_first_run_seen, mark_onboarding, merge_and_remove_worktree,
     mirror_ready, mouse_input, note_webview_error, note_worker_room_change, note_worker_room_seen,
     notification_probe, open_board_popout, open_browser_pane, open_commit_remote,
@@ -2561,6 +2564,15 @@ fn main() -> ExitCode {
             set_route_classifier,
             set_jev_model,
             set_judgment_provider,
+            managed_judgment_apply,
+            managed_judgment_cancel,
+            managed_judgment_check,
+            managed_judgment_install,
+            managed_judgment_prepare_runtime,
+            managed_judgment_remove,
+            managed_judgment_start,
+            managed_judgment_status,
+            managed_judgment_stop,
             judgment_models,
             set_summon_profiles,
             check_typesafe_key,
@@ -3685,6 +3697,7 @@ fn main() -> ExitCode {
                 handle.state::<AppState>().native_tray().begin_exit();
                 emulator::shutdown_all(handle);
                 codex_queue::shutdown_all();
+                cmd::managed_judgment::shutdown();
                 capture_scrollback_at_exit(handle);
                 // 원장의 마지막 플러시 — 디바운스가 아직 자고 있어도 여기서
                 // 적힌다(Orca quit의 flushStatusPersistSync와 같은 자리).
@@ -3787,6 +3800,7 @@ impl exit_runtime::Terminating for ExitSteps<'_> {
     }
 
     fn end_panes(&self) {
+        cmd::managed_judgment::shutdown();
         // Out of the pool, one by one: the last hold on each lets go and
         // the lane ends its child (`PtyLane`'s own drop). Their seats are
         // asleep by now, so the ledger settles nothing as they go.

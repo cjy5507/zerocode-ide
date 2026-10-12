@@ -20,6 +20,12 @@ pub(crate) mod browser;
 pub(crate) mod fs;
 pub(crate) mod github_pr;
 pub(crate) mod integration_prefs;
+pub(crate) mod managed_judgment;
+pub(crate) use managed_judgment::{
+    managed_judgment_apply, managed_judgment_cancel, managed_judgment_check,
+    managed_judgment_install, managed_judgment_prepare_runtime, managed_judgment_remove,
+    managed_judgment_start, managed_judgment_status, managed_judgment_stop,
+};
 pub(crate) mod onboarding;
 pub(crate) mod project;
 pub(crate) mod remote;

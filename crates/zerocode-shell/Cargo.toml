@@ -41,6 +41,7 @@ tauri-build = { version = "2", features = [] }
 sha2 = { workspace = true }
 
 [dependencies]
+local-judgment = { workspace = true }
 judgment-provider = { workspace = true }
 # `macos-private-api` is what a transparent window on macOS costs, and a
 # transparent window is what the blurred material needs something to show
