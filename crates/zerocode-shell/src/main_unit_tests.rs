@@ -13625,12 +13625,14 @@ fn terminate_says_goodbye_before_the_browser_can_stall() {
         "the Exit arm keeps an order of its own:\n{arm}"
     );
     assert!(
-        !arm.contains("chromium_browser::shutdown()") && !arm.contains("window_exiting("),
+        !arm.contains("chromium_browser::shutdown()")
+            && !arm.contains("window_exiting(")
+            && !arm.contains("goodbye_within("),
         "the Exit arm shuts the browser or says goodbye outside the one order:\n{arm}"
     );
     let steps = block_after(main, "impl exit_runtime::Terminating for ExitSteps<'_> {");
     for (step, does) in [
-        ("fn goodbye(", "orchestration::window_exiting("),
+        ("fn goodbye(", "orchestration::goodbye_within("),
         ("fn keep_screens(", "capture_scrollback_at_exit("),
         ("fn keep_statuses(", "write_last_statuses_now("),
         ("fn shut_browser(", "chromium_browser::shutdown()"),

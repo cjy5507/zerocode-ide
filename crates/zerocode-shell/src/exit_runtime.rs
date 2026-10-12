@@ -10,7 +10,9 @@
 //! `ExitRequested` without a code — none of them through a restart button.
 
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 /// A road out of this window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,15 +168,19 @@ pub(crate) enum Choice {
     Overdue,
     /// The question stood unanswered for its whole time.
     Unanswered,
+    /// The census did not answer within [`LEDGER_PATIENCE`] (t-49062): a way
+    /// out the person took went on without asking.
+    Unread,
 }
 
 /// Each choice's word in the goodbye's line, in one table.
-const CHOICES: [(Choice, &str); 5] = [
+const CHOICES: [(Choice, &str); 6] = [
     (Choice::Unasked, "unasked"),
     (Choice::Now, "now"),
     (Choice::Gap, "gap"),
     (Choice::Overdue, "overdue"),
     (Choice::Unanswered, "unanswered"),
+    (Choice::Unread, "unread"),
 ];
 
 impl Choice {
@@ -193,6 +199,9 @@ struct Wait {
     asking: Asking,
     since_ms: i64,
     told: Option<(usize, usize, i64)>,
+    /// Whether the log has said this wait's census went unanswered
+    /// (t-49062): said once, until a census answers it again.
+    unread_said: bool,
 }
 
 /// The line a wait stands on the screen as: what still runs, what nobody
@@ -237,6 +246,10 @@ pub(crate) enum ExitBeat {
     AskAgain(Asking),
     /// Go, by this road.
     Leave(Asking),
+    /// The census did not answer the wait on this road within
+    /// [`LEDGER_PATIENCE`] (t-49062): unknown counts as busy, so the wait
+    /// stands — said once, until a census answers it again.
+    Unread(Asking),
 }
 
 /// The window's way out, as far as it has got.
@@ -247,9 +260,13 @@ struct Exiting {
     question: Option<(Asking, i64)>,
     wait: Option<Wait>,
     choice: Choice,
-    /// The person chose to go, or the road went for them: the next close
-    /// passes without a question.
+    /// The person chose to go, the road went for them, or the census found
+    /// nothing a close would cut: the next close passes without a question.
     confirmed: bool,
+    /// A close's census being read off the close event (t-49062): the close
+    /// is held until it answers, and a second press waits for the same
+    /// answer rather than reading it twice.
+    reading: bool,
 }
 
 static EXITING: Mutex<Exiting> = Mutex::new(Exiting {
@@ -258,7 +275,12 @@ static EXITING: Mutex<Exiting> = Mutex::new(Exiting {
     wait: None,
     choice: Choice::Unasked,
     confirmed: false,
+    reading: false,
 });
+
+/// A wait's census still out (t-49062): the beat does not ask the actor a
+/// second time over a reading it has not answered.
+static WAIT_CENSUS_OUT: AtomicBool = AtomicBool::new(false);
 
 fn exiting() -> std::sync::MutexGuard<'static, Exiting> {
     lock(&EXITING)
@@ -363,6 +385,7 @@ pub(crate) fn arm(asking: Asking, now_ms: i64) {
         asking,
         since_ms: now_ms,
         told: None,
+        unread_said: false,
     });
 }
 
@@ -378,56 +401,147 @@ pub(crate) fn cancel() {
     state.wait = None;
 }
 
+/// How long a way out waits on the ledger's actor before it goes on without
+/// it (t-49062): the close's census, a wait's census on the beat, and the
+/// goodbye (`orchestration::goodbye_within`). Over the eleven goodbyes the
+/// window's log held on 2026-10-12 the census answered in 46 ms at the median
+/// and 313 ms at the slowest; twice that day it never answered, and the
+/// window stood until it was started again 20 and 34 s later. 1.5 s is about
+/// five times the slowest answer seen, and stays under the hang watchdog's
+/// first threshold (2 s, `crash::Limits::DEFAULT`), so a goodbye that waits it
+/// out on the main thread is never filed as a hang.
+pub(crate) const LEDGER_PATIENCE: Duration = Duration::from_millis(1_500);
+
+/// A census read on a thread named `thread`, and its answer if it came within
+/// [`LEDGER_PATIENCE`] (t-49062). `None` is a census that did not answer — it
+/// may still stand in the actor's mailbox, and its answer, if it ever comes,
+/// goes nowhere — or one that panicked.
+pub(crate) fn census_within(
+    thread: &str,
+    read: impl FnOnce() -> crate::orchestration::restart_census::Busy + Send + 'static,
+) -> Option<crate::orchestration::restart_census::Busy> {
+    let (answer, answered) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name(thread.to_string())
+        .spawn(move || {
+            let _ = answer.send(read());
+        })
+        .ok()?;
+    answered.recv_timeout(LEDGER_PATIENCE).ok()
+}
+
 /// What a press of the main window's close needs from the window: who a
 /// close would cut, and the two ways that census answers — one door each,
 /// so where each one runs is a thing a test can hold, as [`Terminating`]
 /// holds the order of the way out.
-pub(crate) trait Closing: Send + 'static {
+pub(crate) trait Closing: Send + Sync + 'static {
     /// Who leaving would cut. It asks the ledger's actor, whose mailbox
-    /// holds four commands and waits when full, and runs the host's `ps`.
+    /// holds four commands and waits when full, and runs the host's `ps` —
+    /// so it is read on a thread of its own, never in the close event.
     fn census(&self) -> crate::orchestration::restart_census::Busy;
     /// Work in progress: the close's question goes to the person.
     fn ask(&self, busy: crate::orchestration::restart_census::Busy);
-    /// Nothing in progress: the window closes again, and passes.
+    /// Nothing in progress, or a census that did not answer: the window
+    /// closes again, and passes.
     fn close(&self);
 }
 
 /// Whether a press of the main window's close is held (t-6428) — the road
 /// the window was left by nine times in nine before this. A close the
 /// person chose, or one the road went for them, passes; a close that
-/// already has a question standing or a wait armed keeps it; otherwise the
-/// census is read, and work in progress holds the close and asks, the
-/// question's minute running on the beat.
+/// already has a question standing, a wait armed or its census being read
+/// keeps it; otherwise the close is held while the census is read on a
+/// thread of its own, and the census answers: work in progress asks, the
+/// question's minute running on the beat, and nothing in progress closes
+/// the window again, unasked. A census that does not answer within
+/// [`LEDGER_PATIENCE`] closes it all the same: the person pressed it, and a
+/// close that waits on the ledger's actor for good is a close that does not
+/// work — the goodbye's line says the census went unread.
+///
+/// The close event runs on the main thread, so nothing here waits on
+/// another thread (t-49062): twice on 2026-10-12 a close's census put its
+/// first question to the ledger's actor and waited for room in a full
+/// mailbox, the window stood frozen from the hang watchdog's first word
+/// (2,027 ms) until it was started again 20 and 34 s later, and the person
+/// saw a crash.
 pub(crate) fn close_pressed(window: impl Closing) -> bool {
     press_close(&EXITING, window)
 }
 
+/// The thread a close's census is read on, by the name a sample shows.
+const CENSUS_THREAD: &str = "zerocode-close-census";
+/// The thread a close waits for its census on.
+const CLOSE_THREAD: &str = "zerocode-close";
+/// The thread a wait's census is read on.
+const WAIT_CENSUS_THREAD: &str = "zerocode-wait-census";
+
 /// [`close_pressed`], on the way out `cell` holds.
 fn press_close(cell: &'static Mutex<Exiting>, window: impl Closing) -> bool {
     {
-        let state = lock(cell);
+        let mut state = lock(cell);
         if state.confirmed {
             return false;
         }
         if holds_close(&state) {
             return true;
         }
+        state.reading = true;
     }
-    let busy = window.census();
-    if !busy.busy {
+    let spawned = std::thread::Builder::new()
+        .name(CLOSE_THREAD.to_string())
+        .spawn(move || read_close(cell, window));
+    if spawned.is_err() {
+        // No thread to read it on: the close goes as it came, and the
+        // goodbye still reads the census and puts every seated worker to
+        // sleep on the way out.
+        lock(cell).reading = false;
         return false;
     }
-    asked(&mut lock(cell), Asking::Close, crate::now_epoch_ms());
-    window.ask(busy);
     true
 }
 
-/// Whether the close already has a question standing or a wait armed: a
-/// second press of the close keeps it rather than asking twice.
+/// A close's census, read off the close event, and what it answers.
+fn read_close(cell: &'static Mutex<Exiting>, window: impl Closing) {
+    let _reading = Reading(cell);
+    let window = Arc::new(window);
+    let reader = Arc::clone(&window);
+    match census_within(CENSUS_THREAD, move || reader.census()) {
+        Some(busy) if busy.busy => {
+            asked(&mut lock(cell), Asking::Close, crate::now_epoch_ms());
+            window.ask(busy);
+        }
+        answered => {
+            {
+                let mut state = lock(cell);
+                state.confirmed = true;
+                if answered.is_none() {
+                    state.choice = Choice::Unread;
+                }
+            }
+            window.close();
+        }
+    }
+}
+
+/// A close's census being read, until the reading ends however it ends —
+/// answered, unanswered, or a door that panicked — so the press after it
+/// reads again rather than being held by a reading nobody is doing.
+struct Reading(&'static Mutex<Exiting>);
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        lock(self.0).reading = false;
+    }
+}
+
+/// Whether the close already has a question standing, a wait armed or its
+/// census being read: a second press of the close keeps it rather than
+/// asking twice.
 fn holds_close(state: &Exiting) -> bool {
-    state
-        .question
-        .is_some_and(|(asking, _)| asking == Asking::Close)
+    state.reading
+        || state
+            .question
+            .is_some_and(|(asking, _)| asking == Asking::Close)
         || state
             .wait
             .as_ref()
@@ -441,18 +555,89 @@ pub(crate) fn watching() -> bool {
     state.question.is_some() || state.wait.is_some()
 }
 
-/// Whether a wait is armed — the one state the beat reads a census for.
-pub(crate) fn waiting() -> bool {
-    exiting().wait.is_some()
+/// The beat's second (t-6428): `read` is the census, read only while a wait
+/// is armed — on a thread of its own, within [`LEDGER_PATIENCE`] (t-49062).
+/// A wait goes by itself, nobody pressing anything at that moment, so a
+/// census that does not answer is unknown, and unknown counts as busy
+/// ([`UNREAD`]): never a gap, so the wait does not go on it, while its own
+/// patience still runs out on it as on any busy census. The window's log is
+/// told once ([`ExitBeat::Unread`]), and while that reading is still out
+/// the actor is not asked again.
+pub(crate) fn beat_reading(
+    now_ms: i64,
+    read: impl FnOnce() -> crate::orchestration::restart_census::Busy + Send + 'static,
+) -> ExitBeat {
+    beat_on(&EXITING, &WAIT_CENSUS_OUT, now_ms, read)
 }
 
-/// The beat's second (t-6428): `busy` is the census, read only while a wait
-/// is armed.
-pub(crate) fn beat(
+/// A wait's census that did not answer (t-49062): the reading itself is the
+/// one thing nobody could read, and unknown counts as busy.
+const UNREAD: crate::orchestration::restart_census::Busy =
+    crate::orchestration::restart_census::Busy {
+        busy: true,
+        workers: 0,
+        turning: 0,
+        background: 0,
+        unknown: 1,
+        running: 0,
+        gap: false,
+    };
+
+/// [`beat_reading`], on the way out `cell` holds, with `out` marking a
+/// wait's census still out.
+fn beat_on(
+    cell: &Mutex<Exiting>,
+    out: &'static AtomicBool,
     now_ms: i64,
-    busy: Option<crate::orchestration::restart_census::Busy>,
+    read: impl FnOnce() -> crate::orchestration::restart_census::Busy + Send + 'static,
 ) -> ExitBeat {
-    step(&mut exiting(), now_ms, busy)
+    if lock(cell).wait.is_none() {
+        return step(&mut lock(cell), now_ms, None);
+    }
+    let busy = if out.swap(true, Ordering::AcqRel) {
+        None
+    } else {
+        // Held by the reading itself, so a thread that never starts lets go
+        // of it too.
+        let held = Out(out);
+        census_within(WAIT_CENSUS_THREAD, move || {
+            let _held = held;
+            read()
+        })
+    };
+    let mut state = lock(cell);
+    let Some(asking) = state.wait.as_ref().map(|wait| wait.asking) else {
+        return step(&mut state, now_ms, None);
+    };
+    let busy = match busy {
+        Some(busy) => {
+            if let Some(wait) = state.wait.as_mut() {
+                wait.unread_said = false;
+            }
+            busy
+        }
+        None => {
+            let said = state
+                .wait
+                .as_mut()
+                .is_some_and(|wait| std::mem::replace(&mut wait.unread_said, true));
+            if !said {
+                return ExitBeat::Unread(asking);
+            }
+            UNREAD
+        }
+    };
+    step(&mut state, now_ms, Some(busy))
+}
+
+/// A wait's census still out, until its reading ends however it ends — or
+/// never starts.
+struct Out(&'static AtomicBool);
+
+impl Drop for Out {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 fn step(
@@ -505,8 +690,6 @@ fn settle(state: &mut Exiting, asking: Asking, choice: Choice) -> ExitBeat {
 mod tests {
     use super::*;
     use crate::orchestration::restart_census::Busy;
-    use std::sync::mpsc;
-    use std::time::Duration;
     use zerocode_orchestrator::runtime_actor::MAX_RUNTIME_MAILBOX;
 
     const MINUTE: i64 = 60_000;
@@ -531,6 +714,7 @@ mod tests {
                 asking,
                 since_ms: 0,
                 told: None,
+                unread_said: false,
             }),
             ..Exiting::default()
         }
@@ -787,16 +971,25 @@ mod tests {
         Box::leak(Box::new(Mutex::new(Exiting::default())))
     }
 
-    /// The main window as a press of its close reaches it: a census whose
-    /// first question stands in the ledger's actor's mailbox the way
-    /// `RuntimeActor::request` does — a full mailbox waits for room — and
+    /// The main window as a press of its close reaches it: its census, and
     /// what the close said through each door.
     struct Window {
-        mailbox: mpsc::SyncSender<()>,
-        busy: Busy,
+        census: Census,
         read: mpsc::Sender<std::thread::Thread>,
         asked: mpsc::Sender<Busy>,
         closed: mpsc::Sender<()>,
+    }
+
+    /// How a test's census answers.
+    enum Census {
+        /// Its first question stands in the ledger's actor's mailbox the
+        /// way `RuntimeActor::request` does — a full mailbox waits for room
+        /// — and then it says `Busy`.
+        Mailbox(mpsc::SyncSender<()>, Busy),
+        /// The actor never answers it.
+        Never,
+        /// It panics, as a bug in it would.
+        Panics,
     }
 
     /// What a test hears from the window's doors: the thread each census
@@ -809,13 +1002,16 @@ mod tests {
 
     impl Window {
         fn new(mailbox: mpsc::SyncSender<()>, busy: Busy) -> (Self, Said) {
+            Self::answering(Census::Mailbox(mailbox, busy))
+        }
+
+        fn answering(census: Census) -> (Self, Said) {
             let (read, reads) = mpsc::channel();
             let (asked, asks) = mpsc::channel();
             let (closed, closes) = mpsc::channel();
             (
                 Self {
-                    mailbox,
-                    busy,
+                    census,
                     read,
                     asked,
                     closed,
@@ -832,8 +1028,14 @@ mod tests {
     impl Closing for Window {
         fn census(&self) -> Busy {
             let _ = self.read.send(std::thread::current());
-            let _ = self.mailbox.send(());
-            self.busy
+            match &self.census {
+                Census::Mailbox(mailbox, busy) => {
+                    let _ = mailbox.send(());
+                    *busy
+                }
+                Census::Never => never(),
+                Census::Panics => panic!("a census that panics on purpose (t-49062 test)"),
+            }
         }
 
         fn ask(&self, busy: Busy) {
@@ -876,9 +1078,10 @@ mod tests {
     /// t-49062: a press of the close never waits on its census. The close
     /// event runs on the main thread, and the census asks the ledger's actor
     /// — whose mailbox holds four commands and waits when full — and runs
-    /// the host's `ps`: on 2026-10-12 a close stood 2,027 ms in that mailbox
+    /// the host's `ps`: on 2026-10-12 a close stood in that mailbox
     /// (`event_window_close` → `leave_census` → `restart_census::take` →
-    /// `RuntimeActor::request`), and the hang watchdog filed it as a crash.
+    /// `RuntimeActor::request`) from the hang watchdog's first word at
+    /// 2,027 ms until the window was started again 20 s later.
     /// Here the actor is busy and its mailbox full: the press comes back held
     /// within 50 ms, the census is read on a thread of its own, and once the
     /// actor drains the census still asks.
@@ -927,5 +1130,221 @@ mod tests {
             "one press read the census twice"
         );
         assert!(main.join().is_ok(), "the press panicked");
+    }
+
+    /// The ledger's actor, idle: its mailbox empty, so a census's question
+    /// goes straight in.
+    fn an_idle_actor() -> (mpsc::SyncSender<()>, mpsc::Receiver<()>) {
+        mpsc::sync_channel(MAX_RUNTIME_MAILBOX)
+    }
+
+    /// t-49062: a close nothing would cut is held only while its census is
+    /// read, then goes unasked — and the close that makes passes, with
+    /// nothing read for it.
+    #[test]
+    fn a_close_nothing_would_cut_goes_unasked_once_its_census_answers() {
+        let cell = a_window();
+        let (mailbox, _actor) = an_idle_actor();
+        let (window, said) = Window::new(mailbox, Busy::default());
+        assert!(
+            press_close(cell, window),
+            "the close went before its census was read"
+        );
+        assert_eq!(
+            said.closed.recv_timeout(ANSWER),
+            Ok(()),
+            "the census never let the close go"
+        );
+        assert!(
+            said.asked.try_recv().is_err(),
+            "a close nothing would cut asked"
+        );
+        {
+            let state = lock(cell);
+            assert!(
+                state.confirmed && state.question.is_none(),
+                "the close the census let go is held: {state:?}"
+            );
+            assert_eq!(
+                state.choice,
+                Choice::Unasked,
+                "the goodbye would say the person chose"
+            );
+        }
+        let (mailbox, _actor) = an_idle_actor();
+        let (window, again) = Window::new(mailbox, Busy::default());
+        assert!(
+            !press_close(cell, window),
+            "the close the census let go was held again"
+        );
+        assert!(
+            again.read.try_recv().is_err(),
+            "the close the census let go read the census again"
+        );
+    }
+
+    /// t-49062: a second press while the census is still being read is held
+    /// as the first was and reads nothing more — one census, one question.
+    #[test]
+    fn a_second_press_while_the_census_is_read_waits_for_the_same_answer() {
+        let cell = a_window();
+        let (mailbox, actor) = a_busy_actor();
+        let (window, said) = Window::new(mailbox, census(1, 0));
+        assert!(
+            press_close(cell, window),
+            "the first press let the close go"
+        );
+        // The census stands in the actor's full mailbox from here on.
+        assert!(
+            said.read.recv_timeout(ANSWER).is_ok(),
+            "the census was never read"
+        );
+        let (mailbox, _idle) = an_idle_actor();
+        let (window, again) = Window::new(mailbox, Busy::default());
+        assert!(
+            press_close(cell, window),
+            "a second press let the close go while its census was read"
+        );
+        assert!(
+            again.read.try_recv().is_err(),
+            "a second press read the census again"
+        );
+        drop(actor);
+        assert_eq!(
+            said.asked.recv_timeout(ANSWER),
+            Ok(census(1, 0)),
+            "the census never asked"
+        );
+        assert!(
+            again.asked.try_recv().is_err() && again.closed.try_recv().is_err(),
+            "the second press answered on its own"
+        );
+    }
+
+    /// A census the ledger's actor never answers: its thread parks for good,
+    /// as one standing in a mailbox nobody drains does.
+    fn never() -> Busy {
+        loop {
+            std::thread::park();
+        }
+    }
+
+    /// t-49062: a close whose census the ledger's actor never answers goes
+    /// all the same once the ledger's patience is out. The person pressed it,
+    /// so it proceeds unasked, and the goodbye's line says the census went
+    /// unread. (A wait, which goes by itself, stands instead — two tests on.)
+    #[test]
+    fn a_close_whose_census_never_answers_goes_unasked_on_the_ledgers_patience() {
+        let cell = a_window();
+        let (window, said) = Window::answering(Census::Never);
+        let pressed = std::time::Instant::now();
+        assert!(
+            press_close(cell, window),
+            "the close went before its census was read"
+        );
+        assert_eq!(
+            said.closed.recv_timeout(LEDGER_PATIENCE + ANSWER),
+            Ok(()),
+            "a close whose census never answered never went"
+        );
+        let waited = pressed.elapsed();
+        assert!(
+            waited >= LEDGER_PATIENCE,
+            "the close went before the ledger's patience was out: {} ms",
+            waited.as_millis()
+        );
+        assert!(
+            said.asked.try_recv().is_err(),
+            "a census that never answered asked"
+        );
+        let state = lock(cell);
+        assert!(
+            state.confirmed && state.question.is_none(),
+            "the close that went is held: {state:?}"
+        );
+        assert_eq!(
+            state.choice,
+            Choice::Unread,
+            "the goodbye would not say the census went unread"
+        );
+    }
+
+    /// t-49062: a census that panics is one that did not answer — the close
+    /// goes unasked on it at once, and nothing is left holding the next
+    /// press.
+    #[test]
+    fn a_census_that_panics_lets_the_close_go_as_one_that_never_answers() {
+        let cell = a_window();
+        let (window, said) = Window::answering(Census::Panics);
+        assert!(
+            press_close(cell, window),
+            "the close went before its census was read"
+        );
+        assert_eq!(
+            said.closed.recv_timeout(ANSWER),
+            Ok(()),
+            "a close whose census panicked never went"
+        );
+        assert!(
+            said.asked.try_recv().is_err(),
+            "a census that panicked asked"
+        );
+        // The reading ends as the close's thread lets go of it.
+        let deadline = std::time::Instant::now() + ANSWER;
+        while lock(cell).reading && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let state = lock(cell);
+        assert!(
+            !state.reading && state.confirmed,
+            "a census that panicked left the close held: {state:?}"
+        );
+        assert_eq!(state.choice, Choice::Unread);
+    }
+
+    /// t-49062: a wait — 「끝나면」, which goes by itself with nobody pressing
+    /// anything — whose census the ledger's actor never answers stands. The
+    /// census is unknown and unknown counts as busy: never a gap, so the
+    /// restart does not go on it, and when the wait's own patience is out it
+    /// asks the person again rather than restarting. The log is told once,
+    /// and the beats after it neither ask the actor again nor wait on it.
+    /// (A close the person pressed goes instead — two tests back.)
+    #[test]
+    fn a_wait_whose_census_never_answers_stands_as_busy_and_is_said_once() {
+        static OUT: AtomicBool = AtomicBool::new(false);
+        let restart = Asking::Restart(None);
+        let cell: &'static Mutex<Exiting> = Box::leak(Box::new(Mutex::new(waiting_on(restart))));
+        assert_eq!(
+            beat_on(cell, &OUT, MINUTE, never),
+            ExitBeat::Unread(restart),
+            "a census nobody answered did not stand the wait"
+        );
+        let again = std::time::Instant::now();
+        assert_eq!(
+            beat_on(cell, &OUT, MINUTE + 1_000, never),
+            ExitBeat::Tell(WaitLine {
+                road: "restart",
+                running: 0,
+                unknown: 1,
+                waited_min: 1,
+                wait_min: 30,
+            }),
+            "the wait's line does not say its census is unknown"
+        );
+        assert_eq!(
+            beat_on(cell, &OUT, MINUTE + 2_000, never),
+            ExitBeat::Nothing
+        );
+        assert!(
+            again.elapsed() < PRESS,
+            "a beat waited on a census it had already left out: {} ms",
+            again.elapsed().as_millis()
+        );
+        assert_eq!(
+            beat_on(cell, &OUT, 30 * MINUTE, never),
+            ExitBeat::AskAgain(restart),
+            "a restart whose census nobody read went by itself"
+        );
+        assert!(!lock(cell).confirmed, "a wait went on a census nobody read");
     }
 }

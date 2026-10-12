@@ -955,6 +955,10 @@ pub(crate) fn set_window_blur(
 /// Who leaving this window would cut, as the window reads it (t-6428): its
 /// own pty table names the process at the root of each terminal, and the
 /// host's process table what runs under it.
+///
+/// It asks the ledger's actor and runs the host's `ps`, so a caller on the
+/// main thread stands until both answer — the close reads it on a thread of
+/// its own (t-49062, [`exit_runtime::close_pressed`]).
 pub(crate) fn take_census(app: &AppHandle) -> crate::orchestration::restart_census::RestartCensus {
     let state = app.state::<AppState>();
     let root_of = |term: u32| {
@@ -1087,6 +1091,7 @@ pub(crate) fn close_asks_first(app: &AppHandle) -> bool {
 
 /// The main window's doors for a press of its close: the one census, the
 /// question it asks through, and the close itself — the road 「지금」 takes.
+/// Each is opened on the close's census thread, never in the close event.
 struct MainWindowClose(AppHandle);
 
 impl exit_runtime::Closing for MainWindowClose {
@@ -1149,13 +1154,15 @@ pub(crate) fn leave_cancel() {
 /// is armed or a question stands; a wait reads the census and goes at the
 /// first gap, says its line when the line moves, and asks again or goes
 /// when the table's time runs out; a question nobody answers goes when its
-/// own time does.
+/// own time does. A wait's census that does not answer within
+/// [`exit_runtime::LEDGER_PATIENCE`] is unknown, and unknown counts as busy:
+/// the wait stands, said once in the window's log (t-49062).
 pub(crate) fn beat_leaving(app: &AppHandle) {
     if !exit_runtime::watching() {
         return;
     }
-    let busy = exit_runtime::waiting().then(|| take_census(app).busy());
-    match exit_runtime::beat(crate::now_epoch_ms(), busy) {
+    let reading = app.clone();
+    match exit_runtime::beat_reading(crate::now_epoch_ms(), move || take_census(&reading).busy()) {
         exit_runtime::ExitBeat::Nothing => {}
         exit_runtime::ExitBeat::Tell(line) => {
             let _ = app.emit_to(crate::MAIN_WINDOW_LABEL, "exit:waiting", line);
@@ -1171,6 +1178,15 @@ pub(crate) fn beat_leaving(app: &AppHandle) {
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || leave(&handle, asking));
         }
+        exit_runtime::ExitBeat::Unread(asking) => crate::note_window_event(
+            app.state::<AppState>().local_data_root(),
+            &format!(
+                "exit: the census did not answer within {} ms — the wait to {} stands, \
+                 unknown counting as busy",
+                exit_runtime::LEDGER_PATIENCE.as_millis(),
+                asking.word()
+            ),
+        ),
     }
 }
 

@@ -500,7 +500,8 @@ fn the_way_out_waits_on_the_beat_and_goes_by_the_one_restart_road() {
     let watching = block_after(backend, "pub(crate) fn beat_leaving(");
     assert!(
         watching.contains("if !exit_runtime::watching() {")
-            && watching.contains("exit_runtime::waiting().then(|| take_census(app).busy())"),
+            && watching.contains("exit_runtime::beat_reading(")
+            && watching.contains("take_census(&reading).busy()"),
         "the beat reads a census when nothing waits:\n{watching}"
     );
     let leave = block_after(
