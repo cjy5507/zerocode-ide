@@ -2325,6 +2325,19 @@ pub(super) fn answer_team_command(
     app: &AppHandle,
     request: &zerocode_hookd::TeamRequest,
 ) -> TeamCommandResult {
+    if let Some(body) = request.gate_open() {
+        let window = TeamWindow { app: app.clone() };
+        return TeamCommandResult {
+            answer: orchestration::open_gate_session(
+                &window,
+                &request.team_id,
+                &request.pane,
+                &request.pane_token,
+                body,
+            ),
+            cleanup: None,
+        };
+    }
     let speaks_orchestration = orchestration::speaks_here(&request.argv);
     // Neither runner is authorized HERE any more. Both take the capability the
     // request presented and prove it under the same team-table guard that

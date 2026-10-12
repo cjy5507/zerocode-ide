@@ -331,6 +331,22 @@ class ReceiptTests(unittest.TestCase):
                     self.assertEqual(child.get("HOME"), self.args.child_home)
                     self.assertNotEqual(child.get("HOME"), private["HOME"])
 
+    @unittest.skipIf(os.name == "nt", "private inherited descriptors require POSIX")
+    def test_the_first_gate_process_detects_a_deliberately_inherited_socket(self):
+        import socket
+        parent, child = socket.socketpair()
+        with parent, child:
+            command = self.args.command
+            environment = gate.execution_environment(self.args)
+            leaked = subprocess.run(command, cwd=self.repo, env=environment, pass_fds=(child.fileno(),),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, check=False)
+            self.assertNotEqual(leaked.returncode, 0, leaked.stdout)
+            self.assertIn(b"fixture first child inherited socket descriptor", leaked.stdout)
+            sterile = subprocess.run(command, cwd=self.repo, env=environment,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, check=False)
+            self.assertEqual(sterile.returncode, 0, sterile.stdout)
+            self.assertEqual(gate.test_count(sterile.stdout), 2, sterile.stdout)
+
     def test_candidate_owned_producer_is_refused_before_a_child_runs(self):
         with mock.patch.object(gate, "__file__", str(self.repo / "producer.py")):
             with mock.patch.object(gate, "execute", wraps=gate.execute) as executed:
@@ -552,6 +568,68 @@ class ReceiptTests(unittest.TestCase):
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, check=False)
                 self.assertEqual(output.returncode, 0, output.stdout)
                 self.assertEqual(gate.test_count(output.stdout), 1, output.stdout)
+
+    def test_real_runner_failures_aborts_and_zero_tests_cannot_hide_behind_a_passing_runner(self):
+        import shutil
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "actual node runner is required")
+        node_test = self.root / "runner-control.cjs"
+        node_cases = {
+            "pass": "const test=require('node:test'); test('control',()=>{});\n",
+            "failure": "const test=require('node:test'); const assert=require('node:assert/strict'); for(let i=0;i<7;i++) test('control-'+i,()=>assert.ok(i<2));\n",
+            "cancelled": "const test=require('node:test'); test('control',async()=>await new Promise(()=>{}));\n",
+            "abort": "process.exit(3);\n",
+            "zero": "",
+        }
+        for reporter in ("tap", "spec"):
+            for label, source in node_cases.items():
+                with self.subTest(runner="node", reporter=reporter, case=label):
+                    node_test.write_text(source)
+                    self.args.command = [node, "--test", "--test-reporter=" + reporter]
+                    if label != "zero":
+                        self.args.command.append(str(node_test))
+                    self.args.script_file = [str(node_test)]
+                    self.args.output = str(self.root / ("node-" + reporter + "-" + label))
+                    ledger = FakeLedger()
+                    result = self.produce(ledger)
+                    log = (Path(self.args.output) / "gate.log").read_bytes()
+                    self.assertTrue(ledger.metadata["executed"])
+                    if label == "pass":
+                        self.assertEqual(ledger.metadata["rc"], 0, log)
+                        self.assertEqual(result["outcome"], "passed", log)
+                        self.assertEqual(result["tests"], 1, log)
+                    else:
+                        self.assertEqual(result["outcome"], "unknown" if label == "zero" else "failed", log)
+                        self.assertEqual(result["tests"], 0, log)
+                        self.assertEqual(gate.test_count(PASS + log), 0, log)
+                        if label == "zero":
+                            self.assertEqual(ledger.metadata["rc"], 0, log)
+                            self.assertRegex(log.decode(), r"(?:#|ℹ) tests 0\b")
+                        else:
+                            self.assertNotEqual(ledger.metadata["rc"], 0, log)
+                        if label == "failure":
+                            for name, count in (("tests", 7), ("pass", 2), ("fail", 5)):
+                                self.assertRegex(log.decode(), rf"(?:#|ℹ) {name} {count}\b")
+                        if label == "cancelled":
+                            self.assertRegex(log.decode(), r"(?:#|ℹ) cancelled 1\b")
+        py_test = self.root / "runner_control.py"
+        empty = self.root / "empty-unittest"
+        empty.mkdir()
+        for label, assertion in (("pass", "True"), ("failure", "False"), ("zero", None)):
+            with self.subTest(runner="unittest", case=label):
+                py_test.write_text("import unittest\nclass Control(unittest.TestCase):\n    def test_control(self):\n        self.assertTrue(" + str(assertion) + ")\n")
+                self.args.command = [sys.executable, "-I", "-S", "-B", "-m", "unittest", "discover",
+                                     "-s", str(empty if label == "zero" else self.root), "-p", py_test.name]
+                self.args.script_file = [str(py_test)]
+                self.args.output = str(self.root / ("unittest-" + label))
+                ledger = FakeLedger()
+                result = self.produce(ledger)
+                log = (Path(self.args.output) / "gate.log").read_bytes()
+                self.assertEqual(ledger.metadata["rc"], 1 if label == "failure" else 0, log)
+                self.assertEqual(result["outcome"], {"pass": "passed", "failure": "failed", "zero": "unknown"}[label], log)
+                self.assertEqual(result["tests"], 1 if label == "pass" else 0, log)
+                if label != "pass":
+                    self.assertEqual(gate.test_count(PASS + log), 0, log)
 
     def test_real_source_ancestry_accepts_a_merge_and_rejects_an_unrelated_candidate(self):
         base = self.git("rev-parse", "HEAD").decode().strip()

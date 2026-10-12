@@ -41,7 +41,7 @@ fn parse(args: &[String]) -> Result<(BTreeMap<&str, &str>, &[String]), ()> {
     }
     let mut options = BTreeMap::new();
     for pair in args[..split].chunks_exact(2) {
-        if !FLAGS.contains(&pair[0].as_str())
+        if (!FLAGS.contains(&pair[0].as_str()) && pair[0] != "--gate-job")
             || options.insert(pair[0].as_str(), pair[1].as_str()).is_some()
         {
             return Err(());
@@ -210,21 +210,7 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
     }
     let mut command = Command::new(&python);
     command.env_clear();
-    for key in [
-        "PATH",
-        "HOME",
-        "SystemRoot",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "ZEROCODE_AGENT_TEAM_ID",
-        "ZEROCODE_AGENT_TEAM_PANE",
-        "ZEROCODE_AGENT_TEAM_TOKEN",
-        "ZEROCODE_AGENT_TEAM_TOKEN_FILE",
-        "ZEROCODE_ORCHESTRATION_RUN",
-        "ZEROCODE_HOOK_PORT",
-        "ZEROCODE_HOOK_TOKEN",
-    ] {
+    for key in ["PATH", "HOME", "SystemRoot", "TMPDIR", "TMP", "TEMP"] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
@@ -236,9 +222,35 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
         .args(["-I", "-S", "-B", "-"])
         .arg("--bootstrap-launcher")
         .arg(&launcher)
-        .args(forwarded)
         .stdin(Stdio::piped());
-    let mut child = command.spawn().map_err(|_| ())?;
+    let mut child = if let Some(job) = options.get("--gate-job") {
+        let channel = match open_authority(job, forwarded) {
+            Ok(value) => value,
+            Err(code) => {
+                println!(
+                    "{}",
+                    json!({"decision":"miss","code":code,"executed":false,"newExecutions":0})
+                );
+                return Ok(ExitCode::FAILURE);
+            }
+        };
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            command
+                .arg("--authority-fd")
+                .arg(channel.as_raw_fd().to_string())
+                .args(forwarded);
+            zerocode_pty::gate_channel::spawn(command, channel).map_err(|_| ())?
+        }
+        #[cfg(not(unix))]
+        {
+            drop(channel);
+            return Err(());
+        }
+    } else {
+        command.args(forwarded).spawn().map_err(|_| ())?
+    };
     let sent = child.stdin.take().ok_or(())?.write_all(&retained);
     if sent.is_err() {
         let _ = child.kill();
@@ -250,6 +262,175 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .map_or(ExitCode::FAILURE, ExitCode::from))
+}
+
+fn option<'a>(words: &'a [String], name: &str) -> Result<&'a str, &'static str> {
+    let end = words
+        .iter()
+        .position(|word| word == "--")
+        .unwrap_or(words.len());
+    let mut found = words[..end].windows(2).filter(|pair| pair[0] == name);
+    let value = found.next().ok_or("invalid_request")?;
+    if found.next().is_some() {
+        return Err("invalid_request");
+    }
+    Ok(&value[1])
+}
+
+fn capability(name: &str, file_name: &str) -> Result<String, &'static str> {
+    let value = if let Ok(value) = std::env::var(name) {
+        value
+    } else {
+        let file = std::env::var(file_name).map_err(|_| "authority_unavailable")?;
+        let mut bytes = Vec::new();
+        fs::File::open(file)
+            .map_err(|_| "authority_unavailable")?
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "authority_unavailable")?;
+        String::from_utf8(bytes).map_err(|_| "authority_unavailable")?
+    };
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 4096
+        || value
+            .bytes()
+            .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
+    {
+        return Err("authority_unavailable");
+    }
+    Ok(value.into())
+}
+
+fn open_authority(job: &str, forwarded: &[String]) -> Result<std::net::TcpStream, &'static str> {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    if job.len() > 16 * 1024 {
+        return Err("invalid_request");
+    }
+    let intent: Value = serde_json::from_str(job).map_err(|_| "invalid_request")?;
+    let path = option(forwarded, "--policy")?;
+    let expected = option(forwarded, "--policy-sha256")?;
+    let mut manifest = Vec::new();
+    fs::File::open(path)
+        .map_err(|_| "identity_unavailable")?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut manifest)
+        .map_err(|_| "identity_unavailable")?;
+    if manifest.len() > 1024 * 1024 || content_key(&manifest) != expected {
+        return Err("digest_mismatch");
+    }
+    let manifest = String::from_utf8(manifest).map_err(|_| "invalid_request")?;
+    let port = std::env::var("ZEROCODE_HOOK_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|value| *value != 0)
+        .ok_or("authority_unavailable")?;
+    let token = capability("ZEROCODE_HOOK_TOKEN", "ZEROCODE_HOOK_TOKEN_FILE")?;
+    let pane_token = capability(
+        "ZEROCODE_AGENT_TEAM_TOKEN",
+        "ZEROCODE_AGENT_TEAM_TOKEN_FILE",
+    )?;
+    let team = capability("ZEROCODE_AGENT_TEAM_ID", "ZEROCODE_AGENT_TEAM_ID_FILE")?;
+    let pane = capability("ZEROCODE_AGENT_TEAM_PANE", "ZEROCODE_AGENT_TEAM_PANE_FILE")?;
+    let body = serde_json::to_vec(&json!({"intent":intent,"manifest":manifest}))
+        .map_err(|_| "invalid_request")?;
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut control = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|_| "authority_unavailable")?;
+    control
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|_| "authority_unavailable")?;
+    control
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|_| "authority_unavailable")?;
+    write!(control, "POST /gate-sessions/open HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\nx-zerocode-hook-token: {token}\r\nx-zerocode-team-id: {team}\r\nx-zerocode-team-pane: {pane}\r\nx-zerocode-team-token: {pane_token}\r\n\r\n", body.len()).map_err(|_| "authority_unavailable")?;
+    control
+        .write_all(&body)
+        .map_err(|_| "authority_unavailable")?;
+    let mut header = Vec::new();
+    while !header.ends_with(b"\r\n\r\n") {
+        if header.len() >= 8192 {
+            return Err("invalid_request");
+        }
+        let mut byte = [0];
+        control
+            .read_exact(&mut byte)
+            .map_err(|_| "authority_unavailable")?;
+        header.push(byte[0]);
+    }
+    let header = std::str::from_utf8(&header).map_err(|_| "invalid_request")?;
+    let length = header
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .filter(|value| *value <= 16 * 1024)
+        .ok_or("invalid_request")?;
+    let mut result = vec![0; length];
+    control
+        .read_exact(&mut result)
+        .map_err(|_| "authority_unavailable")?;
+    if !header
+        .lines()
+        .next()
+        .is_some_and(|line| line.split_whitespace().nth(1) == Some("200"))
+    {
+        let code = std::str::from_utf8(&result)
+            .unwrap_or_default()
+            .split(':')
+            .next()
+            .unwrap_or_default();
+        return Err(match code {
+            "unpinned" => "unpinned",
+            "digest_mismatch" => "digest_mismatch",
+            "stale_pin" => "stale_pin",
+            "unknown_field" => "unknown_field",
+            "expired" => "expired",
+            "out_of_scope" => "out_of_scope",
+            _ => "authority_unavailable",
+        });
+    }
+    let result: Value = serde_json::from_slice(&result).map_err(|_| "invalid_request")?;
+    let port = result["port"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value != 0)
+        .ok_or("invalid_request")?;
+    let mut channel = TcpStream::connect_timeout(
+        &SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_secs(3),
+    )
+    .map_err(|_| "authority_unavailable")?;
+    channel
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|_| "authority_unavailable")?;
+    channel
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|_| "authority_unavailable")?;
+    let authentication =
+        serde_json::to_vec(&json!({"capability":pane_token})).map_err(|_| "invalid_request")?;
+    channel
+        .write_all(&(authentication.len() as u32).to_be_bytes())
+        .and_then(|_| channel.write_all(&authentication))
+        .map_err(|_| "authority_unavailable")?;
+    let mut length = [0; 4];
+    channel
+        .read_exact(&mut length)
+        .map_err(|_| "authority_unavailable")?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > 32 * 1024 {
+        return Err("invalid_request");
+    }
+    let mut bound = vec![0; length];
+    channel
+        .read_exact(&mut bound)
+        .map_err(|_| "authority_unavailable")?;
+    let bound: Value = serde_json::from_slice(&bound).map_err(|_| "invalid_request")?;
+    if bound["ok"] != true {
+        return Err("authority_unavailable");
+    }
+    Ok(channel)
 }
 
 #[cfg(test)]

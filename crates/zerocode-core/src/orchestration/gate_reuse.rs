@@ -6,6 +6,11 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod job_scope;
+pub use job_scope::{
+    JobIntent, JobMode, JobScope, authorize_job, validate_job, validate_job_inputs,
+};
+
 pub const REGISTER: &str = "gate-register";
 pub const PIN: &str = "gate-policy-pin";
 pub const RECORD: &str = "gate-record";

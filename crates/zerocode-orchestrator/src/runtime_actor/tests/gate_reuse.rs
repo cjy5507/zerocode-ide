@@ -23,6 +23,7 @@ fn receipt_gate_child() {
     if !Path::new("fixture-node.cjs").is_file() {
         return;
     }
+    assert_no_inherited_gate_authority();
     for reporter in ["tap", "spec"] {
         let output = Command::new("node")
             .args([
@@ -65,6 +66,9 @@ fn receipt_gate_child_cannot_forge_fixture_completion() {
         return;
     };
     let probe: Value = serde_json::from_slice(&bytes).unwrap();
+    if std::env::var_os(TEAM_TOKEN_VAR).is_none() {
+        assert_no_inherited_gate_authority();
+    }
     println!("fixture probe began");
     let task = probe["task"].as_str().unwrap();
     let call = |verb: &str, value: &Value, extra: &[&str]| -> Option<Value> {
@@ -139,6 +143,36 @@ fn now() -> i64 {
     .unwrap()
 }
 
+fn assert_no_inherited_gate_authority() {
+    for key in [
+        TEAM_TOKEN_VAR,
+        "ZEROCODE_AGENT_TEAM_TOKEN_FILE",
+        "ZEROCODE_HOOK_TOKEN",
+        "ZEROCODE_GATE_JOB_TOKEN",
+    ] {
+        assert!(
+            std::env::var_os(key).is_none(),
+            "gate child inherited authority variable {key}"
+        );
+    }
+    for fd in 3..256 {
+        let mut kind = 0_i32;
+        let mut length = std::mem::size_of::<i32>() as libc::socklen_t;
+        // SAFETY: getsockopt writes to the valid fixed-size kind buffer.
+        let socket = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&mut kind as *mut i32).cast(),
+                &mut length,
+            )
+        };
+        assert_ne!(socket, 0, "gate child inherited socket descriptor {fd}");
+    }
+    println!("fixture child has no authority environment or socket descriptor");
+}
+
 struct CliFixture {
     actor: Arc<RuntimeActor>,
     stop: Arc<AtomicBool>,
@@ -151,12 +185,14 @@ struct CliFixture {
     input: PathBuf,
     child: PathBuf,
     task: String,
+    run: String,
     policy: std::sync::Mutex<Option<Value>>,
+    output: std::sync::Mutex<PathBuf>,
 }
 
 fn http_request(
     stream: &mut TcpStream,
-) -> (std::collections::HashMap<String, String>, Vec<String>) {
+) -> (std::collections::HashMap<String, String>, Vec<u8>, String) {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
@@ -187,13 +223,16 @@ fn http_request(
         assert!(n > 0);
         bytes.extend_from_slice(&block[..n]);
     }
-    let argv = std::str::from_utf8(&bytes[split..split + length])
+    let path = std::str::from_utf8(&bytes[..split])
         .unwrap()
-        .split('\u{1f}')
-        .filter(|word| !word.is_empty())
-        .map(str::to_string)
-        .collect();
-    (headers, argv)
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+    (headers, bytes[split..split + length].to_vec(), path)
 }
 
 impl CliFixture {
@@ -276,15 +315,68 @@ impl CliFixture {
                         }
                         Err(why) => panic!("fixture transport: {why}"),
                     };
-                    let (headers, argv) = http_request(&mut stream);
+                    let (headers, bytes, path) = http_request(&mut stream);
+                    let argv: Vec<String> = if path == "/gate-sessions/open" {
+                        Vec::new()
+                    } else {
+                        std::str::from_utf8(&bytes)
+                            .unwrap()
+                            .split('\u{1f}')
+                            .filter(|word| !word.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    };
                     let (status, body) = if headers.get("x-zerocode-hook-token").map(String::as_str)
                         != Some(HOOK)
                     {
                         (403, "test capability refused".to_string())
                     } else if old_api.load(Ordering::SeqCst)
-                        && argv.first().is_some_and(|verb| verb.starts_with("gate-"))
+                        && (path == "/gate-sessions/open"
+                            || argv.first().is_some_and(|verb| verb.starts_with("gate-")))
                     {
                         (400, "unknown verb in old fixture API".to_string())
+                    } else if path == "/gate-sessions/open" {
+                        let value: Value = serde_json::from_slice(&bytes).unwrap();
+                        let intent = serde_json::from_value(value["intent"].clone()).unwrap();
+                        let owner = PlanCommand::checked(
+                            vec!["native-gate-open".into()],
+                            headers["x-zerocode-team-id"].clone(),
+                            headers["x-zerocode-team-pane"].clone(),
+                            headers["x-zerocode-team-token"].clone(),
+                            Some(format!("actor-v1:{}", "a".repeat(64))),
+                            now() + advance_ms.load(Ordering::SeqCst),
+                        )
+                        .unwrap();
+                        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                        let gate_port = listener.local_addr().unwrap().port();
+                        let reply = actor
+                            .open_gate_session(
+                                owner,
+                                intent,
+                                value["manifest"].as_str().unwrap().into(),
+                            )
+                            .unwrap();
+                        if reply["ok"] == true {
+                            let job = reply["value"]["job"].as_str().unwrap();
+                            super::super::gate_session::serve(
+                                Arc::downgrade(&actor),
+                                listener,
+                                job.into(),
+                                reply["value"]["expiresMs"].as_i64().unwrap(),
+                            );
+                            (
+                                200,
+                                json!({"ok":true,"job":job,"port":gate_port}).to_string(),
+                            )
+                        } else {
+                            (
+                                400,
+                                format!(
+                                    "{}: fixture gate scope refused",
+                                    reply["code"].as_str().unwrap()
+                                ),
+                            )
+                        }
                     } else {
                         let verb = argv.first().cloned().unwrap_or_default();
                         let command = PlanCommand::checked(
@@ -331,15 +423,20 @@ impl CliFixture {
             input,
             child,
             task: String::new(),
+            run: String::new(),
             policy: std::sync::Mutex::new(None),
+            output: std::sync::Mutex::new(authority._root.path().join("gate-cli/out")),
         };
-        held.cli(&[
+        held.run = held.cli(&[
             "run-create",
             "--name",
             "isolated-gates",
             "--retry-request",
             "fixture-run",
-        ]);
+        ])["runId"]
+            .as_str()
+            .unwrap()
+            .into();
         held.task = held.cli(&[
             "task-create",
             "--spec",
@@ -436,7 +533,7 @@ impl CliFixture {
         child_test: &str,
         cargo: bool,
     ) -> Output {
-        if action == "run" {
+        if action == "run" && self.policy.lock().unwrap().is_none() {
             let mut prepare = Command::new("python3");
             prepare
                 .args(["-I", "-S", "-B"])
@@ -477,11 +574,26 @@ impl CliFixture {
             );
             *self.policy.lock().unwrap() = Some(serde_json::from_slice(&output.stdout).unwrap());
             let policy = self.policy.lock().unwrap().clone().unwrap();
-            self.cli(&["gate-policy-pin", "--gate", "gate-root", "--body",
+            let pin = self.cli(&["gate-policy-pin", "--gate", "gate-root", "--body",
                 &json!({"version":1,"policy":policy["policySha256"],"producer":policy["producerSha256"]}).to_string(),
                 "--retry-request", "fixture-reviewed-policy-pin"]);
+            self.policy.lock().unwrap().as_mut().unwrap()["pin"] = pin["pin"].clone();
         }
         let policy = self.policy.lock().unwrap().clone().unwrap();
+        let output_root = self.output.lock().unwrap().clone();
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(self.root.join("trusted-policy.json")).unwrap())
+                .unwrap();
+        let registration = if action == "verify" {
+            let metadata: Value =
+                serde_json::from_slice(&std::fs::read(output_root.join("metadata.json")).unwrap())
+                    .unwrap();
+            metadata["registration"].clone()
+        } else {
+            Value::Null
+        };
+        let intent = json!({"version":1,"run":self.run,"task":self.task,"attempt":"none","gate":"gate-root",
+            "pin":policy["pin"],"head":manifest["gates"]["gate-root"]["target"]["head"],"mode":action,"registration":registration});
         let native =
             std::env::var_os("HERDR_FIXTURE_BOOTSTRAP").expect("approved native fixture binary");
         let mut command = Command::new(native);
@@ -494,6 +606,8 @@ impl CliFixture {
                     .iter()
                     .map(|word| word.as_str().unwrap()),
             )
+            .arg("--gate-job")
+            .arg(intent.to_string())
             .arg("--")
             .arg("--policy")
             .arg(self.root.join("trusted-policy.json"))
@@ -523,13 +637,13 @@ impl CliFixture {
             command.arg("--clean-env");
         }
         if action == "run" {
-            command.arg("--output").arg(self.root.join("out"));
+            command.arg("--output").arg(&output_root);
         } else {
             command
                 .arg("--metadata")
-                .arg(self.root.join("out/metadata.json"))
+                .arg(output_root.join("metadata.json"))
                 .arg("--log")
-                .arg(self.root.join("out/gate.log"));
+                .arg(output_root.join("gate.log"));
         }
         command.arg("--").args(
             policy["command"]
@@ -540,6 +654,75 @@ impl CliFixture {
         );
         self.environment(&mut command);
         command.output().unwrap()
+    }
+
+    fn job_intent(
+        &self,
+        mode: &str,
+        registration: Option<&str>,
+    ) -> zerocode_core::orchestration::gate_reuse::JobIntent {
+        let policy = self.policy.lock().unwrap().clone().unwrap();
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(self.root.join("trusted-policy.json")).unwrap())
+                .unwrap();
+        serde_json::from_value(json!({"version":1,"run":self.run,"task":self.task,"attempt":"none","gate":"gate-root",
+            "pin":policy["pin"],"head":manifest["gates"]["gate-root"]["target"]["head"],"mode":mode,"registration":registration})).unwrap()
+    }
+
+    fn scoped_connection(&self, mode: &str, registration: Option<&str>) -> (String, TcpStream) {
+        let intent = self.job_intent(mode, registration);
+        let owner = PlanCommand::checked(
+            vec!["native-gate-open".into()],
+            "team-1",
+            "%1",
+            capability_of("%1"),
+            Some(format!("actor-v1:{}", "a".repeat(64))),
+            now(),
+        )
+        .unwrap();
+        let reply = self
+            .actor
+            .open_gate_session(
+                owner,
+                intent,
+                std::fs::read_to_string(self.root.join("trusted-policy.json")).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        let job = reply["value"]["job"].as_str().unwrap().to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        super::super::gate_session::serve(
+            Arc::downgrade(&self.actor),
+            listener,
+            job.clone(),
+            reply["value"]["expiresMs"].as_i64().unwrap(),
+        );
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        super::super::gate_session::write_frame(
+            &mut stream,
+            &json!({"capability":capability_of("%1")}),
+        )
+        .unwrap();
+        let bound = super::super::gate_session::read_frame(&mut stream)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bound["ok"], true, "{bound}");
+        (job, stream)
+    }
+
+    fn pin_current_policy(&self, retry: &str) {
+        let policy = self.policy.lock().unwrap().clone().unwrap();
+        let reply = self.cli(&["gate-policy-pin", "--gate", "gate-root", "--body",
+            &json!({"version":1,"policy":policy["policySha256"],"producer":policy["producerSha256"]}).to_string(),
+            "--retry-request", retry]);
+        self.policy.lock().unwrap().as_mut().unwrap()["pin"] = reply["pin"].clone();
     }
 
     fn miss(&self, clean: bool) -> Value {
@@ -578,12 +761,12 @@ fn fixture_child_cannot_create_a_completion_or_a_reusable_hit() {
         completions, 3,
         "fixture child created extra registration, start or completion evidence"
     );
+    let log = std::fs::read_to_string(fixture.root.join("out/gate.log")).unwrap();
     assert!(
         output.status.success(),
-        "{}",
+        "{}\n{log}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let log = std::fs::read_to_string(fixture.root.join("out/gate.log")).unwrap();
     assert!(log.contains("fixture probe began"), "probe never ran");
     assert!(
         log.contains("fixture probe denied missing authority"),
@@ -649,6 +832,374 @@ impl Drop for CliFixture {
         self.stop.store(true, Ordering::SeqCst);
         self.serving.take().unwrap().join().unwrap();
     }
+}
+
+fn reuse_observation(fixture: &CliFixture) -> Value {
+    let output = fixture.output.lock().unwrap().clone();
+    let bytes = std::fs::read(output.join("metadata.json")).unwrap();
+    let metadata: Value = serde_json::from_slice(&bytes).unwrap();
+    let log = std::fs::read(output.join("gate.log")).unwrap();
+    json!({"version":1,"registration":metadata["registration"],"lease":metadata["lease"],"inputs":metadata["inputs"],
+        "metadataSha256":zerocode_core::user_preferences::content_key(&bytes),"logSha256":zerocode_core::user_preferences::content_key(&log),
+        "logBytes":log.len(),"tests":metadata["tests"]})
+}
+
+fn scope_call(stream: &mut TcpStream, value: Value) -> Value {
+    super::super::gate_session::write_frame(stream, &value).unwrap();
+    super::super::gate_session::read_frame(stream)
+        .unwrap()
+        .expect("a complete scoped response")
+}
+
+#[test]
+fn scoped_opening_requires_current_coordinator_identity_and_bounded_slots() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    assert!(fixture.production("run", true).status.success());
+    let intent = fixture.job_intent("run", None);
+    let manifest = std::fs::read_to_string(fixture.root.join("trusted-policy.json")).unwrap();
+    let open = |pane: &str, capability: String, actor: String| {
+        let owner = PlanCommand::checked(
+            vec!["native-gate-open".into()],
+            "team-1",
+            pane,
+            capability,
+            Some(actor),
+            now(),
+        )
+        .unwrap();
+        fixture
+            .actor
+            .open_gate_session(owner, intent.clone(), manifest.clone())
+            .unwrap()
+    };
+    let actor = format!("actor-v1:{}", "a".repeat(64));
+    for (pane, token, caller) in [
+        ("%1", "fixture-wrong-capability".into(), actor.clone()),
+        ("%2", capability_of("%2"), actor.clone()),
+        (
+            "%1",
+            capability_of("%1"),
+            format!("actor-v1:{}", "b".repeat(64)),
+        ),
+    ] {
+        let rejected = open(pane, token, caller);
+        assert_eq!(
+            rejected["ok"], false,
+            "non-coordinator opened a gate scope: {rejected}"
+        );
+    }
+    let mut jobs = Vec::new();
+    for _ in 0..32 {
+        let opened = open("%1", capability_of("%1"), actor.clone());
+        assert_eq!(opened["ok"], true, "{opened}");
+        jobs.push(opened["value"]["job"].as_str().unwrap().to_string());
+    }
+    let full = open("%1", capability_of("%1"), actor.clone());
+    assert_eq!(full["ok"], false, "gate scopes exceeded their bound");
+    assert_eq!(full["code"], "out_of_scope");
+    let rejected = fixture
+        .actor
+        .bind_gate_session(jobs[0].clone(), capability_of("%2"), now())
+        .unwrap();
+    assert_eq!(
+        rejected["ok"], false,
+        "another pane bound the gate connection"
+    );
+    assert!(
+        !fixture
+            .actor
+            .gate_session_alive(jobs[0].clone(), now())
+            .unwrap()
+    );
+    let replacement = open("%1", capability_of("%1"), actor);
+    assert_eq!(
+        replacement["ok"], true,
+        "failed binding did not release capacity"
+    );
+    jobs.push(replacement["value"]["job"].as_str().unwrap().to_string());
+    let bound = fixture
+        .actor
+        .bind_gate_session(jobs[1].clone(), capability_of("%1"), now())
+        .unwrap();
+    assert_eq!(bound["ok"], true);
+    let twice = fixture
+        .actor
+        .bind_gate_session(jobs[1].clone(), capability_of("%1"), now())
+        .unwrap();
+    assert_eq!(
+        twice["ok"], false,
+        "a second connection bound the same scope"
+    );
+    assert!(
+        !fixture
+            .actor
+            .gate_session_alive(jobs[1].clone(), now())
+            .unwrap()
+    );
+    for job in jobs {
+        fixture.actor.close_gate_session(job).unwrap();
+    }
+}
+
+#[test]
+fn a_scoped_connection_cannot_use_general_verbs_or_unknown_fields() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    let output = fixture.production("run", true);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let observed = reuse_observation(&fixture);
+    let registration = observed["registration"].as_str().unwrap();
+    let (_, mut valid) = fixture.scoped_connection("verify", Some(registration));
+    let hit = scope_call(
+        &mut valid,
+        json!({"verb":"gate-reuse","body":observed,"retryRequest":"scope-valid-query"}),
+    );
+    assert_eq!(hit["ok"], true, "{hit}");
+    assert_eq!(hit["value"]["decision"], "hit");
+    fixture.cli(&[
+        "send",
+        "--type",
+        "status",
+        "--to",
+        &format!("run:{}", fixture.run),
+        "--body",
+        "fixture coordinator control",
+        "--retry-request",
+        "scope-coordinator-control",
+    ]);
+    let count = fixture.actor.view().unwrap().projection().messages.len();
+    for verb in [
+        "send",
+        "kill",
+        "task-update",
+        "worker-start",
+        "worker-stop",
+        "gate-policy-pin",
+    ] {
+        let (job, mut stream) = fixture.scoped_connection("verify", Some(registration));
+        let refused = scope_call(
+            &mut stream,
+            json!({"verb":verb,"body":{},"retryRequest":"scope-forbidden-verb"}),
+        );
+        assert_eq!(refused["ok"], false, "{verb}: {refused}");
+        assert_eq!(refused["code"], "out_of_scope");
+        assert!(!fixture.actor.gate_session_alive(job, now()).unwrap());
+    }
+    let (_, mut stream) = fixture.scoped_connection("verify", Some(registration));
+    let argv = vec![
+        "send",
+        "--type",
+        "status",
+        "--to",
+        &format!("run:{}", fixture.run),
+        "--body",
+        "fixture scoped write probe",
+        "--retry-request",
+        "scope-write-probe",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let refused = scope_call(
+        &mut stream,
+        json!({"verb":"send","body":{},"retryRequest":"scope-raw-plan-probe","argv":argv}),
+    );
+    assert_eq!(
+        refused["ok"], false,
+        "scoped connection performed an unrelated ledger write: {refused}"
+    );
+    assert_eq!(refused["code"], "unknown_field");
+    assert_eq!(
+        fixture.actor.view().unwrap().projection().messages.len(),
+        count,
+        "scoped connection changed the ledger"
+    );
+}
+
+#[test]
+fn scoped_connections_bind_receipts_and_revoke_on_eof_pin_generation_and_expiry() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    assert!(fixture.production("run", true).status.success());
+    let observed = reuse_observation(&fixture);
+    let registration = observed["registration"].as_str().unwrap();
+    let count = fixture.actor.view().unwrap().projection().messages.len();
+    let (job, mut stream) = fixture.scoped_connection("verify", Some(registration));
+    let mut other = observed.clone();
+    other["registration"] = "m-other-receipt".into();
+    let refused = scope_call(
+        &mut stream,
+        json!({"verb":"gate-reuse","body":other,"retryRequest":"scope-other-receipt"}),
+    );
+    assert_eq!(refused["ok"], false);
+    assert_eq!(refused["code"], "out_of_scope");
+    assert!(!fixture.actor.gate_session_alive(job, now()).unwrap());
+    assert_eq!(
+        fixture.actor.view().unwrap().projection().messages.len(),
+        count
+    );
+    let (job, stream) = fixture.scoped_connection("verify", Some(registration));
+    drop(stream);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while fixture
+        .actor
+        .gate_session_alive(job.clone(), now())
+        .unwrap()
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !fixture.actor.gate_session_alive(job, now()).unwrap(),
+        "EOF did not revoke scope"
+    );
+    let (job, _stream) = fixture.scoped_connection("verify", Some(registration));
+    fixture.pin_current_policy("scope-replacement-pin");
+    assert!(!fixture.actor.gate_session_alive(job, now()).unwrap());
+    fixture.pin_current_policy("scope-restored-pin");
+    let intent = fixture.job_intent("run", None);
+    let owner = PlanCommand::checked(
+        vec!["native-gate-open".into()],
+        "team-1",
+        "%1",
+        capability_of("%1"),
+        Some(format!("actor-v1:{}", "a".repeat(64))),
+        now(),
+    )
+    .unwrap();
+    let opened = fixture
+        .actor
+        .open_gate_session(
+            owner,
+            intent,
+            std::fs::read_to_string(fixture.root.join("trusted-policy.json")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(opened["ok"], true);
+    let job = opened["value"]["job"].as_str().unwrap().to_string();
+    let expired = fixture
+        .actor
+        .bind_gate_session(
+            job.clone(),
+            capability_of("%1"),
+            opened["value"]["expiresMs"].as_i64().unwrap() + 1,
+        )
+        .unwrap();
+    assert_eq!(expired["ok"], false);
+    assert_eq!(expired["code"], "expired");
+    assert!(!fixture.actor.gate_session_alive(job, now()).unwrap());
+    let (job, _stream) = fixture.scoped_connection("run", None);
+    fixture.actor.window_restarted(now()).unwrap();
+    fixture.cli(&[
+        "run-use",
+        &fixture.run,
+        "--retry-request",
+        "scope-generation-reclaim",
+    ]);
+    assert!(!fixture.actor.gate_session_alive(job, now()).unwrap());
+}
+
+#[test]
+fn scoped_registration_retries_are_exact_and_do_not_cross_job_connections() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    assert!(fixture.production("run", true).status.success());
+    let observed = reuse_observation(&fixture);
+    let request = json!({"verb":"gate-register","body":observed["inputs"],"retryRequest":"same-scoped-registration"});
+    let (one_job, mut one) = fixture.scoped_connection("run", None);
+    let first = scope_call(&mut one, request.clone());
+    assert_eq!(first["ok"], true, "{first}");
+    let exact = scope_call(&mut one, request.clone());
+    assert_eq!(
+        exact["value"]["registration"],
+        first["value"]["registration"]
+    );
+    let (_, mut two) = fixture.scoped_connection("run", None);
+    let other = scope_call(&mut two, request);
+    assert_eq!(other["ok"], true, "{other}");
+    assert_ne!(
+        other["value"]["registration"], first["value"]["registration"],
+        "retry crossed job connections"
+    );
+    fixture.pin_current_policy("scope-retry-pin-replacement");
+    assert!(
+        !fixture
+            .actor
+            .gate_session_alive(one_job.clone(), now())
+            .unwrap()
+    );
+    let replay = fixture.actor.command_gate_session(one_job, json!({"verb":"gate-register","body":observed["inputs"],"retryRequest":"same-scoped-registration"}), now()).unwrap();
+    assert_eq!(
+        replay["ok"], false,
+        "cached registration bypassed current scope"
+    );
+}
+
+#[test]
+fn generation_change_requires_one_measured_fixture_recheck() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    assert!(fixture.production("run", true).status.success());
+    let original_bytes = std::fs::read(fixture.root.join("out/metadata.json")).unwrap();
+    let original: Value = serde_json::from_slice(&original_bytes).unwrap();
+    assert!(fixture.production("verify", true).status.success());
+    let manifest = std::fs::read(fixture.root.join("trusted-policy.json")).unwrap();
+    fixture.actor.window_restarted(now()).unwrap();
+    fixture.cli(&[
+        "run-use",
+        &fixture.run,
+        "--retry-request",
+        "generation-fixture-reclaim",
+    ]);
+    let miss = fixture.miss(true);
+    assert_eq!(miss["code"], "stale_pin");
+    fixture.pin_current_policy("generation-fixture-new-pin");
+    *fixture.output.lock().unwrap() = fixture.root.join("out-generation");
+    let started = std::time::Instant::now();
+    let output = fixture.production("run", true);
+    let elapsed_ms = started.elapsed().as_millis();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let current: Value = serde_json::from_slice(
+        &std::fs::read(fixture.root.join("out-generation/metadata.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        current["inputs"], original["inputs"],
+        "recheck changed more than coordinator generation and pin ID"
+    );
+    assert_ne!(current["policyPin"], original["policyPin"]);
+    assert_eq!(
+        std::fs::read(fixture.root.join("trusted-policy.json")).unwrap(),
+        manifest
+    );
+    assert!(fixture.production("verify", true).status.success());
+    let view = fixture.actor.view().unwrap();
+    let completions = view
+        .projection()
+        .messages
+        .iter()
+        .filter(|row| {
+            serde_json::from_str::<Value>(row.payload.as_str())
+                .ok()
+                .is_some_and(|value| value["gateEvidenceV1"]["phase"] == "completed")
+        })
+        .count();
+    assert_eq!(completions, 2);
+    println!(
+        "{}",
+        json!({"fixtureGenerationRecheck":{"extraExecutions":1,"wallMs":elapsed_ms,"gateDurationMs":current["durationMs"],
+        "originalGateDurationMs":original["durationMs"],"productionMeasured":false}})
+    );
 }
 
 #[test]

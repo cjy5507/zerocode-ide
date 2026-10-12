@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import socket
 import sys
 import types
 
@@ -162,13 +163,15 @@ def configure(context, args, producer):
     selected = context["policy"]["gates"].get(args.gate)
     required = {"command", "recipes", "profile", "environment", "dependencyRoots", "toolchainRoots",
                 "configurationRoots", "configurationSearches", "lockFiles", "scriptFiles", "outputRoots", "mandatoryChecks",
-                "target", "timeout"}
+                "target", "timeout", "maxJobTtlSeconds"}
     if not isinstance(selected, dict) or set(selected) != required:
         raise producer.UnknownInput("gate has no complete independently trusted declaration")
     if selected["command"] != args.command or selected["profile"] != args.profile:
         raise producer.UnknownInput("gate command or profile differs from its trusted recipe")
     if isinstance(selected["timeout"], bool) or not isinstance(selected["timeout"], (int, float)) or not 0 < selected["timeout"] <= 86400 or selected["timeout"] != args.timeout:
         raise producer.UnknownInput("gate timeout differs from its trusted declaration")
+    if isinstance(selected["maxJobTtlSeconds"], bool) or not isinstance(selected["maxJobTtlSeconds"], int) or not selected["timeout"] <= selected["maxJobTtlSeconds"] <= 7200:
+        raise producer.UnknownInput("gate job lifetime is not bounded by its trusted declaration")
     if selected["mandatoryChecks"] != MANDATORY or not isinstance(selected["recipes"], list) or not selected["recipes"]:
         raise producer.UnknownInput("gate has no complete recipe list and mandatory non-reuse checks")
     if len(selected["recipes"]) != len(set(selected["recipes"])) or any(
@@ -307,18 +310,24 @@ def main(argv=None):
     parser.add_argument("--policy-sha256", required=True)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--bootstrap-launcher")
+    parser.add_argument("--authority-fd", type=int)
     words = sys.argv[1:] if argv is None else argv
     if "--" not in words:
         parser.error("separate the producer arguments with --")
     split = words.index("--")
     args = parser.parse_args(words[:split])
     producer_argv = words[split + 1:]
+    authority = None
     try:
         if not sys.flags.isolated or not sys.flags.no_site:
             raise Untrusted("independent invocation requires Python -I -S")
-        if args.bootstrap_launcher and sys.argv[0] != "-":
+        if not args.bootstrap_launcher or sys.argv[0] != "-" or args.authority_fd is None or args.authority_fd < 3:
             raise Untrusted("native bootstrap requires retained launcher bytes on stdin")
+        os.set_inheritable(args.authority_fd, False)
+        authority = socket.socket(fileno=args.authority_fd)
+        authority.settimeout(60)
         context = load_policy(args.policy, args.policy_sha256, args.repo, launcher_path=args.bootstrap_launcher)
+        context["authority"] = authority
         module = types.ModuleType("trusted_gate_receipt")
         module.__file__ = context["policy"]["bundle"]["producer"]["path"]
         exec(compile(context["bytes"]["producer"], module.__file__, "exec"), module.__dict__)
@@ -329,6 +338,9 @@ def main(argv=None):
         print(json.dumps({"decision": "miss", "reason": "independent provenance or input closure unavailable",
                           "executed": False, "newExecutions": 0}, sort_keys=True))
         return 1
+    finally:
+        if authority is not None:
+            authority.close()
 
 
 if __name__ == "__main__":

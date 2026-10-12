@@ -43,7 +43,13 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
     (home / "fixture-config").write_text("no account credentials\n")
     wrapper = root / "recipe.py"
     wrapper.write_text(
-        "import subprocess, sys\n"
+        "import os, stat, subprocess, sys\n"
+        "for key in ['ZEROCODE_AGENT_TEAM_TOKEN', 'ZEROCODE_AGENT_TEAM_TOKEN_FILE', 'ZEROCODE_HOOK_TOKEN']:\n"
+        "    assert key not in os.environ, 'fixture first child inherited authority environment'\n"
+        "for fd in range(3, 256):\n"
+        "    try: mode = os.fstat(fd).st_mode\n"
+        "    except OSError: continue\n"
+        "    assert not stat.S_ISSOCK(mode), 'fixture first child inherited socket descriptor %d' % fd\n"
         "print('==> verify recipe fixture', flush=True)\n"
         "result = subprocess.run(sys.argv[1:], check=False)\n"
         "print('<== verify recipe fixture rc=%d 0s' % result.returncode, flush=True)\n"
@@ -85,6 +91,7 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
               "gates": {args.gate: {"command": args.command, "recipes": ["fixture"], "profile": args.profile,
                   "target": {"repo": str(Path(args.repo).resolve()), "head": producer.git(args.repo, "rev-parse", "--verify", "HEAD").decode().strip(), "scope": args.scope},
                   "timeout": args.timeout,
+                  "maxJobTtlSeconds": min(7200, int(args.timeout) + 60),
                   "environment": environment, "dependencyRoots": [row(path) for path in args.dependency_root],
                   "toolchainRoots": [row(path) for path in [*args.toolchain_root, python, git, *transitive]],
                   "configurationRoots": configuration, "configurationSearches": searches,

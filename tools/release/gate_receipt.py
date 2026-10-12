@@ -44,7 +44,7 @@ class ExecutionUnattested(UnknownInput):
 
 
 def encoded(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
 def digest(data):
@@ -356,7 +356,7 @@ def test_count(log, recipes=()):
                 index += 1
             if any(values[name] for name in ("fail", "cancelled", "skipped", "todo")):
                 return 0
-            if values["tests"] != values["pass"]:
+            if values["tests"] == 0 or values["tests"] != values["pass"]:
                 return 0
             if prefix == "#":
                 node_summaries += 1
@@ -368,6 +368,8 @@ def test_count(log, recipes=()):
         elif re.fullmatch(r"Ran \d+ tests? in \d+(?:\.\d+)?s", line):
             unittest_headers += 1
             count = int(line.split()[1])
+            if count == 0:
+                return 0
             index += 1
             while index < len(lines) and not lines[index]:
                 index += 1
@@ -421,20 +423,38 @@ def mask_log(log, environment, trust):
 class Ledger:
     """Only a live window call can authenticate an attestation; no file/export reader exists."""
 
-    def __init__(self):
-        self.executable = shutil.which("zerocode-orc")
-        if not self.executable:
-            raise UnknownInput("authenticated window ledger is unavailable")
+    def __init__(self, authority=None):
+        if authority is None or authority.fileno() < 3:
+            raise UnknownInput("a native gate job connection is required")
+        self.authority = authority
+
+    def read_exact(self, count):
+        result = bytearray()
+        while len(result) < count:
+            block = self.authority.recv(count - len(result))
+            if not block:
+                raise UnknownInput("native gate job connection closed")
+            result.extend(block)
+        return bytes(result)
 
     def call(self, verb, args, value, retry, extra=()):
-        result = subprocess.run(
-            [self.executable, verb, "--task", args.task, "--attempt", args.attempt,
-             "--body", encoded(value).decode(), "--retry-request", retry, *extra],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60,
-        )
-        if result.returncode != 0:
-            raise UnknownInput(f"native ledger refused {verb} (exit {result.returncode})")
-        answer = json.loads(result.stdout)
+        request = {"verb": verb, "body": value, "retryRequest": retry}
+        for index in range(0, len(extra), 2):
+            key = {"--start": "start", "--cancel": "cancel", "--lease": "lease"}.get(extra[index])
+            if key is None or index + 1 >= len(extra):
+                raise UnknownInput("unsupported native gate record mode")
+            request[key] = extra[index + 1]
+        body = encoded(request)
+        if len(body) > 32 * 1024:
+            raise UnknownInput("native gate job request is too large")
+        self.authority.sendall(len(body).to_bytes(4, "big") + body)
+        length = int.from_bytes(self.read_exact(4), "big")
+        if not 0 < length <= 32 * 1024:
+            raise UnknownInput("native gate job reply is too large")
+        reply = json.loads(self.read_exact(length))
+        if not isinstance(reply, dict) or reply.get("ok") is not True:
+            raise UnknownInput("native gate job refused this operation")
+        answer = reply.get("value")
         if not isinstance(answer, dict):
             raise UnknownInput("native ledger returned an unsupported answer")
         return answer
@@ -462,7 +482,7 @@ def execute(command, repo, environment, timeout):
     started = time.monotonic_ns()
     child = subprocess.Popen(
         command, cwd=repo, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL, start_new_session=os.name == "posix",
+        stdin=subprocess.DEVNULL, start_new_session=os.name == "posix", close_fds=True,
     )
     outcome = "passed"
     captured = bytearray()
@@ -515,7 +535,7 @@ def produce(args, ledger=None):
     trust = provenance(args)
     environment = execution_environment(args)
     before = fingerprint(args, environment, command)
-    ledger = ledger or Ledger()
+    ledger = ledger or Ledger(trust.get("authority"))
     nonce = uuid.uuid4().hex
     registered = ledger.call("gate-register", args, before, f"gate-register-{nonce}")
     registration = registered.get("registration")
@@ -588,7 +608,7 @@ def verify(args, ledger=None):
         "metadataSha256": digest(raw), "logSha256": digest(log), "logBytes": len(log),
         "tests": test_count(log, trust["selected"]["recipes"]),
     }
-    answer = (ledger or Ledger()).call("gate-reuse", args, request, f"gate-reuse-{uuid.uuid4().hex}")
+    answer = (ledger or Ledger(trust.get("authority"))).call("gate-reuse", args, request, f"gate-reuse-{uuid.uuid4().hex}")
     if answer.get("executed") is not False or answer.get("newExecutions") != 0:
         raise UnknownInput("unsupported native reuse decision")
     if answer.get("decision") not in ("hit", "miss") or not isinstance(answer.get("decisionRecord"), str):

@@ -12,6 +12,12 @@ fn invoke(options: &[String], root: &Path) -> std::process::Output {
         .env("PATH", std::env::var("PATH").unwrap())
         .env("PYTHONPATH", root.join("candidate"))
         .env("PYTHONHOME", root.join("candidate"))
+        .env("ZEROCODE_AGENT_TEAM_TOKEN", "fixture-parent-capability")
+        .env(
+            "ZEROCODE_AGENT_TEAM_TOKEN_FILE",
+            root.join("fixture-parent-authority"),
+        )
+        .env("ZEROCODE_HOOK_TOKEN", "fixture-parent-bridge-capability")
         .output()
         .unwrap()
 }
@@ -21,8 +27,37 @@ fn real_python_uses_retained_launcher_bytes_and_declared_standard_library() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let launcher = root.join("launcher.py");
+    let candidate = root.join("candidate");
+    fs::create_dir(&candidate).unwrap();
+    let marker = root.join("candidate-imported");
+    fs::write(
+        candidate.join("json.py"),
+        format!(
+            "from pathlib import Path\nPath({:?}).write_text('imported')\n",
+            marker.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let control = Command::new("python3")
+        .args(["-S", "-B", "-c", "import json"])
+        .env_clear()
+        .env("HOME", &root)
+        .env("PATH", std::env::var("PATH").unwrap())
+        .env("PYTHONPATH", &candidate)
+        .output()
+        .unwrap();
+    assert!(
+        control.status.success(),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(
+        marker.is_file(),
+        "candidate import positive control never ran"
+    );
+    fs::remove_file(&marker).unwrap();
     fs::write(&launcher,
-        "import json, pathlib, sys\nassert sys.flags.isolated and sys.flags.no_site\nassert sys.argv[-3:] == ['--bind', 'forwarded-value', '--help']\nassert pathlib.Path(json.__file__).is_relative_to(pathlib.Path(sys.executable).parent.parent)\nassert __file__ == '<stdin>'\npathlib.Path(sys.argv[2]).write_text(\"raise AssertionError('replacement executed')\\n\")\nprint('verified retained launcher ran')\n").unwrap();
+        "import json, os, pathlib, sys\nassert not any(key in os.environ for key in ['ZEROCODE_AGENT_TEAM_TOKEN', 'ZEROCODE_AGENT_TEAM_TOKEN_FILE', 'ZEROCODE_HOOK_TOKEN'])\nassert sys.flags.isolated and sys.flags.no_site\nassert sys.argv[-3:] == ['--bind', 'forwarded-value', '--help']\nassert pathlib.Path(json.__file__).is_relative_to(pathlib.Path(sys.executable).parent.parent)\nassert __file__ == '<stdin>'\npathlib.Path(sys.argv[2]).write_text(\"raise AssertionError('replacement executed')\\n\")\nprint('verified retained launcher ran')\n").unwrap();
     let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tools/release/tests/gate_bootstrap_fixture.py");
     let output = Command::new("python3")
@@ -49,6 +84,10 @@ fn real_python_uses_retained_launcher_bytes_and_declared_standard_library() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("verified retained launcher ran"));
+    assert!(
+        !marker.exists(),
+        "candidate module polluted the verified runtime"
+    );
     assert!(
         fs::read_to_string(&launcher)
             .unwrap()
