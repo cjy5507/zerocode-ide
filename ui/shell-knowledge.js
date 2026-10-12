@@ -419,9 +419,11 @@ let knowledgeOrphansOnly = false;
 let knowledgeGhostsOnly = false;
 let knowledgeTypedOnly = false;
 /* 건강 카드의 줄 하나가 켠 렌즈 — 백엔드의 lint 표(`graph.lint`)에 이름이 있는
- * 페이지만 남긴다: `index_gaps`·`missing_frontmatter`·`undeclared_relations`,
+ * 페이지만 남긴다: `index_gaps`·`missing_frontmatter`·`undeclared_relations`·`untyped`,
  * 아니면 null. 고아·유령은 제 렌즈(위)를 그대로 쓴다. */
 let knowledgeLintLens = null;
+/* 종류 렌즈(t-43992): 이 종류의 페이지만 남긴다 — `KNOWLEDGE_PAGE_KINDS`의 낱말 하나, 아니면 null. */
+let knowledgeKindLens = null;
 /* 근거 렌즈(t-5966): 숨긴 근거의 낱말들. 비어 있으면 전부 보인다 — 기본이다. */
 const knowledgeProvenanceHidden = new Set();
 let knowledgeShowSources = false;
@@ -1214,7 +1216,26 @@ function buildKnowledgeView() {
   const lenses = document.createElement("div");
   lenses.className = "knowledge-lens-popover";
   /* 우주의 줄(t-12443) — 「움직임」. 우주가 서 있는 동안만 보인다. */
-  lenses.append(sift, provenance, tags, buildKnowledgeUniverseControls());
+  /* 종류 렌즈(t-43992): 페이지의 `type:`이 말하는 종류 하나만 남긴다 — 한 번에 하나, 다시
+   * 누르면 놓는다. 볼트에 없는 종류의 단추는 서지 않는다(`paintKnowledgeHead`). */
+  const kindGroup = document.createElement("div");
+  kindGroup.className = "knowledge-kinds";
+  kindGroup.setAttribute("role", "group");
+  kindGroup.dataset.i18nAria = "knowledge.kindLens";
+  kindGroup.setAttribute("aria-label", t("knowledge.kindLens", "종류"));
+  for (const row of KNOWLEDGE_PAGE_KINDS) {
+    const one = document.createElement("button");
+    one.type = "button";
+    one.className = "btn knowledge-flag knowledge-kind-flag";
+    one.dataset.knowledgeKind = row.kind;
+    one.setAttribute("aria-pressed", "false");
+    const word = document.createElement("span");
+    word.dataset.i18n = row.key;
+    word.textContent = t(row.key, row.word);
+    one.appendChild(word);
+    kindGroup.appendChild(one);
+  }
+  lenses.append(sift, provenance, kindGroup, tags, buildKnowledgeUniverseControls());
 
   const gap = document.createElement("span");
   gap.className = "knowledge-gap";
@@ -1670,6 +1691,9 @@ const KNOWLEDGE_HEALTH_ROWS = [
   { lint: "index_gaps", count: "index_gaps", key: "knowledge.lintIndexGaps", word: "색인에 없는 페이지", door: "lens" },
   { lint: "missing_frontmatter", count: "missing_frontmatter", key: "knowledge.lintMissingFrontmatter", word: "source·ingested_at 없는 페이지", door: "lens" },
   { lint: "undeclared_relations", count: "undeclared_relations", key: "knowledge.lintUndeclaredRelations", word: "관계 키 없는 본문 링크", door: "lens" },
+  /* 종류(t-43992): `type:`이 여섯 종류 중 어느 것도 말하지 않는 페이지. 표가 세는 읽기이지
+   * 발견이 아니다(`zerocode vault-lint`의 실패 합에 들지 않는다) — 누르면 그 페이지만 남는다. */
+  { lint: "untyped", count: "untyped", key: "knowledge.lintUntyped", word: "종류 없는 페이지", door: "lens" },
   { lint: "unlogged_raw", count: "unlogged_raw", key: "knowledge.lintUnloggedRaw", word: "취합 안 된 raw 항목", door: "none" },
   /* 근거 없는 간선(t-5966): 백엔드가 어느 길도 보증하지 못한 선. 그림의 점이 아니라 선의
    * 줄이라 문이 없다 — 스캔한 볼트에서는 만듦새로 0이고, 이 줄은 그 약속을 읽는 자리다. */
@@ -1683,6 +1707,17 @@ const KNOWLEDGE_HEALTH_ROWS = [
   { lint: "recalledToday", count: "recalled_today", key: "knowledge.lintRecalledToday", word: "오늘 회상된 페이지", door: "live", live: true },
   { lint: "neverRecalled", count: "never_recalled", key: "knowledge.lintNeverRecalled", word: "회상된 적 없는 페이지", door: "live", live: true },
   { lint: "merge", count: "merge_candidates", key: "knowledge.lintMerge", word: "합칠 후보", door: "live", live: true },
+];
+
+/* 페이지의 종류(t-43992) — core `second_brain_kinds::PageType`의 여섯 낱말, 스키마의 순서.
+ * 보기 메뉴의 종류 렌즈가 이 순서로 선다. */
+const KNOWLEDGE_PAGE_KINDS = [
+  { kind: "source", key: "knowledge.kindSource", word: "출처 요약" },
+  { kind: "entity", key: "knowledge.kindEntity", word: "개체" },
+  { kind: "concept", key: "knowledge.kindConcept", word: "개념" },
+  { kind: "comparison", key: "knowledge.kindComparison", word: "비교" },
+  { kind: "overview", key: "knowledge.kindOverview", word: "개요" },
+  { kind: "synthesis", key: "knowledge.kindSynthesis", word: "종합" },
 ];
 
 /* 표의 한 줄이 이름 짓는 페이지 id들 — 문자열 목록이거나 `{ page }` 행 목록이다. */
@@ -2053,6 +2088,7 @@ function sameKnowledgeTopology(left, right) {
 function knowledgeModel(report) {
   const lens = [knowledgeOrphansOnly, knowledgeGhostsOnly, knowledgeTypedOnly,
     knowledgeAliveOnly, knowledgeColdOnly, knowledgeMergeOnly, knowledgeLintLens,
+    knowledgeKindLens,
     [...knowledgeProvenanceHidden].sort().join(",")].join("|");
   /* 공급망 렌즈(P4)가 켜졌으면 답의 점과 선이 볼트 뒤에 붙는다(`knowledgeSupplyView`) — 답·볼트·펼침이
    * 그대로면 같은 객체라 캐시의 문지기가 된다. 꺼졌으면 `null`이고 아래는 볼트만의 그림이다. */
@@ -2106,8 +2142,14 @@ function knowledgeModel(report) {
     index_gaps: knowledgeLintPages(lintTable?.index_gaps),
     missing_frontmatter: knowledgeLintPages(lintTable?.missing_frontmatter),
     undeclared_relations: knowledgeLintPages(lintTable?.undeclared_relations),
+    untyped: knowledgeLintPages(lintTable?.untyped),
   };
   const lintLens = knowledgeLintLens !== null ? (lintSets[knowledgeLintLens] ?? new Set()) : null;
+  /* 볼트에 있는 종류(t-43992) — 걸러 놓은 그림이 아니라 답 전체에서 센다. 렌즈를 켜자마자
+   * 다른 종류의 단추가 사라지면 그 렌즈는 바꿀 자리를 잃는다. */
+  const pageKinds = new Set(nodes
+    .filter((node) => node.kind === "page" && typeof node.page_type === "string")
+    .map((node) => node.page_type));
   /* 「유령 링크만」은 유령 점 **과 그것을 가리키는 페이지**다. 유령만 남기면
    * 선이 없는 점들이 뜨고, 그 화면은 "어느 페이지가 없는 것을 가리키는가"라는
    * 물음에 답하지 못한다. */
@@ -2144,6 +2186,7 @@ function knowledgeModel(report) {
     if (knowledgeTypedOnly && typedSide[at] === 0) continue;
     if (knowledgeOrphansOnly && !lintSets.orphans.has(node.id)) continue;
     if (lintLens !== null && !lintLens.has(node.id)) continue;
+    if (knowledgeKindLens !== null && node.page_type !== knowledgeKindLens) continue;
     if (knowledgeAliveOnly && alive[at] === 0) continue;
     if (knowledgeColdOnly && !(node.kind === "page" && !recalledAt.has(node.id))) continue;
     if (knowledgeMergeOnly && mergeSide[at] === 0) continue;
@@ -2288,6 +2331,8 @@ function knowledgeModel(report) {
      * 필터가 이미 걸린 부분집합에서 세면 켜자마자 제 조건을 잃는 칩이 된다.
      * 낡은 답에는 이 목록이 아예 없고, 그때의 답은 「없다」이다. */
     typed: (report?.graph?.kinds ?? []).some((row) => row.kind !== "mentions" && row.count > 0),
+    /* 종류 렌즈(t-43992)가 세울 단추 — 볼트에 있는 종류. */
+    pageKinds,
     total: report?.graph ?? null,
     /* 그림이 들 수 있는 점 전부 — 볼트의 점과 렌즈가 붙인 점. 자리 기억을 놓을 때 이 목록을 읽는다. */
     nodeList: nodes,
@@ -2816,6 +2861,7 @@ function captureCurrentKnowledgeScene(name, view, layout) {
       cold: knowledgeColdOnly,
       merge: knowledgeMergeOnly,
       lint: knowledgeLintLens,
+      kind: knowledgeKindLens,
       nav: knowledgeNavShown,
       supply: knowledgeSupplyShown,
     },
@@ -2857,6 +2903,7 @@ async function restoreKnowledgeScene(view, scene) {
   knowledgeColdOnly = !!scene.lens?.cold;
   knowledgeMergeOnly = !!scene.lens?.merge;
   knowledgeLintLens = scene.lens?.lint ?? null;
+  knowledgeKindLens = scene.lens?.kind ?? null;
   /* 표시 설정(S6)도 시야의 것이다; 옛 시야(없는 칸)는 켜진 채다. */
   knowledgeNavShown = scene.lens?.nav !== false;
   /* 공급망 렌즈(P4)도 답에 없는 점을 만든다 — 켜지는 시야는 「원본도」와 같은 이유로 다시 묻는다.
@@ -5960,6 +6007,7 @@ function paintKnowledgeHealthMarks(view) {
     index_gaps: knowledgeLintLens === "index_gaps",
     missing_frontmatter: knowledgeLintLens === "missing_frontmatter",
     undeclared_relations: knowledgeLintLens === "undeclared_relations",
+    untyped: knowledgeLintLens === "untyped",
     contradictions: query === "contradicts",
     superseded: query === "supersedes",
     recalledToday: knowledgeAliveOnly,
@@ -7696,6 +7744,15 @@ function paintKnowledgeHead(view, layout, matches) {
     writeAttribute(button, "aria-pressed", String(on));
     button.classList.toggle("is-active", on);
   }
+  /* 종류 렌즈(t-43992): 볼트에 그 종류의 페이지가 없으면 단추가 서지 않는다 — 눌러 놓고 빈
+   * 그림을 보여 주는 대신. 종류가 하나도 없는 볼트(옛 볼트·옛 백엔드)에서는 묶음째 서지 않는다. */
+  for (const button of view.querySelectorAll("[data-knowledge-kind]")) {
+    const on = knowledgeKindLens === button.dataset.knowledgeKind;
+    writeAttribute(button, "aria-pressed", String(on));
+    button.classList.toggle("is-active", on);
+    button.hidden = !model.pageKinds.has(button.dataset.knowledgeKind);
+  }
+  for (const group of view.querySelectorAll(".knowledge-kinds")) group.hidden = model.pageKinds.size === 0;
   /* 공급망의 낱말들(P4) — `sev:` 칩과 범례의 줄은 렌즈가 켜졌을 때만 선다. */
   for (const held of view.querySelectorAll('.knowledge-token-chip[data-token="sev:"], .knowledge-legend [data-legend-supply]')) {
     held.hidden = !knowledgeSupplyShown;
@@ -7780,6 +7837,7 @@ function paintKnowledgeEmpty(view, model) {
       knowledgeGhostsOnly = false;
       knowledgeTypedOnly = false;
       knowledgeLintLens = null;
+      knowledgeKindLens = null;
       knowledgeAliveOnly = false;
       knowledgeColdOnly = false;
       knowledgeMergeOnly = false;
@@ -8549,6 +8607,14 @@ function wireKnowledgeView(view) {
       const road = button.dataset.knowledgeProvenance;
       if (knowledgeProvenanceHidden.has(road)) knowledgeProvenanceHidden.delete(road);
       else knowledgeProvenanceHidden.add(road);
+      void paintKnowledgeView();
+    };
+  }
+  /* 종류 렌즈(t-43992): 한 번에 하나 — 같은 단추를 다시 누르면 놓는다. */
+  for (const button of view.querySelectorAll("[data-knowledge-kind]")) {
+    button.onclick = () => {
+      const kind = button.dataset.knowledgeKind;
+      knowledgeKindLens = knowledgeKindLens === kind ? null : kind;
       void paintKnowledgeView();
     };
   }

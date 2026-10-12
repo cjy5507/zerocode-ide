@@ -16,6 +16,7 @@ pub const ARCHIVE_DIR: &str = "archive";
 pub const RAW_README_FILE: &str = "raw/README.md";
 pub const WIKI_INDEX_FILE: &str = "wiki/index.md";
 pub const WIKI_LOG_FILE: &str = "wiki/log.md";
+pub const WIKI_OVERVIEW_FILE: &str = "wiki/overview.md";
 pub const AGENTS_FILE: &str = "AGENTS.md";
 pub const CLAUDE_FILE: &str = "CLAUDE.md";
 pub const MAX_STATUS_ENTRIES: usize = 10_000;
@@ -33,6 +34,18 @@ pub const WIKI_INDEX: &str = r#"# Wiki
 주제별 지식 페이지 링크를 모으는 홈(MOC)입니다. 에이전트가 취합할 때 함께 갱신합니다.
 
 ## 주제
+"#;
+
+/// The vault's one-page map (t-43992 unit 2): written once by setup, kept
+/// current by the weekly review.
+pub const WIKI_OVERVIEW: &str = r#"---
+type: overview
+---
+
+# 개요
+
+이 볼트 전체를 한 쪽으로 보여 주는 지도입니다. 큰 주제와 주제 사이의 연결, 처음 읽을 페이지를 적습니다.
+에이전트가 주간 리뷰 때 최신으로 고칩니다.
 "#;
 
 pub const WIKI_LOG: &str = r#"# 취합 일지
@@ -55,7 +68,14 @@ pub const AGENTS_GUIDE: &str = r#"# second-brain vault protocol
 
 1. `raw/` 항목 하나를 읽고 출처, 핵심 주장, 근거와 재사용할 개념을 식별한다.
 2. `wiki/`를 검색해 같은 개념이 있으면 갱신하고, 없으면 개념을 제목으로 한 페이지를 만든다.
-3. 지식 페이지 맨 앞에 `source`, `ingested_at`, `tags`가 든 YAML frontmatter를 둔다. `source`는 원본의 볼트 상대 경로를 보존한다.
+3. 지식 페이지 맨 앞에 `type`, `source`, `ingested_at`, `tags`가 든 YAML frontmatter를 둔다. `source`는 원본의 볼트 상대 경로를 보존한다.
+   `type`은 페이지가 무엇인지 여섯 가지 중 하나로 적는다.
+   - `source` — 원본 하나를 요약한 페이지.
+   - `entity` — 사람·조직·도구·제품.
+   - `concept` — 생각·방법·패턴.
+   - `comparison` — 둘 이상을 나란히 놓고 비교한 것.
+   - `overview` — 볼트 전체 지도. `wiki/overview.md` 한 쪽뿐이다.
+   - `synthesis` — 여러 페이지에서 끌어낸 답.
    실제 관계가 있으면 위키링크를 값으로 하는 관계 키도 함께 적는다 (예: `implements: [[wiki/adr/003]]`).
    - `related` — 같은 주제일 뿐, 그 이상을 주장하지 않는다.
    - `implements` — 이 페이지가 링크한 명세·결정을 실현한 것을 설명한다.
@@ -76,7 +96,7 @@ pub const AGENTS_GUIDE: &str = r#"# second-brain vault protocol
 
 ## 주간 리뷰
 
-이번 주 `wiki/log.md` 항목을 요약하고, 들어온 주제와 새 연결을 정리한다. 다른 페이지에서 링크되지 않은 고아 페이지와 아직 취합되지 않은 `raw/` 항목을 찾고, 다음에 읽을 항목을 우선순위와 함께 제안한다. 리뷰 중 발견한 실제 연결은 페이지와 `wiki/index.md`에 반영한다.
+이번 주 `wiki/log.md` 항목을 요약하고, 들어온 주제와 새 연결을 정리한다. 다른 페이지에서 링크되지 않은 고아 페이지와 아직 취합되지 않은 `raw/` 항목을 찾고, 다음에 읽을 항목을 우선순위와 함께 제안한다. 리뷰 중 발견한 실제 연결은 페이지와 `wiki/index.md`에 반영한다. 볼트 지도 `wiki/overview.md`(`type: overview`)는 이번 주 들어온 주제와 연결을 반영해 고친다.
 "#;
 
 pub const CLAUDE_INCLUDE: &str = "@AGENTS.md\n";
@@ -135,7 +155,9 @@ pub fn weekly_review_prompt(vault: &Path) -> String {
          기각한 관계는 같은 명령의 마지막 값을 `none`으로 기록한다. 읽지 않은 쌍은 기록하지 않는다. \
          고치는 것은 색인과 링크뿐이다: `{WIKI_INDEX_FILE}`에 빠진 페이지를 알맞은 주제 목록에 추가하고, 유령 링크를 있는 페이지로 재조준하고, \
          문장이 이미 밝힌 관계를 관계 키(`related`·`implements`·`depends_on`·`supersedes`·`contradicts`)로 적는다. \
-         페이지를 새로 만들거나 지우거나 옮기지 않고, `{RAW_DIR}/`는 건드리지 않는다.\n\
+         페이지를 새로 만들거나 지우거나 옮기지 않고, `{RAW_DIR}/`는 건드리지 않는다. \
+         예외는 볼트 지도 `{WIKI_OVERVIEW_FILE}`(`type: overview`) 한 쪽이다: 이번 주 들어온 주제와 연결을 반영해 고치고, \
+         없으면 이 한 쪽만 새로 만든다.\n\
          4. `{WIKI_LOG_FILE}` 맨 끝에 정확히 한 줄을 남긴다: `- YYYY-MM-DD HH:MM — 주간 리뷰(cron) → 요약 한 문장과 고친 것`.\n\
          \n\
          아무도 보고 있지 않다. 질문하지 말고, 위 넷을 마치면 끝낸다."
@@ -457,6 +479,7 @@ pub fn setup(root: &Path) -> io::Result<SetupOutcome> {
         (RAW_README_FILE, RAW_README),
         (WIKI_INDEX_FILE, WIKI_INDEX),
         (WIKI_LOG_FILE, WIKI_LOG),
+        (WIKI_OVERVIEW_FILE, WIKI_OVERVIEW),
         (AGENTS_FILE, AGENTS_GUIDE),
         (CLAUDE_FILE, CLAUDE_INCLUDE),
     ];
@@ -488,7 +511,12 @@ fn write_if_missing(path: &Path, content: &[u8]) -> io::Result<bool> {
 #[must_use]
 pub fn inspect(root: &Path) -> VaultStatus {
     let (raw_items, raw_capped) = count_files(&root.join(RAW_DIR), &["README.md"]);
-    let (wiki_pages, wiki_capped) = count_files(&root.join(WIKI_DIR), &["index.md", "log.md"]);
+    // The ledgers and the map are the vault's furniture, not its pages.
+    let furniture: Vec<&str> = [WIKI_INDEX_FILE, WIKI_LOG_FILE, WIKI_OVERVIEW_FILE]
+        .iter()
+        .filter_map(|file| file.strip_prefix(WIKI_DIR)?.strip_prefix('/'))
+        .collect();
+    let (wiki_pages, wiki_capped) = count_files(&root.join(WIKI_DIR), &furniture);
     VaultStatus {
         path: root.to_string_lossy().into_owned(),
         exists: root.is_dir(),
@@ -863,5 +891,37 @@ mod tests {
             obsidian_open_uri(&beta).as_deref(),
             Some("obsidian://open?vault=Beta+Notes&file=wiki%2Findex.md")
         );
+    }
+
+    /// t-43992 unit 2: setup writes the vault's one-page map beside the index
+    /// and the log, typed `overview`; a vault set up before the map existed is
+    /// still a set-up vault, and the map is not counted as a wiki page.
+    #[test]
+    fn setup_writes_the_overview_and_an_older_vault_is_still_set_up() {
+        let root = tempfile::tempdir().unwrap();
+        let outcome = setup(root.path()).unwrap();
+        assert!(
+            outcome
+                .created
+                .iter()
+                .any(|held| held == WIKI_OVERVIEW_FILE),
+            "{:?}",
+            outcome.created
+        );
+        let overview = std::fs::read_to_string(root.path().join(WIKI_OVERVIEW_FILE)).unwrap();
+        assert!(overview.starts_with("---\ntype: overview\n"), "{overview}");
+        assert_eq!(outcome.status.wiki_pages, 0, "the map is counted as a page");
+        std::fs::remove_file(root.path().join(WIKI_OVERVIEW_FILE)).unwrap();
+        assert!(inspect(root.path()).setup_complete);
+    }
+
+    #[test]
+    fn the_weekly_review_keeps_the_overview_and_may_create_only_it() {
+        let prompt = weekly_review_prompt(Path::new("/Users/me/Knowledge"));
+        assert!(prompt.contains(WIKI_OVERVIEW_FILE), "{prompt}");
+        assert!(prompt.contains("type: overview"), "{prompt}");
+        // Still the review's narrow scope.
+        assert!(prompt.contains("색인과 링크뿐"));
+        assert!(prompt.contains("정확히 한 줄"));
     }
 }

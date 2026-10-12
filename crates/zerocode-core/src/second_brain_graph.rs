@@ -25,6 +25,7 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 
 use crate::second_brain::{RAW_DIR, WIKI_DIR, WIKI_INDEX_FILE, WIKI_LOG_FILE};
+use crate::second_brain_kinds::PageType;
 use crate::second_brain_lint::{self, PageProvenance, VaultLint};
 use crate::second_brain_live;
 
@@ -214,6 +215,11 @@ pub struct GraphNode {
     pub title: String,
     pub tags: Vec<String>,
     pub kind: NodeKind,
+    /// What the page's `type:` key names (t-43992 unit 2): one of the six
+    /// kinds, or nothing for a value outside them, for a page without the
+    /// key, and for every node that is not a page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_type: Option<PageType>,
     /// Milliseconds since the epoch, or 0 for a node that is not a file.
     pub modified_ms: i64,
     pub out_links: u32,
@@ -308,6 +314,8 @@ struct PageFacts {
     /// The `ingested_at:` frontmatter value is there. The value itself is not
     /// a fact the picture uses; whether the protocol's key was written is.
     ingested_at: bool,
+    /// What the page's `type:` key names, when it names one of the six kinds.
+    page_type: Option<PageType>,
     /// Vault-relative `raw/…` paths the body names in prose — how the log and
     /// a page vouch that a raw item was read (`second_brain_lint`).
     raw_mentions: Vec<String>,
@@ -627,6 +635,9 @@ fn parse_page(text: &str, stem: &str, link_bound: usize) -> PageFacts {
     let ingested_at = fields
         .get("ingested_at")
         .is_some_and(|held| !unquote(held.trim()).trim().is_empty());
+    let page_type = fields
+        .get(crate::second_brain_kinds::TYPE_KEY)
+        .and_then(|held| PageType::parse(held));
     let raw_mentions = second_brain_lint::raw_mentions(body, link_bound);
     let code_mentions = crate::second_brain_code::code_mentions(
         body,
@@ -669,6 +680,7 @@ fn parse_page(text: &str, stem: &str, link_bound: usize) -> PageFacts {
         tags,
         source,
         ingested_at,
+        page_type,
         raw_mentions,
         code_mentions,
         excerpt,
@@ -920,7 +932,7 @@ pub(crate) fn parse_frontmatter(front: &str) -> BTreeMap<String, String> {
 }
 
 /// `[a, b]`, `a, b`, or the block list this reader flattened to `a,b`.
-fn split_scalar_list(value: &str) -> Vec<String> {
+pub(crate) fn split_scalar_list(value: &str) -> Vec<String> {
     let inner = value
         .trim()
         .strip_prefix('[')
@@ -1061,6 +1073,7 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
         }
         index.insert(page.id.as_str(), node_index(nodes.len()));
         nodes.push(GraphNode {
+            page_type: facts.and_then(|held| held.page_type),
             id: page.id.clone(),
             title: facts
                 .map(|held| held.title.clone())
@@ -1120,6 +1133,7 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
     for (target, from) in &ghosts {
         let to = node_index(nodes.len());
         nodes.push(GraphNode {
+            page_type: None,
             id: format!("ghost:{target}"),
             title: target.clone(),
             tags: Vec::new(),
@@ -1140,6 +1154,7 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
     for (source, from) in &sourced {
         let to = node_index(nodes.len());
         nodes.push(GraphNode {
+            page_type: None,
             id: source.clone(),
             title: source.rsplit('/').next().unwrap_or(source).to_string(),
             tags: Vec::new(),
@@ -1497,8 +1512,8 @@ mod tests {
         assert_eq!(node(&graph, "wiki/Beta.md").in_links, 1);
         assert_eq!(graph.ghosts, 0);
         assert!(!graph.capped);
-        // index.md and log.md are pages of the wiki like any other.
-        assert_eq!(graph.pages, 6);
+        // index.md, log.md and overview.md are pages of the wiki like any other.
+        assert_eq!(graph.pages, 7);
     }
 
     #[test]
@@ -2136,5 +2151,28 @@ mod tests {
         assert_eq!(page_path(root, "wiki/../../etc/passwd"), None);
         assert_eq!(page_path(root, "wiki"), None);
         assert_eq!(page_path(root, "/etc/passwd"), None);
+    }
+
+    /// t-43992 unit 2: a page's `type:` reaches its node — one of the six
+    /// kinds in any case, or nothing for a value outside them and for a page
+    /// without the key; an untyped node carries no key on the wire.
+    #[test]
+    fn a_page_s_type_key_reaches_its_node() {
+        let root = vault(&[
+            ("idea.md", "---\ntype: Concept\n---\nAn idea.\n"),
+            ("trap.md", "---\ntype: gotcha\n---\nA trap.\n"),
+            ("plain.md", "No frontmatter.\n"),
+        ]);
+        let graph = GraphCache::new().scan(root.path(), false);
+        assert_eq!(
+            node(&graph, "wiki/idea.md").page_type,
+            Some(PageType::Concept)
+        );
+        assert_eq!(node(&graph, "wiki/trap.md").page_type, None);
+        assert_eq!(node(&graph, "wiki/plain.md").page_type, None);
+        let typed = serde_json::to_value(node(&graph, "wiki/idea.md")).unwrap();
+        assert_eq!(typed["page_type"], "concept");
+        let plain = serde_json::to_value(node(&graph, "wiki/plain.md")).unwrap();
+        assert!(plain.get("page_type").is_none(), "{plain}");
     }
 }

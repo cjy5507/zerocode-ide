@@ -114,6 +114,7 @@ fn desk_row(message: &str) -> DeskTask {
         writing: None,
         kept: None,
         hand_in: Default::default(),
+        progress: None,
     }
 }
 

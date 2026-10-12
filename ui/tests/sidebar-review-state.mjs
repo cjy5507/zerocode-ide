@@ -34,36 +34,41 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * checkout it left it in. */
 const SCENE = [
   { path: "/r/ask", term: 8101, hook: "needs-attention" },
-  { path: "/r/rep", term: 8102, hook: "done", task: "wire the beat", ledger: { reported: true } },
+  { path: "/r/rep", term: 8102, hook: "done", task: "wire the beat",
+    ledger: { reported: true, progress: { stage: "report_only" } } },
   { path: "/r/claim", term: 8103, hook: "done", task: "claim only",
-    ledger: { reported: true, review: { claimed_merged: true, author: "worker" } } },
+    ledger: { reported: true, review: { claimed_merged: true, author: "worker" },
+      progress: { stage: "report_only", claimed: "merged" } } },
   { path: "/r/left", term: 8109, hook: "idle", task: "process left after reporting",
-    ledger: { reported: true } },
+    ledger: { reported: true, progress: { stage: "report_only" } } },
   { path: "/r/ver", term: 8104, hook: "done", task: "verified work",
-    ledger: { reported: true, review: { verified: true, written: true, author: "coordinator" } } },
+    ledger: { reported: true, review: { verified: true, written: true, author: "coordinator" },
+      progress: { stage: "verified" } } },
   { path: "/r/own", term: 8105, hook: "done" },
-  { path: "/r/work", term: 8106, hook: "working", task: "still going", ledger: { reported: false } },
-  { path: "/r/gone", settled: { reported: true, task: "released, unreviewed" } },
+  { path: "/r/work", term: 8106, hook: "working", task: "still going",
+    ledger: { reported: false, progress: { stage: "working" } } },
+  { path: "/r/gone", settled: { reported: true, task: "released, unreviewed", progress: { stage: "report_only" } } },
   { path: "/r/landed", settled: { reported: true, task: "released, merged",
-    review: { verified: true, merged: true, written: true, author: "coordinator" } } },
+    review: { verified: true, merged: true, written: true, author: "coordinator" }, progress: { stage: "merged" } } },
   { path: "/r/failed", term: 8107, hook: "done", task: "failed attempt",
-    ledger: { reported: true, failed: true } },
+    ledger: { reported: true, failed: true, progress: { stage: "failed" } } },
   { path: "/r/quiet", term: 8108, hook: "done", task: "turn ended, nothing filed",
-    ledger: { reported: false } },
+    ledger: { reported: false, progress: { stage: "working" } } },
   // A failed attempt whose task a sweep compacted away: no title, no task id —
   // the failed dispatch is all the ledger has left to say there was one.
-  { path: "/r/compact", term: 8110, hook: "done", noTask: true, ledger: { reported: true, failed: true } },
-  { path: "/r/lost", settled: { reported: true, failed: true, task: "released, failed" } },
+  { path: "/r/compact", term: 8110, hook: "done", noTask: true,
+    ledger: { reported: true, failed: true, progress: { stage: "failed" } } },
+  { path: "/r/lost", settled: { reported: true, failed: true, task: "released, failed", progress: { stage: "failed" } } },
   { path: "/r/idle" },
   // Done by hand after attempts that handed nothing in (t-19328): no review
   // record can ever be written for it, the ledger says so (`unreviewable`), and
   // it waits on nobody — not 검증 대기, and not a verified 완료 either.
   { path: "/r/norec", settled: { reported: true, task: "released, done by hand",
-    review: { unreviewable: true } } },
+    review: { unreviewable: true }, progress: { stage: "unreviewable" } } },
   { path: "/r/norecfail", settled: { reported: true, failed: true, task: "released, done by hand after a failure",
-    review: { unreviewable: true } } },
+    review: { unreviewable: true }, progress: { stage: "unreviewable" } } },
   { path: "/r/norecseat", term: 8111, hook: "done", task: "seated, done by hand",
-    ledger: { reported: true, review: { unreviewable: true } } },
+    ledger: { reported: true, review: { unreviewable: true }, progress: { stage: "unreviewable" } } },
 ];
 
 const WANT_GROUPS = {
@@ -94,15 +99,15 @@ const CONFLATED = ["완료 또는 대기 중", "Done or waiting", "完了また�
 const LOCALES = ["ko", "en", "ja", "zh", "es"];
 const TALL = 2400;
 
-/* The board's review stages (`AGENT_GRAPH_LIVE_STAGES`) and where the sidebar
+/* The ledger's stages (`WORK_STAGES`, core `WorkStage`) and where the sidebar
  * places each: waiting for the coordinator, vouched by the coordinator, or
  * neither — the rule the sidebar always had. The list is closed on purpose: a
- * stage the board learns tomorrow makes this suite red instead of falling
+ * stage the ledger learns tomorrow makes this suite red instead of falling
  * through the sidebar unplaced. */
 const WANT_PHASE = {
-  reported: "review", "claimed-verified": "review", "claimed-merged": "review", "claimed-deployed": "review",
-  verified: "vouched", merged: "vouched", deployed: "vouched", failed: "", closed: "closed",
-  unreviewable: "unreviewable", "nothing-to-land": "vouched",
+  working: "", report_only: "review", stale: "review", superseded: "superseded", failed: "", unreviewable: "unreviewable",
+  verified: "vouched", nothing_to_land: "vouched", merged: "vouched", deployed: "vouched", closed: "closed",
+  unknown: "",
 };
 
 export async function testSidebarReviewState({ browser, origin, ok, faults }) {
@@ -221,12 +226,11 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
     );
 
     /* The number: the 검증 대기 lane counts only work a coordinator can still
-     * review. The same ledger as an older window's rows carried it — no
-     * `unreviewable` anywhere — puts six checkouts there, exactly as it always
-     * did; with the ledger's own fact the two reported ones whose task was done
-     * by hand with nothing handed in leave it (the third was a failed attempt,
-     * which the old reading called 실패, not waiting), and nothing that can be
-     * reviewed does. */
+     * review. The same ledger read as a report where it can take no review
+     * puts six checkouts there; with the ledger's own reading the two reported
+     * ones whose task was done by hand with nothing handed in leave it (the
+     * third was a failed attempt, which reads 실패, not waiting), and nothing
+     * that can be reviewed does. */
     const counted = await page.evaluate(async () => {
       const count = () => window.__READ__.groups().find((lane) => lane.id === "review")?.rows.length ?? 0;
       const follow = async (want, payload) => {
@@ -238,20 +242,18 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       };
       const after = count();
       const held = window.__LEDGER__;
-      window.__LEDGER__ = held.map((row) => {
-        const { unreviewable, ...review } = row.review;
-        return { ...row, review };
-      });
-      await follow(() => paneLedger.get(8111)?.review?.unreviewable === undefined
-        && checkoutLedger.get("/r/norec")?.review?.unreviewable === undefined, 30);
+      window.__LEDGER__ = held.map((row) => row.progress?.stage === "unreviewable"
+        ? { ...row, progress: { stage: row.failed ? "failed" : "report_only" } } : row);
+      await follow(() => paneLedger.get(8111)?.progress?.stage === "report_only"
+        && checkoutLedger.get("/r/norec")?.progress?.stage === "report_only", 30);
       const before = count();
       window.__LEDGER__ = held;
-      await follow(() => paneLedger.get(8111)?.review?.unreviewable === true
-        && checkoutLedger.get("/r/norec")?.review?.unreviewable === true, 31);
+      await follow(() => paneLedger.get(8111)?.progress?.stage === "unreviewable"
+        && checkoutLedger.get("/r/norec")?.progress?.stage === "unreviewable", 31);
       return { before, after, restored: count() };
     });
     ok(
-      "the 검증 대기 lane counts only what a coordinator can still review: the same ledger without the fact (an older ledger's rows) puts six checkouts there, with it four — the two reported ones whose task was done by hand with nothing handed in leave it",
+      "the 검증 대기 lane counts only what a coordinator can still review: the same ledger read as reports puts six checkouts there, its own reading four — the two reported ones whose task was done by hand with nothing handed in leave it",
       counted.before === 6 && counted.after === 4 && counted.restored === 4,
       JSON.stringify(counted),
     );
@@ -336,7 +338,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       awaiting: t("board.awaitingReview", "검증 대기"), claimed: t("board.claimedMerged", "병합됐다 함"),
       verified: t("board.verified", "검증됨"), merged: t("board.merged", "병합됨"), done: t("board.done", "완료"),
       failed: t("board.desk.stageFailed", "실패"), idle: t("board.idle", "대기 중"),
-      noRecord: t("board.noReviewRecord", "완료 — 검토 기록 없음"),
+      noRecord: t("board.noReviewRecord", "종료 — 검토 자료 없음"),
     }));
     ok(
       "the agent rows hung under a card wear the same distinction: an hourglass and 검증 대기 while the coordinator has not vouched, a check and the ledger's word once it has, a plain 완료 for an agent the ledger never seated, and a plain dot at rest — never a check — for a turn that ended before its report or a failed attempt",
@@ -376,7 +378,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
     // with a quiet check (nothing is hourglassed for a coordinator, and nothing
     // vouches for it either) and no failure tip.
     ok(
-      "work a coordinator can never review wears its own word on the agent rows — 완료 — 검토 기록 없음, a quiet check, never the hourglass and 검증 대기, never green and 검증됨, and not 실패 after a failed attempt",
+      "work a coordinator can never review wears its own word on the agent rows — 종료 — 검토 자료 없음, a quiet check, never the hourglass and 검증 대기, never green and 검증됨, and not 실패 after a failed attempt",
       ["/r/norec", "/r/norecfail", "/r/norecseat"].every((path) =>
         agents[path]?.said === wantWords.noRecord && agents[path].said !== wantWords.awaiting &&
         agents[path].glyph === "#i-circle-check" && !agents[path].klass.includes("is-review") &&
@@ -401,21 +403,20 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       paneAgents.set(8202, "codex");
       paneParents.set(8202, 8201);
       agentFolded.delete(8201);
-      const old = { verified: false, merged: false, deployed: false, written: false };
-      const facts = (review, over = {}) => ({ run: "run-1", worker: "w-kid", agent: "codex", task: "a child's task",
-        taskId: "t-kid", ledger: "active", reported: true, failed: false, review, closed: null, ...over });
+      const facts = (progress, over = {}) => ({ run: "run-1", worker: "w-kid", agent: "codex", task: "a child's task",
+        taskId: "t-kid", ledger: "active", reported: true, failed: false, review: null, progress, closed: null, ...over });
       const seen = {};
       try {
-        for (const [name, review, over] of [
-          ["waiting", old, {}],
-          ["claimed", { ...old, claimed_verified: true, author: "worker" }, {}],
-          ["failedAttempt", old, { failed: true }],
-          ["vouched", { ...old, verified: true, written: true, author: "coordinator" }, {}],
-          ["unreviewable", { ...old, unreviewable: true }, {}],
-          ["afterFailure", { ...old, unreviewable: true }, { failed: true }],
-          ["closed", old, { closed: { kind: "outdated", why: "x" } }],
+        for (const [name, progress, over] of [
+          ["waiting", { stage: "report_only" }, {}],
+          ["claimed", { stage: "report_only", claimed: "verified" }, {}],
+          ["failedAttempt", { stage: "failed" }, { failed: true }],
+          ["vouched", { stage: "verified" }, {}],
+          ["unreviewable", { stage: "unreviewable" }, {}],
+          ["afterFailure", { stage: "unreviewable" }, { failed: true }],
+          ["closed", { stage: "closed" }, { closed: { kind: "outdated", why: "x" } }],
         ]) {
-          paneLedger.set(8202, facts(review, over));
+          paneLedger.set(8202, facts(progress, over));
           const rows = worktreeAgentRows(path);
           seen[name] = { stands: rows.some((row) => row.term === 8202 && !row.sub && !row.history),
             folded: rows.find((row) => row.history)?.history ?? 0 };
@@ -457,7 +458,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       const gone = projects.flatMap((one) => one.worktrees).find((one) => one.path === "/r/gone");
       const signed = workspaceBoardCardPaintSignature(gone);
       const held = checkoutLedger.get("/r/gone");
-      checkoutLedger.set("/r/gone", { ...held, review: { ...held.review, verified: true } });
+      checkoutLedger.set("/r/gone", { ...held, progress: { stage: "verified" } });
       const signedAfter = workspaceBoardCardPaintSignature(gone);
       checkoutLedger.set("/r/gone", held);
       return {
@@ -485,9 +486,10 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       const glyph = () => document.querySelector('.wt-agents[data-worktree-path="/r/rep"] .wt-agent-dot use')?.getAttribute("href") ?? null;
       seen.before = { lane: lane("/r/rep"), state: window.__READ__.mark("/r/rep").state, glyph: glyph() };
       window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === "w-rep"
-        ? { ...row, review: { ...row.review, verified: true, written: true, author: "coordinator" } } : row);
+        ? { ...row, review: { ...row.review, verified: true, written: true, author: "coordinator" },
+          progress: { stage: "verified" } } : row);
       for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 10 });
-      for (let tries = 0; tries < 80 && !paneLedger.get(8102)?.review?.verified; tries += 1) {
+      for (let tries = 0; tries < 80 && paneLedger.get(8102)?.progress?.stage !== "verified"; tries += 1) {
         await new Promise((done) => setTimeout(done, 25));
       }
       await window.__PAINTED__();
@@ -532,13 +534,14 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       };
       const held = window.__LEDGER__;
       const before = read();
-      window.__LEDGER__ = held.map((one) => one.worker === "w-quiet" ? { ...one, reported: true, failed: true } : one);
+      window.__LEDGER__ = held.map((one) => one.worker === "w-quiet"
+        ? { ...one, reported: true, failed: true, progress: { stage: "failed" } } : one);
       for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 11 });
-      await settle(() => paneLedger.get(8108)?.failed === true);
+      await settle(() => paneLedger.get(8108)?.progress?.stage === "failed");
       const failed = read();
       window.__LEDGER__ = held;
       for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 12 });
-      await settle(() => paneLedger.get(8108)?.failed === false);
+      await settle(() => paneLedger.get(8108)?.progress?.stage === "working");
       const back = read();
       return { before, failed, back,
         want: typeof AGENT_FAILED_TIP === "undefined" ? "" : t(AGENT_FAILED_TIP.key, AGENT_FAILED_TIP.word),
@@ -556,6 +559,41 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       JSON.stringify(turning),
     );
 
+    /* A review that names an older attempt or commit than the work handed in no
+     * longer stands (t-47538): the row says the work waits for a review again,
+     * in a word of its own, and it still waits. */
+    const stale = await page.evaluate(async () => {
+      const row = () => document.querySelector('.wt-agents[data-worktree-path="/r/left"] .wt-agent');
+      const read = () => ({
+        glyph: row()?.querySelector(".wt-agent-dot use")?.getAttribute("href") ?? null,
+        said: row()?.querySelector(".wt-agent-state")?.textContent ?? "",
+        state: window.__READ__.mark("/r/left").state,
+      });
+      const settle = async (until) => {
+        for (let tries = 0; tries < 80 && !until(); tries += 1) await new Promise((done) => setTimeout(done, 25));
+        await window.__PAINTED__();
+        await window.__PAINTED__();
+      };
+      const held = window.__LEDGER__;
+      window.__LEDGER__ = held.map((one) => one.worker === "w-left" ? { ...one,
+        review: { verified: false, merged: false, deployed: false, written: false, author: "coordinator",
+          attempt: "dp-old", source: "1111111", superseded_by: "dp-left" },
+        progress: { stage: "stale", attempt: "dp-left", reviewed: "1111111" } } : one);
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 13 });
+      await settle(() => paneLedger.get(8109)?.progress?.stage === "stale");
+      const stood = read();
+      window.__LEDGER__ = held;
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 14 });
+      await settle(() => paneLedger.get(8109)?.progress?.stage === "report_only");
+      return { stood, back: read(), stale: t("board.staleReview", "다시 검토 대기"), awaiting: t("board.awaitingReview", "검증 대기") };
+    });
+    ok(
+      "a review that names an older attempt or commit than the work handed in reads 다시 검토 대기 on the row — never the plain 검증 대기 of a review nobody wrote — and the work still waits, hourglassed, in its lane",
+      stale.stood.said === stale.stale && stale.stood.said !== stale.awaiting &&
+        stale.stood.glyph === "#i-hourglass" && stale.stood.state === "review" && stale.back.said === stale.awaiting,
+      JSON.stringify(stale),
+    );
+
     /* ---- 5. five languages ------------------------------------------------ */
     const languages = {};
     for (const code of LOCALES) {
@@ -569,7 +607,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
           failedTip: { want: typeof AGENT_FAILED_TIP === "undefined" ? "" : t(AGENT_FAILED_TIP.key, AGENT_FAILED_TIP.word),
             live: dotTip("/r/failed"), settled: dotTip("/r/lost") },
           review: t("board.awaitingReview", "검증 대기"), done: t("sidebar.stateDone", "완료"),
-          noRecord: t("board.noReviewRecord", "완료 — 검토 기록 없음"), verified: t("board.verified", "검증됨"),
+          noRecord: t("board.noReviewRecord", "종료 — 검토 자료 없음"), verified: t("board.verified", "검증됨"),
           seatedNoRecord: document.querySelector('.wt-agents[data-worktree-path="/r/norecseat"] .wt-agent-state')?.textContent ?? "",
           heads: window.__READ__.groups().map((lane) => lane.head),
           gone: words("/r/gone"), landed: words("/r/landed"), own: words("/r/own"),
@@ -579,7 +617,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
     }
     await page.evaluate(() => setLocale("ko", { persist: false }));
     ok(
-      "the five languages each say 완료 — 검토 기록 없음 in a word of their own: not 검증 대기, not the verified word, not Korean, and the seated row follows the language",
+      "the five languages each say 종료 — 검토 자료 없음 in a word of their own: not 검증 대기, not the verified word, not Korean, and the seated row follows the language",
       LOCALES.every((code) => {
         const one = languages[code];
         return one.noRecord !== one.review && one.noRecord !== one.verified && one.noRecord !== one.done &&
@@ -871,36 +909,29 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
 
     /* ---- 9. the seam is read, not copied ---------------------------------- */
     const seam = await page.evaluate(() => {
-      if (typeof worktreeReviewPhase !== "function" || typeof ledgerReviewPhaseOf !== "function") return { missing: true };
-      const facts = (review, over = {}) => ({ reported: true, failed: false, review, ...over });
-      // Every stage the board can name is either placed on one of the two words
-      // or left on the rule the sidebar always had. A stage the board learns
-      // tomorrow lands here red instead of falling through silently.
-      const stages = AGENT_GRAPH_LIVE_STAGES.map((one) => one.stage);
-      const placed = Object.fromEntries(AGENT_GRAPH_LIVE_STAGES.map((one) => {
-        const row = one.flag === "closed"
-          ? { reported: true, closed: { kind: "outdated", why: "x" }, review: null }
-          : one.flag === "reported" || one.flag === "failed"
-            ? { reported: true, [one.flag]: true, review: null }
-            : { reported: true, review: { [one.flag]: true } };
-        return [one.stage, ledgerReviewPhaseOf(row)];
-      }));
-      return { stages, placed, none: ledgerReviewPhaseOf({ reported: false, review: null }),
-        claimNotVouched: ledgerReviewPhaseOf(facts({ claimed_verified: true, verified: false })),
-        // The attempt failed and the task was done by hand: the task's reading wins.
-        unreviewableAfterFailure: ledgerReviewPhaseOf(facts({ unreviewable: true }, { failed: true })),
+      if (typeof worktreeReviewPhase !== "function" || typeof ledgerWork !== "function") return { missing: true };
+      const stages = Object.keys(WORK_STAGES);
+      const placed = Object.fromEntries(stages.map((stage) => [stage, ledgerReviewPhaseOf({ progress: { stage } })]));
+      return { stages, placed,
+        claims: Object.keys(WORK_CLAIMS).map((claimed) => ledgerReviewPhaseOf({ progress: { stage: "report_only", claimed } })),
+        // The live map names every stage the sidebar places, from the same row of the same table.
+        live: stages.filter((stage) => stage !== "working")
+          .every((stage) => AGENT_GRAPH_LIVE_STAGES.some((one) => one.stage === ledgerReviewStage({ progress: { stage } }))),
+        // A row's review flags without the ledger's reading place nothing: the window reads no flag itself.
+        flagsOnly: ledgerReviewPhaseOf({ reported: true, failed: false, review: { verified: true, unreviewable: true } }),
+        none: ledgerReviewPhaseOf({ reported: false, review: null }),
         // Between closed and vouched: something a coordinator vouched for is not
         // hidden by it, and it never hides what still waits.
         ranked: [WORKTREE_PHASE_RANK.closed, WORKTREE_PHASE_RANK.unreviewable, WORKTREE_PHASE_RANK.vouched,
           WORKTREE_PHASE_RANK.unsettled, WORKTREE_PHASE_RANK.review] };
     });
     ok(
-      "the sidebar reads the board's own review stages: a worker's report or claim waits for review, a coordinator's verify, merge or deploy is 완료, and a failed or unreported one keeps the old rule — every stage the board can name is placed",
+      "the sidebar reads the ledger's one reading: a worker's report or claim, and a review that names an older commit, wait for review; a coordinator's verify, merge or deploy is 완료; a failed or unreported one keeps the old rule — every stage the ledger can name is placed, and no flag is read a second way",
       seam.missing !== true &&
         JSON.stringify([...seam.stages].sort()) === JSON.stringify(Object.keys(WANT_PHASE).sort()) &&
         Object.entries(WANT_PHASE).every(([stage, phase]) => seam.placed[stage] === phase) &&
-        seam.none === "" && seam.claimNotVouched === "review" &&
-        seam.unreviewableAfterFailure === "unreviewable" &&
+        seam.claims.length === 3 && seam.claims.every((phase) => phase === "review") && seam.live &&
+        seam.flagsOnly === "" && seam.none === "" &&
         seam.ranked.every((rank, at) => Number.isInteger(rank) && (at === 0 || rank > seam.ranked[at - 1])),
       JSON.stringify(seam),
     );

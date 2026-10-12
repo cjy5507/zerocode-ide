@@ -48401,6 +48401,7 @@ const activeHistory = await page.evaluate(async () => {
     paneLedger.set(7912, {
       run: "run-1", worker: "w-1", task: "navigator cleanup", taskId: "t-9",
       ledger: "active", reported: true, review: { verified: false, merged: false, deployed: false, written: false },
+      progress: { stage: "report_only" },
     });
     const rows = worktreeAgentRows("/tmp/history-proj");
     const titled = makeAgentRow(rows.find((row) => row.term === 7912 && !row.sub), true);
@@ -48416,6 +48417,7 @@ const activeHistory = await page.evaluate(async () => {
       run: "run-1", worker: "w-1", task: "navigator cleanup", taskId: "t-9",
       ledger: "active", reported: true,
       review: { verified: true, merged: true, merge_head: "3a0a289b", deployed: false, written: true },
+      progress: { stage: "merged", merge_head: "3a0a289b" },
     });
     const merged = makeAgentRow(rows.find((row) => row.term === 7912 && !row.sub), true);
     seen.mergedFromLedger =
@@ -48429,6 +48431,7 @@ const activeHistory = await page.evaluate(async () => {
       ledger: "active", reported: true,
       review: { verified: false, merged: false, deployed: false, written: false,
         claimed_verified: true, claimed_merged: true, claimed_deployed: false, author: "worker" },
+      progress: { stage: "report_only", claimed: "merged" },
     });
     const claimed = makeAgentRow(rows.find((row) => row.term === 7912 && !row.sub), true);
     // Keep the actual state and served renderer beside the assertion: the
@@ -48474,7 +48477,8 @@ const activeHistory = await page.evaluate(async () => {
       hearing: "heard", hearing_at: 1, checkout: "/tmp/history-proj", task: "wire the beat",
       task_id: "t-10", reported: true,
       review: { verified: false, merged: false, deployed: false, written: false,
-        claimed_verified: true, claimed_merged: true, author: "worker" }, term: 7911, at: 1,
+        claimed_verified: true, claimed_merged: true, author: "worker" },
+      progress: { stage: "report_only", claimed: "merged" }, term: 7911, at: 1,
     }];
     for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 7 });
     // Await the refresh EFFECT, not just the event dispatch. The backend
@@ -55501,7 +55505,8 @@ suite("sidebar-nav-redesign", async ({ browser, origin, ok }) => {
       const live = await openTermTab({ placement: "tab" });
       tabOfTerm(live).worktree = wt;
       paneModels.set(live, "claude-fable-5-1");
-      ledgerRows.push({ term: live, run: "run-1", worker: "w-1", task: "방아쇠·반복·경기장", task_id: "t-4238", ledger: "", reported: false, review: null });
+      ledgerRows.push({ term: live, run: "run-1", worker: "w-1", task: "방아쇠·반복·경기장", task_id: "t-4238", ledger: "", reported: false, review: null,
+        progress: { stage: "working" } });
       paneActivities.set(`term:${live}`, [{ activity: { verb: "read", target: "ui/shell.js" } }]);
       const settled = await openTermTab({ placement: "tab" });
       tabOfTerm(settled).worktree = wt;
@@ -55509,7 +55514,8 @@ suite("sidebar-nav-redesign", async ({ browser, origin, ok }) => {
       const verified = await openTermTab({ placement: "tab" });
       tabOfTerm(verified).worktree = wt;
       panePrompts.set(verified, "검증된 일");
-      ledgerRows.push({ term: verified, run: "run-1", worker: "w-2", task: "", task_id: "", ledger: "", reported: true, review: { verified: true } });
+      ledgerRows.push({ term: verified, run: "run-1", worker: "w-2", task: "", task_id: "", ledger: "", reported: true, review: { verified: true },
+        progress: { stage: "verified" } });
       hook(live, "working", "claude");
       hook(settled, "done", "codex");
       hook(verified, "done", "codex");
@@ -55633,18 +55639,18 @@ suite("finished-work", async ({ browser, origin, ok }) => {
         };
       };
       await refreshWorktrees();
-      await window.__FINISHED_SETTLE__({});
+      await window.__FINISHED_SETTLE__({}, { progress: { stage: "report_only" } });
     });
     await page.locator("#worktrees").screenshot({ path: "/tmp/zerocode-finished-work-sidebar.png" });
     const seen = await page.evaluate(async () => {
       const out = { awaiting: window.__FINISHED_READ__() };
-      await window.__FINISHED_SETTLE__({ verified: true });
+      await window.__FINISHED_SETTLE__({ verified: true }, { progress: { stage: "verified" } });
       out.verified = window.__FINISHED_READ__();
-      await window.__FINISHED_SETTLE__({ verified: true, merged: true });
+      await window.__FINISHED_SETTLE__({ verified: true, merged: true }, { progress: { stage: "merged" } });
       out.merged = window.__FINISHED_READ__();
-      await window.__FINISHED_SETTLE__({}, { failed: true });
+      await window.__FINISHED_SETTLE__({}, { failed: true, progress: { stage: "failed" } });
       out.failed = window.__FINISHED_READ__();
-      await window.__FINISHED_SETTLE__({ claimed_merged: true });
+      await window.__FINISHED_SETTLE__({ claimed_merged: true }, { progress: { stage: "report_only", claimed: "merged" } });
       out.claimed = window.__FINISHED_READ__();
       out.words = {
         awaiting: t("board.awaitingReview", "검증 대기"), verified: t("board.verified", "검증됨"),

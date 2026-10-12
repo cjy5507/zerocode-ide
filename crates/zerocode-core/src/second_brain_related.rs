@@ -451,6 +451,7 @@ mod tests {
 
     fn page(id: &str, title: &str, tags: &[&str]) -> GraphNode {
         GraphNode {
+            page_type: None,
             id: id.to_string(),
             title: title.to_string(),
             tags: tags.iter().map(|held| (*held).to_string()).collect(),
@@ -466,6 +467,7 @@ mod tests {
 
     fn ghost(target: &str) -> GraphNode {
         GraphNode {
+            page_type: None,
             id: format!("ghost:{target}"),
             title: target.to_string(),
             kind: NodeKind::Ghost,
@@ -525,6 +527,7 @@ mod tests {
         );
         assert_eq!(slug_of(&ghost("wiki/미래")).as_deref(), Some("wiki/미래"));
         let source = GraphNode {
+            page_type: None,
             kind: NodeKind::Source,
             ..page("raw/paper.pdf", "paper.pdf", &[])
         };

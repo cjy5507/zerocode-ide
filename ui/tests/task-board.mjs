@@ -43,7 +43,7 @@ export function taskBoardFixture() {
     run: "run-board", worker: "w-104", agent: "codex", state: "working", ledger: "active",
     hearing: "heard", hearing_at: now - 60_000, checkout: "", task: "관리자 화면 구현", task_id: "t-104",
     reported: true, dispatch_id: "dp-104", dispatch_started_ms: now - 3_600_000, retry_of: null,
-    review: { verified: false, merged: false, deployed: false, written: false },
+    review: { verified: false, merged: false, deployed: false, written: false }, progress: { stage: "report_only" },
     term: 104, at: now - 3_600_000, model: "gpt-6-astra", effort: "max", pane: "%4", asking: false,
     wall: null, quiet_at: null, pane_missing_since_ms: null,
     cost: {
@@ -323,11 +323,11 @@ export async function testTaskBoard(browser, origin, ok) {
         };
       };
       const seen = {
-        awaiting: await read(finished({})),
-        verified: await read(finished({ verified: true })),
-        merged: await read(finished({ verified: true, merged: true })),
-        failed: await read(finished({}, { failed: true })),
-        claimed: await read(finished({ claimed_merged: true })),
+        awaiting: await read(finished({}, { progress: { stage: "report_only" } })),
+        verified: await read(finished({ verified: true }, { progress: { stage: "verified" } })),
+        merged: await read(finished({ verified: true, merged: true }, { progress: { stage: "merged" } })),
+        failed: await read(finished({}, { failed: true, progress: { stage: "failed" } })),
+        claimed: await read(finished({ claimed_merged: true }, { progress: { stage: "report_only", claimed: "merged" } })),
       };
       refreshDeskLedger();
       for (let tries = 0; tries < 40 && deskLedgerAsking; tries += 1) {
