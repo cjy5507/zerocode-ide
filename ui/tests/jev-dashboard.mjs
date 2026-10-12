@@ -1534,8 +1534,14 @@ export async function testJevDashboard(browser, origin, ok) {
         await page.evaluate(async () => {
           document.querySelector("#jev-view .jev-drawer-close").click();
           setSettingsOpen(true, "jev-enabled");
-          document.getElementById("typesafe-advanced").open = true;
           await window.__PAINTED__();
+        });
+        const disclosures = await page.evaluateHandle(async () => {
+          const saved = [...document.querySelectorAll("#typesafe-card details")]
+            .map((element) => ({ element, open: element.open }));
+          for (const { element } of saved) element.open = true;
+          await window.__PAINTED__();
+          return saved;
         });
         const frame = page.locator(".settings-frame");
         const scrollBefore = await frame.evaluate((node) => [node.scrollTop, node.scrollLeft]);
@@ -1570,10 +1576,11 @@ export async function testJevDashboard(browser, origin, ok) {
             node.style.cssText = held.style;
           }, saved);
         }
-        await page.evaluate(() => {
-          document.getElementById("typesafe-advanced").open = false;
-          setSettingsOpen(false);
+        await disclosures.evaluate((saved) => {
+          for (const { element, open } of saved) element.open = open;
         });
+        await disclosures.dispose();
+        await page.evaluate(() => setSettingsOpen(false));
         contrast[theme] = [
           ...dashboard.map((row) => ({ surface: "dashboard", ...row })),
           ...drawer.map((row) => ({ surface: "drawer", ...row })),

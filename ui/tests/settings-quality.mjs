@@ -95,6 +95,17 @@ export async function contrastTable(page, AxeBuilder, include) {
         const measured = findings(await analyze(target))
           .find((one) => one.node.target.join(" ") === target);
         if (measured) ({ verdict, node } = measured);
+      } catch (error) {
+        const ancestors = await control.evaluate((element) => {
+          const states = [];
+          for (let current = element; current && states.length < 16; current = current.parentElement) {
+            states.push({ tag: current.tagName, id: current.id, hidden: current.hidden,
+              open: current.tagName === "DETAILS" ? current.open : null,
+              display: getComputedStyle(current).display });
+          }
+          return states;
+        }).catch(() => []);
+        throw new Error(`contrast target ${target}: ${JSON.stringify(ancestors)}; ${String(error)}`);
       } finally {
         await scroll.evaluate((saved) => {
           for (const { element, top, left } of saved) element.scrollTo({ top, left, behavior: "instant" });
