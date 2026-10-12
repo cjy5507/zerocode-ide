@@ -8652,11 +8652,7 @@ fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
 
     ring.note(edit_activity("src/a.rs", Phase::Started));
     assert!(ring.due(start).is_some(), "the first leaves at once");
-    assert_eq!(
-        ring.owed(start),
-        None,
-        "nothing is held, so nothing is owed"
-    );
+    assert_eq!(ring.owed(start), None, "nothing is held, so nothing is owed");
 
     // The end comes inside the floor: held, and owed the time the floor has left.
     ring.note(edit_activity("src/a.rs", Phase::Finished));
@@ -8668,11 +8664,7 @@ fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
         "one promise for a held batch, not one for each time somebody asks"
     );
     ring.note(edit_activity("src/b.rs", Phase::Started));
-    assert_eq!(
-        ring.owed(after(30)),
-        None,
-        "another event joins the batch the promise covers"
-    );
+    assert_eq!(ring.owed(after(30)), None, "another event joins the batch the promise covers");
 
     // The promise keeps: when the floor opens the batch leaves, all of it.
     let batch = ring.due(after(100)).expect("the floor opened");
@@ -8706,29 +8698,15 @@ fn a_promise_that_wakes_early_is_made_again_and_one_that_wakes_on_time_takes_the
     assert_eq!(owed, Some(Duration::from_millis(90)));
 
     let (batch, owed) = ring.flush(after(95));
-    assert!(
-        batch.is_none(),
-        "the clock woke the task before the floor opened"
-    );
-    assert_eq!(
-        owed,
-        Some(Duration::from_millis(5)),
-        "promised again for what is left"
-    );
+    assert!(batch.is_none(), "the clock woke the task before the floor opened");
+    assert_eq!(owed, Some(Duration::from_millis(5)), "promised again for what is left");
 
     let (batch, owed) = ring.flush(after(100));
-    assert_eq!(
-        batch.map(|held| held.len()),
-        Some(1),
-        "the floor opened: the end leaves"
-    );
+    assert_eq!(batch.map(|held| held.len()), Some(1), "the floor opened: the end leaves");
     assert_eq!(owed, None, "nothing is held, so nothing is owed");
 
     let (batch, owed) = ring.flush(after(200));
-    assert!(
-        batch.is_none() && owed.is_none(),
-        "a promise that finds nothing held makes none"
-    );
+    assert!(batch.is_none() && owed.is_none(), "a promise that finds nothing held makes none");
 }
 
 /// A measurement, not a gate (t-31715): what the ring's deadline costs a busy
@@ -8780,14 +8758,8 @@ fn the_rings_deadline_costs_nanoseconds_an_event_and_one_promise_a_floor() {
             "promises": promises,
         })
     );
-    assert_eq!(
-        batches_before, batches_after,
-        "the deadline moved the floor"
-    );
-    assert!(
-        promises <= batches_after + 1,
-        "more promises than held batches"
-    );
+    assert_eq!(batches_before, batches_after, "the deadline moved the floor");
+    assert!(promises <= batches_after + 1, "more promises than held batches");
 }
 
 /// What the file tree asks when an agent's write ends (t-31715), answered
@@ -8806,8 +8778,7 @@ fn a_scoped_scm_answer_covers_only_the_files_asked_about() {
     test_git(repo, &["add", "."]);
     test_git(repo, &["commit", "-q", "-m", "base"]);
     std::fs::write(repo.join("kept.txt"), "one\nTWO\nthree\nfour\n").expect("a change");
-    std::fs::write(repo.join("other.txt"), "alpha\nbeta\ngamma\n")
-        .expect("a change nobody asked about");
+    std::fs::write(repo.join("other.txt"), "alpha\nbeta\ngamma\n").expect("a change nobody asked about");
     std::fs::write(repo.join("fresh.txt"), "new\n").expect("a new file");
     let orchestrator = Orchestrator::open(repo).expect("open repository");
 
@@ -12694,10 +12665,7 @@ fn a_helper_stop_for_an_agent_with_no_road_is_refused_before_any_channel_is_touc
             called += 1;
             Ok(serde_json::json!({}))
         });
-        assert!(
-            answer.is_err(),
-            "{agent}: a stop with no road was not refused"
-        );
+        assert!(answer.is_err(), "{agent}: a stop with no road was not refused");
         assert_eq!(called, 0, "{agent}: the channel was called");
     }
 }
@@ -12709,12 +12677,7 @@ fn a_helper_stop_for_an_agent_with_no_road_is_refused_before_any_channel_is_touc
 fn a_helper_stop_carries_the_rows_method_the_session_and_the_helper_and_hands_back_the_answer() {
     let roads: Vec<(&str, &str)> = zerocode_core::AGENT_SPECS
         .iter()
-        .filter_map(|spec| {
-            Some((
-                spec.id,
-                zerocode_core::agent::agent_voice(spec.id).helper_stop?,
-            ))
-        })
+        .filter_map(|spec| Some((spec.id, zerocode_core::agent::agent_voice(spec.id).helper_stop?)))
         .collect();
     assert!(!roads.is_empty(), "no catalog row names a road");
     let reply = serde_json::json!({
@@ -12732,17 +12695,10 @@ fn a_helper_stop_carries_the_rows_method_the_session_and_the_helper_and_hands_ba
         });
         assert_eq!(
             sent,
-            vec![(
-                road.to_string(),
-                serde_json::json!({ "id": "s-9", "agent_id": "h-7" })
-            )],
+            vec![(road.to_string(), serde_json::json!({ "id": "s-9", "agent_id": "h-7" }))],
             "{agent}"
         );
-        assert_eq!(
-            answer,
-            Ok(reply.clone()),
-            "{agent}: the answer was changed on the way"
-        );
+        assert_eq!(answer, Ok(reply.clone()), "{agent}: the answer was changed on the way");
     }
 }
 
@@ -18643,35 +18599,17 @@ fn a_folder_panel_settles_once_per_generation_by_whichever_road_ends_it() {
     let opened = Instant::now();
     assert_eq!(desk.ask(opened), FolderPanelAsk::Fresh { generation: 1 });
     let settled = desk
-        .settle(
-            1,
-            FolderPanelHow::Cancelled,
-            opened + Duration::from_secs(9),
-        )
+        .settle(1, FolderPanelHow::Cancelled, opened + Duration::from_secs(9))
         .expect("the standing panel settles");
-    assert_eq!(
-        settled.1,
-        FolderPanelSettled {
-            generation: 1,
-            how: FolderPanelHow::Cancelled
-        }
-    );
+    assert_eq!(settled.1, FolderPanelSettled { generation: 1, how: FolderPanelHow::Cancelled });
     assert_eq!(settled.0.stood_for, Duration::from_secs(9));
     // The same generation never settles twice.
-    assert_eq!(
-        desk.settle(
-            1,
-            FolderPanelHow::Answered,
-            opened + Duration::from_secs(10)
-        ),
-        None
-    );
+    assert_eq!(desk.settle(1, FolderPanelHow::Answered, opened + Duration::from_secs(10)), None);
     assert_eq!(FolderPanelSettled::EVENT, "project:folder-panel-settled");
 }
 
 #[test]
-fn a_panel_presumed_lost_is_settled_lost_when_the_next_ask_replaces_it_and_not_again_when_it_answers()
- {
+fn a_panel_presumed_lost_is_settled_lost_when_the_next_ask_replaces_it_and_not_again_when_it_answers() {
     let mut desk = FolderPanelDesk::new();
     let opened = Instant::now();
     assert_eq!(desk.ask(opened), FolderPanelAsk::Fresh { generation: 1 });
@@ -18680,10 +18618,7 @@ fn a_panel_presumed_lost_is_settled_lost_when_the_next_ask_replaces_it_and_not_a
     assert_eq!(desk.ask(lost), FolderPanelAsk::Fresh { generation: 2 });
     assert_eq!(
         desk.take_replaced(),
-        Some(FolderPanelSettled {
-            generation: 1,
-            how: FolderPanelHow::Lost
-        })
+        Some(FolderPanelSettled { generation: 1, how: FolderPanelHow::Lost })
     );
     assert_eq!(desk.take_replaced(), None);
     assert_eq!(desk.settle(1, FolderPanelHow::Answered, lost), None);
@@ -20330,41 +20265,24 @@ pub(crate) mod computer_desktop_wait {
     #[cfg(unix)]
     #[test]
     fn an_omitted_background_flag_does_not_allow_a_shared_desktop_process() {
-        let _hand = ONE_HAND
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(crate::computer_use::guard::stopped_reason(), None);
         let answer = answer_computer_command(&words(&[
-            "run",
-            "--program",
-            "/bin/echo",
-            "--args",
-            "background-policy-probe",
-            "--json",
+            "run", "--program", "/bin/echo", "--args", "background-policy-probe", "--json",
         ]));
-        assert_ne!(
-            answer.exit_code, 0,
-            "an unscoped program was started by default"
-        );
+        assert_ne!(answer.exit_code, 0, "an unscoped program was started by default");
         assert_eq!(envelope(&answer)["error"]["code"], "requires_foreground");
     }
 
     #[cfg(unix)]
     #[test]
     fn explicit_shared_desktop_policy_preserves_the_existing_process_road() {
-        let _hand = ONE_HAND
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let _policy = crate::computer_use::input_policy::enter(
             zerocode_core::computer_use_protocol::execution::InputPolicy::SharedDesktop,
         );
         let answer = answer_computer_command(&words(&[
-            "run",
-            "--program",
-            "/bin/echo",
-            "--args",
-            "background-policy-probe",
-            "--json",
+            "run", "--program", "/bin/echo", "--args", "background-policy-probe", "--json",
         ]));
         assert_eq!(answer.exit_code, 0, "{}", answer.stderr);
         assert_eq!(envelope(&answer)["ok"], true);
@@ -20379,9 +20297,7 @@ pub(crate) mod computer_desktop_wait {
     }
 
     fn assert_revoked_confirmation_is_not_sent(declared: bool) {
-        let _hand = ONE_HAND
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let _policy = crate::computer_use::input_policy::enter(
             crate::computer_use::input_policy::InputPolicy::SharedDesktop,
         );
@@ -20436,25 +20352,14 @@ pub(crate) mod computer_desktop_wait {
     #[test]
     fn a_running_program_obeys_a_stop_while_it_is_in_flight() {
         use std::os::unix::fs::PermissionsExt as _;
-        let _hand = ONE_HAND
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let folder = tempfile::tempdir().unwrap();
         let program = folder.path().join("wait-for-stop");
         let ready = folder.path().join("ready");
-        std::fs::write(
-            &program,
-            b"#!/bin/sh\nprintf ready > ready\nexec /bin/sleep 5\n",
-        )
-        .unwrap();
+        std::fs::write(&program, b"#!/bin/sh\nprintf ready > ready\nexec /bin/sleep 5\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let args = words(&[
-            "run",
-            "--program",
-            program.to_str().unwrap(),
-            "--cwd",
-            folder.path().to_str().unwrap(),
-            "--json",
+            "run", "--program", program.to_str().unwrap(), "--cwd", folder.path().to_str().unwrap(), "--json",
         ]);
         let running = std::thread::spawn(move || {
             let _policy = crate::computer_use::input_policy::enter(
@@ -20472,10 +20377,7 @@ pub(crate) mod computer_desktop_wait {
         let answer = running.join().unwrap();
         crate::computer_use::guard::lift();
         assert!(was_running, "the child must have started before the stop");
-        assert_eq!(
-            answer.exit_code, 1,
-            "the in-flight program ignored the stop"
-        );
+        assert_eq!(answer.exit_code, 1, "the in-flight program ignored the stop");
         assert_eq!(envelope(&answer)["error"]["code"], "stopped");
         assert!(stopped_at.elapsed() < std::time::Duration::from_secs(2));
     }
@@ -20879,8 +20781,7 @@ pub(crate) mod computer_desktop_wait {
             "--confirming",
             "payment",
             "--json",
-        ]))
-        .unwrap();
+        ])).unwrap();
         let mut calls = 0;
         let result = crate::agent_tools_runtime::call_with_the_persons_last_step(
             &unguarded,
@@ -20890,10 +20791,7 @@ pub(crate) mod computer_desktop_wait {
                 Ok(serde_json::json!({ "fixture": true }))
             },
         );
-        assert!(
-            result.is_ok(),
-            "a disabled confirmation reaches the provider"
-        );
+        assert!(result.is_ok(), "a disabled confirmation reaches the provider");
         assert_eq!(calls, 1);
         crate::computer_use::confirm::set_policy(crate::computer_use::confirm::Policy::default());
     }
@@ -20991,22 +20889,12 @@ pub(crate) mod computer_desktop_wait {
         use crate::computer_use::confirm::{self, Asking};
         use zerocode_core::computer_use_protocol::error_code;
         let background = zerocode_core::computer_use::parse_command(
-            &[
-                "click",
-                "--app",
-                "Fixture",
-                "--ocr",
-                "--text",
-                "Continue",
-                "--background",
-            ]
-            .map(str::to_owned),
-        )
-        .unwrap();
+            &["click", "--app", "Fixture", "--ocr", "--text", "Continue", "--background"]
+                .map(str::to_owned),
+        ).unwrap();
         let refusal = click_by_words(&background, Asking::HandBack, &mut |_, _| {
             panic!("background OCR must not escape into a desktop coordinate click")
-        })
-        .unwrap_err();
+        }).unwrap_err();
         assert_eq!(refusal.code, "requires_foreground");
         let _hand = ONE_HAND
             .lock()
@@ -21024,41 +20912,18 @@ pub(crate) mod computer_desktop_wait {
             { "text": "Pay 30 USD", "x": 880.0, "y": 900.0, "width": 100.0, "height": 20.0 },
         ] });
         let command = zerocode_core::computer_use::parse_command(&words(&[
-            "click",
-            "--app",
-            "iPhone Mirroring",
-            "--ocr",
-            "--text",
-            "No",
-            "--after-text",
-            "farm",
-            "--dy",
-            "2",
+            "click", "--app", "iPhone Mirroring", "--ocr", "--text", "No", "--after-text", "farm", "--dy", "2",
         ]))
         .expect("a click by words");
         let mut asked = Vec::new();
         let answer = click_by_words(&command, Asking::Person, &mut |method, params| {
             asked.push((method.to_string(), params));
-            Ok(if method == "readText" {
-                screen.clone()
-            } else {
-                serde_json::json!({ "path": "synthetic" })
-            })
+            Ok(if method == "readText" { screen.clone() } else { serde_json::json!({ "path": "synthetic" }) })
         })
         .expect("pressed");
         let methods: Vec<&str> = asked.iter().map(|(method, _)| method.as_str()).collect();
-        assert_eq!(
-            methods,
-            ["readText", "mouseClick"],
-            "one reading, one press"
-        );
-        assert_eq!(
-            (&asked[0].1["app"], &asked[0].1["ocr"]),
-            (
-                &serde_json::json!("iPhone Mirroring"),
-                &serde_json::json!(true)
-            )
-        );
+        assert_eq!(methods, ["readText", "mouseClick"], "one reading, one press");
+        assert_eq!((&asked[0].1["app"], &asked[0].1["ocr"]), (&serde_json::json!("iPhone Mirroring"), &serde_json::json!(true)));
         assert_eq!(
             (asked[1].1["x"].as_f64(), asked[1].1["y"].as_f64()),
             (Some(1070.0), Some(430.5)),
@@ -21066,12 +20931,7 @@ pub(crate) mod computer_desktop_wait {
         );
         assert_eq!(answer["pressed"]["words"], "No");
         let pay = zerocode_core::computer_use::parse_command(&words(&[
-            "click",
-            "--app",
-            "iPhone Mirroring",
-            "--ocr",
-            "--text",
-            "Pay",
+            "click", "--app", "iPhone Mirroring", "--ocr", "--text", "Pay",
         ]))
         .expect("a click by words");
         let mut presses = 0;
@@ -21081,14 +20941,8 @@ pub(crate) mod computer_desktop_wait {
             }
             Ok(screen.clone())
         });
-        assert_eq!(
-            handed.expect_err("held for the person").code,
-            error_code::CONFIRMATION_REQUIRED
-        );
-        assert_eq!(
-            presses, 0,
-            "a payment the words name never reaches the helper unasked"
-        );
+        assert_eq!(handed.expect_err("held for the person").code, error_code::CONFIRMATION_REQUIRED);
+        assert_eq!(presses, 0, "a payment the words name never reaches the helper unasked");
     }
 
     /// Every request that types text as keys carries the keyboard's table —
@@ -21593,8 +21447,7 @@ pub(crate) mod computer_desktop_wait {
         );
         let bin = tempfile::tempdir().expect("a folder for the stand-in programs");
         let echo = crate::test_host::echo_program(bin.path());
-        let echoed =
-            desktop_run(&serde_json::json!({ "program": echo, "args": "hello there" })).unwrap();
+        let echoed = desktop_run(&serde_json::json!({ "program": echo, "args": "hello there" })).unwrap();
         assert_eq!(echoed["spawned"], true, "{echoed}");
         assert_eq!(echoed["exitCode"], 0);
         assert_eq!(echoed["stdout"], "hello there\n");
@@ -21604,8 +21457,7 @@ pub(crate) mod computer_desktop_wait {
         let failed = desktop_run(&serde_json::json!({
             "program": crate::test_host::shell_program(),
             "args": "-c exit_7_please",
-        }))
-        .unwrap();
+        })).unwrap();
         assert_eq!(failed["spawned"], true);
         assert_ne!(failed["exitCode"], 0);
         assert!(
@@ -21621,8 +21473,7 @@ pub(crate) mod computer_desktop_wait {
             let started = std::time::Instant::now();
             let slow = desktop_run(
                 &serde_json::json!({ "program": "/bin/sleep", "args": "5", "timeoutMs": 120 }),
-            )
-            .unwrap();
+            ).unwrap();
             assert_eq!(slow["timedOut"], true, "{slow}");
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(3),
@@ -21630,8 +21481,7 @@ pub(crate) mod computer_desktop_wait {
             );
         }
 
-        let missing =
-            desktop_run(&serde_json::json!({ "program": "/nonexistent/program" })).unwrap();
+        let missing = desktop_run(&serde_json::json!({ "program": "/nonexistent/program" })).unwrap();
         assert_eq!(missing["spawned"], false);
 
         let answer = answer_computer_command(&[
@@ -24171,10 +24021,7 @@ fn a_helpers_sidecar_gives_its_kind_and_its_line_and_nothing_else() {
     // One word is enough to say something; none is nothing.
     assert_eq!(
         helper_about_in(r#"{"description":"Only a line"}"#),
-        Some(HelperAbout {
-            agent_type: None,
-            description: Some("Only a line".into())
-        })
+        Some(HelperAbout { agent_type: None, description: Some("Only a line".into()) })
     );
     for silent in [
         r#"{}"#,
@@ -24194,10 +24041,7 @@ fn a_helpers_sidecar_gives_its_kind_and_its_line_and_nothing_else() {
     )
     .expect("an odd value still has words");
     assert_eq!(odd.agent_type.as_deref(), Some("General purpose"));
-    assert_eq!(
-        odd.description.as_deref(),
-        Some("two lines and[31m escapes")
-    );
+    assert_eq!(odd.description.as_deref(), Some("two lines and[31m escapes"));
     let long = helper_about_in(&format!(
         r#"{{"agentType":"{}","description":"{}"}}"#,
         "t".repeat(500),
@@ -24238,10 +24082,7 @@ fn a_helpers_sidecar_is_read_from_beside_its_transcript_only() {
     let bound = usize::try_from(HELPER_ABOUT_BYTES).expect("a small bound");
     let padded = |size: usize| format!("{plan}{}", " ".repeat(size - plan.len()));
     std::fs::write(&beside, padded(bound)).expect("a sidecar at the bound");
-    assert!(
-        helper_about(&transcript).is_some(),
-        "a file at the bound was refused"
-    );
+    assert!(helper_about(&transcript).is_some(), "a file at the bound was refused");
     std::fs::write(&beside, padded(bound + 1)).expect("a sidecar past the bound");
     assert_eq!(helper_about(&transcript), None);
 
@@ -24250,8 +24091,7 @@ fn a_helpers_sidecar_is_read_from_beside_its_transcript_only() {
     std::fs::write(&beside, plan).expect("the sidecar again");
     let zo = dir.path().join("ab12.session.jsonl");
     std::fs::write(&zo, "{}\n").expect("zo's transcript");
-    std::fs::write(dir.path().join("ab12.session.meta.json"), plan)
-        .expect("a sidecar nobody looks for");
+    std::fs::write(dir.path().join("ab12.session.meta.json"), plan).expect("a sidecar nobody looks for");
     assert_eq!(helper_about(&zo), None);
     assert_eq!(helper_about(&dir.path().join("agent-a.b.jsonl")), None);
     assert_eq!(helper_about(&dir.path().join("agent-..%2f.jsonl")), None);
@@ -24266,20 +24106,13 @@ fn a_helpers_sidecar_is_read_from_beside_its_transcript_only() {
     {
         let elsewhere = tempfile::tempdir().expect("somewhere else");
         let target = elsewhere.path().join("secret.json");
-        std::fs::write(
-            &target,
-            r#"{"agentType":"Elsewhere","description":"Not this folder"}"#,
-        )
-        .expect("a good file elsewhere");
+        std::fs::write(&target, r#"{"agentType":"Elsewhere","description":"Not this folder"}"#)
+            .expect("a good file elsewhere");
         std::fs::write(&beside, plan).expect("the sidecar, good");
         assert!(helper_about(&transcript).is_some());
         std::fs::remove_file(&beside).expect("the sidecar goes");
         std::os::unix::fs::symlink(&target, &beside).expect("a link in its place");
-        assert_eq!(
-            helper_about(&transcript),
-            None,
-            "a link out of the folder was followed"
-        );
+        assert_eq!(helper_about(&transcript), None, "a link out of the folder was followed");
         std::fs::remove_file(&beside).expect("the link goes");
         // A pipe in its place must not hold the read: the opener refuses it at once.
         let name = std::ffi::CString::new(beside.to_str().expect("a path")).expect("no NUL");
@@ -24511,9 +24344,7 @@ mod handoff_code_road {
     /// What of a code a reader of `text` could use: the code, a group of it,
     /// or the person's own spelling.
     fn holds_the_code(text: &str) -> bool {
-        [A_CODE, "TEST9", TYPED]
-            .iter()
-            .any(|part| text.contains(part))
+        [A_CODE, "TEST9", TYPED].iter().any(|part| text.contains(part))
     }
 
     /// A code is asked for and nothing says where it goes: the window shows no
@@ -24630,21 +24461,10 @@ mod handoff_code_road {
         // no picture of the field after it.
         {
             let form = form.borrow();
-            assert_eq!(
-                form.field.as_deref(),
-                Some(A_CODE),
-                "the code is in the field"
-            );
-            assert_eq!(
-                form.doors,
-                ["computer"],
-                "one input, through the desktop door"
-            );
+            assert_eq!(form.field.as_deref(), Some(A_CODE), "the code is in the field");
+            assert_eq!(form.doors, ["computer"], "one input, through the desktop door");
             let typed = &form.computer[0];
-            assert_eq!(
-                typed.method,
-                zerocode_core::computer_use::ComputerMethod::SetValue
-            );
+            assert_eq!(typed.method, zerocode_core::computer_use::ComputerMethod::SetValue);
             assert_eq!(typed.params["app"], "Form");
             assert_eq!(typed.params["elementIndex"], 3);
             assert_eq!(typed.params["value"], A_CODE);
@@ -24806,11 +24626,7 @@ mod handoff_code_road {
             assert_eq!(envelope_of(&said)["result"]["entered"], true);
             assert!(!holds_the_code(&told(&said)), "{into}: {}", told(&said));
             let form = form.borrow();
-            assert_eq!(
-                form.doors,
-                [door],
-                "{into}: one input, through its own door"
-            );
+            assert_eq!(form.doors, [door], "{into}: one input, through its own door");
             assert_eq!(form.field.as_deref(), Some(A_CODE), "{into}");
             match door {
                 "browser" => assert_eq!(
@@ -24942,10 +24758,7 @@ mod handoff_code_road {
                 (plain.exit_code, plain.stdout, plain.stderr),
                 "{decision:?}"
             );
-            assert!(
-                form.borrow().doors.is_empty(),
-                "{decision:?}: nothing typed"
-            );
+            assert!(form.borrow().doors.is_empty(), "{decision:?}: nothing typed");
         }
     }
 
@@ -24969,16 +24782,7 @@ mod handoff_code_road {
         for argv in [
             &["key", "--key", "return", "--json"][..],
             &["type-text", "--app", "Form", "--text", A_CODE, "--json"][..],
-            &[
-                "set-value",
-                "--app",
-                "Form",
-                "--element-index",
-                "3",
-                "--value",
-                A_CODE,
-                "--json",
-            ][..],
+            &["set-value", "--app", "Form", "--element-index", "3", "--value", A_CODE, "--json"][..],
             &["click", "--app", "Form", "--text", "보내기", "--json"][..],
         ] {
             let refused = at_the_door(argv, &form);
@@ -25148,11 +24952,7 @@ mod handoff_code_road {
         );
         drop(standing);
         for argv in naming_zerocode {
-            assert_eq!(
-                refusal(argv, &apps),
-                None,
-                "{argv:?} once the card has gone"
-            );
+            assert_eq!(refusal(argv, &apps), None, "{argv:?} once the card has gone");
         }
         let plain = confirm::next_id();
         let _plain_standing = Standing(plain.clone());
@@ -25198,11 +24998,7 @@ mod handoff_code_road {
 
     /// A finished shell call as an agent's hook reports it to the window: its
     /// command, and what came back — as one string, and as the two streams.
-    fn finished_call(
-        command: &[String],
-        answer: &zerocode_hookd::TeamAnswer,
-        streams: bool,
-    ) -> String {
+    fn finished_call(command: &[String], answer: &zerocode_hookd::TeamAnswer, streams: bool) -> String {
         let response = if streams {
             json!({ "stdout": answer.stdout, "stderr": answer.stderr })
         } else {
@@ -25354,11 +25150,7 @@ mod handoff_code_road {
 
         // The checks see a code where one is.
         assert!(
-            holds_the_code(&seen(&finished_call(
-                &words(&["handoff"]),
-                &planted(),
-                true
-            ))),
+            holds_the_code(&seen(&finished_call(&words(&["handoff"]), &planted(), true))),
             "the claim seat's evidence is made of the call's streams"
         );
         assert!(
@@ -25386,27 +25178,13 @@ mod handoff_code_road {
     fn the_terminal_the_log_and_the_evidence_folder_hold_no_code() {
         let _hand = one_hand();
         for (road, argv, answer) in roads() {
-            let screen = format!(
-                "$ zerocode-computer {}\n{}{}",
-                argv.join(" "),
-                answer.stdout,
-                answer.stderr
-            );
-            assert!(
-                !holds_the_code(&screen),
-                "{road}: the terminal shows the code\n{screen}"
-            );
+            let screen = format!("$ zerocode-computer {}\n{}{}", argv.join(" "), answer.stdout, answer.stderr);
+            assert!(!holds_the_code(&screen), "{road}: the terminal shows the code\n{screen}");
             let logged = crate::run_evidence::redacted("computer", &argv).join(" ");
-            assert!(
-                !holds_the_code(&logged),
-                "{road}: the evidence line holds the code: {logged}"
-            );
+            assert!(!holds_the_code(&logged), "{road}: the evidence line holds the code: {logged}");
         }
         let planted = format!("$ zerocode-computer handoff\n{}", planted().stdout);
-        assert!(
-            holds_the_code(&planted),
-            "the check sees a code where one is"
-        );
+        assert!(holds_the_code(&planted), "the check sees a code where one is");
     }
 
     /// The text mode's one line is what the pretty printer says: a handoff that
@@ -25443,9 +25221,7 @@ mod handoff_code_road {
             json!({ "resumed": true, "reason": "x", "entered": false, "codeRefused": "secret_reason" }),
         );
         assert!(
-            refused
-                .stdout
-                .contains("\"codeRefused\": \"secret_reason\""),
+            refused.stdout.contains("\"codeRefused\": \"secret_reason\""),
             "an answer that took no code is the pretty JSON: {}",
             refused.stdout
         );
@@ -25503,9 +25279,7 @@ mod browser_form_fill {
             Duration::from_millis(BROWSER_FILL_PENDING_MS),
             POLL,
             move |asked, _| {
-                log.lock()
-                    .unwrap()
-                    .push(asked.iter().map(|e| e.handle.clone()).collect());
+                log.lock().unwrap().push(asked.iter().map(|e| e.handle.clone()).collect());
                 let loaded = began.elapsed() >= Duration::from_millis(300);
                 async move {
                     Ok(answer(&asked, |handle| {
@@ -25524,10 +25298,7 @@ mod browser_form_fill {
         assert_eq!(report.passes, 4, "0, 100, 200 and 300 ms");
         let asked = asked_log.lock().unwrap().clone();
         assert_eq!(asked[0], ["#date", "#time"]);
-        assert!(
-            asked[1..].iter().all(|pass| pass == &["#time"]),
-            "{asked:?}"
-        );
+        assert!(asked[1..].iter().all(|pass| pass == &["#time"]), "{asked:?}");
         assert!(began.elapsed() < Duration::from_millis(BROWSER_FILL_PENDING_MS));
     }
 
@@ -25540,26 +25311,17 @@ mod browser_form_fill {
         };
         let pending = Duration::from_millis(BROWSER_FILL_PENDING_MS);
         let began = tokio::time::Instant::now();
-        let quick =
-            cmd::browser::form::fill_passes(vec![entry("#ghost")], None, pending, POLL, never)
-                .await
-                .expect("answered");
-        assert_eq!(
-            quick.passes, BROWSER_FILL_PASSES,
-            "the passes ran out first"
-        );
+        let quick = cmd::browser::form::fill_passes(vec![entry("#ghost")], None, pending, POLL, never)
+            .await
+            .expect("answered");
+        assert_eq!(quick.passes, BROWSER_FILL_PASSES, "the passes ran out first");
         assert_eq!(quick.results[0].status, FillStatus::NotFound);
         assert!(began.elapsed() < pending);
         let began = tokio::time::Instant::now();
-        let slow = cmd::browser::form::fill_passes(
-            vec![entry("#ghost")],
-            None,
-            pending,
-            pending / 2,
-            never,
-        )
-        .await
-        .expect("answered");
+        let slow =
+            cmd::browser::form::fill_passes(vec![entry("#ghost")], None, pending, pending / 2, never)
+            .await
+            .expect("answered");
         assert_eq!(slow.passes, 3, "the wait ran out first: 0, 1 and 2 s");
         assert!(began.elapsed() <= pending);
         assert!(!slow.all_took());
@@ -25585,10 +25347,7 @@ mod browser_form_fill {
     fn the_form_scripts_are_handed_the_cores_tables_and_the_bundle_as_data() {
         let mut request = cmd::browser::form::form_request();
         assert_eq!(request["controls"], json!(BROWSER_FORM_CONTROLS));
-        assert_eq!(
-            request["frameSeparator"],
-            json!(BROWSER_FORM_FRAME_SEPARATOR)
-        );
+        assert_eq!(request["frameSeparator"], json!(BROWSER_FORM_FRAME_SEPARATOR));
         // The words of a press that cannot be taken back are the one table the
         // window asks a person with (`guarded`), whole and in its rows' order: a
         // page script never presses, on a guess, a control that says one of them.
@@ -25601,19 +25360,8 @@ mod browser_form_fill {
         .concat();
         assert_eq!(request["holds"], json!(held));
         for key in [
-            "notFields",
-            "actions",
-            "scopes",
-            "options",
-            "days",
-            "dayWords",
-            "on",
-            "off",
-            "lists",
-            "listItems",
-            "pressables",
-            "holds",
-            "live",
+            "notFields", "actions", "scopes", "options", "days", "dayWords", "on", "off", "lists",
+            "listItems", "pressables", "holds", "live",
         ] {
             assert!(
                 request[key].as_array().is_some_and(|list| !list.is_empty()),
@@ -25621,37 +25369,17 @@ mod browser_form_fill {
             );
         }
         for cap in [
-            "fieldCap",
-            "actionCap",
-            "optionCap",
-            "wordCap",
-            "valueCap",
-            "answerCap",
-            "frameDepth",
-            "captionDepth",
-            "monthDays",
-            "monthPages",
-            "scanCap",
-            "freshCap",
-            "pieceCap",
-            "outsideCap",
+            "fieldCap", "actionCap", "optionCap", "wordCap", "valueCap", "answerCap",
+            "frameDepth", "captionDepth", "monthDays", "monthPages", "scanCap", "freshCap",
+            "pieceCap", "outsideCap",
         ] {
             assert!(request[cap].as_u64().is_some_and(|n| n > 0), "{cap}");
         }
         let hostile = "\"); alert(1); (\"";
         request["entries"] = json!([{ "handle": "#a", "value": hostile }]);
-        let script =
-            cmd::browser::form::fill_script(&request, cmd::browser::form::BROWSER_FILL_BODY);
-        assert!(
-            !script.contains(hostile),
-            "the value is JSON data in the request"
-        );
-        for piece in [
-            "const zcNameOf",
-            "const zcFormFields",
-            "const zcWrite",
-            "request.entries",
-        ] {
+        let script = cmd::browser::form::fill_script(&request, cmd::browser::form::BROWSER_FILL_BODY);
+        assert!(!script.contains(hostile), "the value is JSON data in the request");
+        for piece in ["const zcNameOf", "const zcFormFields", "const zcWrite", "request.entries"] {
             assert!(script.contains(piece), "the fill script lacks {piece}");
         }
     }
@@ -25740,13 +25468,11 @@ mod browser_form_fill {
         )
         .await
         .expect("answered");
+        assert!(stale.stale && !stale.all_took() && stale.passes == 1, "{stale:?}");
         assert!(
-            stale.stale && !stale.all_took() && stale.passes == 1,
-            "{stale:?}"
-        );
-        assert!(
-            zerocode_core::browser_form::fill_lines(&stale)
-                .starts_with(zerocode_core::computer_use_protocol::error_code::FORM_STALE)
+            zerocode_core::browser_form::fill_lines(&stale).starts_with(
+                zerocode_core::computer_use_protocol::error_code::FORM_STALE
+            )
         );
     }
 
@@ -25784,10 +25510,7 @@ mod browser_form_fill {
                 async move { Ok(first) }
             },
             move |epoch, at| {
-                on_settle
-                    .lock()
-                    .unwrap()
-                    .push(format!("settle {epoch} {at:?}"));
+                on_settle.lock().unwrap().push(format!("settle {epoch} {at:?}"));
                 async move { settled(ending) }
             },
             move |held, epoch| {
@@ -25863,10 +25586,7 @@ mod browser_form_fill {
         let label = "browser-form-memory-test";
         assert_eq!(cmd::browser::form::known_form(label), None);
         cmd::browser::form::remember_form(label, "9:read");
-        assert_eq!(
-            cmd::browser::form::known_form(label).as_deref(),
-            Some("9:read")
-        );
+        assert_eq!(cmd::browser::form::known_form(label).as_deref(), Some("9:read"));
         cmd::browser::form::remember_form(label, "");
         assert_eq!(cmd::browser::form::known_form(label), None);
     }
@@ -25928,14 +25648,9 @@ mod browser_form_fill {
             "remember_form(label, &report.fingerprint)",
             "remember_buttons(label, &report.actions)",
         ] {
-            assert!(
-                road.contains(piece),
-                "the fill road lacks `{piece}`:\n{road}"
-            );
+            assert!(road.contains(piece), "the fill road lacks `{piece}`:\n{road}");
         }
-        let stale = road
-            .find("if report.stale")
-            .expect("a stale fill ends first");
+        let stale = road.find("if report.stale").expect("a stale fill ends first");
         assert!(
             stale < road.find("report.against(").expect("set against"),
             "a stale fill is not set against anything:\n{road}"
@@ -25974,10 +25689,7 @@ mod browser_form_fill {
     async fn press_through(
         press: Result<cmd::browser::BrowserInputReport, String>,
         ending: zerocode_core::agent_browser::Settle,
-    ) -> (
-        Result<cmd::browser::form::PressedAfter, String>,
-        Vec<String>,
-    ) {
+    ) -> (Result<cmd::browser::form::PressedAfter, String>, Vec<String>) {
         let log: Arc<Mutex<Vec<String>>> = Arc::default();
         let (on_before, on_press, on_settle, on_read) =
             (log.clone(), log.clone(), log.clone(), log.clone());
@@ -25996,10 +25708,7 @@ mod browser_form_fill {
                 async move { press }
             },
             move |epoch, at| {
-                on_settle
-                    .lock()
-                    .unwrap()
-                    .push(format!("settle {epoch} {at:?}"));
+                on_settle.lock().unwrap().push(format!("settle {epoch} {at:?}"));
                 async move { settled(ending) }
             },
             move |before| {
@@ -26037,8 +25746,11 @@ mod browser_form_fill {
     #[tokio::test(start_paused = true)]
     async fn a_press_the_page_refuses_is_neither_settled_nor_read() {
         use zerocode_core::agent_browser::Settle;
-        let (done, log) =
-            press_through(Err(cmd::browser::PAGE_TIMED_OUT.to_string()), Settle::Ready).await;
+        let (done, log) = press_through(
+            Err(cmd::browser::PAGE_TIMED_OUT.to_string()),
+            Settle::Ready,
+        )
+        .await;
         assert_eq!(log, ["before", "press"], "{log:?}");
         assert_eq!(done.err(), Some(cmd::browser::PAGE_TIMED_OUT.to_string()));
     }
@@ -26063,15 +25775,8 @@ mod browser_form_fill {
             .nth(1)
             .and_then(|rest| rest.split("\n}\n").next())
             .expect("the click road");
-        for piece in [
-            "known_form(label)",
-            "form::press_in_form(",
-            "press(&pane, selector, None)",
-        ] {
-            assert!(
-                road.contains(piece),
-                "the click road lacks `{piece}`:\n{road}"
-            );
+        for piece in ["known_form(label)", "form::press_in_form(", "press(&pane, selector, None)"] {
+            assert!(road.contains(piece), "the click road lacks `{piece}`:\n{road}");
         }
         assert!(
             road.find("known_form(label)") < road.find("press(&pane, selector, None)"),
@@ -26097,10 +25802,7 @@ mod browser_form_fill {
             "remember_buttons(label, ",
             "remember_form(label, ",
         ] {
-            assert!(
-                road.contains(piece),
-                "the press road lacks `{piece}`:\n{road}"
-            );
+            assert!(road.contains(piece), "the press road lacks `{piece}`:\n{road}");
         }
         assert!(
             !road.contains("sleep(") && !road.contains("Duration::from_millis"),
