@@ -4368,6 +4368,9 @@ const floatView = makeTermView(el("terminal"), el("term"), el("caret"), {
  *   clock(ask)   the words for a deadline the ask carries (Computer Use)
  *   deliver(ask, choice)  a promise that settles once the answer has reached
  *                whoever asked; a rejection keeps the ask on screen
+ *   refused(ask) the line under the reason when an answer did not arrive:
+ *                where else the same question can be answered, for a kind
+ *                that has such a place
  *   raised / delivered / withdrawn   what the kind does to the rest of the
  *                window when its ask arrives, is answered, or leaves
  *   paint / clear   the kind's own parts of the frame
@@ -4528,6 +4531,7 @@ function paintAsk() {
           error: ask.failure,
         }),
   );
+  paintAskPart("ask-fallback", ask.failure === undefined ? null : kind.refused?.(ask) ?? null);
   paintAskPart("ask-clock", kind.clock?.(ask) ?? null);
   const choices = view.choices ?? null;
   el("ask-choices").hidden = choices === null;
@@ -4605,6 +4609,7 @@ async function answerAsk(choice) {
         error: answered.failure,
       }),
     );
+    paintAskPart("ask-fallback", kind.refused?.(answered) ?? null);
     // The buttons on screen NOW, not the ones that were pressed: a language
     // change during the await drew new ones.
     for (const button of el("ask-choices").querySelectorAll("button")) button.disabled = false;
@@ -4733,9 +4738,26 @@ function askQuestionTitle(frame) {
   return named || t("ask.question.title", "에이전트가 묻습니다");
 }
 
+/* Where else a channel's question can be answered when the card's answer did
+ * not arrive (t-49081): the agent's own terminal. The agent behind a channel
+ * draws every question it puts to the window there too, as a numbered menu in
+ * the order this card draws its buttons, and a number answers it — the first
+ * answer wins, and the terminal's takes this card down (`prompt_resolved`).
+ * Saying so is what a person whose every press came back refused (an agent
+ * typed into a shell pane, 10-12) was missing. */
+function askAnswerInTerminal(ask) {
+  const count = Math.min(askFrameChoices(ask.frame).length, 9);
+  const keys = Array.from({ length: count }, (_, at) => at + 1).join("/");
+  return t(
+    "perm.answerInTerminal",
+    "터미널에서도 답할 수 있습니다 — 번호({{keys}})를 누르거나, ↑↓로 골라 Enter를 누르세요.",
+    { keys },
+  );
+}
+
 /* What the two kinds an agent's channel raises share: the road their answer
- * takes (`permission.respond`, by the prompt's own id), and what they do to
- * the lane behind them. */
+ * takes (`permission.respond`, by the prompt's own id), the other place they
+ * can be answered, and what they do to the lane behind them. */
 const askFromChannel = {
   deliver: (ask, choice) =>
     invoke("respond_permission", {
@@ -4743,6 +4765,7 @@ const askFromChannel = {
       promptId: ask.frame.prompt_id,
       decision: choice.decision,
     }),
+  refused: askAnswerInTerminal,
   raised: (ask) => askGateLane(ask.session, "awaiting_permission"),
   delivered: (ask) => {
     if (!askQueue.some((queued) => queued.session === ask.session)) {

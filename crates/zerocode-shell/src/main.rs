@@ -785,6 +785,33 @@ enum ZoChannelOwner {
     Term(TermId),
 }
 
+/// A pane-owned Zo session's private events channel as an exchange reaches
+/// it: the loopback address its process published and the bearer presented
+/// there.
+///
+/// The two travel together because each channel takes its own bearer. A zo
+/// this window starts is handed the window's token, so its channel takes that;
+/// a zo somebody typed into a shell found none in its environment, made its
+/// own and wrote it beside its address (`zo-events-<pid>.addr`), and refuses
+/// any other with -32002 (t-49081).
+#[derive(Clone, PartialEq, Eq)]
+struct ZoChannel {
+    addr: String,
+    token: Option<String>,
+}
+
+/// Never the bearer itself — a channel is printed wherever a lookup or an
+/// exchange is debugged, and its bearer opens every tool approval it asks.
+impl std::fmt::Debug for ZoChannel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ZoChannel")
+            .field("addr", &self.addr)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 struct ForegroundAgentLook {
     term: TermId,
     child_in_front: Option<bool>,
@@ -925,12 +952,14 @@ struct ShellRuntime {
     /// stop — the loop checks membership before forwarding a frame, so a lane
     /// the person closed cannot raise a modal afterwards.
     subscriptions: Arc<Mutex<HashSet<String>>>,
-    /// Each pane-owned Zo session's private events-channel address.
+    /// Each pane-owned Zo session's private events channel: its address and the
+    /// bearer that channel was opened with.
     ///
     /// Unlike the retained `zo serve` supervisor used by remote lanes, a local
     /// IDE pane opens one socket per process. Permission replies, status reads,
-    /// and subscriptions must all return to that exact address.
-    channels: Arc<Mutex<HashMap<String, String>>>,
+    /// and subscriptions must all return to that exact address, with that
+    /// channel's own bearer — the window's token opens only the zo it started.
+    channels: Arc<Mutex<HashMap<String, ZoChannel>>>,
     /// Which lane or terminal won each session-id subscription claim.
     channel_owners: Mutex<HashMap<String, ZoChannelOwner>>,
     /// The project this window is open on — the repository root when there is
@@ -1342,7 +1371,7 @@ impl ShellRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn channels(&self) -> MutexGuard<'_, HashMap<String, String>> {
+    fn channels(&self) -> MutexGuard<'_, HashMap<String, ZoChannel>> {
         self.channels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1871,7 +1900,7 @@ trait ShellStateExt {
     fn project_root(&self) -> &Path;
     fn watched(&self) -> &Arc<file_watch::WatchSet>;
     fn subscriptions(&self) -> &Arc<Mutex<HashSet<String>>>;
-    fn channels(&self) -> MutexGuard<'_, HashMap<String, String>>;
+    fn channels(&self) -> MutexGuard<'_, HashMap<String, ZoChannel>>;
     fn channel_owners(&self) -> MutexGuard<'_, HashMap<String, ZoChannelOwner>>;
     fn cadence(&self) -> &Cadence;
     fn ssh_credentials(&self) -> &ssh_prompt::CredentialBroker;
@@ -2192,7 +2221,7 @@ impl ShellStateExt for AppState {
         &self.shell_runtime().subscriptions
     }
 
-    fn channels(&self) -> MutexGuard<'_, HashMap<String, String>> {
+    fn channels(&self) -> MutexGuard<'_, HashMap<String, ZoChannel>> {
         self.shell_runtime().channels()
     }
 
@@ -3692,9 +3721,11 @@ fn main() -> ExitCode {
                 let _ = api;
                 // The ledger hears the goodbye before any pane goes (t-3058):
                 // seated workers sleep instead of being settled by their own
-                // panes' exits on the way out.
-                orchestration::window_exiting(now_epoch_ms(), road, &|| {
-                    cmd::appearance::take_census(handle)
+                // panes' exits on the way out — waited for no longer than the
+                // ledger's patience (t-49062).
+                let census = handle.clone();
+                orchestration::goodbye_within(now_epoch_ms(), road, move || {
+                    cmd::appearance::take_census(&census)
                 });
                 handle.state::<AppState>().native_tray().begin_exit();
                 emulator::shutdown_all(handle);
@@ -3788,8 +3819,9 @@ struct ExitSteps<'a>(&'a AppHandle);
 
 impl exit_runtime::Terminating for ExitSteps<'_> {
     fn goodbye(&self, road: exit_runtime::ExitRoad) {
-        orchestration::window_exiting(now_epoch_ms(), road, &|| {
-            cmd::appearance::take_census(self.0)
+        let census = self.0.clone();
+        orchestration::goodbye_within(now_epoch_ms(), road, move || {
+            cmd::appearance::take_census(&census)
         });
     }
 

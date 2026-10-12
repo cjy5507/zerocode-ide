@@ -25396,12 +25396,17 @@ mod tests {
             "the switch road changes the Claude account without telling the running panes:\n{door}"
         );
 
-        // And the fan-out is the one the pane's own wire names.
+        // And the fan-out is the one the pane's own wire names — sent by the
+        // one transport both announcements share, on each channel with that
+        // channel's own bearer (t-49081).
         let backend = shipped_backend();
         let sending = block_after(backend, "fn announce_account_switch(");
+        let transport = block_after(backend, "fn reload_on(");
         assert!(
-            sending.contains("method::AUTH_RELOAD") && sending.contains("account_env_for("),
-            "the announcement does not read the launch table it must agree with:\n{sending}"
+            sending.contains("reload_on")
+                && transport.contains("method::AUTH_RELOAD")
+                && sending.contains("account_env_for("),
+            "the announcement does not read the launch table it must agree with:\n{sending}\n{transport}"
         );
     }
 

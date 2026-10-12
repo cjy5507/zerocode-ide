@@ -16,7 +16,9 @@
 //! the goodbye, the closing window's own beat, the next boot's sweep and its
 //! coordinator coming back. A CLI counted here is one a real entry point cut.
 
-use super::restore::{a_run, a_worker, census_without_commands, deaths_of, row, say};
+use super::restore::{
+    Restoring, a_run, a_worker, census_without_commands, deaths_of, row, say, the_window_goes,
+};
 use super::restore_door::{coordinator_back, the_next_boot};
 use super::restore_seams::{WithTable, with_table};
 use super::*;
@@ -278,6 +280,186 @@ fn the_three_workers_of_the_19_15_restart_come_back_as_themselves() {
     assert_eq!(cut_after, workers.len(), "one CLI per conversation");
     for (term, _) in host.inner.cuts().iter().skip(cuts_before) {
         crate::agent_teams::forget_term(*term);
+    }
+    crate::agent_teams::forget_term(NEW_LEADER);
+}
+
+/// The window's log lines that contain `needle`.
+fn logged(needle: &str) -> usize {
+    let log = super::super::BLACKBOX
+        .get()
+        .expect("the bench window's black box")
+        .join("window-errors.log");
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(needle))
+        .count()
+}
+
+/// A census the ledger's actor never answers: its thread parks for good, as
+/// one standing in a mailbox nobody drains does.
+fn a_census_nobody_answers() -> restart_census::RestartCensus {
+    loop {
+        std::thread::park();
+    }
+}
+
+/// t-49062: a goodbye that read no census — the person's close went on the
+/// ledger's patience, unasked — still puts its worker to sleep, because the
+/// sleep is the ledger's own goodbye and not the census's. The next window
+/// seats the worker again from the ledger alone, as itself. What is lost is
+/// the census's note of what the turn was cut in, so the wake is not told to
+/// go on. (A wait that goes by itself defers on such a census instead —
+/// `exit_runtime`'s tests.)
+#[test]
+fn a_goodbye_with_no_census_still_brings_the_worker_back_from_the_ledger() {
+    const OLD_LEADER: u32 = 290_960;
+    const WORKER: u32 = 290_961;
+    const NEW_LEADER: u32 = 290_970;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the worker's checkout");
+    let host = Restoring::new(
+        checkout.path(),
+        WORKER,
+        (NEW_LEADER, test_actor(OLD_LEADER)),
+    );
+    let (team, _run) = a_run(&host, OLD_LEADER, "no-census");
+    let (_task, worker, term) = a_worker(
+        &host,
+        &team,
+        "--agent codex",
+        Some("session-t49062-no-census"),
+    );
+    let before = row(&worker);
+    super::super::pane_turn_began(term, clock());
+
+    the_window_goes(&restart_census::RestartCensus::default, &[term]);
+    assert_eq!(
+        row(&worker).state,
+        WorkerState::Sleeping,
+        "a goodbye with no census left the worker awake"
+    );
+    let root = super::super::BLACKBOX
+        .get()
+        .expect("the window's data root");
+    assert!(
+        !restart_census::peek_cut(root, &worker).any(),
+        "a goodbye with no census left a note of a cut"
+    );
+
+    the_next_boot(OLD_LEADER);
+    assert_eq!(
+        coordinator_back(&host, "no-census", OLD_LEADER, NEW_LEADER),
+        1,
+        "the next window brought nobody back"
+    );
+    let back = row(&worker);
+    assert_eq!(back.state, WorkerState::Active);
+    assert_eq!(
+        back.dispatch, before.dispatch,
+        "a second attempt was minted"
+    );
+    assert!(deaths_of(&worker).is_empty(), "{:?}", deaths_of(&worker));
+    for (term, _) in host.cuts() {
+        crate::agent_teams::forget_term(term);
+    }
+    crate::agent_teams::forget_term(NEW_LEADER);
+}
+
+/// t-49062: a goodbye the ledger's actor never answers — on 2026-10-12 a
+/// close's census waited in a full mailbox until the window was started
+/// again — no longer holds the way out. The person's road goes on the
+/// ledger's patience, says so once, and a later goodbye on the same way out
+/// does not wait again. The ledger heard neither the goodbye nor the pane
+/// going, so the worker is still the old window's, live; the next boot's
+/// sweep, the one authority on "the window is gone", puts it to sleep with
+/// its dispatch open, and the coordinator back seats it again as itself.
+/// (A wait that goes by itself defers instead — `exit_runtime`'s tests.)
+#[test]
+fn a_goodbye_nobody_answers_goes_on_its_patience_and_the_next_boot_brings_the_worker_back() {
+    const OLD_LEADER: u32 = 290_980;
+    const WORKER: u32 = 290_981;
+    const NEW_LEADER: u32 = 290_990;
+    const SAID: &str = "census unread · the goodbye did not answer within";
+    static UNANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the worker's checkout");
+    let host = Restoring::new(
+        checkout.path(),
+        WORKER,
+        (NEW_LEADER, test_actor(OLD_LEADER)),
+    );
+    let (team, _run) = a_run(&host, OLD_LEADER, "unanswered");
+    let (_task, worker, term) = a_worker(
+        &host,
+        &team,
+        "--agent codex",
+        Some("session-t49062-unanswered"),
+    );
+    let before = row(&worker);
+    let said_before = logged(SAID);
+
+    let going = std::time::Instant::now();
+    super::super::goodbye_on(
+        clock(),
+        crate::exit_runtime::ExitRoad::Close,
+        a_census_nobody_answers,
+        &UNANSWERED,
+    );
+    let took = going.elapsed();
+    assert!(
+        took >= crate::exit_runtime::LEDGER_PATIENCE
+            && took < crate::exit_runtime::LEDGER_PATIENCE + std::time::Duration::from_secs(5),
+        "the way out waited {} ms on a goodbye nobody answered",
+        took.as_millis()
+    );
+    assert_eq!(
+        logged(SAID),
+        said_before + 1,
+        "the way out did not say once that it went without its goodbye"
+    );
+    let again = std::time::Instant::now();
+    super::super::goodbye_on(
+        clock(),
+        crate::exit_runtime::ExitRoad::App,
+        a_census_nobody_answers,
+        &UNANSWERED,
+    );
+    assert!(
+        again.elapsed() < std::time::Duration::from_millis(100),
+        "a later goodbye on the same way out waited again: {} ms",
+        again.elapsed().as_millis()
+    );
+    assert_eq!(
+        row(&worker).state,
+        before.state,
+        "the ledger moved on a goodbye it never heard"
+    );
+
+    // The process ends, its panes with it; their deaths never reach the
+    // ledger either.
+    crate::agent_teams::forget_term(term);
+    the_next_boot(OLD_LEADER);
+    assert_eq!(
+        row(&worker).state,
+        WorkerState::Sleeping,
+        "the next boot's sweep did not put the old window's worker to sleep"
+    );
+    assert_eq!(
+        coordinator_back(&host, "unanswered", OLD_LEADER, NEW_LEADER),
+        1,
+        "the next window brought nobody back"
+    );
+    let back = row(&worker);
+    assert_eq!(back.state, WorkerState::Active);
+    assert_eq!(
+        back.dispatch, before.dispatch,
+        "a second attempt was minted"
+    );
+    assert!(deaths_of(&worker).is_empty(), "{:?}", deaths_of(&worker));
+    for (term, _) in host.cuts() {
+        crate::agent_teams::forget_term(term);
     }
     crate::agent_teams::forget_term(NEW_LEADER);
 }

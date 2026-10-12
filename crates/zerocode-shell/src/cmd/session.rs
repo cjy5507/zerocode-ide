@@ -54,16 +54,15 @@ pub(crate) async fn session_info(
     state: State<'_, AppState>,
     session: String,
 ) -> Result<SessionInfo, String> {
-    let Some(supervisor) = state.supervisor().cloned() else {
+    if state.supervisor().is_none() {
         return Ok(SessionInfo {
             model: None,
             permission_mode: None,
         });
-    };
-    let addr = channel_addr(&state, &session)?;
-    let token = supervisor.token().map(str::to_string);
+    }
+    let channel = zo_channel(&state, &session)?;
     tauri::async_runtime::spawn_blocking(move || {
-        with_client(addr, token, async move |client| {
+        with_client(channel.addr, channel.token, async move |client| {
             let info = client
                 .call(method::INFO, json!({}))
                 .await
@@ -96,15 +95,13 @@ pub(crate) async fn stop_pane_helper(
     agent: String,
     agent_id: String,
 ) -> Result<serde_json::Value, String> {
-    // The address is looked up now and its absence reported only at the call:
+    // The channel is looked up now and its absence reported only at the call:
     // a row with no road is refused first, whatever the pane.
-    let addr = channel_addr(&state, &session);
-    let token = state
-        .supervisor()
-        .and_then(|supervisor| supervisor.token().map(str::to_string));
+    let channel = zo_channel(&state, &session);
     tauri::async_runtime::spawn_blocking(move || {
         stop_helper_through(&agent, &session, &agent_id, |method, params| {
-            with_client(addr?, token, async move |client| {
+            let channel = channel?;
+            with_client(channel.addr, channel.token, async move |client| {
                 client
                     .call(method, params)
                     .await

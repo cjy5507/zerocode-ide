@@ -5386,6 +5386,68 @@ pub(crate) fn window_exiting(
     }
 }
 
+/// Whether a goodbye on this way out went unanswered for its whole
+/// patience (t-49062): every later call on the same way out goes without
+/// waiting again.
+static GOODBYE_UNANSWERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// [`window_exiting`] on a road out of the window (t-49062): said on a thread
+/// of its own, and waited for at most [`crate::exit_runtime::LEDGER_PATIENCE`].
+/// Every road calls this on the main thread — the close's exit, ⌘Q, a restart
+/// button, the menu-bar Quit — and the goodbye asks the ledger's actor, which
+/// twice on 2026-10-12 never answered. A goodbye that does not answer in time
+/// is left to finish if it can; the window goes on and says so in one line,
+/// and the next boot's sweep puts every seat the ledger still holds live to
+/// sleep, as it does after a crash ([`RuntimeActor::window_restarted`]). What
+/// is lost is the census's note of what each turn was cut in.
+pub(crate) fn goodbye_within(
+    now_ms: i64,
+    road: crate::exit_runtime::ExitRoad,
+    census: impl Fn() -> restart_census::RestartCensus + Send + 'static,
+) {
+    goodbye_on(now_ms, road, census, &GOODBYE_UNANSWERED);
+}
+
+/// [`goodbye_within`], with `unanswered` marking a goodbye that went
+/// unanswered on this way out.
+fn goodbye_on(
+    now_ms: i64,
+    road: crate::exit_runtime::ExitRoad,
+    census: impl Fn() -> restart_census::RestartCensus + Send + 'static,
+    unanswered: &std::sync::atomic::AtomicBool,
+) {
+    if unanswered.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let (said, answered) = std::sync::mpsc::sync_channel(1);
+    let spawned = std::thread::Builder::new()
+        .name("zerocode-goodbye".to_string())
+        .spawn(move || {
+            window_exiting(now_ms, road, &census);
+            let _ = said.send(());
+        });
+    if spawned.is_ok()
+        && answered
+            .recv_timeout(crate::exit_runtime::LEDGER_PATIENCE)
+            .is_ok()
+    {
+        return;
+    }
+    unanswered.store(true, std::sync::atomic::Ordering::Release);
+    if let Some(root) = BLACKBOX.get() {
+        crate::note_window_event(
+            root,
+            &format!(
+                "exit by {road} · census unread · the goodbye did not answer within {} ms: the \
+                 window goes without it, and the next boot puts the seats the ledger still \
+                 holds to sleep",
+                crate::exit_runtime::LEDGER_PATIENCE.as_millis()
+            ),
+        );
+    }
+}
+
 /// Every worker the ledger holds asleep right now — what a goodbye may still
 /// owe a continuation to (t-7812 R2). Empty when the ledger cannot be read:
 /// nothing is carried on a guess.

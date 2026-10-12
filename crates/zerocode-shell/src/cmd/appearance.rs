@@ -955,6 +955,10 @@ pub(crate) fn set_window_blur(
 /// Who leaving this window would cut, as the window reads it (t-6428): its
 /// own pty table names the process at the root of each terminal, and the
 /// host's process table what runs under it.
+///
+/// It asks the ledger's actor and runs the host's `ps`, so a caller on the
+/// main thread stands until both answer — the close reads it on a thread of
+/// its own (t-49062, [`exit_runtime::close_pressed`]).
 pub(crate) fn take_census(app: &AppHandle) -> crate::orchestration::restart_census::RestartCensus {
     let state = app.state::<AppState>();
     let root_of = |term: u32| {
@@ -1040,18 +1044,25 @@ pub(crate) struct LeaveCensus {
     answer_sec: Option<i64>,
 }
 
-fn leave_census(app: &AppHandle, asking: exit_runtime::Asking) -> LeaveCensus {
-    let patience = asking.patience();
-    LeaveCensus {
-        road: asking.word(),
-        door: match asking {
-            exit_runtime::Asking::Restart(door) => door.map(exit_runtime::RestartDoor::word),
-            exit_runtime::Asking::Close => None,
-        },
-        busy: take_census(app).busy(),
-        wait_min: patience.gap_wait_ms / exit_runtime::MINUTE_MS,
-        answer_sec: patience.answer_ms.map(|ms| ms / 1_000),
+impl LeaveCensus {
+    /// `busy` as `asking`'s question says it.
+    fn of(asking: exit_runtime::Asking, busy: crate::orchestration::restart_census::Busy) -> Self {
+        let patience = asking.patience();
+        Self {
+            road: asking.word(),
+            door: match asking {
+                exit_runtime::Asking::Restart(door) => door.map(exit_runtime::RestartDoor::word),
+                exit_runtime::Asking::Close => None,
+            },
+            busy,
+            wait_min: patience.gap_wait_ms / exit_runtime::MINUTE_MS,
+            answer_sec: patience.answer_ms.map(|ms| ms / 1_000),
+        }
     }
+}
+
+fn leave_census(app: &AppHandle, asking: exit_runtime::Asking) -> LeaveCensus {
+    LeaveCensus::of(asking, take_census(app).busy())
 }
 
 fn asking_of(road: &str, door: Option<&str>) -> Result<exit_runtime::Asking, String> {
@@ -1071,26 +1082,37 @@ pub(crate) fn busy_census(
     Ok(leave_census(&app, asking_of(&road, door.as_deref())?))
 }
 
-/// Whether closing the main window asks first (t-6428) — the road the
-/// window was left by nine times in nine before this. A close the person
-/// chose, or one the road went for them, passes; a close that already has
-/// a question standing or a wait armed keeps it; otherwise the census is
-/// read, and work in progress holds the close and asks, the question's
-/// minute running on the beat.
+/// Whether closing the main window asks first (t-6428): a press of its
+/// close, as [`exit_runtime::close_pressed`] judges it, through this
+/// window's doors.
 pub(crate) fn close_asks_first(app: &AppHandle) -> bool {
-    if exit_runtime::confirmed() {
-        return false;
+    exit_runtime::close_pressed(MainWindowClose(app.clone()))
+}
+
+/// The main window's doors for a press of its close: the one census, the
+/// question it asks through, and the close itself — the road 「지금」 takes.
+/// Each is opened on the close's census thread, never in the close event.
+struct MainWindowClose(AppHandle);
+
+impl exit_runtime::Closing for MainWindowClose {
+    fn census(&self) -> crate::orchestration::restart_census::Busy {
+        take_census(&self.0).busy()
     }
-    if exit_runtime::holding_close() {
-        return true;
+
+    fn ask(&self, busy: crate::orchestration::restart_census::Busy) {
+        let _ = self.0.emit_to(
+            crate::MAIN_WINDOW_LABEL,
+            "exit:ask",
+            LeaveCensus::of(exit_runtime::Asking::Close, busy),
+        );
     }
-    let census = leave_census(app, exit_runtime::Asking::Close);
-    if !census.busy.busy {
-        return false;
+
+    fn close(&self) {
+        let handle = self.0.clone();
+        let _ = self
+            .0
+            .run_on_main_thread(move || leave(&handle, exit_runtime::Asking::Close));
     }
-    exit_runtime::ask(exit_runtime::Asking::Close, crate::now_epoch_ms());
-    let _ = app.emit_to(crate::MAIN_WINDOW_LABEL, "exit:ask", census);
-    true
 }
 
 /// 「끝나면」: wait on this road for the first gap (t-6428), answering the
@@ -1132,13 +1154,15 @@ pub(crate) fn leave_cancel() {
 /// is armed or a question stands; a wait reads the census and goes at the
 /// first gap, says its line when the line moves, and asks again or goes
 /// when the table's time runs out; a question nobody answers goes when its
-/// own time does.
+/// own time does. A wait's census that does not answer within
+/// [`exit_runtime::LEDGER_PATIENCE`] is unknown, and unknown counts as busy:
+/// the wait stands, said once in the window's log (t-49062).
 pub(crate) fn beat_leaving(app: &AppHandle) {
     if !exit_runtime::watching() {
         return;
     }
-    let busy = exit_runtime::waiting().then(|| take_census(app).busy());
-    match exit_runtime::beat(crate::now_epoch_ms(), busy) {
+    let reading = app.clone();
+    match exit_runtime::beat_reading(crate::now_epoch_ms(), move || take_census(&reading).busy()) {
         exit_runtime::ExitBeat::Nothing => {}
         exit_runtime::ExitBeat::Tell(line) => {
             let _ = app.emit_to(crate::MAIN_WINDOW_LABEL, "exit:waiting", line);
@@ -1154,6 +1178,15 @@ pub(crate) fn beat_leaving(app: &AppHandle) {
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || leave(&handle, asking));
         }
+        exit_runtime::ExitBeat::Unread(asking) => crate::note_window_event(
+            app.state::<AppState>().local_data_root(),
+            &format!(
+                "exit: the census did not answer within {} ms — the wait to {} stands, \
+                 unknown counting as busy",
+                exit_runtime::LEDGER_PATIENCE.as_millis(),
+                asking.word()
+            ),
+        ),
     }
 }
 
