@@ -497,16 +497,19 @@ export async function settlePaint(page, timeoutMs = 5_000) {
       requestAnimationFrame(() => requestAnimationFrame(done)));
     let phase = "first paint";
     let deadline;
+    const moving = () => document.getAnimations({ subtree: true }).some((animation) => {
+      const iterations = animation.effect?.getTiming().iterations;
+      return iterations !== Infinity && (animation.pending || !["finished", "idle"].includes(animation.playState));
+    });
     const paint = async () => {
       await nextPaint();
-      phase = "finite animations";
-      const finiteAnimations = document.getAnimations({ subtree: true }).filter((animation) => {
-        const iterations = animation.effect?.getTiming().iterations;
-        return iterations !== Infinity;
-      });
-      await Promise.all(finiteAnimations.map((animation) => animation.finished.catch(() => {})));
-      phase = "last paint";
-      await nextPaint();
+      for (;;) {
+        phase = "finite animations";
+        while (moving()) await nextPaint();
+        phase = "last paint";
+        await nextPaint();
+        if (!moving()) return;
+      }
     };
     const timedOut = new Promise((_resolve, reject) => {
       deadline = setTimeout(() => {

@@ -4163,13 +4163,19 @@ await test("Computer Use on Windows reads ready and offers no permission door to
 // cannot run now"), and turning it off always works.
 await test("Computer Use는 기본 배경 입력을 유지하고 공유 입력은 사람의 설정으로만 허용한다", async () => {
   const original = backend.settings.computer_input_policy;
+  const peer = await context.newPage();
+  const peerId = "computer-policy-peer";
   try {
+    if (PLATFORM_OVERRIDE) await addReportedPlatform(peer, PLATFORM_OVERRIDE);
+    await installTauri(peer, peerId);
+    attachFaultRecorder(peer, peerId);
+    await bootPage(peer, peerId);
     backend.settings.computer_input_policy = "background";
     await backend.broadcast(null, ["computer_input_policy"]);
     await openSettings(pageA, "computer-use");
-    await openSettings(pageB, "computer-use");
+    await openSettings(peer, "computer-use");
     const first = pageA.locator("#computer-shared-desktop");
-    const second = pageB.locator("#computer-shared-desktop");
+    const second = peer.locator("#computer-shared-desktop");
     assert(await pageA.locator("#computer-input-policy-card").isVisible());
     assert(!(await first.isChecked()), "shared desktop input is on by default");
     assert(!(await second.isChecked()), "the other window starts with shared input");
@@ -4178,18 +4184,18 @@ await test("Computer Use는 기본 배경 입력을 유지하고 공유 입력�
     await first.check();
     const enabled = await backend.waitForCall("A", "set_computer_input_policy", before);
     assertEqual(enabled.args, { policy: "shared-desktop" });
-    await pageB.waitForFunction(() => document.getElementById("computer-shared-desktop").checked);
+    await peer.waitForFunction(() => document.getElementById("computer-shared-desktop").checked, undefined, { timeout: UI_TIMEOUT });
     const restore = backend.calls.length;
     await second.uncheck();
-    const disabled = await backend.waitForCall("B", "set_computer_input_policy", restore);
+    const disabled = await backend.waitForCall(peerId, "set_computer_input_policy", restore);
     assertEqual(disabled.args, { policy: "background" });
-    await pageA.waitForFunction(() => !document.getElementById("computer-shared-desktop").checked);
+    await pageA.waitForFunction(() => !document.getElementById("computer-shared-desktop").checked, undefined, { timeout: UI_TIMEOUT });
     assertEqual(backend.settings.computer_input_policy, "background");
   } finally {
+    await peer.close();
     backend.settings.computer_input_policy = original;
     await backend.broadcast(null, ["computer_input_policy"]);
     await pageA.evaluate(() => setSettingsOpen(false));
-    await pageB.evaluate(() => setSettingsOpen(false));
   }
 });
 
