@@ -33249,6 +33249,59 @@ mod tests {
         }
     }
 
+    /// Words parked behind a working agent are said as parked, never as
+    /// lost (t-47952). `term:prompt` names the park with the pump's own word
+    /// and a timeout with another, neither of them a guard's token: the
+    /// listener says the park in a sentence of its own and writes nothing to
+    /// the clipboard — the words are still on their way — and keeps the
+    /// clipboard road for the timeout, which the withheld table never words.
+    #[test]
+    fn a_parked_prompt_is_said_as_parked_and_only_a_timeout_reaches_the_clipboard() {
+        let window = window_source();
+        let transaction = include_str!("../../src/prompt_transaction.rs");
+        for (pump, listener) in [
+            (
+                "pub(super) const PARKED_WHY: &str = \"busy\";",
+                "const TERM_PROMPT_PARKED = \"busy\";",
+            ),
+            (
+                "pub(super) const NOT_READY_WHY: &str = \"not_ready\";",
+                "const TERM_PROMPT_NOT_READY = \"not_ready\";",
+            ),
+        ] {
+            assert!(
+                transaction.contains(pump),
+                "the pump no longer says `{pump}`"
+            );
+            assert!(
+                window.contains(listener),
+                "the window no longer knows `{listener}`"
+            );
+        }
+        let told = window
+            .split_once(r#"listen("term:prompt", (event) => {"#)
+            .map(|(_, rest)| &rest[..rest.find("});").unwrap_or(rest.len())])
+            .unwrap_or_default();
+        let parked = told
+            .split_once("if (why === TERM_PROMPT_PARKED) {")
+            .map(|(_, rest)| &rest[..rest.find("return;").unwrap_or(rest.len())])
+            .unwrap_or_default();
+        assert!(
+            parked.contains("t(\"term.promptParked\"") && !parked.contains("clipboard"),
+            "a parked prompt is not said as parked, or its words reach the clipboard:\n{told}"
+        );
+        assert!(
+            told.contains("why !== TERM_PROMPT_NOT_READY")
+                && told.contains("term.promptLostCopied"),
+            "a timeout no longer keeps the clipboard road:\n{told}"
+        );
+        let table = block_after(window, "const TERM_WITHHELD = Object.freeze({");
+        assert!(
+            !table.contains("\n  busy: {") && !table.contains("\n  not_ready: {"),
+            "the withheld table words a prompt that is no refusal:\n{table}"
+        );
+    }
+
     /// The left column is a plane of its own, in both treatments.
     ///
     /// Orca established that the left column is a plane of its own. ZeroCode's

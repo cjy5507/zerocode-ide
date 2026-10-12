@@ -958,6 +958,17 @@ impl PromptReadiness {
         }
     }
 
+    /// Whether this delivery waits out its pane's turn (t-47952).
+    pub(crate) const fn parks(self) -> bool {
+        match self {
+            Self::Resting
+            | Self::Mounting
+            | Self::RestingBesideADraft
+            | Self::MountingBesideADraft
+            | Self::EnterAgain(_) => false,
+        }
+    }
+
     /// Whether composer edit keys ride ahead of the paste.
     fn clearing(self, agent: Option<&str>) -> bool {
         match self {
@@ -1045,7 +1056,8 @@ pub(crate) fn prompt_delivery_for(
             .clearing(clearing)
             .guarded(guard)
             .pressing(readiness.enter_again())
-            .words(words),
+            .words(words)
+            .parking(readiness.parks()),
     }
 }
 
@@ -1104,6 +1116,7 @@ pub(crate) fn type_prompt_at_term(
                 guard,
                 enter_again: readiness.enter_again(),
                 words: composer_words_for(agent),
+                parks: readiness.parks(),
                 completion: notify,
             });
         return Ok(waiting);
