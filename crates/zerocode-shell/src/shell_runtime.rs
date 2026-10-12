@@ -512,16 +512,69 @@ pub(super) fn pane_channel_session_id(
     })
 }
 
-/// Resolve a session only to the private channel its pane published.
-pub(super) fn channel_addr(state: &AppState, session: &str) -> Result<String, String> {
-    state
-        .channels()
+/// What this window keeps for a session once its pane published its channel:
+/// the address, and the bearer the channel was opened with — the one its
+/// subscriber already holds. Kept, not dropped: every later exchange on that
+/// channel needs it (t-49081).
+pub(super) fn zo_channel_entry(addr: String, token: Option<String>) -> ZoChannel {
+    ZoChannel { addr, token }
+}
+
+/// A kept channel as an exchange reaches it: with the bearer it was opened
+/// with. A pane that published its address alone — the supervised one-line
+/// publisher, which only this window starts, handing it the window's token —
+/// takes this window's.
+fn zo_channel_reached(channel: &ZoChannel, supervisor: Option<&LaneSupervisor>) -> ZoChannel {
+    ZoChannel {
+        addr: channel.addr.clone(),
+        token: channel.token.clone().or_else(|| {
+            supervisor
+                .and_then(LaneSupervisor::token)
+                .map(str::to_string)
+        }),
+    }
+}
+
+/// Resolve a session only to the private channel its pane published, and the
+/// bearer an exchange presents there: that channel's own.
+///
+/// Pure over the registry and the supervisor, so the road a card's answer
+/// takes can be asserted against a socket without an app.
+pub(super) fn zo_channel_in(
+    channels: &HashMap<String, ZoChannel>,
+    supervisor: Option<&LaneSupervisor>,
+    session: &str,
+) -> Result<ZoChannel, String> {
+    channels
         .get(session)
-        .cloned()
+        .map(|channel| zo_channel_reached(channel, supervisor))
         .ok_or_else(|| format!("세션 {session}의 이벤트 채널을 모릅니다"))
 }
 
-/// Every live zo pane channel, as `(session, address)`.
+/// [`zo_channel_in`] over this window's registries — every door that talks to
+/// a session's channel goes by it.
+pub(super) fn zo_channel(state: &AppState, session: &str) -> Result<ZoChannel, String> {
+    zo_channel_in(&state.channels(), state.supervisor(), session)
+}
+
+/// Answer one prompt on a session's channel: the road a card's button takes.
+/// One blocking exchange, like every call on a pane's channel.
+pub(super) fn answer_prompt(
+    channel: ZoChannel,
+    prompt_id: u64,
+    decision: String,
+) -> Result<(), String> {
+    with_client(channel.addr, channel.token, async move |client| {
+        client
+            .respond_to_permission(prompt_id, &decision)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Every live zo pane channel, as `(session, channel)` — each reached the way
+/// [`zo_channel_in`] reaches it, with its own bearer.
 ///
 /// Pure over the three registries so the routing can be asserted without an
 /// app: a session is a target only when this window is holding its channel AND
@@ -529,11 +582,12 @@ pub(super) fn channel_addr(state: &AppState, session: &str) -> Result<String, St
 /// `auth.reload` — its agent re-reads the account directory at launch, and the
 /// method is not on its wire at all.
 pub(super) fn zo_channel_targets(
-    channels: &HashMap<String, String>,
+    channels: &HashMap<String, ZoChannel>,
     pane_sessions: &HashMap<TermId, zerocode_core::ProviderSession>,
     agent_terms: &HashMap<TermId, &'static str>,
-) -> Vec<(String, String)> {
-    let mut targets: Vec<(String, String)> = channels
+    supervisor: Option<&LaneSupervisor>,
+) -> Vec<(String, ZoChannel)> {
+    let mut targets: Vec<(String, ZoChannel)> = channels
         .iter()
         .filter(|(session, _)| {
             pane_sessions.iter().any(|(term, held)| {
@@ -543,13 +597,13 @@ pub(super) fn zo_channel_targets(
                         .is_some_and(|agent| *agent == AgentKind::Zo.slug())
             })
         })
-        .map(|(session, addr)| (session.clone(), addr.clone()))
+        .map(|(session, channel)| (session.clone(), zo_channel_reached(channel, supervisor)))
         .collect();
     // One pane can be reported twice (a restored pane and its adoption), and
-    // the map's order is not stable. Sorting and deduplicating makes the
-    // broadcast exactly-once and its test deterministic.
-    targets.sort();
-    targets.dedup();
+    // the map's order is not stable. Sorting and deduplicating by session
+    // makes the broadcast exactly-once and its test deterministic.
+    targets.sort_by(|(left, _), (right, _)| left.cmp(right));
+    targets.dedup_by(|(left, _), (right, _)| left == right);
     targets
 }
 
@@ -621,14 +675,31 @@ pub(super) const fn account_provider_slug(
 /// fatal: an account switch must land in the picker even when one pane died
 /// between the enumeration and the call. Returns how many panes took it.
 pub(super) fn broadcast_auth_reload(
-    targets: &[(String, String)],
+    targets: &[(String, ZoChannel)],
     params: &serde_json::Value,
-    mut send: impl FnMut(&str, &serde_json::Value) -> Result<(), String>,
+    mut send: impl FnMut(&ZoChannel, &serde_json::Value) -> Result<(), String>,
 ) -> usize {
     targets
         .iter()
-        .filter(|(_, addr)| send(addr, params).is_ok())
+        .filter(|(_, channel)| send(channel, params).is_ok())
         .count()
+}
+
+/// One `auth.reload` on one pane's channel, with that channel's bearer — the
+/// transport both account announcements hand [`broadcast_auth_reload`].
+pub(super) fn reload_on(channel: &ZoChannel, params: &serde_json::Value) -> Result<(), String> {
+    let params = params.clone();
+    with_client(
+        channel.addr.clone(),
+        channel.token.clone(),
+        async move |client| {
+            client
+                .call(method::AUTH_RELOAD, params)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
+    )
 }
 
 /// The display name this window shows for the account one provider lane is on,
@@ -722,24 +793,12 @@ pub(super) fn announce_account_switch(
         let channels = state.channels();
         let sessions = state.pane_sessions();
         let agents = state.agent_terms();
-        zo_channel_targets(&channels, &sessions, &agents)
+        zo_channel_targets(&channels, &sessions, &agents, state.supervisor())
     };
     if targets.is_empty() {
         return;
     }
-    let token = state
-        .supervisor()
-        .and_then(|supervisor| supervisor.token().map(str::to_string));
-    broadcast_auth_reload(&targets, &params, |addr, params| {
-        let params = params.clone();
-        with_client(addr.to_string(), token.clone(), async move |client| {
-            client
-                .call(method::AUTH_RELOAD, params)
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
-    });
+    broadcast_auth_reload(&targets, &params, reload_on);
 }
 
 /// Tell every live zo pane that this window's Google login changed.
@@ -761,24 +820,12 @@ pub(super) fn announce_google_login(state: &AppState, label: Option<&str>) {
         let channels = state.channels();
         let sessions = state.pane_sessions();
         let agents = state.agent_terms();
-        zo_channel_targets(&channels, &sessions, &agents)
+        zo_channel_targets(&channels, &sessions, &agents, state.supervisor())
     };
     if targets.is_empty() {
         return;
     }
-    let token = state
-        .supervisor()
-        .and_then(|supervisor| supervisor.token().map(str::to_string));
-    broadcast_auth_reload(&targets, &params, |addr, params| {
-        let params = params.clone();
-        with_client(addr.to_string(), token.clone(), async move |client| {
-            client
-                .call(method::AUTH_RELOAD, params)
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
-    });
+    broadcast_auth_reload(&targets, &params, reload_on);
 }
 
 pub(super) fn zo_pane_terms_for_session(app: &AppHandle, session: &str) -> Vec<TermId> {

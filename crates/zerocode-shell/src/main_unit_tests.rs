@@ -12132,10 +12132,15 @@ fn an_account_switch_reaches_each_live_zo_pane_once_and_no_other_pane() {
         id: id.to_string(),
         transcript_path: None,
     };
+    let kept =
+        |addr: &str, bearer: &str| zo_channel_entry(addr.to_string(), Some(bearer.to_string()));
     let channels = HashMap::from([
-        ("zo-one".to_string(), "127.0.0.1:41001".to_string()),
-        ("zo-two".to_string(), "127.0.0.1:41002".to_string()),
-        ("a-claude-pane".to_string(), "127.0.0.1:41003".to_string()),
+        ("zo-one".to_string(), kept("127.0.0.1:41001", "bearer-one")),
+        ("zo-two".to_string(), kept("127.0.0.1:41002", "bearer-two")),
+        (
+            "a-claude-pane".to_string(),
+            kept("127.0.0.1:41003", "bearer-three"),
+        ),
     ]);
     let pane_sessions: HashMap<TermId, zerocode_core::ProviderSession> = HashMap::from([
         (1, session("zo-one")),
@@ -12155,15 +12160,15 @@ fn an_account_switch_reaches_each_live_zo_pane_once_and_no_other_pane() {
         (5, AgentKind::Zo.slug()),
     ]);
 
-    let targets = zo_channel_targets(&channels, &pane_sessions, &agent_terms);
+    let targets = zo_channel_targets(&channels, &pane_sessions, &agent_terms, None);
 
     assert_eq!(
         targets,
         vec![
-            ("zo-one".to_string(), "127.0.0.1:41001".to_string()),
-            ("zo-two".to_string(), "127.0.0.1:41002".to_string()),
+            ("zo-one".to_string(), kept("127.0.0.1:41001", "bearer-one")),
+            ("zo-two".to_string(), kept("127.0.0.1:41002", "bearer-two")),
         ],
-        "the switch went to the wrong panes"
+        "the switch went to the wrong panes, or without their own bearers"
     );
 
     let params = auth_reload_params(
@@ -12176,9 +12181,9 @@ fn an_account_switch_reaches_each_live_zo_pane_once_and_no_other_pane() {
         None,
     );
     let mut sent: Vec<String> = Vec::new();
-    let taken = broadcast_auth_reload(&targets, &params, |addr, carried| {
+    let taken = broadcast_auth_reload(&targets, &params, |channel, carried| {
         assert_eq!(carried, &params);
-        sent.push(addr.to_string());
+        sent.push(channel.addr.clone());
         Ok(())
     });
 
@@ -12262,8 +12267,14 @@ fn a_reload_carries_the_new_paths_and_says_so_when_there_are_none() {
 #[test]
 fn a_pane_that_refuses_the_reload_does_not_fail_the_switch() {
     let targets = vec![
-        ("zo-gone".to_string(), "127.0.0.1:41001".to_string()),
-        ("zo-live".to_string(), "127.0.0.1:41002".to_string()),
+        (
+            "zo-gone".to_string(),
+            zo_channel_entry("127.0.0.1:41001".to_string(), None),
+        ),
+        (
+            "zo-live".to_string(),
+            zo_channel_entry("127.0.0.1:41002".to_string(), None),
+        ),
     ];
     let params = auth_reload_params(
         zerocode_core::account::Provider::OpenAi,
@@ -12272,8 +12283,8 @@ fn a_pane_that_refuses_the_reload_does_not_fail_the_switch() {
         Some(Path::new("/data/runtime/codex")),
     );
 
-    let taken = broadcast_auth_reload(&targets, &params, |addr, _| {
-        if addr.ends_with("41001") {
+    let taken = broadcast_auth_reload(&targets, &params, |channel, _| {
+        if channel.addr.ends_with("41001") {
             Err("connection refused".to_string())
         } else {
             Ok(())
@@ -12281,6 +12292,280 @@ fn a_pane_that_refuses_the_reload_does_not_fail_the_switch() {
     });
 
     assert_eq!(taken, 1);
+}
+
+/// A card's answer goes back on the session's own channel, with the bearer
+/// that channel takes (t-49081).
+///
+/// The person's report, 10-12 17:1x: `zo` typed into a shell pane, a model
+/// switch question on the window's card, and every button said 「응답이
+/// 서버에 닿지 못했습니다 — 다시 시도하세요. (permission.respond failed
+/// (-32002): missing or wrong token for this events channel)」 while the same
+/// question stood in the terminal as a numbered menu. That zo was not started
+/// by this window: it found no token in its environment, made its own, and
+/// wrote it beside its address in `zo-events-<pid>.addr`. The window adopted
+/// the channel from that file and subscribed with that bearer — the card came
+/// — and answered with its own.
+mod zo_channel_bearer {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    /// What a zo typed into a shell made for itself and wrote on the second
+    /// line of its address file. Synthetic.
+    const OWN: &str = "bearer-a-zo-typed-into-a-shell-made-for-itself";
+    /// What this window hands every zo it starts. Synthetic.
+    const WINDOW: &str = "bearer-this-window-hands-every-zo-it-starts";
+    const HEARD_WITHIN: Duration = Duration::from_secs(5);
+
+    /// A pane's events channel as zo serves it: one JSON-RPC line per request
+    /// on loopback, the bearer judged before anything else, and any other
+    /// bearer refused with zo's own code and words (zo-ide
+    /// `ide/channel/server.rs`). It serves `exchanges` connections and says of
+    /// each the method asked and whether the bearer was the one it takes —
+    /// never the bearer itself.
+    fn channel_taking(
+        bearer: &'static str,
+        exchanges: usize,
+    ) -> (String, mpsc::Receiver<(String, bool)>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback channel");
+        let addr = listener.local_addr().expect("its address").to_string();
+        let (heard, hearing) = mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(exchanges) {
+                let Ok(mut stream) = stream else { return };
+                let mut line = String::new();
+                let reader = stream.try_clone().expect("a second handle on the socket");
+                if BufReader::new(reader).read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let request: serde_json::Value =
+                    serde_json::from_str(&line).expect("one JSON-RPC line");
+                let taken = request["token"].as_str() == Some(bearer);
+                let answer = if taken {
+                    json!({ "jsonrpc": "2.0", "id": request["id"], "result": {} })
+                } else {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "error": {
+                            "code": -32002,
+                            "message": "missing or wrong token for this events channel",
+                        },
+                    })
+                };
+                let _ = writeln!(stream, "{answer}");
+                let _ = stream.flush();
+                let method = request["method"].as_str().unwrap_or_default().to_string();
+                let _ = heard.send((method, taken));
+            }
+        });
+        (addr, hearing)
+    }
+
+    /// This window, holding its one token.
+    fn window() -> LaneSupervisor {
+        LaneSupervisor::new(
+            ZoBinary {
+                path: PathBuf::from("/nonexistent/zo"),
+            },
+            "127.0.0.1:8788",
+            Some(WINDOW.to_string()),
+        )
+        .expect("a loopback supervisor")
+    }
+
+    /// The person's case: the window learned the channel and its bearer from
+    /// the address file, and a card's button answers on that channel with
+    /// that bearer.
+    #[test]
+    fn a_cards_answer_reaches_a_zo_typed_into_a_shell_with_the_bearer_it_published() {
+        let (addr, heard) = channel_taking(OWN, 1);
+        let mut channels = HashMap::new();
+        channels.insert(
+            "session-typed-into-a-shell".to_string(),
+            zo_channel_entry(addr, Some(OWN.to_string())),
+        );
+        let window = window();
+
+        let answered = zo_channel_in(&channels, Some(&window), "session-typed-into-a-shell")
+            .and_then(|channel| answer_prompt(channel, 7, "allow_once".to_string()));
+
+        assert_eq!(
+            answered,
+            Ok(()),
+            "the card's answer did not reach the zo typed into a shell"
+        );
+        assert_eq!(
+            heard
+                .recv_timeout(HEARD_WITHIN)
+                .expect("the channel heard the answer"),
+            ("permission.respond".to_string(), true),
+        );
+    }
+
+    /// A zo this window started was handed the window's bearer, and its card
+    /// is answered with it as before — and so is a pane that published only
+    /// its address, the supervised one-line publisher, which only this window
+    /// starts.
+    #[test]
+    fn a_zo_this_window_started_is_still_answered_with_the_windows_bearer() {
+        let (addr, heard) = channel_taking(WINDOW, 2);
+        let mut channels = HashMap::new();
+        channels.insert(
+            "session-this-window-started".to_string(),
+            zo_channel_entry(addr.clone(), Some(WINDOW.to_string())),
+        );
+        channels.insert(
+            "session-that-published-an-address".to_string(),
+            zo_channel_entry(addr, None),
+        );
+        let window = window();
+
+        for session in [
+            "session-this-window-started",
+            "session-that-published-an-address",
+        ] {
+            let answered = zo_channel_in(&channels, Some(&window), session)
+                .and_then(|channel| answer_prompt(channel, 3, "deny".to_string()));
+            assert_eq!(answered, Ok(()), "{session}");
+            assert_eq!(
+                heard
+                    .recv_timeout(HEARD_WITHIN)
+                    .expect("the channel heard the answer"),
+                ("permission.respond".to_string(), true),
+                "{session}"
+            );
+        }
+    }
+
+    /// An account switch reaches a zo typed into a shell the same way: on its
+    /// channel, with the bearer it published. With the window's token it was
+    /// refused, and that zo stayed on the account the person had just left.
+    #[test]
+    fn an_account_switch_reaches_a_zo_typed_into_a_shell_with_the_bearer_it_published() {
+        let (addr, heard) = channel_taking(OWN, 1);
+        let channels = HashMap::from([(
+            "session-typed-into-a-shell".to_string(),
+            zo_channel_entry(addr, Some(OWN.to_string())),
+        )]);
+        let pane_sessions: HashMap<TermId, zerocode_core::ProviderSession> = HashMap::from([(
+            7,
+            zerocode_core::ProviderSession {
+                key: zerocode_core::SessionKey::SessionId,
+                id: "session-typed-into-a-shell".to_string(),
+                transcript_path: None,
+            },
+        )]);
+        let agent_terms: HashMap<TermId, &'static str> = HashMap::from([(7, AgentKind::Zo.slug())]);
+        let window = window();
+        let params = auth_reload_params(
+            zerocode_core::account::Provider::OpenAi,
+            Some("personal"),
+            None,
+            Some(Path::new("/data/runtime/codex")),
+        );
+
+        let targets = zo_channel_targets(&channels, &pane_sessions, &agent_terms, Some(&window));
+        let taken = broadcast_auth_reload(&targets, &params, reload_on);
+
+        assert_eq!(taken, 1, "the zo typed into a shell refused the switch");
+        assert_eq!(
+            heard
+                .recv_timeout(HEARD_WITHIN)
+                .expect("the channel heard the switch"),
+            ("auth.reload".to_string(), true),
+        );
+    }
+
+    /// A bearer the channel did not publish is refused in the very words the
+    /// person read on the card, and the refusal is all the window gets back.
+    #[test]
+    fn another_bearer_is_refused_in_the_words_the_card_showed() {
+        let (addr, heard) = channel_taking(OWN, 1);
+
+        let answered = answer_prompt(
+            ZoChannel {
+                addr,
+                token: Some(WINDOW.to_string()),
+            },
+            7,
+            "allow_once".to_string(),
+        );
+
+        assert_eq!(
+            answered,
+            Err(
+                "permission.respond failed (-32002): missing or wrong token for this events channel"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            heard
+                .recv_timeout(HEARD_WITHIN)
+                .expect("the channel heard the answer"),
+            ("permission.respond".to_string(), false),
+        );
+    }
+
+    /// What the window keeps of a channel never prints its bearer.
+    #[test]
+    fn a_channel_never_prints_its_bearer() {
+        let channel = ZoChannel {
+            addr: "127.0.0.1:49152".to_string(),
+            token: Some(OWN.to_string()),
+        };
+
+        let shown = format!("{channel:?}");
+
+        assert!(
+            shown.contains("127.0.0.1:49152")
+                && shown.contains("<redacted>")
+                && !shown.contains(OWN),
+            "{shown}"
+        );
+    }
+}
+
+/// A session's channel is asked with that channel's own bearer (t-49081).
+///
+/// The window's one token opens only the zo the window started: a zo typed
+/// into a shell made its own and refuses the window's with -32002 — the card
+/// whose buttons did nothing (10-12). So the supervisor's token is read once,
+/// by the opener that hands it to the zo it starts, and every door that talks
+/// to a session's channel goes by the road that knows each channel's bearer.
+#[test]
+fn a_session_channel_is_asked_with_its_own_bearer_never_the_supervisors() {
+    let backend = shipped_backend();
+    let opener = block_after(backend, "pub(crate) fn open_zo_pane_process(");
+    assert!(
+        opener.contains("supervisor.token()"),
+        "the opener no longer hands the window's token to the zo it starts:\n{opener}"
+    );
+    assert_eq!(
+        backend.matches("supervisor.token()").count(),
+        1,
+        "a door reads the supervisor's token besides the opener"
+    );
+    for door in [
+        "pub(crate) async fn respond_permission(",
+        "pub(crate) async fn session_info(",
+        "pub(crate) async fn stop_pane_helper(",
+    ] {
+        let body = block_after(backend, door);
+        assert!(
+            body.contains("zo_channel(") && !body.contains(".token()"),
+            "{door} does not reach the session's channel by its own bearer:\n{body}"
+        );
+    }
+    for door in ["fn announce_account_switch(", "fn announce_google_login("] {
+        let body = block_after(backend, door);
+        assert!(
+            body.contains("reload_on") && !body.contains(".token()"),
+            "{door} tells the running panes with the supervisor's token:\n{body}"
+        );
+    }
 }
 
 /// The helper page's stop (t-16943): the webview names an agent, never a
