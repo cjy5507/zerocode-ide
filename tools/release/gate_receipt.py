@@ -87,7 +87,7 @@ def check_link_cycles(links):
         visit(name, set())
 
 
-def paths_digest(paths):
+def paths_digest(paths, excluded=()):
     """Hash file contents, relative names and modes. Unknown links fail closed.
 
     The root's identity is hashed too: an external path can be a command input. Root paths and
@@ -95,15 +95,20 @@ def paths_digest(paths):
     """
     if not paths:
         return None
+    omitted = [Path(value).absolute() for value in excluded]
     roots = []
     for name in sorted(set(str(Path(path).absolute()) for path in paths)):
         root = Path(name)
+        if any(root.is_relative_to(value) for value in omitted):
+            raise UnknownInput("an output declaration hides an input root")
         if root.is_symlink() or not root.exists():
             raise UnknownInput("input root is missing or linked")
         entries = []
         links = {}
         files = [root, *sorted(root.rglob("*"))] if root.is_dir() else [root]
         for path in files:
+            if any(path.is_relative_to(value) for value in omitted):
+                continue
             if path.name.lower() in {".env", ".netrc", ".npmrc", ".pypirc", "credentials", "credentials.toml", "id_rsa", "id_ed25519"}:
                 raise UnknownInput("credential files are outside the declared public closure")
             mode = path.lstat().st_mode
@@ -282,7 +287,8 @@ def fingerprint(args, environment, command):
     return {
         "version": 1, "gate": args.gate, "head": head,
         "tree": source[1] if source else None, "source": source[2] if source else None,
-        "deps": observed(lambda: digest(encoded([paths_digest(args.dependency_root), trust["ignoredBindings"]]))) if declared else None,
+        "deps": observed(lambda: digest(encoded([paths_digest(args.dependency_root), trust["configurationIdentities"],
+                                                 trust["outputBindings"], trust["ignoredBindings"]]))) if declared else None,
         "lock": observed(lambda: paths_digest(locks)),
         "script": observed(lambda: paths_digest(scripts)) if declared else None,
         "recipe": digest(encoded(command)) if declared and public_command(command) else None,

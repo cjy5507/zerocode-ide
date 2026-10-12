@@ -16,7 +16,27 @@ def load_module(path, name):
     return module
 
 
-def authorize(args, root, producer):
+def configuration_declarations(repo, home, root, producer, launcher, outputs):
+    searches = [
+        {"directory": str(Path(repo).resolve()), "ancestors": True, "names": [".cargo/config", ".cargo/config.toml"]},
+        {"directory": str(home), "ancestors": False, "names": [".cargo/config", ".cargo/config.toml", ".rustup/settings.toml"]},
+        {"directory": str(home / "cargo"), "ancestors": False, "names": ["config", "config.toml"]},
+        {"directory": str(home / "rustup"), "ancestors": False, "names": ["settings.toml"]},
+    ]
+    entries = [{"path": str(home), "sha256": producer.paths_digest([home], excluded=outputs)}]
+    for path in launcher.search_paths(searches, producer):
+        if path.is_relative_to(home):
+            continue
+        if path.exists() or path.is_symlink():
+            if not path.is_relative_to(root):
+                raise AssertionError("fixture refuses existing account or system configuration")
+            entries.append({"path": str(path), "sha256": producer.paths_digest([path])})
+        else:
+            entries.append({"path": str(path), "state": "absent"})
+    return searches, entries
+
+
+def authorize(args, root, producer, environment_overrides=None, output_roots=()):
     root = Path(root).resolve()
     home = root / "child-home"
     home.mkdir(exist_ok=True)
@@ -45,6 +65,8 @@ def authorize(args, root, producer):
                    "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
     if os.name == "nt":
         environment["SystemRoot"] = os.environ["SystemRoot"]
+    environment.update(environment_overrides or {})
+    searches, configuration = configuration_declarations(args.repo, home, root, producer, launcher, output_roots)
     row = lambda path: {"path": str(Path(path).absolute()), "sha256": producer.paths_digest([path])}
     policy = {"version": 1, "trustedCommit": "a" * 40,
               "bundle": {role: {"path": str(path), "sha256": producer.file_digest(path)} for role, path in {
@@ -53,9 +75,9 @@ def authorize(args, root, producer):
               "gates": {args.gate: {"command": args.command, "recipes": ["fixture"], "profile": args.profile,
                   "environment": environment, "dependencyRoots": [row(path) for path in args.dependency_root],
                   "toolchainRoots": [row(path) for path in [*args.toolchain_root, python, git, *transitive]],
-                  "configurationRoots": [row(home)],
+                  "configurationRoots": configuration, "configurationSearches": searches,
                   "lockFiles": [row(path) for path in args.lock_file or [Path(args.repo) / "Cargo.lock"]],
-                  "scriptFiles": [row(path) for path in [wrapper, *args.script_file]], "outputRoots": [],
+                  "scriptFiles": [row(path) for path in [wrapper, *args.script_file]], "outputRoots": list(output_roots),
                   "mandatoryChecks": launcher.MANDATORY}}}
     policy_path = root / "trusted-policy.json"
     raw = producer.encoded(policy)

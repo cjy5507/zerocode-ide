@@ -24,7 +24,7 @@ BUILD_ENV = {
     "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA",
     "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "CARGO_TARGET_DIR", "CARGO_BUILD_JOBS",
     "CARGO_INCREMENTAL", "CARGO_NET_OFFLINE", "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG",
-    "RUSTFLAGS", "RUSTDOCFLAGS", "CC", "CXX", "AR", "SDKROOT", "DEVELOPER_DIR",
+    "RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC", "RUSTDOC", "CC", "CXX", "AR", "SDKROOT", "DEVELOPER_DIR",
     "MACOSX_DEPLOYMENT_TARGET", "TMPDIR", "TMP", "TEMP", "NODE_PATH",
     "npm_config_cache", "npm_config_offline",
 }
@@ -33,6 +33,11 @@ PATH_ENV = {
     "LOCALAPPDATA", "CARGO_HOME", "RUSTUP_HOME", "CARGO_TARGET_DIR", "SDKROOT", "DEVELOPER_DIR",
     "TMPDIR", "TMP", "TEMP", "npm_config_cache",
 }
+CONFIGURATION_ENV = {
+    "HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA",
+    "CARGO_HOME", "RUSTUP_HOME",
+}
+OUTPUT_ENV = {"XDG_CACHE_HOME", "CARGO_TARGET_DIR", "TMPDIR", "TMP", "TEMP", "npm_config_cache"}
 
 
 class Untrusted(Exception):
@@ -99,10 +104,28 @@ def load_policy(path, expected, repo, launcher_path=None):
     return {"policy": policy, "policySha256": expected, "policyPath": str(path), "policyBytes": raw, "bytes": retained}
 
 
+def search_paths(searches, producer):
+    if not isinstance(searches, list) or not searches:
+        raise producer.UnknownInput("configuration search scopes are undeclared")
+    paths = set()
+    for search in searches:
+        if not isinstance(search, dict) or set(search) != {"directory", "ancestors", "names"}:
+            raise producer.UnknownInput("unsupported configuration search scope")
+        root = Path(search["directory"])
+        if not root.is_absolute() or not isinstance(search["ancestors"], bool) or not isinstance(search["names"], list) or not search["names"]:
+            raise producer.UnknownInput("configuration search scope is incomplete")
+        names = [Path(value) for value in search["names"]]
+        if any(value.is_absolute() or ".." in value.parts or str(value) == "." for value in names):
+            raise producer.UnknownInput("configuration search name escapes its scope")
+        for directory in [root, *root.parents] if search["ancestors"] else [root]:
+            paths.update(directory / name for name in names)
+    return sorted(paths)
+
+
 def configure(context, args, producer):
     selected = context["policy"]["gates"].get(args.gate)
     required = {"command", "recipes", "profile", "environment", "dependencyRoots", "toolchainRoots",
-                "configurationRoots", "lockFiles", "scriptFiles", "outputRoots", "mandatoryChecks"}
+                "configurationRoots", "configurationSearches", "lockFiles", "scriptFiles", "outputRoots", "mandatoryChecks"}
     if not isinstance(selected, dict) or set(selected) != required:
         raise producer.UnknownInput("gate has no complete independently trusted declaration")
     if selected["command"] != args.command or selected["profile"] != args.profile:
@@ -133,33 +156,64 @@ def configure(context, args, producer):
         raise producer.UnknownInput("child account and tool configuration fallbacks are undeclared")
     if any(not Path(part).is_absolute() for part in environment.get("PATH", "").split(os.pathsep)):
         raise producer.UnknownInput("child PATH has a relative search entry")
-    roots = {}
-    for role in ("dependencyRoots", "toolchainRoots", "configurationRoots", "lockFiles", "scriptFiles"):
+    roles = ("dependencyRoots", "toolchainRoots", "configurationRoots", "lockFiles", "scriptFiles")
+    roots = {role: [] for role in roles}
+    absent = []
+    for role in roles:
         rows = selected[role]
         if not isinstance(rows, list) or not rows:
             raise producer.UnknownInput("gate input role is undeclared")
-        roots[role] = []
         for row in rows:
-            if set(row) != {"path", "sha256"} or not Path(row["path"]).is_absolute():
+            if not isinstance(row, dict) or not Path(row.get("path", "")).is_absolute():
                 raise producer.UnknownInput("gate input root has no identity")
-            if producer.paths_digest([row["path"]]) != row["sha256"]:
-                raise producer.UnknownInput("declared input root changed")
-            roots[role].append(row["path"])
+            if set(row) == {"path", "state"} and row["state"] == "absent" and role == "configurationRoots":
+                absent.append(Path(row["path"]).resolve())
+            elif set(row) == {"path", "sha256"}:
+                roots[role].append(row["path"])
+            else:
+                raise producer.UnknownInput("unsupported input identity or absence declaration")
     outputs = selected["outputRoots"]
     if not isinstance(outputs, list) or any(not Path(value).is_absolute() for value in outputs):
         raise producer.UnknownInput("output roots must be explicit absolute paths")
     input_paths = [Path(value).resolve() for values in roots.values() for value in values]
     output_paths = [Path(value).resolve() for value in outputs]
+    config_paths = [Path(value).resolve() for value in roots["configurationRoots"]]
+    protected = [Path(value).resolve() for role in roles if role != "configurationRoots" for value in roots[role]]
+    searched = search_paths(selected["configurationSearches"], producer)
+    config_environment = [Path(environment[key]).resolve() for key in CONFIGURATION_ENV.intersection(environment)]
     if any(path.is_relative_to(repo) for path in (Path(value).resolve() for value in roots["toolchainRoots"])):
         raise producer.UnknownInput("candidate-owned toolchain is untrusted")
     if any(path == repo or repo.is_relative_to(path) for path in output_paths):
         raise producer.UnknownInput("output root can hide candidate inputs")
-    if any(a.is_relative_to(b) or b.is_relative_to(a) for a in input_paths for b in output_paths):
-        raise producer.UnknownInput("input and output declarations overlap")
+    if any(a.is_relative_to(b) or b.is_relative_to(a) for a in protected for b in output_paths):
+        raise producer.UnknownInput("cache output hides a dependency, script, lock or tool input")
+    if any(a.is_relative_to(b) for a in [*config_paths, *absent, *searched, *config_environment] for b in output_paths):
+        raise producer.UnknownInput("cache output hides configuration or declared absence")
+    config_directories = [path for path in config_paths if path.is_dir()]
+    for candidate in searched:
+        target = candidate.resolve()
+        if target not in absent and not any(target == root or root.is_dir() and target.is_relative_to(root) for root in config_paths):
+            raise producer.UnknownInput("configuration search has an undeclared input or absence")
     for key in PATH_ENV.intersection(environment):
         value = Path(environment[key])
-        if not value.is_absolute() or not any(value.resolve().is_relative_to(root) for root in input_paths + output_paths):
+        allowed = input_paths + output_paths if key in OUTPUT_ENV else config_directories if key in CONFIGURATION_ENV else input_paths
+        if not value.is_absolute() or not any(value.resolve().is_relative_to(root) for root in allowed):
             raise producer.UnknownInput("configuration or cache path has no declared role")
+    configuration_identities = []
+    for role in ("configurationRoots", "dependencyRoots", "lockFiles", "scriptFiles", "toolchainRoots"):
+        for row in selected[role]:
+            path = Path(row["path"])
+            if row.get("state") == "absent":
+                if path.exists() or path.is_symlink():
+                    raise producer.UnknownInput("declared configuration absence changed")
+                actual = None
+            else:
+                actual = producer.paths_digest([path], excluded=outputs if role == "configurationRoots" else ())
+                if actual != row["sha256"]:
+                    raise producer.UnknownInput("declared input root changed")
+            if role == "configurationRoots":
+                configuration_identities.append([str(path), str(path.resolve()), row.get("state", "present"), actual])
+    output_bindings = [[value, str(Path(value).resolve()), os.readlink(value) if Path(value).is_symlink() else None] for value in outputs]
     for part in environment.get("NODE_PATH", "").split(os.pathsep) if "NODE_PATH" in environment else []:
         value = Path(part)
         if not value.is_absolute() or not any(value.resolve().is_relative_to(root) for root in input_paths):
@@ -168,6 +222,8 @@ def configure(context, args, producer):
     tool_roots = [Path(value).resolve() for value in roots["toolchainRoots"]]
     required_tools = [Path(sys.executable).resolve(), executable,
                       producer.command_executable(repo, "git", environment)]
+    required_tools += [producer.command_executable(repo, environment[key], environment)
+                       for key in ("CC", "CXX", "AR", "RUSTC", "RUSTDOC") if key in environment]
     if any(tool is None or not any(tool.is_relative_to(root) for root in tool_roots) for tool in required_tools):
         raise producer.UnknownInput("an invoked tool has no independently declared identity")
     producer.GIT_EXECUTABLE = str(required_tools[2])
@@ -180,12 +236,13 @@ def configure(context, args, producer):
             if not any(target.is_relative_to(root) for root in input_paths + output_paths):
                 raise producer.UnknownInput("ignored candidate input is undeclared")
             ignored.append([os.fsdecode(name), os.readlink(candidate) if candidate.is_symlink() else None, str(target)])
-    args.dependency_root = roots["dependencyRoots"] + roots["configurationRoots"]
+    args.dependency_root = roots["dependencyRoots"]
     args.toolchain_root = roots["toolchainRoots"]
     args.lock_file = roots["lockFiles"]
     args.script_file = roots["scriptFiles"]
     args.child_home = str(home)
-    args.trust = {**context, "selected": selected, "environment": dict(environment), "ignoredBindings": ignored}
+    args.trust = {**context, "selected": selected, "environment": dict(environment), "ignoredBindings": ignored,
+                  "configurationIdentities": configuration_identities, "outputBindings": output_bindings}
     return args.trust
 
 
