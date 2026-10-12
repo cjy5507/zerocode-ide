@@ -2083,6 +2083,10 @@ pub(crate) struct LedgerAgent {
     /// verification. `None` where the ledger holds no time to count from — a verification an older
     /// window wrote has none — and the sidebar then says no time at all, never zero.
     pub(crate) review_since_ms: Option<i64>,
+    /// Where the work stands, read once from `review` and the attempt
+    /// (`Run::progress_from`, t-47538) — the stage every surface draws.
+    /// `None` for a worker with neither a task nor an attempt.
+    pub(crate) progress: Option<zerocode_core::orchestration::WorkProgress>,
     /// Why the task is closed — folded into a task, handed to a run, or
     /// outdated — when it is. A closed task is neither reported nor failed:
     /// the board says 닫힘 and its reason, and the card leaves the open lanes.
@@ -2620,6 +2624,8 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
             let dispatch_started_ms = dispatch.map_or(0, |one| one.started_ms);
             let retry_of = dispatch.and_then(|one| one.retry_of.clone());
             let review = carried.map(|held| run.review_of(held)).unwrap_or_default();
+            let progress = (carried.is_some() || dispatch.is_some())
+                .then(|| run.progress_from(carried, &review, dispatch));
             let review_since_ms = match (reported && !failed, dispatch) {
                 (true, Some(attempt)) if !review.verified => run
                     .messages()
@@ -2684,6 +2690,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 handed_in: dispatch.and_then(|one| one.source.clone()),
                 review,
                 review_since_ms,
+                progress,
                 closed: carried.and_then(|held| held.closed.clone()),
                 term,
                 // Finished work is dated by when its attempt ended — the

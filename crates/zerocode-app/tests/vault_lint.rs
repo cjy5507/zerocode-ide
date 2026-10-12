@@ -40,6 +40,8 @@ fn the_fixture_vault_is_red_with_exactly_its_expected_counts() {
         "unsourced_edges           0   relations whose provenance no road vouches for",
         "contradictions            1   declared `contradicts`",
         "superseded                1   pages a `supersedes`",
+        // A reading, not a finding (t-43992 unit 2): no fixture page says `type:`.
+        "untyped                   7   pages without a known type",
         // Seated by the scan since 09-07: the fixture has no two pages that look
         // like one, and a zero is not a dash — a dash says nobody computed it.
         "merge_candidates          0   pairs that look like one page (dedupe lens, t-2931",

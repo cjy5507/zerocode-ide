@@ -44,7 +44,8 @@ const PANES = [
 ];
 /* Joined later, one at a time. */
 const SIDE = { term: 9506, path: "/r/side", seat: RUN_B };
-const HANDED = { term: 9505, path: "/r/w-handed", ledger: { worker: "w-9505", task: "넘김 끝난 과업", task_id: "t-9505", reported: true } };
+const HANDED = { term: 9505, path: "/r/w-handed", ledger: { worker: "w-9505", task: "넘김 끝난 과업", task_id: "t-9505", reported: true,
+  progress: { stage: "report_only" } } };
 const CHILD = { term: 9508, path: "/r/side", parent: 9506 };
 /* A worker of run A that sleeps — no terminal in this window — after a restart. */
 const ASLEEP = { path: "/r/w-sleep", ledger: { worker: "w-9507", task: "잠든 과업", task_id: "t-9507", state: "waiting", ledger: "sleeping" } };

@@ -6,7 +6,10 @@
 
 use std::path::Path;
 
-use super::support::{block_after, window_source};
+use super::support::{block_after, strip_comments, window_source};
+
+/// The ledger's one reading of where a task's work stands (t-47538).
+const PROGRESS: &str = include_str!("../../../zerocode-core/src/orchestration/progress.rs");
 
 fn shell_source(name: &str) -> String {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -349,14 +352,15 @@ fn a_closed_task_reads_closed_with_its_reason_and_is_never_called_failed() {
             "the reasons lost `{held}`:\n{reasons}"
         );
     }
-    let word = block_after(window, "function ledgerReviewWord(facts) {");
+    let work = block_after(window, "const WORK_STAGES = Object.freeze({");
     assert!(
-        word.contains(r#"if (facts.closed) return t("board.closed", "닫힘");"#),
-        "a closed task's card does not say closed:\n{word}"
+        work.contains(r#"closed: { key: "board.closed", word: "닫힘", phase: "closed", landing: "closed", live: "closed" },"#),
+        "a closed task's card does not say closed:\n{work}"
     );
+    let reading = block_after(PROGRESS, "fn stage_of(");
     assert!(
-        word.find("facts.closed") < word.find("stageFailed"),
-        "a closed task is read as failed before it is read as closed:\n{word}"
+        reading.find("TaskStatus::Closed") < reading.find("WorkStage::Failed"),
+        "a closed task is read as failed before it is read as closed:\n{reading}"
     );
     let i18n = include_str!("../../../../ui/shell-i18n.js");
     for key in [
@@ -373,7 +377,7 @@ fn a_closed_task_reads_closed_with_its_reason_and_is_never_called_failed() {
     }
     // The backend's stage list is the order the desk draws; closed is last.
     let desk = shell_source("orchestration/desk.rs");
-    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 11] = [");
+    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 15] = [");
     assert!(
         table
             .find("\"failed\"")
@@ -382,8 +386,8 @@ fn a_closed_task_reads_closed_with_its_reason_and_is_never_called_failed() {
     );
 }
 
-/// A completed task nothing can review reads 완료 — 검토 기록 없음 and is
-/// never called 검증 대기 (t-19328, t-15558 slice 2).
+/// A completed task nothing can review reads 종료 — 검토 자료 없음 and is
+/// never called 검증 대기 (t-19328, t-15558 slice 2; the words since t-47538).
 ///
 /// Reported as the pile of old completed work whose every attempt ended
 /// handing nothing in: `task-update` refuses any review of it for ever, and the
@@ -415,55 +419,56 @@ fn a_completed_task_nothing_can_review_reads_no_review_record_and_never_awaiting
         );
     }
 
-    // The desk's stage reads the core's review; it does not count attempts.
+    // The desk's stage reads the core's one reading of the work; it does not count attempts.
     let desk = shell_source("orchestration/desk.rs");
     let stage = block_after(
         &desk,
-        "fn stage_of(run: &Run, task: &Task) -> &'static str {",
+        "fn staged(run: &Run, task: &Task) -> (&'static str, Option<WorkProgress>) {",
     );
     assert!(
-        stage.contains("run.review_of(task)") && stage.contains(".unreviewable"),
-        "the desk's stage does not read the ledger's own fact:\n{stage}"
+        stage.contains("run.progress_of(task)") && !stage.contains("review_of"),
+        "the desk's stage does not read the ledger's own reading:\n{stage}"
     );
     assert!(
         !stage.contains(".dispatches") && !stage.contains(".source"),
         "the desk's stage counts attempts itself:\n{stage}"
     );
-
-    // The window reads the flag and nothing else, ahead of 실패 and 검증 대기.
-    let window = window_source();
-    let word = block_after(window, "function ledgerReviewWord(facts) {");
+    let reading = block_after(PROGRESS, "fn stage_of(");
     assert!(
-        word.contains(
-            r#"if (review.unreviewable) return t("board.noReviewRecord", "완료 — 검토 기록 없음");"#
-        ),
-        "a completed task nothing can review does not say so:\n{word}"
+        reading.contains("review.unreviewable")
+            && reading.find("review.unreviewable") < reading.find("WorkStage::Failed")
+            && reading.find("review.unreviewable") < reading.find("WorkStage::ReportOnly"),
+        "the work is read as failed or as waiting before it is read as unreviewable:\n{reading}"
     );
+
+    // The window reads the ledger's reading and nothing else.
+    let window = window_source();
+    let work = block_after(window, "const WORK_STAGES = Object.freeze({");
     assert!(
-        word.find("review.unreviewable") < word.find("stageFailed")
-            && word.find("review.unreviewable") < word.find("board.awaitingReview"),
-        "the word is read as failed or as waiting before it is read as unreviewable:\n{word}"
+        work.contains(
+            r#"unreviewable: { key: "board.noReviewRecord", word: "종료 — 검토 자료 없음", phase: "unreviewable","#
+        ),
+        "a completed task nothing can review does not say so:\n{work}"
     );
 
     // The desk's stage, the board's live map and the sidebar all place it.
     let stages = block_after(window, "const DESK_STAGES = Object.freeze([");
     assert!(
         stages.contains(
-            r#"{ id: "unreviewable", flow: false, tone: "", key: "board.noReviewRecord", word: "완료 — 검토 기록 없음" }"#
+            r#"{ id: "unreviewable", flow: false, tone: "", key: "board.noReviewRecord", word: "종료 — 검토 자료 없음" }"#
         ),
         "the desk has no stage for it, or draws it in a signal tone:\n{stages}"
     );
     let live = block_after(window, "const AGENT_GRAPH_LIVE_STAGES = Object.freeze([");
     assert!(
         live.contains(
-            r#"{ stage: "unreviewable", flag: "unreviewable", key: "board.noReviewRecord", word: "완료 — 검토 기록 없음" }"#
+            r#"{ stage: "unreviewable", flag: "unreviewable", key: "board.noReviewRecord", word: "종료 — 검토 자료 없음" }"#
         ),
         "the live map cannot read the word back as a stage:\n{live}"
     );
-    let placed = block_after(window, "const LEDGER_REVIEW_PHASE = Object.freeze({");
     assert!(
-        placed.contains("unreviewable: \"unreviewable\""),
-        "the sidebar does not place the stage:\n{placed}"
+        work.contains("phase: \"unreviewable\", landing:"),
+        "the sidebar does not place the stage:\n{work}"
     );
     let rank = block_after(window, "const WORKTREE_PHASE_RANK = Object.freeze({");
     assert!(
@@ -494,7 +499,7 @@ fn a_completed_task_nothing_can_review_reads_no_review_record_and_never_awaiting
     );
 
     // The window draws the backend's stages, in the backend's order.
-    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 11] = [");
+    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 15] = [");
     let backend: Vec<&str> = table
         .split("];")
         .next()
@@ -526,6 +531,44 @@ fn a_completed_task_nothing_can_review_reads_no_review_record_and_never_awaiting
         i18n.matches("\"board.noReviewRecord\":").count(),
         4,
         "board.noReviewRecord is not in every language but the source's own Korean"
+    );
+}
+
+/// Where a task's work stands is read once, in core, and every surface draws that reading (t-47538). The
+/// live map took a stage by translating each row of its table and comparing the result with the word the
+/// sidebar had chosen — a second reading of one fact, and one a translation could break. What is pinned is
+/// that the window's one table has a row for every stage the core answers, that the live map takes the
+/// stage's name from that table and reads no word back, and that the tables the old readings kept are gone.
+#[test]
+fn where_work_stands_is_read_once_in_core_and_no_surface_reads_a_word_back_as_a_stage() {
+    let window = window_source();
+    let code = strip_comments(window);
+    assert!(
+        !code.contains("t(one.key, one.word) === said"),
+        "the live map reads a translated word back as a stage"
+    );
+    for gone in [
+        "const LEDGER_REVIEW_PHASE",
+        "review.unreviewable",
+        "review.claimed_",
+    ] {
+        assert!(
+            !code.contains(gone),
+            "the window reads the review a second way (`{gone}`)"
+        );
+    }
+    let work = block_after(window, "const WORK_STAGES = Object.freeze({");
+    let names = block_after(PROGRESS, "pub const fn word(self) -> &'static str {");
+    for name in names.split('"').skip(1).step_by(2) {
+        assert!(
+            work.contains(&format!("\n  {name}: {{ key: ")),
+            "the window has no row for the core's `{name}`:\n{work}"
+        );
+    }
+    let live = block_after(window, "function ledgerReviewStage(row) {");
+    assert!(
+        live.contains("ledgerWork(row)") && !live.contains("t("),
+        "the live map names a stage some other way:\n{live}"
     );
 }
 

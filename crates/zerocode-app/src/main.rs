@@ -9,6 +9,7 @@
 //! zerocode lane [<session>]   host `zo attach` in a pty and render its screen
 //! zerocode watch <session>    follow the same session as structured frames
 //! zerocode vault-lint         the second brain's lint table, exit 1 on findings
+//! zerocode vault-types        give untyped wiki pages a type: key, a dry run unless --write
 //! ```
 //!
 //! `status` is the one that proves the independence contract: on a machine with
@@ -30,6 +31,7 @@ use zerocode_lane::{
 use zerocode_pty::ZoBinary;
 
 mod vault_lint;
+mod vault_types;
 
 const USAGE: &str = "\
 zerocode — shell IDE for parallel agent lanes
@@ -38,6 +40,7 @@ zerocode — shell IDE for parallel agent lanes
     zerocode lane [<session>]    host `zo attach` in a pty and render it
     zerocode watch <session>     follow a session as structured frames
     zerocode vault-lint          lint the second-brain vault (exit 1 on findings)
+    zerocode vault-types         give untyped wiki pages a type: key (a dry run unless --write)
 
 Options:
     --bind <addr>   session server address (loopback only). Defaults to a port
@@ -72,6 +75,7 @@ fn main() -> ExitCode {
     match command {
         // Its own arguments, its own usage: the vault has no bind address.
         "vault-lint" => vault_lint::run(&positional[1..]),
+        "vault-types" => vault_types::run(&positional[1..]),
         "status" => run_status(&bind, &project),
         "lane" => run_lane(&bind, &project, argument.as_deref()),
         "watch" => match argument {

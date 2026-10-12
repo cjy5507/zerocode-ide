@@ -151,6 +151,12 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
         .map(([page, targets]) => ({ page, targets: [...new Set(targets)].sort() })),
       unlogged_raw: [],
       unsourced_edges: [],
+      /* 종류가 없는 페이지(t-43992) — 목차·일지는 제 자리라 세지 않는다. 읽기이지 발견이 아니다. */
+      untyped: pages
+        .filter(([node]) => typeof node.page_type !== "string"
+          && !/^wiki\/(index|log)\.md$/u.test(node.id))
+        .map(([node]) => node.id)
+        .sort(),
       contradictions,
       superseded: [...superseded].sort(),
       merge_candidates: null,
@@ -163,6 +169,7 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
       undeclared_relations: table.undeclared_relations.length,
       unlogged_raw: 0,
       unsourced_edges: 0,
+      untyped: table.untyped.length,
       contradictions,
       superseded: table.superseded.length,
       merge_candidates: null,
@@ -185,6 +192,9 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
         title: spec.titles?.[at] ?? `개념 ${at}`,
         tags: tags.length === 0 ? [] : [tags[at % tags.length]],
         kind: "page",
+        /* 종류(t-43992): 시험이 준 자리만 `page_type`을 든다 — 백엔드도 종류가 없는
+         * 페이지에는 그 칸을 싣지 않는다. */
+        ...(typeof spec.pageKinds?.[at] === "string" ? { page_type: spec.pageKinds[at] } : {}),
         modified_ms: spec.modifiedMs?.[at] ?? 1700000000000 + at,
         out_links: 0,
         in_links: 0,
