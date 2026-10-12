@@ -8,12 +8,34 @@
 //! only, one file per source address, and never a file already in `raw/`
 //! opened for writing.
 
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::net::IpAddr;
 use std::path::Path;
+
+use url::{Host, Url};
+
+use crate::civil;
+use crate::localhost_label::is_loopback_hostname;
+use crate::second_brain::{MAX_STATUS_ENTRIES, RAW_DIR};
+use crate::second_brain_graph::{MARKDOWN_SUFFIX, parse_frontmatter, split_frontmatter, unquote};
 
 /// Bytes of a page's text one capture keeps. A longer page lands cut at this
 /// bound and its frontmatter says so (`truncated: true`).
 pub const MAX_CAPTURE_BYTES: usize = 512 * 1024;
+/// Characters of a title the frontmatter keeps.
+pub const MAX_TITLE_CHARS: usize = 300;
+/// Characters of a file name's slug.
+pub const MAX_SLUG_CHARS: usize = 64;
+/// Names tried for one day's slug (`-2`, `-3`, …) before the feed gives up.
+pub const MAX_NAME_TRIES: u32 = 100;
+/// Bytes read from the head of a raw file for its `source:` line.
+const SOURCE_HEAD_BYTES: u64 = 4096;
+/// The slug of a page whose title and address both name nothing.
+const FALLBACK_SLUG: &str = "page";
+/// Host names a person's own machine or network answers to: the loopback
+/// names' subdomains (RFC 6761) and multicast DNS (RFC 6762).
+const LOCAL_NAME_SUFFIXES: [&str; 2] = [".localhost", ".local"];
 
 /// One page as an agent read it.
 #[derive(Debug, Clone, Copy)]
@@ -53,8 +75,247 @@ pub fn feed(
     now_ms: i64,
     offset_minutes: i32,
 ) -> io::Result<Fed> {
-    let _ = (vault, enabled, page, now_ms, offset_minutes);
-    Ok(Fed::Off)
+    let Some(root) = vault.filter(|_| enabled) else {
+        return Ok(Fed::Off);
+    };
+    let Some(source) = external_source(page.url) else {
+        return Ok(Fed::NotExternal);
+    };
+    let raw = root.join(RAW_DIR);
+    match held_source(&raw, &source)? {
+        Scan::Held(path) => return Ok(Fed::Held(path)),
+        Scan::Full => return Ok(Fed::Full),
+        Scan::Absent => {}
+    }
+    fs::create_dir_all(&raw)?;
+    let stem = format!(
+        "{}-{}",
+        civil::iso_date_of(now_ms, offset_minutes),
+        slug_of(page.title, &source)
+    );
+    let file = page_file(page, &source, &civil::iso_utc_of(now_ms));
+    for attempt in 1..=MAX_NAME_TRIES {
+        let name = if attempt == 1 {
+            format!("{stem}{MARKDOWN_SUFFIX}")
+        } else {
+            format!("{stem}-{attempt}{MARKDOWN_SUFFIX}")
+        };
+        let path = raw.join(&name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut opened) => {
+                if let Err(error) = opened.write_all(file.as_bytes()) {
+                    // The file is the one this call created: a half-written
+                    // capture is removed rather than left for the turn to eat.
+                    drop(opened);
+                    let _ = fs::remove_file(&path);
+                    return Err(error);
+                }
+                return Ok(Fed::Written(format!("{RAW_DIR}/{name}")));
+            }
+            // Another capture of the same source may have landed between the
+            // scan and this name (two reads at once): it is held, not doubled.
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if source_of(&path).is_some_and(|held| same_source(&held, &source)) {
+                    return Ok(Fed::Held(format!("{RAW_DIR}/{name}")));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("{RAW_DIR}/{stem}: every name up to -{MAX_NAME_TRIES} is taken"),
+    ))
+}
+
+/// The address an external page is filed under — no credentials, no
+/// fragment — or nothing for anything that is not an external `http(s)` page:
+/// another scheme, a loopback or local name, a private or link-local address.
+#[must_use]
+pub fn external_source(url: &str) -> Option<String> {
+    let mut parsed = Url::parse(url.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let external = match parsed.host()? {
+        Host::Domain(name) => {
+            !is_loopback_hostname(name)
+                && !LOCAL_NAME_SUFFIXES
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+        }
+        Host::Ipv4(address) => is_public(IpAddr::V4(address)),
+        Host::Ipv6(address) => is_public(IpAddr::V6(address)),
+    };
+    if !external {
+        return None;
+    }
+    parsed.set_fragment(None);
+    parsed.set_username("").ok()?;
+    parsed.set_password(None).ok()?;
+    Some(parsed.into())
+}
+
+/// An address a page outside the person's machine and network can have.
+fn is_public(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(v4) => {
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast())
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_public(IpAddr::V4(v4)),
+            None => {
+                !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local())
+            }
+        },
+    }
+}
+
+/// Whether a `source:` value someone wrote names the same page.
+fn same_source(held: &str, source: &str) -> bool {
+    external_source(held).map_or(held == source, |filed| filed == source)
+}
+
+enum Scan {
+    Absent,
+    Held(String),
+    Full,
+}
+
+/// The raw file — under any folder of `raw/` — whose `source:` names
+/// `source`, reading at most [`MAX_STATUS_ENTRIES`] entries. Links are not
+/// followed: `raw/` is the vault's own, and a walk must end.
+fn held_source(raw: &Path, source: &str) -> io::Result<Scan> {
+    let mut folders = vec![raw.to_path_buf()];
+    let mut read = 0usize;
+    while let Some(folder) = folders.pop() {
+        let entries = match fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            read += 1;
+            if read > MAX_STATUS_ENTRIES {
+                return Ok(Scan::Full);
+            }
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            if kind.is_dir() {
+                folders.push(path);
+                continue;
+            }
+            let markdown = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(MARKDOWN_SUFFIX));
+            if kind.is_file()
+                && markdown
+                && source_of(&path).is_some_and(|held| same_source(&held, source))
+            {
+                let relative = path.strip_prefix(raw).unwrap_or(&path);
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                return Ok(Scan::Held(format!("{RAW_DIR}/{relative}")));
+            }
+        }
+    }
+    Ok(Scan::Absent)
+}
+
+/// A raw file's `source:` value, read from its head only.
+fn source_of(path: &Path) -> Option<String> {
+    let mut head = Vec::new();
+    File::open(path)
+        .ok()?
+        .take(SOURCE_HEAD_BYTES)
+        .read_to_end(&mut head)
+        .ok()?;
+    let text = String::from_utf8_lossy(&head);
+    let (front, _) = split_frontmatter(&text);
+    let fields = parse_frontmatter(front);
+    let source = unquote(fields.get("source")?.trim()).trim();
+    (!source.is_empty()).then(|| source.to_string())
+}
+
+/// A file name's slug: the title's ASCII words, or — for a title with none —
+/// the address's host and path.
+fn slug_of(title: &str, source: &str) -> String {
+    let from_title = slugify(title);
+    if !from_title.is_empty() {
+        return from_title;
+    }
+    let address = Url::parse(source)
+        .map(|url| format!("{} {}", url.host_str().unwrap_or_default(), url.path()))
+        .unwrap_or_default();
+    let from_address = slugify(&address);
+    if from_address.is_empty() {
+        FALLBACK_SLUG.to_string()
+    } else {
+        from_address
+    }
+}
+
+/// Lowercase ASCII letters and digits, every other run one `-`, at most
+/// [`MAX_SLUG_CHARS`].
+fn slugify(text: &str) -> String {
+    let mut slug = String::new();
+    for held in text.chars() {
+        if slug.len() >= MAX_SLUG_CHARS {
+            break;
+        }
+        if held.is_ascii_alphanumeric() {
+            slug.push(held.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_end_matches('-').to_string()
+}
+
+/// The file one capture writes: its frontmatter, then the page's text.
+fn page_file(page: &Capture<'_>, source: &str, captured_at: &str) -> String {
+    let text = page.text.trim();
+    let mut cut = text.len().min(MAX_CAPTURE_BYTES);
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let title: String = page.title.trim().chars().take(MAX_TITLE_CHARS).collect();
+    let mut file = format!(
+        "---\nsource: {source}\ncaptured_at: {captured_at}\nby: {}\ntitle: {}\n",
+        quoted(page.by),
+        quoted(&title)
+    );
+    if cut < text.len() {
+        file.push_str("truncated: true\n");
+    }
+    file.push_str("---\n\n");
+    file.push_str(&text[..cut]);
+    file.push('\n');
+    file
+}
+
+/// A YAML double-quoted scalar on one line.
+fn quoted(value: &str) -> String {
+    let mut held = String::with_capacity(value.len() + 2);
+    held.push('"');
+    for mark in value.chars() {
+        match mark {
+            '\\' => held.push_str("\\\\"),
+            '"' => held.push_str("\\\""),
+            control if control.is_control() => held.push(' '),
+            other => held.push(other),
+        }
+    }
+    held.push('"');
+    held
 }
 
 #[cfg(test)]
