@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const REGISTER: &str = "gate-register";
+pub const PIN: &str = "gate-policy-pin";
 pub const RECORD: &str = "gate-record";
 pub const REUSE: &str = "gate-reuse";
 const KEY: &str = "gateEvidenceV1";
@@ -14,6 +15,76 @@ const MAX_METADATA: usize = 16 * 1024;
 const LEASE_MS: i64 = 2 * 60 * 60 * 1000;
 const ALLOWED_GATES: &[&str] = &["gate-root", "gate-zo"];
 const MANDATORY_CHECKS: &[&str] = &["native", "windows", "flake-judgment", "publish"];
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApprovedPolicy {
+    version: u32,
+    policy: String,
+    producer: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PolicyPin {
+    gate: String,
+    definition: ApprovedPolicy,
+    generation: u32,
+    actor: String,
+    pinned_ms: i64,
+}
+
+fn current_pin<'a>(run: &'a Run, gate: &str, at: i64) -> Result<(&'a Message, PolicyPin), String> {
+    let current = run
+        .coordinator_live()
+        .ok_or("gate evidence needs a live coordinator")?;
+    let (row, value) = run
+        .messages
+        .iter()
+        .rev()
+        .find_map(|row| {
+            if row.kind != MessageKind::LandCheck
+                || row.from != LEDGER_ITSELF
+                || row.task.is_some()
+                || row.dispatch.is_some()
+            {
+                return None;
+            }
+            let body: serde_json::Value = serde_json::from_str(row.payload.as_str()).ok()?;
+            (body[KEY]["phase"] == "policy_pinned" && body[KEY]["value"]["gate"] == gate)
+                .then(|| (row, body[KEY]["value"].clone()))
+        })
+        .ok_or("gate has no current coordinator policy pin")?;
+    let pin: PolicyPin =
+        serde_json::from_value(value).map_err(|_| "unsupported gate policy pin")?;
+    if pin.generation != current.generation || current.actor.as_deref() != Some(pin.actor.as_str())
+    {
+        return Err("coordinator changed after gate policy pin".into());
+    }
+    if pin.pinned_ms != row.created_ms || at < row.created_ms {
+        return Err("gate policy pin has an invalid event order".into());
+    }
+    if pin.definition.version != 1
+        || !hex(&pin.definition.policy, &[64])
+        || !hex(&pin.definition.producer, &[64])
+    {
+        return Err("gate policy pin has an unknown identity".into());
+    }
+    Ok((row, pin))
+}
+
+fn policy_matches(run: &Run, inputs: &Inputs, id: Option<&str>, at: i64) -> Result<String, String> {
+    let (row, pin) = current_pin(run, &inputs.gate, at)?;
+    if id.is_some_and(|id| id != row.id.as_str()) {
+        return Err("gate policy pin changed after registration".into());
+    }
+    if inputs.policy.as_deref() != Some(pin.definition.policy.as_str())
+        || inputs.producer.as_deref() != Some(pin.definition.producer.as_str())
+    {
+        return Err("gate policy or producer differs from the current coordinator pin".into());
+    }
+    Ok(row.id.clone())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,6 +229,8 @@ pub struct Metadata {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Registration {
     inputs: Inputs,
+    #[serde(default)]
+    policy_pin: String,
     attempt: String,
     handed_in_head: Option<String>,
     lease: String,
@@ -464,6 +537,7 @@ fn judge(
         if at < completed_row.created_ms || completed_row.created_ms < registered_row.created_ms {
             return Err("reuse precedes the recorded execution".into());
         }
+        policy_matches(run, &registered.inputs, Some(&registered.policy_pin), at)?;
         registered.inputs.reusable()?;
         request.inputs.reusable()?;
         if metadata.attempt != attempt
@@ -511,6 +585,17 @@ pub(super) fn validate_replay(
 ) -> Result<(), String> {
     let run = ledger.run(run_id).ok_or_else(|| unknown_run(run_id))?;
     let generation = coordinator(run, team, pane, actor)?;
+    if verb == PIN {
+        let gate = words
+            .value("--gate")
+            .ok_or("gate policy pin needs --gate")?;
+        let answer: serde_json::Value = parse(answer)?;
+        let (row, _) = current_pin(run, gate, now_ms)?;
+        if answer["pin"] != row.id {
+            return Err("gate policy pin retry no longer names the current pin".into());
+        }
+        return Ok(());
+    }
     let task = words.value("--task").ok_or("gate evidence needs --task")?;
     let attempt = words
         .value("--attempt")
@@ -544,6 +629,12 @@ pub(super) fn validate_replay(
     if registered.generation != generation || registered.actor != actor || now_ms < row.created_ms {
         return Err("gate retry's coordinator or registration event changed".into());
     }
+    policy_matches(
+        run,
+        &registered.inputs,
+        Some(&registered.policy_pin),
+        now_ms,
+    )?;
     Ok(())
 }
 
@@ -564,6 +655,52 @@ pub(super) fn decide(
     if now_ms < 0 {
         return Err("invalid gate event time".into());
     }
+    if verb == PIN {
+        let gate = words
+            .value("--gate")
+            .ok_or("gate policy pin needs --gate")?;
+        if !ALLOWED_GATES.contains(&gate) {
+            return Err("gate scope is not allowed for a policy pin".into());
+        }
+        let definition: ApprovedPolicy = parse(words.value("--body").unwrap_or_default())?;
+        if definition.version != 1
+            || !hex(&definition.policy, &[64])
+            || !hex(&definition.producer, &[64])
+        {
+            return Err(
+                "gate policy pin needs exact policy and producer SHA-256 identities".into(),
+            );
+        }
+        let pin = PolicyPin {
+            gate: gate.into(),
+            definition,
+            generation,
+            actor: actor.into(),
+            pinned_ms: now_ms,
+        };
+        let id = ledger.post(
+            run_id,
+            Draft {
+                from: LEDGER_ITSELF.into(),
+                to: format!("run:{run_id}"),
+                kind: MessageKind::LandCheck,
+                body: format!("gate policy {gate}: pinned").into(),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: serde_json::json!({(KEY):{"phase":"policy_pinned","value":pin}})
+                    .to_string()
+                    .into(),
+                thread: None,
+                task: None,
+                dispatch: None,
+            },
+            now_ms,
+        )?;
+        return Ok(said(
+            serde_json::json!({"pin":id,"gate":gate,"policy":pin.definition.policy,
+            "producer":pin.definition.producer,"generation":generation,"executed":false}),
+        ));
+    }
     let task = words.value("--task").ok_or("gate evidence needs --task")?;
     let attempt = words
         .value("--attempt")
@@ -573,6 +710,7 @@ pub(super) fn decide(
         REGISTER => {
             let inputs: Inputs = parse(body)?;
             inputs.validate()?;
+            let policy_pin = policy_matches(run, &inputs, None, now_ms)?;
             let handed_in_head = handed_in(run, task, attempt, now_ms)?;
             if inputs.handed_in_head != handed_in_head
                 || handed_in_head.is_some() && !inputs.source_ancestor
@@ -585,6 +723,7 @@ pub(super) fn decide(
             let lease = ledger.mint("gx-");
             let registered = Registration {
                 inputs,
+                policy_pin,
                 attempt: attempt.into(),
                 handed_in_head,
                 lease: lease.clone(),
@@ -622,6 +761,12 @@ pub(super) fn decide(
                 if registered.generation != generation || registered.actor != actor {
                     return Err("coordinator changed after gate registration".into());
                 }
+                policy_matches(
+                    run,
+                    &registered.inputs,
+                    Some(&registered.policy_pin),
+                    now_ms,
+                )?;
                 live_lease(run, id, &registered, task, attempt, now_ms)?;
                 let inputs: Inputs = parse(body)?;
                 if inputs != registered.inputs {
@@ -685,6 +830,12 @@ pub(super) fn decide(
             if registered.generation != generation || registered.actor != actor {
                 return Err("coordinator changed after gate registration".into());
             }
+            policy_matches(
+                run,
+                &registered.inputs,
+                Some(&registered.policy_pin),
+                now_ms,
+            )?;
             if metadata.inputs != registered.inputs || metadata.attempt != attempt {
                 return Err("gate metadata differs from the registered inputs or attempt".into());
             }
@@ -724,6 +875,12 @@ pub(super) fn decide(
         REUSE => {
             let request: ReuseRequest = parse(body)?;
             let (original, result) = judge(run, task, attempt, &request, now_ms);
+            let policy_pin = registration(run, &request.registration, task, attempt)
+                .ok()
+                .map(|(_, value)| value.policy_pin);
+            let current_policy_pin = current_pin(run, &request.inputs.gate, now_ms)
+                .ok()
+                .map(|(row, _)| row.id.clone());
             let (decision, reason) = match result {
                 Ok(()) => (
                     "hit",
@@ -733,7 +890,8 @@ pub(super) fn decide(
             };
             let value = serde_json::json!({"decision":decision,"reason":reason,"registration":request.registration,"original":original,"executed":false,"newExecutions":0,"gate":request.inputs.gate,"mandatoryChecks":MANDATORY_CHECKS,
                 "head":request.inputs.head,"tree":request.inputs.tree,"handedInHead":request.inputs.handed_in_head,
-                "recipe":request.inputs.recipe,"policy":request.inputs.policy,"producer":request.inputs.producer,"sourceAncestor":request.inputs.source_ancestor});
+                "recipe":request.inputs.recipe,"policy":request.inputs.policy,"producer":request.inputs.producer,"sourceAncestor":request.inputs.source_ancestor,
+                "policyPin":policy_pin,"currentPolicyPin":current_policy_pin});
             let id = post(
                 ledger,
                 run_id,

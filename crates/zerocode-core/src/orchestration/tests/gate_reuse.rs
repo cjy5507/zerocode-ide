@@ -39,12 +39,21 @@ impl Fixture {
             .unwrap()
             .id
             .clone();
-        Self {
+        let mut fixture = Self {
             bench,
             task,
             attempt,
             worker_pane,
-        }
+        };
+        fixture.pin("gate-root", 'b');
+        fixture
+    }
+
+    fn pin(&mut self, name: &str, byte: char) -> Value {
+        let planned = self.bench.at_argv("%1", vec![gate::PIN.into(), "--gate".into(), name.into(),
+            "--body".into(), json!({"version":1,"policy":byte.to_string().repeat(64),"producer":byte.to_string().repeat(64)}).to_string()]);
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        serde_json::from_str(&planned.reply.stdout).unwrap()
     }
 
     fn call(&mut self, verb: &str, value: &Value) -> Decided {
@@ -211,6 +220,12 @@ fn every_unknown_registered_identity_misses_even_when_the_consumer_repeats_it() 
         let mut fixture = Fixture::new();
         let mut input = inputs();
         input[key] = Value::Null;
+        if matches!(key, "policy" | "producer") {
+            let refused = fixture.call(gate::REGISTER, &input);
+            assert_ne!(refused.reply.exit_code, 0);
+            assert!(refused.reply.stderr.contains("current coordinator pin"));
+            continue;
+        }
         let metadata = fixture.registered(input);
         fixture.json(gate::RECORD, &metadata);
         let answer = fixture.json(gate::REUSE, &request(&metadata));
@@ -364,10 +379,16 @@ fn a_completed_receipt_misses_after_a_coordinator_generation_change() {
         answer["decision"], "miss",
         "old generation reused: {answer}"
     );
+    assert!(
+        answer["reason"]
+            .as_str()
+            .unwrap()
+            .contains("coordinator changed")
+    );
 }
 
 #[test]
-fn an_unrelated_candidate_without_source_ancestry_is_refused() {
+fn an_absent_coordinator_source_ancestry_observation_is_refused() {
     let mut fixture = Fixture::new();
     let mut input = inputs();
     input["head"] = "f".repeat(40).into();
@@ -621,6 +642,7 @@ fn a_coordinators_direct_task_has_an_explicit_no_attempt_execution() {
         attempt: NO_ATTEMPT.into(),
         worker_pane: String::new(),
     };
+    fixture.pin("gate-root", 'b');
     let (metadata, _) = fixture.completed();
     assert_eq!(
         fixture.json(gate::REUSE, &request(&metadata))["decision"],
@@ -665,6 +687,290 @@ fn a_lease_start_is_single_use_including_replays_and_competing_requests() {
     let other = fixture.bench.at_argv("%1", argv);
     assert_ne!(other.reply.exit_code, 0);
     assert!(other.reply.stderr.contains("already started"));
+}
+
+#[test]
+fn policy_pins_require_the_current_coordinator_and_exact_supported_fields() {
+    let mut fixture = Fixture::new();
+    let run = fixture.bench.ledger.runs()[0].id.clone();
+    let valid = json!({"version":1,"policy":"b".repeat(64),"producer":"b".repeat(64)});
+    let argv = |body: Value, name: &str| {
+        vec![
+            gate::PIN.into(),
+            "--run".into(),
+            run.clone(),
+            "--gate".into(),
+            name.into(),
+            "--body".into(),
+            body.to_string(),
+        ]
+    };
+    let count = fixture.bench.ledger.runs()[0].messages.len();
+    let worker = fixture.worker_pane.clone();
+    let refused = fixture
+        .bench
+        .at_argv(&worker, argv(valid.clone(), "gate-root"));
+    assert_ne!(refused.reply.exit_code, 0);
+    fixture.bench.actor = Some(bench_actor("session", "stranger"));
+    let refused = fixture
+        .bench
+        .at_argv("%1", argv(valid.clone(), "gate-root"));
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(refused.reply.stderr.contains("authenticated session"));
+    fixture.bench.actor = None;
+    for body in [
+        json!({"version":1,"policy":"b".repeat(64)}),
+        json!({"version":1,"policy":"b".repeat(64),"producer":"b".repeat(64),"extraTrust":true}),
+        json!({"version":2,"policy":"b".repeat(64),"producer":"b".repeat(64)}),
+        json!({"version":1,"policy":"B".repeat(64),"producer":"b".repeat(64)}),
+    ] {
+        assert_ne!(
+            fixture
+                .bench
+                .at_argv("%1", argv(body, "gate-root"))
+                .reply
+                .exit_code,
+            0
+        );
+    }
+    assert_ne!(
+        fixture
+            .bench
+            .at_argv("%1", argv(valid, "native"))
+            .reply
+            .exit_code,
+        0
+    );
+    assert_eq!(fixture.bench.ledger.runs()[0].messages.len(), count);
+}
+
+#[test]
+fn unpinned_or_differently_pinned_policies_cannot_register_a_gate() {
+    let mut fixture = Fixture::new();
+    let mut value = inputs();
+    value["gate"] = "gate-zo".into();
+    let refused = fixture.call(gate::REGISTER, &value);
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(
+        refused
+            .reply
+            .stderr
+            .contains("no current coordinator policy pin")
+    );
+    value = inputs();
+    value["policy"] = "e".repeat(64).into();
+    let refused = fixture.call(gate::REGISTER, &value);
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(refused.reply.stderr.contains("current coordinator pin"));
+    assert_eq!(fixture.call(gate::REGISTER, &inputs()).reply.exit_code, 0);
+}
+
+#[test]
+fn policy_pins_are_separate_for_each_gate_and_old_digests_do_not_restore_evidence() {
+    let mut fixture = Fixture::new();
+    let (root, _) = fixture.completed();
+    fixture.pin("gate-zo", 'c');
+    let mut value = inputs();
+    value["gate"] = "gate-zo".into();
+    value["policy"] = "c".repeat(64).into();
+    value["producer"] = "c".repeat(64).into();
+    let other = fixture.registered(value);
+    fixture.json(gate::RECORD, &other);
+    assert_eq!(
+        fixture.json(gate::REUSE, &request(&root))["decision"],
+        "hit"
+    );
+    assert_eq!(
+        fixture.json(gate::REUSE, &request(&other))["decision"],
+        "hit"
+    );
+    fixture.pin("gate-root", 'e');
+    let miss = fixture.json(gate::REUSE, &request(&root));
+    assert_eq!(miss["decision"], "miss");
+    assert_ne!(miss["policyPin"], miss["currentPolicyPin"]);
+    assert!(
+        miss["reason"]
+            .as_str()
+            .unwrap()
+            .contains("policy pin changed")
+    );
+    assert_eq!(
+        fixture.json(gate::REUSE, &request(&other))["decision"],
+        "hit"
+    );
+    fixture.pin("gate-root", 'b');
+    assert_eq!(
+        fixture.json(gate::REUSE, &request(&root))["decision"],
+        "miss"
+    );
+    let (fresh, _) = fixture.completed();
+    assert_eq!(
+        fixture.json(gate::REUSE, &request(&fresh))["decision"],
+        "hit"
+    );
+}
+
+#[test]
+fn cached_policy_pins_and_hits_recheck_the_current_pin_after_replacement() {
+    let mut fixture = Fixture::new();
+    let pin_argv = vec![
+        gate::PIN.into(),
+        "--gate".into(),
+        "gate-root".into(),
+        "--body".into(),
+        json!({"version":1,"policy":"b".repeat(64),"producer":"b".repeat(64)}).to_string(),
+        RETRY_REQUEST.into(),
+        "fixed-policy-pin-retry".into(),
+    ];
+    let first = fixture.bench.at_argv("%1", pin_argv.clone());
+    assert_eq!(first.reply.exit_code, 0, "{}", first.reply.stderr);
+    assert_eq!(
+        fixture.bench.at_argv("%1", pin_argv.clone()).reply.stdout,
+        first.reply.stdout
+    );
+    let (metadata, _) = fixture.completed();
+    let hit_argv = vec![
+        gate::REUSE.into(),
+        "--task".into(),
+        fixture.task.clone(),
+        "--attempt".into(),
+        fixture.attempt.clone(),
+        "--body".into(),
+        request(&metadata).to_string(),
+        RETRY_REQUEST.into(),
+        "fixed-policy-hit-retry".into(),
+    ];
+    let hit = fixture.bench.at_argv("%1", hit_argv.clone());
+    assert_eq!(hit.reply.exit_code, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&hit.reply.stdout).unwrap()["decision"],
+        "hit"
+    );
+    assert_eq!(
+        fixture.bench.at_argv("%1", hit_argv.clone()).reply.stdout,
+        hit.reply.stdout
+    );
+    fixture.pin("gate-root", 'c');
+    let count = fixture.bench.ledger.runs()[0].messages.len();
+    let refused = fixture.bench.at_argv("%1", pin_argv.clone());
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(refused.reply.stderr.contains("current pin"));
+    assert_ne!(
+        fixture
+            .bench
+            .at_argv("%1", hit_argv.clone())
+            .reply
+            .exit_code,
+        0
+    );
+    assert_eq!(fixture.bench.ledger.runs()[0].messages.len(), count);
+    fixture.pin("gate-root", 'b');
+    assert_ne!(fixture.bench.at_argv("%1", pin_argv).reply.exit_code, 0);
+    assert_ne!(fixture.bench.at_argv("%1", hit_argv).reply.exit_code, 0);
+    assert_eq!(
+        fixture.json(gate::REUSE, &request(&metadata))["decision"],
+        "miss"
+    );
+}
+
+#[test]
+fn policy_replacement_invalidates_registration_retries_starts_and_completions() {
+    let mut fixture = Fixture::new();
+    let argv = vec![
+        gate::REGISTER.into(),
+        "--task".into(),
+        fixture.task.clone(),
+        "--attempt".into(),
+        fixture.attempt.clone(),
+        "--body".into(),
+        inputs().to_string(),
+        RETRY_REQUEST.into(),
+        "fixed-policy-registration-retry".into(),
+    ];
+    let registered = fixture.bench.at_argv("%1", argv.clone());
+    assert_eq!(registered.reply.exit_code, 0);
+    let value: Value = serde_json::from_str(&registered.reply.stdout).unwrap();
+    fixture.pin("gate-root", 'c');
+    assert_ne!(fixture.bench.at_argv("%1", argv).reply.exit_code, 0);
+    let start = fixture.bench.at_argv(
+        "%1",
+        vec![
+            gate::RECORD.into(),
+            "--task".into(),
+            fixture.task.clone(),
+            "--attempt".into(),
+            fixture.attempt.clone(),
+            "--start".into(),
+            value["registration"].as_str().unwrap().into(),
+            "--lease".into(),
+            value["lease"].as_str().unwrap().into(),
+            "--body".into(),
+            inputs().to_string(),
+        ],
+    );
+    assert_ne!(start.reply.exit_code, 0);
+    assert!(start.reply.stderr.contains("policy pin changed"));
+    fixture.pin("gate-root", 'b');
+    let metadata = fixture.registered(inputs());
+    fixture.pin("gate-root", 'c');
+    let refused = fixture.call(gate::RECORD, &metadata);
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(refused.reply.stderr.contains("policy pin changed"));
+}
+
+#[test]
+fn a_new_coordinator_generation_requires_a_new_pin_and_cannot_revive_old_evidence() {
+    let mut fixture = Fixture::new();
+    let pin_argv = vec![
+        gate::PIN.into(),
+        "--gate".into(),
+        "gate-root".into(),
+        "--body".into(),
+        json!({"version":1,"policy":"b".repeat(64),"producer":"b".repeat(64)}).to_string(),
+        RETRY_REQUEST.into(),
+        "generation-policy-pin-retry".into(),
+    ];
+    assert_eq!(
+        fixture
+            .bench
+            .at_argv("%1", pin_argv.clone())
+            .reply
+            .exit_code,
+        0
+    );
+    let (metadata, _) = fixture.completed();
+    fixture.bench.ledger.runs[0]
+        .coordinator
+        .as_mut()
+        .unwrap()
+        .generation += 1;
+    let refused = fixture.call(gate::REGISTER, &inputs());
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(
+        refused
+            .reply
+            .stderr
+            .contains("coordinator changed after gate policy pin")
+    );
+    assert_ne!(
+        fixture
+            .bench
+            .at_argv("%1", pin_argv.clone())
+            .reply
+            .exit_code,
+        0
+    );
+    fixture.pin("gate-root", 'b');
+    assert_ne!(fixture.bench.at_argv("%1", pin_argv).reply.exit_code, 0);
+    assert_eq!(
+        fixture.json(gate::REUSE, &request(&metadata))["decision"],
+        "miss"
+    );
+    let (new_metadata, _) = fixture.completed();
+    assert_eq!(
+        fixture.json(gate::REUSE, &request(&new_metadata))["decision"],
+        "hit"
+    );
 }
 
 #[test]

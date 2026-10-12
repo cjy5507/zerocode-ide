@@ -77,25 +77,12 @@ fn real_python_uses_retained_launcher_bytes_and_declared_standard_library() {
     assert_eq!(fs::read(&launcher).unwrap(), original);
     fs::write(python, original_python).unwrap();
     fs::write(
-        python
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("pyvenv.cfg"),
+        runtime.parent().unwrap().join("pyvenv.cfg"),
         "home = candidate\n",
     )
     .unwrap();
     assert_eq!(invoke(&options, &root).status.code(), Some(1));
-    fs::remove_file(
-        python
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("pyvenv.cfg"),
-    )
-    .unwrap();
+    fs::remove_file(runtime.parent().unwrap().join("pyvenv.cfg")).unwrap();
 
     for flag in ["--launcher-sha256", "--python-sha256", "--stdlib-sha256"] {
         let mut changed = options.clone();

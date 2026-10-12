@@ -99,6 +99,11 @@ fn receipt_gate_child_cannot_forge_fixture_completion() {
         }
     };
     let inputs = &probe["inputs"];
+    let pin = json!({"version":1,"policy":inputs["policy"],"producer":inputs["producer"]});
+    let Some(_) = call("gate-policy-pin", &pin, &["--gate", "gate-root"]) else {
+        println!("fixture child has no ledger authority");
+        return;
+    };
     let Some(registered) = call("gate-register", inputs, &[]) else {
         println!("fixture child has no ledger authority");
         return;
@@ -471,6 +476,10 @@ impl CliFixture {
                 String::from_utf8_lossy(&output.stderr)
             );
             *self.policy.lock().unwrap() = Some(serde_json::from_slice(&output.stdout).unwrap());
+            let policy = self.policy.lock().unwrap().clone().unwrap();
+            self.cli(&["gate-policy-pin", "--gate", "gate-root", "--body",
+                &json!({"version":1,"policy":policy["policySha256"],"producer":policy["producerSha256"]}).to_string(),
+                "--retry-request", "fixture-reviewed-policy-pin"]);
         }
         let policy = self.policy.lock().unwrap().clone().unwrap();
         let native =
@@ -626,6 +635,7 @@ fn the_identical_fixture_probe_completes_and_hits_with_fixture_authority() {
     assert_eq!(
         phases,
         vec![
+            json!("policy_pinned"),
             json!("registered"),
             json!("started"),
             json!("completed"),
@@ -856,4 +866,120 @@ fn offline_cargo_first_writes_and_ignored_tests_issue_a_hit_and_changed_config_m
         })
         .count();
     assert_eq!(completions, 1);
+}
+
+#[test]
+fn concurrent_policy_replacement_and_registration_use_one_current_pin() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    fixture.install_probe();
+    let probe: Value =
+        serde_json::from_slice(&std::fs::read(fixture.input.join("probe.json")).unwrap()).unwrap();
+    let initial = fixture.cli(&[
+        "gate-policy-pin",
+        "--gate",
+        "gate-root",
+        "--body",
+        &json!({"version":1,"policy":"b".repeat(64),"producer":"b".repeat(64)}).to_string(),
+        "--retry-request",
+        "fixture-initial-policy-pin",
+    ]);
+    let barrier = std::sync::Barrier::new(3);
+    let (replacement, registration) = thread::scope(|scope| {
+        let one = scope.spawn(|| {
+            barrier.wait();
+            fixture.raw_cli(&[
+                "gate-policy-pin",
+                "--gate",
+                "gate-root",
+                "--body",
+                &json!({"version":1,"policy":"c".repeat(64),"producer":"c".repeat(64)}).to_string(),
+                "--retry-request",
+                "fixture-concurrent-policy-pin",
+            ])
+        });
+        let two = scope.spawn(|| {
+            barrier.wait();
+            fixture.raw_cli(&[
+                "gate-register",
+                "--task",
+                &fixture.task,
+                "--attempt",
+                "none",
+                "--body",
+                &probe["inputs"].to_string(),
+                "--retry-request",
+                "fixture-concurrent-registration",
+            ])
+        });
+        barrier.wait();
+        (one.join().unwrap(), two.join().unwrap())
+    });
+    assert!(
+        replacement.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replacement.stderr)
+    );
+    let replacement: Value = serde_json::from_slice(&replacement.stdout).unwrap();
+    assert_ne!(replacement["pin"], initial["pin"]);
+    if registration.status.success() {
+        let registered: Value = serde_json::from_slice(&registration.stdout).unwrap();
+        let view = fixture.actor.view().unwrap();
+        let row = view
+            .projection()
+            .messages
+            .iter()
+            .find(|row| row.id == registered["registration"].as_str().unwrap())
+            .unwrap();
+        let stored: Value = serde_json::from_str(row.payload.as_str()).unwrap();
+        assert_eq!(
+            stored["gateEvidenceV1"]["value"]["policyPin"],
+            initial["pin"]
+        );
+        let start = fixture.raw_cli(&[
+            "gate-record",
+            "--task",
+            &fixture.task,
+            "--attempt",
+            "none",
+            "--start",
+            registered["registration"].as_str().unwrap(),
+            "--lease",
+            registered["lease"].as_str().unwrap(),
+            "--body",
+            &probe["inputs"].to_string(),
+            "--retry-request",
+            "fixture-concurrent-old-start",
+        ]);
+        assert!(!start.status.success());
+        assert!(String::from_utf8_lossy(&start.stderr).contains("policy pin changed"));
+    } else {
+        assert!(String::from_utf8_lossy(&registration.stderr).contains("current coordinator pin"));
+    }
+    let mut current = probe["inputs"].clone();
+    current["policy"] = "c".repeat(64).into();
+    current["producer"] = "c".repeat(64).into();
+    let registered = fixture.cli(&[
+        "gate-register",
+        "--task",
+        &fixture.task,
+        "--attempt",
+        "none",
+        "--body",
+        &current.to_string(),
+        "--retry-request",
+        "fixture-concurrent-current-registration",
+    ]);
+    let view = fixture.actor.view().unwrap();
+    let row = view
+        .projection()
+        .messages
+        .iter()
+        .find(|row| row.id == registered["registration"].as_str().unwrap())
+        .unwrap();
+    let stored: Value = serde_json::from_str(row.payload.as_str()).unwrap();
+    assert_eq!(
+        stored["gateEvidenceV1"]["value"]["policyPin"],
+        replacement["pin"]
+    );
 }

@@ -18231,6 +18231,11 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::Mutation,
     ),
     (
+        gate_reuse::PIN,
+        "--gate <gate-root|gate-zo> --body <policy-json> · pin exact policy and producer identities for the current authenticated coordinator",
+        Doing::Mutation,
+    ),
+    (
         gate_reuse::REGISTER,
         "--task <id> --attempt <dispatch|none> --body <inputs-json> · register one gate before execution from the authenticated coordinator session",
         Doing::Mutation,
@@ -20216,7 +20221,7 @@ fn plan_inner(
             let answer = answer.replay(ledger)?;
             if matches!(
                 verb.as_str(),
-                gate_reuse::REGISTER | gate_reuse::RECORD | gate_reuse::REUSE
+                gate_reuse::PIN | gate_reuse::REGISTER | gate_reuse::RECORD | gate_reuse::REUSE
             ) {
                 let run_id = bound(ledger, &words, &caller, &seat)?;
                 gate_reuse::validate_replay(
@@ -22584,7 +22589,7 @@ fn plan_inner(
          * repository and refuses a worker's pane; the window merges in a throwaway checkout,
          * runs the project's check and writes the evidence back (`Ledger::land_checked`). The
          * reply is the window's, written once the merge has been judged. */
-        gate_reuse::REGISTER | gate_reuse::RECORD | gate_reuse::REUSE => {
+        gate_reuse::PIN | gate_reuse::REGISTER | gate_reuse::RECORD | gate_reuse::REUSE => {
             let run_id = bound(ledger, &words, &caller, &seat)?;
             gate_reuse::decide(ledger, team, &run_id, verb, &words, pane, actor, now_ms)?
         }
