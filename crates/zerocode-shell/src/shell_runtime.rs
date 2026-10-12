@@ -3124,6 +3124,9 @@ pub(super) struct QueuedPrompt {
     /// How its words go onto the composer, the row's answer carried to the
     /// queued copy (t-17274).
     pub(super) words: zerocode_pty::Words,
+    /// Whether it waits out its pane's turn once it has the line (t-47952),
+    /// the door's choice carried to the queued copy like its guard.
+    pub(super) parks: bool,
     pub(super) completion: std::sync::mpsc::SyncSender<DeliveryOutcome>,
 }
 
