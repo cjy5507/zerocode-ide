@@ -350,3 +350,9 @@ pub fn entry_count(count: usize) -> String {
 pub fn exit_code(code: i32) -> String {
     format!("exit {code}")
 }
+
+/// A permission card's risk line: `High risk`.
+#[must_use]
+pub fn risk(level: &str) -> String {
+    format!("{level} risk")
+}

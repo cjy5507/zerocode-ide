@@ -483,15 +483,28 @@ impl Dialog {
             None => Self {
                 title: "Allow".to_string(),
                 subject: crate::util::ansi::sanitize_inline(&prompt.tool_name),
-                body: prompt
-                    .audit_hint
-                    .clone()
-                    .unwrap_or_else(|| prompt.reasoning.clone()),
+                body: permission_body(prompt),
                 options,
-                selected: 0,
+                // Enter allows this one call; the session-wide allow is a
+                // choice the person makes, never the default (t-48216).
+                selected: prompt
+                    .choices
+                    .iter()
+                    .position(|choice| {
+                        matches!(choice.decision, runtime::message_stream::PermissionDecision::AllowOnce)
+                    })
+                    .unwrap_or(0),
                 footer,
             },
         }
+    }
+
+    /// The whole command a permission card asks about, over its reason.
+    #[must_use]
+    pub fn with_command(mut self, command: &str) -> Self {
+        let command: Vec<String> = command.lines().map(crate::util::ansi::sanitize_inline).collect();
+        self.body = format!("{}\n\n{}", command.join("\n"), self.body);
+        self
     }
 
     #[must_use]
@@ -2013,7 +2026,8 @@ mod tests {
             .map(Line::plain)
             .collect();
         assert_eq!(plain[0], "> Allow Bash", "a tool permission is unchanged: {plain:?}");
-        assert!(plain.iter().any(|line| line.starts_with("  risk: high; explicitly unblock with")), "{plain:?}");
+        // Its reason, then its risk in words (t-48216).
+        assert_eq!(plain[2..4], ["  runs a command", "  High risk"], "{plain:?}");
     }
 
     /// codex caps every popup at `MAX_POPUP_ROWS` and scrolls the window
@@ -2454,6 +2468,28 @@ mod tests {
         assert_eq!(plain[7], "• Working (3s • esc to interrupt)");
         assert_eq!(cursor, Some((3, 11)));
     }
+}
+
+/// The runtime's audit hint opens with the call's risk level —
+/// `risk: high; explicitly unblock with [y] Allow or [o] Allow once`
+/// (`runtime::permission::PermissionRequest::prompt_audit_hint`).
+const AUDIT_RISK_PREFIX: &str = "risk: ";
+
+/// A permission card's words: why the call needs approval, then how risky it
+/// is — the choices are listed once, as choices.
+fn permission_body(prompt: &runtime::message_stream::PermissionPrompt) -> String {
+    let risk = prompt.audit_hint.as_deref().and_then(|hint| {
+        let level = hint.strip_prefix(AUDIT_RISK_PREFIX)?.split(';').next()?.trim();
+        let mut letters = level.chars();
+        let first = letters.next()?;
+        Some(strings::risk(&format!("{}{}", first.to_uppercase(), letters.as_str())))
+    });
+    [Some(prompt.reasoning.trim().to_string()), risk]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The approval card and the status row while a call runs (t-48216).

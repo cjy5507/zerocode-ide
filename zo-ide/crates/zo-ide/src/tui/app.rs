@@ -3308,10 +3308,30 @@ impl Ui {
         }
     }
 
+    /// The whole command of the one call of `tool` still waiting for its
+    /// result — what a permission card asks about, in full: the request
+    /// carries only its first sixty characters. Two such calls leave it unsaid.
+    fn pending_command(&self, tool: &str) -> Option<String> {
+        let mut commands = self
+            .tools
+            .values()
+            .filter(|pending| pending.name == tool)
+            .filter_map(|pending| match &pending.kind {
+                ToolKind::Command { command, .. } => Some(command.clone()),
+                _ => None,
+            });
+        let command = commands.next()?;
+        commands.next().is_none().then_some(command)
+    }
+
     fn park(&mut self, prompt: PendingPrompt) {
         let screen = match &prompt {
             PendingPrompt::Permission(permission) => {
-                ParkedScreen::Dialog(Dialog::for_permission(permission))
+                let dialog = Dialog::for_permission(permission);
+                ParkedScreen::Dialog(match self.pending_command(&permission.tool_name) {
+                    Some(command) => dialog.with_command(&command),
+                    None => dialog,
+                })
             }
             // 세 갈래 모두 같은 오버레이다 — 보기가 있으면 번호 목록,
             // 다중이면 그 목록에 `[x]`, 없으면 컴포저가 답을 받는다.
