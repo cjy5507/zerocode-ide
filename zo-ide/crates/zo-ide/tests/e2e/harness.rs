@@ -1096,9 +1096,13 @@ pub fn visible_row_occupancy(capture: &[u8], rows: usize) -> Vec<bool> {
         .collect()
 }
 
+/// A styled row ends on its colour resets. A row with no style of its own
+/// sends none: it is its erase and its text, and ends where the next
+/// row, the scroll-region reset or the end of the frame begins.
 fn scan_history_rows(capture: &[u8]) -> Vec<Vec<u8>> {
     const ERASE_LINE: &[u8] = b"\x1b[K";
     const LINE_TAIL: &[u8] = b"\x1b[39m\x1b[49m\x1b[0m";
+    const PLAIN_ENDS: [&[u8]; 3] = [b"\r\n", b"\x1b[r", b"\x1b[?2026l"];
     let mut rows = Vec::new();
     let mut cursor = 0;
     while let Some(relative) = find_bytes(&capture[cursor..], b"\r\n") {
@@ -1108,13 +1112,26 @@ fn scan_history_rows(capture: &[u8]) -> Vec<Vec<u8>> {
             continue;
         };
         let body_start = start + erase_relative + ERASE_LINE.len();
-        let Some(tail_relative) = find_bytes(&capture[body_start..], LINE_TAIL) else {
-            cursor = body_start;
-            continue;
-        };
-        let body_end = body_start + tail_relative;
-        rows.push(capture[body_start..body_end].to_vec());
-        cursor = body_end + LINE_TAIL.len();
+        let rest = &capture[body_start..];
+        let plain_end = PLAIN_ENDS
+            .iter()
+            .filter_map(|end| find_bytes(rest, end))
+            .min()
+            .unwrap_or(rest.len());
+        match find_bytes(rest, LINE_TAIL).filter(|tail| *tail <= plain_end) {
+            Some(tail_relative) => {
+                let body_end = body_start + tail_relative;
+                rows.push(capture[body_start..body_end].to_vec());
+                cursor = body_end + LINE_TAIL.len();
+            }
+            None => {
+                let body = &rest[..plain_end];
+                if !body.contains(&0x1b) {
+                    rows.push(body.to_vec());
+                }
+                cursor = body_start + plain_end;
+            }
+        }
     }
     rows
 }
