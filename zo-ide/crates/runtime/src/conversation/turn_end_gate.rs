@@ -115,15 +115,18 @@ pub(super) fn unverified_completion_reminder(edits: &[&str], check: Option<&str>
     )
 }
 
+/// How the receipt opens — words a person reads, not an internal tag (t-48216).
+const RECEIPT_LEAD: &str = "Checks passed after the last edit:";
+
 /// One transcript line receipting a turn that edited and then checked: the
 /// harness's own record that `commands` exited 0 after the last edit.
 #[must_use]
 pub(super) fn completion_receipt(commands: &[&str]) -> String {
     let listed: Vec<String> = commands
         .iter()
-        .map(|command| format!("{} ✓", crate::verified_state::first_line(command)))
+        .map(|command| crate::verified_state::first_line(command))
         .collect();
-    format!("[receipt] green after the last edit: {}", listed.join(" · "))
+    format!("{RECEIPT_LEAD} {}", listed.join(" · "))
 }
 
 /// The shapes a tool call takes when written as prose rather than issued:
@@ -576,7 +579,7 @@ mod tests {
         assert!(reminder.contains("(/ws/src/a.rs)") && reminder.contains("`cargo build --tests`"));
         assert_eq!(
             completion_receipt(&["cargo test -p runtime\n# second line", "just clippy"]),
-            "[receipt] green after the last edit: cargo test -p runtime … ✓ · just clippy ✓"
+            "Checks passed after the last edit: cargo test -p runtime … · just clippy"
         );
     }
 
