@@ -3155,3 +3155,235 @@ mod tests {
         );
     }
 }
+
+/// One row per call (t-48216): a status glyph, the verb, the target and the
+/// call's result at the right edge — never folded into `Ran N commands`.
+#[cfg(test)]
+mod row_tests {
+    use std::time::Duration;
+
+    use runtime::message_stream::{
+        BashResult, DiffHunk, DiffLine, DiffLineKind, DiffView, ToolResultBody,
+    };
+
+    use super::{Explored, Outcome, ToolCall, ToolGroup, ToolKind};
+    use crate::tui::ansi::{Color, Line};
+
+    const WIDTH: usize = 60;
+
+    fn plain(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(Line::plain).collect()
+    }
+
+    /// `left`, then spaces, then `right` ending on the last column.
+    fn edge(left: &str, right: &str, width: usize) -> String {
+        let used = left.chars().count() + right.chars().count();
+        format!("{left}{}{right}", " ".repeat(width.saturating_sub(used)))
+    }
+
+    fn ok(output: &str) -> Outcome {
+        let body = ToolResultBody::Text {
+            content: output.to_string(),
+            truncated: false,
+        };
+        Outcome::from_result(false, &body, "")
+    }
+
+    fn numbered(count: usize) -> String {
+        (1..=count)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn command(id: &str, command: &str) -> ToolCall {
+        ToolCall::new(
+            id.to_string(),
+            ToolKind::Command {
+                command: command.to_string(),
+                background: false,
+            },
+        )
+    }
+
+    fn read(id: &str, name: &str) -> ToolCall {
+        ToolCall::new(
+            id.to_string(),
+            ToolKind::Explore(vec![Explored::Read {
+                name: name.to_string(),
+            }]),
+        )
+    }
+
+    #[test]
+    fn a_read_and_a_search_are_two_rows_with_their_results_at_the_edge() {
+        let mut group = ToolGroup::new(read("a", "src/app.py"));
+        group.push(ToolCall::new(
+            "b".to_string(),
+            ToolKind::Explore(vec![Explored::Search {
+                query: "do_(GET|POST)".to_string(),
+                path: Some("src".to_string()),
+            }]),
+        ));
+        assert!(group.complete("a", ok(&numbered(12))));
+        assert!(group.complete("b", ok("src/app.py:7:    def do_GET(self):")));
+        assert_eq!(
+            plain(&group.lines(WIDTH, Duration::ZERO)),
+            vec![
+                edge("✓ Read    src/app.py", "12 lines", WIDTH),
+                edge("✓ Search  do_(GET|POST) in src", "1 match", WIDTH),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_finished_commands_stay_two_rows_never_ran_two_commands() {
+        let mut group = ToolGroup::new(command("a", "echo one"));
+        group.push(command("b", "echo two"));
+        assert!(group.complete("a", ok("one")));
+        assert!(group.complete("b", ok("two")));
+        let rows = plain(&group.lines(WIDTH, Duration::ZERO));
+        assert!(rows.iter().all(|row| !row.contains("Ran 2")), "{rows:#?}");
+        assert_eq!(
+            rows,
+            vec![
+                edge("✓ Run     echo one", "1 line", WIDTH),
+                "  └ one".to_string(),
+                edge("✓ Run     echo two", "1 line", WIDTH),
+                "  └ two".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_command_wears_a_cross_and_names_its_exit_code() {
+        let mut group = ToolGroup::new(command("a", "cargo test"));
+        let body = ToolResultBody::Bash(BashResult {
+            exit_code: 101,
+            stdout: String::new(),
+            stderr: "error: test failed".to_string(),
+            truncated: false,
+        });
+        assert!(group.complete("a", Outcome::from_result(false, &body, "")));
+        let rows = plain(&group.lines(WIDTH, Duration::ZERO));
+        assert_eq!(rows[0], edge("✗ Run     cargo test", "exit 101", WIDTH));
+        assert_eq!(rows[1], "  └ error: test failed");
+    }
+
+    #[test]
+    fn a_running_call_spins_on_its_own_row() {
+        let group = ToolGroup::new(read("a", "README.md"));
+        let rows = plain(&group.lines(WIDTH, Duration::from_millis(250)));
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        let mut chars = rows[0].chars();
+        let glyph = chars.next().expect("a status glyph");
+        assert!(
+            ('\u{2800}'..='\u{28ff}').contains(&glyph),
+            "a running call spins a braille frame, got {glyph:?}"
+        );
+        assert_eq!(chars.as_str().trim_end(), " Read    README.md");
+    }
+
+    #[test]
+    fn the_spinner_advances_with_time() {
+        let group = ToolGroup::new(read("a", "README.md"));
+        let frames: std::collections::HashSet<char> = (0..12)
+            .filter_map(|step| {
+                let rows = plain(&group.lines(WIDTH, Duration::from_millis(step * 100)));
+                rows[0].chars().next()
+            })
+            .collect();
+        assert!(frames.len() > 1, "one frame forever is not a spinner: {frames:?}");
+    }
+
+    #[test]
+    fn an_edit_row_counts_its_change_at_the_edge_and_hangs_its_diff_under_the_target() {
+        let view = DiffView {
+            old_path: Some("src/app.py".to_string()),
+            new_path: Some("src/app.py".to_string()),
+            language: None,
+            hunks: vec![DiffHunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 2,
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        text: "import json".to_string(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Context,
+                        text: "TODOS = []".to_string(),
+                    },
+                ],
+            }],
+        };
+        let mut group = ToolGroup::new(ToolCall::new(
+            "e".to_string(),
+            ToolKind::Edit {
+                path: "src/app.py".to_string(),
+            },
+        ));
+        assert!(group.complete(
+            "e",
+            Outcome::from_result(false, &ToolResultBody::Diff(view), "src/app.py")
+        ));
+        let lines = group.lines(WIDTH, Duration::ZERO);
+        assert_eq!(
+            plain(&lines),
+            vec![
+                edge("✓ Edit    src/app.py", "+1 -0", WIDTH),
+                "       1 + import json".to_string(),
+                "    1  2   TODOS = []".to_string(),
+            ]
+        );
+        let added = lines[0]
+            .spans
+            .iter()
+            .find(|span| span.text == "+1")
+            .expect("the added count");
+        let removed = lines[0]
+            .spans
+            .iter()
+            .find(|span| span.text == "-0")
+            .expect("the removed count");
+        assert_eq!(added.style.fg, Some(Color::GREEN));
+        assert_eq!(removed.style.fg, Some(Color::RED));
+    }
+
+    #[test]
+    fn a_path_inside_the_working_directory_is_shown_relative_to_it() {
+        let absolute = std::env::current_dir()
+            .expect("a working directory")
+            .join("src")
+            .join("app.py");
+        let mut group = ToolGroup::new(read("a", &absolute.display().to_string()));
+        assert!(group.complete("a", ok("x")));
+        assert_eq!(
+            plain(&group.lines(WIDTH, Duration::ZERO))[0],
+            edge("✓ Read    src/app.py", "1 line", WIDTH)
+        );
+    }
+
+    #[test]
+    fn a_running_command_shows_the_tail_of_its_live_output_and_names_itself_once() {
+        let handle = runtime::live_output::register(Some("toolu_row_tail"));
+        handle
+            .writer()
+            .append_stdout(b"test_create ... ok\ntest_list ... ok\ntest_delete ... ok\ntest_update ... ok\n");
+        let group = ToolGroup::new(command(
+            "toolu_row_tail",
+            "for t in create list delete update; do echo test_$t ... ok; done",
+        ));
+        let rows = plain(&group.lines(100, Duration::from_secs(7)));
+        assert_eq!(
+            rows.iter().filter(|row| row.contains("for t in create")).count(),
+            1,
+            "{rows:#?}"
+        );
+        assert!(rows.iter().any(|row| row == "  │ test_delete ... ok"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "  │ test_update ... ok"), "{rows:#?}");
+        drop(handle);
+    }
+}
