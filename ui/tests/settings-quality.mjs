@@ -491,18 +491,42 @@ export function performanceFailures(performance) {
   return { overBudget, longTasks: performance.long_tasks };
 }
 
-export async function settlePaint(page) {
-  await page.evaluate(async () => {
+export async function settlePaint(page, timeoutMs = 5_000) {
+  await page.evaluate(async (deadlineMs) => {
     const nextPaint = () => new Promise((done) =>
       requestAnimationFrame(() => requestAnimationFrame(done)));
-    await nextPaint();
-    const finiteAnimations = document.getAnimations({ subtree: true }).filter((animation) => {
-      const iterations = animation.effect?.getTiming().iterations;
-      return iterations !== Infinity;
+    let phase = "first paint";
+    let deadline;
+    const paint = async () => {
+      await nextPaint();
+      phase = "finite animations";
+      const finiteAnimations = document.getAnimations({ subtree: true }).filter((animation) => {
+        const iterations = animation.effect?.getTiming().iterations;
+        return iterations !== Infinity;
+      });
+      await Promise.all(finiteAnimations.map((animation) => animation.finished.catch(() => {})));
+      phase = "last paint";
+      await nextPaint();
+    };
+    const timedOut = new Promise((_resolve, reject) => {
+      deadline = setTimeout(() => {
+        const animations = document.getAnimations({ subtree: true }).slice(0, 24).map((animation) => ({
+          target: animation.effect?.target?.id ?? animation.effect?.target?.tagName,
+          name: animation.animationName ?? animation.transitionProperty,
+          state: animation.playState,
+          pending: animation.pending,
+          rate: animation.playbackRate,
+          iterations: String(animation.effect?.getTiming().iterations),
+        }));
+        reject(new Error(`settings paint did not settle: ${JSON.stringify({ phase, visibility: document.visibilityState, animations })}`));
+      }, deadlineMs);
     });
-    await Promise.all(finiteAnimations.map((animation) => animation.finished.catch(() => {})));
-    await nextPaint();
-  });
+    try {
+      await Promise.race([paint(), timedOut]);
+    } finally {
+      clearTimeout(deadline);
+    }
+  }, timeoutMs);
 }
 
 function percentile(values, quantile) {

@@ -4188,8 +4188,8 @@ await test("Computer Use는 기본 배경 입력을 유지하고 공유 입력�
   } finally {
     backend.settings.computer_input_policy = original;
     await backend.broadcast(null, ["computer_input_policy"]);
-    await pageA.evaluate(() => closeSettings());
-    await pageB.evaluate(() => closeSettings());
+    await pageA.evaluate(() => setSettingsOpen(false));
+    await pageB.evaluate(() => setSettingsOpen(false));
   }
 });
 
