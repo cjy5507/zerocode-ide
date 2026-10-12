@@ -8541,6 +8541,32 @@ mod tests {
         assert_eq!(images, vec![("image/png".to_string(), "AAEC".to_string())]);
     }
 
+    /// A check the harness saw pass after the last edit is a row like the
+    /// calls' rows (t-48216), `✓ Check   <command>   passed after the last
+    /// edit`, not a dim note carrying the runtime's sentence.
+    #[test]
+    fn a_passed_check_is_a_check_row_not_a_note() {
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        ui.block(RenderBlock::System {
+            id: ids.next(),
+            level: runtime::message_stream::SystemLevel::Info,
+            text: "Checks passed after the last edit: python3 -m py_compile src/app.py".to_string(),
+        });
+        let history: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
+        let row = history
+            .iter()
+            .find(|row| row.starts_with("✓ Check   "))
+            .unwrap_or_else(|| panic!("no check row: {history:#?}"));
+        assert!(row.starts_with("✓ Check   python3 -m py_compile src/app.py "), "{row}");
+        assert!(row.ends_with(" passed after the last edit"), "{row}");
+        assert_eq!(row.chars().count(), ui.width(), "the result stands at the right edge: {row}");
+        assert!(
+            !history.iter().any(|row| row.contains("Checks passed after the last edit:")),
+            "the runtime's sentence is not on screen: {history:#?}"
+        );
+    }
+
     /// The card asks about the whole command, not its first sixty characters
     /// (t-48216): a person approves what will run, all of it.
     #[test]
