@@ -8748,3 +8748,29 @@ mod footer_key_tests {
         assert!(viewer_open(&ui));
     }
 }
+
+/// Every paint asks for the model's context window (t-48216): the model is
+/// resolved once, and again only when it changes.
+#[cfg(test)]
+mod model_window_tests {
+    use super::ModelWindow;
+
+    #[test]
+    fn the_context_window_is_resolved_once_per_model() {
+        let window = ModelWindow::default();
+        let mut asked = 0;
+        for _ in 0..8 {
+            let tokens = window.get("claude-opus-5-5", |_| {
+                asked += 1;
+                200_000
+            });
+            assert_eq!(tokens, 200_000);
+        }
+        assert_eq!(asked, 1, "a paint does not resolve the model again");
+        let tokens = window.get("claude-haiku-5-5", |_| {
+            asked += 1;
+            100_000
+        });
+        assert_eq!((tokens, asked), (100_000, 2), "a new model is resolved once");
+    }
+}

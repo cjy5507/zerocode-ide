@@ -470,3 +470,22 @@ mod tests {
         assert!(lines[1].spans[0].text.is_empty());
     }
 }
+
+/// The footer asks for its accent colours on every paint (t-48216): the theme
+/// answers a scope list once.
+#[cfg(test)]
+mod scope_style_tests {
+    use super::{foreground_style_for_scopes, HIGHLIGHTERS_BUILT};
+
+    #[test]
+    fn a_scope_list_asks_the_theme_once() {
+        let scopes = ["markup.heading.scope-style-test", "keyword"];
+        let before = HIGHLIGHTERS_BUILT.with(std::cell::Cell::get);
+        let first = foreground_style_for_scopes(&scopes);
+        for _ in 0..8 {
+            assert_eq!(foreground_style_for_scopes(&scopes), first);
+        }
+        let built = HIGHLIGHTERS_BUILT.with(std::cell::Cell::get) - before;
+        assert!(built <= 1, "{built} highlighters were built for one scope list");
+    }
+}
