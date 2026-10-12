@@ -819,7 +819,25 @@ class ReceiptTests(unittest.TestCase):
             "pass": "const test=require('node:test'); test('control',()=>{});\n",
             "failure": "const test=require('node:test'); const assert=require('node:assert/strict'); for(let i=0;i<7;i++) test('control-'+i,()=>assert.ok(i<2));\n",
             "cancelled": "const test=require('node:test'); const controller=new AbortController(); controller.signal.addEventListener('abort',()=>console.log('fixture abort signal fired '+controller.signal.aborted),{once:true}); test('control',{signal:controller.signal},async()=>{console.log('fixture cancellation began'); setTimeout(()=>controller.abort(),100); await new Promise(()=>{});});\n",
-            "cancelled-by-parent": "const test=require('node:test'); test('parent',async context=>{let signalStarted; const started=new Promise(resolve=>{signalStarted=resolve;}); context.test('child',async()=>{console.log('fixture child cancellation began'); signalStarted(); await new Promise(resolve=>setTimeout(resolve,100));}); await started;});\n",
+            "implicit-child-wait": "const test=require('node:test'); test('parent',async context=>{let signalStarted; const started=new Promise(resolve=>{signalStarted=resolve;}); context.test('child',async()=>{console.log('fixture implicit child began'); signalStarted(); await new Promise(resolve=>setTimeout(resolve,100)); console.log('fixture implicit child completed');}); await started;});\n",
+            "cancelled-by-parent": (
+                "const test=require('node:test');\n"
+                "const assert=require('node:assert/strict');\n"
+                "const {setTimeout:delay}=require('node:timers/promises');\n"
+                "test('parent',{timeout:2000},async context=>{\n"
+                "  let signalStarted;\n"
+                "  const started=new Promise(resolve=>{signalStarted=resolve;});\n"
+                "  context.test('child',async child=>{\n"
+                "    child.signal.addEventListener('abort',()=>console.log('fixture child cancellation observed '+child.signal.aborted),{once:true});\n"
+                "    console.log('fixture child cancellation began');\n"
+                "    signalStarted();\n"
+                "    await delay(1000,undefined,{signal:child.signal});\n"
+                "    console.log('fixture child unexpectedly completed');\n"
+                "  });\n"
+                "  await started;\n"
+                "  assert.fail('fixture parent failure after child start');\n"
+                "});\n"
+            ),
             "abort": "process.exit(3);\n",
             "zero": "",
         }
@@ -842,13 +860,14 @@ class ReceiptTests(unittest.TestCase):
                           "log": log.decode(errors="replace")}}), file=sys.stderr)
                     self.assertTrue(ledger.metadata["executed"])
                     self.assertGreaterEqual(ledger.metadata["endedMs"], ledger.metadata["startedMs"])
-                    if label == "pass":
+                    if label in ("pass", "implicit-child-wait"):
                         self.assertEqual(ledger.metadata["rc"], 0, log)
                         self.assertEqual(result["outcome"], "passed", log)
-                        self.assertEqual(result["tests"], 1, log)
+                        self.assertEqual(result["tests"], 2 if label == "implicit-child-wait" else 1, log)
                     else:
                         self.assertEqual(result["outcome"], "unknown" if label == "zero" else "failed", log)
                         self.assertEqual(result["tests"], 0, log)
+                        self.assertEqual(gate.test_count(log), 0, log)
                         self.assertEqual(gate.test_count(PASS + log), 0, log)
                         if label == "zero":
                             self.assertEqual(ledger.metadata["rc"], 0, log)
@@ -858,37 +877,52 @@ class ReceiptTests(unittest.TestCase):
                         if label == "failure":
                             for name, count in (("tests", 7), ("pass", 2), ("fail", 5)):
                                 self.assertRegex(log.decode(), rf"(?:#|ℹ) {name} {count}\b")
-                        if label in ("cancelled", "cancelled-by-parent"):
-                            text = log.decode()
-                            fields = re.findall(r"(?m)^(?:#|ℹ) (tests|suites|pass|fail|cancelled|skipped|todo) ([0-9]+)$", text)
-                            self.assertEqual(len(fields), 7, log)
-                            summary = {name: int(count) for name, count in fields}
-                            self.assertEqual(set(summary), {"tests", "suites", "pass", "fail", "cancelled", "skipped", "todo"}, log)
-                            self.assertEqual(summary["tests"], summary["pass"] + summary["fail"] + summary["cancelled"], log)
-                            self.assertEqual(summary["suites"], 0, log)
-                            self.assertEqual(summary["skipped"], 0, log)
-                            self.assertEqual(summary["todo"], 0, log)
-                            self.assertEqual(ledger.metadata["rc"], 1, log)
-                            self.assertLess(ledger.metadata["durationMs"], int(self.args.timeout * 1000))
-                            durations = re.findall(r"(?m)^(?:#|ℹ) duration_ms ([0-9]+(?:\.[0-9]+)?)$", text)
-                            self.assertEqual(len(durations), 1, log)
-                            self.assertGreater(float(durations[0]), 0, log)
+                    if label in ("cancelled", "implicit-child-wait", "cancelled-by-parent"):
+                        text = log.decode()
+                        fields = re.findall(r"(?m)^(?:#|ℹ) (tests|suites|pass|fail|cancelled|skipped|todo) ([0-9]+)$", text)
+                        self.assertEqual(len(fields), 7, log)
+                        summary = {name: int(count) for name, count in fields}
+                        self.assertEqual(set(summary), {"tests", "suites", "pass", "fail", "cancelled", "skipped", "todo"}, log)
+                        self.assertEqual(summary["tests"], summary["pass"] + summary["fail"] + summary["cancelled"], log)
+                        self.assertEqual(summary["suites"], 0, log)
+                        self.assertEqual(summary["skipped"], 0, log)
+                        self.assertEqual(summary["todo"], 0, log)
+                        self.assertEqual(ledger.metadata["rc"], 0 if label == "implicit-child-wait" else 1, log)
+                        self.assertLess(ledger.metadata["durationMs"], int(self.args.timeout * 1000))
+                        durations = re.findall(r"(?m)^(?:#|ℹ) duration_ms ([0-9]+(?:\.[0-9]+)?)$", text)
+                        self.assertEqual(len(durations), 1, log)
+                        self.assertGreater(float(durations[0]), 0, log)
+                        if reporter == "tap":
+                            self.assertEqual(re.findall(r"(?m)^1\.\.([0-9]+)$", text), ["1"], log)
+                            nested_plans = re.findall(r"(?m)^[ \t]+1\.\.([0-9]+)$", text)
+                            self.assertEqual(nested_plans, [] if label == "cancelled" else ["1"], log)
+                        if label == "cancelled":
+                            self.assertIn(b"fixture cancellation began", log)
+                            self.assertIn(b"fixture abort signal fired true", log)
+                            self.assertRegex(text, r"AbortError|AbortController\.abort")
+                            self.assertEqual(summary["tests"], 1, log)
+                            self.assertEqual(summary["pass"], 0, log)
+                            self.assertEqual(summary["fail"] + summary["cancelled"], 1, log)
+                        elif label == "implicit-child-wait":
+                            self.assertIn(b"fixture implicit child began", log)
+                            self.assertIn(b"fixture implicit child completed", log)
+                            self.assertEqual(summary["tests"], 2, log)
+                            self.assertEqual(summary["pass"], 2, log)
+                            self.assertEqual(summary["fail"], 0, log)
+                            self.assertEqual(summary["cancelled"], 0, log)
+                            self.assertEqual(gate.test_count(log), 2, log)
+                        else:
+                            self.assertIn(b"fixture child cancellation began", log)
+                            self.assertIn(b"fixture child cancellation observed true", log)
+                            self.assertNotIn(b"fixture child unexpectedly completed", log)
+                            self.assertIn(b"fixture parent failure after child start", log)
+                            self.assertIn(b"test did not finish before its parent", log)
                             if reporter == "tap":
-                                self.assertEqual(re.findall(r"(?m)^1\.\.([0-9]+)$", text), ["1"], log)
-                                nested_plans = re.findall(r"(?m)^[ \t]+1\.\.([0-9]+)$", text)
-                                self.assertEqual(nested_plans, ["1"] if label == "cancelled-by-parent" else [], log)
-                            if label == "cancelled":
-                                self.assertIn(b"fixture cancellation began", log)
-                                self.assertIn(b"fixture abort signal fired true", log)
-                                self.assertRegex(text, r"AbortError|AbortController\.abort")
-                                self.assertEqual(summary["tests"], 1, log)
-                                self.assertEqual(summary["pass"], 0, log)
-                                self.assertEqual(summary["fail"] + summary["cancelled"], 1, log)
-                            else:
-                                self.assertIn(b"fixture child cancellation began", log)
-                                self.assertIn(b"test did not finish before its parent", log)
-                                self.assertEqual(summary["tests"], 2, log)
-                                self.assertEqual(summary["cancelled"], 1, log)
+                                self.assertIn(b"failureType: 'cancelledByParent'", log)
+                            self.assertEqual(summary["tests"], 2, log)
+                            self.assertEqual(summary["pass"], 0, log)
+                            self.assertEqual(summary["fail"], 1, log)
+                            self.assertEqual(summary["cancelled"], 1, log)
         py_test = self.root / "runner_control.py"
         empty = self.root / "empty-unittest"
         empty.mkdir()

@@ -1456,6 +1456,67 @@ fn shared_native_open_validates_identity_fields_limits_and_listener_lifetime() {
 }
 
 #[test]
+fn native_handshake_accepts_delayed_header_and_body_fragments() {
+    use super::super::gate_session as session;
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    assert!(fixture.production("run", true).status.success());
+    let observed = reuse_observation(&fixture);
+    let registration = observed["registration"].as_str().unwrap();
+    let body = json!({"intent":fixture.job_intent("verify", Some(registration)),"manifest":std::fs::read_to_string(fixture.root.join("trusted-policy.json")).unwrap(),"bootstrap":fixture.bootstrap_identity()});
+    let opened = session::open_native(
+        &fixture.actor,
+        "team-1",
+        "%1",
+        &capability_of("%1"),
+        Some(format!("actor-v1:{}", "a".repeat(64))),
+        &body.to_string(),
+    )
+    .unwrap();
+    let address =
+        std::net::SocketAddr::from(([127, 0, 0, 1], opened["port"].as_u64().unwrap() as u16));
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut handshake = Vec::new();
+    session::write_frame(&mut handshake, &json!({"capability":capability_of("%1")})).unwrap();
+    let last_byte = handshake.len() - 1;
+    for fragment in [
+        &handshake[..0],
+        &handshake[..1],
+        &handshake[1..4],
+        &handshake[4..last_byte],
+    ] {
+        stream.write_all(fragment).unwrap();
+        let mut unsolicited_reply = [0_u8; 1];
+        let pending = stream.peek(&mut unsolicited_reply).unwrap_err();
+        assert!(
+            matches!(
+                pending.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ),
+            "incomplete handshake did not remain open: {pending}"
+        );
+    }
+    stream.write_all(&handshake[last_byte..]).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let bound = session::read_frame(&mut stream).unwrap().unwrap();
+    assert_eq!(bound["ok"], true, "{bound}");
+    let hit = scope_call(
+        &mut stream,
+        json!({"verb":"gate-reuse","body":observed,"retryRequest":"scope-fragmented-handshake"}),
+    );
+    assert_eq!(hit["ok"], true, "{hit}");
+    assert_eq!(hit["value"]["decision"], "hit");
+}
+
+#[test]
 fn stale_retained_context_is_checked_before_cached_registration_after_pin_replacement() {
     let authority = Fixture::new();
     let fixture = CliFixture::new(&authority);

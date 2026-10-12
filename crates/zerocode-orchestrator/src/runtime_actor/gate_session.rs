@@ -158,8 +158,16 @@ pub fn serve(
             return;
         };
         drop(listener);
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
-        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+        if stream.set_nonblocking(false).is_err()
+            || stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .is_err()
+            || stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+                .is_err()
+        {
+            return;
+        }
         let capability = (|| -> std::io::Result<String> {
             let value = read_frame(&mut stream)?.ok_or(std::io::ErrorKind::TimedOut)?;
             let object = value.as_object().ok_or(std::io::ErrorKind::InvalidData)?;
