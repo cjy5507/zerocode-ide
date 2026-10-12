@@ -77,7 +77,9 @@ impl InputPolicy {
             "status"
                 | "stop"
                 | "resume"
-                | "eyeFrame"
+                | super::eye::START_METHOD
+                | super::eye::CHANGES_METHOD
+                | super::eye::FRAME_METHOD
                 | "reflexStatus"
                 | "reflexStop"
                 | "reflexReceipts"
@@ -277,6 +279,9 @@ mod tests {
             "status",
             "stop",
             "reflexStop",
+            super::super::eye::START_METHOD,
+            super::super::eye::CHANGES_METHOD,
+            super::super::eye::FRAME_METHOD,
         ] {
             assert_eq!(
                 InputPolicy::Background

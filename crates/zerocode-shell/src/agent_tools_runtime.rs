@@ -2675,11 +2675,11 @@ pub(super) async fn computer_loop(
                 let _ = tauri::async_runtime::spawn_blocking(move || {
                     let _sequence = _sequence;
                     let _acting = run_evidence::acting_for(actor);
-                    let _input_policy = computer_use::input_policy::enter(
+                    let _input_policy = computer_use::input_policy::enter_with(|| {
                         crate::settings_runtime::computer_input_policy(
                             app.state::<AppState>().settings(),
-                        ),
-                    );
+                        )
+                    });
                     if let Err(error) = computer_use::input_policy::current().prepare(&mut command)
                     {
                         let answer = computer_cli_error(command.json, &error.code, &error.message);
@@ -5174,6 +5174,7 @@ impl computer_use::enter::Typer for LiveTyper<'_> {
             return Err(refusal);
         }
         let mut command = command.clone();
+        computer_use::input_policy::ensure_current()?;
         computer_use::input_policy::current().prepare(&mut command)?;
         // No step above this call: the road that counts an action, remembers
         // it and records the field's picture is the step's (`leave_step`), and
@@ -5269,12 +5270,19 @@ pub(super) fn answer_computer_command_with(
     if let Some(refusal) = refused_at_the_door(&command) {
         return refusal;
     }
-    let _input_policy = computer_use::input_policy::enter(permission_window.map_or_else(
-        computer_use::input_policy::current,
+    let _input_policy = permission_window.map_or_else(
+        || computer_use::input_policy::enter_captured(computer_use::input_policy::capture()),
         |window| {
-            crate::settings_runtime::computer_input_policy(window.state::<AppState>().settings())
+            computer_use::input_policy::enter_with(|| {
+                crate::settings_runtime::computer_input_policy(
+                    window.state::<AppState>().settings(),
+                )
+            })
         },
-    ));
+    );
+    if let Err(error) = computer_use::input_policy::ensure_current() {
+        return computer_cli_error(command.json, &error.code, &error.message);
+    }
     let input_policy = computer_use::input_policy::current();
     if let Err(error) = input_policy.prepare(&mut command) {
         return computer_cli_error(command.json, &error.code, &error.message);
@@ -5458,7 +5466,7 @@ pub(super) fn answer_computer_command_with(
     } else if command.method == ComputerMethod::Run {
         // A run is the window's to answer too: a program, no pane, its head of
         // output as the result — the terminal a person would have opened.
-        Ok(desktop_run(&command.params))
+        desktop_run(&command.params)
     } else if command.method == ComputerMethod::Wait {
         // A wait is the window's to answer: a bounded pause, no helper round
         // trip — or, with `--settle` (a batch's wait after an act, t-37883),
@@ -5672,6 +5680,22 @@ pub(super) fn call_with_the_persons_last_step(
         serde_json::Value,
     ) -> Result<serde_json::Value, computer_use::ComputerUseError>,
 ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+    call_with_confirmation_asker(command, asking, call, &mut computer_use::confirm::ask)
+}
+
+pub(super) fn call_with_confirmation_asker(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    asking: computer_use::confirm::Asking,
+    call: &mut dyn FnMut(
+        &str,
+        serde_json::Value,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError>,
+    ask: &mut dyn FnMut(
+        zerocode_core::computer_use::ConfirmKind,
+        &str,
+        &str,
+    ) -> computer_use::confirm::Decision,
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
     use computer_use::confirm::{self, Asking, Decision};
     use zerocode_core::computer_use::{ConfirmKind, parse_confirmation_required};
     use zerocode_core::computer_use_protocol::error_code;
@@ -5715,7 +5739,7 @@ pub(super) fn call_with_the_persons_last_step(
                     format!("{}: {label}", declared.as_str()),
                 ));
             }
-            match confirm::ask(declared, &label, verb.verb_name()) {
+            match ask(declared, &label, verb.verb_name()) {
                 Decision::Allowed => {}
                 decision => return Err(refusal(decision, declared, &label)),
             }
@@ -5728,17 +5752,19 @@ pub(super) fn call_with_the_persons_last_step(
         params[zerocode_core::computer_use::KEYBOARD_GUARD_PARAM] =
             zerocode_core::computer_use::keyboard_guard();
     }
+    computer_use::input_policy::ensure_current()?;
     match call(method, params.clone()) {
         Err(error)
             if error.code == error_code::CONFIRMATION_REQUIRED && asking == Asking::Person =>
         {
             let (kind, label) = parse_confirmation_required(&error.message).ok_or(error)?;
-            match confirm::ask(kind, &label, verb.verb_name()) {
+            match ask(kind, &label, verb.verb_name()) {
                 Decision::Allowed => {
                     params["confirmed"] = serde_json::Value::Bool(true);
                     if let Some(object) = params.as_object_mut() {
                         object.remove("confirmGuard");
                     }
+                    computer_use::input_policy::ensure_current()?;
                     call(method, params)
                 }
                 decision => Err(refusal(decision, kind, &label)),
@@ -6196,9 +6222,11 @@ pub(super) fn said_envelope(
 /// both streams to the end on their own threads, and kill it at the budget.
 /// The answer says what it printed, how it ended, and whether anything was
 /// cut — never a hang, never an unbounded blob.
-pub(super) fn desktop_run(params: &serde_json::Value) -> serde_json::Value {
-    use std::io::Read as _;
+pub(super) fn desktop_run(
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
     use zerocode_core::computer_use::{desktop_run_ms, desktop_run_output};
+    computer_run_admitted()?;
     let program = params
         .get("program")
         .and_then(serde_json::Value::as_str)
@@ -6223,9 +6251,9 @@ pub(super) fn desktop_run(params: &serde_json::Value) -> serde_json::Value {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            return serde_json::json!({
+            return Ok(serde_json::json!({
                 "program": program, "spawned": false, "error": error.to_string(),
-            });
+            }));
         }
     };
     let mut stdout = child.stdout.take();
@@ -6233,20 +6261,21 @@ pub(super) fn desktop_run(params: &serde_json::Value) -> serde_json::Value {
     let out_reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         if let Some(pipe) = stdout.as_mut() {
-            let _ = pipe.read_to_end(&mut bytes);
+            bytes = bounded_computer_run_output(pipe);
         }
         bytes
     });
     let err_reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         if let Some(pipe) = stderr.as_mut() {
-            let _ = pipe.read_to_end(&mut bytes);
+            bytes = bounded_computer_run_output(pipe);
         }
         bytes
     });
     let budget = std::time::Duration::from_millis(budget_ms);
     let poll = std::time::Duration::from_millis(20);
     let mut timed_out = false;
+    let mut cancelled = None;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -6255,7 +6284,14 @@ pub(super) fn desktop_run(params: &serde_json::Value) -> serde_json::Value {
                 let _ = child.kill();
                 break child.wait().ok();
             }
-            Ok(None) => std::thread::sleep(poll),
+            Ok(None) => {
+                if let Err(error) = computer_run_admitted() {
+                    cancelled = Some(error);
+                    let _ = child.kill();
+                    break child.wait().ok();
+                }
+                std::thread::sleep(poll);
+            }
             Err(_) => {
                 let _ = child.kill();
                 break child.wait().ok();
@@ -6264,7 +6300,10 @@ pub(super) fn desktop_run(params: &serde_json::Value) -> serde_json::Value {
     };
     let (stdout_text, stdout_cut) = desktop_run_output(&out_reader.join().unwrap_or_default());
     let (stderr_text, stderr_cut) = desktop_run_output(&err_reader.join().unwrap_or_default());
-    serde_json::json!({
+    if let Some(error) = cancelled {
+        return Err(error);
+    }
+    Ok(serde_json::json!({
         "program": program,
         "spawned": true,
         "exitCode": status.and_then(|status| status.code()),
@@ -6275,7 +6314,24 @@ pub(super) fn desktop_run(params: &serde_json::Value) -> serde_json::Value {
         "stdout": stdout_text,
         "stderr": stderr_text,
         "truncated": stdout_cut || stderr_cut,
-    })
+    }))
+}
+
+fn computer_run_admitted() -> Result<(), computer_use::ComputerUseError> {
+    computer_use::input_policy::ensure_current()?;
+    computer_use::guard::stopped_reason()
+        .map_or(Ok(()), |reason| Err(computer_use::guard::refusal(&reason)))
+}
+
+pub(super) fn bounded_computer_run_output(mut reader: impl std::io::Read) -> Vec<u8> {
+    use std::io::Read as _;
+    let limit = u64::try_from(zerocode_core::computer_use::COMPUTER_RUN_MAX_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::new();
+    let _ = reader.by_ref().take(limit).read_to_end(&mut bytes);
+    let _ = std::io::copy(&mut reader, &mut std::io::sink());
+    bytes
 }
 
 pub(super) fn computer_said(stdout: impl Into<String>) -> zerocode_hookd::TeamAnswer {

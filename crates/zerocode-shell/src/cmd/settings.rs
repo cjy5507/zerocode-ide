@@ -1404,7 +1404,7 @@ pub(crate) fn set_computer_input_policy(
             Ok(())
         },
     )?;
-    if revoked && computer_use::session_stands() {
+    if revoked {
         computer_use::guard::stop(zerocode_core::computer_use::STOP_REASON_WINDOW);
         let _ = app.emit(
             "computer:activity",
