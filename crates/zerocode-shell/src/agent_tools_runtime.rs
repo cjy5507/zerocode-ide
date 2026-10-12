@@ -1658,7 +1658,12 @@ impl agent_teams::Host for TeamWindow {
             .is_some_and(DeliveryOutcome::entered)
     }
 
-    fn paste_continuation(&self, term: TermId, text: &str) -> bool {
+    fn paste_continuation(
+        &self,
+        term: TermId,
+        text: &str,
+        worker: &str,
+    ) -> Option<DeliveryOutcome> {
         let state = self.app.state::<AppState>();
         // Read before the words go: the Enter pressed again is for this
         // launch, on a line no hand has reached since (t-17037).
@@ -1669,13 +1674,11 @@ impl agent_teams::Host for TeamWindow {
         // continuation waits for the program's start-up to hand over
         // (t-18353), where its row says it has one.
         let placed = Instant::now();
-        let Some(outcome) = self.pasted_at(
+        let outcome = self.pasted_at(
             term,
             text,
             crate::cmd::terminal::PromptReadiness::MountingBesideADraft,
-        ) else {
-            return false;
-        };
+        )?;
         if let Some(agent) = agent {
             let session = self.provider_session(term).map(|held| held.id);
             // A continuation the pane reported taking is its own receipt:
@@ -1700,9 +1703,13 @@ impl agent_teams::Host for TeamWindow {
                     hand,
                 },
                 outcome,
+                Some(crate::restart_nudge_runtime::Owed {
+                    root: state.local_data_root().to_path_buf(),
+                    worker: worker.to_string(),
+                }),
             );
         }
-        outcome.entered()
+        Some(outcome)
     }
 
     /// The integration record's verdict on this pane's zo, as the one sentence

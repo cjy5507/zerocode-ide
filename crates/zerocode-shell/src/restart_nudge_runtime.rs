@@ -959,7 +959,7 @@ fn hear_until(
 
 /// Act on a resolution; a fallback that went leaves the row waiting on its
 /// own answer — until then nobody can say what it did.
-fn placed(
+pub(super) fn placed(
     receipts: &dyn WakeReceipts,
     term: TermId,
     resolution: Resolution,
@@ -1062,31 +1062,32 @@ pub(super) fn arm_in_window(
     });
 }
 
-/// A restored worker's continuation, typed by the ledger's reseat road
-/// (t-17037), answered that its words are on the line and their Enter was
-/// not taken. The words are the reseat's own and already spent
-/// (`deliver_continuation`); what is left is the same one fallback a wake's
-/// row gets — an Enter alone at the composer's next ready — so it takes the
-/// same row and the same watch. `hand` is the line's hand count read before
-/// the words were typed.
+/// Watch a restored worker's continuation on the existing bounded wake.
+/// A readiness timeout permits one paste fallback. Words already pasted
+/// permit only the existing Enter retry. `owed` keeps an untyped goodbye
+/// note until that fallback may have reached the same launch.
 pub(crate) fn arm_left_unsent(
     app: &AppHandle,
     term: TermId,
     words: LeftUnsent<'_>,
     outcome: DeliveryOutcome,
+    owed: Option<Owed>,
 ) {
-    if let Some((pending, delivery)) = left_unsent(words, outcome) {
+    if let Some((mut pending, delivery)) = left_unsent(words, outcome) {
+        if Said::of(outcome) == Said::NotReady {
+            pending.owed = owed;
+        }
         arm_in_window(app, term, pending, Some(delivery));
     }
 }
 
 /// The row a reseat's continuation waits in, and its delivery's answer to
 /// be heard first, when that answer left the words unsent (t-17037).
-fn left_unsent(
+pub(super) fn left_unsent(
     words: LeftUnsent<'_>,
     outcome: DeliveryOutcome,
 ) -> Option<(PendingNudge, std::sync::mpsc::Receiver<DeliveryOutcome>)> {
-    if Said::of(outcome) != Said::Unsent {
+    if !matches!(Said::of(outcome), Said::Unsent | Said::NotReady) {
         return None;
     }
     let pending = PendingNudge {

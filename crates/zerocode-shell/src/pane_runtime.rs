@@ -3600,13 +3600,12 @@ pub(super) fn pump_loop(app: &AppHandle) {
                 );
             }
             for (id, _, _) in &gone {
-                deliveries.remove(id);
-                if let Some(waiting) = state.delivery_waiters().remove(id) {
-                    let _ = waiting.send(DeliveryOutcome::TimedOut);
-                }
-                // A dead shell answers no more prompts; what was parked for
-                // it goes too, or the map holds text addressed to nobody.
-                state.prompt_queue().remove(id);
+                prompt_transaction::departed(
+                    *id,
+                    &mut deliveries,
+                    &mut state.delivery_waiters(),
+                    &mut state.prompt_queue(),
+                );
             }
             // Where each shell sits in the snapshot. Both questions below —
             // which entry a death carries the evidence of, and whether a frame

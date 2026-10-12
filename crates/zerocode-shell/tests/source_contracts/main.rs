@@ -20042,16 +20042,21 @@ mod tests {
         );
 
         // And nothing waits for a shell that cannot answer: both ends of a
-        // shell's life sweep its queue.
+        // shell's life sweep its queue. A death sweeps it in
+        // `prompt_transaction::departed`, the seam that also tells a pasted
+        // delivery from one that wrote nothing (t-47834).
         let retiring = block_after(shipped, "fn retire_terminal(");
         assert!(
             retiring.contains("state.prompt_queue().remove(&term);"),
             "closing a shell leaves prompts parked for it:\n{retiring}"
         );
         let reaping = block_after(shipped, "for (id, _, _) in &gone {");
+        let departing = block_after(transaction, "pub(super) fn departed(");
         assert!(
-            reaping.contains("state.prompt_queue().remove(id);"),
-            "a dead shell keeps its parked prompts:\n{reaping}"
+            reaping.contains("prompt_transaction::departed(")
+                && reaping.contains("&mut state.prompt_queue(),")
+                && departing.contains("queue.remove(&term);"),
+            "a dead shell keeps its parked prompts:\n{reaping}\n{departing}"
         );
     }
 
@@ -22354,9 +22359,17 @@ mod tests {
         );
         let looping = block_after(backend, "fn pump_loop(app: &AppHandle) {");
         // The vector carries the exit code beside the id since 1-de — what it
-        // is destructured into changed, what it must still do did not.
+        // is destructured into changed, what it must still do did not. The
+        // removal itself lives in `prompt_transaction::departed` (t-47834),
+        // handed the pump's own `deliveries` guard.
+        let departing = block_after(
+            include_str!("../../src/prompt_transaction.rs"),
+            "pub(super) fn departed(",
+        );
         assert!(
-            looping.contains("for (id, _, _) in &gone {\n                deliveries.remove(id);"),
+            looping.contains(
+                "for (id, _, _) in &gone {\n                prompt_transaction::departed(\n                    *id,\n                    &mut deliveries,"
+            ) && departing.contains("deliveries.remove(&term);"),
             "a shell that exited on its own leaves its delivery behind:\n{looping}"
         );
     }

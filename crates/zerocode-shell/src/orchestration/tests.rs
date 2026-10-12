@@ -4710,6 +4710,7 @@ struct Stopped {
     transcript: std::path::PathBuf,
     busy: Mutex<bool>,
     refusing: Mutex<bool>,
+    point_refusal: Mutex<Option<Box<dyn Fn() + Send>>>,
     sent: Mutex<Vec<(u32, String)>>,
     /// The worker pane's visible screen.
     screen: Mutex<String>,
@@ -4757,6 +4758,27 @@ impl Host for Stopped {
             .unwrap_or_else(|held| held.into_inner())
             .push((term, text.to_string()));
         true
+    }
+    fn point(
+        &self,
+        term: u32,
+        line: &str,
+        submit: bool,
+    ) -> Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>> {
+        if let Some(refuse) = self.point_refusal.lock().unwrap().take() {
+            refuse();
+            return None;
+        }
+        let landed = self.send(term, line) && (!submit || self.send(term, "\r"));
+        let (settled, receipt) = std::sync::mpsc::sync_channel(1);
+        settled
+            .send(if landed {
+                zerocode_pty::DeliveryOutcome::Delivered
+            } else {
+                zerocode_pty::DeliveryOutcome::TimedOut
+            })
+            .unwrap();
+        Some(receipt)
     }
     fn pane_exists(&self, _term: u32) -> bool {
         true
@@ -4854,6 +4876,7 @@ impl StoppedWorker {
                 .join("d4e81823-3b9a-4bf1-a54b-b4366117b514.jsonl"),
             busy: Mutex::new(false),
             refusing: Mutex::new(false),
+            point_refusal: Mutex::new(None),
             sent: Mutex::new(Vec::new()),
             screen: Mutex::new(String::new()),
             jev: Mutex::new(None),
@@ -5910,6 +5933,205 @@ fn a_refused_readings_switches_wait_and_land_before_the_rotation_is_read() {
         (placed(&rotated), None),
         "an unchanged file moved the cursor"
     );
+}
+
+#[test]
+fn a_resume_settlement_keeps_its_observed_result_until_the_store_accepts_it() {
+    use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    use zerocode_core::orchestration::MessageKind;
+    for submitted in [false, true] {
+        let stood = StoppedWorker::stand(96_360, "--on-transient-error resume", Vec::new());
+        let at = |elapsed| stood.began + elapsed;
+        let record = transient_record_keyed("settlement-refused");
+        stood.stops_on(
+            &[CLAUDE_PLAIN_RECORD, &record, CLAUDE_TURN_DURATION],
+            at(9_000),
+        );
+        tick(&stood.host, &[], at(10_000));
+        let rows = the_rows();
+        let receipt = rows
+            .messages
+            .iter()
+            .find(|message| message.kind == MessageKind::Resumed)
+            .expect("the durable reservation")
+            .id
+            .clone();
+        super::settle_resumes(at(11_000));
+        if submitted {
+            super::pane_prompt_submitted(stood.host.worker_term);
+        }
+        let budget = i64::try_from(zerocode_pty::ready::SUBMIT_ACK_TIMEOUT.as_millis()).unwrap();
+        let connection = stood._store.fault_connection_for_tests().unwrap();
+        connection.execute_batch(REFUSE_LEDGER_WRITES).unwrap();
+        super::settle_resumes(at(12_000 + budget));
+        super::settle_resumes(at(13_000 + budget));
+        connection
+            .execute_batch("DROP TRIGGER refuse_writes;")
+            .unwrap();
+        let refused = the_rows();
+        let body: serde_json::Value = serde_json::from_str(
+            refused
+                .messages
+                .iter()
+                .find(|message| message.id == receipt)
+                .expect("the refused settlement's reservation")
+                .body
+                .as_str(),
+        )
+        .unwrap();
+        assert_eq!(
+            body["status"], "typing",
+            "the target settlement was not refused"
+        );
+        super::pane_prompt_submitted(stood.host.worker_term);
+        *stood.host.busy.lock().unwrap() = true;
+        if submitted {
+            let worker = the_rows()
+                .workers
+                .into_iter()
+                .find(|worker| worker.id == stood.worker)
+                .unwrap();
+            let capability =
+                crate::agent_teams::current_pane_capability(&worker.team, &worker.pane).unwrap();
+            let done = run(
+                &stood.host,
+                Vec::new(),
+                &worker.team,
+                &worker.pane,
+                &capability,
+                &words(
+                    r#"send --type worker_done --retry-request resume-settlement-done --body {"ok":true}"#,
+                ),
+                at(14_000 + budget - 1),
+            );
+            assert_eq!(done.exit_code, 0, "{}", done.stderr);
+        }
+        tick(&stood.host, &[], at(14_000 + budget));
+        let settled = stood.news("resumed", at(14_001 + budget));
+        assert_eq!(
+            settled.len(),
+            1,
+            "the observed result was lost after storage refusal"
+        );
+        assert_eq!(
+            settled[0]["status"],
+            if submitted {
+                "submitted"
+            } else {
+                "not_submitted"
+            }
+        );
+        assert_eq!(settled[0]["typed"], true);
+        assert!(
+            the_rows()
+                .messages
+                .iter()
+                .any(|message| message.id == receipt)
+        );
+        tick(&stood.host, &[], at(15_000 + budget));
+        assert_eq!(stood.news("resumed", at(15_001 + budget)), settled);
+        assert_eq!(stood.host.typed_at(stood.host.worker_term).len(), 2);
+    }
+}
+
+#[test]
+fn an_unaddressable_resume_keeps_its_untyped_result_until_the_store_accepts_it() {
+    use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    use zerocode_core::orchestration::MessageKind;
+    let stood = StoppedWorker::stand(96_370, "--on-transient-error resume", Vec::new());
+    let at = |elapsed| stood.began + elapsed;
+    let record = transient_record_keyed("unaddressable-settlement");
+    stood.stops_on(
+        &[CLAUDE_PLAIN_RECORD, &record, CLAUDE_TURN_DURATION],
+        at(9_000),
+    );
+    let fault = stood._store.fault_connection_for_tests().unwrap();
+    *stood.host.point_refusal.lock().unwrap() = Some(Box::new(move || {
+        fault.execute_batch(REFUSE_LEDGER_WRITES).unwrap();
+    }));
+    tick(&stood.host, &[], at(10_000));
+    let connection = stood._store.fault_connection_for_tests().unwrap();
+    connection
+        .execute_batch("DROP TRIGGER refuse_writes;")
+        .unwrap();
+    let rows = the_rows();
+    let body: serde_json::Value = serde_json::from_str(
+        rows.messages
+            .iter()
+            .find(|message| message.kind == MessageKind::Resumed)
+            .expect("the reservation preceded the injected refusal")
+            .body
+            .as_str(),
+    )
+    .unwrap();
+    assert_eq!(body["status"], "typing");
+    *stood.host.busy.lock().unwrap() = true;
+    tick(&stood.host, &[], at(11_000));
+    let settled = stood.news("resumed", at(11_001));
+    assert_eq!(
+        settled.len(),
+        1,
+        "the untyped result was lost after storage refusal"
+    );
+    assert_eq!(settled[0]["status"], "not_submitted");
+    assert_eq!(settled[0]["typed"], false);
+    tick(&stood.host, &[], at(12_000));
+    assert_eq!(stood.news("resumed", at(12_001)), settled);
+    assert!(stood.host.typed_at(stood.host.worker_term).is_empty());
+}
+
+#[test]
+fn a_resume_settlement_releases_only_a_matching_already_recorded_result() {
+    use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    for mismatched in [false, true] {
+        let stood = StoppedWorker::stand(96_380, "--on-transient-error resume", Vec::new());
+        let at = |elapsed| stood.began + elapsed;
+        let record = transient_record_keyed("already-recorded");
+        stood.stops_on(
+            &[CLAUDE_PLAIN_RECORD, &record, CLAUDE_TURN_DURATION],
+            at(9_000),
+        );
+        tick(&stood.host, &[], at(10_000));
+        super::settle_resumes(at(11_000));
+        super::pane_prompt_submitted(stood.host.worker_term);
+        let (run_id, receipt, observed) = {
+            let flying = super::resumes_in_flight().lock().unwrap();
+            let (receipt, pending) = flying
+                .iter()
+                .find(|(_, pending)| pending.term == stood.host.worker_term)
+                .unwrap();
+            (
+                pending.run.clone(),
+                receipt.clone(),
+                super::resume_outcome(pending, at(12_000)).unwrap(),
+            )
+        };
+        let stored = if mismatched {
+            zerocode_core::orchestration::ResumeOutcome {
+                detail: "a different recorded observation".to_string().into(),
+                ..observed
+            }
+        } else {
+            observed
+        };
+        assert!(
+            super::runtime()
+                .unwrap()
+                .actor
+                .resume_settle(run_id, receipt.clone(), stored, at(12_000))
+                .unwrap()
+                .0
+        );
+        super::settle_resumes(at(13_000));
+        let mut flying = super::resumes_in_flight().lock().unwrap();
+        assert_eq!(
+            flying.contains_key(&receipt),
+            mismatched,
+            "Ok(false) did not compare the recorded result"
+        );
+        flying.remove(&receipt);
+        assert_eq!(stood.host.typed_at(stood.host.worker_term).len(), 2);
+    }
 }
 
 /// The whole road, attempt by attempt. The declaration reads back with its
@@ -15710,6 +15932,591 @@ struct RestorationHost {
     returned_actor: Option<(u32, String)>,
     next: std::sync::atomic::AtomicU32,
     commands: Mutex<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ContinuationCase {
+    EnterRejected,
+    NotReady,
+    Draft,
+    Parked,
+    Cancelled,
+    LostBeforePaste,
+    LostAfterPaste,
+    HandAfterPaste,
+    LaunchAfterPaste,
+}
+
+struct ContinuationRestore {
+    base: RestorationHost,
+    case: ContinuationCase,
+    wrote: Mutex<Vec<u8>>,
+    closed: Mutex<Vec<u32>>,
+    outcomes: Mutex<Vec<Option<zerocode_pty::DeliveryOutcome>>>,
+    pending: Mutex<crate::restart_nudge_runtime::PendingNudges>,
+    live_launch: std::sync::atomic::AtomicU64,
+    live_hand: std::sync::atomic::AtomicU64,
+    prompts: Mutex<Vec<String>>,
+    notes_before: Mutex<Vec<String>>,
+}
+
+impl ContinuationRestore {
+    fn complete(
+        &self,
+        term: u32,
+        text: &str,
+        enter_again: Option<zerocode_pty::EnterAgain>,
+    ) -> std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome> {
+        use crate::prompt_transaction::{Turned, turn};
+        use zerocode_pty::ready::{Guard, Line, SUBMIT_GAP};
+        let start = std::time::Instant::now();
+        let mut delivery = zerocode_pty::PromptDelivery::new(
+            text.to_string(),
+            true,
+            zerocode_pty::ReadySignal::CursorShown,
+            start,
+        )
+        .clearing(false)
+        .guarded(Guard::for_somebody_elses_line(Some(1)))
+        .pressing(enter_again);
+        let (answer, receipt) = std::sync::mpsc::sync_channel(1);
+        for round in 0..5u32 {
+            let hand = self.live_hand.load(std::sync::atomic::Ordering::SeqCst);
+            let line = Line {
+                launch: Some(self.live_launch.load(std::sync::atomic::Ordering::SeqCst)),
+                hand: (hand != 0).then_some(hand),
+                draft: matches!(self.case, ContinuationCase::Draft),
+                parked: matches!(self.case, ContinuationCase::Parked),
+                ..Line::default()
+            };
+            let seen = zerocode_pty::Observed {
+                wrote: true,
+                bracketed_paste: true,
+                cursor_shows: u64::from(round),
+                ..zerocode_pty::Observed::default()
+            };
+            if let Turned::Settled(outcome) = turn(
+                term,
+                &mut delivery,
+                seen,
+                line,
+                start + SUBMIT_GAP * round,
+                |bytes| {
+                    self.wrote.lock().unwrap().extend_from_slice(bytes);
+                    true
+                },
+            ) {
+                answer.send(outcome).unwrap();
+                return receipt;
+            }
+        }
+        panic!("the fallback delivery did not settle");
+    }
+
+    fn delivery(&self, term: u32, text: &str) -> Option<zerocode_pty::DeliveryOutcome> {
+        use crate::prompt_transaction::{Turned, turn};
+        use zerocode_pty::ready::{Guard, Line, SUBMIT_GAP, TIMEOUT};
+        let start = std::time::Instant::now();
+        let mut delivery = zerocode_pty::PromptDelivery::new(
+            text.to_string(),
+            true,
+            zerocode_pty::ReadySignal::CursorShown,
+            start,
+        )
+        .clearing(false)
+        .guarded(Guard::for_somebody_elses_line(Some(1)));
+        for round in 0..4 {
+            let line = Line {
+                launch: Some(
+                    if matches!(self.case, ContinuationCase::Cancelled)
+                        || (round > 1 && matches!(self.case, ContinuationCase::LaunchAfterPaste))
+                    {
+                        2
+                    } else {
+                        1
+                    },
+                ),
+                draft: matches!(self.case, ContinuationCase::Draft),
+                parked: matches!(self.case, ContinuationCase::Parked),
+                hand: (round > 1 && matches!(self.case, ContinuationCase::HandAfterPaste))
+                    .then_some(1),
+                ..Line::default()
+            };
+            let seen = if matches!(self.case, ContinuationCase::NotReady) {
+                zerocode_pty::Observed::default()
+            } else {
+                zerocode_pty::Observed {
+                    wrote: true,
+                    bracketed_paste: true,
+                    cursor_shows: round,
+                    ..zerocode_pty::Observed::default()
+                }
+            };
+            let now = if matches!(self.case, ContinuationCase::NotReady) && round > 0 {
+                start + TIMEOUT + SUBMIT_GAP
+            } else {
+                start + SUBMIT_GAP * u32::try_from(round).unwrap()
+            };
+            let turned = turn(term, &mut delivery, seen, line, now, |bytes| {
+                if bytes == b"\r" && matches!(self.case, ContinuationCase::EnterRejected) {
+                    return false;
+                }
+                self.wrote.lock().unwrap().extend_from_slice(bytes);
+                true
+            });
+            if round == 0 && matches!(self.case, ContinuationCase::LostBeforePaste) {
+                assert_eq!(turned, Turned::Waiting);
+                return None;
+            }
+            if matches!(turned, Turned::Pasted)
+                && matches!(self.case, ContinuationCase::LostAfterPaste)
+            {
+                return None;
+            }
+            if let Turned::Settled(outcome) = turned {
+                return Some(outcome);
+            }
+        }
+        panic!("the controlled delivery did not settle: {:?}", self.case);
+    }
+}
+
+impl crate::restart_nudge_runtime::WakeReceipts for ContinuationRestore {
+    fn rows(&self) -> std::sync::MutexGuard<'_, crate::restart_nudge_runtime::PendingNudges> {
+        self.pending.lock().unwrap()
+    }
+    fn launch(&self, _term: u32) -> Option<u64> {
+        Some(self.live_launch.load(std::sync::atomic::Ordering::SeqCst))
+    }
+    fn type_again(
+        &self,
+        term: u32,
+        _agent: &str,
+        text: &str,
+    ) -> Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>> {
+        Some(self.complete(term, text, None))
+    }
+    fn submit_again(
+        &self,
+        term: u32,
+        _agent: &str,
+        hand: Option<u64>,
+    ) -> Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>> {
+        Some(self.complete(term, "", Some(zerocode_pty::EnterAgain { hand })))
+    }
+    fn note(&self, _line: &str) {}
+}
+
+impl Host for ContinuationRestore {
+    fn split(
+        &self,
+        team: &str,
+        leader: u32,
+        from: u32,
+        pane: &str,
+        direction: zerocode_core::agent_teams::Direction,
+        command: &str,
+        token: &str,
+    ) -> Option<u32> {
+        self.base
+            .split(team, leader, from, pane, direction, command, token)
+    }
+    fn send(&self, _term: u32, _text: &str) -> bool {
+        true
+    }
+    fn capture(&self, _term: u32) -> Option<String> {
+        Some(String::new())
+    }
+    fn focus(&self, _term: u32) -> bool {
+        true
+    }
+    fn close(&self, term: u32) {
+        self.closed.lock().unwrap().push(term);
+    }
+    fn actor_for(&self, term: u32) -> Option<String> {
+        self.base.actor_for(term)
+    }
+    fn paste_continuation(
+        &self,
+        term: u32,
+        text: &str,
+        worker: &str,
+    ) -> Option<zerocode_pty::DeliveryOutcome> {
+        self.prompts.lock().unwrap().push(text.to_string());
+        let outcome = self.delivery(term, text);
+        self.outcomes.lock().unwrap().push(outcome);
+        if let Some(outcome) = outcome
+            && let Some((mut pending, _receipt)) = crate::restart_nudge_runtime::left_unsent(
+                crate::restart_nudge_runtime::LeftUnsent {
+                    agent: "codex",
+                    session_id: "controlled-reseat",
+                    text,
+                    launch: Some(1),
+                    hand: None,
+                },
+                outcome,
+            )
+        {
+            if !outcome.pasted() {
+                pending.owed =
+                    super::BLACKBOX
+                        .get()
+                        .map(|root| crate::restart_nudge_runtime::Owed {
+                            root: root.clone(),
+                            worker: worker.to_string(),
+                        });
+            }
+            self.pending.lock().unwrap().register(term, pending);
+        }
+        outcome
+    }
+}
+
+fn continuation_notes(worker: &str, term: u32) -> Vec<String> {
+    let root = super::BLACKBOX
+        .get()
+        .expect("the test window's diagnostic root");
+    let prefix = format!("orchestration: worker {worker} terminal {term} continuation ");
+    std::fs::read_to_string(root.join(crate::system_runtime::WINDOW_LOG))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once(' ').map(|(_, note)| note))
+        .filter(|note| note.starts_with(&prefix))
+        .map(str::to_string)
+        .collect()
+}
+
+fn continuation_reseat(
+    case: ContinuationCase,
+    check: impl FnOnce(&ContinuationRestore, &str, u32),
+) {
+    const LEADER: u32 = 193_600;
+    const WORKER: u32 = 193_601;
+    const RESTORED: u32 = 193_602;
+    let (_window, _store) = PrivateWindow::boot();
+    let _beat = one_beat_at_a_time();
+    let checkout = tempfile::tempdir().unwrap();
+    let host = ContinuationRestore {
+        base: RestorationHost {
+            checkout: checkout.path().to_string_lossy().into_owned(),
+            returned_actor: None,
+            next: std::sync::atomic::AtomicU32::new(WORKER),
+            commands: Mutex::new(Vec::new()),
+        },
+        case,
+        wrote: Mutex::new(Vec::new()),
+        closed: Mutex::new(Vec::new()),
+        outcomes: Mutex::new(Vec::new()),
+        pending: Mutex::new(crate::restart_nudge_runtime::PendingNudges::default()),
+        live_launch: std::sync::atomic::AtomicU64::new(1),
+        live_hand: std::sync::atomic::AtomicU64::new(0),
+        prompts: Mutex::new(Vec::new()),
+        notes_before: Mutex::new(Vec::new()),
+    };
+    let (_team, _task, worker) =
+        a_seated_worker_with_a_session(&host, LEADER, WORKER, "controlled-reseat");
+    let before = restore::row(&worker);
+    super::pane_turn_began(WORKER, clock());
+    restore::the_window_goes(&restore::census_without_commands, &[WORKER]);
+    super::runtime()
+        .unwrap()
+        .actor
+        .window_restarted(clock())
+        .unwrap();
+    crate::agent_teams::forget_term(WORKER);
+    *host.notes_before.lock().unwrap() = continuation_notes(&worker, RESTORED);
+    let _ = super::reseat_sleeping(&host, Vec::new(), LEADER, Some(&test_actor(LEADER)));
+    assert!(
+        host.closed.lock().unwrap().is_empty(),
+        "continuation {:?} closed the durable restored pane",
+        case
+    );
+    let after = restore::row(&worker);
+    assert_eq!(after.state, WorkerState::Active);
+    assert_eq!(after.dispatch, before.dispatch);
+    assert_eq!(after.session, before.session);
+    check(&host, &worker, RESTORED);
+    let noted = continuation_notes(&worker, RESTORED);
+    assert_eq!(
+        super::reseat_sleeping(&host, Vec::new(), LEADER, Some(&test_actor(LEADER))),
+        0
+    );
+    assert_eq!(host.outcomes.lock().unwrap().len(), 1);
+    assert!(host.closed.lock().unwrap().is_empty());
+    assert_eq!(continuation_notes(&worker, RESTORED), noted);
+    crate::agent_teams::forget_term(RESTORED);
+    crate::agent_teams::forget_term(LEADER);
+}
+
+#[test]
+fn a_reseated_continuation_keeps_its_pane_when_the_paste_lands_but_enter_is_rejected() {
+    use zerocode_pty::{DeliveryOutcome, ready::Refusal};
+    continuation_reseat(ContinuationCase::EnterRejected, |host, _worker, term| {
+        assert_eq!(
+            *host.outcomes.lock().unwrap(),
+            [Some(DeliveryOutcome::Unsubmitted(Refusal::InputRejected))]
+        );
+        assert_eq!(
+            host.wrote
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|byte| **byte == b'\r')
+                .count(),
+            0
+        );
+        let resolution = host
+            .pending
+            .lock()
+            .unwrap()
+            .heard(
+                term,
+                DeliveryOutcome::Unsubmitted(Refusal::InputRejected),
+                std::time::Instant::now(),
+            )
+            .expect("the Enter retry");
+        assert!(matches!(
+            resolution,
+            crate::restart_nudge_runtime::Resolution::FallbackSubmit(_)
+        ));
+        let receipt = crate::restart_nudge_runtime::placed(host, term, resolution).unwrap();
+        assert_eq!(receipt.try_recv(), Ok(DeliveryOutcome::Delivered));
+        let wrote = host.wrote.lock().unwrap();
+        assert_eq!(
+            wrote
+                .windows(6)
+                .filter(|bytes| *bytes == b"\x1b[200~")
+                .count(),
+            1,
+            "the body was pasted again"
+        );
+        assert_eq!(wrote.iter().filter(|byte| **byte == b'\r').count(), 1);
+        drop(wrote);
+        assert!(
+            host.pending
+                .lock()
+                .unwrap()
+                .working(term, std::time::Instant::now())
+                .is_some()
+        );
+        assert!(!host.pending.lock().unwrap().holds(term));
+    });
+}
+
+#[test]
+fn a_reseated_continuation_keeps_untyped_words_and_never_types_over_a_person() {
+    for case in [
+        ContinuationCase::NotReady,
+        ContinuationCase::Draft,
+        ContinuationCase::Parked,
+        ContinuationCase::Cancelled,
+    ] {
+        continuation_reseat(case, |host, worker, term| {
+            assert!(host.wrote.lock().unwrap().is_empty());
+            assert!(
+                !super::reseat_nudge(worker, None).is_empty(),
+                "untyped continuation was spent: {case:?}"
+            );
+            if !matches!(case, ContinuationCase::NotReady) {
+                assert!(!host.pending.lock().unwrap().holds(term));
+            }
+        });
+    }
+}
+
+#[test]
+fn a_reseated_continuation_never_repeats_words_after_an_unknown_answer_or_changed_line() {
+    for case in [
+        ContinuationCase::LostAfterPaste,
+        ContinuationCase::HandAfterPaste,
+        ContinuationCase::LaunchAfterPaste,
+    ] {
+        continuation_reseat(case, |host, worker, term| {
+            assert!(!host.wrote.lock().unwrap().is_empty());
+            assert_eq!(
+                host.wrote
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|byte| **byte == b'\r')
+                    .count(),
+                0
+            );
+            assert!(!host.pending.lock().unwrap().holds(term));
+            assert!(super::reseat_nudge(worker, None).is_empty());
+        });
+    }
+}
+
+#[test]
+fn an_untyped_reseated_continuation_uses_one_bounded_paste_fallback() {
+    use zerocode_pty::DeliveryOutcome;
+    continuation_reseat(ContinuationCase::NotReady, |host, worker, term| {
+        let start = std::time::Instant::now();
+        let window = std::time::Duration::from_millis(10);
+        assert!(
+            host.pending
+                .lock()
+                .unwrap()
+                .heard(term, DeliveryOutcome::TimedOut, start)
+                .is_none()
+        );
+        let resolution = host
+            .pending
+            .lock()
+            .unwrap()
+            .timeout(term, start + window, window)
+            .unwrap();
+        assert!(matches!(
+            resolution,
+            crate::restart_nudge_runtime::Resolution::FallbackDeliver(_)
+        ));
+        let receipt = crate::restart_nudge_runtime::placed(host, term, resolution).unwrap();
+        assert_eq!(receipt.try_recv(), Ok(DeliveryOutcome::Delivered));
+        host.pending
+            .lock()
+            .unwrap()
+            .heard(term, DeliveryOutcome::Delivered, start + window);
+        assert!(super::reseat_nudge(worker, None).is_empty());
+        host.pending
+            .lock()
+            .unwrap()
+            .timeout(term, start + window * 2, window);
+        assert!(
+            host.pending
+                .lock()
+                .unwrap()
+                .timeout(term, start + window * 3, window)
+                .is_none()
+        );
+        let wrote = host.wrote.lock().unwrap();
+        assert_eq!(
+            wrote
+                .windows(6)
+                .filter(|bytes| *bytes == b"\x1b[200~")
+                .count(),
+            1
+        );
+        assert_eq!(wrote.iter().filter(|byte| **byte == b'\r').count(), 1);
+    });
+}
+
+#[test]
+fn a_reseated_continuations_enter_retry_yields_to_a_later_hand_or_launch() {
+    use zerocode_pty::{DeliveryOutcome, ready::Refusal};
+    for changed_launch in [false, true] {
+        continuation_reseat(ContinuationCase::EnterRejected, |host, _worker, term| {
+            let before = host.wrote.lock().unwrap().clone();
+            let resolution = host
+                .pending
+                .lock()
+                .unwrap()
+                .heard(
+                    term,
+                    DeliveryOutcome::Unsubmitted(Refusal::InputRejected),
+                    std::time::Instant::now(),
+                )
+                .unwrap();
+            if changed_launch {
+                host.live_launch
+                    .store(2, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                host.live_hand.store(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let receipt = crate::restart_nudge_runtime::placed(host, term, resolution);
+            if let Some(receipt) = receipt {
+                assert_eq!(
+                    receipt.try_recv(),
+                    Ok(DeliveryOutcome::Refused(Refusal::HandReached))
+                );
+            }
+            assert_eq!(
+                *host.wrote.lock().unwrap(),
+                before,
+                "input arrived after cancellation or a person's hand"
+            );
+            assert!(host.closed.lock().unwrap().is_empty());
+        });
+    }
+}
+
+#[test]
+fn a_reseated_continuation_reports_unknown_delivery_without_claiming_submission() {
+    use zerocode_pty::{DeliveryOutcome, ready::Refusal};
+    for outcome in [
+        None,
+        Some(DeliveryOutcome::Unsubmitted(Refusal::NotTaken)),
+        Some(DeliveryOutcome::Unsubmitted(Refusal::LaunchChanged)),
+    ] {
+        let answer = super::continuation_answer(
+            zerocode_core::agent_teams::Reply::ok("{\"workerId\":\"w-example\"}"),
+            outcome,
+            false,
+        );
+        let body: serde_json::Value = serde_json::from_str(&answer.stdout).unwrap();
+        assert_eq!(body["continuation"]["status"], "unknown");
+        assert_eq!(
+            body["continuation"]["pasted"],
+            serde_json::json!(outcome.map(DeliveryOutcome::pasted))
+        );
+        assert!(answer.stderr.contains("observe"));
+    }
+}
+
+#[test]
+fn an_idle_reseated_worker_reports_no_continuation_submission() {
+    let answer = super::continuation_answer(
+        zerocode_core::agent_teams::Reply::ok("{\"workerId\":\"w-example\"}"),
+        Some(zerocode_pty::DeliveryOutcome::Delivered),
+        true,
+    );
+    let body: serde_json::Value = serde_json::from_str(&answer.stdout).unwrap();
+    assert_eq!(body["continuation"]["status"], "idle");
+    assert_eq!(body["continuation"]["pasted"], false);
+}
+
+#[test]
+fn an_unknown_auto_reseat_is_recorded_once_without_input_or_private_context() {
+    for case in [
+        ContinuationCase::LostBeforePaste,
+        ContinuationCase::LostAfterPaste,
+    ] {
+        continuation_reseat(case, |host, worker, term| {
+            let before = host.notes_before.lock().unwrap().clone();
+            let notes = continuation_notes(worker, term);
+            assert_eq!(
+                notes.len(),
+                before.len() + 1,
+                "the automatic reseat discarded its unknown delivery result"
+            );
+            let note = notes.last().unwrap();
+            assert_eq!(
+                note,
+                &format!(
+                    "orchestration: worker {worker} terminal {term} continuation unknown (delivery_unknown)"
+                )
+            );
+            assert!(!note.contains(&host.base.checkout));
+            assert!(!note.contains("controlled-reseat"));
+            for prompt in host.prompts.lock().unwrap().iter() {
+                assert!(!note.contains(prompt));
+            }
+            let wrote = host.wrote.lock().unwrap().clone();
+            if matches!(case, ContinuationCase::LostBeforePaste) {
+                assert!(wrote.is_empty());
+            }
+            assert_eq!(wrote.iter().filter(|byte| **byte == b'\r').count(), 0);
+            assert!(!host.pending.lock().unwrap().holds(term));
+            tick(host, &[], clock());
+            assert_eq!(*host.wrote.lock().unwrap(), wrote);
+            assert!(host.closed.lock().unwrap().is_empty());
+            assert_eq!(
+                continuation_notes(worker, term),
+                notes,
+                "a repeated beat recorded the same restoration twice"
+            );
+        });
+    }
 }
 
 impl Host for RestorationHost {

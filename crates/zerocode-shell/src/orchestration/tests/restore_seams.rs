@@ -252,13 +252,17 @@ fn a_wake_hears_only_what_the_goodbye_cut_and_hears_it_once() {
         fn close(&self, _term: u32) {}
     }
     let keys = Keys(Mutex::new(Vec::new()));
-    assert!(super::super::deliver_continuation(&keys, 1, "", "w-rest"));
+    assert!(
+        super::super::deliver_continuation(&keys, 1, "", "w-rest")
+            .is_some_and(zerocode_pty::DeliveryOutcome::entered)
+    );
     assert!(
         keys.0.lock().unwrap().is_empty(),
         "an empty continuation was typed"
     );
-    assert!(super::super::deliver_continuation(
-        &keys, 1, "go on", "w-gate"
-    ));
+    assert!(
+        super::super::deliver_continuation(&keys, 1, "go on", "w-gate")
+            .is_some_and(zerocode_pty::DeliveryOutcome::entered)
+    );
     assert_eq!(*keys.0.lock().unwrap(), vec!["go on".to_string()]);
 }
