@@ -783,7 +783,8 @@ impl ToolGroup {
     }
 
     /// `✓ Run     <cmd>      3 lines` and the output under it; while the
-    /// command runs, the tail of what it has printed so far.
+    /// command runs, the tail of what it has printed so far. A finished
+    /// command keeps its whole text: what the row cannot show hangs under it.
     fn command_row(
         &self,
         call: &ToolCall,
@@ -792,14 +793,23 @@ impl ToolGroup {
         width: usize,
         elapsed: Duration,
     ) -> Vec<Line> {
-        let first = command.lines().next().unwrap_or_default();
-        let mut target = super::highlight::highlight_block_to_lines(first, "bash")
-            .and_then(|lines| lines.into_iter().next())
-            .map_or_else(|| vec![Span::raw(first.to_string())], |line| line.spans);
-        if background {
-            target.push(Span::dim(format!(" {}", super::strings::COMMAND_BACKGROUND)));
-        }
         let result = call.done.as_ref().map(command_result).unwrap_or_default();
+        let marker =
+            background.then(|| Span::dim(format!(" {}", super::strings::COMMAND_BACKGROUND)));
+        let (mut target, rest) = if call.done.is_some() {
+            let lines = super::highlight::highlight_block_to_lines(command, "bash")
+                .unwrap_or_else(|| command.lines().map(Line::from_text).collect());
+            let budget = target_budget(&result, width)
+                .saturating_sub(marker.as_ref().map_or(0, Span::width));
+            split_target(lines, budget)
+        } else {
+            let first = command.lines().next().unwrap_or_default();
+            let target = super::highlight::highlight_block_to_lines(first, "bash")
+                .and_then(|lines| lines.into_iter().next())
+                .map_or_else(|| vec![Span::raw(first.to_string())], |line| line.spans);
+            (target, Vec::new())
+        };
+        target.extend(marker);
         let mut out = vec![tool_row(
             self.row_glyph(call, elapsed),
             super::strings::TOOL_RUN,
@@ -807,6 +817,7 @@ impl ToolGroup {
             result,
             width,
         )];
+        out.extend(hung(&rest, width));
         match call.done.as_ref() {
             Some(done) => out.extend(output_block(&done.output, width)),
             None => out.extend(live_tail(&call.id, width)),
@@ -1165,6 +1176,8 @@ pub fn check_row(command: &str, width: usize) -> Line {
 
 /// The verb column's width, so every row's target starts on one column.
 const VERB_COLUMNS: usize = 8;
+/// That column: the glyph, a space, then the verb's.
+const TARGET_COLUMN: usize = 2 + VERB_COLUMNS;
 /// How far an edit's diff hangs in under its row.
 const DIFF_INDENT: usize = 4;
 /// A running call's spinner, one frame per [`SPINNER_FRAME_MILLIS`].
@@ -1181,8 +1194,7 @@ fn tool_row(glyph: Span, verb: &str, target: Vec<Span>, result: Vec<Span>, width
     let mut spans = vec![glyph, Span::raw(" "), Span::bold(format!("{verb:<VERB_COLUMNS$}"))];
     let head: usize = spans.iter().map(Span::width).sum();
     let result_width: usize = result.iter().map(Span::width).sum();
-    let reserved = if result_width == 0 { 0 } else { result_width + 1 };
-    let target = Line::new(target).truncated(width.saturating_sub(head + reserved));
+    let target = Line::new(target).truncated(target_budget(&result, width));
     let used = head + target.width();
     spans.extend(target.spans);
     if result_width > 0 {
@@ -1190,6 +1202,30 @@ fn tool_row(glyph: Span, verb: &str, target: Vec<Span>, result: Vec<Span>, width
         spans.extend(result);
     }
     Line::new(spans).truncated(width)
+}
+
+/// The columns a row leaves its target: the width less the glyph and the verb,
+/// and less the result with the space before it.
+fn target_budget(result: &[Span], width: usize) -> usize {
+    let result_width: usize = result.iter().map(Span::width).sum();
+    let reserved = if result_width == 0 { 0 } else { result_width + 1 };
+    width.saturating_sub(TARGET_COLUMN + reserved)
+}
+
+/// A target that is not cut, split for its row: the stretch of its first line
+/// that fits in `budget` columns, then every row after it.
+fn split_target(lines: Vec<Line>, budget: usize) -> (Vec<Span>, Vec<Line>) {
+    let mut lines = lines.into_iter();
+    let first = lines.next().unwrap_or_else(Line::empty);
+    let mut stretches = wrap_line(&first, budget.max(1), &Span::raw("")).into_iter();
+    let head = stretches.next().map(|line| line.spans).unwrap_or_default();
+    (head, stretches.chain(lines).collect())
+}
+
+/// Rows hung under a row from its target's column, wrapped at the edge.
+fn hung(rows: &[Line], width: usize) -> Vec<Line> {
+    let indent = Span::raw(" ".repeat(TARGET_COLUMN));
+    prefixed(rows, width, &Prefix::new(indent.clone(), indent), true)
 }
 
 fn explored_target(item: &Explored) -> (&'static str, Vec<Span>) {
