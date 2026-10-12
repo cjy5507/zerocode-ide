@@ -6,7 +6,9 @@ fn invoke(options: &[String], root: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_zerocode"))
         .arg("gate-bootstrap")
         .args(options)
-        .args(["--", "--fixture", "--bind", "forwarded-value", "--help"])
+        .args(["--", "--fixture"])
+        .arg(&options[options.iter().position(|word| word == "--python").unwrap() + 1])
+        .args(["--bind", "forwarded-value", "--help"])
         .env_clear()
         .env("HOME", root)
         .env("PATH", std::env::var("PATH").unwrap())
@@ -57,7 +59,7 @@ fn real_python_uses_retained_launcher_bytes_and_declared_standard_library() {
     );
     fs::remove_file(&marker).unwrap();
     fs::write(&launcher,
-        "import encodings, json, os, pathlib, sys\nassert not any(key in os.environ for key in ['ZEROCODE_AGENT_TEAM_TOKEN', 'ZEROCODE_AGENT_TEAM_TOKEN_FILE', 'ZEROCODE_HOOK_TOKEN'])\nassert sys.flags.isolated and sys.flags.no_site\nassert sys.argv[-3:] == ['--bind', 'forwarded-value', '--help']\nroot = pathlib.Path(sys.executable).parent.parent\nstdlib = root / 'lib' / ('python%d.%d' % sys.version_info[:2])\nassert pathlib.Path(json.__file__).is_relative_to(stdlib)\nassert pathlib.Path(encodings.__file__).is_relative_to(stdlib)\nassert sys.path == [str(stdlib), str(stdlib / 'lib-dynload')]\nassert __file__ == '<stdin>'\npathlib.Path(sys.argv[2]).write_text(\"raise AssertionError('replacement executed')\\n\")\nprint('verified retained launcher ran')\n").unwrap();
+        "import encodings, json, os, pathlib, sys\nassert not any(key in os.environ for key in ['ZEROCODE_AGENT_TEAM_TOKEN', 'ZEROCODE_AGENT_TEAM_TOKEN_FILE', 'ZEROCODE_HOOK_TOKEN'])\nassert sys.flags.isolated and sys.flags.no_site\nassert sys.argv[-3:] == ['--bind', 'forwarded-value', '--help']\nassert sys.argv[3] == '--fixture'\npython = pathlib.Path(sys.argv[4]).resolve()\nassert pathlib.Path(sys.executable).resolve() == python, 'reported executable differs from pinned Python'\nassert pathlib.Path(sys.orig_argv[0]).resolve() == python, 'actual process image differs from pinned Python'\nassert pathlib.Path(sys._base_executable).resolve() == python, 'base executable differs from pinned Python'\nroot = python.parent.parent\nstdlib = root / 'lib' / ('python%d.%d' % sys.version_info[:2])\nassert pathlib.Path(json.__file__).is_relative_to(stdlib)\nassert pathlib.Path(encodings.__file__).is_relative_to(stdlib)\nassert sys.path == [str(stdlib), str(stdlib / 'lib-dynload')]\nassert __file__ == '<stdin>'\npathlib.Path(sys.argv[2]).write_text(\"raise AssertionError('replacement executed')\\n\")\nprint('verified retained launcher ran')\n").unwrap();
     let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tools/release/tests/gate_bootstrap_fixture.py");
     let output = Command::new("python3")

@@ -76,11 +76,12 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
             "ui = subprocess.run(['node', 'fixture_ui_zero.mjs'], check=False)\n"
             "print('<== verify recipe ui rc=%d 0s' % ui.returncode, flush=True)\n"
             "raise SystemExit(rust.returncode or ui.returncode)\n")
+    bootstrap = getattr(args, "fixture_bootstrap", None)
+    python = Path(bootstrap[bootstrap.index("--python") + 1] if bootstrap else sys.executable).resolve(strict=True)
     if str(wrapper) not in args.command[:5]:
-        args.command = [sys.executable, "-I", "-S", "-B", str(wrapper), *args.command]
+        args.command = [str(python), "-I", "-S", "-B", str(wrapper), *args.command]
     folder = Path(producer.__file__).resolve().parent
     launcher = load_module(folder / "gate_launcher.py", "fixture_launcher")
-    python = Path(sys.executable).resolve()
     git = Path(shutil.which("git", path=os.defpath)).resolve()
     tool_paths = {"python3": python, "git": git}
     tool_paths.update({word: Path(found).resolve() for word in ("node", "sh", "curl") if (found := shutil.which(word))})
@@ -107,7 +108,6 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
     searches, configuration = configuration_declarations(args.repo, home, root, producer, launcher, output_roots,
                                                          [wrapper, *args.script_file], args.dependency_root)
     row = lambda path: {"path": str(Path(path).absolute()), "sha256": producer.paths_digest([path])}
-    bootstrap = getattr(args, "fixture_bootstrap", None)
     runtime = ({role: {"path": bootstrap[bootstrap.index(path_flag) + 1],
                        "sha256": bootstrap[bootstrap.index(hash_flag) + 1]}
                 for role, path_flag, hash_flag in (("python", "--python", "--python-sha256"),

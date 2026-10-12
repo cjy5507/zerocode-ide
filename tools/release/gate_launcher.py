@@ -229,8 +229,13 @@ def runtime_locations(policy):
     root = Path(runtime["stdlib"]["path"]).resolve(strict=True)
     python = Path(runtime["python"]["path"]).resolve(strict=True)
     paths = read_regular(Path(str(python) + "._pth")).decode().splitlines()
-    if len(paths) != 2 or sys.path != paths or Path(sys.executable).resolve(strict=True) != python:
-        raise Untrusted("runtime startup paths differ from the native binding", "digest_mismatch")
+    arguments = getattr(sys, "orig_argv", None)
+    images = [sys.executable, getattr(sys, "_base_executable", None),
+              arguments[0] if isinstance(arguments, list) and arguments else None]
+    if (len(paths) != 2 or sys.path != paths
+            or any(not isinstance(value, str) or not Path(value).is_absolute()
+                   or Path(value).resolve(strict=True) != python for value in images)):
+        raise Untrusted("runtime startup paths or process image differ from the native binding", "digest_mismatch")
     stdlib, dynload = (Path(path) for path in paths)
     if (any(not path.is_absolute() or path.resolve(strict=True) != path for path in (stdlib, dynload))
             or stdlib.parent != root / "lib" or dynload != stdlib / "lib-dynload"):

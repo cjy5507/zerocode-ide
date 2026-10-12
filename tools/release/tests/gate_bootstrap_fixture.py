@@ -13,6 +13,30 @@ LIBRARY_DECLARATION = "runtime-libraries.json"
 LIBRARY_CAP = 256 * 1024 * 1024
 
 
+def executable_image():
+    if sys.platform != "darwin":
+        raise AssertionError("fixture process image format is unsupported")
+    import ctypes
+    getter = ctypes.CDLL(None)._NSGetExecutablePath
+    getter.argtypes = [ctypes.POINTER(ctypes.c_char), ctypes.POINTER(ctypes.c_uint32)]
+    getter.restype = ctypes.c_int
+    size = ctypes.c_uint32(0)
+    if getter(None, ctypes.byref(size)) != -1 or not 0 < size.value <= 16 * 1024:
+        raise AssertionError("fixture process image allocation is unsupported")
+    buffer = ctypes.create_string_buffer(size.value)
+    if getter(buffer, ctypes.byref(size)) != 0:
+        raise AssertionError("fixture process image identity is unavailable")
+    named = Path(os.fsdecode(buffer.value))
+    arguments = getattr(sys, "orig_argv", None)
+    if (not named.is_absolute() or not isinstance(arguments, list) or not arguments
+            or not isinstance(arguments[0], str) or not Path(arguments[0]).is_absolute()):
+        raise AssertionError("fixture process image identity is ambiguous")
+    image = named.resolve(strict=True)
+    if Path(arguments[0]).resolve(strict=True) != image or not image.is_file() or not macho(image):
+        raise AssertionError("fixture process image differs from the actual startup argument")
+    return image
+
+
 def macho(path):
     with Path(path).open("rb") as file:
         return file.read(4) in (b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
@@ -108,7 +132,8 @@ def prepare(root, launcher):
     runtime = root / "python-runtime"
     stdlib = runtime / "lib" / ("python%d.%d" % sys.version_info[:2])
     python = runtime / "bin" / ("python%d.%d" % sys.version_info[:2])
-    original = Path(sys.executable).resolve()
+    original = executable_image()
+    original_hash = file_hash(original)
     source = Path(sysconfig.get_path("stdlib")).resolve()
     libraries = runtime_libraries(original, source)
     declaration = json.dumps(libraries, sort_keys=True, separators=(",", ":")) + "\n"
@@ -132,6 +157,8 @@ def prepare(root, launcher):
             raise AssertionError("fixture standard library exceeds its scratch allocation")
     python.parent.mkdir(parents=True)
     shutil.copy2(original, python)
+    if file_hash(original) != original_hash or file_hash(python) != original_hash:
+        raise AssertionError("fixture process image changed while copying")
     shutil.copytree(source, stdlib,
                     ignore=shutil.ignore_patterns("site-packages", "__pycache__"))
     for relative, target, expected in linked:
