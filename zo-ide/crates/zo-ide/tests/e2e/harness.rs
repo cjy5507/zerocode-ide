@@ -1228,6 +1228,19 @@ fn printable(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{match_end_after, parse_ps_time, slave_device_path, terminal_command, Terminal, CHILD_EXIT_TIMEOUT};
+
+    /// A plain row has no escape of its own, so the next insertion may follow
+    /// its text directly: the row is its text, not its text and that
+    /// insertion's scroll region.
+    #[test]
+    fn a_plain_row_ends_where_the_next_insertion_begins() {
+        let capture = "\x1b[1;14r\x1b[11;1H\r\n\x1b[K  first half\r\n\x1b[K  second half\x1b[1;14r\x1b[14;1H\r\n\x1b[K\r\n\x1b[39;49m\x1b[K  \x1b[1mstyled\x1b[39m\x1b[49m\x1b[0m\x1b[r";
+        let rows: Vec<String> = super::history_rows_raw(capture.as_bytes())
+            .iter()
+            .map(|row| String::from_utf8_lossy(row).into_owned())
+            .collect();
+        assert_eq!(rows, ["  first half", "  second half", "", "  \x1b[1mstyled"]);
+    }
     use std::fs::File;
     use std::io::Read;
     use std::process::Stdio;
