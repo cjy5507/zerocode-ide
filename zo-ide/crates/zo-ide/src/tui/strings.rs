@@ -295,3 +295,9 @@ pub const TEAMMATE_SPLIT_GIVEN_UP: &str = "부모가 이 판 열기를 포기했
 /// command draws in the foreground. Everything else (verb, bullet colour,
 /// output preview, elision) is the foreground formatter's.
 pub const COMMAND_BACKGROUND: &str = "· background";
+
+/// The row a diff draws where it skips the unchanged lines between two hunks.
+#[must_use]
+pub fn unchanged_lines(count: usize) -> String {
+    if count == 1 { "⋯ 1 unchanged line".to_string() } else { format!("⋯ {count} unchanged lines") }
+}
