@@ -1421,7 +1421,11 @@ fn native_arguments_cannot_substitute_an_unpinned_producer_after_policy_verifica
             !marker.exists(),
             "unpinned producer ran after native policy verification"
         );
-        assert_eq!(fixture.gate_open_attempts.load(Ordering::SeqCst), opens);
+        assert_eq!(
+            fixture.gate_open_attempts.load(Ordering::SeqCst),
+            opens,
+            "native argument rejection happened after opening job authority"
+        );
         assert_eq!(
             fixture.actor.view().unwrap().projection().messages.len(),
             before

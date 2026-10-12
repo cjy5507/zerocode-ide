@@ -914,9 +914,9 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(good.returncode, 0, good.stderr)
         self.assertEqual(good_marker.read_text(), "ran")
         denied = invoke("bad", policies["good"][1])
+        self.assertFalse(bad_marker.exists(), "producer code ran before policy binding")
         self.assertEqual(denied.returncode, 1, denied.stderr)
         self.assertEqual(json.loads(denied.stdout)["code"], "digest_mismatch")
-        self.assertFalse(bad_marker.exists(), "producer code ran before policy binding")
         for variant in ("equals", "abbreviation", "duplicate", "reserved"):
             denied = invoke("good", policies["good"][1], variant)
             self.assertEqual(denied.returncode, 1, denied.stderr)
