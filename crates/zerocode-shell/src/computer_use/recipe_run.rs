@@ -109,6 +109,9 @@ impl Default for LiveDesk {
 
 impl Desk for LiveDesk {
     fn pointer(&mut self) -> Option<(f64, f64)> {
+        if super::input_policy::current() == super::input_policy::InputPolicy::Background {
+            return None;
+        }
         let at = super::call("cursorPosition", json!({})).ok()?;
         Some((at.get("x")?.as_f64()?, at.get("y")?.as_f64()?))
     }

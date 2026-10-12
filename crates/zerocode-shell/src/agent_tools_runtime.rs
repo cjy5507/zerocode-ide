@@ -2658,7 +2658,7 @@ pub(super) async fn computer_loop(
             // A walk — a batch, a recipe — is the loop's to run: each step
             // goes down the lone command's road, and the loop knows when its
             // caller has gone.
-            if let Some(command) = parsed
+            if let Some(mut command) = parsed
                 .as_ref()
                 .filter(|command| {
                     use zerocode_core::computer_use::ComputerMethod;
@@ -2675,6 +2675,18 @@ pub(super) async fn computer_loop(
                 let _ = tauri::async_runtime::spawn_blocking(move || {
                     let _sequence = _sequence;
                     let _acting = run_evidence::acting_for(actor);
+                    let _input_policy = computer_use::input_policy::enter(
+                        crate::settings_runtime::computer_input_policy(
+                            app.state::<AppState>().settings(),
+                        ),
+                    );
+                    if let Err(error) = computer_use::input_policy::current().prepare(&mut command)
+                    {
+                        let answer = computer_cli_error(command.json, &error.code, &error.message);
+                        leave_step(&app, &root, evidence.as_deref(), &argv, &argv, &answer);
+                        let _ = reply.send(answer);
+                        return;
+                    }
                     let answer = if command.method
                         == zerocode_core::computer_use::ComputerMethod::Batch
                     {
@@ -5161,11 +5173,13 @@ impl computer_use::enter::Typer for LiveTyper<'_> {
         if let Some(refusal) = door_refusal(command) {
             return Err(refusal);
         }
+        let mut command = command.clone();
+        computer_use::input_policy::current().prepare(&mut command)?;
         // No step above this call: the road that counts an action, remembers
         // it and records the field's picture is the step's (`leave_step`), and
         // a code typed here is none of those.
         call_with_the_persons_last_step(
-            command,
+            &command,
             computer_use::confirm::Asking::HandBack,
             &mut computer_use::call,
         )
@@ -5248,12 +5262,22 @@ pub(super) fn answer_computer_command_with(
         return computer_said(format!("{}\n", usage()));
     }
     let wants_json = argv.iter().any(|word| word == "--json");
-    let command = match parse_command(argv) {
+    let mut command = match parse_command(argv) {
         Ok(command) => command,
         Err(error) => return computer_cli_error(wants_json, "invalid_argument", &error),
     };
     if let Some(refusal) = refused_at_the_door(&command) {
         return refusal;
+    }
+    let _input_policy = computer_use::input_policy::enter(permission_window.map_or_else(
+        computer_use::input_policy::current,
+        |window| {
+            crate::settings_runtime::computer_input_policy(window.state::<AppState>().settings())
+        },
+    ));
+    let input_policy = computer_use::input_policy::current();
+    if let Err(error) = input_policy.prepare(&mut command) {
+        return computer_cli_error(command.json, &error.code, &error.message);
     }
     let result = if command.method == ComputerMethod::Stop {
         Ok(computer_use::guard::stop(
@@ -5293,6 +5317,7 @@ pub(super) fn answer_computer_command_with(
         // stand-in rate.
         Ok(serde_json::json!({
             "stopped": computer_use::guard::stopped_reason(),
+            "inputPolicy": input_policy,
             "hotkey": zerocode_core::computer_use::COMPUTER_STOP_HOTKEY,
             "pace": zerocode_core::computer_use::pace_table(
                 zerocode_core::computer_use::COMPUTER_PACE
@@ -5361,6 +5386,12 @@ pub(super) fn answer_computer_command_with(
     } else if command.method == ComputerMethod::Evidence {
         let dir = computer_use::evidence::session_dir(now_epoch_ms());
         Ok(evidence_report(&command, dir.as_deref()))
+    } else if command.method == ComputerMethod::Permissions
+        && input_policy == computer_use::input_policy::InputPolicy::Background
+    {
+        serde_json::to_value(computer_use::permission_status()).map_err(|error| {
+            computer_use::ComputerUseError::new("accessibility_error", error.to_string())
+        })
     } else if command.method == ComputerMethod::Permissions {
         let id = command
             .params

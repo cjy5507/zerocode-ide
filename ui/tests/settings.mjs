@@ -364,6 +364,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "computer_confirm_transfer": true,
   "computer_confirm_delete": true,
   "computer_live_reflex": false,
+  "computer_input_policy": "background",
   "computer_generator_road": "auto",
   "emulator.keepBooted": true,
   "emulator.prebootLastUsed": true,
@@ -769,7 +770,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
   "set_diff_side_by_side", "set_conversation_focus_view", "set_confirm_close_pinned",
-  "set_computer_live_reflex", "set_computer_generator_road",
+  "set_computer_live_reflex", "set_computer_generator_road", "set_computer_input_policy",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
   "patch_workspace_creation_prefs",
   "patch_floating_workspace",
@@ -1380,6 +1381,11 @@ class StatefulBackend {
       case "set_computer_live_reflex":
         this.settings.computer_live_reflex = args.on === true;
         keys = ["computer_live_reflex"];
+        break;
+      case "set_computer_input_policy":
+        if (!["background", "shared-desktop"].includes(args.policy)) throw "invalid input policy";
+        this.settings.computer_input_policy = args.policy;
+        keys = ["computer_input_policy"];
         break;
       case "set_computer_generator_road":
         // serde's refusal of a word `GeneratorRoad` does not name.
@@ -4138,6 +4144,38 @@ await test("Computer Use on Windows reads ready and offers no permission door to
 // stand. Otherwise it stays off and unpressable, saying why; once on it is
 // never turned off behind the person's back (a revoked permission says "on,
 // cannot run now"), and turning it off always works.
+await test("Computer Use는 기본 배경 입력을 유지하고 공유 입력은 사람의 설정으로만 허용한다", async () => {
+  const original = backend.settings.computer_input_policy;
+  try {
+    backend.settings.computer_input_policy = "background";
+    await backend.broadcast(null, ["computer_input_policy"]);
+    await openSettings(pageA, "computer-use");
+    await openSettings(pageB, "computer-use");
+    const first = pageA.locator("#computer-shared-desktop");
+    const second = pageB.locator("#computer-shared-desktop");
+    assert(await pageA.locator("#computer-input-policy-card").isVisible());
+    assert(!(await first.isChecked()), "shared desktop input is on by default");
+    assert(!(await second.isChecked()), "the other window starts with shared input");
+    assertEqual(await first.getAttribute("aria-describedby"), "computer-input-policy-about");
+    const before = backend.calls.length;
+    await first.check();
+    const enabled = await backend.waitForCall("A", "set_computer_input_policy", before);
+    assertEqual(enabled.args, { policy: "shared-desktop" });
+    await pageB.waitForFunction(() => document.getElementById("computer-shared-desktop").checked);
+    const restore = backend.calls.length;
+    await second.uncheck();
+    const disabled = await backend.waitForCall("B", "set_computer_input_policy", restore);
+    assertEqual(disabled.args, { policy: "background" });
+    await pageA.waitForFunction(() => !document.getElementById("computer-shared-desktop").checked);
+    assertEqual(backend.settings.computer_input_policy, "background");
+  } finally {
+    backend.settings.computer_input_policy = original;
+    await backend.broadcast(null, ["computer_input_policy"]);
+    await pageA.evaluate(() => closeSettings());
+    await pageB.evaluate(() => closeSettings());
+  }
+});
+
 const LIVE_REFLEX_WORDS = Object.freeze({
   supported: { key: "computerUse.liveReflexSupported", word: "이 Mac과 헬퍼가 반사 커널을 읽습니다" },
   helperOld: { key: "computerUse.liveReflexHelperOld", word: "이 헬퍼는 반사 커널을 읽지 않습니다 — Computer Use를 다시 시작하세요" },
@@ -6023,11 +6061,11 @@ await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁�
         const violations = await axeViolations(managedPage, AxeBuilder, "#managed-judgment-panel");
         assertEqual(violations, [], `${locale}/${theme} local manager accessibility`);
       }
-      for (const width of [360, 720, 1280, 1998]) {
-        await managedPage.setViewportSize({ width, height: 1069 });
+      for (const viewport of [SETTINGS_QUALITY_SPEC.viewport, { width: 1280, height: 1069 }, { width: 1998, height: 1069 }]) {
+        await managedPage.setViewportSize(viewport);
         await renderSettled(managedPage);
         const geometry = await managedPage.locator("#managed-judgment-panel").evaluate((panel) => ({ client: panel.clientWidth, scroll: panel.scrollWidth }));
-        assert(geometry.client > 0 && geometry.scroll <= geometry.client + 1, `${locale}/${width} local manager overflows`, geometry);
+        assert(geometry.client > 0 && geometry.scroll <= geometry.client + 1, `${locale}/${viewport.width}×${viewport.height} local manager overflows`, geometry);
       }
     }
     await setQualityLocale(managedPage, "ko");
@@ -6045,7 +6083,7 @@ await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁�
     backend.zoSettings.smart = previous;
     backend.managedModelState = previousManaged;
   }
-  return "real Enter · 5 locales × 2 themes · 4 widths · model actions grouped";
+  return "real Enter · 5 locales × 2 themes · supported 720×480 minimum and wider viewports · model actions grouped";
 });
 
 await test("다른 서버의 키를 모델 선택 전에 저장하고 늦은 목록은 새 선택을 덮지 않는다", async () => {

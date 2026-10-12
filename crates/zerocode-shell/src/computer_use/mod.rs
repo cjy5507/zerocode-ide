@@ -43,6 +43,7 @@ pub mod eye;
 mod geometry;
 pub mod guard;
 pub mod guarded;
+pub(crate) mod input_policy;
 pub mod listen;
 pub mod marks;
 pub mod observe;
@@ -113,6 +114,7 @@ fn held_client() -> &'static Mutex<Option<platform::Session>> {
 /// Call the persistent provider. Transport failures discard the session so a
 /// later request gets one clean restart; provider refusals keep its snapshots.
 pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
+    let params = input_policy::current().prepare_provider(method, params)?;
     if let Some(params) = params.as_object() {
         zerocode_core::computer_use_protocol::execution::validate(method, params)?;
     }

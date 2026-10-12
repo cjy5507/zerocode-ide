@@ -19835,23 +19835,35 @@ pub(crate) mod computer_desktop_wait {
     #[cfg(unix)]
     #[test]
     fn an_omitted_background_flag_does_not_allow_a_shared_desktop_process() {
-        let _hand = ONE_HAND
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(crate::computer_use::guard::stopped_reason(), None);
         let answer = answer_computer_command(&words(&[
-            "run",
-            "--program",
-            "/bin/echo",
-            "--args",
-            "background-policy-probe",
-            "--json",
+            "run", "--program", "/bin/echo", "--args", "background-policy-probe", "--json",
         ]));
-        assert_ne!(
-            answer.exit_code, 0,
-            "an unscoped program was started by default"
-        );
+        assert_ne!(answer.exit_code, 0, "an unscoped program was started by default");
         assert_eq!(envelope(&answer)["error"]["code"], "requires_foreground");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_shared_desktop_policy_preserves_the_existing_process_road() {
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _policy = crate::computer_use::input_policy::enter(
+            zerocode_core::computer_use_protocol::execution::InputPolicy::SharedDesktop,
+        );
+        let answer = answer_computer_command(&words(&[
+            "run", "--program", "/bin/echo", "--args", "background-policy-probe", "--json",
+        ]));
+        assert_eq!(answer.exit_code, 0, "{}", answer.stderr);
+        assert_eq!(envelope(&answer)["ok"], true);
+    }
+
+    #[test]
+    fn a_default_settings_document_does_not_allow_shared_desktop_input() {
+        assert_eq!(
+            crate::settings_runtime::SettingsDocument::default().computer_input_policy,
+            zerocode_core::computer_use_protocol::execution::InputPolicy::Background,
+        );
     }
 
     fn envelope(answer: &zerocode_hookd::TeamAnswer) -> serde_json::Value {

@@ -6247,6 +6247,18 @@
                   data-i18n="computerUse.reset">접근 권한 초기화</button>
         </div>
 
+        <div class="settings-card" id="computer-input-policy-card">
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="computerUse.inputPolicyTitle">백그라운드로 작업</h3>
+            <p class="settings-subhead-desc" id="computer-input-policy-about" data-i18n="computerUse.inputPolicyAbout">기본은 백그라운드입니다. 지원되지 않는 동작은 멈추며 전경 입력으로 우회하지 않습니다. 아래 옵션을 켜면 에이전트가 사용자 마우스·키보드·포커스를 사용할 수 있습니다.</p>
+          </div>
+          <label class="settings-check">
+            <input type="checkbox" id="computer-shared-desktop" aria-describedby="computer-input-policy-about" disabled />
+            <span class="settings-label" data-i18n="computerUse.sharedDesktop">공유 마우스·키보드 사용 허용</span>
+          </label>
+          <p class="settings-hint" id="computer-input-policy-state" role="status" data-i18n="computerUse.inputPolicyUnknown">현재 입력 정책을 확인하지 못했습니다.</p>
+        </div>
+
         <!-- The last step is the person's (§1.5): three kinds, on unless
              chosen off; and where the operator stands (§1.3). -->
         <div class="settings-card" id="computer-confirm-card">
