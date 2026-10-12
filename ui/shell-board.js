@@ -1380,7 +1380,7 @@ const DESK_STAGES = Object.freeze([
   { id: "failed", flow: false, tone: "halt", key: "board.desk.stageFailed", word: "실패" },
   { id: "unreviewable", flow: false, tone: "", key: "board.noReviewRecord", word: "종료 — 검토 자료 없음" },
   { id: "nothing_to_land", flow: false, tone: "", key: "board.nothingToLand", word: "완료 — 착지할 것 없음" },
-  { id: "unknown", flow: false, tone: "", key: "board.stageUnknown", word: "상태 모름" },
+  { id: "unknown", flow: false, tone: "", key: "board.stageUnknown", word: "상태 모름", evidence: true },
   { id: "closed", flow: false, tone: "", key: "board.closed", word: "닫힘" },
 ]);
 
@@ -1410,7 +1410,7 @@ function deskStageChip(host, stage, counts, view) {
   const count = counts.get(stage.id) ?? 0;
   writeClassName(chip, `board-desk-stage${stage.flow ? " is-flow" : ""}${count > 0 && stage.tone ? ` is-${stage.tone}` : ""}`);
   writeTextContent(chip.firstElementChild, t(stage.key, stage.word));
-  writeTextContent(chip.lastElementChild, String(count));
+  writeTextContent(chip.lastElementChild, stage.evidence && !Number.isInteger(counts.get(stage.id)) ? "—" : String(count));
   return chip;
 }
 
@@ -1607,11 +1607,14 @@ function paintDeskPipeline(block, now, view) {
   if (open && (counts.get(open) ?? 0) === 0) open = deskDefaultStage(counts);
   const [flowRun, stuckRun] = strip.children;
   for (const [run, flow] of [[flowRun, true], [stuckRun, false]]) {
-    reconcileElementOrder(run, DESK_STAGES.filter((stage) => stage.flow === flow).map((stage) => {
-      const chip = deskStageChip(run, stage, counts, view);
-      writeAttribute(chip, "aria-pressed", String(open === stage.id));
-      return chip;
-    }));
+    const chips = DESK_STAGES.filter((stage) => stage.flow === flow && !(stage.evidence && counts.get(stage.id) === 0))
+      .map((stage) => {
+        const chip = deskStageChip(run, stage, counts, view);
+        writeAttribute(chip, "aria-pressed", String(open === stage.id));
+        return chip;
+      });
+    for (const gone of [...run.children]) if (!chips.includes(gone)) gone.remove();
+    reconcileElementOrder(run, chips);
   }
   const list = body.querySelector(".board-desk-tasks");
   const rows = open ? (ledger.tasks ?? []).filter((task) => task.stage === open) : [];
