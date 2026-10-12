@@ -3190,6 +3190,49 @@ mod row_tests {
     }
 
     #[test]
+    fn each_edit_in_a_group_hangs_its_own_diff() {
+        fn added(path: &str, texts: &[&str]) -> ToolResultBody {
+            ToolResultBody::Diff(DiffView {
+                old_path: Some(path.to_string()),
+                new_path: Some(path.to_string()),
+                language: None,
+                hunks: vec![DiffHunk {
+                    old_start: 1,
+                    old_lines: 0,
+                    new_start: 1,
+                    new_lines: u32::try_from(texts.len()).expect("a short hunk"),
+                    lines: texts
+                        .iter()
+                        .map(|text| DiffLine {
+                            kind: DiffLineKind::Added,
+                            text: (*text).to_string(),
+                        })
+                        .collect(),
+                }],
+            })
+        }
+        let edit = |id: &str, path: &str| {
+            ToolCall::new(id.to_string(), ToolKind::Edit { path: path.to_string() })
+        };
+        let mut group = ToolGroup::new(edit("a", "alpha.txt"));
+        group.push(edit("b", "beta.txt"));
+        let alpha = added("alpha.txt", &["alpha one", "alpha two"]);
+        let beta = added("beta.txt", &["beta one"]);
+        assert!(group.complete("a", Outcome::from_result(false, &alpha, "alpha.txt")));
+        assert!(group.complete("b", Outcome::from_result(false, &beta, "beta.txt")));
+        assert_eq!(
+            plain(&group.lines(WIDTH, Duration::ZERO)),
+            vec![
+                edge("✓ Edit    alpha.txt", "+2 -0", WIDTH),
+                "       1 + alpha one".to_string(),
+                "       2 + alpha two".to_string(),
+                edge("✓ Edit    beta.txt", "+1 -0", WIDTH),
+                "       1 + beta one".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn a_path_inside_the_working_directory_is_shown_relative_to_it() {
         let absolute = std::env::current_dir()
             .expect("a working directory")
