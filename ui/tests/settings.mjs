@@ -5894,6 +5894,7 @@ await test("Jev를 켜면 카드가 기능마다 적용 중인지, 기록 중이
   const summaryAt = backend.count("A", "jev_summary");
   await pageA.evaluate(() => refreshApiRouters());
   const list = pageA.locator("#typesafe-card [data-jev-standings]");
+  await pageA.locator("#judgment-feature-details > summary").click();
   await pageA.waitForFunction(
     () => document.querySelectorAll("#typesafe-card [data-jev-standing]").length === 5,
     null, { timeout: UI_TIMEOUT },
@@ -11837,7 +11838,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
     for (const [card, finish] of [["router-card", "router-save-btn"], ["typesafe-card", "judgment-save-provider"]]) {
       const bottom = await pageA.evaluate((id) => {
         const box = document.getElementById(id);
-        const last = box.lastElementChild;
+        const last = id === "typesafe-card" ? box.querySelector(".settings-judgment-actions") : box.lastElementChild;
         const filled = [...box.querySelectorAll(".btn--primary")].map((one) => one.id);
         return {
           actions: last.className,
@@ -11849,7 +11850,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
           filled,
         };
       }, card);
-      assert(bottom.actions.includes("settings-action-row"), `${card} does not end in its actions`, bottom);
+      assert(bottom.actions.includes("settings-action-row"), `${card} does not group its connection actions`, bottom);
       assertEqual(bottom.buttonsOutside, [], `${card} leaves a button loose above its footer`);
       assertEqual(bottom.filled, [finish], `${card} does not fill exactly the one thing to finish`);
     }

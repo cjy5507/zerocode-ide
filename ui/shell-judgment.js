@@ -36,6 +36,29 @@ const judgmentProviderController = {
     return row?.saidKey ? t(row.saidKey, row.said) : null;
   },
 
+  providerName(provider) {
+    if (provider.kind === "local") return t("settings.judgment.local", "로컬 판단 모델");
+    if (provider.kind === "remote") return t("settings.judgment.remote", "다른 판단 서버");
+    return "Jev · TypeSafe";
+  },
+
+  setupHint() {
+    if (!this.draft?.baseUrl) {
+      return ["connection", t("settings.judgment.nextConnection", "먼저 연결할 판단 서버 주소를 입력하세요. 모델을 고르기 전까지 현재 설정은 유지됩니다.")];
+    }
+    const sameServer = this.state?.provider && this.serverKey(this.draft) === this.serverKey(this.state.provider);
+    if (sameServer && this.draft.requiresAuth && !this.state.keySaved) {
+      return ["key", t("settings.judgment.nextKey", "이 서비스의 API 키를 입력하고 키 저장을 누르세요. 키는 이 서비스에만 사용합니다.")];
+    }
+    if (!this.draft.model) {
+      return ["model", t("settings.judgment.nextModel", "모델 목록을 읽고 사용할 모델을 고르세요. 모델 ID를 알고 있다면 직접 입력해도 됩니다.")];
+    }
+    if (this.dirty()) {
+      return ["apply", t("settings.judgment.nextApply", "선택이 준비됐습니다. 판단 모델 적용을 누른 뒤 연결 확인으로 응답을 확인하세요.")];
+    }
+    return ["check", t("settings.judgment.nextCheck", "현재 설정이 적용돼 있습니다. 연결 확인은 모델의 응답만 확인하며 작업 정확도를 보장하지 않습니다.")];
+  },
+
   init() {
     if (this.initialized) return;
     this.initialized = true;
@@ -120,7 +143,7 @@ const judgmentProviderController = {
     const scope = this.draft.kind === "local"
       ? t("settings.judgment.localScope", "이 컴퓨터의 판단 서버에 연결합니다. Jev 키는 보내지 않습니다. 서버 자체의 외부 통신 설정도 확인하세요.")
       : t("settings.judgment.remoteScope", "동의한 프로젝트의 내용이 선택한 판단 서비스로 전송됩니다. 모델을 바꿔도 승인·정지·결과 검증은 유지합니다.");
-    el("judgment-provider-scope").textContent = `${scope} ${t("settings.judgment.active", "현재 적용: {{model}}", { model: this.state.provider.model })}`;
+    el("judgment-provider-scope").textContent = scope;
     this.controls();
   },
 
@@ -129,6 +152,20 @@ const judgmentProviderController = {
     const dirty = this.dirty();
     const busy = typesafeBusy || unavailable;
     const auth = this.draft?.requiresAuth ?? true;
+    const active = el("judgment-active-model");
+    if (active) {
+      active.textContent = this.state?.provider
+        ? t("settings.judgment.activeProvider", "현재 적용된 설정: {{provider}} · {{model}}", {
+          provider: this.providerName(this.state.provider), model: this.state.provider.model,
+        })
+        : t("settings.judgment.activeUnknown", "현재 적용된 모델을 읽지 못했습니다. 연결 설정을 다시 확인하세요.");
+    }
+    const hint = el("judgment-setup-hint");
+    if (hint) {
+      const [step, words] = this.draft ? this.setupHint() : ["unavailable", ""];
+      hint.dataset.step = step;
+      hint.textContent = words;
+    }
     for (const name of ["judgment-provider-kind", "judgment-endpoint", "typesafe-model-input", "judgment-requires-auth"]) {
       const element = el(name);
       if (element) element.disabled = busy;

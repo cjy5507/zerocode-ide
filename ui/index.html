@@ -4206,10 +4206,11 @@
             <span class="settings-state" id="typesafe-key-state" data-state="unchecked"
                   role="status" aria-live="polite"></span>
           </div>
+          <p class="settings-notice judgment-active-model" id="judgment-active-model" role="status" aria-live="polite"></p>
           <section id="judgment-provider-editor" aria-label="판단 모델 연결">
             <label class="settings-field" data-field="md" for="judgment-provider-kind">
               <span class="settings-field-copy">
-                <span class="settings-label" data-i18n="settings.judgment.provider">제공자</span>
+                <span class="settings-label" data-i18n="settings.judgment.location">1. 어디에서 판단할까요?</span>
               </span>
               <select class="settings-input" id="judgment-provider-kind" disabled>
                 <option value="jev">Jev · TypeSafe</option>
@@ -4217,12 +4218,27 @@
                 <option value="remote" data-i18n="settings.judgment.remote">다른 판단 서버</option>
               </select>
             </label>
+            <p class="settings-row-desc judgment-setup-hint" id="judgment-setup-hint" role="status" aria-live="polite"></p>
             <label class="settings-field" data-field="lg" id="judgment-endpoint-field" for="judgment-endpoint" hidden>
               <span class="settings-field-copy">
                 <span class="settings-label" data-i18n="settings.judgment.endpoint">판단 서버 주소</span>
                 <span class="settings-row-desc" data-i18n="settings.judgment.endpointHint">System One 호환 판단 인터페이스를 사용합니다. 로컬은 이 컴퓨터의 주소만, 원격은 HTTPS만 허용합니다.</span>
               </span>
               <input class="settings-input" id="judgment-endpoint" type="url" maxlength="8192" autocomplete="off" spellcheck="false" disabled />
+            </label>
+            <label class="settings-check" id="judgment-auth-field" for="judgment-requires-auth" hidden>
+              <input type="checkbox" id="judgment-requires-auth" disabled />
+              <span data-i18n="settings.judgment.authentication">이 서버는 API 키가 필요합니다</span>
+            </label>
+            <label class="settings-field" data-field="lg" for="typesafe-key-input">
+              <span class="settings-field-copy">
+                <span class="settings-label" data-i18n="settings.typesafe.apiKey">API 키</span>
+                <span class="settings-row-desc" id="typesafe-no-keychain-hint" data-i18n="settings.typesafe.noKeychainHint" hidden>
+                  이 컴퓨터에는 API 키를 보관할 키체인이 없습니다.
+                </span>
+              </span>
+              <input class="settings-input" id="typesafe-key-input" type="password"
+                     autocomplete="off" spellcheck="false" placeholder="apikey_..." />
             </label>
             <label class="settings-field" data-field="md" for="typesafe-model-input">
               <span class="settings-field-copy">
@@ -4232,14 +4248,19 @@
               <input class="settings-input" id="typesafe-model-input" list="judgment-model-options" type="text" maxlength="256" autocomplete="off" spellcheck="false" disabled />
               <datalist id="judgment-model-options"></datalist>
             </label>
-            <label class="settings-check" id="judgment-auth-field" for="judgment-requires-auth" hidden>
-              <input type="checkbox" id="judgment-requires-auth" disabled />
-              <span data-i18n="settings.judgment.authentication">이 서버는 API 키가 필요합니다</span>
-            </label>
             <p class="settings-row-desc" id="judgment-provider-scope"></p>
             <p class="settings-notice" id="judgment-provider-dirty" data-i18n="settings.judgment.unapplied" hidden>아직 적용하지 않은 선택입니다. 적용한 뒤 연결을 확인하세요.</p>
             <p class="settings-row-desc" id="judgment-model-status" role="status" aria-live="polite"></p>
           </section>
+          <div class="settings-status" id="typesafe-status" role="status" aria-live="polite"></div>
+          <div class="settings-action-row settings-judgment-actions">
+            <button class="btn" id="judgment-refresh-models" type="button" data-i18n="settings.judgment.refresh" disabled>모델 목록 새로고침</button>
+            <button class="btn" id="typesafe-check-btn" type="button" disabled data-i18n="settings.typesafe.check">연결 확인</button>
+            <button class="btn" id="typesafe-remove-btn" type="button" disabled data-i18n="settings.typesafe.remove">키 지우기</button>
+            <button class="btn" id="typesafe-save-btn" type="button" disabled data-i18n="settings.judgment.saveKey">키 저장</button>
+            <button class="btn" id="judgment-revert-provider" type="button" data-i18n="settings.judgment.revert" disabled>변경 취소</button>
+            <button class="btn btn--primary" id="judgment-save-provider" type="button" data-i18n="settings.judgment.apply" disabled>판단 모델 적용</button>
+          </div>
           <!-- The one switch (`smart.jev.enabled`, `set_jev_enabled`). On:
                every folder consented and every feature at its table's
                recommended mode; off: nothing is sent. The dashboard wears
@@ -4266,6 +4287,8 @@
                or still recording with the samples its next judgment waits
                on — the numbers `zo jev summary` answers, the dashboard's own
                reading (`paintJevStandings`). Hidden while the switch is off. -->
+          <details class="settings-fold settings-jev-features" id="judgment-feature-details">
+            <summary data-i18n="settings.judgment.featureDetails">기능별 상태와 진단 보기</summary>
           <section class="settings-jev-standings" data-jev-standings aria-labelledby="jev-standings-title" hidden>
             <h4 class="settings-jev-standings-title" id="jev-standings-title" data-i18n="settings.typesafe.standings">기능별 상태</h4>
             <p class="settings-row-desc" data-i18n="settings.typesafe.standingsAbout">켠 동안 기능마다 판단을 실제로 적용하는지, 아직 기록만 하는지 보여 줍니다. 기록 중인 기능 옆의 숫자는 다음 판정에 필요한 표본 중 모인 수입니다.</p>
@@ -4279,6 +4302,7 @@
             <span data-i18n="settings.typesafe.dashboardLine">기능별 사용 현황과 정확도는 Jev 대시보드에서 봅니다.</span>
             <button class="settings-jev-link" type="button" id="jev-open-dashboard" data-i18n="settings.typesafe.openDashboard">대시보드 열기</button>
           </p>
+          </details>
 
           <!-- What a person rarely changes, closed until asked for: the model
                pin, and the classifier that decides whether the routing
@@ -4331,27 +4355,6 @@
             </div>
           </details>
 
-          <label class="settings-field" data-field="lg" for="typesafe-key-input">
-            <span class="settings-field-copy">
-              <span class="settings-label" data-i18n="settings.typesafe.apiKey">API 키</span>
-              <span class="settings-row-desc" id="typesafe-no-keychain-hint" data-i18n="settings.typesafe.noKeychainHint" hidden>
-                이 컴퓨터에는 API 키를 보관할 키체인이 없습니다.
-              </span>
-            </span>
-            <input class="settings-input" id="typesafe-key-input" type="password"
-                   autocomplete="off" spellcheck="false" placeholder="apikey_..." />
-          </label>
-
-          <div class="settings-status" id="typesafe-status" role="status" aria-live="polite"></div>
-
-          <div class="settings-action-row settings-judgment-actions">
-            <button class="btn" id="judgment-refresh-models" type="button" data-i18n="settings.judgment.refresh" disabled>모델 목록 새로고침</button>
-            <button class="btn" id="typesafe-check-btn" type="button" disabled data-i18n="settings.typesafe.check">연결 확인</button>
-            <button class="btn" id="typesafe-remove-btn" type="button" disabled data-i18n="settings.typesafe.remove">키 지우기</button>
-            <button class="btn" id="typesafe-save-btn" type="button" disabled data-i18n="settings.judgment.saveKey">키 저장</button>
-            <button class="btn" id="judgment-revert-provider" type="button" data-i18n="settings.judgment.revert" disabled>변경 취소</button>
-            <button class="btn btn--primary" id="judgment-save-provider" type="button" data-i18n="settings.judgment.apply" disabled>판단 모델 적용</button>
-          </div>
         </div>
 
         <!-- Every feature Jev judges for, in the use table's order: its name,

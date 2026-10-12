@@ -20756,6 +20756,21 @@ button.helper-sib:hover {
   flex-wrap: wrap;
 }
 
+.judgment-active-model,
+.judgment-setup-hint {
+  margin: var(--space-3) var(--space-4);
+  overflow-wrap: anywhere;
+}
+
+.settings-jev-features {
+  margin: var(--space-4);
+}
+
+.settings-jev-features > .settings-jev-standings,
+.settings-jev-features > .settings-jev-dashboard {
+  max-width: none;
+}
+
 .settings-steps {
   display: grid;
   gap: var(--space-2);
