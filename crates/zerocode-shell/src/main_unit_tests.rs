@@ -12132,10 +12132,15 @@ fn an_account_switch_reaches_each_live_zo_pane_once_and_no_other_pane() {
         id: id.to_string(),
         transcript_path: None,
     };
+    let kept =
+        |addr: &str, bearer: &str| zo_channel_entry(addr.to_string(), Some(bearer.to_string()));
     let channels = HashMap::from([
-        ("zo-one".to_string(), "127.0.0.1:41001".to_string()),
-        ("zo-two".to_string(), "127.0.0.1:41002".to_string()),
-        ("a-claude-pane".to_string(), "127.0.0.1:41003".to_string()),
+        ("zo-one".to_string(), kept("127.0.0.1:41001", "bearer-one")),
+        ("zo-two".to_string(), kept("127.0.0.1:41002", "bearer-two")),
+        (
+            "a-claude-pane".to_string(),
+            kept("127.0.0.1:41003", "bearer-three"),
+        ),
     ]);
     let pane_sessions: HashMap<TermId, zerocode_core::ProviderSession> = HashMap::from([
         (1, session("zo-one")),
@@ -12155,15 +12160,15 @@ fn an_account_switch_reaches_each_live_zo_pane_once_and_no_other_pane() {
         (5, AgentKind::Zo.slug()),
     ]);
 
-    let targets = zo_channel_targets(&channels, &pane_sessions, &agent_terms);
+    let targets = zo_channel_targets(&channels, &pane_sessions, &agent_terms, None);
 
     assert_eq!(
         targets,
         vec![
-            ("zo-one".to_string(), "127.0.0.1:41001".to_string()),
-            ("zo-two".to_string(), "127.0.0.1:41002".to_string()),
+            ("zo-one".to_string(), kept("127.0.0.1:41001", "bearer-one")),
+            ("zo-two".to_string(), kept("127.0.0.1:41002", "bearer-two")),
         ],
-        "the switch went to the wrong panes"
+        "the switch went to the wrong panes, or without their own bearers"
     );
 
     let params = auth_reload_params(
@@ -12176,9 +12181,9 @@ fn an_account_switch_reaches_each_live_zo_pane_once_and_no_other_pane() {
         None,
     );
     let mut sent: Vec<String> = Vec::new();
-    let taken = broadcast_auth_reload(&targets, &params, |addr, carried| {
+    let taken = broadcast_auth_reload(&targets, &params, |channel, carried| {
         assert_eq!(carried, &params);
-        sent.push(addr.to_string());
+        sent.push(channel.addr.clone());
         Ok(())
     });
 
@@ -12262,8 +12267,14 @@ fn a_reload_carries_the_new_paths_and_says_so_when_there_are_none() {
 #[test]
 fn a_pane_that_refuses_the_reload_does_not_fail_the_switch() {
     let targets = vec![
-        ("zo-gone".to_string(), "127.0.0.1:41001".to_string()),
-        ("zo-live".to_string(), "127.0.0.1:41002".to_string()),
+        (
+            "zo-gone".to_string(),
+            zo_channel_entry("127.0.0.1:41001".to_string(), None),
+        ),
+        (
+            "zo-live".to_string(),
+            zo_channel_entry("127.0.0.1:41002".to_string(), None),
+        ),
     ];
     let params = auth_reload_params(
         zerocode_core::account::Provider::OpenAi,
@@ -12272,8 +12283,8 @@ fn a_pane_that_refuses_the_reload_does_not_fail_the_switch() {
         Some(Path::new("/data/runtime/codex")),
     );
 
-    let taken = broadcast_auth_reload(&targets, &params, |addr, _| {
-        if addr.ends_with("41001") {
+    let taken = broadcast_auth_reload(&targets, &params, |channel, _| {
+        if channel.addr.ends_with("41001") {
             Err("connection refused".to_string())
         } else {
             Ok(())
@@ -12427,6 +12438,45 @@ mod zo_channel_bearer {
                 "{session}"
             );
         }
+    }
+
+    /// An account switch reaches a zo typed into a shell the same way: on its
+    /// channel, with the bearer it published. With the window's token it was
+    /// refused, and that zo stayed on the account the person had just left.
+    #[test]
+    fn an_account_switch_reaches_a_zo_typed_into_a_shell_with_the_bearer_it_published() {
+        let (addr, heard) = channel_taking(OWN, 1);
+        let channels = HashMap::from([(
+            "session-typed-into-a-shell".to_string(),
+            zo_channel_entry(addr, Some(OWN.to_string())),
+        )]);
+        let pane_sessions: HashMap<TermId, zerocode_core::ProviderSession> = HashMap::from([(
+            7,
+            zerocode_core::ProviderSession {
+                key: zerocode_core::SessionKey::SessionId,
+                id: "session-typed-into-a-shell".to_string(),
+                transcript_path: None,
+            },
+        )]);
+        let agent_terms: HashMap<TermId, &'static str> = HashMap::from([(7, AgentKind::Zo.slug())]);
+        let window = window();
+        let params = auth_reload_params(
+            zerocode_core::account::Provider::OpenAi,
+            Some("personal"),
+            None,
+            Some(Path::new("/data/runtime/codex")),
+        );
+
+        let targets = zo_channel_targets(&channels, &pane_sessions, &agent_terms, Some(&window));
+        let taken = broadcast_auth_reload(&targets, &params, reload_on);
+
+        assert_eq!(taken, 1, "the zo typed into a shell refused the switch");
+        assert_eq!(
+            heard
+                .recv_timeout(HEARD_WITHIN)
+                .expect("the channel heard the switch"),
+            ("auth.reload".to_string(), true),
+        );
     }
 
     /// A bearer the channel did not publish is refused in the very words the

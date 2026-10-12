@@ -571,6 +571,10 @@ pub(crate) async fn open_lane(
 
 /// Answer a permission prompt. The decision is one of the four wire tags;
 /// anything else the server treats as a deny — there is no accidental allow.
+///
+/// The answer goes back on the session's own channel with that channel's own
+/// bearer, so it needs no zo of this window's: a zo somebody typed into a
+/// shell is answered whether or not this window found one (t-49081).
 #[tauri::command]
 pub(crate) async fn respond_permission(
     state: State<'_, AppState>,
@@ -578,9 +582,6 @@ pub(crate) async fn respond_permission(
     prompt_id: u64,
     decision: String,
 ) -> Result<(), String> {
-    if state.supervisor().is_none() {
-        return Err("`zo`가 PATH에 없습니다".to_string());
-    }
     let channel = zo_channel(&state, &session)?;
     tauri::async_runtime::spawn_blocking(move || answer_prompt(channel, prompt_id, decision))
         .await
