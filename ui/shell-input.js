@@ -2646,13 +2646,17 @@ function treeMenuAt(x, y, seat) {
       label: t("tree.menu.openInTerminal", "터미널에서 열기"),
       run: async () => {
         try {
+          // A tab, as Orca opens it (`createNewTerminalTab(…, { startupCwd })`),
+          // never a division of the pane holding the keyboard — asked for the way
+          // the "terminal" door asks (`TERMINAL_TAB`), so a browser in front gets
+          // the folder's shell beside it rather than in a far-away tab (t-47782).
+          // Sized and seated by the same answer.
           const term = await invoke("open_term_tab", {
-            rows: 24,
-            cols: 96,
+            ...spawnGrid({ placement: TERMINAL_TAB }),
             plain: true,
             cwd: treeAbsolute(relative),
           });
-          mountTermTab(term, {}, { placement: "tab" });
+          mountTermTab(term, {}, { placement: TERMINAL_TAB });
         } catch (error) {
           showError(error);
         }
