@@ -50,7 +50,36 @@ pub fn compact_line_diff(original: &str, updated: &str) -> Vec<CompactDiffHunk> 
 
     let original_lines: Vec<&str> = original.lines().collect();
     let updated_lines: Vec<&str> = updated.lines().collect();
-    if let Some(ops) = line_diff_ops(&original_lines, &updated_lines) {
+    // The exact table runs over the lines between the common head and the
+    // common tail; those stand around it as context, as a whole-file table
+    // would have matched them. A 900-line edit held a 6 MB table (t-48216).
+    let head = original_lines
+        .iter()
+        .zip(&updated_lines)
+        .take_while(|(old, new)| old == new)
+        .count();
+    let tail = original_lines[head..]
+        .iter()
+        .rev()
+        .zip(updated_lines[head..].iter().rev())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let (old_end, new_end) = (original_lines.len() - tail, updated_lines.len() - tail);
+    if let Some(middle) = line_diff_ops(&original_lines[head..old_end], &updated_lines[head..new_end]) {
+        let context = |old_index: usize, new_index: usize| LineDiffOp {
+            kind: CompactDiffLineKind::Context,
+            old_index,
+            new_index,
+            text: original_lines[old_index],
+        };
+        let mut ops: Vec<LineDiffOp<'_>> = Vec::with_capacity(head + middle.len() + tail);
+        ops.extend((0..head).map(|index| context(index, index)));
+        ops.extend(middle.into_iter().map(|op| LineDiffOp {
+            old_index: op.old_index + head,
+            new_index: op.new_index + head,
+            ..op
+        }));
+        ops.extend((0..tail).map(|offset| context(old_end + offset, new_end + offset)));
         return hunks_from_ops(&ops);
     }
 
@@ -65,7 +94,8 @@ fn line_diff_ops<'a>(old_lines: &[&'a str], new_lines: &[&'a str]) -> Option<Vec
 
     let width = new_lines.len() + 1;
     let index = |old_index: usize, new_index: usize| old_index * width + new_index;
-    let mut lengths = vec![0usize; (old_lines.len() + 1) * width];
+    // Within the cell cap no common subsequence outgrows `u32`.
+    let mut lengths = vec![0u32; (old_lines.len() + 1) * width];
     for old_index in (0..old_lines.len()).rev() {
         for new_index in (0..new_lines.len()).rev() {
             lengths[index(old_index, new_index)] = if old_lines[old_index] == new_lines[new_index] {
