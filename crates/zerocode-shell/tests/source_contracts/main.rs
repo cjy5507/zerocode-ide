@@ -8634,19 +8634,13 @@ mod tests {
             stills.contains("CAPTURE_TIMEOUT") && stills.contains("wait_for_child"),
             "the iOS still capture lost its wedged-device deadline:\n{stills}"
         );
-        // A pane opening never puts a second application on the person's
-        // desktop. The Simulator is launched hidden and put back out of sight
-        // after the boot that makes it draw, because the road that reads the
-        // device does not need a window: with the Simulator hidden and the
-        // device's screen deliberately made to move, the helper answered 10
-        // distinct pictures in 11 polls and its seed walked 489 -> 644.
-        // (Byte-identical frames across the hide would have proved nothing —
-        // that is exactly what a cached dead surface looks like.)
+        // A stream can read its device without hiding the Simulator application.
+        // Other devices may be visible there because the person opened them.
         let starting = block_after(ios_emulator, "fn start_emulator_stream(");
         assert!(
-            starting.contains("simulator_window::hide_simulator();")
+            !starting.contains("simulator_window::hide_simulator();")
                 && !starting.contains("show_simulator"),
-            "an emulator pane put the Simulator on the person's desktop:\n{starting}"
+            "an emulator stream changed the Simulator application's visibility:\n{starting}"
         );
         // And both roads are still wired, in the order that matters: the
         // window when this machine offers it, the still picture whenever it
@@ -9066,7 +9060,8 @@ mod tests {
         // And the close hides first, closes second, burns the mint LAST — a
         // failure must leave a pane that can still be addressed (finding 6).
         let hid = closing
-            .find("pane.hide()")
+            .find("hide_browser_pane(&pane, &webview)")
+            .or_else(|| closing.find("pane.hide()"))
             .expect("the close no longer hides first");
         let shut = closing
             .find("pane.close()")
@@ -9525,14 +9520,16 @@ mod tests {
                 && listener.contains("openEmulatorTab(platform, device, { from, agent: true })"),
             "the window stopped validating and opening the built-in emulator request:\n{listener}"
         );
-        // Seated in the asking pane's checkout (t-6379): an agent's mirror
-        // never turns the person's head from another checkout, and one whose
+        // Seated in the asking pane's checkout: an agent's mirror never
+        // changes the active tab or split layout, and one whose
         // pane is unknown says where it went, in every catalog.
         let opening = block_after(window, "async function openEmulatorTab(");
         for owned in [
             "tabOfTerm(from)",
             "standBeside(caller.pane)",
-            "{ focus: !away }",
+            "const focus = !agent && !away;",
+            "const stood = !focus ? null",
+            "{ focus }",
             "\"emulator.agentOpenUnseated\"",
         ] {
             assert!(
