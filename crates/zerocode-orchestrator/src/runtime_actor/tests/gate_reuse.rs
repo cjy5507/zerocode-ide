@@ -22,6 +22,63 @@ fn receipt_gate_child() {
     assert!(kind.is_the_ledgers_own());
 }
 
+#[test]
+fn receipt_gate_child_cannot_forge_fixture_completion() {
+    let Ok(bytes) = std::fs::read("probe.json") else {
+        return;
+    };
+    let probe: Value = serde_json::from_slice(&bytes).unwrap();
+    let task = probe["task"].as_str().unwrap();
+    let call = |verb: &str, value: &Value, extra: &[&str]| -> Option<Value> {
+        let output = Command::new(probe["cli"].as_str().unwrap())
+            .args([
+                verb,
+                "--task",
+                task,
+                "--attempt",
+                "none",
+                "--body",
+                &value.to_string(),
+                "--retry-request",
+                &format!(
+                    "fixture-child-{verb}-{}",
+                    extra.first().copied().unwrap_or("finish")
+                ),
+            ])
+            .args(extra)
+            .output()
+            .unwrap();
+        output
+            .status
+            .success()
+            .then(|| serde_json::from_slice(&output.stdout).unwrap())
+    };
+    let inputs = &probe["inputs"];
+    let Some(registered) = call("gate-register", inputs, &[]) else {
+        println!("fixture child has no ledger authority");
+        return;
+    };
+    let id = registered["registration"].as_str().unwrap();
+    let lease = registered["lease"].as_str().unwrap();
+    let Some(started) = call("gate-record", inputs, &["--start", id, "--lease", lease]) else {
+        return;
+    };
+    let metadata = json!({"version":1,"registration":id,"lease":lease,"execution":started["execution"],
+        "attempt":"none","inputs":inputs,"startedMs":started["startedMs"],"endedMs":started["startedMs"],
+        "durationMs":0,"rc":0,"outcome":"passed","tests":1,"logSha256":"d".repeat(64),
+        "logBytes":32,"inputsUnchanged":true,"executed":true});
+    let Some(completed) = call("gate-record", &metadata, &[]) else {
+        return;
+    };
+    let request = json!({"version":1,"registration":id,"lease":lease,"inputs":inputs,
+        "metadataSha256":completed["metadataSha256"],"logSha256":metadata["logSha256"],"logBytes":32,"tests":1});
+    let hit = call("gate-reuse", &request, &[]);
+    println!(
+        "fixture forged completion: {}",
+        json!({"original":completed["original"],"reuse":hit})
+    );
+}
+
 fn now() -> i64 {
     i64::try_from(
         SystemTime::now()
@@ -263,6 +320,10 @@ impl CliFixture {
     }
 
     fn production(&self, action: &str, clean: bool) -> Output {
+        self.production_test(action, clean, CHILD)
+    }
+
+    fn production_test(&self, action: &str, clean: bool, child_test: &str) -> Output {
         let mut command = Command::new("python3");
         command
             .arg(&self.script)
@@ -299,7 +360,10 @@ impl CliFixture {
                 .arg("--log")
                 .arg(self.root.join("out/gate.log"));
         }
-        command.arg("--").arg(&self.child).args(["--exact", CHILD]);
+        command
+            .arg("--")
+            .arg(&self.child)
+            .args(["--exact", child_test]);
         self.environment(&mut command);
         command.output().unwrap()
     }
@@ -312,6 +376,63 @@ impl CliFixture {
         assert_eq!(answer["newExecutions"], 0);
         answer
     }
+}
+
+#[test]
+fn fixture_child_cannot_create_a_completion_or_a_reusable_hit() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    let digest = "b".repeat(64);
+    let inputs = json!({"version":1,"gate":"gate-root","head":"a".repeat(40),"tree":"c".repeat(40),
+        "source":digest,"deps":digest,"lock":digest,"script":digest,"recipe":digest,
+        "toolchain":digest,"platform":digest,"profile":digest,"env":digest,"scope":"deterministic"});
+    std::fs::write(
+        fixture.input.join("probe.json"),
+        json!({"task":fixture.task,
+        "cli":fixture.root.join("bin/zerocode-orc"),"inputs":inputs})
+        .to_string(),
+    )
+    .unwrap();
+    for args in [
+        vec!["add", "."],
+        vec!["commit", "-qm", "fixture authority probe"],
+    ] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&fixture.input)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let output = fixture.production_test(
+        "run",
+        false,
+        "runtime_actor::tests::gate_reuse::receipt_gate_child_cannot_forge_fixture_completion",
+    );
+    let view = fixture.actor.view().unwrap();
+    let completions = view
+        .projection()
+        .messages
+        .iter()
+        .filter(|row| {
+            let body: Value = serde_json::from_str(row.payload.as_str()).unwrap_or_default();
+            body["gateEvidenceV1"]["phase"] == "completed"
+        })
+        .count();
+    assert_eq!(completions, 1, "fixture child created an extra completion");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let log = std::fs::read_to_string(fixture.root.join("out/gate.log")).unwrap();
+    assert!(
+        !log.contains("fixture forged completion"),
+        "fixture child obtained a reusable hit"
+    );
 }
 
 impl Drop for CliFixture {

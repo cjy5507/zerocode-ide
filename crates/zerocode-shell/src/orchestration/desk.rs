@@ -1355,6 +1355,34 @@ mod tests {
         assert!(died_line.get("clashes").is_none(), "{died_line}");
     }
 
+    #[test]
+    fn gate_bookkeeping_does_not_become_a_failed_merge_on_the_desk() {
+        let now = crate::now_epoch_ms();
+        let mut ledger = Ledger::new();
+        let (run_id, _) = a_worker_carrying_a_task(&mut ledger, now - HOUR_MS);
+        for phase in ["registered", "started", "completed", "reuse"] {
+            let mut gate = a_notice(&run_id, MessageKind::LandCheck, "gate evidence");
+            gate.payload =
+                serde_json::json!({"gateEvidenceV1":{"phase":phase,"attempt":"none","value":{}}})
+                    .to_string()
+                    .into();
+            ledger.post(&run_id, gate, now - 1_000).unwrap();
+        }
+        let mut failed = a_notice(&run_id, MessageKind::LandCheck, "real merge failed");
+        failed.payload = r#"{"state":"failed","rc":7,"check":"lc-fixture"}"#.into();
+        let failed = ledger.post(&run_id, failed, now - 500).unwrap();
+        let desk = desk_json(&ledger);
+        let lines = drawn(&desk);
+        assert_eq!(
+            lines.len(),
+            1,
+            "gate bookkeeping appeared as merge failures: {desk}"
+        );
+        assert_eq!(lines[0]["id"], failed);
+        assert_eq!(lines[0]["verdict"], "failed");
+        assert_eq!(lines[0]["rc"], 7);
+    }
+
     /// One quiet episode is one line with one name (t-9548): a silence told
     /// again — every five minutes by a ledger written before t-15313 — keeps
     /// the name it began with, never the newest notice's id, which moved

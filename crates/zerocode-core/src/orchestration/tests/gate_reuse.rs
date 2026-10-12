@@ -342,6 +342,71 @@ fn a_coordinator_change_interrupts_an_unfinished_registration() {
 }
 
 #[test]
+fn a_completed_receipt_misses_after_a_coordinator_generation_change() {
+    let mut fixture = Fixture::new();
+    let (metadata, _) = fixture.completed();
+    fixture.bench.ledger.runs[0]
+        .coordinator
+        .as_mut()
+        .unwrap()
+        .generation += 1;
+    let answer = fixture.json(gate::REUSE, &request(&metadata));
+    assert_eq!(
+        answer["decision"], "miss",
+        "old generation reused: {answer}"
+    );
+}
+
+#[test]
+fn an_unrelated_candidate_without_source_ancestry_is_refused() {
+    let mut fixture = Fixture::new();
+    let mut input = inputs();
+    input["head"] = "f".repeat(40).into();
+    input.as_object_mut().unwrap().remove("handedInHead");
+    input.as_object_mut().unwrap().remove("sourceAncestor");
+    let refused = fixture.call(gate::REGISTER, &input);
+    assert_ne!(refused.reply.exit_code, 0, "unrelated source registered");
+}
+
+#[test]
+fn a_reuse_decision_records_candidate_source_and_recipe_provenance() {
+    let mut fixture = Fixture::new();
+    let (metadata, _) = fixture.completed();
+    let answer = fixture.json(gate::REUSE, &request(&metadata));
+    assert_eq!(answer["head"], metadata["inputs"]["head"]);
+    assert_eq!(answer["tree"], metadata["inputs"]["tree"]);
+    assert_eq!(answer["handedInHead"], HEAD);
+    assert_eq!(answer["recipe"], metadata["inputs"]["recipe"]);
+}
+
+#[test]
+fn gate_completions_do_not_count_as_legacy_land_check_executions() {
+    let mut fixture = Fixture::new();
+    fixture.completed();
+    let run = &fixture.bench.ledger.runs()[0];
+    let attempt = run.newest_attempt(&fixture.task).unwrap();
+    let time = crate::orchestration::attempt_time::attempt_time(run, attempt);
+    assert!(
+        !time.events.contains_key("land_check"),
+        "gate completion counted as a merge check"
+    );
+}
+
+#[test]
+fn a_windows_process_failure_code_is_recorded_without_losing_the_failure() {
+    let mut fixture = Fixture::new();
+    let mut metadata = fixture.registered(inputs());
+    metadata["rc"] = json!(3_221_225_477_u64);
+    metadata["outcome"] = "failed".into();
+    let recorded = fixture.call(gate::RECORD, &metadata);
+    assert_eq!(recorded.reply.exit_code, 0, "{}", recorded.reply.stderr);
+    assert_eq!(
+        fixture.json(gate::REUSE, &request(&metadata))["decision"],
+        "miss"
+    );
+}
+
+#[test]
 fn a_copied_run_or_seat_does_not_authenticate_another_session() {
     let mut fixture = Fixture::new();
     let run_id = fixture.bench.ledger.runs()[0].id.clone();

@@ -21,6 +21,9 @@ SPEC = importlib.util.spec_from_file_location("gate_receipt", SCRIPT)
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 PASS = b"test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+TAP = b"TAP version 13\nok 1 - fixture\n1..1\n# tests 1\n# suites 0\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 1.25\n"
+SPEC_OUTPUT = "✔ fixture (1.25ms)\nℹ tests 1\nℹ suites 0\nℹ pass 1\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 1.25\n".encode()
+UNITTEST = b"..\n----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nOK\n"
 
 
 class FakeLedger:
@@ -268,6 +271,113 @@ class ReceiptTests(unittest.TestCase):
             ledger = FakeLedger()
             gate.produce(self.args, ledger)
         self.assertEqual(ledger.metadata["tests"], 0)
+
+    def test_child_never_inherits_fixture_ledger_or_account_authority(self):
+        private = {
+            "HOME": str(self.root / "account-home"),
+            "ZEROCODE_AGENT_TEAM_TOKEN": "fixture-pane-capability",
+            "ZEROCODE_AGENT_TEAM_TOKEN_FILE": str(self.root / "fixture-auth"),
+            "ZEROCODE_ORCHESTRATION_RUN": "fixture-run",
+            "CLAUDE_CODE_MESSAGING_TOKEN": "fixture-message-capability",
+            "HERDR_TEST_HOOK": "fixture-hook-capability",
+        }
+        self.args.child_home = str(self.root / "child-home")
+        with mock.patch.dict(os.environ, private):
+            for clean in (False, True):
+                with self.subTest(clean=clean):
+                    self.args.clean_env = clean
+                    child = gate.execution_environment(self.args)
+                    self.assertFalse(set(private).difference({"HOME"}).intersection(child))
+                    self.assertEqual(child.get("HOME"), self.args.child_home)
+                    self.assertNotEqual(child.get("HOME"), private["HOME"])
+
+    def test_candidate_owned_producer_is_refused_before_a_child_runs(self):
+        with mock.patch.object(gate, "__file__", str(self.repo / "producer.py")):
+            with mock.patch.object(gate, "execute", wraps=gate.execute) as executed:
+                try:
+                    gate.produce(self.args, FakeLedger())
+                except gate.UnknownInput:
+                    pass
+                self.assertEqual(executed.call_count, 0, "candidate producer reached execution")
+
+    @unittest.skipIf(os.name == "nt", "symlink creation needs Windows developer mode")
+    def test_tracked_internal_links_bind_their_text_mode_and_reachable_input(self):
+        folder = self.repo / "tools/computer-bench/long-form/bin"
+        folder.mkdir(parents=True)
+        (folder / "zerocode-door").write_text("fixture door\n")
+        for name in ("zerocode-browser", "zerocode-computer"):
+            (folder / name).symlink_to("zerocode-door")
+        self.git("add", ".")
+        self.git("commit", "-qm", "internal links")
+        before = self.fingerprint()
+        self.assertIsNotNone(before["source"], "safe tracked internal links lost source identity")
+        self.assertIsNotNone(before["tree"])
+        (folder / "zerocode-door").write_text("changed reachable input\n")
+        self.assertIsNone(self.fingerprint()["source"])
+
+    @unittest.skipIf(os.name == "nt", "symlink creation needs Windows developer mode")
+    def test_outside_dangling_cyclic_and_untracked_link_targets_remain_unknown(self):
+        for target in (str(self.deps / "dependency"), "absent", "link", "ignored-input"):
+            with self.subTest(target=target):
+                link = self.repo / "link"
+                if link.is_symlink():
+                    link.unlink()
+                link.symlink_to(target)
+                (self.repo / ".gitignore").write_text("ignored-input\n")
+                (self.repo / "ignored-input").write_text("undeclared input\n")
+                self.git("add", ".")
+                self.git("commit", "-qm", "unsafe link")
+                self.assertIsNone(self.fingerprint()["source"])
+
+    def test_complete_mixed_runner_output_counts_zero_skip_and_cancel_summaries(self):
+        for log, count in ((TAP, 1), (SPEC_OUTPUT, 1), (UNITTEST, 2), (PASS + TAP + SPEC_OUTPUT + UNITTEST, 6)):
+            with self.subTest(log=log):
+                self.assertEqual(gate.test_count(log), count)
+
+    def test_mixed_runner_failures_skips_cancellation_and_truncation_are_unknown(self):
+        for log in (
+            TAP.replace(b"# fail 0", b"# fail 1"),
+            TAP.replace(b"# cancelled 0", b"# cancelled 1"),
+            TAP.replace(b"# skipped 0", b"# skipped 1"),
+            TAP.replace(b"# todo 0", b"# todo 1"),
+            TAP.replace(b"# duration_ms 1.25\n", b""),
+            SPEC_OUTPUT.replace("ℹ pass 1".encode(), "ℹ pass 0".encode()),
+            UNITTEST.replace(b"OK\n", b"OK (skipped=1)\n"),
+            UNITTEST.replace(b"OK\n", b"FAILED (failures=1)\n"),
+            b"Ran 2 tests in 0.001s\n", b"TAP version 13\nok 1 - truncated\n",
+        ):
+            with self.subTest(log=log):
+                self.assertEqual(gate.test_count(PASS + log), 0)
+
+    def test_real_fixture_process_emits_complete_mixed_runner_summaries(self):
+        output = PASS + TAP + SPEC_OUTPUT + UNITTEST
+        self.args.command = [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({output!r})"]
+        ledger = FakeLedger()
+        result = gate.produce(self.args, ledger)
+        self.assertEqual(result["tests"], 6)
+        self.assertEqual(Path(self.args.log).read_bytes(), output)
+
+    def test_zero_executed_tests_cannot_make_the_producer_exit_successfully(self):
+        self.args.command = [sys.executable, "-c", "print('no tests executed')"]
+        argv = [str(SCRIPT), "run", "--repo", self.args.repo, "--gate", "gate-root", "--task", "t-1",
+                "--attempt", "none", "--output", self.args.output, "--", *self.args.command]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(gate, "Ledger", return_value=FakeLedger()):
+            self.assertEqual(gate.main(), 1, "rc0 with zero tests reported gate success")
+
+    def test_fingerprint_head_and_source_are_from_the_same_snapshot(self):
+        original = gate.source_identity
+        observed_source = []
+
+        def changed_source(repo):
+            self.git("commit", "--allow-empty", "-qm", "move before snapshot")
+            identity = original(repo)
+            observed_source.append(identity)
+            return identity
+
+        with mock.patch.object(gate, "source_identity", side_effect=changed_source):
+            result = self.fingerprint()
+        self.assertTrue(result["source"] is None or result["head"] == observed_source[0][0],
+                        "HEAD and source identity name different commits")
 
 
 if __name__ == "__main__":
