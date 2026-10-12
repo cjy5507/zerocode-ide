@@ -101,7 +101,11 @@ def safe_git_configuration(paths, producer):
             parser.read_string(read_configuration(path, producer).decode())
         except (configparser.Error, UnicodeError) as why:
             raise producer.UnknownInput("Git configuration cannot be inspected safely") from why
+        if parser.defaults():
+            raise producer.UnknownInput("Git default sections are unsupported")
         for section in parser.sections():
+            if any(value is not None and ("\n" in value or "\r" in value) for value in parser[section].values()):
+                raise producer.UnknownInput("ambiguous multiline Git configuration is unsupported")
             prefix = section.split(maxsplit=1)[0].lower()
             if prefix not in allowed or set(parser[section]) - allowed[prefix]:
                 raise producer.UnknownInput("Git configuration has an undeclared file or program dependency")
@@ -111,6 +115,10 @@ def safe_git_configuration(paths, producer):
 
 class Untrusted(Exception):
     """Independent provenance or declared input closure is unavailable."""
+
+    def __init__(self, message, code="identity_unavailable"):
+        super().__init__(message)
+        self.code = code
 
 
 def sha256(data):
@@ -403,21 +411,35 @@ def configure(context, args, producer):
     return args.trust
 
 
+def launcher_prefix(words):
+    if "--" not in words:
+        raise Untrusted("producer separator is required", "invalid_request")
+    split = words.index("--")
+    allowed = {"--policy", "--policy-sha256", "--repo", "--bootstrap-launcher", "--authority-fd", "--bound-policy-sha256"}
+    prefix = words[:split]
+    if len(prefix) != 2 * len(allowed) or split + 1 == len(words):
+        raise Untrusted("complete native launcher arguments are required", "invalid_request")
+    seen = set()
+    for key, value in zip(prefix[::2], prefix[1::2]):
+        if key not in allowed or key in seen or not value or value.startswith("--"):
+            raise Untrusted("launcher options need unique exact pairs", "invalid_request")
+        seen.add(key)
+    return prefix, words[split + 1:]
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--policy", required=True)
     parser.add_argument("--policy-sha256", required=True)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--bootstrap-launcher")
     parser.add_argument("--authority-fd", type=int)
+    parser.add_argument("--bound-policy-sha256")
     words = sys.argv[1:] if argv is None else argv
-    if "--" not in words:
-        parser.error("separate the producer arguments with --")
-    split = words.index("--")
-    args = parser.parse_args(words[:split])
-    producer_argv = words[split + 1:]
     authority = None
     try:
+        prefix, producer_argv = launcher_prefix(words)
+        args = parser.parse_args(prefix)
         if not sys.flags.isolated or not sys.flags.no_site:
             raise Untrusted("independent invocation requires Python -I -S")
         if not args.bootstrap_launcher or sys.argv[0] != "-" or args.authority_fd is None or args.authority_fd < 3:
@@ -425,6 +447,8 @@ def main(argv=None):
         os.set_inheritable(args.authority_fd, False)
         authority = socket.socket(fileno=args.authority_fd)
         authority.settimeout(60)
+        if args.policy_sha256 != args.bound_policy_sha256:
+            raise Untrusted("policy differs from the authenticated job binding", "digest_mismatch")
         context = load_policy(args.policy, args.policy_sha256, args.repo, launcher_path=args.bootstrap_launcher)
         context["authority"] = authority
         module = types.ModuleType("trusted_gate_receipt")
@@ -433,8 +457,9 @@ def main(argv=None):
         context["configure"] = lambda parsed: configure(context, parsed, module)
         context["repo"] = str(Path(args.repo).resolve())
         return module.main(trust=context, argv=producer_argv)
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError, Untrusted):
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, Untrusted) as why:
         print(json.dumps({"decision": "miss", "reason": "independent provenance or input closure unavailable",
+                          "code": getattr(why, "code", "identity_unavailable"),
                           "executed": False, "newExecutions": 0}, sort_keys=True))
         return 1
     finally:

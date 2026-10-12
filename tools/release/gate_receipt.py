@@ -685,7 +685,7 @@ def verify(args, ledger=None):
 
 
 def main(trust=None, argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("action", choices=("run", "verify"))
     parser.add_argument("--repo", required=True)
     parser.add_argument("--gate", choices=("gate-root", "gate-zo"), required=True)

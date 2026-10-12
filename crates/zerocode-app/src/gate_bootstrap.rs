@@ -220,7 +220,7 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
         return Err(());
     }
     let prehash_ms = wall_started.elapsed().as_millis();
-    let mut open_ms = 0;
+    let open_ms;
     let mut command = Command::new(&python);
     command.env_clear();
     for key in ["PATH", "HOME", "SystemRoot", "TMPDIR", "TMP", "TEMP"] {
@@ -237,6 +237,17 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
         .arg(&launcher)
         .stdin(Stdio::piped());
     let mut child = if let Some(job) = options.get("--gate-job") {
+        let arguments = match launcher_arguments(forwarded) {
+            Ok(value) => value,
+            Err(code) => {
+                println!(
+                    "{}",
+                    json!({"decision":"miss","code":code,"executed":false,"newExecutions":0})
+                );
+                return Ok(ExitCode::FAILURE);
+            }
+        };
+        #[cfg(unix)]
         let opening = std::time::Instant::now();
         let identity = BootstrapIdentity {
             launcher: FileIdentity {
@@ -252,7 +263,7 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
                 sha256: options["--stdlib-sha256"].into(),
             },
         };
-        let channel = match open_authority(job, forwarded, &identity) {
+        let channel = match open_authority(job, &arguments, &identity) {
             Ok(value) => value,
             Err(code) => {
                 println!(
@@ -262,13 +273,15 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
                 return Ok(ExitCode::FAILURE);
             }
         };
-        open_ms = opening.elapsed().as_millis();
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
+            open_ms = opening.elapsed().as_millis();
             command
                 .arg("--authority-fd")
                 .arg(channel.as_raw_fd().to_string())
+                .arg("--bound-policy-sha256")
+                .arg(arguments.policy_sha)
                 .args(forwarded);
             zerocode_pty::gate_channel::spawn(command, channel).map_err(|_| ())?
         }
@@ -278,6 +291,7 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
             return Err(());
         }
     } else {
+        open_ms = 0;
         command.args(forwarded).spawn().map_err(|_| ())?
     };
     let sent = child.stdin.take().ok_or(())?.write_all(&retained);
@@ -299,17 +313,33 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
         .map_or(ExitCode::FAILURE, ExitCode::from))
 }
 
-fn option<'a>(words: &'a [String], name: &str) -> Result<&'a str, &'static str> {
+struct LauncherArguments<'a> {
+    policy: &'a str,
+    policy_sha: &'a str,
+}
+
+fn launcher_arguments(words: &[String]) -> Result<LauncherArguments<'_>, &'static str> {
     let end = words
         .iter()
         .position(|word| word == "--")
-        .unwrap_or(words.len());
-    let mut found = words[..end].windows(2).filter(|pair| pair[0] == name);
-    let value = found.next().ok_or("invalid_request")?;
-    if found.next().is_some() {
+        .ok_or("invalid_request")?;
+    if end != 6 || end + 1 == words.len() {
         return Err("invalid_request");
     }
-    Ok(&value[1])
+    let mut options = BTreeMap::new();
+    for pair in words[..end].chunks_exact(2) {
+        if !["--policy", "--policy-sha256", "--repo"].contains(&pair[0].as_str())
+            || pair[1].is_empty()
+            || pair[1].starts_with("--")
+            || options.insert(pair[0].as_str(), pair[1].as_str()).is_some()
+        {
+            return Err("invalid_request");
+        }
+    }
+    Ok(LauncherArguments {
+        policy: options["--policy"],
+        policy_sha: options["--policy-sha256"],
+    })
 }
 
 fn capability(name: &str, file_name: &str) -> Result<String, &'static str> {
@@ -339,7 +369,7 @@ fn capability(name: &str, file_name: &str) -> Result<String, &'static str> {
 
 fn open_authority(
     job: &str,
-    forwarded: &[String],
+    arguments: &LauncherArguments<'_>,
     bootstrap: &BootstrapIdentity,
 ) -> Result<std::net::TcpStream, &'static str> {
     use std::net::{SocketAddr, TcpStream};
@@ -354,8 +384,8 @@ fn open_authority(
             "invalid_request"
         }
     })?;
-    let path = option(forwarded, "--policy")?;
-    let expected = option(forwarded, "--policy-sha256")?;
+    let path = arguments.policy;
+    let expected = arguments.policy_sha;
     let mut manifest = Vec::new();
     fs::File::open(path)
         .map_err(|_| "identity_unavailable")?
@@ -485,6 +515,9 @@ fn open_authority(
     if bound["ok"] != true {
         return Err("authority_unavailable");
     }
+    if bound["value"]["policy"].as_str() != Some(expected) {
+        return Err("digest_mismatch");
+    }
     Ok(channel)
 }
 
@@ -503,6 +536,34 @@ mod tests {
             let words = words.into_iter().map(str::to_string).collect::<Vec<_>>();
             assert!(parse(&words).is_err());
         }
+        let good = vec![
+            "--policy".into(),
+            "/fixture/policy".into(),
+            "--policy-sha256".into(),
+            "b".repeat(64),
+            "--repo".into(),
+            "/fixture/repo".into(),
+            "--".into(),
+            "run".into(),
+        ];
+        assert!(launcher_arguments(&good).is_ok());
+        for key in [
+            "--pol",
+            "--policy-sha256=value",
+            "--bootstrap-launcher",
+            "--authority-fd",
+            "--bound-policy-sha256",
+        ] {
+            let mut bad = good.clone();
+            bad[0] = key.into();
+            assert!(launcher_arguments(&bad).is_err());
+        }
+        let mut duplicate = good.clone();
+        duplicate.splice(6..6, ["--policy".into(), "/fixture/other".into()]);
+        assert!(launcher_arguments(&duplicate).is_err());
+        let mut disguised = good;
+        disguised[1] = "--policy-sha256".into();
+        assert!(launcher_arguments(&disguised).is_err());
     }
 
     #[test]

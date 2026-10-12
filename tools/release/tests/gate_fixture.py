@@ -118,7 +118,7 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
               "bundle": {role: {"path": str(path), "sha256": producer.file_digest(path)} for role, path in {
                   "launcher": folder / "gate_launcher.py", "producer": folder / "gate_receipt.py",
                   "scanner": folder / "pii-scan.py", "rules": folder / "pii-rules.json"}.items()},
-              "gates": {args.gate: {"command": args.command, "recipes": ["rust", "ui"] if ui_zero else ["fixture"], "testRecipes": ["rust", "ui"] if ui_zero else ["fixture"], "profile": args.profile,
+              "gates": {args.gate: {"command": args.command, "recipes": ["rust", "ui"] if ui_zero else ["fixture"], "testRecipes": ["rust"] if ui_zero else ["fixture"], "profile": args.profile,
                   "target": {"repo": str(Path(args.repo).resolve()), "head": producer.git(args.repo, "rev-parse", "--verify", "HEAD").decode().strip(), "scope": args.scope},
                   "timeout": args.timeout,
                   "maxJobTtlSeconds": math.ceil(args.timeout) + 300,

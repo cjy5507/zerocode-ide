@@ -547,8 +547,9 @@ impl RuntimeState {
                     ));
                 }
                 session.bound = true;
+                let binding = serde_json::json!({"policy":session.scope.policy,"producer":session.scope.producer});
                 self.gate_jobs.rows.insert(job, session);
-                Ok(answer(true, serde_json::Value::Null, "", self.revision))
+                Ok(answer(true, binding, "", self.revision))
             }
             Request::Command { job, body, now_ms } => {
                 let Some(mut session) = self.gate_jobs.rows.remove(&job) else {

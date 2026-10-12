@@ -873,6 +873,56 @@ class ReceiptTests(unittest.TestCase):
                 self.repin_policy(original)
                 self.assertEqual(self.fingerprint(), baseline)
 
+    @unittest.skipIf(os.name == "nt", "private inherited descriptors require POSIX")
+    def test_bound_policy_and_strict_arguments_precede_any_producer_code(self):
+        import socket
+        good_marker = self.root / "approved-loader-ran"
+        bad_marker = self.root / "unapproved-loader-ran"
+        good_producer = self.root / "approved-producer.py"
+        bad_producer = self.root / "unapproved-producer.py"
+        good_producer.write_text("from pathlib import Path\ndef main(trust=None, argv=None):\n    Path(" + repr(str(good_marker)) + ").write_text('ran')\n    return 0\n")
+        bad_producer.write_text("from pathlib import Path\nPath(" + repr(str(bad_marker)) + ").write_text('ran')\ndef main(trust=None, argv=None):\n    return 0\n")
+        policies = {}
+        for label, producer in (("good", good_producer), ("bad", bad_producer)):
+            policy = copy.deepcopy(self.args.trust["policy"])
+            policy["bundle"]["producer"] = {"path": str(producer), "sha256": gate.file_digest(producer)}
+            path = self.root / (label + "-loader-policy.json")
+            path.write_bytes(gate.encoded(policy))
+            policies[label] = (str(path), gate.digest(path.read_bytes()))
+        launcher = SCRIPT.with_name("gate_launcher.py")
+
+        def invoke(label, bound, malformed=None):
+            parent, child = socket.socketpair()
+            with parent, child:
+                policy_path, policy_sha = policies[label]
+                prefix = ["--bootstrap-launcher", str(launcher), "--authority-fd", str(child.fileno()),
+                          "--bound-policy-sha256", bound, "--policy", policy_path, "--policy-sha256", policy_sha, "--repo", str(self.repo)]
+                if malformed == "equals":
+                    prefix[8:10] = ["--policy-sha256=" + policy_sha]
+                elif malformed == "abbreviation":
+                    prefix[8] = "--policy-s"
+                elif malformed == "duplicate":
+                    prefix += ["--policy", policies["bad"][0]]
+                elif malformed == "reserved":
+                    prefix += ["--bound-policy-sha256", policies["bad"][1]]
+                return subprocess.run([sys.executable, "-I", "-S", "-B", "-", *prefix, "--", "run"],
+                                      input=launcher.read_bytes(), pass_fds=(child.fileno(),), cwd=self.repo,
+                                      env={"HOME": str(self.root / "git-home"), "PATH": os.defpath},
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=30)
+
+        good = invoke("good", policies["good"][1])
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertEqual(good_marker.read_text(), "ran")
+        denied = invoke("bad", policies["good"][1])
+        self.assertEqual(denied.returncode, 1, denied.stderr)
+        self.assertEqual(json.loads(denied.stdout)["code"], "digest_mismatch")
+        self.assertFalse(bad_marker.exists(), "producer code ran before policy binding")
+        for variant in ("equals", "abbreviation", "duplicate", "reserved"):
+            denied = invoke("good", policies["good"][1], variant)
+            self.assertEqual(denied.returncode, 1, denied.stderr)
+            self.assertEqual(json.loads(denied.stdout)["code"], "invalid_request")
+            self.assertFalse(bad_marker.exists())
+
     def test_actual_ui_runner_reports_require_matching_nonzero_complete_checks(self):
         import shutil
         node = shutil.which("node")
@@ -927,6 +977,7 @@ process.exitCode = runner.report() ? 1 : 0;
                         self.assertIn(b"0/0 passed", log)
                         mixed = b"==> verify recipe rust\n" + PASS + b"<== verify recipe rust rc=0 0s\n==> verify recipe ui\n" + log + b"<== verify recipe ui rc=0 0s\n"
                         self.assertEqual(gate.test_count(mixed, ["rust", "ui"], ["rust", "ui"]), 0, mixed)
+                        self.assertEqual(gate.test_count(mixed, ["rust", "ui"], ["rust"]), 0, mixed)
 
     def test_each_required_recipe_runs_tests_and_a_zero_command_cannot_hide(self):
         suite = self.root / "actual-suite"
@@ -1018,7 +1069,22 @@ process.exitCode = runner.report() ? 1 : 0;
         variants = (original + b"\n[include]\npath = fixture-include\n",
                     original.replace(b"[core]", b"[core]\nfsmonitor = fixture-monitor", 1),
                     original + b"\n[filter \"fixture\"]\nclean = fixture-filter\n",
-                    original.replace(b"[core]", b"[core]\nhooksPath = fixture-hooks", 1))
+                    original.replace(b"[core]", b"[core]\nhooksPath = fixture-hooks", 1),
+                    b"[core]\n\tbare = false\n\t\t[include]\n\t\tpath = fixture-include\n",
+                    b"[core]\n\tbare = false\n\t\thooksPath = fixture-hooks\n",
+                    b"[core]\n\tbare = false\n\t\t[filter \"fixture\"]\n\t\tclean = fixture-filter\n")
+        inspection = self.root / "git-parser-control"
+        safe_environment = {"HOME": str(self.root / "git-home"), "PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1",
+                            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_COUNT": "0"}
+        for raw, key, expected in ((original, "core.repositoryformatversion", "0"),
+                                   (variants[-3], "include.path", "fixture-include"),
+                                   (variants[-2], "core.hookspath", "fixture-hooks"),
+                                   (variants[-1], "filter.fixture.clean", "fixture-filter")):
+            inspection.write_bytes(raw)
+            actual = subprocess.run(["git", "config", "--file", str(inspection), "--no-includes", "--get", key],
+                                    cwd=self.root, env=safe_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=30)
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            self.assertEqual(actual.stdout.decode().strip(), expected)
         for changed in variants:
             self.assertNotEqual(changed, original)
             config.write_bytes(changed)

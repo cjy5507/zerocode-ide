@@ -1292,6 +1292,144 @@ fn general_cli_requires_a_server_owned_job_before_registration_or_cached_evidenc
 }
 
 #[test]
+fn native_arguments_cannot_substitute_an_unpinned_producer_after_policy_verification() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    assert!(fixture.production("run", true).status.success());
+    let policy = fixture.policy.lock().unwrap().clone().unwrap();
+    let original_path = fixture.root.join("trusted-policy.json");
+    let mut shadow: Value =
+        serde_json::from_slice(&std::fs::read(&original_path).unwrap()).unwrap();
+    let marker = fixture.root.join("unpinned-producer-ran");
+    let producer = fixture.root.join("unpinned-producer.py");
+    std::fs::write(&producer, format!("from pathlib import Path\nPath({:?}).write_text('ran')\ndef main(trust=None, argv=None):\n    return 0\n", marker.to_str().unwrap())).unwrap();
+    shadow["bundle"]["producer"] = json!({"path":producer,"sha256":zerocode_core::user_preferences::content_key(&std::fs::read(&producer).unwrap())});
+    let shadow_path = fixture.root.join("unpinned-policy.json");
+    let shadow_bytes = serde_json::to_vec(&shadow).unwrap();
+    std::fs::write(&shadow_path, &shadow_bytes).unwrap();
+    let shadow_sha = zerocode_core::user_preferences::content_key(&shadow_bytes);
+    let observed = reuse_observation(&fixture);
+    let intent = fixture.job_intent("verify", observed["registration"].as_str());
+    let options: Vec<String> = serde_json::from_value(policy["bootstrap"].clone()).unwrap();
+    let original_sha = policy["policySha256"].as_str().unwrap().to_string();
+    let prefix = vec![
+        "--policy".to_string(),
+        original_path.to_str().unwrap().into(),
+        "--policy-sha256".into(),
+        original_sha.clone(),
+        "--repo".into(),
+        fixture.input.to_str().unwrap().into(),
+    ];
+    let mut producer_args = vec![
+        "verify".to_string(),
+        "--repo".into(),
+        fixture.input.to_str().unwrap().into(),
+        "--gate".into(),
+        "gate-root".into(),
+        "--task".into(),
+        fixture.task.clone(),
+        "--attempt".into(),
+        "none".into(),
+        "--scope".into(),
+        "deterministic".into(),
+        "--closure".into(),
+        "declared".into(),
+        "--profile".into(),
+        "test-debug".into(),
+        "--timeout".into(),
+        "120".into(),
+        "--metadata".into(),
+        fixture
+            .root
+            .join("out/metadata.json")
+            .to_str()
+            .unwrap()
+            .into(),
+        "--log".into(),
+        fixture.root.join("out/gate.log").to_str().unwrap().into(),
+        "--".into(),
+    ];
+    producer_args.extend(serde_json::from_value::<Vec<String>>(policy["command"].clone()).unwrap());
+    let invoke = |forwarded: &[String]| {
+        let mut command = Command::new(std::env::var_os("HERDR_FIXTURE_BOOTSTRAP").unwrap());
+        command
+            .arg("gate-bootstrap")
+            .args(&options)
+            .arg("--gate-job")
+            .arg(serde_json::to_string(&intent).unwrap())
+            .arg("--")
+            .args(forwarded)
+            .arg("--")
+            .args(&producer_args);
+        fixture.environment(&mut command);
+        command.output().unwrap()
+    };
+    let reordered = vec![
+        prefix[4].clone(),
+        prefix[5].clone(),
+        prefix[2].clone(),
+        prefix[3].clone(),
+        prefix[0].clone(),
+        prefix[1].clone(),
+    ];
+    let good = invoke(&reordered);
+    assert!(
+        good.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&good.stdout),
+        String::from_utf8_lossy(&good.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&good.stdout).unwrap()["decision"],
+        "hit"
+    );
+    let before = fixture.actor.view().unwrap().projection().messages.len();
+    let opens = fixture.gate_open_attempts.load(Ordering::SeqCst);
+    let mut equals = prefix.clone();
+    equals.extend([
+        format!("--policy={}", shadow_path.display()),
+        format!("--policy-sha256={shadow_sha}"),
+    ]);
+    let mut duplicate = prefix.clone();
+    duplicate.extend(["--policy".into(), shadow_path.to_str().unwrap().into()]);
+    let mut abbreviated = prefix.clone();
+    abbreviated[2] = "--policy-s".into();
+    let mut reserved = prefix.clone();
+    reserved.extend(["--authority-fd".into(), "3".into()]);
+    let mut reserved_equals = prefix.clone();
+    reserved_equals.extend([format!("--bootstrap-launcher={}", producer.display())]);
+    let mut bound = prefix;
+    bound.extend(["--bound-policy-sha256".into(), shadow_sha]);
+    for malformed in [
+        equals,
+        duplicate,
+        abbreviated,
+        reserved,
+        reserved_equals,
+        bound,
+    ] {
+        let denied = invoke(&malformed);
+        assert!(
+            !denied.status.success(),
+            "unpinned argument override was accepted"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&denied.stdout).unwrap()["code"],
+            "invalid_request"
+        );
+        assert!(
+            !marker.exists(),
+            "unpinned producer ran after native policy verification"
+        );
+        assert_eq!(fixture.gate_open_attempts.load(Ordering::SeqCst), opens);
+        assert_eq!(
+            fixture.actor.view().unwrap().projection().messages.len(),
+            before
+        );
+    }
+}
+
+#[test]
 fn native_bootstrap_binds_launcher_and_runtime_to_the_current_policy_before_python() {
     let authority = Fixture::new();
     let fixture = CliFixture::new(&authority);
@@ -1350,7 +1488,9 @@ fn native_bootstrap_binds_launcher_and_runtime_to_the_current_policy_before_pyth
             .arg("--policy-sha256")
             .arg(zerocode_core::user_preferences::content_key(&bytes))
             .arg("--repo")
-            .arg(&fixture.input);
+            .arg(&fixture.input)
+            .arg("--")
+            .arg("run");
         fixture.environment(&mut command);
         let output = command.output().unwrap();
         assert!(
@@ -1396,7 +1536,9 @@ fn native_bootstrap_binds_launcher_and_runtime_to_the_current_policy_before_pyth
             .arg("--policy-sha256")
             .arg(zerocode_core::user_preferences::content_key(&bytes))
             .arg("--repo")
-            .arg(&fixture.input);
+            .arg(&fixture.input)
+            .arg("--")
+            .arg("run");
         fixture.environment(&mut command);
         let output = command.output().unwrap();
         assert!(!output.status.success());
@@ -1618,7 +1760,7 @@ fn a_scoped_connection_cannot_use_general_verbs_or_unknown_fields() {
 }
 
 #[test]
-fn scoped_connections_bind_receipts_and_revoke_on_eof_pin_generation_and_expiry() {
+fn scoped_connections_bind_receipts_and_revoke_on_eof_cancel_pin_restart_and_expiry() {
     let authority = Fixture::new();
     let fixture = CliFixture::new(&authority);
     assert!(fixture.production("run", true).status.success());
@@ -1762,6 +1904,7 @@ fn scoped_registration_retries_are_exact_and_do_not_cross_job_connections() {
         replay["ok"], false,
         "cached registration bypassed current scope"
     );
+    assert_eq!(replay["code"], "out_of_scope");
 }
 
 #[test]
@@ -1942,10 +2085,7 @@ fn a_zero_ui_recipe_cannot_reuse_an_actual_passing_rust_recipe() {
     let authority = Fixture::new();
     let fixture = CliFixture::new(&authority);
     let output = fixture.production_fixture("run", true, CHILD, false, true);
-    assert!(!output.status.success());
     let produced: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(produced["outcome"], "unknown");
-    assert_eq!(produced["tests"], 0);
     assert_eq!(produced["newExecutions"], 1);
     let metadata: Value =
         serde_json::from_slice(&std::fs::read(fixture.root.join("out/metadata.json")).unwrap())
@@ -1968,7 +2108,16 @@ fn a_zero_ui_recipe_cannot_reuse_an_actual_passing_rust_recipe() {
     );
     assert!(log.contains("<== verify recipe rust rc=0"));
     assert!(log.contains("<== verify recipe ui rc=0"));
-    fixture.miss(true);
+    let verified = fixture.production("verify", true);
+    let decision: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    assert_eq!(
+        decision["decision"], "miss",
+        "actual zero UI recipe obtained a reusable hit: {decision}"
+    );
+    assert_eq!(decision["newExecutions"], 0);
+    assert!(!output.status.success());
+    assert_eq!(produced["outcome"], "unknown");
+    assert_eq!(produced["tests"], 0);
 }
 
 #[test]
