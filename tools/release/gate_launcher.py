@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Launch a pinned receipt producer from a coordinator-reviewed external manifest.
 
-The root coordinator creates and updates the manifest from a reviewed trusted commit.
-It independently pins this launcher and the manifest before invoking Python with -I -S.
-The manifest is never generated from candidate declarations. This is a declared-input
-cache, not isolation from arbitrary code running as the same operating-system user.
+The native bootstrap verifies launcher and Python runtime identities before Python starts.
+The coordinator pins the external manifest and bundle. This declared-input cache does
+not isolate arbitrary code running as the same operating-system user.
 """
 
 import argparse
@@ -81,10 +80,8 @@ def load_policy(path, expected, repo, launcher_path=None):
     if len(raw) > MAX_POLICY or sha256(raw) != expected:
         raise Untrusted("manifest identity changed")
     policy = json.loads(raw, object_pairs_hook=unique_object)
-    if not isinstance(policy, dict) or set(policy) != {"version", "trustedCommit", "bundle", "gates"} or policy["version"] != 1:
+    if not isinstance(policy, dict) or set(policy) != {"version", "bundle", "gates"} or policy["version"] != 2:
         raise Untrusted("unsupported trust manifest")
-    if not isinstance(policy["trustedCommit"], str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", policy["trustedCommit"]):
-        raise Untrusted("manifest has no root-reviewed trusted commit")
     bundle = policy["bundle"]
     if not isinstance(bundle, dict) or set(bundle) != {"launcher", "producer", "scanner", "rules"} or not isinstance(policy["gates"], dict):
         raise Untrusted("incomplete trusted bundle")
@@ -120,6 +117,39 @@ def search_paths(searches, producer):
         for directory in [root, *root.parents] if search["ancestors"] else [root]:
             paths.update(directory / name for name in names)
     return sorted(paths)
+
+
+def path_bindings(environment, roots, producer):
+    bindings = []
+    for name in environment["PATH"].split(os.pathsep):
+        directory = Path(name)
+        if not directory.is_absolute() or not directory.is_dir():
+            raise producer.UnknownInput("tool search directory is missing or relative")
+        entries = []
+        for path in sorted(directory.iterdir()):
+            target = path.resolve(strict=True)
+            if not target.is_file() or not any(target == root or root.is_dir() and target.is_relative_to(root) for root in roots):
+                raise producer.UnknownInput("PATH exposes a tool without a declared identity")
+            entries.append([path.name, stat.S_IMODE(path.lstat().st_mode),
+                            os.readlink(path) if path.is_symlink() else None, str(target)])
+        bindings.append([str(directory), str(directory.resolve()), entries])
+    return bindings
+
+
+def cache_bindings(outputs, producer):
+    bindings = []
+    for name in outputs:
+        path = Path(name)
+        if path != path.resolve() or any(parent.is_symlink() for parent in path.parents):
+            raise producer.UnknownInput("cache output path is linked or not canonical")
+        if path.is_dir():
+            for child in path.rglob("*"):
+                if child.is_symlink():
+                    target = child.resolve(strict=True)
+                    if not target.is_relative_to(path):
+                        raise producer.UnknownInput("cache output link reaches an input outside its output root")
+        bindings.append(str(path))
+    return bindings
 
 
 def configure(context, args, producer):
@@ -180,6 +210,12 @@ def configure(context, args, producer):
     config_paths = [Path(value).resolve() for value in roots["configurationRoots"]]
     protected = [Path(value).resolve() for role in roles if role != "configurationRoots" for value in roots[role]]
     searched = search_paths(selected["configurationSearches"], producer)
+    cargo_searches = [directory / ".cargo" / name for directory in (repo, *repo.parents) for name in ("config", "config.toml")]
+    cargo_searches += [Path(environment["CARGO_HOME"]) / name for name in ("config", "config.toml")]
+    cargo_searches += [home / ".cargo" / name for name in ("config", "config.toml")]
+    cargo_searches += [Path(environment["RUSTUP_HOME"]) / "settings.toml", home / ".rustup/settings.toml"]
+    if not set(cargo_searches).issubset(searched):
+        raise producer.UnknownInput("Cargo configuration search fallbacks are undeclared")
     config_environment = [Path(environment[key]).resolve() for key in CONFIGURATION_ENV.intersection(environment)]
     if any(path.is_relative_to(repo) for path in (Path(value).resolve() for value in roots["toolchainRoots"])):
         raise producer.UnknownInput("candidate-owned toolchain is untrusted")
@@ -213,7 +249,7 @@ def configure(context, args, producer):
                     raise producer.UnknownInput("declared input root changed")
             if role == "configurationRoots":
                 configuration_identities.append([str(path), str(path.resolve()), row.get("state", "present"), actual])
-    output_bindings = [[value, str(Path(value).resolve()), os.readlink(value) if Path(value).is_symlink() else None] for value in outputs]
+    output_bindings = cache_bindings(outputs, producer)
     for part in environment.get("NODE_PATH", "").split(os.pathsep) if "NODE_PATH" in environment else []:
         value = Path(part)
         if not value.is_absolute() or not any(value.resolve().is_relative_to(root) for root in input_paths):
@@ -226,13 +262,19 @@ def configure(context, args, producer):
                        for key in ("CC", "CXX", "AR", "RUSTC", "RUSTDOC") if key in environment]
     if any(tool is None or not any(tool.is_relative_to(root) for root in tool_roots) for tool in required_tools):
         raise producer.UnknownInput("an invoked tool has no independently declared identity")
+    tools = path_bindings(environment, tool_roots, producer)
     producer.GIT_EXECUTABLE = str(required_tools[2])
     producer.GIT_ENVIRONMENT = {key: environment[key] for key in ("PATH", "LANG", "LC_ALL", "HOME")}
     ignored = []
     for name in producer.git(repo, "ls-files", "--others", "--ignored", "--exclude-standard", "-z").split(b"\0"):
         if name:
             candidate = (repo / os.fsdecode(name)).absolute()
-            target = candidate.resolve(strict=True)
+            try:
+                target = candidate.resolve(strict=True)
+            except (OSError, RuntimeError) as why:
+                raise producer.UnknownInput("ignored candidate link is missing or cyclic") from why
+            if any(candidate.is_relative_to(root) and target.is_relative_to(root) for root in output_paths):
+                continue
             if not any(target.is_relative_to(root) for root in input_paths + output_paths):
                 raise producer.UnknownInput("ignored candidate input is undeclared")
             ignored.append([os.fsdecode(name), os.readlink(candidate) if candidate.is_symlink() else None, str(target)])
@@ -242,7 +284,8 @@ def configure(context, args, producer):
     args.script_file = roots["scriptFiles"]
     args.child_home = str(home)
     args.trust = {**context, "selected": selected, "environment": dict(environment), "ignoredBindings": ignored,
-                  "configurationIdentities": configuration_identities, "outputBindings": output_bindings}
+                  "configurationIdentities": configuration_identities, "outputBindings": output_bindings,
+                  "pathBindings": tools}
     return args.trust
 
 
@@ -251,6 +294,7 @@ def main(argv=None):
     parser.add_argument("--policy", required=True)
     parser.add_argument("--policy-sha256", required=True)
     parser.add_argument("--repo", required=True)
+    parser.add_argument("--bootstrap-launcher")
     words = sys.argv[1:] if argv is None else argv
     if "--" not in words:
         parser.error("separate the producer arguments with --")
@@ -260,14 +304,16 @@ def main(argv=None):
     try:
         if not sys.flags.isolated or not sys.flags.no_site:
             raise Untrusted("independent invocation requires Python -I -S")
-        context = load_policy(args.policy, args.policy_sha256, args.repo)
+        if args.bootstrap_launcher and sys.argv[0] != "-":
+            raise Untrusted("native bootstrap requires retained launcher bytes on stdin")
+        context = load_policy(args.policy, args.policy_sha256, args.repo, launcher_path=args.bootstrap_launcher)
         module = types.ModuleType("trusted_gate_receipt")
         module.__file__ = context["policy"]["bundle"]["producer"]["path"]
         exec(compile(context["bytes"]["producer"], module.__file__, "exec"), module.__dict__)
         context["configure"] = lambda parsed: configure(context, parsed, module)
         context["repo"] = str(Path(args.repo).resolve())
         return module.main(trust=context, argv=producer_argv)
-    except (OSError, ValueError, TypeError, KeyError, Untrusted):
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, Untrusted):
         print(json.dumps({"decision": "miss", "reason": "independent provenance or input closure unavailable",
                           "executed": False, "newExecutions": 0}, sort_keys=True))
         return 1

@@ -202,7 +202,7 @@ impl CliFixture {
         let door = root.join("bin/zerocode-orc");
         std::fs::write(
             &door,
-            shim_script("HERDR_TEST_PORT", "HERDR_TEST_HOOK", "test-only-orc"),
+            shim_script("ZEROCODE_HOOK_PORT", "ZEROCODE_HOOK_TOKEN", "test-only-orc"),
         )
         .unwrap();
         std::fs::set_permissions(&door, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -358,8 +358,8 @@ impl CliFixture {
             .env_clear()
             .env("HOME", self.root.join("home"))
             .env("PATH", path)
-            .env("HERDR_TEST_PORT", self.port.to_string())
-            .env("HERDR_TEST_HOOK", HOOK)
+            .env("ZEROCODE_HOOK_PORT", self.port.to_string())
+            .env("ZEROCODE_HOOK_TOKEN", HOOK)
             .env(TEAM_ID_VAR, "team-1")
             .env(TEAM_PANE_VAR, "%1")
             .env(TEAM_TOKEN_VAR, capability_of("%1"));
@@ -421,6 +421,16 @@ impl CliFixture {
     }
 
     fn production_test(&self, action: &str, clean: bool, child_test: &str) -> Output {
+        self.production_fixture(action, clean, child_test, false)
+    }
+
+    fn production_fixture(
+        &self,
+        action: &str,
+        clean: bool,
+        child_test: &str,
+        cargo: bool,
+    ) -> Output {
         if action == "run" {
             let mut prepare = Command::new("python3");
             prepare
@@ -435,8 +445,25 @@ impl CliFixture {
                 .arg("--child")
                 .arg(&self.child)
                 .arg("--test")
-                .arg(child_test);
+                .arg(child_test)
+                .arg("--bootstrap");
+            if cargo {
+                prepare.arg("--cargo");
+            }
             self.environment(&mut prepare);
+            if cargo {
+                for key in [
+                    "HERDR_FIXTURE_TOOLCHAIN",
+                    "HERDR_FIXTURE_DEVELOPER_DIR",
+                    "HERDR_FIXTURE_SDKROOT",
+                    "HERDR_FIXTURE_LINKER",
+                ] {
+                    prepare.env(
+                        key,
+                        std::env::var_os(key).expect("approved offline fixture input"),
+                    );
+                }
+            }
             let output = prepare.output().unwrap();
             assert!(
                 output.status.success(),
@@ -446,10 +473,19 @@ impl CliFixture {
             *self.policy.lock().unwrap() = Some(serde_json::from_slice(&output.stdout).unwrap());
         }
         let policy = self.policy.lock().unwrap().clone().unwrap();
-        let mut command = Command::new("python3");
+        let native =
+            std::env::var_os("HERDR_FIXTURE_BOOTSTRAP").expect("approved native fixture binary");
+        let mut command = Command::new(native);
         command
-            .args(["-I", "-S", "-B"])
-            .arg(self.script.with_file_name("gate_launcher.py"))
+            .arg("gate-bootstrap")
+            .args(
+                policy["bootstrap"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|word| word.as_str().unwrap()),
+            )
+            .arg("--")
             .arg("--policy")
             .arg(self.root.join("trusted-policy.json"))
             .arg("--policy-sha256")
@@ -759,4 +795,65 @@ fn production_cli_real_authority_and_real_process_issue_and_reuse_one_receipt() 
     assert!(!expired.status.success());
     fixture.old_api.store(true, Ordering::SeqCst);
     fixture.miss(true); // The same product shim against an old API causes a miss, never a hit.
+}
+
+#[test]
+fn offline_cargo_first_writes_and_ignored_tests_issue_a_hit_and_changed_config_misses() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    let output = fixture.production_fixture("run", true, CHILD, true);
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let produced: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(produced["outcome"], "passed");
+    assert_eq!(produced["tests"], 1);
+    let log = std::fs::read_to_string(fixture.root.join("out/gate.log")).unwrap();
+    assert!(
+        log.contains("1 passed; 0 failed; 1 ignored;"),
+        "actual Cargo fixture did not run: {log}"
+    );
+    assert!(fixture.input.join("cargo-fixture/target").is_dir());
+    assert!(fixture.input.join("tools/release/__pycache__").is_dir());
+    let output = fixture.production_fixture("verify", true, CHILD, true);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let hit: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(hit["decision"], "hit");
+    assert_eq!(hit["original"], produced["original"]);
+    assert_eq!(hit["newExecutions"], 0);
+    let config = fixture.root.join("child-home/cargo/config.toml");
+    let original = std::fs::read(&config).unwrap();
+    std::fs::write(&config, b"[env]\nFIXTURE_INPUT = \"changed\"\n").unwrap();
+    fixture.miss(true);
+    std::fs::write(&config, original).unwrap();
+    assert!(
+        fixture
+            .production_fixture("verify", true, CHILD, true)
+            .status
+            .success()
+    );
+    std::fs::write(
+        fixture.input.join("cargo-fixture/src/lib.rs"),
+        b"compile_error!(\"changed actual input\");\n",
+    )
+    .unwrap();
+    fixture.miss(true);
+    let view = fixture.actor.view().unwrap();
+    let completions = view
+        .projection()
+        .messages
+        .iter()
+        .filter(|row| {
+            let body: Value = serde_json::from_str(row.payload.as_str()).unwrap_or_default();
+            body["gateEvidenceV1"]["phase"] == "completed"
+        })
+        .count();
+    assert_eq!(completions, 1);
 }

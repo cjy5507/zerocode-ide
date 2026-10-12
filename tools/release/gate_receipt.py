@@ -3,8 +3,8 @@
 
 `run` is an execution, not a dry run. `verify` only hashes observations and asks the live ledger.
 An old window without the three native gate verbs produces a miss, never a file-based fallback.
-The root coordinator supplies an independently pinned launcher and manifest from a reviewed
-trusted commit. Candidate declarations never establish producer or recipe provenance. The
+The root coordinator supplies independently pinned launcher and manifest bytes.
+Candidate declarations never establish producer or recipe provenance. The
 cache covers declared inputs; it does not isolate arbitrary same-user code.
 """
 
@@ -105,7 +105,11 @@ def paths_digest(paths, excluded=()):
             raise UnknownInput("input root is missing or linked")
         entries = []
         links = {}
-        files = [root, *sorted(root.rglob("*"))] if root.is_dir() else [root]
+        files = [root]
+        if root.is_dir():
+            for directory, children, leaves in os.walk(root, followlinks=False):
+                children[:] = sorted(name for name in children if not any((Path(directory) / name).is_relative_to(value) for value in omitted))
+                files.extend(Path(directory) / name for name in [*children, *sorted(leaves)])
         for path in files:
             if any(path.is_relative_to(value) for value in omitted):
                 continue
@@ -122,6 +126,8 @@ def paths_digest(paths, excluded=()):
                     raise UnknownInput("declared link is dangling or cyclic") from why
                 if not target.is_relative_to(root):
                     raise UnknownInput("declared link escapes its input root")
+                if any(target.is_relative_to(value) for value in omitted):
+                    raise UnknownInput("an input link reaches excluded cache output")
                 target_name = target.relative_to(root).as_posix()
                 links[relative] = (target_name, target.is_dir())
                 entries.append([relative, stat.S_IMODE(mode), "link", os.readlink(path), target_name])
@@ -137,7 +143,7 @@ def paths_digest(paths, excluded=()):
 def observed(call):
     try:
         return call()
-    except (OSError, UnknownInput, subprocess.SubprocessError, ValueError):
+    except (OSError, UnknownInput, subprocess.SubprocessError, ValueError, RuntimeError):
         return None
 
 
@@ -292,7 +298,7 @@ def fingerprint(args, environment, command):
         "lock": observed(lambda: paths_digest(locks)),
         "script": observed(lambda: paths_digest(scripts)) if declared else None,
         "recipe": digest(encoded(command)) if declared and public_command(command) else None,
-        "toolchain": observed(lambda: paths_digest([*args.toolchain_root, *tools]))
+        "toolchain": observed(lambda: digest(encoded([paths_digest([*args.toolchain_root, *tools]), trust["pathBindings"]])))
         if declared and args.toolchain_root and executable else None,
         "platform": digest(encoded([platform.system(), platform.release(), platform.version(), platform.machine()])),
         "profile": digest(encoded([args.profile, args.closure])) if args.profile else None,
@@ -320,11 +326,11 @@ def test_count(log, recipes=()):
         line = lines[index]
         if "test result:" in line:
             row = SUMMARY.fullmatch(line)
-            if row is None or row[1] != "ok" or int(row[3]) or int(row[4]):
+            if row is None or row[1] != "ok" or int(row[3]):
                 return 0
             if re.search(r"; [1-9]\d* measured;", line):
                 return 0
-            libtest.append(int(row[2]))
+            libtest.append(int(row[2]) + int(row[4]))
             total += int(row[2])
         elif line == "TAP version 13":
             if node_active:
@@ -372,7 +378,7 @@ def test_count(log, recipes=()):
             return 0
         elif re.match(r"Ran \d|test result:|not ok\b|\s+not ok\b|FAILED(?:\b|\s*\()|failures:", line):
             return 0
-        elif re.search(r"\b(?:SKIPPED|timed[ _]out|cancelled)\b", line, re.IGNORECASE):
+        elif re.match(r"^(?:SKIPPED\b|timed[ _]out\b|cancelled\b)", line, re.IGNORECASE):
             return 0
         elif re.match(r"error: test failed|verify: red recipes:|\d+ (?:passed|failed),", line):
             return 0

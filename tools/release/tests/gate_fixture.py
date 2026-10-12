@@ -55,20 +55,30 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
     launcher = load_module(folder / "gate_launcher.py", "fixture_launcher")
     python = Path(sys.executable).resolve()
     git = Path(shutil.which("git", path=os.defpath)).resolve()
-    transitive = [Path(found).resolve() for word in ("node", "sh", "curl") if (found := shutil.which(word))]
+    tool_paths = {"python3": python, "git": git}
+    tool_paths.update({word: Path(found).resolve() for word in ("node", "sh", "curl") if (found := shutil.which(word))})
+    tool_paths.update(getattr(args, "fixture_tools", {}))
+    search = root / "path-bin"
+    search.mkdir(exist_ok=True)
+    for name, target in tool_paths.items():
+        alias = search / name
+        if alias.is_symlink():
+            alias.unlink()
+        alias.symlink_to(target)
+    transitive = list(tool_paths.values())
     environment = {"HOME": str(home), "USERPROFILE": str(home),
                    "CARGO_HOME": str(home / "cargo"), "RUSTUP_HOME": str(home / "rustup"),
                    "XDG_CONFIG_HOME": str(home / "config"),
                    "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data"),
                    "APPDATA": str(home / "appdata"), "LOCALAPPDATA": str(home / "localappdata"),
-                   "PATH": os.pathsep.join(dict.fromkeys([str(python.parent), *(str(path.parent) for path in transitive), *os.defpath.split(os.pathsep)])),
+                   "PATH": str(search),
                    "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
     if os.name == "nt":
         environment["SystemRoot"] = os.environ["SystemRoot"]
     environment.update(environment_overrides or {})
     searches, configuration = configuration_declarations(args.repo, home, root, producer, launcher, output_roots)
     row = lambda path: {"path": str(Path(path).absolute()), "sha256": producer.paths_digest([path])}
-    policy = {"version": 1, "trustedCommit": "a" * 40,
+    policy = {"version": 2,
               "bundle": {role: {"path": str(path), "sha256": producer.file_digest(path)} for role, path in {
                   "launcher": folder / "gate_launcher.py", "producer": folder / "gate_receipt.py",
                   "scanner": folder / "pii-scan.py", "rules": folder / "pii-rules.json"}.items()},
@@ -97,6 +107,8 @@ def main():
     parser.add_argument("--producer", required=True)
     parser.add_argument("--child", required=True)
     parser.add_argument("--test", required=True)
+    parser.add_argument("--cargo", action="store_true")
+    parser.add_argument("--bootstrap", action="store_true")
     options = parser.parse_args()
     root = Path(options.root)
     args = argparse.Namespace(repo=options.repo, gate="gate-root", profile="test-debug",
@@ -104,8 +116,22 @@ def main():
         toolchain_root=[str(root / "toolchain"), str(root / "bin")], lock_file=[], script_file=[],
         command=[options.child, "--exact", options.test, "--nocapture"])
     producer = load_module(Path(options.producer), "fixture_producer")
-    context = authorize(args, root, producer)
-    print(json.dumps({"policySha256": context["policySha256"], "command": args.command}))
+    environment, outputs = {}, []
+    if options.cargo:
+        fixture = load_module(Path(__file__).with_name("gate_cargo_fixture.py"), "offline_cargo_fixture")
+        environment, outputs = fixture.prepare(args, root, producer)
+        for words in (["add", "."], ["commit", "-qm", "offline cargo fixture"]):
+            producer.git(options.repo, *words)
+    bootstrap = []
+    if options.bootstrap:
+        fixture = load_module(Path(__file__).with_name("gate_bootstrap_fixture.py"), "native_bootstrap_fixture")
+        bootstrap = fixture.prepare(root, Path(options.producer).with_name("gate_launcher.py"))
+        args.toolchain_root.append(bootstrap[bootstrap.index("--stdlib") + 1])
+    context = authorize(args, root, producer, environment_overrides=environment, output_roots=outputs)
+    bundle = context["policy"]["bundle"]
+    print(json.dumps({"policySha256": context["policySha256"],
+                      "producerSha256": producer.digest(producer.encoded({role: row["sha256"] for role, row in bundle.items()})),
+                      "command": args.command, "bootstrap": bootstrap}))
 
 
 if __name__ == "__main__":

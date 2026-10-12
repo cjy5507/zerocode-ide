@@ -30,6 +30,7 @@ use zerocode_lane::{
 };
 use zerocode_pty::ZoBinary;
 
+mod gate_bootstrap;
 mod vault_lint;
 mod vault_types;
 
@@ -41,6 +42,7 @@ zerocode — shell IDE for parallel agent lanes
     zerocode watch <session>     follow a session as structured frames
     zerocode vault-lint          lint the second-brain vault (exit 1 on findings)
     zerocode vault-types         give untyped wiki pages a type: key (a dry run unless --write)
+    zerocode gate-bootstrap      verify runtime and launcher pins before a gate receipt
 
 Options:
     --bind <addr>   session server address (loopback only). Defaults to a port
@@ -50,6 +52,9 @@ Options:
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "gate-bootstrap") {
+        return gate_bootstrap::run(&args[1..]);
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project = project_root(&cwd);
     let mut bind = default_bind_for(&project);
