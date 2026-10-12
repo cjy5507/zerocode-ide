@@ -958,6 +958,22 @@ impl PromptReadiness {
         }
     }
 
+    /// Whether this delivery waits out its pane's turn (t-47952) — see
+    /// [`zerocode_pty::PromptDelivery::parking`].
+    ///
+    /// The person's own send, and an automation's to a running agent, which
+    /// is that same send: nobody blocks on its answer, and a working agent
+    /// cost it its words — the zo resumed after the 1.1.58 restart was still
+    /// in its turn, the send's eight seconds ran out against the spinner and
+    /// the words went to the clipboard. Every other door keeps its clock: the
+    /// mail pointer types only once its pass has read the turn as over and
+    /// reads the receipt on its next beat; a launch briefing answers its
+    /// worker start; the ssh door, a dispatch preamble and an explain request
+    /// block on the answer; and a restart's words have their own watch.
+    pub(crate) const fn parks(self) -> bool {
+        matches!(self, Self::Resting)
+    }
+
     /// Whether composer edit keys ride ahead of the paste.
     fn clearing(self, agent: Option<&str>) -> bool {
         match self {
@@ -1045,7 +1061,8 @@ pub(crate) fn prompt_delivery_for(
             .clearing(clearing)
             .guarded(guard)
             .pressing(readiness.enter_again())
-            .words(words),
+            .words(words)
+            .parking(readiness.parks()),
     }
 }
 
@@ -1104,6 +1121,7 @@ pub(crate) fn type_prompt_at_term(
                 guard,
                 enter_again: readiness.enter_again(),
                 words: composer_words_for(agent),
+                parks: readiness.parks(),
                 completion: notify,
             });
         return Ok(waiting);

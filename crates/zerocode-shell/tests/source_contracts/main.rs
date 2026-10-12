@@ -18,6 +18,7 @@ mod handoff_code;
 mod jev_pane_seats;
 mod quiet_children;
 mod quota_wall;
+mod raw_feed;
 mod readiness;
 mod release_versions;
 mod secret_prompt;
@@ -18698,36 +18699,40 @@ mod tests {
             // first, and stays one on every other answer.
             ("tileTermPane(", 5),
             ("TILE_PANE_CAP", 2),
-            // Ten: a repository's declared `defaultTabs:`, the two doors
+            // Nine: a repository's declared `defaultTabs:`, the two doors
             // back into a conversation (the resume road — which the sidebar's
             // past-conversation rows take too, since t-4398 — and the vault),
             // SSH Host, Remote Workspace, Remote Server and SSH-target actions
-            // (those four mount a newly opened remote terminal), the map
+            // (those four mount a newly opened remote terminal), and the map
             // popover's "start a new agent" row — a revived conversation must
-            // not tile into a stranger's tab — plus the tree's Open in
-            // Terminal, which Orca opens as a NEW tab too
-            // (use-file-explorer-node-commands.ts:192,
-            // `createNewTerminalTab(…, { startupCwd })`), not as a division
-            // of whatever pane happened to hold the keyboard.
+            // not tile into a stranger's tab.
             // The restore makes its own tabs on render.
             //
-            // And the tenth is `ssh:agent-open`, for the same reason as the
+            // The tree's Open in Terminal left this list (t-47782). Orca opens
+            // it as a NEW tab too (use-file-explorer-node-commands.ts:192,
+            // `createNewTerminalTab(…, { startupCwd })`), never a division of
+            // whatever pane happened to hold the keyboard — but "tab" looks
+            // nowhere ahead, so with a browser in front the folder's shell
+            // went to a far-away tab. It asks for `TERMINAL_TAB`, as the
+            // "terminal" door does, and is pinned below.
+            //
+            // And the ninth is `ssh:agent-open`, for the same reason as the
             // four remote rows it joins: the shell is already connected when
             // the seat is asked for, and a machine an agent opened must not
             // cut the pane somebody is reading to seat itself.
             //
-            // Thirteen with the three roads that spawn a shell of their own —
+            // Twelve with the three roads that spawn a shell of their own —
             // the resume road and the vault's, the map's new agent — each
             // saying `tab` once more to `spawnGrid`, so the pty is born at the
             // size the seat gives it.
             //
-            // Seventeen with the wire tab's 「화면」 (2026-09-16,
+            // Sixteen with the wire tab's 「화면」 (2026-09-16,
             // `handWireToScreen`): a conversation coming back from its wire
             // to the CLI's own screen is a revived conversation like the
             // resumes above — it must not divide the pane somebody is reading
             // — and it says `tab` to `spawnGrid` and to `mountTermTab`, then
             // takes the wire tab's own seat on the strip.
-            ("{ placement: \"tab\"", 17),
+            ("{ placement: \"tab\"", 16),
         ] {
             assert_eq!(
                 window.matches(needle).count(),
@@ -18736,6 +18741,17 @@ mod tests {
                  and the explicitly accounted-for roads allow"
             );
         }
+        // The tree's Open in Terminal asks what the "terminal" door asks: a
+        // tab that still looks ahead, so a browser in front gets the folder's
+        // shell beside it — sized by `spawnGrid` and seated by `mountTermTab`
+        // with the same answer (t-47782).
+        let tree_terminal = block_after(window, "function treeMenuAt(x, y, seat) {");
+        assert!(
+            tree_terminal.contains("...spawnGrid({ placement: TERMINAL_TAB }),")
+                && tree_terminal.contains("mountTermTab(term, {}, { placement: TERMINAL_TAB });"),
+            "the tree's Open in Terminal no longer asks for the terminal door's \
+             placement, so a browser in front gets a far-away tab:\n{tree_terminal}"
+        );
 
         // The division itself, whole — the two `if (focus)` guards are the
         // background promise: a scheduled run's pane appears, the name lands
@@ -33247,6 +33263,59 @@ mod tests {
                 line.trim()
             );
         }
+    }
+
+    /// Words parked behind a working agent are said as parked, never as
+    /// lost (t-47952). `term:prompt` names the park with the pump's own word
+    /// and a timeout with another, neither of them a guard's token: the
+    /// listener says the park in a sentence of its own and writes nothing to
+    /// the clipboard — the words are still on their way — and keeps the
+    /// clipboard road for the timeout, which the withheld table never words.
+    #[test]
+    fn a_parked_prompt_is_said_as_parked_and_only_a_timeout_reaches_the_clipboard() {
+        let window = window_source();
+        let transaction = include_str!("../../src/prompt_transaction.rs");
+        for (pump, listener) in [
+            (
+                "pub(super) const PARKED_WHY: &str = \"busy\";",
+                "const TERM_PROMPT_PARKED = \"busy\";",
+            ),
+            (
+                "pub(super) const NOT_READY_WHY: &str = \"not_ready\";",
+                "const TERM_PROMPT_NOT_READY = \"not_ready\";",
+            ),
+        ] {
+            assert!(
+                transaction.contains(pump),
+                "the pump no longer says `{pump}`"
+            );
+            assert!(
+                window.contains(listener),
+                "the window no longer knows `{listener}`"
+            );
+        }
+        let told = window
+            .split_once(r#"listen("term:prompt", (event) => {"#)
+            .map(|(_, rest)| &rest[..rest.find("});").unwrap_or(rest.len())])
+            .unwrap_or_default();
+        let parked = told
+            .split_once("if (why === TERM_PROMPT_PARKED) {")
+            .map(|(_, rest)| &rest[..rest.find("return;").unwrap_or(rest.len())])
+            .unwrap_or_default();
+        assert!(
+            parked.contains("t(\"term.promptParked\"") && !parked.contains("clipboard"),
+            "a parked prompt is not said as parked, or its words reach the clipboard:\n{told}"
+        );
+        assert!(
+            told.contains("why !== TERM_PROMPT_NOT_READY")
+                && told.contains("term.promptLostCopied"),
+            "a timeout no longer keeps the clipboard road:\n{told}"
+        );
+        let table = block_after(window, "const TERM_WITHHELD = Object.freeze({");
+        assert!(
+            !table.contains("\n  busy: {") && !table.contains("\n  not_ready: {"),
+            "the withheld table words a prompt that is no refusal:\n{table}"
+        );
     }
 
     /// The left column is a plane of its own, in both treatments.

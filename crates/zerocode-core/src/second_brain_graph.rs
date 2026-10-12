@@ -10,6 +10,7 @@
 //! Every bound is a constant in this file and nowhere else: [`MAX_GRAPH_PAGES`]
 //! caps how many pages a graph holds, [`MAX_PAGE_BYTES`] how much of one page
 //! is read, [`MAX_PAGE_LINKS`] how many links one page contributes,
+//! [`MAX_LEDGER_BYTES`] how much of the index or the log is read,
 //! [`MAX_GRAPH_GHOSTS`] and [`MAX_GRAPH_EDGES`] how far a runaway file can grow
 //! the picture. The scan is also incremental: [`GraphCache`] holds each page's
 //! parsed facts against the modification time and length it read them at, so
@@ -23,7 +24,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
-use crate::second_brain::{RAW_DIR, WIKI_DIR};
+use crate::second_brain::{RAW_DIR, WIKI_DIR, WIKI_INDEX_FILE, WIKI_LOG_FILE};
 use crate::second_brain_lint::{self, PageProvenance, VaultLint};
 use crate::second_brain_live;
 
@@ -35,6 +36,11 @@ pub const MAX_PAGE_BYTES: usize = 256 * 1024;
 /// Links one page contributes. A generated index linking a thousand pages is a
 /// real page; one linking a hundred thousand is a runaway file.
 pub const MAX_PAGE_LINKS: usize = 2_000;
+/// How much of the index or the log is read. The two ledgers grow with the
+/// vault — the index names every page, the log every ingest — so the page
+/// bound would cut them while they are still true. They are bounded by what
+/// one graph can hold instead: this many bytes, and [`MAX_GRAPH_PAGES`] links.
+pub const MAX_LEDGER_BYTES: usize = 16 * 1024 * 1024;
 /// Ghost nodes the picture carries. Ghosts come from text rather than from
 /// disk, so they are the one part of this graph a single bad file could grow
 /// without limit.
@@ -285,7 +291,8 @@ pub struct VaultGraph {
     /// A bound was reached, so the picture is a part of the vault rather than
     /// all of it.
     pub capped: bool,
-    /// Pages whose body was cut at [`MAX_PAGE_BYTES`].
+    /// Pages whose body was cut at their read bound: [`MAX_PAGE_BYTES`], or
+    /// [`MAX_LEDGER_BYTES`] for the index and the log.
     pub truncated: usize,
     /// How many pages this scan actually re-read. Zero on an unchanged vault:
     /// the number the incremental promise is measured by.
@@ -387,7 +394,7 @@ impl GraphCache {
                     CacheEntry {
                         modified_ms: page.modified_ms,
                         len: page.len,
-                        facts: read_page(&page.path, &page.stem),
+                        facts: read_page(&page.path, &page.stem, ReadBound::for_page(&page.id)),
                     }
                 }
             };
@@ -543,24 +550,49 @@ fn modified_ms(metadata: &fs::Metadata) -> Option<i64> {
     i64::try_from(since.as_millis()).ok()
 }
 
-/// Read at most [`MAX_PAGE_BYTES`] of one page and keep only its facts.
-fn read_page(path: &Path, stem: &str) -> PageFacts {
+/// What one read of a page may take.
+#[derive(Clone, Copy)]
+struct ReadBound {
+    bytes: usize,
+    links: usize,
+}
+
+impl ReadBound {
+    /// [`MAX_LEDGER_BYTES`] and [`MAX_GRAPH_PAGES`] links for the index and
+    /// the log; [`MAX_PAGE_BYTES`] and [`MAX_PAGE_LINKS`] for every other page.
+    fn for_page(id: &str) -> Self {
+        if id == WIKI_INDEX_FILE || id == WIKI_LOG_FILE {
+            Self {
+                bytes: MAX_LEDGER_BYTES,
+                links: MAX_GRAPH_PAGES,
+            }
+        } else {
+            Self {
+                bytes: MAX_PAGE_BYTES,
+                links: MAX_PAGE_LINKS,
+            }
+        }
+    }
+}
+
+/// Read at most `bound` of one page and keep only its facts.
+fn read_page(path: &Path, stem: &str, bound: ReadBound) -> PageFacts {
     let Ok(bytes) = fs::read(path) else {
         return PageFacts {
             title: stem.to_string(),
             ..PageFacts::default()
         };
     };
-    let truncated = bytes.len() > MAX_PAGE_BYTES;
+    let truncated = bytes.len() > bound.bytes;
     // On a character boundary: cutting mid-sequence would turn the tail of a
     // 한글 title into replacement characters.
     let end = if truncated {
-        floor_char_boundary(&bytes, MAX_PAGE_BYTES)
+        floor_char_boundary(&bytes, bound.bytes)
     } else {
         bytes.len()
     };
     let text = String::from_utf8_lossy(&bytes[..end]);
-    let mut facts = parse_page(&text, stem);
+    let mut facts = parse_page(&text, stem, bound.links);
     facts.truncated = truncated;
     facts
 }
@@ -574,7 +606,7 @@ fn floor_char_boundary(bytes: &[u8], at: usize) -> usize {
 }
 
 /// The frontmatter block and the links in the body.
-fn parse_page(text: &str, stem: &str) -> PageFacts {
+fn parse_page(text: &str, stem: &str, link_bound: usize) -> PageFacts {
     let (front, body) = split_frontmatter(text);
     let fields = parse_frontmatter(front);
     let title = fields
@@ -595,7 +627,7 @@ fn parse_page(text: &str, stem: &str) -> PageFacts {
     let ingested_at = fields
         .get("ingested_at")
         .is_some_and(|held| !unquote(held.trim()).trim().is_empty());
-    let raw_mentions = second_brain_lint::raw_mentions(body, MAX_PAGE_LINKS);
+    let raw_mentions = second_brain_lint::raw_mentions(body, link_bound);
     let code_mentions = crate::second_brain_code::code_mentions(
         body,
         source.as_deref(),
@@ -603,10 +635,10 @@ fn parse_page(text: &str, stem: &str) -> PageFacts {
     );
     let excerpt = page_excerpt(body);
     // Body links first, in written order, then the declared relations in enum
-    // order: [`MAX_PAGE_LINKS`] bounds what one page contributes in total, so a
+    // order: `link_bound` bounds what one page contributes in total, so a
     // runaway body cannot be joined by a runaway frontmatter.
     // The inferred road: prose links.
-    let mut links: Vec<WrittenLink> = wiki_links(body)
+    let mut links: Vec<WrittenLink> = wiki_links(body, link_bound)
         .into_iter()
         .map(|target| WrittenLink {
             kind: EdgeKind::Mentions,
@@ -620,7 +652,7 @@ fn parse_page(text: &str, stem: &str) -> PageFacts {
             continue;
         };
         for item in split_relation_list(value) {
-            if links.len() >= MAX_PAGE_LINKS {
+            if links.len() >= link_bound {
                 break;
             }
             if let Some(target) = relation_target(&item) {
@@ -758,6 +790,10 @@ fn truncate_excerpt(excerpt: &str) -> String {
 /// rather than a list holding a list, while `depends_on: [ [[wiki/a]], b ]` is
 /// two items. The two are told apart by what stripping one bracket pair would
 /// leave — a flow list of links still opens with `[[`, a lone link does not.
+///
+/// A quote that opens an item quotes it to its closing mark, commas and all:
+/// `"[[b]]의 'x, y' 결정"` is one item. An apostrophe inside an unquoted item
+/// opens nothing, and a quote that never closes is read as a plain character.
 pub(crate) fn split_relation_list(value: &str) -> Vec<String> {
     let trimmed = value.trim();
     let inner = match trimmed.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
@@ -769,6 +805,15 @@ pub(crate) fn split_relation_list(value: &str) -> Vec<String> {
     let mut current = String::new();
     let mut at = 0;
     while at < chars.len() {
+        if matches!(chars[at], '"' | '\'') && current.trim().is_empty() {
+            let mark = chars[at];
+            if let Some(close) = chars[at + 1..].iter().position(|held| *held == mark) {
+                let end = at + 1 + close;
+                current.extend(&chars[at..=end]);
+                at = end + 1;
+                continue;
+            }
+        }
         if chars[at] == '[' && at + 1 < chars.len() && chars[at + 1] == '[' {
             let mut end = at + 2;
             while end + 1 < chars.len() && !(chars[end] == ']' && chars[end + 1] == ']') {
@@ -794,14 +839,15 @@ pub(crate) fn split_relation_list(value: &str) -> Vec<String> {
     items
 }
 
-/// One declared relation's target: quotes off, one `[[…]]` pair off, then the
+/// One declared relation's target: quotes off, one `[[…]]` pair off along
+/// with whatever the value writes after it (`"[[page]]#절"`, a note), then the
 /// same `Target|alias` and `Target#heading` rule a body link answers to.
 pub(crate) fn relation_target(item: &str) -> Option<String> {
     let held = unquote(item.trim()).trim();
     let bare = held
         .strip_prefix("[[")
-        .and_then(|inner| inner.strip_suffix("]]"))
-        .unwrap_or(held);
+        .and_then(|inner| inner.split_once("]]"))
+        .map_or(held, |(inner, _)| inner);
     link_target(bare)
 }
 
@@ -810,7 +856,7 @@ pub(crate) fn relation_target(item: &str) -> Option<String> {
 /// Byte offsets rather than `lines()`: that iterator drops a `\r` without
 /// telling anyone how many bytes it consumed, and a vault written on Windows
 /// would have its whole frontmatter read one byte out of step per line.
-fn split_frontmatter(text: &str) -> (&str, &str) {
+pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
     let whole = text.strip_prefix('\u{feff}').unwrap_or(text);
     let after = match whole.strip_prefix("---") {
         Some(rest) if rest.starts_with('\n') => &rest[1..],
@@ -837,7 +883,7 @@ fn split_frontmatter(text: &str) -> (&str, &str) {
 /// protocol writes (`second_brain::AGENTS_GUIDE`), and a graph view is not the
 /// place to grow a YAML engine — a key this reader cannot parse is simply not
 /// a fact the picture uses.
-fn parse_frontmatter(front: &str) -> BTreeMap<String, String> {
+pub(crate) fn parse_frontmatter(front: &str) -> BTreeMap<String, String> {
     let mut fields: BTreeMap<String, String> = BTreeMap::new();
     let mut open: Option<String> = None;
     for line in front.lines() {
@@ -890,7 +936,7 @@ fn split_scalar_list(value: &str) -> Vec<String> {
     held
 }
 
-fn unquote(value: &str) -> &str {
+pub(crate) fn unquote(value: &str) -> &str {
     for mark in ['"', '\''] {
         if let Some(inner) = value
             .strip_prefix(mark)
@@ -908,7 +954,7 @@ fn unquote(value: &str) -> &str {
 /// very syntax must not be read as linking to its own example — and the vault
 /// protocol page this integration writes is exactly such a page. `![[embed]]`
 /// counts, because an embed is a relation a person can see on the page.
-fn wiki_links(body: &str) -> Vec<String> {
+fn wiki_links(body: &str, limit: usize) -> Vec<String> {
     let mut held = Vec::new();
     let mut fence: Option<(char, usize)> = None;
     for line in body.lines() {
@@ -925,9 +971,9 @@ fn wiki_links(body: &str) -> Vec<String> {
         if fence.is_some() {
             continue;
         }
-        scan_line_links(line, &mut held);
-        if held.len() >= MAX_PAGE_LINKS {
-            held.truncate(MAX_PAGE_LINKS);
+        scan_line_links(line, &mut held, limit);
+        if held.len() >= limit {
+            held.truncate(limit);
             break;
         }
     }
@@ -945,7 +991,7 @@ pub(crate) fn fence_mark(trimmed: &str) -> Option<(char, usize)> {
     None
 }
 
-fn scan_line_links(line: &str, into: &mut Vec<String>) {
+fn scan_line_links(line: &str, into: &mut Vec<String>, limit: usize) {
     let chars: Vec<char> = line.chars().collect();
     let mut at = 0;
     while at < chars.len() {
@@ -976,7 +1022,7 @@ fn scan_line_links(line: &str, into: &mut Vec<String>) {
             let inner: String = chars[at + 2..end].iter().collect();
             if let Some(target) = link_target(&inner) {
                 into.push(target);
-                if into.len() >= MAX_PAGE_LINKS {
+                if into.len() >= limit {
                     return;
                 }
             }

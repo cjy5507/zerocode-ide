@@ -154,6 +154,7 @@ pub(super) mod setting_key {
     pub const LEFT_SIDEBAR_TINT_OPACITY: &str = "left_sidebar_tint_opacity";
     pub const SECOND_BRAIN_VAULT: &str = "second_brain_vault";
     pub const SECOND_BRAIN_WEEKLY_REVIEW: &str = "second_brain_weekly_review";
+    pub const SECOND_BRAIN_RAW_CAPTURE: &str = "second_brain_raw_capture";
     pub const SECOND_BRAIN_SCENES: &str = "second_brain_scenes";
     pub const SECOND_BRAIN_EXPLORE: &str = "second_brain_explore";
     pub const GOOGLE_ACCOUNT_EMAIL: &str = "google_account_email";
@@ -2375,6 +2376,11 @@ pub(super) struct SettingsDocument {
     /// the switch the card shows and the status road reads the receipt for.
     #[serde(default)]
     pub(super) second_brain_weekly_review: bool,
+    /// External pages an agent reads whole in this window land in the vault's
+    /// `raw/` (t-43992, `zerocode_core::second_brain_feed`) — opt-in, off
+    /// until the person turns it on.
+    #[serde(default)]
+    pub(super) second_brain_raw_capture: bool,
     /// Saved knowledge scenes per vault path (one JSON line per vault path).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) second_brain_scenes: BTreeMap<String, String>,
@@ -2505,6 +2511,7 @@ impl Default for SettingsDocument {
             deleted_ssh_config_aliases: Vec::new(),
             second_brain_vault: String::new(),
             second_brain_weekly_review: false,
+            second_brain_raw_capture: false,
             second_brain_scenes: BTreeMap::new(),
             second_brain_explore: BTreeMap::new(),
             google_account_email: String::new(),

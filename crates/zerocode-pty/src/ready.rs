@@ -461,7 +461,8 @@ impl Readiness {
     /// The send road keeps the shared clock from the start: a running agent
     /// asked to take a prompt while it works IS the case that deadline was
     /// written for, and the caller waiting on that answer must not wait out
-    /// two minutes for it.
+    /// two minutes for it. A send that waits out its pane's turn (t-47952)
+    /// starts this clock when the turn is over ([`Self::restart`]).
     fn settle_if_late(&mut self, now: Instant) -> State {
         let late = match self.signal {
             // A settle's deadline is hard like a running composer's: the
@@ -479,6 +480,19 @@ impl Readiness {
             return State::TimedOut;
         }
         State::Waiting
+    }
+
+    /// Begin this wait again at `now`, as if it were registered then — for
+    /// a delivery that waited out its pane's turn (t-47952). Nothing seen
+    /// during the turn counts: a handshake, a cursor shown or a glyph drawn
+    /// then were the program at work, and the rest that answers the wait is
+    /// one measured from the round the turn is over.
+    fn restart(&mut self, now: Instant) {
+        self.started = now;
+        self.spoke = now;
+        self.shook = None;
+        self.saw_marker_in_alt = false;
+        self.settled = None;
     }
 
     /// Whether the handshake has arrived, for a caller that wants to say so.
@@ -602,6 +616,8 @@ pub struct Line {
     pub taken: Option<u64>,
     /// The pane's program says it is mid-turn. A prompt entered there waits
     /// in the program's own queue, and its receipt comes when it is dequeued.
+    /// A delivery that parks waits the turn out before its words go
+    /// (t-47952, [`PromptDelivery::parking`]).
     pub busy: bool,
 }
 
@@ -810,6 +826,16 @@ pub struct PromptDelivery {
     enter_again: Option<EnterAgain>,
     /// How the words go onto the composer: its agent's row says (t-17274).
     words: Words,
+    /// Whether this delivery waits out its pane's turn (t-47952) — the door
+    /// that made it says, see [`Self::parking`].
+    parks: bool,
+    /// When this delivery was made — what the black box counts its age from.
+    since: Instant,
+    /// The round it first waited out a turn, if it has.
+    parked_at: Option<Instant>,
+    /// It is waiting out a turn right now: the next round that finds the
+    /// turn over starts its wait for rest afresh.
+    waiting_out: bool,
 }
 
 /// The receipt's two clocks (t-14037).
@@ -861,6 +887,10 @@ impl PromptDelivery {
             receipt: ReceiptClock::default(),
             enter_again: None,
             words: Words::Pasted,
+            parks: false,
+            since: now,
+            parked_at: None,
+            waiting_out: false,
         }
     }
 
@@ -904,6 +934,10 @@ impl PromptDelivery {
             receipt: ReceiptClock::default(),
             enter_again: None,
             words: Words::Pasted,
+            parks: false,
+            since: now,
+            parked_at: None,
+            waiting_out: false,
         }
     }
 
@@ -972,6 +1006,45 @@ impl PromptDelivery {
         self.guard
     }
 
+    /// Choose whether this delivery waits out its pane's turn (t-47952).
+    ///
+    /// A delivery that parks writes nothing and spends none of its readiness
+    /// clock while the line says the pane's program is mid-turn
+    /// ([`Line::busy`]), however long the turn lasts; the round the turn is
+    /// over, its wait for rest starts afresh, as a send made then would. Its
+    /// words were handed over a turn ago, so whatever is on the line by then
+    /// was put there after them: it comes back yielding to a person's draft
+    /// and their hand, and sending no clear keys. A person's own send parks —
+    /// a working agent used to cost it the eight seconds of a send's
+    /// deadline and the words went to the clipboard. A door that blocks on
+    /// the answer, or that types only once a turn has ended, keeps the clock
+    /// it always had.
+    #[must_use]
+    pub const fn parking(mut self, parks: bool) -> Self {
+        self.parks = parks;
+        self
+    }
+
+    /// Whether this delivery waits out its pane's turn — for the copy parked
+    /// in a queue behind another to carry.
+    #[must_use]
+    pub const fn parks(&self) -> bool {
+        self.parks
+    }
+
+    /// The round this delivery first waited out a turn, if it has.
+    #[must_use]
+    pub const fn parked_at(&self) -> Option<Instant> {
+        self.parked_at
+    }
+
+    /// When this delivery was made. A queued copy is made when it takes the
+    /// line, so its wait in the queue is not counted.
+    #[must_use]
+    pub const fn since(&self) -> Instant {
+        self.since
+    }
+
     /// The words this delivery carries — for the caller that has to hand
     /// them to a person once the child could not be made to take them.
     #[must_use]
@@ -1012,8 +1085,12 @@ impl PromptDelivery {
     /// that says how far it got — [`Outcome::Refused`] wrote nothing,
     /// [`Outcome::Unsubmitted`] wrote the words and withheld the Enter — and
     /// a settled delivery writes nothing further, however many rounds it is
-    /// fed.
+    /// fed. A delivery that parks ([`Self::parking`]) is also fed `line` on
+    /// every round before its words go, to wait out a turn.
     pub fn poll_line(&mut self, seen: Observed, line: Line, now: Instant) -> Step {
+        if self.waits_out(line, now) {
+            return Step::Waiting;
+        }
         match self.phase {
             Phase::Waiting => match self.wait.observe(seen, now) {
                 State::Waiting => Step::Waiting,
@@ -1098,6 +1175,28 @@ impl PromptDelivery {
             } => self.confirm(line, now, entered_at, taken, again),
             Phase::Done(outcome) => Step::Done(outcome),
         }
+    }
+
+    /// Whether this round is one a parking delivery waits out (t-47952): its
+    /// words not yet written, and the line saying the pane's program is
+    /// mid-turn. The first round that finds the turn over brings it back on
+    /// a fresh clock, to a line it no longer owns — anything there was put
+    /// there after its words were handed over.
+    fn waits_out(&mut self, line: Line, now: Instant) -> bool {
+        if !self.parks || self.phase != Phase::Waiting {
+            return false;
+        }
+        if line.busy {
+            self.parked_at = Some(self.parked_at.unwrap_or(now));
+            self.waiting_out = true;
+            return true;
+        }
+        if std::mem::take(&mut self.waiting_out) {
+            self.wait.restart(now);
+            self.clearing = false;
+            self.guard.hands = true;
+        }
+        false
     }
 
     /// The Enter alone, at a composer that just said it is ready (t-17037).
@@ -2581,6 +2680,138 @@ mod tests {
             delivery.poll_line(seen(false, true, 1, false), busy, entered + WINDOW),
             Step::Done(Outcome::Delivered)
         );
+    }
+
+    /* ---- a send that waits out its pane's turn (t-47952) --------------- */
+
+    /// A person's send to a zo resumed after the 1.1.58 restart, still in
+    /// its long turn: the send's eight seconds ran out against a spinner, and
+    /// the words went to the clipboard. A delivery that parks waits the turn
+    /// out instead — past its own deadline and past [`PATIENCE`], writing
+    /// nothing, a cursor shown mid-turn included — and the round the turn is
+    /// over its wait for rest starts afresh: a new handshake round, then the
+    /// composer's cursor shown again, and the paste goes in that very round.
+    #[test]
+    fn a_parking_delivery_waits_out_a_working_pane_and_writes_once_the_turn_is_over() {
+        let start = Instant::now();
+        let mut delivery =
+            PromptDelivery::new("look at this".into(), true, ReadySignal::Rest(None), start)
+                .clearing(false)
+                .parking(true);
+        let working = Line {
+            busy: true,
+            ..Line::default()
+        };
+        // A spinner redraws all turn long, so the quiet never comes.
+        let mut now = start;
+        while now <= start + PATIENCE + TIMEOUT {
+            assert_eq!(
+                delivery.poll_line(seen(true, true, 0, false), working, now),
+                Step::Waiting,
+                "a working pane cost the send its words {:?} in",
+                now - start
+            );
+            now += QUIET / 2;
+        }
+        // Nor is a cursor shown mid-turn a rest.
+        assert_eq!(
+            delivery.poll_line(seen(true, true, 1, false), working, now),
+            Step::Waiting
+        );
+        assert_eq!(delivery.parked_at(), Some(start));
+        assert!(!delivery.pasted());
+        assert_eq!(delivery.since(), start);
+        // The turn is over: the wait's new handshake round…
+        let rested = Line::default();
+        now += SUBMIT_GAP;
+        assert_eq!(
+            delivery.poll_line(seen(true, true, 1, false), rested, now),
+            Step::Waiting
+        );
+        // …and the composer's cursor shown again is the rest.
+        now += SUBMIT_GAP;
+        assert!(
+            matches!(
+                delivery.poll_line(seen(false, true, 2, false), rested, now),
+                Step::Write(_)
+            ),
+            "the rest after the turn did not take the paste"
+        );
+        assert_eq!(delivery.parked_at(), Some(start));
+    }
+
+    /// t-47952: words that waited out a turn come back to a line a person may
+    /// have used meanwhile. A draft standing there refuses them — handed back
+    /// whole — where the send made on the spot would have been appended to
+    /// it; and with no draft, no clear keys go ahead of them, where codex's
+    /// send would have sent its own.
+    #[test]
+    fn a_parked_delivery_comes_back_to_a_line_it_does_not_own() {
+        let start = Instant::now();
+        let working = Line {
+            busy: true,
+            ..Line::default()
+        };
+        let drafted = Line {
+            draft: true,
+            hand: Some(3),
+            ..Line::default()
+        };
+        let mut delivery =
+            PromptDelivery::new("look at this".into(), true, ReadySignal::Rest(None), start)
+                .parking(true);
+        delivery.poll_line(seen(true, true, 0, false), working, start);
+        assert_eq!(
+            delivery.poll_line(seen(true, true, 0, false), drafted, start + QUIET),
+            Step::Waiting
+        );
+        assert_eq!(
+            delivery.poll_line(seen(false, true, 1, false), drafted, start + QUIET * 2),
+            Step::Done(Outcome::Refused(Refusal::HoldsADraft))
+        );
+        assert_eq!(delivery.text(), "look at this");
+
+        let mut clean =
+            PromptDelivery::new("look at this".into(), true, ReadySignal::Rest(None), start)
+                .parking(true);
+        clean.poll_line(seen(true, true, 0, false), working, start);
+        clean.poll_line(seen(true, true, 0, false), Line::default(), start + QUIET);
+        let step = clean.poll_line(
+            seen(false, true, 1, false),
+            Line::default(),
+            start + QUIET * 2,
+        );
+        let Step::Write(bytes) = step else {
+            panic!("the rest after the turn did not take the paste: {step:?}");
+        };
+        assert!(
+            !bytes.contains(&CLEAR_INPUT_LINE) && !bytes.contains(&CLEAR_INPUT_FORWARD),
+            "clear keys went ahead of words that waited out a turn: {bytes:?}"
+        );
+    }
+
+    /// t-47952, every other door: a delivery that does not park — the mail
+    /// pointer's, a launch briefing's, a door that blocks on its answer —
+    /// keeps the deadline it always had beside a working pane.
+    #[test]
+    fn a_delivery_that_does_not_park_keeps_its_deadline_beside_a_working_pane() {
+        let start = Instant::now();
+        let working = Line {
+            busy: true,
+            ..Line::default()
+        };
+        let mut pointer = PromptDelivery::new("mail".into(), true, ReadySignal::Rest(None), start)
+            .guarded(Guard::for_somebody_elses_line(None));
+        assert_eq!(
+            pointer.poll_line(seen(true, true, 0, false), working, start),
+            Step::Waiting
+        );
+        assert_eq!(
+            pointer.poll_line(seen(true, true, 0, false), working, start + TIMEOUT),
+            Step::Done(Outcome::TimedOut)
+        );
+        assert_eq!(pointer.parked_at(), None);
+        assert!(!pointer.parks());
     }
 
     /// A program whose row reports nothing keeps the one Enter it always had:

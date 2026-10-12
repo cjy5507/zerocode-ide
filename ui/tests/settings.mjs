@@ -239,6 +239,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "minimize_to_tray_on_close": false,
   "compact_worktree_cards": false,
   "second_brain_weekly_review": false,
+  "second_brain_raw_capture": false,
   "agent_activity_display": "compact",
   "show_git_ignored_files": true,
   "source_control_group_order": "changes-first",
@@ -779,6 +780,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_artifacts_retention_days",
   "set_artifacts_auto_open_beside",
   "set_second_brain_weekly_review",
+  "set_second_brain_raw_capture",
   "set_second_brain_explore",
   "save_worktree_prefs",
 ]);
@@ -1508,6 +1510,14 @@ class StatefulBackend {
             : null,
         };
         keys = ["second_brain_weekly_review"];
+        break;
+      }
+      case "set_second_brain_raw_capture": {
+        // The backend refuses to turn the feed on without a saved vault and
+        // writes the one switch otherwise; the card's vault is saved by the
+        // time the section presses it.
+        this.settings.second_brain_raw_capture = args.enabled === true;
+        keys = ["second_brain_raw_capture"];
         break;
       }
       case "set_second_brain_explore": {
@@ -10638,6 +10648,36 @@ await test("Second Brain detects, sets up, registers, and seeds its recurring wo
     document.getElementById("second-brain-weekly-review").checked === false
       && document.getElementById("second-brain-weekly-review-receipt")?.hidden === true);
   assertEqual(backend.settings.second_brain_weekly_review, false, "a refused switch changed the setting");
+
+  // raw 받은편지함(t-43992 단위 1) — 에이전트가 이 창의 브라우저로 통째로 읽은
+  // 바깥 페이지를 볼트의 raw/에 새 파일로 모으는 스위치. 처음엔 꺼져 있고(옵트인),
+  // 저장된 볼트가 있으면 살며, 켜고 끄는 것은 설정 한 칸을 쓴다. 거절은 스위치를
+  // 문서가 말하는 자리로 되돌린다.
+  const rawSwitch = await pageB.evaluate(() => {
+    const box = document.getElementById("second-brain-raw-capture");
+    return box === null ? null : { checked: box.checked, disabled: box.disabled };
+  });
+  assertEqual(rawSwitch, { checked: false, disabled: false },
+    "the raw-capture switch is missing, dead with a vault saved, or on before the person turned it on");
+  const rawOn = backend.calls.length;
+  await pageB.click("#second-brain-raw-capture");
+  const rawTurnedOn = await backend.waitForCall("B", "set_second_brain_raw_capture", rawOn);
+  assertEqual(rawTurnedOn.args, { enabled: true }, "the raw-capture switch did not ask to turn the feed on");
+  await pageB.waitForFunction(() => document.getElementById("second-brain-raw-capture").checked === true);
+  assertEqual(backend.settings.second_brain_raw_capture, true, "turning the raw feed on did not write the setting");
+  const rawOff = backend.calls.length;
+  await pageB.click("#second-brain-raw-capture");
+  const rawTurnedOff = await backend.waitForCall("B", "set_second_brain_raw_capture", rawOff);
+  assertEqual(rawTurnedOff.args, { enabled: false }, "the raw-capture switch did not ask to turn the feed off");
+  await pageB.waitForFunction(() => document.getElementById("second-brain-raw-capture").checked === false);
+  assertEqual(backend.settings.second_brain_raw_capture, false, "turning the raw feed off did not clear the setting");
+  backend.rejectOnce("set_second_brain_raw_capture");
+  const rawRefusedAt = backend.calls.length;
+  await pageB.click("#second-brain-raw-capture");
+  await backend.waitForCall("B", "set_second_brain_raw_capture", rawRefusedAt);
+  await backend.waitForCall("B", "settings_snapshot", rawRefusedAt);
+  await pageB.waitForFunction(() => document.getElementById("second-brain-raw-capture").checked === false);
+  assertEqual(backend.settings.second_brain_raw_capture, false, "a refused raw-capture switch changed the setting");
 
   backend.automations = [];
   await pageB.evaluate(() => setAutoOpen(true));
