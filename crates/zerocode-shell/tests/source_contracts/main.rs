@@ -18,6 +18,7 @@ mod handoff_code;
 mod jev_pane_seats;
 mod quiet_children;
 mod quota_wall;
+mod raw_feed;
 mod readiness;
 mod release_versions;
 mod secret_prompt;
