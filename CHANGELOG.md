@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.59] — 2026-10-12
+- `anthropic-latest` and `claude-latest` point at claude-opus-5-5 again: a provider pointer never steps down its family's ladder, so the newest release of a smaller family (Haiku 5.5 in 1.1.58) no longer takes the pointer (t-47996).
+- A prompt sent from the window to an agent that is still working waits for the agent's turn to end and goes in when the composer is idle, instead of falling to the clipboard after eight seconds; the window says 「터미널 N의 에이전트가 일하는 중이라 끝나면 보냅니다.」 once and logs each wait, delivery and timeout (t-47952).
+- The file tree's 「터미널에서 열기」 opens the folder's shell beside a browser in front instead of hiding the browser behind a new tab in the same pane (t-47782).
+- The second-brain vault lint loses its phantoms: the index and the log are read whole, a `source:` naming several raw files counts every one, and a relation value keeps only its first link, so commas inside quotes no longer split it; on a real vault the findings go 799 → 386 with no new ones (t-46020).
+- Settings › Integrations › second brain gains an opt-in switch (default off, needs a saved vault): an outside web page an agent reads whole through the window's browser lands in the vault's raw/ once, deduplicated by address; loopback, private and link-local addresses are refused (t-43992 unit 1).
+
 ## [1.1.58] — 2026-10-12
 - A request from a pane the person is not looking at rings again: the watched-screen rule now asks whether the ringing pane is on the main window's stage, so another tab of the same worktree no longer silences the bell (t-47525).
 - A worker at a quota wall wears a 「한도 대기 · HH:MM 재개 예정」 chip in the sidebar and on the board, and the person can press 「지금 다시 시도」 or 「다른 에이전트로 넘기기」 after a confirmation; the press re-reads the wall and never seats two replacements (T3 stage 5, t-42448).
