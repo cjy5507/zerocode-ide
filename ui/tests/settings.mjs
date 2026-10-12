@@ -3340,7 +3340,11 @@ async function test(name, run) {
   } catch (error) {
     fail(name, error?.stack ?? error);
   } finally {
-    if (process.env.SETTINGS_TRACE) process.stderr.write(`settings END ${name}\n`);
+    if (process.env.SETTINGS_TRACE) {
+      const result = results.at(-1);
+      process.stderr.write(`settings END ${result.pass ? "PASS" : "FAIL"} ${name}\n`);
+      if (!result.pass) process.stderr.write(`${result.detail}\n`);
+    }
   }
 }
 
@@ -6063,25 +6067,38 @@ await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁�
   const managedPage = await context.newPage();
   await installTauri(managedPage, "managed-quality");
   attachFaultRecorder(managedPage, "managed-quality");
+  const traceManaged = (phase) => {
+    if (process.env.SETTINGS_TRACE) process.stderr.write(`managed quality ${phase}\n`);
+  };
+  const deadline = setTimeout(() => {
+    traceManaged("deadline exceeded");
+    void managedPage.close().catch(() => {});
+  }, 60_000);
   try {
+    traceManaged("boot");
     await bootPage(managedPage, "managed-quality");
     await openSettings(managedPage, "api-routers");
     await managedPage.selectOption("#judgment-provider-kind", "local");
+    traceManaged("model list");
     await managedPage.waitForFunction(() => managedJudgmentController.snapshot?.models.length > 0);
     await managedPage.locator("#managed-judgment-prepare").focus();
     const preparedAt = backend.calls.length;
+    traceManaged("keyboard prepare");
     await managedPage.keyboard.press("Enter");
     await backend.waitForCall("managed-quality", "managed_judgment_prepare_runtime", preparedAt);
     await managedPage.waitForFunction(() => managedJudgmentController.snapshot?.runtime.state === "ready");
     for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      traceManaged(`locale ${locale}`);
       await setQualityLocale(managedPage, locale);
       await managedPage.evaluate(() => judgmentProviderController.render());
       for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+        traceManaged(`accessibility ${locale}/${theme}`);
         await setQualityTheme(managedPage, theme);
         const violations = await axeViolations(managedPage, AxeBuilder, "#managed-judgment-panel");
         assertEqual(violations, [], `${locale}/${theme} local manager accessibility`);
       }
       for (const viewport of [SETTINGS_QUALITY_SPEC.viewport, { width: 1280, height: 1069 }, { width: 1998, height: 1069 }]) {
+        traceManaged(`layout ${locale}/${viewport.width}x${viewport.height}`);
         await managedPage.setViewportSize(viewport);
         await renderSettled(managedPage);
         const geometry = await managedPage.locator("#managed-judgment-panel").evaluate((panel) => ({ client: panel.clientWidth, scroll: panel.scrollWidth }));
@@ -6099,6 +6116,7 @@ await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁�
     const looseButtons = await managedPage.locator("#managed-judgment-panel .btn").evaluateAll((buttons) => buttons.filter((button) => !button.closest(".settings-action-row") && button.id !== "managed-judgment-cancel").map((button) => button.id));
     assertEqual(looseButtons, [], "managed actions are not grouped with their controls");
   } finally {
+    clearTimeout(deadline);
     await managedPage.close();
     backend.zoSettings.smart = previous;
     backend.managedModelState = previousManaged;
