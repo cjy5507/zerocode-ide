@@ -1289,13 +1289,8 @@ fn newline_terminated_source_still_commits_at_the_newline() {
 }
 
 // ============================================================================
-// 6. 도구 셀 — tool-turn 캡처
+// 6. 도구 셀 — 호출마다 한 줄 (t-48216)
 // ============================================================================
-
-/// 도구 턴 캡처 원본.
-fn tool_capture() -> Vec<u8> {
-    capture_named("codex-tui-v0.149.1-tool-turn.bin")
-}
 
 fn bash(id: &str, command: &str) -> ToolCall {
     ToolCall::new(
