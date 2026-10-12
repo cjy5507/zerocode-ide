@@ -47,6 +47,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTINUE_ARGS: [&str; 2] = ["--continue", "--permission-mode"];
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const VERSION_TOKEN: &[u8] = b"v{VERSION}";
+const ELAPSED_TOKEN: &str = "{ELAPSED}";
 
 struct Layout {
     root: TempDir,
@@ -191,12 +192,86 @@ fn mask_volatile(bytes: &[u8], layout: &Layout) -> Vec<u8> {
 /// 가운데가 접히므로 경로 문자열이 원문으로 남지 않는다 — 라벨 뒤를 통째로
 /// 가린다. 행 단위라서 안전하다(스트림 전체에 쓰면 뒤를 전부 잘라 먹는다).
 fn mask_history_row(row: &[u8], layout: &Layout) -> Vec<u8> {
-    let mut masked = mask_volatile(row, layout);
+    let mut masked = mask_turn_elapsed(&mask_volatile(row, layout));
     if let Some(at) = find_bytes(&masked, b"directory:") {
         masked.truncate(at + b"directory:".len());
         masked.extend_from_slice(b" <cwd>");
     }
     masked
+}
+
+/// The rule a work turn ends on opens with its wall time, `── 3s · 1 tool
+/// call ──…`, which the clock decides: the time becomes a token, and the dash
+/// fill after the label, whose length is the time's width in disguise, folds
+/// to one dash. Only a row that opens with the rule is touched.
+fn mask_turn_elapsed(row: &[u8]) -> Vec<u8> {
+    const RULE: &str = "── ";
+    let Ok(text) = std::str::from_utf8(row) else {
+        return row.to_vec();
+    };
+    let start = sgr_prefix_len(text);
+    let Some(rest) = text[start..].strip_prefix(RULE) else {
+        return row.to_vec();
+    };
+    let time = elapsed_len(rest);
+    if time == 0 {
+        return row.to_vec();
+    }
+    let after = &rest[time..];
+    let label = after.trim_end_matches('─');
+    let fill = if label.len() < after.len() { "─" } else { "" };
+    format!("{}{RULE}{ELAPSED_TOKEN}{label}{fill}", &text[..start]).into_bytes()
+}
+
+/// The bytes of the SGR sequences `text` opens with.
+fn sgr_prefix_len(text: &str) -> usize {
+    let mut at = 0;
+    while let Some(params) = text[at..].strip_prefix("\u{1b}[") {
+        let len = params
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit() || *byte == b';')
+            .count();
+        if params.as_bytes().get(len) != Some(&b'm') {
+            break;
+        }
+        at += "\u{1b}[".len() + len + 1;
+    }
+    at
+}
+
+/// The length of the `0s` … `25h 02m 03s` time `text` opens with, or 0.
+fn elapsed_len(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    loop {
+        let digits = bytes[at..].iter().take_while(|byte| byte.is_ascii_digit()).count();
+        if digits == 0 {
+            return 0;
+        }
+        at += digits;
+        match bytes.get(at) {
+            Some(b's') => return at + 1,
+            Some(b'h' | b'm') if bytes.get(at + 1) == Some(&b' ') => at += 2,
+            _ => return 0,
+        }
+    }
+}
+
+#[test]
+fn the_turn_rule_mask_hides_its_time_and_the_times_width() {
+    let three = "\u{1b}[2m── 3s · 1 tool call ──────".as_bytes();
+    let twelve = "\u{1b}[2m── 12s · 1 tool call ─────".as_bytes();
+    let minute = "\u{1b}[2m── 1m 05s · 1 tool call ──".as_bytes();
+    let masked = "\u{1b}[2m── {ELAPSED} · 1 tool call ─".as_bytes();
+    assert_eq!(mask_turn_elapsed(three), masked);
+    assert_eq!(mask_turn_elapsed(twelve), masked);
+    assert_eq!(mask_turn_elapsed(minute), masked);
+    // The tally is still evidence.
+    let two = "\u{1b}[2m── 3s · 2 tool calls ─────".as_bytes();
+    assert_ne!(mask_turn_elapsed(two), masked);
+    for row in ["  ── 3s · not a rule", "── done ──", "╭──────╮", "── 3x ──"] {
+        assert_eq!(mask_turn_elapsed(row.as_bytes()), row.as_bytes(), "{row}");
+    }
 }
 
 /// `session-<millis>-<n>` 을 고정 문자열로. 숫자 자리는 시계에서 온다.
