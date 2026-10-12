@@ -10,6 +10,8 @@ use zerocode_core::orchestration::gate_reuse::{
 };
 use zerocode_core::user_preferences::content_key;
 
+mod runtime_libraries;
+
 const LAUNCHER_CAP: u64 = 8 * 1024 * 1024;
 const FILE_CAP: usize = 128 * 1024 * 1024;
 const ENTRY_CAP: usize = 50_000;
@@ -219,6 +221,16 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
     {
         return Err(());
     }
+    let libraries = match runtime_libraries::read_and_verify(&python, &runtime) {
+        Ok(value) => value,
+        Err(code) => {
+            println!(
+                "{}",
+                json!({"decision":"miss","code":code,"executed":false,"newExecutions":0})
+            );
+            return Ok(ExitCode::FAILURE);
+        }
+    };
     let prehash_ms = wall_started.elapsed().as_millis();
     let open_ms;
     let mut command = Command::new(&python);
@@ -262,6 +274,7 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
                 path: runtime.to_str().ok_or(())?.into(),
                 sha256: options["--stdlib-sha256"].into(),
             },
+            libraries,
         };
         let channel = match open_authority(job, &arguments, &identity) {
             Ok(value) => value,
@@ -524,6 +537,128 @@ fn open_authority(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bootstrap_library_closure_rejects_missing_transitive_and_unresolved_loads() {
+        use zerocode_core::orchestration::gate_reuse::LibraryIdentity;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let write_image = |path: &Path, dependency: &str| {
+            let length = (24 + dependency.len() + 1).div_ceil(8) * 8;
+            let mut bytes = Vec::new();
+            for word in [
+                0xfeed_facf_u32,
+                0x0100_000c,
+                0,
+                6,
+                1,
+                length as u32,
+                0,
+                0,
+                12,
+                length as u32,
+                24,
+                0,
+                0,
+                0,
+            ] {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+            bytes.extend_from_slice(dependency.as_bytes());
+            bytes.resize(32 + length, 0);
+            fs::write(path, bytes).unwrap();
+        };
+        let image = root.join("interpreter");
+        let first = root.join("library-a");
+        let second = root.join("library-b");
+        write_image(&second, "/usr/lib/libSystem.B.dylib");
+        write_image(&first, second.to_str().unwrap());
+        write_image(&image, first.to_str().unwrap());
+        let entry = |path: &Path| LibraryIdentity {
+            path: path.to_str().unwrap().into(),
+            resolved_path: path.to_str().unwrap().into(),
+            sha256: file_hash(path).unwrap(),
+        };
+        let libraries = vec![entry(&first), entry(&second)];
+        assert!(runtime_libraries::verify_entries(&libraries).is_ok());
+        assert!(runtime_libraries::verify_closure(&image, &root, &libraries).is_ok());
+        assert_eq!(
+            runtime_libraries::verify_closure(&image, &root, &libraries[..1]),
+            Err("unknown_runtime_dependency")
+        );
+        write_image(&image, "@rpath/library-a");
+        assert_eq!(
+            runtime_libraries::verify_closure(&image, &root, &libraries),
+            Err("unknown_runtime_dependency")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_runtime_libraries_bind_loader_targets_bytes_and_limits() {
+        use zerocode_core::orchestration::gate_reuse::LibraryIdentity;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let target = root.join("library-a");
+        let other = root.join("library-b");
+        let loader = root.join("loader-name");
+        fs::write(&target, b"fixture library bytes").unwrap();
+        fs::write(&other, b"other fixture library bytes").unwrap();
+        std::os::unix::fs::symlink(&target, &loader).unwrap();
+        let entry = LibraryIdentity {
+            path: loader.to_str().unwrap().into(),
+            resolved_path: target.to_str().unwrap().into(),
+            sha256: file_hash(&target).unwrap(),
+        };
+        assert!(runtime_libraries::verify_entries(std::slice::from_ref(&entry)).is_ok());
+        fs::write(&target, b"changed fixture library bytes").unwrap();
+        assert_eq!(
+            runtime_libraries::verify_entries(std::slice::from_ref(&entry)),
+            Err("digest_mismatch")
+        );
+        fs::write(&target, b"fixture library bytes").unwrap();
+        fs::remove_file(&loader).unwrap();
+        std::os::unix::fs::symlink(&other, &loader).unwrap();
+        assert_eq!(
+            runtime_libraries::verify_entries(std::slice::from_ref(&entry)),
+            Err("digest_mismatch")
+        );
+        fs::remove_file(&loader).unwrap();
+        std::os::unix::fs::symlink(&target, &loader).unwrap();
+        assert_eq!(
+            runtime_libraries::verify_entries(&[entry.clone(), entry.clone()]),
+            Err("digest_mismatch")
+        );
+        assert_eq!(
+            runtime_libraries::verify_entries(&vec![entry.clone(); 17]),
+            Err("digest_mismatch")
+        );
+        let directory = LibraryIdentity {
+            path: root.to_str().unwrap().into(),
+            resolved_path: root.to_str().unwrap().into(),
+            sha256: "b".repeat(64),
+        };
+        assert_eq!(
+            runtime_libraries::verify_entries(&[directory]),
+            Err("digest_mismatch")
+        );
+        let sparse = root.join("oversized-library");
+        fs::File::create(&sparse)
+            .unwrap()
+            .set_len(256 * 1024 * 1024 + 1)
+            .unwrap();
+        let oversized = LibraryIdentity {
+            path: sparse.to_str().unwrap().into(),
+            resolved_path: sparse.to_str().unwrap().into(),
+            sha256: "b".repeat(64),
+        };
+        assert_eq!(
+            runtime_libraries::verify_entries(&[oversized]),
+            Err("invalid_request")
+        );
+        assert!(runtime_libraries::verify_entries(&[entry]).is_ok());
+    }
 
     #[test]
     fn bootstrap_rejects_missing_duplicate_unknown_and_partial_options() {

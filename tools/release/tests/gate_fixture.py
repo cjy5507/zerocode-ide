@@ -114,6 +114,7 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
                                                    ("stdlib", "--stdlib", "--stdlib-sha256"))}
                if bootstrap else {"python": {"path": str(python), "sha256": producer.file_digest(python)},
                                   "stdlib": row(args.toolchain_root[0])})
+    runtime["libraries"] = getattr(args, "fixture_libraries", [])
     policy = {"version": 3, "runtime": runtime,
               "bundle": {role: {"path": str(path), "sha256": producer.file_digest(path)} for role, path in {
                   "launcher": folder / "gate_launcher.py", "producer": folder / "gate_receipt.py",
@@ -169,7 +170,9 @@ def main():
         fixture = load_module(Path(__file__).with_name("gate_bootstrap_fixture.py"), "native_bootstrap_fixture")
         bootstrap = fixture.prepare(root, Path(options.producer).with_name("gate_launcher.py"))
         args.fixture_bootstrap = bootstrap
+        args.fixture_libraries = json.loads((Path(bootstrap[bootstrap.index("--stdlib") + 1]) / "runtime-libraries.json").read_bytes())
         args.toolchain_root.append(bootstrap[bootstrap.index("--stdlib") + 1])
+        args.toolchain_root.extend(entry["resolvedPath"] for entry in args.fixture_libraries)
     context = authorize(args, root, producer, environment_overrides=environment, output_roots=outputs)
     bundle = context["policy"]["bundle"]
     print(json.dumps({"policySha256": context["policySha256"],

@@ -161,14 +161,15 @@ def load_policy(path, expected, repo, launcher_path=None):
     if not isinstance(policy, dict) or set(policy) != {"version", "bundle", "runtime", "gates"} or policy["version"] != 3:
         raise Untrusted("unsupported trust manifest")
     runtime = policy["runtime"]
-    if not isinstance(runtime, dict) or set(runtime) != {"python", "stdlib"}:
+    if not isinstance(runtime, dict) or set(runtime) != {"python", "stdlib", "libraries"}:
         raise Untrusted("unsupported runtime declaration")
-    for entry in runtime.values():
+    for entry in (runtime["python"], runtime["stdlib"]):
         if (not isinstance(entry, dict) or set(entry) != {"path", "sha256"}
                 or not isinstance(entry["path"], str) or not Path(entry["path"]).is_absolute()
                 or Path(entry["path"]).resolve().is_relative_to(repo)
                 or not isinstance(entry["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])):
             raise Untrusted("runtime needs independently pinned external identities")
+    library_bindings(runtime["libraries"], repo)
     bundle = policy["bundle"]
     if not isinstance(bundle, dict) or set(bundle) != {"launcher", "producer", "scanner", "rules"} or not isinstance(policy["gates"], dict):
         raise Untrusted("incomplete trusted bundle")
@@ -186,6 +187,37 @@ def load_policy(path, expected, repo, launcher_path=None):
     if Path(bundle["launcher"]["path"]).resolve() != Path(launcher_path or __file__).resolve():
         raise Untrusted("launcher invocation does not match the independent pin")
     return {"policy": policy, "policySha256": expected, "policyPath": str(path), "policyBytes": raw, "bytes": retained}
+
+
+def library_bindings(libraries, repo):
+    if not isinstance(libraries, list) or len(libraries) > 16:
+        raise Untrusted("runtime libraries are not bounded", "digest_mismatch")
+    names, targets, bindings, total = set(), set(), [], 0
+    for entry in libraries:
+        if (not isinstance(entry, dict) or set(entry) != {"path", "resolvedPath", "sha256"}
+                or any(not isinstance(entry[key], str) for key in entry)):
+            raise Untrusted("unsupported runtime library identity", "digest_mismatch")
+        named, target = Path(entry["path"]), Path(entry["resolvedPath"])
+        if (not named.is_absolute() or not target.is_absolute() or ".." in named.parts or target != target.resolve(strict=True)
+                or named.resolve(strict=True) != target or target.is_relative_to(repo)
+                or entry["path"] in names or entry["resolvedPath"] in targets or not target.is_file()):
+            raise Untrusted("runtime library binding changed or duplicated", "digest_mismatch")
+        before = target.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 128 * 1024 * 1024:
+            raise Untrusted("runtime library file is not bounded and regular", "digest_mismatch")
+        hasher = hashlib.sha256()
+        with target.open("rb") as file:
+            for block in iter(lambda: file.read(1024 * 1024), b""):
+                hasher.update(block)
+        after = target.lstat()
+        stamp = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_mode)
+        total += before.st_size
+        if stamp(before) != stamp(after) or total > 256 * 1024 * 1024 or hasher.hexdigest() != entry["sha256"]:
+            raise Untrusted("runtime library bytes or allocation changed", "digest_mismatch")
+        names.add(entry["path"])
+        targets.add(entry["resolvedPath"])
+        bindings.append([entry["path"], entry["resolvedPath"], entry["sha256"]])
+    return bindings
 
 
 def search_paths(searches, producer):
@@ -288,6 +320,10 @@ def configure(context, args, producer):
             or environment.get("GIT_CONFIG_GLOBAL") != os.devnull or environment.get("GIT_CONFIG_SYSTEM") != os.devnull):
         raise producer.UnknownInput("Node and Git fallbacks are not explicitly disabled")
     repo = Path(args.repo).resolve()
+    try:
+        runtime_bindings = library_bindings(context["policy"]["runtime"]["libraries"], repo)
+    except (Untrusted, OSError, ValueError) as why:
+        raise producer.UnknownInput("runtime library input changed") from why
     account = Path(os.environ.get("HOME", os.path.expanduser("~"))).resolve()
     home = Path(environment.get("HOME", ""))
     if not home.is_absolute() or home.resolve().is_relative_to(repo) or home.resolve() == account:
@@ -351,7 +387,7 @@ def configure(context, args, producer):
         allowed = input_paths + output_paths if key in OUTPUT_ENV else config_directories if key in CONFIGURATION_ENV else input_paths
         if not value.is_absolute() or not any(value.resolve().is_relative_to(root) for root in allowed):
             raise producer.UnknownInput("configuration or cache path has no declared role")
-    configuration_identities = []
+    configuration_identities = [["runtimeLibraries", runtime_bindings]]
     for role in ("configurationRoots", "dependencyRoots", "lockFiles", "scriptFiles", "toolchainRoots"):
         for row in selected[role]:
             path = Path(row["path"])

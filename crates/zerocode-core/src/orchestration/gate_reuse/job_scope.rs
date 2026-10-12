@@ -9,11 +9,45 @@ pub struct FileIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LibraryIdentity {
+    pub path: String,
+    pub resolved_path: String,
+    pub sha256: String,
+}
+
+pub fn validate_libraries(libraries: &[LibraryIdentity]) -> Result<(), String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut targets = std::collections::BTreeSet::new();
+    if libraries.len() > 16
+        || libraries.iter().any(|entry| {
+            !std::path::Path::new(&entry.path).is_absolute()
+                || !std::path::Path::new(&entry.resolved_path).is_absolute()
+                || std::path::Path::new(&entry.path)
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir)
+                || std::path::Path::new(&entry.resolved_path)
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir)
+                || !hex(&entry.sha256, &[64])
+                || !names.insert(&entry.path)
+                || !targets.insert(&entry.resolved_path)
+        })
+    {
+        return Err(
+            "digest_mismatch: runtime library declarations are invalid or duplicated".into(),
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapIdentity {
     pub launcher: FileIdentity,
     pub python: FileIdentity,
     pub stdlib: FileIdentity,
+    pub libraries: Vec<LibraryIdentity>,
 }
 
 impl BootstrapIdentity {
@@ -21,7 +55,8 @@ impl BootstrapIdentity {
         let result: Self = serde_json::from_value(serde_json::json!({
             "launcher":manifest["bundle"]["launcher"],
             "python":manifest["runtime"]["python"],
-            "stdlib":manifest["runtime"]["stdlib"]
+            "stdlib":manifest["runtime"]["stdlib"],
+            "libraries":manifest["runtime"]["libraries"]
         }))
         .map_err(|_| "digest_mismatch: gate bootstrap declaration")?;
         if [&result.launcher, &result.python, &result.stdlib]
@@ -32,6 +67,7 @@ impl BootstrapIdentity {
         {
             return Err("digest_mismatch: gate bootstrap identity".into());
         }
+        validate_libraries(&result.libraries)?;
         Ok(result)
     }
 }

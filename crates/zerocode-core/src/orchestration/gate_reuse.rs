@@ -9,8 +9,9 @@ use sha2::{Digest, Sha256};
 mod job_scope;
 use job_scope::JobProvenance;
 pub use job_scope::{
-    BootstrapIdentity, FileIdentity, JobContext, JobIntent, JobMode, JobScope, authorize_job,
-    job_lifetime_ms, validate_job, validate_job_inputs, validate_job_receipt,
+    BootstrapIdentity, FileIdentity, JobContext, JobIntent, JobMode, JobScope, LibraryIdentity,
+    authorize_job, job_lifetime_ms, validate_job, validate_job_inputs, validate_job_receipt,
+    validate_libraries,
 };
 
 pub const REGISTER: &str = "gate-register";
