@@ -8,10 +8,10 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * 키를 싣고 이벤트가 그 판의 term을 들고 오므로, 창은
  *   1. 사람이 다른 체크아웃을 보고 있으면 — 부른 판의 그룹에 탭으로만 세우고
  *      활성 체크아웃·활성 탭·초점 그룹·스테이지 나눔을 그대로 둔다;
- *   2. 사람이 그 체크아웃을 보고 있으면 — 부른 판 옆에 세운다(지금처럼 화면을
- *      가져간다);
+ *   2. 사람이 그 체크아웃을 보고 있어도 — 부른 판의 그룹에 비활성 탭으로
+ *      추가하고 활성 탭·초점·나눔을 유지한다;
  *   3. 팔레트에서 연 것은 지금처럼 초점 옆;
- *   4. 부른 판을 모르면 지금처럼 초점 옆에 세우고 그렇게 됐다고 한 줄 말한다.
+ *   4. 부른 판을 모르면 현재 그룹에 비활성 탭으로 추가하고 한 줄 말한다.
  * 그리고 다른 체크아웃에 선 탭은 사람이 보는 화면에 제 이름·자막을 쓰지 않고,
  * 이미 스트림이 있는 기기를 다시 열어도 화면을 넘기지 않는다.
  *
@@ -23,7 +23,7 @@ export async function testEmulatorSeat(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     await page.evaluate(() => {
-      window.__SEAT__ = { starts: [] };
+      window.__SEAT__ = { starts: [], channels: [] };
       const fleet = [
         { udid: "U1", name: "iPhone 17", booted: true },
         { udid: "U2", name: "t-6379 probe", booted: false },
@@ -32,6 +32,7 @@ export async function testEmulatorSeat(browser, origin, ok) {
       window.__ANSWER__.android_emulators = () => [];
       window.__ANSWER__.start_emulator_stream = (args) => {
         window.__SEAT__.starts.push(args?.udid ?? null);
+        window.__SEAT__.channels.push(args?.onFrame ?? null);
         const device = fleet.find((one) => one.udid === args?.udid) ?? fleet[0];
         const shared = window.__SEAT__.shared?.[device.udid];
         return shared
@@ -55,7 +56,7 @@ export async function testEmulatorSeat(browser, origin, ok) {
     }, payload);
     const unseatedWords = await page.evaluate(() => t(
       "emulator.agentOpenUnseated",
-      "에이전트가 에뮬레이터를 열었지만 요청한 터미널을 알 수 없어, 지금 보고 있는 화면 옆에 열었습니다.",
+      "에이전트가 에뮬레이터를 열었지만 요청한 터미널을 알 수 없어, 현재 그룹에 비활성 탭으로 추가했습니다.",
     ));
     const toasts = () => page.evaluate(() =>
       [...document.querySelectorAll(".toasts .toast")].map((one) => one.textContent.trim()));
@@ -112,25 +113,31 @@ export async function testEmulatorSeat(browser, origin, ok) {
       // 사람은 옆 그룹의 보드를 보고 있다 — 초점은 부른 판이 아니다.
       const beside = standBesideFocused();
       openTab({ id: "board", kind: "board", pane: beside });
-      return { leader, leaderGroup, focused: focusedPane };
+      return {
+        leader, leaderGroup, focused: focusedPane, tab: activeTabId,
+        tree: JSON.stringify(stageTree()), worktree: activeWorktreePath,
+      };
     });
     await settle();
     await fire({ platform: "ios", device: "U1", term: home.leader });
     await settle();
-    const here = await page.evaluate(({ leaderGroup }) => {
+    const here = await page.evaluate((was) => {
       const mirror = tabs.find((one) => one.kind === "emulator" && one.deviceId === "U1");
       return {
         seatedIn: mirror?.worktree ?? null,
         home: activeWorktreePath,
         group: mirror?.pane ?? null,
-        besideCaller: stageRightOf(stageTree(), leaderGroup).seat,
-        took: activeTabId === mirror?.id,
+        tabKept: activeTabId === was.tab,
+        focusKept: focusedPane === was.focused,
+        stageKept: JSON.stringify(stageTree()) === was.tree,
+        worktreeKept: activeWorktreePath === was.worktree,
       };
     }, home);
     ok(
-      "an agent's mirror in the checkout on screen stands beside the pane that asked, not beside the focus",
-      here.seatedIn === here.home && here.group !== null && here.group === here.besideCaller
-        && home.focused !== home.leaderGroup && here.took,
+      "an agent's mirror in the checkout on screen keeps the active tab, focus group and split layout",
+      here.seatedIn === here.home && here.group === home.leaderGroup
+        && home.focused !== home.leaderGroup && here.tabKept && here.focusKept
+        && here.stageKept && here.worktreeKept,
       JSON.stringify({ home, here }),
     );
 
@@ -158,29 +165,45 @@ export async function testEmulatorSeat(browser, origin, ok) {
       JSON.stringify({ palette, paletteToasts }),
     );
 
-    /* ---- 4. 부른 판을 모르면 초점 옆 + 한 줄 ---------------------------- */
+    /* ---- 4. 부른 판을 모르면 비활성 탭 + 한 줄 -------------------------- */
     await clear();
     await page.evaluate(() => openTermTab({ placement: "tab" }));
     await settle();
+    const namelessBefore = await page.evaluate(() => ({
+      tab: activeTabId, focused: focusedPane, tree: JSON.stringify(stageTree()),
+    }));
     await fire({ platform: "ios", device: "U1" });
     await settle();
-    const nameless = await page.evaluate(() => ({
+    const nameless = await page.evaluate((was) => ({
       mirrors: tabs.filter((one) => one.kind === "emulator" && one.worktree === activeWorktreePath).length,
-    }));
+      tabKept: activeTabId === was.tab, focusKept: focusedPane === was.focused,
+      stageKept: JSON.stringify(stageTree()) === was.tree,
+      group: tabs.find((one) => one.kind === "emulator")?.pane,
+    }), namelessBefore);
     const namelessToasts = await toasts();
     await clear();
     await page.evaluate(() => openTermTab({ placement: "tab" }));
     await settle();
+    const strangerBefore = await page.evaluate(() => ({
+      tab: activeTabId, focused: focusedPane, tree: JSON.stringify(stageTree()),
+    }));
     await fire({ platform: "ios", device: "U1", term: 987654 });
     await settle();
-    const stranger = await page.evaluate(() => ({
+    const stranger = await page.evaluate((was) => ({
       mirrors: tabs.filter((one) => one.kind === "emulator" && one.worktree === activeWorktreePath).length,
-    }));
+      tabKept: activeTabId === was.tab, focusKept: focusedPane === was.focused,
+      stageKept: JSON.stringify(stageTree()) === was.tree,
+      group: tabs.find((one) => one.kind === "emulator")?.pane,
+    }), strangerBefore);
     const strangerToasts = await toasts();
     ok(
-      "a mirror from a pane the window cannot name opens where the person is looking, and says so",
+      "an unknown caller adds an inactive mirror without changing the tab, focus group or split layout",
       nameless.mirrors === 1 && namelessToasts.includes(unseatedWords)
-        && stranger.mirrors === 1 && strangerToasts.includes(unseatedWords),
+        && nameless.tabKept && nameless.focusKept && nameless.stageKept
+        && nameless.group === namelessBefore.focused
+        && stranger.mirrors === 1 && strangerToasts.includes(unseatedWords)
+        && stranger.tabKept && stranger.focusKept && stranger.stageKept
+        && stranger.group === strangerBefore.focused,
       JSON.stringify({ nameless, namelessToasts, stranger, strangerToasts, unseatedWords }),
     );
 
@@ -213,6 +236,49 @@ export async function testEmulatorSeat(browser, origin, ok) {
       rehomed.tabKept && rehomed.worktreeKept
         && rehomed.mirrors.length === 1 && rehomed.mirrors[0] === reused.person,
       JSON.stringify({ reused, rehomed }),
+    );
+
+    /* 같은 체크아웃의 재사용도 기존 탭과 입력 수신자를 유지한다. */
+    await clear();
+    const sameCheckout = await page.evaluate(async () => {
+      const leader = await openTermTab({ placement: "tab" });
+      await openEmulatorTab("ios", "U1");
+      const person = tabs.find((one) => one.kind === "emulator");
+      window.__SEAT__.shared = { U1: person?.stream };
+      window.__SEAT__.oldChannel = person?.binaryDoor?.channel;
+      setActiveTab(tabOfTerm(leader).id);
+      const field = document.createElement("input");
+      field.id = "emulator-seat-typing";
+      document.body.appendChild(field);
+      field.focus();
+      return {
+        leader, person: person?.id, stream: person?.stream,
+        tab: activeTabId, focused: focusedPane, tree: JSON.stringify(stageTree()),
+      };
+    });
+    await fire({ platform: "ios", device: "U1", term: sameCheckout.leader });
+    await settle();
+    const sameReuse = await page.evaluate((was) => {
+      const person = tabs.find((one) => one.id === was.person);
+      const latest = window.__SEAT__.channels.at(-1);
+      const answer = {
+        tabKept: activeTabId === was.tab, focusKept: focusedPane === was.focused,
+        stageKept: JSON.stringify(stageTree()) === was.tree,
+        receiverKept: document.activeElement?.id === "emulator-seat-typing",
+        mirrors: tabs.filter((one) => one.kind === "emulator").map((one) => one.id),
+        streamKept: person?.stream === was.stream,
+        frameChannelKept: latest != null && person?.binaryDoor?.channel === latest && !latest.cleaned,
+        oldChannelReleased: window.__SEAT__.oldChannel?.cleaned === true,
+      };
+      document.getElementById("emulator-seat-typing")?.remove();
+      return answer;
+    }, sameCheckout);
+    ok(
+      "same-checkout reuse keeps the person's tab, typing field and layout, and retains the live frame channel",
+      sameReuse.tabKept && sameReuse.focusKept && sameReuse.stageKept && sameReuse.receiverKept
+        && sameReuse.mirrors.length === 1 && sameReuse.mirrors[0] === sameCheckout.person
+        && sameReuse.streamKept && sameReuse.frameChannelKept && sameReuse.oldChannelReleased,
+      JSON.stringify({ sameCheckout, sameReuse }),
     );
 
     /* ---- 6. 다른 체크아웃에 선 탭은 사람의 화면에 쓰지 않는다 ------------ */

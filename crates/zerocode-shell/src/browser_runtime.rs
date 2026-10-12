@@ -88,6 +88,28 @@ pub(super) use crate::chromium_browser::BrowserPane;
 #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
 pub(super) type BrowserPane = tauri::Webview;
 
+/// Whether this view contains the window's current keyboard receiver.
+///
+/// # Safety
+/// Call on the main thread with a live NSView, or a null pointer.
+#[cfg(target_os = "macos")]
+pub(super) unsafe fn browser_view_owns_first_responder(
+    view: *mut objc2::runtime::AnyObject,
+) -> bool {
+    use objc2_app_kit::NSView;
+
+    let Some(view) = (unsafe { view.cast::<NSView>().as_ref() }) else {
+        return false;
+    };
+    view.window()
+        .and_then(|window| window.firstResponder())
+        .is_some_and(|responder| {
+            responder.downcast_ref::<NSView>().is_some_and(|responder| {
+                std::ptr::eq(responder, view) || responder.isDescendantOf(view)
+            })
+        })
+}
+
 /// The pane a label names — after the mint check. Both halves matter: the set
 /// proves the label is one THIS window handed out, and the lookup proves the
 /// webview is still alive.

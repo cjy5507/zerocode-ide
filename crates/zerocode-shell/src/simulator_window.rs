@@ -17,25 +17,21 @@
 //! answers no image at all. So this is offered, never assumed, and the pump
 //! keeps its still pictures for every machine where the window is not there.
 //!
-//! We now have that helper too (`emulator/ios_hid.rs`, 1.92ms a frame), which
-//! settles the question this file used to answer the other way: the pane is no
-//! longer worth a Simulator on the person's desktop, and a pane opening
-//! [`hide_simulator`]s it instead. The road below survives because it is still
-//! the cheap one for a machine whose helper cannot start AND whose person has
-//! the Simulator open anyway — it is read when it is there, and asked for
-//! never.
+//! We now have that helper too (`emulator/ios_hid.rs`, 1.92ms a frame).
+//! This capture remains a fallback when the person already has Simulator
+//! visible. Starting a stream never hides the application or its other devices.
 
 #[cfg(target_os = "macos")]
 mod mac {
     use std::ffi::c_void;
 
     use objc2::AnyThread;
-    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSRunningApplication};
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
     use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFNumberType, CFString};
     use objc2_core_graphics::{
         CGRectNull, CGWindowImageOption, CGWindowListCopyWindowInfo, CGWindowListOption,
     };
-    use objc2_foundation::{NSDictionary, NSString};
+    use objc2_foundation::NSDictionary;
 
     /// The application that draws every iOS simulator screen on this machine.
     const SIMULATOR_OWNER: &str = "Simulator";
@@ -138,47 +134,6 @@ mod mac {
             });
         }
         rows
-    }
-
-    /// Apple's own identifier for the application that draws simulators.
-    /// Not a guess and not ours to choose — it is the string Launch Services
-    /// answers to, and the same application the original's own launch shim
-    /// names (`open -gj -a Simulator`).
-    const SIMULATOR_BUNDLE_ID: &str = "com.apple.iphonesimulator";
-
-    /// Put the Simulator back out of sight.
-    ///
-    /// The opposite of what this file used to offer, and for the reason the
-    /// header now records: the helper reads the device's framebuffer with no
-    /// window at all, so a pane that opens has nothing to gain from a
-    /// Simulator on the desktop and the person has a second application to
-    /// close for nothing.
-    ///
-    /// `simctl boot` is what draws that window — the Simulator opens one for
-    /// any device that boots under it, whoever asked — so the launch shim's
-    /// `-j` cannot cover this on its own: it only keeps an application we
-    /// STARTED hidden, and says nothing about one the person already had
-    /// open. Hiding is therefore said here, after the boot, rather than
-    /// wished for at the launch.
-    ///
-    /// Hidden rather than closed, and never activated: the Simulator may be
-    /// holding other devices for the person, and `open_mobile_emulator` — the
-    /// "Open in Simulator" button, the one door where showing it is what was
-    /// asked for — brings all of them back with one click.
-    ///
-    /// `hide` answers a BOOL that is measured unreliable here (false while the
-    /// application does go away), so nothing reads it.
-    pub fn hide_simulator() {
-        if let Some(running) = simulator_application()
-            && !running.isHidden()
-        {
-            let _ = running.hide();
-        }
-    }
-
-    fn simulator_application() -> Option<objc2::rc::Retained<NSRunningApplication>> {
-        let id = NSString::from_str(SIMULATOR_BUNDLE_ID);
-        NSRunningApplication::runningApplicationsWithBundleIdentifier(&id).firstObject()
     }
 
     /// This device's screen as JPEG bytes, or nothing at all.
@@ -299,7 +254,7 @@ mod mac {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{capture_jpeg, hide_simulator, pick_window, windows};
+pub use mac::{capture_jpeg, pick_window, windows};
 
 /// Off macOS there is no Simulator and no window to read: the caller keeps
 /// whatever road it already had, and says so in the same words either way.
@@ -318,6 +273,3 @@ pub fn windows() -> Vec<()> {
 pub fn capture_jpeg(_window: u32) -> Option<Vec<u8>> {
     None
 }
-
-#[cfg(not(target_os = "macos"))]
-pub fn hide_simulator() {}

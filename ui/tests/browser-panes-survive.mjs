@@ -209,6 +209,34 @@ export async function testBrowserPanesSurvive(browser, origin, ok) {
         && swept.stored.join("|") === swept.before.join("|") && swept.stored.length === 2,
       JSON.stringify(swept));
 
+    /* 숨은 자동 탭을 닫아도 다른 입력 칸의 키보드는 그대로다. */
+    const hiddenClose = await page.evaluate(async () => {
+      await openTermTab({ placement: "tab" });
+      const before = { tab: activeTabId, focused: focusedPane, tree: JSON.stringify(stageTree()) };
+      const label = await openBrowserTab("https://example.com/hidden-close", { focus: false });
+      const field = document.createElement("input");
+      field.id = "browser-close-typing";
+      document.body.appendChild(field);
+      field.focus();
+      for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label } });
+      await browserPlacing;
+      return {
+        tabKept: activeTabId === before.tab,
+        focusKept: focusedPane === before.focused,
+        stageKept: JSON.stringify(stageTree()) === before.tree,
+        receiverKept: document.activeElement === field,
+        removed: !tabs.some((one) => one.kind === "browser" && one.label === label),
+        nativeClosed: window.__PANES__.closed.includes(label),
+      };
+    });
+    await page.keyboard.type("kept");
+    const keptTyping = await page.locator("#browser-close-typing").inputValue();
+    await page.locator("#browser-close-typing").evaluate((field) => field.remove());
+    ok("closing a hidden agent browser preserves the active tab, layout and actual typing receiver",
+      hiddenClose.tabKept && hiddenClose.focusKept && hiddenClose.stageKept
+        && hiddenClose.receiverKept && hiddenClose.removed && hiddenClose.nativeClosed
+        && keptTyping === "kept", JSON.stringify({ hiddenClose, keptTyping }));
+
     ok("the pane survival suite raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
