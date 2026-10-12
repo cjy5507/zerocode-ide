@@ -1120,20 +1120,17 @@ fn scan_history_rows(capture: &[u8]) -> Vec<Vec<u8>> {
             .filter_map(|end| find_bytes(rest, end))
             .min()
             .unwrap_or(rest.len());
-        match find_bytes(rest, LINE_TAIL).filter(|tail| *tail <= plain_end) {
-            Some(tail_relative) => {
-                let body_end = body_start + tail_relative;
-                rows.push(capture[body_start..body_end].to_vec());
-                cursor = body_end + LINE_TAIL.len();
+        if let Some(tail_relative) = find_bytes(rest, LINE_TAIL).filter(|tail| *tail <= plain_end) {
+            let body_end = body_start + tail_relative;
+            rows.push(capture[body_start..body_end].to_vec());
+            cursor = body_end + LINE_TAIL.len();
+        } else {
+            let body = &rest[..plain_end];
+            let text_end = body.iter().position(|byte| *byte == 0x1b).unwrap_or(body.len());
+            if erase_relative == 0 {
+                rows.push(body[..text_end].to_vec());
             }
-            None => {
-                let body = &rest[..plain_end];
-                let text_end = body.iter().position(|byte| *byte == 0x1b).unwrap_or(body.len());
-                if erase_relative == 0 {
-                    rows.push(body[..text_end].to_vec());
-                }
-                cursor = body_start + text_end;
-            }
+            cursor = body_start + text_end;
         }
     }
     rows
