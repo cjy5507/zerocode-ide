@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::second_brain::{RAW_DIR, RAW_README_FILE, WIKI_INDEX_FILE, WIKI_LOG_FILE};
 use crate::second_brain_graph::{
-    EdgeKind, EdgeProvenance, MAX_GRAPH_ENTRIES, NodeKind, VaultGraph, vouched,
+    EdgeKind, EdgeProvenance, MAX_GRAPH_ENTRIES, MAX_PAGE_LINKS, NodeKind, VaultGraph, vouched,
 };
 
 /// A link target nothing on disk answers to, and the pages that wrote it.
@@ -327,8 +327,8 @@ pub fn assess(
                 });
             }
         }
-        if let Some(source) = node.source.as_deref().map(normalize_raw_path) {
-            named_sources.insert(source);
+        if let Some(source) = node.source.as_deref() {
+            named_sources.extend(raw_mentions(source, MAX_PAGE_LINKS));
         }
     }
     for held in provenance.values() {
@@ -374,10 +374,11 @@ fn normalize_raw_path(written: &str) -> String {
         .to_string()
 }
 
-/// Every `raw/…` path a body mentions, bounded by `limit` — normalised the
-/// way a `source:` value is, so the two compare. A mention is the path as prose writes
-/// it: after a space, a bracket, a quote or a backtick, up to the next space
-/// or closing mark.
+/// Every `raw/…` path a body or a `source:` value mentions, bounded by
+/// `limit` and normalised, so the two compare. A mention is the path as prose
+/// writes it: after a space, a bracket, a quote, a backtick or a list
+/// separator (`,` `;` — a block list reads back as `a,b`), up to the next
+/// space, closing mark or separator.
 #[must_use]
 pub fn raw_mentions(body: &str, limit: usize) -> Vec<String> {
     let needle = format!("{RAW_DIR}/");
@@ -395,11 +396,15 @@ pub fn raw_mentions(body: &str, limit: usize) -> Vec<String> {
         let end = tail
             .find(|held: char| {
                 held.is_whitespace()
-                    || matches!(held, ')' | ']' | '`' | '"' | '\'' | '<' | '>' | '|')
+                    || matches!(
+                        held,
+                        ')' | ']' | '`' | '"' | '\'' | '<' | '>' | '|' | ',' | ';'
+                    )
             })
             .unwrap_or(tail.len());
         let opens = before.is_none_or(|held| {
-            held.is_whitespace() || matches!(held, '(' | '[' | '`' | '"' | '\'' | '→' | '←')
+            held.is_whitespace()
+                || matches!(held, '(' | '[' | '`' | '"' | '\'' | '→' | '←' | ',' | ';')
         });
         if opens {
             let path = normalize_raw_path(&tail[..end]);
