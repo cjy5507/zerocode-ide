@@ -641,8 +641,18 @@ impl BrowserPane {
         on_ui(&self.app, &self.label, |pane| pane.set_hidden(false))
     }
 
-    pub(crate) fn hide(&self) -> Result<(), String> {
-        on_ui(&self.app, &self.label, |pane| pane.set_hidden(true))
+    pub(crate) fn hide(&self, main_webview: tauri::Webview) -> Result<(), String> {
+        on_ui(&self.app, &self.label, move |pane| {
+            let view = pane.native_view()?;
+            // The check and hide share the native UI turn. Hiding a different
+            // pane must leave the current browser or main-document field alone.
+            let owned = unsafe { crate::browser_runtime::browser_view_owns_first_responder(view) };
+            pane.set_hidden(true)?;
+            if owned {
+                let _ = main_webview.set_focus();
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn close(&self) -> Result<(), String> {
@@ -1419,7 +1429,7 @@ wrap_task! {
             if view.is_null() { return; }
             unsafe {
                 let window: *mut objc2::runtime::AnyObject = objc2::msg_send![view, window];
-                if !window.is_null() {
+                if crate::browser_runtime::browser_view_owns_first_responder(view) {
                     let _: bool = objc2::msg_send![window, makeFirstResponder: std::ptr::null_mut::<objc2::runtime::AnyObject>()];
                 }
                 let _: () = objc2::msg_send![view, removeFromSuperview];
