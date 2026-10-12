@@ -1,6 +1,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -23,11 +25,13 @@ pub const START_TIMEOUT: Duration = Duration::from_secs(120);
 pub struct Engine {
     child: Mutex<Child>,
     io: Mutex<Pipe>,
+    exited: AtomicBool,
+    on_exit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 struct Pipe {
     input: ChildStdin,
-    output: BufReader<ChildStdout>,
+    output: Receiver<Result<Vec<u8>>>,
 }
 
 pub struct Running {
@@ -87,24 +91,8 @@ impl Engine {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0800_0000);
         }
-        let mut process = command.spawn().map_err(|_| Error::RuntimeFailed)?;
-        let Some(input) = process.stdin.take() else {
-            let _ = process.kill();
-            let _ = process.wait();
-            return Err(Error::RuntimeFailed);
-        };
-        let Some(output) = process.stdout.take() else {
-            let _ = process.kill();
-            let _ = process.wait();
-            return Err(Error::RuntimeFailed);
-        };
-        let engine = Arc::new(Self {
-            child: Mutex::new(process),
-            io: Mutex::new(Pipe {
-                input,
-                output: BufReader::new(output),
-            }),
-        });
+        let process = command.spawn().map_err(|_| Error::RuntimeFailed)?;
+        let engine = Self::from_child(process)?;
         let packages: serde_json::Map<String, Value> = profile
             .wheels
             .iter()
@@ -121,6 +109,59 @@ impl Engine {
         Ok(engine)
     }
 
+    fn from_child(mut process: Child) -> Result<Arc<Self>> {
+        let Some(input) = process.stdin.take() else {
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(Error::RuntimeFailed);
+        };
+        let Some(output) = process.stdout.take() else {
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(Error::RuntimeFailed);
+        };
+        let (sender, receiver) = sync_channel(2);
+        let engine = Arc::new(Self {
+            child: Mutex::new(process),
+            io: Mutex::new(Pipe {
+                input,
+                output: receiver,
+            }),
+            exited: AtomicBool::new(false),
+            on_exit: Mutex::new(None),
+        });
+        let weak = Arc::downgrade(&engine);
+        std::thread::Builder::new()
+            .name("local-judgment-output".to_owned())
+            .spawn(move || {
+                let mut output = BufReader::new(output);
+                loop {
+                    let frame = read(&mut output);
+                    let failed = frame.is_err();
+                    if sender.try_send(frame).is_err() || failed {
+                        break;
+                    }
+                }
+                if let Some(engine) = weak.upgrade() {
+                    engine.stop();
+                    engine.exited.store(true, Ordering::Release);
+                    let notify = lock(&engine.on_exit).clone();
+                    if let Some(notify) = notify {
+                        notify();
+                    }
+                }
+            })
+            .map_err(|_| Error::RuntimeFailed)?;
+        Ok(engine)
+    }
+
+    fn on_exit(&self, notify: Arc<dyn Fn() + Send + Sync>) {
+        *lock(&self.on_exit) = Some(notify.clone());
+        if self.exited.load(Ordering::Acquire) {
+            notify();
+        }
+    }
+
     fn write(&self, bytes: &[u8]) -> Result<()> {
         let mut io = lock(&self.io);
         io.input
@@ -131,8 +172,8 @@ impl Engine {
     }
 
     pub fn ready(&self) -> Result<()> {
-        let mut io = lock(&self.io);
-        let bytes = read(&mut io.output)?;
+        let io = lock(&self.io);
+        let bytes = io.output.recv().map_err(|_| Error::RuntimeFailed)??;
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| Error::RuntimeFailed)?;
         if value.get("ready").and_then(Value::as_bool) != Some(true) {
             return Err(Error::RuntimeFailed);
@@ -150,7 +191,7 @@ impl Engine {
             .and_then(|()| io.input.write_all(b"\n"))
             .and_then(|()| io.input.flush())
             .map_err(|_| Error::RuntimeFailed)?;
-        read(&mut io.output)
+        io.output.recv().map_err(|_| Error::RuntimeFailed)?
     }
 
     pub fn alive(&self) -> bool {
@@ -169,17 +210,12 @@ impl Engine {
 
     #[cfg(test)]
     pub(crate) fn from_command(command: &mut Command) -> Arc<Self> {
-        let mut child = command
+        let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let input = child.stdin.take().unwrap();
-        let output = BufReader::new(child.stdout.take().unwrap());
-        Arc::new(Self {
-            child: Mutex::new(child),
-            io: Mutex::new(Pipe { input, output }),
-        })
+        Self::from_child(child).unwrap()
     }
 }
 
@@ -300,6 +336,7 @@ pub async fn serve(
     engine: Arc<Engine>,
     failed: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<Running> {
+    engine.on_exit(failed.clone());
     match model.engine {
         EngineKind::Laya => {}
     }

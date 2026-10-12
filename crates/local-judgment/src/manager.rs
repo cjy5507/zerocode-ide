@@ -743,6 +743,9 @@ impl Manager {
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::Cancelled);
         }
+        if !running.engine.alive() {
+            return Err(Error::RuntimeFailed);
+        }
         inner.server = ServerInfo {
             id: Some(running.id.clone()),
             state: "ready",

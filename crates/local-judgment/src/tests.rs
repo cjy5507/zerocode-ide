@@ -723,3 +723,31 @@ async fn chat_text_cannot_pass_the_native_connection_check() {
     assert_eq!(fs::read(settings).unwrap(), b"{}");
     manager.shutdown();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_idle_child_exit_emits_failure_without_a_status_poll() {
+    use std::sync::atomic::Ordering;
+    let engine =
+        crate::engine::Engine::from_command(std::process::Command::new("sleep").arg("0.05"));
+    let notified = std::sync::Arc::new(AtomicBool::new(false));
+    let event = notified.clone();
+    let running = crate::engine::serve(
+        &model(),
+        engine.clone(),
+        std::sync::Arc::new(move || {
+            event.store(true, Ordering::Release);
+        }),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !notified.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!engine.alive());
+    drop(running);
+}
