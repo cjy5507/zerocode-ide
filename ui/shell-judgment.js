@@ -7,6 +7,7 @@ const judgmentProviderController = {
   listedServer: null,
   loading: false,
   sequence: 0,
+  localMode: "managed",
 
   copy(provider) {
     return {
@@ -43,6 +44,9 @@ const judgmentProviderController = {
   },
 
   setupHint() {
+    if (this.draft?.kind === "local" && this.localMode === "managed") {
+      return ["local", t("settings.managed.setupHint", "실행 환경과 모델을 설치한 뒤 실행하고 적용을 누르세요. 서버 주소나 포트는 직접 입력하지 않아도 됩니다.")];
+    }
     if (!this.draft?.baseUrl) {
       return ["connection", t("settings.judgment.nextConnection", "먼저 연결할 판단 서버 주소를 입력하세요. 모델을 고르기 전까지 현재 설정은 유지됩니다.")];
     }
@@ -50,7 +54,7 @@ const judgmentProviderController = {
     if (sameServer && this.draft.requiresAuth && !this.state.keySaved) {
       return ["key", t("settings.judgment.nextKey", "이 서비스의 API 키를 입력하고 키 저장을 누르세요. 키는 이 서비스에만 사용합니다.")];
     }
-    if (!this.draft.model) {
+    if (!this.draft.model && this.draft.kind !== "jev") {
       return ["model", t("settings.judgment.nextModel", "모델 목록을 읽고 사용할 모델을 고르세요. 모델 ID를 알고 있다면 직접 입력해도 됩니다.")];
     }
     if (this.dirty()) {
@@ -63,6 +67,12 @@ const judgmentProviderController = {
     if (this.initialized) return;
     this.initialized = true;
     el("judgment-provider-kind")?.addEventListener("change", () => this.changeKind());
+    for (const mode of ["managed", "manual"]) {
+      el(`judgment-local-${mode}`)?.addEventListener("click", () => {
+        this.localMode = mode;
+        this.render();
+      });
+    }
     for (const name of ["judgment-endpoint", "typesafe-model-input", "judgment-requires-auth"]) {
       el(name)?.addEventListener("input", () => this.read());
       el(name)?.addEventListener("change", () => this.read());
@@ -133,6 +143,15 @@ const judgmentProviderController = {
 
   render() {
     if (!this.draft) return;
+    managedJudgmentController.init();
+    const local = this.draft.kind === "local";
+    const managed = local && this.localMode === "managed";
+    el("judgment-local-mode").hidden = !local;
+    el("managed-judgment-panel").hidden = !managed;
+    el("judgment-manual-fields").hidden = managed;
+    for (const mode of ["managed", "manual"]) {
+      el(`judgment-local-${mode}`).setAttribute("aria-pressed", String(this.localMode === mode));
+    }
     el("judgment-provider-kind").value = this.draft.kind;
     if (document.activeElement !== el("judgment-endpoint")) el("judgment-endpoint").value = this.draft.baseUrl;
     if (document.activeElement !== el("typesafe-model-input")) el("typesafe-model-input").value = this.draft.model;
@@ -145,12 +164,17 @@ const judgmentProviderController = {
       : t("settings.judgment.remoteScope", "동의한 프로젝트의 내용이 선택한 판단 서비스로 전송됩니다. 모델을 바꿔도 승인·정지·결과 검증은 유지합니다.");
     el("judgment-provider-scope").textContent = scope;
     this.controls();
+    if (managed) {
+      managedJudgmentController.render();
+      if (!managedJudgmentController.snapshot && !managedJudgmentController.loading && managedJudgmentController.visible()) void managedJudgmentController.refresh();
+    }
   },
 
   controls() {
     const unavailable = !this.draft;
     const dirty = this.dirty();
-    const busy = typesafeBusy || unavailable;
+    const busy = typesafeBusy || unavailable || managedJudgmentController.activating;
+    const managed = this.draft?.kind === "local" && this.localMode === "managed";
     const auth = this.draft?.requiresAuth ?? true;
     const active = el("judgment-active-model");
     if (active) {
@@ -171,24 +195,34 @@ const judgmentProviderController = {
       if (element) element.disabled = busy;
     }
     const apply = el("judgment-save-provider");
-    if (apply) apply.disabled = busy || !dirty || !this.draft.baseUrl || (!this.draft.model && this.draft.kind !== "jev");
+    if (apply) {
+      apply.hidden = managed;
+      apply.disabled = busy || !dirty || !this.draft.baseUrl || (!this.draft.model && this.draft.kind !== "jev");
+    }
     const revert = el("judgment-revert-provider");
     if (revert) revert.disabled = busy || !dirty;
     const refresh = el("judgment-refresh-models");
-    if (refresh) refresh.disabled = busy || this.loading || !this.draft.baseUrl;
+    if (refresh) {
+      refresh.hidden = managed;
+      refresh.disabled = busy || this.loading || !this.draft.baseUrl;
+    }
     const notice = el("judgment-provider-dirty");
     if (notice) notice.hidden = !dirty;
     const keyField = el("typesafe-key-input")?.closest("label");
     if (keyField) keyField.hidden = !auth;
     const saveKey = el("typesafe-save-btn");
-    if (saveKey) saveKey.hidden = !auth;
+    if (saveKey) saveKey.hidden = managed || !auth;
     const removeKey = el("typesafe-remove-btn");
     if (removeKey) {
-      removeKey.hidden = !auth || dirty;
+      removeKey.hidden = managed || !auth || dirty;
       removeKey.disabled = busy || dirty || !this.state?.keySaved;
     }
     const check = el("typesafe-check-btn");
-    if (check) check.disabled = busy || dirty || (this.state?.provider?.requiresAuth && !this.state.keySaved);
+    if (check) {
+      check.hidden = managed;
+      check.disabled = busy || dirty || (this.state?.provider?.requiresAuth && !this.state.keySaved);
+    }
+    for (const mode of ["managed", "manual"]) el(`judgment-local-${mode}`).disabled = busy;
     paintTypeSafeSave();
   },
 

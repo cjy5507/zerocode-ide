@@ -2852,6 +2852,73 @@ class StatefulBackend {
       // item every zo reads and never sent back; the switch is
       // `smart.jev.enabled`, written as the core's press writes it.
       case "typesafe_settings": return this.typesafeSettings();
+      case "managed_judgment_status": return this.managedJudgmentSettings();
+      case "managed_judgment_prepare_runtime": {
+        this.managedJudgmentSettings();
+        this.managedModelState.runtime.state = "ready";
+        return this.managedOperation("runtime");
+      }
+      case "managed_judgment_install": {
+        this.managedJudgmentSettings();
+        const model = this.managedModelState.models.find((row) => row.id === args.modelId && row.revision === args.revision);
+        if (!model) throw "model_changed";
+        if (!this.managedPendingKinds?.has("download")) model.installed = true;
+        return this.managedOperation(args.sourceDirectory ? "import" : "download", model.id);
+      }
+      case "managed_judgment_cancel": {
+        if (this.managedModelState?.operation?.id !== args.operationId) throw "operation_changed";
+        this.managedModelState.operation.state = "cancelled";
+        this.managedModelState.revision += 1;
+        return this.managedJudgmentSettings();
+      }
+      case "managed_judgment_start": {
+        this.managedJudgmentSettings();
+        const model = this.managedModelState.models.find((row) => row.id === args.modelId && row.revision === args.revision);
+        if (!model?.installed || this.managedModelState.runtime.state !== "ready") throw "not_installed";
+        this.managedModelState.server = {
+          id: "fixture-server", state: "ready", modelId: model.id, checked: false, error: null,
+          provider: { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32101", model: model.id, requiresAuth: false },
+        };
+        return this.managedOperation("start", model.id);
+      }
+      case "managed_judgment_check": {
+        if (this.managedModelState?.server.id !== args.serverId) throw "server_changed";
+        this.managedModelState.server.checked = !this.managedCheckFailure;
+        const snapshot = this.managedOperation("check", this.managedModelState.server.modelId);
+        if (this.managedCheckFailure) {
+          this.managedModelState.operation.state = "failed";
+          this.managedModelState.operation.error = "invalid_response";
+          return this.managedJudgmentSettings();
+        }
+        if (this.managedChangeOnCheck) this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), [JEV_MODEL_SETTING]: "jev-other-window" };
+        return snapshot;
+      }
+      case "managed_judgment_apply": {
+        if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
+        const held = this.managedModelState;
+        if (!held?.server.checked || held.server.id !== args.serverId || held.server.state !== "ready") throw "server_changed";
+        this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), judgmentProvider: clone(held.server.provider) };
+        held.configuredModelId = held.server.modelId;
+        held.appliedModelId = held.server.modelId;
+        held.revision += 1;
+        return this.managedJudgmentSettings();
+      }
+      case "managed_judgment_stop": {
+        if (this.managedModelState?.server.id !== args.serverId) throw "server_changed";
+        this.managedModelState.server.state = "stopped";
+        this.managedModelState.appliedModelId = null;
+        this.managedModelState.revision += 1;
+        return this.managedJudgmentSettings();
+      }
+      case "managed_judgment_remove": {
+        const held = this.managedModelState;
+        if (held.configuredModelId === args.modelId || (held.server.modelId === args.modelId && held.server.state !== "stopped")) throw "model_in_use";
+        const model = held.models.find((row) => row.id === args.modelId && row.revision === args.revision);
+        if (!model) throw "model_changed";
+        model.installed = false;
+        held.revision += 1;
+        return this.managedJudgmentSettings();
+      }
       case "save_typesafe_key": {
         const key = String(args.key ?? "").trim();
         if (!key) throw { kind: "failed", message: "the TypeSafe key is empty" };
@@ -3024,6 +3091,36 @@ class StatefulBackend {
 
   judgmentService(provider) {
     return provider.kind === "jev" ? TYPESAFE_SERVICE : `fixture-decision-key:${provider.protocol}:${provider.baseUrl}`;
+  }
+
+  managedJudgmentSettings() {
+    this.managedModelState ??= {
+      instanceId: "fixture-instance", revision: 1, catalogVersion: 1,
+      models: [{ id: "fixture-decision", label: "Fixture Decision", engine: "fixture", protocol: "system_one", revision: "fixture-revision", license: "Apache-2.0", source: "https://models.example.com/decision", downloadBytes: 1024, installed: false, compatibility: "supported", compatibilityReason: null, quality: "experimental" }],
+      runtime: { state: "missing", pythonRequirement: "fixture", downloadBytes: 2048, reason: null },
+      operation: null,
+      server: { id: null, state: "stopped", modelId: null, provider: null, checked: false, error: null },
+      providerIdentity: this.typesafeSettings().providerIdentity, configuredModelId: null, appliedModelId: null,
+    };
+    if (this.managedModelState.providerIdentity !== this.typesafeSettings().providerIdentity) {
+      this.managedModelState.providerIdentity = this.typesafeSettings().providerIdentity;
+      this.managedModelState.revision += 1;
+    }
+    return clone(this.managedModelState);
+  }
+
+  managedOperation(kind, modelId = null) {
+    const held = this.managedModelState;
+    held.revision += 1;
+    held.operation = { id: `operation-${held.revision}`, kind, modelId, state: this.managedPendingKinds?.has(kind) ? "running" : "done", receivedBytes: 0, totalBytes: 1024, error: null };
+    return this.managedJudgmentSettings();
+  }
+
+  async emitManaged(snapshot) {
+    for (const [, page] of this.pages) {
+      if (page.isClosed() || page.url() === "about:blank") continue;
+      await page.evaluate((payload) => window.__SETTINGS_TEST_EMIT__("managed-judgment:changed", payload), snapshot);
+    }
   }
 
   typesafeSettings() {
@@ -5753,6 +5850,7 @@ await test("판단 모델은 명시적으로 적용하고 로컬 연결은 Jev �
   try {
     await pageA.evaluate(() => refreshApiRouters());
     await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.click("#judgment-local-manual");
     await pageA.fill("#judgment-endpoint", "http://127.0.0.1:1234");
     await pageA.fill("#typesafe-model-input", "acme/new-decision-model");
     assert(await pageA.locator("#typesafe-check-btn").isDisabled(), "an unapplied provider offered a connection check");
@@ -5812,6 +5910,90 @@ await test("판단 모델은 명시적으로 적용하고 로컬 연결은 Jev �
     await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
   }
   return "Jev pin kept · anonymous local check · exact ID kept · no chat adapter";
+});
+
+await test("로컬 모델은 서버 주소 대신 다운로드 상태를 보이고 취소와 오래된 진행 이벤트를 구별한다", async () => {
+  const previous = clone(backend.zoSettings.smart);
+  delete backend.managedModelState;
+  backend.managedPendingKinds = new Set(["download"]);
+  await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.localMode = "managed"; });
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models.length > 0);
+    assert(await pageA.locator("#managed-judgment-panel").isVisible(), "local selection does not offer managed models");
+    assert(await pageA.locator("#judgment-endpoint").isHidden(), "local setup still starts with an empty server address");
+    const applied = clone(backend.typesafeSettings().provider);
+    const downloadedAt = backend.calls.length;
+    await pageA.click('[data-model-action="install"]');
+    const request = await backend.waitForCall("A", "managed_judgment_install", downloadedAt);
+    assertEqual(request.args, { modelId: "fixture-decision", revision: "fixture-revision" }, "download did not bind the catalog revision");
+    await pageA.waitForFunction(() => !document.getElementById("managed-judgment-progress").hidden);
+    const stale = clone(backend.managedModelState);
+    backend.managedModelState.revision += 1;
+    backend.managedModelState.operation.receivedBytes = 512;
+    await backend.emitManaged(backend.managedJudgmentSettings());
+    await backend.emitManaged(stale);
+    assertEqual(await pageA.locator("#managed-judgment-progress progress").evaluate((meter) => meter.value), 512, "a late event rewound download progress");
+    await pageA.click("#managed-judgment-cancel");
+    await pageA.waitForFunction(() => document.getElementById("managed-judgment-progress").hidden);
+    assertEqual(backend.typesafeSettings().provider, applied, "download or cancellation changed the applied model");
+    assert(!backend.managedModelState.models[0].installed, "a cancelled download was shown as installed");
+    assert(!backend.calls.slice(downloadedAt).some((entry) => entry.command === "managed_judgment_apply"), "download silently applied a model");
+  } finally {
+    backend.zoSettings.smart = previous;
+    delete backend.managedPendingKinds;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "no server field · revision-bound download · stale event ignored · cancellation is not installation";
+});
+
+await test("로컬 모델은 준비와 응답 확인을 마친 같은 서버만 명시적으로 적용한다", async () => {
+  const previous = clone(backend.zoSettings.smart);
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  backend.managedModelState.runtime.state = "ready";
+  backend.managedModelState.models[0].installed = true;
+  backend.managedCheckFailure = true;
+  await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.localMode = "managed"; });
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models[0]?.installed);
+    const before = clone(backend.typesafeSettings().provider);
+    const failedAt = backend.calls.length;
+    await pageA.click('[data-model-action="activate"]');
+    await backend.waitForCall("A", "managed_judgment_check", failedAt);
+    await pageA.waitForFunction(() => !managedJudgmentController.activating);
+    assertEqual(backend.typesafeSettings().provider, before, "a failed response check replaced the provider");
+    assert(!backend.calls.slice(failedAt).some((entry) => entry.command === "managed_judgment_apply"), "a failed check reached apply");
+    backend.managedCheckFailure = false;
+    backend.managedChangeOnCheck = true;
+    const changedAt = backend.calls.length;
+    await pageA.click('[data-model-action="activate"]');
+    await backend.waitForCall("A", "managed_judgment_apply", changedAt);
+    await pageA.waitForFunction(() => !managedJudgmentController.activating);
+    assertEqual(backend.typesafeSettings().provider.kind, "jev", "apply overwrote another window's selection");
+    assertEqual(backend.typesafeSettings().provider.model, "jev-other-window", "the newer setting was lost");
+    backend.managedChangeOnCheck = false;
+    await pageA.evaluate(() => managedJudgmentController.refresh());
+    const successfulAt = backend.calls.length;
+    await pageA.click('[data-model-action="activate"]');
+    await backend.waitForCall("A", "managed_judgment_apply", successfulAt);
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.appliedModelId === "fixture-decision" && !managedJudgmentController.activating);
+    assertEqual(backend.typesafeSettings().provider.model, "fixture-decision");
+    assert(await pageA.locator('[data-model-action="remove"]').isDisabled(), "the configured model can be deleted");
+    await pageA.click('[data-model-action="stop"]');
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "stopped");
+    assertEqual(backend.managedModelState.configuredModelId, "fixture-decision", "stopping forgot the configured binding");
+    assertEqual(backend.managedModelState.appliedModelId, null, "a stopped server is shown as running and applied");
+  } finally {
+    backend.zoSettings.smart = previous;
+    delete backend.managedCheckFailure;
+    delete backend.managedChangeOnCheck;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "failed check cannot apply · cross-window identity guard · explicit apply · stopped is not running";
 });
 
 await test("다른 서버의 키를 모델 선택 전에 저장하고 늦은 목록은 새 선택을 덮지 않는다", async () => {
@@ -11845,7 +12027,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
           // A notice's own action (the switch's 「모든 폴더에서 사용」) is the
           // notice's, not a button loose above the card's footer.
           buttonsOutside: [...box.querySelectorAll(".btn")]
-            .filter((one) => one.closest(".settings-action-row") !== last && !one.closest(".settings-notice"))
+            .filter((one) => one.closest(".settings-action-row") !== last && !one.closest(".settings-notice") && !one.closest("#judgment-local-mode, #managed-judgment-panel"))
             .map((one) => one.id),
           filled,
         };

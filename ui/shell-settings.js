@@ -990,6 +990,7 @@ function showSettingsPane(pane) {
   }
   if (pane === "api-routers" && arriving) {
     void refreshApiRouters();
+    if (judgmentProviderController.current()?.kind === "local" && judgmentProviderController.localMode === "managed") void managedJudgmentController.refresh();
   }
   if (pane === "onboarding" && arriving) {
     paintSettingsOnboarding();

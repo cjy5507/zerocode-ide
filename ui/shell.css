@@ -20771,6 +20771,41 @@ button.helper-sib:hover {
   max-width: none;
 }
 
+#managed-judgment-panel {
+  margin: var(--space-4);
+  min-width: 0;
+}
+
+#managed-judgment-panel .settings-action-row {
+  flex-wrap: wrap;
+  margin-inline: 0;
+}
+
+.managed-judgment-model {
+  padding: var(--space-4) 0;
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  overflow-wrap: anywhere;
+}
+
+.managed-judgment-model h4 {
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+#managed-judgment-progress progress {
+  width: 100%;
+  max-width: 100%;
+  accent-color: var(--ink-chalk);
+}
+
+#judgment-local-mode {
+  flex-wrap: wrap;
+}
+
+#judgment-local-mode [aria-pressed="true"] {
+  border-color: var(--ink-chalk);
+}
+
 .settings-steps {
   display: grid;
   gap: var(--space-2);

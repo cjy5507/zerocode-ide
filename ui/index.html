@@ -60,6 +60,7 @@
     <script defer src="./shell-update.js"></script>
     <script defer src="./shell-computer.js"></script>
     <script defer src="./shell-settings.js"></script>
+    <script defer src="./shell-managed-judgment.js"></script>
     <script defer src="./shell-judgment.js"></script>
     <script defer src="./shell-jev.js"></script>
     <script defer src="./shell-flow.js"></script>
@@ -4219,6 +4220,39 @@
               </select>
             </label>
             <p class="settings-row-desc judgment-setup-hint" id="judgment-setup-hint" role="status" aria-live="polite"></p>
+            <div id="judgment-local-mode" class="settings-action-row" hidden>
+              <button type="button" class="btn" id="judgment-local-managed" aria-pressed="true" data-i18n="settings.managed.manage">모델 다운로드·관리</button>
+              <button type="button" class="btn" id="judgment-local-manual" aria-pressed="false" data-i18n="settings.managed.manual">이미 실행 중인 서버 연결</button>
+            </div>
+            <section id="managed-judgment-panel" data-i18n-aria="settings.managed.panel" aria-label="로컬 판단 모델 관리" hidden>
+              <p class="settings-row-desc" id="managed-judgment-runtime" role="status"></p>
+              <div class="settings-action-row">
+                <button type="button" class="btn" id="managed-judgment-prepare" data-i18n="settings.managed.prepare" disabled>실행 환경 설치</button>
+                <button type="button" class="btn" id="managed-judgment-refresh" data-i18n="settings.managed.refresh">상태 새로고침</button>
+              </div>
+              <p class="settings-notice" data-i18n="settings.managed.experimental">실험용 판단 모델입니다. 다운로드나 연결 확인은 작업 정확도 검증이 아닙니다. 설치만으로 현재 모델이 바뀌지는 않습니다.</p>
+              <div id="managed-judgment-progress" hidden>
+                <p id="managed-judgment-progress-label" role="status" aria-live="polite"></p>
+                <progress aria-labelledby="managed-judgment-progress-label"></progress>
+                <button type="button" class="btn" id="managed-judgment-cancel" data-i18n="settings.managed.cancel">취소</button>
+              </div>
+              <div id="managed-judgment-models"></div>
+              <p class="settings-row-desc" id="managed-judgment-empty" data-i18n="settings.managed.empty" hidden>설치할 수 있는 모델이 없습니다. 이미 실행 중인 판단 서버를 연결할 수 있습니다.</p>
+              <details class="settings-fold" id="managed-judgment-import">
+                <summary data-i18n="settings.managed.import">기존 파일 등록</summary>
+                <p id="managed-judgment-import-model"></p>
+                <label class="settings-field" for="managed-judgment-import-path">
+                  <span class="settings-label" data-i18n="settings.managed.importPath">선택한 모델 파일이 있는 폴더</span>
+                  <input type="text" class="settings-input" id="managed-judgment-import-path" autocomplete="off" spellcheck="false" />
+                </label>
+                <p class="settings-row-desc" data-i18n="settings.managed.importHint">목록에서 등록할 모델을 고르세요. 파일의 무결성을 확인해 앱에 복사하며, 원본은 이동하거나 삭제하지 않습니다.</p>
+                <div class="settings-action-row">
+                  <button type="button" class="btn" id="managed-judgment-import-submit" data-i18n="settings.managed.importSubmit" disabled>검사하고 등록</button>
+                </div>
+              </details>
+              <p class="settings-status" id="managed-judgment-status" role="status" aria-live="polite"></p>
+            </section>
+            <div id="judgment-manual-fields">
             <label class="settings-field" data-field="lg" id="judgment-endpoint-field" for="judgment-endpoint" hidden>
               <span class="settings-field-copy">
                 <span class="settings-label" data-i18n="settings.judgment.endpoint">판단 서버 주소</span>
@@ -4251,6 +4285,7 @@
             <p class="settings-row-desc" id="judgment-provider-scope"></p>
             <p class="settings-notice" id="judgment-provider-dirty" data-i18n="settings.judgment.unapplied" hidden>아직 적용하지 않은 선택입니다. 적용한 뒤 연결을 확인하세요.</p>
             <p class="settings-row-desc" id="judgment-model-status" role="status" aria-live="polite"></p>
+            </div>
           </section>
           <div class="settings-status" id="typesafe-status" role="status" aria-live="polite"></div>
           <div class="settings-action-row settings-judgment-actions">
