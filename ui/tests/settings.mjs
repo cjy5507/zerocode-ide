@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import {
   SETTINGS_QUALITY_SPEC,
   axeViolations,
+  contrastTable,
   inspectSettingsLayout,
   maximalSettingsFixture,
   measureSettingsPerformance,
@@ -365,6 +366,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "computer_confirm_transfer": true,
   "computer_confirm_delete": true,
   "computer_live_reflex": false,
+  "computer_input_policy": "background",
   "computer_generator_road": "auto",
   "emulator.keepBooted": true,
   "emulator.prebootLastUsed": true,
@@ -770,7 +772,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
   "set_diff_side_by_side", "set_conversation_focus_view", "set_confirm_close_pinned",
-  "set_computer_live_reflex", "set_computer_generator_road",
+  "set_computer_live_reflex", "set_computer_generator_road", "set_computer_input_policy",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
   "patch_workspace_creation_prefs",
   "patch_floating_workspace",
@@ -1382,6 +1384,11 @@ class StatefulBackend {
       case "set_computer_live_reflex":
         this.settings.computer_live_reflex = args.on === true;
         keys = ["computer_live_reflex"];
+        break;
+      case "set_computer_input_policy":
+        if (!["background", "shared-desktop"].includes(args.policy)) throw "invalid input policy";
+        this.settings.computer_input_policy = args.policy;
+        keys = ["computer_input_policy"];
         break;
       case "set_computer_generator_road":
         // serde's refusal of a word `GeneratorRoad` does not name.
@@ -2862,6 +2869,73 @@ class StatefulBackend {
       // item every zo reads and never sent back; the switch is
       // `smart.jev.enabled`, written as the core's press writes it.
       case "typesafe_settings": return this.typesafeSettings();
+      case "managed_judgment_status": return this.managedJudgmentSettings();
+      case "managed_judgment_prepare_runtime": {
+        this.managedJudgmentSettings();
+        this.managedModelState.runtime.state = "ready";
+        return this.managedOperation("runtime");
+      }
+      case "managed_judgment_install": {
+        this.managedJudgmentSettings();
+        const model = this.managedModelState.models.find((row) => row.id === args.modelId && row.revision === args.revision);
+        if (!model) throw "model_changed";
+        if (!this.managedPendingKinds?.has("download")) model.installed = true;
+        return this.managedOperation(args.sourceDirectory ? "import" : "download", model.id);
+      }
+      case "managed_judgment_cancel": {
+        if (this.managedModelState?.operation?.id !== args.operationId) throw "operation_changed";
+        this.managedModelState.operation.state = "cancelled";
+        this.managedModelState.revision += 1;
+        return this.managedJudgmentSettings();
+      }
+      case "managed_judgment_start": {
+        this.managedJudgmentSettings();
+        const model = this.managedModelState.models.find((row) => row.id === args.modelId && row.revision === args.revision);
+        if (!model?.installed || this.managedModelState.runtime.state !== "ready") throw "not_installed";
+        this.managedModelState.server = {
+          id: "fixture-server", state: "ready", modelId: model.id, checked: false, error: null,
+          provider: { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32101", model: model.id, requiresAuth: false },
+        };
+        return this.managedOperation("start", model.id);
+      }
+      case "managed_judgment_check": {
+        if (this.managedModelState?.server.id !== args.serverId) throw "server_changed";
+        this.managedModelState.server.checked = !this.managedCheckFailure;
+        const snapshot = this.managedOperation("check", this.managedModelState.server.modelId);
+        if (this.managedCheckFailure) {
+          this.managedModelState.operation.state = "failed";
+          this.managedModelState.operation.error = "invalid_response";
+          return this.managedJudgmentSettings();
+        }
+        if (this.managedChangeOnCheck) this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), [JEV_MODEL_SETTING]: "jev-other-window" };
+        return snapshot;
+      }
+      case "managed_judgment_apply": {
+        if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
+        const held = this.managedModelState;
+        if (!held?.server.checked || held.server.id !== args.serverId || held.server.state !== "ready") throw "server_changed";
+        this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), judgmentProvider: clone(held.server.provider) };
+        held.configuredModelId = held.server.modelId;
+        held.appliedModelId = held.server.modelId;
+        held.revision += 1;
+        return this.managedJudgmentSettings();
+      }
+      case "managed_judgment_stop": {
+        if (this.managedModelState?.server.id !== args.serverId) throw "server_changed";
+        this.managedModelState.server.state = "stopped";
+        this.managedModelState.appliedModelId = null;
+        this.managedModelState.revision += 1;
+        return this.managedJudgmentSettings();
+      }
+      case "managed_judgment_remove": {
+        const held = this.managedModelState;
+        if (held.configuredModelId === args.modelId || (held.server.modelId === args.modelId && held.server.state !== "stopped")) throw "model_in_use";
+        const model = held.models.find((row) => row.id === args.modelId && row.revision === args.revision);
+        if (!model) throw "model_changed";
+        model.installed = false;
+        held.revision += 1;
+        return this.managedJudgmentSettings();
+      }
       case "save_typesafe_key": {
         const key = String(args.key ?? "").trim();
         if (!key) throw { kind: "failed", message: "the TypeSafe key is empty" };
@@ -3034,6 +3108,36 @@ class StatefulBackend {
 
   judgmentService(provider) {
     return provider.kind === "jev" ? TYPESAFE_SERVICE : `fixture-decision-key:${provider.protocol}:${provider.baseUrl}`;
+  }
+
+  managedJudgmentSettings() {
+    this.managedModelState ??= {
+      instanceId: "fixture-instance", revision: 1, catalogVersion: 1,
+      models: [{ id: "fixture-decision", label: "Fixture Decision", engine: "fixture", protocol: "system_one", revision: "fixture-revision", license: "Apache-2.0", source: "https://models.example.com/decision", downloadBytes: 1024, installed: false, compatibility: "supported", compatibilityReason: null, quality: "experimental" }],
+      runtime: { state: "missing", pythonRequirement: "fixture", downloadBytes: 2048, reason: null },
+      operation: null,
+      server: { id: null, state: "stopped", modelId: null, provider: null, checked: false, error: null },
+      providerIdentity: this.typesafeSettings().providerIdentity, configuredModelId: null, appliedModelId: null,
+    };
+    if (this.managedModelState.providerIdentity !== this.typesafeSettings().providerIdentity) {
+      this.managedModelState.providerIdentity = this.typesafeSettings().providerIdentity;
+      this.managedModelState.revision += 1;
+    }
+    return clone(this.managedModelState);
+  }
+
+  managedOperation(kind, modelId = null) {
+    const held = this.managedModelState;
+    held.revision += 1;
+    held.operation = { id: `operation-${held.revision}`, kind, modelId, state: this.managedPendingKinds?.has(kind) ? "running" : "done", receivedBytes: 0, totalBytes: 1024, error: null };
+    return this.managedJudgmentSettings();
+  }
+
+  async emitManaged(snapshot) {
+    for (const [, page] of this.pages) {
+      if (page.isClosed() || page.url() === "about:blank") continue;
+      await page.evaluate((payload) => window.__SETTINGS_TEST_EMIT__("managed-judgment:changed", payload), snapshot);
+    }
   }
 
   typesafeSettings() {
@@ -3230,11 +3334,18 @@ const pass = (name, detail = "") => results.push({ name, pass: true, detail });
 const fail = (name, detail) => results.push({ name, pass: false, detail: String(detail) });
 
 async function test(name, run) {
+  if (process.env.SETTINGS_TRACE) process.stderr.write(`settings START ${name}\n`);
   try {
     const detail = await run();
     pass(name, detail ?? "");
   } catch (error) {
     fail(name, error?.stack ?? error);
+  } finally {
+    if (process.env.SETTINGS_TRACE) {
+      const result = results.at(-1);
+      process.stderr.write(`settings END ${result.pass ? "PASS" : "FAIL"} ${name}\n`);
+      if (!result.pass) process.stderr.write(`${result.detail}\n`);
+    }
   }
 }
 
@@ -4051,6 +4162,44 @@ await test("Computer Use on Windows reads ready and offers no permission door to
 // stand. Otherwise it stays off and unpressable, saying why; once on it is
 // never turned off behind the person's back (a revoked permission says "on,
 // cannot run now"), and turning it off always works.
+await test("Computer Use는 기본 배경 입력을 유지하고 공유 입력은 사람의 설정으로만 허용한다", async () => {
+  const original = backend.settings.computer_input_policy;
+  const peer = await context.newPage();
+  const peerId = "computer-policy-peer";
+  try {
+    if (PLATFORM_OVERRIDE) await addReportedPlatform(peer, PLATFORM_OVERRIDE);
+    await installTauri(peer, peerId);
+    attachFaultRecorder(peer, peerId);
+    await bootPage(peer, peerId);
+    backend.settings.computer_input_policy = "background";
+    await backend.broadcast(null, ["computer_input_policy"]);
+    await openSettings(pageA, "computer-use");
+    await openSettings(peer, "computer-use");
+    const first = pageA.locator("#computer-shared-desktop");
+    const second = peer.locator("#computer-shared-desktop");
+    assert(await pageA.locator("#computer-input-policy-card").isVisible());
+    assert(!(await first.isChecked()), "shared desktop input is on by default");
+    assert(!(await second.isChecked()), "the other window starts with shared input");
+    assertEqual(await first.getAttribute("aria-describedby"), "computer-input-policy-about");
+    const before = backend.calls.length;
+    await first.check();
+    const enabled = await backend.waitForCall("A", "set_computer_input_policy", before);
+    assertEqual(enabled.args, { policy: "shared-desktop" });
+    await peer.waitForFunction(() => document.getElementById("computer-shared-desktop").checked, undefined, { timeout: UI_TIMEOUT });
+    const restore = backend.calls.length;
+    await second.uncheck();
+    const disabled = await backend.waitForCall(peerId, "set_computer_input_policy", restore);
+    assertEqual(disabled.args, { policy: "background" });
+    await pageA.waitForFunction(() => !document.getElementById("computer-shared-desktop").checked, undefined, { timeout: UI_TIMEOUT });
+    assertEqual(backend.settings.computer_input_policy, "background");
+  } finally {
+    await peer.close();
+    backend.settings.computer_input_policy = original;
+    await backend.broadcast(null, ["computer_input_policy"]);
+    await pageA.evaluate(() => setSettingsOpen(false));
+  }
+});
+
 const LIVE_REFLEX_WORDS = Object.freeze({
   supported: { key: "computerUse.liveReflexSupported", word: "이 Mac과 헬퍼가 반사 커널을 읽습니다" },
   helperOld: { key: "computerUse.liveReflexHelperOld", word: "이 헬퍼는 반사 커널을 읽지 않습니다 — Computer Use를 다시 시작하세요" },
@@ -5483,6 +5632,53 @@ await test("키체인이 없는 컴퓨터: 판이 키체인을 약속하지 않�
   return reason;
 });
 
+await test("판단 설정은 적용된 모델과 아직 연결하지 않은 선택을 분리한다", async () => {
+  await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => refreshApiRouters());
+  const applied = clone(backend.typesafeSettings().provider);
+  try {
+    assert(await pageA.locator("#judgment-active-model").isVisible(), "the active model has no separate summary");
+    assert((await pageA.locator("#judgment-active-model").textContent()).includes(applied.model), "the summary does not name the applied model");
+    await pageA.selectOption("#judgment-provider-kind", "remote");
+    await pageA.fill("#judgment-endpoint", "");
+    assertEqual(await pageA.locator("#judgment-setup-hint").getAttribute("data-step"), "connection", "the next step does not ask for a server");
+    assert((await pageA.locator("#judgment-setup-hint").textContent()).trim(), "the next step has no instructions");
+    assert((await pageA.locator("#judgment-active-model").textContent()).includes(applied.model), "a draft replaced the active-model summary");
+    assertEqual(backend.typesafeSettings().provider, applied, "choosing a setup path applied it");
+  } finally {
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "applied model separate from draft · next connection step named";
+});
+
+await test("판단 모델 연결 동작은 기능별 진단보다 먼저 보인다", async () => {
+  await openSettings(pageA, "api-routers");
+  const order = await pageA.evaluate(() => {
+    const editor = document.getElementById("judgment-provider-editor");
+    const actions = document.querySelector(".settings-judgment-actions");
+    const diagnostics = document.querySelector("#typesafe-card [data-jev-standings]");
+    return {
+      keyInsideConnection: editor.contains(document.getElementById("typesafe-key-input")),
+      actionsBeforeDiagnostics: Boolean(actions.compareDocumentPosition(diagnostics) & Node.DOCUMENT_POSITION_FOLLOWING),
+      modelInsideConnection: editor.contains(document.getElementById("typesafe-model-input")),
+    };
+  });
+  assertEqual(order, { keyInsideConnection: true, actionsBeforeDiagnostics: true, modelInsideConnection: true }, "connection controls are scattered around diagnostics");
+  return "credentials and model together · apply before diagnostics";
+});
+
+await test("판단 기능별 진단은 기본으로 접고 사용자가 펼친다", async () => {
+  await openSettings(pageA, "api-routers");
+  const details = pageA.locator("#judgment-feature-details");
+  assertEqual(await details.count(), 1, "the feature diagnostics have no fold");
+  assert(!(await details.evaluate((element) => element.open)), "diagnostics are expanded before setup");
+  await details.locator("summary").click();
+  assert(await details.evaluate((element) => element.open), "the diagnostics fold did not open");
+  assertEqual(await details.locator("[data-jev-standings]").count(), 1, "the existing feature diagnostics were removed");
+  await details.locator("summary").click();
+  return "diagnostic details retained and opt-in";
+});
+
 await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 켜고 끈다 — 카드에 고를 모드는 없다", async () => {
   await openSettings(pageA, "api-routers");
   backend.keychain.delete(TYPESAFE_SERVICE);
@@ -5716,6 +5912,7 @@ await test("판단 모델은 명시적으로 적용하고 로컬 연결은 Jev �
   try {
     await pageA.evaluate(() => refreshApiRouters());
     await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.click("#judgment-local-manual");
     await pageA.fill("#judgment-endpoint", "http://127.0.0.1:1234");
     await pageA.fill("#typesafe-model-input", "acme/new-decision-model");
     assert(await pageA.locator("#typesafe-check-btn").isDisabled(), "an unapplied provider offered a connection check");
@@ -5775,6 +5972,170 @@ await test("판단 모델은 명시적으로 적용하고 로컬 연결은 Jev �
     await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
   }
   return "Jev pin kept · anonymous local check · exact ID kept · no chat adapter";
+});
+
+await test("로컬 모델은 서버 주소 대신 다운로드 상태를 보이고 취소와 오래된 진행 이벤트를 구별한다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  delete backend.managedModelState;
+  backend.managedPendingKinds = new Set(["download"]);
+  await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.localMode = "managed"; });
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models.length > 0);
+    assert(await pageA.locator("#managed-judgment-panel").isVisible(), "local selection does not offer managed models");
+    assert(await pageA.locator("#judgment-endpoint").isHidden(), "local setup still starts with an empty server address");
+    const applied = clone(backend.typesafeSettings().provider);
+    const downloadedAt = backend.calls.length;
+    await pageA.click('[data-model-action="install"]');
+    const request = await backend.waitForCall("A", "managed_judgment_install", downloadedAt);
+    assertEqual(request.args, { modelId: "fixture-decision", revision: "fixture-revision" }, "download did not bind the catalog revision");
+    await pageA.waitForFunction(() => !document.getElementById("managed-judgment-progress").hidden);
+    const meterStyle = await pageA.locator("#managed-judgment-progress progress").evaluate((meter) => ({
+      appearance: getComputedStyle(meter).appearance,
+      height: meter.getBoundingClientRect().height,
+      label: document.getElementById(meter.getAttribute("aria-labelledby"))?.textContent.trim(),
+    }));
+    assertEqual(meterStyle.appearance, "none", "download progress still uses native platform decoration");
+    assert(meterStyle.height > 0 && meterStyle.label, "download progress is invisible or has no accessible label");
+    const stale = clone(backend.managedModelState);
+    backend.managedModelState.revision += 1;
+    backend.managedModelState.operation.receivedBytes = 512;
+    await backend.emitManaged(backend.managedJudgmentSettings());
+    await backend.emitManaged(stale);
+    assertEqual(await pageA.locator("#managed-judgment-progress progress").evaluate((meter) => meter.value), 512, "a late event rewound download progress");
+    await pageA.click("#managed-judgment-cancel");
+    await pageA.waitForFunction(() => document.getElementById("managed-judgment-progress").hidden);
+    assertEqual(backend.typesafeSettings().provider, applied, "download or cancellation changed the applied model");
+    assert(!backend.managedModelState.models[0].installed, "a cancelled download was shown as installed");
+    assert(!backend.calls.slice(downloadedAt).some((entry) => entry.command === "managed_judgment_apply"), "download silently applied a model");
+  } finally {
+    backend.zoSettings.smart = previous;
+    delete backend.managedPendingKinds;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "no server field · revision-bound download · stale event ignored · cancellation is not installation";
+});
+
+await test("로컬 모델은 준비와 응답 확인을 마친 같은 서버만 명시적으로 적용한다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  backend.managedModelState.runtime.state = "ready";
+  backend.managedModelState.models[0].installed = true;
+  backend.managedCheckFailure = true;
+  await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.localMode = "managed"; });
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models[0]?.installed);
+    const before = clone(backend.typesafeSettings().provider);
+    const failedAt = backend.calls.length;
+    await pageA.click('[data-model-action="activate"]');
+    await backend.waitForCall("A", "managed_judgment_check", failedAt);
+    await pageA.waitForFunction(() => !managedJudgmentController.activating);
+    assertEqual(backend.typesafeSettings().provider, before, "a failed response check replaced the provider");
+    assert(!backend.calls.slice(failedAt).some((entry) => entry.command === "managed_judgment_apply"), "a failed check reached apply");
+    const runningWords = await pageA.evaluate(() => t("settings.managed.runningUnapplied", "실행 중 · 아직 적용하지 않음"));
+    assert((await pageA.locator(".managed-judgment-model").textContent()).includes(runningWords), "a running but unverified model was shown as merely installed");
+    backend.managedCheckFailure = false;
+    backend.managedChangeOnCheck = true;
+    const changedAt = backend.calls.length;
+    await pageA.click('[data-model-action="activate"]');
+    await backend.waitForCall("A", "managed_judgment_apply", changedAt);
+    await pageA.waitForFunction(() => !managedJudgmentController.activating);
+    assertEqual(backend.typesafeSettings().provider.kind, "jev", "apply overwrote another window's selection");
+    assertEqual(backend.typesafeSettings().provider.model, "jev-other-window", "the newer setting was lost");
+    backend.managedChangeOnCheck = false;
+    await pageA.evaluate(() => managedJudgmentController.refresh());
+    const successfulAt = backend.calls.length;
+    await pageA.click('[data-model-action="activate"]');
+    await backend.waitForCall("A", "managed_judgment_apply", successfulAt);
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.appliedModelId === "fixture-decision" && !managedJudgmentController.activating);
+    assertEqual(backend.typesafeSettings().provider.model, "fixture-decision");
+    assert(await pageA.locator('[data-model-action="remove"]').isDisabled(), "the configured model can be deleted");
+    await pageA.click('[data-model-action="stop"]');
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "stopped");
+    assertEqual(backend.managedModelState.configuredModelId, "fixture-decision", "stopping forgot the configured binding");
+    assertEqual(backend.managedModelState.appliedModelId, null, "a stopped server is shown as running and applied");
+  } finally {
+    backend.zoSettings.smart = previous;
+    delete backend.managedCheckFailure;
+    delete backend.managedChangeOnCheck;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "failed check cannot apply · cross-window identity guard · explicit apply · stopped is not running";
+});
+
+await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁은 화면을 지원한다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  const managedPage = await context.newPage();
+  await installTauri(managedPage, "managed-quality");
+  attachFaultRecorder(managedPage, "managed-quality");
+  const traceManaged = (phase) => {
+    if (process.env.SETTINGS_TRACE) process.stderr.write(`managed quality ${phase}\n`);
+  };
+  const deadline = setTimeout(() => {
+    traceManaged("deadline exceeded");
+    void managedPage.close().catch(() => {});
+  }, 60_000);
+  try {
+    traceManaged("boot");
+    await bootPage(managedPage, "managed-quality");
+    await openSettings(managedPage, "api-routers");
+    await managedPage.selectOption("#judgment-provider-kind", "local");
+    traceManaged("model list");
+    await managedPage.waitForFunction(() => managedJudgmentController.snapshot?.models.length > 0);
+    await managedPage.locator("#managed-judgment-prepare").focus();
+    const preparedAt = backend.calls.length;
+    traceManaged("keyboard prepare");
+    await managedPage.keyboard.press("Enter");
+    await backend.waitForCall("managed-quality", "managed_judgment_prepare_runtime", preparedAt);
+    await managedPage.waitForFunction(() => managedJudgmentController.snapshot?.runtime.state === "ready");
+    await managedPage.locator("#managed-judgment-import").evaluate((element) => { element.open = true; });
+    await managedPage.locator("#managed-judgment-import-path").fill("/models/example");
+    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      traceManaged(`locale ${locale}`);
+      await setQualityLocale(managedPage, locale);
+      await managedPage.evaluate(() => judgmentProviderController.render());
+      for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+        traceManaged(`accessibility ${locale}/${theme}`);
+        await setQualityTheme(managedPage, theme);
+        const violations = await axeViolations(managedPage, AxeBuilder, "#managed-judgment-panel");
+        assertEqual(violations, [], `${locale}/${theme} local manager accessibility`);
+        const contrast = await contrastTable(managedPage, AxeBuilder, "#managed-judgment-import-path");
+        const importedPath = contrast.find((row) => row.target === "#managed-judgment-import-path");
+        assert(importedPath?.verdict !== "hidden" && importedPath?.ratio >= 4.5
+          && importedPath.fg !== null && importedPath.bg !== null,
+        `${locale}/${theme} visible import path has no passing contrast measurement`, importedPath);
+      }
+      for (const viewport of [SETTINGS_QUALITY_SPEC.viewport, { width: 1280, height: 1069 }, { width: 1998, height: 1069 }]) {
+        traceManaged(`layout ${locale}/${viewport.width}x${viewport.height}`);
+        await managedPage.setViewportSize(viewport);
+        await renderSettled(managedPage);
+        const geometry = await managedPage.locator("#managed-judgment-panel").evaluate((panel) => ({ client: panel.clientWidth, scroll: panel.scrollWidth }));
+        assert(geometry.client > 0 && geometry.scroll <= geometry.client + 1, `${locale}/${viewport.width}×${viewport.height} local manager overflows`, geometry);
+      }
+    }
+    await setQualityLocale(managedPage, "ko");
+    await managedPage.evaluate(() => judgmentProviderController.render());
+    if (process.env.MANAGED_JUDGMENT_SHOTS) {
+      for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+        await setQualityTheme(managedPage, theme);
+        await managedPage.locator("#typesafe-card").screenshot({ path: resolve(process.env.MANAGED_JUDGMENT_SHOTS, `managed-${theme}.png`), animations: "disabled" });
+      }
+    }
+    const looseButtons = await managedPage.locator("#managed-judgment-panel .btn").evaluateAll((buttons) => buttons.filter((button) => !button.closest(".settings-action-row") && button.id !== "managed-judgment-cancel").map((button) => button.id));
+    assertEqual(looseButtons, [], "managed actions are not grouped with their controls");
+  } finally {
+    clearTimeout(deadline);
+    await managedPage.close();
+    backend.zoSettings.smart = previous;
+    backend.managedModelState = previousManaged;
+  }
+  return "real Enter · 5 locales × 2 themes · supported 720×480 minimum and wider viewports · model actions grouped";
 });
 
 await test("다른 서버의 키를 모델 선택 전에 저장하고 늦은 목록은 새 선택을 덮지 않는다", async () => {
@@ -5857,6 +6218,7 @@ await test("Jev를 켜면 카드가 기능마다 적용 중인지, 기록 중이
   const summaryAt = backend.count("A", "jev_summary");
   await pageA.evaluate(() => refreshApiRouters());
   const list = pageA.locator("#typesafe-card [data-jev-standings]");
+  await pageA.locator("#judgment-feature-details > summary").click();
   await pageA.waitForFunction(
     () => document.querySelectorAll("#typesafe-card [data-jev-standing]").length === 5,
     null, { timeout: UI_TIMEOUT },
@@ -11830,19 +12192,19 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
     for (const [card, finish] of [["router-card", "router-save-btn"], ["typesafe-card", "judgment-save-provider"]]) {
       const bottom = await pageA.evaluate((id) => {
         const box = document.getElementById(id);
-        const last = box.lastElementChild;
+        const last = id === "typesafe-card" ? box.querySelector(".settings-judgment-actions") : box.lastElementChild;
         const filled = [...box.querySelectorAll(".btn--primary")].map((one) => one.id);
         return {
           actions: last.className,
           // A notice's own action (the switch's 「모든 폴더에서 사용」) is the
           // notice's, not a button loose above the card's footer.
           buttonsOutside: [...box.querySelectorAll(".btn")]
-            .filter((one) => one.closest(".settings-action-row") !== last && !one.closest(".settings-notice"))
+            .filter((one) => one.closest(".settings-action-row") !== last && !one.closest(".settings-notice") && !one.closest("#judgment-local-mode, #managed-judgment-panel"))
             .map((one) => one.id),
           filled,
         };
       }, card);
-      assert(bottom.actions.includes("settings-action-row"), `${card} does not end in its actions`, bottom);
+      assert(bottom.actions.includes("settings-action-row"), `${card} does not group its connection actions`, bottom);
       assertEqual(bottom.buttonsOutside, [], `${card} leaves a button loose above its footer`);
       assertEqual(bottom.filled, [finish], `${card} does not fill exactly the one thing to finish`);
     }

@@ -43,6 +43,7 @@ pub mod eye;
 mod geometry;
 pub mod guard;
 pub mod guarded;
+pub(crate) mod input_policy;
 pub mod listen;
 pub mod marks;
 pub mod observe;
@@ -113,12 +114,15 @@ fn held_client() -> &'static Mutex<Option<platform::Session>> {
 /// Call the persistent provider. Transport failures discard the session so a
 /// later request gets one clean restart; provider refusals keep its snapshots.
 pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
+    input_policy::ensure_current()?;
+    let params = input_policy::current().prepare_provider(method, params)?;
     if let Some(params) = params.as_object() {
         zerocode_core::computer_use_protocol::execution::validate(method, params)?;
     }
     let mut held = held_client()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    input_policy::ensure_current()?;
     if held.is_none() {
         let session = platform::Session::start()?;
         guard::remember_helper(session.helper_pid());
@@ -160,6 +164,7 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
             return Err(refused);
         }
     }
+    input_policy::ensure_current()?;
     match session.request(method, params) {
         Ok(answer) => Ok(answer),
         Err(SessionFailure::Provider(error)) => Err(error),

@@ -20756,6 +20756,84 @@ button.helper-sib:hover {
   flex-wrap: wrap;
 }
 
+.judgment-active-model,
+.judgment-setup-hint {
+  margin: var(--space-3) var(--space-4);
+  overflow-wrap: anywhere;
+}
+
+.settings-jev-features {
+  margin: var(--space-4);
+}
+
+.settings-jev-features > .settings-jev-standings,
+.settings-jev-features > .settings-jev-dashboard {
+  max-width: none;
+}
+
+#managed-judgment-panel {
+  margin: var(--space-4);
+  min-width: 0;
+}
+
+#managed-judgment-panel .settings-action-row {
+  flex-wrap: wrap;
+  margin-inline: 0;
+}
+
+.managed-judgment-model {
+  padding: var(--space-4) 0;
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  overflow-wrap: anywhere;
+}
+
+.managed-judgment-model h4 {
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+progress {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  background: var(--edge-mark);
+  color: var(--ink-chalk);
+}
+
+progress::-webkit-progress-bar {
+  background: var(--edge-mark);
+  border-radius: var(--radius-pill);
+}
+
+progress::-webkit-progress-value {
+  background: var(--ink-chalk);
+  border-radius: var(--radius-pill);
+}
+
+progress::-moz-progress-bar {
+  background: var(--ink-chalk);
+  border-radius: var(--radius-pill);
+}
+
+progress:indeterminate,
+progress:indeterminate::-webkit-progress-bar {
+  background: repeating-linear-gradient(90deg, var(--edge-mark) 0 20%, var(--ink-chalk) 20% 30%);
+}
+
+#judgment-local-mode {
+  flex-wrap: wrap;
+}
+
+#judgment-local-mode [aria-pressed="true"] {
+  border-color: var(--ink-chalk);
+}
+
 .settings-steps {
   display: grid;
   gap: var(--space-2);

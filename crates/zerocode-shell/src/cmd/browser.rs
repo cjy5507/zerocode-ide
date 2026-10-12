@@ -1667,15 +1667,39 @@ pub(crate) fn browser_place(
         }
         pane.show().map_err(|error| error.to_string())
     } else {
-        pane.hide().map_err(|error| error.to_string())?;
-        // A hidden native pane can stay the window's first responder — the
-        // palette then opens VISIBLY while every keystroke still runs into
-        // the page nobody can see (live report 2026-08-14: "인풋창에 글이 안
-        // 써짐"). The keyboard follows the eye: hiding a pane hands focus
-        // back to the main webview. Best-effort — a focus that fails must
-        // not fail the hide that mattered.
-        let _ = webview.set_focus();
-        Ok(())
+        hide_browser_pane(&pane, &webview)
+    }
+}
+
+/// Return the keyboard only when the hidden native view was receiving it.
+fn hide_browser_pane(pane: &BrowserPane, main_webview: &tauri::Webview) -> Result<(), String> {
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    {
+        pane.hide(main_webview.clone())
+    }
+    #[cfg(all(target_os = "macos", not(feature = "chromium-browser")))]
+    {
+        let main_webview = main_webview.clone();
+        let (answer, read) = std::sync::mpsc::sync_channel(1);
+        pane.with_webview(move |platform| {
+            unsafe {
+                let view = platform.inner().cast::<objc2::runtime::AnyObject>();
+                let owned = crate::browser_runtime::browser_view_owns_first_responder(view);
+                let _: () = objc2::msg_send![view, setHidden: true];
+                if owned {
+                    let _ = main_webview.set_focus();
+                }
+            }
+            let _ = answer.send(());
+        })
+        .map_err(|error| error.to_string())?;
+        read.recv_timeout(BROWSER_CALLBACK_DEADLINE)
+            .map_err(|error| format!("browser hide timed out: {error}"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = main_webview;
+        pane.hide().map_err(|error| error.to_string())
     }
 }
 
@@ -4159,7 +4183,7 @@ pub(crate) fn close_browser_pane(
     // 2026-09-09: "터미널창을 덮어버리는 버그"). A pane the engine already
     // lost still gives up its label, as before.
     if let Ok(pane) = browser_pane_of(&app, &state, &label) {
-        let _ = pane.hide();
+        let _ = hide_browser_pane(&pane, &webview);
         pane.close().map_err(|error| error.to_string())?;
     }
     state.browser_panes().remove(&label);

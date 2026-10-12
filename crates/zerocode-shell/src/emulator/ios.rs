@@ -409,6 +409,16 @@ fn shutdown_simulator_by(mut command: Command, udid: &str) -> Result<(), String>
 /// window that is not there yet.
 #[cfg(target_os = "macos")]
 fn prepare_simulator_services(udid: &str) {
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+
+    let bundle = NSString::from_str("com.apple.iphonesimulator");
+    if NSRunningApplication::runningApplicationsWithBundleIdentifier(&bundle)
+        .firstObject()
+        .is_some()
+    {
+        return;
+    }
     let _ = crate::proc::quiet_command("open")
         .args([
             "-gj",
@@ -1361,32 +1371,6 @@ pub(crate) async fn start_emulator_stream(
             waking,
         );
         prepare_simulator_services(&chosen.udid);
-        // And then out of sight again. The person asked for a device inside
-        // THIS window; a second application appearing on their desktop is not
-        // part of that, and until now one always did — the launch above starts
-        // the Simulator hidden (`-j`), but `simctl boot` above makes it draw a
-        // window for the device anyway, and this line used to be an `unhide`
-        // that guaranteed the rest (33578e8).
-        //
-        // What that unhide bought was the window road, and the road above it
-        // has since made the purchase pointless: the helper reads the device's
-        // framebuffer through CoreSimulator with no window at all (main.swift
-        // 160-163), at 1.92ms a frame against the window's 11-14ms.
-        //
-        // Measured with the Simulator hidden, and measured the only way that
-        // proves anything: identical bytes across a hide would be exactly what
-        // a CACHED DEAD surface answers (main.swift 155-158 warns of it), so
-        // the screen was MADE to move instead. Safari opened on a hidden
-        // device gave ten distinct pictures in eleven polls and a surface seed
-        // that climbed 489 to 644 — a live road, not a remembered one. And
-        // `simctl io screenshot`, the road below both, never wanted a window
-        // either.
-        //
-        // So the window road keeps its wiring in the pump and stops being fed:
-        // it is now reachable only when the person has the Simulator open
-        // themselves, which is the one case where reading it costs them
-        // nothing they did not already choose.
-        crate::simulator_window::hide_simulator();
         // The input helper is NOT asked for here. Its cold start costs
         // 247-495ms on this machine (dlopen of the active Xcode's private
         // frameworks, then a SimServiceContext), and none of that is on the
@@ -2757,14 +2741,9 @@ mod tests {
             BootWatch::already_up()
         };
         if flag("ZEROCODE_LIVE_SIMULATOR_APP", "1") {
-            // What the window does between the boot and the pump: the
-            // Simulator application is asked for, hidden, so the device has
-            // a window of its own — and the application is on the device
-            // the whole time the helper reads its framebuffer.
             prepare_simulator_services(&udid);
-            crate::simulator_window::hide_simulator();
             println!(
-                "LIVE: +{}ms Simulator.app asked for, hidden",
+                "LIVE: +{}ms Simulator.app launch requested without activation",
                 started.elapsed().as_millis()
             );
         }

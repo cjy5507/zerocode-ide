@@ -55,7 +55,10 @@ types into a secret or unreadable field. Fields above 4096 UTF-8 bytes are
 left to the normal editing commands rather than truncated and replaced.
 Desktop walks also offer bounded Tab, Shift+Tab, Escape, Find and Select All
 actions, tied to the observed window, not model-written key strings.
-For concurrent use on macOS, add `--background` to an app walk or to
+The window's default input policy is background-only, including preparation,
+observation, nested walks and result inspection. `status.inputPolicy` reports
+the effective policy. A missing field on an older window is not proof that it
+enforces this default. Still add `--background` to an app walk or to
 app-scoped observation, click, scroll, set-value, type-text, paste-text,
 press-key and hotkey commands (zo's Computer tool: `background: true` on an
 app `walk`). This is local app/window-scoped input, not a separate computer.
@@ -84,8 +87,14 @@ window title. If accessibility has not exposed that control, observe or wait
 for it before retrying; do not turn confirmation off or switch to the shared
 mouse to force the action through.
 Apps that activate themselves or do not accept window-scoped events need an
-explicitly separate desktop/VM or a foreground handoff.
+explicitly separate desktop/VM or a handoff to the person. Do not restore or
+activate a window during preparation, remove background protection, change the
+person's input setting, or substitute a shared-input shell command. Only the
+person can explicitly enable shared desktop input in Computer Use settings.
+A background run cannot inherit that weaker policy partway through its steps.
 
+Under background-only policy, recipes never watch the person's shared pointer;
+each desktop input is admitted independently and an unsupported step stops.
 Recipes containing only built-in browser, emulator or explicitly background
 app steps do not watch the shared pointer and continue when the person moves
 it. A recipe containing a foreground desktop step retains the person's

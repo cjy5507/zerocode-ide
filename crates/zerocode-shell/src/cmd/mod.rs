@@ -20,6 +20,12 @@ pub(crate) mod browser;
 pub(crate) mod fs;
 pub(crate) mod github_pr;
 pub(crate) mod integration_prefs;
+pub(crate) mod managed_judgment;
+pub(crate) use managed_judgment::{
+    managed_judgment_apply, managed_judgment_cancel, managed_judgment_check,
+    managed_judgment_install, managed_judgment_prepare_runtime, managed_judgment_remove,
+    managed_judgment_start, managed_judgment_status, managed_judgment_stop,
+};
 pub(crate) mod onboarding;
 pub(crate) mod project;
 pub(crate) mod remote;
@@ -232,10 +238,10 @@ pub(crate) use settings::{
     patch_workspace_creation_prefs, read_primary_selection, save_pane_layouts, save_stage_layouts,
     scm_tree_rows, set_agent_teams_mode, set_artifacts_auto_open_beside,
     set_artifacts_retention_days, set_claude_autoswitch_mode, set_computer_confirm,
-    set_computer_generator_road, set_computer_live_reflex, set_confirm_close_pinned,
-    set_conversation_focus_view, set_ctrl_tab_order_mode, set_default_task_source,
-    set_diff_side_by_side, set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
-    set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
+    set_computer_generator_road, set_computer_input_policy, set_computer_live_reflex,
+    set_confirm_close_pinned, set_conversation_focus_view, set_ctrl_tab_order_mode,
+    set_default_task_source, set_diff_side_by_side, set_harness_settings, set_hidden_shortcuts,
+    set_hidden_task_sources, set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
     set_hide_sleeping_workspaces, set_keep_default_branch_awake, set_keybinding, set_panel_width,
     set_panel_widths, set_shortcut_visibility, set_sidebar_view,

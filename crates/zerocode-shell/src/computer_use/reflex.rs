@@ -1098,7 +1098,9 @@ fn watch_report(run: &str) -> Option<Value> {
 /// the window's helper session stands — never starting one.
 fn watch_in_the_background(run: &str, evidence: Option<PathBuf>, workspace: Option<PathBuf>) {
     let run = run.to_string();
+    let input_policy = super::input_policy::capture();
     std::thread::spawn(move || {
+        let _input_policy = super::input_policy::enter_captured(input_policy);
         let wire = Wire::of_this_machine();
         let ledger = systemone::ledger_of(&wire, &REFLEX_DECIDE);
         let ask = asker(wire, workspace);

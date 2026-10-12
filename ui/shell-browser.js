@@ -1988,10 +1988,9 @@ function paintEmulatorView(tab) {
 /* 기기 갈아타기: 옛 펌프를 멈추고 고른 기기로 새 스트림 — 탭은 그대로,
  * 이름표만 그 기기의 것이 된다.
  *
- * `focus`는 이 여는 일이 화면을 가져가도 되는가다. 다른 체크아웃에 선
- * 에이전트의 거울(t-6379)은 안 된다: 그 탭은 화면에 없으니 그리지 않고,
- * 같은 기기의 스트림이 이미 있어 그 탭으로 합쳐질 때도 사람의 화면을 그
- * 탭으로 넘기지 않는다.
+ * `focus`는 이 여는 일이 화면을 가져가도 되는가다. 에이전트의 자동 열기는
+ * 체크아웃과 무관하게 안 된다. 같은 기기의 스트림이 이미 있어 그 탭으로
+ * 합쳐질 때도 사람의 화면과 입력 수신자를 유지한다.
  *
  * `borrower`는 이 여는 일을 부탁한 에이전트의 판이다(t-6336) — 에이전트의
  * open만 싣는다. 백엔드는 이 시작이 기기를 부팅했을 때만 그 판에 빌려 준
@@ -2044,9 +2043,15 @@ async function switchEmulatorDevice(tab, platform, id, { focus = true, borrower 
       ? tabs.find((one) => one !== tab && one.kind === "emulator" && one.stream === said.stream)
       : null;
     if (existing) {
-      binaryDoor?.dispose();
-      closeTab(tab.id);
+      // The backend has already handed frames to this request's channel.
+      // Keep that channel on the surviving tab before removing the temporary
+      // tab. A normal close would also move the main document's keyboard.
+      dropEmulatorBinaryDoor(existing);
+      existing.binaryDoor = binaryDoor;
+      binaryDoor?.bind(said.stream);
+      dropTab(tab.id);
       if (focus) setActiveTab(existing.id);
+      syncEmulatorStreamVisibility();
       return;
     }
     tab.platform = platform;
@@ -2734,21 +2739,16 @@ let emulatorTabSeq = 0;
  * 넘겨주기·이름표 갈아입기·H264 터널로 갈아타기 — 는 `switchEmulatorDevice`가
  * 이미 전부 들고 있다. 여기서 다시 쓰지 않는다. */
 async function openEmulatorTab(platform = "ios", device, { from = null, agent = false } = {}) {
-  // 에이전트가 연 거울은 부른 판의 체크아웃에 선다(t-6379): 사람이 그
-  // 체크아웃을 보고 있으면 부른 판 옆에, 다른 곳을 보고 있으면 부른 판의
-  // 그룹에 탭으로만 서고 체크아웃·탭·초점·나눔은 사람의 것 그대로다(09-23
-  // 14:14·14:34·14:49, 워커의 거울 셋이 사람이 보던 dl 스테이지에 섰다).
-  // 부른 판을 모르면 — 판 키 없는 셸, 이 창에 없는 판 — 지금처럼 초점 옆에
-  // 세우고 그렇게 됐다고 한 줄 말한다. 팔레트는 지금 그대로다.
   const caller = from === null ? null : tabOfTerm(from);
   const away = caller !== null && caller.worktree !== activeWorktreePath;
   if (agent && caller === null) {
     toast(t(
       "emulator.agentOpenUnseated",
-      "에이전트가 에뮬레이터를 열었지만 요청한 터미널을 알 수 없어, 지금 보고 있는 화면 옆에 열었습니다.",
+      "에이전트가 에뮬레이터를 열었지만 요청한 터미널을 알 수 없어, 현재 그룹에 비활성 탭으로 추가했습니다.",
     ));
   }
-  const stood = away ? null : caller !== null ? standBeside(caller.pane) : standBesideFocused();
+  const focus = !agent && !away;
+  const stood = !focus ? null : caller !== null ? standBeside(caller.pane) : standBesideFocused();
   if (stood !== null) optimizeRichStageGroup(stood);
   emulatorTabSeq += 1;
   const id = `emulator:${emulatorTabSeq}`;
@@ -2761,11 +2761,11 @@ async function openEmulatorTab(platform = "ios", device, { from = null, agent = 
     working: true,
     live: false,
     emulatorEpoch: 0,
-    ...(away ? { worktree: caller.worktree, pane: caller.pane } : {}),
+    ...(caller === null ? {} : { worktree: caller.worktree, pane: caller.pane }),
     ...(stood === null ? {} : { pane: stood }),
     // 누구의 거울인가(t-6336): 그 판의 일이 끝나 기기가 반납되면 이 탭이 걷힌다.
     ...(caller === null ? {} : { borrower: from }),
-  }, { focus: !away });
+  }, { focus });
   if (stood !== null) persistStageLayouts();
   const tab = tabs.find((one) => one.id === id);
   if (!tab) return;
@@ -2777,7 +2777,7 @@ async function openEmulatorTab(platform = "ios", device, { from = null, agent = 
     })
     .catch(() => {});
   await switchEmulatorDevice(tab, platform, device, {
-    focus: !away,
+    focus,
     borrower: caller === null ? null : from,
   });
 }

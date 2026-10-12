@@ -22,7 +22,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openWindowTestPage } from "./window-boot.mjs";
 import { createRequire } from "node:module";
-import { contrastTable, setQualityTheme, settlePaint } from "./settings-quality.mjs";
+import { SETTINGS_QUALITY_SPEC, contrastTable, setQualityTheme, settlePaint } from "./settings-quality.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 /* Where the evidence goes: a person looks at these (t-5807, the operator's
@@ -1531,18 +1531,36 @@ export async function testJevDashboard(browser, origin, ok) {
           await window.__PAINTED__();
         });
         const drawer = await contrastTable(page, AxeBuilder, "#jev-view .jev-drawer");
+        const viewport = page.viewportSize();
+        await page.setViewportSize({ ...viewport, height: SETTINGS_QUALITY_SPEC.viewport.height });
         await page.evaluate(async () => {
           document.querySelector("#jev-view .jev-drawer-close").click();
           setSettingsOpen(true, "jev-enabled");
-          document.getElementById("typesafe-advanced").open = true;
           await window.__PAINTED__();
         });
+        const disclosures = await page.evaluateHandle(async () => {
+          const saved = [...document.querySelectorAll("#typesafe-card details")]
+            .map((element) => ({ element, open: element.open }));
+          for (const { element } of saved) element.open = true;
+          await window.__PAINTED__();
+          return saved;
+        });
         const frame = page.locator(".settings-frame");
+        await frame.evaluate((node) => node.scrollTo({ top: 0, left: 0, behavior: "instant" }));
+        await settlePaint(page);
         const scrollBefore = await frame.evaluate((node) => [node.scrollTop, node.scrollLeft]);
-        const clipped = await page.locator("#typesafe-key-input").evaluate((node) =>
-          node.getBoundingClientRect().top >= node.closest(".settings-frame").getBoundingClientRect().bottom);
+        const clipped = await page.locator("#typesafe-key-input").evaluate((node) => {
+          const control = node.getBoundingClientRect();
+          const bounds = node.closest(".settings-frame").getBoundingClientRect();
+          return control.top >= bounds.bottom || control.bottom <= bounds.top;
+        });
         const card = await contrastTable(page, AxeBuilder, "#typesafe-card");
         const scrollAfter = await frame.evaluate((node) => [node.scrollTop, node.scrollLeft]);
+        const hiddenImport = card.find((row) => row.target === "#managed-judgment-import-path");
+        ok(`${theme}: a control under a hidden provider panel is recorded as unmeasured, not passed`,
+          hiddenImport?.verdict === "hidden" && hiddenImport.ratio === null
+            && hiddenImport.why === "display:none at #managed-judgment-panel",
+          JSON.stringify(hiddenImport));
         const key = card.find((row) => row.target === "#typesafe-key-input");
         ok(`${theme}: the offscreen key placeholder is measured and the card's scroll is restored`,
           clipped && key?.ratio >= CONTRAST_FLOOR && key.fg !== null && key.bg !== null
@@ -1570,10 +1588,12 @@ export async function testJevDashboard(browser, origin, ok) {
             node.style.cssText = held.style;
           }, saved);
         }
-        await page.evaluate(() => {
-          document.getElementById("typesafe-advanced").open = false;
-          setSettingsOpen(false);
+        await disclosures.evaluate((saved) => {
+          for (const { element, open } of saved) element.open = open;
         });
+        await disclosures.dispose();
+        await page.evaluate(() => setSettingsOpen(false));
+        await page.setViewportSize(viewport);
         contrast[theme] = [
           ...dashboard.map((row) => ({ surface: "dashboard", ...row })),
           ...drawer.map((row) => ({ surface: "drawer", ...row })),
@@ -1591,12 +1611,14 @@ export async function testJevDashboard(browser, origin, ok) {
       await writeFile(join(EVIDENCE_DIR, "jev-contrast.json"),
         `${JSON.stringify(Object.fromEntries(Object.entries(contrast).map(([theme, list]) => [theme, least(list)])), null, 2)}\n`);
     }
-    const under = rows.filter((row) => row.verdict === "fail" || (row.ratio !== null && row.ratio < CONTRAST_FLOOR));
-    const unknown = rows.filter((row) => row.verdict === "unknown" || row.ratio === null);
-    ok(`every text on the dashboard and the card clears ${CONTRAST_FLOOR}:1 in both treatments`,
-      AxeBuilder !== null && rows.length > 0 && under.length === 0 && unknown.length === 0,
+    const visible = rows.filter((row) => row.verdict !== "hidden");
+    const under = visible.filter((row) => row.verdict === "fail" || (row.ratio !== null && row.ratio < CONTRAST_FLOOR));
+    const unknown = visible.filter((row) => row.verdict === "unknown" || row.ratio === null);
+    ok(`every visible text on the dashboard and the card clears ${CONTRAST_FLOOR}:1 in both treatments`,
+      AxeBuilder !== null && visible.length > 0 && under.length === 0 && unknown.length === 0,
       AxeBuilder === null ? "@axe-core/playwright is not installed" : JSON.stringify({
-        measured: rows.length, least: Math.min(...rows.filter((row) => row.ratio !== null).map((row) => row.ratio)),
+        measured: visible.length, hidden: rows.length - visible.length,
+        least: Math.min(...visible.filter((row) => row.ratio !== null).map((row) => row.ratio)),
         under: under.slice(0, 6), unknown: unknown.slice(0, 6) }));
 
     await testJevReview(page, ok);

@@ -293,6 +293,9 @@ use cmd::{
     list_automation_runs, list_automations, list_branches, list_claude_sessions, list_diff_notes,
     list_dir, list_quick_commands, list_run_evidence, list_skills, list_system_fonts,
     list_worktrees, listening_ports, log_window_error, logout_codex_login, machine_load,
+    managed_judgment_apply, managed_judgment_cancel, managed_judgment_check,
+    managed_judgment_install, managed_judgment_prepare_runtime, managed_judgment_remove,
+    managed_judgment_start, managed_judgment_status, managed_judgment_stop,
     mark_default_tabs_applied, mark_first_run_seen, mark_onboarding, merge_and_remove_worktree,
     mirror_ready, mouse_input, note_webview_error, note_worker_room_change, note_worker_room_seen,
     notification_probe, open_board_popout, open_browser_pane, open_commit_remote,
@@ -334,11 +337,12 @@ use cmd::{
     set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
     set_claude_autoswitch_mode, set_clipboard_image, set_compact_worktree_cards,
     set_computer_awake_mode, set_computer_confirm, set_computer_generator_road,
-    set_computer_live_reflex, set_confirm_close_pinned, set_conversation_focus_view,
-    set_crash_watchdog, set_ctrl_tab_order_mode, set_default_agent, set_default_task_source,
-    set_diff_side_by_side, set_dock_badge, set_external_worktree_visibility,
-    set_finish_notification_mode, set_guide_dismissed, set_harness_settings, set_hidden_shortcuts,
-    set_hidden_task_sources, set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
+    set_computer_input_policy, set_computer_live_reflex, set_confirm_close_pinned,
+    set_conversation_focus_view, set_crash_watchdog, set_ctrl_tab_order_mode, set_default_agent,
+    set_default_task_source, set_diff_side_by_side, set_dock_badge,
+    set_external_worktree_visibility, set_finish_notification_mode, set_guide_dismissed,
+    set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
+    set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
     set_hide_sleeping_workspaces, set_hooks_enabled, set_jev_enabled, set_jev_model,
     set_jev_review_enabled, set_judgment_provider, set_keep_default_branch_awake, set_keybinding,
@@ -2590,6 +2594,15 @@ fn main() -> ExitCode {
             set_route_classifier,
             set_jev_model,
             set_judgment_provider,
+            managed_judgment_apply,
+            managed_judgment_cancel,
+            managed_judgment_check,
+            managed_judgment_install,
+            managed_judgment_prepare_runtime,
+            managed_judgment_remove,
+            managed_judgment_start,
+            managed_judgment_status,
+            managed_judgment_stop,
             judgment_models,
             set_summon_profiles,
             check_typesafe_key,
@@ -3145,6 +3158,7 @@ fn main() -> ExitCode {
             set_computer_confirm,
             set_computer_generator_road,
             set_computer_live_reflex,
+            set_computer_input_policy,
             computer_confirm_answer,
             computer_handoff_code,
             computer_stop,
@@ -3716,6 +3730,7 @@ fn main() -> ExitCode {
                 handle.state::<AppState>().native_tray().begin_exit();
                 emulator::shutdown_all(handle);
                 codex_queue::shutdown_all();
+                cmd::managed_judgment::shutdown();
                 capture_scrollback_at_exit(handle);
                 // 원장의 마지막 플러시 — 디바운스가 아직 자고 있어도 여기서
                 // 적힌다(Orca quit의 flushStatusPersistSync와 같은 자리).
@@ -3819,6 +3834,7 @@ impl exit_runtime::Terminating for ExitSteps<'_> {
     }
 
     fn end_panes(&self) {
+        cmd::managed_judgment::shutdown();
         // Out of the pool, one by one: the last hold on each lets go and
         // the lane ends its child (`PtyLane`'s own drop). Their seats are
         // asleep by now, so the ledger settles nothing as they go.

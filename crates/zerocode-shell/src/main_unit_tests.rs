@@ -94,6 +94,10 @@ const BACKEND_PARTS: &[(&str, &str)] = &[
     ("cmd/second_brain.rs", include_str!("cmd/second_brain.rs")),
     ("cmd/worktree.rs", include_str!("cmd/worktree.rs")),
     ("cmd/settings.rs", include_str!("cmd/settings.rs")),
+    (
+        "cmd/managed_judgment.rs",
+        include_str!("cmd/managed_judgment.rs"),
+    ),
     ("cmd/session.rs", include_str!("cmd/session.rs")),
 ];
 
@@ -763,6 +767,70 @@ fn declared_names(code: &str) -> HashSet<String> {
     names
 }
 
+fn plain_block_arrow_scope(chars: &[char], opening: usize) -> Option<(usize, Vec<String>)> {
+    let mut cursor = opening + 1;
+    let mut parameters = Vec::new();
+    loop {
+        while chars.get(cursor).is_some_and(|value| value.is_whitespace()) {
+            cursor += 1;
+        }
+        if chars.get(cursor) == Some(&')') {
+            cursor += 1;
+            break;
+        }
+        if !chars
+            .get(cursor)
+            .is_some_and(|value| is_ident_start(*value))
+        {
+            return None;
+        }
+        let start = cursor;
+        while chars.get(cursor).is_some_and(|value| is_ident_char(*value)) {
+            cursor += 1;
+        }
+        parameters.push(chars[start..cursor].iter().collect());
+        while chars.get(cursor).is_some_and(|value| value.is_whitespace()) {
+            cursor += 1;
+        }
+        match chars.get(cursor) {
+            Some(',') => cursor += 1,
+            Some(')') => {}
+            _ => return None,
+        }
+    }
+    while chars.get(cursor).is_some_and(|value| value.is_whitespace()) {
+        cursor += 1;
+    }
+    if parameters.is_empty()
+        || chars.get(cursor) != Some(&'=')
+        || chars.get(cursor + 1) != Some(&'>')
+    {
+        return None;
+    }
+    cursor += 2;
+    while chars.get(cursor).is_some_and(|value| value.is_whitespace()) {
+        cursor += 1;
+    }
+    if chars.get(cursor) != Some(&'{') {
+        return None;
+    }
+    let mut depth = 0_usize;
+    while let Some(glyph) = chars.get(cursor) {
+        match glyph {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some((cursor + 1, parameters));
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
+}
+
 /// Bare `name(` call sites. A method call (`a.b()`) belongs to whatever
 /// object it is on, an object/class method declaration (`write(value) {`)
 /// introduces a member rather than calling a global, and a keyword's
@@ -792,9 +860,16 @@ fn called_names(code: &str) -> std::collections::BTreeSet<String> {
 
     let chars: Vec<char> = code.chars().collect();
     let mut called = std::collections::BTreeSet::new();
+    let mut parameter_scopes: Vec<(usize, Vec<String>)> = Vec::new();
     let mut i = 0;
 
     while i < chars.len() {
+        parameter_scopes.retain(|(end, _)| *end > i);
+        if chars[i] == '('
+            && let Some(scope) = plain_block_arrow_scope(&chars, i)
+        {
+            parameter_scopes.push(scope);
+        }
         let after_name_char = i > 0 && (is_ident_char(chars[i - 1]) || chars[i - 1] == '.');
         if !is_ident_start(chars[i]) || after_name_char {
             i += 1;
@@ -835,7 +910,11 @@ fn called_names(code: &str) -> std::collections::BTreeSet<String> {
             continue;
         }
         let word: String = chars[start..i].iter().collect();
-        if !KEYWORDS.contains(&word.as_str()) {
+        if !KEYWORDS.contains(&word.as_str())
+            && !parameter_scopes
+                .iter()
+                .any(|(_, parameters)| parameters.contains(&word))
+        {
             called.insert(word);
         }
     }
@@ -18171,6 +18250,36 @@ fn a_call_to_a_name_nobody_wrote_is_caught() {
 }
 
 #[test]
+fn block_arrow_parameters_are_local_calls_not_window_globals() {
+    let code =
+        strip_literals("new Promise((complete, fail) => { complete(); fail(); stillMissing(); });");
+    let calls = called_names(&code);
+    assert!(!calls.contains("complete") && !calls.contains("fail"));
+    assert!(calls.contains("stillMissing"));
+    assert!(!declared_names(&code).contains("fail"));
+}
+
+#[test]
+fn a_callback_parameter_does_not_hide_a_missing_call_outside_its_body() {
+    let inside = "new Promise((complete, fail) => { setTimeout(() => { fail(); }, 0); });";
+    assert!(!called_names(&strip_literals(inside)).contains("fail"));
+    let outside = format!("{inside} fail();");
+    assert!(called_names(&strip_literals(&outside)).contains("fail"));
+}
+
+#[test]
+fn call_arguments_and_default_value_calls_are_not_parameter_declarations() {
+    for source in [
+        "perform(complete, missing); missing();",
+        "const callback = (complete = missing(), failure) => failure();",
+    ] {
+        let code = strip_literals(source);
+        assert!(!declared_names(&code).contains("missing"));
+        assert!(called_names(&code).contains("missing"));
+    }
+}
+
+#[test]
 fn an_object_method_is_not_a_global_call_but_a_bare_call_still_is() {
     let method = called_names(&strip_literals(
         "const clipboardText = { async write(value) { return value; } };\n",
@@ -20153,6 +20262,126 @@ pub(crate) mod computer_desktop_wait {
     /// never refuses another's run.
     pub(crate) static ONE_HAND: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[cfg(unix)]
+    #[test]
+    fn an_omitted_background_flag_does_not_allow_a_shared_desktop_process() {
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(crate::computer_use::guard::stopped_reason(), None);
+        let answer = answer_computer_command(&words(&[
+            "run", "--program", "/bin/echo", "--args", "background-policy-probe", "--json",
+        ]));
+        assert_ne!(answer.exit_code, 0, "an unscoped program was started by default");
+        assert_eq!(envelope(&answer)["error"]["code"], "requires_foreground");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_shared_desktop_policy_preserves_the_existing_process_road() {
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _policy = crate::computer_use::input_policy::enter(
+            zerocode_core::computer_use_protocol::execution::InputPolicy::SharedDesktop,
+        );
+        let answer = answer_computer_command(&words(&[
+            "run", "--program", "/bin/echo", "--args", "background-policy-probe", "--json",
+        ]));
+        assert_eq!(answer.exit_code, 0, "{}", answer.stderr);
+        assert_eq!(envelope(&answer)["ok"], true);
+    }
+
+    #[test]
+    fn a_default_settings_document_does_not_allow_shared_desktop_input() {
+        assert_eq!(
+            crate::settings_runtime::SettingsDocument::default().computer_input_policy,
+            zerocode_core::computer_use_protocol::execution::InputPolicy::Background,
+        );
+    }
+
+    fn assert_revoked_confirmation_is_not_sent(declared: bool) {
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _policy = crate::computer_use::input_policy::enter(
+            crate::computer_use::input_policy::InputPolicy::SharedDesktop,
+        );
+        crate::computer_use::confirm::set_policy(crate::computer_use::confirm::Policy::default());
+        let mut argv = words(&["mouse-click", "--x", "1", "--y", "1"]);
+        if declared {
+            argv.extend(words(&["--confirming", "payment"]));
+        }
+        let command = zerocode_core::computer_use::parse_command(&argv).unwrap();
+        let mut calls = 0;
+        let answer = crate::agent_tools_runtime::call_with_confirmation_asker(
+            &command,
+            crate::computer_use::confirm::Asking::Person,
+            &mut |_, _| {
+                calls += 1;
+                Err(crate::computer_use::ComputerUseError::new(
+                    "confirmation_required",
+                    "payment: fixture",
+                ))
+            },
+            &mut |_, _, _| {
+                crate::computer_use::guard::stop(zerocode_core::computer_use::STOP_REASON_WINDOW);
+                crate::computer_use::guard::lift();
+                crate::computer_use::confirm::Decision::Allowed
+            },
+        );
+        assert_eq!(answer.unwrap_err().code, "stopped");
+        assert_eq!(calls, usize::from(!declared));
+    }
+
+    #[test]
+    fn a_declared_confirmation_cannot_revive_a_revoked_shared_request() {
+        assert_revoked_confirmation_is_not_sent(true);
+    }
+
+    #[test]
+    fn a_provider_confirmation_cannot_retry_a_revoked_shared_request() {
+        assert_revoked_confirmation_is_not_sent(false);
+    }
+
+    #[test]
+    fn program_output_is_bounded_while_the_pipe_is_fully_drained() {
+        let limit = zerocode_core::computer_use::COMPUTER_RUN_MAX_BYTES;
+        let mut input = std::io::Cursor::new(vec![b'x'; limit * 2]);
+        let kept = crate::agent_tools_runtime::bounded_computer_run_output(&mut input);
+        assert_eq!(kept.len(), limit + 1);
+        assert_eq!(input.position(), u64::try_from(limit * 2).unwrap());
+        assert!(zerocode_core::computer_use::desktop_run_output(&kept).1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_running_program_obeys_a_stop_while_it_is_in_flight() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let folder = tempfile::tempdir().unwrap();
+        let program = folder.path().join("wait-for-stop");
+        let ready = folder.path().join("ready");
+        std::fs::write(&program, b"#!/bin/sh\nprintf ready > ready\nexec /bin/sleep 5\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let args = words(&[
+            "run", "--program", program.to_str().unwrap(), "--cwd", folder.path().to_str().unwrap(), "--json",
+        ]);
+        let running = std::thread::spawn(move || {
+            let _policy = crate::computer_use::input_policy::enter(
+                crate::computer_use::input_policy::InputPolicy::SharedDesktop,
+            );
+            answer_computer_command(&args)
+        });
+        let started = std::time::Instant::now();
+        while !ready.exists() && started.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let was_running = ready.exists();
+        crate::computer_use::guard::stop(zerocode_core::computer_use::STOP_REASON_WINDOW);
+        let stopped_at = std::time::Instant::now();
+        let answer = running.join().unwrap();
+        crate::computer_use::guard::lift();
+        assert!(was_running, "the child must have started before the stop");
+        assert_eq!(answer.exit_code, 1, "the in-flight program ignored the stop");
+        assert_eq!(envelope(&answer)["error"]["code"], "stopped");
+        assert!(stopped_at.elapsed() < std::time::Duration::from_secs(2));
+    }
+
     fn envelope(answer: &zerocode_hookd::TeamAnswer) -> serde_json::Value {
         let line = [answer.stdout.as_str(), answer.stderr.as_str()]
             .into_iter()
@@ -20185,6 +20414,9 @@ pub(crate) mod computer_desktop_wait {
         let _hand = ONE_HAND
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _policy = crate::computer_use::input_policy::enter(
+            crate::computer_use::input_policy::InputPolicy::SharedDesktop,
+        );
         crate::computer_use::confirm::set_policy(crate::computer_use::confirm::Policy::default());
         let command = batch_of(&serde_json::json!([
             ["wait", "--ms", "1"],
@@ -20498,6 +20730,9 @@ pub(crate) mod computer_desktop_wait {
         let _hand = ONE_HAND
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _policy = crate::computer_use::input_policy::enter(
+            crate::computer_use::input_policy::InputPolicy::SharedDesktop,
+        );
         let words = |argv: &[&str]| {
             argv.iter()
                 .map(|word| (*word).to_string())
@@ -20537,7 +20772,7 @@ pub(crate) mod computer_desktop_wait {
             transfer: true,
             delete: true,
         });
-        let unguarded = answer_computer_command(&words(&[
+        let unguarded = zerocode_core::computer_use::parse_command(&words(&[
             "mouse-click",
             "--x",
             "1",
@@ -20546,12 +20781,18 @@ pub(crate) mod computer_desktop_wait {
             "--confirming",
             "payment",
             "--json",
-        ]));
-        assert_ne!(
-            envelope(&unguarded)["error"]["code"],
-            "confirmation_refused",
-            "a kind turned off is not asked about; the helper (absent here) answers"
+        ])).unwrap();
+        let mut calls = 0;
+        let result = crate::agent_tools_runtime::call_with_the_persons_last_step(
+            &unguarded,
+            crate::computer_use::confirm::Asking::Person,
+            &mut |_, _| {
+                calls += 1;
+                Ok(serde_json::json!({ "fixture": true }))
+            },
         );
+        assert!(result.is_ok(), "a disabled confirmation reaches the provider");
+        assert_eq!(calls, 1);
         crate::computer_use::confirm::set_policy(crate::computer_use::confirm::Policy::default());
     }
 
@@ -21201,9 +21442,12 @@ pub(crate) mod computer_desktop_wait {
         let _hand = ONE_HAND
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _policy = crate::computer_use::input_policy::enter(
+            crate::computer_use::input_policy::InputPolicy::SharedDesktop,
+        );
         let bin = tempfile::tempdir().expect("a folder for the stand-in programs");
         let echo = crate::test_host::echo_program(bin.path());
-        let echoed = desktop_run(&serde_json::json!({ "program": echo, "args": "hello there" }));
+        let echoed = desktop_run(&serde_json::json!({ "program": echo, "args": "hello there" })).unwrap();
         assert_eq!(echoed["spawned"], true, "{echoed}");
         assert_eq!(echoed["exitCode"], 0);
         assert_eq!(echoed["stdout"], "hello there\n");
@@ -21213,7 +21457,7 @@ pub(crate) mod computer_desktop_wait {
         let failed = desktop_run(&serde_json::json!({
             "program": crate::test_host::shell_program(),
             "args": "-c exit_7_please",
-        }));
+        })).unwrap();
         assert_eq!(failed["spawned"], true);
         assert_ne!(failed["exitCode"], 0);
         assert!(
@@ -21229,7 +21473,7 @@ pub(crate) mod computer_desktop_wait {
             let started = std::time::Instant::now();
             let slow = desktop_run(
                 &serde_json::json!({ "program": "/bin/sleep", "args": "5", "timeoutMs": 120 }),
-            );
+            ).unwrap();
             assert_eq!(slow["timedOut"], true, "{slow}");
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(3),
@@ -21237,7 +21481,7 @@ pub(crate) mod computer_desktop_wait {
             );
         }
 
-        let missing = desktop_run(&serde_json::json!({ "program": "/nonexistent/program" }));
+        let missing = desktop_run(&serde_json::json!({ "program": "/nonexistent/program" })).unwrap();
         assert_eq!(missing["spawned"], false);
 
         let answer = answer_computer_command(&[

@@ -179,6 +179,7 @@ pub(crate) fn set_judgment_provider(
     provider: judgment_provider::Provider,
 ) -> Result<TypeSafeSettings, RouterRefusal> {
     typesafe_settings::set_provider(&settings_path()?, provider)?;
+    super::managed_judgment::settings_changed();
     settings_now()
 }
 

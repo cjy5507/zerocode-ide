@@ -32,6 +32,7 @@ const PANE_OF = {
   // key, and this id is the one a walk reads (`paintTypeValueSlot`).
   "type-value-key-input": "computer-use",
   "computer-live-reflex": "computer-use",
+  "computer-shared-desktop": "computer-use",
   "show-automations": "appearance",
   "show-tasks": "appearance",
   "worktree-prefix": "git",
@@ -540,6 +541,11 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
     computerLiveReflex = snapshot.computer_live_reflex === true;
     paintComputerLiveReflex();
   }
+  if (first || hasSetting(snapshot, "computer_input_policy")) {
+    computerInputPolicyKnown = ["background", "shared-desktop"].includes(snapshot.computer_input_policy);
+    computerInputPolicy = snapshot.computer_input_policy === "shared-desktop" ? "shared-desktop" : "background";
+    paintComputerInputPolicy();
+  }
   if (hasSetting(snapshot, "computer_generator_road")) {
     computerGeneratorRoad = normalizeGeneratorRoad(snapshot.computer_generator_road);
     paintComputerGeneratorRoad();
@@ -997,6 +1003,7 @@ function showSettingsPane(pane) {
   }
   if (pane === "api-routers" && arriving) {
     void refreshApiRouters();
+    if (judgmentProviderController.current()?.kind === "local" && judgmentProviderController.localMode === "managed") void managedJudgmentController.refresh();
   }
   if (pane === "onboarding" && arriving) {
     paintSettingsOnboarding();
@@ -3128,6 +3135,25 @@ function computerUseCoverageSummary() {
 const COMPUTER_CONFIRM_KINDS = ["payment", "transfer", "delete"];
 let computerConfirmPolicy = { payment: true, transfer: true, delete: true };
 let computerGuard = null;
+let computerInputPolicy = "background";
+let computerInputPolicyKnown = false;
+
+function paintComputerInputPolicy() {
+  el("computer-shared-desktop").checked = computerInputPolicy === "shared-desktop";
+  el("computer-shared-desktop").disabled = !computerInputPolicyKnown;
+  const state = el("computer-input-policy-state");
+  state.removeAttribute("data-i18n");
+  say(state, () => computerInputPolicyKnown
+    ? t(computerInputPolicy === "background" ? "computerUse.backgroundActive" : "computerUse.sharedActive",
+      computerInputPolicy === "background" ? "배경 입력만 허용됨" : "공유 데스크톱 입력이 허용됨")
+    : t("computerUse.inputPolicyUnknown", "현재 입력 정책을 확인하지 못했습니다."));
+}
+
+el("computer-shared-desktop").addEventListener("change", () => {
+  if (!computerInputPolicyKnown) return;
+  computerInputPolicy = el("computer-shared-desktop").checked ? "shared-desktop" : "background";
+  void commitSetting("computer_input_policy", "set_computer_input_policy", { policy: computerInputPolicy });
+});
 
 function paintComputerConfirm() {
   for (const kind of COMPUTER_CONFIRM_KINDS) {

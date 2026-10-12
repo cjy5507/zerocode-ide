@@ -1657,7 +1657,9 @@ pub(crate) fn begin(
         let mut world = roads.world(call, &ask, &mut generator, &mut enabled);
         Autopilot::start(asked, facts, workspace.clone(), &mut world)?
     };
+    let input_policy = super::super::input_policy::capture();
     std::thread::spawn(move || {
+        let _input_policy = super::super::input_policy::enter_captured(input_policy);
         let mut autopilot = autopilot;
         let mut generator = plan::Background::window(setup);
         let mut roads = Roads::of(&wire, workspace);

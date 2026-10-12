@@ -1382,6 +1382,38 @@ pub(crate) fn set_computer_confirm(
     Ok(snapshot)
 }
 
+#[tauri::command(async)]
+pub(crate) fn set_computer_input_policy(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    policy: zerocode_core::computer_use_protocol::execution::InputPolicy,
+) -> Result<SettingsSnapshot, String> {
+    let mut revoked = false;
+    let snapshot = commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::COMPUTER_INPUT_POLICY],
+        |settings| {
+            revoked = settings.computer_input_policy
+                == zerocode_core::computer_use_protocol::execution::InputPolicy::SharedDesktop
+                && policy
+                    == zerocode_core::computer_use_protocol::execution::InputPolicy::Background;
+            settings.computer_input_policy = policy;
+            Ok(())
+        },
+    )?;
+    if revoked {
+        computer_use::guard::stop(zerocode_core::computer_use::STOP_REASON_WINDOW);
+        let _ = app.emit(
+            "computer:activity",
+            computer_use::guard::activity_report(None),
+        );
+    }
+    Ok(snapshot)
+}
+
 /// Whether a live reflex run may start (`computer_live_reflex`, t-10221):
 /// the settings page offers it on only when the platform, both permissions
 /// and a check with this helper stand; the reflex door reads it again at

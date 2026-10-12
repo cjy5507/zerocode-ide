@@ -82,6 +82,20 @@ export async function contrastTable(page, AxeBuilder, include) {
       .some((check) => check.data?.messageKey === "hidden")) {
       const target = node.target.join(" ");
       const control = page.locator(target);
+      const hiddenBy = await control.evaluate((element) => {
+        for (let current = element; current; current = current.parentElement) {
+          if (getComputedStyle(current).display === "none") {
+            return current.id ? `#${current.id}` : current.tagName.toLowerCase();
+          }
+        }
+        return null;
+      });
+      if (hiddenBy !== null) {
+        rows.push({ verdict: "hidden", target, text: "", fg: null, bg: null,
+          ratio: null, size: null, why: `display:none at ${hiddenBy}` });
+        console.info(`contrast: skipped hidden ${target} (display:none at ${hiddenBy})`);
+        continue;
+      }
       const scroll = await control.evaluateHandle((element) => {
         const saved = [];
         for (let at = element; at; at = at.parentElement) {
@@ -95,6 +109,17 @@ export async function contrastTable(page, AxeBuilder, include) {
         const measured = findings(await analyze(target))
           .find((one) => one.node.target.join(" ") === target);
         if (measured) ({ verdict, node } = measured);
+      } catch (error) {
+        const ancestors = await control.evaluate((element) => {
+          const states = [];
+          for (let current = element; current && states.length < 16; current = current.parentElement) {
+            states.push({ tag: current.tagName, id: current.id, hidden: current.hidden,
+              open: current.tagName === "DETAILS" ? current.open : null,
+              display: getComputedStyle(current).display });
+          }
+          return states;
+        }).catch(() => []);
+        throw new Error(`contrast target ${target}: ${JSON.stringify(ancestors)}; ${String(error)}`);
       } finally {
         await scroll.evaluate((saved) => {
           for (const { element, top, left } of saved) element.scrollTo({ top, left, behavior: "instant" });
@@ -491,18 +516,45 @@ export function performanceFailures(performance) {
   return { overBudget, longTasks: performance.long_tasks };
 }
 
-export async function settlePaint(page) {
-  await page.evaluate(async () => {
+export async function settlePaint(page, timeoutMs = 5_000) {
+  await page.evaluate(async (deadlineMs) => {
     const nextPaint = () => new Promise((done) =>
       requestAnimationFrame(() => requestAnimationFrame(done)));
-    await nextPaint();
-    const finiteAnimations = document.getAnimations({ subtree: true }).filter((animation) => {
+    let phase = "first paint";
+    let deadline;
+    const moving = () => document.getAnimations({ subtree: true }).some((animation) => {
       const iterations = animation.effect?.getTiming().iterations;
-      return iterations !== Infinity;
+      return iterations !== Infinity && (animation.pending || !["finished", "idle"].includes(animation.playState));
     });
-    await Promise.all(finiteAnimations.map((animation) => animation.finished.catch(() => {})));
-    await nextPaint();
-  });
+    const paint = async () => {
+      await nextPaint();
+      for (;;) {
+        phase = "finite animations";
+        while (moving()) await nextPaint();
+        phase = "last paint";
+        await nextPaint();
+        if (!moving()) return;
+      }
+    };
+    const timedOut = new Promise((_resolve, reject) => {
+      deadline = setTimeout(() => {
+        const animations = document.getAnimations({ subtree: true }).slice(0, 24).map((animation) => ({
+          target: animation.effect?.target?.id ?? animation.effect?.target?.tagName,
+          name: animation.animationName ?? animation.transitionProperty,
+          state: animation.playState,
+          pending: animation.pending,
+          rate: animation.playbackRate,
+          iterations: String(animation.effect?.getTiming().iterations),
+        }));
+        reject(new Error(`settings paint did not settle: ${JSON.stringify({ phase, visibility: document.visibilityState, animations })}`));
+      }, deadlineMs);
+    });
+    try {
+      await Promise.race([paint(), timedOut]);
+    } finally {
+      clearTimeout(deadline);
+    }
+  }, timeoutMs);
 }
 
 function percentile(values, quantile) {

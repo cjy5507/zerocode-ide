@@ -5,6 +5,7 @@
 //! pid. `resume` lifts both; `status` reads both.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 use zerocode_core::computer_use_protocol::error_code;
@@ -13,6 +14,11 @@ use super::ComputerUseError;
 
 /// Why the window refuses actions, if it does.
 static STOPPED: Mutex<Option<String>> = Mutex::new(None);
+static STOP_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(super) fn stop_generation() -> u64 {
+    STOP_GENERATION.load(Ordering::Acquire)
+}
 /// The helper's pid, remembered when a session stood, so a stop can reach it
 /// without the session's lock.
 static HELPER_PID: Mutex<Option<i32>> = Mutex::new(None);
@@ -60,6 +66,7 @@ pub fn adopt(reason: &str) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if held.is_none() {
+        STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
         *held = Some(reason.to_string());
     }
 }
@@ -67,6 +74,7 @@ pub fn adopt(reason: &str) {
 /// Stop now: the window refuses every action from here on, and the helper is
 /// told by signal so an action already in flight ends at its next event.
 pub fn stop(reason: &str) -> Value {
+    STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
     *STOPPED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.to_string());

@@ -5772,13 +5772,17 @@ function closeTab(id) {
   // ⌘⇧T that brought back the URL with none of the page's state would be a
   // different page wearing the same address.
   if (tab.kind === "browser") {
+    const ownedFocus = activeTabId === id && (
+      document.activeElement === document.body
+      || groupOf(tab.pane)?.browserView?.contains(document.activeElement)
+    );
     // The one door a browser tab leaves by on purpose — the strip's ×, ⌘W,
     // 「탭 닫기」, and the agent's `zerocode-browser close`, which the window
     // routes here so that it walks exactly this road. Said out loud
     // (`closed`), because it is what tells the restore record to forget this
     // address; no other road may.
     dropTab(id, { closed: true });
-    if (termFloat.hidden) keySink.focus();
+    if (ownedFocus && termFloat.hidden) keySink.focus();
     return;
   }
   // Documents go through the one door that asks about unsaved typing, and
