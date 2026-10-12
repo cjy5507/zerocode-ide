@@ -655,6 +655,7 @@ class ReceiptTests(unittest.TestCase):
                 with self.assertRaisesRegex(gate.UnknownInput, "Node or Git configuration search scopes are undeclared"):
                     self.args.trust["configure"](self.args)
                 self.repin_policy(original)
+                gate.provenance(self.args)
                 self.assertEqual(self.fingerprint(), baseline)
 
     def test_even_a_trusted_manifest_cannot_give_a_child_ledger_credentials(self):
