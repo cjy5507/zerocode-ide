@@ -600,3 +600,153 @@ mod tests {
         assert_eq!(super::diff_theme_for_bg(Some((255, 255, 255))), super::DiffTheme::Light);
     }
 }
+
+/// Two number columns, a marker for the lines a hunk gap skipped, and the
+/// changed words painted over the line tint (t-48216).
+#[cfg(test)]
+mod two_column_tests {
+    use runtime::message_stream::{DiffHunk, DiffLine, DiffLineKind, DiffView};
+
+    use super::{hunk_lines, hunk_lines_for_palette};
+    use crate::tui::ansi::{Color, Line};
+    use crate::tui::palette::{ColorLevel, TerminalPalette};
+
+    fn line(kind: DiffLineKind, text: &str) -> DiffLine {
+        DiffLine {
+            kind,
+            text: text.to_string(),
+        }
+    }
+
+    fn hunk(old_start: u32, new_start: u32, lines: Vec<DiffLine>) -> DiffHunk {
+        DiffHunk {
+            old_start,
+            old_lines: 0,
+            new_start,
+            new_lines: 0,
+            lines,
+        }
+    }
+
+    fn view(hunks: Vec<DiffHunk>) -> DiffView {
+        DiffView {
+            old_path: Some("src/app.py".into()),
+            new_path: Some("src/app.py".into()),
+            language: None,
+            hunks,
+        }
+    }
+
+    fn plain(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(Line::plain).collect()
+    }
+
+    #[test]
+    fn old_and_new_numbers_stand_in_their_own_columns() {
+        let lines = hunk_lines(
+            &view(vec![hunk(
+                100,
+                200,
+                vec![
+                    line(DiffLineKind::Context, "kept"),
+                    line(DiffLineKind::Removed, "gone"),
+                    line(DiffLineKind::Added, "fresh"),
+                    line(DiffLineKind::Context, "kept too"),
+                ],
+            )]),
+            80,
+        );
+        assert_eq!(
+            plain(&lines),
+            vec![
+                "100  200   kept",
+                "101      - gone",
+                "     201 + fresh",
+                "102  202   kept too",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gap_between_two_hunks_says_how_many_lines_it_skipped() {
+        let lines = hunk_lines(
+            &view(vec![
+                hunk(
+                    1,
+                    1,
+                    vec![line(DiffLineKind::Context, "a"), line(DiffLineKind::Context, "b")],
+                ),
+                hunk(
+                    7,
+                    7,
+                    vec![line(DiffLineKind::Context, "g"), line(DiffLineKind::Added, "h")],
+                ),
+            ]),
+            80,
+        );
+        assert_eq!(
+            plain(&lines),
+            vec![
+                "1  1   a",
+                "2  2   b",
+                "     ⋯ 4 unchanged lines",
+                "7  7   g",
+                "   8 + h",
+            ]
+        );
+    }
+
+    #[test]
+    fn one_skipped_line_is_one_unchanged_line() {
+        let lines = hunk_lines(
+            &view(vec![
+                hunk(1, 1, vec![line(DiffLineKind::Context, "a")]),
+                hunk(3, 3, vec![line(DiffLineKind::Added, "c")]),
+            ]),
+            80,
+        );
+        assert_eq!(plain(&lines)[1], "     ⋯ 1 unchanged line");
+    }
+
+    #[test]
+    fn the_changed_words_are_painted_over_the_line_tint() {
+        let palette = TerminalPalette::new((220, 220, 220), (20, 20, 20), ColorLevel::TrueColor);
+        let lines = hunk_lines_for_palette(
+            &view(vec![hunk(
+                9,
+                9,
+                vec![
+                    line(DiffLineKind::Removed, "        self.wfile.write(str(TODOS).encode())"),
+                    line(DiffLineKind::Added, "        self.wfile.write(json.dumps(TODOS).encode())"),
+                ],
+            )]),
+            100,
+            Some(palette),
+        );
+        let background_of = |row: &Line, needle: &str| -> Option<Color> {
+            let mut at = 0usize;
+            let start = row.plain().find(needle).expect("needle on the row");
+            for span in &row.spans {
+                let end = at + span.text.len();
+                if at <= start && start < end {
+                    return span.style.bg;
+                }
+                at = end;
+            }
+            None
+        };
+        for (row, changed) in [(&lines[0], "str"), (&lines[1], "json.dumps")] {
+            let tint = background_of(row, "self.wfile");
+            let emphasis = background_of(row, changed);
+            assert!(tint.is_some(), "the line keeps its tint: {row:?}");
+            assert!(emphasis.is_some(), "the changed words keep a background: {row:?}");
+            assert_ne!(emphasis, tint, "`{changed}` must stand out from its line: {row:?}");
+        }
+        let unchanged_tail = background_of(&lines[1], ".encode()");
+        assert_eq!(
+            unchanged_tail,
+            background_of(&lines[1], "self.wfile"),
+            "only the changed words are emphasised"
+        );
+    }
+}
