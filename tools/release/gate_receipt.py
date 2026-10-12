@@ -143,7 +143,7 @@ def paths_digest(paths, excluded=()):
 def observed(call):
     try:
         return call()
-    except (OSError, UnknownInput, subprocess.SubprocessError, ValueError, RuntimeError):
+    except (OSError, UnknownInput, subprocess.SubprocessError, ValueError, RuntimeError, TypeError, KeyError):
         return None
 
 

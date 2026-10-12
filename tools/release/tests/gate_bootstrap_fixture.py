@@ -40,7 +40,16 @@ def prepare(root, launcher):
     python = runtime / "bin" / ("python%d.%d" % sys.version_info[:2])
     python.parent.mkdir(parents=True)
     shutil.copy2(Path(sys.executable).resolve(), python)
-    shutil.copytree(sysconfig.get_path("stdlib"), stdlib,
+    source = Path(sysconfig.get_path("stdlib"))
+    size = 0
+    for directory, children, files in os.walk(source):
+        children[:] = [name for name in children if name not in {"site-packages", "__pycache__"}]
+        if any((Path(directory) / name).is_symlink() for name in children + files):
+            raise AssertionError("fixture standard library contains an undeclared link")
+        size += sum((Path(directory) / name).stat().st_size for name in files)
+        if size > 256 * 1024 * 1024:
+            raise AssertionError("fixture standard library exceeds its scratch allocation")
+    shutil.copytree(source, stdlib,
                     ignore=shutil.ignore_patterns("site-packages", "__pycache__"))
     return ["--launcher", str(Path(launcher).resolve()), "--launcher-sha256", file_hash(launcher),
             "--python", str(python), "--python-sha256", file_hash(python),

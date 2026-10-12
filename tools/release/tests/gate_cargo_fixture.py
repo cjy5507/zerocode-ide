@@ -44,7 +44,10 @@ def prepare(args, root, producer):
     args.command = [str(Path(os.sys.executable).resolve()), str(script)]
     args.script_file = [str(script)]
     args.lock_file = [str(repo / "Cargo.lock"), str(package / "Cargo.lock")]
-    args.toolchain_root.extend([str(toolchain), str(developer)])
+    tool_inputs = [toolchain / "lib", *(toolchain / "bin" / name for name in ("cargo", "rustc", "rustdoc")),
+                   sdk, linker, developer / "usr/bin/ld", developer / "usr/bin/ar", developer / "usr/lib/clang"]
+    tool_inputs.extend(sorted((developer / "usr/lib").glob("*.dylib")))
+    args.toolchain_root.extend(str(path) for path in tool_inputs)
     args.fixture_tools = {name: toolchain / "bin" / name for name in ("cargo", "rustc", "rustdoc")}
     args.fixture_tools.update({"cc": linker, "clang": linker, "ld": developer / "usr/bin/ld",
                               "ar": developer / "usr/bin/ar"})
@@ -57,6 +60,6 @@ def prepare(args, root, producer):
                    "CARGO_INCREMENTAL": "0", "CARGO_NET_OFFLINE": "true",
                    "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0",
                    "RUSTC": str(toolchain / "bin/rustc"), "RUSTDOC": str(toolchain / "bin/rustdoc"),
-                   "CC": str(linker), "SDKROOT": str(sdk), "DEVELOPER_DIR": str(developer),
+                   "CC": str(linker), "SDKROOT": str(sdk),
                    "RUSTFLAGS": "-C linker=" + str(linker), "TMPDIR": str(temporary), "TMP": str(temporary), "TEMP": str(temporary)}
     return environment, [str(path) for path in outputs]

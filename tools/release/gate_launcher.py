@@ -127,7 +127,10 @@ def path_bindings(environment, roots, producer):
             raise producer.UnknownInput("tool search directory is missing or relative")
         entries = []
         for path in sorted(directory.iterdir()):
-            target = path.resolve(strict=True)
+            try:
+                target = path.resolve(strict=True)
+            except (OSError, RuntimeError) as why:
+                raise producer.UnknownInput("PATH contains a missing or cyclic tool link") from why
             if not target.is_file() or not any(target == root or root.is_dir() and target.is_relative_to(root) for root in roots):
                 raise producer.UnknownInput("PATH exposes a tool without a declared identity")
             entries.append([path.name, stat.S_IMODE(path.lstat().st_mode),
@@ -145,7 +148,10 @@ def cache_bindings(outputs, producer):
         if path.is_dir():
             for child in path.rglob("*"):
                 if child.is_symlink():
-                    target = child.resolve(strict=True)
+                    try:
+                        target = child.resolve(strict=True)
+                    except (OSError, RuntimeError) as why:
+                        raise producer.UnknownInput("cache output contains a missing or cyclic link") from why
                     if not target.is_relative_to(path):
                         raise producer.UnknownInput("cache output link reaches an input outside its output root")
         bindings.append(str(path))
