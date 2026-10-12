@@ -407,11 +407,12 @@ fn the_working_row_carries_the_captured_interrupt_hint() {
     assert!(rendered.contains("Working"));
 }
 
-/// A long tool call keeps the turn timer and says what is running, where, and
-/// for how long. The suffix is dim like the captured interrupt hint; the
-/// shimmer prefix remains independently pinned above.
+/// A long tool call keeps the turn timer and nothing else (t-48216): the call
+/// names itself on its own row, with its own spinner, so the status row does
+/// not name it a second time or run a second clock. The suffix is dim like
+/// the captured interrupt hint; the shimmer prefix remains pinned above.
 #[test]
-fn the_working_row_names_the_current_tool_target_and_elapsed_time() {
+fn the_working_row_keeps_one_clock_while_a_tool_runs() {
     let mut status = Status::working(Duration::from_secs(12));
     status.note_tool_started(
         "toolu_read",
@@ -421,10 +422,7 @@ fn the_working_row_names_the_current_tool_target_and_elapsed_time() {
     status.elapsed = Duration::from_secs(19);
 
     let line = status.line(120);
-    assert_eq!(
-        line.plain(),
-        "• Working (19s • esc to interrupt) · Read · tui/view.rs · 7s"
-    );
+    assert_eq!(line.plain(), "• Working (19s • esc to interrupt)");
     let mut rendered = String::new();
     write_spans(&line, &mut rendered);
     // The shimmer prefix is truecolor or a DIM/plain/BOLD ramp depending on
@@ -432,13 +430,13 @@ fn the_working_row_names_the_current_tool_target_and_elapsed_time() {
     // hint case above): the plain text above pins its vocabulary, and only
     // the dim suffix pins its bytes.
     assert!(
-        rendered.ends_with("\u{1b}[2m(19s • esc to interrupt) · Read · tui/view.rs · 7s"),
-        "tool suffix lost its byte grammar: {rendered:?}"
+        rendered.ends_with("\u{1b}[2m(19s • esc to interrupt)"),
+        "the suffix lost its byte grammar: {rendered:?}"
     );
 }
 
 #[test]
-fn the_working_row_compacts_a_command_to_its_first_word() {
+fn the_working_row_leaves_a_running_command_to_its_own_row() {
     let mut status = Status::working(Duration::from_secs(3));
     status.note_tool_started(
         "toolu_bash",
@@ -447,10 +445,7 @@ fn the_working_row_compacts_a_command_to_its_first_word() {
     );
     status.elapsed = Duration::from_secs(5);
 
-    assert_eq!(
-        status.line(120).plain(),
-        "• Working (5s • esc to interrupt) · Bash · cargo · 2s"
-    );
+    assert_eq!(status.line(120).plain(), "• Working (5s • esc to interrupt)");
 }
 
 #[test]
@@ -599,37 +594,29 @@ fn status_detail_bytes_pin_the_empty_case() {
 // 3. 마크다운 헤딩
 // ============================================================================
 
-/// 캡처의 답변 첫 줄. codex 는 `### ` 를 지우지 않고 h3 스타일만 입힌다.
+/// 캡처의 답변 첫 줄 `### 자기소개`. 해시는 지우고(t-48216) h3 스타일만 입힌다.
 #[test]
-fn a_heading_keeps_its_hashes_and_takes_bold_italic() {
-    let measured = "\u{1b}[1m\u{1b}[3m### 자기소개";
-    assert!(contains(&capture(), measured.as_bytes()), "capture drifted");
+fn a_heading_drops_its_hashes_and_takes_bold_italic() {
+    assert!(
+        contains(&capture(), "\u{1b}[1m\u{1b}[3m### 자기소개".as_bytes()),
+        "capture drifted"
+    );
 
     let mut rendered = String::new();
     write_spans(&markdown::render("### 자기소개")[0], &mut rendered);
-    assert_eq!(rendered, measured);
+    assert_eq!(rendered, "\u{1b}[1m\u{1b}[3m자기소개");
 }
 
-/// 답변 셀 전체 — dim `• ` 마커가 앞에 붙는다(캡처: `ESC[2m• ` 뒤에 헤딩).
+/// 답변 셀 전체 — 불릿 없이 두 칸 들여 선다(t-48216). 캡처의 codex 행은
+/// `ESC[2m• ESC[22mESC[1mESC[3m### 자기소개` 였다.
 #[test]
-fn the_answer_cell_prefixes_the_heading_with_a_dim_bullet() {
-    let measured = "\u{1b}[2m• ";
-    assert!(contains(&capture(), measured.as_bytes()), "capture drifted");
-
+fn the_answer_cell_hangs_the_heading_two_columns_in() {
     let mut stream = MarkdownStream::answer(80);
     stream.push("### 자기소개\n");
     let lines = stream.finish();
     let mut rendered = String::new();
     write_spans(lines.last().expect("body"), &mut rendered);
-    // 캡처(`codex-tui-v0.149.1-turn.bin`) 히스토리 22행 그대로:
-    // `ESC[2m• ESC[22mESC[1mESC[3m### 자기소개`. dim 을 끄는 것은 `ESC[0m` 이
-    // 아니라 `ESC[22m` 이다(codex `ModifierDiff::queue`).
-    let measured_row = "\u{1b}[2m• \u{1b}[22m\u{1b}[1m\u{1b}[3m### 자기소개";
-    assert!(
-        contains(&capture(), measured_row.as_bytes()),
-        "capture no longer frames the answer heading this way"
-    );
-    assert_eq!(rendered, measured_row);
+    assert_eq!(rendered, "  \u{1b}[1m\u{1b}[3m자기소개");
 }
 
 /// 유저 셀의 `› ` — 캡처는 bold+dim 이다.
@@ -1279,7 +1266,7 @@ fn newline_terminated_source_still_commits_at_the_newline() {
                 .map(Line::plain),
         );
     }
-    assert_eq!(out, vec![String::new(), "• - one".to_string()]);
+    assert_eq!(out, vec![String::new(), "  • one".to_string()]);
 }
 
 // ============================================================================
@@ -1908,7 +1895,7 @@ fn history_row(line: &Line) -> String {
 fn the_committed_table_is_the_captured_grid() {
     let capture = table_capture();
     let measured = [
-        "\u{1b}[38;2;249;226;175;49m\u{1b}[K\u{1b}[1m\u{1b}[2m\u{1b}[38;2;249;226;175;49m• \u{1b}[22m Name     Count    Status\u{1b}[39m\u{1b}[49m\u{1b}[0m",
+        "\u{1b}[38;2;249;226;175;49m\u{1b}[K\u{1b}[1m\u{1b}[38;2;249;226;175;49m   Name     Count    Status\u{1b}[39m\u{1b}[49m\u{1b}[0m",
         "\u{1b}[39;49m\u{1b}[K  \u{1b}[2m━━━━━━━  ━━━━━━━  ━━━━━━━━━\u{1b}[39m\u{1b}[49m\u{1b}[0m",
         "\u{1b}[39;49m\u{1b}[K   alpha    1        ok\u{1b}[39m\u{1b}[49m\u{1b}[0m",
         "\u{1b}[39;49m\u{1b}[K  \u{1b}[2m───────  ───────  ─────────\u{1b}[39m\u{1b}[49m\u{1b}[0m",
@@ -1918,7 +1905,9 @@ fn the_committed_table_is_the_captured_grid() {
         "\u{1b}[39;49m\u{1b}[K  \u{1b}[2m───────  ───────  ─────────\u{1b}[39m\u{1b}[49m\u{1b}[0m",
         "\u{1b}[39;49m\u{1b}[K   delta    4444     ok\u{1b}[39m\u{1b}[49m\u{1b}[0m",
     ];
-    for row in measured {
+    // The first row is the capture's own row less codex's dim `• `: an answer
+    // hangs two columns in without a bullet (t-48216).
+    for row in &measured[1..] {
         assert!(
             contains(&capture, row.as_bytes()),
             "capture no longer holds {row:?}"
@@ -1983,7 +1972,7 @@ fn a_streaming_table_lives_in_the_tail_until_it_finishes() {
     assert_eq!(
         tail,
         vec![
-            "•  Name     Count    Status".to_string(),
+            "   Name     Count    Status".to_string(),
             "  ━━━━━━━  ━━━━━━━  ━━━━━━━━━".to_string(),
             "   alpha    1        ok".to_string(),
             "  ───────  ───────  ─────────".to_string(),
@@ -2000,7 +1989,7 @@ fn a_streaming_table_lives_in_the_tail_until_it_finishes() {
     write_spans(&stream.tail()[0], &mut head);
     assert_eq!(
         head,
-        "\u{1b}[1m\u{1b}[2m\u{1b}[38;2;249;226;175;49m• \u{1b}[22m Name     Count    Status"
+        "\u{1b}[1m\u{1b}[38;2;249;226;175;49m   Name     Count    Status"
     );
 
     // 끝나면 한 번에 내려간다.
@@ -2077,14 +2066,16 @@ const CODEBLOCK_SOURCE: &str = concat!(
 fn the_committed_code_fence_is_the_captured_highlighting() {
     let capture = codeblock_capture();
     let measured = [
-        "\u{1b}[39;49m\u{1b}[K\u{1b}[2m• \u{1b}[22m\u{1b}[38;2;203;166;247;49mfn\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;137;180;250;49mmain\u{1b}[38;2;147;153;178;49m()\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;147;153;178;49m{\u{1b}[39m\u{1b}[49m\u{1b}[0m",
+        "\u{1b}[39;49m\u{1b}[K  \u{1b}[38;2;203;166;247;49mfn\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;137;180;250;49mmain\u{1b}[38;2;147;153;178;49m()\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;147;153;178;49m{\u{1b}[39m\u{1b}[49m\u{1b}[0m",
         "\u{1b}[39;49m\u{1b}[K  \u{1b}[38;2;205;214;244;49m    \u{1b}[38;2;203;166;247;49mlet\u{1b}[38;2;205;214;244;49m name \u{1b}[38;2;148;226;213;49m=\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;166;227;161;49m\"zo\"\u{1b}[38;2;147;153;178;49m;\u{1b}[39m\u{1b}[49m\u{1b}[0m",
         "\u{1b}[39;49m\u{1b}[K  \u{1b}[38;2;205;214;244;49m    \u{1b}[38;2;137;180;250;49mprintln!\u{1b}[38;2;147;153;178;49m(\u{1b}[38;2;166;227;161;49m\"hello \u{1b}[38;2;245;194;231;49m{name}\u{1b}[38;2;166;227;161;49m\"\u{1b}[38;2;147;153;178;49m);\u{1b}[39m\u{1b}[49m\u{1b}[0m",
         "\u{1b}[39;49m\u{1b}[K  \u{1b}[38;2;147;153;178;49m}\u{1b}[39m\u{1b}[49m\u{1b}[0m",
         "\u{1b}[39;49m\u{1b}[K\u{1b}[39m\u{1b}[49m\u{1b}[0m",
         "\u{1b}[39;49m\u{1b}[K  plain fallback line\u{1b}[39m\u{1b}[49m\u{1b}[0m",
     ];
-    for row in measured {
+    // The first row is the capture's own row less codex's dim `• `: an answer
+    // hangs two columns in without a bullet (t-48216).
+    for row in &measured[1..] {
         assert!(
             contains(&capture, row.as_bytes()),
             "capture no longer holds {row:?}"
@@ -2322,7 +2313,7 @@ fn a_streamed_answer_renders_the_same_bytes_as_a_single_shot_answer() {
     );
     assert_eq!(
         streamed[1],
-        "\u{1b}[39;49m\u{1b}[K\u{1b}[2m• \u{1b}[22m\u{1b}[1m\u{1b}[3m### 자기소개\u{1b}[39m\u{1b}[49m\u{1b}[0m"
+        "\u{1b}[39;49m\u{1b}[K  \u{1b}[1m\u{1b}[3m자기소개\u{1b}[39m\u{1b}[49m\u{1b}[0m"
     );
     let table_header = streamed
         .iter()
