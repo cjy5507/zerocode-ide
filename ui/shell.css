@@ -33367,16 +33367,19 @@ details.task-board-section > summary {
 /* 과업 흐름: 흐름의 단계는 작은 꺾쇠로 이어지고, 멈춰 선 단계는 한 칸 떨어져
  * 선다. 과업이 있는 멈춘 단계만 제 신호의 잉크를 입는다. 누른 단계는 필터 알약과
  * 같은 옷(보기의 색)이다. */
-.board-desk-stages,
-.board-desk-stage-run {
+.board-desk-stages {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1);
 }
 
-.board-desk-stages {
-  gap: var(--space-2) var(--space-4);
+.board-desk-stage-run {
+  display: contents;
+}
+
+.board-desk-stage-run:not(.is-flow) > .board-desk-stage:first-child {
+  margin-left: var(--space-3);
 }
 
 .board-desk-stage {

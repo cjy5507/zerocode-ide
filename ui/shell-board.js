@@ -1597,8 +1597,8 @@ function paintDeskPipeline(block, now, view) {
   if (!strip) {
     strip = deskElement("div", "board-desk-stages");
     strip.setAttribute("role", "group");
-    // The flow and the stuck stages are two runs of chips, so a narrow block
-    // breaks between them rather than inside either.
+    // The flow and the stuck stages are two runs of chips that wrap as one
+    // line: the stuck run starts beside the flow's last chip, one space on.
     strip.append(deskElement("span", "board-desk-stage-run is-flow"), deskElement("span", "board-desk-stage-run"));
     body.replaceChildren(strip, deskElement("ol", "board-desk-tasks"), deskElement("p", "board-desk-more"));
   }
