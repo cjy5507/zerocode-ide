@@ -763,11 +763,11 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       };
     });
     const pipeline = await readPipeline();
-    ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last",
+    ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last — the evidence stage 상태 모름 only when its count is not an exact zero",
       pipeline.shown && pipeline.head === "과업 흐름 · 60" &&
       pipeline.chips.map((chip) => chip.split(":").slice(0, 2).join(":")).join() ===
-        "pending:6,ready:20,dispatched:5,reported:6,verified:0,merged:18,deployed:0,gate:2,blocked:2,stale:0,failed:1,unreviewable:0,nothing_to_land:0,unknown:0,closed:0" &&
-      pipeline.words.join() === "선행 대기,준비,진행,보고됨,검증됨,병합,배포됨,게이트,막힘,다시 검토 대기,실패,종료 — 검토 자료 없음,완료 — 착지할 것 없음,상태 모름,닫힘",
+        "pending:6,ready:20,dispatched:5,reported:6,verified:0,merged:18,deployed:0,gate:2,blocked:2,stale:0,failed:1,unreviewable:0,nothing_to_land:0,closed:0" &&
+      pipeline.words.join() === "선행 대기,준비,진행,보고됨,검증됨,병합,배포됨,게이트,막힘,다시 검토 대기,실패,종료 — 검토 자료 없음,완료 — 착지할 것 없음,닫힘",
       JSON.stringify(pipeline));
     ok("a stuck stage with tasks wears its signal and opens first, naming the gate and its question",
       pipeline.chips.includes("gate:2:true:is-wait") && pipeline.chips.includes("failed:1:false:is-halt") &&
@@ -985,6 +985,64 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("at 360 and 560 px, in both treatments and the five languages, the new stages and the row's commits, command and copy stay inside the desk — nothing overflows and no chip is cut — and each language says the stage in its own word",
       Object.values(fit).every((one) => one.desk <= 1 && one.strip <= 1 && one.outside.length === 0 && one.chips === 0) &&
       staleWords.size === 5, JSON.stringify(fit));
+
+    /* ---- 상태 모름은 증거 상태 (t-47538): 정확히 센 0이면 칩이 없고, 셈이 없으면 「—」, 과업이 있으면 이름과 수 ---- */
+    const setUnknown = (entry) => page.evaluate(async (entry) => {
+      const rest = window.__DESK__.stages.filter((one) => one.stage !== "unknown");
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
+        stages: entry === "absent" ? rest : [...rest, { stage: "unknown", count: entry }] };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    }, entry);
+    const readUnknown = () => page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-desk-block="pipeline"]');
+      const chip = block.querySelector('[data-stage="unknown"]');
+      return { head: block.querySelector(".board-desk-head").textContent, drawn: Boolean(chip),
+        word: chip?.querySelector(".board-desk-stage-word")?.textContent ?? null,
+        count: chip?.querySelector(".board-desk-stage-count")?.textContent ?? null,
+        type: chip?.type ?? null, reachable: chip ? chip.tabIndex >= 0 : null };
+    });
+    const heldUnknown = await page.evaluate(() => window.__DESK__.stages.find((one) => one.stage === "unknown")?.count ?? "absent");
+    await setUnknown(1);
+    await settleDesk();
+    const positive = await readUnknown();
+    const positiveRows = await readStage("unknown");
+    await setUnknown(0);
+    await settleDesk();
+    const zero = await readUnknown();
+    await setUnknown("absent");
+    await settleDesk();
+    const unlisted = await readUnknown();
+    await setUnknown(null);
+    await settleDesk();
+    const uncounted = await readUnknown();
+    ok("상태 모름 is evidence, not a stage of the flow: an exact zero draws no chip, a count the ledger did not give says — and never 0, and work in it keeps its chip with its name and number, a button the keyboard reaches that opens its rows — the flow's count is the same in every case",
+      positive.drawn && positive.word === "상태 모름" && positive.count === "1" && positive.type === "button" && positive.reachable &&
+      positiveRows.some((row) => row.id === "t-964") && !zero.drawn &&
+      unlisted.drawn && unlisted.word === "상태 모름" && unlisted.count === "—" && uncounted.drawn && uncounted.count === "—" &&
+      [zero.head, unlisted.head, uncounted.head].every((head) => head === positive.head),
+      JSON.stringify({ positive, positiveRows, zero, unlisted, uncounted }));
+    await setUnknown(1);
+    await settleDesk();
+    await page.evaluate(() => {
+      window.__HELD__ = document.querySelector('#board-view [data-desk-block="pipeline"] [data-stage="closed"]');
+      window.__HELD__.focus();
+    });
+    const kept = [];
+    for (const entry of [0, 1]) {
+      await setUnknown(entry);
+      await settleDesk();
+      kept.push(await page.evaluate(() => ({ drawn: Boolean(document.querySelector('#board-view [data-desk-block="pipeline"] [data-stage="unknown"]')),
+        kept: window.__HELD__.isConnected && document.activeElement === window.__HELD__ })));
+    }
+    ok("a poll that takes the zero 상태 모름 chip away or brings it back keeps the focus on the chip the person left it on",
+      kept.length === 2 && !kept[0].drawn && kept[1].drawn && kept.every((one) => one.kept), JSON.stringify(kept));
+    await page.evaluate(() => {
+      window.__HELD__.blur();
+      window.__HELD__ = null;
+    });
+    await setUnknown(heldUnknown);
+    await settleDesk();
 
     /* ---- 과업이 든 비용 (t-9470): 끝난 행마다 한 줄, 모르는 것은 「—」와 그 까닭 ---- */
     const readCosts = () => page.evaluate(() =>
