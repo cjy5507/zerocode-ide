@@ -3342,7 +3342,16 @@ pub(super) fn pump_loop(app: &AppHandle) {
         // learns about the chase shell by shell (`ChaseRound`).
         let looked_at = Instant::now();
         let mut chase_round = ChaseRound::default();
-        let (told, news, background_activity, clipboard_writes, gone, settled, pumped_any) = {
+        let (
+            told,
+            news,
+            background_activity,
+            clipboard_writes,
+            gone,
+            settled,
+            prompt_notes,
+            pumped_any,
+        ) = {
             // A SNAPSHOT of the pool, not its lock: the map lock is held for
             // the `Arc` clones and released, and each shell below is parsed
             // under its own terminal lock — so a keystroke waits, at worst,
@@ -3369,6 +3378,11 @@ pub(super) fn pump_loop(app: &AppHandle) {
             // with it.
             let mut gone: Vec<(TermId, Option<i32>, String)> = Vec::new();
             let mut settled: Vec<(TermId, DeliveryOutcome, Option<String>)> = Vec::new();
+            // A prompt's park, landing or timeout, with its age, for the
+            // black box's line (t-47952). The age can only be read here,
+            // before the settle below drops the delivery; the line is written
+            // once the round has let go of its locks.
+            let mut prompt_notes: Vec<(TermId, prompt_transaction::Turned, Duration)> = Vec::new();
             // Held across the walk, exactly as the old single pool lock was:
             // a settled delivery and the next queued prompt must swap under
             // one guard, and a death's cleanup must finish before anybody
@@ -3455,19 +3469,30 @@ pub(super) fn pump_loop(app: &AppHandle) {
                     // same pty lock. Refresh after acquiring it, so a key or
                     // IME commit that won the lock cannot be missed.
                     let line = prompt_transaction::refresh_hand(*id, line);
+                    // And the hook's word that a turn runs, against the
+                    // pane's own silence (t-47952): a turn whose end never
+                    // reached the window holds no parked send for good.
+                    let at = Instant::now();
+                    let line = prompt_transaction::still_mid_turn(line, pty.last_output_at(), at);
                     // The one seam every prompt producer's write crosses:
                     // the delivery is turned against the grid's facts AND
                     // the line's, and what it withholds it withholds here,
                     // at the write (`prompt_transaction`). Queue rejection
                     // settles immediately, including while the child lives.
-                    if let prompt_transaction::Turned::Settled(outcome) = prompt_transaction::turn(
-                        *id,
-                        delivery,
-                        seen,
-                        line,
-                        Instant::now(),
-                        |bytes| pty.write_input(bytes).is_ok(),
+                    let turned = prompt_transaction::turn(*id, delivery, seen, line, at, |bytes| {
+                        pty.write_input(bytes).is_ok()
+                    });
+                    if matches!(
+                        turned,
+                        prompt_transaction::Turned::Parked | prompt_transaction::Turned::Settled(_)
                     ) {
+                        prompt_notes.push((
+                            *id,
+                            turned,
+                            at.saturating_duration_since(delivery.since()),
+                        ));
+                    }
+                    if let prompt_transaction::Turned::Settled(outcome) = turned {
                         // The words travel with a failure: the person told
                         // to paste them has to have them.
                         let words = prompt_transaction::words_to_hand_back(delivery, outcome);
@@ -3643,6 +3668,7 @@ pub(super) fn pump_loop(app: &AppHandle) {
                 clipboard_writes,
                 gone,
                 settled,
+                prompt_notes,
                 pumped_any,
             )
         };
@@ -3847,6 +3873,19 @@ pub(super) fn pump_loop(app: &AppHandle) {
             // pane nobody launched one in. One gate, two questions, so the
             // kernel is asked about a pane once per turn of this clock.
             sweep_arrived_agents(app);
+        }
+        // Written down, each with its age and what the pane was doing — the
+        // 08:5x timeout left no line at all (t-47952). And words parked
+        // behind a working agent are said the round they park: they go in
+        // when its turn ends, and the window tells the person so.
+        for (term, turned, after) in prompt_notes {
+            let doing = prompt_transaction::pane_doing(&state, term);
+            if let Some(line) = prompt_transaction::told_line(term, turned, after, doing) {
+                note_window_event(&local_data_root, &line);
+            }
+            if turned == prompt_transaction::Turned::Parked {
+                let _ = app.emit("term:prompt", prompt_transaction::parked_event(term));
+            }
         }
         // Said out loud, both ways. A prompt that was never delivered is the
         // case a caller most needs to hear about — the agent is sitting there

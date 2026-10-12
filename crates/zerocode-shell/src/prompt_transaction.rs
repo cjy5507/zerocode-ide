@@ -107,10 +107,14 @@ fn pane_is_parked(state: &AppState, term: TermId) -> bool {
 }
 
 /// What one round did to one delivery.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Turned {
     /// Nothing yet; keep pumping.
     Waiting,
+    /// The pane's program is mid-turn, and the delivery waits the turn out
+    /// (t-47952) — answered the round it first does, so the window can say
+    /// the words are on their way; every round after is [`Self::Waiting`].
+    Parked,
     /// The paste (and any clear keys ahead of it) went to the child.
     Pasted,
     /// The Enter went to the child — and was written down as the gesture
@@ -133,7 +137,9 @@ pub(super) fn turn(
     now: Instant,
     write: impl FnOnce(&[u8]) -> bool,
 ) -> Turned {
+    let parked_before = delivery.parked_at().is_some();
     match delivery.poll_line(seen, line, now) {
+        Step::Waiting if !parked_before && delivery.parked_at().is_some() => Turned::Parked,
         Step::Waiting => Turned::Waiting,
         Step::Write(bytes) => {
             if write(&bytes) {
@@ -185,22 +191,34 @@ pub(super) fn withheld(outcome: DeliveryOutcome) -> Option<Refusal> {
     }
 }
 
+/// The word `term:prompt` carries for words parked behind a working agent
+/// (t-47952): they go in when its turn ends, and the window says so.
+pub(super) const PARKED_WHY: &str = "busy";
+
+/// The word `term:prompt` carries for words whose program never said it was
+/// ready (t-47952): they come back for the person to paste.
+pub(super) const NOT_READY_WHY: &str = "not_ready";
+
 /// What the window hears about a settled delivery (`term:prompt`) — the
 /// pump's settle and a refused zo launch both say it here, so the event has
 /// one shape whoever settled it. A withheld write is named by the guard's
 /// token: the window words it in the person's language from its own table
 /// (t-10159), and the English sentence stays the receipt's and the black
-/// box's.
+/// box's. A timeout is named too, by a word of its own ([`NOT_READY_WHY`]).
 pub(super) fn settled_event(
     term: TermId,
     outcome: DeliveryOutcome,
     text: Option<String>,
 ) -> PromptSettled {
+    let why = match outcome {
+        DeliveryOutcome::TimedOut => Some(NOT_READY_WHY),
+        _ => withheld(outcome).map(Refusal::token),
+    };
     PromptSettled {
         term,
         delivered: outcome == DeliveryOutcome::Delivered,
         pasted: outcome.pasted(),
-        why: withheld(outcome).map(Refusal::token),
+        why,
         text,
     }
 }
@@ -217,6 +235,105 @@ pub(super) fn withheld_line(term: TermId, outcome: DeliveryOutcome) -> Option<St
             why.says()
         )),
         DeliveryOutcome::Delivered | DeliveryOutcome::TimedOut => None,
+    }
+}
+
+/// What the window hears about words parked behind a working agent
+/// (t-47952) — the same event as a settled delivery's, so the window has
+/// one listener, with nothing delivered, nothing pasted and nothing handed
+/// back: the words are still on their way.
+pub(super) fn parked_event(term: TermId) -> PromptSettled {
+    PromptSettled {
+        term,
+        delivered: false,
+        pasted: false,
+        why: Some(PARKED_WHY),
+        text: None,
+    }
+}
+
+/// What the window knew a pane to be doing when one of its prompts parked
+/// or settled — the `state=` of the black box's line (t-47952).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PaneDoing {
+    /// Its program says it is mid-turn ([`pane_is_busy`]).
+    Working,
+    /// A restart's wake is still waiting on it.
+    Resuming,
+    /// Neither.
+    Idle,
+}
+
+impl PaneDoing {
+    /// The word the black box's line spells it with.
+    pub(super) const fn word(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Resuming => "resuming",
+            Self::Idle => "idle",
+        }
+    }
+}
+
+/// What `term` is doing as the window knows it, read once for a line: its
+/// program's word that it is mid-turn first, then a restart's wake still
+/// waiting on it. Each map is asked under its own lock and let go.
+pub(super) fn pane_doing(state: &AppState, term: TermId) -> PaneDoing {
+    if pane_is_busy(state, term) {
+        PaneDoing::Working
+    } else if state.pending_nudges().holds(term) {
+        PaneDoing::Resuming
+    } else {
+        PaneDoing::Idle
+    }
+}
+
+/// The black-box line one prompt's park, landing or timeout writes
+/// (t-47952): `term N prompt <parked|delivered|timed out> after <ms>
+/// state=<working|idle|resuming>`, the age counted from when the delivery
+/// was made. `None` for a round that did neither, and for a withheld write,
+/// whose line [`withheld_line`] already writes.
+///
+/// A timeout used to leave no line at all: the 08:5x report had the words on
+/// the clipboard and nothing to say how long they had waited or what the
+/// pane was doing.
+pub(super) fn told_line(
+    term: TermId,
+    turned: Turned,
+    after: Duration,
+    doing: PaneDoing,
+) -> Option<String> {
+    let said = match turned {
+        Turned::Parked => "parked",
+        Turned::Settled(DeliveryOutcome::Delivered) => "delivered",
+        Turned::Settled(DeliveryOutcome::TimedOut) => "timed out",
+        _ => return None,
+    };
+    Some(format!(
+        "term {term} prompt {said} after {} ms state={}",
+        after.as_millis(),
+        doing.word()
+    ))
+}
+
+/// The line's `busy`, unless the pane has written nothing for as long as the
+/// pointer takes to read a turn as over without hearing its end (t-47952,
+/// [`crate::orchestration::PROVIDER_SILENCE_ENDS_TURN_MS`]).
+///
+/// A parked send waits on the hook's word that a turn is running, and the
+/// word that it ended can be lost on its way to a loaded window. A working
+/// program redraws its spinner; ten minutes of nothing from the pane is a
+/// turn that ended without telling the window, and the send goes at its
+/// rest instead of waiting for good. A pane that never wrote is not judged
+/// by a silence nobody measured.
+pub(super) fn still_mid_turn(line: Line, last_output: Option<Instant>, now: Instant) -> Line {
+    let floor =
+        Duration::from_millis(crate::orchestration::PROVIDER_SILENCE_ENDS_TURN_MS.unsigned_abs());
+    let silent_past_floor =
+        last_output.is_some_and(|wrote| now.saturating_duration_since(wrote) >= floor);
+    Line {
+        busy: line.busy && !silent_past_floor,
+        ..line
     }
 }
 
@@ -249,7 +366,8 @@ pub(super) fn settle(
                     .clearing(next.clearing)
                     .guarded(next.guard)
                     .pressing(next.enter_again)
-                    .words(next.words),
+                    .words(next.words)
+                    .parking(next.parks),
             );
         }
         if row.is_empty() {
@@ -261,7 +379,7 @@ pub(super) fn settle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zerocode_pty::ready::{Guard, Refusal, SUBMIT_GAP};
+    use zerocode_pty::ready::{Guard, PATIENCE, QUIET, Refusal, SUBMIT_GAP, TIMEOUT};
 
     #[test]
     fn committed_ime_text_is_a_draft_and_failed_human_writes_leave_no_marker() {
@@ -460,6 +578,7 @@ mod tests {
             guard: Guard::for_somebody_elses_line(None),
             enter_again: Some(zerocode_pty::EnterAgain { hand: placed }),
             words: zerocode_pty::Words::Pasted,
+            parks: false,
             completion,
         });
         settle(
@@ -511,6 +630,7 @@ mod tests {
                 guard,
                 enter_again: None,
                 words: zerocode_pty::Words::Pasted,
+                parks: false,
                 completion,
             },
             receipt,
@@ -518,19 +638,23 @@ mod tests {
     }
 
     /// One shell's share of the pump's three maps and the bytes its pane
-    /// received — what a round below turns.
+    /// received — what a round below turns — with the black box's lines and
+    /// the words handed back to the person, as the pump keeps them.
     #[derive(Default)]
     struct Bench {
         deliveries: HashMap<TermId, PromptDelivery>,
         waiters: HashMap<TermId, std::sync::mpsc::SyncSender<DeliveryOutcome>>,
         queue: HashMap<TermId, VecDeque<QueuedPrompt>>,
         wrote: Vec<u8>,
+        lines: Vec<String>,
+        handed_back: Vec<String>,
     }
 
     impl Bench {
         /// One pump round for one shell, exactly as the pump makes it: the
-        /// delivery turned against the line facts, and a settled one retired
-        /// with its queue swapped in.
+        /// delivery turned against the line facts, its park or its ending
+        /// written down with what the line said the pane was doing, and a
+        /// settled one retired with its queue swapped in.
         fn round(&mut self, term: TermId, seen: Observed, line: Line, now: Instant) -> Turned {
             let Some(delivery) = self.deliveries.get_mut(&term) else {
                 return Turned::Waiting;
@@ -540,7 +664,16 @@ mod tests {
                 wrote.extend_from_slice(bytes);
                 true
             });
+            let doing = if line.busy {
+                PaneDoing::Working
+            } else {
+                PaneDoing::Idle
+            };
+            let age = now.saturating_duration_since(delivery.since());
+            self.lines.extend(told_line(term, turned, age, doing));
             if let Turned::Settled(outcome) = turned {
+                self.handed_back
+                    .extend(words_to_hand_back(delivery, outcome));
                 settle(
                     term,
                     outcome,
@@ -909,8 +1042,10 @@ mod tests {
     /// The window hears a withheld write by the guard's token, never by its
     /// English sentence: the sentence is the receipt's and the black box's,
     /// and the window words the token in the person's language from a table
-    /// of its own (t-10159). A delivery that landed or ran out of time names
-    /// no refusal at all.
+    /// of its own (t-10159). A delivery that landed names nothing; one whose
+    /// program never said it was ready names that, and words parked behind
+    /// a working agent name the turn they wait out (t-47952) — neither of
+    /// them a refusal, so neither one of the guard's tokens.
     #[test]
     fn the_window_hears_a_withheld_write_by_its_token() {
         const TERM: TermId = 8_314;
@@ -946,10 +1081,41 @@ mod tests {
             assert_eq!(said["why"], refusal.token(), "{refusal:?}");
             assert_ne!(said["why"], refusal.says(), "{refusal:?}");
         }
-        for outcome in [DeliveryOutcome::Delivered, DeliveryOutcome::TimedOut] {
-            let quiet =
-                serde_json::to_value(settled_event(TERM, outcome, None)).expect("serializes");
-            assert_eq!(quiet["why"], serde_json::Value::Null, "{outcome:?}");
+        let landed = serde_json::to_value(settled_event(TERM, DeliveryOutcome::Delivered, None))
+            .expect("serializes");
+        assert_eq!(landed["why"], serde_json::Value::Null);
+        let lost = serde_json::to_value(settled_event(
+            TERM,
+            DeliveryOutcome::TimedOut,
+            Some("look at this page".to_string()),
+        ))
+        .expect("serializes");
+        assert_eq!(
+            lost,
+            serde_json::json!({
+                "term": TERM,
+                "delivered": false,
+                "pasted": false,
+                "why": "not_ready",
+                "text": "look at this page",
+            })
+        );
+        let parked = serde_json::to_value(parked_event(TERM)).expect("serializes");
+        assert_eq!(
+            parked,
+            serde_json::json!({
+                "term": TERM,
+                "delivered": false,
+                "pasted": false,
+                "why": "busy",
+                "text": null,
+            })
+        );
+        for refusal in Refusal::ALL {
+            assert!(
+                refusal.token() != PARKED_WHY && refusal.token() != NOT_READY_WHY,
+                "{refusal:?} shares a word with a prompt that is no refusal"
+            );
         }
     }
 
@@ -1003,6 +1169,290 @@ mod tests {
             start,
         );
         assert!(bench.deliveries.is_empty());
+    }
+
+    /* ---- a send to a working agent waits its turn out (t-47952) -------- */
+
+    /// The person's send, as the window's door makes it.
+    fn sent(text: &str, agent: &str, now: Instant) -> PromptDelivery {
+        crate::cmd::terminal::prompt_delivery_for(
+            text.to_string(),
+            true,
+            Some(agent),
+            crate::cmd::terminal::PromptReadiness::Resting,
+            None,
+            now,
+        )
+    }
+
+    /// A program mid-turn as the grid sees it: a spinner redrawing, its
+    /// bracketed paste long on, no cursor shown again.
+    fn spinning() -> Observed {
+        Observed {
+            wrote: true,
+            bracketed_paste: true,
+            ..Observed::default()
+        }
+    }
+
+    /// The line while the hook says the turn is running.
+    fn working() -> Line {
+        Line {
+            busy: true,
+            ..Line::default()
+        }
+    }
+
+    /// The person's report, 10-12 08:5x: a prompt sent from the window to a
+    /// zo resumed after the 1.1.58 restart, still in its long turn, ran out
+    /// the send's eight seconds against the spinner and landed on the
+    /// clipboard — and nothing in the black box said so. The send waits the
+    /// turn out now: the round it parks is said, nothing is written and
+    /// nothing settles past `PATIENCE`; the round the composer rests after
+    /// the turn, the paste goes in, its Enter follows and the waiter hears
+    /// it delivered — and the black box has one line for the park and one
+    /// for the landing, each with its age and what the pane was doing.
+    #[test]
+    fn a_prompt_to_a_working_pane_is_parked_and_goes_in_at_the_rest_after_its_turn() {
+        const TERM: TermId = 8_501;
+        crate::human_input::forget_term(TERM);
+        let start = Instant::now();
+        let mut bench = Bench::default();
+        let (settled, receipt) = std::sync::mpsc::sync_channel(1);
+        bench
+            .deliveries
+            .insert(TERM, sent("look at this page", "zo", start));
+        bench.waiters.insert(TERM, settled);
+
+        assert_eq!(
+            bench.round(TERM, spinning(), working(), start),
+            Turned::Parked
+        );
+        let mut now = start;
+        while now <= start + PATIENCE + TIMEOUT {
+            now += QUIET / 2;
+            assert_eq!(
+                bench.round(TERM, spinning(), working(), now),
+                Turned::Waiting,
+                "a send to a working pane was turned {:?} in",
+                now - start
+            );
+        }
+        assert!(bench.wrote.is_empty(), "{:?}", bench.wrote);
+        assert!(
+            receipt.try_recv().is_err(),
+            "a parked send was settled while its pane worked"
+        );
+        assert!(bench.handed_back.is_empty());
+
+        // The turn is over: the wait's new handshake round, then the
+        // composer's cursor shown again — the rest, and the paste with it.
+        now += SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, spinning(), Line::default(), now),
+            Turned::Waiting
+        );
+        now += SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(1), Line::default(), now),
+            Turned::Pasted
+        );
+        now += SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(1), Line::default(), now),
+            Turned::Entered
+        );
+        now += SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(1), Line::default(), now),
+            Turned::Settled(DeliveryOutcome::Delivered)
+        );
+        assert_eq!(receipt.try_recv(), Ok(DeliveryOutcome::Delivered));
+        assert!(
+            bench.wrote.starts_with(b"\x1b[200~look at this page") && bench.wrote.ends_with(b"\r"),
+            "{:?}",
+            bench.wrote
+        );
+        assert!(bench.handed_back.is_empty());
+        assert_eq!(
+            bench.lines,
+            vec![
+                format!("term {TERM} prompt parked after 0 ms state=working"),
+                format!(
+                    "term {TERM} prompt delivered after {} ms state=idle",
+                    (now - start).as_millis()
+                ),
+            ]
+        );
+        crate::human_input::forget_term(TERM);
+    }
+
+    /// t-47952, the road that stays: a pane that is NOT working and never
+    /// rests — its stream never quiet, no cursor shown, no glyph — still
+    /// runs out the send's deadline, and its words still go back for the
+    /// clipboard; the black box now has the one line that says so.
+    #[test]
+    fn an_idle_pane_that_never_rests_still_times_out_and_says_so_in_one_line() {
+        const TERM: TermId = 8_502;
+        let start = Instant::now();
+        let mut bench = Bench::default();
+        bench
+            .deliveries
+            .insert(TERM, sent("look at this page", "zo", start));
+        let mut now = start;
+        let outcome = loop {
+            match bench.round(TERM, spinning(), Line::default(), now) {
+                Turned::Waiting => {}
+                Turned::Settled(outcome) => break outcome,
+                other => panic!("a send to an idle pane was turned {other:?}"),
+            }
+            now += QUIET / 2;
+            assert!(
+                now <= start + TIMEOUT + QUIET,
+                "the send outlived its deadline"
+            );
+        };
+        assert_eq!(outcome, DeliveryOutcome::TimedOut);
+        assert!(bench.wrote.is_empty(), "{:?}", bench.wrote);
+        assert_eq!(bench.handed_back, ["look at this page"]);
+        assert_eq!(
+            bench.lines,
+            [format!(
+                "term {TERM} prompt timed out after {} ms state=idle",
+                (now - start).as_millis()
+            )]
+        );
+    }
+
+    /// t-47952: a send queued behind another delivery parks too, once it
+    /// has the line — the queue carries the door's choice like its guard;
+    /// and a send that parks again, a new turn starting before its rest,
+    /// is said once.
+    #[test]
+    fn a_queued_send_parks_when_it_takes_the_line_and_is_said_once() {
+        const TERM: TermId = 8_503;
+        let start = Instant::now();
+        let mut bench = Bench::default();
+        bench
+            .deliveries
+            .insert(TERM, guarded("mail is waiting", true, start));
+        let resting = crate::cmd::terminal::PromptReadiness::Resting;
+        let (completion, _receipt) = std::sync::mpsc::sync_channel(1);
+        bench
+            .queue
+            .entry(TERM)
+            .or_default()
+            .push_back(QueuedPrompt {
+                text: "look at this page".to_string(),
+                submit: true,
+                signal: ReadySignal::Rest(None),
+                clearing: false,
+                guard: Guard::for_its_own_line(None),
+                enter_again: None,
+                words: zerocode_pty::Words::Pasted,
+                parks: resting.parks(),
+                completion,
+            });
+        settle(
+            TERM,
+            DeliveryOutcome::Delivered,
+            &mut bench.deliveries,
+            &mut bench.waiters,
+            &mut bench.queue,
+            start,
+        );
+        assert!(
+            bench.deliveries[&TERM].parks(),
+            "the queued send lost the door's choice to wait out a turn"
+        );
+        assert_eq!(
+            bench.round(TERM, spinning(), working(), start),
+            Turned::Parked
+        );
+        // The turn ends, and another begins before the composer rests.
+        assert_eq!(
+            bench.round(TERM, spinning(), Line::default(), start + QUIET),
+            Turned::Waiting
+        );
+        assert_eq!(
+            bench.round(TERM, spinning(), working(), start + QUIET * 2),
+            Turned::Waiting
+        );
+        assert_eq!(
+            bench.round(TERM, spinning(), working(), start + TIMEOUT * 2),
+            Turned::Waiting
+        );
+        assert_eq!(bench.lines.len(), 1, "{:?}", bench.lines);
+    }
+
+    /// t-47952, the roads that stay as they were. Only the person's own
+    /// send parks: the mail pointer's door types once its pass has read the
+    /// turn as over and reads the receipt on its next beat; a launch
+    /// briefing answers its worker start, whose refusal names the door that
+    /// stayed shut; a restart's continuation and its Enter alone have their
+    /// own watch. Beside a working pane the pointer's line still runs out
+    /// the deadline it always had.
+    #[test]
+    fn the_pointer_and_a_briefing_never_park() {
+        use crate::cmd::terminal::PromptReadiness;
+        let start = Instant::now();
+        for readiness in [
+            PromptReadiness::RestingBesideADraft,
+            PromptReadiness::Mounting,
+            PromptReadiness::MountingBesideADraft,
+            PromptReadiness::EnterAgain(None),
+        ] {
+            assert!(!readiness.parks(), "{readiness:?}");
+            let delivery = crate::cmd::terminal::prompt_delivery_for(
+                "words".to_string(),
+                true,
+                Some("claude"),
+                readiness,
+                None,
+                start,
+            );
+            assert!(!delivery.parks(), "{readiness:?}");
+        }
+        const TERM: TermId = 8_504;
+        let mut bench = Bench::default();
+        bench.deliveries.insert(
+            TERM,
+            crate::cmd::terminal::prompt_delivery_for(
+                "You have 1 orchestration message.".to_string(),
+                true,
+                Some("claude"),
+                PromptReadiness::RestingBesideADraft,
+                None,
+                start,
+            ),
+        );
+        assert_eq!(
+            bench.round(TERM, spinning(), working(), start),
+            Turned::Waiting
+        );
+        assert_eq!(
+            bench.round(TERM, spinning(), working(), start + TIMEOUT),
+            Turned::Settled(DeliveryOutcome::TimedOut)
+        );
+    }
+
+    /// t-47952: parking waits on the hook's word that a turn is running, and
+    /// a turn's end can be lost on its way to the window. A pane that has
+    /// written nothing for as long as the pointer takes to read a turn as
+    /// over without hearing its end is not mid-turn — a working program
+    /// redraws its spinner — so a parked send is not held there for good. A
+    /// pane still writing stays mid-turn, and one that never wrote is not
+    /// judged by a silence nobody measured.
+    #[test]
+    fn a_working_word_on_a_pane_silent_past_the_pointers_floor_is_not_a_turn() {
+        let floor = Duration::from_millis(
+            crate::orchestration::PROVIDER_SILENCE_ENDS_TURN_MS.unsigned_abs(),
+        );
+        let wrote = Instant::now();
+        assert!(still_mid_turn(working(), Some(wrote), wrote + Duration::from_secs(1)).busy);
+        assert!(still_mid_turn(working(), None, wrote + floor).busy);
+        assert!(!still_mid_turn(working(), Some(wrote), wrote + floor).busy);
+        assert!(!still_mid_turn(Line::default(), Some(wrote), wrote).busy);
     }
 
     /* ---- a restart's words reach a real program once (t-14037) --------- */
@@ -1127,6 +1577,7 @@ done
                     guard: Guard::for_somebody_elses_line(None),
                     enter_again: None,
                     words: composer_words_for(Some("claude")),
+                    parks: false,
                     completion,
                 });
         }

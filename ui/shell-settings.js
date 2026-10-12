@@ -72,6 +72,9 @@ let secondBrainVault = "";
 /* 주간 리뷰를 zo cron 턴으로 — 카드의 스위치. 기록 자체는 볼트의 zo 등록부에
  * 있고 영수증은 상태 답에 실려 온다. */
 let secondBrainWeeklyReview = false;
+/* raw 받은편지함(t-43992) — 에이전트가 통째로 읽은 바깥 페이지를 볼트의 raw/에
+ * 모으는 스위치. 설정 한 칸이 전부다. */
+let secondBrainRawCapture = false;
 const SETTINGS_HEALTH_RANK = { healthy: 0, migrated: 0, recovered: 1, error: 2 };
 
 const hasSetting = (snapshot, key) =>
@@ -435,6 +438,10 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
   if (hasSetting(snapshot, "second_brain_weekly_review")) {
     secondBrainWeeklyReview = snapshot.second_brain_weekly_review === true;
     paintSecondBrainWeeklyReview();
+  }
+  if (hasSetting(snapshot, "second_brain_raw_capture")) {
+    secondBrainRawCapture = snapshot.second_brain_raw_capture === true;
+    paintSecondBrainRawCapture();
   }
   if (hasSetting(snapshot, "hide_automation_workspaces")) {
     const changed = hideAutomationWorkspaces !== (snapshot.hide_automation_workspaces === true);
@@ -9682,6 +9689,15 @@ function paintSecondBrainWeeklyReview() {
   }
 }
 
+/* raw 받은편지함 스위치. 설정(`second_brain_raw_capture`)을 비춘다. 켜는 것은
+ * 저장된 볼트가 있어야 한다 — 떨어뜨릴 raw/가 없는 「켜짐」은 오지 않을 파일을
+ * 약속한다. 끄는 것은 볼트가 사라진 뒤에도 언제나 된다. */
+function paintSecondBrainRawCapture() {
+  const box = el("second-brain-raw-capture");
+  box.checked = secondBrainRawCapture;
+  box.disabled = secondBrainLoading || (!secondBrainReport?.savedPath && !secondBrainRawCapture);
+}
+
 /* 「전역 연결」 줄. 사람이 볼 수 없는 사실 하나를 말한다: 볼트 밖 어느
  * 프로젝트에서 판을 열어도 그 에이전트가 볼트를 아는가. 아는 근거는 그
  * 에이전트의 전역 지시문 파일 안에 우리가 관리하는 블록이 서 있다는 것이고,
@@ -9779,6 +9795,7 @@ function paintSecondBrain() {
   // 어느 에이전트에게도 실리지 않는다.
   el("second-brain-link").disabled = secondBrainLoading || !secondBrainReport?.savedPath;
   paintSecondBrainWeeklyReview();
+  paintSecondBrainRawCapture();
 }
 
 /* 이 카드가 백엔드에 묻는 모든 길은 같은 모양이다: 세대를 올리고, 기다리는
@@ -9845,6 +9862,14 @@ el("second-brain-weekly-review").addEventListener("change", (event) => {
   ).then((snapshot) => {
     if (snapshot !== undefined) void refreshSecondBrain();
   });
+});
+el("second-brain-raw-capture").addEventListener("change", (event) => {
+  // 그림이 먼저, 쓰기는 그 뒤 — 다른 스위치와 같다. 거절되면(볼트 없이 켜기)
+  // 스냅샷이 스위치를 문서가 말하는 자리로 되돌린다.
+  const enabled = event.target.checked;
+  secondBrainRawCapture = enabled;
+  paintSecondBrainRawCapture();
+  void commitSetting("second_brain_raw_capture", "set_second_brain_raw_capture", { enabled });
 });
 el("second-brain-graph").addEventListener("click", () => {
   // 설정 시트를 덮고 무대로 — 사이드바의 줄이 지나는 그 문 그대로.

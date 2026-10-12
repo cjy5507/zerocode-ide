@@ -4,6 +4,11 @@ use crate::*;
 
 const SECOND_BRAIN_SKILL: &str = "second-brain";
 const QUICK_COMMAND_PREFIX: &str = "second-brain";
+/// The refusal of a switch that needs a saved vault to mean anything.
+const VAULT_FIRST: &str = "볼트를 먼저 세팅해 주세요";
+/// Who read a page, as a raw file's `by:` says it when the door names no pane
+/// this window holds.
+const UNKNOWN_READER: &str = "zerocode-browser";
 
 #[derive(Clone, Serialize)]
 pub(crate) struct SecondBrainReport {
@@ -148,7 +153,7 @@ pub(crate) async fn set_second_brain_weekly_review(
         .document
         .second_brain_vault;
     let Some(vault) = saved_vault(&saved) else {
-        return Err("볼트를 먼저 세팅해 주세요".to_string());
+        return Err(VAULT_FIRST.to_string());
     };
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let marker = zerocode_core::second_brain::WEEKLY_REVIEW_CRON_MARKER;
@@ -183,6 +188,96 @@ pub(crate) async fn set_second_brain_weekly_review(
             Ok(())
         },
     )
+}
+
+/// The raw inbox feed's switch (t-43992 unit 1). Turning it on needs a saved
+/// vault — "on" with nowhere to land would promise files that never come;
+/// turning it off never does.
+#[tauri::command]
+pub(crate) async fn set_second_brain_raw_capture(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<SettingsSnapshot, String> {
+    let saved = load_settings_resilient(state.settings())
+        .document
+        .second_brain_vault;
+    if enabled && saved_vault(&saved).is_none() {
+        return Err(VAULT_FIRST.to_string());
+    }
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::SECOND_BRAIN_RAW_CAPTURE],
+        move |settings| {
+            settings.second_brain_raw_capture = enabled;
+            Ok(())
+        },
+    )
+}
+
+/// Hand a page an agent read whole to the raw inbox feed (t-43992 unit 1).
+///
+/// Nothing happens without a vault, and the vault is the one this window
+/// published for its panes — read here, where the read runs, so a window with
+/// no vault pays nothing. Everything else — the person's switch in the
+/// settings file, the scan of `raw/`, the write — runs on a blocking thread of
+/// its own: the agent's answer never waits on a vault.
+pub(crate) fn feed_read_page(
+    app: &AppHandle,
+    pane: Option<&str>,
+    report: &crate::cmd::browser::BrowserReadReport,
+) {
+    let Some(vault) = hooks::second_brain_vault() else {
+        return;
+    };
+    let by = pane
+        .and_then(|key| crate::artifact_runtime::held_pane(app, key))
+        .map_or_else(
+            || UNKNOWN_READER.to_string(),
+            |held| match held.facts.agent {
+                Some(agent) => format!("{agent} · {}", held.key),
+                None => held.key,
+            },
+        );
+    let app = app.clone();
+    let (url, title, text) = (
+        report.url.clone(),
+        report.title.clone(),
+        report.text.clone(),
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if !load_settings_resilient(state.settings())
+            .document
+            .second_brain_raw_capture
+        {
+            return;
+        }
+        let page = zerocode_core::second_brain_feed::Capture {
+            url: &url,
+            title: &title,
+            text: &text,
+            by: &by,
+        };
+        let offset_minutes =
+            i32::try_from(crate::automation_runtime::local_offset_secs() / 60).unwrap_or_default();
+        match zerocode_core::second_brain_feed::feed(
+            Some(Path::new(&vault)),
+            true,
+            &page,
+            crate::project_runtime::now_epoch_ms(),
+            offset_minutes,
+        ) {
+            Ok(zerocode_core::second_brain_feed::Fed::Written(path)) => {
+                eprintln!("[second-brain] raw feed wrote {path}");
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("[second-brain] raw feed failed: {error}"),
+        }
+    });
 }
 
 struct SetupWork {
