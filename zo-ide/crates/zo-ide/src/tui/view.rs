@@ -2569,3 +2569,58 @@ mod card_tests {
         assert_eq!(status.line(120).plain(), "• Working (7s • esc to interrupt)");
     }
 }
+
+/// The footer says what the session may do and which effort runs (t-48216):
+/// an amber `▲ Full Access` first, and the composer's own `◆` beside `smart`.
+#[cfg(test)]
+mod footer_mark_tests {
+    use super::footer;
+    use crate::tui::effort_effect::EffortTier;
+    use crate::tui::palette;
+
+    #[test]
+    fn full_access_and_the_smart_mark_lead_the_footer() {
+        let line = footer(
+            "claude-opus-5-5",
+            "smart",
+            None,
+            "/tmp",
+            80,
+            None,
+            None,
+            false,
+            None,
+            None,
+            Some("Full Access"),
+            Some(EffortTier::Smart.caret_span()),
+        );
+        assert_eq!(line.plain(), "  ▲ Full Access   claude-opus-5-5 ◆ smart · /tmp");
+        let mark = line
+            .spans
+            .iter()
+            .find(|span| span.text.contains("Full Access"))
+            .expect("the permission mark");
+        assert_eq!(mark.style.fg, Some(palette::NOTICE_WARN));
+        let diamond = line.spans.iter().find(|span| span.text == "◆").expect("the smart mark");
+        assert_eq!(diamond.style, EffortTier::Smart.caret_span().style);
+    }
+
+    #[test]
+    fn an_ordinary_session_keeps_its_footer() {
+        let line = footer(
+            "claude-opus-5-5",
+            "high",
+            None,
+            "/tmp",
+            80,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(line.plain(), "  claude-opus-5-5 high · /tmp");
+    }
+}
