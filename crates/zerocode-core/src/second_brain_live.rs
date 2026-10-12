@@ -987,6 +987,7 @@ mod tests {
 
     fn page(id: &str, title: &str, modified_ms: i64) -> GraphNode {
         GraphNode {
+            page_type: None,
             id: id.to_string(),
             title: title.to_string(),
             tags: Vec::new(),

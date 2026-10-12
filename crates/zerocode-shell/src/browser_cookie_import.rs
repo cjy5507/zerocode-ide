@@ -978,8 +978,11 @@ pub fn discard_staged_cookies(config_root: &Path, profile_id: &str) {
 /// 주입을 죽이면 안 된다.
 #[derive(Debug, Default, Deserialize)]
 pub struct StagedCookie {
-    // 쿠키를 앉히는 macOS 갈래(`chromium_browser`)만 읽는다 — 파일 모양은 어느 OS에서나 같다.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // 쿠키를 앉히는 `chromium_browser`(macOS에서 `chromium-browser` 기능을 켠 빌드)만 읽는다 — 파일 모양은 어느 빌드에서나 같다.
+    #[cfg_attr(
+        not(all(target_os = "macos", feature = "chromium-browser")),
+        allow(dead_code)
+    )]
     #[serde(default)]
     pub url: String,
     #[serde(default)]
@@ -994,8 +997,11 @@ pub struct StagedCookie {
     pub secure: bool,
     #[serde(default)]
     pub http_only: bool,
-    // `url`과 같은 이유로 macOS 갈래만 읽는다.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // `url`과 같은 이유로 `chromium_browser`만 읽는다.
+    #[cfg_attr(
+        not(all(target_os = "macos", feature = "chromium-browser")),
+        allow(dead_code)
+    )]
     #[serde(default)]
     pub same_site: Option<SameSite>,
     #[serde(default)]

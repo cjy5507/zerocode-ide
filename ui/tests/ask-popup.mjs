@@ -39,6 +39,17 @@ export const ASK_CODE_WORDS = Object.freeze({
   es: { title: "Escribe el código", label: "Código", hint: "De 4 a 10 letras o dígitos · la ventana lo escribe una vez en el campo que indicó el agente; el agente no lo recibe", send: "Enviar", cancel: "Cancelar", invalid: "Escribe de 4 a 10 letras o dígitos" },
 });
 
+/* What a card whose answer was refused says of the terminal the same question
+ * stands in, in the five languages the window speaks — for a question with
+ * three choices, so the numbers are 1/2/3 (t-49081). */
+export const ASK_TERMINAL_WORDS = Object.freeze({
+  ko: "터미널에서도 답할 수 있습니다 — 번호(1/2/3)를 누르거나, ↑↓로 골라 Enter를 누르세요.",
+  en: "You can also answer in the terminal: press 1/2/3, or pick with ↑↓ and press Enter.",
+  ja: "ターミナルでも答えられます — 番号(1/2/3)を押すか、↑↓ で選んで Enter を押してください。",
+  zh: "也可以在终端里回答 — 按数字(1/2/3)，或用 ↑↓ 选好后按 Enter。",
+  es: "También puedes responder en la terminal: pulsa 1/2/3, o elige con ↑↓ y pulsa Enter.",
+});
+
 /* What the window sends for a card with a line: the plain card's fields and
  * the limits the page may show (`codeAsk`, from core's one table). */
 const CODE_CARD = Object.freeze({ reason: "카카오톡 인증번호", timeoutMs: 180000, codeAsk: { min: 4, max: 10, typedMax: 20 } });
@@ -130,6 +141,7 @@ const installHands = () => {
         title: said("ask-title"),
         mono: said("ask-body"),
         why: said("ask-why"),
+        fallback: said("ask-fallback"),
         clock: said("ask-clock"),
         more: said("ask-more"),
         buttons: buttons.map((one) => one.textContent.trim()),
@@ -727,6 +739,117 @@ async function queue(browser, origin, ok) {
       JSON.stringify(flight),
     );
     ok("the queue scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+}
+
+/* ------------------------------------------------------- a refused answer */
+
+/* The answer an agent's channel refused keeps the card — and the card says
+ * where else the same question can be answered (t-49081). zo draws every
+ * question it puts to the window in its own terminal too, as a numbered menu
+ * in the order the card draws its buttons, and a number answers it there. The
+ * person whose every press came back 「permission.respond failed (-32002)」 (a
+ * zo typed into a shell pane, 10-12) had only a button that kept failing. A
+ * Computer Use confirm has no terminal of its own, and says nothing of one. */
+async function refused(browser, origin, ok) {
+  await scenario(browser, origin, "refused answer", ok, async (page, faults) => {
+    const refusal = "permission.respond failed (-32002): missing or wrong token for this events channel";
+    const seen = await page.evaluate(async (refusal) => {
+      const T = window.__ASK_T__;
+      // What tauri hands the page for a command's `Err`: the string itself.
+      window.__ANSWER__.respond_permission = async () => {
+        throw refusal;
+      };
+      T.frame("s-hand", {
+        type: "permission_prompt",
+        prompt_id: 4,
+        kind: "question",
+        topic: "model_switch",
+        title: "Switch models?",
+        tool_name: "",
+        reasoning: "이 요청은 지금 쓰는 모델의 안전 분류기가 거절했습니다. 다른 모델로 바꿔 다시 시도할까요?",
+        audit_hint: null,
+        choices: [
+          { key: "a", label: "Switch and from now on", decision: "allow_always" },
+          { key: "y", label: "Switch for this turn", decision: "allow_once" },
+          { key: "n", label: "Stay", decision: "deny" },
+        ],
+      });
+      await T.settle();
+      const before = T.look();
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(200);
+      const after = T.look();
+      const languages = {};
+      for (const code of ["ko", "en", "ja", "zh", "es"]) {
+        setLocale(code, { persist: false, refresh: false });
+        await T.settle(30);
+        languages[code] = T.look().fallback;
+      }
+      setLocale("ko", { persist: false, refresh: false });
+      await T.settle(30);
+      // A tool permission with two choices names two numbers.
+      T.frame("s-hand", {
+        type: "permission_prompt",
+        prompt_id: 5,
+        tool_name: "bash",
+        reasoning: "",
+        audit_hint: null,
+        choices: [
+          { key: "y", label: "한 번 허용", decision: "allow_once" },
+          { key: "n", label: "거부", decision: "deny" },
+        ],
+      });
+      T.frame("s-hand", { type: "prompt_resolved", prompt_id: 4, resolved_by: "pane" });
+      await T.settle(200);
+      const tool = T.look();
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(200);
+      const toolRefused = T.look();
+      return { before, after, languages, tool, toolRefused };
+    }, refusal);
+    ok(
+      "a refused answer keeps the card, its reason and its buttons, and says the terminal answers the same question by its number",
+      seen.before.fallback === null
+        && seen.after.shown && seen.after.kind === "question" && seen.after.why?.includes(refusal)
+        && seen.after.buttons.join() === "Switch and from now on,Switch for this turn,Stay"
+        && seen.after.fallback === ASK_TERMINAL_WORDS.ko,
+      JSON.stringify(seen),
+    );
+    const wrong = Object.keys(ASK_TERMINAL_WORDS).filter((code) => seen.languages[code] !== ASK_TERMINAL_WORDS[code]);
+    ok(
+      "the terminal line is said in all five languages and follows a language change on a card already up",
+      wrong.length === 0,
+      JSON.stringify({ wrong, seen: seen.languages }),
+    );
+    ok(
+      "the question the terminal answered leaves, and a refused tool permission with two choices names two numbers",
+      seen.tool.shown && seen.tool.kind === "tool" && seen.tool.fallback === null
+        && seen.toolRefused.fallback === ASK_TERMINAL_WORDS.ko.replace("1/2/3", "1/2"),
+      JSON.stringify({ tool: seen.tool, toolRefused: seen.toolRefused }),
+    );
+
+    // A Computer Use confirm that could not be delivered points at no terminal.
+    const computer = await page.evaluate(async () => {
+      const T = window.__ASK_T__;
+      T.ended("s-hand");
+      await T.settle(200);
+      window.__ANSWER__.computer_confirm_answer = async () => {
+        throw "the confirm is gone";
+      };
+      T.fire("computer:confirm", { id: "confirm-refused", kind: "delete", label: "Delete repo", verb: "mouse-click", timeoutMs: 120000 });
+      await T.settle();
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(200);
+      return T.look();
+    });
+    ok(
+      "a Computer Use confirm whose answer was refused keeps its reason and says nothing of a terminal",
+      computer.shown && computer.kind === "computer-confirm" && computer.why?.includes("the confirm is gone")
+        && computer.fallback === null,
+      JSON.stringify(computer),
+    );
+    ok("the refused answer scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   });
 }
 
@@ -1499,6 +1622,7 @@ export async function testAskPopup(browser, origin, ok) {
   await computerHandoffCode(browser, origin, ok);
   await confirm(browser, origin, ok);
   await queue(browser, origin, ok);
+  await refused(browser, origin, ok);
   await keyboard(browser, origin, ok);
   await midAnswer(browser, origin, ok);
   await oneKey(browser, origin, ok);

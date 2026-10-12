@@ -1044,10 +1044,10 @@ ok(
     brainOpen.overview.tags === 2 &&
     brainOpen.overview.kinds >= 2 &&
     brainOpen.overview.recent === 5 &&
-    // 카파시의 lint 여덟 줄, 근거 없는 간선 한 줄(t-5966), 라이브 층의 셋(t-2931) —
-    // 열두 줄, 수는 픽스처가 지은 `graph.lint.counts`의 것(라이브 층이 없는 답에서
-    // 셋은 0)이고 창은 하나도 세지 않는다.
-    brainOpen.overview.health.length === 12 &&
+    // 카파시의 lint 여덟 줄, 근거 없는 간선 한 줄(t-5966), 라이브 층의 셋(t-2931), 종류
+    // 없는 페이지 한 줄(t-43992) — 열세 줄, 수는 픽스처가 지은 `graph.lint.counts`의 것
+    // (라이브 층이 없는 답에서 셋은 0)이고 창은 하나도 세지 않는다.
+    brainOpen.overview.health.length === 13 &&
     JSON.stringify(brainOpen.overview.health) === JSON.stringify(brainOpen.overview.healthExpected) &&
     brainOpen.overview.health.includes("orphans=1") &&
     brainOpen.overview.orphanTile === "1" &&
@@ -1202,6 +1202,116 @@ ok(
     brainFixture.ghostTile === "1" &&
     JSON.stringify(brainFixture.clean) === JSON.stringify(["unsourced_edges"]),
   JSON.stringify(brainFixture),
+);
+
+/* 종류(t-43992 단위 2): 페이지의 `type:`은 건강 카드와 그래프 필터가 읽는다(설계 §4).
+ * 합성 볼트의 열두 페이지 가운데 여덟에 종류가 있고(개념 넷·비교 둘·출처 요약 둘) 넷에는
+ * 없다. 카드의 「종류 없는 페이지」는 표의 수 그대로 4이고 누르면 그 넷만 남는 렌즈다.
+ * 보기 메뉴의 종류 단추는 볼트에 있는 종류만 스키마의 순서로 서고, 하나를 누르면 그
+ * 종류의 페이지만 남는다 — 다른 단추는 그대로 서 있다. 시야에 저장되고 되살아나며, 종류
+ * 칸이 없는 옛 시야는 그것을 놓는다. */
+const brainKindsSetUp = await page.evaluate(async () => {
+  knowledgeSelectedKey = null;
+  window.__VAULT__ = {
+    pages: 12,
+    linksPer: 2,
+    ghosts: 3,
+    tags: ["core", "reading"],
+    pageKinds: ["concept", "comparison", "concept", "source", "concept", "comparison",
+      "concept", "source"],
+  };
+  dropTab("knowledge");
+  document.getElementById("nav-knowledge").click();
+  await new Promise((done) => setTimeout(done, 400));
+  const viewOf = () => [...document.querySelectorAll(".file-view")]
+    .find((one) => one.classList.contains("knowledge-view") && !one.hidden);
+  const count = () => viewOf().querySelectorAll(".knowledge-node").length;
+  const pause = () => new Promise((done) => setTimeout(done, 60));
+  const kindLens = () => (typeof knowledgeKindLens === "undefined" ? "missing" : knowledgeKindLens);
+  const untyped = () => viewOf().querySelector('button[data-knowledge-lint="untyped"]');
+  const kind = (name) => viewOf().querySelector(`[data-knowledge-kind="${name}"]`);
+  const shown = () => [...viewOf().querySelectorAll("[data-knowledge-kind]")]
+    .filter((one) => !one.hidden).map((one) => one.dataset.knowledgeKind);
+  const before = {
+    nodes: count(),
+    note: viewOf().querySelector('.knowledge-health-row[data-knowledge-lint="untyped"] .knowledge-inspector-note')
+      ?.textContent ?? null,
+    shown: shown(),
+  };
+  untyped()?.click();
+  await pause();
+  const untypedLens = {
+    nodes: count(),
+    lens: knowledgeLintLens,
+    pressed: untyped()?.getAttribute("aria-pressed") ?? null,
+  };
+  untyped()?.click();
+  await pause();
+  kind("comparison")?.click();
+  await pause();
+  const comparison = {
+    nodes: count(),
+    lens: kindLens(),
+    pressed: kind("comparison")?.getAttribute("aria-pressed") ?? null,
+    shown: shown(),
+  };
+  /* 사진 한 장: 보기 메뉴가 열린 채 비교만 남은 그림과, 「종류 없는 페이지」 줄이 선 건강 카드. */
+  viewOf().querySelector(".knowledge-lens-toggle")?.click();
+  await pause();
+  return { before, untypedLens, comparison };
+});
+await page.screenshot({ path: join(UI, "..", "output/playwright/knowledge-graph-kinds.png") });
+const brainKindsScene = await page.evaluate(async () => {
+  const viewOf = () => [...document.querySelectorAll(".file-view")]
+    .find((one) => one.classList.contains("knowledge-view") && !one.hidden);
+  const count = () => viewOf().querySelectorAll(".knowledge-node").length;
+  const pause = () => new Promise((done) => setTimeout(done, 60));
+  const kindLens = () => (typeof knowledgeKindLens === "undefined" ? "missing" : knowledgeKindLens);
+  const kind = (name) => viewOf().querySelector(`[data-knowledge-kind="${name}"]`);
+  viewOf().querySelector(".knowledge-lens-toggle")?.click();
+  await pause();
+  const scene = captureCurrentKnowledgeScene("kind", viewOf(), knowledgeLayouts.get(viewOf()));
+  kind("comparison")?.click();
+  await pause();
+  const released = { nodes: count(), lens: kindLens() };
+  await restoreKnowledgeScene(viewOf(), scene);
+  await pause();
+  const sceneBack = { nodes: count(), lens: kindLens() };
+  /* 종류 칸이 없는 옛 시야. 목차·일지 표시는 지금 값을 실어 둔다 — 옛 시야는 그것을 켜고,
+   * 그 값은 뒤의 S6 시험이 읽는 기본(접힘)을 바꾼다. */
+  await restoreKnowledgeScene(viewOf(), {
+    name: "old", lens: { nav: knowledgeNavShown }, tags: [], search: "", selected: null, depth: 1,
+  });
+  await pause();
+  return {
+    savedKind: scene.lens?.kind ?? null,
+    released,
+    sceneBack,
+    oldScene: { nodes: count(), lens: kindLens(), lintLens: knowledgeLintLens },
+  };
+});
+const brainKinds = { ...brainKindsSetUp, ...brainKindsScene };
+ok(
+  "a page's kind is read by the vault health card, whose pages-with-no-kind row is a lens, and by a kind filter that a saved view keeps",
+  () => brainKinds.before.nodes === 15 &&
+    brainKinds.before.note === "4" &&
+    JSON.stringify(brainKinds.before.shown) === JSON.stringify(["source", "concept", "comparison"]) &&
+    brainKinds.untypedLens.nodes === 4 &&
+    brainKinds.untypedLens.lens === "untyped" &&
+    brainKinds.untypedLens.pressed === "true" &&
+    brainKinds.comparison.nodes === 2 &&
+    brainKinds.comparison.lens === "comparison" &&
+    brainKinds.comparison.pressed === "true" &&
+    JSON.stringify(brainKinds.comparison.shown) === JSON.stringify(["source", "concept", "comparison"]) &&
+    brainKinds.savedKind === "comparison" &&
+    brainKinds.released.nodes === 15 &&
+    brainKinds.released.lens === null &&
+    brainKinds.sceneBack.nodes === 2 &&
+    brainKinds.sceneBack.lens === "comparison" &&
+    brainKinds.oldScene.nodes === 15 &&
+    brainKinds.oldScene.lens === null &&
+    brainKinds.oldScene.lintLens === null,
+  JSON.stringify(brainKinds),
 );
 
 // Test 6: Empty Vault Test (Adversarial edge case 0 nodes)

@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.60] — 2026-10-12
+- Every wiki page in the second brain carries a kind in its frontmatter `type:` (source, entity, concept, comparison, overview or synthesis): the graph and the vault lint read it, an untyped page is a reading in the health card, `zerocode vault-types [--vault <dir>] [--write]` plans a kind for every untyped page (a dry run unless --write, which never opens raw/ and logs one line), setup writes wiki/overview.md, and the knowledge view gains a 「종류 없는 페이지」 health line and a kind filter in its view menu (t-43992 unit 2).
+- A task's progress is read once in the ledger and the desk, the sidebar and the board draw that reading: verified-but-unmerged counts as 「검증됨」, deployed as 「배포됨」, a review of an older attempt or commit reads 「다시 검토 대기」, a record with no attempt or no source reads 「상태 모름」 and never counts as a success; the desk's task row shows the commit, the owner, the blocker the ledger holds a witness for, and the next command to read — copy only (t-47538, Herdr stage 1).
+
 ## [1.1.59] — 2026-10-12
 - `anthropic-latest` and `claude-latest` point at claude-opus-5-5 again: a provider pointer never steps down its family's ladder, so the newest release of a smaller family (Haiku 5.5 in 1.1.58) no longer takes the pointer (t-47996).
 - A prompt sent from the window to an agent that is still working waits for the agent's turn to end and goes in when the composer is idle, instead of falling to the clipboard after eight seconds; the window says 「터미널 N의 에이전트가 일하는 중이라 끝나면 보냅니다.」 once and logs each wait, delivery and timeout (t-47952).

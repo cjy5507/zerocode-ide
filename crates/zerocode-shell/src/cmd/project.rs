@@ -464,7 +464,10 @@ pub(crate) fn attach_zo_pane_channel(
         }
         return false;
     }
-    state.channels().insert(session_id.clone(), addr.clone());
+    state.channels().insert(
+        session_id.clone(),
+        zo_channel_entry(addr.clone(), token.clone()),
+    );
     state.channel_owners().insert(session_id.clone(), owner);
     let epoch = zo_integration_runtime::begin(state, owner, &session_id, observation);
     spawn_subscriber(
@@ -568,6 +571,10 @@ pub(crate) async fn open_lane(
 
 /// Answer a permission prompt. The decision is one of the four wire tags;
 /// anything else the server treats as a deny — there is no accidental allow.
+///
+/// The answer goes back on the session's own channel with that channel's own
+/// bearer, so it needs no zo of this window's: a zo somebody typed into a
+/// shell is answered whether or not this window found one (t-49081).
 #[tauri::command]
 pub(crate) async fn respond_permission(
     state: State<'_, AppState>,
@@ -575,23 +582,10 @@ pub(crate) async fn respond_permission(
     prompt_id: u64,
     decision: String,
 ) -> Result<(), String> {
-    let supervisor = state
-        .supervisor()
-        .cloned()
-        .ok_or("`zo`가 PATH에 없습니다")?;
-    let addr = channel_addr(&state, &session)?;
-    let token = supervisor.token().map(str::to_string);
-    tauri::async_runtime::spawn_blocking(move || {
-        with_client(addr, token, async move |client| {
-            client
-                .respond_to_permission(prompt_id, &decision)
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        })
-    })
-    .await
-    .map_err(|join| join.to_string())?
+    let channel = zo_channel(&state, &session)?;
+    tauri::async_runtime::spawn_blocking(move || answer_prompt(channel, prompt_id, decision))
+        .await
+        .map_err(|join| join.to_string())?
 }
 
 /// Set the gate state the pty cannot see. The webview calls this from the

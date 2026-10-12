@@ -500,7 +500,8 @@ fn the_way_out_waits_on_the_beat_and_goes_by_the_one_restart_road() {
     let watching = block_after(backend, "pub(crate) fn beat_leaving(");
     assert!(
         watching.contains("if !exit_runtime::watching() {")
-            && watching.contains("exit_runtime::waiting().then(|| take_census(app).busy())"),
+            && watching.contains("exit_runtime::beat_reading(")
+            && watching.contains("take_census(&reading).busy()"),
         "the beat reads a census when nothing waits:\n{watching}"
     );
     let leave = block_after(
@@ -530,7 +531,10 @@ fn the_way_out_waits_on_the_beat_and_goes_by_the_one_restart_road() {
 /// census before it goes. The tray's hide still comes first; a close the
 /// person chose, or one the road went for them, passes; one already asked
 /// about keeps its question or its wait; otherwise work in progress holds
-/// the close and the window asks through the one question function.
+/// the close and the window asks through the one question function. The
+/// press is judged in `exit_runtime::close_pressed`, whose own tests hold
+/// its order (t-49062); the window hands it the one census, the one
+/// question and the close 「지금」 takes.
 #[test]
 fn closing_the_window_asks_the_one_census_first() {
     let main = strip_rust_comments(include_str!("../../src/main.rs"));
@@ -546,22 +550,22 @@ fn closing_the_window_asks_the_one_census_first() {
     );
     let backend = shipped_backend();
     let asking = block_after(backend, "pub(crate) fn close_asks_first(");
-    let order = [
-        "exit_runtime::confirmed()",
-        "exit_runtime::holding_close()",
-        "leave_census(app, exit_runtime::Asking::Close)",
-        "exit_runtime::ask(exit_runtime::Asking::Close",
-        "\"exit:ask\"",
-    ]
-    .map(|needle| {
-        asking
-            .find(needle)
-            .unwrap_or_else(|| panic!("the close's question lost `{needle}`:\n{asking}"))
-    });
     assert!(
-        order.windows(2).all(|pair| pair[0] < pair[1]),
-        "the close asks out of order:\n{asking}"
+        asking.contains("exit_runtime::close_pressed(MainWindowClose(app.clone()))"),
+        "the close is judged somewhere else:\n{asking}"
     );
+    let doors = block_after(backend, "impl exit_runtime::Closing for MainWindowClose {");
+    for needle in [
+        "take_census(&self.0).busy()",
+        "\"exit:ask\"",
+        "LeaveCensus::of(exit_runtime::Asking::Close, busy)",
+        "leave(&handle, exit_runtime::Asking::Close)",
+    ] {
+        assert!(
+            doors.contains(needle),
+            "the close's doors lost `{needle}`:\n{doors}"
+        );
+    }
     let window = window_source();
     let heard = block_after(window, "listen(\"exit:ask\"");
     assert!(

@@ -21,17 +21,21 @@ const HOUR = 3600_000;
  * every suite at its start and reaches this one minutes later, so a clock read at import made
  * 「reported a moment ago」 seven minutes old in the whole-suite run. */
 const sceneAt = (NOW) => [
-  { path: "/r/rev", settled: { reported: true, task: "waits for a review", review_since_ms: NOW - 3 * HOUR } },
-  { path: "/r/revold", settled: { reported: true, task: "an older row, no time kept" } },
-  { path: "/r/revnow", settled: { reported: true, task: "reported a moment ago", review_since_ms: NOW - 20_000 } },
+  { path: "/r/rev", settled: { reported: true, task: "waits for a review", review_since_ms: NOW - 3 * HOUR,
+    progress: { stage: "report_only" } } },
+  { path: "/r/revold", settled: { reported: true, task: "an older row, no time kept", progress: { stage: "report_only" } } },
+  { path: "/r/revnow", settled: { reported: true, task: "reported a moment ago", review_since_ms: NOW - 20_000,
+    progress: { stage: "report_only" } } },
   { path: "/r/ver", settled: { reported: true, task: "verified, never merged",
-    review: { verified: true, merged: false, written: true, author: "coordinator" }, review_since_ms: NOW - 2 * HOUR } },
+    review: { verified: true, merged: false, written: true, author: "coordinator" }, review_since_ms: NOW - 2 * HOUR,
+    progress: { stage: "verified" } } },
   { path: "/r/verold", settled: { reported: true, task: "verified, time not kept",
-    review: { verified: true, merged: false, written: true, author: "coordinator" } } },
+    review: { verified: true, merged: false, written: true, author: "coordinator" }, progress: { stage: "verified" } } },
   { path: "/r/merged", settled: { reported: true, task: "merged",
-    review: { verified: true, merged: true, written: true, author: "coordinator" } } },
+    review: { verified: true, merged: true, written: true, author: "coordinator" }, progress: { stage: "merged" } } },
   { path: "/r/nothing", settled: { reported: true, task: "research",
-    review: { verified: true, nothing_to_land: true, written: true, author: "coordinator" } } },
+    review: { verified: true, nothing_to_land: true, written: true, author: "coordinator" },
+    progress: { stage: "nothing_to_land" } } },
 ];
 
 export async function testLandingAlerts({ browser, origin, ok, faults }) {
@@ -43,14 +47,13 @@ export async function testLandingAlerts({ browser, origin, ok, faults }) {
 
     /* ---- the board's own words ---- */
     const board = await page.evaluate(() => {
-      const row = (review, over = {}) => ({ reported: true, failed: false, review: { verified: false, merged: false, deployed: false, ...review }, ...over });
+      const row = (stage) => ({ reported: true, failed: false, review: null, progress: { stage } });
       const stage = (id) => DESK_STAGES.find((one) => one.id === id) ?? null;
       return {
-        nothing: ledgerReviewWord(row({ verified: true, nothing_to_land: true })),
-        mergedBeside: ledgerReviewWord(row({ verified: true, merged: true, nothing_to_land: true })),
-        claimed: ledgerReviewWord(row({ claimed_nothing_to_land: true })),
-        unverified: ledgerReviewWord(row({ nothing_to_land: false })),
-        phase: ledgerReviewPhaseOf(row({ verified: true, nothing_to_land: true })),
+        nothing: ledgerReviewWord(row("nothing_to_land")),
+        merged: ledgerReviewWord(row("merged")),
+        waiting: ledgerReviewWord(row("report_only")),
+        phase: ledgerReviewPhaseOf(row("nothing_to_land")),
         liveStage: AGENT_GRAPH_LIVE_STAGES.find((one) => one.stage === "nothing-to-land")?.flag ?? null,
         deskStage: stage("nothing_to_land"),
         over: DESK_OVER_STAGES.includes("nothing_to_land"),
@@ -58,9 +61,9 @@ export async function testLandingAlerts({ browser, origin, ok, faults }) {
       };
     });
     ok(
-      "a verified task marked as having no code to land reads 완료 — 착지할 것 없음: not 병합 (a merge beside the mark wins), not 검증 대기 (a worker's claim leaves it waiting), counted as vouched; the board's live stages know it and the desk draws it outside the flow",
-      board.nothing === "완료 — 착지할 것 없음" && board.mergedBeside === "병합됨" &&
-        board.claimed === "검증 대기" && board.unverified === "검증 대기" && board.phase === "vouched" &&
+      "a verified task marked as having no code to land reads 완료 — 착지할 것 없음 — not 병합, not 검증 대기 — counted as vouched; the board's live stages know it and the desk draws it outside the flow (which mark wins is the ledger's one reading, t-47538)",
+      board.nothing === "완료 — 착지할 것 없음" && board.merged === "병합됨" && board.waiting === "검증 대기" &&
+        board.phase === "vouched" &&
         board.liveStage === "nothing_to_land" && board.deskStage?.word === "완료 — 착지할 것 없음" &&
         board.deskStage?.flow === false && board.over === true && !board.flow.includes("nothing_to_land"),
       JSON.stringify(board),

@@ -2083,6 +2083,10 @@ pub(crate) struct LedgerAgent {
     /// verification. `None` where the ledger holds no time to count from — a verification an older
     /// window wrote has none — and the sidebar then says no time at all, never zero.
     pub(crate) review_since_ms: Option<i64>,
+    /// Where the work stands, read once from `review` and the attempt
+    /// (`Run::progress_from`, t-47538) — the stage every surface draws.
+    /// `None` for a worker with neither a task nor an attempt.
+    pub(crate) progress: Option<zerocode_core::orchestration::WorkProgress>,
     /// Why the task is closed — folded into a task, handed to a run, or
     /// outdated — when it is. A closed task is neither reported nor failed:
     /// the board says 닫힘 and its reason, and the card leaves the open lanes.
@@ -2620,6 +2624,8 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
             let dispatch_started_ms = dispatch.map_or(0, |one| one.started_ms);
             let retry_of = dispatch.and_then(|one| one.retry_of.clone());
             let review = carried.map(|held| run.review_of(held)).unwrap_or_default();
+            let progress = (carried.is_some() || dispatch.is_some())
+                .then(|| run.progress_from(carried, &review, dispatch));
             let review_since_ms = match (reported && !failed, dispatch) {
                 (true, Some(attempt)) if !review.verified => run
                     .messages()
@@ -2684,6 +2690,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 handed_in: dispatch.and_then(|one| one.source.clone()),
                 review,
                 review_since_ms,
+                progress,
                 closed: carried.and_then(|held| held.closed.clone()),
                 term,
                 // Finished work is dated by when its attempt ended — the
@@ -5376,6 +5383,68 @@ pub(crate) fn window_exiting(
             rang(swept.moved);
         }
         Err(_) => note_ledger_unwritten("the window's goodbye"),
+    }
+}
+
+/// Whether a goodbye on this way out went unanswered for its whole
+/// patience (t-49062): every later call on the same way out goes without
+/// waiting again.
+static GOODBYE_UNANSWERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// [`window_exiting`] on a road out of the window (t-49062): said on a thread
+/// of its own, and waited for at most [`crate::exit_runtime::LEDGER_PATIENCE`].
+/// Every road calls this on the main thread — the close's exit, ⌘Q, a restart
+/// button, the menu-bar Quit — and the goodbye asks the ledger's actor, which
+/// twice on 2026-10-12 never answered. A goodbye that does not answer in time
+/// is left to finish if it can; the window goes on and says so in one line,
+/// and the next boot's sweep puts every seat the ledger still holds live to
+/// sleep, as it does after a crash ([`RuntimeActor::window_restarted`]). What
+/// is lost is the census's note of what each turn was cut in.
+pub(crate) fn goodbye_within(
+    now_ms: i64,
+    road: crate::exit_runtime::ExitRoad,
+    census: impl Fn() -> restart_census::RestartCensus + Send + 'static,
+) {
+    goodbye_on(now_ms, road, census, &GOODBYE_UNANSWERED);
+}
+
+/// [`goodbye_within`], with `unanswered` marking a goodbye that went
+/// unanswered on this way out.
+fn goodbye_on(
+    now_ms: i64,
+    road: crate::exit_runtime::ExitRoad,
+    census: impl Fn() -> restart_census::RestartCensus + Send + 'static,
+    unanswered: &std::sync::atomic::AtomicBool,
+) {
+    if unanswered.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let (said, answered) = std::sync::mpsc::sync_channel(1);
+    let spawned = std::thread::Builder::new()
+        .name("zerocode-goodbye".to_string())
+        .spawn(move || {
+            window_exiting(now_ms, road, &census);
+            let _ = said.send(());
+        });
+    if spawned.is_ok()
+        && answered
+            .recv_timeout(crate::exit_runtime::LEDGER_PATIENCE)
+            .is_ok()
+    {
+        return;
+    }
+    unanswered.store(true, std::sync::atomic::Ordering::Release);
+    if let Some(root) = BLACKBOX.get() {
+        crate::note_window_event(
+            root,
+            &format!(
+                "exit by {road} · census unread · the goodbye did not answer within {} ms: the \
+                 window goes without it, and the next boot puts the seats the ledger still \
+                 holds to sleep",
+                crate::exit_runtime::LEDGER_PATIENCE.as_millis()
+            ),
+        );
     }
 }
 

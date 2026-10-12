@@ -9962,13 +9962,17 @@
          answers by itself — every answer goes back by the kind's own road.
          Last in the body, so it stands above every other dialog. -->
     <div class="scrim" id="ask-scrim" hidden>
-      <section class="permission ask" role="dialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-why" data-kind="" tabindex="-1">
+      <section class="permission ask" role="dialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-why ask-fallback" data-kind="" tabindex="-1">
         <header>
           <span class="perm-agent" id="ask-agent" hidden></span>
           <h2 id="ask-title"></h2>
         </header>
         <pre class="perm-cmd" id="ask-body" hidden></pre>
         <p class="perm-why" id="ask-why" hidden></p>
+        <!-- 답이 닿지 못한 물음에 다른 길로 답하는 법(t-49081). 에이전트 채널의
+             물음은 그 에이전트의 터미널에도 번호 메뉴로 서 있어 번호 하나로 답이 된다.
+             답이 실패하지 않은 물음과 터미널이 없는 물음에는 없다. -->
+        <p class="perm-why" id="ask-fallback" hidden></p>
         <!-- 시계가 있는 물음(Computer Use)의 남은 시간. 시계가 없는 물음에는 없다. -->
         <p class="ask-clock" id="ask-clock" hidden></p>
         <!-- 인증번호를 받는 사람 차례 카드(t-40807)의 한 줄. 창이 줄이 있다고 한 카드에만
