@@ -2048,7 +2048,7 @@ mod tests {
     }
 
     #[test]
-    fn other_tools_use_the_mcp_call_grammar() {
+    fn other_tools_wear_the_call_row() {
         let mut group = ToolGroup::new(ToolCall::new(
             "a".to_string(),
             ToolKind::Call {
@@ -2056,12 +2056,11 @@ mod tests {
                 detail: "3 items".to_string(),
             },
         ));
-        // A running call is a bounded one-liner: name, then the detail dimmed
-        // and truncated to the width; the invocation grammar with parentheses
-        // is for the committed line.
+        // The row every call wears: the spinner, then ✓ or ✗, the verb, and
+        // the invocation as its target while it runs and once it is done.
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO))[0],
-            "• Calling TodoWrite 3 items"
+            "⠋ Call    TodoWrite(3 items)"
         );
         assert!(group.complete(
             "a",
@@ -2077,7 +2076,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
             vec![
-                "• Called TodoWrite(3 items)".to_string(),
+                "✓ Call    TodoWrite(3 items)".to_string(),
                 "  └ done".to_string()
             ]
         );
@@ -2101,7 +2100,7 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO))[0],
-            "• Calling TodoWrite"
+            "⠋ Call    TodoWrite"
         );
     }
 
@@ -2179,7 +2178,7 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["• Called Sleep".to_string()]
+            vec!["✓ Call    Sleep".to_string()]
         );
     }
 
@@ -2196,8 +2195,10 @@ mod tests {
         assert_eq!(lines[0].spans[0].style.fg, Some(super::palette::TOOL_OK));
     }
 
+    /// A finished call keeps its whole invocation: what the row cannot show
+    /// hangs under it from the target's column, as a long command's text does.
     #[test]
-    fn a_long_mcp_invocation_moves_below_the_header_and_wraps() {
+    fn a_long_call_keeps_its_whole_invocation_under_its_row() {
         let preview = preview_tool_input(
             "Lookup",
             &json!({ "query": "alpha beta gamma delta epsilon" }),
@@ -2209,15 +2210,19 @@ mod tests {
         assert!(group.complete("a", Outcome::from_result(false, &body, "")));
         let rows = plain(&group.lines(24, Duration::ZERO));
 
-        assert_eq!(rows[0], "• Called");
-        assert!(rows[1].starts_with("  └ Lookup("), "rows were {rows:?}");
+        assert!(rows[0].starts_with("✓ Call    Lookup("), "rows were {rows:?}");
+        assert!(rows.len() >= 3, "rows were {rows:?}");
+        assert!(
+            rows[1..rows.len() - 1].iter().all(|row| row.starts_with("          ")),
+            "rows were {rows:?}"
+        );
         assert!(rows.iter().all(|row| !row.contains('…')), "rows were {rows:?}");
         assert!(rows.iter().any(|row| row.contains("epsilon)")), "rows were {rows:?}");
-        assert_eq!(rows.last().expect("output row"), "    ok");
+        assert_eq!(rows.last().expect("output row"), "  └ ok");
     }
 
     #[test]
-    fn web_search_uses_the_search_activity_grammar() {
+    fn web_search_wears_the_search_row() {
         let preview = preview_tool_input("WebSearch", &json!({ "query": "rust async" }));
         let summary = preview_summary(&preview);
         let kind = ToolKind::from_preview("WebSearch", &preview, &summary);
@@ -2225,15 +2230,14 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["• Searching the web rust async".to_string()]
+            vec!["⠋ Search  rust async on the web".to_string()]
         );
 
         let body = format_tool_result_from_raw("WebSearch", "raw search result", false);
         assert!(group.complete("a", Outcome::from_result(false, &body, "")));
         let lines = group.lines(60, Duration::ZERO);
-        assert_eq!(plain(&lines), vec!["• Searched the web for rust async".to_string()]);
-        assert!(lines[0].spans[0].style.dim);
-        assert_eq!(lines[0].spans[0].style.fg, None);
+        assert_eq!(plain(&lines), vec!["✓ Search  rust async on the web".to_string()]);
+        assert_eq!(lines[0].spans[0].style.fg, Some(super::palette::TOOL_OK));
     }
 
     #[test]
@@ -2244,16 +2248,22 @@ mod tests {
         let reason = "Small delegated task: do it inline. Do not retry this spawn.";
         let body = ToolResultBody::Declined { reason: reason.to_owned() };
         group.complete("a", Outcome::from_result(true, &body, reason));
-        let text = plain(&group.lines(100, Duration::ZERO)).join("\n");
-        assert!(text.contains("Spawn declined — kept inline") && text.contains(reason), "{text}");
-        assert!(!text.contains("Agent spawn failed"), "a verdict is not a failure:\n{text}");
+        let lines = group.lines(100, Duration::ZERO);
+        let rows = plain(&lines);
+        let text = rows.join("\n");
+        assert!(rows[0].starts_with("✗ Spawn   "), "{text}");
+        assert!(rows[0].ends_with("declined — kept inline") && text.contains(reason), "{text}");
+        // A policy verdict is not a failure: it does not say so, and its ✗ is
+        // dimmed rather than red.
+        assert!(!text.contains("failed"), "a verdict is not a failure:\n{text}");
+        assert!(lines[0].spans[0].style.dim && lines[0].spans[0].style.fg.is_none(), "{:?}", lines[0].spans[0]);
         // A spawn that really failed still says so.
         let kind = ToolKind::from_preview("Agent", &preview, &preview_summary(&preview));
         let mut failed = ToolGroup::new(ToolCall::new("b".to_string(), kind));
         let body = format_tool_result_from_raw("Agent", "execution error: child died", true);
         failed.complete("b", Outcome::from_result(true, &body, "child died"));
-        let text = plain(&failed.lines(100, Duration::ZERO)).join("\n");
-        assert!(text.contains("Agent spawn failed"), "{text}");
+        let rows = plain(&failed.lines(100, Duration::ZERO));
+        assert!(rows[0].starts_with("✗ Spawn   ") && rows[0].ends_with("failed"), "{rows:?}");
     }
 
     #[test]
@@ -2276,7 +2286,7 @@ mod tests {
         // names the helper and, once the poller has a manifest, its live row.
         assert_eq!(
             plain(&group.lines(100, Duration::ZERO)),
-            vec!["• Spawning robie [worker] (gpt-5.1 high)".to_string()]
+            vec!["⠋ Spawn   robie [worker] (gpt-5.1 high)".to_string()]
         );
         assert!(group.set_spawn_progress(&[(
             "a".to_string(),
@@ -2285,7 +2295,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(100, Duration::ZERO)),
             vec![
-                "• Spawning robie [worker] (gpt-5.1 high)".to_string(),
+                "⠋ Spawn   robie [worker] (gpt-5.1 high)".to_string(),
                 "  └ 12 tool uses · 1m 20s · Read · src/main.rs".to_string(),
             ]
         );
@@ -2305,7 +2315,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(100, Duration::ZERO)),
             vec![
-                "• Spawned robie [worker] (gpt-5.1 high)".to_string(),
+                "✓ Spawn   robie [worker] (gpt-5.1 high)".to_string(),
                 "  └ Investigate the flaky orchestration test".to_string(),
             ]
         );
@@ -2368,9 +2378,9 @@ mod tests {
         assert_eq!(
             plain(&group.lines(100, Duration::ZERO)),
             vec![
-                "• Spawning scout".to_string(),
+                "⠋ Spawn   scout".to_string(),
                 "  └ 3 tool uses · 9s · reading".to_string(),
-                "• Spawning verifier".to_string(),
+                "⠋ Spawn   verifier".to_string(),
                 "  └ 1 tool use · 4s · thinking".to_string(),
             ]
         );
@@ -2384,9 +2394,9 @@ mod tests {
         assert_eq!(
             plain(&group.lines(100, Duration::ZERO)),
             vec![
-                "• Spawning scout".to_string(),
+                "⠋ Spawn   scout".to_string(),
                 "  └ 3 tool uses · 9s · reading".to_string(),
-                "• Spawning verifier".to_string(),
+                "⠋ Spawn   verifier".to_string(),
             ]
         );
     }
