@@ -1044,10 +1044,10 @@ ok(
     brainOpen.overview.tags === 2 &&
     brainOpen.overview.kinds >= 2 &&
     brainOpen.overview.recent === 5 &&
-    // 카파시의 lint 여덟 줄, 근거 없는 간선 한 줄(t-5966), 라이브 층의 셋(t-2931) —
-    // 열두 줄, 수는 픽스처가 지은 `graph.lint.counts`의 것(라이브 층이 없는 답에서
-    // 셋은 0)이고 창은 하나도 세지 않는다.
-    brainOpen.overview.health.length === 12 &&
+    // 카파시의 lint 여덟 줄, 근거 없는 간선 한 줄(t-5966), 라이브 층의 셋(t-2931), 종류
+    // 없는 페이지 한 줄(t-43992) — 열세 줄, 수는 픽스처가 지은 `graph.lint.counts`의 것
+    // (라이브 층이 없는 답에서 셋은 0)이고 창은 하나도 세지 않는다.
+    brainOpen.overview.health.length === 13 &&
     JSON.stringify(brainOpen.overview.health) === JSON.stringify(brainOpen.overview.healthExpected) &&
     brainOpen.overview.health.includes("orphans=1") &&
     brainOpen.overview.orphanTile === "1" &&
