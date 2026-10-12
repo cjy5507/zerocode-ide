@@ -19832,6 +19832,28 @@ pub(crate) mod computer_desktop_wait {
     /// never refuses another's run.
     pub(crate) static ONE_HAND: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[cfg(unix)]
+    #[test]
+    fn an_omitted_background_flag_does_not_allow_a_shared_desktop_process() {
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(crate::computer_use::guard::stopped_reason(), None);
+        let answer = answer_computer_command(&words(&[
+            "run",
+            "--program",
+            "/bin/echo",
+            "--args",
+            "background-policy-probe",
+            "--json",
+        ]));
+        assert_ne!(
+            answer.exit_code, 0,
+            "an unscoped program was started by default"
+        );
+        assert_eq!(envelope(&answer)["error"]["code"], "requires_foreground");
+    }
+
     fn envelope(answer: &zerocode_hookd::TeamAnswer) -> serde_json::Value {
         let line = [answer.stdout.as_str(), answer.stderr.as_str()]
             .into_iter()
