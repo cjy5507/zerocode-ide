@@ -783,3 +783,69 @@ fn a_manual_provider_change_emits_the_new_identity_without_starting_a_server() {
     assert!(event.configured_model_id.is_none());
     assert_eq!(event.server.state, "stopped");
 }
+
+#[test]
+fn concurrent_snapshots_cannot_give_an_old_provider_a_newer_revision() {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Barrier, Mutex};
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let mut identities = BTreeMap::new();
+    let mut documents = Vec::new();
+    for index in 0..=100 {
+        let provider = judgment_provider::Provider {
+            kind: judgment_provider::ProviderKind::Remote,
+            protocol: judgment_provider::Protocol::SystemOne,
+            base_url: "https://example.invalid".to_owned(),
+            model: format!("fixture-{index}"),
+            requires_auth: false,
+        };
+        identities.insert(provider.identity(), index);
+        documents.push(
+            serde_json::to_vec(&serde_json::json!({"smart":{"judgmentProvider":provider}}))
+                .unwrap(),
+        );
+    }
+    fs::write(&settings, &documents[0]).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = events.clone();
+    let manager = Manager::new(home.path(), &settings, move |snapshot| {
+        observed
+            .lock()
+            .unwrap()
+            .push((snapshot.revision, snapshot.provider_identity.unwrap()));
+    })
+    .unwrap();
+    let start = Arc::new(Barrier::new(9));
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let manager = manager.clone();
+            let start = start.clone();
+            scope.spawn(move || {
+                start.wait();
+                for _ in 0..200 {
+                    manager.notify_settings_changed();
+                }
+            });
+        }
+        start.wait();
+        for document in &documents[1..] {
+            let temporary = home.path().join("settings-next.json");
+            fs::write(&temporary, document).unwrap();
+            fs::rename(temporary, &settings).unwrap();
+            manager.notify_settings_changed();
+        }
+    });
+    let mut events = events.lock().unwrap();
+    events.sort_by_key(|(revision, _)| *revision);
+    let versions: Vec<_> = events
+        .iter()
+        .map(|(_, identity)| identities[identity])
+        .collect();
+    assert_eq!(events.len(), 1700);
+    assert!(
+        versions.windows(2).all(|pair| pair[0] <= pair[1]),
+        "a stale provider observation received a newer revision"
+    );
+    assert_eq!(versions.last(), Some(&100));
+}

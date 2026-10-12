@@ -187,10 +187,10 @@ impl Manager {
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        let mut inner = lock(&self.inner);
         let provider_identity = Provider::read(&self.settings)
             .ok()
             .map(|provider| provider.identity());
-        let mut inner = lock(&self.inner);
         if inner.provider_identity != provider_identity {
             inner.provider_identity.clone_from(&provider_identity);
             inner.revision += 1;

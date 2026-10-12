@@ -33,12 +33,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = before.models.first().ok_or("empty_catalog")?;
     match action.to_str().ok_or("invalid_action")? {
         "runtime" => {
-            manager.prepare_runtime()?;
-            settled(&manager).await?;
+            if manager.prepare_runtime()?.runtime.state != "ready" {
+                settled(&manager).await?;
+            }
         }
         "install" => {
-            manager.install(&model.id, &model.revision, source)?;
-            settled(&manager).await?;
+            let installed = manager.install(&model.id, &model.revision, source)?;
+            if !installed
+                .models
+                .iter()
+                .any(|installed| installed.id == model.id && installed.installed)
+            {
+                settled(&manager).await?;
+            }
         }
         "run" => {
             manager.start(&model.id, &model.revision)?;
