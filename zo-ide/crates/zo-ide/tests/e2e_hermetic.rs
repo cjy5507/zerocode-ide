@@ -2497,7 +2497,7 @@ async fn e2e_workflow_first_tool_frame_shows_both_live_helpers() {
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"Run the two-helper workflow\r")
         .expect("send workflow prompt");
-    run.wait_for("agents 2 · running 2 · done 0", timeout);
+    run.wait_for_screen("agents 2 · running 2 · done 0", 40, timeout);
     run.wait_for("Bash · sleep", timeout);
 
     let mut screen = Screen::new(40);
