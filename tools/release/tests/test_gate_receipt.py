@@ -499,6 +499,58 @@ class ReceiptTests(unittest.TestCase):
                 with self.assertRaises(launcher.Untrusted):
                     launcher.load_policy(path, gate.digest(raw), self.repo)
 
+    @unittest.skipIf(os.name == "nt", "symlink creation needs Windows developer mode")
+    def test_runtime_library_aliases_bind_targets_bytes_and_policy(self):
+        launcher = load_module(SCRIPT.with_name("gate_launcher.py"), "library_fixture_launcher")
+        target = self.root / "runtime-library"
+        other = self.root / "other-runtime-library"
+        target.write_bytes(b"runtime library fixture bytes")
+        other.write_bytes(b"other runtime library fixture bytes")
+        aliases = [self.root / "loader-a", self.root / "loader-b"]
+        for alias in aliases:
+            alias.symlink_to(target)
+        rows = [{"path": str(alias), "resolvedPath": str(target), "sha256": gate.file_digest(target)} for alias in aliases]
+        expected = [[row["path"], row["resolvedPath"], row["sha256"]] for row in rows]
+        self.assertEqual(launcher.library_bindings(rows, self.repo), expected)
+        policy = copy.deepcopy(self.args.trust["policy"])
+        policy["runtime"]["libraries"] = rows
+        path = self.root / "library-policy.json"
+        raw = gate.encoded(policy)
+        path.write_bytes(raw)
+        context = launcher.load_policy(path, gate.digest(raw), self.repo)
+        self.assertEqual(context["policy"]["runtime"]["libraries"], rows)
+        for bad in ([rows[0], rows[0]], [rows[0], {**rows[1], "sha256": "0" * 64}], rows * 9):
+            with self.subTest(rows=bad):
+                with self.assertRaises(launcher.Untrusted):
+                    launcher.library_bindings(bad, self.repo)
+        aliases[1].unlink()
+        aliases[1].symlink_to(other)
+        with self.assertRaises(launcher.Untrusted):
+            launcher.library_bindings(rows, self.repo)
+        aliases[1].unlink()
+        aliases[1].symlink_to(target)
+        target.write_bytes(b"changed runtime library fixture bytes")
+        with self.assertRaises(launcher.Untrusted):
+            launcher.load_policy(path, gate.digest(raw), self.repo)
+        target.write_bytes(b"runtime library fixture bytes")
+        self.assertEqual(launcher.library_bindings(rows, self.repo), expected)
+        many = []
+        for index in range(17):
+            alias = self.root / ("count-loader-" + str(index))
+            alias.symlink_to(target)
+            many.append({**rows[0], "path": str(alias)})
+        with self.assertRaises(launcher.Untrusted):
+            launcher.library_bindings(many, self.repo)
+        shared = self.root / "shared-budget-library"
+        with shared.open("wb") as file:
+            file.truncate(90 * 1024 * 1024)
+        shared_rows = []
+        for index in range(3):
+            alias = self.root / ("budget-loader-" + str(index))
+            alias.symlink_to(shared)
+            shared_rows.append({"path": str(alias), "resolvedPath": str(shared), "sha256": gate.file_digest(shared)})
+        self.assertEqual(len(launcher.library_bindings(shared_rows, self.repo)), 3)
+
     def test_a_small_command_cannot_claim_the_trusted_root_gate(self):
         self.args.command = [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({PASS!r})"]
         ledger = FakeLedger()
@@ -882,14 +934,21 @@ class ReceiptTests(unittest.TestCase):
         bad_producer = self.root / "unapproved-producer.py"
         good_producer.write_text("from pathlib import Path\ndef main(trust=None, argv=None):\n    Path(" + repr(str(good_marker)) + ").write_text('ran')\n    return 0\n")
         bad_producer.write_text("from pathlib import Path\nPath(" + repr(str(bad_marker)) + ").write_text('ran')\ndef main(trust=None, argv=None):\n    return 0\n")
+        launcher = SCRIPT.with_name("gate_launcher.py")
+        fixture = load_module(SCRIPT.with_name("tests") / "gate_bootstrap_fixture.py", "loader_runtime_fixture")
+        bootstrap = fixture.prepare(self.root / "loader-runtime", launcher)
+        runtime = {role: {"path": bootstrap[bootstrap.index("--" + role) + 1],
+                          "sha256": bootstrap[bootstrap.index("--" + role + "-sha256") + 1]}
+                   for role in ("python", "stdlib")}
+        runtime["libraries"] = json.loads((Path(runtime["stdlib"]["path"]) / fixture.LIBRARY_DECLARATION).read_bytes())
         policies = {}
         for label, producer in (("good", good_producer), ("bad", bad_producer)):
             policy = copy.deepcopy(self.args.trust["policy"])
+            policy["runtime"] = runtime
             policy["bundle"]["producer"] = {"path": str(producer), "sha256": gate.file_digest(producer)}
             path = self.root / (label + "-loader-policy.json")
             path.write_bytes(gate.encoded(policy))
             policies[label] = (str(path), gate.digest(path.read_bytes()))
-        launcher = SCRIPT.with_name("gate_launcher.py")
 
         def invoke(label, bound, malformed=None):
             parent, child = socket.socketpair()
@@ -905,7 +964,7 @@ class ReceiptTests(unittest.TestCase):
                     prefix += ["--policy", policies["bad"][0]]
                 elif malformed == "reserved":
                     prefix += ["--bound-policy-sha256", policies["bad"][1]]
-                return subprocess.run([sys.executable, "-I", "-S", "-B", "-", *prefix, "--", "run"],
+                return subprocess.run([runtime["python"]["path"], "-I", "-S", "-B", "-", *prefix, "--", "run"],
                                       input=launcher.read_bytes(), pass_fds=(child.fileno(),), cwd=self.repo,
                                       env={"HOME": str(self.root / "git-home"), "PATH": os.defpath},
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=30)

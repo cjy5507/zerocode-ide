@@ -11,6 +11,7 @@ use zerocode_core::orchestration::gate_reuse::{
 use zerocode_core::user_preferences::content_key;
 
 mod runtime_libraries;
+mod startup_layout;
 
 const LAUNCHER_CAP: u64 = 8 * 1024 * 1024;
 const FILE_CAP: usize = 128 * 1024 * 1024;
@@ -166,28 +167,6 @@ fn tree_hash(root: &Path) -> Result<String, ()> {
     Ok(content_key(&serde_json::to_vec(&rows).map_err(|_| ())?))
 }
 
-fn startup_layout(python: &Path, runtime: &Path) -> Result<(), ()> {
-    if !runtime.is_dir() || !python.starts_with(runtime) {
-        return Err(());
-    }
-    let directory = python.parent().ok_or(())?;
-    let mut redirects = vec![directory.join("pyvenv.cfg"), directory.join("python._pth")];
-    redirects.push(python.with_extension("_pth"));
-    for parent in [directory.parent(), runtime.parent(), Some(runtime)]
-        .into_iter()
-        .flatten()
-    {
-        redirects.push(parent.join("pyvenv.cfg"));
-    }
-    for path in redirects {
-        match fs::symlink_metadata(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(()),
-        }
-    }
-    Ok(())
-}
-
 fn execute(args: &[String]) -> Result<ExitCode, ()> {
     let wall_started = std::time::Instant::now();
     let (options, forwarded) = parse(args)?;
@@ -201,7 +180,7 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
     let launcher = canonical(options["--launcher"])?;
     let python = canonical(options["--python"])?;
     let runtime = canonical(options["--stdlib"])?;
-    startup_layout(&python, &runtime)?;
+    startup_layout::verify(&python, &runtime, &[])?;
     let mut file = fs::File::open(&launcher).map_err(|_| ())?;
     let before = file.metadata().map_err(|_| ())?;
     if !before.is_file() || before.len() > LAUNCHER_CAP {
@@ -231,6 +210,7 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
             return Ok(ExitCode::FAILURE);
         }
     };
+    startup_layout::verify(&python, &runtime, &libraries)?;
     let prehash_ms = wall_started.elapsed().as_millis();
     let open_ms;
     let mut command = Command::new(&python);
@@ -543,7 +523,11 @@ mod tests {
     fn bootstrap_library_closure_rejects_missing_transitive_and_unresolved_loads() {
         use zerocode_core::orchestration::gate_reuse::LibraryIdentity;
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let directory = temp.path().canonicalize().unwrap();
+        let root = directory.join("runtime");
+        let external = directory.join("libraries");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&external).unwrap();
         let write_image = |path: &Path, dependency: &str| {
             let length = (24 + dependency.len() + 1).div_ceil(8) * 8;
             let mut bytes = Vec::new();
@@ -551,7 +535,7 @@ mod tests {
                 0xfeed_facf_u32,
                 0x0100_000c,
                 0,
-                6,
+                8,
                 1,
                 length as u32,
                 0,
@@ -570,8 +554,8 @@ mod tests {
             fs::write(path, bytes).unwrap();
         };
         let image = root.join("interpreter");
-        let first = root.join("library-a");
-        let second = root.join("library-b");
+        let first = external.join("library-a");
+        let second = external.join("library-b");
         write_image(&second, "/usr/lib/libSystem.B.dylib");
         write_image(&first, second.to_str().unwrap());
         write_image(&image, first.to_str().unwrap());
@@ -611,6 +595,21 @@ mod tests {
             resolved_path: target.to_str().unwrap().into(),
             sha256: file_hash(&target).unwrap(),
         };
+        let alias = root.join("other-loader-name");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let other_name = LibraryIdentity {
+            path: alias.to_str().unwrap().into(),
+            ..entry.clone()
+        };
+        assert!(runtime_libraries::verify_entries(&[entry.clone(), other_name.clone()]).is_ok());
+        let conflicting = LibraryIdentity {
+            sha256: "b".repeat(64),
+            ..other_name
+        };
+        assert_eq!(
+            runtime_libraries::verify_entries(&[entry.clone(), conflicting]),
+            Err("digest_mismatch")
+        );
         assert!(runtime_libraries::verify_entries(std::slice::from_ref(&entry)).is_ok());
         fs::write(&target, b"changed fixture library bytes").unwrap();
         assert_eq!(
@@ -634,6 +633,38 @@ mod tests {
             runtime_libraries::verify_entries(&vec![entry.clone(); 17]),
             Err("digest_mismatch")
         );
+        let many = (0..17)
+            .map(|index| {
+                let path = root.join(format!("count-loader-{index}"));
+                std::os::unix::fs::symlink(&target, &path).unwrap();
+                LibraryIdentity {
+                    path: path.to_str().unwrap().into(),
+                    ..entry.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            runtime_libraries::verify_entries(&many),
+            Err("digest_mismatch")
+        );
+        let shared = root.join("shared-budget-library");
+        fs::File::create(&shared)
+            .unwrap()
+            .set_len(90 * 1024 * 1024)
+            .unwrap();
+        let digest = file_hash(&shared).unwrap();
+        let shared_names = (0..3)
+            .map(|index| {
+                let path = root.join(format!("budget-loader-{index}"));
+                std::os::unix::fs::symlink(&shared, &path).unwrap();
+                LibraryIdentity {
+                    path: path.to_str().unwrap().into(),
+                    resolved_path: shared.to_str().unwrap().into(),
+                    sha256: digest.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(runtime_libraries::verify_entries(&shared_names).is_ok());
         let directory = LibraryIdentity {
             path: root.to_str().unwrap().into(),
             resolved_path: root.to_str().unwrap().into(),
@@ -658,6 +689,73 @@ mod tests {
             Err("invalid_request")
         );
         assert!(runtime_libraries::verify_entries(&[entry]).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_startup_file_binds_exact_paths_and_rejects_prior_redirects() {
+        use zerocode_core::orchestration::gate_reuse::LibraryIdentity;
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().canonicalize().unwrap();
+        let runtime = directory.join("runtime");
+        let python = runtime.join("bin/python3.14");
+        let stdlib = runtime.join("lib/python3.14");
+        let dynload = stdlib.join("lib-dynload");
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::create_dir_all(&dynload).unwrap();
+        fs::create_dir(stdlib.join("encodings")).unwrap();
+        fs::write(&python, b"fixture interpreter bytes").unwrap();
+        fs::write(stdlib.join("os.py"), b"").unwrap();
+        fs::write(stdlib.join("encodings/__init__.py"), b"").unwrap();
+        let approved = startup_layout::pth_path(&python);
+        let text = format!("{}\n{}\n", stdlib.display(), dynload.display());
+        fs::write(&approved, &text).unwrap();
+        assert_eq!(
+            startup_layout::verify(&python, &runtime, &[]).unwrap(),
+            vec![stdlib.clone(), dynload.clone()]
+        );
+        for invalid in [
+            String::new(),
+            format!("{text}\n"),
+            format!("{text}import site\n"),
+            format!("{text}import os\n"),
+            format!("{}#comment\n{}\n", stdlib.display(), dynload.display()),
+            format!("../lib/python3.14\n{}\n", dynload.display()),
+            format!("{}\n{}\n", directory.display(), dynload.display()),
+            format!("{}\n{}\n", stdlib.display(), directory.display()),
+        ] {
+            fs::write(&approved, invalid).unwrap();
+            assert!(startup_layout::verify(&python, &runtime, &[]).is_err());
+        }
+        fs::write(&approved, &text).unwrap();
+        let legacy = python.with_extension("_pth");
+        fs::rename(&approved, &legacy).unwrap();
+        assert!(startup_layout::verify(&python, &runtime, &[]).is_err());
+        fs::rename(&legacy, &approved).unwrap();
+        let external = directory.join("libraries");
+        fs::create_dir(&external).unwrap();
+        let target = external.join("runtime-library");
+        let alias = external.join("runtime-alias");
+        fs::write(&target, b"fixture library bytes").unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let libraries = vec![LibraryIdentity {
+            path: alias.to_str().unwrap().into(),
+            resolved_path: target.to_str().unwrap().into(),
+            sha256: file_hash(&target).unwrap(),
+        }];
+        assert!(startup_layout::verify(&python, &runtime, &libraries).is_ok());
+        for prior in [
+            startup_layout::pth_path(&alias),
+            startup_layout::pth_path(&target),
+            external.join("pyvenv.cfg"),
+            python.parent().unwrap().join("python._pth"),
+            runtime.parent().unwrap().join("pyvenv.cfg"),
+        ] {
+            fs::write(&prior, &text).unwrap();
+            assert!(startup_layout::verify(&python, &runtime, &libraries).is_err());
+            fs::remove_file(&prior).unwrap();
+        }
+        assert!(startup_layout::verify(&python, &runtime, &libraries).is_ok());
     }
 
     #[test]

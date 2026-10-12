@@ -10,6 +10,7 @@ pub(super) const DECLARATION: &str = "runtime-libraries.json";
 pub(super) fn verify_entries(libraries: &[LibraryIdentity]) -> Result<(), &'static str> {
     validate_libraries(libraries).map_err(|_| "digest_mismatch")?;
     let mut bytes = 0_u64;
+    let mut targets = std::collections::BTreeSet::new();
     for library in libraries {
         let path = Path::new(&library.path);
         if path.components().any(|part| part == Component::ParentDir) {
@@ -23,7 +24,9 @@ pub(super) fn verify_entries(libraries: &[LibraryIdentity]) -> Result<(), &'stat
         if !metadata.is_file() {
             return Err("digest_mismatch");
         }
-        bytes = bytes.checked_add(metadata.len()).ok_or("digest_mismatch")?;
+        if targets.insert(resolved.clone()) {
+            bytes = bytes.checked_add(metadata.len()).ok_or("digest_mismatch")?;
+        }
         if bytes > TOTAL_CAP {
             return Err("invalid_request");
         }
@@ -190,6 +193,9 @@ fn load_names(path: &Path) -> Result<Vec<String>, &'static str> {
     let mut names = Vec::new();
     for line in text.lines().map(str::trim) {
         if let Some(command) = line.strip_prefix("cmd ") {
+            if command == "LC_DYLD_ENVIRONMENT" {
+                return Err("unsupported_runtime");
+            }
             if needed {
                 return Err("unknown_runtime_dependency");
             }
@@ -202,14 +208,13 @@ fn load_names(path: &Path) -> Result<Vec<String>, &'static str> {
                     | "LC_LAZY_LOAD_DYLIB"
                     | "LC_LOAD_DYLINKER"
             );
-        } else if needed {
-            if let Some(name) = line
+        } else if needed
+            && let Some(name) = line
                 .strip_prefix("name ")
                 .and_then(|value| value.rsplit_once(" (offset ").map(|(name, _)| name))
-            {
-                names.push(name.into());
-                needed = false;
-            }
+        {
+            names.push(name.into());
+            needed = false;
         }
     }
     if needed {

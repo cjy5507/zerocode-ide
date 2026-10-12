@@ -1454,7 +1454,7 @@ fn native_bootstrap_binds_launcher_and_runtime_to_the_current_policy_before_pyth
         ),
     )
     .unwrap();
-    for role in ["launcher", "python", "stdlib"] {
+    for role in ["launcher", "python", "stdlib", "libraries"] {
         let mut options: Vec<String> = serde_json::from_value(policy["bootstrap"].clone()).unwrap();
         let mut manifest = original_manifest.clone();
         if role == "launcher" {
@@ -1471,6 +1471,14 @@ fn native_bootstrap_binds_launcher_and_runtime_to_the_current_policy_before_pyth
                 + 1;
             options[hash] =
                 zerocode_core::user_preferences::content_key(&std::fs::read(&launcher).unwrap());
+        } else if role == "libraries" {
+            assert!(
+                !manifest["runtime"]["libraries"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            manifest["runtime"]["libraries"] = json!([]);
         } else {
             manifest["runtime"][role]["sha256"] = "0".repeat(64).into();
         }

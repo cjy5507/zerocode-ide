@@ -29,6 +29,8 @@ def load_names(path):
     for line in result.stdout.decode().splitlines():
         line = line.strip()
         if line.startswith("cmd "):
+            if line[4:] == "LC_DYLD_ENVIRONMENT":
+                raise AssertionError("fixture runtime dependency redirects are unsupported")
             if needed:
                 raise AssertionError("fixture runtime dependency is unknown")
             needed = line[4:] in commands
@@ -67,7 +69,12 @@ def runtime_libraries(python, source):
                 libraries[name] = {"path": name, "resolvedPath": str(resolved), "sha256": file_hash(resolved)}
                 pending.append(resolved)
     rows = [libraries[name] for name in sorted(libraries)]
-    if len(rows) > 16 or len({row["resolvedPath"] for row in rows}) != len(rows) or sum(Path(row["resolvedPath"]).stat().st_size for row in rows) > LIBRARY_CAP:
+    targets = {}
+    for row in rows:
+        previous = targets.setdefault(row["resolvedPath"], row["sha256"])
+        if previous != row["sha256"]:
+            raise AssertionError("fixture runtime aliases have conflicting identities")
+    if len(rows) > 16 or sum(Path(path).stat().st_size for path in targets) > LIBRARY_CAP:
         raise AssertionError("fixture runtime dependency allocation or identity is unsupported")
     return rows
 
@@ -107,9 +114,10 @@ def prepare(root, launcher):
     declaration = json.dumps(libraries, sort_keys=True, separators=(",", ":")) + "\n"
     if len(declaration.encode()) > 64 * 1024:
         raise AssertionError("fixture runtime declaration exceeds its allocation")
+    startup = str(stdlib) + "\n" + str(stdlib / "lib-dynload") + "\n"
     allowed = {Path(row["resolvedPath"]): row["sha256"] for row in libraries}
     linked = []
-    size = original.stat().st_size + len(declaration.encode())
+    size = original.stat().st_size + len(declaration.encode()) + len(startup.encode())
     for directory, children, files in os.walk(source):
         children[:] = [name for name in children if name not in {"site-packages", "__pycache__"}]
         for name in children + files:
@@ -133,6 +141,7 @@ def prepare(root, launcher):
         if str(Path(entry["path"]).resolve(strict=True)) != entry["resolvedPath"] or file_hash(entry["resolvedPath"]) != entry["sha256"]:
             raise AssertionError("fixture runtime input changed while copying")
     (runtime / LIBRARY_DECLARATION).write_text(declaration)
+    Path(str(python) + "._pth").write_bytes(startup.encode())
     return ["--launcher", str(Path(launcher).resolve()), "--launcher-sha256", file_hash(launcher),
             "--python", str(python), "--python-sha256", file_hash(python),
             "--stdlib", str(runtime), "--stdlib-sha256", tree_hash(runtime)]

@@ -8,6 +8,7 @@ not isolate arbitrary code running as the same operating-system user.
 
 import argparse
 import configparser
+import encodings
 import hashlib
 import json
 import os
@@ -192,7 +193,7 @@ def load_policy(path, expected, repo, launcher_path=None):
 def library_bindings(libraries, repo):
     if not isinstance(libraries, list) or len(libraries) > 16:
         raise Untrusted("runtime libraries are not bounded", "digest_mismatch")
-    names, targets, bindings, total = set(), set(), [], 0
+    names, targets, bindings, total = set(), {}, [], 0
     for entry in libraries:
         if (not isinstance(entry, dict) or set(entry) != {"path", "resolvedPath", "sha256"}
                 or any(not isinstance(entry[key], str) for key in entry)):
@@ -200,7 +201,9 @@ def library_bindings(libraries, repo):
         named, target = Path(entry["path"]), Path(entry["resolvedPath"])
         if (not named.is_absolute() or not target.is_absolute() or ".." in named.parts or target != target.resolve(strict=True)
                 or named.resolve(strict=True) != target or target.is_relative_to(repo)
-                or entry["path"] in names or entry["resolvedPath"] in targets or not target.is_file()):
+                or entry["path"] in names
+                or entry["resolvedPath"] in targets and targets[entry["resolvedPath"]] != entry["sha256"]
+                or not target.is_file()):
             raise Untrusted("runtime library binding changed or duplicated", "digest_mismatch")
         before = target.lstat()
         if not stat.S_ISREG(before.st_mode) or before.st_size > 128 * 1024 * 1024:
@@ -211,13 +214,33 @@ def library_bindings(libraries, repo):
                 hasher.update(block)
         after = target.lstat()
         stamp = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_mode)
-        total += before.st_size
+        if entry["resolvedPath"] not in targets:
+            total += before.st_size
         if stamp(before) != stamp(after) or total > 256 * 1024 * 1024 or hasher.hexdigest() != entry["sha256"]:
             raise Untrusted("runtime library bytes or allocation changed", "digest_mismatch")
         names.add(entry["path"])
-        targets.add(entry["resolvedPath"])
+        targets[entry["resolvedPath"]] = entry["sha256"]
         bindings.append([entry["path"], entry["resolvedPath"], entry["sha256"]])
     return bindings
+
+
+def runtime_locations(policy):
+    runtime = policy["runtime"]
+    root = Path(runtime["stdlib"]["path"]).resolve(strict=True)
+    python = Path(runtime["python"]["path"]).resolve(strict=True)
+    paths = read_regular(Path(str(python) + "._pth")).decode().splitlines()
+    if len(paths) != 2 or sys.path != paths or Path(sys.executable).resolve(strict=True) != python:
+        raise Untrusted("runtime startup paths differ from the native binding", "digest_mismatch")
+    stdlib, dynload = (Path(path) for path in paths)
+    if (any(not path.is_absolute() or path.resolve(strict=True) != path for path in (stdlib, dynload))
+            or stdlib.parent != root / "lib" or dynload != stdlib / "lib-dynload"):
+        raise Untrusted("runtime startup paths leave the pinned tree", "digest_mismatch")
+    locations = [sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix, getattr(sys, "_stdlib_dir", None)]
+    if any(not isinstance(value, str) or not Path(value).is_absolute()
+           or not Path(value).resolve().is_relative_to(root) for value in locations):
+        raise Untrusted("runtime prefixes leave the pinned tree", "digest_mismatch")
+    if any(not Path(module.__file__).resolve(strict=True).is_relative_to(stdlib) for module in (json, encodings)):
+        raise Untrusted("runtime startup modules leave the pinned standard library", "digest_mismatch")
 
 
 def search_paths(searches, producer):
@@ -486,6 +509,7 @@ def main(argv=None):
         if args.policy_sha256 != args.bound_policy_sha256:
             raise Untrusted("policy differs from the authenticated job binding", "digest_mismatch")
         context = load_policy(args.policy, args.policy_sha256, args.repo, launcher_path=args.bootstrap_launcher)
+        runtime_locations(context["policy"])
         context["authority"] = authority
         module = types.ModuleType("trusted_gate_receipt")
         module.__file__ = context["policy"]["bundle"]["producer"]["path"]

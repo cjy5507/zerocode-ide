@@ -57,7 +57,7 @@ fn real_python_uses_retained_launcher_bytes_and_declared_standard_library() {
     );
     fs::remove_file(&marker).unwrap();
     fs::write(&launcher,
-        "import json, os, pathlib, sys\nassert not any(key in os.environ for key in ['ZEROCODE_AGENT_TEAM_TOKEN', 'ZEROCODE_AGENT_TEAM_TOKEN_FILE', 'ZEROCODE_HOOK_TOKEN'])\nassert sys.flags.isolated and sys.flags.no_site\nassert sys.argv[-3:] == ['--bind', 'forwarded-value', '--help']\nassert pathlib.Path(json.__file__).is_relative_to(pathlib.Path(sys.executable).parent.parent)\nassert __file__ == '<stdin>'\npathlib.Path(sys.argv[2]).write_text(\"raise AssertionError('replacement executed')\\n\")\nprint('verified retained launcher ran')\n").unwrap();
+        "import encodings, json, os, pathlib, sys\nassert not any(key in os.environ for key in ['ZEROCODE_AGENT_TEAM_TOKEN', 'ZEROCODE_AGENT_TEAM_TOKEN_FILE', 'ZEROCODE_HOOK_TOKEN'])\nassert sys.flags.isolated and sys.flags.no_site\nassert sys.argv[-3:] == ['--bind', 'forwarded-value', '--help']\nroot = pathlib.Path(sys.executable).parent.parent\nstdlib = root / 'lib' / ('python%d.%d' % sys.version_info[:2])\nassert pathlib.Path(json.__file__).is_relative_to(stdlib)\nassert pathlib.Path(encodings.__file__).is_relative_to(stdlib)\nassert sys.path == [str(stdlib), str(stdlib / 'lib-dynload')]\nassert __file__ == '<stdin>'\npathlib.Path(sys.argv[2]).write_text(\"raise AssertionError('replacement executed')\\n\")\nprint('verified retained launcher ran')\n").unwrap();
     let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tools/release/tests/gate_bootstrap_fixture.py");
     let output = Command::new("python3")
@@ -98,6 +98,40 @@ fn real_python_uses_retained_launcher_bytes_and_declared_standard_library() {
         Path::new(&options[options.iter().position(|word| word == "--python").unwrap() + 1]);
     let runtime =
         Path::new(&options[options.iter().position(|word| word == "--stdlib").unwrap() + 1]);
+    let startup = std::path::PathBuf::from(format!("{}._pth", python.display()));
+    let startup_bytes = fs::read(&startup).unwrap();
+    let misnamed = python.with_extension("_pth");
+    fs::rename(&startup, &misnamed).unwrap();
+    let without = Command::new(python)
+        .args(["-I", "-S", "-B", "-c", "import encodings,json,pathlib,sys; root=pathlib.Path(sys.executable).parent.parent; print(all(pathlib.Path(module.__file__).is_relative_to(root) for module in (encodings,json)))"])
+        .env_clear()
+        .env("HOME", &root)
+        .output()
+        .unwrap();
+    assert!(
+        without.status.success(),
+        "{}",
+        String::from_utf8_lossy(&without.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&without.stdout).trim(),
+        "False",
+        "misnamed startup file did not expose the original framework library"
+    );
+    let denied = invoke(&options, &root);
+    assert_eq!(denied.status.code(), Some(1));
+    assert_eq!(fs::read(&launcher).unwrap(), original);
+    fs::rename(&misnamed, &startup).unwrap();
+    for changed in [
+        b"".as_slice(),
+        b"import site\n".as_slice(),
+        b"../outside\n../other\n".as_slice(),
+    ] {
+        fs::write(&startup, changed).unwrap();
+        assert_eq!(invoke(&options, &root).status.code(), Some(1));
+        assert_eq!(fs::read(&launcher).unwrap(), original);
+    }
+    fs::write(&startup, startup_bytes).unwrap();
     let module = fs::read_dir(runtime.join("lib"))
         .unwrap()
         .next()

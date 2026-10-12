@@ -18,7 +18,7 @@ pub struct LibraryIdentity {
 
 pub fn validate_libraries(libraries: &[LibraryIdentity]) -> Result<(), String> {
     let mut names = std::collections::BTreeSet::new();
-    let mut targets = std::collections::BTreeSet::new();
+    let mut targets = BTreeMap::new();
     if libraries.len() > 16
         || libraries.iter().any(|entry| {
             !std::path::Path::new(&entry.path).is_absolute()
@@ -31,7 +31,9 @@ pub fn validate_libraries(libraries: &[LibraryIdentity]) -> Result<(), String> {
                     .any(|part| part == std::path::Component::ParentDir)
                 || !hex(&entry.sha256, &[64])
                 || !names.insert(&entry.path)
-                || !targets.insert(&entry.resolved_path)
+                || targets
+                    .insert(&entry.resolved_path, &entry.sha256)
+                    .is_some_and(|previous| previous != &entry.sha256)
         })
     {
         return Err(
