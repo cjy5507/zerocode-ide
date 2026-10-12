@@ -616,4 +616,42 @@ mod tests {
             "the skill does not name the backfill"
         );
     }
+
+    /// An answer drawn from two or more pages is how the vault compounds:
+    /// both texts an agent reads before it answers say to file it back,
+    /// naming the kind, the key for the pages it rests on, and the two files
+    /// every write touches.
+    #[test]
+    fn the_guide_and_the_skill_file_an_answer_from_two_or_more_pages_back() {
+        let skill = include_str!("../../../skills/second-brain/SKILL.md");
+        let kind = format!("`{TYPE_KEY}: {}`", PageType::Synthesis.as_str());
+        let rests_on = format!(
+            "`{}`",
+            crate::second_brain_graph::EdgeKind::DependsOn.as_str()
+        );
+        for (name, text, heading) in [
+            (
+                "AGENTS_GUIDE",
+                crate::second_brain::AGENTS_GUIDE,
+                "## 질문 답변",
+            ),
+            ("SKILL.md", skill, "## Answer from the vault"),
+        ] {
+            let (_, after) = text
+                .split_once(heading)
+                .unwrap_or_else(|| panic!("{name} has no {heading} section"));
+            let section = after.split("\n## ").next().unwrap_or(after);
+            for words in [
+                kind.as_str(),
+                rests_on.as_str(),
+                crate::second_brain::WIKI_INDEX_FILE,
+                WIKI_LOG_FILE,
+            ] {
+                assert!(
+                    section.contains(words),
+                    "{name}'s {heading} section does not name {words}"
+                );
+            }
+        }
+    }
 }
