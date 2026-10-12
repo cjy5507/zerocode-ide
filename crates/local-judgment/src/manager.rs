@@ -1071,6 +1071,7 @@ pub(crate) mod test_support {
         .unwrap()
     }
 
+    #[cfg(unix)]
     pub async fn running(
         manager: &Arc<Manager>,
         engine: Arc<Engine>,
@@ -1119,6 +1120,7 @@ pub(crate) mod test_support {
         snapshot
     }
 
+    #[cfg(unix)]
     pub async fn ready_timeout(engine: &Arc<Engine>) -> Result<()> {
         wait_ready_for(engine, &Cancel::new(), Duration::from_millis(20)).await
     }

@@ -208,7 +208,7 @@ impl Engine {
         let _ = child.wait();
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn from_command(command: &mut Command) -> Arc<Self> {
         let child = command
             .stdin(Stdio::piped())

@@ -345,7 +345,8 @@ async fn stream_server(
     let task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = [0; 2048];
-        stream.read(&mut request).await.unwrap();
+        let request_bytes = stream.read(&mut request).await.unwrap();
+        assert!(request_bytes > 0);
         stream
             .write_all(
                 format!(
