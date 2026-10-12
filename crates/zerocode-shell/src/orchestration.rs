@@ -10621,11 +10621,7 @@ fn carried(
                             &prepared.agent,
                             prepared.resumed,
                         );
-                        return continuation_answer(
-                            decided.reply,
-                            continuation,
-                            idle,
-                        );
+                        return continuation_answer(decided.reply, continuation, idle);
                     }
                     /* The judgment's row, beside what was actually summoned
                      * (t-4711). Here rather than at the plan, because a
