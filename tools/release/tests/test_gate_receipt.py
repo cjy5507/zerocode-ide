@@ -42,7 +42,7 @@ class FakeLedger:
         if verb == self.refused or self.refused == "gate-finish" and verb == "gate-record" and not extra:
             raise gate.UnknownInput("fake native refusal")
         if verb == "gate-register":
-            return {"registration": "m-1", "lease": "gx-1", "registeredMs": 0}
+            return {"registration": "m-1", "policyPin": "m-fixture-policy", "lease": "gx-1", "registeredMs": 0}
         if verb == "gate-record" and extra:
             return {"execution": "m-start", "startedMs": 0}
         if verb == "gate-record":
@@ -774,6 +774,24 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(gate.test_count(output.replace(b"0 failed", b"1 failed")), 0)
         self.assertEqual(gate.test_count(output.replace(b"running 3", b"running 2")), 0)
         self.assertEqual(gate.test_count(b"running 1 test\n" + PASS.replace(b"2 passed", b"0 passed").replace(b"0 ignored", b"1 ignored")), 0)
+
+    def test_manifest_target_and_timeout_must_match_the_exact_invocation(self):
+        baseline = self.fingerprint()
+        self.assertIsNotNone(baseline["policy"])
+        original = copy.deepcopy(self.args.trust["policy"])
+        for change in ("timeout", "head", "repo", "scope"):
+            with self.subTest(dimension=change):
+                policy = copy.deepcopy(original)
+                selected = policy["gates"]["gate-root"]
+                if change == "timeout":
+                    selected["timeout"] += 1
+                else:
+                    selected["target"][change] = "f" * 40 if change == "head" else "different"
+                self.repin_policy(policy)
+                with self.assertRaises(gate.UnknownInput):
+                    gate.provenance(self.args)
+                self.repin_policy(original)
+                self.assertEqual(self.fingerprint(), baseline)
 
     def test_real_offline_cargo_with_ignored_tests_and_first_writes_preserves_inputs(self):
         from gate_cargo_fixture import prepare

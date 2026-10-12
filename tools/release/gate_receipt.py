@@ -519,8 +519,9 @@ def produce(args, ledger=None):
     nonce = uuid.uuid4().hex
     registered = ledger.call("gate-register", args, before, f"gate-register-{nonce}")
     registration = registered.get("registration")
+    policy_pin = registered.get("policyPin")
     lease = registered.get("lease")
-    if not isinstance(registration, str) or not isinstance(lease, str) or not isinstance(registered.get("registeredMs"), int):
+    if not isinstance(registration, str) or not isinstance(policy_pin, str) or not isinstance(lease, str) or not isinstance(registered.get("registeredMs"), int):
         raise UnknownInput("native gate registration was not acknowledged")
     if time.time_ns() // 1_000_000 < registered["registeredMs"]:
         raise UnknownInput("clock precedes the registration event")
@@ -544,7 +545,7 @@ def produce(args, ledger=None):
         if observed_end["outcome"] == "passed" and (raw_count == 0 or raw_count != masked_count or before != after):
             observed_end["outcome"] = "unknown"
         metadata = {
-            "version": 1, "registration": registration, "lease": lease, "execution": started["execution"],
+            "version": 1, "registration": registration, "policyPin": policy_pin, "lease": lease, "execution": started["execution"],
             "attempt": args.attempt, "inputs": before,
             **observed_end, "tests": raw_count if raw_count == masked_count else 0,
             "logSha256": digest(log), "logBytes": len(log),

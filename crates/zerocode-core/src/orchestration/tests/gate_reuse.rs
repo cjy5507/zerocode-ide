@@ -84,7 +84,7 @@ impl Fixture {
         }
         let registration = self.json(gate::REGISTER, &inputs);
         let started = self.record_action("--start", &registration, Some(&inputs));
-        json!({"version":1,"registration":registration["registration"],"attempt":self.attempt,
+        json!({"version":1,"registration":registration["registration"],"policyPin":registration["policyPin"],"attempt":self.attempt,
             "lease":registration["lease"],"execution":started["execution"],
             "inputs":inputs,"startedMs":started["startedMs"],"endedMs":started["startedMs"],
             "durationMs":0,"rc":0,"outcome":"passed","tests":2,"logSha256":"d".repeat(64),

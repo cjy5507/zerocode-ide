@@ -113,7 +113,7 @@ fn receipt_gate_child_cannot_forge_fixture_completion() {
     let Some(started) = call("gate-record", inputs, &["--start", id, "--lease", lease]) else {
         return;
     };
-    let metadata = json!({"version":1,"registration":id,"lease":lease,"execution":started["execution"],
+    let metadata = json!({"version":1,"registration":id,"policyPin":registered["policyPin"],"lease":lease,"execution":started["execution"],
         "attempt":"none","inputs":inputs,"startedMs":started["startedMs"],"endedMs":started["startedMs"],
         "durationMs":0,"rc":0,"outcome":"passed","tests":1,"logSha256":"d".repeat(64),
         "logBytes":32,"inputsUnchanged":true,"executed":true});

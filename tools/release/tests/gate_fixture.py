@@ -83,6 +83,8 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
                   "launcher": folder / "gate_launcher.py", "producer": folder / "gate_receipt.py",
                   "scanner": folder / "pii-scan.py", "rules": folder / "pii-rules.json"}.items()},
               "gates": {args.gate: {"command": args.command, "recipes": ["fixture"], "profile": args.profile,
+                  "target": {"repo": str(Path(args.repo).resolve()), "head": producer.git(args.repo, "rev-parse", "--verify", "HEAD").decode().strip(), "scope": args.scope},
+                  "timeout": args.timeout,
                   "environment": environment, "dependencyRoots": [row(path) for path in args.dependency_root],
                   "toolchainRoots": [row(path) for path in [*args.toolchain_root, python, git, *transitive]],
                   "configurationRoots": configuration, "configurationSearches": searches,
@@ -114,7 +116,7 @@ def main():
     args = argparse.Namespace(repo=options.repo, gate="gate-root", profile="test-debug",
         scope="deterministic", closure="declared", dependency_root=[str(root / "deps")],
         toolchain_root=[str(root / "toolchain"), str(root / "bin")], lock_file=[], script_file=[],
-        command=[options.child, "--exact", options.test, "--nocapture"])
+        command=[options.child, "--exact", options.test, "--nocapture"], timeout=1800)
     producer = load_module(Path(options.producer), "fixture_producer")
     environment, outputs = {}, []
     if options.cargo:

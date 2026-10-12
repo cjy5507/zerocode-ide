@@ -54,12 +54,12 @@ fn current_pin<'a>(run: &'a Run, gate: &str, at: i64) -> Result<(&'a Message, Po
             (body[KEY]["phase"] == "policy_pinned" && body[KEY]["value"]["gate"] == gate)
                 .then(|| (row, body[KEY]["value"].clone()))
         })
-        .ok_or("gate has no current coordinator policy pin")?;
+        .ok_or("unpinned: gate has no current coordinator policy pin")?;
     let pin: PolicyPin =
         serde_json::from_value(value).map_err(|_| "unsupported gate policy pin")?;
     if pin.generation != current.generation || current.actor.as_deref() != Some(pin.actor.as_str())
     {
-        return Err("coordinator changed after gate policy pin".into());
+        return Err("stale_pin: coordinator changed after gate policy pin".into());
     }
     if pin.pinned_ms != row.created_ms || at < row.created_ms {
         return Err("gate policy pin has an invalid event order".into());
@@ -76,12 +76,15 @@ fn current_pin<'a>(run: &'a Run, gate: &str, at: i64) -> Result<(&'a Message, Po
 fn policy_matches(run: &Run, inputs: &Inputs, id: Option<&str>, at: i64) -> Result<String, String> {
     let (row, pin) = current_pin(run, &inputs.gate, at)?;
     if id.is_some_and(|id| id != row.id.as_str()) {
-        return Err("gate policy pin changed after registration".into());
+        return Err("stale_pin: gate policy pin changed after registration".into());
     }
     if inputs.policy.as_deref() != Some(pin.definition.policy.as_str())
         || inputs.producer.as_deref() != Some(pin.definition.producer.as_str())
     {
-        return Err("gate policy or producer differs from the current coordinator pin".into());
+        return Err(
+            "digest_mismatch: gate policy or producer differs from the current coordinator pin"
+                .into(),
+        );
     }
     Ok(row.id.clone())
 }
@@ -208,6 +211,7 @@ pub enum Outcome {
 pub struct Metadata {
     pub version: u32,
     pub registration: String,
+    pub policy_pin: String,
     pub lease: String,
     pub execution: String,
     pub attempt: String,
@@ -271,7 +275,13 @@ fn parse<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, String> {
     if text.len() > MAX_METADATA {
         return Err("gate metadata exceeds its size limit".into());
     }
-    serde_json::from_str(text).map_err(|_| "invalid or unsupported gate metadata".into())
+    serde_json::from_str(text).map_err(|error| {
+        if error.to_string().contains("unknown field") {
+            "unknown_field: unsupported gate request field".into()
+        } else {
+            "invalid_request: invalid or unsupported gate metadata".into()
+        }
+    })
 }
 
 fn coordinator(run: &Run, team: &Team, pane: &str, actor: &str) -> Result<u32, String> {
@@ -524,6 +534,9 @@ fn judge(
             return Err("completion has another coordinator identity".into());
         }
         let metadata = &completed.metadata;
+        if metadata.policy_pin != registered.policy_pin {
+            return Err("stale_pin: completion names another policy pin".into());
+        }
         let started = execution(run, &registered, metadata, task, attempt)?;
         if started.created_ms < registered_row.created_ms {
             return Err("gate start precedes registration".into());
@@ -592,7 +605,7 @@ pub(super) fn validate_replay(
         let answer: serde_json::Value = parse(answer)?;
         let (row, _) = current_pin(run, gate, now_ms)?;
         if answer["pin"] != row.id {
-            return Err("gate policy pin retry no longer names the current pin".into());
+            return Err("stale_pin: gate policy pin retry no longer names the current pin".into());
         }
         return Ok(());
     }
@@ -668,7 +681,7 @@ pub(super) fn decide(
             || !hex(&definition.producer, &[64])
         {
             return Err(
-                "gate policy pin needs exact policy and producer SHA-256 identities".into(),
+                "digest_mismatch: gate policy pin needs exact policy and producer SHA-256 identities".into(),
             );
         }
         let pin = PolicyPin {
@@ -742,7 +755,7 @@ pub(super) fn decide(
                 now_ms,
             )?;
             Ok(said(
-                serde_json::json!({"registration":id,"lease":lease,"registeredMs":now_ms,"expiresMs":expires_ms,"executed":false}),
+                serde_json::json!({"registration":id,"policyPin":registered.policy_pin,"lease":lease,"registeredMs":now_ms,"expiresMs":expires_ms,"executed":false}),
             ))
         }
         RECORD if words.value("--start").is_some() || words.value("--cancel").is_some() => {
@@ -836,6 +849,9 @@ pub(super) fn decide(
                 Some(&registered.policy_pin),
                 now_ms,
             )?;
+            if metadata.policy_pin != registered.policy_pin {
+                return Err("stale_pin: completion names another policy pin".into());
+            }
             if metadata.inputs != registered.inputs || metadata.attempt != attempt {
                 return Err("gate metadata differs from the registered inputs or attempt".into());
             }

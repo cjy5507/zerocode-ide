@@ -161,11 +161,14 @@ def cache_bindings(outputs, producer):
 def configure(context, args, producer):
     selected = context["policy"]["gates"].get(args.gate)
     required = {"command", "recipes", "profile", "environment", "dependencyRoots", "toolchainRoots",
-                "configurationRoots", "configurationSearches", "lockFiles", "scriptFiles", "outputRoots", "mandatoryChecks"}
+                "configurationRoots", "configurationSearches", "lockFiles", "scriptFiles", "outputRoots", "mandatoryChecks",
+                "target", "timeout"}
     if not isinstance(selected, dict) or set(selected) != required:
         raise producer.UnknownInput("gate has no complete independently trusted declaration")
     if selected["command"] != args.command or selected["profile"] != args.profile:
         raise producer.UnknownInput("gate command or profile differs from its trusted recipe")
+    if isinstance(selected["timeout"], bool) or not isinstance(selected["timeout"], (int, float)) or not 0 < selected["timeout"] <= 86400 or selected["timeout"] != args.timeout:
+        raise producer.UnknownInput("gate timeout differs from its trusted declaration")
     if selected["mandatoryChecks"] != MANDATORY or not isinstance(selected["recipes"], list) or not selected["recipes"]:
         raise producer.UnknownInput("gate has no complete recipe list and mandatory non-reuse checks")
     if len(selected["recipes"]) != len(set(selected["recipes"])) or any(
@@ -271,6 +274,9 @@ def configure(context, args, producer):
     tools = path_bindings(environment, tool_roots, producer)
     producer.GIT_EXECUTABLE = str(required_tools[2])
     producer.GIT_ENVIRONMENT = {key: environment[key] for key in ("PATH", "LANG", "LC_ALL", "HOME")}
+    target = {"repo": str(repo), "head": producer.git(repo, "rev-parse", "--verify", "HEAD").decode().strip(), "scope": args.scope}
+    if selected["target"] != target:
+        raise producer.UnknownInput("gate target differs from its trusted declaration")
     ignored = []
     for name in producer.git(repo, "ls-files", "--others", "--ignored", "--exclude-standard", "-z").split(b"\0"):
         if name:
