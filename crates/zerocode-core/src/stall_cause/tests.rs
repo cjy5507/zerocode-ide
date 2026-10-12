@@ -132,13 +132,14 @@ fn an_answer_is_read_only_through_the_causes_offered() {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
+    // Version 6 quotes zo's redesigned turn separator beside its old footer.
     // Version 5 carries the screen's lines and the record's turns as fields
     // of their own where version 4 carried each as one text (t-9469): what
     // the question reads changed shape, so the series starts again.
-    assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 5);
+    assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 6);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "557d21525cc1dc79"
+        "73e2bff0e4f7554b"
     );
 }
 

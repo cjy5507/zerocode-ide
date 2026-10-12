@@ -61,7 +61,7 @@ const TURN_KEYS: [&str; 2] = ["role", "words"];
 /// `words`, where version 4 carried each as one text (t-9469). The version
 /// rides every request row, so a reader can tell the series apart; reading
 /// them apart is t-6877's contract.
-pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 5;
+pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 6;
 
 /// How long after a silence was asked about its label waits for what
 /// followed ([`followed`]).
