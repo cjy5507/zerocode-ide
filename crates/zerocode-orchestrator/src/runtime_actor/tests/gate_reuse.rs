@@ -37,6 +37,10 @@ fn receipt_gate_child() {
         println!("\n{}", String::from_utf8_lossy(&output.stdout));
         assert!(output.stderr.is_empty(), "unexpected node stderr");
     }
+    let ui = Command::new("node").arg("fixture_ui.mjs").output().unwrap();
+    assert!(ui.status.success(), "actual UI report fixture failed");
+    println!("{}", String::from_utf8_lossy(&ui.stdout));
+    assert!(ui.stderr.is_empty());
     let output = Command::new("python3")
         .args([
             "-I",
@@ -270,6 +274,15 @@ impl CliFixture {
             b"const test = require('node:test'); const assert = require('node:assert/strict'); test('fixture', () => assert.equal(1 + 1, 2));\n").unwrap();
         std::fs::write(root.join("input/fixture_unittest.py"),
             b"import unittest\nclass Fixture(unittest.TestCase):\n    def test_fixture(self):\n        self.assertEqual(1 + 1, 2)\n").unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui/tests/window-runner.mjs"),
+            root.join("input/ui-runner.mjs"),
+        )
+        .unwrap();
+        std::fs::write(root.join("input/fixture_ui.mjs"),
+            b"import { createRunner } from './ui-runner.mjs'; const runner=createRunner({env:{},argv:[]}); runner.suite('fixture',({ok})=>ok('actual UI runner check',1+1===2)); await runner.run(); process.exitCode=runner.report()?1:0;\n").unwrap();
+        std::fs::write(root.join("input/fixture_ui_zero.mjs"),
+            b"import { createRunner } from './ui-runner.mjs'; const runner=createRunner({env:{},argv:[]}); await runner.run(); process.exitCode=runner.report()?1:0;\n").unwrap();
         let linked = root.join("input/tools/computer-bench/long-form/bin");
         std::fs::create_dir_all(&linked).unwrap();
         std::fs::write(linked.join("zerocode-door"), b"fixture source input\n").unwrap();
@@ -518,7 +531,7 @@ impl CliFixture {
     }
 
     fn production_test(&self, action: &str, clean: bool, child_test: &str) -> Output {
-        self.production_fixture(action, clean, child_test, false)
+        self.production_fixture(action, clean, child_test, false, false)
     }
 
     fn production_fixture(
@@ -527,6 +540,7 @@ impl CliFixture {
         clean: bool,
         child_test: &str,
         cargo: bool,
+        ui_zero: bool,
     ) -> Output {
         if action == "run" && self.policy.lock().unwrap().is_none() {
             let mut prepare = Command::new("python3");
@@ -546,6 +560,9 @@ impl CliFixture {
                 .arg("--bootstrap");
             if cargo {
                 prepare.arg("--cargo");
+            }
+            if ui_zero {
+                prepare.arg("--ui-zero");
             }
             self.environment(&mut prepare);
             if cargo {
@@ -1823,7 +1840,7 @@ fn production_cli_real_authority_and_real_process_issue_and_reuse_one_receipt() 
         String::from_utf8_lossy(&output.stderr)
     );
     let produced: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(produced["tests"], 4);
+    assert_eq!(produced["tests"], 5);
     let hit = fixture.production("verify", true);
     assert!(
         hit.status.success(),
@@ -1921,10 +1938,44 @@ fn production_cli_real_authority_and_real_process_issue_and_reuse_one_receipt() 
 }
 
 #[test]
+fn a_zero_ui_recipe_cannot_reuse_an_actual_passing_rust_recipe() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    let output = fixture.production_fixture("run", true, CHILD, false, true);
+    assert!(!output.status.success());
+    let produced: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(produced["outcome"], "unknown");
+    assert_eq!(produced["tests"], 0);
+    assert_eq!(produced["newExecutions"], 1);
+    let metadata: Value =
+        serde_json::from_slice(&std::fs::read(fixture.root.join("out/metadata.json")).unwrap())
+            .unwrap();
+    assert_eq!(metadata["rc"], 0);
+    assert_eq!(metadata["executed"], true);
+    assert_eq!(metadata["inputsUnchanged"], true);
+    let log = std::fs::read_to_string(fixture.root.join("out/gate.log")).unwrap();
+    assert!(
+        log.contains("test result: ok. 1 passed;"),
+        "actual Rust fixture did not pass"
+    );
+    assert!(
+        log.contains("1/1 passed"),
+        "actual UI positive report did not run"
+    );
+    assert!(
+        log.contains("0/0 passed"),
+        "actual zero UI report did not run"
+    );
+    assert!(log.contains("<== verify recipe rust rc=0"));
+    assert!(log.contains("<== verify recipe ui rc=0"));
+    fixture.miss(true);
+}
+
+#[test]
 fn offline_cargo_first_writes_and_ignored_tests_issue_a_hit_and_changed_config_misses() {
     let authority = Fixture::new();
     let fixture = CliFixture::new(&authority);
-    let output = fixture.production_fixture("run", true, CHILD, true);
+    let output = fixture.production_fixture("run", true, CHILD, true, false);
     assert!(
         output.status.success(),
         "{} {}",
@@ -1941,7 +1992,7 @@ fn offline_cargo_first_writes_and_ignored_tests_issue_a_hit_and_changed_config_m
     );
     assert!(fixture.input.join("cargo-fixture/target").is_dir());
     assert!(fixture.input.join("tools/release/__pycache__").is_dir());
-    let output = fixture.production_fixture("verify", true, CHILD, true);
+    let output = fixture.production_fixture("verify", true, CHILD, true, false);
     assert!(
         output.status.success(),
         "{}",
@@ -1958,7 +2009,7 @@ fn offline_cargo_first_writes_and_ignored_tests_issue_a_hit_and_changed_config_m
     std::fs::write(&config, original).unwrap();
     assert!(
         fixture
-            .production_fixture("verify", true, CHILD, true)
+            .production_fixture("verify", true, CHILD, true, false)
             .status
             .success()
     );

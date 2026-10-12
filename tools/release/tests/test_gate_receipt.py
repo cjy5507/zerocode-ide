@@ -873,6 +873,61 @@ class ReceiptTests(unittest.TestCase):
                 self.repin_policy(original)
                 self.assertEqual(self.fingerprint(), baseline)
 
+    def test_actual_ui_runner_reports_require_matching_nonzero_complete_checks(self):
+        import shutil
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        runner = self.root / "window-runner.mjs"
+        runner.write_bytes((SCRIPT.parents[2] / "ui/tests/window-runner.mjs").read_bytes())
+        script = self.root / "ui-report-fixture.mjs"
+        script.write_text(r"""import { createRunner } from './window-runner.mjs';
+const mode = process.argv[2];
+const runner = createRunner({ env: {}, argv: [], log: (line) => {
+  if (/^\d+\/\d+ passed$/.test(line)) {
+    if (mode === 'abort') process.exit(3);
+    if (mode === 'truncated') return;
+    if (mode === 'mismatch') line = '3/3 passed';
+  }
+  console.log(line);
+}});
+if (mode !== 'zero') {
+  if (mode === 'loose') {
+    runner.ok('first actual check', 1 + 1 === 2);
+    runner.ok('second actual check', true);
+  } else {
+    runner.suite('fixture', ({ ok }) => {
+      ok('first actual check', 1 + 1 === 2);
+      ok('second actual check', mode !== 'failure');
+    });
+  }
+}
+await runner.run();
+process.exitCode = runner.report() ? 1 : 0;
+""")
+        for mode in ("passed", "loose", "failure", "zero", "abort", "truncated", "mismatch"):
+            with self.subTest(mode=mode):
+                self.args.command = [node, str(script), mode]
+                self.args.script_file = [str(script), str(runner)]
+                self.args.output = str(self.root / ("ui-" + mode))
+                ledger = FakeLedger()
+                result = self.produce(ledger)
+                log = (Path(self.args.output) / "gate.log").read_bytes()
+                expected_rc = 3 if mode == "abort" else 1 if mode == "failure" else 0
+                self.assertEqual(ledger.metadata["rc"], expected_rc, log)
+                self.assertTrue(ledger.metadata["executed"])
+                if mode in ("passed", "loose"):
+                    self.assertEqual(result["outcome"], "passed", log)
+                    self.assertEqual(result["tests"], 2, log)
+                    self.assertIn(b"2/2 passed", log)
+                else:
+                    self.assertEqual(result["outcome"], "failed" if expected_rc else "unknown", log)
+                    self.assertEqual(result["tests"], 0, log)
+                    self.assertEqual(gate.test_count(PASS + log), 0, log)
+                    if mode == "zero":
+                        self.assertIn(b"0/0 passed", log)
+                        mixed = b"==> verify recipe rust\n" + PASS + b"<== verify recipe rust rc=0 0s\n==> verify recipe ui\n" + log + b"<== verify recipe ui rc=0 0s\n"
+                        self.assertEqual(gate.test_count(mixed, ["rust", "ui"], ["rust", "ui"]), 0, mixed)
+
     def test_each_required_recipe_runs_tests_and_a_zero_command_cannot_hide(self):
         suite = self.root / "actual-suite"
         suite.mkdir()

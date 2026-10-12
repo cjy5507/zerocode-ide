@@ -334,11 +334,32 @@ def test_count(log, recipes=(), test_recipes=None):
     node_active = False
     node_plan = False
     spec_pending = False
+    ui_checks = ui_passes = 0
+    ui_pending = False
     unittest_headers = 0
     index = 0
     while index < len(lines):
         line = lines[index]
-        if "test result:" in line:
+        ui_result = re.fullmatch(r"(PASS|FAIL)  (\S.*)", line)
+        ui_footer = re.fullmatch(r"(\d+)/(\d+) passed", line)
+        if ui_result:
+            ui_pending = True
+            ui_checks += 1
+            if ui_result[1] != "PASS":
+                return 0
+            ui_passes += 1
+        elif ui_footer:
+            passed, checks = map(int, ui_footer.groups())
+            if checks == 0 or passed != checks or passed != ui_passes or checks != ui_checks:
+                return 0
+            total += passed
+            ui_checks = ui_passes = 0
+            ui_pending = False
+        elif re.fullmatch(r"SUITE  \S.*", line):
+            ui_pending = True
+        elif re.match(r"^(?:PASS|FAIL|SUITE)\s|^[+-]?\d+/[+-]?\d+\s+pass", line):
+            return 0
+        elif "test result:" in line:
             row = SUMMARY.fullmatch(line)
             if row is None or row[1] != "ok" or int(row[3]):
                 return 0
@@ -406,7 +427,7 @@ def test_count(log, recipes=(), test_recipes=None):
     running = [int(value) for value in re.findall(r"^running (\d+) tests?$", text, re.MULTILINE)]
     if running and running != libtest:
         return 0
-    if node_headers != node_summaries or spec_pending:
+    if node_headers != node_summaries or spec_pending or ui_pending:
         return 0
     if re.search(r"^OK(?:\s|$)", text, re.MULTILINE) and not unittest_headers:
         return 0

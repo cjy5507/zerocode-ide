@@ -65,6 +65,17 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
         "print('<== verify recipe fixture rc=%d 0s' % result.returncode, flush=True)\n"
         "raise SystemExit(result.returncode)\n"
     )
+    ui_zero = getattr(args, "fixture_ui_zero", False)
+    if ui_zero:
+        prefix = wrapper.read_text().split("print('==> verify recipe fixture'", 1)[0]
+        wrapper.write_text(prefix +
+            "print('==> verify recipe rust', flush=True)\n"
+            "rust = subprocess.run(sys.argv[1:], check=False)\n"
+            "print('<== verify recipe rust rc=%d 0s' % rust.returncode, flush=True)\n"
+            "print('==> verify recipe ui', flush=True)\n"
+            "ui = subprocess.run(['node', 'fixture_ui_zero.mjs'], check=False)\n"
+            "print('<== verify recipe ui rc=%d 0s' % ui.returncode, flush=True)\n"
+            "raise SystemExit(rust.returncode or ui.returncode)\n")
     if str(wrapper) not in args.command[:5]:
         args.command = [sys.executable, "-I", "-S", "-B", str(wrapper), *args.command]
     folder = Path(producer.__file__).resolve().parent
@@ -107,7 +118,7 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
               "bundle": {role: {"path": str(path), "sha256": producer.file_digest(path)} for role, path in {
                   "launcher": folder / "gate_launcher.py", "producer": folder / "gate_receipt.py",
                   "scanner": folder / "pii-scan.py", "rules": folder / "pii-rules.json"}.items()},
-              "gates": {args.gate: {"command": args.command, "recipes": ["fixture"], "testRecipes": ["fixture"], "profile": args.profile,
+              "gates": {args.gate: {"command": args.command, "recipes": ["rust", "ui"] if ui_zero else ["fixture"], "testRecipes": ["rust", "ui"] if ui_zero else ["fixture"], "profile": args.profile,
                   "target": {"repo": str(Path(args.repo).resolve()), "head": producer.git(args.repo, "rev-parse", "--verify", "HEAD").decode().strip(), "scope": args.scope},
                   "timeout": args.timeout,
                   "maxJobTtlSeconds": math.ceil(args.timeout) + 300,
@@ -138,6 +149,7 @@ def main():
     parser.add_argument("--test", required=True)
     parser.add_argument("--cargo", action="store_true")
     parser.add_argument("--bootstrap", action="store_true")
+    parser.add_argument("--ui-zero", action="store_true")
     options = parser.parse_args()
     root = Path(options.root)
     args = argparse.Namespace(repo=options.repo, gate="gate-root", profile="test-debug",
@@ -145,6 +157,7 @@ def main():
         toolchain_root=[str(root / "toolchain"), str(root / "bin")], lock_file=[], script_file=[],
         command=[options.child, "--exact", options.test, "--nocapture"], timeout=120)
     producer = load_module(Path(options.producer), "fixture_producer")
+    args.fixture_ui_zero = options.ui_zero
     environment, outputs = {}, []
     if options.cargo:
         fixture = load_module(Path(__file__).with_name("gate_cargo_fixture.py"), "offline_cargo_fixture")
