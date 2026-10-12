@@ -189,7 +189,8 @@ pub(super) struct AutomationRow {
     pub(super) runs: usize,
 }
 
-/// A prompt that finished its journey into a shell, either way.
+/// A prompt that finished its journey into a shell, either way — or that is
+/// parked behind a working agent until its turn ends (t-47952).
 ///
 /// The failure is the half worth carrying: a prompt that timed out left an
 /// agent sitting with nothing to do, and without this the window has no way to
@@ -202,10 +203,11 @@ pub(super) struct PromptSettled {
     /// that pasted and then withheld its Enter, whose words are on the line
     /// where the person can read them.
     pub(super) pasted: bool,
-    /// Why a write was withheld, as the guard's token
-    /// (`zerocode_pty::ready::Refusal::token`), when one was — the window
-    /// words it (`TERM_WITHHELD`). `None` for a delivery that landed or
-    /// simply timed out.
+    /// Why the words have not landed: the guard's token
+    /// (`zerocode_pty::ready::Refusal::token`) for a withheld write — the
+    /// window words it (`TERM_WITHHELD`) — or the pump's own word for words
+    /// parked behind a working agent (`busy`) and for a program that never
+    /// said it was ready (`not_ready`). `None` for a delivery that landed.
     pub(super) why: Option<&'static str>,
     /// The words that never landed, when they did not — so the person asked
     /// to paste them has them.

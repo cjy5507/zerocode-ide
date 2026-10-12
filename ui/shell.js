@@ -12244,6 +12244,13 @@ const TERM_WITHHELD_UNWORDED = Object.freeze({
   left: { key: "term.promptLeftUnsubmitted", word: "터미널 {{term}}에 프롬프트를 붙여넣었지만 보내지는 않았습니다." },
 });
 
+/* The pump's own two words on `term:prompt`, neither a guard's refusal
+ * (`prompt_transaction::PARKED_WHY`, `NOT_READY_WHY`, t-47952): the words
+ * are parked behind an agent that is still working and go in when its turn
+ * ends, or its program never said it was ready and the words come back. */
+const TERM_PROMPT_PARKED = "busy";
+const TERM_PROMPT_NOT_READY = "not_ready";
+
 /* The withheld notices each shell has had since it last took a prompt, by
  * token, with the words each handed back (t-10159). The mail pointer offers
  * its advice again every beat while a person's words stand on the line, and
@@ -12290,11 +12297,18 @@ listen("term:prompt", (event) => {
     withheldNotices.delete(term);
     return;
   }
+  // Parked, not lost (t-47952): the agent there is still in its turn, and
+  // the words go in when the turn ends. A report, not a failure — they are
+  // still on their way, so nothing reaches the clipboard.
+  if (why === TERM_PROMPT_PARKED) {
+    toast(t("term.promptParked", "터미널 {{term}}의 에이전트가 일하는 중이라 끝나면 보냅니다.", { term }));
+    return;
+  }
   // A write the window WITHHELD is a different sentence from one that timed
   // out: the guard yielded to something a person owns on that line — their
   // draft, a parked question, a hand that arrived while the words settled —
   // or the line refused it, and the event names which.
-  if (typeof why === "string" && why.length > 0) {
+  if (typeof why === "string" && why.length > 0 && why !== TERM_PROMPT_NOT_READY) {
     sayWithheldPrompt(term, why, pasted, text);
     return;
   }

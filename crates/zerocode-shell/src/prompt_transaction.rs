@@ -137,7 +137,9 @@ pub(super) fn turn(
     now: Instant,
     write: impl FnOnce(&[u8]) -> bool,
 ) -> Turned {
+    let parked_before = delivery.parked_at().is_some();
     match delivery.poll_line(seen, line, now) {
+        Step::Waiting if !parked_before && delivery.parked_at().is_some() => Turned::Parked,
         Step::Waiting => Turned::Waiting,
         Step::Write(bytes) => {
             if write(&bytes) {
@@ -202,17 +204,21 @@ pub(super) const NOT_READY_WHY: &str = "not_ready";
 /// one shape whoever settled it. A withheld write is named by the guard's
 /// token: the window words it in the person's language from its own table
 /// (t-10159), and the English sentence stays the receipt's and the black
-/// box's.
+/// box's. A timeout is named too, by a word of its own ([`NOT_READY_WHY`]).
 pub(super) fn settled_event(
     term: TermId,
     outcome: DeliveryOutcome,
     text: Option<String>,
 ) -> PromptSettled {
+    let why = match outcome {
+        DeliveryOutcome::TimedOut => Some(NOT_READY_WHY),
+        _ => withheld(outcome).map(Refusal::token),
+    };
     PromptSettled {
         term,
         delivered: outcome == DeliveryOutcome::Delivered,
         pasted: outcome.pasted(),
-        why: withheld(outcome).map(Refusal::token),
+        why,
         text,
     }
 }
@@ -241,7 +247,7 @@ pub(super) fn parked_event(term: TermId) -> PromptSettled {
         term,
         delivered: false,
         pasted: false,
-        why: None,
+        why: Some(PARKED_WHY),
         text: None,
     }
 }
@@ -269,26 +275,66 @@ impl PaneDoing {
     }
 }
 
+/// What `term` is doing as the window knows it, read once for a line: its
+/// program's word that it is mid-turn first, then a restart's wake still
+/// waiting on it. Each map is asked under its own lock and let go.
+pub(super) fn pane_doing(state: &AppState, term: TermId) -> PaneDoing {
+    if pane_is_busy(state, term) {
+        PaneDoing::Working
+    } else if state.pending_nudges().holds(term) {
+        PaneDoing::Resuming
+    } else {
+        PaneDoing::Idle
+    }
+}
+
 /// The black-box line one prompt's park, landing or timeout writes
 /// (t-47952): `term N prompt <parked|delivered|timed out> after <ms>
 /// state=<working|idle|resuming>`, the age counted from when the delivery
 /// was made. `None` for a round that did neither, and for a withheld write,
 /// whose line [`withheld_line`] already writes.
+///
+/// A timeout used to leave no line at all: the 08:5x report had the words on
+/// the clipboard and nothing to say how long they had waited or what the
+/// pane was doing.
 pub(super) fn told_line(
     term: TermId,
     turned: Turned,
     after: Duration,
     doing: PaneDoing,
 ) -> Option<String> {
-    let _ = (term, turned, after, doing);
-    None
+    let said = match turned {
+        Turned::Parked => "parked",
+        Turned::Settled(DeliveryOutcome::Delivered) => "delivered",
+        Turned::Settled(DeliveryOutcome::TimedOut) => "timed out",
+        _ => return None,
+    };
+    Some(format!(
+        "term {term} prompt {said} after {} ms state={}",
+        after.as_millis(),
+        doing.word()
+    ))
 }
 
 /// The line's `busy`, unless the pane has written nothing for as long as the
-/// pointer takes to read a turn as over without hearing its end (t-47952).
+/// pointer takes to read a turn as over without hearing its end (t-47952,
+/// [`crate::orchestration::PROVIDER_SILENCE_ENDS_TURN_MS`]).
+///
+/// A parked send waits on the hook's word that a turn is running, and the
+/// word that it ended can be lost on its way to a loaded window. A working
+/// program redraws its spinner; ten minutes of nothing from the pane is a
+/// turn that ended without telling the window, and the send goes at its
+/// rest instead of waiting for good. A pane that never wrote is not judged
+/// by a silence nobody measured.
 pub(super) fn still_mid_turn(line: Line, last_output: Option<Instant>, now: Instant) -> Line {
-    let _ = (last_output, now);
-    line
+    let floor =
+        Duration::from_millis(crate::orchestration::PROVIDER_SILENCE_ENDS_TURN_MS.unsigned_abs());
+    let silent_past_floor =
+        last_output.is_some_and(|wrote| now.saturating_duration_since(wrote) >= floor);
+    Line {
+        busy: line.busy && !silent_past_floor,
+        ..line
+    }
 }
 
 /// A delivery has settled: drop it, answer whoever was waiting, and put the

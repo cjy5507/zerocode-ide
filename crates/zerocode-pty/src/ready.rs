@@ -461,7 +461,8 @@ impl Readiness {
     /// The send road keeps the shared clock from the start: a running agent
     /// asked to take a prompt while it works IS the case that deadline was
     /// written for, and the caller waiting on that answer must not wait out
-    /// two minutes for it.
+    /// two minutes for it. A send that waits out its pane's turn (t-47952)
+    /// starts this clock when the turn is over ([`Self::restart`]).
     fn settle_if_late(&mut self, now: Instant) -> State {
         let late = match self.signal {
             // A settle's deadline is hard like a running composer's: the
@@ -479,6 +480,19 @@ impl Readiness {
             return State::TimedOut;
         }
         State::Waiting
+    }
+
+    /// Begin this wait again at `now`, as if it were registered then — for
+    /// a delivery that waited out its pane's turn (t-47952). Nothing seen
+    /// during the turn counts: a handshake, a cursor shown or a glyph drawn
+    /// then were the program at work, and the rest that answers the wait is
+    /// one measured from the round the turn is over.
+    fn restart(&mut self, now: Instant) {
+        self.started = now;
+        self.spoke = now;
+        self.shook = None;
+        self.saw_marker_in_alt = false;
+        self.settled = None;
     }
 
     /// Whether the handshake has arrived, for a caller that wants to say so.
@@ -602,6 +616,8 @@ pub struct Line {
     pub taken: Option<u64>,
     /// The pane's program says it is mid-turn. A prompt entered there waits
     /// in the program's own queue, and its receipt comes when it is dequeued.
+    /// A delivery that parks waits the turn out before its words go
+    /// (t-47952, [`PromptDelivery::parking`]).
     pub busy: bool,
 }
 
@@ -817,6 +833,9 @@ pub struct PromptDelivery {
     since: Instant,
     /// The round it first waited out a turn, if it has.
     parked_at: Option<Instant>,
+    /// It is waiting out a turn right now: the next round that finds the
+    /// turn over starts its wait for rest afresh.
+    waiting_out: bool,
 }
 
 /// The receipt's two clocks (t-14037).
@@ -871,6 +890,7 @@ impl PromptDelivery {
             parks: false,
             since: now,
             parked_at: None,
+            waiting_out: false,
         }
     }
 
@@ -917,6 +937,7 @@ impl PromptDelivery {
             parks: false,
             since: now,
             parked_at: None,
+            waiting_out: false,
         }
     }
 
@@ -1064,8 +1085,12 @@ impl PromptDelivery {
     /// that says how far it got — [`Outcome::Refused`] wrote nothing,
     /// [`Outcome::Unsubmitted`] wrote the words and withheld the Enter — and
     /// a settled delivery writes nothing further, however many rounds it is
-    /// fed.
+    /// fed. A delivery that parks ([`Self::parking`]) is also fed `line` on
+    /// every round before its words go, to wait out a turn.
     pub fn poll_line(&mut self, seen: Observed, line: Line, now: Instant) -> Step {
+        if self.waits_out(line, now) {
+            return Step::Waiting;
+        }
         match self.phase {
             Phase::Waiting => match self.wait.observe(seen, now) {
                 State::Waiting => Step::Waiting,
@@ -1150,6 +1175,28 @@ impl PromptDelivery {
             } => self.confirm(line, now, entered_at, taken, again),
             Phase::Done(outcome) => Step::Done(outcome),
         }
+    }
+
+    /// Whether this round is one a parking delivery waits out (t-47952): its
+    /// words not yet written, and the line saying the pane's program is
+    /// mid-turn. The first round that finds the turn over brings it back on
+    /// a fresh clock, to a line it no longer owns — anything there was put
+    /// there after its words were handed over.
+    fn waits_out(&mut self, line: Line, now: Instant) -> bool {
+        if !self.parks || self.phase != Phase::Waiting {
+            return false;
+        }
+        if line.busy {
+            self.parked_at = Some(self.parked_at.unwrap_or(now));
+            self.waiting_out = true;
+            return true;
+        }
+        if std::mem::take(&mut self.waiting_out) {
+            self.wait.restart(now);
+            self.clearing = false;
+            self.guard.hands = true;
+        }
+        false
     }
 
     /// The Enter alone, at a composer that just said it is ready (t-17037).
