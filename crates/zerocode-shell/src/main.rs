@@ -3678,9 +3678,11 @@ fn main() -> ExitCode {
                 let _ = api;
                 // The ledger hears the goodbye before any pane goes (t-3058):
                 // seated workers sleep instead of being settled by their own
-                // panes' exits on the way out.
-                orchestration::window_exiting(now_epoch_ms(), road, &|| {
-                    cmd::appearance::take_census(handle)
+                // panes' exits on the way out — waited for no longer than the
+                // ledger's patience (t-49062).
+                let census = handle.clone();
+                orchestration::goodbye_within(now_epoch_ms(), road, move || {
+                    cmd::appearance::take_census(&census)
                 });
                 handle.state::<AppState>().native_tray().begin_exit();
                 emulator::shutdown_all(handle);
@@ -3773,8 +3775,9 @@ struct ExitSteps<'a>(&'a AppHandle);
 
 impl exit_runtime::Terminating for ExitSteps<'_> {
     fn goodbye(&self, road: exit_runtime::ExitRoad) {
-        orchestration::window_exiting(now_epoch_ms(), road, &|| {
-            cmd::appearance::take_census(self.0)
+        let census = self.0.clone();
+        orchestration::goodbye_within(now_epoch_ms(), road, move || {
+            cmd::appearance::take_census(&census)
         });
     }
 
