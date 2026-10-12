@@ -38,7 +38,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::second_brain::{RAW_DIR, RAW_README_FILE, WIKI_INDEX_FILE, WIKI_LOG_FILE};
+use crate::second_brain::{
+    RAW_DIR, RAW_README_FILE, WIKI_INDEX_FILE, WIKI_LOG_FILE, WIKI_OVERVIEW_FILE,
+};
 use crate::second_brain_graph::{
     EdgeKind, EdgeProvenance, MAX_GRAPH_ENTRIES, MAX_PAGE_LINKS, NodeKind, VaultGraph, vouched,
 };
@@ -220,7 +222,12 @@ pub fn assess(
     let nodes = &graph.nodes;
     let index_at = nodes.iter().position(|node| node.id == WIKI_INDEX_FILE);
     let log_at = nodes.iter().position(|node| node.id == WIKI_LOG_FILE);
-    let scaffold = |at: usize| Some(at) == index_at || Some(at) == log_at;
+    let overview_at = nodes.iter().position(|node| node.id == WIKI_OVERVIEW_FILE);
+    let ledger = |at: usize| Some(at) == index_at || Some(at) == log_at;
+    // The ledgers and the vault's map: pages the window set up for finding
+    // your way, not knowledge a row holds to the protocol. The map's own
+    // links still count as a page linking a page.
+    let scaffold = |at: usize| ledger(at) || Some(at) == overview_at;
     let is_page = |at: usize| {
         nodes
             .get(at)
@@ -270,7 +277,7 @@ pub fn assess(
         if Some(from) == index_at {
             indexed.insert(edge.to);
         }
-        if !scaffold(from) && is_page(from) {
+        if !ledger(from) && is_page(from) {
             inbound_from_pages.insert(edge.to);
         }
         match edge.kind {
@@ -294,8 +301,15 @@ pub fn assess(
     let mut missing_frontmatter = Vec::new();
     let mut undeclared_relations = Vec::new();
     let mut named_sources: HashSet<String> = HashSet::new();
+    let mut untyped = Vec::new();
     for (at, node) in nodes.iter().enumerate() {
-        if node.kind != NodeKind::Page || scaffold(at) {
+        if node.kind != NodeKind::Page || ledger(at) {
+            continue;
+        }
+        if node.page_type.is_none() {
+            untyped.push(node.id.clone());
+        }
+        if scaffold(at) {
             continue;
         }
         let seat = u32::try_from(at).unwrap_or(u32::MAX);
@@ -344,6 +358,7 @@ pub fn assess(
             named_sources.insert(normalize_raw_path(mention));
         }
     }
+    untyped.sort();
     let unlogged_raw: Vec<String> = walk_raw(root)
         .into_iter()
         .filter(|item| !named_sources.contains(item))
@@ -365,7 +380,7 @@ pub fn assess(
         unsourced_edges,
         contradictions,
         superseded: superseded.into_iter().collect(),
-        untyped: Vec::new(),
+        untyped,
         merge_candidates: None,
         counts: LintCounts::default(),
         findings: 0,
@@ -929,7 +944,7 @@ mod tests {
     }
 
     /// t-43992 unit 2: pages that name no known kind are listed and counted —
-    /// the vault's ledgers and its overview are not pages to type — and the
+    /// the index and the log are ledgers, not pages to type — and the
     /// row is a reading, not a finding: a vault of untyped pages still passes.
     #[test]
     fn pages_without_a_known_type_are_counted_but_do_not_fail_the_lint() {

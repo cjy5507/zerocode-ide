@@ -5,10 +5,58 @@
 //! that only ever adds the key — a `type:` someone wrote stands as written,
 //! and nothing under `raw/` is opened.
 
-use std::io;
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::civil;
+use crate::second_brain::{
+    MAX_STATUS_ENTRIES, WIKI_DIR, WIKI_INDEX_FILE, WIKI_LOG_FILE, WIKI_OVERVIEW_FILE,
+};
+use crate::second_brain_graph::{
+    MARKDOWN_SUFFIX, parse_frontmatter, split_frontmatter, split_scalar_list, unquote,
+};
+use crate::second_brain_live::write_atomically;
+
+/// The frontmatter key a page's kind is written under.
+pub const TYPE_KEY: &str = "type";
+
+/// Words that set two things side by side in a title or a file name.
+const COMPARISON_MARKERS: [&str; 3] = ["vs", "versus", "비교"];
+
+/// Tag words that say what a page is beyond the kinds' own names, checked in
+/// this order; the first kind with a matching word wins.
+const TAG_WORDS: [(PageType, &[&str]); 5] = [
+    (
+        PageType::Entity,
+        &[
+            "person",
+            "people",
+            "org",
+            "organization",
+            "company",
+            "tool",
+            "product",
+            "project",
+            "library",
+            "인물",
+            "회사",
+            "도구",
+            "제품",
+        ],
+    ),
+    (
+        PageType::Source,
+        &[
+            "paper", "article", "book", "video", "talk", "podcast", "논문", "기사", "책", "영상",
+        ],
+    ),
+    (PageType::Comparison, &COMPARISON_MARKERS),
+    (PageType::Synthesis, &["answer", "qa", "답변"]),
+    (PageType::Overview, &["moc", "map", "지도"]),
+];
 
 /// What a page is, as its `type:` key says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -56,17 +104,46 @@ impl PageType {
     /// or nothing for a value outside the six.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        let _ = value;
-        None
+        let word = unquote(value.trim()).trim();
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str().eq_ignore_ascii_case(word))
     }
 }
 
 /// The kind the backfill gives a page that names none, from its id, its
-/// title and its tags.
+/// title and its tags: the overview by its path, a kind a tag names outright,
+/// a comparison its title or file name sets side by side, then the tag words
+/// above, and a concept when nothing says otherwise.
 #[must_use]
 pub fn guess(id: &str, title: &str, tags: &[String]) -> PageType {
-    let _ = (id, title, tags);
-    PageType::Concept
+    if id == WIKI_OVERVIEW_FILE {
+        return PageType::Overview;
+    }
+    let words: Vec<String> = tags
+        .iter()
+        .map(|tag| tag.trim().trim_start_matches('#').to_lowercase())
+        .collect();
+    if let Some(kind) = words.iter().find_map(|word| PageType::parse(word)) {
+        return kind;
+    }
+    if [id, title].into_iter().any(sets_side_by_side) {
+        return PageType::Comparison;
+    }
+    TAG_WORDS
+        .iter()
+        .find(|(_, vocabulary)| words.iter().any(|word| vocabulary.contains(&word.as_str())))
+        .map_or(PageType::Concept, |(kind, _)| *kind)
+}
+
+/// Whether a title or a file name sets two things side by side.
+fn sets_side_by_side(text: &str) -> bool {
+    text.split(|held: char| !held.is_alphanumeric())
+        .any(|word| {
+            COMPARISON_MARKERS
+                .iter()
+                .any(|marker| word.eq_ignore_ascii_case(marker))
+        })
 }
 
 /// What putting a `type:` key into one page's text comes to.
@@ -81,11 +158,34 @@ pub enum Typing {
 }
 
 /// `text` with `kind` declared, unless it declares a type already or has no
-/// frontmatter to hold one.
+/// frontmatter to hold one. The key goes first, in the text's own line ending.
 #[must_use]
 pub fn with_type(text: &str, kind: PageType) -> Typing {
-    let _ = (text, kind);
-    Typing::NoFrontmatter
+    let (mark, body) = match text.strip_prefix('\u{feff}') {
+        Some(rest) => ("\u{feff}", rest),
+        None => ("", text),
+    };
+    let newline = if body.starts_with("---\r\n") {
+        "\r\n"
+    } else if body.starts_with("---\n") {
+        "\n"
+    } else {
+        return Typing::NoFrontmatter;
+    };
+    let (front, after) = split_frontmatter(body);
+    // A fence that never closes hands the whole text back: no frontmatter.
+    if after.len() == body.len() {
+        return Typing::NoFrontmatter;
+    }
+    if let Some(value) = parse_frontmatter(front).get(TYPE_KEY) {
+        return Typing::Declared(unquote(value.trim()).trim().to_string());
+    }
+    let opened = "---".len() + newline.len();
+    Typing::Added(format!(
+        "{mark}---{newline}{TYPE_KEY}: {}{newline}{}",
+        kind.as_str(),
+        &body[opened..]
+    ))
 }
 
 /// What one backfill over a vault found, and did when asked to write.
@@ -98,6 +198,8 @@ pub struct Backfill {
     pub kept: Vec<(String, String)>,
     /// Pages with no frontmatter to hold the key — left as they are.
     pub no_frontmatter: Vec<String>,
+    /// Pages that are not UTF-8 text — left as they are.
+    pub unreadable: Vec<String>,
     /// Pages written; zero unless asked to write.
     pub written: usize,
     /// The line appended to `wiki/log.md`, when anything was written.
@@ -105,10 +207,150 @@ pub struct Backfill {
 }
 
 /// Plan — and with `write`, apply — a kind for every page under `wiki/` that
-/// names none. `now_ms` stamps the log line.
+/// names none. The index and the log are ledgers, not pages to type. Each
+/// write replaces one page whole (temp beside, then rename); a write that
+/// fails stops the run, and what was written before it is still logged.
+/// `now_ms` stamps the log line.
 pub fn backfill(root: &Path, write: bool, now_ms: i64) -> io::Result<Backfill> {
-    let _ = (root, write, now_ms);
-    Ok(Backfill::default())
+    let mut plan = Backfill::default();
+    let mut typed: Vec<(PathBuf, String)> = Vec::new();
+    for (path, id) in wiki_pages(root)? {
+        let Ok(text) = String::from_utf8(fs::read(&path)?) else {
+            plan.unreadable.push(id);
+            continue;
+        };
+        let stem = Path::new(&id)
+            .file_stem()
+            .and_then(|held| held.to_str())
+            .unwrap_or_default();
+        let (front, _) = split_frontmatter(&text);
+        let fields = parse_frontmatter(front);
+        let title = fields
+            .get("title")
+            .map(|held| unquote(held.trim()).trim())
+            .filter(|held| !held.is_empty())
+            .unwrap_or(stem);
+        let tags = fields
+            .get("tags")
+            .map(|held| split_scalar_list(held))
+            .unwrap_or_default();
+        let kind = guess(&id, title, &tags);
+        match with_type(&text, kind) {
+            Typing::Added(retyped) => {
+                plan.planned.push((id, kind));
+                typed.push((path, retyped));
+            }
+            Typing::Declared(value) => {
+                if PageType::parse(&value).is_none() {
+                    plan.kept.push((id, value));
+                }
+            }
+            Typing::NoFrontmatter => plan.no_frontmatter.push(id),
+        }
+    }
+    if !write {
+        return Ok(plan);
+    }
+    let mut failed = None;
+    for (path, retyped) in &typed {
+        if let Err(error) = write_atomically(path, retyped.as_bytes()) {
+            failed = Some(error);
+            break;
+        }
+        plan.written += 1;
+    }
+    if plan.written > 0 {
+        let line = log_line(&plan.planned[..plan.written], now_ms);
+        append_line(&root.join(WIKI_LOG_FILE), &line)?;
+        plan.log_line = Some(line);
+    }
+    failed.map_or(Ok(plan), Err)
+}
+
+/// Every Markdown page under `wiki/` but the two ledgers, as (path, id),
+/// sorted by id. Links are not followed, and the walk reads at most
+/// [`MAX_STATUS_ENTRIES`] entries.
+fn wiki_pages(root: &Path) -> io::Result<Vec<(PathBuf, String)>> {
+    let mut pages = Vec::new();
+    let mut folders = vec![root.join(WIKI_DIR)];
+    let mut read = 0usize;
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder)? {
+            let entry = entry?;
+            read += 1;
+            if read > MAX_STATUS_ENTRIES {
+                return Err(io::Error::other(format!(
+                    "{WIKI_DIR}/ holds more than {MAX_STATUS_ENTRIES} entries"
+                )));
+            }
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            if kind.is_dir() {
+                folders.push(path);
+                continue;
+            }
+            let id = path
+                .strip_prefix(root)
+                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if kind.is_file()
+                && id.ends_with(MARKDOWN_SUFFIX)
+                && id != WIKI_INDEX_FILE
+                && id != WIKI_LOG_FILE
+            {
+                pages.push((path, id));
+            }
+        }
+    }
+    pages.sort_by(|left, right| left.1.cmp(&right.1));
+    Ok(pages)
+}
+
+/// The one log line a written backfill leaves, in the log's own shape. The
+/// time is UTC and says so: this command does not know the person's zone.
+fn log_line(typed: &[(String, PageType)], now_ms: i64) -> String {
+    let day = civil::iso_date_of(now_ms, 0);
+    let since_midnight = now_ms.rem_euclid(civil::MS_PER_DAY);
+    let ms_per_minute = civil::MS_PER_HOUR / 60;
+    let hour = since_midnight / civil::MS_PER_HOUR;
+    let minute = since_midnight / ms_per_minute % 60;
+    let counts: Vec<String> = PageType::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            let count = typed.iter().filter(|(_, held)| *held == kind).count();
+            (count > 0).then(|| format!("{} {count}", kind.as_str()))
+        })
+        .collect();
+    format!(
+        "- {day} {hour:02}:{minute:02} UTC — zerocode vault-types → 페이지 {}쪽에 {TYPE_KEY} 추가 ({})",
+        typed.len(),
+        counts.join(" · ")
+    )
+}
+
+/// Append `line` to the log, opening a new line first when the log's last
+/// line was left open. Only the log's last byte is read.
+fn append_line(path: &Path, line: &str) -> io::Result<()> {
+    let open_ended = match File::open(path) {
+        Ok(mut file) => {
+            if file.metadata()?.len() == 0 {
+                false
+            } else {
+                file.seek(SeekFrom::End(-1))?;
+                let mut last = [0u8; 1];
+                file.read_exact(&mut last)?;
+                last[0] != b'\n'
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    let lead = if open_ended { "\n" } else { "" };
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(format!("{lead}{line}\n").as_bytes())
 }
 
 #[cfg(test)]

@@ -124,7 +124,9 @@ pub fn feed(
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
-        format!("{RAW_DIR}/{stem}: every name up to -{MAX_NAME_TRIES} is taken"),
+        format!(
+            "{RAW_DIR}/: every name up to -{MAX_NAME_TRIES} for this page's day and title is taken"
+        ),
     ))
 }
 

@@ -264,18 +264,16 @@ pub(crate) fn feed_read_page(
         };
         let offset_minutes =
             i32::try_from(crate::automation_runtime::local_offset_secs() / 60).unwrap_or_default();
-        match zerocode_core::second_brain_feed::feed(
+        // The file and the vault health card are the record of what landed;
+        // the window's log says only that something failed, never the page.
+        if let Err(error) = zerocode_core::second_brain_feed::feed(
             Some(Path::new(&vault)),
             true,
             &page,
             crate::project_runtime::now_epoch_ms(),
             offset_minutes,
         ) {
-            Ok(zerocode_core::second_brain_feed::Fed::Written(path)) => {
-                eprintln!("[second-brain] raw feed wrote {path}");
-            }
-            Ok(_) => {}
-            Err(error) => eprintln!("[second-brain] raw feed failed: {error}"),
+            eprintln!("[second-brain] raw feed failed: {error}");
         }
     });
 }
