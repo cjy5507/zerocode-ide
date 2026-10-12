@@ -2708,6 +2708,9 @@ impl Ui {
             self.permission_mode == PermissionMode::ReadOnly,
             goal::footer_status_from_snapshot(&self.goal, &self.autonomous),
             (self.loops != "none").then_some(self.loops.as_str()),
+            matches!(self.permission_mode, PermissionMode::DangerFullAccess | PermissionMode::Allow)
+                .then(|| super::permissions::mode_label(self.permission_mode)),
+            self.effort_tier.map(EffortTier::caret_span),
         )
     }
 

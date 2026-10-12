@@ -693,6 +693,8 @@ fn the_r8_fast_popup_matches_codex_0150() {
 fn the_footer_carries_the_codex_context_value() {
     let line = zo_ide::tui::view::footer(
         "claude-opus-5", "high", None, "~/work", 80, Some(42), None, false, None, None,
+        None,
+        None,
     );
     let plain = line.plain();
     assert!(
@@ -716,6 +718,8 @@ fn the_footer_falls_back_to_used_tokens_without_a_window() {
     let line = zo_ide::tui::view::footer(
         "claude-opus-5", "high", None, "~/work", 80, None, Some(6_575), false, None,
         None,
+        None,
+        None,
     );
     assert!(
         line.plain().ends_with("6.6K used"),
@@ -730,6 +734,8 @@ fn the_footer_falls_back_to_used_tokens_without_a_window() {
 fn the_footer_says_nothing_when_the_context_is_unknown() {
     let line = zo_ide::tui::view::footer(
         "claude-opus-5", "high", None, "~/work", 80, None, None, false, None, None,
+        None,
+        None,
     );
     assert_eq!(line.plain(), "  claude-opus-5 high · ~/work");
 }
@@ -747,6 +753,8 @@ fn the_footer_pins_plan_mode_without_a_false_key_hint() {
         None,
         true,
         Some(zo_ide::goal::GoalFooterStatus::Pursuing),
+        None,
+        None,
         None,
     );
     let plain = line.plain();
@@ -781,6 +789,8 @@ fn the_footer_pins_every_goal_status_phrase() {
     ] {
         let line = zo_ide::tui::view::footer(
             "m", "", None, "", 100, None, None, false, Some(status), None,
+            None,
+            None,
         );
         assert!(line.plain().ends_with(expected), "footer was {:?}", line.plain());
 
@@ -805,6 +815,8 @@ fn loop_footer_is_visible_but_yields_to_goal() {
         false,
         None,
         Some("loop: every 10m · next 04:12 · quiet ×3"),
+        None,
+        None,
     );
     assert!(loop_only.plain().contains("loop: every 10m"));
 
@@ -818,6 +830,8 @@ fn loop_footer_is_visible_but_yields_to_goal() {
         false,
         Some(zo_ide::goal::GoalFooterStatus::Pursuing),
         Some("loop: every 10m"),
+        None,
+        None,
     );
     assert!(with_goal.plain().contains("Pursuing goal"));
     assert!(!with_goal.plain().contains("loop: every 10m"));
@@ -837,6 +851,8 @@ fn row_one_keeps_the_context_and_the_hint_has_a_row_of_its_own() {
             Some(7),
             None,
             false,
+            None,
+            None,
             None,
             None,
         );
@@ -863,6 +879,8 @@ fn a_narrow_footer_keeps_goal_before_context() {
         None,
         false,
         Some(zo_ide::goal::GoalFooterStatus::Pursuing),
+        None,
+        None,
         None,
     );
     let plain = line.plain();
@@ -941,6 +959,8 @@ fn the_r8_fast_footer_token_matches_codex_0150() {
         None,
         None,
         false,
+        None,
+        None,
         None,
         None,
     );

@@ -365,3 +365,6 @@ pub fn risk(level: &str) -> String {
 pub fn tool_calls(count: usize) -> String {
     if count == 1 { "1 tool call".to_string() } else { format!("{count} tool calls") }
 }
+
+/// The footer's mark before a permission that lets everything run.
+pub const PERMISSION_MARK: &str = "▲";

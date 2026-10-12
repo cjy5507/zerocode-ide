@@ -1170,6 +1170,9 @@ fn two_column(
 ///
 /// cwd 는 **남는 자리만큼만** 쓴다. 오른쪽을 통째 뒤에 붙이고 줄 전체를 자르면
 /// 긴 경로가 표시자를 잡아먹는다.
+/// Between the footer's permission mark and the model.
+const FOOTER_MARK_GAP: &str = "   ";
+
 #[must_use]
 #[allow(clippy::too_many_arguments)] // This public byte-test seam mirrors the footer's visible facts.
 pub fn footer(
@@ -1183,19 +1186,34 @@ pub fn footer(
     plan_mode: bool,
     goal_status: Option<crate::goal::GoalFooterStatus>,
     loop_status: Option<&str>,
+    permission: Option<&str>,
+    effort_mark: Option<Span>,
 ) -> Line {
-    let head = if effort.is_empty() {
-        model.to_string()
-    } else {
-        format!("{model} {effort}")
-    };
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::new(head, footer_theme_style(
-            &["entity.name.type", "support.type", "variable"],
-            palette::FOOTER_MODEL,
-        )),
-    ];
+    let model_style = footer_theme_style(
+        &["entity.name.type", "support.type", "variable"],
+        palette::FOOTER_MODEL,
+    );
+    let mut spans = vec![Span::raw("  ")];
+    // A session that may run anything says so first, in the warn tint
+    // (t-48216): nothing on screen showed Full Access before.
+    if let Some(permission) = permission {
+        spans.push(Span::new(
+            format!("{} {permission}", super::strings::PERMISSION_MARK),
+            Style::new().fg(palette::NOTICE_WARN),
+        ));
+        spans.push(Span::raw(FOOTER_MARK_GAP));
+    }
+    // The composer's tier glyph stands beside the effort it means, so `◆`
+    // reads as `◆ smart` wherever it appears.
+    match effort_mark.filter(|_| !effort.is_empty()) {
+        Some(mark) => {
+            spans.push(Span::new(format!("{model} "), model_style));
+            spans.push(mark);
+            spans.push(Span::new(format!(" {effort}"), model_style));
+        }
+        None if effort.is_empty() => spans.push(Span::new(model.to_string(), model_style)),
+        None => spans.push(Span::new(format!("{model} {effort}"), model_style)),
+    }
     // A swap on the wire names itself right after the model it put there —
     // one warn-tinted word, so a reply another model wrote is never read as
     // the session model's.
@@ -1564,6 +1582,8 @@ fn rows_under_the_composer(frame: &Frame<'_>, focus: Color) -> Vec<Line> {
             frame.plan_mode,
             frame.goal_status,
             frame.loop_status,
+            None,
+            None,
         );
         if let Some(effect) = frame
             .effort_effect
@@ -2069,7 +2089,7 @@ mod tests {
 
     #[test]
     fn the_footer_colours_model_and_cwd_apart() {
-        let line = footer("m", "high", None, "/tmp", 40, None, None, false, None, None);
+        let line = footer("m", "high", None, "/tmp", 40, None, None, false, None, None, None, None);
         assert_eq!(line.plain(), "  m high · /tmp");
         assert_eq!(line.spans[1].style.fg, Some(crate::tui::palette::FOOTER_MODEL));
         assert_eq!(line.spans[3].style.fg, Some(crate::tui::palette::FOOTER_CWD));
@@ -2088,6 +2108,8 @@ mod tests {
             None,
             None,
             false,
+            None,
+            None,
             None,
             None,
         );
@@ -2133,6 +2155,8 @@ mod tests {
         let location = footer_location("/repo", Some("wt/task ← main"));
         let line = footer(
             "m", "high", None, &location, 80, None, None, false, None, None,
+            None,
+            None,
         );
 
         assert_eq!(line.plain(), "  m high · wt/task ← main · /repo");
@@ -2147,7 +2171,7 @@ mod tests {
             "/private/tmp/a/very/long/repository/path",
             Some("wt/task ← main"),
         );
-        let narrow = footer("m", "", None, &long, 32, None, None, false, None, None);
+        let narrow = footer("m", "", None, &long, 32, None, None, false, None, None, None, None);
         assert!(narrow.plain().contains("wt/task ← main"));
     }
 
@@ -2267,7 +2291,7 @@ mod tests {
 
     #[test]
     fn a_path_that_fills_its_budget_still_separates_plan_mode() {
-        let line = footer("m", "high", None, "/work", 25, None, None, true, None, None);
+        let line = footer("m", "high", None, "/work", 25, None, None, true, None, None, None, None);
         assert!(line.plain().contains("… Plan mode"), "footer was {line:?}");
         assert!(!line.plain().contains("…Plan mode"), "footer was {line:?}");
     }
@@ -2284,6 +2308,8 @@ mod tests {
                 Some(80),
                 None,
                 true,
+                None,
+                None,
                 None,
                 None,
             )
@@ -2306,6 +2332,8 @@ mod tests {
             Some(80),
             None,
             true,
+            None,
+            None,
             None,
             None,
         )
