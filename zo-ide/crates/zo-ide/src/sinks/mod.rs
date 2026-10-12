@@ -748,6 +748,7 @@ pub(crate) mod serializable {
                         tool_name: tool_name.clone(),
                         reasoning: reasoning.clone(),
                         audit_hint: audit_hint.clone(),
+                        risk_level: None,
                         choices: choices
                             .iter()
                             .map(|c| PermissionChoice {
@@ -1093,7 +1094,7 @@ mod prompt_wire_tests {
     use runtime::message_stream::{
         BlockId, PermissionChoice, PermissionDecision, PermissionPrompt, RenderBlock, ToolCallId,
     };
-    use runtime::permission::PromptQuestion;
+    use runtime::permission::{PromptQuestion, RiskLevel};
 
     fn prompt(question: Option<PromptQuestion>) -> RenderBlock {
         let (responder, _unused) = tokio::sync::oneshot::channel();
@@ -1103,6 +1104,7 @@ mod prompt_wire_tests {
             tool_name: if question.is_some() { String::new() } else { "Bash".to_string() },
             reasoning: "run ls".to_string(),
             audit_hint: question.is_none().then(|| "risk: high; explicitly unblock".to_string()),
+            risk_level: question.is_none().then_some(RiskLevel::High),
             choices: vec![PermissionChoice {
                 key: 'o',
                 label: "Once".to_string(),
@@ -1162,5 +1164,25 @@ mod prompt_wire_tests {
             }
             other => panic!("not a permission prompt: {other:?}"),
         }
+    }
+
+    /// A tool prompt's risk level crosses the `zo attach` wire, so the attached
+    /// client's card states it as the local one does; a question carries none.
+    #[test]
+    fn a_tool_prompt_carries_its_risk_level_over_the_wire() {
+        let json = serde_json::to_value(SerializableRenderBlock::from_block(&prompt(None)))
+            .expect("serialize");
+        assert_eq!(json["risk_level"], "high", "{json}");
+        match render_block_from_value(&json).expect("deserialize") {
+            RenderBlock::PermissionPrompt(back) => assert_eq!(back.risk_level, Some(RiskLevel::High)),
+            other => panic!("not a permission prompt: {other:?}"),
+        }
+        let asked = PromptQuestion {
+            topic: "model_switch".to_string(),
+            title: "Switch models?".to_string(),
+        };
+        let json = serde_json::to_value(SerializableRenderBlock::from_block(&prompt(Some(asked))))
+            .expect("serialize");
+        assert!(json.get("risk_level").is_none(), "a question states no risk: {json}");
     }
 }

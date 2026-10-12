@@ -2621,6 +2621,27 @@ mod card_tests {
         );
     }
 
+    /// The card states the risk the prompt carries, however the runtime words
+    /// its audit sentence: a card that read the level out of that sentence lost
+    /// its risk line whenever the sentence changed.
+    #[test]
+    fn the_card_states_the_prompts_risk_however_the_audit_sentence_reads() {
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        let mut prompt = crate::session::permission_bridge::build_render_prompt(
+            &bash_request(),
+            responder,
+            runtime::message_stream::BlockId(1),
+        );
+        prompt.audit_hint = Some("explicitly unblock with [y] Allow or [o] Allow once".to_string());
+        let text = Dialog::for_permission(&prompt)
+            .lines(100)
+            .iter()
+            .map(Line::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("High risk"), "the risk is on the card:\n{text}");
+    }
+
     /// The running call has its own row with its own spinner; the status row
     /// keeps the turn's clock and does not name the command a second time.
     #[test]

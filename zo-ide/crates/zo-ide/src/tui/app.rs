@@ -6702,6 +6702,7 @@ mod tests {
             tool_name: tool_name.to_string(),
             reasoning: "writes outside the workspace".to_string(),
             audit_hint: None,
+            risk_level: None,
             choices: vec![
                 PermissionChoice {
                     key: 'y',

@@ -936,6 +936,7 @@ mod tests {
             tool_name: "Bash".to_string(),
             reasoning: "run ls".to_string(),
             audit_hint: Some("[y] Allow".to_string()),
+            risk_level: None,
             choices: vec![PermissionChoice {
                 key: 'y',
                 label: "Allow once".to_string(),

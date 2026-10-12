@@ -147,6 +147,7 @@ mod tests {
             tool_name: "Bash".to_string(),
             reasoning: "ls".to_string(),
             audit_hint: None,
+            risk_level: None,
             choices: vec![
                 PermissionChoice {
                     key: 'y',

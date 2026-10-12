@@ -57,6 +57,7 @@ fn parked_permission(block_id: u64) -> (RenderBlock, PendingPrompt, oneshot::Rec
         tool_name: "Bash".to_string(),
         reasoning: "run cargo test".to_string(),
         audit_hint: Some("[y] Allow once  [n] Deny".to_string()),
+        risk_level: None,
         choices: vec![
             PermissionChoice {
                 key: 'y',
@@ -83,6 +84,7 @@ fn parked_permission(block_id: u64) -> (RenderBlock, PendingPrompt, oneshot::Rec
         tool_name: prompt.tool_name.clone(),
         reasoning: prompt.reasoning.clone(),
         audit_hint: prompt.audit_hint.clone(),
+        risk_level: prompt.risk_level,
         choices: prompt.choices.clone(),
         question: prompt.question.clone(),
         responder: twin_responder,
@@ -285,6 +287,7 @@ async fn a_question_zo_puts_to_the_person_crosses_the_channel_as_a_question() {
                     category's route?"
             .to_string(),
         audit_hint: None,
+        risk_level: None,
         choices: vec![
             PermissionChoice {
                 key: 'y',
