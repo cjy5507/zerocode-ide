@@ -2225,6 +2225,40 @@ fn recency(model: &DiscoveredModel) -> (u32, u64, std::cmp::Reverse<u32>) {
     (rank(&model.id), model.released, std::cmp::Reverse(model.prominence))
 }
 
+/// What a provider pointer naming `pointer_family` may move to: no release of
+/// a family the shipped ladder (`demotes_to`) puts below it, however many
+/// rungs down. A newer release down there is a smaller model, not a newer
+/// default. `None` (a family alias, which stays inside its own family) admits
+/// every release.
+fn not_below_the_pointer(provider: &'static str, pointer_family: Option<&str>) -> impl Fn(&&DiscoveredModel) -> bool {
+    let below = pointer_family.map(|family| families_below(provider, family)).unwrap_or_default();
+    move |model| family_key(provider, &model.id).is_none_or(|own| !below.contains(&own))
+}
+
+/// Every family the shipped ladder (`demotes_to`) puts below `family`.
+fn families_below(provider: &str, family: &str) -> HashSet<String> {
+    let catalog = api::builtin_provider_catalog();
+    let of_provider = |entry: &&api::ProviderCatalogEntry| provider_key(entry.provider) == Some(provider);
+    let rung_below = |rung: &str| {
+        let to = catalog
+            .iter()
+            .filter(of_provider)
+            .filter(|entry| family_key(provider, entry.canonical_model_id).as_deref() == Some(rung))
+            .find_map(|entry| entry.demotes_to)?;
+        let alias = catalog.iter().filter(of_provider).find(|entry| entry.alias.eq_ignore_ascii_case(to))?;
+        family_key(provider, alias.canonical_model_id)
+    };
+    let mut below = HashSet::new();
+    let mut rung = rung_below(family);
+    while let Some(next) = rung {
+        if next == family || !below.insert(next.clone()) {
+            break;
+        }
+        rung = rung_below(&next);
+    }
+    below
+}
+
 /// Ids the shipped catalog does not carry and that are at least as recent as
 /// their family's shipped head — the rows worth showing and routing to.
 #[must_use]
@@ -2325,8 +2359,9 @@ pub fn overlay(catalog: &DiscoveredCatalog, policy: UpdatePolicy) -> Overlay {
 /// Every alias that names a withdrawn shipped release ([`Withdrawn`]) and no
 /// release itself (a versioned name is a pin, and stays): a family alias
 /// follows the newest release of its family the lists still name, a
-/// provider pointer the newest of its provider — older or newer, the living
-/// one is the answer — unless a newer release already moved it. One with
+/// provider pointer the newest of its provider short of a rung below its own
+/// family — older or newer, the living one is the answer — unless a newer
+/// release already moved it. One with
 /// nothing to follow is returned, for the catalog to say so. A target the
 /// shipped catalog does not carry and that is not news (`fresh`) gets its row
 /// here, so the alias does not name an id nothing describes.
@@ -2362,6 +2397,7 @@ fn follow_withdrawn_aliases(
             .filter(|model| model.provider == provider && model.unlisted_since.is_none())
             .filter(|model| withdrawn_since_in(catalog, &model.id).is_none())
             .filter(|model| is_pointer || family.is_some() && family_key(provider, &model.id) == family)
+            .filter(not_below_the_pointer(provider, family.as_deref().filter(|_| is_pointer)))
             .max_by_key(|model| recency(model));
         let Some(living) = living else {
             orphaned.push(AliasUpdate {
@@ -2481,7 +2517,8 @@ struct AliasMoves {
 }
 
 /// A provider pointer (`openai-latest`, `claude-latest`): the alias that names
-/// the provider's newest release, whatever family it comes from.
+/// the provider's newest release, from any family but one the ladder
+/// (`demotes_to`) puts below the family it names.
 const PROVIDER_POINTER_SUFFIX: &str = "-latest";
 
 /// The token a provider's family aliases may be spelled behind
@@ -2504,7 +2541,8 @@ fn alias_prefix(provider: &str) -> Option<&'static str> {
 ///   resolves to, not what the name is for.
 /// - A provider pointer (`openai-latest`) follows the provider's newest
 ///   release across families, so a new generation heads the provider the day
-///   it is discovered (GPT-6 astra after the 5.6 line).
+///   it is discovered (GPT-6 astra after the 5.6 line) — never a release of a
+///   family the ladder (`demotes_to`) puts below the one it names.
 /// - A new family gets the aliases its provider's grammar gives every family:
 ///   the codename (`astra`), the prefixed spelling where the provider uses one
 ///   (`claude-nova`), and for OpenAI the versioned lineup name (`gpt-6`) that
@@ -2581,6 +2619,7 @@ fn family_alias_moves(fresh: &[DiscoveredModel], policy: UpdatePolicy) -> AliasM
             .iter()
             .filter(|model| model.provider == provider)
             .filter(|model| is_pointer || family_key(provider, &model.id).as_deref() == Some(family.as_str()))
+            .filter(not_below_the_pointer(provider, is_pointer.then_some(family.as_str())))
             .max_by_key(|model| recency(model))
         else {
             continue;
