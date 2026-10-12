@@ -20376,7 +20376,7 @@ pub(crate) mod computer_desktop_wait {
             transfer: true,
             delete: true,
         });
-        let unguarded = answer_computer_command(&words(&[
+        let unguarded = zerocode_core::computer_use::parse_command(&words(&[
             "mouse-click",
             "--x",
             "1",
@@ -20385,12 +20385,18 @@ pub(crate) mod computer_desktop_wait {
             "--confirming",
             "payment",
             "--json",
-        ]));
-        assert_ne!(
-            envelope(&unguarded)["error"]["code"],
-            "confirmation_refused",
-            "a kind turned off is not asked about; the helper (absent here) answers"
+        ])).unwrap();
+        let mut calls = 0;
+        let result = crate::agent_tools_runtime::call_with_the_persons_last_step(
+            &unguarded,
+            crate::computer_use::confirm::Asking::Person,
+            &mut |_, _| {
+                calls += 1;
+                Ok(serde_json::json!({ "fixture": true }))
+            },
         );
+        assert!(result.is_ok(), "a disabled confirmation reaches the provider");
+        assert_eq!(calls, 1);
         crate::computer_use::confirm::set_policy(crate::computer_use::confirm::Policy::default());
     }
 
