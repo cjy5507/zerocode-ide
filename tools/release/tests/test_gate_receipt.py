@@ -15,6 +15,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 from gate_fixture import authorize, load_module
@@ -27,6 +28,45 @@ PASS = b"test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered 
 TAP = b"TAP version 13\nok 1 - fixture\n1..1\n# tests 1\n# suites 0\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 1.25\n"
 SPEC_OUTPUT = "✔ fixture (1.25ms)\nℹ tests 1\nℹ suites 0\nℹ pass 1\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 1.25\n".encode()
 UNITTEST = b"..\n----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nOK\n"
+
+
+class RuntimeLocationTests(unittest.TestCase):
+    def test_mismatched_engine_identities_are_refused_with_pinned_executable(self):
+        launcher = load_module(SCRIPT.with_name("gate_launcher.py"), "engine_identity_launcher")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            runtime = root / "runtime"
+            python = runtime / "bin/python"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"pinned engine fixture")
+            other = root / "other-engine"
+            other.write_bytes(b"different engine fixture")
+            stdlib = runtime / "lib/python-fixture"
+            dynload = stdlib / "lib-dynload"
+            dynload.mkdir(parents=True)
+            modules = {name: stdlib / (name + ".py") for name in ("json", "encodings")}
+            for path in modules.values():
+                path.write_bytes(b"")
+            paths = [str(stdlib), str(dynload)]
+            Path(str(python) + "._pth").write_text("\n".join(paths) + "\n")
+            facts = SimpleNamespace(
+                executable=str(python), orig_argv=[str(python)], _base_executable=str(python), path=paths,
+                prefix=str(python.parent), base_prefix=str(python.parent),
+                exec_prefix=str(python.parent), base_exec_prefix=str(python.parent),
+                _stdlib_dir=str(python.parent / "lib/python-fixture"),
+            )
+            policy = {"runtime": {"python": {"path": str(python)}, "stdlib": {"path": str(runtime)}}}
+            with mock.patch.multiple(launcher, sys=facts,
+                                     json=SimpleNamespace(__file__=str(modules["json"])),
+                                     encodings=SimpleNamespace(__file__=str(modules["encodings"]))):
+                launcher.runtime_locations(policy)
+                for name, value in (("orig_argv", [str(other)]), ("_base_executable", str(other))):
+                    with self.subTest(identity=name), mock.patch.object(facts, name, value):
+                        self.assertEqual(facts.executable, str(python))
+                        with self.assertRaises(launcher.Untrusted) as denied:
+                            launcher.runtime_locations(policy)
+                        self.assertEqual(denied.exception.code, "digest_mismatch")
+                launcher.runtime_locations(policy)
 
 
 class FakeLedger:
@@ -972,6 +1012,34 @@ class ReceiptTests(unittest.TestCase):
         good = invoke("good", policies["good"][1])
         self.assertEqual(good.returncode, 0, good.stderr)
         self.assertEqual(good_marker.read_text(), "ran")
+        good_marker.unlink()
+        copied = Path(runtime["python"]["path"])
+        copied_bytes = copied.read_bytes()
+        source_launcher = Path(sys.executable).resolve(strict=True)
+        self.assertNotEqual(source_launcher, fixture.executable_image(), "separate launcher control is unavailable")
+        good_policy = Path(policies["good"][0])
+        good_policy_bytes = good_policy.read_bytes()
+        good_pin = policies["good"]
+        try:
+            copied.write_bytes(source_launcher.read_bytes())
+            redirected = json.loads(good_policy_bytes)
+            redirected["runtime"]["python"]["sha256"] = gate.file_digest(copied)
+            redirected["runtime"]["stdlib"]["sha256"] = fixture.tree_hash(runtime["stdlib"]["path"])
+            good_policy.write_bytes(gate.encoded(redirected))
+            policies["good"] = (str(good_policy), gate.digest(good_policy.read_bytes()))
+            denied_image = invoke("good", policies["good"][1])
+            self.assertEqual(denied_image.returncode, 1, denied_image.stderr)
+            self.assertEqual(json.loads(denied_image.stdout)["code"], "digest_mismatch")
+            self.assertFalse(good_marker.exists(), "redirected process image executed the producer")
+            print("engine-image-control: rc=1 code=digest_mismatch producer-ran=false", file=sys.stderr)
+        finally:
+            copied.write_bytes(copied_bytes)
+            good_policy.write_bytes(good_policy_bytes)
+            policies["good"] = good_pin
+        restored = invoke("good", policies["good"][1])
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertEqual(good_marker.read_text(), "ran")
+        good_marker.unlink()
         denied = invoke("bad", policies["good"][1])
         self.assertFalse(bad_marker.exists(), "producer code ran before policy binding")
         self.assertEqual(denied.returncode, 1, denied.stderr)
@@ -981,6 +1049,7 @@ class ReceiptTests(unittest.TestCase):
             self.assertEqual(denied.returncode, 1, denied.stderr)
             self.assertEqual(json.loads(denied.stdout)["code"], "invalid_request")
             self.assertFalse(bad_marker.exists())
+            self.assertFalse(good_marker.exists())
 
     def test_actual_ui_runner_reports_require_matching_nonzero_complete_checks(self):
         import shutil
