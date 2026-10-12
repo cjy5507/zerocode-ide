@@ -15941,6 +15941,7 @@ enum ContinuationCase {
     Draft,
     Parked,
     Cancelled,
+    LostBeforePaste,
     LostAfterPaste,
     HandAfterPaste,
     LaunchAfterPaste,
@@ -15955,6 +15956,8 @@ struct ContinuationRestore {
     pending: Mutex<crate::restart_nudge_runtime::PendingNudges>,
     live_launch: std::sync::atomic::AtomicU64,
     live_hand: std::sync::atomic::AtomicU64,
+    prompts: Mutex<Vec<String>>,
+    notes_before: Mutex<Vec<String>>,
 }
 
 impl ContinuationRestore {
@@ -16061,6 +16064,10 @@ impl ContinuationRestore {
                 self.wrote.lock().unwrap().extend_from_slice(bytes);
                 true
             });
+            if round == 0 && matches!(self.case, ContinuationCase::LostBeforePaste) {
+                assert_eq!(turned, Turned::Waiting);
+                return None;
+            }
             if matches!(turned, Turned::Pasted)
                 && matches!(self.case, ContinuationCase::LostAfterPaste)
             {
@@ -16135,6 +16142,7 @@ impl Host for ContinuationRestore {
         text: &str,
         worker: &str,
     ) -> Option<zerocode_pty::DeliveryOutcome> {
+        self.prompts.lock().unwrap().push(text.to_string());
         let outcome = self.delivery(term, text);
         self.outcomes.lock().unwrap().push(outcome);
         if let Some(outcome) = outcome
@@ -16164,6 +16172,20 @@ impl Host for ContinuationRestore {
     }
 }
 
+fn continuation_notes(worker: &str, term: u32) -> Vec<String> {
+    let root = super::BLACKBOX
+        .get()
+        .expect("the test window's diagnostic root");
+    let prefix = format!("orchestration: worker {worker} terminal {term} continuation ");
+    std::fs::read_to_string(root.join(crate::system_runtime::WINDOW_LOG))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once(' ').map(|(_, note)| note))
+        .filter(|note| note.starts_with(&prefix))
+        .map(str::to_string)
+        .collect()
+}
+
 fn continuation_reseat(
     case: ContinuationCase,
     check: impl FnOnce(&ContinuationRestore, &str, u32),
@@ -16188,6 +16210,8 @@ fn continuation_reseat(
         pending: Mutex::new(crate::restart_nudge_runtime::PendingNudges::default()),
         live_launch: std::sync::atomic::AtomicU64::new(1),
         live_hand: std::sync::atomic::AtomicU64::new(0),
+        prompts: Mutex::new(Vec::new()),
+        notes_before: Mutex::new(Vec::new()),
     };
     let (_team, _task, worker) =
         a_seated_worker_with_a_session(&host, LEADER, WORKER, "controlled-reseat");
@@ -16200,6 +16224,7 @@ fn continuation_reseat(
         .window_restarted(clock())
         .unwrap();
     crate::agent_teams::forget_term(WORKER);
+    *host.notes_before.lock().unwrap() = continuation_notes(&worker, RESTORED);
     let _ = super::reseat_sleeping(&host, Vec::new(), LEADER, Some(&test_actor(LEADER)));
     assert!(
         host.closed.lock().unwrap().is_empty(),
@@ -16211,12 +16236,14 @@ fn continuation_reseat(
     assert_eq!(after.dispatch, before.dispatch);
     assert_eq!(after.session, before.session);
     check(&host, &worker, RESTORED);
+    let noted = continuation_notes(&worker, RESTORED);
     assert_eq!(
         super::reseat_sleeping(&host, Vec::new(), LEADER, Some(&test_actor(LEADER))),
         0
     );
     assert_eq!(host.outcomes.lock().unwrap().len(), 1);
     assert!(host.closed.lock().unwrap().is_empty());
+    assert_eq!(continuation_notes(&worker, RESTORED), noted);
     crate::agent_teams::forget_term(RESTORED);
     crate::agent_teams::forget_term(LEADER);
 }
@@ -16446,6 +16473,50 @@ fn an_idle_reseated_worker_reports_no_continuation_submission() {
     let body: serde_json::Value = serde_json::from_str(&answer.stdout).unwrap();
     assert_eq!(body["continuation"]["status"], "idle");
     assert_eq!(body["continuation"]["pasted"], false);
+}
+
+#[test]
+fn an_unknown_auto_reseat_is_recorded_once_without_input_or_private_context() {
+    for case in [
+        ContinuationCase::LostBeforePaste,
+        ContinuationCase::LostAfterPaste,
+    ] {
+        continuation_reseat(case, |host, worker, term| {
+            let before = host.notes_before.lock().unwrap().clone();
+            let notes = continuation_notes(worker, term);
+            assert_eq!(
+                notes.len(),
+                before.len() + 1,
+                "the automatic reseat discarded its unknown delivery result"
+            );
+            let note = notes.last().unwrap();
+            assert_eq!(
+                note,
+                &format!(
+                    "orchestration: worker {worker} terminal {term} continuation unknown (delivery_unknown)"
+                )
+            );
+            assert!(!note.contains(&host.base.checkout));
+            assert!(!note.contains("controlled-reseat"));
+            for prompt in host.prompts.lock().unwrap().iter() {
+                assert!(!note.contains(prompt));
+            }
+            let wrote = host.wrote.lock().unwrap().clone();
+            if matches!(case, ContinuationCase::LostBeforePaste) {
+                assert!(wrote.is_empty());
+            }
+            assert_eq!(wrote.iter().filter(|byte| **byte == b'\r').count(), 0);
+            assert!(!host.pending.lock().unwrap().holds(term));
+            tick(host, &[], clock());
+            assert_eq!(*host.wrote.lock().unwrap(), wrote);
+            assert!(host.closed.lock().unwrap().is_empty());
+            assert_eq!(
+                continuation_notes(worker, term),
+                notes,
+                "a repeated beat recorded the same restoration twice"
+            );
+        });
+    }
 }
 
 impl Host for RestorationHost {
