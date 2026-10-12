@@ -790,6 +790,10 @@ fn truncate_excerpt(excerpt: &str) -> String {
 /// rather than a list holding a list, while `depends_on: [ [[wiki/a]], b ]` is
 /// two items. The two are told apart by what stripping one bracket pair would
 /// leave — a flow list of links still opens with `[[`, a lone link does not.
+///
+/// A quote that opens an item quotes it to its closing mark, commas and all:
+/// `"[[b]]의 'x, y' 결정"` is one item. An apostrophe inside an unquoted item
+/// opens nothing, and a quote that never closes is read as a plain character.
 pub(crate) fn split_relation_list(value: &str) -> Vec<String> {
     let trimmed = value.trim();
     let inner = match trimmed.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
@@ -801,6 +805,15 @@ pub(crate) fn split_relation_list(value: &str) -> Vec<String> {
     let mut current = String::new();
     let mut at = 0;
     while at < chars.len() {
+        if matches!(chars[at], '"' | '\'') && current.trim().is_empty() {
+            let mark = chars[at];
+            if let Some(close) = chars[at + 1..].iter().position(|held| *held == mark) {
+                let end = at + 1 + close;
+                current.extend(&chars[at..=end]);
+                at = end + 1;
+                continue;
+            }
+        }
         if chars[at] == '[' && at + 1 < chars.len() && chars[at + 1] == '[' {
             let mut end = at + 2;
             while end + 1 < chars.len() && !(chars[end] == ']' && chars[end + 1] == ']') {
