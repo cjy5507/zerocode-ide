@@ -8541,6 +8541,48 @@ mod tests {
         assert_eq!(images, vec![("image/png".to_string(), "AAEC".to_string())]);
     }
 
+    /// The turn ends on what it did, not only on how long it took (t-48216):
+    /// `── 57s · 3 tool calls · +2 -2 ──…`, the rule running to the edge.
+    #[test]
+    fn the_turn_summary_counts_the_calls_and_the_changed_lines() {
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        let edited = |path: &str| {
+            json!({
+                "filePath": path, "oldString": "a", "newString": "b",
+                "structuredPatch": [{"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1, "lines": ["-a", "+b"]}]
+            })
+            .to_string()
+        };
+        for (call, path) in [("edit-1", "src/a.rs"), ("edit-2", "src/b.rs")] {
+            ui.block(tool_call(&ids, call, "edit_file", &json!({"path": path, "old_string": "a", "new_string": "b"})));
+            ui.block(RenderBlock::ToolResult {
+                id: ids.next(),
+                tool_call_id: ToolCallId(call.to_string()),
+                is_error: false,
+                body: format_tool_result_from_raw("edit_file", &edited(path), false),
+            });
+        }
+        ui.block(tool_call(&ids, "bash-1", "bash", &json!({"command": "cargo test"})));
+        ui.block(RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId("bash-1".to_string()),
+            is_error: false,
+            body: format_tool_result_from_raw("bash", r#"{"stdout": "ok", "stderr": "", "exit_code": 0}"#, false),
+        });
+        let label = "── 57s · 3 tool calls · +2 -2 ";
+        let rule = "─".repeat(ui.width() - label.chars().count());
+        assert_eq!(ui.turn_summary(57).plain(), format!("{label}{rule}"));
+    }
+
+    #[test]
+    fn a_turn_without_calls_ends_on_its_time_alone() {
+        let ui = test_ui();
+        let line = ui.turn_summary(65).plain();
+        assert!(line.starts_with("── 1m 05s ──"), "{line}");
+        assert_eq!(line.chars().count(), ui.width(), "{line}");
+    }
+
     /// A check the harness saw pass after the last edit is a row like the
     /// calls' rows (t-48216), `✓ Check   <command>   passed after the last
     /// edit`, not a dim note carrying the runtime's sentence.
