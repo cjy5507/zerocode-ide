@@ -33,6 +33,15 @@ const DARK_256_ADD_LINE_BG: Color = Color::Indexed(22);
 const DARK_256_DEL_LINE_BG: Color = Color::Indexed(52);
 const LIGHT_256_ADD_LINE_BG: Color = Color::Indexed(194);
 const LIGHT_256_DEL_LINE_BG: Color = Color::Indexed(224);
+// The changed words inside a changed line: the line's tint, one step stronger.
+const DARK_TC_ADD_WORD_BG: Color = Color::Rgb(44, 105, 64);
+const DARK_TC_DEL_WORD_BG: Color = Color::Rgb(122, 46, 38);
+const LIGHT_TC_ADD_WORD_BG: Color = Color::Rgb(172, 238, 187);
+const LIGHT_TC_DEL_WORD_BG: Color = Color::Rgb(255, 206, 203);
+const DARK_256_ADD_WORD_BG: Color = Color::Indexed(28);
+const DARK_256_DEL_WORD_BG: Color = Color::Indexed(88);
+const LIGHT_256_ADD_WORD_BG: Color = Color::Indexed(157);
+const LIGHT_256_DEL_WORD_BG: Color = Color::Indexed(217);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DiffTheme { Dark, Light }
@@ -88,6 +97,20 @@ fn line_background(kind: DiffLineKind, theme: DiffTheme, level: ColorLevel) -> O
     }
 }
 
+fn word_background(kind: DiffLineKind, theme: DiffTheme, level: ColorLevel) -> Option<Color> {
+    match (kind, theme, level) {
+        (DiffLineKind::Added, DiffTheme::Dark, ColorLevel::TrueColor) => Some(DARK_TC_ADD_WORD_BG),
+        (DiffLineKind::Removed, DiffTheme::Dark, ColorLevel::TrueColor) => Some(DARK_TC_DEL_WORD_BG),
+        (DiffLineKind::Added, DiffTheme::Light, ColorLevel::TrueColor) => Some(LIGHT_TC_ADD_WORD_BG),
+        (DiffLineKind::Removed, DiffTheme::Light, ColorLevel::TrueColor) => Some(LIGHT_TC_DEL_WORD_BG),
+        (DiffLineKind::Added, DiffTheme::Dark, ColorLevel::Ansi256) => Some(DARK_256_ADD_WORD_BG),
+        (DiffLineKind::Removed, DiffTheme::Dark, ColorLevel::Ansi256) => Some(DARK_256_DEL_WORD_BG),
+        (DiffLineKind::Added, DiffTheme::Light, ColorLevel::Ansi256) => Some(LIGHT_256_ADD_WORD_BG),
+        (DiffLineKind::Removed, DiffTheme::Light, ColorLevel::Ansi256) => Some(LIGHT_256_DEL_WORD_BG),
+        _ => None,
+    }
+}
+
 fn sign_style(kind: DiffLineKind, background: Option<Color>) -> Style {
     let mut style = match kind {
         DiffLineKind::Added => Style::new().fg(Color::GREEN),
@@ -135,18 +158,34 @@ pub fn hunk_lines_for_palette(
     let styles = diff_styles(terminal_palette);
     let mut out = Vec::new();
     let mut folded = 0usize;
+    let mut previous_end: Option<(usize, usize)> = None;
     for hunk in &view.hunks {
+        if let Some((old_end, new_end)) = previous_end {
+            let skipped = (hunk.old_start as usize).saturating_sub(old_end)
+                .min((hunk.new_start as usize).saturating_sub(new_end));
+            if skipped > 0 && out.len() < MAX_RENDERED_LINES {
+                out.push(Line::new(vec![Span::dim(format!(
+                    "{:cell$}{}",
+                    "",
+                    super::strings::unchanged_lines(skipped),
+                    cell = numbers_width(gutter)
+                ))]));
+            }
+        }
+        previous_end = Some(hunk_end(hunk));
         let highlighted = language.and_then(|language| hunk_highlights(hunk, language));
-        for (index, (number, kind, text)) in numbered_lines(hunk).into_iter().enumerate() {
+        let emphasis = changed_words(hunk);
+        for (index, (old, new, kind, text)) in numbered_lines(hunk).into_iter().enumerate() {
             if out.len() >= MAX_RENDERED_LINES {
                 folded += 1;
                 continue;
             }
             out.extend(rendered_line(
-                number,
+                (old, new),
                 kind,
-                &text,
+                text,
                 highlighted.as_ref().and_then(|lines| lines.get(index)),
+                emphasis[index],
                 width,
                 gutter,
                 styles,
@@ -155,20 +194,134 @@ pub fn hunk_lines_for_palette(
     }
     if folded > 0 {
         out.push(Line::new(vec![Span::dim(format!(
-            "{:gutter$}  … {folded} more line{}",
+            "{:cell$}… {folded} more line{}",
             "",
             if folded == 1 { "" } else { "s" },
-            gutter = gutter
+            cell = numbers_width(gutter)
         ))]));
     }
     out
 }
 
-/// 줄번호 칸의 폭 — codex `line_number_width`, 최소 1.
+/// Both number columns and the space after them: `old  new `.
+fn numbers_width(gutter: usize) -> usize {
+    gutter * 2 + 3
+}
+
+/// The first old and new line numbers after a hunk.
+fn hunk_end(hunk: &DiffHunk) -> (usize, usize) {
+    let mut old = hunk.old_start as usize;
+    let mut new = hunk.new_start as usize;
+    for line in &hunk.lines {
+        match line.kind {
+            DiffLineKind::Added => new += 1,
+            DiffLineKind::Removed => old += 1,
+            DiffLineKind::Context => { old += 1; new += 1; }
+        }
+    }
+    (old, new)
+}
+
+/// What changed inside each changed line, as a byte range of its text: a run
+/// of removed lines followed by a run of added ones pairs up row by row, and a
+/// pair's changed stretch is the words between their common head and tail. A
+/// pair sharing neither is a rewrite, and a rewrite points at nothing.
+fn changed_words(hunk: &DiffHunk) -> Vec<Option<(usize, usize)>> {
+    let lines = &hunk.lines;
+    let mut out = vec![None; lines.len()];
+    let mut index = 0usize;
+    while index < lines.len() {
+        let removed_start = index;
+        while index < lines.len() && lines[index].kind == DiffLineKind::Removed { index += 1; }
+        let added_start = index;
+        while index < lines.len() && lines[index].kind == DiffLineKind::Added { index += 1; }
+        if removed_start == added_start || added_start == index {
+            index = index.max(removed_start + 1);
+            continue;
+        }
+        let pairs = (added_start - removed_start).min(index - added_start);
+        for offset in 0..pairs {
+            let (old_row, new_row) = (removed_start + offset, added_start + offset);
+            if let Some((old, new)) = word_change(&lines[old_row].text, &lines[new_row].text) {
+                out[old_row] = old;
+                out[new_row] = new;
+            }
+        }
+    }
+    out
+}
+
+type WordRange = Option<(usize, usize)>;
+
+fn word_change(old: &str, new: &str) -> Option<(WordRange, WordRange)> {
+    let old_words = word_bounds(old);
+    let new_words = word_bounds(new);
+    let same = |a: &(usize, usize), b: &(usize, usize)| old[a.0..a.1] == new[b.0..b.1];
+    let head = old_words.iter().zip(&new_words).take_while(|(a, b)| same(a, b)).count();
+    let tail = old_words[head..].iter().rev()
+        .zip(new_words[head..].iter().rev())
+        .take_while(|(a, b)| same(a, b))
+        .count();
+    if head == 0 && tail == 0 {
+        return None;
+    }
+    let span = |words: &[(usize, usize)]| -> WordRange {
+        Some((words.first()?.0, words.last()?.1))
+    };
+    Some((
+        span(&old_words[head..old_words.len() - tail]),
+        span(&new_words[head..new_words.len() - tail]),
+    ))
+}
+
+/// A line's words as byte ranges: a run of letters, digits and `_`, a run of
+/// whitespace, or any other single character.
+fn word_bounds(text: &str) -> Vec<(usize, usize)> {
+    let class = |ch: char| {
+        if ch.is_alphanumeric() || ch == '_' { 1 } else if ch.is_whitespace() { 2 } else { 0 }
+    };
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let mut previous = None;
+    for (at, ch) in text.char_indices() {
+        let kind = class(ch);
+        let end = at + ch.len_utf8();
+        match out.last_mut() {
+            Some(last) if kind != 0 && previous == Some(kind) => last.1 = end,
+            _ => out.push((at, end)),
+        }
+        previous = Some(kind);
+    }
+    out
+}
+
+/// Paints `range` of the row's text with `background`, splitting the spans at
+/// its edges, over whatever tint the spans already carry.
+fn emphasize(spans: Vec<Span>, range: (usize, usize), background: Color) -> Vec<Span> {
+    let mut out = Vec::with_capacity(spans.len() + 2);
+    let mut at = 0usize;
+    for span in spans {
+        let (start, end) = (at, at + span.text.len());
+        at = end;
+        let from = range.0.clamp(start, end) - start;
+        let to = range.1.clamp(start, end) - start;
+        if from == to || !span.text.is_char_boundary(from) || !span.text.is_char_boundary(to) {
+            out.push(span);
+            continue;
+        }
+        let (before, rest) = span.text.split_at(from);
+        let (inside, after) = rest.split_at(to - from);
+        for (piece, style) in [(before, span.style), (inside, span.style.bg(background)), (after, span.style)] {
+            if !piece.is_empty() { out.push(Span::new(piece.to_string(), style)); }
+        }
+    }
+    out
+}
+
+/// 줄번호 한 칸의 폭 — 옛 번호와 새 번호 중 가장 큰 것, 최소 1.
 fn gutter_width(hunks: &[DiffHunk]) -> usize {
     let widest = hunks
         .iter()
-        .flat_map(|hunk| numbered_lines(hunk).into_iter().map(|(number, _, _)| number))
+        .flat_map(|hunk| numbered_lines(hunk).into_iter().flat_map(|(old, new, _, _)| old.into_iter().chain(new)))
         .max()
         .unwrap_or(0);
     if widest == 0 {
@@ -251,43 +404,33 @@ fn hunk_highlights(hunk: &DiffHunk, language: &str) -> Option<Vec<Line>> {
     Some(highlighted)
 }
 
-/// 한 hunk 의 줄에 번호를 매긴다 — codex 의 규칙 그대로:
-/// 추가는 **새** 파일의 번호를, 삭제는 **옛** 파일의 번호를 달고, 문맥 줄은
-/// 새 번호를 보이되 양쪽 커서를 함께 민다.
-fn numbered_lines(hunk: &DiffHunk) -> Vec<(usize, DiffLineKind, String)> {
+/// 한 hunk 의 줄에 양쪽 번호를 매긴다: 삭제는 옛 번호만, 추가는 새 번호만,
+/// 문맥 줄은 둘 다 달고 양쪽 커서를 함께 민다.
+fn numbered_lines(hunk: &DiffHunk) -> Vec<(Option<usize>, Option<usize>, DiffLineKind, &str)> {
     let mut old_line = hunk.old_start as usize;
     let mut new_line = hunk.new_start as usize;
     let mut out = Vec::with_capacity(hunk.lines.len());
     for line in &hunk.lines {
-        let number = match line.kind {
-            DiffLineKind::Added => {
-                let number = new_line;
-                new_line += 1;
-                number
-            }
-            DiffLineKind::Removed => {
-                let number = old_line;
-                old_line += 1;
-                number
-            }
-            DiffLineKind::Context => {
-                let number = new_line;
-                old_line += 1;
-                new_line += 1;
-                number
-            }
+        let (old, new) = match line.kind {
+            DiffLineKind::Added => (None, Some(new_line)),
+            DiffLineKind::Removed => (Some(old_line), None),
+            DiffLineKind::Context => (Some(old_line), Some(new_line)),
         };
-        out.push((number, line.kind, line.text.clone()));
+        if old.is_some() { old_line += 1; }
+        if new.is_some() { new_line += 1; }
+        out.push((old, new, line.kind, line.text.as_str()));
     }
     out
 }
 
 /// 한 줄 — 넘치면 이어지는 줄로 접힌다.
+#[allow(clippy::too_many_arguments)]
 fn rendered_line(
-    number: usize,
+    (old, new): (Option<usize>, Option<usize>),
     kind: DiffLineKind,
     text: &str,
     syntax: Option<&Line>,
+    emphasis: Option<(usize, usize)>,
     width: usize,
     gutter: usize,
     styles: DiffStyles,
@@ -298,10 +441,10 @@ fn rendered_line(
     let background = line_background(kind, styles.theme, styles.color_level);
     let sign_style = sign_style(kind, background);
     let style = content_style(kind, background);
-    // 번호 칸 + 공백 + 부호가 앞에 서므로 본문은 그만큼 좁다.
-    let content_width = width.saturating_sub(gutter + 2).max(1);
+    // 두 번호 칸 + 부호와 그 뒤 한 칸이 앞에 서므로 본문은 그만큼 좁다.
+    let content_width = width.saturating_sub(numbers_width(gutter) + 2).max(1);
     let mut out = Vec::new();
-    let spans = syntax.map_or_else(|| vec![Span::new(text.to_string(), style)], |line| {
+    let mut spans = syntax.map_or_else(|| vec![Span::new(text.to_string(), style)], |line| {
         line.spans.iter().map(|span| {
             let mut style = span.style;
             if let Some(background) = background { style = style.bg(background); }
@@ -309,16 +452,23 @@ fn rendered_line(
             Span::new(span.text.clone(), style)
         }).collect()
     });
+    let word_bg = word_background(kind, styles.theme, styles.color_level);
+    if let (Some(range), Some(word_bg)) = (emphasis, word_bg) {
+        if spans.iter().map(|span| span.text.len()).sum::<usize>() == text.len() {
+            spans = emphasize(spans, range, word_bg);
+        }
+    }
     for (index, chunk) in wrapped_spans(&spans, content_width).into_iter().enumerate() {
         let mut row = if index == 0 {
+            let column = |number: Option<usize>| number.map_or_else(String::new, |number| number.to_string());
             vec![
-                Span::new(format!("{number:>gutter$} "), Style::new().dim()),
-                Span::new(sign.to_string(), sign_style),
+                Span::new(format!("{:>gutter$}  {:>gutter$} ", column(old), column(new)), Style::new().dim()),
+                Span::new(format!("{sign} "), sign_style),
             ]
         } else {
-            // 이어지는 줄은 번호도 부호도 없다. 두 칸은 부호 자리와 그 뒤
-            // 한 칸을 대신해 본문이 같은 열에서 이어지게 한다.
-            vec![Span::new(format!("{:gutter$}  ", ""), Style::new().dim())]
+            // 이어지는 줄은 번호도 부호도 없다. 빈 칸이 번호 칸과 부호 자리를
+            // 대신해 본문이 같은 열에서 이어지게 한다.
+            vec![Span::new(format!("{:cell$}", "", cell = numbers_width(gutter) + 2), Style::new().dim())]
         };
         row.extend(chunk);
         out.push(Line::new(row));
@@ -399,11 +549,11 @@ mod tests {
         );
         let plain: Vec<String> = lines.iter().map(super::Line::plain).collect();
 
-        assert_eq!(plain[0], "200  kept");
-        assert_eq!(plain[1], "101 -gone");
-        assert_eq!(plain[2], "201 +fresh");
-        // Context advanced both cursors, so the next context line is 202/102.
-        assert_eq!(plain[3], "202  kept too");
+        assert_eq!(plain[0], "100  200   kept");
+        assert_eq!(plain[1], "101      - gone");
+        assert_eq!(plain[2], "     201 + fresh");
+        // Context advanced both cursors, so the next context line is 102/202.
+        assert_eq!(plain[3], "102  202   kept too");
     }
 
     /// The gutter is as wide as the widest number in the whole diff, so the
@@ -418,8 +568,8 @@ mod tests {
             80,
         );
         let plain: Vec<String> = lines.iter().map(super::Line::plain).collect();
-        assert_eq!(plain[0], "   1 +a");
-        assert_eq!(plain[1], "9000 +b");
+        assert_eq!(plain[0], "         1 + a");
+        assert_eq!(plain[2], "      9000 + b");
     }
 
     /// Added and removed lines carry the tinted background; context does not.
@@ -469,14 +619,12 @@ mod tests {
                 1,
                 vec![line(DiffLineKind::Added, "abcdefghij")],
             )]),
-            // gutter(1) + space + sign = 3, leaving 4 columns of content.
-            // codex puts no space after the sign: `gutter` is the number plus
-            // one space and `sign` is the character alone, so the content
-            // starts in the very next column.
-            7,
+            // two number columns (1 each) and three spaces, the sign and one
+            // space = 7, leaving 4 columns of content.
+            11,
         );
         let plain: Vec<String> = lines.iter().map(super::Line::plain).collect();
-        assert_eq!(plain, vec!["1 +abcd", "   efgh", "   ij"]);
+        assert_eq!(plain, vec!["   1 + abcd", "       efgh", "       ij"]);
     }
 
     /// A huge diff is folded, and says how much it folded. Silently dropping
@@ -598,5 +746,155 @@ mod tests {
     #[test]
     fn explicit_light_background_selects_the_light_palette_policy() {
         assert_eq!(super::diff_theme_for_bg(Some((255, 255, 255))), super::DiffTheme::Light);
+    }
+}
+
+/// Two number columns, a marker for the lines a hunk gap skipped, and the
+/// changed words painted over the line tint (t-48216).
+#[cfg(test)]
+mod two_column_tests {
+    use runtime::message_stream::{DiffHunk, DiffLine, DiffLineKind, DiffView};
+
+    use super::{hunk_lines, hunk_lines_for_palette};
+    use crate::tui::ansi::{Color, Line};
+    use crate::tui::palette::{ColorLevel, TerminalPalette};
+
+    fn line(kind: DiffLineKind, text: &str) -> DiffLine {
+        DiffLine {
+            kind,
+            text: text.to_string(),
+        }
+    }
+
+    fn hunk(old_start: u32, new_start: u32, lines: Vec<DiffLine>) -> DiffHunk {
+        DiffHunk {
+            old_start,
+            old_lines: 0,
+            new_start,
+            new_lines: 0,
+            lines,
+        }
+    }
+
+    fn view(hunks: Vec<DiffHunk>) -> DiffView {
+        DiffView {
+            old_path: Some("src/app.py".into()),
+            new_path: Some("src/app.py".into()),
+            language: None,
+            hunks,
+        }
+    }
+
+    fn plain(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(Line::plain).collect()
+    }
+
+    #[test]
+    fn old_and_new_numbers_stand_in_their_own_columns() {
+        let lines = hunk_lines(
+            &view(vec![hunk(
+                100,
+                200,
+                vec![
+                    line(DiffLineKind::Context, "kept"),
+                    line(DiffLineKind::Removed, "gone"),
+                    line(DiffLineKind::Added, "fresh"),
+                    line(DiffLineKind::Context, "kept too"),
+                ],
+            )]),
+            80,
+        );
+        assert_eq!(
+            plain(&lines),
+            vec![
+                "100  200   kept",
+                "101      - gone",
+                "     201 + fresh",
+                "102  202   kept too",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gap_between_two_hunks_says_how_many_lines_it_skipped() {
+        let lines = hunk_lines(
+            &view(vec![
+                hunk(
+                    1,
+                    1,
+                    vec![line(DiffLineKind::Context, "a"), line(DiffLineKind::Context, "b")],
+                ),
+                hunk(
+                    7,
+                    7,
+                    vec![line(DiffLineKind::Context, "g"), line(DiffLineKind::Added, "h")],
+                ),
+            ]),
+            80,
+        );
+        assert_eq!(
+            plain(&lines),
+            vec![
+                "1  1   a",
+                "2  2   b",
+                "     ⋯ 4 unchanged lines",
+                "7  7   g",
+                "   8 + h",
+            ]
+        );
+    }
+
+    #[test]
+    fn one_skipped_line_is_one_unchanged_line() {
+        let lines = hunk_lines(
+            &view(vec![
+                hunk(1, 1, vec![line(DiffLineKind::Context, "a")]),
+                hunk(3, 3, vec![line(DiffLineKind::Added, "c")]),
+            ]),
+            80,
+        );
+        assert_eq!(plain(&lines)[1], "     ⋯ 1 unchanged line");
+    }
+
+    #[test]
+    fn the_changed_words_are_painted_over_the_line_tint() {
+        let palette = TerminalPalette::new((220, 220, 220), (20, 20, 20), ColorLevel::TrueColor);
+        let lines = hunk_lines_for_palette(
+            &view(vec![hunk(
+                9,
+                9,
+                vec![
+                    line(DiffLineKind::Removed, "        self.wfile.write(str(TODOS).encode())"),
+                    line(DiffLineKind::Added, "        self.wfile.write(json.dumps(TODOS).encode())"),
+                ],
+            )]),
+            100,
+            Some(palette),
+        );
+        let background_of = |row: &Line, needle: &str| -> Option<Color> {
+            let mut at = 0usize;
+            let start = row.plain().find(needle).expect("needle on the row");
+            for span in &row.spans {
+                let end = at + span.text.len();
+                if at <= start && start < end {
+                    return span.style.bg;
+                }
+                at = end;
+            }
+            None
+        };
+        for (row, changed) in [(&lines[0], "str"), (&lines[1], "json.dumps")] {
+            let tint = background_of(row, "self.wfile");
+            let emphasis = background_of(row, changed);
+            assert!(tint.is_some(), "the line keeps its tint: {row:?}");
+            assert!(emphasis.is_some(), "the changed words keep a background: {row:?}");
+            assert_ne!(emphasis, tint, "`{changed}` must stand out from its line: {row:?}");
+        }
+        let unchanged_tail = background_of(&lines[1], ".encode()");
+        assert_eq!(
+            unchanged_tail,
+            background_of(&lines[1], "self.wfile"),
+            "only the changed words are emphasised"
+        );
     }
 }

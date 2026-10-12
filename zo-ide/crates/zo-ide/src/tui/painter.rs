@@ -988,7 +988,14 @@ impl<W: Write> Painter<W> {
     /// a row put back under a closing popup or rebuilt after a resize.
     fn render_row(&self, line: &Line) -> String {
         let mut shown = String::new();
-        if self.color {
+        if self.color && is_plain(line) {
+            // A row with no style of its own sets no colour and resets none:
+            // every row leaves the terminal on its default colours, so `ESC[K`
+            // already erases with them. The lead and the three resets were 25
+            // of the 87 bytes a streamed answer row cost (t-48216).
+            shown.push_str("\u{1b}[K");
+            write_plain(line, &mut shown);
+        } else if self.color {
             // 행 머리의 색은 **줄 스타일**의 것이다 — codex
             // `write_history_line` 은 `SetColors(line.style.fg, …)` 를 `ESC[K`
             // 앞에 낸다. 색 없는 줄이면 지금까지처럼 `ESC[39;49m` 이다.
@@ -1629,8 +1636,8 @@ mod tests {
             "frame was {frame:?}"
         );
         assert!(!frame.contains("\u{1b}M"), "a head on the floor is not pushed: {frame:?}");
-        assert!(frame.contains("\r\n\u{1b}[39;49m\u{1b}[K\u{1b}[39m\u{1b}[49m\u{1b}[0m"));
-        assert!(frame.contains("\r\n\u{1b}[39;49m\u{1b}[Kwarn\u{1b}[39m\u{1b}[49m\u{1b}[0m"));
+        assert!(frame.contains("\r\n\u{1b}[K"));
+        assert!(frame.contains("\r\n\u{1b}[Kwarn"));
         assert!(frame.ends_with("\u{1b}[r"));
     }
 
@@ -1906,8 +1913,8 @@ mod tests {
         // first screen row, so it stands from row 1 again — h1 on row 1, h30
         // on row 30 — with the band under it and the head on the floor.
         assert_eq!((painter.known_above, painter.gap), (30, 11));
-        assert!(frame.contains("\u{1b}[1;1H\u{1b}[39;49m\u{1b}[Kh1\u{1b}[39m"), "{frame:?}");
-        assert!(frame.contains("\u{1b}[30;1H\u{1b}[39;49m\u{1b}[Kh30\u{1b}[39m"), "{frame:?}");
+        assert!(frame.contains("\u{1b}[1;1H\u{1b}[Kh1\u{1b}["), "{frame:?}");
+        assert!(frame.contains("\u{1b}[30;1H\u{1b}[Kh30"), "{frame:?}");
         assert!(!frame.contains("\u{1b}M"), "nothing is scrolled — the rows are rebuilt");
     }
 
@@ -2548,14 +2555,14 @@ mod tests {
         let frame = painter.take_frame();
         assert_eq!((painter.top, painter.gap, painter.known_above), (41, 37, 3));
         assert!(frame.starts_with("\u{1b}[?2026h\u{1b}[1;1H\u{1b}[J"), "{frame:?}");
-        assert!(frame.contains("\u{1b}[2;1H\u{1b}[39;49m\u{1b}[Kh1\u{1b}[39m"), "h1 is back on row one: {frame:?}");
-        assert!(frame.contains("\u{1b}[4;1H\u{1b}[39;49m\u{1b}[Kh3\u{1b}[39m"), "h3 on row three: {frame:?}");
+        assert!(frame.contains("\u{1b}[2;1H\u{1b}[Kh1\u{1b}["), "h1 is back on row one: {frame:?}");
+        assert!(frame.contains("\u{1b}[4;1H\u{1b}[Kh3"), "h3 on row three: {frame:?}");
         assert!(!frame.contains("\u{1b}M"), "nothing scrolled: {frame:?}");
 
         painter.resize(40, 12);
         let frame = painter.take_frame();
         assert_eq!((painter.top, painter.gap, painter.known_above), (7, 3, 3));
-        assert!(frame.contains("\u{1b}[2;1H\u{1b}[39;49m\u{1b}[Kh1\u{1b}[39m"), "{frame:?}");
+        assert!(frame.contains("\u{1b}[2;1H\u{1b}[Kh1\u{1b}["), "{frame:?}");
     }
 
     /// A transcript taller than the new band is bottom-aligned above the head
@@ -2571,8 +2578,8 @@ mod tests {
         painter.resize(40, 10);
         let frame = painter.take_frame();
         assert_eq!((painter.top, painter.gap, painter.known_above), (7, 0, 7));
-        assert!(frame.contains("\u{1b}[1;1H\u{1b}[39;49m\u{1b}[Kh14\u{1b}[39m"), "{frame:?}");
-        assert!(frame.contains("\u{1b}[7;1H\u{1b}[39;49m\u{1b}[Kh20\u{1b}[39m"), "{frame:?}");
+        assert!(frame.contains("\u{1b}[1;1H\u{1b}[Kh14\u{1b}["), "{frame:?}");
+        assert!(frame.contains("\u{1b}[7;1H\u{1b}[Kh20"), "{frame:?}");
     }
 
     /// History arriving under a head short of the floor — a popup scrolled
@@ -2729,5 +2736,46 @@ mod tests {
         painter.leave();
         let out = String::from_utf8(std::mem::take(&mut painter.out)).expect("utf-8");
         assert!(out.ends_with("\u{1b}[r\u{1b}[5;1H\u{1b}[J\u{1b}[0m\u{1b}[?25h"), "{out:?}");
+    }
+}
+
+/// No colour, no attribute, no control bytes of its own: the row is its text.
+fn is_plain(line: &Line) -> bool {
+    line.style == super::ansi::Style::default()
+        && line.lead.is_none()
+        && line.trail.is_none()
+        && line.spans.iter().all(|span| span.style == super::ansi::Style::default())
+}
+
+/// What a streamed answer costs on the wire (t-48216): a history row is its
+/// text plus a few bytes, not its text plus a colour reset on each side.
+#[cfg(test)]
+mod wire_cost_tests {
+    use super::Painter;
+    use crate::tui::ansi::Line;
+
+    /// `\r\n` and the `ESC[K` that clears the row.
+    const PER_PLAIN_ROW: usize = 5;
+    /// Setting and resetting the scroll region and placing the cursor once.
+    const PER_INSERT: usize = 48;
+
+    #[test]
+    fn a_plain_history_row_costs_its_text_and_a_few_bytes() {
+        let mut painter = Painter::new(Vec::new(), 120, 40, 22, true);
+        painter.set_height(4);
+        let _ = painter.take_frame();
+        let rows: Vec<Line> = (0..64)
+            .map(|n| Line::from_text(format!("plain row {n:03} of a long streamed answer")))
+            .collect();
+        let text: usize = rows.iter().map(|row| row.plain().len()).sum();
+        painter.insert_history(&rows);
+        let frame = painter.take_frame();
+        let budget = text + rows.len() * PER_PLAIN_ROW + PER_INSERT;
+        assert!(
+            frame.len() <= budget,
+            "{} bytes for {} rows of {text} bytes of text; budget {budget}",
+            frame.len(),
+            rows.len()
+        );
     }
 }

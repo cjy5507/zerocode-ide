@@ -396,12 +396,15 @@ impl Status {
             spans.push(Span::dim(format!("({elapsed})")));
         }
         // The housekeeping word takes the activity's place: it is the newer
-        // fact, and the activity phrase it hides is the wait it fills.
-        if let Some(word) = self
-            .housekeeping
-            .clone()
-            .or_else(|| self.activity().map(|activity| activity.line()))
-        {
+        // fact, and the activity phrase it hides is the wait it fills. A
+        // running call names itself on its own row, with its own spinner, so
+        // the row keeps the turn's one clock and does not say it twice
+        // (t-48216).
+        if let Some(word) = self.housekeeping.clone().or_else(|| {
+            self.activity()
+                .filter(|activity| !matches!(activity, StatusActivity::Tool { .. }))
+                .map(|activity| activity.line())
+        }) {
             spans.push(Span::dim(" · "));
             spans.push(Span::dim(word));
         }
@@ -483,15 +486,28 @@ impl Dialog {
             None => Self {
                 title: "Allow".to_string(),
                 subject: crate::util::ansi::sanitize_inline(&prompt.tool_name),
-                body: prompt
-                    .audit_hint
-                    .clone()
-                    .unwrap_or_else(|| prompt.reasoning.clone()),
+                body: permission_body(prompt),
                 options,
-                selected: 0,
+                // Enter allows this one call; the session-wide allow is a
+                // choice the person makes, never the default (t-48216).
+                selected: prompt
+                    .choices
+                    .iter()
+                    .position(|choice| {
+                        matches!(choice.decision, runtime::message_stream::PermissionDecision::AllowOnce)
+                    })
+                    .unwrap_or(0),
                 footer,
             },
         }
+    }
+
+    /// The whole command a permission card asks about, over its reason.
+    #[must_use]
+    pub fn with_command(mut self, command: &str) -> Self {
+        let command: Vec<String> = command.lines().map(crate::util::ansi::sanitize_inline).collect();
+        self.body = format!("{}\n\n{}", command.join("\n"), self.body);
+        self
     }
 
     #[must_use]
@@ -1154,6 +1170,9 @@ fn two_column(
 ///
 /// cwd 는 **남는 자리만큼만** 쓴다. 오른쪽을 통째 뒤에 붙이고 줄 전체를 자르면
 /// 긴 경로가 표시자를 잡아먹는다.
+/// Between the footer's permission mark and the model.
+const FOOTER_MARK_GAP: &str = "   ";
+
 #[must_use]
 #[allow(clippy::too_many_arguments)] // This public byte-test seam mirrors the footer's visible facts.
 pub fn footer(
@@ -1167,19 +1186,34 @@ pub fn footer(
     plan_mode: bool,
     goal_status: Option<crate::goal::GoalFooterStatus>,
     loop_status: Option<&str>,
+    permission: Option<&str>,
+    effort_mark: Option<Span>,
 ) -> Line {
-    let head = if effort.is_empty() {
-        model.to_string()
-    } else {
-        format!("{model} {effort}")
-    };
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::new(head, footer_theme_style(
-            &["entity.name.type", "support.type", "variable"],
-            palette::FOOTER_MODEL,
-        )),
-    ];
+    let model_style = footer_theme_style(
+        &["entity.name.type", "support.type", "variable"],
+        palette::FOOTER_MODEL,
+    );
+    let mut spans = vec![Span::raw("  ")];
+    // A session that may run anything says so first, in the warn tint
+    // (t-48216): nothing on screen showed Full Access before.
+    if let Some(permission) = permission {
+        spans.push(Span::new(
+            format!("{} {permission}", super::strings::PERMISSION_MARK),
+            Style::new().fg(palette::NOTICE_WARN),
+        ));
+        spans.push(Span::raw(FOOTER_MARK_GAP));
+    }
+    // The composer's tier glyph stands beside the effort it means, so `◆`
+    // reads as `◆ smart` wherever it appears.
+    match effort_mark.filter(|_| !effort.is_empty()) {
+        Some(mark) => {
+            spans.push(Span::new(format!("{model} "), model_style));
+            spans.push(mark);
+            spans.push(Span::new(format!(" {effort}"), model_style));
+        }
+        None if effort.is_empty() => spans.push(Span::new(model.to_string(), model_style)),
+        None => spans.push(Span::new(format!("{model} {effort}"), model_style)),
+    }
     // A swap on the wire names itself right after the model it put there —
     // one warn-tinted word, so a reply another model wrote is never read as
     // the session model's.
@@ -1288,6 +1322,9 @@ pub fn footer_location(cwd: &str, worktree_context: Option<&str>) -> String {
 pub struct Frame<'a> {
     pub composer: &'a Composer,
     pub effort_tier: Option<EffortTier>,
+    /// The footer's permission mark — the mode's name while the session may
+    /// run anything, else `None`.
+    pub permission: Option<&'a str>,
     pub effort_effect: Option<&'a EffortEffect>,
     pub now: Instant,
     pub status: Option<&'a Status>,
@@ -1548,6 +1585,8 @@ fn rows_under_the_composer(frame: &Frame<'_>, focus: Color) -> Vec<Line> {
             frame.plan_mode,
             frame.goal_status,
             frame.loop_status,
+            frame.permission,
+            frame.effort_tier.map(EffortTier::caret_span),
         );
         if let Some(effect) = frame
             .effort_effect
@@ -1628,11 +1667,13 @@ mod tests {
     };
     use crate::tui::ansi::{Line, Style};
     use crate::tui::composer::Composer;
+    use crate::tui::effort_effect::EffortTier;
 
     fn frame<'a>(composer: &'a Composer, status: Option<&'a Status>) -> Frame<'a> {
         Frame {
             composer,
             effort_tier: None,
+            permission: None,
             effort_effect: None,
             now: Instant::now(),
             status,
@@ -1663,6 +1704,34 @@ mod tests {
             max_rows: 39,
             max_height: 39,
         }
+    }
+
+    /// zo paints its footer through the frame, not through `footer()` alone
+    /// (t-48216 captures): a Full Access session at smart shows both marks on
+    /// the painted row.
+    #[test]
+    fn the_painted_footer_wears_the_permission_and_effort_marks() {
+        let composer = Composer::new();
+        let frame = Frame {
+            permission: Some("Full Access"),
+            effort_tier: Some(EffortTier::Smart),
+            model: "claude-opus-5-5",
+            effort: "smart",
+            cwd: "/tmp",
+            width: 80,
+            ..frame(&composer, None)
+        };
+        let (rows, _) = build(&frame);
+        let plain: Vec<String> = rows.iter().map(Line::plain).collect();
+        let footer_row = plain
+            .iter()
+            .find(|row| row.contains("claude-opus-5-5"))
+            .expect("the footer row");
+        assert_eq!(
+            footer_row.trim_end(),
+            "  ▲ Full Access   claude-opus-5-5 ◆ smart · /tmp",
+            "{plain:#?}"
+        );
     }
 
     #[test]
@@ -1846,9 +1915,9 @@ mod tests {
         status.note_tool_started("t1", "bash", Some("cargo test"));
         status.elapsed = Duration::from_secs(10);
         let line = status.line(140).plain();
-        assert!(
-            !line.contains("Context nearing") && line.contains("Bash"),
-            "a tool boundary retires the note: {line}"
+        assert_eq!(
+            line, "• Working (10s • esc to interrupt)",
+            "a tool boundary retires the note; the tool names itself on its own row"
         );
     }
 
@@ -2013,7 +2082,8 @@ mod tests {
             .map(Line::plain)
             .collect();
         assert_eq!(plain[0], "> Allow Bash", "a tool permission is unchanged: {plain:?}");
-        assert!(plain.iter().any(|line| line.starts_with("  risk: high; explicitly unblock with")), "{plain:?}");
+        // Its reason, then its risk in words (t-48216).
+        assert_eq!(plain[2..4], ["  runs a command", "  High risk"], "{plain:?}");
     }
 
     /// codex caps every popup at `MAX_POPUP_ROWS` and scrolls the window
@@ -2052,7 +2122,7 @@ mod tests {
 
     #[test]
     fn the_footer_colours_model_and_cwd_apart() {
-        let line = footer("m", "high", None, "/tmp", 40, None, None, false, None, None);
+        let line = footer("m", "high", None, "/tmp", 40, None, None, false, None, None, None, None);
         assert_eq!(line.plain(), "  m high · /tmp");
         assert_eq!(line.spans[1].style.fg, Some(crate::tui::palette::FOOTER_MODEL));
         assert_eq!(line.spans[3].style.fg, Some(crate::tui::palette::FOOTER_CWD));
@@ -2071,6 +2141,8 @@ mod tests {
             None,
             None,
             false,
+            None,
+            None,
             None,
             None,
         );
@@ -2116,6 +2188,8 @@ mod tests {
         let location = footer_location("/repo", Some("wt/task ← main"));
         let line = footer(
             "m", "high", None, &location, 80, None, None, false, None, None,
+            None,
+            None,
         );
 
         assert_eq!(line.plain(), "  m high · wt/task ← main · /repo");
@@ -2130,7 +2204,7 @@ mod tests {
             "/private/tmp/a/very/long/repository/path",
             Some("wt/task ← main"),
         );
-        let narrow = footer("m", "", None, &long, 32, None, None, false, None, None);
+        let narrow = footer("m", "", None, &long, 32, None, None, false, None, None, None, None);
         assert!(narrow.plain().contains("wt/task ← main"));
     }
 
@@ -2250,7 +2324,7 @@ mod tests {
 
     #[test]
     fn a_path_that_fills_its_budget_still_separates_plan_mode() {
-        let line = footer("m", "high", None, "/work", 25, None, None, true, None, None);
+        let line = footer("m", "high", None, "/work", 25, None, None, true, None, None, None, None);
         assert!(line.plain().contains("… Plan mode"), "footer was {line:?}");
         assert!(!line.plain().contains("…Plan mode"), "footer was {line:?}");
     }
@@ -2267,6 +2341,8 @@ mod tests {
                 Some(80),
                 None,
                 true,
+                None,
+                None,
                 None,
                 None,
             )
@@ -2289,6 +2365,8 @@ mod tests {
             Some(80),
             None,
             true,
+            None,
+            None,
             None,
             None,
         )
@@ -2453,5 +2531,157 @@ mod tests {
         assert_eq!(plain[5], "diff line 5");
         assert_eq!(plain[7], "• Working (3s • esc to interrupt)");
         assert_eq!(cursor, Some((3, 11)));
+    }
+}
+
+/// The runtime's audit hint opens with the call's risk level —
+/// `risk: high; explicitly unblock with [y] Allow or [o] Allow once`
+/// (`runtime::permission::PermissionRequest::prompt_audit_hint`).
+const AUDIT_RISK_PREFIX: &str = "risk: ";
+
+/// A permission card's words: why the call needs approval, then how risky it
+/// is — the choices are listed once, as choices.
+fn permission_body(prompt: &runtime::message_stream::PermissionPrompt) -> String {
+    let risk = prompt.audit_hint.as_deref().and_then(|hint| {
+        let level = hint.strip_prefix(AUDIT_RISK_PREFIX)?.split(';').next()?.trim();
+        let mut letters = level.chars();
+        let first = letters.next()?;
+        Some(strings::risk(&format!("{}{}", first.to_uppercase(), letters.as_str())))
+    });
+    [Some(prompt.reasoning.trim().to_string()), risk]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The approval card and the status row while a call runs (t-48216).
+#[cfg(test)]
+mod card_tests {
+    use std::time::Duration;
+
+    use runtime::permission::{PermissionChoice, PermissionDecision, PermissionRequest, RiskLevel};
+
+    use super::{Dialog, Status};
+    use crate::tui::ansi::Line;
+
+    const REASON: &str = "tool 'bash' requires approval to run while mode is workspace-write";
+
+    fn bash_request() -> PermissionRequest {
+        let choice = |key, label: &str, decision| PermissionChoice {
+            key,
+            label: label.to_string(),
+            decision,
+        };
+        PermissionRequest {
+            tool: "bash".to_string(),
+            input_summary: "python3 -m py_compile src/app.py".to_string(),
+            input_hash: String::new(),
+            reasoning: REASON.to_string(),
+            choices: vec![
+                choice('y', "Allow", PermissionDecision::Allow),
+                choice('o', "Allow once", PermissionDecision::AllowOnce),
+                choice('n', "Deny", PermissionDecision::Deny),
+            ],
+            risk_level: RiskLevel::High,
+            question: None,
+        }
+    }
+
+    fn card() -> Dialog {
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        let prompt = crate::session::permission_bridge::build_render_prompt(
+            &bash_request(),
+            responder,
+            runtime::message_stream::BlockId(1),
+        );
+        Dialog::for_permission(&prompt)
+    }
+
+    #[test]
+    fn the_card_starts_on_allow_once_never_on_the_session_wide_allow() {
+        let dialog = card();
+        assert_eq!(dialog.options[dialog.selected], "Allow once");
+    }
+
+    #[test]
+    fn the_card_states_the_reason_and_the_risk_in_plain_words() {
+        let text = card()
+            .lines(100)
+            .iter()
+            .map(Line::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(REASON), "the reason is on the card:\n{text}");
+        assert!(text.contains("High risk"), "the risk is on the card:\n{text}");
+        assert!(
+            !text.contains("explicitly unblock"),
+            "the choices are listed once, as choices:\n{text}"
+        );
+    }
+
+    /// The running call has its own row with its own spinner; the status row
+    /// keeps the turn's clock and does not name the command a second time.
+    #[test]
+    fn the_status_row_keeps_one_clock_and_leaves_the_command_to_its_row() {
+        let mut status = Status::working(Duration::from_secs(7));
+        status.note_tool_started("toolu_run", "Run", Some("for t in create list; do echo $t; done"));
+        assert_eq!(status.line(120).plain(), "• Working (7s • esc to interrupt)");
+    }
+}
+
+/// The footer says what the session may do and which effort runs (t-48216):
+/// an amber `▲ Full Access` first, and the composer's own `◆` beside `smart`.
+#[cfg(test)]
+mod footer_mark_tests {
+    use super::footer;
+    use crate::tui::effort_effect::EffortTier;
+    use crate::tui::palette;
+
+    #[test]
+    fn full_access_and_the_smart_mark_lead_the_footer() {
+        let line = footer(
+            "claude-opus-5-5",
+            "smart",
+            None,
+            "/tmp",
+            80,
+            None,
+            None,
+            false,
+            None,
+            None,
+            Some("Full Access"),
+            Some(EffortTier::Smart.caret_span()),
+        );
+        assert_eq!(line.plain(), "  ▲ Full Access   claude-opus-5-5 ◆ smart · /tmp");
+        let mark = line
+            .spans
+            .iter()
+            .find(|span| span.text.contains("Full Access"))
+            .expect("the permission mark");
+        assert_eq!(mark.style.fg, Some(palette::NOTICE_WARN));
+        let diamond = line.spans.iter().find(|span| span.text == "◆").expect("the smart mark");
+        assert_eq!(diamond.style, EffortTier::Smart.caret_span().style);
+    }
+
+    #[test]
+    fn an_ordinary_session_keeps_its_footer() {
+        let line = footer(
+            "claude-opus-5-5",
+            "high",
+            None,
+            "/tmp",
+            80,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(line.plain(), "  claude-opus-5-5 high · /tmp");
     }
 }

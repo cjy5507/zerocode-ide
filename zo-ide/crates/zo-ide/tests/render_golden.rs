@@ -527,7 +527,7 @@ fn a_light_background_selects_the_light_truecolor_diff_palette() {
 
     assert_eq!(
         rendered,
-        "\u{1b}[2m1 \u{1b}[22m\u{1b}[32;48;2;218;251;225m+added"
+        "\u{1b}[2m   1 \u{1b}[22m\u{1b}[32;48;2;218;251;225m+ added"
     );
 }
 
@@ -544,7 +544,7 @@ fn an_ansi256_terminal_gets_the_indexed_diff_palette() {
 
     assert_eq!(
         rendered,
-        "\u{1b}[2m1 \u{1b}[22m\u{1b}[32;48;5;22m+added"
+        "\u{1b}[2m   1 \u{1b}[22m\u{1b}[32;48;5;22m+ added"
     );
 }
 
@@ -559,7 +559,7 @@ fn an_ansi16_terminal_keeps_diffs_foreground_only() {
     let mut rendered = String::new();
     write_spans_for_palette(&lines[0], Some(palette), &mut rendered);
 
-    assert_eq!(rendered, "\u{1b}[2m1 \u{1b}[22m\u{1b}[32;49m+added");
+    assert_eq!(rendered, "\u{1b}[2m   1 \u{1b}[22m\u{1b}[32;49m+ added");
 }
 
 // ============================================================================

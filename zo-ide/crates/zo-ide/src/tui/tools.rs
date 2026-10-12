@@ -71,9 +71,6 @@ const COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES: usize = 240;
 /// codex `multi_agents.rs::COLLAB_PROMPT_PREVIEW_GRAPHEMES` — how much of the
 /// delegated prompt a spawn cell keeps under `└`.
 const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
-/// 명령이 여러 줄일 때 헤더 아래로 흐르는 행 수 상한 — 같은 레이아웃의
-/// `command_continuation_max_lines`(2).
-const COMMAND_CONTINUATION_MAX_ROWS: usize = 2;
 
 /// 도구 하나가 무엇을 하는지 — codex 의 `ParsedCommand`/셀 종류에 대응한다.
 #[derive(Debug, Clone)]
@@ -300,15 +297,6 @@ pub struct Change {
     pub view: DiffView,
 }
 
-struct EditGroupEntry<'a> {
-    path: String,
-    change: Option<&'a Change>,
-    /// The first line of what the tool said when the edit FAILED — the entry
-    /// then stands in the group as a failure with its reason, never as
-    /// `Edited … (+0 -0)`.
-    failure: Option<String>,
-}
-
 impl Change {
     /// 결과 diff 에서 동사와 증감을 읽는다. codex 는 `FileChange::Add` →
     /// `Added`, `Delete` → `Deleted`, 그 외 → `Edited` 로 가른다.
@@ -346,8 +334,8 @@ impl Change {
 
     fn display_path(&self) -> String {
         match (&self.view.old_path, &self.view.new_path) {
-            (Some(old), Some(new)) if old != new => format!("{old} → {new}"),
-            _ => self.path.clone(),
+            (Some(old), Some(new)) if old != new => format!("{} → {}", shown_path(old), shown_path(new)),
+            _ => shown_path(&self.path),
         }
     }
 }
@@ -392,23 +380,11 @@ fn change_body(change: &Change, drawn: Vec<Line>) -> Vec<Line> {
     head
 }
 
-/// `✘ Failed to apply patch` — codex's patch-failure header, one spelling for
-/// the single edit and the group alike.
-fn patch_failure_line(width: usize) -> Line {
-    Line::new(vec![Span::new(
-        "✘ Failed to apply patch",
-        Style::new().fg(Color::MAGENTA).bold(),
-    )])
-    .truncated(width)
-}
-
 fn change_count_spans(added: usize, removed: usize) -> Vec<Span> {
     vec![
-        Span::raw("("),
         Span::new(format!("+{added}"), Style::new().fg(Color::GREEN)),
         Span::raw(" "),
         Span::new(format!("-{removed}"), Style::new().fg(Color::RED)),
-        Span::raw(")"),
     ]
 }
 
@@ -423,6 +399,8 @@ pub struct Outcome {
     pub output: String,
     /// Edit·Write 결과의 파일 변경 요약(있으면 헤더가 이것을 쓴다).
     pub change: Option<Change>,
+    /// A finished command's exit code — a failed row's result.
+    pub exit_code: Option<i32>,
 }
 
 impl Outcome {
@@ -443,6 +421,10 @@ impl Outcome {
             declined: matches!(body, ToolResultBody::Declined { .. }),
             output: body_text(body),
             change,
+            exit_code: match body {
+                ToolResultBody::Bash(result) => Some(result.exit_code),
+                _ => None,
+            },
         }
     }
 }
@@ -483,14 +465,15 @@ pub struct ToolGroup {
     calls: Vec<ToolCall>,
     /// Diff syntax parsing is expensive and this cell is drawn every frame.
     /// A completed edit's diff is immutable, so only a width change invalidates
-    /// its rendered lines; mutations clear this cache below.
-    diff_cache: RefCell<Option<(usize, Vec<Line>)>>,
+    /// its rendered lines; mutations clear this cache below. Keyed by call id:
+    /// a group holds several edits.
+    diff_cache: RefCell<Vec<(String, usize, Vec<Line>)>>,
 }
 
 impl ToolGroup {
     #[must_use]
     pub fn new(call: ToolCall) -> Self {
-        Self { calls: vec![call], diff_cache: RefCell::new(None) }
+        Self { calls: vec![call], diff_cache: RefCell::default() }
     }
 
     #[must_use]
@@ -633,7 +616,7 @@ impl ToolGroup {
 
     pub fn push(&mut self, call: ToolCall) {
         self.calls.push(call);
-        self.diff_cache.get_mut().take();
+        self.diff_cache.get_mut().clear();
     }
 
     /// 결과를 붙인다. 그 id 의 호출이 없으면 거짓 — codex 도
@@ -648,7 +631,7 @@ impl ToolGroup {
             return false;
         };
         self.calls.remove(index);
-        self.diff_cache.get_mut().take();
+        self.diff_cache.get_mut().clear();
         true
     }
 
@@ -665,7 +648,7 @@ impl ToolGroup {
             call.kind = kind;
         }
         call.done = Some(outcome);
-        self.diff_cache.get_mut().take();
+        self.diff_cache.get_mut().clear();
         true
     }
 
@@ -685,10 +668,11 @@ impl ToolGroup {
                     ok: false,
                     output: super::strings::TOOL_CALL_INTERRUPTED.to_string(),
                     change: None,
+                    exit_code: None,
                 });
             }
         }
-        self.diff_cache.get_mut().take();
+        self.diff_cache.get_mut().clear();
     }
 
     /// 이 셀을 지금 히스토리로 넘겨야 하는가 — codex `ExecCell::should_flush`.
@@ -717,71 +701,14 @@ impl ToolGroup {
     /// 낱말이 나온다(codex `HistoryCell for ExecCell::display_lines`).
     #[must_use]
     pub fn lines(&self, width: usize, elapsed: Duration) -> Vec<Line> {
-        self.lines_in(width, elapsed, FoldMode::Bare)
+        self.lines_in(width, elapsed)
     }
 
-    /// 같은 줄들을, 접기 모드를 알고. 뷰포트의 활성 칸은 언제나
-    /// [`FoldMode::Bare`] 다 — 매 프레임 다시 그리는 자리에는 마커가 없고,
-    /// 본문을 달면 칸만 높아진다. 접기 본문은 커밋될 때만 붙는다
-    /// ([`Self::committed`]).
-    fn lines_in(&self, width: usize, elapsed: Duration, mode: FoldMode) -> Vec<Line> {
-        if self.calls.is_empty() {
-            return Vec::new();
-        }
-        if self.is_editing() && self.calls.len() > 1 {
-            return self.edit_group_lines(width, elapsed);
-        }
-        if self.is_spawning() {
-            return self
-                .calls
-                .iter()
-                .flat_map(|call| self.call_lines(call, width, elapsed))
-                .collect();
-        }
-        if self.calls.len() > 1 && (!self.is_exploring() || !self.is_active()) {
-            return self.compact_group_lines(width, elapsed, mode);
-        }
-        if self.is_exploring() {
-            return Self::exploring_lines(&self.calls, width, elapsed);
-        }
-        self.call_lines(&self.calls[0], width, elapsed)
-    }
-
-    /// `• Ran N commands` — codex `compact_group_display_lines`. N 은 앞에서부터
-    /// 성공으로 끝난 호출의 개수이고, 그 뒤 호출들은 낱개로 이어 그린다.
-    ///
-    /// [`FoldMode::Markers`] 에서는 그 헤더 아래에 접힐 본문을 단다
-    /// ([`Self::grouped_body`]) — 원본은 접힌 명령들의 출력을 히스토리에 아예
-    /// 남기지 않지만, marker opt-in에서는 손잡이로 그것을 펼칠 수 있다.
-    fn compact_group_lines(&self, width: usize, elapsed: Duration, mode: FoldMode) -> Vec<Line> {
-        let completed = self
-            .calls
+    fn lines_in(&self, width: usize, elapsed: Duration) -> Vec<Line> {
+        self.calls
             .iter()
-            .take_while(|call| call.succeeded())
-            .count();
-        let mut out = Vec::new();
-        if completed > 0 {
-            let noun = if completed == 1 { "command" } else { "commands" };
-            out.push(
-                Line::new(vec![
-                    Span::new("•", Style::new().fg(palette::TOOL_OK).bold()),
-                    Span::raw(" "),
-                    Span::bold(format!("Ran {completed} {noun}")),
-                ])
-                .truncated(width),
-            );
-            if mode.markers_enabled() {
-                out.extend(Self::grouped_body(&self.calls[..completed], width));
-            }
-        }
-        for call in &self.calls[completed..] {
-            if call.kind.is_explore() {
-                out.extend(Self::exploring_lines(std::slice::from_ref(call), width, elapsed));
-            } else {
-                out.extend(self.call_lines(call, width, elapsed));
-            }
-        }
-        out
+            .flat_map(|call| self.call_lines(call, width, elapsed))
+            .collect()
     }
 
     /// 한 호출의 줄들 — 종류마다 다른 문법.
@@ -790,9 +717,23 @@ impl ToolGroup {
             ToolKind::Command {
                 command,
                 background,
-            } => self.command_lines(call, command, *background, width, elapsed),
-            ToolKind::Explore(_) => Self::exploring_lines(std::slice::from_ref(call), width, elapsed),
-            ToolKind::Edit { path } => self.edit_lines(call, path, width, elapsed),
+            } => self.command_row(call, command, *background, width, elapsed),
+            ToolKind::Explore(items) => items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let (verb, target) = explored_target(item);
+                    // An explore call with several items reports once, on its first row.
+                    let result = call
+                        .done
+                        .as_ref()
+                        .filter(|_| index == 0)
+                        .map(|done| explored_result(item, done))
+                        .unwrap_or_default();
+                    tool_row(self.row_glyph(call, elapsed), verb, target, result, width)
+                })
+                .collect(),
+            ToolKind::Edit { path } => self.edit_row(call, path, width, elapsed),
             ToolKind::Plan(items) => super::cells::plan_update_cell(items, width),
             ToolKind::WebSearch { detail } => {
                 self.web_search_lines(call, detail, width, elapsed)
@@ -824,14 +765,26 @@ impl ToolGroup {
         }
     }
 
-    /// `• Ran <cmd>` + `  │ ` 이어지는 명령 줄 + `  └ ` 출력 —
-    /// codex `command_call_display_lines`, including bash syntax highlighting.
-    ///
-    /// A background command's cell is this same cell with one dim word
-    /// ([`super::strings::COMMAND_BACKGROUND`]) after the command on the
-    /// header row; the word's width is taken off the command's first-row
-    /// budget so it is never the part the truncation drops.
-    fn command_lines(
+    fn cached_diff_lines(&self, id: &str, view: &DiffView, width: usize) -> Vec<Line> {
+        {
+            let cache = self.diff_cache.borrow();
+            let hit = cache
+                .iter()
+                .find(|(cached, cached_width, _)| cached == id && *cached_width == width);
+            if let Some((_, _, lines)) = hit {
+                return lines.clone();
+            }
+        }
+        let lines = super::diff::hunk_lines(view, width);
+        let mut cache = self.diff_cache.borrow_mut();
+        cache.retain(|(cached, _, _)| cached != id);
+        cache.push((id.to_string(), width, lines.clone()));
+        lines
+    }
+
+    /// `✓ Run     <cmd>      3 lines` and the output under it; while the
+    /// command runs, the tail of what it has printed so far.
+    fn command_row(
         &self,
         call: &ToolCall,
         command: &str,
@@ -839,351 +792,86 @@ impl ToolGroup {
         width: usize,
         elapsed: Duration,
     ) -> Vec<Line> {
-        let verb = if call.done.is_none() { "Running" } else { "Ran" };
-        let mut header = vec![
-            self.bullet(call, elapsed),
-            Span::raw(" "),
-            Span::bold(verb),
-            Span::raw(" "),
-        ];
-        let marker =
-            background.then(|| Span::dim(format!(" {}", super::strings::COMMAND_BACKGROUND)));
-        let head_width = header
-            .iter()
-            .chain(marker.iter())
-            .map(Span::width)
-            .sum::<usize>();
-        let first_budget = width.saturating_sub(head_width).max(1);
-        let mut highlighted = super::highlight::highlight_block_to_lines(command, "bash")
-            .unwrap_or_else(|| command.lines().map(Line::from_text).collect());
-        if highlighted.is_empty() {
-            highlighted.push(Line::empty());
+        let first = command.lines().next().unwrap_or_default();
+        let mut target = super::highlight::highlight_block_to_lines(first, "bash")
+            .and_then(|lines| lines.into_iter().next())
+            .map_or_else(|| vec![Span::raw(first.to_string())], |line| line.spans);
+        if background {
+            target.push(Span::dim(format!(" {}", super::strings::COMMAND_BACKGROUND)));
         }
-        let mut source = highlighted.into_iter();
-        let first_line = source.next().unwrap_or_else(Line::empty);
-        let mut rows = wrap_line(&first_line, first_budget, &Span::raw("")).into_iter();
-        if let Some(first) = rows.next() {
-            header.extend(first.spans);
-        }
-        header.extend(marker);
-        let mut out = vec![Line::new(header).truncated(width)];
-
-        let mut continuation: Vec<Line> = rows.collect();
-        let continuation_width = width.saturating_sub(4).max(1);
-        for line in source {
-            continuation.extend(wrap_line(
-                &line,
-                continuation_width,
-                &Span::raw(""),
-            ));
-        }
-        if !continuation.is_empty() {
-            let kept = limit_from_start(&continuation, COMMAND_CONTINUATION_MAX_ROWS);
-            out.extend(prefixed(
-                &kept,
-                width,
-                &Prefix::new(Span::dim("  │ "), Span::dim("  │ ")),
-                true,
-            ));
-        }
-        if let Some(done) = call.done.as_ref() {
-            out.extend(output_block(&done.output, width));
+        let result = call.done.as_ref().map(command_result).unwrap_or_default();
+        let mut out = vec![tool_row(
+            self.row_glyph(call, elapsed),
+            super::strings::TOOL_RUN,
+            target,
+            result,
+            width,
+        )];
+        match call.done.as_ref() {
+            Some(done) => out.extend(output_block(&done.output, width)),
+            None => out.extend(live_tail(&call.id, width)),
         }
         out
     }
 
-    /// `• Exploring` / `• Explored` + `  └ Read a, b` — codex
-    /// `exploring_display_lines`. 연달아 오는 Read 항목은 한 행에 쉼표로
-    /// 모으고 같은 이름은 접는다(원본의 `.unique()`).
-    fn exploring_lines(calls: &[ToolCall], width: usize, elapsed: Duration) -> Vec<Line> {
-        let active = calls.iter().any(|call| call.done.is_none());
-        let marker = if active {
-            tool_activity_marker(elapsed)
-        } else {
-            Span::dim("•")
+    /// `✓ Edit    <path>      +A -B` and the change's diff hung under it.
+    fn edit_row(&self, call: &ToolCall, path: &str, width: usize, elapsed: Duration) -> Vec<Line> {
+        let done = call.done.as_ref();
+        let change = done.filter(|done| done.ok).and_then(|done| done.change.as_ref());
+        let verb = change.map_or(super::strings::TOOL_EDIT, |change| match change.verb {
+            "Added" => super::strings::TOOL_CREATE,
+            "Deleted" => super::strings::TOOL_DELETE,
+            _ => super::strings::TOOL_EDIT,
+        });
+        let target = change.map_or_else(|| shown_path(path), Change::display_path);
+        let result = match (done, change) {
+            (Some(done), _) if !done.ok => failure_result(done),
+            (_, Some(change)) => change_count_spans(change.added, change.removed),
+            _ => Vec::new(),
         };
-        let word = if active { "Exploring" } else { "Explored" };
-        let mut out = vec![Line::new(vec![marker, Span::raw(" "), Span::bold(word)]).truncated(width)];
-
-        let body = Self::explored_items(calls);
-        out.extend(prefixed(&body, width, &Prefix::tool_output(), true));
-        out
-    }
-
-    /// `Read a, b` · `List <glob>` · `Search <q> in <path>` — 탐색 목록의
-    /// 알맹이(접두어 없이). `Exploring`/`Explored` 셀과 접힌 묶음의 본문이
-    /// 같은 문법을 쓰도록 여기 한 군데에 둔다.
-    fn explored_items(calls: &[ToolCall]) -> Vec<Line> {
-        let items: Vec<&Explored> = calls
-            .iter()
-            .flat_map(|call| match &call.kind {
-                ToolKind::Explore(items) => items.as_slice(),
-                _ => &[],
-            })
-            .collect();
-
-        let mut body: Vec<Line> = Vec::new();
-        let mut index = 0usize;
-        while index < items.len() {
-            if let Explored::Read { .. } = items[index] {
-                let mut names: Vec<&str> = Vec::new();
-                while let Some(Explored::Read { name }) = items.get(index) {
-                    if !names.contains(&name.as_str()) {
-                        names.push(name);
-                    }
-                    index += 1;
-                }
-                let mut spans = vec![
-                    Span::new("Read", Style::new().fg(palette::TOOL_LABEL)),
-                    Span::raw(" "),
-                ];
-                for (position, name) in names.iter().enumerate() {
-                    if position > 0 {
-                        spans.push(Span::dim(", "));
-                    }
-                    spans.push(Span::raw((*name).to_string()));
-                }
-                body.push(Line::new(spans));
-                continue;
+        let mut out = vec![tool_row(
+            self.row_glyph(call, elapsed),
+            verb,
+            vec![Span::raw(target)],
+            result,
+            width,
+        )];
+        if let Some(done) = done.filter(|done| !done.ok && !done.output.is_empty()) {
+            let (first, rest) = done.output.split_once('\n').unwrap_or((done.output.as_str(), ""));
+            let mut reason = failure_reason(first, path);
+            if !rest.is_empty() {
+                reason = format!("{reason}\n{rest}");
             }
-            let (label, mut spans) = match &items[index] {
-                Explored::List { path } => ("List", vec![Span::raw(path.clone())]),
-                Explored::Search { query, path } => (
-                    "Search",
-                    match path {
-                        Some(path) => vec![
-                            Span::raw(query.clone()),
-                            Span::dim(" in "),
-                            Span::raw(path.clone()),
-                        ],
-                        None => vec![Span::raw(query.clone())],
-                    },
-                ),
-                Explored::Read { .. } => unreachable!("read runs are consumed above"),
-            };
-            let mut line = vec![
-                Span::new(label, Style::new().fg(palette::TOOL_LABEL)),
-                Span::raw(" "),
-            ];
-            line.append(&mut spans);
-            body.push(Line::new(line));
-            index += 1;
+            out.extend(output_block(&reason, width));
         }
-        body
-    }
-
-    /// 접힌 `• Ran N commands` 아래로 숨는 본문 — 호출마다 `  └ <cmd>` 한 줄과
-    /// 그 아래 출력 미리보기(거터 `    `). 미리보기 규칙은 단일 명령 셀과 똑같다
-    /// ([`OUTPUT_MAX_ROWS`]·[`trim_logical`]) — 마커를 모르는 터미널에 이 바이트가
-    /// 흘러도 codex 한 셀의 분량을 넘지 않아야 한다는 계약 때문이다.
-    ///
-    /// 묶음에 드는 종류는 명령과 탐색뿐이다([`ToolKind::groupable`]). 탐색은
-    /// 원본이 출력을 아예 안 보이므로 목록 줄만 낸다.
-    fn grouped_body(calls: &[ToolCall], width: usize) -> Vec<Line> {
-        let mut out = Vec::new();
-        for call in calls {
-            match &call.kind {
-                ToolKind::Command { command, .. } => {
-                    out.extend(prefixed(
-                        &[Line::from_text(command.clone())],
-                        width,
-                        &Prefix::tool_output(),
-                        true,
-                    ));
-                    if let Some(done) = call.done.as_ref() {
-                        out.extend(output_rows(&done.output, width, &Prefix::gutter()));
-                    }
-                }
-                ToolKind::Explore(_) => {
-                    let items = Self::explored_items(std::slice::from_ref(call));
-                    out.extend(prefixed(&items, width, &Prefix::tool_output(), true));
-                }
-                // 패치 셀과 MCP 셀은 묶이지 않는다 — `accepts` 가 막는다.
-                ToolKind::Edit { .. }
-                | ToolKind::Plan(_)
-                | ToolKind::WebSearch { .. }
-                | ToolKind::Spawn { .. }
-                | ToolKind::AgentResult { .. }
-                | ToolKind::Call { .. } => {}
-            }
+        if let Some(change) = change {
+            let drawn = self.cached_diff_lines(
+                &call.id,
+                &change.view,
+                width.saturating_sub(DIFF_INDENT).max(1),
+            );
+            out.extend(change_body(change, drawn).into_iter().map(|mut line| {
+                line.spans.insert(0, Span::raw(" ".repeat(DIFF_INDENT)));
+                line
+            }));
         }
         out
     }
 
-    /// `• Edited <path> (+A -B)` — codex `diff_render.rs::render_changes_block`
-    /// 의 단일 파일 헤더. 도는 중에는 아직 diff 가 없으므로 `• Editing <path>`.
-    fn edit_lines(
-        &self,
-        call: &ToolCall,
-        path: &str,
-        width: usize,
-        elapsed: Duration,
-    ) -> Vec<Line> {
-        // codex draws a finished spawn with a dim marker
-        // (`multi_agents.rs`); only the live one shimmers.
-        let mut header = match call.done {
-            None => vec![self.bullet(call, elapsed), Span::raw(" ")],
-            Some(_) => vec![Span::dim("• ")],
-        };
+    /// A running call's spinner frame, or how its call ended.
+    fn row_glyph(&self, call: &ToolCall, elapsed: Duration) -> Span {
         match call.done.as_ref() {
             None => {
-                header.push(Span::bold("Editing"));
-                header.push(Span::raw(" "));
-                header.push(Span::raw(path.to_string()));
-                vec![Line::new(header).truncated(width)]
+                let ticks = elapsed.max(self.age(call)).as_millis() / SPINNER_FRAME_MILLIS;
+                let frame = usize::try_from(ticks).unwrap_or_default() % SPINNER_FRAMES.len();
+                Span::new(SPINNER_FRAMES[frame], Style::new().fg(palette::TOOL_LABEL))
             }
-            Some(done) if !done.ok => {
-                let mut out = vec![patch_failure_line(width)];
-                if !done.output.is_empty() {
-                    out.extend(output_block(&done.output, width));
-                }
-                out
+            Some(done) if done.ok => {
+                Span::new(super::strings::TOOL_DONE, Style::new().fg(palette::TOOL_OK).bold())
             }
-            Some(done) => {
-                let change = done.change.as_ref();
-                header.push(Span::bold(change.map_or("Edited", |change| change.verb)));
-                header.push(Span::raw(" "));
-                header.push(Span::raw(
-                    change.map_or_else(|| path.to_string(), Change::display_path),
-                ));
-                if let Some(change) = change {
-                    header.push(Span::raw(" ("));
-                    header.push(Span::new(
-                        format!("+{}", change.added),
-                        Style::new().fg(Color::GREEN),
-                    ));
-                    header.push(Span::raw(" "));
-                    header.push(Span::new(
-                        format!("-{}", change.removed),
-                        Style::new().fg(Color::RED),
-                    ));
-                    header.push(Span::raw(")"));
-                }
-                let mut out = vec![Line::new(header).truncated(width)];
-                if let Some(change) = change {
-                    out.extend(change_body(change, self.cached_diff_lines(&change.view, width)));
-                }
-                out
-            }
+            Some(done) if done.declined => Span::dim(super::strings::TOOL_FAILED),
+            Some(_) => Span::new(super::strings::TOOL_FAILED, Style::new().fg(palette::TOOL_FAIL).bold()),
         }
-    }
-
-    fn edit_group_lines(&self, width: usize, elapsed: Duration) -> Vec<Line> {
-        if self.is_active() {
-            let mut paths: Vec<String> = self
-                .calls
-                .iter()
-                .filter_map(|call| match &call.kind {
-                    ToolKind::Edit { path } => Some(path.clone()),
-                    _ => None,
-                })
-                .collect();
-            paths.sort();
-            let noun = if paths.len() == 1 { "file" } else { "files" };
-            let mut out = vec![Line::new(vec![
-                tool_activity_marker(elapsed),
-                Span::raw(" "),
-                Span::bold("Editing"),
-                Span::raw(format!(" {} {noun}", paths.len())),
-            ])
-            .truncated(width)];
-            let body: Vec<Line> = paths.into_iter().map(Line::from_text).collect();
-            out.extend(prefixed(&body, width, &Prefix::tool_output(), true));
-            return out;
-        }
-
-        let mut entries: Vec<EditGroupEntry<'_>> = self
-            .calls
-            .iter()
-            .filter_map(|call| {
-                let ToolKind::Edit { path } = &call.kind else {
-                    return None;
-                };
-                let done = call.done.as_ref();
-                let change = done.and_then(|done| done.change.as_ref());
-                let failure = done
-                    .filter(|done| !done.ok)
-                    .map(|done| failure_reason(done.output.lines().next().unwrap_or_default(), path));
-                Some(EditGroupEntry {
-                    path: change.map_or_else(|| path.clone(), Change::display_path),
-                    change,
-                    failure,
-                })
-            })
-            .collect();
-        entries.sort_by(|left, right| left.path.cmp(&right.path));
-        // The header counts the files that were edited; a failed one is not
-        // among them and is named below with its reason ("Failed to apply
-        // patch" without a reason, and `(+0 -0)` for a failure, 2026-09-06).
-        let edited = entries.iter().filter(|entry| entry.failure.is_none()).count();
-        let added = entries
-            .iter()
-            .filter_map(|entry| entry.change)
-            .map(|change| change.added)
-            .sum::<usize>();
-        let removed = entries
-            .iter()
-            .filter_map(|entry| entry.change)
-            .map(|change| change.removed)
-            .sum::<usize>();
-        let mut out = Vec::new();
-        if edited == 0 {
-            out.push(patch_failure_line(width));
-        } else {
-            let noun = if edited == 1 { "file" } else { "files" };
-            let mut header = vec![
-                Span::dim("• "),
-                Span::bold("Edited"),
-                Span::raw(format!(" {edited} {noun} ")),
-            ];
-            header.extend(change_count_spans(added, removed));
-            out.push(Line::new(header).truncated(width));
-        }
-
-        for (index, entry) in entries.iter().enumerate() {
-            if let Some(reason) = &entry.failure {
-                let mut row = vec![
-                    Span::new("  └ ✘ ", Style::new().fg(Color::MAGENTA).bold()),
-                    Span::raw(entry.path.clone()),
-                ];
-                if !reason.is_empty() {
-                    row.push(Span::dim(format!(" — {reason}")));
-                }
-                out.push(Line::new(row).truncated(width));
-            } else {
-                let (added, removed) = entry
-                    .change
-                    .map_or((0, 0), |change| (change.added, change.removed));
-                let mut row = vec![Span::dim("  └ "), Span::raw(entry.path.clone()), Span::raw(" ")];
-                row.extend(change_count_spans(added, removed));
-                out.push(Line::new(row).truncated(width));
-                if let Some(change) = entry.change {
-                    let diff = change_body(
-                        change,
-                        super::diff::hunk_lines(&change.view, width.saturating_sub(4).max(1)),
-                    );
-                    out.extend(prefixed(&diff, width, &Prefix::gutter(), true));
-                }
-            }
-            if index + 1 < entries.len() {
-                out.push(Line::empty());
-            }
-        }
-        out
-    }
-
-    fn cached_diff_lines(&self, view: &DiffView, width: usize) -> Vec<Line> {
-        {
-            let cache = self.diff_cache.borrow();
-            if let Some((cached_width, lines)) = cache.as_ref() {
-                if *cached_width == width {
-                    return lines.clone();
-                }
-            }
-        }
-        let lines = super::diff::hunk_lines(view, width);
-        *self.diff_cache.borrow_mut() = Some((width, lines.clone()));
-        lines
     }
 
     /// `• Calling <name>(<args>)` / `• Called …` — codex
@@ -1425,21 +1113,24 @@ impl ToolGroup {
     /// 않는다. 커밋된 셀에는 활동 표시가 없어 `elapsed` 도 필요 없다.
     #[must_use]
     pub fn committed(&self, width: usize, ids: &mut FoldIds, mode: FoldMode) -> Vec<Line> {
-        let mut cell = self.lines_in(width, Duration::ZERO, mode);
-        if cell.is_empty() {
+        if self.calls.is_empty() {
             return Vec::new();
         }
         let mut out = vec![Line::empty()];
-        // With markers enabled the folded cell keeps codex's density: the header and one
+        // With markers enabled each call's row heads a fold of what hangs
+        // under it, keeping codex's density: the row and one
         // `  └ … +N lines` teaser, N being the rows the fold hides. The
         // teaser is a row of the region drawn only while it is collapsed
-        // (`teaser=1`), so opening the cell shows the body in its place.
-        if mode.markers_enabled() && cell.len() >= 2 {
-            let folded = cell.len() - 1;
-            cell.insert(1, teaser_line(folded, width));
-            out.extend(folds::wrap_cell_with_teaser(cell, 1, ids));
-        } else {
-            out.extend(cell);
+        // (`teaser=1`), so opening the row shows the body in its place.
+        for call in &self.calls {
+            let mut cell = self.call_lines(call, width, Duration::ZERO);
+            if mode.markers_enabled() && cell.len() >= 2 {
+                let folded = cell.len() - 1;
+                cell.insert(1, teaser_line(folded, width));
+                out.extend(folds::wrap_cell_with_teaser(cell, 1, ids));
+            } else {
+                out.extend(cell);
+            }
         }
         out
     }
@@ -1456,6 +1147,139 @@ impl ToolGroup {
 /// `N` being the body rows the fold hides. Same grammar as the in-body
 /// elision marker, so a person reads one vocabulary whether the cell is
 /// folded or its preview was capped.
+/// `✓ Check   <command>      passed after the last edit` — a check the
+/// harness saw pass after the turn's last edit, shaped like a call's row.
+#[must_use]
+pub fn check_row(command: &str, width: usize) -> Line {
+    let target = super::highlight::highlight_block_to_lines(command, "bash")
+        .and_then(|lines| lines.into_iter().next())
+        .map_or_else(|| vec![Span::raw(command.to_string())], |line| line.spans);
+    tool_row(
+        Span::new(super::strings::TOOL_DONE, Style::new().fg(palette::TOOL_OK).bold()),
+        super::strings::TOOL_CHECK,
+        target,
+        vec![Span::dim(super::strings::CHECK_PASSED)],
+        width,
+    )
+}
+
+/// The verb column's width, so every row's target starts on one column.
+const VERB_COLUMNS: usize = 8;
+/// How far an edit's diff hangs in under its row.
+const DIFF_INDENT: usize = 4;
+/// A running call's spinner, one frame per [`SPINNER_FRAME_MILLIS`].
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAME_MILLIS: u128 = 80;
+/// How much of a running command's output its row reads, and how many of the
+/// last lines it shows.
+const LIVE_TAIL_BYTES: usize = 4096;
+const LIVE_TAIL_ROWS: usize = 4;
+
+/// `<glyph> <Verb>    <target>   <result>` — the result ends on the last
+/// column, and the target gives way to it when the row is short.
+fn tool_row(glyph: Span, verb: &str, target: Vec<Span>, result: Vec<Span>, width: usize) -> Line {
+    let mut spans = vec![glyph, Span::raw(" "), Span::bold(format!("{verb:<VERB_COLUMNS$}"))];
+    let head: usize = spans.iter().map(Span::width).sum();
+    let result_width: usize = result.iter().map(Span::width).sum();
+    let reserved = if result_width == 0 { 0 } else { result_width + 1 };
+    let target = Line::new(target).truncated(width.saturating_sub(head + reserved));
+    let used = head + target.width();
+    spans.extend(target.spans);
+    if result_width > 0 {
+        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + result_width).max(1))));
+        spans.extend(result);
+    }
+    Line::new(spans).truncated(width)
+}
+
+fn explored_target(item: &Explored) -> (&'static str, Vec<Span>) {
+    match item {
+        Explored::Read { name } => (super::strings::TOOL_READ, vec![Span::raw(shown_path(name))]),
+        Explored::List { path } => (super::strings::TOOL_LIST, vec![Span::raw(shown_path(path))]),
+        Explored::Search { query, path } => {
+            let mut target = vec![Span::raw(query.clone())];
+            if let Some(path) = path {
+                target.push(Span::dim(" in "));
+                target.push(Span::raw(shown_path(path)));
+            }
+            (super::strings::TOOL_SEARCH, target)
+        }
+    }
+}
+
+fn explored_result(item: &Explored, done: &Outcome) -> Vec<Span> {
+    if !done.ok {
+        return failure_result(done);
+    }
+    let rows = done.output.lines().filter(|line| !line.trim().is_empty()).count();
+    let text = match item {
+        Explored::Read { .. } => kept_lines(&done.output),
+        Explored::List { .. } => super::strings::entry_count(rows),
+        Explored::Search { .. } => super::strings::match_count(rows),
+    };
+    vec![Span::dim(text)]
+}
+
+/// How many lines a command printed — nothing when it printed nothing, since
+/// the `(no output)` row under it already says so.
+fn command_result(done: &Outcome) -> Vec<Span> {
+    if !done.ok {
+        return failure_result(done);
+    }
+    if done.output.trim().is_empty() {
+        return Vec::new();
+    }
+    vec![Span::dim(kept_lines(&done.output))]
+}
+
+/// How many lines an output holds; one cut at its source had more than it kept.
+fn kept_lines(output: &str) -> String {
+    match output.strip_suffix(SOURCE_TRUNCATION_NOTE) {
+        Some(kept) => super::strings::lines_at_least(kept.lines().count()),
+        None => super::strings::line_count(output.lines().count()),
+    }
+}
+
+/// `declined`, `exit 101`, or `failed` when there is no exit code to name.
+fn failure_result(done: &Outcome) -> Vec<Span> {
+    if done.declined {
+        return vec![Span::dim(super::strings::TOOL_DECLINED_RESULT)];
+    }
+    let text = done
+        .exit_code
+        .filter(|code| *code != 0)
+        .map_or_else(|| super::strings::TOOL_FAILED_RESULT.to_string(), super::strings::exit_code);
+    vec![Span::new(text, Style::new().fg(palette::TOOL_FAIL))]
+}
+
+/// The last lines a running command has printed, `  │ ` under its row.
+fn live_tail(id: &str, width: usize) -> Vec<Line> {
+    let Some(tail) = runtime::live_output::snapshot(id, LIVE_TAIL_BYTES) else {
+        return Vec::new();
+    };
+    let printed = format!("{}\n{}", tail.stdout_tail, tail.stderr_tail);
+    let printed = runtime::live_output::sanitize_live_output(&printed);
+    let rows: Vec<&str> = printed.lines().filter(|line| !line.trim().is_empty()).collect();
+    rows[rows.len().saturating_sub(LIVE_TAIL_ROWS)..]
+        .iter()
+        .map(|row| Line::new(vec![Span::dim("  │ "), Span::dim((*row).to_string())]).truncated(width))
+        .collect()
+}
+
+/// A path under the working directory, shown from there.
+fn shown_path(path: &str) -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            std::path::Path::new(path)
+                .strip_prefix(cwd)
+                .ok()
+                .filter(|rest| !rest.as_os_str().is_empty())
+                .map(|rest| rest.display().to_string())
+        })
+        .unwrap_or_else(|| path.to_string())
+}
+
 fn teaser_line(folded_rows: usize, width: usize) -> Line {
     Line::new(vec![
         Prefix::tool_output().initial,
@@ -1953,6 +1777,7 @@ mod tests {
             ok: true,
             output: output.to_string(),
             change: None,
+            exit_code: None,
         }
     }
 
@@ -1960,16 +1785,22 @@ mod tests {
         lines.iter().map(Line::plain).collect()
     }
 
+    /// `left`, then spaces, then `right` ending on the last column.
+    fn edge(left: &str, right: &str, width: usize) -> String {
+        let used = left.chars().count() + right.chars().count();
+        format!("{left}{}{right}", " ".repeat(width.saturating_sub(used)))
+    }
+
     #[test]
-    fn a_running_command_reads_running_and_a_finished_one_reads_ran() {
+    fn a_running_command_spins_and_a_finished_one_wears_a_check() {
         let mut group = ToolGroup::new(bash("a", "ls -la"));
-        assert_eq!(plain(&group.lines(60, Duration::ZERO))[0], "• Running ls -la");
+        assert_eq!(plain(&group.lines(60, Duration::ZERO))[0], "⠋ Run     ls -la");
         assert!(group.complete("a", ok("total 16\nsrc")));
         let lines = group.lines(60, Duration::ZERO);
         assert_eq!(
             plain(&lines),
             vec![
-                "• Ran ls -la".to_string(),
+                edge("✓ Run     ls -la", "2 lines", 60),
                 "  └ total 16".to_string(),
                 "    src".to_string(),
             ]
@@ -1983,7 +1814,6 @@ mod tests {
         assert_eq!(plain(&group.lines(60, Duration::ZERO))[1], "  └ (no output)");
     }
 
-    /// codex 의 출력 상한은 다섯 행이고, 넘치면 머리 둘 · 생략 · 꼬리 둘이다.
     #[test]
     fn long_output_keeps_a_head_and_a_tail_around_the_ellipsis() {
         let output = (1..=20).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
@@ -1993,7 +1823,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "• Ran seq 20".to_string(),
+                edge("✓ Run     seq 20", "20 lines", 60),
                 "  └ 1".to_string(),
                 "    2".to_string(),
                 "    … +16 lines".to_string(),
@@ -2003,65 +1833,55 @@ mod tests {
         );
     }
 
-    /// 캡처(`codex-tui-v0.149.1-tool-turn.bin`, 883번째 줄)의 라이브 셀.
     #[test]
-    fn a_live_explore_group_is_the_captured_exploring_cell() {
+    fn a_live_read_is_one_spinning_row() {
         let group = ToolGroup::new(read("a", "README.md"));
-        assert_eq!(
-            plain(&group.lines(60, Duration::ZERO)),
-            vec!["• Exploring".to_string(), "  └ Read README.md".to_string()]
-        );
+        assert_eq!(plain(&group.lines(60, Duration::ZERO)), vec!["⠋ Read    README.md".to_string()]);
     }
 
-    /// 연달아 오는 Read 는 한 행에 쉼표로 모이고 같은 이름은 접힌다
-    /// (codex `exploring_display_lines` 의 `.unique()`).
     #[test]
-    fn consecutive_reads_collapse_into_one_comma_joined_row() {
+    fn consecutive_reads_are_one_row_each() {
         let mut group = ToolGroup::new(read("a", "a.rs"));
         assert!(group.accepts(&ToolKind::Explore(vec![Explored::Read {
             name: "b.rs".to_string()
         }])));
         group.push(read("b", "b.rs"));
         group.push(read("c", "a.rs"));
-        // 아직 도는 탐색 묶음이라 `Exploring` 목록이 그려진다.
+        // 아직 도는 묶음 — 호출마다 제 줄과 스피너가 있다.
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["• Exploring".to_string(), "  └ Read a.rs, b.rs".to_string()]
+            vec![
+                "⠋ Read    a.rs".to_string(),
+                "⠋ Read    b.rs".to_string(),
+                "⠋ Read    a.rs".to_string(),
+            ]
         );
     }
 
-    /// 끝난 **여러** 호출은 탐색이라도 접힌다 — codex 의 갈림은
-    /// `HistoryCell for ExecCell::display_lines` 한 줄이다:
-    /// `if calls.len() > 1 && (!is_exploring_cell() || !is_active())`
-    /// → `compact_group_display_lines`. 그래서 캡처의 "ls -la + README 읽기"
-    /// 도 `• Ran 2 commands` 한 줄로 남는다.
     #[test]
-    fn a_finished_multi_call_group_collapses_even_when_it_only_explored() {
+    fn a_finished_explore_group_keeps_one_row_per_call() {
         let mut group = ToolGroup::new(read("a", "a.rs"));
         group.push(read("b", "b.rs"));
         assert!(group.complete("a", ok("")));
         assert!(group.complete("b", ok("")));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["• Ran 2 commands".to_string()]
+            vec![edge("✓ Read    a.rs", "0 lines", 60), edge("✓ Read    b.rs", "0 lines", 60)]
         );
     }
 
-    /// 한 호출뿐인 탐색은 끝나도 `Explored` 목록으로 남는다.
     #[test]
-    fn a_single_finished_explore_keeps_the_explored_list() {
+    fn a_single_finished_read_is_one_row() {
         let mut group = ToolGroup::new(read("a", "README.md"));
         assert!(group.complete("a", ok("")));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["• Explored".to_string(), "  └ Read README.md".to_string()]
+            vec![edge("✓ Read    README.md", "0 lines", 60)]
         );
     }
 
-    /// 캡처(같은 파일, 887번째 줄)의 접힌 셀. 트랜스크립트 힌트는 이번
-    /// 라운드에서 뺐다.
     #[test]
-    fn two_finished_commands_collapse_into_ran_two_commands() {
+    fn two_finished_commands_are_two_rows() {
         let mut group = ToolGroup::new(bash("a", "ls -la"));
         assert!(group.complete("a", ok("x")));
         assert!(group.accepts(&ToolKind::Command {
@@ -2072,12 +1892,15 @@ mod tests {
         assert!(group.complete("b", ok("/tmp")));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["• Ran 2 commands".to_string()]
+            vec![
+                edge("✓ Run     ls -la", "1 line", 60),
+                "  └ x".to_string(),
+                edge("✓ Run     pwd", "1 line", 60),
+                "  └ /tmp".to_string(),
+            ]
         );
     }
 
-    /// zo 는 한 메시지의 도구 호출을 먼저 전부 announce 한다 — 아직 도는 앞
-    /// 호출이 다음 announce 를 밀어내면 안 된다.
     #[test]
     fn a_batch_announce_lands_in_one_cell() {
         let mut group = ToolGroup::new(bash("a", "ls -la"));
@@ -2091,7 +1914,11 @@ mod tests {
         assert!(group.complete("b", ok("hello")));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["• Ran 2 commands".to_string()]
+            vec![
+                edge("✓ Run     ls -la", "1 line", 60),
+                "  └ total 8".to_string(),
+                edge("✓ Read    README.md", "1 line", 60),
+            ]
         );
     }
 
@@ -2106,6 +1933,7 @@ mod tests {
                 ok: false,
                 output: "boom".to_string(),
                 change: None,
+                exit_code: None,
             }
         ));
         assert!(!group.accepts(&ToolKind::Command {
@@ -2171,7 +1999,7 @@ mod tests {
         ));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO))[0],
-            "• Editing a.rs"
+            "⠋ Edit    a.rs"
         );
         assert!(group.complete(
             "a",
@@ -2179,7 +2007,7 @@ mod tests {
         ));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO))[0],
-            "• Edited a.rs (+2 -1)"
+            edge("✓ Edit    a.rs", "+2 -1", 60)
         );
     }
 
@@ -2242,7 +2070,7 @@ mod tests {
     }
 
     #[test]
-    fn a_capability_invoke_read_preview_renders_as_exploration() {
+    fn a_capability_invoke_read_preview_renders_as_a_read_row() {
         let preview = preview_tool_input(
             "CapabilityInvoke",
             &json!({
@@ -2256,7 +2084,7 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["• Exploring".to_string(), "  └ Read src/lib.rs".to_string()]
+            vec!["⠋ Read    src/lib.rs".to_string()]
         );
     }
 
@@ -2658,6 +2486,7 @@ mod tests {
                 ok: false,
                 output: "[exit 1]\ntraceback line".to_string(),
                 change: None,
+                exit_code: None,
             },
         ));
         assert_eq!(
@@ -2686,6 +2515,7 @@ mod tests {
                 ok: false,
                 output: String::new(),
                 change: None,
+                exit_code: None,
             },
         ));
         let lines = group.lines(80, Duration::ZERO);
@@ -2713,17 +2543,17 @@ mod tests {
         group.mark_failed();
 
         let lines = plain(&group.lines(140, Duration::ZERO));
-        assert_eq!(lines[0], "✘ Failed to apply patch", "{lines:?}");
-        for path in ["src/a.rs", "src/b.rs"] {
-            let row = lines
-                .iter()
-                .find(|line| line.contains(&format!("✘ {path}")))
-                .unwrap_or_else(|| panic!("{path} has no ✘ row: {lines:?}"));
-            assert!(
-                row.ends_with(&format!("— {}", super::super::strings::TOOL_CALL_INTERRUPTED)),
-                "the row says nothing about why: {row:?}"
-            );
-        }
+        let why = format!("  └ {}", super::super::strings::TOOL_CALL_INTERRUPTED);
+        assert_eq!(
+            lines,
+            vec![
+                edge("✗ Edit    src/a.rs", "failed", 140),
+                why.clone(),
+                edge("✗ Edit    src/b.rs", "failed", 140),
+                why,
+            ],
+            "each interrupted edit says why"
+        );
     }
 
     /// Two `MultiEdit` calls in one turn. Its result is the same
@@ -2755,15 +2585,16 @@ mod tests {
         assert!(group.complete("w2", Outcome::from_result(true, &refused, "src/b.ts")));
 
         let lines = plain(&group.lines(140, Duration::ZERO));
-        assert_eq!(lines[0], "• Edited 1 file (+2 -0)", "{lines:?}");
-        assert!(lines.iter().any(|line| line.contains("src/a.ts (+2 -0)")), "{lines:?}");
-        let failed = lines
+        assert_eq!(lines[0], edge("✓ Create  src/a.ts", "+2 -0", 140), "{lines:?}");
+        let failed_row = edge("✗ Edit    src/b.ts", "failed", 140);
+        let at = lines
             .iter()
-            .find(|line| line.contains("✘ src/b.ts"))
+            .position(|line| *line == failed_row)
             .expect("the refused write stands as a failure");
+        let failed = &lines[at + 1];
         assert!(
-            failed.contains("— exists but has not been read in this conversation"),
-            "the reason follows the path, not the path again: {failed}"
+            failed.starts_with("  └ exists but has not been read in this conversation"),
+            "the reason hangs under the path, not the path again: {failed}"
         );
         assert!(!failed.contains("invalid input") && !failed.contains("/Users/dev"), "{failed}");
     }
@@ -2786,7 +2617,7 @@ mod tests {
         let ok = format_tool_result_from_raw("write_file", &created.to_string(), false);
         assert!(group.complete("w1", Outcome::from_result(false, &ok, "src/big.ts")));
         let lines = plain(&group.lines(120, Duration::ZERO));
-        assert!(lines.iter().any(|line| line.contains("(+60 -0)")), "{lines:?}");
+        assert_eq!(lines[0], edge("✓ Create  src/big.ts", "+60 -0", 120), "{lines:?}");
         assert!(
             lines.len() < 30,
             "a 60-line create is a head and a count, not 60 rows: {} rows",
@@ -2835,21 +2666,18 @@ mod tests {
         assert!(group.complete("m2", Outcome::from_result(true, &failed, "ui/shell.css")));
 
         let lines = plain(&group.lines(100, Duration::ZERO));
-        assert_eq!(lines[0], "• Edited 1 file (+2 -1)", "{lines:?}");
-        assert!(
-            lines.iter().any(|line| line.contains("✘ ui/shell.css")
-                && line.contains("edit[5] failed: old_string not found in file")),
+        assert_eq!(lines[0], edge("✓ Edit    ui/tokens.css", "+2 -1", 100), "the edited file keeps its counts");
+        let failed_row = edge("✗ Edit    ui/shell.css", "failed", 100);
+        let at = lines.iter().position(|line| *line == failed_row).expect("the failed file stands");
+        assert_eq!(
+            lines[at + 1], "  └ io error: edit[5] failed: old_string not found in file",
             "the failed file stands with its reason: {lines:?}"
-        );
-        assert!(
-            lines.iter().any(|line| line.starts_with("  └ ui/tokens.css (+2 -1)")),
-            "the edited file keeps its counts: {lines:?}"
         );
         assert!(!lines.iter().any(|line| line.contains("+0 -0")), "{lines:?}");
     }
 
     #[test]
-    fn a_failed_edit_uses_the_patch_failure_cell() {
+    fn a_failed_edit_wears_a_cross_and_keeps_its_reason() {
         let preview = preview_tool_input(
             "Edit",
             &json!({
@@ -2863,11 +2691,10 @@ mod tests {
         let mut group = ToolGroup::new(ToolCall::new("edit".to_string(), kind));
         let body = format_tool_result_from_raw("Edit", "context mismatch\ntry again", true);
         assert!(group.complete("edit", Outcome::from_result(true, &body, "src/lib.rs")));
-
         assert_eq!(
             plain(&group.lines(80, Duration::ZERO)),
             vec![
-                "✘ Failed to apply patch".to_string(),
+                edge("✗ Edit    src/lib.rs", "failed", 80),
                 "  └ context mismatch".to_string(),
                 "    try again".to_string(),
             ]
@@ -2875,7 +2702,7 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_edit_results_roll_up_into_a_sorted_multi_file_cell() {
+    fn consecutive_edits_are_one_row_each_in_call_order() {
         let b_preview = preview_tool_input("Edit", &json!({ "file_path": "b.rs" }));
         let b_summary = preview_summary(&b_preview);
         let b_kind = ToolKind::from_preview("Edit", &b_preview, &b_summary);
@@ -2901,10 +2728,9 @@ mod tests {
         assert!(group.complete("a", Outcome::from_result(false, &a_body, "a.rs")));
 
         let rows = plain(&group.lines(80, Duration::ZERO));
-        assert_eq!(rows[0], "• Edited 2 files (+3 -1)");
-        let a_row = rows.iter().position(|row| row == "  └ a.rs (+1 -1)").expect("a row");
-        let b_row = rows.iter().position(|row| row == "  └ b.rs (+2 -0)").expect("b row");
-        assert!(a_row < b_row, "rows were {rows:?}");
+        assert_eq!(rows[0], edge("✓ Edit    b.rs", "+2 -0", 80));
+        let a_row = rows.iter().position(|row| *row == edge("✓ Edit    a.rs", "+1 -1", 80)).expect("a row");
+        assert!(a_row > 0, "each edit is its own row, in the order the calls ran: {rows:?}");
     }
 
     #[test]
@@ -2928,7 +2754,7 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(80, Duration::ZERO))[0],
-            "• Edited old.rs → new.rs (+0 -0)"
+            edge("✓ Edit    old.rs → new.rs", "+0 -0", 80)
         );
     }
 
@@ -2967,12 +2793,11 @@ mod tests {
 
     /// 헤더에 안 들어가는 긴 명령은 `  │ ` 로 두 줄까지 흐르고 접힌다.
     #[test]
-    fn a_long_command_continues_under_the_pipe_gutter() {
+    fn a_long_command_is_cut_at_the_edge_of_its_row() {
         let mut group = ToolGroup::new(bash("a", "alpha beta gamma delta epsilon zeta eta theta"));
         assert!(group.complete("a", ok("")));
         let rows = plain(&group.lines(20, Duration::ZERO));
-        assert_eq!(rows[0], "• Ran alpha beta");
-        assert!(rows[1].starts_with("  │ "), "rows were {rows:?}");
+        assert_eq!(rows, vec!["✓ Run     alpha bet…".to_string(), "  └ (no output)".to_string()]);
     }
 
     /// Marker mode의 커밋된 도구 셀은 접기 구간이 된다.
@@ -2987,7 +2812,7 @@ mod tests {
             plain(&rows),
             vec![
                 String::new(),
-                "• Ran ls -la".to_string(),
+                edge("✓ Run     ls -la", "1 line", 60),
                 "  └ … +1 lines".to_string(),
                 "  └ total 16".to_string(),
             ]
@@ -2996,14 +2821,14 @@ mod tests {
         assert_eq!(rows[0].lead, None);
         assert_eq!(
             rows[1].lead.as_deref(),
-            Some("\u{1b}]7788;begin;0;collapsed,teaser=1;• Ran ls -la\u{1b}\\")
+            Some("\u{1b}]7788;begin;0;collapsed,teaser=1;✓ Run ls -la 1 line\u{1b}\\")
         );
         assert_eq!(rows[3].trail.as_deref(), Some("\u{1b}]7788;end;0\u{1b}\\"));
     }
 
     /// 맨 터미널에서는 헤더 한 줄뿐이라 손잡이를 달지 않는다 — 접을 본문이 없다.
     #[test]
-    fn a_collapsed_group_header_alone_gets_no_fold() {
+    fn bare_mode_commits_the_rows_without_fold_markers() {
         use crate::tui::folds::{FoldIds, FoldMode};
         let mut group = ToolGroup::new(bash("a", "ls"));
         assert!(group.complete("a", ok("x")));
@@ -3011,14 +2836,23 @@ mod tests {
         assert!(group.complete("b", ok("/tmp")));
         let mut ids = FoldIds::default();
         let rows = group.committed(60, &mut ids, FoldMode::Bare);
-        assert_eq!(plain(&rows), vec![String::new(), "• Ran 2 commands".to_string()]);
+        assert_eq!(
+            plain(&rows),
+            vec![
+                String::new(),
+                edge("✓ Run     ls", "1 line", 60),
+                "  └ x".to_string(),
+                edge("✓ Run     pwd", "1 line", 60),
+                "  └ /tmp".to_string(),
+            ]
+        );
         assert!(rows.iter().all(|row| row.lead.is_none() && row.trail.is_none()));
     }
 
     /// marker opt-in에서는 같은 묶음이 본문을 달고 접힌다 — 호출마다 `  └ <cmd>` 와
     /// 그 출력이 네 칸 거터로 이어진다.
     #[test]
-    fn marker_mode_hides_group_output_under_the_header() {
+    fn marker_mode_folds_each_calls_output_under_its_row() {
         use crate::tui::folds::{FoldIds, FoldMode};
         let mut group = ToolGroup::new(bash("a", "ls"));
         assert!(group.complete("a", ok("x")));
@@ -3030,27 +2864,32 @@ mod tests {
             plain(&rows),
             vec![
                 String::new(),
-                "• Ran 2 commands".to_string(),
-                "  └ … +4 lines".to_string(),
-                "  └ ls".to_string(),
-                "    x".to_string(),
-                "  └ pwd".to_string(),
-                "    /tmp".to_string(),
+                edge("✓ Run     ls", "1 line", 60),
+                "  └ … +1 lines".to_string(),
+                "  └ x".to_string(),
+                edge("✓ Run     pwd", "1 line", 60),
+                "  └ … +1 lines".to_string(),
+                "  └ /tmp".to_string(),
             ]
         );
-        // 헤더가 begin 을 물고(접힌 동안 보이는 밀도 줄 하나를 teaser 로 선언),
-        // 마지막 본문 줄이 end 를 문다.
+        // 호출마다 제 줄이 begin 을 물고(접힌 동안 보이는 밀도 줄 하나를 teaser 로
+        // 선언), 그 호출의 마지막 본문 줄이 end 를 문다.
         assert_eq!(rows[0].lead, None);
         assert_eq!(
             rows[1].lead.as_deref(),
-            Some("\u{1b}]7788;begin;0;collapsed,teaser=1;• Ran 2 commands\u{1b}\\")
+            Some("\u{1b}]7788;begin;0;collapsed,teaser=1;✓ Run ls 1 line\u{1b}\\")
         );
-        assert_eq!(rows[6].trail.as_deref(), Some("\u{1b}]7788;end;0\u{1b}\\"));
+        assert_eq!(rows[3].trail.as_deref(), Some("\u{1b}]7788;end;0\u{1b}\\"));
+        assert_eq!(
+            rows[4].lead.as_deref(),
+            Some("\u{1b}]7788;begin;1;collapsed,teaser=1;✓ Run pwd 1 line\u{1b}\\")
+        );
+        assert_eq!(rows[6].trail.as_deref(), Some("\u{1b}]7788;end;1\u{1b}\\"));
     }
 
     /// 탐색 묶음의 본문은 codex 의 목록 줄 그대로다 — 출력은 원본도 안 보인다.
     #[test]
-    fn a_marked_group_shows_explored_items_as_its_body() {
+    fn a_marked_read_row_has_nothing_to_fold() {
         use crate::tui::folds::{FoldIds, FoldMode};
         let mut group = ToolGroup::new(read("a", "README.md"));
         assert!(group.complete("a", ok("# hi")));
@@ -3062,11 +2901,10 @@ mod tests {
             plain(&rows),
             vec![
                 String::new(),
-                "• Ran 2 commands".to_string(),
-                "  └ … +3 lines".to_string(),
-                "  └ Read README.md".to_string(),
-                "  └ pwd".to_string(),
-                "    /tmp".to_string(),
+                edge("✓ Read    README.md", "1 line", 60),
+                edge("✓ Run     pwd", "1 line", 60),
+                "  └ … +1 lines".to_string(),
+                "  └ /tmp".to_string(),
             ]
         );
     }
@@ -3087,16 +2925,16 @@ mod tests {
             plain(&rows),
             vec![
                 String::new(),
-                "• Ran 2 commands".to_string(),
-                "  └ … +8 lines".to_string(),
-                "  └ seq".to_string(),
-                "    line1".to_string(),
+                edge("✓ Run     seq", "9 lines", 60),
+                "  └ … +5 lines".to_string(),
+                "  └ line1".to_string(),
                 "    line2".to_string(),
                 "    … +5 lines".to_string(),
                 "    line8".to_string(),
                 "    line9".to_string(),
-                "  └ pwd".to_string(),
-                "    /tmp".to_string(),
+                edge("✓ Run     pwd", "1 line", 60),
+                "  └ … +1 lines".to_string(),
+                "  └ /tmp".to_string(),
             ]
         );
     }
@@ -3109,9 +2947,16 @@ mod tests {
         assert!(group.complete("a", ok("x")));
         group.push(bash("b", "pwd"));
         assert!(group.complete("b", ok("/tmp")));
+        let rows = plain(&group.lines(60, Duration::ZERO));
+        assert!(!rows.iter().any(|row| row.contains("… +")), "no teaser in the live cell: {rows:?}");
         assert_eq!(
-            plain(&group.lines(60, Duration::ZERO)),
-            vec!["• Ran 2 commands".to_string()]
+            rows,
+            vec![
+                edge("✓ Run     ls", "1 line", 60),
+                "  └ x".to_string(),
+                edge("✓ Run     pwd", "1 line", 60),
+                "  └ /tmp".to_string(),
+            ]
         );
     }
 
@@ -3145,7 +2990,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
             vec![
-                "• Ran seq 8".to_string(),
+                edge("✓ Run     seq 8", "8+ lines", 60),
                 "  └ line1".to_string(),
                 "    line2".to_string(),
                 "    … +5 lines".to_string(),
@@ -3153,5 +2998,280 @@ mod tests {
                 "    line8".to_string(),
             ]
         );
+    }
+}
+
+/// One row per call (t-48216): a status glyph, the verb, the target and the
+/// call's result at the right edge — never folded into `Ran N commands`.
+#[cfg(test)]
+mod row_tests {
+    use std::time::Duration;
+
+    use runtime::message_stream::{
+        BashResult, DiffHunk, DiffLine, DiffLineKind, DiffView, ToolResultBody,
+    };
+
+    use super::{Explored, Outcome, ToolCall, ToolGroup, ToolKind};
+    use crate::tui::ansi::{Color, Line};
+
+    const WIDTH: usize = 60;
+
+    fn plain(lines: &[Line]) -> Vec<String> {
+        lines.iter().map(Line::plain).collect()
+    }
+
+    /// `left`, then spaces, then `right` ending on the last column.
+    fn edge(left: &str, right: &str, width: usize) -> String {
+        let used = left.chars().count() + right.chars().count();
+        format!("{left}{}{right}", " ".repeat(width.saturating_sub(used)))
+    }
+
+    fn ok(output: &str) -> Outcome {
+        let body = ToolResultBody::Text {
+            content: output.to_string(),
+            truncated: false,
+        };
+        Outcome::from_result(false, &body, "")
+    }
+
+    fn numbered(count: usize) -> String {
+        (1..=count)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn command(id: &str, command: &str) -> ToolCall {
+        ToolCall::new(
+            id.to_string(),
+            ToolKind::Command {
+                command: command.to_string(),
+                background: false,
+            },
+        )
+    }
+
+    fn read(id: &str, name: &str) -> ToolCall {
+        ToolCall::new(
+            id.to_string(),
+            ToolKind::Explore(vec![Explored::Read {
+                name: name.to_string(),
+            }]),
+        )
+    }
+
+    #[test]
+    fn a_read_and_a_search_are_two_rows_with_their_results_at_the_edge() {
+        let mut group = ToolGroup::new(read("a", "src/app.py"));
+        group.push(ToolCall::new(
+            "b".to_string(),
+            ToolKind::Explore(vec![Explored::Search {
+                query: "do_(GET|POST)".to_string(),
+                path: Some("src".to_string()),
+            }]),
+        ));
+        assert!(group.complete("a", ok(&numbered(12))));
+        assert!(group.complete("b", ok("src/app.py:7:    def do_GET(self):")));
+        assert_eq!(
+            plain(&group.lines(WIDTH, Duration::ZERO)),
+            vec![
+                edge("✓ Read    src/app.py", "12 lines", WIDTH),
+                edge("✓ Search  do_(GET|POST) in src", "1 match", WIDTH),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_finished_commands_stay_two_rows_never_ran_two_commands() {
+        let mut group = ToolGroup::new(command("a", "echo one"));
+        group.push(command("b", "echo two"));
+        assert!(group.complete("a", ok("one")));
+        assert!(group.complete("b", ok("two")));
+        let rows = plain(&group.lines(WIDTH, Duration::ZERO));
+        assert!(rows.iter().all(|row| !row.contains("Ran 2")), "{rows:#?}");
+        assert_eq!(
+            rows,
+            vec![
+                edge("✓ Run     echo one", "1 line", WIDTH),
+                "  └ one".to_string(),
+                edge("✓ Run     echo two", "1 line", WIDTH),
+                "  └ two".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_command_wears_a_cross_and_names_its_exit_code() {
+        let mut group = ToolGroup::new(command("a", "cargo test"));
+        let body = ToolResultBody::Bash(BashResult {
+            exit_code: 101,
+            stdout: String::new(),
+            stderr: "error: test failed".to_string(),
+            truncated: false,
+        });
+        assert!(group.complete("a", Outcome::from_result(false, &body, "")));
+        let rows = plain(&group.lines(WIDTH, Duration::ZERO));
+        assert_eq!(rows[0], edge("✗ Run     cargo test", "exit 101", WIDTH));
+        assert_eq!(rows[1], "  └ error: test failed");
+    }
+
+    #[test]
+    fn a_running_call_spins_on_its_own_row() {
+        let group = ToolGroup::new(read("a", "README.md"));
+        let rows = plain(&group.lines(WIDTH, Duration::from_millis(250)));
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        let mut chars = rows[0].chars();
+        let glyph = chars.next().expect("a status glyph");
+        assert!(
+            ('\u{2800}'..='\u{28ff}').contains(&glyph),
+            "a running call spins a braille frame, got {glyph:?}"
+        );
+        assert_eq!(chars.as_str().trim_end(), " Read    README.md");
+    }
+
+    #[test]
+    fn the_spinner_advances_with_time() {
+        let group = ToolGroup::new(read("a", "README.md"));
+        let frames: std::collections::HashSet<char> = (0..12)
+            .filter_map(|step| {
+                let rows = plain(&group.lines(WIDTH, Duration::from_millis(step * 100)));
+                rows[0].chars().next()
+            })
+            .collect();
+        assert!(frames.len() > 1, "one frame forever is not a spinner: {frames:?}");
+    }
+
+    #[test]
+    fn an_edit_row_counts_its_change_at_the_edge_and_hangs_its_diff_under_the_target() {
+        let view = DiffView {
+            old_path: Some("src/app.py".to_string()),
+            new_path: Some("src/app.py".to_string()),
+            language: None,
+            hunks: vec![DiffHunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 2,
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        text: "import json".to_string(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Context,
+                        text: "TODOS = []".to_string(),
+                    },
+                ],
+            }],
+        };
+        let mut group = ToolGroup::new(ToolCall::new(
+            "e".to_string(),
+            ToolKind::Edit {
+                path: "src/app.py".to_string(),
+            },
+        ));
+        assert!(group.complete(
+            "e",
+            Outcome::from_result(false, &ToolResultBody::Diff(view), "src/app.py")
+        ));
+        let lines = group.lines(WIDTH, Duration::ZERO);
+        assert_eq!(
+            plain(&lines),
+            vec![
+                edge("✓ Edit    src/app.py", "+1 -0", WIDTH),
+                "       1 + import json".to_string(),
+                "    1  2   TODOS = []".to_string(),
+            ]
+        );
+        let added = lines[0]
+            .spans
+            .iter()
+            .find(|span| span.text == "+1")
+            .expect("the added count");
+        let removed = lines[0]
+            .spans
+            .iter()
+            .find(|span| span.text == "-0")
+            .expect("the removed count");
+        assert_eq!(added.style.fg, Some(Color::GREEN));
+        assert_eq!(removed.style.fg, Some(Color::RED));
+    }
+
+    #[test]
+    fn each_edit_in_a_group_hangs_its_own_diff() {
+        fn added(path: &str, texts: &[&str]) -> ToolResultBody {
+            ToolResultBody::Diff(DiffView {
+                old_path: Some(path.to_string()),
+                new_path: Some(path.to_string()),
+                language: None,
+                hunks: vec![DiffHunk {
+                    old_start: 1,
+                    old_lines: 0,
+                    new_start: 1,
+                    new_lines: u32::try_from(texts.len()).expect("a short hunk"),
+                    lines: texts
+                        .iter()
+                        .map(|text| DiffLine {
+                            kind: DiffLineKind::Added,
+                            text: (*text).to_string(),
+                        })
+                        .collect(),
+                }],
+            })
+        }
+        let edit = |id: &str, path: &str| {
+            ToolCall::new(id.to_string(), ToolKind::Edit { path: path.to_string() })
+        };
+        let mut group = ToolGroup::new(edit("a", "alpha.txt"));
+        group.push(edit("b", "beta.txt"));
+        let alpha = added("alpha.txt", &["alpha one", "alpha two"]);
+        let beta = added("beta.txt", &["beta one"]);
+        assert!(group.complete("a", Outcome::from_result(false, &alpha, "alpha.txt")));
+        assert!(group.complete("b", Outcome::from_result(false, &beta, "beta.txt")));
+        assert_eq!(
+            plain(&group.lines(WIDTH, Duration::ZERO)),
+            vec![
+                edge("✓ Edit    alpha.txt", "+2 -0", WIDTH),
+                "       1 + alpha one".to_string(),
+                "       2 + alpha two".to_string(),
+                edge("✓ Edit    beta.txt", "+1 -0", WIDTH),
+                "       1 + beta one".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_path_inside_the_working_directory_is_shown_relative_to_it() {
+        let absolute = std::env::current_dir()
+            .expect("a working directory")
+            .join("src")
+            .join("app.py");
+        let mut group = ToolGroup::new(read("a", &absolute.display().to_string()));
+        assert!(group.complete("a", ok("x")));
+        assert_eq!(
+            plain(&group.lines(WIDTH, Duration::ZERO))[0],
+            edge("✓ Read    src/app.py", "1 line", WIDTH)
+        );
+    }
+
+    #[test]
+    fn a_running_command_shows_the_tail_of_its_live_output_and_names_itself_once() {
+        let handle = runtime::live_output::register(Some("toolu_row_tail"));
+        handle
+            .writer()
+            .append_stdout(b"test_create ... ok\ntest_list ... ok\ntest_delete ... ok\ntest_update ... ok\n");
+        let group = ToolGroup::new(command(
+            "toolu_row_tail",
+            "for t in create list delete update; do echo test_$t ... ok; done",
+        ));
+        let rows = plain(&group.lines(100, Duration::from_secs(7)));
+        assert_eq!(
+            rows.iter().filter(|row| row.contains("for t in create")).count(),
+            1,
+            "{rows:#?}"
+        );
+        assert!(rows.iter().any(|row| row == "  │ test_delete ... ok"), "{rows:#?}");
+        assert!(rows.iter().any(|row| row == "  │ test_update ... ok"), "{rows:#?}");
+        drop(handle);
     }
 }

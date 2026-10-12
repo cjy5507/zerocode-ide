@@ -1,14 +1,14 @@
 //! 마크다운 → 스타일 있는 줄. 규칙은 codex `tui/src/markdown_render.rs` 실측.
 //!
-//! 핵심은 codex 가 "해시를 지우지 않는다"는 것이다: `### 제목` 은 `### ` 를
-//! 그대로 남기고 헤딩 스타일(h3 = bold+italic)을 입힌다. 캡처의
-//! `ESC[1mESC[3m### 자기소개` 가 그 증거다.
+//! 제목은 해시 없이 굵은 글씨로 선다(t-48216): `### 제목` 은 `제목` 한 줄에
+//! 헤딩 스타일(h3 = bold+italic)을 입힌다. codex 는 `### ` 를 남겼고, 그것이
+//! 화면에 `• ## 변경 요약` 으로 읽혔다.
 //!
 //! 표도 원본 그대로다 — `Options::ENABLE_TABLES` 를 켜고 열 폭 배분·정렬·칸
 //! 접기는 [`super::tables`] 가 맡는다(codex `start_table`/`end_table`).
 //!
 //! 들여쓰기 규칙도 원본 그대로다 — 깊이 `d` 의 리스트는 `width = 4d - 3`,
-//! 불릿 마커는 `" "×(width-1) + "- "`, 번호 마커는 `"{n:width$}. "`, 이어지는
+//! 불릿 마커는 `" "×(width-1) + "• "`, 번호 마커는 `"{n:width$}. "`, 이어지는
 //! 줄은 불릿 `width + 1` · 번호 `width + 2` 칸을 들여쓴다. 바깥 리스트의
 //! 접두어는 **쌓이지 않는다**(가장 안쪽 것만 쓴다 — `prefix_spans`).
 
@@ -67,13 +67,15 @@ pub mod probe {
     }
 }
 
-/// 헤딩 수준별 스타일 — codex `MarkdownStyles::default`.
+/// 헤딩 수준별 스타일 — codex `MarkdownStyles::default` 에서 h4 이하도 굵게
+/// (t-48216): 해시가 없으니 굵기가 제목을 알린다.
 fn heading_style(level: HeadingLevel) -> Style {
     match level {
         HeadingLevel::H1 => Style::new().bold().underline(),
         HeadingLevel::H2 => Style::new().bold(),
-        HeadingLevel::H3 => Style::new().bold().italic(),
-        HeadingLevel::H4 | HeadingLevel::H5 | HeadingLevel::H6 => Style::new().italic(),
+        HeadingLevel::H3 | HeadingLevel::H4 | HeadingLevel::H5 | HeadingLevel::H6 => {
+            Style::new().bold().italic()
+        }
     }
 }
 
@@ -445,8 +447,7 @@ impl Writer<'_> {
                     self.needs_newline = false;
                 }
                 let style = heading_style(*level);
-                let hashes = format!("{} ", "#".repeat(*level as usize));
-                self.push_line(vec![Span::new(hashes, style)]);
+                self.push_line(Vec::new());
                 self.inline.push(style);
             }
             Tag::BlockQuote(_) => {
@@ -566,7 +567,7 @@ impl Writer<'_> {
                 )])
             }
             Some(None) => Some(vec![Span::raw(format!(
-                "{}- ",
+                "{}• ",
                 " ".repeat(width.saturating_sub(1))
             ))]),
             None => None,
@@ -1071,13 +1072,13 @@ mod tests {
         render(source).iter().map(Line::plain).collect()
     }
 
-    /// 캡처(`codex-tui-v0.149.1-turn.bin`)의 답변 첫 줄: 해시를 남기고
-    /// bold+italic 만 입힌다.
+    /// 캡처(`codex-tui-v0.149.1-turn.bin`)의 답변 첫 줄 `### 자기소개`: 해시 없이
+    /// 제목만 남고 h3 의 bold+italic 을 입는다(t-48216).
     #[test]
-    fn headings_keep_their_hashes_and_take_the_level_style() {
+    fn headings_drop_their_hashes_and_take_the_level_style() {
         let lines = render("### 자기소개");
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].plain(), "### 자기소개");
+        assert_eq!(lines[0].plain(), "자기소개");
         assert!(lines[0].spans.iter().all(|span| span.style.bold && span.style.italic));
     }
 
@@ -1087,15 +1088,15 @@ mod tests {
         assert!(render("## a")[0].spans[0].style.bold);
         assert!(!render("## a")[0].spans[0].style.italic);
         assert!(render("#### a")[0].spans[0].style.italic);
-        assert!(!render("#### a")[0].spans[0].style.bold);
+        assert!(render("#### a")[0].spans[0].style.bold, "every heading is a bold title");
     }
 
     #[test]
     fn bullets_use_the_measured_marker_and_indent() {
-        assert_eq!(plain("- one\n- two"), vec!["- one", "- two"]);
+        assert_eq!(plain("- one\n- two"), vec!["• one", "• two"]);
         assert_eq!(
             plain("- one\n  - nested"),
-            vec!["- one", "    - nested"]
+            vec!["• one", "    • nested"]
         );
     }
 
@@ -1120,7 +1121,7 @@ mod tests {
     fn a_blank_line_separates_a_heading_from_the_list_below() {
         assert_eq!(
             plain("### t\n\n- a"),
-            vec!["### t".to_string(), String::new(), "- a".to_string()]
+            vec!["t".to_string(), String::new(), "• a".to_string()]
         );
     }
 
@@ -1205,7 +1206,7 @@ mod tests {
     /// `ENABLE_TASKLISTS` 는 codex 에 없다 — 체크박스는 평문으로 흐른다.
     #[test]
     fn task_lists_stay_plain_text() {
-        assert_eq!(plain("- [x] done\n- [ ] todo"), vec!["- [x] done", "- [ ] todo"]);
+        assert_eq!(plain("- [x] done\n- [ ] todo"), vec!["• [x] done", "• [ ] todo"]);
     }
 
     /// 표는 격자로 나온다 — 헤더 아래는 `━`, 본문 행 사이는 `─`
@@ -1312,5 +1313,35 @@ mod tests {
             lines.iter().all(|line| !line.contains('━')),
             "no grid separator survives: {lines:?}"
         );
+    }
+}
+
+/// Headings read as titles and list items wear a dot (t-48216): `## ` was
+/// drawn as text, so an answer opened on `• ## 변경 요약`.
+#[cfg(test)]
+mod title_tests {
+    use super::render;
+
+    fn plain(source: &str) -> Vec<String> {
+        render(source).iter().map(super::Line::plain).collect()
+    }
+
+    #[test]
+    fn a_heading_is_a_bold_title_without_its_hashes() {
+        for source in ["# 변경 요약", "## 변경 요약", "### 변경 요약", "#### 변경 요약"] {
+            let lines = render(source);
+            assert_eq!(lines.len(), 1, "{source}");
+            assert_eq!(lines[0].plain(), "변경 요약", "{source}");
+            assert!(
+                lines[0].spans.iter().all(|span| span.style.bold),
+                "{source}: every span of a title is bold"
+            );
+        }
+    }
+
+    #[test]
+    fn list_items_wear_a_dot() {
+        assert_eq!(plain("- one\n- two"), vec!["• one", "• two"]);
+        assert_eq!(plain("- one\n  - nested"), vec!["• one", "    • nested"]);
     }
 }

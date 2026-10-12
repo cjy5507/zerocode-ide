@@ -140,13 +140,43 @@ fn convert_style(syn_style: SyntectStyle) -> Style {
 /// Query the active syntax theme for the first foreground supplied by these
 /// `TextMate` scopes. Table headers and footer accents share this resolver with
 /// syntax highlighting instead of freezing one theme's RGB values at call sites.
+///
+/// The footer asks on every paint, and a `Highlighter` is built from the whole
+/// theme, so each scope list's answer is kept; the theme is fixed for the
+/// process, so an answer never goes stale (t-48216).
 pub(crate) fn foreground_style_for_scopes(scope_names: &[&str]) -> Option<Style> {
-    let highlighter = Highlighter::new(theme());
-    scope_names.iter().find_map(|scope_name| {
-        let scope = Scope::new(scope_name).ok()?;
-        let foreground = highlighter.style_mod_for_stack(&[scope]).foreground?;
-        convert_syntect_color(foreground).map(|color| Style::new().fg(color))
+    SCOPE_STYLES.with(|answers| {
+        let known = answers
+            .borrow()
+            .iter()
+            .find(|(scopes, _)| scopes.iter().map(String::as_str).eq(scope_names.iter().copied()))
+            .map(|(_, style)| *style);
+        if let Some(style) = known {
+            return style;
+        }
+        #[cfg(test)]
+        HIGHLIGHTERS_BUILT.with(|built| built.set(built.get() + 1));
+        let highlighter = Highlighter::new(theme());
+        let style = scope_names.iter().find_map(|scope_name| {
+            let scope = Scope::new(scope_name).ok()?;
+            let foreground = highlighter.style_mod_for_stack(&[scope]).foreground?;
+            convert_syntect_color(foreground).map(|color| Style::new().fg(color))
+        });
+        let scopes = scope_names.iter().map(|scope| (*scope).to_string()).collect();
+        answers.borrow_mut().push((scopes, style));
+        style
     })
+}
+
+thread_local! {
+    static SCOPE_STYLES: std::cell::RefCell<Vec<(Vec<String>, Option<Style>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many highlighters [`foreground_style_for_scopes`] built on this thread.
+    static HIGHLIGHTERS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 // -- 문법 찾기 ------------------------------------------------------------
@@ -468,5 +498,24 @@ mod tests {
         assert_eq!(plain(&lines), vec!["let a = 1;", "", "let b = 2;"]);
         assert_eq!(lines[1].spans.len(), 1);
         assert!(lines[1].spans[0].text.is_empty());
+    }
+}
+
+/// The footer asks for its accent colours on every paint (t-48216): the theme
+/// answers a scope list once.
+#[cfg(test)]
+mod scope_style_tests {
+    use super::{foreground_style_for_scopes, HIGHLIGHTERS_BUILT};
+
+    #[test]
+    fn a_scope_list_asks_the_theme_once() {
+        let scopes = ["markup.heading.scope-style-test", "keyword"];
+        let before = HIGHLIGHTERS_BUILT.with(std::cell::Cell::get);
+        let first = foreground_style_for_scopes(&scopes);
+        for _ in 0..8 {
+            assert_eq!(foreground_style_for_scopes(&scopes), first);
+        }
+        let built = HIGHLIGHTERS_BUILT.with(std::cell::Cell::get) - before;
+        assert!(built <= 1, "{built} highlighters were built for one scope list");
     }
 }

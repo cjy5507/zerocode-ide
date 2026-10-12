@@ -115,15 +115,22 @@ pub(super) fn unverified_completion_reminder(edits: &[&str], check: Option<&str>
     )
 }
 
+/// How the receipt opens — words a person reads, not an internal tag
+/// (t-48216). The TUI matches on this exact prefix to draw the receipt as
+/// check rows — keep every emitter on this constant.
+pub const COMPLETION_RECEIPT_LEAD: &str = "Checks passed after the last edit:";
+/// Between the receipt's commands.
+pub const COMPLETION_RECEIPT_SEPARATOR: &str = " · ";
+
 /// One transcript line receipting a turn that edited and then checked: the
 /// harness's own record that `commands` exited 0 after the last edit.
 #[must_use]
 pub(super) fn completion_receipt(commands: &[&str]) -> String {
     let listed: Vec<String> = commands
         .iter()
-        .map(|command| format!("{} ✓", crate::verified_state::first_line(command)))
+        .map(|command| crate::verified_state::first_line(command))
         .collect();
-    format!("[receipt] green after the last edit: {}", listed.join(" · "))
+    format!("{COMPLETION_RECEIPT_LEAD} {}", listed.join(COMPLETION_RECEIPT_SEPARATOR))
 }
 
 /// The shapes a tool call takes when written as prose rather than issued:
@@ -576,7 +583,7 @@ mod tests {
         assert!(reminder.contains("(/ws/src/a.rs)") && reminder.contains("`cargo build --tests`"));
         assert_eq!(
             completion_receipt(&["cargo test -p runtime\n# second line", "just clippy"]),
-            "[receipt] green after the last edit: cargo test -p runtime … ✓ · just clippy ✓"
+            "Checks passed after the last edit: cargo test -p runtime … · just clippy"
         );
     }
 
@@ -584,5 +591,19 @@ mod tests {
     fn empty_text_is_ignored() {
         assert_eq!(screen_turn_ending("", true), None);
         assert_eq!(screen_turn_ending("\n\n", true), None);
+    }
+}
+
+/// The receipt is read by a person (t-48216): plain words, no internal tag.
+#[cfg(test)]
+mod receipt_words_tests {
+    use super::completion_receipt;
+
+    #[test]
+    fn the_receipt_reads_as_plain_words_without_an_internal_tag() {
+        assert_eq!(
+            completion_receipt(&["cargo test", "cargo clippy"]),
+            "Checks passed after the last edit: cargo test · cargo clippy"
+        );
     }
 }

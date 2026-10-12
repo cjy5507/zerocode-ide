@@ -47,6 +47,12 @@ impl Prefix {
         )
     }
 
+    /// 답변 셀의 `  ` / `  ` — 불릿 없이 두 칸 들여 선다(t-48216).
+    #[must_use]
+    pub fn hang() -> Self {
+        Self::new(Span::raw("  "), Span::raw("  "))
+    }
+
     /// 유저 셀의 `› ` / `  `.
     #[must_use]
     pub fn user() -> Self {
@@ -782,6 +788,12 @@ pub struct MarkdownStream {
     pending: String,
     /// 확정 원문을 지금 폭으로 렌더한 표시 행 — codex `StreamingRender::lines`.
     rendered: Vec<Line>,
+    /// Rows already in the scrollback, let go from the front of `rendered`:
+    /// `emitted`, `enqueued` and `stable_lines` count from the answer's first
+    /// row, `rendered` holds what has not gone out (t-48216).
+    dropped: usize,
+    /// How many source lines those rows drew, for a resize to find its place.
+    dropped_logical: usize,
     /// 큐에 넣은 행 수 — codex `enqueued_stable_len`.
     enqueued: usize,
     /// 스크롤백으로 나간 행 수 — codex `emitted_stable_len`.
@@ -832,6 +844,8 @@ impl MarkdownStream {
             committed: String::new(),
             pending: String::new(),
             rendered: Vec::new(),
+            dropped: 0,
+            dropped_logical: 0,
             enqueued: 0,
             emitted: 0,
             queue: VecDeque::new(),
@@ -926,7 +940,7 @@ impl MarkdownStream {
         if self.committed.is_empty() {
             return;
         }
-        let lines_out = logical_lines(&self.rendered[..self.emitted.min(self.rendered.len())]);
+        let lines_out = self.dropped_logical + logical_lines(&self.rendered[..self.at(self.emitted)]);
         self.stable_prefix = None;
         self.open_code_fence = None;
         self.open_fence_pad.clear();
@@ -960,11 +974,11 @@ impl MarkdownStream {
     /// systems are bridged" 라고 적는다.
     fn tail_budget_from_source_start(&mut self, source_start: usize) -> usize {
         if source_start == 0 {
-            return self.rendered.len();
+            return self.total_rows();
         }
         let source_start = source_start.min(self.committed.len());
         let prefix_len = self.stable_prefix_len(source_start);
-        self.rendered.len().saturating_sub(prefix_len)
+        self.total_rows().saturating_sub(prefix_len)
     }
 
     /// 표 앞 구간을 지금 폭으로 렌더한 행 수. 캐시가 있는 이유는 원본과 같다 —
@@ -1060,10 +1074,9 @@ impl MarkdownStream {
         }
         self.sync_render(None);
         self.queue.clear();
-        let start = self.emitted.min(self.rendered.len());
-        let out = self.rendered[start..].to_vec();
-        self.emitted = self.rendered.len();
-        self.enqueued = self.rendered.len();
+        let out = self.rendered[self.at(self.emitted)..].to_vec();
+        self.emitted = self.total_rows();
+        self.enqueued = self.total_rows();
         self.policy.reset();
         self.open_code_fence = None;
         self.open_fence_pad.clear();
@@ -1098,10 +1111,10 @@ impl MarkdownStream {
     /// 올 때까지 화면은 `Working` 만 보여 준다.
     #[must_use]
     pub fn tail(&self) -> Vec<Line> {
-        if self.enqueued >= self.rendered.len() {
+        if self.enqueued >= self.total_rows() {
             return Vec::new();
         }
-        self.rendered[self.enqueued..].to_vec()
+        self.rendered[self.at(self.enqueued)..].to_vec()
     }
 
     /// 확정 영역의 경계를 밀고 새 행을 큐에 넣는다 — codex
@@ -1114,16 +1127,13 @@ impl MarkdownStream {
     /// 바닥이다.
     fn sync_stable_queue(&mut self) {
         let budget = self.active_tail_budget_lines();
-        let target = self
-            .rendered
-            .len()
-            .saturating_sub(budget)
-            .max(self.emitted);
+        let target = self.total_rows().saturating_sub(budget).max(self.emitted);
         if target < self.enqueued {
             self.queue.clear();
             if self.emitted < target {
                 let now = Instant::now();
-                for line in &self.rendered[self.emitted..target] {
+                let (from, to) = (self.at(self.emitted), self.at(target));
+                for line in &self.rendered[from..to] {
                     self.queue.push_back((line.clone(), now));
                 }
             }
@@ -1134,10 +1144,41 @@ impl MarkdownStream {
             return;
         }
         let now = Instant::now();
-        for line in &self.rendered[self.enqueued..target] {
+        let (from, to) = (self.at(self.enqueued), self.at(target));
+        for line in &self.rendered[from..to] {
             self.queue.push_back((line.clone(), now));
         }
         self.enqueued = target;
+    }
+
+    /// Rows drawn so far, counting those already let go.
+    fn total_rows(&self) -> usize {
+        self.dropped + self.rendered.len()
+    }
+
+    /// Where answer row `row` stands in `rendered`.
+    fn at(&self, row: usize) -> usize {
+        row.saturating_sub(self.dropped).min(self.rendered.len())
+    }
+
+    /// Rows already in the scrollback and settled are never read again — a
+    /// resize renders the source anew — so they are let go, at a source
+    /// line's edge so a resize can still count the lines that went out.
+    fn forget_emitted(&mut self) {
+        let mut gone = self.at(self.emitted.min(self.stable_lines));
+        let same_line = |above: &Line, below: &Line| match (&above.origin, &below.origin) {
+            (Some(above), Some(below)) => std::sync::Arc::ptr_eq(above, below),
+            _ => false,
+        };
+        while gone > 0 && gone < self.rendered.len() && same_line(&self.rendered[gone - 1], &self.rendered[gone]) {
+            gone -= 1;
+        }
+        if gone == 0 {
+            return;
+        }
+        self.dropped_logical += logical_lines(&self.rendered[..gone]);
+        self.rendered.drain(..gone);
+        self.dropped += gone;
     }
 
     fn drain(&mut self, rows: usize) -> Vec<Line> {
@@ -1147,6 +1188,7 @@ impl MarkdownStream {
         }
         let out: Vec<Line> = self.queue.drain(..take).map(|(line, _)| line).collect();
         self.emitted += out.len();
+        self.forget_emitted();
         self.opened(out)
     }
 
@@ -1169,7 +1211,14 @@ impl MarkdownStream {
     /// 뒤의 접기를 그대로 통과한다. codex 도 답변 스트림에
     /// `current_stream_width(/*reserved_cols*/ 2)` 를 준다.
     fn content_width(&self) -> usize {
-        self.width.saturating_sub(Prefix::bullet().width()).max(1)
+        self.width.saturating_sub(self.prefix().width()).max(1)
+    }
+
+    /// Reasoning keeps its bullet — its dim style marks it even once `finish`
+    /// hands its body on as an answer; an answer hangs two columns in without
+    /// one.
+    fn prefix(&self) -> Prefix {
+        if self.style.is_some() { Prefix::bullet() } else { Prefix::hang() }
     }
 
     /// 원문을 지금 폭의 표시 행으로. 마커(`• `)는 내용이 있는 첫 행이 가져가고
@@ -1194,9 +1243,9 @@ impl MarkdownStream {
             .rposition(|line| !line.plain().trim().is_empty())
             .map_or(0, |at| at + 1);
         let trailing = md.split_off(keep);
-        let (lines, marker) = prefixed_marking(&md, self.width, &Prefix::bullet(), first);
+        let (lines, marker) = prefixed_marking(&md, self.width, &self.prefix(), first);
         let (pad, _) =
-            prefixed_marking(&trailing, self.width, &Prefix::bullet(), first && !marker);
+            prefixed_marking(&trailing, self.width, &self.prefix(), first && !marker);
         Segment { lines, pad, marker }
     }
 
@@ -1255,13 +1304,13 @@ impl MarkdownStream {
             .map_or(0, |at| at + 1);
         self.open_fence_pad = visible.split_off(keep);
         if !visible.is_empty() {
-            if self.rendered.len() == self.stable_lines && self.stable_cut > 0 {
+            if self.total_rows() == self.stable_lines && self.stable_cut > 0 {
                 self.rendered.extend(self.stable_pad.iter().cloned());
                 self.rendered.push(Line::empty());
             }
-            let first = !self.stable_marker && self.rendered.is_empty();
+            let first = !self.stable_marker && self.total_rows() == 0;
             self.rendered
-                .extend(prefixed(&visible, self.width, &Prefix::bullet(), first));
+                .extend(prefixed(&visible, self.width, &self.prefix(), first));
         }
         self.open_code_fence = Some(fence);
         true
@@ -1275,6 +1324,8 @@ impl MarkdownStream {
         self.stable_pad.clear();
         self.stable_marker = false;
         self.rendered.clear();
+        self.dropped = 0;
+        self.dropped_logical = 0;
     }
 
     /// 경계를 지금 놓을 수 있는 데까지 민다. 새로 확정된 구간은 딱 한 번
@@ -1299,14 +1350,14 @@ impl MarkdownStream {
             // 하는지 알 수 없다. 그런 원문은 증분에서 뺀다(전체 렌더가 정답이다).
             return;
         }
-        self.rendered.truncate(self.stable_lines);
+        self.rendered.truncate(self.at(self.stable_lines));
         if self.stable_cut > 0 {
             let mut pad = std::mem::take(&mut self.stable_pad);
             self.rendered.append(&mut pad);
             self.rendered.push(Line::empty());
         }
         self.rendered.append(&mut fresh.lines);
-        self.stable_lines = self.rendered.len();
+        self.stable_lines = self.total_rows();
         self.stable_pad = fresh.pad;
         self.stable_marker |= fresh.marker;
         self.stable_cut = cut;
@@ -1320,7 +1371,7 @@ impl MarkdownStream {
     /// **꼬리가 살아 있을 때만** 도로 끼운다.
     fn render_mutable_tail(&mut self) {
         let tail = self.segment(&self.committed[self.stable_cut..], !self.stable_marker);
-        self.rendered.truncate(self.stable_lines);
+        self.rendered.truncate(self.at(self.stable_lines));
         if tail.lines.is_empty() {
             return;
         }
@@ -1349,7 +1400,7 @@ impl MarkdownStream {
                 })
                 .collect()
         };
-        let (want, got) = (rows(&full), rows(&self.rendered));
+        let (want, got) = (rows(&full[self.dropped.min(full.len())..]), rows(&self.rendered));
         (0..want.len().max(got.len())).find_map(|at| {
             let (left, right) = (want.get(at), got.get(at));
             (left != right).then(|| {
@@ -1365,6 +1416,8 @@ impl MarkdownStream {
     /// 지금 폭으로 `rendered` 를 처음부터 세운다 — 폭이 바뀔 때만.
     fn rebuild_render(&mut self) {
         self.rendered.clear();
+        self.dropped = 0;
+        self.dropped_logical = 0;
         self.stable_lines = 0;
         self.stable_pad.clear();
         self.stable_marker = false;
@@ -1539,23 +1592,23 @@ mod tests {
 
         stream.push("소개\n");
         let rows = drain(&mut stream, 4);
-        assert_eq!(rows, vec![String::new(), "• ### 자기소개".to_string()]);
+        assert_eq!(rows, vec![String::new(), "  자기소개".to_string()]);
         assert!(stream.tail().is_empty());
 
         stream.push("\n- 저는 개발자입니다\n");
         let rows = drain(&mut stream, 4);
-        assert_eq!(rows, vec![String::new(), "  - 저는 개발자입니다".to_string()]);
+        assert_eq!(rows, vec![String::new(), "  • 저는 개발자입니다".to_string()]);
     }
 
     /// Smooth 기어는 틱마다 한 행이다 — codex `chunking.rs` 의 기본 케이던스.
     #[test]
     fn smooth_mode_lets_one_row_out_per_tick() {
         let mut stream = MarkdownStream::answer(12);
-        // 폭 12 → `• ` 를 뺀 본문 열 칸. 세 행으로 접힌다.
+        // 폭 12 → 두 칸 들여쓰기를 뺀 본문 열 칸. 세 행으로 접힌다.
         stream.push("alpha beta gamma delta\n");
         let start = Instant::now();
         let first: Vec<String> = stream.tick(start).iter().map(Line::plain).collect();
-        assert_eq!(first, vec![String::new(), "• alpha beta".to_string()]);
+        assert_eq!(first, vec![String::new(), "  alpha beta".to_string()]);
         let second: Vec<String> = stream.tick(start).iter().map(Line::plain).collect();
         assert_eq!(second, vec!["  gamma".to_string()]);
         let third: Vec<String> = stream.tick(start).iter().map(Line::plain).collect();
@@ -1584,7 +1637,7 @@ mod tests {
             rows,
             vec![
                 String::new(),
-                "• alpha beta".to_string(),
+                "  alpha beta".to_string(),
                 "  gamma".to_string(),
             ]
         );
@@ -1620,7 +1673,7 @@ mod tests {
         let prose = drain(&mut stream, 8);
         assert_eq!(
             prose,
-            vec![String::new(), "• 여기 표가 있습니다".to_string()],
+            vec![String::new(), "  여기 표가 있습니다".to_string()],
             "prose before the table still commits"
         );
 
@@ -1719,7 +1772,7 @@ mod tests {
         let mut stream = MarkdownStream::answer(40);
         stream.push("one two three");
         let rows: Vec<String> = stream.finish().iter().map(Line::plain).collect();
-        assert_eq!(rows, vec![String::new(), "• one two three".to_string()]);
+        assert_eq!(rows, vec![String::new(), "  one two three".to_string()]);
         assert!(stream.finish().is_empty());
     }
 
@@ -1821,7 +1874,7 @@ mod tests {
         let mut stream = MarkdownStream::answer(12);
         stream.push("alpha beta gamma delta\n\nnext one\n");
         let first: Vec<String> = stream.tick(Instant::now()).iter().map(Line::plain).collect();
-        assert_eq!(first, vec![String::new(), "• alpha beta".to_string()]);
+        assert_eq!(first, vec![String::new(), "  alpha beta".to_string()]);
         stream.set_width(40);
         let rest = drain(&mut stream, 8);
         assert_eq!(rest, vec![String::new(), "  next one".to_string()]);
@@ -1835,7 +1888,7 @@ mod tests {
         stream.push("alpha beta\n");
         assert_eq!(
             drain(&mut stream, 8),
-            vec![String::new(), "• alpha beta".to_string()]
+            vec![String::new(), "  alpha beta".to_string()]
         );
         stream.set_width(60);
         assert!(drain(&mut stream, 8).is_empty());
@@ -2215,7 +2268,7 @@ mod tests {
         );
         let rows = prefixed(&lines, 14, &Prefix::bullet(), true);
         let plain: Vec<String> = rows.iter().map(Line::plain).collect();
-        assert_eq!(plain, ["• - alpha beta", "    gamma", "    delta", "    epsilon"]);
+        assert_eq!(plain, ["• • alpha beta", "    gamma", "    delta", "    epsilon"]);
     }
 
     /// A quote keeps its bar on every row it wraps into.
@@ -2277,6 +2330,62 @@ mod tests {
         assert!(
             rest.iter().any(|row| row.contains("second paragraph here")),
             "the paragraph after it still comes: {rest:?}"
+        );
+    }
+}
+
+/// The answer hangs two columns in without a bullet (t-48216): tool rows open
+/// on their status glyph in the first column, and an answer that also opened
+/// on `• ` read as one more row of the same list.
+#[cfg(test)]
+mod answer_cell_tests {
+    use std::time::{Duration, Instant};
+
+    use super::MarkdownStream;
+    use crate::tui::ansi::Line;
+
+    fn drain(stream: &mut MarkdownStream, ticks: usize) -> Vec<String> {
+        let start = Instant::now();
+        let mut out = Vec::new();
+        for step in 0..ticks {
+            let now = start + Duration::from_millis(step as u64);
+            out.extend(stream.tick(now).iter().map(Line::plain));
+        }
+        out
+    }
+
+    #[test]
+    fn an_answer_hangs_two_columns_in_without_a_bullet() {
+        let mut stream = MarkdownStream::answer(40);
+        stream.push("## 변경 요약\n\n- 하나\n");
+        let rows = drain(&mut stream, 8);
+        assert_eq!(
+            rows,
+            vec![
+                String::new(),
+                "  변경 요약".to_string(),
+                String::new(),
+                "  • 하나".to_string(),
+            ]
+        );
+    }
+
+    /// A row that went out to the scrollback is the terminal's to keep. The
+    /// stream holds only what has not gone out yet, so a long answer costs the
+    /// same few rows of memory at its end as at its start.
+    #[test]
+    fn rows_already_in_the_scrollback_are_not_kept() {
+        let mut stream = MarkdownStream::answer(60);
+        for paragraph in 0..400 {
+            stream.push(&format!("Paragraph {paragraph} of a long answer.\n\n"));
+            drain(&mut stream, 4);
+        }
+        drain(&mut stream, 64);
+        assert!(!stream.is_draining(), "everything committed has gone out");
+        assert!(
+            stream.rendered.len() < 16,
+            "{} rendered rows are still held for an answer whose rows all went out",
+            stream.rendered.len()
         );
     }
 }

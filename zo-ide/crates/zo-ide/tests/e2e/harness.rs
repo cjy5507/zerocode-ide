@@ -1096,9 +1096,15 @@ pub fn visible_row_occupancy(capture: &[u8], rows: usize) -> Vec<bool> {
         .collect()
 }
 
+/// A styled row ends on its colour resets. A row with no style of its own
+/// sends none: it is `\r\n`, its erase and its text, which holds no escape of
+/// its own, so the text ends at the first escape or the next row, whatever
+/// that escape begins (a reset of the scroll region, the next insertion's
+/// region, the end of the frame).
 fn scan_history_rows(capture: &[u8]) -> Vec<Vec<u8>> {
     const ERASE_LINE: &[u8] = b"\x1b[K";
     const LINE_TAIL: &[u8] = b"\x1b[39m\x1b[49m\x1b[0m";
+    const PLAIN_ENDS: [&[u8]; 3] = [b"\r\n", b"\x1b[r", b"\x1b[?2026l"];
     let mut rows = Vec::new();
     let mut cursor = 0;
     while let Some(relative) = find_bytes(&capture[cursor..], b"\r\n") {
@@ -1108,13 +1114,24 @@ fn scan_history_rows(capture: &[u8]) -> Vec<Vec<u8>> {
             continue;
         };
         let body_start = start + erase_relative + ERASE_LINE.len();
-        let Some(tail_relative) = find_bytes(&capture[body_start..], LINE_TAIL) else {
-            cursor = body_start;
-            continue;
-        };
-        let body_end = body_start + tail_relative;
-        rows.push(capture[body_start..body_end].to_vec());
-        cursor = body_end + LINE_TAIL.len();
+        let rest = &capture[body_start..];
+        let plain_end = PLAIN_ENDS
+            .iter()
+            .filter_map(|end| find_bytes(rest, end))
+            .min()
+            .unwrap_or(rest.len());
+        if let Some(tail_relative) = find_bytes(rest, LINE_TAIL).filter(|tail| *tail <= plain_end) {
+            let body_end = body_start + tail_relative;
+            rows.push(capture[body_start..body_end].to_vec());
+            cursor = body_end + LINE_TAIL.len();
+        } else {
+            let body = &rest[..plain_end];
+            let text_end = body.iter().position(|byte| *byte == 0x1b).unwrap_or(body.len());
+            if erase_relative == 0 {
+                rows.push(body[..text_end].to_vec());
+            }
+            cursor = body_start + text_end;
+        }
     }
     rows
 }
@@ -1211,6 +1228,19 @@ fn printable(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{match_end_after, parse_ps_time, slave_device_path, terminal_command, Terminal, CHILD_EXIT_TIMEOUT};
+
+    /// A plain row has no escape of its own, so the next insertion may follow
+    /// its text directly: the row is its text, not its text and that
+    /// insertion's scroll region.
+    #[test]
+    fn a_plain_row_ends_where_the_next_insertion_begins() {
+        let capture = "\x1b[1;14r\x1b[11;1H\r\n\x1b[K  first half\r\n\x1b[K  second half\x1b[1;14r\x1b[14;1H\r\n\x1b[K\r\n\x1b[39;49m\x1b[K  \x1b[1mstyled\x1b[39m\x1b[49m\x1b[0m\x1b[r";
+        let rows: Vec<String> = super::history_rows_raw(capture.as_bytes())
+            .iter()
+            .map(|row| String::from_utf8_lossy(row).into_owned())
+            .collect();
+        assert_eq!(rows, ["  first half", "  second half", "", "  \x1b[1mstyled"]);
+    }
     use std::fs::File;
     use std::io::Read;
     use std::process::Stdio;
