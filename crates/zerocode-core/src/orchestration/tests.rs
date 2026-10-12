@@ -338,7 +338,7 @@ struct Bench {
     /// session resumed into a new window, which is the case receipts exist
     /// for and the one a pane id can never model.
     actor: Option<String>,
-    gate_context: Option<gate_reuse::JobContext>,
+    gate_context: Option<super::gate_reuse::JobContext>,
 }
 
 impl Bench {
@@ -404,7 +404,9 @@ impl Bench {
         }
         let gate_context = matches!(
             argv.first().map(String::as_str),
-            Some(gate_reuse::REGISTER | gate_reuse::RECORD | gate_reuse::REUSE)
+            Some(
+                super::gate_reuse::REGISTER | super::gate_reuse::RECORD | super::gate_reuse::REUSE
+            )
         )
         .then_some(self.gate_context.as_ref())
         .flatten();

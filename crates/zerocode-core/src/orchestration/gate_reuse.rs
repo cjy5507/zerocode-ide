@@ -689,11 +689,10 @@ pub(super) fn validate_replay(
     }
     let id = if verb == REGISTER {
         let replay: serde_json::Value = parse(answer)?;
-        let id = replay["registration"]
+        replay["registration"]
             .as_str()
             .ok_or("unsupported gate retry answer")?
-            .to_string();
-        id
+            .to_string()
     } else {
         let metadata: Metadata = parse(body)?;
         metadata.registration

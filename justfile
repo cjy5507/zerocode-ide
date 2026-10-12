@@ -46,6 +46,7 @@ shell-lint:
 # 2026-09-11 (the signer's until 09-12) — the same silence the knowledge graph
 # tests had.
 tools-test:
+    python3 -I -S -B tools/release/tests/test_gate_receipt.py --receipt-mode routine -v
     python3 tools/release/tests/test_lane.py
     python3 tools/release/tests/test_win_check.py
     python3 tools/release/tests/test_bump.py

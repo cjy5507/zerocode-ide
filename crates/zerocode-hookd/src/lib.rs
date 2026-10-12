@@ -1048,17 +1048,21 @@ async fn receive_team_command(State(state): State<BridgeState>, request: Request
 }
 
 async fn receive_gate_open(State(state): State<BridgeState>, request: Request) -> Response {
-    let text = |name: &str| {
-        request
-            .headers()
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_string()
+    let (team, pane, capability) = {
+        let headers = request.headers();
+        let text = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string()
+        };
+        (
+            text(TEAM_ID_HEADER),
+            text(TEAM_PANE_HEADER),
+            text(TEAM_TOKEN_HEADER),
+        )
     };
-    let team = text(TEAM_ID_HEADER);
-    let pane = text(TEAM_PANE_HEADER);
-    let capability = text(TEAM_TOKEN_HEADER);
     if team.is_empty() || pane.is_empty() || capability.is_empty() {
         return refused("authority_unavailable: native gate owner");
     }

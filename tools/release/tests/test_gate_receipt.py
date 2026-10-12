@@ -18,6 +18,8 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gate_fixture import authorize, load_module
 
 SCRIPT = Path(__file__).resolve().parents[1] / "gate_receipt.py"
@@ -28,6 +30,22 @@ PASS = b"test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered 
 TAP = b"TAP version 13\nok 1 - fixture\n1..1\n# tests 1\n# suites 0\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 1.25\n"
 SPEC_OUTPUT = "✔ fixture (1.25ms)\nℹ tests 1\nℹ suites 0\nℹ pass 1\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 1.25\n".encode()
 UNITTEST = b"..\n----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nOK\n"
+
+
+def integration_case(method):
+    method.receipt_integration = True
+    return method
+
+
+class ReceiptTestLoader(unittest.TestLoader):
+    def __init__(self, mode):
+        super().__init__()
+        self.mode = mode
+
+    def getTestCaseNames(self, testCaseClass):
+        names = super().getTestCaseNames(testCaseClass)
+        return [name for name in names if self.mode == "all" or
+                getattr(getattr(testCaseClass, name), "receipt_integration", False) == (self.mode == "integration")]
 
 
 class RuntimeLocationTests(unittest.TestCase):
@@ -94,6 +112,7 @@ class FakeLedger:
         raise AssertionError(verb)
 
 
+@unittest.skipUnless(os.name == "posix", "receipt fixture requires POSIX executable aliases and native authority")
 class ReceiptTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -1023,7 +1042,8 @@ class ReceiptTests(unittest.TestCase):
                 self.repin_policy(original)
                 self.assertEqual(self.fingerprint(), baseline)
 
-    @unittest.skipIf(os.name == "nt", "private inherited descriptors require POSIX")
+    @integration_case
+    @unittest.skipUnless(sys.platform == "darwin", "Mach-O runtime fixture requires macOS")
     def test_bound_policy_and_strict_arguments_precede_any_producer_code(self):
         import socket
         good_marker = self.root / "approved-loader-ran"
@@ -1300,6 +1320,8 @@ process.exitCode = runner.report() ? 1 : 0;
         self.repin_policy(original)
         self.assertIsNotNone(gate.provenance(self.args))
 
+    @integration_case
+    @unittest.skipUnless(sys.platform == "darwin", "offline Cargo fixture requires an Apple SDK and linker")
     def test_real_offline_cargo_with_ignored_tests_and_first_writes_preserves_inputs(self):
         from gate_cargo_fixture import prepare
         environment, outputs = prepare(self.args, self.root, gate)
@@ -1329,5 +1351,46 @@ process.exitCode = runner.report() ? 1 : 0;
         self.assertIsNone(self.fingerprint()["source"])
 
 
+def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--receipt-mode", choices=("all", "routine", "integration"), default="all")
+    options, arguments = parser.parse_known_args()
+    loader = ReceiptTestLoader(options.receipt_mode)
+    available = loader.loadTestsFromModule(sys.modules[__name__]).countTestCases()
+    complete = ReceiptTestLoader("all").loadTestsFromModule(sys.modules[__name__]).countTestCases()
+    print("receipt-mode=%s profile-methods=%d all-methods=%d excluded-methods=%d" %
+          (options.receipt_mode, available, complete, complete - available), flush=True)
+    original_home = Path.home()
+    tool_environment = {name: os.environ[name] for name in (
+        "PATH", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "DEVELOPER_DIR", "SDKROOT",
+        "HERDR_FIXTURE_TOOLCHAIN", "HERDR_FIXTURE_DEVELOPER_DIR", "HERDR_FIXTURE_SDKROOT",
+        "HERDR_FIXTURE_LINKER", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT",
+    ) if name in os.environ}
+    tool_environment.setdefault("PATH", os.defpath)
+    tool_environment.setdefault("RUSTUP_HOME", str(original_home / ".rustup"))
+    with tempfile.TemporaryDirectory(prefix="receipt-tests-") as folder:
+        scratch = Path(folder).resolve()
+        home, temporary = scratch / "home", scratch / "tmp"
+        home.mkdir()
+        temporary.mkdir()
+        environment = {
+            **tool_environment, "HOME": str(home), "USERPROFILE": str(home),
+            "XDG_CONFIG_HOME": str(home / "config"), "XDG_DATA_HOME": str(home / "data"),
+            "XDG_CACHE_HOME": str(home / "cache"), "APPDATA": str(home / "appdata"),
+            "LOCALAPPDATA": str(home / "localappdata"), "CARGO_HOME": str(home / "cargo"),
+            "TMPDIR": str(temporary), "TMP": str(temporary), "TEMP": str(temporary),
+            "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "ZO_DISABLE_KEYCHAIN": "1",
+            "RUSTUP_AUTO_INSTALL": "0", "CARGO_NET_OFFLINE": "true",
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+        }
+        with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(tempfile, "tempdir", str(temporary)):
+            program = unittest.main(argv=[sys.argv[0], *arguments], testLoader=loader, exit=False)
+            result = program.result
+            print("receipt-summary selected=%d executed=%d skipped=%d excluded=%d failures=%d errors=%d expected-failures=%d unexpected-successes=%d" %
+                  (result.testsRun, result.testsRun - len(result.skipped), len(result.skipped), complete - available,
+                   len(result.failures), len(result.errors), len(result.expectedFailures), len(result.unexpectedSuccesses)), flush=True)
+            raise SystemExit(0 if result.wasSuccessful() else 1)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    main()

@@ -1,14 +1,36 @@
 import os
 from pathlib import Path
+import subprocess
+
+
+def installed_path(variable, command):
+    value = os.environ.get(variable)
+    if not value:
+        environment = {name: os.environ[name] for name in
+                       ("PATH", "HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "DEVELOPER_DIR", "SDKROOT")
+                       if name in os.environ}
+        environment.update(LANG="C", LC_ALL="C", RUSTUP_AUTO_INSTALL="0")
+        result = subprocess.run(command, env=environment, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, check=False, timeout=30)
+        if result.returncode:
+            raise AssertionError("offline fixture tool discovery failed: %s rc=%d: %s" %
+                                 (command[0], result.returncode, result.stderr.decode(errors="replace")))
+        value = result.stdout.decode().strip()
+        if not value or "\n" in value or "\r" in value:
+            raise AssertionError("offline fixture tool discovery is ambiguous")
+    path = Path(value)
+    if not path.is_absolute():
+        raise AssertionError("offline fixture tool discovery needs an absolute path")
+    return path.resolve(strict=True)
 
 
 def prepare(args, root, producer):
     root = Path(root).resolve()
     repo = Path(args.repo).resolve()
-    toolchain = Path(os.environ["HERDR_FIXTURE_TOOLCHAIN"]).resolve(strict=True)
-    developer = Path(os.environ["HERDR_FIXTURE_DEVELOPER_DIR"]).resolve(strict=True)
-    sdk = Path(os.environ["HERDR_FIXTURE_SDKROOT"]).resolve(strict=True)
-    linker = Path(os.environ["HERDR_FIXTURE_LINKER"]).resolve(strict=True)
+    toolchain = installed_path("HERDR_FIXTURE_TOOLCHAIN", ["rustc", "--print", "sysroot"])
+    developer = installed_path("HERDR_FIXTURE_DEVELOPER_DIR", ["xcode-select", "-p"])
+    sdk = installed_path("HERDR_FIXTURE_SDKROOT", ["xcrun", "--show-sdk-path"])
+    linker = installed_path("HERDR_FIXTURE_LINKER", ["xcrun", "--find", "clang"])
     if not sdk.is_relative_to(developer) or not linker.is_relative_to(developer):
         raise AssertionError("offline fixture needs a declared SDK and linker closure")
     package = repo / "cargo-fixture"
