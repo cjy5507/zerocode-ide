@@ -4755,15 +4755,36 @@ function askAnswerInTerminal(ask) {
   );
 }
 
+/* What the backend answers for a card whose session it can no longer reach:
+ * it holds no channel for the session, or the channel it holds refuses the
+ * connection (`SESSION_UNREACHABLE`, shell_runtime.rs). A marker, not prose —
+ * the sentence is the window's own. */
+const ASK_SESSION_UNREACHABLE = "zerocode:session-unreachable";
+
 /* What the two kinds an agent's channel raises share: the road their answer
  * takes (`permission.respond`, by the prompt's own id), the other place they
- * can be answered, and what they do to the lane behind them. */
+ * can be answered, and what they do to the lane behind them. An answer that
+ * nobody is left to take cannot succeed on a retry, so the session's
+ * questions leave the way a session end takes them, and the person is told
+ * the answer went nowhere (t-51007). */
 const askFromChannel = {
   deliver: (ask, choice) =>
     invoke("respond_permission", {
       session: ask.session,
       promptId: ask.frame.prompt_id,
       decision: choice.decision,
+    }).catch((error) => {
+      if (error === ASK_SESSION_UNREACHABLE) {
+        withdrawPermissions(ask.session);
+        toast(
+          t(
+            "perm.unreachable",
+            "이 질문을 한 세션에 더는 닿을 수 없습니다 — 답을 받을 곳이 없어 질문을 닫았습니다.",
+          ),
+          "halt",
+        );
+      }
+      throw error;
     }),
   refused: askAnswerInTerminal,
   raised: (ask) => askGateLane(ask.session, "awaiting_permission"),
