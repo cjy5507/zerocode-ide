@@ -12,6 +12,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -465,6 +466,8 @@ class ReceiptTests(unittest.TestCase):
         for log in (
             TAP.replace(b"# fail 0", b"# fail 1"),
             TAP.replace(b"# cancelled 0", b"# cancelled 1"),
+            TAP.replace(b"ok 1 - fixture", b"not ok 1 - fixture").replace(b"# pass 1", b"# pass 0").replace(b"# cancelled 0", b"# cancelled 1"),
+            SPEC_OUTPUT.replace("✔ fixture".encode(), "✖ fixture".encode()).replace("ℹ pass 1".encode(), "ℹ pass 0".encode()).replace("ℹ cancelled 0".encode(), "ℹ cancelled 1".encode()),
             TAP.replace(b"# skipped 0", b"# skipped 1"),
             TAP.replace(b"# todo 0", b"# todo 1"),
             TAP.replace(b"# duration_ms 1.25\n", b""),
@@ -749,7 +752,8 @@ class ReceiptTests(unittest.TestCase):
         node_cases = {
             "pass": "const test=require('node:test'); test('control',()=>{});\n",
             "failure": "const test=require('node:test'); const assert=require('node:assert/strict'); for(let i=0;i<7;i++) test('control-'+i,()=>assert.ok(i<2));\n",
-            "cancelled": "const test=require('node:test'); const controller=new AbortController(); test('control',{signal:controller.signal},async()=>{console.log('fixture cancellation began'); setTimeout(()=>controller.abort(),100); await new Promise(()=>{});});\n",
+            "cancelled": "const test=require('node:test'); const controller=new AbortController(); controller.signal.addEventListener('abort',()=>console.log('fixture abort signal fired '+controller.signal.aborted),{once:true}); test('control',{signal:controller.signal},async()=>{console.log('fixture cancellation began'); setTimeout(()=>controller.abort(),100); await new Promise(()=>{});});\n",
+            "cancelled-by-parent": "const test=require('node:test'); test('parent',async context=>{let signalStarted; const started=new Promise(resolve=>{signalStarted=resolve;}); context.test('child',async()=>{console.log('fixture child cancellation began'); signalStarted(); await new Promise(resolve=>setTimeout(resolve,100));}); await started;});\n",
             "abort": "process.exit(3);\n",
             "zero": "",
         }
@@ -788,10 +792,35 @@ class ReceiptTests(unittest.TestCase):
                         if label == "failure":
                             for name, count in (("tests", 7), ("pass", 2), ("fail", 5)):
                                 self.assertRegex(log.decode(), rf"(?:#|ℹ) {name} {count}\b")
-                        if label == "cancelled":
-                            self.assertIn(b"fixture cancellation began", log)
+                        if label in ("cancelled", "cancelled-by-parent"):
+                            text = log.decode()
+                            fields = re.findall(r"(?m)^(?:#|ℹ) (tests|suites|pass|fail|cancelled|skipped|todo) ([0-9]+)$", text)
+                            self.assertEqual(len(fields), 7, log)
+                            summary = {name: int(count) for name, count in fields}
+                            self.assertEqual(set(summary), {"tests", "suites", "pass", "fail", "cancelled", "skipped", "todo"}, log)
+                            self.assertEqual(summary["tests"], summary["pass"] + summary["fail"] + summary["cancelled"], log)
+                            self.assertEqual(summary["suites"], 0, log)
+                            self.assertEqual(summary["skipped"], 0, log)
+                            self.assertEqual(summary["todo"], 0, log)
+                            self.assertEqual(ledger.metadata["rc"], 1, log)
                             self.assertLess(ledger.metadata["durationMs"], int(self.args.timeout * 1000))
-                            self.assertRegex(log.decode(), r"(?:#|ℹ) cancelled 1\b")
+                            durations = re.findall(r"(?m)^(?:#|ℹ) duration_ms ([0-9]+(?:\.[0-9]+)?)$", text)
+                            self.assertEqual(len(durations), 1, log)
+                            self.assertGreater(float(durations[0]), 0, log)
+                            if reporter == "tap":
+                                self.assertRegex(text, rf"(?m)^1\.\.{summary['tests']}$")
+                            if label == "cancelled":
+                                self.assertIn(b"fixture cancellation began", log)
+                                self.assertIn(b"fixture abort signal fired true", log)
+                                self.assertRegex(text, r"AbortError|AbortController\.abort")
+                                self.assertEqual(summary["tests"], 1, log)
+                                self.assertEqual(summary["pass"], 0, log)
+                                self.assertEqual(summary["fail"] + summary["cancelled"], 1, log)
+                            else:
+                                self.assertIn(b"fixture child cancellation began", log)
+                                self.assertIn(b"test did not finish before its parent", log)
+                                self.assertEqual(summary["tests"], 2, log)
+                                self.assertEqual(summary["cancelled"], 1, log)
         py_test = self.root / "runner_control.py"
         empty = self.root / "empty-unittest"
         empty.mkdir()

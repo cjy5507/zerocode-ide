@@ -2,18 +2,19 @@
 //! The HTTP listener is test transport. All capabilities and the HOME belong to this fixture.
 //! This does not launch the installed window, use its accounts, or validate a release gate.
 use super::*;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use zerocode_core::agent_teams::{TEAM_ID_VAR, TEAM_PANE_VAR, TEAM_TOKEN_VAR, shim_script};
 
 const HOOK: &str = "test-only-hook-capability";
 const CHILD: &str = "runtime_actor::tests::gate_reuse::receipt_gate_child";
+const HTTP_IO_BUDGET: Duration = Duration::from_secs(10);
 
 #[test]
 fn receipt_gate_child() {
@@ -202,12 +203,11 @@ fn assert_no_inherited_gate_authority() {
 }
 
 struct CliFixture {
+    _server: FixtureHttpServer,
     actor: Arc<RuntimeActor>,
-    stop: Arc<AtomicBool>,
     old_api: Arc<AtomicBool>,
     gate_open_attempts: Arc<AtomicUsize>,
     panes: TableFixture,
-    serving: Option<thread::JoinHandle<()>>,
     port: u16,
     root: PathBuf,
     script: PathBuf,
@@ -219,21 +219,83 @@ struct CliFixture {
     output: std::sync::Mutex<PathBuf>,
 }
 
+struct FixtureHttpServer {
+    stop: Arc<AtomicBool>,
+    serving: Option<thread::JoinHandle<()>>,
+}
+
+fn bounded_socket_io(
+    stream: &mut TcpStream,
+    stop: &AtomicBool,
+    deadline: Instant,
+    mut operation: impl FnMut(&mut TcpStream) -> io::Result<usize>,
+) -> io::Result<usize> {
+    let mut last_wait = None;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "fixture HTTP shutdown requested",
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("fixture HTTP deadline expired; last I/O error: {last_wait:?}"),
+            ));
+        }
+        let interval = remaining.min(Duration::from_millis(50));
+        stream.set_read_timeout(Some(interval))?;
+        stream.set_write_timeout(Some(interval))?;
+        match operation(stream) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) =>
+            {
+                last_wait = Some(error);
+            }
+            result => return result,
+        }
+    }
+}
+
 fn http_request(
     stream: &mut TcpStream,
-) -> (std::collections::HashMap<String, String>, Vec<u8>, String) {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> io::Result<(std::collections::HashMap<String, String>, Vec<u8>, String)> {
+    stream.set_nonblocking(false)?;
     let mut bytes = Vec::new();
     let split = loop {
         let mut block = [0_u8; 4096];
-        let n = stream.read(&mut block).unwrap();
-        assert!(
-            n > 0 && bytes.len() + n <= 128 * 1024,
-            "bounded complete fixture request"
-        );
-        bytes.extend_from_slice(&block[..n]);
+        let count = bounded_socket_io(stream, stop, deadline, |stream| stream.read(&mut block))
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "fixture request headers after {} bytes: {error}",
+                        bytes.len()
+                    ),
+                )
+            })?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("incomplete fixture request headers: {} bytes", bytes.len()),
+            ));
+        }
+        if bytes.len() + count > 128 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "fixture request headers exceed 128 KiB",
+            ));
+        }
+        bytes.extend_from_slice(&block[..count]);
         if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
             break index + 4;
         }
@@ -248,9 +310,29 @@ fn http_request(
     assert!(length <= 64 * 1024);
     while bytes.len() < split + length {
         let mut block = [0_u8; 4096];
-        let n = stream.read(&mut block).unwrap();
-        assert!(n > 0);
-        bytes.extend_from_slice(&block[..n]);
+        let remaining = (split + length - bytes.len()).min(block.len());
+        let count = bounded_socket_io(stream, stop, deadline, |stream| {
+            stream.read(&mut block[..remaining])
+        })
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "fixture request body after {} of {length} bytes: {error}",
+                    bytes.len() - split
+                ),
+            )
+        })?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "incomplete fixture request body: {} of {length} bytes",
+                    bytes.len() - split
+                ),
+            ));
+        }
+        bytes.extend_from_slice(&block[..count]);
     }
     let path = std::str::from_utf8(&bytes[..split])
         .unwrap()
@@ -261,7 +343,41 @@ fn http_request(
         .nth(1)
         .unwrap()
         .to_string();
-    (headers, bytes[split..split + length].to_vec(), path)
+    Ok((headers, bytes[split..split + length].to_vec(), path))
+}
+
+fn http_response(
+    stream: &mut TcpStream,
+    bytes: &[u8],
+    stop: &AtomicBool,
+    deadline: Instant,
+) -> io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        let count = bounded_socket_io(stream, stop, deadline, |stream| {
+            stream.write(&bytes[written..])
+        })
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "fixture response after {written} of {} bytes: {error}",
+                    bytes.len()
+                ),
+            )
+        })?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                format!(
+                    "incomplete fixture response: {written} of {} bytes",
+                    bytes.len()
+                ),
+            ));
+        }
+        written += count;
+    }
+    Ok(())
 }
 
 impl CliFixture {
@@ -366,7 +482,9 @@ impl CliFixture {
                         }
                         Err(why) => panic!("fixture transport: {why}"),
                     };
-                    let (headers, bytes, path) = http_request(&mut stream);
+                    let deadline = Instant::now() + HTTP_IO_BUDGET;
+                    let (headers, bytes, path) = http_request(&mut stream, &stop, deadline)
+                        .unwrap_or_else(|error| panic!("fixture transport request: {error}"));
                     if path == "/gate-sessions/open" {
                         gate_open_attempts.fetch_add(1, Ordering::SeqCst);
                     }
@@ -429,19 +547,26 @@ impl CliFixture {
                             ),
                         }
                     };
-                    write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    let response = format!(
+                        "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    http_response(&mut stream, response.as_bytes(), &stop, deadline)
+                        .unwrap_or_else(|error| panic!("fixture transport response: {error}"));
                 }
             })
         };
         let script =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/release/gate_receipt.py");
         let mut held = Self {
+            _server: FixtureHttpServer {
+                stop,
+                serving: Some(serving),
+            },
             actor,
-            stop,
             old_api,
             gate_open_attempts,
             panes,
-            serving: Some(serving),
             port,
             root,
             script,
@@ -971,11 +1096,164 @@ fn the_identical_probe_requires_a_scoped_job_even_with_full_fixture_authority() 
     assert_eq!(hit["newExecutions"], 0);
 }
 
-impl Drop for CliFixture {
+impl Drop for FixtureHttpServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.serving.take().unwrap().join().unwrap();
+        let Some(serving) = self.serving.take() else {
+            return;
+        };
+        let deadline = Instant::now() + HTTP_IO_BUDGET;
+        while !serving.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let failure = if serving.is_finished() {
+            serving.join().err().map(|payload| {
+                let reason = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("non-string panic payload");
+                format!("fixture HTTP server panicked: {reason}")
+            })
+        } else {
+            Some("fixture HTTP server did not stop within 10 seconds".to_string())
+        };
+        if let Some(failure) = failure {
+            if thread::panicking() {
+                let _ = writeln!(io::stderr().lock(), "{failure}");
+            } else {
+                panic!("{failure}");
+            }
+        }
     }
+}
+
+fn fixture_socket_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client =
+        TcpStream::connect_timeout(&listener.local_addr().unwrap(), Duration::from_secs(2))
+            .unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    (listener.accept().unwrap().0, client)
+}
+
+#[test]
+fn http_transport_completes_fragmented_io_on_an_inherited_nonblocking_socket() {
+    let (mut server, mut client) = fixture_socket_pair();
+    server.set_nonblocking(true).unwrap();
+    let response = vec![b'x'; 16 * 1024];
+    let expected = response.clone();
+    let receiving = thread::spawn(move || {
+        for part in [
+            b"POST /fixture HTTP/1.1\r\nContent-Length: 6\r\n".as_slice(),
+            b"\r\nabc",
+            b"def",
+        ] {
+            client.write_all(part).unwrap();
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).unwrap();
+        assert_eq!(received, expected);
+    });
+    let stop = AtomicBool::new(false);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (headers, bytes, path) = http_request(&mut server, &stop, deadline).unwrap();
+    assert_eq!(headers["content-length"], "6");
+    assert_eq!(bytes, b"abcdef");
+    assert_eq!(path, "/fixture");
+    http_response(&mut server, &response, &stop, deadline).unwrap();
+    drop(server);
+    receiving.join().unwrap();
+}
+
+#[test]
+fn http_transport_rejects_an_incomplete_request_at_the_deadline() {
+    let (mut server, mut client) = fixture_socket_pair();
+    client
+        .write_all(b"POST /fixture HTTP/1.1\r\nContent-Length: 4\r\n\r\nab")
+        .unwrap();
+    let error = http_request(
+        &mut server,
+        &AtomicBool::new(false),
+        Instant::now() + Duration::from_millis(100),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("fixture HTTP deadline expired"));
+}
+
+#[test]
+fn fixture_server_shutdown_interrupts_an_incomplete_read() {
+    let (mut server, mut client) = fixture_socket_pair();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::clone(&stop);
+    let (ready, started) = std::sync::mpsc::channel();
+    let serving = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut block = [0_u8; 1];
+        let count = bounded_socket_io(&mut server, &stopping, deadline, |stream| {
+            stream.read(&mut block)
+        })
+        .unwrap();
+        assert_eq!(count, 1);
+        ready.send(()).unwrap();
+        let error = bounded_socket_io(&mut server, &stopping, deadline, |stream| {
+            stream.read(&mut block)
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    });
+    let server = FixtureHttpServer {
+        stop,
+        serving: Some(serving),
+    };
+    client.write_all(b"P").unwrap();
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    drop(server);
+    assert_eq!(client.read(&mut [0_u8; 1]).unwrap(), 0);
+}
+
+#[test]
+fn fixture_server_preserves_a_thread_panic_as_a_test_failure() {
+    let failure = std::panic::catch_unwind(|| {
+        let _server = FixtureHttpServer {
+            stop: Arc::new(AtomicBool::new(false)),
+            serving: Some(thread::spawn(|| {
+                panic!("fixture server regression failure")
+            })),
+        };
+    })
+    .unwrap_err();
+    assert!(
+        failure
+            .downcast_ref::<String>()
+            .unwrap()
+            .contains("fixture server regression failure")
+    );
+}
+
+#[test]
+fn fixture_server_does_not_panic_again_while_a_test_unwinds() {
+    let failure = std::panic::catch_unwind(|| {
+        let _server = FixtureHttpServer {
+            stop: Arc::new(AtomicBool::new(false)),
+            serving: Some(thread::spawn(|| {
+                panic!("fixture server regression failure")
+            })),
+        };
+        panic!("primary fixture regression failure");
+    })
+    .unwrap_err();
+    assert_eq!(
+        failure.downcast_ref::<&str>(),
+        Some(&"primary fixture regression failure")
+    );
 }
 
 fn reuse_observation(fixture: &CliFixture) -> Value {
