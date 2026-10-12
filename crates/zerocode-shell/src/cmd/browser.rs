@@ -1682,8 +1682,6 @@ fn hide_browser_pane(pane: &BrowserPane, main_webview: &tauri::Webview) -> Resul
         let main_webview = main_webview.clone();
         let (answer, read) = std::sync::mpsc::sync_channel(1);
         pane.with_webview(move |platform| {
-            // Wry's hide is NSView.setHidden as well. Keep the ownership check
-            // and hide in this main-thread callback, before focus can change.
             unsafe {
                 let view = platform.inner().cast::<objc2::runtime::AnyObject>();
                 let owned = crate::browser_runtime::browser_view_owns_first_responder(view);

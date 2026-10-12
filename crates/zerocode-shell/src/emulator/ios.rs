@@ -409,6 +409,16 @@ fn shutdown_simulator_by(mut command: Command, udid: &str) -> Result<(), String>
 /// window that is not there yet.
 #[cfg(target_os = "macos")]
 fn prepare_simulator_services(udid: &str) {
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+
+    let bundle = NSString::from_str("com.apple.iphonesimulator");
+    if NSRunningApplication::runningApplicationsWithBundleIdentifier(&bundle)
+        .firstObject()
+        .is_some()
+    {
+        return;
+    }
     let _ = crate::proc::quiet_command("open")
         .args([
             "-gj",
@@ -1361,9 +1371,6 @@ pub(crate) async fn start_emulator_stream(
             waking,
         );
         prepare_simulator_services(&chosen.udid);
-        // The helper reads this device's framebuffer without a visible window.
-        // Never hide the Simulator application: it may show other devices the
-        // person is using. The existing -gj launch remains non-activating.
         // The input helper is NOT asked for here. Its cold start costs
         // 247-495ms on this machine (dlopen of the active Xcode's private
         // frameworks, then a SimServiceContext), and none of that is on the
@@ -2734,8 +2741,6 @@ mod tests {
             BootWatch::already_up()
         };
         if flag("ZEROCODE_LIVE_SIMULATOR_APP", "1") {
-            // Match stream startup's non-activating launch. Leave any Simulator
-            // application the person already opened visible.
             prepare_simulator_services(&udid);
             println!(
                 "LIVE: +{}ms Simulator.app launch requested without activation",

@@ -10,8 +10,6 @@ const chromium = read("../../crates/zerocode-shell/src/chromium_browser.rs");
 const ios = read("../../crates/zerocode-shell/src/emulator/ios.rs");
 const simulator = read("../../crates/zerocode-shell/src/simulator_window.rs");
 
-// Run the production close function. Native browser focus is checked
-// separately below; this harness measures only the main document's receiver.
 const closeSource = status.match(/^function closeTab\(.*?^\}/ms)?.[0];
 assert.ok(closeSource, "the production closeTab function is present");
 
@@ -57,9 +55,6 @@ for (const receiver of ["body", "chrome"]) {
   });
 }
 
-// These are source contracts, not native GUI evidence. Only the engine can
-// check which native view owns firstResponder; the generic IPC command must
-// not request host focus after every hide.
 test("browser placement delegates focus return instead of always focusing the main webview", () => {
   const place = browserCommands.match(/pub\(crate\) fn browser_place\([\s\S]*?\n\}/)?.[0];
   assert.ok(place, "browser_place is present");
@@ -80,4 +75,10 @@ test("an in-window iOS stream never hides the whole Simulator application", () =
   assert.ok(start, "start_emulator_stream is present");
   assert.doesNotMatch(start, /hide_simulator\(/);
   assert.doesNotMatch(simulator, /running\.hide\(/);
+});
+
+test("Simulator preparation source leaves an already running application alone", () => {
+  const prepare = ios.match(/fn prepare_simulator_services\(udid: &str\)\s*\{[\s\S]*?\n\}/)?.[0];
+  assert.ok(prepare, "the macOS service preparation is present");
+  assert.match(prepare, /runningApplicationsWithBundleIdentifier\(&bundle\)[\s\S]*?\.is_some\(\)\s*\{\s*return;\s*\}[\s\S]*?quiet_command\("open"\)/);
 });

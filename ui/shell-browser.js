@@ -2739,8 +2739,6 @@ let emulatorTabSeq = 0;
  * 넘겨주기·이름표 갈아입기·H264 터널로 갈아타기 — 는 `switchEmulatorDevice`가
  * 이미 전부 들고 있다. 여기서 다시 쓰지 않는다. */
 async function openEmulatorTab(platform = "ios", device, { from = null, agent = false } = {}) {
-  // 자동 열기는 요청한 판의 그룹에 비활성 탭으로 추가한다. caller가 없어도
-  // 현재 그룹에 탭만 추가하며 활성 탭·포커스·분할을 바꾸지 않는다.
   const caller = from === null ? null : tabOfTerm(from);
   const away = caller !== null && caller.worktree !== activeWorktreePath;
   if (agent && caller === null) {

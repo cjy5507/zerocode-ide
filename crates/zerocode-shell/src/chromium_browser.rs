@@ -644,8 +644,6 @@ impl BrowserPane {
     pub(crate) fn hide(&self, main_webview: tauri::Webview) -> Result<(), String> {
         on_ui(&self.app, &self.label, move |pane| {
             let view = pane.native_view()?;
-            // The check and hide share the native UI turn. Hiding a different
-            // pane must leave the current browser or main-document field alone.
             let owned = unsafe { crate::browser_runtime::browser_view_owns_first_responder(view) };
             pane.set_hidden(true)?;
             if owned {
