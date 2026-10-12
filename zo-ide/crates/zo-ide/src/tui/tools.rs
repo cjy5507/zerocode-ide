@@ -465,14 +465,15 @@ pub struct ToolGroup {
     calls: Vec<ToolCall>,
     /// Diff syntax parsing is expensive and this cell is drawn every frame.
     /// A completed edit's diff is immutable, so only a width change invalidates
-    /// its rendered lines; mutations clear this cache below.
-    diff_cache: RefCell<Option<(usize, Vec<Line>)>>,
+    /// its rendered lines; mutations clear this cache below. Keyed by call id:
+    /// a group holds several edits.
+    diff_cache: RefCell<Vec<(String, usize, Vec<Line>)>>,
 }
 
 impl ToolGroup {
     #[must_use]
     pub fn new(call: ToolCall) -> Self {
-        Self { calls: vec![call], diff_cache: RefCell::new(None) }
+        Self { calls: vec![call], diff_cache: RefCell::default() }
     }
 
     #[must_use]
@@ -615,7 +616,7 @@ impl ToolGroup {
 
     pub fn push(&mut self, call: ToolCall) {
         self.calls.push(call);
-        self.diff_cache.get_mut().take();
+        self.diff_cache.get_mut().clear();
     }
 
     /// 결과를 붙인다. 그 id 의 호출이 없으면 거짓 — codex 도
@@ -630,7 +631,7 @@ impl ToolGroup {
             return false;
         };
         self.calls.remove(index);
-        self.diff_cache.get_mut().take();
+        self.diff_cache.get_mut().clear();
         true
     }
 
@@ -647,7 +648,7 @@ impl ToolGroup {
             call.kind = kind;
         }
         call.done = Some(outcome);
-        self.diff_cache.get_mut().take();
+        self.diff_cache.get_mut().clear();
         true
     }
 
@@ -671,7 +672,7 @@ impl ToolGroup {
                 });
             }
         }
-        self.diff_cache.get_mut().take();
+        self.diff_cache.get_mut().clear();
     }
 
     /// 이 셀을 지금 히스토리로 넘겨야 하는가 — codex `ExecCell::should_flush`.
@@ -764,17 +765,20 @@ impl ToolGroup {
         }
     }
 
-    fn cached_diff_lines(&self, view: &DiffView, width: usize) -> Vec<Line> {
+    fn cached_diff_lines(&self, id: &str, view: &DiffView, width: usize) -> Vec<Line> {
         {
             let cache = self.diff_cache.borrow();
-            if let Some((cached_width, lines)) = cache.as_ref() {
-                if *cached_width == width {
-                    return lines.clone();
-                }
+            let hit = cache
+                .iter()
+                .find(|(cached, cached_width, _)| cached == id && *cached_width == width);
+            if let Some((_, _, lines)) = hit {
+                return lines.clone();
             }
         }
         let lines = super::diff::hunk_lines(view, width);
-        *self.diff_cache.borrow_mut() = Some((width, lines.clone()));
+        let mut cache = self.diff_cache.borrow_mut();
+        cache.retain(|(cached, _, _)| cached != id);
+        cache.push((id.to_string(), width, lines.clone()));
         lines
     }
 
@@ -841,7 +845,11 @@ impl ToolGroup {
             out.extend(output_block(&reason, width));
         }
         if let Some(change) = change {
-            let drawn = self.cached_diff_lines(&change.view, width.saturating_sub(DIFF_INDENT).max(1));
+            let drawn = self.cached_diff_lines(
+                &call.id,
+                &change.view,
+                width.saturating_sub(DIFF_INDENT).max(1),
+            );
             out.extend(change_body(change, drawn).into_iter().map(|mut line| {
                 line.spans.insert(0, Span::raw(" ".repeat(DIFF_INDENT)));
                 line
