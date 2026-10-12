@@ -125,21 +125,20 @@ fn history_insertion_grammar_is_the_captured_one() {
     );
 }
 
-/// 캡처의 빈 히스토리 줄 한 개 — `\r\n` + 색 리셋 + EL + 되돌림.
+/// 빈 히스토리 줄 한 개 — `\r\n` + EL 뿐이다(t-48216). 캡처의 codex 는 색 리셋과
+/// 되돌림 세 개로 감쌌다: 제 스타일이 없는 줄은 색을 정하지도 되돌리지도 않는다.
 #[test]
-fn a_history_line_is_framed_exactly_like_the_capture() {
-    let measured = b"\r\n\x1b[39;49m\x1b[K\x1b[39m\x1b[49m\x1b[0m";
-    assert!(contains(&capture(), measured), "capture drifted");
+fn a_plain_history_line_costs_only_its_erase() {
+    let codex = b"\r\n\x1b[39;49m\x1b[K\x1b[39m\x1b[49m\x1b[0m";
+    assert!(contains(&capture(), codex), "capture drifted");
 
     let mut painter = Painter::new(Vec::new(), 120, 40, 12, true);
     painter.set_height(7);
     painter.take_frame();
     painter.insert_history(&[Line::empty()]);
     let frame = painter.take_frame();
-    assert!(
-        frame.contains(&String::from_utf8_lossy(measured).into_owned()),
-        "frame was {frame:?}"
-    );
+    assert!(frame.contains("\r\n\u{1b}[K\u{1b}[r"), "frame was {frame:?}");
+    assert!(!frame.contains("\u{1b}[39;49m"), "frame was {frame:?}");
 }
 
 /// Five noop iterations occupy the painter's one live-cell row. Each newer
