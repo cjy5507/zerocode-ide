@@ -175,7 +175,8 @@ pub use conversation::{
     StreamingTurnError, ToolError, ToolExecutor, ToolTextKind, TurnSummary, AUTO_RETRY_MARKER,
     DEEP_EXEC_MARKER, DEEP_PLAN_MARKER, DEEP_VERIFY_MARKER,
     DEFAULT_STREAMING_CHANNEL_CAPACITY, DEFAULT_TURN_DEADLINE_SECS,
-    DEFAULT_TURN_INPUT_TOKEN_BUDGET, DEFAULT_TURN_OUTPUT_TOKEN_BUDGET, STEERING_ECHO_PREFIX,
+    COMPLETION_RECEIPT_LEAD, COMPLETION_RECEIPT_SEPARATOR, DEFAULT_TURN_INPUT_TOKEN_BUDGET,
+    DEFAULT_TURN_OUTPUT_TOKEN_BUDGET, STEERING_ECHO_PREFIX,
 };
 pub use conversation::{parse_peer_message, peer_message_frame, PeerMessage, PEER_MESSAGE_FRAME_OPEN};
 /// Provider failure classification carried on [`RuntimeError`]. Re-exported so

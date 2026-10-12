@@ -3957,6 +3957,18 @@ impl Ui {
                         }
                         None => self.user_cell(steer),
                     }
+                } else if let Some(checks) = text
+                    .strip_prefix(runtime::COMPLETION_RECEIPT_LEAD)
+                    .filter(|_| level == SystemLevel::Info)
+                {
+                    self.close_segment();
+                    let mut cell = vec![Line::empty()];
+                    cell.extend(
+                        checks
+                            .split(runtime::COMPLETION_RECEIPT_SEPARATOR)
+                            .map(|command| super::tools::check_row(command.trim(), width)),
+                    );
+                    self.history(&cell);
                 } else if level == SystemLevel::Housekeeping {
                     // The session's plumbing, not the work: a word beside the
                     // status line while the turn runs, no transcript row, and

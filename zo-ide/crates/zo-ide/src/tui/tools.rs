@@ -1139,6 +1139,22 @@ impl ToolGroup {
 /// `N` being the body rows the fold hides. Same grammar as the in-body
 /// elision marker, so a person reads one vocabulary whether the cell is
 /// folded or its preview was capped.
+/// `✓ Check   <command>      passed after the last edit` — a check the
+/// harness saw pass after the turn's last edit, shaped like a call's row.
+#[must_use]
+pub fn check_row(command: &str, width: usize) -> Line {
+    let target = super::highlight::highlight_block_to_lines(command, "bash")
+        .and_then(|lines| lines.into_iter().next())
+        .map_or_else(|| vec![Span::raw(command.to_string())], |line| line.spans);
+    tool_row(
+        Span::new(super::strings::TOOL_DONE, Style::new().fg(palette::TOOL_OK).bold()),
+        super::strings::TOOL_CHECK,
+        target,
+        vec![Span::dim(super::strings::CHECK_PASSED)],
+        width,
+    )
+}
+
 /// The verb column's width, so every row's target starts on one column.
 const VERB_COLUMNS: usize = 8;
 /// How far an edit's diff hangs in under its row.

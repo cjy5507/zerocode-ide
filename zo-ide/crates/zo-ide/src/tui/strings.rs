@@ -310,6 +310,9 @@ pub const TOOL_RUN: &str = "Run";
 pub const TOOL_EDIT: &str = "Edit";
 pub const TOOL_CREATE: &str = "Create";
 pub const TOOL_DELETE: &str = "Delete";
+pub const TOOL_CHECK: &str = "Check";
+/// A check row's result: the command exited 0 after the turn's last edit.
+pub const CHECK_PASSED: &str = "passed after the last edit";
 /// How a finished tool row's call ended.
 pub const TOOL_DONE: &str = "✓";
 pub const TOOL_FAILED: &str = "✗";

@@ -31,6 +31,7 @@ mod tool;
 mod tool_call_salvage;
 mod turn_end;
 mod turn_end_gate;
+pub use turn_end_gate::{COMPLETION_RECEIPT_LEAD, COMPLETION_RECEIPT_SEPARATOR};
 pub mod claim_check;
 mod turn_support;
 mod verified_state;

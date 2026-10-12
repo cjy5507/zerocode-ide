@@ -115,8 +115,12 @@ pub(super) fn unverified_completion_reminder(edits: &[&str], check: Option<&str>
     )
 }
 
-/// How the receipt opens — words a person reads, not an internal tag (t-48216).
-const RECEIPT_LEAD: &str = "Checks passed after the last edit:";
+/// How the receipt opens — words a person reads, not an internal tag
+/// (t-48216). The TUI matches on this exact prefix to draw the receipt as
+/// check rows — keep every emitter on this constant.
+pub const COMPLETION_RECEIPT_LEAD: &str = "Checks passed after the last edit:";
+/// Between the receipt's commands.
+pub const COMPLETION_RECEIPT_SEPARATOR: &str = " · ";
 
 /// One transcript line receipting a turn that edited and then checked: the
 /// harness's own record that `commands` exited 0 after the last edit.
@@ -126,7 +130,7 @@ pub(super) fn completion_receipt(commands: &[&str]) -> String {
         .iter()
         .map(|command| crate::verified_state::first_line(command))
         .collect();
-    format!("{RECEIPT_LEAD} {}", listed.join(" · "))
+    format!("{COMPLETION_RECEIPT_LEAD} {}", listed.join(COMPLETION_RECEIPT_SEPARATOR))
 }
 
 /// The shapes a tool call takes when written as prose rather than issued:
