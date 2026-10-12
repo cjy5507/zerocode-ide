@@ -87,6 +87,16 @@ class ReceiptTests(unittest.TestCase):
         authorize(self.args, self.root, gate)
         return gate.produce(self.args, ledger)
 
+    def repin_policy(self, policy):
+        launcher = load_module(SCRIPT.with_name("gate_launcher.py"), "repinned_fixture_launcher")
+        path = self.root / "repinned-policy.json"
+        raw = gate.encoded(policy)
+        path.write_bytes(raw)
+        context = launcher.load_policy(path, gate.digest(raw), self.repo)
+        context["repo"] = str(self.repo)
+        context["configure"] = lambda parsed: launcher.configure(context, parsed, gate)
+        self.args.trust = context
+
     def git(self, *args):
         return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -570,6 +580,43 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNone(self.fingerprint()["source"])
         with self.assertRaises(gate.UnknownInput):
             gate.paths_digest([folder])
+
+    def test_configuration_paths_cannot_be_exempted_as_output_roots(self):
+        policy = copy.deepcopy(self.args.trust["policy"])
+        other = self.root / "other-configuration"
+        other.mkdir()
+        (other / "public-input").write_text("unrelated configuration\n")
+        selected = policy["gates"]["gate-root"]
+        selected["configurationRoots"] = [{"path": str(other), "sha256": gate.paths_digest([other])}]
+        selected["outputRoots"] = [str(self.root / "child-home")]
+        self.repin_policy(policy)
+        accepted = False
+        try:
+            gate.provenance(self.args)
+            accepted = True
+        except gate.UnknownInput:
+            pass
+        self.assertFalse(accepted, "configuration path escaped its input identity")
+
+    def test_declared_cache_outputs_coexist_with_configuration_inputs(self):
+        policy = copy.deepcopy(self.args.trust["policy"])
+        cache = self.root / "child-home/cache"
+        policy["gates"]["gate-root"]["outputRoots"] = [str(cache)]
+        self.repin_policy(policy)
+        accepted = False
+        try:
+            gate.provenance(self.args)
+            accepted = True
+        except gate.UnknownInput:
+            pass
+        self.assertTrue(accepted, "valid nested cache declaration was refused")
+        before = self.fingerprint()
+        self.assertIsNotNone(before["policy"])
+        cache.mkdir()
+        (cache / "output").write_text("allowed mutable output\n")
+        after = self.fingerprint()
+        self.assertEqual(after["deps"], before["deps"], "cache output changed an input identity")
+        self.assertEqual(after["env"], before["env"])
 
 
 if __name__ == "__main__":
