@@ -2568,6 +2568,7 @@ fn question_frame<'a>(composer: &'a Composer, question: &'a view::Question) -> F
     Frame {
         composer,
         effort_tier: None,
+        permission: None,
         effort_effect: None,
         now: Instant::now(),
         status: None,
@@ -2731,6 +2732,7 @@ fn frame_build_cost() {
     let frame = Frame {
         composer: &composer,
         effort_tier: None,
+        permission: None,
         effort_effect: None,
         now: Instant::now(),
         status: None,
