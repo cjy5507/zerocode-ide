@@ -738,6 +738,35 @@ mod tests {
         );
     }
 
+    /// A quoted relation value is one scalar, so the commas inside its quotes
+    /// are its own: the tail of `"[[b]]의 'x, y, 1,286개' 결정"` is not cut
+    /// into ghosts at each comma. Only a quote that opens an item quotes it —
+    /// an apostrophe in an unquoted item still leaves its commas as separators
+    /// (t-46020).
+    #[test]
+    fn a_quoted_relation_value_keeps_the_commas_inside_its_quotes() {
+        let root = vault(&[
+            ("wiki/index.md", "- [[a]]\n- [[b]]\n- [[c]]\n"),
+            (
+                "wiki/a.md",
+                "---\nsource: raw/a.md\ningested_at: 2026-09-07\n\
+                 contradicts: \"[[b]]의 '데이터 접근은 MyBatis, 레거시 테이블 1,286개' 결정\"\n\
+                 related:\n  - \"[[c]]의 「pause 97%로 수 초 만에 끝」(질문 v1, R9)\"\n\
+                 depends_on: [[c]] isn't the whole story, [[b]]\n---\na answers [[b]] and [[c]]\n",
+            ),
+            ("wiki/b.md", &format!("{FULL}b\n")),
+            ("wiki/c.md", &format!("{FULL}c\n")),
+        ]);
+        let lint = lint_of(root.path());
+        assert!(lint.ghost_links.is_empty(), "{:?}", lint.ghost_links);
+        assert_eq!(lint.contradictions, 1);
+        assert!(
+            lint.undeclared_relations.is_empty(),
+            "{:?}",
+            lint.undeclared_relations
+        );
+    }
+
     #[test]
     fn contradictions_and_superseded_pages_are_rows_that_never_fail_the_recipe() {
         let root = vault(&[
