@@ -1,20 +1,21 @@
 //! 도구 턴의 셀 — codex `tui/src/exec_cell/`(model.rs·render.rs) 와
 //! `history_cell/{patches,mcp}.rs` 의 문법을 그대로 옮긴 것.
 //!
-//! # 어휘 (codex 실측)
+//! # 어휘 (t-48216)
 //!
-//! | zo 도구 | 도는 중 | 커밋 | 출처 |
-//! |---|---|---|---|
-//! | Bash | `• Running <cmd>` | `• Ran <cmd>` | `exec_cell/render.rs::command_call_display_lines` |
-//! | Read·Grep·Glob | `• Exploring` + `  └ Read x` | `• Explored` + 같은 목록 | `exec_cell/render.rs::exploring_display_lines` |
-//! | 연속 명령 | — | `• Ran N commands` | `exec_cell/render.rs::compact_group_display_lines` |
-//! | Edit·Write | `• Editing <path>` | `• Edited <path> (+A -B)` | `diff_render.rs::render_changes_block` |
-//! | 그 외(MCP 등) | `• Calling <name>(<args>)` | `• Called …` | `history_cell/mcp.rs::render_lines` |
+//! 호출마다 같은 한 줄을 입는다: `<상태> <동사>  <대상>   <결과>`. 상태는 도는
+//! 동안 점자 스피너, 끝나면 `✓`, 실패하면 빨간 `✗`, 거절되면 흐린 `✗` 다.
+//! 끝난 호출의 대상은 잘리지 않는다 — 줄에 못 들어간 나머지는 대상의 열에서
+//! 줄 아래로 걸린다.
 //!
-//! `Editing` 만 원본에 없는 낱말이다 — codex 의 패치 셀은 승인 게이트를 거쳐
-//! 한 번에 커밋되므로 라이브 형태가 아예 없다. 그래서 원본이 스스로 쓰는
-//! `-ing`/`-ed` 짝(`Running`/`Ran`·`Calling`/`Called`·`Exploring`/`Explored`)을
-//! 그대로 이어 붙였다.
+//! | zo 도구 | 줄 |
+//! |---|---|
+//! | Bash | `✓ Run     <cmd>      3 lines` |
+//! | Read·Grep·Glob | `✓ Read    <path>` · `✓ Search  <q> in <path>` · `✓ List    <glob>` |
+//! | Edit·Write | `✓ Edit    <path>      +A -B` 과 그 아래 diff |
+//! | 웹 검색 | `✓ Search  <q> on the web` |
+//! | 스폰 | `✓ Spawn   <label> [role] (request)` 과 그 아래 진행·결과 한 줄 |
+//! | 그 외(MCP 등) | `✓ Call    <name>(<args>)` 과 그 아래 결과 |
 //!
 //! # 트랜스크립트 힌트를 뺀 이유
 //!
@@ -44,7 +45,6 @@ use super::ansi::{Color, Line, Span, Style};
 use super::cells::{prefixed, Prefix};
 use super::folds::{self, FoldIds, FoldMode};
 use super::palette;
-use super::shimmer::activity_marker;
 use super::wrap::wrap_line;
 
 /// 한 셀에 묶는 도구 호출 수 상한 — codex `exec_cell/model.rs::MAX_GROUPED_COMMANDS`.
@@ -75,21 +75,22 @@ const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
 /// 도구 하나가 무엇을 하는지 — codex 의 `ParsedCommand`/셀 종류에 대응한다.
 #[derive(Debug, Clone)]
 pub enum ToolKind {
-    /// Bash. `Running`/`Ran`. `background` is a command that ran as a task
+    /// Bash: a `Run` row. `background` is a command that ran as a task
     /// (`run_in_background`) and came back down the completion road: its
-    /// header carries one dim word beside the command and nothing else
-    /// differs from the foreground cell (t-3177).
+    /// row carries one dim word beside the command and nothing else
+    /// differs from the foreground row (t-3177).
     Command { command: String, background: bool },
     /// Read·Grep·Glob 류. 한 호출이 여러 항목을 낼 수 있다(codex `parsed`).
     Explore(Vec<Explored>),
-    /// Edit·Write. `Editing`/`Edited`.
+    /// Edit·Write: an `Edit`, `Create` or `Delete` row and its diff.
     Edit { path: String },
     /// `TodoWrite` / `TaskList` result. `Updated Plan` with an uncapped checklist.
     Plan(Vec<TodoResultItem>),
-    /// Web search/fetch activity. `Searching the web` / `Searched the web`.
+    /// Web search/fetch activity: a `Search` row whose target is the query
+    /// on the web.
     WebSearch { detail: String },
-    /// Agent-family spawn. A running one shows the helper's live row; the
-    /// completion says `Spawned`.
+    /// Agent-family spawn: a `Spawn` row. A running one shows the helper's
+    /// live row under it.
     Spawn {
         label: String,
         role: Option<String>,
@@ -107,7 +108,7 @@ pub enum ToolKind {
         label: String,
         summary: Option<String>,
     },
-    /// 그 밖의 도구 — codex 의 MCP 셀 문법을 쓴다.
+    /// 그 밖의 도구 — `Call` 줄에 이름과 인자를 쓴다.
     Call { name: String, detail: String },
 }
 
@@ -218,26 +219,6 @@ fn sanitize(text: &str, fallback: &str) -> String {
         crate::util::ansi::sanitize_inline(fallback.trim())
     } else {
         cleaned
-    }
-}
-
-fn tool_activity_marker(elapsed: Duration) -> Span {
-    let level = palette::terminal_palette().map_or_else(
-        palette::color_level_from_env,
-        palette::TerminalPalette::color_level,
-    );
-    activity_marker_for_level(elapsed, level)
-}
-
-fn activity_marker_for_level(elapsed: Duration, level: palette::ColorLevel) -> Span {
-    if level == palette::ColorLevel::Ansi16 {
-        if (elapsed.as_millis() / 600).is_multiple_of(2) {
-            Span::raw("•")
-        } else {
-            Span::dim("◦")
-        }
-    } else {
-        activity_marker(elapsed)
     }
 }
 
@@ -885,9 +866,8 @@ impl ToolGroup {
         }
     }
 
-    /// `• Calling <name>(<args>)` / `• Called …` — codex
-    /// `history_cell/mcp.rs::render_lines` + `format_mcp_invocation`
-    /// (이름은 시안, 인자는 dim, 결과는 `  └ ` 아래).
+    /// `✓ Call    <name>(<args>)` and what the call returned under it; an
+    /// empty result adds no row.
     fn mcp_lines(
         &self,
         call: &ToolCall,
@@ -896,27 +876,6 @@ impl ToolGroup {
         width: usize,
         elapsed: Duration,
     ) -> Vec<Line> {
-        if call.done.is_none() {
-            let mut live = vec![
-                self.bullet(call, elapsed),
-                Span::raw(" "),
-                Span::bold("Calling"),
-                Span::raw(" "),
-                Span::new(name.to_string(), Style::new().fg(palette::TOOL_LABEL)),
-            ];
-            if !detail.is_empty() {
-                live.push(Span::raw(" "));
-                live.push(Span::dim(detail.to_string()));
-            }
-            return vec![Line::new(live).truncated(width)];
-        }
-
-        let mut header = vec![
-            self.bullet(call, elapsed),
-            Span::raw(" "),
-            Span::bold("Called"),
-            Span::raw(" "),
-        ];
         let mut invocation = vec![Span::new(
             name.to_string(),
             Style::new().fg(palette::TOOL_LABEL),
@@ -926,43 +885,17 @@ impl ToolGroup {
             invocation.push(Span::dim(detail.to_string()));
             invocation.push(Span::raw(")"));
         }
-        let invocation = Line::new(invocation);
-        let reserved = Line::new(header.clone()).width();
-        let inline_invocation = invocation.width() <= width.saturating_sub(reserved);
-
-        let mut out = if inline_invocation {
-            header.extend(invocation.spans);
-            vec![Line::new(header).truncated(width)]
-        } else {
-            header.pop();
-            let mut lines = vec![Line::new(header).truncated(width)];
-            let wrapped = wrap_line(
-                &invocation,
-                width.saturating_sub(4).max(1),
-                &Span::raw("    "),
-            );
-            lines.extend(prefixed(
-                &wrapped,
-                width,
-                &Prefix::tool_output(),
-                true,
-            ));
-            lines
-        };
-
+        let result = call.done.as_ref().filter(|done| !done.ok).map(failure_result).unwrap_or_default();
+        let mut out =
+            self.uncut_row(call, super::strings::TOOL_CALL, invocation, result, width, elapsed);
         if let Some(done) = call.done.as_ref().filter(|done| !done.output.is_empty()) {
-            let prefix = if inline_invocation {
-                Prefix::tool_output()
-            } else {
-                Prefix::gutter()
-            };
-            out.extend(output_rows(&done.output, width, &prefix));
+            out.extend(output_block(&done.output, width));
         }
         out
     }
 
-    /// `Searching the web <detail>` / `Searched the web for <detail>` — codex
-    /// `history_cell/search.rs::WebSearchCell::display_lines`.
+    /// `✓ Search  <query> on the web` — a file search's row, with the web
+    /// where a file search names its path.
     fn web_search_lines(
         &self,
         call: &ToolCall,
@@ -970,26 +903,14 @@ impl ToolGroup {
         width: usize,
         elapsed: Duration,
     ) -> Vec<Line> {
-        let completed = call.done.is_some();
-        let marker = if completed {
-            Span::dim("•")
-        } else {
-            tool_activity_marker(elapsed.max(self.age(call)))
-        };
-        let mut spans = vec![
-            marker,
-            Span::raw(" "),
-            Span::bold(if completed {
-                "Searched the web"
-            } else {
-                "Searching the web"
-            }),
-        ];
+        let mut target = Vec::new();
         if !detail.is_empty() {
-            spans.push(Span::raw(if completed { " for " } else { " " }));
-            spans.push(Span::raw(detail.to_string()));
+            target.push(Span::raw(detail.to_string()));
+            target.push(Span::dim(" on "));
         }
-        wrap_line(&Line::new(spans), width.max(1), &Span::raw("  "))
+        target.push(Span::dim(super::strings::THE_WEB));
+        let result = call.done.as_ref().filter(|done| !done.ok).map(failure_result).unwrap_or_default();
+        self.uncut_row(call, super::strings::TOOL_SEARCH, target, result, width, elapsed)
     }
 
     /// Collab spawn — codex `multi_agents.rs::spawn_end`, plus Claude Code's
@@ -1005,41 +926,33 @@ impl ToolGroup {
         width: usize,
         elapsed: Duration,
     ) -> Vec<Line> {
-        let mut header = vec![self.bullet(call, elapsed), Span::raw(" ")];
-        match call.done.as_ref() {
+        let mut target = vec![Span::new(
+            spawn.label.to_string(),
+            Style::new().fg(Color::CYAN).bold(),
+        )];
+        if let Some(role) = spawn.role {
+            target.push(Span::dim(" "));
+            target.push(Span::raw(format!("[{role}]")));
+        }
+        if let Some(request) = spawn.request {
+            target.push(Span::dim(" "));
+            target.push(Span::new(
+                format!("({request})"),
+                Style::new().fg(Color::MAGENTA),
+            ));
+        }
+        let result = match call.done.as_ref() {
             // A policy verdict is not a failure: the dispatch kept the work
             // inline and said so (`ToolResultBody::Declined`), and a person
             // reading "failed" here looked for a fault that was not there
             // (2026-09-15, "이것도 오류인거같은데").
-            Some(done) if done.declined => {
-                header.push(Span::bold("Spawn declined — kept inline"));
-            }
-            Some(done) if !done.ok => header.push(Span::bold("Agent spawn failed")),
-            done => {
-                header.push(Span::bold(if done.is_some() {
-                    "Spawned "
-                } else {
-                    "Spawning "
-                }));
-                header.push(Span::new(
-                    spawn.label.to_string(),
-                    Style::new().fg(Color::CYAN).bold(),
-                ));
-                if let Some(role) = spawn.role {
-                    header.push(Span::dim(" "));
-                    header.push(Span::raw(format!("[{role}]")));
-                }
-                if let Some(request) = spawn.request {
-                    header.push(Span::dim(" "));
-                    header.push(Span::new(
-                        format!("({request})"),
-                        Style::new().fg(Color::MAGENTA),
-                    ));
-                }
-            }
-        }
+            Some(done) if done.declined => vec![Span::dim(super::strings::SPAWN_DECLINED_RESULT)],
+            Some(done) if !done.ok => failure_result(done),
+            _ => Vec::new(),
+        };
 
-        let mut out = wrap_line(&Line::new(header), width.max(1), &Span::raw("  "));
+        let mut out =
+            self.uncut_row(call, super::strings::TOOL_SPAWN, target, result, width, elapsed);
         // While it runs, the live row owns the `└` slot; the prompt is what
         // the finished cell keeps, and the two never both need saying.
         if call.done.is_none() {
@@ -1102,14 +1015,25 @@ impl ToolGroup {
         out
     }
 
-    /// 셀 머리의 점 — 도는 중이면 shimmer 가 훑고, 끝나면 성패 색이 된다
-    /// (codex `activity_marker` / `"•".green().bold()` / `"•".red().bold()`).
-    fn bullet(&self, call: &ToolCall, elapsed: Duration) -> Span {
-        match call.done.as_ref() {
-            None => tool_activity_marker(elapsed.max(self.age(call))),
-            Some(done) if done.ok => Span::new("•", Style::new().fg(palette::TOOL_OK).bold()),
-            Some(_) => Span::new("•", Style::new().fg(palette::TOOL_FAIL).bold()),
-        }
+    /// A row whose target is not cut once its call is done: what the row
+    /// cannot show then hangs under it. A running call keeps to one row.
+    fn uncut_row(
+        &self,
+        call: &ToolCall,
+        verb: &str,
+        target: Vec<Span>,
+        result: Vec<Span>,
+        width: usize,
+        elapsed: Duration,
+    ) -> Vec<Line> {
+        let (target, rest) = if call.done.is_some() {
+            split_target(vec![Line::new(target)], target_budget(&result, width))
+        } else {
+            (target, Vec::new())
+        };
+        let mut out = vec![tool_row(self.row_glyph(call, elapsed), verb, target, result, width)];
+        out.extend(hung(&rest, width));
+        out
     }
 
     /// 히스토리로 커밋할 줄들 — 앞 빈 줄 하나 + 셀, 그리고 본문이 있으면
@@ -1329,8 +1253,7 @@ fn output_block(output: &str, width: usize) -> Vec<Line> {
     output_rows(output, width, &Prefix::tool_output())
 }
 
-/// 같은 미리보기를, 접두어를 골라서. 접힌 묶음의 본문은 `  └ ` 를 명령 줄이
-/// 이미 썼으므로 네 칸 거터([`Prefix::gutter`])로 이어 붙인다.
+/// 같은 미리보기를, 접두어를 골라서.
 fn output_rows(output: &str, width: usize, prefix: &Prefix) -> Vec<Line> {
     preview_rows(
         output,
@@ -2802,21 +2725,6 @@ mod tests {
             plain(&group.lines(80, Duration::ZERO))[0],
             edge("✓ Edit    old.rs → new.rs", "+0 -0", 80)
         );
-    }
-
-    #[test]
-    fn ansi16_activity_markers_blink_between_bullet_and_circle() {
-        use crate::tui::palette::ColorLevel;
-
-        let bullet = super::activity_marker_for_level(Duration::ZERO, ColorLevel::Ansi16);
-        let circle = super::activity_marker_for_level(
-            Duration::from_millis(600),
-            ColorLevel::Ansi16,
-        );
-
-        assert_eq!(bullet.text, "•");
-        assert_eq!(circle.text, "◦");
-        assert!(circle.style.dim);
     }
 
     #[test]

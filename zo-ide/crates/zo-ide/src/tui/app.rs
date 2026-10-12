@@ -7313,10 +7313,11 @@ mod tests {
     }
 
     fn assert_one_plan_cell(frame: &str) {
+        let plain = plain_frame(frame);
         assert_eq!(
             (
                 frame.matches("\u{1b}[K• Updated Plan").count(),
-                frame.matches("\u{1b}[K• Called TodoWrite").count(),
+                plain.matches("✓ Call    TodoWrite").count() + plain.matches("✗ Call    TodoWrite").count(),
             ),
             (1, 0),
             "one TodoWrite call must render exactly one plan cell: {frame:?}"
@@ -8097,7 +8098,7 @@ mod tests {
         });
         let visible: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
         assert!(
-            visible.iter().any(|line| line.contains("Called ToolSearch"))
+            visible.iter().any(|line| line.contains("Call    ToolSearch"))
                 && visible.iter().any(|line| line.contains("discovery denied")),
             "failed discovery was hidden: {visible:?}"
         );

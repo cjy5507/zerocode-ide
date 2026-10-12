@@ -65,13 +65,6 @@ impl Prefix {
         Self::new(Span::dim("  └ "), Span::raw("    "))
     }
 
-    /// `  └ ` 없이 네 칸만 — 접힌 묶음 본문에서 `  └ <cmd>` 아래로 이어지는
-    /// 출력이 쓴다(`tool_output` 의 subsequent 와 같은 칸).
-    #[must_use]
-    pub fn gutter() -> Self {
-        Self::new(Span::raw("    "), Span::raw("    "))
-    }
-
     fn width(&self) -> usize {
         self.initial.width().max(self.subsequent.width())
     }

@@ -1960,8 +1960,8 @@ async fn e2e_a_delegation_cell_shows_its_task_not_its_arguments() {
     // A detached spawn commits the collab-shaped completion cell and suppresses
     // the result envelope; the report arrives later as its own AgentResult cell.
     assert!(
-        plain_screen.contains("Spawned agent [general-purpose]"),
-        "the result cell must use the spawned-agent grammar"
+        plain_screen.contains("Spawn   agent [general-purpose]"),
+        "the result cell must use the spawn row"
     );
     for syntax in ["agentId", "outputFile", "subagentType"] {
         assert!(
@@ -8266,8 +8266,8 @@ async fn e2e_housekeeping_refuses_small_spawn_and_continues_inline() {
     assert_eq!(requests.len(), 4, "a refused child must make no provider request");
     assert!(requests[1].contains("Small delegated task: do it inline"));
     let screen = strip_ansi(&String::from_utf8_lossy(&capture));
-    assert!(screen.contains("Spawn declined") && screen.contains("Small delegated task"), "{screen}");
-    assert!(!screen.contains("Agent spawn failed"), "a policy verdict is not drawn as a failure:\n{screen}");
+    assert!(screen.contains("declined — kept inline") && screen.contains("Small delegated task"), "{screen}");
+    assert!(!screen.lines().any(|line| line.contains("Spawn   ") && line.contains("failed")), "a policy verdict is not drawn as a failure:\n{screen}");
 }
 
 /// t-2999: a model-authored reserved implementation model is refused; the
@@ -8294,7 +8294,7 @@ async fn e2e_reserved_implementation_refusal_is_followed_by_inline_work() {
     assert_eq!(requests.len(), 4, "no child or pinned retry request");
     assert!(requests[1].contains("reserved for orchestration") && requests[1].contains("Do this work inline"));
     let screen = strip_ansi(&String::from_utf8_lossy(&capture));
-    assert!(screen.contains("Spawn declined") && screen.contains("reserved for orchestration"), "{screen}");
+    assert!(screen.contains("declined — kept inline") && screen.contains("reserved for orchestration"), "{screen}");
 }
 
 /// t-3000: a server dies while another tool is running. Its next request,

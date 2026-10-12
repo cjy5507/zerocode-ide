@@ -311,6 +311,14 @@ pub const TOOL_EDIT: &str = "Edit";
 pub const TOOL_CREATE: &str = "Create";
 pub const TOOL_DELETE: &str = "Delete";
 pub const TOOL_CHECK: &str = "Check";
+pub const TOOL_CALL: &str = "Call";
+pub const TOOL_SPAWN: &str = "Spawn";
+/// Where a web search looks, in the place a file search names its path:
+/// `✓ Search  rust async on the web`.
+pub const THE_WEB: &str = "the web";
+/// A spawn row's result when the dispatch kept the work inline: a policy
+/// verdict, not a failure.
+pub const SPAWN_DECLINED_RESULT: &str = "declined — kept inline";
 /// A check row's result: the command exited 0 after the turn's last edit.
 pub const CHECK_PASSED: &str = "passed after the last edit";
 /// How a finished tool row's call ended.
