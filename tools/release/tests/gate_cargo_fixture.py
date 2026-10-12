@@ -1,6 +1,12 @@
+import json
 import os
 from pathlib import Path
+import shutil
+import stat
 import subprocess
+
+SDK_ENTRY_LIMIT = 100000
+SDK_BYTE_LIMIT = 1024 ** 3
 
 
 def installed_path(variable, command):
@@ -24,6 +30,127 @@ def installed_path(variable, command):
     return path.resolve(strict=True)
 
 
+def fixture_sdk(source, destination):
+    source = Path(source).resolve(strict=True)
+    destination = Path(destination).absolute()
+    if not source.is_dir() or destination.exists() or destination.is_symlink() or destination.is_relative_to(source):
+        raise AssertionError("fixture SDK needs a separate new directory")
+    links = {}
+    logical_bytes = 0
+    regular_files = 0
+    entries = 0
+    for directory, children, leaves in os.walk(source, followlinks=False):
+        for name in sorted([*children, *leaves]):
+            entries += 1
+            path = Path(directory) / name
+            information = path.lstat()
+            if stat.S_ISREG(information.st_mode):
+                logical_bytes += information.st_size
+                regular_files += 1
+            elif stat.S_ISLNK(information.st_mode):
+                try:
+                    target = path.resolve(strict=True)
+                except (OSError, RuntimeError) as error:
+                    raise AssertionError("fixture SDK link is dangling or cyclic") from error
+                if not target.is_relative_to(source):
+                    raise AssertionError("fixture SDK link leaves its input root")
+                links[path.relative_to(source).as_posix()] = {
+                    "target": target.relative_to(source).as_posix(), "directory": target.is_dir(),
+                    "raw": os.readlink(path),
+                }
+            elif not stat.S_ISDIR(information.st_mode):
+                raise AssertionError("fixture SDK contains a non-file input")
+            if entries + 1 > SDK_ENTRY_LIMIT or logical_bytes > SDK_BYTE_LIMIT:
+                raise AssertionError("fixture SDK exceeds the bounded copy budget")
+    if regular_files == 0:
+        raise AssertionError("fixture SDK has no file inputs")
+    complete = set()
+    cut = set()
+
+    def visit(name, active):
+        if name in cut or name in complete:
+            return
+        if name in active:
+            cut.add(name)
+            return
+        link = links[name]
+        if link["directory"]:
+            for child in sorted(links):
+                if link["target"] == "." or child.startswith(link["target"] + "/"):
+                    visit(child, active | {name})
+                    if name in cut:
+                        break
+        complete.add(name)
+
+    for name in sorted(links):
+        visit(name, set())
+
+    manifest = (json.dumps({
+        "version": 1, "cycleLinks": [{"path": name, **links[name]} for name in sorted(cut)],
+    }, sort_keys=True) + "\n").encode()
+    link_bytes = sum(max(len(os.fsencode(link["raw"])),
+                         len(os.fsencode(os.path.relpath(destination / link["target"], (destination / name).parent))))
+                     for name, link in links.items() if name not in cut)
+    if logical_bytes + len(manifest) + link_bytes > SDK_BYTE_LIMIT:
+        raise AssertionError("fixture SDK exceeds the bounded copy budget")
+    copied_entries = 1
+    copied_bytes = len(manifest) + link_bytes
+
+    def omitted(directory, names):
+        nonlocal copied_entries
+        excluded = []
+        for name in names:
+            path = Path(directory) / name
+            relative = path.relative_to(source).as_posix()
+            if path.is_symlink():
+                if relative not in links or os.readlink(path) != links[relative]["raw"]:
+                    raise AssertionError("fixture SDK links changed while copying")
+            elif relative in links:
+                raise AssertionError("fixture SDK links changed while copying")
+            if relative in cut:
+                excluded.append(name)
+        copied_entries += len(names) - len(excluded)
+        if copied_entries > SDK_ENTRY_LIMIT:
+            raise AssertionError("fixture SDK exceeds the bounded copy budget")
+        return excluded
+
+    def copy_file(original, owned):
+        nonlocal copied_bytes
+        descriptor = os.open(original, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as input_file:
+            before = os.fstat(input_file.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise AssertionError("fixture SDK contains a non-file input")
+            with Path(owned).open("xb") as output_file:
+                while block := input_file.read(min(1024 ** 2, SDK_BYTE_LIMIT - copied_bytes + 1)):
+                    copied_bytes += len(block)
+                    if copied_bytes > SDK_BYTE_LIMIT:
+                        raise AssertionError("fixture SDK exceeds the bounded copy budget")
+                    output_file.write(block)
+            after = os.fstat(input_file.fileno())
+            identity = lambda row: (row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns, row.st_ctime_ns, row.st_mode)
+            if identity(before) != identity(after):
+                raise AssertionError("fixture SDK changed while copying")
+        shutil.copystat(original, owned, follow_symlinks=False)
+
+    try:
+        shutil.copytree(source, destination, symlinks=True, ignore=omitted, copy_function=copy_file)
+        for name, link in links.items():
+            if name in cut:
+                continue
+            alias = destination / name
+            alias.unlink()
+            alias.symlink_to(os.path.relpath(destination / link["target"], alias.parent),
+                             target_is_directory=link["directory"])
+        with (destination / ".fixture-sdk-links.json").open("xb") as output:
+            output.write(manifest)
+    except BaseException:
+        if destination.is_dir():
+            shutil.rmtree(destination)
+        raise
+    return destination
+
+
 def prepare(args, root, producer):
     root = Path(root).resolve()
     repo = Path(args.repo).resolve()
@@ -33,6 +160,12 @@ def prepare(args, root, producer):
     linker = installed_path("HERDR_FIXTURE_LINKER", ["xcrun", "--find", "clang"])
     if not sdk.is_relative_to(developer) or not linker.is_relative_to(developer):
         raise AssertionError("offline fixture needs a declared SDK and linker closure")
+    linker_tools = linker.parent
+    linker_libraries = linker_tools.parent / "lib"
+    archive = (linker_tools / "ar").resolve(strict=True)
+    linker_driver = (linker_tools / "ld").resolve(strict=True)
+    clang_libraries = (linker_libraries / "clang").resolve(strict=True)
+    sdk = fixture_sdk(sdk, root / "fixture-sdk" / sdk.name)
     package = repo / "cargo-fixture"
     (package / "src").mkdir(parents=True)
     (package / "Cargo.toml").write_text(
@@ -67,12 +200,11 @@ def prepare(args, root, producer):
     args.script_file = [str(script)]
     args.lock_file = [str(repo / "Cargo.lock"), str(package / "Cargo.lock")]
     tool_inputs = [toolchain / "lib", *(toolchain / "bin" / name for name in ("cargo", "rustc", "rustdoc")),
-                   sdk, linker, developer / "usr/bin/ld", developer / "usr/bin/ar", developer / "usr/lib/clang"]
-    tool_inputs.extend(sorted((developer / "usr/lib").glob("*.dylib")))
+                   sdk, linker, linker_driver, archive, clang_libraries]
+    tool_inputs.extend(sorted(linker_libraries.glob("*.dylib")))
     args.toolchain_root.extend(str(path) for path in tool_inputs)
     args.fixture_tools = {name: toolchain / "bin" / name for name in ("cargo", "rustc", "rustdoc")}
-    args.fixture_tools.update({"cc": linker, "clang": linker, "ld": developer / "usr/bin/ld",
-                              "ar": developer / "usr/bin/ar"})
+    args.fixture_tools.update({"cc": linker, "clang": linker, "ld": linker_driver, "ar": archive})
     temporary = root / "child-home/tmp"
     temporary.mkdir(exist_ok=True)
     outputs = [package / "target", repo / "tools/release/__pycache__", root / "child-home/cache", temporary]

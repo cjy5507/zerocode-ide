@@ -457,6 +457,72 @@ class ReceiptTests(unittest.TestCase):
                 self.git("commit", "-qm", "unsafe link")
                 self.assertIsNone(self.fingerprint()["source"])
 
+    def test_fixture_sdk_preserves_files_and_bounds_directory_link_cycles(self):
+        fixture = load_module(Path(__file__).with_name("gate_cargo_fixture.py"), "finite_sdk_fixture")
+        source = self.root / "source-sdk"
+        include = source / "include"
+        include.mkdir(parents=True)
+        (include / "input.h").write_bytes(b"declared SDK input\n")
+        (source / "headers").symlink_to("include", target_is_directory=True)
+        (include / "repeat").symlink_to(".", target_is_directory=True)
+        with self.assertRaisesRegex(gate.UnknownInput, "reachable directory links form a cycle"):
+            gate.paths_digest([source])
+        destination = fixture.fixture_sdk(source, self.root / "fixture-sdk")
+        self.assertEqual((destination / "include/input.h").read_bytes(), b"declared SDK input\n")
+        self.assertEqual((destination / "headers/input.h").read_bytes(), b"declared SDK input\n")
+        self.assertFalse((destination / "include/repeat").exists())
+        recorded = json.loads((destination / ".fixture-sdk-links.json").read_text())
+        self.assertEqual([row["path"] for row in recorded["cycleLinks"]], ["include/repeat"])
+        before = gate.paths_digest([destination])
+        self.assertIsNotNone(before)
+        (destination / "include/input.h").write_bytes(b"changed SDK input\n")
+        self.assertNotEqual(gate.paths_digest([destination]), before)
+        with self.assertRaisesRegex(gate.UnknownInput, "reachable directory links form a cycle"):
+            gate.paths_digest([source])
+
+    def test_fixture_sdk_refuses_invalid_or_growing_inputs_and_cleans_partial_copies(self):
+        fixture = load_module(Path(__file__).with_name("gate_cargo_fixture.py"), "refused_sdk_fixture")
+        outside = self.root / "outside-sdk-input"
+        outside.write_bytes(b"outside SDK input\n")
+        for label, target, reason in (("escape", outside, "leaves its input root"),
+                                      ("missing", "absent", "dangling or cyclic"),
+                                      ("cycle", "link", "dangling or cyclic")):
+            with self.subTest(link=label):
+                source = self.root / ("source-sdk-" + label)
+                source.mkdir()
+                (source / "input.h").write_bytes(b"declared SDK input\n")
+                (source / "link").symlink_to(target)
+                destination = self.root / ("fixture-sdk-" + label)
+                with self.assertRaisesRegex(AssertionError, reason):
+                    fixture.fixture_sdk(source, destination)
+                self.assertFalse(destination.exists())
+        copytree = fixture.shutil.copytree
+        for label, limit, grow in (("bytes-before", "SDK_BYTE_LIMIT", False),
+                                   ("entries-before", "SDK_ENTRY_LIMIT", False),
+                                   ("bytes-during", "SDK_BYTE_LIMIT", True),
+                                   ("entries-during", "SDK_ENTRY_LIMIT", True)):
+            with self.subTest(budget=label):
+                source = self.root / ("source-sdk-" + label)
+                source.mkdir()
+                input_file = source / "input.h"
+                input_file.write_bytes(b"SDK input\n")
+                destination = self.root / ("fixture-sdk-" + label)
+
+                def growing_copy(original, owned, **options):
+                    if limit == "SDK_BYTE_LIMIT":
+                        input_file.write_bytes(b"expanded SDK input" * 32)
+                    else:
+                        for number in range(3):
+                            (source / ("extra-" + str(number))).write_bytes(b"SDK input\n")
+                    return copytree(original, owned, **options)
+
+                bound = (128 if limit == "SDK_BYTE_LIMIT" else 3) if grow else 1
+                with mock.patch.object(fixture, limit, bound):
+                    copying = mock.patch.object(fixture.shutil, "copytree", side_effect=growing_copy) if grow else contextlib.nullcontext()
+                    with copying, self.assertRaisesRegex(AssertionError, "bounded copy budget"):
+                        fixture.fixture_sdk(source, destination)
+                self.assertFalse(destination.exists())
+
     def test_complete_mixed_runner_output_counts_zero_skip_and_cancel_summaries(self):
         for log, count in ((TAP, 1), (SPEC_OUTPUT, 1), (UNITTEST, 2), (PASS + TAP + SPEC_OUTPUT + UNITTEST, 6)):
             with self.subTest(log=log):
@@ -808,7 +874,9 @@ class ReceiptTests(unittest.TestCase):
                             self.assertEqual(len(durations), 1, log)
                             self.assertGreater(float(durations[0]), 0, log)
                             if reporter == "tap":
-                                self.assertRegex(text, rf"(?m)^1\.\.{summary['tests']}$")
+                                self.assertEqual(re.findall(r"(?m)^1\.\.([0-9]+)$", text), ["1"], log)
+                                nested_plans = re.findall(r"(?m)^[ \t]+1\.\.([0-9]+)$", text)
+                                self.assertEqual(nested_plans, ["1"] if label == "cancelled-by-parent" else [], log)
                             if label == "cancelled":
                                 self.assertIn(b"fixture cancellation began", log)
                                 self.assertIn(b"fixture abort signal fired true", log)

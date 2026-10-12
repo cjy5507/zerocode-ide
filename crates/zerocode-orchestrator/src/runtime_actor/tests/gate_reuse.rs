@@ -221,7 +221,49 @@ struct CliFixture {
 
 struct FixtureHttpServer {
     stop: Arc<AtomicBool>,
+    accepted: Arc<AtomicUsize>,
     serving: Option<thread::JoinHandle<()>>,
+}
+
+type FixtureHeaders = std::collections::HashMap<String, String>;
+
+#[derive(Debug)]
+enum FixtureHttpError {
+    Stopped,
+    Io(io::Error),
+}
+
+impl From<io::Error> for FixtureHttpError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl std::fmt::Display for FixtureHttpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stopped => formatter.write_str("fixture HTTP shutdown requested"),
+            Self::Io(error) => std::fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl FixtureHttpError {
+    fn context(self, context: String) -> Self {
+        match self {
+            Self::Stopped => Self::Stopped,
+            Self::Io(error) => {
+                Self::Io(io::Error::new(error.kind(), format!("{context}: {error}")))
+            }
+        }
+    }
+
+    fn kind(&self) -> io::ErrorKind {
+        match self {
+            Self::Stopped => io::ErrorKind::ConnectionAborted,
+            Self::Io(error) => error.kind(),
+        }
+    }
 }
 
 fn bounded_socket_io(
@@ -229,21 +271,19 @@ fn bounded_socket_io(
     stop: &AtomicBool,
     deadline: Instant,
     mut operation: impl FnMut(&mut TcpStream) -> io::Result<usize>,
-) -> io::Result<usize> {
+) -> Result<usize, FixtureHttpError> {
     let mut last_wait = None;
     loop {
         if stop.load(Ordering::SeqCst) {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "fixture HTTP shutdown requested",
-            ));
+            return Err(FixtureHttpError::Stopped);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("fixture HTTP deadline expired; last I/O error: {last_wait:?}"),
-            ));
+            )
+            .into());
         }
         let interval = remaining.min(Duration::from_millis(50));
         stream.set_read_timeout(Some(interval))?;
@@ -259,7 +299,8 @@ fn bounded_socket_io(
             {
                 last_wait = Some(error);
             }
-            result => return result,
+            Ok(count) => return Ok(count),
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -268,39 +309,38 @@ fn http_request(
     stream: &mut TcpStream,
     stop: &AtomicBool,
     deadline: Instant,
-) -> io::Result<(std::collections::HashMap<String, String>, Vec<u8>, String)> {
+) -> Result<(FixtureHeaders, Vec<u8>, String), FixtureHttpError> {
     stream.set_nonblocking(false)?;
     let mut bytes = Vec::new();
     let split = loop {
         let mut block = [0_u8; 4096];
         let count = bounded_socket_io(stream, stop, deadline, |stream| stream.read(&mut block))
             .map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!(
-                        "fixture request headers after {} bytes: {error}",
-                        bytes.len()
-                    ),
-                )
+                error.context(format!(
+                    "fixture request headers after {} bytes",
+                    bytes.len()
+                ))
             })?;
         if count == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!("incomplete fixture request headers: {} bytes", bytes.len()),
-            ));
+            )
+            .into());
         }
         if bytes.len() + count > 128 * 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "fixture request headers exceed 128 KiB",
-            ));
+            )
+            .into());
         }
         bytes.extend_from_slice(&block[..count]);
         if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
             break index + 4;
         }
     };
-    let headers: std::collections::HashMap<String, String> = std::str::from_utf8(&bytes[..split])
+    let headers: FixtureHeaders = std::str::from_utf8(&bytes[..split])
         .unwrap()
         .lines()
         .filter_map(|line| line.split_once(':'))
@@ -315,13 +355,10 @@ fn http_request(
             stream.read(&mut block[..remaining])
         })
         .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "fixture request body after {} of {length} bytes: {error}",
-                    bytes.len() - split
-                ),
-            )
+            error.context(format!(
+                "fixture request body after {} of {length} bytes",
+                bytes.len() - split
+            ))
         })?;
         if count == 0 {
             return Err(io::Error::new(
@@ -330,7 +367,8 @@ fn http_request(
                     "incomplete fixture request body: {} of {length} bytes",
                     bytes.len() - split
                 ),
-            ));
+            )
+            .into());
         }
         bytes.extend_from_slice(&block[..count]);
     }
@@ -351,20 +389,17 @@ fn http_response(
     bytes: &[u8],
     stop: &AtomicBool,
     deadline: Instant,
-) -> io::Result<()> {
+) -> Result<(), FixtureHttpError> {
     let mut written = 0;
     while written < bytes.len() {
         let count = bounded_socket_io(stream, stop, deadline, |stream| {
             stream.write(&bytes[written..])
         })
         .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "fixture response after {written} of {} bytes: {error}",
-                    bytes.len()
-                ),
-            )
+            error.context(format!(
+                "fixture response after {written} of {} bytes",
+                bytes.len()
+            ))
         })?;
         if count == 0 {
             return Err(io::Error::new(
@@ -373,11 +408,59 @@ fn http_response(
                     "incomplete fixture response: {written} of {} bytes",
                     bytes.len()
                 ),
-            ));
+            )
+            .into());
         }
         written += count;
     }
     Ok(())
+}
+
+impl FixtureHttpServer {
+    fn start(
+        listener: TcpListener,
+        mut handle: impl FnMut(FixtureHeaders, Vec<u8>, String) -> (u16, String) + Send + 'static,
+    ) -> Self {
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let stopping = Arc::clone(&stop);
+        let accepting = Arc::clone(&accepted);
+        let serving = thread::spawn(move || {
+            while !stopping.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(held) => held,
+                    Err(why) if why.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(why) => panic!("fixture transport: {why}"),
+                };
+                accepting.fetch_add(1, Ordering::SeqCst);
+                let deadline = Instant::now() + HTTP_IO_BUDGET;
+                let (headers, bytes, path) = match http_request(&mut stream, &stopping, deadline) {
+                    Ok(request) => request,
+                    Err(FixtureHttpError::Stopped) => return,
+                    Err(error) => panic!("fixture transport request: {error}"),
+                };
+                let (status, body) = handle(headers, bytes, path);
+                let response = format!(
+                    "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                match http_response(&mut stream, response.as_bytes(), &stopping, deadline) {
+                    Ok(()) => {}
+                    Err(FixtureHttpError::Stopped) => return,
+                    Err(error) => panic!("fixture transport response: {error}"),
+                }
+            }
+        });
+        Self {
+            stop,
+            accepted,
+            serving: Some(serving),
+        }
+    }
 }
 
 impl CliFixture {
@@ -463,106 +546,79 @@ impl CliFixture {
         );
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        listener.set_nonblocking(true).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
         let old_api = Arc::new(AtomicBool::new(false));
         let gate_open_attempts = Arc::new(AtomicUsize::new(0));
-        let serving = {
+        let server = {
             let actor = Arc::clone(&actor);
-            let stop = Arc::clone(&stop);
             let old_api = Arc::clone(&old_api);
             let gate_open_attempts = Arc::clone(&gate_open_attempts);
-            thread::spawn(move || {
-                while !stop.load(Ordering::SeqCst) {
-                    let (mut stream, _) = match listener.accept() {
-                        Ok(held) => held,
-                        Err(why) if why.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(5));
-                            continue;
-                        }
-                        Err(why) => panic!("fixture transport: {why}"),
-                    };
-                    let deadline = Instant::now() + HTTP_IO_BUDGET;
-                    let (headers, bytes, path) = http_request(&mut stream, &stop, deadline)
-                        .unwrap_or_else(|error| panic!("fixture transport request: {error}"));
-                    if path == "/gate-sessions/open" {
-                        gate_open_attempts.fetch_add(1, Ordering::SeqCst);
+            FixtureHttpServer::start(listener, move |headers, bytes, path| {
+                if path == "/gate-sessions/open" {
+                    gate_open_attempts.fetch_add(1, Ordering::SeqCst);
+                }
+                let argv: Vec<String> = if path == "/gate-sessions/open" {
+                    Vec::new()
+                } else {
+                    std::str::from_utf8(&bytes)
+                        .unwrap()
+                        .split('\u{1f}')
+                        .filter(|word| !word.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                };
+                if headers.get("x-zerocode-hook-token").map(String::as_str) != Some(HOOK) {
+                    (403, "test capability refused".to_string())
+                } else if old_api.load(Ordering::SeqCst)
+                    && (path == "/gate-sessions/open"
+                        || argv.first().is_some_and(|verb| verb.starts_with("gate-")))
+                {
+                    (400, "unknown verb in old fixture API".to_string())
+                } else if path == "/gate-sessions/open" {
+                    match super::super::gate_session::open_native(
+                        &actor,
+                        &headers["x-zerocode-team-id"],
+                        &headers["x-zerocode-team-pane"],
+                        &headers["x-zerocode-team-token"],
+                        Some(format!("actor-v1:{}", "a".repeat(64))),
+                        std::str::from_utf8(&bytes).unwrap(),
+                    ) {
+                        Ok(value) => (200, value.to_string()),
+                        Err(code) => (400, format!("{code}: fixture gate scope refused")),
                     }
-                    let argv: Vec<String> = if path == "/gate-sessions/open" {
-                        Vec::new()
-                    } else {
-                        std::str::from_utf8(&bytes)
-                            .unwrap()
-                            .split('\u{1f}')
-                            .filter(|word| !word.is_empty())
-                            .map(str::to_string)
-                            .collect()
-                    };
-                    let (status, body) = if headers.get("x-zerocode-hook-token").map(String::as_str)
-                        != Some(HOOK)
-                    {
-                        (403, "test capability refused".to_string())
-                    } else if old_api.load(Ordering::SeqCst)
-                        && (path == "/gate-sessions/open"
-                            || argv.first().is_some_and(|verb| verb.starts_with("gate-")))
-                    {
-                        (400, "unknown verb in old fixture API".to_string())
-                    } else if path == "/gate-sessions/open" {
-                        match super::super::gate_session::open_native(
-                            &actor,
-                            &headers["x-zerocode-team-id"],
-                            &headers["x-zerocode-team-pane"],
-                            &headers["x-zerocode-team-token"],
-                            Some(format!("actor-v1:{}", "a".repeat(64))),
-                            std::str::from_utf8(&bytes).unwrap(),
-                        ) {
-                            Ok(value) => (200, value.to_string()),
-                            Err(code) => (400, format!("{code}: fixture gate scope refused")),
+                } else {
+                    let verb = argv.first().cloned().unwrap_or_default();
+                    let command = PlanCommand::checked(
+                        argv,
+                        headers["x-zerocode-team-id"].clone(),
+                        headers["x-zerocode-team-pane"].clone(),
+                        headers["x-zerocode-team-token"].clone(),
+                        Some(format!("actor-v1:{}", "a".repeat(64))),
+                        now(),
+                    )
+                    .unwrap();
+                    match actor.plan(command) {
+                        Ok((planned, _)) if planned.reply.exit_code == 0 => {
+                            (200, planned.reply.stdout)
                         }
-                    } else {
-                        let verb = argv.first().cloned().unwrap_or_default();
-                        let command = PlanCommand::checked(
-                            argv,
-                            headers["x-zerocode-team-id"].clone(),
-                            headers["x-zerocode-team-pane"].clone(),
-                            headers["x-zerocode-team-token"].clone(),
-                            Some(format!("actor-v1:{}", "a".repeat(64))),
-                            now(),
-                        )
-                        .unwrap();
-                        match actor.plan(command) {
-                            Ok((planned, _)) if planned.reply.exit_code == 0 => {
-                                (200, planned.reply.stdout)
-                            }
-                            Ok((planned, _)) => {
-                                println!(
-                                    "{}",
-                                    json!({"fixtureNativeRefusal":verb,"reason":planned.reply.stderr})
-                                );
-                                (400, planned.reply.stderr)
-                            }
-                            Err(_) => (
-                                403,
-                                "native authority refused the fixture request".to_string(),
-                            ),
+                        Ok((planned, _)) => {
+                            println!(
+                                "{}",
+                                json!({"fixtureNativeRefusal":verb,"reason":planned.reply.stderr})
+                            );
+                            (400, planned.reply.stderr)
                         }
-                    };
-                    let response = format!(
-                        "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    http_response(&mut stream, response.as_bytes(), &stop, deadline)
-                        .unwrap_or_else(|error| panic!("fixture transport response: {error}"));
+                        Err(_) => (
+                            403,
+                            "native authority refused the fixture request".to_string(),
+                        ),
+                    }
                 }
             })
         };
         let script =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/release/gate_receipt.py");
         let mut held = Self {
-            _server: FixtureHttpServer {
-                stop,
-                serving: Some(serving),
-            },
+            _server: server,
             actor,
             old_api,
             gate_open_attempts,
@@ -1142,6 +1198,17 @@ fn fixture_socket_pair() -> (TcpStream, TcpStream) {
     (listener.accept().unwrap().0, client)
 }
 
+fn wait_for_fixture(ready: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !ready() {
+        assert!(
+            Instant::now() < deadline,
+            "fixture condition deadline expired"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn http_transport_completes_fragmented_io_on_an_inherited_nonblocking_socket() {
     let (mut server, mut client) = fixture_socket_pair();
@@ -1190,51 +1257,68 @@ fn http_transport_rejects_an_incomplete_request_at_the_deadline() {
 
 #[test]
 fn fixture_server_shutdown_interrupts_an_incomplete_read() {
-    let (mut server, mut client) = fixture_socket_pair();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stopping = Arc::clone(&stop);
-    let (ready, started) = std::sync::mpsc::channel();
-    let serving = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut block = [0_u8; 1];
-        let count = bounded_socket_io(&mut server, &stopping, deadline, |stream| {
-            stream.read(&mut block)
-        })
-        .unwrap();
-        assert_eq!(count, 1);
-        ready.send(()).unwrap();
-        let error = bounded_socket_io(&mut server, &stopping, deadline, |stream| {
-            stream.read(&mut block)
-        })
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = FixtureHttpServer::start(listener, |_, _, _| {
+        panic!("an incomplete request reached the fixture handler")
     });
-    let server = FixtureHttpServer {
-        stop,
-        serving: Some(serving),
-    };
+    let mut client = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     client.write_all(b"P").unwrap();
-    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    wait_for_fixture(|| server.accepted.load(Ordering::SeqCst) == 1);
     drop(server);
-    assert_eq!(client.read(&mut [0_u8; 1]).unwrap(), 0);
 }
 
 #[test]
-fn fixture_server_preserves_a_thread_panic_as_a_test_failure() {
+fn fixture_server_shutdown_interrupts_a_pending_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready, entered) = std::sync::mpsc::channel();
+    let (release, pending) = std::sync::mpsc::channel();
+    let server = FixtureHttpServer::start(listener, move |_, _, _| {
+        ready.send(()).unwrap();
+        pending.recv_timeout(Duration::from_secs(2)).unwrap();
+        (200, "fixture response".to_string())
+    });
+    let mut client = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    client
+        .write_all(b"POST /fixture HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+        .unwrap();
+    entered.recv_timeout(Duration::from_secs(2)).unwrap();
+    let stopping = Arc::clone(&server.stop);
+    let teardown = thread::spawn(move || drop(server));
+    wait_for_fixture(|| stopping.load(Ordering::SeqCst));
+    release.send(()).unwrap();
+    teardown.join().unwrap();
+}
+
+#[test]
+fn fixture_server_preserves_an_incomplete_request_as_a_test_failure() {
     let failure = std::panic::catch_unwind(|| {
-        let _server = FixtureHttpServer {
-            stop: Arc::new(AtomicBool::new(false)),
-            serving: Some(thread::spawn(|| {
-                panic!("fixture server regression failure")
-            })),
-        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = FixtureHttpServer::start(listener, |_, _, _| {
+            panic!("an incomplete request reached the fixture handler")
+        });
+        let mut client = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client.write_all(b"P").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        wait_for_fixture(|| server.serving.as_ref().unwrap().is_finished());
     })
     .unwrap_err();
     assert!(
         failure
             .downcast_ref::<String>()
             .unwrap()
-            .contains("fixture server regression failure")
+            .contains("incomplete fixture request headers")
     );
 }
 
@@ -1243,6 +1327,7 @@ fn fixture_server_does_not_panic_again_while_a_test_unwinds() {
     let failure = std::panic::catch_unwind(|| {
         let _server = FixtureHttpServer {
             stop: Arc::new(AtomicBool::new(false)),
+            accepted: Arc::new(AtomicUsize::new(0)),
             serving: Some(thread::spawn(|| {
                 panic!("fixture server regression failure")
             })),
