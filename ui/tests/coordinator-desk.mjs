@@ -92,6 +92,8 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
         ? { verified: false, merged: false, deployed: false, written: false,
           claimed_verified: true, claimed_merged: true, claimed_deployed: false, author: "worker" }
         : { verified: false, merged: false, deployed: false, written: false },
+      progress: n === 1 ? { stage: "report_only", claimed: "merged", attempt: `dp-${n}` }
+        : word === "idle" ? { stage: "report_only", attempt: `dp-${n}` } : { stage: "working", attempt: `dp-${n}` },
       term: seated ? term : null, at: now - (40 + n) * minute,
       model: models[(n - 1) % models.length], effort: n % 2 ? "max" : "xhigh", pane: `%${n}`,
       asking: word === "asking",
@@ -150,10 +152,17 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
   }
   /* The run's tasks by the pipeline's own stage words, sixty by default. */
   const stages = [
-    ["pending", 6], ["ready", 20], ["dispatched", 5], ["reported", 6],
-    ["merged", 18], ["gate", 2], ["blocked", 2], ["failed", 1], ["unreviewable", 0], ["nothing_to_land", 0],
-    ["closed", 0],
+    ["pending", 6], ["ready", 20], ["dispatched", 5], ["reported", 6], ["verified", 0],
+    ["merged", 18], ["deployed", 0], ["gate", 2], ["blocked", 2], ["stale", 0], ["failed", 1], ["unreviewable", 0],
+    ["nothing_to_land", 0], ["unknown", 0], ["closed", 0],
   ];
+  const head = (n) => n.toString(16).padStart(7, "0").repeat(6).slice(0, 40);
+  const progressOf = (stage, n) => stage === "reported"
+    ? { stage: "report_only", attempt: `dp-${100 + n}`, source: head(n), next: `zerocode-orc worktree-evidence --worker w-${100 + n}` }
+    : stage === "merged" ? { stage: "merged", attempt: `dp-${100 + n}`, source: head(n), merge_head: head(n + 1) }
+    : stage === "failed" ? { stage: "failed", attempt: `dp-${100 + n}`, next: `zerocode-orc worker-transcript --worker w-${100 + n}` }
+    : stage === "dispatched" ? { stage: "working", attempt: `dp-${100 + n}` }
+    : { stage: "unknown" };
   const total = stages.reduce((sum, [, count]) => sum + count, 0);
   /* What a finished task cost, as `task_cost` hands it over (t-9470): one in
    * four ran on an agent with no usage ledger, one in five is still open to
@@ -189,6 +198,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
         blocked_by: stage === "blocked" ? [`t-${100 + at - 1}`] : [],
         created_ms: now - (tasks - at) * 3 * minute,
         cost: stage === "reported" || stage === "merged" ? cost(at) : null,
+        progress: progressOf(stage, at),
         writing: stage === "reported" ? writing(at) : null,
         ...(stage === "reported" && keptOf(at) ? { kept: keptOf(at) } : {}),
       });
@@ -678,27 +688,57 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     /* ---- 검토 기록을 받을 수 없는 일 (t-19328): 워커 줄도 검증 대기라 하지 않는다 ---- */
     const restate = (change) => page.evaluate(async (changed) => {
       const w2 = window.__LEDGER__.find((row) => row.worker === "w-2");
-      // The row as an older ledger sent it carries no such key at all.
-      const { unreviewable, ...rest } = w2.review ?? {};
-      w2.review = changed.unreviewable ? { ...rest, unreviewable: true } : rest;
+      const { unreviewable, superseded_by, author, attempt, source, ...rest } = w2.review ?? {};
+      w2.review = changed.stage === "unreviewable" ? { ...rest, unreviewable: true }
+        : changed.stage === "stale" ? { ...rest, author: "coordinator", attempt: "dp-old", source: "1111111", superseded_by: "dp-2" }
+        : rest;
+      w2.progress = changed.stage === "stale" ? { stage: "stale", attempt: "dp-2", reviewed: "1111111" }
+        : changed.stage ? { stage: changed.stage, attempt: "dp-2" } : undefined;
       w2.failed = changed.failed === true;
       refreshDeskLedger();
       await new Promise((done) => setTimeout(done, 0));
       return true;
     }, change);
-    await restate({ unreviewable: true });
+    await restate({ stage: "unreviewable" });
     await settleMail();
     const unrecorded = await readWorkers();
-    await restate({ unreviewable: true, failed: true });
+    await restate({ stage: "unreviewable", failed: true });
     await settleMail();
     const unrecordedAfterFailure = await readWorkers();
     await restate({});
     await settleMail();
-    const older = await readWorkers();
-    ok("a worker whose task was done by hand with nothing handed in reads 완료 — 검토 기록 없음, never 검증 대기 and never 실패; a row from an older ledger, without the fact, reads as it did",
-      unrecorded.rows["w-2"].task === "데스크 과업 2 · 완료 — 검토 기록 없음" &&
-      unrecordedAfterFailure.rows["w-2"].task === "데스크 과업 2 · 완료 — 검토 기록 없음" &&
-      older.rows["w-2"].task === "데스크 과업 2 · 검증 대기", JSON.stringify({ unrecorded, unrecordedAfterFailure, older }));
+    const unread = await readWorkers();
+    await restate({ stage: "report_only" });
+    await settleMail();
+    const reportedAgain = await readWorkers();
+    ok("a worker whose task was done by hand with nothing handed in reads 종료 — 검토 자료 없음, never 검증 대기 and never 실패; a row the ledger sent no reading for says no stage at all",
+      unrecorded.rows["w-2"].task === "데스크 과업 2 · 종료 — 검토 자료 없음" &&
+      unrecordedAfterFailure.rows["w-2"].task === "데스크 과업 2 · 종료 — 검토 자료 없음" &&
+      unread.rows["w-2"].task === "데스크 과업 2" && reportedAgain.rows["w-2"].task === "데스크 과업 2 · 검증 대기",
+      JSON.stringify({ unrecorded, unrecordedAfterFailure, unread, reportedAgain }));
+
+    /* ---- 옛 커밋을 가리키는 검토 (t-47538): 워커 줄이 그냥 검증 대기라 하지 않는다 ---- */
+    const heldW2 = await page.evaluate(async () => {
+      const w2 = window.__LEDGER__.find((row) => row.worker === "w-2");
+      const held = { review: w2.review, progress: w2.progress };
+      w2.review = { ...w2.review, author: "coordinator", attempt: "dp-old", source: "1111111", superseded_by: "dp-2" };
+      w2.progress = { stage: "stale", attempt: "dp-2", reviewed: "1111111" };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+      return held;
+    });
+    await settleMail();
+    const staleWorker = await readWorkers();
+    await page.evaluate(async (held) => {
+      const w2 = window.__LEDGER__.find((row) => row.worker === "w-2");
+      w2.review = held.review;
+      w2.progress = held.progress;
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    }, heldW2);
+    await settleMail();
+    ok("a worker whose review names an older attempt or commit than it handed in reads 다시 검토 대기 — never the plain 검증 대기 of a review nobody wrote (t-47538)",
+      staleWorker.rows["w-2"].task === "데스크 과업 2 · 다시 검토 대기", JSON.stringify(staleWorker.rows["w-2"]));
 
     /* ---- 과업 흐름: `task-list`의 자리, 멈춰 선 단계가 먼저 펼쳐진다 ---------- */
     const settleDesk = () => page.evaluate(async () => {
@@ -723,11 +763,11 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       };
     });
     const pipeline = await readPipeline();
-    ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last",
+    ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last — the evidence stage 상태 모름 only when its count is not an exact zero",
       pipeline.shown && pipeline.head === "과업 흐름 · 60" &&
       pipeline.chips.map((chip) => chip.split(":").slice(0, 2).join(":")).join() ===
-        "pending:6,ready:20,dispatched:5,reported:6,merged:18,gate:2,blocked:2,failed:1,unreviewable:0,nothing_to_land:0,closed:0" &&
-      pipeline.words.join() === "선행 대기,준비,진행,보고됨,병합,게이트,막힘,실패,완료 — 검토 기록 없음,완료 — 착지할 것 없음,닫힘",
+        "pending:6,ready:20,dispatched:5,reported:6,verified:0,merged:18,deployed:0,gate:2,blocked:2,stale:0,failed:1,unreviewable:0,nothing_to_land:0,closed:0" &&
+      pipeline.words.join() === "선행 대기,준비,진행,보고됨,검증됨,병합,배포됨,게이트,막힘,다시 검토 대기,실패,종료 — 검토 자료 없음,완료 — 착지할 것 없음,닫힘",
       JSON.stringify(pipeline));
     ok("a stuck stage with tasks wears its signal and opens first, naming the gate and its question",
       pipeline.chips.includes("gate:2:true:is-wait") && pipeline.chips.includes("failed:1:false:is-halt") &&
@@ -799,11 +839,210 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const noRecordChip = await page.$('#board-view [data-desk-block="pipeline"] [data-stage="unreviewable"]');
     if (noRecordChip) await noRecordChip.click();
     const noRecordStage = await readPipeline();
-    ok("work nothing can review stands in its own stage — 완료 — 검토 기록 없음, not 보고됨 (검증 대기), not counted as open, in no signal tone — and its rows say what the task cost",
+    ok("work nothing can review stands in its own stage — 종료 — 검토 자료 없음, not 보고됨 (검증 대기), not counted as open, in no signal tone — and its rows say what the task cost",
       noRecordStage.head === "과업 흐름 · 84" && noRecordStage.chips.includes("unreviewable:3:true:") &&
       noRecordStage.chips.includes("reported:6:false:is-flow") && noRecordStage.chips.includes("closed:3:false:") &&
       noRecordStage.rows.length === 3 && noRecordStage.rows.every((row) => row.note === ""),
       JSON.stringify(noRecordStage));
+
+    /* ---- 어디까지 왔는가 (t-47538): 검증됨·배포됨·다시 검토 대기·상태 모름이 제 단계에 서고, 행이 커밋·담당·막힘·다음을 말한다 ---- */
+    const sha = { reviewed: "abcdef1234567890abcdef1234567890abcdef12", now: "fedcba9876543210fedcba9876543210fedcba98",
+      landed: "0123456789abcdef0123456789abcdef01234567" };
+    await page.evaluate(async (heads) => {
+      const run = window.__DESK__.runs[0].run;
+      const w4 = window.__LEDGER__.find((one) => one.worker === "w-4");
+      w4.wall = { ...w4.wall, stands_until_ms: Date.now() + 47 * 60_000 };
+      const rows = [
+        { id: "t-961", stage: "verified", progress: { stage: "verified", attempt: "dp-961", source: heads.reviewed,
+          next: `zerocode-orc land-check --task t-961 --head ${heads.reviewed} --retry-request land-check-t-961-abcdef123456` } },
+        { id: "t-962", stage: "deployed", progress: { stage: "deployed", attempt: "dp-962", source: heads.reviewed, merge_head: heads.landed } },
+        { id: "t-963", stage: "stale", progress: { stage: "stale", attempt: "dp-963", source: heads.now, reviewed: heads.reviewed,
+          next: "zerocode-orc worktree-evidence --worker w-963" } },
+        { id: "t-964", stage: "unknown", progress: { stage: "unknown" } },
+        { id: "t-4", stage: "dispatched", progress: { stage: "working", attempt: "dp-4" } },
+        { id: "t-3", stage: "dispatched", progress: { stage: "working", attempt: "dp-3" } },
+        { id: "t-2", stage: "failed", progress: { stage: "failed", attempt: "dp-2", next: "zerocode-orc worker-transcript --worker w-2" } },
+        { id: "t-970", stage: "failed", progress: { stage: "failed", attempt: "dp-970" } },
+      ].map((one) => ({ run, title: `단계 ${one.id}`, gate: null, blocked_by: [], closed: null, created_ms: 1, cost: null, ...one }));
+      const added = (stage) => rows.filter((one) => one.stage === stage).length;
+      const known = new Set(window.__DESK__.stages.map((one) => one.stage));
+      const fresh = [...new Set(rows.map((one) => one.stage))].filter((stage) => !known.has(stage))
+        .map((stage) => ({ stage, count: 0 }));
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
+        tasks: [...window.__DESK__.tasks, ...rows],
+        stages: [...window.__DESK__.stages, ...fresh].map((one) => ({ ...one, count: one.count + added(one.stage) })) };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    }, sha);
+    await settleDesk();
+    const readStage = async (stage) => {
+      const chip = await page.$(`#board-view [data-desk-block="pipeline"] [data-stage="${stage}"]`);
+      if (chip && (await chip.getAttribute("aria-pressed")) !== "true") await chip.click();
+      await settleDesk();
+      return page.evaluate(() => [...document.querySelectorAll('#board-view [data-desk-block="pipeline"] .board-desk-task')]
+        .map((row) => {
+          const line = (name) => {
+            const node = row.querySelector(name);
+            return node && !node.hidden ? node.textContent : "";
+          };
+          const copy = row.querySelector(".board-desk-task-next-copy");
+          return { id: line(".board-desk-task-id"), work: line(".board-desk-task-work"), owner: line(".board-desk-task-owner"),
+            next: line(".board-desk-task-next-command"), label: line(".board-desk-task-next-label"),
+            copy: copy && !copy.hidden ? copy.textContent : "" };
+        }));
+    };
+    const flow = await readPipeline();
+    const verifiedRows = await readStage("verified");
+    const deployedRows = await readStage("deployed");
+    const staleRows = await readStage("stale");
+    const unknownRows = await readStage("unknown");
+    const carriedRows = await readStage("dispatched");
+    const failedRows = await readStage("failed");
+    const row = (rows, id) => rows.find((one) => one.id === id) ?? {};
+    ok("verified, deployed, a review that names an older commit and work the ledger cannot read stand in stages of their own, in the flow's order, and only the last is left out of the count",
+      flow.chips.includes("verified:1:false:is-flow") && flow.chips.includes("deployed:1:false:is-flow") &&
+      flow.chips.includes("stale:1:false:is-wait") && flow.chips.includes("unknown:1:false:") &&
+      flow.words.join().includes("보고됨,검증됨,병합,배포됨") && flow.head === "과업 흐름 · 91",
+      JSON.stringify(flow));
+    ok("a verified row names the commit the review read and the landing check to run next; a deployed one names the commit it shipped and the one it landed as",
+      row(verifiedRows, "t-961").work === "검토한 커밋 abcdef123" &&
+      row(verifiedRows, "t-961").next === `zerocode-orc land-check --task t-961 --head ${sha.reviewed} --retry-request land-check-t-961-abcdef123456` &&
+      row(verifiedRows, "t-961").copy === "명령 복사" && row(verifiedRows, "t-961").label === "다음" &&
+      row(deployedRows, "t-962").work === "검토한 커밋 abcdef123 · 병합 커밋 012345678" && row(deployedRows, "t-962").next === "",
+      JSON.stringify({ verifiedRows, deployedRows }));
+    ok("a stale row names both commits — the one the review read and the one handed in now — and what to read next; a row the ledger cannot read says no commit and offers nothing",
+      row(staleRows, "t-963").work === "검토한 커밋 abcdef123 · 지금 커밋 fedcba987" &&
+      row(staleRows, "t-963").next === "zerocode-orc worktree-evidence --worker w-963" &&
+      row(unknownRows, "t-964").work === "" && row(unknownRows, "t-964").next === "" && row(unknownRows, "t-964").copy === "",
+      JSON.stringify({ staleRows, unknownRows }));
+    ok("a carried task names who carries it and the cause the ledger witnessed — a quota wall, a pane proven gone; one whose worker asks points at the mail to answer instead of a command; a failed one with no witness says its cause needs checking",
+      row(carriedRows, "t-4").owner.startsWith("담당 w-4 · ") && row(carriedRows, "t-4").owner.endsWith("막힘: 한도 벽") &&
+      row(carriedRows, "t-3").label === "답할 우편에서 질문에 답하세요" && row(carriedRows, "t-3").next === "" &&
+      row(carriedRows, "t-3").copy === "" &&
+      row(failedRows, "t-2").owner.startsWith("담당 w-2 · ") && row(failedRows, "t-2").owner.endsWith("막힘: 판 없음") &&
+      row(failedRows, "t-2").next === "zerocode-orc worker-transcript --worker w-2" &&
+      row(failedRows, "t-970").owner === "막힘: 원인 확인 필요" && row(failedRows, "t-970").next === "",
+      JSON.stringify({ carriedRows, failedRows }));
+    await readStage("verified");
+    const copied = await page.evaluate(async () => {
+      window.__CLIPBOARD_WRITES__ = [];
+      const button = [...document.querySelectorAll('#board-view [data-desk-block="pipeline"] .board-desk-task')]
+        .find((one) => one.querySelector(".board-desk-task-id")?.textContent === "t-961")
+        ?.querySelector(".board-desk-task-next-copy") ?? null;
+      button?.focus();
+      return { focused: button !== null && document.activeElement === button, type: button?.type ?? null,
+        name: button?.textContent ?? null, sent: window.__DESK_SENT__.length };
+    });
+    if (copied.focused) await page.keyboard.press("Enter");
+    const afterCopy = await page.evaluate(async () => {
+      for (let tries = 0; tries < 40 && window.__CLIPBOARD_WRITES__.length === 0; tries += 1) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      return { writes: [...window.__CLIPBOARD_WRITES__], said: document.activeElement?.textContent ?? "",
+        sent: window.__DESK_SENT__.length };
+    });
+    ok("the next command's copy is a button the keyboard reaches: Enter copies the command, word for word, and the button says it did — nothing runs",
+      copied.focused && copied.type === "button" && copied.name === "명령 복사" &&
+      afterCopy.writes.length === 1 && afterCopy.writes[0] === `zerocode-orc land-check --task t-961 --head ${sha.reviewed} --retry-request land-check-t-961-abcdef123456` &&
+      afterCopy.said === "명령을 복사했습니다" && afterCopy.sent === copied.sent,
+      JSON.stringify({ copied, afterCopy }));
+    await readStage("stale");
+    const viewport = page.viewportSize();
+    const fit = {};
+    for (const width of [360, 560]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const theme of ["dark", "light"]) {
+        for (const locale of ["ko", "en", "ja", "zh", "es"]) {
+          fit[`${width}-${theme}-${locale}`] = await page.evaluate(async ({ theme, locale }) => {
+            document.documentElement.dataset.theme = theme;
+            setLocale(locale, { persist: false });
+            const view = document.querySelector("#board-view");
+            Object.assign(view.style, { position: "fixed", inset: "0", width: "100vw", height: "100vh", zIndex: "100" });
+            paintCoordinatorDesk(view);
+            await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const desk = view.querySelector(".task-board-desk");
+            const strip = view.querySelector(".board-desk-stages");
+            const task = [...view.querySelectorAll(".board-desk-task")].find((one) => one.querySelector(".board-desk-task-id").textContent === "t-963");
+            const box = task?.getBoundingClientRect();
+            const outside = [".board-desk-task-work", ".board-desk-task-next-command", ".board-desk-task-next-copy"].filter((name) => {
+              const part = task?.querySelector(name)?.getBoundingClientRect();
+              return !part || part.right > box.right + 0.5 || part.left < box.left - 0.5;
+            });
+            const chips = [...view.querySelectorAll(".board-desk-stage")].filter((chip) => chip.scrollWidth > chip.clientWidth + 1).length;
+            return { desk: desk.scrollWidth - desk.clientWidth, strip: strip.scrollWidth - strip.clientWidth, outside, chips,
+              stale: view.querySelector('[data-stage="stale"] .board-desk-stage-word')?.textContent ?? "" };
+          }, { theme, locale });
+        }
+      }
+    }
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "dark";
+      setLocale("ko", { persist: false });
+      Object.assign(document.querySelector("#board-view").style, { position: "", inset: "", width: "", height: "", zIndex: "" });
+    });
+    if (viewport) await page.setViewportSize(viewport);
+    const staleWords = new Set(Object.entries(fit).filter(([key]) => key.startsWith("360-dark-")).map(([, one]) => one.stale));
+    ok("at 360 and 560 px, in both treatments and the five languages, the new stages and the row's commits, command and copy stay inside the desk — nothing overflows and no chip is cut — and each language says the stage in its own word",
+      Object.values(fit).every((one) => one.desk <= 1 && one.strip <= 1 && one.outside.length === 0 && one.chips === 0) &&
+      staleWords.size === 5, JSON.stringify(fit));
+
+    /* ---- 상태 모름은 증거 상태 (t-47538): 정확히 센 0이면 칩이 없고, 셈이 없으면 「—」, 과업이 있으면 이름과 수 ---- */
+    const setUnknown = (entry) => page.evaluate(async (entry) => {
+      const rest = window.__DESK__.stages.filter((one) => one.stage !== "unknown");
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
+        stages: entry === "absent" ? rest : [...rest, { stage: "unknown", count: entry }] };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    }, entry);
+    const readUnknown = () => page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-desk-block="pipeline"]');
+      const chip = block.querySelector('[data-stage="unknown"]');
+      return { head: block.querySelector(".board-desk-head").textContent, drawn: Boolean(chip),
+        word: chip?.querySelector(".board-desk-stage-word")?.textContent ?? null,
+        count: chip?.querySelector(".board-desk-stage-count")?.textContent ?? null,
+        type: chip?.type ?? null, reachable: chip ? chip.tabIndex >= 0 : null };
+    });
+    const heldUnknown = await page.evaluate(() => window.__DESK__.stages.find((one) => one.stage === "unknown")?.count ?? "absent");
+    await setUnknown(1);
+    await settleDesk();
+    const positive = await readUnknown();
+    const positiveRows = await readStage("unknown");
+    await setUnknown(0);
+    await settleDesk();
+    const zero = await readUnknown();
+    await setUnknown("absent");
+    await settleDesk();
+    const unlisted = await readUnknown();
+    await setUnknown(null);
+    await settleDesk();
+    const uncounted = await readUnknown();
+    ok("상태 모름 is evidence, not a stage of the flow: an exact zero draws no chip, a count the ledger did not give says — and never 0, and work in it keeps its chip with its name and number, a button the keyboard reaches that opens its rows — the flow's count is the same in every case",
+      positive.drawn && positive.word === "상태 모름" && positive.count === "1" && positive.type === "button" && positive.reachable &&
+      positiveRows.some((row) => row.id === "t-964") && !zero.drawn &&
+      unlisted.drawn && unlisted.word === "상태 모름" && unlisted.count === "—" && uncounted.drawn && uncounted.count === "—" &&
+      [zero.head, unlisted.head, uncounted.head].every((head) => head === positive.head),
+      JSON.stringify({ positive, positiveRows, zero, unlisted, uncounted }));
+    await setUnknown(1);
+    await settleDesk();
+    await page.evaluate(() => {
+      window.__HELD__ = document.querySelector('#board-view [data-desk-block="pipeline"] [data-stage="closed"]');
+      window.__HELD__.focus();
+    });
+    const kept = [];
+    for (const entry of [0, 1]) {
+      await setUnknown(entry);
+      await settleDesk();
+      kept.push(await page.evaluate(() => ({ drawn: Boolean(document.querySelector('#board-view [data-desk-block="pipeline"] [data-stage="unknown"]')),
+        kept: window.__HELD__.isConnected && document.activeElement === window.__HELD__ })));
+    }
+    ok("a poll that takes the zero 상태 모름 chip away or brings it back keeps the focus on the chip the person left it on",
+      kept.length === 2 && !kept[0].drawn && kept[1].drawn && kept.every((one) => one.kept), JSON.stringify(kept));
+    await page.evaluate(() => {
+      window.__HELD__.blur();
+      window.__HELD__ = null;
+    });
+    await setUnknown(heldUnknown);
+    await settleDesk();
 
     /* ---- 과업이 든 비용 (t-9470): 끝난 행마다 한 줄, 모르는 것은 「—」와 그 까닭 ---- */
     const readCosts = () => page.evaluate(() =>

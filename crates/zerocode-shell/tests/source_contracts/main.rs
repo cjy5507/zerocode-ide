@@ -7600,25 +7600,32 @@ mod tests {
         let tokens = include_str!("../../../../ui/tokens.css");
         let sprite = include_str!("../../../../ui/index.html");
 
-        // The verdict is the board's, folded onto the two words a row can say.
+        // The verdict is the ledger's one reading (t-47538), folded onto the words a row can say.
         let phase = block_after(window, "function ledgerReviewPhaseOf(facts) {");
         assert!(
-            phase.contains("ledgerReviewStage(null, facts)"),
+            phase.contains("ledgerWork(facts)"),
             "the sidebar reads the ledger's review in a hand of its own:\n{phase}"
         );
-        let table = block_after(window, "const LEDGER_REVIEW_PHASE = Object.freeze({");
-        for (stage, word) in [
-            ("reported", "review"),
-            ("\"claimed-verified\"", "review"),
-            ("\"claimed-merged\"", "review"),
-            ("\"claimed-deployed\"", "review"),
-            ("verified", "vouched"),
-            ("merged", "vouched"),
-            ("deployed", "vouched"),
+        let stages = block_after(window, "const WORK_STAGES = Object.freeze({");
+        let claims = block_after(window, "const WORK_CLAIMS = Object.freeze({");
+        for (table, stage, word) in [
+            (stages, "report_only", "review"),
+            (stages, "stale", "review"),
+            (claims, "verified", "review"),
+            (claims, "merged", "review"),
+            (claims, "deployed", "review"),
+            (stages, "verified", "vouched"),
+            (stages, "merged", "vouched"),
+            (stages, "deployed", "vouched"),
+            (stages, "nothing_to_land", "vouched"),
         ] {
+            let row = table
+                .lines()
+                .find(|line| line.starts_with(&format!("  {stage}: {{")))
+                .unwrap_or_else(|| panic!("the stage {stage} has no row:\n{table}"));
             assert!(
-                table.contains(&format!("{stage}: \"{word}\"")),
-                "the stage {stage} is not placed on {word}:\n{table}"
+                row.contains(&format!("phase: \"{word}\"")),
+                "the stage {stage} is not placed on {word}:\n{row}"
             );
         }
         // The checkout is found by its path, through the same two ledgers the

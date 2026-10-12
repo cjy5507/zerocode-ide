@@ -50,7 +50,8 @@ const PANES = [
   { term: 9202, path: "/r/act-ask", hook: "done",
     ledger: { task: "질문 과업", task_id: "t-9202", asking: true }, want: "답을 기다리는 중" },
   { term: 9203, path: "/r/act-review", hook: "done",
-    ledger: { task: "검토 과업", task_id: "t-9203", reported: true, review_since_ms: NOW - HOUR }, want: "검토를 기다리는 중" },
+    ledger: { task: "검토 과업", task_id: "t-9203", reported: true, review_since_ms: NOW - HOUR, progress: { stage: "report_only" } },
+    want: "검토를 기다리는 중" },
   { term: 9204, path: "/r/act-quota", hook: "done",
     ledger: { task: "한도 과업", task_id: "t-9204", wall: WALL }, want: "사용량 한도" },
 ];
@@ -114,6 +115,7 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
         tag: "finished", checkout: scene.finished, settled: true, reported: true, task: scene.task, task_id: "t-44016",
         agent: "claude", model: "claude-haiku-5-5", at: Date.now() - 2 * 3_600_000, handed_in: scene.head,
         review: { ...scene.nothing, verified: true, written: true, author: "coordinator" },
+        progress: { stage: "verified", source: scene.head },
       }));
       window.__LEDGER__ = ledger;
       window.__ANSWER__.project_catalog = () => [{

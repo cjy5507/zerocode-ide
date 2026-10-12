@@ -41,9 +41,11 @@ pub mod delegate;
 pub mod evidence;
 pub mod land_check;
 pub mod landing_watch;
+mod progress;
 mod session_history;
 pub mod task_cost;
 
+pub use progress::{WorkProgress, WorkStage};
 pub use session_history::SessionHistory;
 
 use std::collections::VecDeque;
