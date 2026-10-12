@@ -1307,67 +1307,42 @@ fn ok(output: &str) -> Outcome {
         ok: true,
         output: output.to_string(),
         change: None,
+        exit_code: None,
     }
 }
 
-/// 캡처의 접힌 셀 — 초록 bold 불릿 + bold `Ran 2 commands`. 트랜스크립트 힌트
-/// (`· ctrl + t to view transcript`)는 오버레이가 없는 이번 라운드에서 뺐다.
+/// Two finished commands are two rows (t-48216), never codex's folded
+/// `Ran 2 commands`: a green bold check, the bold verb, the command, and how
+/// many lines it printed at the right edge, its output under it.
 #[test]
-fn the_collapsed_ran_cell_is_the_captured_one() {
-    let capture = tool_capture();
-    assert!(
-        contains(&capture, "Ran 2 commands".as_bytes()),
-        "the capture no longer holds the collapsed cell"
-    );
-    assert!(
-        contains(&capture, b"\x1b[38;5;2;49m\xe2\x80\xa2"),
-        "the capture no longer paints the success bullet green"
-    );
-
+fn two_finished_commands_are_two_rows_with_a_green_check() {
     let mut group = ToolGroup::new(bash("a", "ls -la"));
     assert!(group.complete("a", ok("total 16")));
     group.push(bash("b", "cat README.md"));
     assert!(group.complete("b", ok("hello")));
     let lines = group.lines(120, Duration::ZERO);
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0].plain(), "• Ran 2 commands");
-
-    // 5라운드에서 `write_spans` 를 codex 것으로 옮긴 뒤로는 헤더 조각이
-    // **캡처 바이트 그대로**다 — 캡처에서 잘라 와 비교한다(트랜스크립트 힌트
-    // 이전까지).
-    let measured = "\u{1b}[1m\u{1b}[38;5;2;49m•\u{1b}[22m\u{1b}[39;49m \u{1b}[1mRan 2 commands";
-    assert!(
-        contains(&capture, measured.as_bytes()),
-        "the capture no longer frames the collapsed header this way"
+    let plain: Vec<String> = lines.iter().map(Line::plain).collect();
+    assert_eq!(
+        plain,
+        vec![
+            "✓ Run     ls -la                                                                                                  1 line".to_string(),
+            "  └ total 16".to_string(),
+            "✓ Run     cat README.md                                                                                           1 line".to_string(),
+            "  └ hello".to_string(),
+        ]
     );
     let mut rendered = String::new();
     write_spans(&lines[0], &mut rendered);
-    assert_eq!(rendered, measured);
     assert!(
-        !rendered.contains("ctrl + t"),
-        "no transcript overlay exists this round"
+        rendered.starts_with("\u{1b}[1m\u{1b}[38;5;2;49m✓\u{1b}[22m\u{1b}[39;49m \u{1b}[1mRun     "),
+        "the check is green and bold, the verb bold: {rendered:?}"
     );
 }
 
-/// 캡처의 라이브 셀 — `• Exploring` + `  └ Read README.md`. 항목 이름표는
-/// 시안(`ESC[38;5;6;49mRead`).
+/// A running read is one row (t-48216): a spinner frame, the bold verb, the
+/// path — no `Exploring` header over a list.
 #[test]
-fn the_live_exploring_cell_is_the_captured_one() {
-    // 캡처의 두 행(24·25행 프레임):
-    //   `ESC[1m ESC[38;2;167;167;167;49m• ESC[22m ESC[39;49m ' ' ESC[1mExploring`
-    //   `ESC[2m  └ ESC[22m ESC[38;5;6;49mRead ESC[39;49m ' README.md'`
-    // 이름표와 이름 사이에 SGR 이 끼므로 `Read README.md` 는 연속 바이트가
-    // 아니다 — 실제로 흐른 그 조각을 그대로 핀한다.
-    let capture = tool_capture();
-    assert!(
-        contains(&capture, b"\x1b[1mExploring"),
-        "the capture no longer bolds the live header"
-    );
-    assert!(
-        contains(&capture, b"\x1b[38;5;6;49mRead\x1b[39;49m README.md"),
-        "the capture no longer paints the Read label cyan before its name"
-    );
-
+fn a_live_read_is_one_spinning_row() {
     let group = ToolGroup::new(ToolCall::new(
         "a".to_string(),
         ToolKind::Explore(vec![Explored::Read {
@@ -1376,23 +1351,10 @@ fn the_live_exploring_cell_is_the_captured_one() {
     ));
     let lines = group.lines(120, Duration::ZERO);
     let plain: Vec<String> = lines.iter().map(Line::plain).collect();
-    assert_eq!(
-        plain,
-        vec!["• Exploring".to_string(), "  └ Read README.md".to_string()]
-    );
-
-    // 헤더의 낱말은 bold, 목록 이름표는 시안.
-    let mut header = String::new();
-    write_spans(&lines[0], &mut header);
-    assert!(header.contains("\u{1b}[1mExploring"), "header was {header:?}");
-    let mut item = String::new();
-    write_spans(&lines[1], &mut item);
-    // 캡처의 그 행 그대로 — dim 을 끄는 것은 `ESC[22m`, 색 되돌림은
-    // `ESC[39;49m` 이다.
-    assert_eq!(
-        item,
-        "\u{1b}[2m  └ \u{1b}[22m\u{1b}[38;5;6;49mRead\u{1b}[39;49m README.md"
-    );
+    assert_eq!(plain, vec!["⠋ Read    README.md".to_string()]);
+    let mut row = String::new();
+    write_spans(&lines[0], &mut row);
+    assert!(row.contains("\u{1b}[1mRead    "), "the verb is bold: {row:?}");
 }
 
 /// Generic calls retain their semantic target while running, but narrow panes
@@ -1453,10 +1415,10 @@ fn a_committed_tool_cell_carries_the_fold_markers() {
     // 앞 빈 줄은 구간 밖 — 접어도 셀 사이의 숨은 남는다.
     assert_eq!(rows[0].plain(), "");
     assert_eq!(rows[0].lead, None);
-    assert_eq!(rows[1].plain(), "• Ran grep -n 'a;b' src");
+    assert_eq!(rows[1].plain(), "✓ Run     grep -n 'a;b' src                                                                                       1 line");
     assert_eq!(
         rows[1].lead.as_deref(),
-        Some("\u{1b}]7788;begin;0;collapsed,teaser=1;• Ran grep -n 'a%3Bb' src\u{1b}\\")
+        Some("\u{1b}]7788;begin;0;collapsed,teaser=1;✓ Run grep -n 'a%3Bb' src 1 line\u{1b}\\")
     );
     assert_eq!(rows[2].plain(), "  └ … +1 lines");
     assert_eq!(rows[3].plain(), "  └ src/a.rs:1:a;b");
@@ -1470,7 +1432,7 @@ fn a_committed_tool_cell_carries_the_fold_markers() {
     painter.insert_history(&rows);
     let frame = painter.take_frame();
     assert!(
-        frame.contains("\u{1b}]7788;begin;0;collapsed,teaser=1;• Ran grep -n 'a%3Bb' src\u{1b}\\\u{1b}[39;49m\u{1b}[K"),
+        frame.contains("\u{1b}]7788;begin;0;collapsed,teaser=1;✓ Run grep -n 'a%3Bb' src 1 line\u{1b}\\\u{1b}[39;49m\u{1b}[K"),
         "frame was {frame:?}"
     );
     assert!(frame.contains("\u{1b}[0m\u{1b}]7788;end;0\u{1b}\\"), "frame was {frame:?}");
@@ -1495,8 +1457,7 @@ fn a_bare_committed_tool_cell_carries_no_fold_markers() {
     assert_eq!(ids.mint(), 0, "the disabled protocol consumed a fold id");
 }
 
-/// Explicit marker mode의 묶음 셀 — `• Ran 2 commands` 가 헤더가 되고,
-/// 접힌 명령들의 출력이 그 아래 본문으로 붙는다.
+/// With markers enabled each call's row heads a fold of its own output (t-48216).
 #[test]
 fn marker_mode_folds_group_output_into_the_body() {
     let mut group = ToolGroup::new(bash("a", "ls -la"));
@@ -1511,44 +1472,48 @@ fn marker_mode_folds_group_output_into_the_body() {
         plain,
         vec![
             String::new(),
-            "• Ran 2 commands".to_string(),
+            "✓ Run     ls -la                                                                                                  1 line".to_string(),
             // 접힌 동안 보이는 밀도 줄(teaser) — 펼치면 사라지고 본문이 선다.
-            "  └ … +4 lines".to_string(),
-            "  └ ls -la".to_string(),
-            "    total 16".to_string(),
-            "  └ cat README.md".to_string(),
-            "    hello".to_string(),
+            "  └ … +1 lines".to_string(),
+            "  └ total 16".to_string(),
+            "✓ Run     cat README.md                                                                                           1 line".to_string(),
+            "  └ … +1 lines".to_string(),
+            "  └ hello".to_string(),
         ]
     );
 
-    // 헤더 = begin 뒤 첫 행(teaser 한 줄을 선언), 나머지가 본문 — opt-in renderer가
-    // 그대로 접는다.
+    // 호출 줄 = begin 뒤 첫 행(teaser 한 줄을 선언), 그 아래가 본문 — opt-in
+    // renderer가 그대로 접는다.
     assert_eq!(rows[0].lead, None);
     assert_eq!(
         rows[1].lead.as_deref(),
-        Some("\u{1b}]7788;begin;0;collapsed,teaser=1;• Ran 2 commands\u{1b}\\")
+        Some("\u{1b}]7788;begin;0;collapsed,teaser=1;✓ Run ls -la 1 line\u{1b}\\")
     );
-    assert_eq!(rows[6].trail.as_deref(), Some("\u{1b}]7788;end;0\u{1b}\\"));
+    assert_eq!(rows[3].trail.as_deref(), Some("\u{1b}]7788;end;0\u{1b}\\"));
+    assert_eq!(
+        rows[4].lead.as_deref(),
+        Some("\u{1b}]7788;begin;1;collapsed,teaser=1;✓ Run cat README.md 1 line\u{1b}\\")
+    );
+    assert_eq!(rows[6].trail.as_deref(), Some("\u{1b}]7788;end;1\u{1b}\\"));
 
-    // painter 를 통과한 바이트에도 두 마커가 그대로 실린다.
+    // painter 를 통과한 바이트에도 마커가 그대로 실린다.
     let mut painter = Painter::new(Vec::new(), 120, 40, 12, true);
     painter.set_height(7);
     painter.take_frame();
     painter.insert_history(&rows);
     let frame = painter.take_frame();
     assert!(
-        frame.contains("\u{1b}]7788;begin;0;collapsed,teaser=1;• Ran 2 commands\u{1b}\\"),
+        frame.contains("\u{1b}]7788;begin;0;collapsed,teaser=1;✓ Run ls -la 1 line\u{1b}\\"),
         "frame was {frame:?}"
     );
     assert!(
-        frame.contains("\u{1b}]7788;end;0\u{1b}\\"),
+        frame.contains("\u{1b}]7788;end;1\u{1b}\\"),
         "frame was {frame:?}"
     );
     assert!(frame.contains("total 16") && frame.contains("hello"), "frame was {frame:?}");
-    assert!(frame.contains("  └ … +4 lines"), "the teaser row rides the frame: {frame:?}");
 }
 
-/// 기본 모드에서는 같은 묶음이 codex 원본 그대로다 — 본문도 마커도 **0 바이트**.
+/// 기본 모드에서는 마커가 **0 바이트**다 — 호출마다 제 줄과 출력이 그대로 선다.
 /// 파이프 골든과 같은 모양을 지키는 핀이다.
 #[test]
 fn default_mode_grouped_cell_emits_no_fold_bytes() {
@@ -1560,7 +1525,16 @@ fn default_mode_grouped_cell_emits_no_fold_bytes() {
     let rows = group.committed(120, &mut ids, FoldMode::Bare);
 
     let plain: Vec<String> = rows.iter().map(Line::plain).collect();
-    assert_eq!(plain, vec![String::new(), "• Ran 2 commands".to_string()]);
+    assert_eq!(
+        plain,
+        vec![
+            String::new(),
+            "✓ Run     ls -la                                                                                                  1 line".to_string(),
+            "  └ total 16".to_string(),
+            "✓ Run     cat README.md                                                                                           1 line".to_string(),
+            "  └ hello".to_string(),
+        ]
+    );
     assert!(rows.iter().all(|row| row.lead.is_none() && row.trail.is_none()));
     // id 도 소비하지 않는다 — 기본에서는 접기 자체가 없는 일이다.
     assert_eq!(ids.mint(), 0);
@@ -1571,7 +1545,7 @@ fn default_mode_grouped_cell_emits_no_fold_bytes() {
     painter.insert_history(&rows);
     let frame = painter.take_frame();
     assert!(!frame.contains("7788"), "frame was {frame:?}");
-    assert!(!frame.contains("total 16"), "frame was {frame:?}");
+    assert!(frame.contains("total 16"), "each command keeps its output, unfolded: {frame:?}");
 }
 
 // ============================================================================

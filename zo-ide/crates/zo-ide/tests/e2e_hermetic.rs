@@ -1181,7 +1181,8 @@ async fn e2e_tool_turn_runs_bash_and_read_and_compacts_to_two_commands() {
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"Run Bash once and Read fixture.txt once, then summarize\r")
         .expect("send tool prompt");
-    run.wait_for("Ran 2 commands", TEST_TIMEOUT);
+    // The read's row: its bold verb padded to the column (t-48216).
+    run.wait_for("Read    ", TEST_TIMEOUT);
     run.wait_for_history_row("fixture read", TEST_TIMEOUT);
     let capture = run.finish();
 
@@ -4014,8 +4015,8 @@ async fn e2e_a_background_bash_completes_as_the_foreground_ran_cell() {
     let capture = run.finish();
     dump_capture(&capture, "background-bash-foreground-control");
     let foreground = settled_screen(&capture, 40).transcript();
-    let control = command_cell(&foreground, "• Ran sh -c")
-        .unwrap_or_else(|| panic!("no foreground Ran cell: {foreground:#?}"));
+    let control = command_cell(&foreground, "Run     sh -c")
+        .unwrap_or_else(|| panic!("no foreground Run row: {foreground:#?}"));
     assert_eq!(control[1], "  └ x", "the control cell is not the one expected: {control:#?}");
 
     // The same command in the background: the start call answers at once,
@@ -4049,12 +4050,15 @@ async fn e2e_a_background_bash_completes_as_the_foreground_ran_cell() {
         .iter()
         .position(|row| row.contains(BACKGROUND_WORD))
         .unwrap_or_else(|| panic!("no completion header: {transcript:#?}"));
+    // The row's result stands at its right edge, so the word sits between
+    // the command and the padding: compare the words.
+    let words = |row: &str| row.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(
-        transcript[completion_at],
-        format!("{} {BACKGROUND_WORD}", control[0]),
-        "the header is the foreground header plus one dim word: {transcript:#?}"
+        words(&transcript[completion_at].replacen(&format!(" {BACKGROUND_WORD}"), "", 1)),
+        words(&control[0]),
+        "the row is the foreground row plus one dim word: {transcript:#?}"
     );
-    let completion = command_cell(&transcript[completion_at..], "• Ran sh -c")
+    let completion = command_cell(&transcript[completion_at..], "Run     sh -c")
         .unwrap_or_else(|| panic!("no completion cell: {transcript:#?}"));
     assert!(completion.iter().any(|row| row.trim() == "x"), "original command output remains: {completion:?}");
     assert_eq!(completion.iter().filter(|row| row.contains("background task") && row.contains("exited (code 1)")).count(), 1);
@@ -4075,8 +4079,12 @@ async fn e2e_a_background_bash_completes_as_the_foreground_ran_cell() {
 
 /// The rows of one command cell: the first row at or after the start of
 /// `rows` that begins with `head`, then every row until the next blank one.
+/// A tool row whose verb and target start with `head`, after its status glyph,
+/// and the rows hung under it.
 fn command_cell(rows: &[String], head: &str) -> Option<Vec<String>> {
-    let start = rows.iter().position(|row| row.starts_with(head))?;
+    let start = rows
+        .iter()
+        .position(|row| row.split_once(' ').is_some_and(|(_, rest)| rest.starts_with(head)))?;
     let body = rows[start + 1..]
         .iter()
         .take_while(|row| !row.trim().is_empty())
@@ -4155,7 +4163,7 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
         );
     }
     assert!(
-        screen.transcript().iter().filter(|row| row.starts_with("• Ran ")).count() >= 1,
+        screen.transcript().iter().filter(|row| row.contains(" Run     ")).count() >= 1,
         "the commands themselves are still in the transcript: {:#?}",
         screen.transcript()
     );

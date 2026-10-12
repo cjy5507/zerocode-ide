@@ -155,7 +155,8 @@ pub fn wrap_cell_with_teaser(mut lines: Vec<Line>, teaser: usize, ids: &mut Fold
         return lines;
     }
     let id = ids.mint();
-    let summary = lines[0].plain();
+    // A row aligned into columns reads as its words, not its padding.
+    let summary = lines[0].plain().split_whitespace().collect::<Vec<_>>().join(" ");
     let last = lines.len() - 1;
     let teaser = teaser.min(last);
     lines[0].lead = Some(begin_with_teaser(id, /*collapsed*/ true, teaser, &summary).into());

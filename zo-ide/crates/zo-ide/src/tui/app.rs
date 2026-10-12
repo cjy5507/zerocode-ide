@@ -3891,6 +3891,7 @@ impl Ui {
                                     ok: status == AgentResultStatus::Completed,
                                     output: body.clone(),
                                     change: None,
+                                    exit_code: None,
                                 },
                             )
                         },
@@ -7566,6 +7567,7 @@ mod tests {
             ok: true,
             output: String::new(),
             change: Some(change),
+            exit_code: None,
         };
         let announced = PendingTool {
             name: "edit_file".to_string(),
@@ -7595,6 +7597,7 @@ mod tests {
             ok: true,
             output: "done".to_string(),
             change: None,
+            exit_code: None,
         };
         let announced = PendingTool {
             name: "bash".to_string(),
@@ -7759,7 +7762,7 @@ mod tests {
             vec![
                 String::new(),
                 format!(
-                    "• Ran python3 <<'PY' print('detail') PY {}",
+                    "✓ Run     python3 <<'PY' print('detail') PY {}",
                     super::super::strings::COMMAND_BACKGROUND
                 ),
                 "  └ (no output)".to_string(),
@@ -7801,8 +7804,8 @@ mod tests {
         let foreground: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
         let foreground_head = foreground
             .iter()
-            .position(|row| row.starts_with("• Ran "))
-            .unwrap_or_else(|| panic!("no foreground Ran header: {foreground:?}"));
+            .position(|row| row.starts_with("✗ Run     "))
+            .unwrap_or_else(|| panic!("no foreground Run row: {foreground:?}"));
         ui.pending_history.clear();
 
         // The background completion, exactly as the pump re-injects it: the
@@ -7829,15 +7832,16 @@ mod tests {
                 "`{word}` reached the screen: {background:#?}"
             );
         }
-        let expected_head = format!(
-            "{} {}",
-            foreground[foreground_head],
-            super::super::strings::COMMAND_BACKGROUND
-        );
+        // The row's result stands at its right edge, so the word sits
+        // between the command and the padding: compare the words.
+        let words = |row: &str| row.split_whitespace().collect::<Vec<_>>().join(" ");
+        let marker = format!(" {}", super::super::strings::COMMAND_BACKGROUND);
+        let head = background.get(foreground_head).map(String::as_str).unwrap_or_default();
+        assert!(head.contains(&marker), "the row carries the dim word: {background:#?}");
         assert_eq!(
-            background.get(foreground_head).map(String::as_str),
-            Some(expected_head.as_str()),
-            "the header is the foreground header plus one dim word: {background:#?}"
+            words(&head.replacen(&marker, "", 1)),
+            words(&foreground[foreground_head]),
+            "the row is the foreground row plus one dim word: {background:#?}"
         );
         assert_eq!(
             &background[foreground_head + 1..],
@@ -8256,9 +8260,10 @@ mod tests {
         });
         let frame = plain_frame(&finish_tool_frame(&mut ui));
         assert!(!frame.contains("Failed to apply patch"), "{frame}");
-        assert!(!frame.contains('✘'), "{frame}");
-        let edited_at = frame.find("Edited 2 files (+2 -2)").unwrap_or_else(|| panic!("{frame}"));
-        let ran_at = frame.find("Ran cargo test").unwrap_or_else(|| panic!("{frame}"));
+        assert!(!frame.contains('✗'), "{frame}");
+        assert_eq!(frame.matches("✓ Edit    ").count(), 2, "{frame}");
+        let edited_at = frame.find("✓ Edit    ").unwrap_or_else(|| panic!("{frame}"));
+        let ran_at = frame.find("✓ Run     cargo test").unwrap_or_else(|| panic!("{frame}"));
         assert!(edited_at < ran_at, "the edits stand before the command that followed them: {frame}");
     }
 
@@ -8297,9 +8302,12 @@ mod tests {
             body: format_tool_result_from_raw("bash", r#"{"stdout": "ok", "stderr": "", "exit_code": 0}"#, false),
         });
         let frame = plain_frame(&finish_tool_frame(&mut ui));
-        assert!(!frame.contains('✘'), "{frame}");
-        assert!(frame.contains("Edited src/a.rs (+1 -1)"), "{frame}");
-        assert!(frame.contains("Ran cargo test"), "{frame}");
+        assert!(!frame.contains('✗'), "{frame}");
+        assert!(
+            frame.lines().any(|row| row.starts_with("✓ Edit    src/a.rs") && row.trim_end().ends_with("+1 -1")),
+            "{frame}"
+        );
+        assert!(frame.contains("✓ Run     cargo test"), "{frame}");
     }
 
     /// The `agents 1 · running 0 · done 1` line under a working header is a

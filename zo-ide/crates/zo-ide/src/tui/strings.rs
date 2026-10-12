@@ -301,3 +301,52 @@ pub const COMMAND_BACKGROUND: &str = "· background";
 pub fn unchanged_lines(count: usize) -> String {
     if count == 1 { "⋯ 1 unchanged line".to_string() } else { format!("⋯ {count} unchanged lines") }
 }
+
+/// A tool row's verb (t-48216): `✓ Read    src/app.py      12 lines`.
+pub const TOOL_READ: &str = "Read";
+pub const TOOL_SEARCH: &str = "Search";
+pub const TOOL_LIST: &str = "List";
+pub const TOOL_RUN: &str = "Run";
+pub const TOOL_EDIT: &str = "Edit";
+pub const TOOL_CREATE: &str = "Create";
+pub const TOOL_DELETE: &str = "Delete";
+/// How a finished tool row's call ended.
+pub const TOOL_DONE: &str = "✓";
+pub const TOOL_FAILED: &str = "✗";
+/// A tool row's result when the call did not run or did not succeed.
+pub const TOOL_DECLINED_RESULT: &str = "declined";
+pub const TOOL_FAILED_RESULT: &str = "failed";
+
+/// A tool row's result: how many lines the call read or printed.
+#[must_use]
+pub fn line_count(count: usize) -> String {
+    if count == 1 { "1 line".to_string() } else { format!("{count} lines") }
+}
+
+/// A tool row's result when the output was cut before it reached zo.
+#[must_use]
+pub fn lines_at_least(count: usize) -> String {
+    format!("{count}+ lines")
+}
+
+#[must_use]
+pub fn match_count(count: usize) -> String {
+    match count {
+        0 => "no matches".to_string(),
+        1 => "1 match".to_string(),
+        _ => format!("{count} matches"),
+    }
+}
+
+#[must_use]
+pub fn entry_count(count: usize) -> String {
+    match count {
+        1 => "1 entry".to_string(),
+        _ => format!("{count} entries"),
+    }
+}
+
+#[must_use]
+pub fn exit_code(code: i32) -> String {
+    format!("exit {code}")
+}
