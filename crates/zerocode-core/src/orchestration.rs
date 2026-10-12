@@ -35,6 +35,7 @@
 //! that read the clock could not be tested at a chosen instant, and a ledger
 //! that opened a file could not be tested at all.
 
+pub mod attempt_time;
 mod completion;
 pub mod coordinator_handover;
 pub mod delegate;
@@ -22248,6 +22249,10 @@ fn plan_inner(
                     "lifecycle": dispatch_lifecycle(run, &dispatch.id),
                 }),
             };
+            answer["time"] = serde_json::json!({
+                "attempt": latest.map(|dispatch| attempt_time::attempt_time(run, dispatch)),
+                "task": attempt_time::task_time(run, task),
+            });
             if words.has("--preamble") {
                 answer["preamble"] = serde_json::Value::String(dispatch_preamble(task));
             }

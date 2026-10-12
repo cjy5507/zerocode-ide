@@ -25142,6 +25142,8 @@ fn a_late_sound_never_retires_the_next_occupants_readiness() {
 
 /// t-15554: the assign moment's one request (`tests/assign.rs`).
 mod assign;
+/// t-47835: where an attempt's time went (`tests/attempt_time.rs`).
+mod attempt_time;
 /// t-19159: a closed state that is not failure, and the settle pass
 /// (`tests/closed.rs`).
 mod closed;
