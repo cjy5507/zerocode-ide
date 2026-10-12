@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::catalog::{self, Artifact, Catalog, EngineKind, Model, RuntimeProfile};
 use crate::engine::{self, Engine, Running};
-use crate::storage::{self, Binding, Store};
+use crate::selection::{self, Binding};
+use crate::storage::{self, Store};
 use crate::{Error, Result};
 
 #[derive(Clone, Serialize)]
@@ -188,9 +189,16 @@ impl Manager {
 
     pub fn snapshot(&self) -> Snapshot {
         let mut inner = lock(&self.inner);
-        let provider_identity = Provider::read(&self.settings)
+        let selected = selection::read(&self.settings);
+        let provider_identity = selected
+            .as_ref()
             .ok()
-            .map(|provider| provider.identity());
+            .map(|selected| selected.provider.identity())
+            .or_else(|| {
+                Provider::read(&self.settings)
+                    .ok()
+                    .map(|provider| provider.identity())
+            });
         if inner.provider_identity != provider_identity {
             inner.provider_identity.clone_from(&provider_identity);
             inner.revision += 1;
@@ -207,15 +215,15 @@ impl Manager {
             inner.server.error = Some(Error::ServerStopped.token());
             inner.revision += 1;
         }
-        let bindings = self.store.bindings().unwrap_or_default();
-        let configured = bindings
-            .iter()
-            .rev()
-            .find(|binding| {
-                Some(&binding.provider_identity) == provider_identity.as_ref()
-                    && self.catalog.models.iter().any(|model| {
-                        model.id == binding.model_id && model.revision == binding.revision
-                    })
+        let configured = selected
+            .as_ref()
+            .ok()
+            .and_then(|selected| selected.binding.as_ref())
+            .filter(|binding| {
+                self.catalog
+                    .models
+                    .iter()
+                    .any(|model| model.id == binding.model_id && model.revision == binding.revision)
             })
             .map(|binding| binding.model_id.clone());
         let applied = inner
@@ -290,6 +298,7 @@ impl Manager {
     }
 
     pub fn notify_settings_changed(&self) {
+        lock(&self.inner).revision += 1;
         self.emit();
     }
 
@@ -812,7 +821,7 @@ impl Manager {
         &self,
         server_id: &str,
         expected: &str,
-        apply: impl FnOnce(&Provider, &str) -> Result<()>,
+        apply: impl FnOnce(&Provider, &str, &Binding) -> Result<()>,
     ) -> Result<Snapshot> {
         let mut inner = lock(&self.inner);
         if inner.cancel.is_some() {
@@ -839,12 +848,12 @@ impl Manager {
         if current.identity() != expected {
             return Err(Error::SettingsChanged);
         }
-        self.store.keep_binding(Binding {
+        let binding = Binding {
             model_id: model.id.clone(),
             revision: model.revision.clone(),
             provider_identity: provider.identity(),
-        })?;
-        apply(&provider, expected)?;
+        };
+        apply(&provider, expected, &binding)?;
         inner.revision += 1;
         drop(inner);
         self.emit();
@@ -892,12 +901,11 @@ impl Manager {
             return Err(Error::Busy);
         }
         guard(&|| {
-            let identity = Provider::read(&self.settings)
-                .map_err(|_| Error::SettingsChanged)?
-                .identity();
-            if self.store.bindings()?.iter().any(|binding| {
-                binding.model_id == model_id && binding.provider_identity == identity
-            }) {
+            let selected = selection::read(&self.settings)?;
+            if selected
+                .binding
+                .is_some_and(|binding| binding.model_id == model_id)
+            {
                 return Err(Error::Configured);
             }
             self.store.remove(&model)
@@ -1136,7 +1144,7 @@ pub(crate) mod test_support {
         expected: &str,
         settings: &Path,
     ) -> Result<Snapshot> {
-        manager.apply(server, expected, |_, _| {
+        manager.apply(server, expected, |_, _, _| {
             let backup = settings.with_extension("backup");
             fs::rename(settings, &backup).unwrap();
             fs::create_dir(settings).unwrap();

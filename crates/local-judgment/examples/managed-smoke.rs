@@ -63,14 +63,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .provider_identity
                     .as_deref()
                     .ok_or("provider_unknown")?,
-                |provider, expected| {
+                |provider, expected, binding| {
                     let current = judgment_provider::Provider::read(&settings)
                         .map_err(|_| local_judgment::Error::SettingsChanged)?;
                     if current.identity() != expected {
                         return Err(local_judgment::Error::SettingsChanged);
                     }
                     let bytes = serde_json::to_vec(
-                        &serde_json::json!({"smart":{"judgmentProvider":provider}}),
+                        &serde_json::json!({"smart":{"judgmentProvider":provider,(local_judgment::MANAGED_MODEL_KEY):binding}}),
                     )
                     .map_err(|_| local_judgment::Error::Storage)?;
                     std::fs::write(&settings, bytes).map_err(|_| local_judgment::Error::Storage)

@@ -2,9 +2,11 @@ mod archive;
 mod catalog;
 mod engine;
 mod manager;
+mod selection;
 mod storage;
 
 pub use manager::{Manager, Snapshot};
+pub use selection::{Binding, MANAGED_MODEL_KEY};
 
 pub type Result<T> = std::result::Result<T, Error>;
 

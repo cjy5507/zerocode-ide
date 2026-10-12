@@ -525,7 +525,7 @@ fn revision_mismatch_and_missing_runtime_leave_the_provider_unchanged() {
         Err(Error::RuntimeMissing)
     ));
     assert!(matches!(
-        manager.apply("stale", "old", |_, _| panic!("must not write")),
+        manager.apply("stale", "old", |_, _, _| panic!("must not write")),
         Err(Error::ServerStopped)
     ));
     assert_eq!(fs::read(settings).unwrap(), original);
@@ -583,23 +583,25 @@ async fn managed_apply_requires_the_checked_owned_server_and_expected_provider()
     let (id, _) = test_support::running(&manager, engine, false).await;
     let expected = manager.snapshot().provider_identity.unwrap();
     assert!(matches!(
-        manager.apply(&id, &expected, |_, _| panic!("unchecked must not write")),
+        manager.apply(&id, &expected, |_, _, _| panic!("unchecked must not write")),
         Err(Error::NotChecked)
     ));
     manager.check(&id).unwrap();
     assert_eq!(settled(&manager).await.operation.unwrap().state, "done");
     assert!(matches!(
-        manager.apply("old-server", &expected, |_, _| panic!(
+        manager.apply("old-server", &expected, |_, _, _| panic!(
             "stale must not write"
         )),
         Err(Error::ServerChanged)
     ));
     assert!(matches!(
-        manager.apply(&id, "old-provider", |_, _| panic!("changed must not write")),
+        manager.apply(&id, "old-provider", |_, _, _| panic!(
+            "changed must not write"
+        )),
         Err(Error::SettingsChanged)
     ));
     let applied = manager
-        .apply(&id, &expected, |provider, expected| {
+        .apply(&id, &expected, |provider, expected, binding| {
             assert_eq!(
                 judgment_provider::Provider::read(&settings)
                     .unwrap()
@@ -608,7 +610,7 @@ async fn managed_apply_requires_the_checked_owned_server_and_expected_provider()
             );
             fs::write(
                 &settings,
-                serde_json::to_vec(&json!({"smart":{"judgmentProvider":provider}})).unwrap(),
+                serde_json::to_vec(&json!({"smart":{"judgmentProvider":provider,(crate::MANAGED_MODEL_KEY):binding}})).unwrap(),
             )
             .unwrap();
             Ok(())

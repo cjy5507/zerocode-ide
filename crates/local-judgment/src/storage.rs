@@ -18,14 +18,6 @@ pub struct Stage {
     committed: bool,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Binding {
-    pub model_id: String,
-    pub revision: String,
-    pub provider_identity: String,
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Receipt {
@@ -151,39 +143,6 @@ impl Store {
             io(fs::remove_dir_all(path))?;
         }
         Ok(())
-    }
-
-    pub fn bindings(&self) -> Result<Vec<Binding>> {
-        let path = child(&self.root, "bindings.json")?;
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let bytes = bounded_read(&path, 64 * 1024)?;
-        let bindings: Vec<Binding> = serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?;
-        if bindings.len() > 16 {
-            return Err(Error::TooLarge);
-        }
-        Ok(bindings)
-    }
-
-    pub fn keep_binding(&self, binding: Binding) -> Result<()> {
-        let mut bindings = self.bindings()?;
-        bindings.retain(|kept| kept.provider_identity != binding.provider_identity);
-        bindings.push(binding);
-        if bindings.len() > 16 {
-            bindings.remove(0);
-        }
-        let bytes = serde_json::to_vec(&bindings).map_err(|_| Error::Storage)?;
-        let temp = child(
-            &self.root,
-            &format!("bindings-{}.tmp", uuid::Uuid::new_v4()),
-        )?;
-        let mut file = io(OpenOptions::new().write(true).create_new(true).open(&temp))?;
-        io(file.write_all(&bytes))?;
-        io(file.sync_all())?;
-        drop(file);
-        let final_path = child(&self.root, "bindings.json")?;
-        io(fs::rename(temp, final_path))
     }
 
     pub fn require_space(&self, bytes: u64) -> Result<()> {

@@ -123,15 +123,20 @@ pub(crate) fn managed_judgment_apply(
         .apply(
             &server_id,
             &expected_provider_identity,
-            |provider, expected| {
-                typesafe_settings::set_provider_if_identity(&path, provider.clone(), expected)
-                    .map_err(|error| {
-                        if error == "settings_changed" {
-                            local_judgment::Error::SettingsChanged
-                        } else {
-                            local_judgment::Error::Storage
-                        }
-                    })
+            |provider, expected, binding| {
+                typesafe_settings::set_provider_if_identity(
+                    &path,
+                    provider.clone(),
+                    expected,
+                    Some(binding),
+                )
+                .map_err(|error| {
+                    if error == "settings_changed" {
+                        local_judgment::Error::SettingsChanged
+                    } else {
+                        local_judgment::Error::Storage
+                    }
+                })
             },
         )
         .map_err(|error| error.to_string())
