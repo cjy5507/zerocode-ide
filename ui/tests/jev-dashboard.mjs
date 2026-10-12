@@ -22,7 +22,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openWindowTestPage } from "./window-boot.mjs";
 import { createRequire } from "node:module";
-import { contrastTable, setQualityTheme, settlePaint } from "./settings-quality.mjs";
+import { SETTINGS_QUALITY_SPEC, contrastTable, setQualityTheme, settlePaint } from "./settings-quality.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 /* Where the evidence goes: a person looks at these (t-5807, the operator's
@@ -1531,6 +1531,8 @@ export async function testJevDashboard(browser, origin, ok) {
           await window.__PAINTED__();
         });
         const drawer = await contrastTable(page, AxeBuilder, "#jev-view .jev-drawer");
+        const viewport = page.viewportSize();
+        await page.setViewportSize({ ...viewport, height: SETTINGS_QUALITY_SPEC.viewport.height });
         await page.evaluate(async () => {
           document.querySelector("#jev-view .jev-drawer-close").click();
           setSettingsOpen(true, "jev-enabled");
@@ -1544,9 +1546,14 @@ export async function testJevDashboard(browser, origin, ok) {
           return saved;
         });
         const frame = page.locator(".settings-frame");
+        await frame.evaluate((node) => node.scrollTo({ top: 0, left: 0, behavior: "instant" }));
+        await settlePaint(page);
         const scrollBefore = await frame.evaluate((node) => [node.scrollTop, node.scrollLeft]);
-        const clipped = await page.locator("#typesafe-key-input").evaluate((node) =>
-          node.getBoundingClientRect().top >= node.closest(".settings-frame").getBoundingClientRect().bottom);
+        const clipped = await page.locator("#typesafe-key-input").evaluate((node) => {
+          const control = node.getBoundingClientRect();
+          const bounds = node.closest(".settings-frame").getBoundingClientRect();
+          return control.top >= bounds.bottom || control.bottom <= bounds.top;
+        });
         const card = await contrastTable(page, AxeBuilder, "#typesafe-card");
         const scrollAfter = await frame.evaluate((node) => [node.scrollTop, node.scrollLeft]);
         const hiddenImport = card.find((row) => row.target === "#managed-judgment-import-path");
@@ -1586,6 +1593,7 @@ export async function testJevDashboard(browser, origin, ok) {
         });
         await disclosures.dispose();
         await page.evaluate(() => setSettingsOpen(false));
+        await page.setViewportSize(viewport);
         contrast[theme] = [
           ...dashboard.map((row) => ({ surface: "dashboard", ...row })),
           ...drawer.map((row) => ({ surface: "drawer", ...row })),
