@@ -8509,6 +8509,57 @@ mod tests {
         let images = load_submission_images(&[image.path().to_path_buf()]).expect("read png");
         assert_eq!(images, vec![("image/png".to_string(), "AAEC".to_string())]);
     }
+
+    /// The card asks about the whole command, not its first sixty characters
+    /// (t-48216): a person approves what will run, all of it.
+    #[test]
+    fn the_permission_card_shows_the_whole_command_it_asks_about() {
+        use runtime::permission::{
+            PermissionChoice, PermissionDecision, PermissionRequest, RiskLevel,
+        };
+
+        let long = "python3 -m py_compile src/app.py && echo \"syntax check passed: src/app.py\" \
+                    && python3 -m unittest discover -s tests -p 'test_*.py'";
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        ui.block(tool_call(&ids, "toolu_long", "bash", &serde_json::json!({ "command": long })));
+        let request = PermissionRequest {
+            tool: "bash".to_string(),
+            input_summary: long.chars().take(60).collect(),
+            input_hash: String::new(),
+            reasoning: "tool 'bash' requires approval to run while mode is workspace-write"
+                .to_string(),
+            choices: vec![
+                PermissionChoice {
+                    key: 'o',
+                    label: "Allow once".to_string(),
+                    decision: PermissionDecision::AllowOnce,
+                },
+                PermissionChoice {
+                    key: 'n',
+                    label: "Deny".to_string(),
+                    decision: PermissionDecision::Deny,
+                },
+            ],
+            risk_level: RiskLevel::High,
+            question: None,
+        };
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        ui.block(RenderBlock::PermissionPrompt(
+            crate::session::permission_bridge::build_render_prompt(&request, responder, ids.next()),
+        ));
+        let parked = ui.parked.as_ref().expect("the card is up");
+        let super::ParkedScreen::Dialog(dialog) = &parked.screen else {
+            panic!("a permission prompt parks a dialog");
+        };
+        let text = dialog
+            .lines(240)
+            .iter()
+            .map(Line::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(long), "the whole command is on the card:\n{text}");
+    }
 }
 
 /// The footer's second row and its three keys (t-10232): codex 0.157.1's

@@ -2455,3 +2455,78 @@ mod tests {
         assert_eq!(cursor, Some((3, 11)));
     }
 }
+
+/// The approval card and the status row while a call runs (t-48216).
+#[cfg(test)]
+mod card_tests {
+    use std::time::Duration;
+
+    use runtime::permission::{PermissionChoice, PermissionDecision, PermissionRequest, RiskLevel};
+
+    use super::{Dialog, Status};
+    use crate::tui::ansi::Line;
+
+    const REASON: &str = "tool 'bash' requires approval to run while mode is workspace-write";
+
+    fn bash_request() -> PermissionRequest {
+        let choice = |key, label: &str, decision| PermissionChoice {
+            key,
+            label: label.to_string(),
+            decision,
+        };
+        PermissionRequest {
+            tool: "bash".to_string(),
+            input_summary: "python3 -m py_compile src/app.py".to_string(),
+            input_hash: String::new(),
+            reasoning: REASON.to_string(),
+            choices: vec![
+                choice('y', "Allow", PermissionDecision::Allow),
+                choice('o', "Allow once", PermissionDecision::AllowOnce),
+                choice('n', "Deny", PermissionDecision::Deny),
+            ],
+            risk_level: RiskLevel::High,
+            question: None,
+        }
+    }
+
+    fn card() -> Dialog {
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        let prompt = crate::session::permission_bridge::build_render_prompt(
+            &bash_request(),
+            responder,
+            runtime::message_stream::BlockId(1),
+        );
+        Dialog::for_permission(&prompt)
+    }
+
+    #[test]
+    fn the_card_starts_on_allow_once_never_on_the_session_wide_allow() {
+        let dialog = card();
+        assert_eq!(dialog.options[dialog.selected], "Allow once");
+    }
+
+    #[test]
+    fn the_card_states_the_reason_and_the_risk_in_plain_words() {
+        let text = card()
+            .lines(100)
+            .iter()
+            .map(Line::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(REASON), "the reason is on the card:\n{text}");
+        assert!(text.contains("High risk"), "the risk is on the card:\n{text}");
+        assert!(
+            !text.contains("explicitly unblock"),
+            "the choices are listed once, as choices:\n{text}"
+        );
+    }
+
+    /// The running call has its own row with its own spinner; the status row
+    /// keeps the turn's clock and does not name the command a second time.
+    #[test]
+    fn the_status_row_keeps_one_clock_and_leaves_the_command_to_its_row() {
+        let mut status = Status::working(Duration::from_secs(7));
+        status.note_tool_started("toolu_run", "Run", Some("for t in create list; do echo $t; done"));
+        assert_eq!(status.line(120).plain(), "• Working (7s • esc to interrupt)");
+    }
+}
