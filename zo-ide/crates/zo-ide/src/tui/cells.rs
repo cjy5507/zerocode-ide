@@ -2280,3 +2280,59 @@ mod tests {
         );
     }
 }
+
+/// The answer hangs two columns in without a bullet (t-48216): tool rows open
+/// on their status glyph in the first column, and an answer that also opened
+/// on `• ` read as one more row of the same list.
+#[cfg(test)]
+mod answer_cell_tests {
+    use std::time::{Duration, Instant};
+
+    use super::MarkdownStream;
+    use crate::tui::ansi::Line;
+
+    fn drain(stream: &mut MarkdownStream, ticks: usize) -> Vec<String> {
+        let start = Instant::now();
+        let mut out = Vec::new();
+        for step in 0..ticks {
+            let now = start + Duration::from_millis(step as u64);
+            out.extend(stream.tick(now).iter().map(Line::plain));
+        }
+        out
+    }
+
+    #[test]
+    fn an_answer_hangs_two_columns_in_without_a_bullet() {
+        let mut stream = MarkdownStream::answer(40);
+        stream.push("## 변경 요약\n\n- 하나\n");
+        let rows = drain(&mut stream, 8);
+        assert_eq!(
+            rows,
+            vec![
+                String::new(),
+                "  변경 요약".to_string(),
+                String::new(),
+                "  • 하나".to_string(),
+            ]
+        );
+    }
+
+    /// A row that went out to the scrollback is the terminal's to keep. The
+    /// stream holds only what has not gone out yet, so a long answer costs the
+    /// same few rows of memory at its end as at its start.
+    #[test]
+    fn rows_already_in_the_scrollback_are_not_kept() {
+        let mut stream = MarkdownStream::answer(60);
+        for paragraph in 0..400 {
+            stream.push(&format!("Paragraph {paragraph} of a long answer.\n\n"));
+            drain(&mut stream, 4);
+        }
+        drain(&mut stream, 64);
+        assert!(!stream.is_draining(), "everything committed has gone out");
+        assert!(
+            stream.rendered.len() < 16,
+            "{} rendered rows are still held for an answer whose rows all went out",
+            stream.rendered.len()
+        );
+    }
+}

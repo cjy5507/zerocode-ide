@@ -1314,3 +1314,33 @@ mod tests {
         );
     }
 }
+
+/// Headings read as titles and list items wear a dot (t-48216): `## ` was
+/// drawn as text, so an answer opened on `• ## 변경 요약`.
+#[cfg(test)]
+mod title_tests {
+    use super::render;
+
+    fn plain(source: &str) -> Vec<String> {
+        render(source).iter().map(super::Line::plain).collect()
+    }
+
+    #[test]
+    fn a_heading_is_a_bold_title_without_its_hashes() {
+        for source in ["# 변경 요약", "## 변경 요약", "### 변경 요약", "#### 변경 요약"] {
+            let lines = render(source);
+            assert_eq!(lines.len(), 1, "{source}");
+            assert_eq!(lines[0].plain(), "변경 요약", "{source}");
+            assert!(
+                lines[0].spans.iter().all(|span| span.style.bold),
+                "{source}: every span of a title is bold"
+            );
+        }
+    }
+
+    #[test]
+    fn list_items_wear_a_dot() {
+        assert_eq!(plain("- one\n- two"), vec!["• one", "• two"]);
+        assert_eq!(plain("- one\n  - nested"), vec!["• one", "    • nested"]);
+    }
+}

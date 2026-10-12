@@ -586,3 +586,17 @@ mod tests {
         assert_eq!(screen_turn_ending("\n\n", true), None);
     }
 }
+
+/// The receipt is read by a person (t-48216): plain words, no internal tag.
+#[cfg(test)]
+mod receipt_words_tests {
+    use super::completion_receipt;
+
+    #[test]
+    fn the_receipt_reads_as_plain_words_without_an_internal_tag() {
+        assert_eq!(
+            completion_receipt(&["cargo test", "cargo clippy"]),
+            "Checks passed after the last edit: cargo test · cargo clippy"
+        );
+    }
+}
