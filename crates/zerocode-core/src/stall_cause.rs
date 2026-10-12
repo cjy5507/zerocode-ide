@@ -61,7 +61,7 @@ const TURN_KEYS: [&str; 2] = ["role", "words"];
 /// `words`, where version 4 carried each as one text (t-9469). The version
 /// rides every request row, so a reader can tell the series apart; reading
 /// them apart is t-6877's contract.
-pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 5;
+pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 6;
 
 /// How long after a silence was asked about its label waits for what
 /// followed ([`followed`]).
@@ -170,7 +170,7 @@ impl Cause {
                 "The agent's own program has a question or a confirmation on the screen and waits for a key: a box like `Do you want to continue?` over `1. Yes` and `2. No` with `Enter to select · ↑/↓ to navigate · Esc to cancel`, or an `AskUserQuestion` call as the conversation's last record with no answer after it."
             }
             Self::FinishedWithoutReport => {
-                "The work reads as finished — a closing summary, a turn footer like `✻ Worked for 27m 0s · done 2:11 AM` or `─ Worked for 8m 43s ─`, and an empty composer (`❯`, `› Ask Codex to do anything`) — but no `zerocode-orc send --type worker_done` ran after the summary."
+                "The work reads as finished — a closing summary, a turn footer like `✻ Worked for 27m 0s · done 2:11 AM`, `─ Worked for 8m 43s ─` or `── 8m 43s · 12 tool calls · +40 -3 ──`, and an empty composer (`❯`, `› Ask Codex to do anything`) — but no `zerocode-orc send --type worker_done` ran after the summary."
             }
             Self::LongRunningTool => {
                 "A command the agent started is still running and the agent is waiting on it, as in `• Working (19m 43s • esc to interrupt) · 1 background terminal running` or a turn footer ending `· 1 shell still running`."
