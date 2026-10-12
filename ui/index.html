@@ -4965,6 +4965,16 @@
               볼트를 연 zo 판이 쉬는 동안 매주 한 번 스킬의 주간 리뷰를 돌려 색인·링크만 고치고 wiki/log.md에 한 줄을 남깁니다.
             </p>
             <p class="settings-hint" id="second-brain-weekly-review-receipt" role="status" aria-live="polite" hidden></p>
+            <!-- raw 받은편지함(t-43992): 에이전트가 이 창의 브라우저로 통째로 읽은 바깥
+                 웹 페이지를 볼트의 raw/에 새 파일로 떨어뜨린다. 「raw 취합」 턴이 그것을
+                 먹는다. 옵트인이다. -->
+            <label class="settings-check" id="second-brain-raw-capture-field">
+              <input type="checkbox" id="second-brain-raw-capture" />
+              <span class="settings-label" data-i18n="settings.secondBrain.rawCapture">에이전트가 읽은 웹 페이지를 raw/에 모으기</span>
+            </label>
+            <p class="settings-hint" data-i18n="settings.secondBrain.rawCaptureHint">
+              에이전트가 이 창의 브라우저로 통째로 읽은 바깥 웹 페이지를 볼트의 raw/에 새 파일로 남깁니다. 같은 주소는 한 번만 남기고, 이미 있는 파일은 건드리지 않습니다.
+            </p>
             <p class="integration-error" id="second-brain-error" role="alert" hidden></p>
             <p class="integration-error" id="second-brain-link-error" role="alert" hidden></p>
             <p class="integration-empty" id="second-brain-optional" hidden>
