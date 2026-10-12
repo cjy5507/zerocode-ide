@@ -666,6 +666,37 @@ class ReceiptTests(unittest.TestCase):
         with mock.patch.object(Path, "read_text", side_effect=AssertionError("rules reopened after verification")):
             self.assertEqual(gate.mask_log(PASS, {}, self.args.trust), PASS)
 
+    def test_environment_credential_names_preserve_settings_and_mask_short_secrets(self):
+        raw = b".\n----------------------------------------------------------------------\nRan 1 test in 0.011s\n\nOK\n"
+        settings = {"ZO_DISABLE_KEYCHAIN": "1", "SERVICE_KEYCHAIN_MODE": "1", "KEYBOARD_LAYOUT": "1", "MONKEY_LEVEL": "1"}
+        self.assertEqual(gate.mask_log(raw, settings, self.args.trust), raw)
+        self.assertEqual(gate.test_count(raw), 1)
+        names = ("TOKEN", "PASSWORD", "SECRET", "KEY", "AUTH", "COOKIE", "SERVICE_API_KEY",
+                 "SERVICE_ACCESS_TOKEN", "SERVICE_PRIVATEKEY", "SERVICE_APIKEY", "SERVICE_CLIENTSECRET",
+                 "npm_config__authToken", "serviceApiKey", "HTTP_AUTHORIZATION", "DATABASE_CREDENTIALS",
+                 "SERVERAPIKEY", "SERVICEACCESSTOKEN", "SUPERSECRET")
+        for name in names:
+            with self.subTest(name=name):
+                self.assertTrue(gate.credential_environment_name(name))
+                masked = gate.mask_log(raw, {**settings, name: "1"}, self.args.trust)
+                self.assertNotIn(b"1", masked)
+                self.assertIn(b"[private]", masked)
+                self.assertEqual(gate.test_count(masked), 0)
+
+    def test_genuine_short_secret_count_collision_keeps_real_execution_unknown(self):
+        script = self.root / "fixture_short_secret.py"
+        script.write_text("import unittest\nclass Fixture(unittest.TestCase):\n    def test_fixture(self):\n        self.assertEqual(1+1,2)\n")
+        self.args.command = [sys.executable, "-I", "-S", "-B", "-m", "unittest", "discover", "-s", str(self.root), "-p", script.name]
+        self.args.script_file = [str(script)]
+        ledger = FakeLedger()
+        with mock.patch.dict(os.environ, {"SERVICE_API_KEY": "1"}):
+            result = self.produce(ledger)
+        self.assertEqual(ledger.metadata["rc"], 0)
+        self.assertTrue(ledger.metadata["inputsUnchanged"])
+        self.assertEqual(result["outcome"], "unknown")
+        self.assertEqual(result["tests"], 0)
+        self.assertIn(b"Ran [private] test", (Path(self.args.output) / "gate.log").read_bytes())
+
     def test_recipe_coverage_is_checked_against_the_independent_declaration(self):
         complete = b"==> verify recipe first\n" + PASS + b"<== verify recipe first rc=0 1s\n"
         self.assertEqual(gate.test_count(complete, ["first"]), 2)

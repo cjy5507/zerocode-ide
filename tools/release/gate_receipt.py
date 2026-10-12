@@ -460,6 +460,18 @@ def test_count(log, recipes=(), test_recipes=None):
     return total
 
 
+def credential_environment_name(name):
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", separated)
+    words = set(re.findall(r"[A-Z0-9]+", separated.upper()))
+    sensitive = {"TOKEN", "PASSWORD", "PASSWD", "SECRET", "KEY", "COOKIE", "AUTH",
+                 "AUTHORIZATION", "AUTHENTICATION", "CREDENTIAL", "CREDENTIALS"}
+    compact = {"APIKEY", "ACCESSKEY", "PRIVATEKEY", "SECRETKEY", "SIGNINGKEY", "ENCRYPTIONKEY",
+               "AUTHTOKEN", "ACCESSTOKEN", "REFRESHTOKEN", "BEARERTOKEN", "CLIENTSECRET", "SESSIONCOOKIE"}
+    endings = compact | {"TOKEN", "PASSWORD", "PASSWD", "SECRET", "COOKIE", "AUTHORIZATION", "CREDENTIAL", "CREDENTIALS"}
+    return any(word in sensitive or any(word.endswith(ending) for ending in endings) for word in words)
+
+
 def mask_log(log, environment, trust):
     """Use the release scanner's shared rules and known secret environment values."""
     scanner = types.ModuleType("gate_pii_scan")
@@ -468,7 +480,7 @@ def mask_log(log, environment, trust):
     exec(compile(trust["bytes"]["scanner"], scanner.__file__, "exec"), scanner.__dict__)
     text = log.decode("utf-8", errors="replace")
     for key, value in sorted(environment.items(), key=lambda pair: len(pair[1]), reverse=True):
-        if value and re.search(r"TOKEN|PASSWORD|SECRET|KEY|COOKIE|AUTH", key, re.IGNORECASE):
+        if value and credential_environment_name(key):
             text = text.replace(value, "[private]")
     for rule in scanner.RULES:
         text = re.sub(rule["find"], "[private]", text)
