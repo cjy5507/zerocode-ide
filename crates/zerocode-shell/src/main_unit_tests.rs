@@ -14434,6 +14434,40 @@ fn second_brain_explore_roundtrip_in_settings() {
     );
 }
 
+/// t-43992 unit 1: the raw inbox feed's switch is one boolean beside the
+/// weekly review — off in a fresh document and in every document written
+/// before the switch existed, and kept once the person turns it on.
+#[test]
+fn second_brain_raw_capture_is_off_until_the_person_turns_it_on() {
+    let key = "second_brain_raw_capture";
+    let fresh = serde_json::to_value(SettingsDocument::default()).unwrap();
+    assert_eq!(
+        fresh.get(key),
+        Some(&serde_json::Value::Bool(false)),
+        "a fresh document does not say the feed is off"
+    );
+
+    let mut older = fresh.clone();
+    older.as_object_mut().unwrap().remove(key);
+    let read: SettingsDocument = serde_json::from_value(older).unwrap();
+    assert_eq!(
+        serde_json::to_value(&read).unwrap().get(key),
+        Some(&serde_json::Value::Bool(false)),
+        "a document from before the switch does not read as off"
+    );
+
+    let mut on = fresh;
+    on.as_object_mut()
+        .unwrap()
+        .insert(key.to_string(), serde_json::Value::Bool(true));
+    let kept: SettingsDocument = serde_json::from_value(on).unwrap();
+    assert_eq!(
+        serde_json::to_value(&kept).unwrap().get(key),
+        Some(&serde_json::Value::Bool(true)),
+        "a switch the person turned on did not survive a write and a read"
+    );
+}
+
 /// Which folder the knowledge graph reads, and which it refuses.
 ///
 /// "No pages" and "no such folder" are different sentences, and the view

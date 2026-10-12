@@ -1,6 +1,7 @@
 import { endRun } from "./end-run.mjs";
 import "./scm-notices.mjs";
 import "./mail-waiting.mjs";
+import "./prompt-parked.mjs";
 import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 import { createRunner } from "./window-runner.mjs";
 import { reportedPlatformScript, TEST_PLATFORM } from "./test-platform.mjs";

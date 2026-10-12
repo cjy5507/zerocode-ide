@@ -98,6 +98,7 @@ pub mod screen_menu;
 pub mod second_brain;
 pub mod second_brain_code;
 pub mod second_brain_export;
+pub mod second_brain_feed;
 pub mod second_brain_graph;
 pub mod second_brain_lint;
 pub mod second_brain_live;
