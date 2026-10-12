@@ -4050,13 +4050,20 @@ async fn e2e_a_background_bash_completes_as_the_foreground_ran_cell() {
         .iter()
         .position(|row| row.contains(BACKGROUND_WORD))
         .unwrap_or_else(|| panic!("no completion header: {transcript:#?}"));
-    // The row's result stands at its right edge, so the word sits between
-    // the command and the padding: compare the words.
-    let words = |row: &str| row.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert_eq!(
-        words(&transcript[completion_at].replacen(&format!(" {BACKGROUND_WORD}"), "", 1)),
-        words(&control[0]),
-        "the row is the foreground row plus one dim word: {transcript:#?}"
+    // Each row wears its own call's outcome: the start succeeded,
+    // the task exited 1. So the completion is the foreground row's verb and
+    // command, the one dim word, and its own result at the edge.
+    let command = control[0]
+        .split_once("Run     ")
+        .and_then(|(_, rest)| rest.split("  ").next())
+        .unwrap_or_else(|| panic!("the foreground row names its command: {:?}", control[0]));
+    assert!(
+        transcript[completion_at].starts_with(&format!("✗ Run     {command} {BACKGROUND_WORD}")),
+        "the row is the foreground row's command plus one dim word: {transcript:#?}"
+    );
+    assert!(
+        transcript[completion_at].trim_end().ends_with("exit 1"),
+        "the completion carries its own exit: {transcript:#?}"
     );
     let completion = command_cell(&transcript[completion_at..], "Run     sh -c")
         .unwrap_or_else(|| panic!("no completion cell: {transcript:#?}"));
@@ -4102,6 +4109,7 @@ fn command_cell(rows: &[String], head: &str) -> Option<Vec<String>> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript() {
     const TRIM: &str = "Context trim";
+    const ROWS: u16 = 40;
     // The microcompact tier is 64% of the compaction window; the trim keeps
     // the 24 newest results (the model's own window is large) and needs at
     // least 4k tokens of older ones to clear. Sixty results of ~4.8 KiB
@@ -4138,24 +4146,28 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
     // The trim is painted while the next request is held: on the status row.
     let long = Duration::from_secs(60);
     run.wait_for(TRIM, long);
-    let painted = String::from_utf8_lossy(&run.snapshot_output()).into_owned();
-    let trim_rows: Vec<String> = plain_rows(&painted)
-        .into_iter()
-        .filter(|row| row.contains(TRIM))
-        .collect();
-    assert!(!trim_rows.is_empty(), "the trim was matched but not on a row");
-    for row in &trim_rows {
-        assert!(
-            row.contains("Working") && row.contains("to interrupt"),
-            "the trim stands somewhere other than the status row: {row:?}"
-        );
-    }
 
     run.wait_for_history_row("the ladder ran", long);
     wait_until_quiet(&run, Duration::from_millis(300), TEST_TIMEOUT);
     let capture = run.finish();
     dump_capture(&capture, "context-trim-status-row");
-    let screen = settled_screen(&capture, 40);
+    // The painter writes only the cells of a row that changed, and the status
+    // row already reads `Working (…)` when the trim joins it: every frame is
+    // read as the screen it leaves, not as the bytes it sent.
+    let mut frame_screen = Screen::new(usize::from(ROWS));
+    let mut shown = 0;
+    for frame in frames(&capture) {
+        frame_screen.feed(frame);
+        for row in frame_screen.visible().iter().filter(|row| row.contains(TRIM)) {
+            assert!(
+                row.contains("Working") && row.contains("to interrupt"),
+                "the trim stands somewhere other than the status row: {row:?}"
+            );
+            shown += 1;
+        }
+    }
+    assert!(shown > 0, "the trim was matched but never stood on the screen");
+    let screen = settled_screen(&capture, ROWS);
     for (name, rows) in [("visible", screen.visible()), ("transcript", screen.transcript())] {
         assert!(
             !rows.iter().any(|row| row.contains(TRIM)),
@@ -4169,45 +4181,19 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
     );
 }
 
-/// The capture's rows with their escape sequences stripped — what a person
-/// would have seen painted, frame after frame, not the settled screen.
-fn plain_rows(painted: &str) -> Vec<String> {
-    let mut rows = Vec::new();
-    let mut row = String::new();
-    let mut chars = painted.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\u{1b}' => {
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    while let Some(&next) = chars.peek() {
-                        chars.next();
-                        if ('\u{40}'..='\u{7e}').contains(&next) {
-                            break;
-                        }
-                    }
-                } else if chars.peek() == Some(&']') {
-                    while let Some(next) = chars.next() {
-                        if next == '\u{07}' {
-                            break;
-                        }
-                        if next == '\u{1b}' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-            }
-            '\n' => rows.push(std::mem::take(&mut row)),
-            '\r' => {}
-            ch if ch.is_control() => {}
-            ch => row.push(ch),
-        }
+/// The capture cut after each synchronised update's end: one slice per frame.
+fn frames(capture: &[u8]) -> Vec<&[u8]> {
+    let mut frames = Vec::new();
+    let mut rest = capture;
+    while let Some(at) = find_bytes(rest, SYNC_END) {
+        let (frame, tail) = rest.split_at(at + SYNC_END.len());
+        frames.push(frame);
+        rest = tail;
     }
-    if !row.is_empty() {
-        rows.push(row);
+    if !rest.is_empty() {
+        frames.push(rest);
     }
-    rows
+    frames
 }
 
 /// Two files written and a `bash` announced in one batch. zo announces the
@@ -4215,7 +4201,8 @@ fn plain_rows(painted: &str) -> Vec<String> {
 /// the viewport's live cell from the writes while they ran, committing them
 /// as `✘ Failed to apply patch` with a bare `✘ path` per file — the lotto
 /// session's four edits, every result `is_error: false` (2026-09-07 23:43,
-/// t-3063). The screen must read `Edited 2 files`, then the command.
+/// t-3063). The screen must read one success row per write, each over its
+/// own diff, then the command.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_writes_announced_beside_a_bash_are_edited_files_never_a_failed_patch() {
     let layout = Layout::new();
@@ -4241,18 +4228,32 @@ async fn e2e_writes_announced_beside_a_bash_are_edited_files_never_a_failed_patc
 
     let transcript = settled_screen(&capture, 40).transcript();
     assert!(
-        !transcript.iter().any(|row| row.contains("Failed to apply patch") || row.contains('✘')),
+        !transcript.iter().any(|row| {
+            row.contains("Failed to apply patch") || row.contains('✘') || row.contains('✗')
+        }),
         "a successful write was drawn as a failure: {transcript:#?}"
     );
-    let edited = transcript
-        .iter()
-        .position(|row| row.contains("Edited 2 files"))
-        .unwrap_or_else(|| panic!("the writes are not one edited group: {transcript:#?}"));
-    let ran = transcript
-        .iter()
-        .position(|row| row.contains("Ran printf"))
-        .unwrap_or_else(|| panic!("the command that followed is missing: {transcript:#?}"));
-    assert!(edited < ran, "the command stands before the writes it followed: {transcript:#?}");
+    let row = |lead: &str| {
+        transcript
+            .iter()
+            .position(|row| row.starts_with(lead))
+            .unwrap_or_else(|| panic!("no {lead:?} row: {transcript:#?}"))
+    };
+    let alpha = row("✓ Create  alpha.txt");
+    let beta = row("✓ Create  beta.txt");
+    let ran = row("✓ Run     printf");
+    assert!(
+        alpha < beta && beta < ran,
+        "the command stands before the writes it followed: {transcript:#?}"
+    );
+    assert!(transcript[alpha].trim_end().ends_with("+2 -0"), "{transcript:#?}");
+    assert!(transcript[beta].trim_end().ends_with("+1 -0"), "{transcript:#?}");
+    let beta_diff = &transcript[beta + 1..ran];
+    assert!(
+        beta_diff.iter().any(|row| row.trim() == "1 + beta one")
+            && !beta_diff.iter().any(|row| row.contains("alpha")),
+        "beta.txt hangs a diff other than its own: {transcript:#?}"
+    );
     assert_eq!(
         fs::read_to_string(layout.cwd.join("alpha.txt")).expect("alpha.txt was written"),
         "alpha one\nalpha two\n"
@@ -4260,7 +4261,7 @@ async fn e2e_writes_announced_beside_a_bash_are_edited_files_never_a_failed_patc
 }
 
 /// Five files of 22 lines written in one batch on a 24-row pane. The finished
-/// `Edited 5 files` cell with its five diffs is taller than the pane, and it
+/// cell, five write rows with their diffs, is taller than the pane, and it
 /// pushed the composer off the bottom while it stood live (2026-09-07 23:35
 /// screenshot, t-3063). The model is held for a while before its answer so
 /// the cell stays live: the footer must be on the last row, the composer on
@@ -4268,6 +4269,7 @@ async fn e2e_writes_announced_beside_a_bash_are_edited_files_never_a_failed_patc
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
     const ROWS: u16 = 24;
+    const FIRST_ROW: &str = "✓ Create  file1.txt";
     let layout = Layout::new();
     let files: Vec<(String, String)> = (1..=5)
         .map(|file| {
@@ -4306,7 +4308,7 @@ async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
         settled_screen(bytes, ROWS)
             .visible()
             .iter()
-            .any(|row| row.contains("Edited 5 files"))
+            .any(|row| row.starts_with(FIRST_ROW))
     });
     wait_until_quiet(&run, Duration::from_millis(250), TEST_TIMEOUT);
     let live = run.snapshot_output();
@@ -4318,8 +4320,8 @@ async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
         "tall-cell (live): the composer is off the pane: {visible:#?}"
     );
     assert!(
-        visible.iter().any(|row| row.contains("Edited 5 files")),
-        "tall-cell (live): the cell's header is not on screen: {visible:#?}"
+        visible.iter().any(|row| row.starts_with(FIRST_ROW)),
+        "tall-cell (live): the cell's first row is not on screen: {visible:#?}"
     );
     let folded = visible
         .iter()
