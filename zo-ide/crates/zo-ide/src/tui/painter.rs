@@ -2731,3 +2731,36 @@ mod tests {
         assert!(out.ends_with("\u{1b}[r\u{1b}[5;1H\u{1b}[J\u{1b}[0m\u{1b}[?25h"), "{out:?}");
     }
 }
+
+/// What a streamed answer costs on the wire (t-48216): a history row is its
+/// text plus a few bytes, not its text plus a colour reset on each side.
+#[cfg(test)]
+mod wire_cost_tests {
+    use super::Painter;
+    use crate::tui::ansi::Line;
+
+    /// `\r\n` and the `ESC[K` that clears the row.
+    const PER_PLAIN_ROW: usize = 5;
+    /// Setting and resetting the scroll region and placing the cursor once.
+    const PER_INSERT: usize = 48;
+
+    #[test]
+    fn a_plain_history_row_costs_its_text_and_a_few_bytes() {
+        let mut painter = Painter::new(Vec::new(), 120, 40, 22, true);
+        painter.set_height(4);
+        let _ = painter.take_frame();
+        let rows: Vec<Line> = (0..64)
+            .map(|n| Line::from_text(format!("plain row {n:03} of a long streamed answer")))
+            .collect();
+        let text: usize = rows.iter().map(|row| row.plain().len()).sum();
+        painter.insert_history(&rows);
+        let frame = painter.take_frame();
+        let budget = text + rows.len() * PER_PLAIN_ROW + PER_INSERT;
+        assert!(
+            frame.len() <= budget,
+            "{} bytes for {} rows of {text} bytes of text; budget {budget}",
+            frame.len(),
+            rows.len()
+        );
+    }
+}

@@ -453,3 +453,30 @@ mod tests {
         );
     }
 }
+
+/// The exact diff runs over the lines between the common head and tail, not
+/// the whole file (t-48216): the table was sized by the whole file, so a
+/// 900-line edit held a 6 MB table and a larger file fell back to one hunk
+/// spanning everything between its first and last change.
+#[cfg(test)]
+mod long_file_tests {
+    use super::compact_line_diff;
+
+    #[test]
+    fn two_far_apart_changes_in_a_large_file_are_two_exact_hunks() {
+        let original: String = (0..3_000).map(|n| format!("line {n}\n")).collect();
+        let updated = original
+            .replacen("line 1000\n", "line one thousand\n", 1)
+            .replacen("line 1400\n", "line fourteen hundred\n", 1);
+        let hunks = compact_line_diff(&original, &updated);
+        let shapes: Vec<_> = hunks
+            .iter()
+            .map(|hunk| (hunk.old_lines, hunk.new_lines, hunk.lines.len()))
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![(7, 7, 8), (7, 7, 8)],
+            "one changed line with three lines of context on each side, twice"
+        );
+    }
+}
