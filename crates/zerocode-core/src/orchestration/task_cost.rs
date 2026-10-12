@@ -617,7 +617,7 @@ pub fn generation_fingerprint(run: &Run) -> u64 {
 }
 
 /// First start to last end, or `None` while any attempt is open.
-fn wall_ms(attempts: &[&Dispatch]) -> Option<i64> {
+pub(super) fn wall_ms(attempts: &[&Dispatch]) -> Option<i64> {
     let first = attempts.iter().map(|one| one.started_ms).min()?;
     let last = attempts.iter().try_fold(first, |latest, attempt| {
         let ended = attempt.ended_ms?;

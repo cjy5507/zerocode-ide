@@ -815,66 +815,42 @@ do_publish() {
 # ------------------------------------------------ which gates the sha owes --
 # Each gate judges one tree: root (the window, its crates, the tools) and zo
 # (zo-ide). A sha whose tree is byte for byte what the last green install of
-# that half was built from — apart from the release stamp and the docs — owes
-# that gate nothing: those bytes passed it then. The two halves of
+# that half was built from — apart from version lines in the release stamp —
+# owes that gate nothing: those bytes passed it then. The two halves of
 # installed.json are the base (the app's sha for root, zo's for zo), so a
-# folded ancestor never becomes the base. The crates zo reads from outside its
-# own tree belong to both trees; they come off cargo's metadata, not a list
-# kept by hand. A change to their shared gate policy owes both gates again.
-# Anything the lane cannot tell — no install yet, git or cargo
-# not answering — runs the gate.
+# folded ancestor never becomes the base. Any other changed path owes both
+# gates: no path is known to lie outside either, since each reads files of the
+# other half and of the docs — the root gate's pii-check reads every tracked
+# file, core tests read zo-ide sources, the core build script turns skills/
+# into code and zo tests read the root fixtures at run time. Anything the lane
+# cannot tell — no install yet, git not answering, a path with a space or a
+# control character in it (git's list is read NUL-separated) — runs the gate.
 # Measured 2026-09-16 (three green runs): gate-root 1105–1615 s, gate-zo
 # 876–1296 s, on releases that each changed one tree.
-zo_shared_paths() { # -> repo-relative directories (trailing slash), space-separated, or nothing
-  if is_dry; then # a stub of `-` is cargo saying nothing (an empty stub reads as the default)
-    local s; s=$(stub ZO_SHARED_PATHS "crates/zerocode-core/ crates/model-prices/"); [ "$s" = "-" ] || printf '%s' "$s"; return 0
-  fi
-  # `--no-deps` needs no registry and no network: the workspace members and
-  # their declared dependencies, a path dependency carrying its `path`.
-  ( cd "$SCRATCH/zo-ide" && cargo metadata --format-version 1 --no-deps 2>/dev/null ) | python3 -c '
-import json, os, sys
-meta = json.load(sys.stdin)
-scratch = os.path.realpath(sys.argv[1]); zo = os.path.join(scratch, "zo-ide")
-out = set()
-for package in meta["packages"]:
-    for dependency in package.get("dependencies", []):
-        where = dependency.get("path")
-        if not where:
-            continue
-        where = os.path.realpath(where)
-        if where == zo or where.startswith(zo + os.sep) or not where.startswith(scratch + os.sep):
-            continue
-        out.add(os.path.relpath(where, scratch) + "/")
-print(" ".join(sorted(out)))' "$SCRATCH" 2>/dev/null
-}
 stamp_only() { # PATH SINCE — the file changed in version lines only
   if is_dry; then case " $(stub STAMP_REAL_CHANGES) " in *" $1 "*) return 1;; esac; return 0; fi
-  ! git -C "$SCRATCH" diff -U0 "$2" "$SHA" -- "$1" 2>/dev/null \
+  local diff
+  diff=$(git -C "$SCRATCH" diff -U0 "$2" "$SHA" -- "$1" 2>/dev/null) || return 1
+  ! printf '%s\n' "$diff" \
     | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | grep -qvE '^[+-][[:space:]]*"?version"?[[:space:]]*[:=]'
 }
 gate_owed() { # root|zo — 0 when the gate must run; otherwise SKIP says why and 1
-  local lane=$1 half since changed shared path s owed= n
+  local lane=$1 half since changed path n=0
   case $lane in root) half=app ;; zo) half=zo ;; esac
   since=$(installed_part "$INSTALLED" "$half"); since=${since%% *}
   [ -n "$since" ] || return 0
   # The dry default names a shared crate, so every gate a stub run does not
   # speak about is owed — as before this rule existed.
   if is_dry; then changed=$(stub CHANGED_PATHS "crates/zerocode-core/src/lib.rs" | tr ' ' '\n')
-  else changed=$(git -C "$SCRATCH" diff --name-only "$since" "$SHA" 2>/dev/null) || return 0; fi
-  shared=$(zo_shared_paths); [ -n "$shared" ] || return 0
-  n=0
-  for path in $changed; do
+  else changed=$(git -C "$SCRATCH" diff --name-only -z "$since" "$SHA" 2>/dev/null | tr '\n\0' '\001\n'
+                 exit "${PIPESTATUS[0]}") || return 0; fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
     n=$(( n + 1 ))
+    case $path in *[[:space:]]*|*[[:cntrl:]]*) return 0 ;; esac
     case " $RELEASE_STAMP_FILES " in *" $path "*) stamp_only "$path" "$since" && continue ;; esac
-    case $path in docs/*|*.md) continue ;; esac
-    case $path in tools/release/lane.sh|tools/release/verify-every-recipe.sh) return 0 ;; esac
-    case $lane in
-      zo)   case $path in zo-ide/*) owed=$path ;; esac
-            for s in $shared; do case $path in "$s"*) owed=$path ;; esac; done ;;
-      root) case $path in zo-ide/*) ;; *) owed=$path ;; esac ;;
-    esac
-    [ -z "$owed" ] || return 0
-  done
+    return 0
+  done <<< "$changed"
   SKIP="$lane tree unchanged since ${since:0:8} — $n path(s) changed, none its own"
   return 1
 }

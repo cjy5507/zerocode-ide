@@ -81,29 +81,35 @@ directory, the RFC 5737 documentation addresses (192.0.2.x, 198.51.100.x) for a
 network address, and an `example.com` / `.test` / `.invalid` domain for a
 mailbox. `tests/test_pii_scan.py` pins every row from both sides.
 
-## Which gates a sha owes (2026-09-16)
+## Which gates a sha owes (2026-09-16, narrowed 2026-10-12)
 
 Each gate judges one tree — `gate-root` the window, its crates and the tools,
 `gate-zo` zo-ide. Before a gate the lane diffs the sha against the sha the
 matching half of `installed.json` was built from (the app's for root, zo's for
-zo — the last green install of that half, never a folded ancestor). A tree the
-diff did not touch owes no gate: the same bytes passed it then. The phase line
-then reads `gate-zo rc=0 0s … skipped: zo tree unchanged since <sha8> — N
-path(s) changed, none its own`.
+zo — the last green install of that half, never a folded ancestor). A diff
+that changed nothing, or only version lines in the release stamp (`Cargo.toml`,
+`Cargo.lock`, `tauri.conf.json`, `zo-ide/Cargo.toml`, `zo-ide/Cargo.lock`),
+owes no gate: the same bytes passed it then. The phase line then reads
+`gate-zo rc=0 0s … skipped: zo tree unchanged since <sha8> — N path(s)
+changed, none its own`.
 
-- The release stamp (`Cargo.toml`, `Cargo.lock`, `tauri.conf.json`,
-  `zo-ide/Cargo.toml`, `zo-ide/Cargo.lock`) counts only when a diff changes
-  more than version lines; `docs/` and `*.md` never count.
-- The crates zo reads from outside its tree belong to both trees; they are read
-  off `cargo metadata` in the scratch (today `crates/zerocode-core/`,
-  `crates/model-prices/`, `crates/jev-socket/`), not from a list kept by hand.
-- Anything the lane cannot tell — no install yet, git or cargo not answering —
-  runs the gate.
+Any other changed path owes both gates. No path is known to lie outside
+either: the root gate's `pii-check` reads every tracked file (docs, README and
+zo-ide included), core tests read zo-ide sources and markdown fixtures, the
+core build script turns `skills/` into code, and zo tests read the root
+`fixtures/` and `skills/` at run time. Until 2026-10-12 the lane skipped
+`docs/` and `*.md` and split the paths between the halves by folder; a change
+to a skill, a core fixture or a file one half reads from the other skipped a
+gate that read it.
+
+Anything the lane cannot tell — no install yet, git not answering, a stamp
+diff git cannot read, a path with a space or a control character in it (the
+lane reads git's list NUL-separated) — runs the gate.
 
 Measured before the rule (three green runs): gate-root 1105–1615 s, gate-zo
 876–1296 s, on releases that each changed one tree. `tests/test_lane.py
-GateOwed` pins the rule with stubs (`CHANGED_PATHS`, `STAMP_REAL_CHANGES`,
-`ZO_SHARED_PATHS`, `-` for cargo saying nothing).
+GateOwed` pins the rule with stubs (`CHANGED_PATHS`, `STAMP_REAL_CHANGES`);
+`GateOwedOnGit` runs `gate_owed` and `stamp_only` on a real repository.
 
 ## The two phases after the swaps
 
