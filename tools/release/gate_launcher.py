@@ -394,7 +394,7 @@ def configure(context, args, producer):
         raise producer.UnknownInput("Cargo configuration search fallbacks are undeclared")
     node_paths = search_paths(node_searches(repo, roots["scriptFiles"], roots["dependencyRoots"]), producer)
     git_paths = git_metadata_paths(repo, producer)
-    if not node_paths.issubset(searched) or not set(git_paths).issubset(searched):
+    if not set(node_paths).issubset(searched) or not set(git_paths).issubset(searched):
         raise producer.UnknownInput("Node or Git configuration search scopes are undeclared")
     config_environment = [Path(environment[key]).resolve() for key in CONFIGURATION_ENV.intersection(environment)]
     if any(path.is_relative_to(repo) for path in (Path(value).resolve() for value in roots["toolchainRoots"])):

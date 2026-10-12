@@ -631,6 +631,32 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNone(self.fingerprint()["env"])
         self.assertIsNone(self.fingerprint()["toolchain"])
 
+    def test_node_and_git_search_coverage_accepts_only_complete_declarations(self):
+        launcher = load_module(SCRIPT.with_name("gate_launcher.py"), "coverage_boundary_launcher")
+        original = copy.deepcopy(self.args.trust["policy"])
+        baseline = self.fingerprint()
+        self.assertIsNotNone(baseline["env"])
+        self.assertIsNotNone(baseline["toolchain"])
+        git_paths = set(launcher.git_metadata_paths(self.repo, gate))
+        self.assertTrue(git_paths)
+        for role in ("node", "git"):
+            with self.subTest(role=role):
+                policy = copy.deepcopy(original)
+                selected = policy["gates"]["gate-root"]
+                searches = selected["configurationSearches"]
+                if role == "node":
+                    retained = [search for search in searches if "node_modules" not in search["names"]]
+                else:
+                    retained = [search for search in searches
+                                if not any(Path(search["directory"]) / name in git_paths for name in search["names"])]
+                self.assertLess(len(retained), len(searches))
+                selected["configurationSearches"] = retained
+                self.repin_policy(policy)
+                with self.assertRaisesRegex(gate.UnknownInput, "Node or Git configuration search scopes are undeclared"):
+                    self.args.trust["configure"](self.args)
+                self.repin_policy(original)
+                self.assertEqual(self.fingerprint(), baseline)
+
     def test_even_a_trusted_manifest_cannot_give_a_child_ledger_credentials(self):
         self.args.trust["policy"]["gates"]["gate-root"]["environment"]["ZEROCODE_AGENT_TEAM_TOKEN"] = "fixture-capability"
         with self.assertRaises(gate.UnknownInput):
