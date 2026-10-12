@@ -639,6 +639,7 @@ class ReceiptTests(unittest.TestCase):
         (self.repo / "node_modules").symlink_to(self.deps, target_is_directory=True)
         self.git("add", ".gitignore")
         self.git("commit", "-qm", "declared dependency alias")
+        authorize(self.args, self.root, gate)
         before = self.fingerprint()
         self.assertIsNotNone(before["deps"])
         self.assertIsNotNone(before["source"])
@@ -748,7 +749,7 @@ class ReceiptTests(unittest.TestCase):
         node_cases = {
             "pass": "const test=require('node:test'); test('control',()=>{});\n",
             "failure": "const test=require('node:test'); const assert=require('node:assert/strict'); for(let i=0;i<7;i++) test('control-'+i,()=>assert.ok(i<2));\n",
-            "cancelled": "const test=require('node:test'); test('control',async()=>await new Promise(()=>{}));\n",
+            "cancelled": "const test=require('node:test'); const controller=new AbortController(); test('control',{signal:controller.signal},async()=>{console.log('fixture cancellation began'); setTimeout(()=>controller.abort(),100); await new Promise(()=>{});});\n",
             "abort": "process.exit(3);\n",
             "zero": "",
         }
@@ -764,7 +765,13 @@ class ReceiptTests(unittest.TestCase):
                     ledger = FakeLedger()
                     result = self.produce(ledger)
                     log = (Path(self.args.output) / "gate.log").read_bytes()
+                    print(json.dumps({"runnerControl": {"runner": "node", "reporter": reporter, "case": label,
+                          "startedMs": ledger.metadata["startedMs"], "endedMs": ledger.metadata["endedMs"],
+                          "durationMs": ledger.metadata["durationMs"], "rc": ledger.metadata["rc"],
+                          "outcome": result["outcome"], "logSha256": gate.digest(log),
+                          "log": log.decode(errors="replace")}}), file=sys.stderr)
                     self.assertTrue(ledger.metadata["executed"])
+                    self.assertGreaterEqual(ledger.metadata["endedMs"], ledger.metadata["startedMs"])
                     if label == "pass":
                         self.assertEqual(ledger.metadata["rc"], 0, log)
                         self.assertEqual(result["outcome"], "passed", log)
@@ -782,23 +789,40 @@ class ReceiptTests(unittest.TestCase):
                             for name, count in (("tests", 7), ("pass", 2), ("fail", 5)):
                                 self.assertRegex(log.decode(), rf"(?:#|ℹ) {name} {count}\b")
                         if label == "cancelled":
+                            self.assertIn(b"fixture cancellation began", log)
+                            self.assertLess(ledger.metadata["durationMs"], int(self.args.timeout * 1000))
                             self.assertRegex(log.decode(), r"(?:#|ℹ) cancelled 1\b")
         py_test = self.root / "runner_control.py"
         empty = self.root / "empty-unittest"
         empty.mkdir()
-        for label, assertion in (("pass", "True"), ("failure", "False"), ("zero", None)):
+        zero_exit = getattr(importlib.import_module("unittest.main"), "_NO_TESTS_EXITCODE", 0)
+        for label, assertion in (("pass", "True"), ("failure", "False"), ("zero", None), ("zero-rc0", None)):
             with self.subTest(runner="unittest", case=label):
                 py_test.write_text("import unittest\nclass Control(unittest.TestCase):\n    def test_control(self):\n        self.assertTrue(" + str(assertion) + ")\n")
                 self.args.command = [sys.executable, "-I", "-S", "-B", "-m", "unittest", "discover",
                                      "-s", str(empty if label == "zero" else self.root), "-p", py_test.name]
+                if label == "zero-rc0":
+                    py_test.write_text("import unittest\nresult=unittest.TextTestRunner().run(unittest.TestSuite())\nraise SystemExit(0 if result.wasSuccessful() else 1)\n")
+                    self.args.command = [sys.executable, "-I", "-S", "-B", str(py_test)]
                 self.args.script_file = [str(py_test)]
                 self.args.output = str(self.root / ("unittest-" + label))
                 ledger = FakeLedger()
                 result = self.produce(ledger)
                 log = (Path(self.args.output) / "gate.log").read_bytes()
-                self.assertEqual(ledger.metadata["rc"], 1 if label == "failure" else 0, log)
-                self.assertEqual(result["outcome"], {"pass": "passed", "failure": "failed", "zero": "unknown"}[label], log)
+                print(json.dumps({"runnerControl": {"runner": "unittest", "case": label,
+                      "startedMs": ledger.metadata["startedMs"], "endedMs": ledger.metadata["endedMs"],
+                      "durationMs": ledger.metadata["durationMs"], "rc": ledger.metadata["rc"],
+                      "outcome": result["outcome"], "logSha256": gate.digest(log),
+                      "log": log.decode(errors="replace")}}), file=sys.stderr)
+                expected_rc = 1 if label == "failure" else zero_exit if label == "zero" else 0
+                self.assertEqual(ledger.metadata["rc"], expected_rc, log)
+                self.assertTrue(ledger.metadata["executed"])
+                self.assertGreaterEqual(ledger.metadata["endedMs"], ledger.metadata["startedMs"])
+                expected_outcome = "passed" if label == "pass" else "failed" if expected_rc else "unknown"
+                self.assertEqual(result["outcome"], expected_outcome, log)
                 self.assertEqual(result["tests"], 1 if label == "pass" else 0, log)
+                if label in ("zero", "zero-rc0"):
+                    self.assertIn(b"Ran 0 tests", log)
                 if label != "pass":
                     self.assertEqual(gate.test_count(PASS + log), 0, log)
 
@@ -1025,7 +1049,8 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(gate.test_count(b"running 1 test\n" + PASS.replace(b"2 passed", b"0 passed").replace(b"0 ignored", b"1 ignored")), 0)
 
     def test_manifest_target_and_timeout_must_match_the_exact_invocation(self):
-        baseline = self.fingerprint()
+        verified_environment = gate.execution_environment(self.args)
+        baseline = self.fingerprint(verified_environment)
         self.assertIsNotNone(baseline["policy"])
         original = copy.deepcopy(self.args.trust["policy"])
         for change in ("timeout", "head", "repo", "scope"):
@@ -1039,8 +1064,9 @@ class ReceiptTests(unittest.TestCase):
                 self.repin_policy(policy)
                 with self.assertRaises(gate.UnknownInput):
                     gate.provenance(self.args)
+                self.assertIsNone(self.fingerprint(verified_environment)["policy"])
                 self.repin_policy(original)
-                self.assertEqual(self.fingerprint(), baseline)
+                self.assertEqual(self.fingerprint(verified_environment), baseline)
 
     @integration_case
     @unittest.skipUnless(sys.platform == "darwin", "Mach-O runtime fixture requires macOS")

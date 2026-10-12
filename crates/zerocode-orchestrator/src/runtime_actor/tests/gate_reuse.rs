@@ -152,6 +152,25 @@ fn now() -> i64 {
     .unwrap()
 }
 
+fn native_bootstrap_binary() -> PathBuf {
+    let path = std::env::var_os("HERDR_FIXTURE_BOOTSTRAP")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .expect("the current workspace test executable")
+                .parent()
+                .and_then(Path::parent)
+                .expect("the Cargo target profile directory")
+                .join(format!("zerocode{}", std::env::consts::EXE_SUFFIX))
+        });
+    assert!(
+        path.is_file(),
+        "the real native bootstrap must be built by the root workspace test gate: {}",
+        path.display()
+    );
+    path
+}
+
 fn assert_no_inherited_gate_authority() {
     for key in [
         TEAM_TOKEN_VAR,
@@ -298,8 +317,9 @@ impl CliFixture {
             vec!["commit", "-qm", "fixture"],
         ] {
             assert!(
-                Command::new("git")
+                zerocode_core::host::lock_free_git(Command::new("git"))
                     .env_clear()
+                    .env(zerocode_core::host::GIT_OPTIONAL_LOCKS, "0")
                     .env("HOME", root.join("home"))
                     .env("PATH", std::env::var("PATH").unwrap())
                     .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -510,8 +530,9 @@ impl CliFixture {
             vec!["commit", "-qm", "fixture authority probe"],
         ] {
             assert!(
-                Command::new("git")
+                zerocode_core::host::lock_free_git(Command::new("git"))
                     .env_clear()
+                    .env(zerocode_core::host::GIT_OPTIONAL_LOCKS, "0")
                     .env("HOME", self.root.join("home"))
                     .env("PATH", std::env::var("PATH").unwrap())
                     .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -566,16 +587,27 @@ impl CliFixture {
             }
             self.environment(&mut prepare);
             if cargo {
+                let rustup_home = std::env::var_os("RUSTUP_HOME").or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|home| PathBuf::from(home).join(".rustup").into_os_string())
+                });
+                if let Some(home) = rustup_home {
+                    prepare.env("RUSTUP_HOME", home);
+                }
+                prepare.env("RUSTUP_AUTO_INSTALL", "0");
+                prepare.env("CARGO_NET_OFFLINE", "true");
                 for key in [
+                    "RUSTUP_TOOLCHAIN",
+                    "DEVELOPER_DIR",
+                    "SDKROOT",
                     "HERDR_FIXTURE_TOOLCHAIN",
                     "HERDR_FIXTURE_DEVELOPER_DIR",
                     "HERDR_FIXTURE_SDKROOT",
                     "HERDR_FIXTURE_LINKER",
                 ] {
-                    prepare.env(
-                        key,
-                        std::env::var_os(key).expect("approved offline fixture input"),
-                    );
+                    if let Some(value) = std::env::var_os(key) {
+                        prepare.env(key, value);
+                    }
                 }
             }
             let output = prepare.output().unwrap();
@@ -606,9 +638,7 @@ impl CliFixture {
         };
         let intent = json!({"version":1,"run":self.run,"task":self.task,"attempt":"none","gate":"gate-root",
             "pin":policy["pin"],"head":manifest["gates"]["gate-root"]["target"]["head"],"mode":action,"registration":registration});
-        let native =
-            std::env::var_os("HERDR_FIXTURE_BOOTSTRAP").expect("approved native fixture binary");
-        let mut command = Command::new(native);
+        let mut command = Command::new(native_bootstrap_binary());
         command
             .arg("gate-bootstrap")
             .args(
@@ -1351,7 +1381,7 @@ fn native_arguments_cannot_substitute_an_unpinned_producer_after_policy_verifica
     ];
     producer_args.extend(serde_json::from_value::<Vec<String>>(policy["command"].clone()).unwrap());
     let invoke = |forwarded: &[String]| {
-        let mut command = Command::new(std::env::var_os("HERDR_FIXTURE_BOOTSTRAP").unwrap());
+        let mut command = Command::new(native_bootstrap_binary());
         command
             .arg("gate-bootstrap")
             .args(&options)
@@ -1488,7 +1518,7 @@ fn native_bootstrap_binds_launcher_and_runtime_to_the_current_policy_before_pyth
             serde_json::to_vec(&manifest).unwrap()
         };
         std::fs::write(&manifest_path, &bytes).unwrap();
-        let mut command = Command::new(std::env::var_os("HERDR_FIXTURE_BOOTSTRAP").unwrap());
+        let mut command = Command::new(native_bootstrap_binary());
         command
             .arg("gate-bootstrap")
             .args(&options)
@@ -1535,7 +1565,7 @@ fn native_bootstrap_binds_launcher_and_runtime_to_the_current_policy_before_pyth
         manifest["gates"]["gate-root"][field] = true.into();
         let bytes = serde_json::to_vec(&manifest).unwrap();
         std::fs::write(&manifest_path, &bytes).unwrap();
-        let mut command = Command::new(std::env::var_os("HERDR_FIXTURE_BOOTSTRAP").unwrap());
+        let mut command = Command::new(native_bootstrap_binary());
         let options: Vec<String> = serde_json::from_value(policy["bootstrap"].clone()).unwrap();
         command
             .arg("gate-bootstrap")
@@ -2024,8 +2054,9 @@ fn production_cli_real_authority_and_real_process_issue_and_reuse_one_receipt() 
     std::fs::write(&log_path, log).unwrap();
     assert!(fixture.production("verify", false).status.success());
     assert!(
-        Command::new("git")
+        zerocode_core::host::lock_free_git(Command::new("git"))
             .env_clear()
+            .env(zerocode_core::host::GIT_OPTIONAL_LOCKS, "0")
             .env("HOME", fixture.root.join("home"))
             .env("PATH", std::env::var("PATH").unwrap())
             .env("GIT_CONFIG_NOSYSTEM", "1")

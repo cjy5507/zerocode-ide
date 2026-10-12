@@ -62,6 +62,8 @@ impl Fixture {
             "%1",
             vec![
                 verb.into(),
+                "--run".into(),
+                self.bench.ledger.runs()[0].id.clone(),
                 "--task".into(),
                 self.task.clone(),
                 "--attempt".into(),
@@ -410,10 +412,20 @@ fn an_execution_has_one_immutable_completion() {
 fn registration_and_completion_are_bound_to_the_current_successful_attempt() {
     let mut fixture = Fixture::new();
     let (metadata, _) = fixture.completed();
-    fixture.attempt = "dp-other".into();
     assert_eq!(
         fixture.json(gate::REUSE, &request(&metadata))["decision"],
-        "miss"
+        "hit"
+    );
+    fixture.attempt = "dp-other".into();
+    let refused = fixture.call(gate::REUSE, &request(&metadata));
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(
+        refused
+            .reply
+            .stderr
+            .contains("registration is not ledger evidence for this attempt"),
+        "{}",
+        refused.reply.stderr
     );
     fixture.attempt = fixture.bench.ledger.runs()[0].dispatches[0].id.clone();
     fixture.bench.ledger.runs[0].dispatches[0].succeeded = Some(false);
@@ -536,11 +548,16 @@ fn a_windows_process_failure_code_is_recorded_without_losing_the_failure() {
 fn a_copied_run_or_seat_does_not_authenticate_another_session() {
     let mut fixture = Fixture::new();
     let run_id = fixture.bench.ledger.runs()[0].id.clone();
+    fixture.json(gate::REGISTER, &inputs());
     let before = fixture.bench.ledger.runs()[0].messages.len();
     fixture.bench.actor = Some(bench_actor("session", "stranger"));
     let refused = fixture.call(gate::REGISTER, &inputs());
     assert_ne!(refused.reply.exit_code, 0);
-    assert!(refused.reply.stderr.contains("authenticated session"));
+    assert!(
+        refused.reply.stderr.contains("authenticated session"),
+        "{}",
+        refused.reply.stderr
+    );
     fixture.bench.actor = None;
     for pane in [&fixture.worker_pane, "%99"] {
         let refused = fixture.bench.at_argv(
@@ -601,10 +618,29 @@ fn ordinary_mail_and_legacy_land_checks_cannot_supply_gate_authority() {
         )
         .unwrap()
         .unwrap();
-    let metadata = fixture.registered(inputs());
-    let mut observed = request(&metadata);
-    observed["registration"] = legacy.into();
-    assert_eq!(fixture.json(gate::REUSE, &observed)["decision"], "miss");
+    let (metadata, _) = fixture.completed();
+    assert_eq!(
+        fixture.json(gate::REUSE, &request(&metadata))["decision"],
+        "hit"
+    );
+    let ordinary_id: Value = serde_json::from_str(&ordinary.reply.stdout).unwrap();
+    for registration in [
+        ordinary_id["messageId"].as_str().unwrap().to_string(),
+        legacy,
+    ] {
+        let mut observed = request(&metadata);
+        observed["registration"] = registration.into();
+        let refused = fixture.call(gate::REUSE, &observed);
+        assert_ne!(refused.reply.exit_code, 0);
+        assert!(
+            refused
+                .reply
+                .stderr
+                .contains("registration is not ledger evidence for this attempt"),
+            "{}",
+            refused.reply.stderr
+        );
+    }
 }
 
 #[test]
@@ -739,6 +775,7 @@ fn a_coordinators_direct_task_has_an_explicit_no_attempt_execution() {
         worker_pane: String::new(),
     };
     fixture.pin("gate-root", 'b');
+    fixture.bench.gate_context = Some(gate::JobContext::fixture());
     let (metadata, _) = fixture.completed();
     assert_eq!(
         fixture.json(gate::REUSE, &request(&metadata))["decision"],
@@ -1127,27 +1164,39 @@ fn metadata_cannot_claim_another_lease_or_execution_start() {
 
 #[test]
 fn only_root_and_zo_scopes_can_hit_and_mandatory_checks_always_remain() {
-    for scope in [
-        "gate-root",
-        "gate-zo",
-        "windows",
-        "flake-judgment",
-        "publish",
-        "unknown",
-    ] {
+    for scope in ["gate-root", "gate-zo"] {
         let mut fixture = Fixture::new();
+        if scope == "gate-zo" {
+            fixture.pin(scope, 'b');
+        }
         let mut input = inputs();
         input["gate"] = scope.into();
         let metadata = fixture.registered(input);
         fixture.json(gate::RECORD, &metadata);
         let answer = fixture.json(gate::REUSE, &request(&metadata));
+        assert_eq!(answer["decision"], "hit");
         assert_eq!(
-            answer["decision"],
-            if ["gate-root", "gate-zo"].contains(&scope) {
-                "hit"
-            } else {
-                "miss"
-            }
+            answer["mandatoryChecks"],
+            json!(["native", "windows", "flake-judgment", "publish"])
+        );
+    }
+    for scope in ["windows", "flake-judgment", "publish", "unknown"] {
+        let mut fixture = Fixture::new();
+        let (metadata, _) = fixture.completed();
+        assert_eq!(
+            fixture.json(gate::REUSE, &request(&metadata))["decision"],
+            "hit"
+        );
+        let mut observed = request(&metadata);
+        observed["inputs"]["gate"] = scope.into();
+        let answer = fixture.json(gate::REUSE, &observed);
+        assert_eq!(answer["decision"], "miss");
+        assert!(
+            answer["reason"]
+                .as_str()
+                .unwrap()
+                .contains("gate scope is not allowed for reuse"),
+            "{answer}"
         );
         assert_eq!(
             answer["mandatoryChecks"],

@@ -5808,18 +5808,18 @@ impl RuntimeState {
             command.presented(),
             &mut |team| {
                 if let Some(team) = team {
-                    if let Some(scope) = &command.gate_scope {
-                        if let Err(reason) = zerocode_core::orchestration::gate_reuse::validate_job(
+                    if let Some(scope) = &command.gate_scope
+                        && let Err(reason) = zerocode_core::orchestration::gate_reuse::validate_job(
                             ledger,
                             team,
                             command.pane(),
                             command.actor().unwrap_or_default(),
                             scope,
                             command.now_ms(),
-                        ) {
-                            gate_refusal = Some(reason);
-                            return;
-                        }
+                        )
+                    {
+                        gate_refusal = Some(reason);
+                        return;
                     }
                     planned = Some(zerocode_core::orchestration::plan_with_gate_job(
                         ledger,

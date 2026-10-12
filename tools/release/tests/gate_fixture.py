@@ -125,7 +125,7 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
                   "maxJobTtlSeconds": math.ceil(args.timeout) + 300,
                   "overheadTimeoutSeconds": 300, "verificationTimeoutSeconds": 300,
                   "environment": environment, "dependencyRoots": [row(path) for path in args.dependency_root],
-                  "toolchainRoots": [row(path) for path in [*args.toolchain_root, python, git, *transitive]],
+                  "toolchainRoots": [row(path) for path in [*args.toolchain_root, Path(sys.executable).resolve(), python, git, *transitive]],
                   "configurationRoots": configuration, "configurationSearches": searches,
                   "lockFiles": [row(path) for path in args.lock_file or [Path(args.repo) / "Cargo.lock"]],
                   "scriptFiles": [row(path) for path in [wrapper, *args.script_file]], "outputRoots": list(output_roots),

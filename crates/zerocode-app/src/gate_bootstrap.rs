@@ -449,10 +449,10 @@ fn open_authority(
     control
         .read_exact(&mut result)
         .map_err(|_| "authority_unavailable")?;
-    if !header
+    if header
         .lines()
         .next()
-        .is_some_and(|line| line.split_whitespace().nth(1) == Some("200"))
+        .is_none_or(|line| line.split_whitespace().nth(1) != Some("200"))
     {
         let code = std::str::from_utf8(&result)
             .unwrap_or_default()
