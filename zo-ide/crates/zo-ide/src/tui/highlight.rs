@@ -140,13 +140,43 @@ fn convert_style(syn_style: SyntectStyle) -> Style {
 /// Query the active syntax theme for the first foreground supplied by these
 /// `TextMate` scopes. Table headers and footer accents share this resolver with
 /// syntax highlighting instead of freezing one theme's RGB values at call sites.
+///
+/// The footer asks on every paint, and a `Highlighter` is built from the whole
+/// theme, so each scope list's answer is kept; the theme is fixed for the
+/// process, so an answer never goes stale (t-48216).
 pub(crate) fn foreground_style_for_scopes(scope_names: &[&str]) -> Option<Style> {
-    let highlighter = Highlighter::new(theme());
-    scope_names.iter().find_map(|scope_name| {
-        let scope = Scope::new(scope_name).ok()?;
-        let foreground = highlighter.style_mod_for_stack(&[scope]).foreground?;
-        convert_syntect_color(foreground).map(|color| Style::new().fg(color))
+    SCOPE_STYLES.with(|answers| {
+        let known = answers
+            .borrow()
+            .iter()
+            .find(|(scopes, _)| scopes.iter().map(String::as_str).eq(scope_names.iter().copied()))
+            .map(|(_, style)| *style);
+        if let Some(style) = known {
+            return style;
+        }
+        #[cfg(test)]
+        HIGHLIGHTERS_BUILT.with(|built| built.set(built.get() + 1));
+        let highlighter = Highlighter::new(theme());
+        let style = scope_names.iter().find_map(|scope_name| {
+            let scope = Scope::new(scope_name).ok()?;
+            let foreground = highlighter.style_mod_for_stack(&[scope]).foreground?;
+            convert_syntect_color(foreground).map(|color| Style::new().fg(color))
+        });
+        let scopes = scope_names.iter().map(|scope| (*scope).to_string()).collect();
+        answers.borrow_mut().push((scopes, style));
+        style
     })
+}
+
+thread_local! {
+    static SCOPE_STYLES: std::cell::RefCell<Vec<(Vec<String>, Option<Style>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many highlighters [`foreground_style_for_scopes`] built on this thread.
+    static HIGHLIGHTERS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 // -- 문법 찾기 ------------------------------------------------------------

@@ -536,6 +536,7 @@ struct Ui {
     quiet_candidate: Option<Vec<Line>>,
     /// This turn performed concrete exec/MCP/edit work and earns a final rule.
     had_work_activity: bool,
+    context_window: ModelWindow,
     /// Successful spawn-family results in this foreground turn. Kept separate
     /// from live progress rows: a fast child may finish between watcher polls.
     turn_agent_count: usize,
@@ -1716,7 +1717,7 @@ impl Ui {
         let context_left = context_used_tokens.and_then(|used_tokens| {
             crate::status_format::context_left_percent(
                 used_tokens,
-                api::context_window_for_model(&self.model),
+                self.context_window.get(&self.model, api::context_window_for_model),
             )
         });
         let dream = crate::dream::last_pass_line();
@@ -2681,7 +2682,7 @@ impl Ui {
         let context_left = context_used_tokens.and_then(|used_tokens| {
             crate::status_format::context_left_percent(
                 used_tokens,
-                api::context_window_for_model(&self.model),
+                self.context_window.get(&self.model, api::context_window_for_model),
             )
         });
         let (model, model_note) = self.footer_model();
@@ -4458,6 +4459,7 @@ impl App {
                 quiet_loop_cell: None,
                 quiet_candidate: None,
                 had_work_activity: false,
+                context_window: ModelWindow::default(),
                 turn_agent_count: 0,
                 folds: FoldIds::default(),
                 fold_mode: FoldMode::from_env(),
@@ -6358,6 +6360,7 @@ fn test_ui() -> Ui {
         quiet_loop_cell: None,
         quiet_candidate: None,
         had_work_activity: false,
+        context_window: ModelWindow::default(),
         turn_agent_count: 0,
         folds: FoldIds::default(),
         fold_mode: FoldMode::Bare,
@@ -8746,6 +8749,27 @@ mod footer_key_tests {
         let mut ui = test_ui();
         ui.turn_slash("warnings");
         assert!(viewer_open(&ui));
+    }
+}
+
+/// The context window of the model the footer shows, resolved when the model
+/// changes rather than on every paint: resolving walks the alias table, a
+/// third of a streamed answer's paint time (t-48216).
+#[derive(Default)]
+struct ModelWindow {
+    resolved: std::cell::RefCell<Option<(String, u64)>>,
+}
+
+impl ModelWindow {
+    fn get(&self, model: &str, resolve: impl FnOnce(&str) -> u64) -> u64 {
+        if let Some((known, tokens)) = self.resolved.borrow().as_ref() {
+            if known == model {
+                return *tokens;
+            }
+        }
+        let tokens = resolve(model);
+        *self.resolved.borrow_mut() = Some((model.to_string(), tokens));
+        tokens
     }
 }
 
