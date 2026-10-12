@@ -10,7 +10,8 @@ fn inputs() -> Value {
     let digest = "b".repeat(64);
     json!({"version":1,"gate":"gate-root","head":HEAD,"tree":"c".repeat(40),
         "source":digest,"deps":digest,"lock":digest,"script":digest,"recipe":digest,
-        "toolchain":digest,"platform":digest,"profile":digest,"env":digest,"scope":"deterministic"})
+        "toolchain":digest,"platform":digest,"profile":digest,"env":digest,"scope":"deterministic",
+        "policy":digest,"producer":digest,"handedInHead":HEAD,"sourceAncestor":true})
 }
 
 struct Fixture {
@@ -67,7 +68,11 @@ impl Fixture {
         serde_json::from_str(&planned.reply.stdout).unwrap()
     }
 
-    fn registered(&mut self, inputs: Value) -> Value {
+    fn registered(&mut self, mut inputs: Value) -> Value {
+        if self.attempt == NO_ATTEMPT {
+            inputs["handedInHead"] = Value::Null;
+            inputs["sourceAncestor"] = false.into();
+        }
         let registration = self.json(gate::REGISTER, &inputs);
         let started = self.record_action("--start", &registration, Some(&inputs));
         json!({"version":1,"registration":registration["registration"],"attempt":self.attempt,
@@ -124,7 +129,7 @@ fn native_evidence_survives_rebuild_and_reuse_is_not_a_second_execution() {
     assert_eq!(answer["newExecutions"], 0);
     assert_eq!(
         answer["mandatoryChecks"],
-        json!(["windows", "flake-judgment", "publish"])
+        json!(["native", "windows", "flake-judgment", "publish"])
     );
     let run = &fixture.bench.ledger.runs()[0];
     assert_eq!(run.dispatches.len(), 1);
@@ -160,6 +165,8 @@ fn changing_or_forgetting_any_input_dimension_misses() {
         "profile",
         "env",
         "tree",
+        "policy",
+        "producer",
     ] {
         for changed in [
             Value::Null,
@@ -198,6 +205,8 @@ fn every_unknown_registered_identity_misses_even_when_the_consumer_repeats_it() 
         "profile",
         "env",
         "tree",
+        "policy",
+        "producer",
     ] {
         let mut fixture = Fixture::new();
         let mut input = inputs();
@@ -740,7 +749,7 @@ fn only_root_and_zo_scopes_can_hit_and_mandatory_checks_always_remain() {
         );
         assert_eq!(
             answer["mandatoryChecks"],
-            json!(["windows", "flake-judgment", "publish"])
+            json!(["native", "windows", "flake-judgment", "publish"])
         );
     }
 }

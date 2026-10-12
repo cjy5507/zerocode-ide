@@ -258,6 +258,9 @@ pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
     let mut episodes: HashMap<&str, usize> = HashMap::new();
     let mut folded_in_open = false;
     for message in run.messages().iter().filter(|one| one.to == address) {
+        if zerocode_core::orchestration::gate_reuse::is_gate_evidence(message) {
+            continue;
+        }
         if run.awaits_answer(message) {
             if run.question_is_answerable(message).is_ok() {
                 owed.mail.push(mail_row(run, message, &inbox));

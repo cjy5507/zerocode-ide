@@ -20,6 +20,43 @@ fn receipt_gate_child() {
     // This real libtest process also compiles on the pre-API source for a functional RED.
     let kind: zerocode_core::orchestration::MessageKind = "land_check".parse().unwrap();
     assert!(kind.is_the_ledgers_own());
+    if !Path::new("fixture-node.cjs").is_file() {
+        return;
+    }
+    for reporter in ["tap", "spec"] {
+        let output = Command::new("node")
+            .args([
+                "--test",
+                &format!("--test-reporter={reporter}"),
+                "fixture-node.cjs",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "actual node fixture failed");
+        println!("\n{}", String::from_utf8_lossy(&output.stdout));
+        assert!(output.stderr.is_empty(), "unexpected node stderr");
+    }
+    let output = Command::new("python3")
+        .args([
+            "-I",
+            "-S",
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            ".",
+            "-p",
+            "fixture_unittest.py",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "actual unittest fixture failed");
+    println!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -28,6 +65,7 @@ fn receipt_gate_child_cannot_forge_fixture_completion() {
         return;
     };
     let probe: Value = serde_json::from_slice(&bytes).unwrap();
+    println!("fixture probe began");
     let task = probe["task"].as_str().unwrap();
     let call = |verb: &str, value: &Value, extra: &[&str]| -> Option<Value> {
         let output = Command::new(probe["cli"].as_str().unwrap())
@@ -48,10 +86,17 @@ fn receipt_gate_child_cannot_forge_fixture_completion() {
             .args(extra)
             .output()
             .unwrap();
-        output
-            .status
-            .success()
-            .then(|| serde_json::from_slice(&output.stdout).unwrap())
+        if output.status.success() {
+            Some(serde_json::from_slice(&output.stdout).unwrap())
+        } else {
+            let reason = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                reason.contains("this shell is not part of an agent team"),
+                "probe failed without an authority refusal: {reason}"
+            );
+            println!("fixture probe denied missing authority");
+            None
+        }
     };
     let inputs = &probe["inputs"];
     let Some(registered) = call("gate-register", inputs, &[]) else {
@@ -101,6 +146,7 @@ struct CliFixture {
     input: PathBuf,
     child: PathBuf,
     task: String,
+    policy: std::sync::Mutex<Option<Value>>,
 }
 
 fn http_request(
@@ -152,6 +198,7 @@ impl CliFixture {
         for part in ["home", "bin", "input", "deps", "toolchain"] {
             std::fs::create_dir_all(root.join(part)).unwrap();
         }
+        let root = root.canonicalize().unwrap();
         let door = root.join("bin/zerocode-orc");
         std::fs::write(
             &door,
@@ -169,6 +216,16 @@ impl CliFixture {
         .unwrap();
         std::fs::write(root.join("input/input.txt"), b"public fixture source\n").unwrap();
         std::fs::write(root.join("input/Cargo.lock"), b"version = 4\n").unwrap();
+        std::fs::write(root.join("input/fixture-node.cjs"),
+            b"const test = require('node:test'); const assert = require('node:assert/strict'); test('fixture', () => assert.equal(1 + 1, 2));\n").unwrap();
+        std::fs::write(root.join("input/fixture_unittest.py"),
+            b"import unittest\nclass Fixture(unittest.TestCase):\n    def test_fixture(self):\n        self.assertEqual(1 + 1, 2)\n").unwrap();
+        let linked = root.join("input/tools/computer-bench/long-form/bin");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(linked.join("zerocode-door"), b"fixture source input\n").unwrap();
+        for name in ["zerocode-browser", "zerocode-computer"] {
+            std::os::unix::fs::symlink("zerocode-door", linked.join(name)).unwrap();
+        }
         let input = root.join("input");
         for args in [
             vec!["init", "-q"],
@@ -179,6 +236,11 @@ impl CliFixture {
         ] {
             assert!(
                 Command::new("git")
+                    .env_clear()
+                    .env("HOME", root.join("home"))
+                    .env("PATH", std::env::var("PATH").unwrap())
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
                     .arg("-C")
                     .arg(&input)
                     .args(args)
@@ -264,6 +326,7 @@ impl CliFixture {
             input,
             child,
             task: String::new(),
+            policy: std::sync::Mutex::new(None),
         };
         held.cli(&[
             "run-create",
@@ -319,14 +382,81 @@ impl CliFixture {
         serde_json::from_slice(&output.stdout).unwrap()
     }
 
+    fn install_probe(&self) {
+        let digest = "b".repeat(64);
+        let inputs = json!({"version":1,"gate":"gate-root","head":"a".repeat(40),"tree":"c".repeat(40),
+            "source":digest,"deps":digest,"lock":digest,"script":digest,"recipe":digest,
+            "toolchain":digest,"platform":digest,"profile":digest,"env":digest,"scope":"deterministic",
+            "policy":digest,"producer":digest,"handedInHead":null,"sourceAncestor":false});
+        std::fs::write(
+            self.input.join("probe.json"),
+            json!({"task":self.task,
+            "cli":self.root.join("bin/zerocode-orc"),"inputs":inputs})
+            .to_string(),
+        )
+        .unwrap();
+        for args in [
+            vec!["add", "."],
+            vec!["commit", "-qm", "fixture authority probe"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .env_clear()
+                    .env("HOME", self.root.join("home"))
+                    .env("PATH", std::env::var("PATH").unwrap())
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .arg("-C")
+                    .arg(&self.input)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+
     fn production(&self, action: &str, clean: bool) -> Output {
         self.production_test(action, clean, CHILD)
     }
 
     fn production_test(&self, action: &str, clean: bool, child_test: &str) -> Output {
+        if action == "run" {
+            let mut prepare = Command::new("python3");
+            prepare
+                .args(["-I", "-S", "-B"])
+                .arg(self.script.parent().unwrap().join("tests/gate_fixture.py"))
+                .arg("--root")
+                .arg(&self.root)
+                .arg("--repo")
+                .arg(&self.input)
+                .arg("--producer")
+                .arg(&self.script)
+                .arg("--child")
+                .arg(&self.child)
+                .arg("--test")
+                .arg(child_test);
+            self.environment(&mut prepare);
+            let output = prepare.output().unwrap();
+            assert!(
+                output.status.success(),
+                "fixture trust setup: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            *self.policy.lock().unwrap() = Some(serde_json::from_slice(&output.stdout).unwrap());
+        }
+        let policy = self.policy.lock().unwrap().clone().unwrap();
         let mut command = Command::new("python3");
         command
-            .arg(&self.script)
+            .args(["-I", "-S", "-B"])
+            .arg(self.script.with_file_name("gate_launcher.py"))
+            .arg("--policy")
+            .arg(self.root.join("trusted-policy.json"))
+            .arg("--policy-sha256")
+            .arg(policy["policySha256"].as_str().unwrap())
+            .arg("--repo")
+            .arg(&self.input)
+            .arg("--")
             .arg(action)
             .arg("--repo")
             .arg(&self.input)
@@ -343,11 +473,7 @@ impl CliFixture {
                 "declared",
                 "--profile",
                 "test-debug",
-                "--dependency-root",
-            ])
-            .arg(self.root.join("deps"))
-            .arg("--toolchain-root")
-            .arg(self.root.join("toolchain"));
+            ]);
         if clean {
             command.arg("--clean-env");
         }
@@ -360,10 +486,13 @@ impl CliFixture {
                 .arg("--log")
                 .arg(self.root.join("out/gate.log"));
         }
-        command
-            .arg("--")
-            .arg(&self.child)
-            .args(["--exact", child_test]);
+        command.arg("--").args(
+            policy["command"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|word| word.as_str().unwrap()),
+        );
         self.environment(&mut command);
         command.output().unwrap()
     }
@@ -382,31 +511,7 @@ impl CliFixture {
 fn fixture_child_cannot_create_a_completion_or_a_reusable_hit() {
     let authority = Fixture::new();
     let fixture = CliFixture::new(&authority);
-    let digest = "b".repeat(64);
-    let inputs = json!({"version":1,"gate":"gate-root","head":"a".repeat(40),"tree":"c".repeat(40),
-        "source":digest,"deps":digest,"lock":digest,"script":digest,"recipe":digest,
-        "toolchain":digest,"platform":digest,"profile":digest,"env":digest,"scope":"deterministic"});
-    std::fs::write(
-        fixture.input.join("probe.json"),
-        json!({"task":fixture.task,
-        "cli":fixture.root.join("bin/zerocode-orc"),"inputs":inputs})
-        .to_string(),
-    )
-    .unwrap();
-    for args in [
-        vec!["add", "."],
-        vec!["commit", "-qm", "fixture authority probe"],
-    ] {
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&fixture.input)
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
+    fixture.install_probe();
     let output = fixture.production_test(
         "run",
         false,
@@ -419,19 +524,77 @@ fn fixture_child_cannot_create_a_completion_or_a_reusable_hit() {
         .iter()
         .filter(|row| {
             let body: Value = serde_json::from_str(row.payload.as_str()).unwrap_or_default();
-            body["gateEvidenceV1"]["phase"] == "completed"
+            ["registered", "started", "completed"]
+                .iter()
+                .any(|phase| body["gateEvidenceV1"]["phase"] == *phase)
         })
         .count();
-    assert_eq!(completions, 1, "fixture child created an extra completion");
+    assert_eq!(
+        completions, 3,
+        "fixture child created extra registration, start or completion evidence"
+    );
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
     let log = std::fs::read_to_string(fixture.root.join("out/gate.log")).unwrap();
+    assert!(log.contains("fixture probe began"), "probe never ran");
+    assert!(
+        log.contains("fixture probe denied missing authority"),
+        "probe never reached an authority refusal"
+    );
     assert!(
         !log.contains("fixture forged completion"),
         "fixture child obtained a reusable hit"
+    );
+}
+
+#[test]
+fn the_identical_fixture_probe_completes_and_hits_with_fixture_authority() {
+    let authority = Fixture::new();
+    let fixture = CliFixture::new(&authority);
+    fixture.install_probe();
+    let mut child = Command::new(&fixture.child);
+    child.current_dir(&fixture.input).args([
+        "--exact",
+        "runtime_actor::tests::gate_reuse::receipt_gate_child_cannot_forge_fixture_completion",
+        "--nocapture",
+    ]);
+    fixture.environment(&mut child);
+    let output = child.output().unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains("fixture probe began"),
+        "positive control never ran"
+    );
+    assert!(
+        text.contains("fixture forged completion"),
+        "positive control did not complete"
+    );
+    assert!(
+        text.contains("\"decision\":\"hit\""),
+        "positive control did not reuse: {text}"
+    );
+    let view = fixture.actor.view().unwrap();
+    let phases: Vec<Value> = view
+        .projection()
+        .messages
+        .iter()
+        .filter_map(|row| {
+            let body: Value = serde_json::from_str(row.payload.as_str()).ok()?;
+            body["gateEvidenceV1"].get("phase").cloned()
+        })
+        .collect();
+    assert_eq!(
+        phases,
+        vec![
+            json!("registered"),
+            json!("started"),
+            json!("completed"),
+            json!("reuse")
+        ]
     );
 }
 
@@ -455,7 +618,7 @@ fn production_cli_real_authority_and_real_process_issue_and_reuse_one_receipt() 
         String::from_utf8_lossy(&output.stderr)
     );
     let produced: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(produced["tests"], 1);
+    assert_eq!(produced["tests"], 4);
     let hit = fixture.production("verify", true);
     assert!(
         hit.status.success(),
@@ -467,7 +630,7 @@ fn production_cli_real_authority_and_real_process_issue_and_reuse_one_receipt() 
     assert_eq!(hit["original"], produced["original"]);
     assert_eq!(
         hit["mandatoryChecks"],
-        json!(["windows", "flake-judgment", "publish"])
+        json!(["native", "windows", "flake-judgment", "publish"])
     );
     assert!(fixture.actor.view().unwrap().revision() > initial);
 
@@ -482,9 +645,14 @@ fn production_cli_real_authority_and_real_process_issue_and_reuse_one_receipt() 
     std::fs::write(&log_path, [log.as_slice(), b"changed log\n"].concat()).unwrap();
     fixture.miss(true);
     std::fs::write(&log_path, log).unwrap();
-    fixture.miss(false); // The inherited environment has no identity, including no secret hash.
+    assert!(fixture.production("verify", false).status.success());
     assert!(
         Command::new("git")
+            .env_clear()
+            .env("HOME", fixture.root.join("home"))
+            .env("PATH", std::env::var("PATH").unwrap())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .arg("-C")
             .arg(&fixture.input)
             .args(["commit", "--allow-empty", "-qm", "another candidate"])

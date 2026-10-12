@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from gate_fixture import authorize, load_module
 
 SCRIPT = Path(__file__).resolve().parents[1] / "gate_receipt.py"
 SPEC = importlib.util.spec_from_file_location("gate_receipt", SCRIPT)
@@ -55,7 +56,8 @@ class ReceiptTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
+        (self.root / "git-home").mkdir()
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.git("init", "-q")
@@ -79,10 +81,17 @@ class ReceiptTests(unittest.TestCase):
             command=[sys.executable, "-c", f"import sys; sys.stdout.buffer.write({PASS!r})"],
             metadata=str(self.root / "out/metadata.json"), log=str(self.root / "out/gate.log"),
         )
+        authorize(self.args, self.root, gate)
+
+    def produce(self, ledger):
+        authorize(self.args, self.root, gate)
+        return gate.produce(self.args, ledger)
 
     def git(self, *args):
         return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env={"HOME": str(self.root / "git-home"), "PATH": os.defpath,
+                                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}).stdout
 
     def fingerprint(self, environment=None):
         return gate.fingerprint(self.args, gate.execution_environment(self.args) if environment is None else environment, self.args.command)
@@ -104,7 +113,7 @@ class ReceiptTests(unittest.TestCase):
             return original_call(verb, args, value, retry, extra=extra)
 
         ledger.call = observed_call
-        result = gate.produce(self.args, ledger)
+        result = self.produce(ledger)
         self.assertEqual(result["state"], "recorded")
         self.assertEqual(result["tests"], 2)
         self.assertTrue(ledger.metadata["inputsUnchanged"])
@@ -115,17 +124,17 @@ class ReceiptTests(unittest.TestCase):
         marker = self.root / "must-not-exist"
         self.args.command = [sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"]
         with self.assertRaises(gate.UnknownInput):
-            gate.produce(self.args, FakeLedger(refused="gate-register"))
+            self.produce(FakeLedger(refused="gate-register"))
         self.assertFalse(marker.exists())
 
     def test_a_failed_native_completion_is_unattested_after_a_real_execution(self):
         with self.assertRaises(gate.ExecutionUnattested):
-            gate.produce(self.args, FakeLedger(refused="gate-finish"))
+            self.produce(FakeLedger(refused="gate-finish"))
         self.assertTrue(Path(self.args.metadata).is_file())
 
     def test_verification_recomputes_bytes_and_never_calls_the_execution_function(self):
         ledger = FakeLedger()
-        gate.produce(self.args, ledger)
+        self.produce(ledger)
         metadata = Path(self.args.metadata).read_bytes()
         with mock.patch.object(gate, "execute", side_effect=AssertionError("verify executed a gate")):
             result = gate.verify(self.args, ledger)
@@ -138,7 +147,7 @@ class ReceiptTests(unittest.TestCase):
 
     def test_tampered_metadata_and_log_are_observations_not_local_cache_hits(self):
         ledger = FakeLedger()
-        gate.produce(self.args, ledger)
+        self.produce(ledger)
         original = Path(self.args.metadata).read_bytes()
         Path(self.args.metadata).write_bytes(original + b"\n")
         Path(self.args.log).write_bytes(PASS + b"changed\n")
@@ -148,7 +157,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(observations["logSha256"], gate.digest(PASS + b"changed\n"))
 
     def test_missing_native_ledger_has_no_json_file_fallback(self):
-        gate.produce(self.args, FakeLedger())
+        self.produce(FakeLedger())
         with mock.patch.object(gate, "Ledger", side_effect=gate.UnknownInput("not connected")):
             with self.assertRaises(gate.UnknownInput):
                 gate.verify(self.args)
@@ -156,7 +165,7 @@ class ReceiptTests(unittest.TestCase):
     def test_failed_timeout_and_zero_test_executions_are_recorded_truthfully(self):
         for label, command, outcome, count in [
             ("failure", [sys.executable, "-c", "raise SystemExit(7)"], "failed", 0),
-            ("zero", [sys.executable, "-c", "print('no tests')"], "passed", 0),
+            ("zero", [sys.executable, "-c", "print('no tests')"], "unknown", 0),
             ("timeout", [sys.executable, "-c", "import time; time.sleep(10)"], "timed_out", 0),
         ]:
             with self.subTest(label=label):
@@ -164,7 +173,7 @@ class ReceiptTests(unittest.TestCase):
                 self.args.command = command
                 self.args.timeout = 0.1 if label == "timeout" else 10
                 ledger = FakeLedger()
-                result = gate.produce(self.args, ledger)
+                result = self.produce(ledger)
                 self.assertEqual(result["outcome"], outcome)
                 self.assertEqual(result["tests"], count)
 
@@ -172,7 +181,7 @@ class ReceiptTests(unittest.TestCase):
         self.args.command = [sys.executable, "-c",
             f"from pathlib import Path; import sys; Path('source.rs').write_text('changed'); sys.stdout.buffer.write({PASS!r})"]
         ledger = FakeLedger()
-        gate.produce(self.args, ledger)
+        self.produce(ledger)
         self.assertFalse(ledger.metadata["inputsUnchanged"])
 
     def test_each_real_fingerprint_dimension_reacts_to_its_input(self):
@@ -195,6 +204,7 @@ class ReceiptTests(unittest.TestCase):
         extra_script = self.root / "gate-script.py"
         extra_script.write_text("pass\n")
         self.args.script_file = [str(extra_script)]
+        authorize(self.args, self.root, gate)
         first_script = self.fingerprint()["script"]
         extra_script.write_text("raise SystemExit(1)\n")
         self.assertNotEqual(self.fingerprint()["script"], first_script)
@@ -220,8 +230,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNone(unknown["deps"])
         self.assertIsNone(unknown["script"])
         self.args.closure = "declared"
-        self.args.dependency_root = []
-        self.args.toolchain_root = []
+        self.args.trust = None
         unknown = self.fingerprint()
         self.assertIsNone(unknown["deps"])
         self.assertIsNone(unknown["toolchain"])
@@ -237,18 +246,18 @@ class ReceiptTests(unittest.TestCase):
         self.args.clean_env = False
         secret = "synthetic-test-secret-value"
         with mock.patch.dict(os.environ, {"GATE_TEST_SECRET": secret}):
-            self.args.command = [sys.executable, "-c", f"import os; print(os.environ['GATE_TEST_SECRET']); print({PASS.decode()!r})"]
+            self.args.command = [sys.executable, "-c", f"import os; print(os.environ.get('GATE_TEST_SECRET', 'no inherited value')); print({PASS.decode()!r})"]
             ledger = FakeLedger()
-            gate.produce(self.args, ledger)
+            self.produce(ledger)
         self.assertNotIn(secret.encode(), Path(self.args.metadata).read_bytes())
         self.assertNotIn(secret.encode(), Path(self.args.log).read_bytes())
         self.assertNotIn("GATE_TEST_SECRET", json.dumps(ledger.metadata))
-        self.assertIsNone(ledger.metadata["inputs"]["env"])
+        self.assertIsNotNone(ledger.metadata["inputs"]["env"])
 
     def test_output_in_the_source_checkout_is_refused(self):
         self.args.output = str(self.repo / "output")
         with self.assertRaises(gate.UnknownInput):
-            gate.produce(self.args, FakeLedger())
+            self.produce(FakeLedger())
         self.assertFalse(Path(self.args.output).exists())
 
     def test_test_counts_require_complete_passing_nonmeasured_summaries(self):
@@ -269,7 +278,7 @@ class ReceiptTests(unittest.TestCase):
         self.args.command = [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({output!r})"]
         with mock.patch.dict(os.environ, {"GATE_TEST_SECRET": "FAILED"}):
             ledger = FakeLedger()
-            gate.produce(self.args, ledger)
+            self.produce(ledger)
         self.assertEqual(ledger.metadata["tests"], 0)
 
     def test_child_never_inherits_fixture_ledger_or_account_authority(self):
@@ -314,6 +323,18 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNotNone(before["tree"])
         (folder / "zerocode-door").write_text("changed reachable input\n")
         self.assertIsNone(self.fingerprint()["source"])
+        (folder / "zerocode-door").write_text("fixture door\n")
+        (folder / "zerocode-browser").unlink()
+        (folder / "zerocode-browser").symlink_to("./zerocode-door")
+        self.git("add", ".")
+        self.git("commit", "-qm", "link text changed")
+        changed_text = self.fingerprint()
+        self.assertIsNotNone(changed_text["source"])
+        self.assertNotEqual(changed_text["source"], before["source"])
+        (folder / "zerocode-door").chmod(0o755)
+        self.git("add", ".")
+        self.git("commit", "-qm", "target mode changed")
+        self.assertNotEqual(self.fingerprint()["source"], changed_text["source"])
 
     @unittest.skipIf(os.name == "nt", "symlink creation needs Windows developer mode")
     def test_outside_dangling_cyclic_and_untracked_link_targets_remain_unknown(self):
@@ -345,6 +366,7 @@ class ReceiptTests(unittest.TestCase):
             UNITTEST.replace(b"OK\n", b"OK (skipped=1)\n"),
             UNITTEST.replace(b"OK\n", b"FAILED (failures=1)\n"),
             b"Ran 2 tests in 0.001s\n", b"TAP version 13\nok 1 - truncated\n",
+            TAP + TAP.replace(b"1..1\n", b""),
         ):
             with self.subTest(log=log):
                 self.assertEqual(gate.test_count(PASS + log), 0)
@@ -353,16 +375,18 @@ class ReceiptTests(unittest.TestCase):
         output = PASS + TAP + SPEC_OUTPUT + UNITTEST
         self.args.command = [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({output!r})"]
         ledger = FakeLedger()
-        result = gate.produce(self.args, ledger)
+        result = self.produce(ledger)
         self.assertEqual(result["tests"], 6)
-        self.assertEqual(Path(self.args.log).read_bytes(), output)
+        self.assertIn(output, Path(self.args.log).read_bytes())
 
     def test_zero_executed_tests_cannot_make_the_producer_exit_successfully(self):
         self.args.command = [sys.executable, "-c", "print('no tests executed')"]
+        trust = authorize(self.args, self.root, gate)
         argv = [str(SCRIPT), "run", "--repo", self.args.repo, "--gate", "gate-root", "--task", "t-1",
-                "--attempt", "none", "--output", self.args.output, "--", *self.args.command]
+                "--attempt", "none", "--output", self.args.output, "--profile", self.args.profile,
+                "--scope", "deterministic", "--closure", "declared", "--", *self.args.command]
         with mock.patch.object(sys, "argv", argv), mock.patch.object(gate, "Ledger", return_value=FakeLedger()):
-            self.assertEqual(gate.main(), 1, "rc0 with zero tests reported gate success")
+            self.assertEqual(gate.main(trust=trust), 1, "rc0 with zero tests reported gate success")
 
     def test_fingerprint_head_and_source_are_from_the_same_snapshot(self):
         original = gate.source_identity
@@ -378,6 +402,174 @@ class ReceiptTests(unittest.TestCase):
             result = self.fingerprint()
         self.assertTrue(result["source"] is None or result["head"] == observed_source[0][0],
                         "HEAD and source identity name different commits")
+
+    def test_unverified_producer_cannot_register_or_execute(self):
+        self.args.trust = None
+        ledger = FakeLedger()
+        with mock.patch.object(gate, "execute", side_effect=AssertionError("unverified code executed")):
+            with self.assertRaises(gate.UnknownInput):
+                gate.produce(self.args, ledger)
+        self.assertEqual(ledger.calls, [])
+
+    def test_an_external_copy_is_untrusted_until_its_bytes_match_independent_pins(self):
+        launcher = load_module(SCRIPT.with_name("gate_launcher.py"), "external_copy_launcher")
+        policy = copy.deepcopy(self.args.trust["policy"])
+        copied = self.root / "external-producer.py"
+        copied.write_text("raise AssertionError('untrusted producer imported')\n")
+        policy["bundle"]["producer"]["path"] = str(copied)
+        raw = gate.encoded(policy)
+        path = self.root / "copy-policy.json"
+        path.write_bytes(raw)
+        with self.assertRaises(launcher.Untrusted):
+            launcher.load_policy(path, gate.digest(raw), self.repo)
+
+    def test_candidate_scanner_and_launcher_are_refused_even_with_declared_digests(self):
+        launcher = load_module(SCRIPT.with_name("gate_launcher.py"), "candidate_bundle_launcher")
+        for role in ("launcher", "producer", "scanner", "rules"):
+            with self.subTest(role=role):
+                policy = copy.deepcopy(self.args.trust["policy"])
+                copied = self.repo / (role + ".py")
+                copied.write_bytes(self.args.trust["bytes"][role])
+                policy["bundle"][role] = {"path": str(copied), "sha256": gate.file_digest(copied)}
+                raw = gate.encoded(policy)
+                path = self.root / "candidate-policy.json"
+                path.write_bytes(raw)
+                with self.assertRaises(launcher.Untrusted):
+                    launcher.load_policy(path, gate.digest(raw), self.repo)
+
+    def test_a_small_command_cannot_claim_the_trusted_root_gate(self):
+        self.args.command = [sys.executable, "-c", f"import sys; sys.stdout.buffer.write({PASS!r})"]
+        ledger = FakeLedger()
+        with self.assertRaises(gate.UnknownInput):
+            gate.produce(self.args, ledger)
+        self.assertEqual(ledger.calls, [])
+
+    def test_a_changed_manifest_is_not_accepted_as_a_new_independent_pin(self):
+        Path(self.args.trust["policyPath"]).write_bytes(b"{}")
+        ledger = FakeLedger()
+        with self.assertRaises(gate.UnknownInput):
+            gate.produce(self.args, ledger)
+        self.assertEqual(ledger.calls, [])
+
+    def test_undeclared_ignored_inputs_make_the_closure_unknown(self):
+        (self.repo / ".gitignore").write_text("hidden-dependency\n")
+        (self.repo / "hidden-dependency").write_text("not in the trusted declaration\n")
+        self.git("add", ".gitignore")
+        self.git("commit", "-qm", "ignored dependency")
+        self.assertIsNone(self.fingerprint()["deps"])
+        with self.assertRaises(gate.UnknownInput):
+            gate.produce(self.args, FakeLedger())
+
+    @unittest.skipIf(os.name == "nt", "symlink creation needs Windows developer mode")
+    def test_an_ignored_link_to_a_declared_dependency_binds_the_reachable_input(self):
+        (self.repo / ".gitignore").write_text("node_modules\n")
+        (self.repo / "node_modules").symlink_to(self.deps, target_is_directory=True)
+        self.git("add", ".gitignore")
+        self.git("commit", "-qm", "declared dependency alias")
+        before = self.fingerprint()
+        self.assertIsNotNone(before["deps"])
+        self.assertIsNotNone(before["source"])
+        (self.deps / "dependency").write_bytes(b"changed reachable dependency")
+        self.assertIsNone(self.fingerprint()["deps"])
+
+    def test_configuration_changes_and_missing_roles_remain_unknown(self):
+        (self.root / "child-home/fixture-config").write_text("changed configuration\n")
+        self.assertIsNone(self.fingerprint()["env"])
+        self.assertIsNone(self.fingerprint()["toolchain"])
+
+    def test_even_a_trusted_manifest_cannot_give_a_child_ledger_credentials(self):
+        self.args.trust["policy"]["gates"]["gate-root"]["environment"]["ZEROCODE_AGENT_TEAM_TOKEN"] = "fixture-capability"
+        with self.assertRaises(gate.UnknownInput):
+            self.args.trust["configure"](self.args)
+
+    def test_scanner_import_uses_the_verified_rules_bytes_without_reopening_them(self):
+        with mock.patch.object(Path, "read_text", side_effect=AssertionError("rules reopened after verification")):
+            self.assertEqual(gate.mask_log(PASS, {}, self.args.trust), PASS)
+
+    def test_recipe_coverage_is_checked_against_the_independent_declaration(self):
+        complete = b"==> verify recipe first\n" + PASS + b"<== verify recipe first rc=0 1s\n"
+        self.assertEqual(gate.test_count(complete, ["first"]), 2)
+        self.assertEqual(gate.test_count(complete, ["first", "missing"]), 0)
+        self.assertEqual(gate.test_count(complete, ["other"]), 0)
+
+    def test_real_node_tap_spec_and_unittest_runners_produce_complete_counts(self):
+        import shutil
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "actual node runner is required for this acceptance fixture")
+        node_test = self.root / "fixture-node.cjs"
+        node_test.write_text("const test=require('node:test'); const assert=require('node:assert/strict'); test('fixture',()=>assert.equal(1+1,2));\n")
+        py_test = self.root / "fixture_unittest.py"
+        py_test.write_text("import unittest\nclass Fixture(unittest.TestCase):\n    def test_fixture(self):\n        self.assertEqual(1+1,2)\n")
+        commands = [[node, "--test", "--test-reporter=" + reporter, str(node_test)] for reporter in ("tap", "spec")]
+        commands.append([sys.executable, "-I", "-S", "-B", "-m", "unittest", "discover", "-s", str(self.root), "-p", py_test.name])
+        for command in commands:
+            with self.subTest(runner=command[:4]):
+                output = subprocess.run(command, env=gate.execution_environment(self.args),
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, check=False)
+                self.assertEqual(output.returncode, 0, output.stdout)
+                self.assertEqual(gate.test_count(output.stdout), 1, output.stdout)
+
+    def test_real_source_ancestry_accepts_a_merge_and_rejects_an_unrelated_candidate(self):
+        base = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("checkout", "-qb", "fixture-worker")
+        (self.repo / "worker.rs").write_text("pub const FIXTURE: bool = true;\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "worker source")
+        handed_in = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("checkout", "-qb", "fixture-main", base)
+        (self.repo / "main.rs").write_text("fn main() {}\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "main source")
+        self.git("merge", "--no-ff", "-qm", "merge candidate", "fixture-worker")
+        self.args.handed_in_head = handed_in
+        merged = self.fingerprint()
+        self.assertTrue(merged["sourceAncestor"])
+        self.assertNotEqual(merged["head"], handed_in)
+        self.assertEqual(merged["handedInHead"], handed_in)
+        self.git("checkout", "--orphan", "unrelated")
+        self.git("commit", "-qm", "unrelated root")
+        self.assertFalse(self.fingerprint()["sourceAncestor"])
+
+    def test_isolated_launcher_ignores_candidate_sitecustomize_and_pythonpath(self):
+        marker = self.root / "candidate-imported"
+        (self.repo / "sitecustomize.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('imported')\n")
+        environment = gate.execution_environment(self.args)
+        environment["PYTHONPATH"] = str(self.repo)
+        control = subprocess.run([sys.executable, "-c", "print('fixture import control')"],
+            cwd=self.repo, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False)
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.assertTrue(marker.is_file(), "import pollution positive control never ran")
+        marker.unlink()
+        trust = self.args.trust
+        command = [sys.executable, "-I", "-S", "-B", str(SCRIPT.with_name("gate_launcher.py")),
+            "--policy", trust["policyPath"], "--policy-sha256", trust["policySha256"], "--repo", str(self.repo), "--",
+            "verify", "--repo", str(self.repo), "--gate", "gate-root", "--task", "t-1", "--attempt", "none",
+            "--scope", "deterministic", "--closure", "declared", "--profile", self.args.profile,
+            "--metadata", self.args.metadata, "--log", self.args.log, "--", *self.args.command]
+        output = subprocess.run(command, cwd=self.repo, env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False)
+        self.assertEqual(output.returncode, 1, output.stderr)
+        self.assertEqual(json.loads(output.stdout)["newExecutions"], 0)
+        self.assertFalse(marker.exists(), "candidate import polluted the trusted launcher")
+
+    def test_credential_files_are_refused_before_their_contents_are_hashed(self):
+        credential = self.deps / "credentials.toml"
+        credential.write_text("fixture credential content\n")
+        with mock.patch.object(gate, "file_digest", side_effect=AssertionError("credential contents hashed")):
+            with self.assertRaises(gate.UnknownInput):
+                gate.paths_digest([credential])
+
+    @unittest.skipIf(os.name == "nt", "symlink creation needs Windows developer mode")
+    def test_reachable_directory_link_cycles_are_unknown(self):
+        folder = self.repo / "folder"
+        folder.mkdir()
+        (folder / "input").write_text("tracked input\n")
+        (folder / "cycle").symlink_to(".", target_is_directory=True)
+        self.git("add", ".")
+        self.git("commit", "-qm", "directory cycle")
+        self.assertIsNone(self.fingerprint()["source"])
+        with self.assertRaises(gate.UnknownInput):
+            gate.paths_digest([folder])
 
 
 if __name__ == "__main__":

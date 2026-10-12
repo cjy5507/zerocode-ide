@@ -3,13 +3,13 @@
 
 `run` is an execution, not a dry run. `verify` only hashes observations and asks the live ledger.
 An old window without the three native gate verbs produces a miss, never a file-based fallback.
-The default scope and input closure are unknown. A coordinator must establish a deterministic,
-complete input closure before selecting `--scope deterministic --closure declared`.
+The root coordinator supplies an independently pinned launcher and manifest from a reviewed
+trusted commit. Candidate declarations never establish producer or recipe provenance. The
+cache covers declared inputs; it does not isolate arbitrary same-user code.
 """
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,9 +22,11 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import uuid
 
-HERE = Path(__file__).resolve().parent
+GIT_EXECUTABLE = shutil.which("git", path=os.defpath)
+GIT_ENVIRONMENT = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"}
 MAX_METADATA = 16 * 1024
 MAX_LOG = 64 * 1024 * 1024
 SUMMARY = re.compile(
@@ -59,11 +61,30 @@ def file_digest(path):
         for block in iter(lambda: source.read(1024 * 1024), b""):
             hasher.update(block)
     after = path.lstat()
-    if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_mode) != (
-        after.st_ino, after.st_size, after.st_mtime_ns, after.st_mode
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns, before.st_mode) != (
+        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_mode
     ):
         raise UnknownInput("input changed while hashing")
     return hasher.hexdigest()
+
+
+def check_link_cycles(links):
+    complete = set()
+
+    def visit(name, active):
+        if name in active:
+            raise UnknownInput("reachable directory links form a cycle")
+        if name in complete:
+            return
+        target, directory = links[name]
+        if directory:
+            children = [value for value in links if target == "." or value.startswith(target + "/")]
+            for child in children:
+                visit(child, active | {name})
+        complete.add(name)
+
+    for name in links:
+        visit(name, set())
 
 
 def paths_digest(paths):
@@ -80,16 +101,30 @@ def paths_digest(paths):
         if root.is_symlink() or not root.exists():
             raise UnknownInput("input root is missing or linked")
         entries = []
-        files = sorted(root.rglob("*")) if root.is_dir() else [root]
+        links = {}
+        files = [root, *sorted(root.rglob("*"))] if root.is_dir() else [root]
         for path in files:
+            if path.name.lower() in {".env", ".netrc", ".npmrc", ".pypirc", "credentials", "credentials.toml", "id_rsa", "id_ed25519"}:
+                raise UnknownInput("credential files are outside the declared public closure")
             mode = path.lstat().st_mode
-            relative = str(path.relative_to(root)) if path != root else "."
+            relative = path.relative_to(root).as_posix() if path != root else "."
             if stat.S_ISDIR(mode):
                 entries.append([relative, stat.S_IMODE(mode), "directory"])
+            elif stat.S_ISLNK(mode):
+                try:
+                    target = path.resolve(strict=True)
+                except (OSError, RuntimeError) as why:
+                    raise UnknownInput("declared link is dangling or cyclic") from why
+                if not target.is_relative_to(root):
+                    raise UnknownInput("declared link escapes its input root")
+                target_name = target.relative_to(root).as_posix()
+                links[relative] = (target_name, target.is_dir())
+                entries.append([relative, stat.S_IMODE(mode), "link", os.readlink(path), target_name])
             else:
                 entries.append([relative, stat.S_IMODE(mode), file_digest(path)])
         if not entries:
             raise UnknownInput("empty dependency or toolchain input root")
+        check_link_cycles(links)
         roots.append([name, entries])
     return digest(encoded(roots))
 
@@ -103,9 +138,9 @@ def observed(call):
 
 def git(repo, *args):
     result = subprocess.run(
-        ["git", "-c", "core.fsmonitor=false", "-C", str(repo), *args], check=True, stdout=subprocess.PIPE,
+        [GIT_EXECUTABLE, "-c", "core.fsmonitor=false", "-C", str(repo), *args], check=True, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, timeout=30, env={
-            "PATH": os.environ.get("PATH", os.defpath), "LANG": "C", "LC_ALL": "C",
+            **GIT_ENVIRONMENT,
             "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
         },
     )
@@ -113,23 +148,57 @@ def git(repo, *args):
 
 
 def source_identity(repo):
+    repo = Path(repo).resolve()
     head = git(repo, "rev-parse", "--verify", "HEAD").decode().strip()
-    tree = git(repo, "rev-parse", "--verify", "HEAD^{tree}").decode().strip()
+    tree = git(repo, "rev-parse", "--verify", head + "^{tree}").decode().strip()
     if git(repo, "status", "--porcelain=v1", "--untracked-files=all"):
         raise UnknownInput("source checkout is dirty")
+    tracked = {}
+    for raw in git(repo, "ls-tree", "-rz", head).split(b"\0"):
+        if raw:
+            fields, name = raw.split(b"\t", 1)
+            mode, kind, oid = fields.split()
+            if kind != b"blob" or mode not in (b"100644", b"100755", b"120000"):
+                raise UnknownInput("source has an undeclared submodule input")
+            tracked[os.fsdecode(name)] = (mode.decode(), oid.decode())
     entries = []
-    for raw in git(repo, "ls-files", "--stage", "-z").split(b"\0"):
-        if not raw:
-            continue
-        mode_oid_stage, name = raw.split(b"\t", 1)
-        mode, _, stage = mode_oid_stage.split()
-        # Submodules and symlinks have inputs beyond this tracked tree.
-        if mode not in (b"100644", b"100755") or stage != b"0":
-            raise UnknownInput("source includes an unresolved external or merged input")
-        path = repo / os.fsdecode(name)
-        entries.append([os.fsdecode(name), mode.decode(), file_digest(path)])
+    links = {}
+    for name, (mode, oid) in sorted(tracked.items()):
+        path = repo / name
+        before = path.lstat()
+        if mode == "120000":
+            if not stat.S_ISLNK(before.st_mode):
+                raise UnknownInput("tracked link mode changed")
+            data = os.fsencode(os.readlink(path))
+            try:
+                target = path.resolve(strict=True)
+            except (OSError, RuntimeError) as why:
+                raise UnknownInput("tracked link is dangling or cyclic") from why
+            if not target.is_relative_to(repo):
+                raise UnknownInput("tracked link escapes the source root")
+            target_name = target.relative_to(repo).as_posix()
+            if target_name not in tracked and not any(value.startswith(target_name + "/") for value in tracked):
+                raise UnknownInput("tracked link reaches an undeclared input")
+            closure = target_name
+            links[name] = (target_name, target.is_dir())
+        else:
+            if not stat.S_ISREG(before.st_mode) or bool(before.st_mode & 0o111) != (mode == "100755"):
+                raise UnknownInput("tracked source mode changed")
+            data = path.read_bytes()
+            closure = None
+        after = path.lstat()
+        identity = lambda item: (item.st_dev, item.st_ino, item.st_mode, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+        if identity(before) != identity(after):
+            raise UnknownInput("source changed during the snapshot")
+        algorithm = hashlib.sha1 if len(oid) == 40 else hashlib.sha256
+        if algorithm(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != oid:
+            raise UnknownInput("source bytes differ from the frozen tree")
+        entries.append([name, mode, digest(data), closure])
+    check_link_cycles(links)
     if not entries or head != git(repo, "rev-parse", "HEAD").decode().strip():
         raise UnknownInput("source moved while hashing")
+    if git(repo, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise UnknownInput("source changed during the snapshot")
     return head, tree, digest(encoded(entries))
 
 
@@ -148,28 +217,20 @@ def command_executable(repo, word, environment):
 
 
 def execution_environment(args):
-    """Inherited values may be low-entropy secrets: never persist a digest of that environment."""
-    if not args.clean_env:
-        return dict(os.environ)
-    executable = command_executable(Path(args.repo).resolve(), args.command[0], os.environ)
+    """Give every child explicit values, without the parent's ledger or account authority."""
+    trust = getattr(args, "trust", None)
+    if trust:
+        return dict(trust["environment"])
+    executable = command_executable(Path(args.repo).resolve(), args.command[0], {"PATH": os.defpath})
     environment = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
     if executable:
         environment["PATH"] = str(executable.parent) + os.pathsep + os.defpath
-    if os.name == "nt" and os.environ.get("SystemRoot"):
-        environment["SystemRoot"] = os.environ["SystemRoot"]
+    home = getattr(args, "child_home", None)
+    if home:
+        environment.update(HOME=home, USERPROFILE=home, CARGO_HOME=str(Path(home) / "cargo"),
+                           RUSTUP_HOME=str(Path(home) / "rustup"), XDG_CONFIG_HOME=str(Path(home) / "config"))
     return environment
 
-
-def public_environment(environment):
-    if set(environment) - {"PATH", "LANG", "LC_ALL", "TZ", "SystemRoot"}:
-        return False
-    if any(environment.get(key) != value for key, value in (("LANG", "C"), ("LC_ALL", "C"), ("TZ", "UTC"))):
-        return False
-    # These are filesystem search roots, not free-form strings or URLs carrying credentials.
-    if "SystemRoot" in environment and not Path(environment["SystemRoot"]).is_dir():
-        return False
-    return all(Path(part).is_absolute() and not re.search(r"[\r\n=@]", part)
-               for part in environment.get("PATH", "").split(os.pathsep))
 
 
 def public_command(command):
@@ -177,67 +238,161 @@ def public_command(command):
                    for word in command)
 
 
+def provenance(args):
+    trust = getattr(args, "trust", None)
+    if not trust or not callable(trust.get("configure")):
+        raise UnknownInput("independently pinned launcher and trust manifest are required")
+    repo = Path(args.repo).resolve()
+    if repo != Path(trust["repo"]) or Path(__file__).resolve().is_relative_to(repo):
+        raise UnknownInput("candidate-contained or mismatched producer")
+    bundle = trust["policy"]["bundle"]
+    if Path(bundle["producer"]["path"]).resolve() != Path(__file__).resolve():
+        raise UnknownInput("producer invocation differs from the independent pin")
+    if digest(Path(trust["policyPath"]).read_bytes()) != trust["policySha256"]:
+        raise UnknownInput("trusted manifest changed")
+    if digest(trust["policyBytes"]) != trust["policySha256"] or encoded(json.loads(trust["policyBytes"])) != encoded(trust["policy"]):
+        raise UnknownInput("loaded manifest differs from the independent pin")
+    for role, entry in bundle.items():
+        path = Path(entry["path"])
+        if path.resolve().is_relative_to(repo) or file_digest(path) != entry["sha256"]:
+            raise UnknownInput("trusted bundle changed")
+        if digest(trust["bytes"][role]) != entry["sha256"]:
+            raise UnknownInput("loaded trusted bytes changed")
+    return trust["configure"](args)
+
+
 def fingerprint(args, environment, command):
     """Capture all dimensions. Unknown closure or unreadable inputs remain explicit nulls."""
     repo = Path(args.repo).resolve()
-    # A full HEAD is needed even for an unknown source; the native ledger checks it independently.
-    head = git(repo, "rev-parse", "--verify", "HEAD").decode().strip()
+    trust = observed(lambda: provenance(args))
     source = observed(lambda: source_identity(repo))
+    head = source[0] if source else git(repo, "rev-parse", "--verify", "HEAD").decode().strip()
     locks = [repo / path for path in args.lock_file]
     if not locks:
         locks = [path for path in (repo / "Cargo.lock", repo / "zo-ide/Cargo.lock") if path.exists()]
-    scripts = [Path(__file__).resolve(), HERE / "pii-scan.py", HERE / "pii-rules.json"]
+    scripts = [Path(entry["path"]) for entry in trust["policy"]["bundle"].values()] if trust else []
     scripts += [repo / path for path in args.script_file]
     executable = command_executable(repo, command[0], environment)
     tools = [Path(sys.executable).resolve()]
     if executable:
         tools.append(executable)
-    declared = args.closure == "declared"
+    declared = args.closure == "declared" and trust is not None
+    handed_in = getattr(args, "handed_in_head", None)
+    ancestor = observed(lambda: git(repo, "merge-base", "--is-ancestor", handed_in, head) == b"") if handed_in else False
     return {
         "version": 1, "gate": args.gate, "head": head,
         "tree": source[1] if source else None, "source": source[2] if source else None,
-        "deps": observed(lambda: paths_digest(args.dependency_root)) if declared else None,
+        "deps": observed(lambda: digest(encoded([paths_digest(args.dependency_root), trust["ignoredBindings"]]))) if declared else None,
         "lock": observed(lambda: paths_digest(locks)),
         "script": observed(lambda: paths_digest(scripts)) if declared else None,
         "recipe": digest(encoded(command)) if declared and public_command(command) else None,
         "toolchain": observed(lambda: paths_digest([*args.toolchain_root, *tools]))
-        if args.toolchain_root and executable else None,
+        if declared and args.toolchain_root and executable else None,
         "platform": digest(encoded([platform.system(), platform.release(), platform.version(), platform.machine()])),
         "profile": digest(encoded([args.profile, args.closure])) if args.profile else None,
         "env": digest(encoded(sorted(environment.items())))
-        if args.clean_env and declared and public_environment(environment) else None, "scope": args.scope,
+        if declared and environment == trust["environment"] else None,
+        "policy": trust["policySha256"] if trust else None,
+        "producer": digest(encoded({role: entry["sha256"] for role, entry in trust["policy"]["bundle"].items()})) if trust else None,
+        "handedInHead": handed_in, "sourceAncestor": ancestor is True, "scope": args.scope,
     }
 
 
-def test_count(log):
-    """Only complete passing libtest summaries establish a count; unsupported logs give zero."""
+def test_count(log, recipes=()):
+    """Count complete libtest, node TAP/spec and unittest runs; incomplete suites give zero."""
     text = log.decode("utf-8", errors="replace").replace("\r\n", "\n")
-    summary_lines = [line for line in text.splitlines() if "test result:" in line]
-    summaries = [SUMMARY.fullmatch(line) for line in summary_lines]
-    if any(row is None for row in summaries):
+    lines = text.splitlines()
+    total = 0
+    libtest = []
+    node_headers = 0
+    node_summaries = 0
+    node_active = False
+    node_plan = False
+    unittest_headers = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if "test result:" in line:
+            row = SUMMARY.fullmatch(line)
+            if row is None or row[1] != "ok" or int(row[3]) or int(row[4]):
+                return 0
+            if re.search(r"; [1-9]\d* measured;", line):
+                return 0
+            libtest.append(int(row[2]))
+            total += int(row[2])
+        elif line == "TAP version 13":
+            if node_active:
+                return 0
+            node_headers += 1
+            node_active, node_plan = True, False
+        elif line.startswith("TAP version"):
+            return 0
+        elif re.fullmatch(r"1\.\.\d+", line):
+            if node_active:
+                node_plan = True
+        elif re.fullmatch(r"(?:#|ℹ) tests \d+", line):
+            prefix = line[0]
+            values = {}
+            names = ("tests", "suites", "pass", "fail", "cancelled", "skipped", "todo", "duration_ms")
+            for name in names:
+                if index >= len(lines):
+                    return 0
+                match = re.fullmatch(re.escape(prefix) + r" " + name + r" (\d+(?:\.\d+)?)", lines[index])
+                if match is None or name != "duration_ms" and "." in match[1]:
+                    return 0
+                values[name] = float(match[1]) if name == "duration_ms" else int(match[1])
+                index += 1
+            if any(values[name] for name in ("fail", "cancelled", "skipped", "todo")):
+                return 0
+            if values["tests"] != values["pass"]:
+                return 0
+            if prefix == "#":
+                node_summaries += 1
+                if not node_active or not node_plan:
+                    return 0
+                node_active = False
+            total += values["pass"]
+            continue
+        elif re.fullmatch(r"Ran \d+ tests? in \d+(?:\.\d+)?s", line):
+            unittest_headers += 1
+            count = int(line.split()[1])
+            index += 1
+            while index < len(lines) and not lines[index]:
+                index += 1
+            if index >= len(lines) or not re.fullmatch(r"OK(?: \(skipped=0\))?", lines[index]):
+                return 0
+            total += count
+        elif re.match(r"(?:#|ℹ) (?:pass|fail|cancelled|skipped|todo|suites|duration_ms)\b", line):
+            return 0
+        elif re.match(r"Ran \d|test result:|not ok\b|\s+not ok\b|FAILED(?:\b|\s*\()|failures:", line):
+            return 0
+        elif re.search(r"\b(?:SKIPPED|timed[ _]out|cancelled)\b", line, re.IGNORECASE):
+            return 0
+        elif re.match(r"error: test failed|verify: red recipes:|\d+ (?:passed|failed),", line):
+            return 0
+        index += 1
+    running = [int(value) for value in re.findall(r"^running (\d+) tests?$", text, re.MULTILINE)]
+    if running and running != libtest:
         return 0
-    if not summaries or any(row[1] != "ok" or int(row[3]) for row in summaries):
+    if node_headers != node_summaries:
         return 0
-    # A skipped, truncated or measured suite is never a reusable test execution.
-    if re.search(r"\b(?:SKIPPED|timed[ _]out|cancelled)\b", text, re.IGNORECASE):
-        return 0
-    if re.search(r"^error: test failed|^failures:", text, re.MULTILINE):
+    if re.search(r"^OK(?:\s|$)", text, re.MULTILINE) and not unittest_headers:
         return 0
     begins = re.findall(r"^==> verify recipe (\S+)$", text, re.MULTILINE)
     ends = re.findall(r"^<== verify recipe (\S+) rc=(\d+) \d+s$", text, re.MULTILINE)
-    if (begins or ends) and (begins != [recipe for recipe, _ in ends] or any(rc != "0" for _, rc in ends)):
+    if begins != [recipe for recipe, _ in ends] or any(rc != "0" for _, rc in ends):
         return 0
-    if any(re.search(r"; [1-9]\d* measured;", row[0]) for row in summaries):
+    if recipes and begins != list(recipes):
         return 0
-    return sum(int(row[2]) for row in summaries)
+    return total
 
 
-def mask_log(log, environment):
+def mask_log(log, environment, trust):
     """Use the release scanner's shared rules and known secret environment values."""
-    spec = importlib.util.spec_from_file_location("gate_pii_scan", HERE / "pii-scan.py")
-    scanner = importlib.util.module_from_spec(spec)
-    # Read the measured source, rather than accepting a cached bytecode file from another run.
-    exec(compile((HERE / "pii-scan.py").read_bytes(), str(HERE / "pii-scan.py"), "exec"), scanner.__dict__)
+    scanner = types.ModuleType("gate_pii_scan")
+    scanner.__file__ = trust["policy"]["bundle"]["scanner"]["path"]
+    scanner.VERIFIED_RULES_BYTES = trust["bytes"]["rules"]
+    exec(compile(trust["bytes"]["scanner"], scanner.__file__, "exec"), scanner.__dict__)
     text = log.decode("utf-8", errors="replace")
     for key, value in sorted(environment.items(), key=lambda pair: len(pair[1]), reverse=True):
         if value and re.search(r"TOKEN|PASSWORD|SECRET|KEY|COOKIE|AUTH", key, re.IGNORECASE):
@@ -345,6 +500,7 @@ def execute(command, repo, environment, timeout):
 
 def produce(args, ledger=None):
     command = args.command
+    trust = provenance(args)
     environment = execution_environment(args)
     before = fingerprint(args, environment, command)
     ledger = ledger or Ledger()
@@ -370,8 +526,11 @@ def produce(args, ledger=None):
     observed_end, raw_log = execute(command, args.repo, environment, args.timeout)
     try:
         after = observed(lambda: fingerprint(args, environment, command))
-        log = mask_log(raw_log, {**os.environ, **environment})
-        raw_count, masked_count = test_count(raw_log), test_count(log)
+        log = mask_log(raw_log, {**os.environ, **environment}, trust)
+        recipes = trust["selected"]["recipes"]
+        raw_count, masked_count = test_count(raw_log, recipes), test_count(log, recipes)
+        if observed_end["outcome"] == "passed" and (raw_count == 0 or raw_count != masked_count or before != after):
+            observed_end["outcome"] = "unknown"
         metadata = {
             "version": 1, "registration": registration, "lease": lease, "execution": started["execution"],
             "attempt": args.attempt, "inputs": before,
@@ -395,6 +554,7 @@ def produce(args, ledger=None):
 
 
 def verify(args, ledger=None):
+    trust = provenance(args)
     # A file supplies only the registration locator and observed bytes. The ledger supplies trust.
     metadata_path = Path(args.metadata)
     file_digest(metadata_path)  # Refuse links and changing files before interpreting bytes.
@@ -413,7 +573,7 @@ def verify(args, ledger=None):
     request = {
         "version": 1, "registration": metadata["registration"], "lease": metadata.get("lease", "unknown"), "inputs": current,
         "metadataSha256": digest(raw), "logSha256": digest(log), "logBytes": len(log),
-        "tests": test_count(log),
+        "tests": test_count(log, trust["selected"]["recipes"]),
     }
     answer = (ledger or Ledger()).call("gate-reuse", args, request, f"gate-reuse-{uuid.uuid4().hex}")
     if answer.get("executed") is not False or answer.get("newExecutions") != 0:
@@ -422,22 +582,23 @@ def verify(args, ledger=None):
         raise UnknownInput("native ledger did not record a reuse decision")
     if answer.get("decision") == "hit" and (
         answer.get("gate") not in ("gate-root", "gate-zo")
-        or answer.get("mandatoryChecks") != ["windows", "flake-judgment", "publish"]
+        or answer.get("mandatoryChecks") != ["native", "windows", "flake-judgment", "publish"]
     ):
         raise UnknownInput("native decision has an unsupported reuse scope")
     return answer
 
 
-def main():
+def main(trust=None, argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("run", "verify"))
     parser.add_argument("--repo", required=True)
     parser.add_argument("--gate", choices=("gate-root", "gate-zo"), required=True)
     parser.add_argument("--task", required=True)
     parser.add_argument("--attempt", required=True)
+    parser.add_argument("--handed-in-head")
     parser.add_argument("--scope", choices=("unknown", "deterministic", "measurement", "nondeterministic"), default="unknown")
     parser.add_argument("--closure", choices=("unknown", "declared"), default="unknown")
-    parser.add_argument("--clean-env", action="store_true", help="execute with a fixed public environment instead of inheriting secrets")
+    parser.add_argument("--clean-env", action="store_true", help="compatibility flag; every child uses only the trusted explicit environment")
     parser.add_argument("--profile")
     parser.add_argument("--dependency-root", action="append", default=[])
     parser.add_argument("--toolchain-root", action="append", default=[])
@@ -448,7 +609,7 @@ def main():
     parser.add_argument("--log")
     parser.add_argument("--timeout", type=float, default=1800)
     # Split the child argv explicitly: REMAINDER can consume this tool's options after `action`.
-    arguments = sys.argv[1:]
+    arguments = sys.argv[1:] if argv is None else argv
     if "--" not in arguments:
         parser.error("separate the gate command with --")
     split = arguments.index("--")
@@ -459,6 +620,10 @@ def main():
     if args.action == "run" and not args.output or args.action == "verify" and not (args.metadata and args.log):
         parser.error("run needs --output; verify needs --metadata and --log")
     try:
+        if trust is None:
+            raise UnknownInput("use the independently pinned external launcher")
+        args.trust = trust
+        provenance(args)
         answer = produce(args) if args.action == "run" else verify(args)
     except ExecutionUnattested:
         answer = {"state": "unattested", "reason": "execution has no authenticated completion",

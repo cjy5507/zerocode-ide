@@ -1,8 +1,7 @@
 //! Authenticated coordinator attestations for one executed gate.
 //!
-//! Files are locators, never authority. Registration, completion and reuse decisions live in
-//! ledger-only `land_check` messages. The producer measures inputs and files; the live coordinator
-//! attests those observations. This does not protect against a malicious coordinator or host.
+//! The coordinator attests a declared input cache through a separately trusted launcher.
+//! Files locate ledger evidence. Same-user candidate processes are not an isolated security boundary.
 use super::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,7 +13,7 @@ const KEY: &str = "gateEvidenceV1";
 const MAX_METADATA: usize = 16 * 1024;
 const LEASE_MS: i64 = 2 * 60 * 60 * 1000;
 const ALLOWED_GATES: &[&str] = &["gate-root", "gate-zo"];
-const MANDATORY_CHECKS: &[&str] = &["windows", "flake-judgment", "publish"];
+const MANDATORY_CHECKS: &[&str] = &["native", "windows", "flake-judgment", "publish"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +42,11 @@ pub struct Inputs {
     pub platform: Option<String>,
     pub profile: Option<String>,
     pub env: Option<String>,
+    pub policy: Option<String>,
+    pub producer: Option<String>,
+    pub handed_in_head: Option<String>,
+    #[serde(default)]
+    pub source_ancestor: bool,
     pub scope: Scope,
 }
 
@@ -54,7 +58,7 @@ fn hex(value: &str, lengths: &[usize]) -> bool {
 }
 
 impl Inputs {
-    fn digests(&self) -> [(&str, Option<&str>); 10] {
+    fn digests(&self) -> [(&str, Option<&str>); 12] {
         [
             ("source", self.source.as_deref()),
             ("deps", self.deps.as_deref()),
@@ -66,12 +70,21 @@ impl Inputs {
             ("profile", self.profile.as_deref()),
             ("env", self.env.as_deref()),
             ("tree", self.tree.as_deref()),
+            ("policy", self.policy.as_deref()),
+            ("producer", self.producer.as_deref()),
         ]
     }
 
     fn validate(&self) -> Result<(), String> {
         if self.version != 1 || !hex(&self.head, &[40, 64]) {
             return Err("gate inputs require version 1 and a full lowercase commit id".into());
+        }
+        if self
+            .handed_in_head
+            .as_deref()
+            .is_some_and(|head| !hex(head, &[40, 64]))
+        {
+            return Err("invalid handed-in source identity".into());
         }
         if self.gate.is_empty()
             || self.gate.len() > 64
@@ -131,7 +144,7 @@ pub struct Metadata {
     pub started_ms: i64,
     pub ended_ms: i64,
     pub duration_ms: u64,
-    pub rc: Option<i32>,
+    pub rc: Option<i64>,
     pub outcome: Outcome,
     pub tests: u64,
     pub log_sha256: String,
@@ -248,6 +261,15 @@ fn payload(row: &Message, task: &str, attempt: &str, phase: &str) -> Option<serd
     let body: serde_json::Value = serde_json::from_str(row.payload.as_str()).ok()?;
     (body[KEY]["phase"] == phase && body[KEY]["attempt"] == attempt)
         .then(|| body[KEY]["value"].clone())
+}
+
+/// Whether a ledger message records gate bookkeeping rather than a merge check.
+pub fn is_gate_evidence(row: &Message) -> bool {
+    row.kind == MessageKind::LandCheck
+        && row.from == LEDGER_ITSELF
+        && serde_json::from_str::<serde_json::Value>(row.payload.as_str())
+            .ok()
+            .is_some_and(|value| value.get(KEY).is_some())
 }
 
 fn registration<'a>(
@@ -406,6 +428,14 @@ fn judge(
             return Err("unsupported reuse version".into());
         }
         let (registered_row, registered) = registration(run, &request.registration, task, attempt)?;
+        let current = run
+            .coordinator_live()
+            .ok_or("gate evidence needs a live coordinator")?;
+        if current.generation != registered.generation
+            || current.actor.as_deref() != Some(registered.actor.as_str())
+        {
+            return Err("coordinator changed after gate registration".into());
+        }
         let (completed_row, completed) = completion(run, &request.registration, task, attempt)?;
         original = Some(completed_row.id.clone());
         if handed_in(run, task, attempt, registered_row.created_ms)? != registered.handed_in_head {
@@ -544,6 +574,11 @@ pub(super) fn decide(
             let inputs: Inputs = parse(body)?;
             inputs.validate()?;
             let handed_in_head = handed_in(run, task, attempt, now_ms)?;
+            if inputs.handed_in_head != handed_in_head
+                || handed_in_head.is_some() && !inputs.source_ancestor
+            {
+                return Err("candidate has no verified handed-in source ancestry".into());
+            }
             let expires_ms = now_ms
                 .checked_add(LEASE_MS)
                 .ok_or("gate lease time overflow")?;
@@ -696,7 +731,9 @@ pub(super) fn decide(
                 ),
                 Err(why) => ("miss", why),
             };
-            let value = serde_json::json!({"decision":decision,"reason":reason,"registration":request.registration,"original":original,"executed":false,"newExecutions":0,"gate":request.inputs.gate,"mandatoryChecks":MANDATORY_CHECKS});
+            let value = serde_json::json!({"decision":decision,"reason":reason,"registration":request.registration,"original":original,"executed":false,"newExecutions":0,"gate":request.inputs.gate,"mandatoryChecks":MANDATORY_CHECKS,
+                "head":request.inputs.head,"tree":request.inputs.tree,"handedInHead":request.inputs.handed_in_head,
+                "recipe":request.inputs.recipe,"policy":request.inputs.policy,"producer":request.inputs.producer,"sourceAncestor":request.inputs.source_ancestor});
             let id = post(
                 ledger,
                 run_id,

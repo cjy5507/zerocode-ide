@@ -356,6 +356,7 @@ fn events(run: &Run, dispatch_id: &str) -> BTreeMap<&'static str, EventTally> {
     for held in run.messages().iter().filter(|held| {
         held.dispatch.as_deref() == Some(dispatch_id)
             && (held.kind.is_the_ledgers_own() || held.kind == MessageKind::WorkerDone)
+            && !super::gate_reuse::is_gate_evidence(held)
     }) {
         tally
             .entry(held.kind.as_str())
