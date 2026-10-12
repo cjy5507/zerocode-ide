@@ -23,12 +23,14 @@ use crate::second_brain_live::write_atomically;
 /// The frontmatter key a page's kind is written under.
 pub const TYPE_KEY: &str = "type";
 
-/// Words that set two things side by side in a title or a file name.
-const COMPARISON_MARKERS: [&str; 3] = ["vs", "versus", "비교"];
+/// Words that set two things side by side in a title or a file name. Not
+/// 「비교」: a Korean title uses it as an everyday noun.
+const COMPARISON_MARKERS: [&str; 2] = ["vs", "versus"];
 
 /// Tag words that say what a page is beyond the kinds' own names, checked in
-/// this order; the first kind with a matching word wins.
-const TAG_WORDS: [(PageType, &[&str]); 5] = [
+/// this order; the first kind with a matching word wins. A word a vault also
+/// files its subjects under — `product`, `qa`, `answer`, `video` — is not one.
+const TAG_WORDS: [(PageType, &[&str]); 3] = [
     (
         PageType::Entity,
         &[
@@ -38,24 +40,20 @@ const TAG_WORDS: [(PageType, &[&str]); 5] = [
             "organization",
             "company",
             "tool",
-            "product",
             "project",
             "library",
             "인물",
             "회사",
             "도구",
-            "제품",
         ],
     ),
     (
         PageType::Source,
         &[
-            "paper", "article", "book", "video", "talk", "podcast", "논문", "기사", "책", "영상",
+            "paper", "article", "book", "talk", "podcast", "논문", "기사", "책",
         ],
     ),
     (PageType::Comparison, &COMPARISON_MARKERS),
-    (PageType::Synthesis, &["answer", "qa", "답변"]),
-    (PageType::Overview, &["moc", "map", "지도"]),
 ];
 
 /// What a page is, as its `type:` key says.
@@ -112,9 +110,9 @@ impl PageType {
 }
 
 /// The kind the backfill gives a page that names none, from its id, its
-/// title and its tags: the overview by its path, a kind a tag names outright,
-/// a comparison its title or file name sets side by side, then the tag words
-/// above, and a concept when nothing says otherwise.
+/// title and its tags: the overview by its path alone, a kind a tag names
+/// outright, a comparison its title or file name sets side by side, then the
+/// tag words above, and a concept when nothing says otherwise.
 #[must_use]
 pub fn guess(id: &str, title: &str, tags: &[String]) -> PageType {
     if id == WIKI_OVERVIEW_FILE {
@@ -124,7 +122,11 @@ pub fn guess(id: &str, title: &str, tags: &[String]) -> PageType {
         .iter()
         .map(|tag| tag.trim().trim_start_matches('#').to_lowercase())
         .collect();
-    if let Some(kind) = words.iter().find_map(|word| PageType::parse(word)) {
+    if let Some(kind) = words
+        .iter()
+        .filter_map(|word| PageType::parse(word))
+        .find(|kind| *kind != PageType::Overview)
+    {
         return kind;
     }
     if [id, title].into_iter().any(sets_side_by_side) {
