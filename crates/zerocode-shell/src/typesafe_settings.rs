@@ -486,6 +486,29 @@ pub fn remove_selected_key(
 }
 
 pub fn set_provider(path: &Path, provider: judgment_provider::Provider) -> Result<(), String> {
+    set_provider_checked(path, provider, None)
+}
+
+pub(crate) fn set_provider_if_identity(
+    path: &Path,
+    provider: judgment_provider::Provider,
+    expected: &str,
+) -> Result<(), String> {
+    set_provider_checked(path, provider, Some(expected))
+}
+
+pub(crate) fn with_provider_locked<R>(
+    path: &Path,
+    read: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
+    crate::api_routers::with_zo_settings_root(path, |_| read())
+}
+
+fn set_provider_checked(
+    path: &Path,
+    provider: judgment_provider::Provider,
+    expected: Option<&str>,
+) -> Result<(), String> {
     let provider = provider.validated().map_err(|reason| reason.to_string())?;
     if provider.kind == judgment_provider::ProviderKind::Jev
         && zerocode_core::jev::pinned_model(&provider.model).is_none()
@@ -493,6 +516,14 @@ pub fn set_provider(path: &Path, provider: judgment_provider::Provider) -> Resul
         return Err("provider_model".to_string());
     }
     update_smart(path, |smart| {
+        if let Some(expected) = expected {
+            let current =
+                judgment_provider::Provider::from_root(&serde_json::json!({"smart":smart}))
+                    .map_err(|reason| reason.to_string())?;
+            if current.identity() != expected {
+                return Err("settings_changed".to_string());
+            }
+        }
         if provider.kind == judgment_provider::ProviderKind::Jev {
             if provider.model == DEFAULT_MODEL {
                 smart.remove(MODEL_SETTING);
@@ -718,6 +749,41 @@ mod provider_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_provider_apply_compares_the_identity_inside_the_settings_transaction() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let original = serde_json::json!({"theme":"dark","smart":{"jev":{"enabled":false}}});
+        std::fs::write(&path, original.to_string()).unwrap();
+        let expected = selected_provider(&path).unwrap().identity();
+        let provider = judgment_provider::Provider {
+            kind: judgment_provider::ProviderKind::Local,
+            protocol: judgment_provider::Protocol::SystemOne,
+            base_url: "http://127.0.0.1:43210".to_string(),
+            model: "fixture-native".to_string(),
+            requires_auth: false,
+        };
+        assert_eq!(
+            set_provider_if_identity(&path, provider.clone(), "old-provider"),
+            Err("settings_changed".to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original.to_string()
+        );
+        set_provider_if_identity(&path, provider.clone(), &expected).unwrap();
+        let applied = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(selected_provider(&path).unwrap(), provider);
+        assert_eq!(
+            set_provider_if_identity(&path, provider, &expected),
+            Err("settings_changed".to_string())
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), applied);
+        let root: Value = serde_json::from_str(&applied).unwrap();
+        assert_eq!(root["theme"], "dark");
+        assert_eq!(root["smart"]["jev"]["enabled"], false);
+    }
     use crate::api_routers::{HeldKeys, Keychain, RouterRefusalKind};
 
     #[test]

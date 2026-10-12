@@ -424,6 +424,16 @@ fn settings_root(text: &str) -> Result<serde_json::Map<String, serde_json::Value
 /// replaces the file, so two at once would lose one change.
 static ZO_SETTINGS_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+pub(crate) fn with_zo_settings_root<R>(
+    path: &Path,
+    read: impl FnOnce(&serde_json::Map<String, serde_json::Value>) -> Result<R, String>,
+) -> Result<R, String> {
+    let _guard = ZO_SETTINGS_WRITES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    read(&read_zo_settings_root(path)?)
+}
+
 /// zo's settings file as the object every window writer edits; empty when the
 /// file is absent.
 pub(crate) fn read_zo_settings_root(
