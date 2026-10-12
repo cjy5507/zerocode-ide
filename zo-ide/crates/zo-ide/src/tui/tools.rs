@@ -3233,9 +3233,10 @@ mod row_tests {
             .join("app.py");
         let mut group = ToolGroup::new(read("a", &absolute.display().to_string()));
         assert!(group.complete("a", ok("x")));
+        let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(
             plain(&group.lines(WIDTH, Duration::ZERO))[0],
-            edge("✓ Read    src/app.py", "1 line", WIDTH)
+            edge(&format!("✓ Read    src{sep}app.py"), "1 line", WIDTH)
         );
     }
 
