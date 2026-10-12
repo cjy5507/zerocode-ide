@@ -581,6 +581,10 @@ mod tests {
         let line = done.log_line.expect("a write is logged");
         assert_eq!(added, format!("{line}\n"));
         assert!(line.starts_with("- 2026-10-12 01:02 UTC — "), "{line}");
+        assert!(
+            line.contains(&format!("페이지 {}개에", done.written)),
+            "pages are counted, not numbered: {line}"
+        );
         assert!(line.contains("zerocode vault-types"), "{line}");
 
         let again = backfill(root.path(), true, now()).unwrap();
