@@ -27,10 +27,18 @@ For each source not already represented in `wiki/log.md` or a page's
 2. Update an existing concept page or create a short page named for one
    concept. Do not create a source-summary page when the material belongs in
    existing concepts.
-3. Add YAML frontmatter with `source`, `ingested_at`, and `tags`. Keep
-   `source` as the vault-relative raw path. State a real relation as a
-   frontmatter key whose value is one or more wikilinks — for example
-   `implements: [[wiki/adr/003]]`:
+3. Add YAML frontmatter with `type`, `source`, `ingested_at`, and `tags`.
+   Keep `source` as the vault-relative raw path. `type` says what the page
+   is, one of six kinds:
+   - `source` — a page that summarises one raw source;
+   - `entity` — a person, an organisation, a tool or a product;
+   - `concept` — an idea, a method or a pattern;
+   - `comparison` — two or more things set side by side;
+   - `overview` — the vault's one-page map, `wiki/overview.md` and no other;
+   - `synthesis` — an answer drawn from two or more pages.
+
+   State a real relation as a frontmatter key whose value is one or more
+   wikilinks — for example `implements: [[wiki/adr/003]]`:
    - `related` — same topic, no stronger claim;
    - `implements` — this page describes the thing that realises the linked
      spec or decision;
@@ -77,14 +85,20 @@ connections, and identify:
 - the most valuable sources to read next.
 
 Apply clear link and index improvements as part of the review, without
-rewriting source files.
+rewriting source files. Keep `wiki/overview.md` (`type: overview`), the
+vault's one-page map, current with the week's topics and connections, and
+create it if it is missing.
 
 The deterministic half of this list is a table, not a reading: in a ZeroCode
 checkout `just vault-lint` (the `zerocode vault-lint` command) prints index
 gaps, links to missing pages, orphans, pages without `source`/`ingested_at`,
 prose links no relation key declares, and raw items nothing ingested, over the
 vault `ZEROCODE_SECOND_BRAIN` names, and exits non-zero while a finding
-stands. The window's vault health card paints the same table. Start the
+stands. It also counts pages whose `type` names none of the six kinds — a
+reading, not a finding: `zerocode vault-types` prints the kind it would give
+each (a dry run), and `--write` adds the key as the first frontmatter line,
+keeps any `type` someone wrote, never touches `raw/`, and leaves one line
+in `wiki/log.md`. The window's vault health card paints the same table. Start the
 review from it when it is available; the prose half — contradictions to
 weigh, pages to merge, what to read next — is yours.
 

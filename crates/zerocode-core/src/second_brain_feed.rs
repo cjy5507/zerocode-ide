@@ -124,7 +124,9 @@ pub fn feed(
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
-        format!("{RAW_DIR}/{stem}: every name up to -{MAX_NAME_TRIES} is taken"),
+        format!(
+            "{RAW_DIR}/: every name up to -{MAX_NAME_TRIES} for this page's day and title is taken"
+        ),
     ))
 }
 
@@ -524,5 +526,33 @@ mod tests {
             !body.is_empty() && body.chars().all(|held| held == '가'),
             "cut on a character"
         );
+    }
+
+    /// The window's log names no page (m-48177): a range of taken names is
+    /// said without the page's name.
+    #[test]
+    fn a_full_range_of_names_is_said_without_the_page_s_name() {
+        let root = tempfile::tempdir().unwrap();
+        let raw = root.path().join(RAW_DIR);
+        fs::create_dir_all(&raw).unwrap();
+        for attempt in 1..=MAX_NAME_TRIES {
+            let name = if attempt == 1 {
+                "2026-10-12-some-title.md".to_string()
+            } else {
+                format!("2026-10-12-some-title-{attempt}.md")
+            };
+            let other = format!("---\nsource: https://other.example/{attempt}\n---\n");
+            fs::write(raw.join(name), other).unwrap();
+        }
+        let refused = feed(
+            Some(root.path()),
+            true,
+            &page("https://example.com/post", "Some Title"),
+            now(),
+            SEOUL,
+        )
+        .unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(!refused.to_string().contains("some-title"), "{refused}");
     }
 }

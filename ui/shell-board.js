@@ -1371,18 +1371,22 @@ const DESK_STAGES = Object.freeze([
   { id: "ready", flow: true, tone: "", key: "board.desk.stageReady", word: "준비" },
   { id: "dispatched", flow: true, tone: "", key: "board.desk.stageDispatched", word: "진행" },
   { id: "reported", flow: true, tone: "", key: "board.desk.stageReported", word: "보고됨" },
+  { id: "verified", flow: true, tone: "", key: "board.verified", word: "검증됨" },
   { id: "merged", flow: true, tone: "", key: "board.desk.stageMerged", word: "병합" },
+  { id: "deployed", flow: true, tone: "", key: "board.deployed", word: "배포됨" },
   { id: "gate", flow: false, tone: "wait", key: "board.desk.stageGate", word: "게이트" },
   { id: "blocked", flow: false, tone: "wait", key: "board.desk.stageBlocked", word: "막힘" },
+  { id: "stale", flow: false, tone: "wait", key: "board.staleReview", word: "다시 검토 대기" },
   { id: "failed", flow: false, tone: "halt", key: "board.desk.stageFailed", word: "실패" },
-  { id: "unreviewable", flow: false, tone: "", key: "board.noReviewRecord", word: "완료 — 검토 기록 없음" },
+  { id: "unreviewable", flow: false, tone: "", key: "board.noReviewRecord", word: "종료 — 검토 자료 없음" },
   { id: "nothing_to_land", flow: false, tone: "", key: "board.nothingToLand", word: "완료 — 착지할 것 없음" },
+  { id: "unknown", flow: false, tone: "", key: "board.stageUnknown", word: "상태 모름", evidence: true },
   { id: "closed", flow: false, tone: "", key: "board.closed", word: "닫힘" },
 ]);
 
 /* 흐름을 떠난 단계: 닫힘, 그리고 검토 기록을 영영 받을 수 없어 완료로만 남은 것(t-19328).
  * 「과업 흐름 · N」의 N은 아직 흐름에 있는 과업만 센다. */
-const DESK_OVER_STAGES = Object.freeze(["unreviewable", "nothing_to_land", "closed"]);
+const DESK_OVER_STAGES = Object.freeze(["unreviewable", "nothing_to_land", "unknown", "closed"]);
 
 /* 처음 펼쳐 둘 단계: 멈춰 선 단계 가운데 과업이 있는 첫째. 없으면 아무것도. */
 function deskDefaultStage(counts) {
@@ -1406,7 +1410,7 @@ function deskStageChip(host, stage, counts, view) {
   const count = counts.get(stage.id) ?? 0;
   writeClassName(chip, `board-desk-stage${stage.flow ? " is-flow" : ""}${count > 0 && stage.tone ? ` is-${stage.tone}` : ""}`);
   writeTextContent(chip.firstElementChild, t(stage.key, stage.word));
-  writeTextContent(chip.lastElementChild, String(count));
+  writeTextContent(chip.lastElementChild, stage.evidence && !Number.isInteger(counts.get(stage.id)) ? "—" : String(count));
   return chip;
 }
 
@@ -1453,13 +1457,90 @@ function deskHandInWords(handIn) {
   ].filter(Boolean).join(" · ");
 }
 
-function deskTaskRow(held, task, runs) {
+const DESK_TASK_BLOCKERS = Object.freeze(["gone", "walled", "asking", "asleep"]);
+
+function deskTaskCarrier(task) {
+  let carrier = null;
+  for (const row of deskAgents) {
+    if (row.run !== task.run || row.task_id !== task.id) continue;
+    if (row.dispatch_id === task.progress?.attempt) return row;
+    if (!carrier || (Number(row.dispatch_started_ms) || 0) > (Number(carrier.dispatch_started_ms) || 0)) carrier = row;
+  }
+  return carrier;
+}
+
+function deskTaskWorkWords(progress) {
+  const short = (sha) => (COMMIT_ID.test(sha ?? "") ? sha.slice(0, SHORT_COMMIT_LENGTH) : "");
+  const source = short(progress?.source);
+  if (progress?.stage === "stale") {
+    const reviewed = short(progress.reviewed);
+    return reviewed || source
+      ? t("board.desk.workStale", "검토한 커밋 {{reviewed}} · 지금 커밋 {{source}}", { reviewed: reviewed || "—", source: source || "—" })
+      : "";
+  }
+  if (source === "") return "";
+  const said = WORK_STAGES[progress.stage]?.phase === "vouched"
+    ? t("board.desk.workReviewed", "검토한 커밋 {{sha}}", { sha: source })
+    : t("board.desk.workHandedIn", "넘긴 커밋 {{sha}}", { sha: source });
+  const merged = short(progress.merge_head);
+  return merged && merged !== source ? `${said} · ${t("board.desk.workMerged", "병합 커밋 {{sha}}", { sha: merged })}` : said;
+}
+
+function deskTaskBlocker(task, health) {
+  if (task.stage !== "dispatched" && task.stage !== "failed") return "";
+  if (health && DESK_TASK_BLOCKERS.includes(health.id)) return t(health.key, health.word);
+  return task.stage === "failed" ? t("board.desk.causeUnknown", "원인 확인 필요") : "";
+}
+
+function deskTaskOwnerWords(task, carrier, health) {
+  const cause = deskTaskBlocker(task, health);
+  return [
+    carrier ? t("board.desk.taskOwner", "담당 {{worker}} · {{agent}}", { worker: carrier.worker, agent: agentName(carrier.agent) }) : "",
+    cause ? t("board.desk.taskBlocker", "막힘: {{cause}}", { cause }) : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function deskTaskNextLine() {
+  const line = deskElement("p", "board-desk-task-next");
+  const copy = deskElement("button", "board-desk-task-next-copy");
+  copy.type = "button";
+  copy.dataset.keyboardOwner = "true";
+  copy.onclick = async () => {
+    const command = line.__command;
+    if (!command || !(await clipboardText.write(command))) return;
+    copy.__copied = true;
+    writeTextContent(copy, t("vault.copied", "명령을 복사했습니다"));
+    setTimeout(() => {
+      copy.__copied = false;
+      writeTextContent(copy, t("vault.copy", "명령 복사"));
+    }, VAULT_COPY_FEEDBACK_MS);
+  };
+  line.append(deskElement("span", "board-desk-task-next-label"), deskElement("code", "board-desk-task-next-command"), copy);
+  return line;
+}
+
+function paintDeskTaskNext(line, task, health) {
+  const asking = task.stage === "dispatched" && health?.id === "asking";
+  const command = asking ? "" : task.progress?.next ?? "";
+  const [label, code, copy] = line.children;
+  line.__command = command;
+  writeTextContent(label, asking ? t("board.desk.nextAnswer", "답할 우편에서 질문에 답하세요") : t("board.desk.taskNext", "다음"));
+  writeTextContent(code, command);
+  writeHidden(code, command === "");
+  if (!copy.__copied) writeTextContent(copy, t("vault.copy", "명령 복사"));
+  writeHidden(copy, command === "");
+  writeHidden(line, command === "" && !asking);
+}
+
+function deskTaskRow(held, task, runs, now) {
   const row = held ?? deskElement("li", "board-desk-task");
   if (!held) row.append(deskElement("code", "board-desk-task-id"), deskElement("span", "board-desk-task-title"),
-    deskElement("span", "board-desk-task-note"), deskElement("span", "board-desk-task-cost"),
+    deskElement("span", "board-desk-task-note"), deskElement("span", "board-desk-task-work"),
+    deskElement("span", "board-desk-task-owner"), deskTaskNextLine(), deskElement("span", "board-desk-task-cost"),
     deskElement("span", "board-desk-task-writing"), deskElement("ol", "board-desk-task-conditions"),
     deskElement("p", "board-desk-task-handin"), deskKeptLine("board-desk-task-kept", true));
-  const [, title, noteLine, costLine, writingLine, conditionsLine, handInLine, keptLine] = row.children;
+  const [, title, noteLine, workLine, ownerLine, nextLine, costLine, writingLine, conditionsLine, handInLine, keptLine] =
+    row.children;
   writeAttribute(row, "data-task", `${task.run}/${task.id}`);
   writeTextContent(row.firstElementChild, task.id);
   writeTextContent(title, runs > 1 ? `${task.title} · ${task.run}` : task.title);
@@ -1472,6 +1553,15 @@ function deskTaskRow(held, task, runs) {
       : "";
   writeTextContent(noteLine, note);
   writeHidden(noteLine, note === "");
+  const work = deskTaskWorkWords(task.progress);
+  writeTextContent(workLine, work);
+  writeHidden(workLine, work === "");
+  const carrier = deskTaskCarrier(task);
+  const health = carrier ? deskWorkerHealth(carrier, null, now) : null;
+  const owner = deskTaskOwnerWords(task, carrier, health);
+  writeTextContent(ownerLine, owner);
+  writeHidden(ownerLine, owner === "");
+  paintDeskTaskNext(nextLine, task, health);
   // A finished row carries what its task cost (t-9470); a moving one carries none.
   const cost = task.cost && typeof task.cost === "object" ? taskCostWords(task.cost) : null;
   writeTextContent(costLine, cost?.text ?? "");
@@ -1507,8 +1597,8 @@ function paintDeskPipeline(block, now, view) {
   if (!strip) {
     strip = deskElement("div", "board-desk-stages");
     strip.setAttribute("role", "group");
-    // The flow and the stuck stages are two runs of chips, so a narrow block
-    // breaks between them rather than inside either.
+    // The flow and the stuck stages are two runs of chips that wrap as one
+    // line: the stuck run starts beside the flow's last chip, one space on.
     strip.append(deskElement("span", "board-desk-stage-run is-flow"), deskElement("span", "board-desk-stage-run"));
     body.replaceChildren(strip, deskElement("ol", "board-desk-tasks"), deskElement("p", "board-desk-more"));
   }
@@ -1517,17 +1607,20 @@ function paintDeskPipeline(block, now, view) {
   if (open && (counts.get(open) ?? 0) === 0) open = deskDefaultStage(counts);
   const [flowRun, stuckRun] = strip.children;
   for (const [run, flow] of [[flowRun, true], [stuckRun, false]]) {
-    reconcileElementOrder(run, DESK_STAGES.filter((stage) => stage.flow === flow).map((stage) => {
-      const chip = deskStageChip(run, stage, counts, view);
-      writeAttribute(chip, "aria-pressed", String(open === stage.id));
-      return chip;
-    }));
+    const chips = DESK_STAGES.filter((stage) => stage.flow === flow && !(stage.evidence && counts.get(stage.id) === 0))
+      .map((stage) => {
+        const chip = deskStageChip(run, stage, counts, view);
+        writeAttribute(chip, "aria-pressed", String(open === stage.id));
+        return chip;
+      });
+    for (const gone of [...run.children]) if (!chips.includes(gone)) gone.remove();
+    reconcileElementOrder(run, chips);
   }
   const list = body.querySelector(".board-desk-tasks");
   const rows = open ? (ledger.tasks ?? []).filter((task) => task.stage === open) : [];
   const held = new Map([...list.children].map((node) => [node.dataset.task, node]));
   const runs = ledger.runs?.length ?? 1;
-  reconcileElementOrder(list, rows.map((task) => deskTaskRow(held.get(`${task.run}/${task.id}`), task, runs)));
+  reconcileElementOrder(list, rows.map((task) => deskTaskRow(held.get(`${task.run}/${task.id}`), task, runs, now)));
   writeHidden(list, rows.length === 0);
   const more = body.querySelector(".board-desk-more");
   const hidden = open ? (counts.get(open) ?? 0) - rows.length : 0;

@@ -82,7 +82,7 @@ export function liveFixture() {
   const ledgerRow = (over) => ({
     run: "run-1", worker: "", agent: "codex", state: "working", ledger: "active",
     hearing: "pending", hearing_at: now - 120_000, checkout: "", task: "", task_id: "",
-    reported: false, review: null, dispatch_id: "", dispatch_started_ms: now - 300_000,
+    reported: false, review: null, progress: { stage: "working" }, dispatch_id: "", dispatch_started_ms: now - 300_000,
     retry_of: null, term: null, at: now - 300_000, model: null, effort: null, pane: "%1",
     asking: false, wall: null, quiet_at: null, pane_missing_since_ms: null, ...over,
   });
@@ -106,10 +106,10 @@ export function liveFixture() {
       dispatch_id: "dp-c1", term: 301 }),
     /* 주장만 있는 결과: 워커는 보고했고 코디네이터는 아직 아무것도 적지 않았다. */
     ledgerRow({ worker: "w-impl", checkout: WT_A, task: "구현", task_id: "t-impl",
-      dispatch_id: "dp-impl", reported: true, term: 302 }),
+      dispatch_id: "dp-impl", reported: true, progress: { stage: "report_only" }, term: 302 }),
     /* 받아들여진 사실: 코디네이터가 검증됨을 적었다. */
     ledgerRow({ worker: "w-verify", checkout: WT_B, task: "독립 검증", task_id: "t-verify",
-      dispatch_id: "dp-verify", reported: true, review: { verified: true }, term: 303 }),
+      dispatch_id: "dp-verify", reported: true, review: { verified: true }, progress: { stage: "verified" }, term: 303 }),
     /* 벽 앞에서 기다리는 워커 — 사유도 시작도 원장이 적었다. */
     ledgerRow({ worker: "w-wall", checkout: WT_A, task: "재시도", task_id: "t-retry",
       dispatch_id: "dp-retry-2", retry_of: "dp-retry-1", term: 304,
@@ -121,7 +121,7 @@ export function liveFixture() {
       pane_missing_since_ms: now - 240_000 }),
     /* 끝난 워커와 그 아래 살아 있는 자식. */
     ledgerRow({ worker: "w-parent", checkout: ROOT, task: "끝난 일", task_id: "t-parent",
-      dispatch_id: "dp-parent", reported: true, state: "idle", term: 306 }),
+      dispatch_id: "dp-parent", reported: true, progress: { stage: "report_only" }, state: "idle", term: 306 }),
     ledgerRow({ worker: "w-child", checkout: ROOT, task: "이어받은 일", task_id: "t-child",
       dispatch_id: "dp-child", term: 307 }),
     ledgerRow({ run: "run-2", worker: "w-c2", checkout: ROOT, task: "다른 런 조율",
@@ -744,12 +744,9 @@ async function testLiveMap(browser, origin, ok) {
 
     ok("worker_claim_is_not_verified_or_merged", await page.evaluate(() => {
       const view = document.querySelector("#board-view");
-      const stage = (pane) => {
-        const row = window.__LEDGER__.find((one) => one.term === pane);
-        return ledgerReviewStage({ reported: row.reported }, row);
-      };
-      const claimed = ledgerReviewWord({ reported: true, review: null });
-      const accepted = ledgerReviewWord({ reported: true, review: { verified: true } });
+      const stage = (pane) => ledgerReviewStage(window.__LEDGER__.find((one) => one.term === pane));
+      const claimed = ledgerReviewWord({ reported: true, review: null, progress: { stage: "report_only" } });
+      const accepted = ledgerReviewWord({ reported: true, review: { verified: true }, progress: { stage: "verified" } });
       return stage(302) === "reported" && stage(303) === "verified"
         && claimed !== accepted && claimed === t("board.awaitingReview", "검증 대기")
         && view !== null;
@@ -758,8 +755,9 @@ async function testLiveMap(browser, origin, ok) {
     /* 착지한 권위 seam(t-6815)이 실제로 싣는 사실로 — 워커가 스스로 적은
      * 「검증됐다」는 **주장**이고, 코디네이터가 그 시도의 출처를 보고 적은
      * 「검증됨」은 **사실**이다. 두 사건은 실제 그리기 문을 지나 각자 제 낱말로
-     * 서고, 주장은 사실의 낱말도, 배정도 되지 않는다. 그리고 그 seam이 내는 모든
-     * 낱말이 지도의 단계 하나로 되읽힌다 — seam이 낱말을 늘리면 여기서 빨개진다. */
+     * 서고, 주장은 사실의 낱말도, 배정도 되지 않는다. 그리고 원장의 한 읽기
+     * (`progress`, t-47538)가 낼 수 있는 모든 단계가 지도의 단계 하나로 서고 —
+     * 원장이 단계를 늘리면 여기서 빨개진다. */
     const authority = await page.evaluate(async () => {
       const view = document.querySelector("#board-view");
       const held = window.__LEDGER__;
@@ -767,12 +765,13 @@ async function testLiveMap(browser, origin, ok) {
         if (row.worker === "w-impl") {
           return { ...row, reported: true, review: { verified: false, merged: false, deployed: false,
             written: false, claimed_verified: true, claimed_merged: false, claimed_deployed: false,
-            author: "worker" } };
+            author: "worker" }, progress: { stage: "report_only", claimed: "verified" } };
         }
         if (row.worker === "w-verify") {
           return { ...row, reported: true, review: { verified: true, merged: true, deployed: false,
             written: true, claimed_verified: false, claimed_merged: false, claimed_deployed: false,
-            author: "coordinator", attempt: "dp-verify", source: "0123abc" } };
+            author: "coordinator", attempt: "dp-verify", source: "0123abc" },
+            progress: { stage: "merged", attempt: "dp-verify", source: "0123abc" } };
         }
         return row;
       });
@@ -789,23 +788,24 @@ async function testLiveMap(browser, origin, ok) {
       };
       const claim = said("dp-impl");
       const fact = said("dp-verify");
-      /* seam이 답할 수 있는 모든 낱말이 단계 하나로 되읽히는가. */
-      const reviews = [{ deployed: true }, { merged: true }, { verified: true },
-        { claimed_deployed: true }, { claimed_merged: true }, { claimed_verified: true },
-        { unreviewable: true }, {}];
-      const unread = reviews.filter((review) =>
-        ledgerReviewStage({ reported: true }, { reported: true, review }) === "dispatched");
-      /* 표의 `flag`가 그 seam이 그 낱말을 고를 때 읽는 칸인가 — 그 칸 하나만 선
-       * 행을 seam이 그 줄의 낱말로 읽어야 하고, 지난 결과 사건이 「그 사실이 지금도
-       * 서 있는가」를 물을 때(`agentGraphLiveStageHolds`) 그 행에서 참이어야 한다. */
+      /* 원장이 읽어 보낼 수 있는 모든 단계(주장 셋 포함)가 지도의 단계 하나로 서는가. */
+      const readings = [
+        ...Object.keys(WORK_STAGES).filter((stage) => stage !== "working").map((stage) => ({ stage })),
+        ...Object.keys(WORK_CLAIMS).map((claimed) => ({ stage: "report_only", claimed })),
+      ];
+      const unread = readings.filter((progress) => ledgerReviewStage({ progress }) === "dispatched");
+      /* 표의 `flag`가 그 단계의 행에서 참인 칸인가 — 원장이 그 단계로 읽어 보낸 행을 창이 그 줄의
+       * 낱말로 말해야 하고, 지난 결과 사건이 「그 사실이 지금도 서 있는가」를 물을 때
+       * (`agentGraphLiveStageHolds`) 그 행에서 참이어야 한다. */
       const misnamed = AGENT_GRAPH_LIVE_STAGES.filter((one) => {
-        // `reported`와 `failed`는 행의 칸이고(실패도 닫힌 보고다), 나머지는 검토의 칸이다.
-        // `closed`는 행의 칸이고 까닭을 든 닫힘이다(접힘·넘김·낡음 중 하나).
         const row = one.flag === "closed"
-          ? { reported: false, closed: { kind: "outdated", why: "x" }, review: null }
-          : one.flag === "reported" || one.flag === "failed"
-            ? { reported: true, [one.flag]: true, review: null }
-            : { reported: false, review: { [one.flag]: true } };
+          ? { reported: false, closed: { kind: "outdated", why: "x" }, review: null, progress: { stage: "closed" } }
+          : one.flag === "reported" ? { reported: true, review: null, progress: { stage: "report_only" } }
+          : one.flag === "failed" ? { reported: true, failed: true, review: null, progress: { stage: "failed" } }
+          : one.flag === "progress" ? { reported: true, review: null, progress: { stage: one.stage } }
+          : one.flag.startsWith("claimed_")
+            ? { reported: true, review: { [one.flag]: true }, progress: { stage: "report_only", claimed: one.flag.slice(8) } }
+            : { reported: true, review: { [one.flag]: true }, progress: { stage: one.flag } };
         return ledgerReviewWord(row) !== t(one.key, one.word)
           || !agentGraphLiveStageHolds(one.stage, null, row);
       }).map((one) => one.stage);
@@ -823,46 +823,39 @@ async function testLiveMap(browser, origin, ok) {
       && authority.fact?.kind === "result" && authority.fact.stage === "merged"
       && authority.fact.facts?.includes(authority.words.merged) === true,
       JSON.stringify(authority));
-    ok("every_word_the_review_seam_answers_reads_back_as_a_stage",
+    ok("every_stage_the_ledger_reads_stands_as_a_stage_of_the_map",
       authority.unread.length === 0, JSON.stringify(authority.unread));
     ok("each_stage_names_the_ledger_field_the_review_seam_reads_for_its_word",
       authority.misnamed.length === 0, JSON.stringify(authority.misnamed));
 
     /* 검토 기록을 받을 수 없는 일 (t-19328, t-15558 조각 2). 모든 시도가 아무것도 넘기지
      * 않고 끝난 뒤 사람 손으로 끝낸 과업은 코디네이터가 볼 출처가 없어 검토 기록이 영영
-     * 적힐 수 없는데, 보드는 그것을 검증 대기로 세고 있었다. 사실은 원장의 것이다 —
-     * 행의 `review.unreviewable` — 그리고 창은 그 한 칸만 읽는다. */
+     * 적힐 수 없는데, 보드는 그것을 검증 대기로 세고 있었다. 단계는 원장이 한 번 읽어 보낸
+     * 것이고(`progress`, t-47538) 창은 행의 검토 칸으로 단계를 다시 고르지 않는다. */
     const noRecord = await page.evaluate(() => {
-      const row = (over) => ({ reported: true, failed: false, review: null, ...over });
-      const word = (over) => ledgerReviewWord(row(over));
-      const stage = (over) => ledgerReviewStage({ reported: true }, row(over));
+      const row = (progress, over = {}) => ({ reported: true, failed: false, review: null, progress, ...over });
       const awaiting = t("board.awaitingReview", "검증 대기");
-      const none = t("board.noReviewRecord", "완료 — 검토 기록 없음");
-      const old = { verified: false, merged: false, deployed: false, written: false };
+      const none = t("board.noReviewRecord", "종료 — 검토 자료 없음");
+      const flagsOnly = { reported: true, failed: false, review: { verified: true, unreviewable: true } };
       return {
-        said: word({ review: { ...old, unreviewable: true } }),
-        // 시도는 실패했고 과업은 손으로 끝났다: 과업의 낱말이 이긴다(닫힘이 그랬듯).
-        afterFailure: word({ failed: true, review: { ...old, unreviewable: true } }),
-        // 옛 원장의 행에는 그 칸이 없고, 옛 그대로 읽힌다.
-        older: word({ review: old }),
-        olderFailed: word({ failed: true, review: old }),
-        // 코디네이터의 사실 위에 서지 않는다.
-        fact: word({ review: { ...old, verified: true, unreviewable: true } }),
-        stage: stage({ review: { ...old, unreviewable: true } }),
-        olderStage: stage({ review: old }),
-        awaiting, none, failed: t("board.desk.stageFailed", "실패"), verified: t("board.verified", "검증됨"),
+        said: ledgerReviewWord(row({ stage: "unreviewable" })),
+        afterFailure: ledgerReviewWord(row({ stage: "unreviewable" }, { failed: true })),
+        stage: ledgerReviewStage(row({ stage: "unreviewable" })),
+        flagsOnly: ledgerReviewWord(flagsOnly),
+        flagsOnlyStage: ledgerReviewStage(flagsOnly),
+        awaiting, none,
         distinct: new Set([awaiting, none, t("board.verified", "검증됨"), t("board.merged", "병합됨"),
-          t("board.deployed", "배포됨"), t("board.closed", "닫힘"), t("board.desk.stageFailed", "실패")]).size,
+          t("board.deployed", "배포됨"), t("board.closed", "닫힘"), t("board.desk.stageFailed", "실패"),
+          t("board.staleReview", "다시 검토 대기"), t("board.stageUnknown", "상태 모름")]).size,
       };
     });
     ok("a_completed_task_nothing_can_review_reads_no_review_record_not_awaiting_review",
       noRecord.said === noRecord.none && noRecord.afterFailure === noRecord.none
-      && noRecord.said !== noRecord.awaiting && noRecord.distinct === 7
+      && noRecord.said !== noRecord.awaiting && noRecord.distinct === 9
       && noRecord.stage === "unreviewable",
       JSON.stringify(noRecord));
-    ok("an_older_ledgers_row_without_the_fact_reads_as_it_did_and_a_coordinators_fact_outranks_it",
-      noRecord.older === noRecord.awaiting && noRecord.olderFailed === noRecord.failed
-      && noRecord.olderStage === "reported" && noRecord.fact === noRecord.verified,
+    ok("a_row_without_the_ledgers_reading_says_no_stage_and_its_review_flags_are_not_read_a_second_way",
+      noRecord.flagsOnly === "" && noRecord.flagsOnlyStage === "dispatched",
       JSON.stringify(noRecord));
 
     ok("a_recorded_dispatch_and_message_point_to_their_exact_evidence",
@@ -1058,7 +1051,7 @@ async function testLiveMap(browser, origin, ok) {
       const at = window.__LEDGER__.findIndex((one) => one.worker === "w-wall");
       const held = window.__LEDGER__[at];
       window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at
-        ? { ...held, reported: true } : row);
+        ? { ...held, reported: true, progress: { stage: "report_only" } } : row);
       /* 선행 조건 t-impl 이 끝나 t-verify 가 실행 대기로 넘어갔다 — 과업은 3분 전에 생겼다. */
       const overlays = window.__LIVE_OVERLAYS__(now);
       overlays.task_dependencies = overlays.task_dependencies.map((fact) => fact.task === "t-verify"
@@ -1154,7 +1147,8 @@ async function testLiveMap(browser, origin, ok) {
       const seat = (term, worker, dispatch) => ({
         pane: { term, agent: "codex", state: "working", at: now, state_started_at: now, resumable: false },
         row: { ...base, worker, task: `시도 ${dispatch}`, task_id: `t-${dispatch}`, dispatch_id: dispatch,
-          dispatch_started_ms: now + 68_000, term, reported: true, review: { ...verified, attempt: dispatch } },
+          dispatch_started_ms: now + 68_000, term, reported: true, review: { ...verified, attempt: dispatch },
+          progress: { stage: "verified", attempt: dispatch, source: "0123abc" } },
         card: { ...window.__COLUMNS__[0].cards[1], pane: `term:${term}`, heading: `시도 ${dispatch}`,
           task: `시도 ${dispatch}`, parent: "" },
       });
@@ -1167,8 +1161,10 @@ async function testLiveMap(browser, origin, ok) {
       await paintBoardView(undefined, { force: true });
       await window.__BOARD_SETTLED__();
       window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === "w-retract"
-        ? { ...row, review: { ...row.review, verified: false, claimed_verified: true, author: "worker" } }
-        : row.worker === "w-land" ? { ...row, review: { ...row.review, merged: true } } : row);
+        ? { ...row, review: { ...row.review, verified: false, claimed_verified: true, author: "worker" },
+          progress: { stage: "report_only", claimed: "verified" } }
+        : row.worker === "w-land" ? { ...row, review: { ...row.review, merged: true },
+          progress: { ...row.progress, stage: "merged" } } : row);
       await paintBoardView(undefined, { force: true });
       await window.__BOARD_SETTLED__();
       const result = (dispatch, stage) => (event) => event.kind === "result"
@@ -1212,7 +1208,8 @@ async function testLiveMap(browser, origin, ok) {
         await window.__BOARD_SETTLED__();
       };
       const write = async (review) => {
-        window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? { ...held, review } : row);
+        const progress = { stage: review.deployed ? "deployed" : "merged", attempt: review.attempt, source: review.source };
+        window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? { ...held, review, progress } : row);
         await beat();
       };
       const base = { verified: true, merged: true, deployed: false, written: true,

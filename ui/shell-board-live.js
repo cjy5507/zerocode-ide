@@ -436,7 +436,7 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), { ledger = null
     if (subject === null) continue;
     const lane = `work:${subject}`;
     const started = Number(place.dispatchStarted) || 0;
-    const stage = ledgerReviewStage(place, rows.get(pane) ?? null);
+    const stage = ledgerReviewStage(rows.get(pane) ?? null);
     const key = agentGraphLiveEventKey("work", [subject, stage]);
     if (agentGraphLiveLane(lane, started, key) !== "new") continue;
     const assignment = stage === "dispatched";
@@ -844,18 +844,8 @@ function dressAgentGraphWait(chip, wait) {
 
 /* ---- 권위 -------------------------------------------------------------------- */
 
-/* 단계의 이름과 그 낱말, 한 표. 사건 줄이 단계를 말할 때와 원장의 판정을
- * 단계로 되읽을 때가 같은 표를 읽는다. 낱말은 t-6815의 seam
- * (`ledgerReviewWord`)이 쓰는 그 키들이다 — 코디네이터가 적은 사실 셋, 워커가
- * 적은 **주장** 셋(원장이 사실과 떼어 둔 것), 그리고 보고. 주장은 제 낱말로만
- * 서고 사실의 단계가 되지 않는다. 검토 기록을 영영 받을 수 없는 일(`unreviewable`,
- * 모든 시도가 아무것도 넘기지 않고 끝난 완료 과업)은 원장이 그렇게 읽어 보낸
- * 칸이고 — 보고로 세지 않는다.
- *
- * `flag`는 그 seam이 그 낱말을 고를 때 읽는 원장 행의 칸이다(`reported`는 행의
- * 보고, `failed`는 그 보고가 실패였다는 행의 칸(t-10993), 나머지는 `review`의 칸).
- * 지난 결과 사건을 누를 때 그 사건이 적은 사실이
- * 지금도 **같은 사실로** 서 있는지 이 칸으로 묻는다(`agentGraphLiveStageHolds`). */
+/* 단계의 이름과 그 낱말, 한 표. 사건 줄이 단계를 말할 때 읽는다. `flag`는 지난 결과 사건이 적은
+ * 사실이 지금도 서 있는지 묻는 원장 행의 칸이다(`agentGraphLiveStageHolds`). */
 const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
   { stage: "closed", flag: "closed", key: "board.closed", word: "닫힘" },
   { stage: "deployed", flag: "deployed", key: "board.deployed", word: "배포됨" },
@@ -865,24 +855,16 @@ const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
   { stage: "claimed-deployed", flag: "claimed_deployed", key: "board.claimedDeployed", word: "배포됐다 함" },
   { stage: "claimed-merged", flag: "claimed_merged", key: "board.claimedMerged", word: "병합됐다 함" },
   { stage: "claimed-verified", flag: "claimed_verified", key: "board.claimedVerified", word: "검증됐다 함" },
-  { stage: "unreviewable", flag: "unreviewable", key: "board.noReviewRecord", word: "완료 — 검토 기록 없음" },
+  { stage: "unreviewable", flag: "unreviewable", key: "board.noReviewRecord", word: "종료 — 검토 자료 없음" },
+  { stage: "stale", flag: "progress", key: "board.staleReview", word: "다시 검토 대기" },
+  { stage: "superseded", flag: "progress", key: "board.superseded", word: "다음 시도로 넘어감" },
+  { stage: "unknown", flag: "progress", key: "board.stageUnknown", word: "상태 모름" },
   { stage: "failed", flag: "failed", key: "board.desk.stageFailed", word: "실패" },
   { stage: "reported", flag: "reported", key: "board.awaitingReview", word: "검증 대기" },
 ]);
 
-/* 「어디까지 왔는가」를 **원장이 적은 만큼만**. 판정은 t-6815의 한 손
- * (`ledgerReviewWord`)이 하고, 여기서는 그 손이 답한 낱말을 위의 표로 단계
- * 이름으로 되읽을 뿐이다 — 워커의 주장(`reported`)이 검증·병합·배포 배지가
- * 되는 길은 이 파일에 없고, 그 seam이 권위를 바꾸면 이 지도도 따라 바뀐다. */
-function ledgerReviewStage(place, row) {
-  const said = ledgerReviewWord({
-    reported: place?.reported === true || row?.reported === true,
-    failed: row?.failed === true,
-    review: row?.review ?? null,
-    closed: row?.closed ?? null,
-  });
-  return AGENT_GRAPH_LIVE_STAGES.find((one) => t(one.key, one.word) === said)?.stage
-    ?? "dispatched";
+function ledgerReviewStage(row) {
+  return ledgerWork(row)?.live ?? "dispatched";
 }
 
 /* 한 결과 단계가 적은 사실이 이 행에 **지금도** 서 있는가. 단계가 앞으로 가도 옛
@@ -898,6 +880,7 @@ function agentGraphLiveFlagHolds(held, place, row) {
   if (held.flag === "reported") return place?.reported === true || row?.reported === true;
   if (held.flag === "failed") return row?.failed === true;
   if (held.flag === "closed") return row?.closed != null;
+  if (held.flag === "progress") return row?.progress?.stage === held.stage;
   return row?.review?.[held.flag] === true;
 }
 

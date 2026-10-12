@@ -82,3 +82,16 @@ fn the_switch_turns_on_only_with_a_vault_and_the_window_answers_it() {
     let handlers = block(&main, "tauri::generate_handler![");
     at(handlers, "set_second_brain_raw_capture,");
 }
+
+/// The window's log names no page (m-48177): the file and the health card
+/// are the record of what landed; stderr says only that something failed.
+#[test]
+fn the_feed_names_no_page_in_the_window_s_log() {
+    let second_brain = shell_source("cmd/second_brain.rs");
+    let glue = block(&second_brain, "pub(crate) fn feed_read_page(");
+    assert!(
+        !glue.contains("raw feed wrote"),
+        "the feed logs the page it wrote:\n{glue}"
+    );
+    at(glue, "raw feed failed");
+}
