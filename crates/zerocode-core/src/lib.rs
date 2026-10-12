@@ -100,6 +100,7 @@ pub mod second_brain_code;
 pub mod second_brain_export;
 pub mod second_brain_feed;
 pub mod second_brain_graph;
+pub mod second_brain_kinds;
 pub mod second_brain_lint;
 pub mod second_brain_live;
 pub mod second_brain_pairs;

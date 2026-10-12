@@ -16,6 +16,7 @@ pub const ARCHIVE_DIR: &str = "archive";
 pub const RAW_README_FILE: &str = "raw/README.md";
 pub const WIKI_INDEX_FILE: &str = "wiki/index.md";
 pub const WIKI_LOG_FILE: &str = "wiki/log.md";
+pub const WIKI_OVERVIEW_FILE: &str = "wiki/overview.md";
 pub const AGENTS_FILE: &str = "AGENTS.md";
 pub const CLAUDE_FILE: &str = "CLAUDE.md";
 pub const MAX_STATUS_ENTRIES: usize = 10_000;
@@ -863,5 +864,37 @@ mod tests {
             obsidian_open_uri(&beta).as_deref(),
             Some("obsidian://open?vault=Beta+Notes&file=wiki%2Findex.md")
         );
+    }
+
+    /// t-43992 unit 2: setup writes the vault's one-page map beside the index
+    /// and the log, typed `overview`; a vault set up before the map existed is
+    /// still a set-up vault, and the map is not counted as a wiki page.
+    #[test]
+    fn setup_writes_the_overview_and_an_older_vault_is_still_set_up() {
+        let root = tempfile::tempdir().unwrap();
+        let outcome = setup(root.path()).unwrap();
+        assert!(
+            outcome
+                .created
+                .iter()
+                .any(|held| held == WIKI_OVERVIEW_FILE),
+            "{:?}",
+            outcome.created
+        );
+        let overview = std::fs::read_to_string(root.path().join(WIKI_OVERVIEW_FILE)).unwrap();
+        assert!(overview.starts_with("---\ntype: overview\n"), "{overview}");
+        assert_eq!(outcome.status.wiki_pages, 0, "the map is counted as a page");
+        std::fs::remove_file(root.path().join(WIKI_OVERVIEW_FILE)).unwrap();
+        assert!(inspect(root.path()).setup_complete);
+    }
+
+    #[test]
+    fn the_weekly_review_keeps_the_overview_and_may_create_only_it() {
+        let prompt = weekly_review_prompt(Path::new("/Users/me/Knowledge"));
+        assert!(prompt.contains(WIKI_OVERVIEW_FILE), "{prompt}");
+        assert!(prompt.contains("type: overview"), "{prompt}");
+        // Still the review's narrow scope.
+        assert!(prompt.contains("색인과 링크뿐"));
+        assert!(prompt.contains("정확히 한 줄"));
     }
 }

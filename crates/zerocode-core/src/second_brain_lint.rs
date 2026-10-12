@@ -109,6 +109,9 @@ pub struct LintCounts {
     pub unsourced_edges: u32,
     pub contradictions: u32,
     pub superseded: u32,
+    /// Pages whose `type:` names none of the six kinds (t-43992 unit 2).
+    #[serde(default)]
+    pub untyped: u32,
     /// `None` until the dedupe lens (t-2931) computes it — a row that says
     /// "not measured", never a zero nobody counted.
     pub merge_candidates: Option<u32>,
@@ -134,6 +137,10 @@ pub struct VaultLint {
     /// Pages a `supersedes` relation points at, sorted; two pages superseding
     /// one target is one superseded page.
     pub superseded: Vec<String>,
+    /// Pages whose `type:` names none of the six kinds, sorted (t-43992 unit
+    /// 2) — a reading, not a finding: the key is newer than most vaults.
+    #[serde(default)]
+    pub untyped: Vec<String>,
     /// t-2931's seat. `None` means nobody computed it.
     pub merge_candidates: Option<Vec<MergeCandidate>>,
     pub counts: LintCounts,
@@ -169,6 +176,7 @@ impl VaultLint {
             unsourced_edges: count(self.unsourced_edges.len()),
             contradictions: self.contradictions,
             superseded: count(self.superseded.len()),
+            untyped: count(self.untyped.len()),
             merge_candidates: self.merge_candidates.as_ref().map(|held| count(held.len())),
         };
         self.findings = [
@@ -357,6 +365,7 @@ pub fn assess(
         unsourced_edges,
         contradictions,
         superseded: superseded.into_iter().collect(),
+        untyped: Vec::new(),
         merge_candidates: None,
         counts: LintCounts::default(),
         findings: 0,
@@ -851,6 +860,7 @@ mod tests {
     fn an_edge_no_road_vouches_for_is_counted_and_fails_the_recipe() {
         use crate::second_brain_graph::{EdgeProvenance, GraphEdge, GraphNode};
         let page = |id: &str| GraphNode {
+            page_type: None,
             id: id.to_string(),
             title: id.to_string(),
             tags: Vec::new(),
@@ -916,5 +926,30 @@ mod tests {
     fn the_wiki_dir_constant_is_the_one_the_ids_carry() {
         // A regression guard for the id spelling every list depends on.
         assert!(WIKI_INDEX_FILE.starts_with(WIKI_DIR));
+    }
+
+    /// t-43992 unit 2: pages that name no known kind are listed and counted —
+    /// the vault's ledgers and its overview are not pages to type — and the
+    /// row is a reading, not a finding: a vault of untyped pages still passes.
+    #[test]
+    fn pages_without_a_known_type_are_counted_but_do_not_fail_the_lint() {
+        const TYPED: &str =
+            "---\ntype: entity\nsource: raw/a.md\ningested_at: 2026-09-07T00:00:00+09:00\n---\n";
+        const ODD: &str =
+            "---\ntype: gotcha\nsource: raw/a.md\ningested_at: 2026-09-07T00:00:00+09:00\n---\n";
+        let root = vault(&[
+            ("wiki/typed.md", TYPED),
+            ("wiki/untyped.md", FULL),
+            ("wiki/odd.md", ODD),
+            (
+                "wiki/index.md",
+                "# Wiki\n\n- [[typed]]\n- [[untyped]]\n- [[odd]]\n",
+            ),
+            ("raw/a.md", "a source\n"),
+        ]);
+        let lint = lint_of(root.path());
+        assert_eq!(lint.untyped, ["wiki/odd.md", "wiki/untyped.md"]);
+        assert_eq!(lint.counts.untyped, 2);
+        assert!(lint.is_clean(), "{lint:?}");
     }
 }
