@@ -5,11 +5,78 @@ use zerocode_core::orchestration::gate_reuse::{self as gate, JobIntent, JobMode,
 const SESSION_CAP: usize = 32;
 pub const FRAME_CAP: usize = 32 * 1024;
 
+pub fn open_native(
+    actor: &std::sync::Arc<RuntimeActor>,
+    team: &str,
+    pane: &str,
+    capability: &str,
+    caller: Option<String>,
+    body: &str,
+) -> Result<serde_json::Value, &'static str> {
+    if cfg!(not(unix)) {
+        return Err("unsupported_platform");
+    }
+    if body.len() > 1024 * 1024 {
+        return Err("invalid_request");
+    }
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|_| "invalid_request")?;
+    let object = value.as_object().ok_or("invalid_request")?;
+    if object.len() != 3
+        || object
+            .keys()
+            .any(|key| !["intent", "manifest", "bootstrap"].contains(&key.as_str()))
+    {
+        return Err("unknown_field");
+    }
+    let intent = parsed(&value["intent"]).map_err(|reason| code(&reason))?;
+    let bootstrap = parsed(&value["bootstrap"]).map_err(|reason| code(&reason))?;
+    let manifest = value["manifest"]
+        .as_str()
+        .filter(|text| text.len() <= 1024 * 1024)
+        .ok_or("invalid_request")?;
+    let owner = PlanCommand::checked(
+        vec!["native-gate-open".into()],
+        team,
+        pane,
+        capability,
+        caller,
+        wall_time(0),
+    )
+    .map_err(|_| "authority_unavailable")?;
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(|_| "authority_unavailable")?;
+    let port = listener
+        .local_addr()
+        .map_err(|_| "authority_unavailable")?
+        .port();
+    let result = actor
+        .open_gate_session(owner, intent, manifest.into(), bootstrap)
+        .map_err(|_| "authority_unavailable")?;
+    if result["ok"] != true {
+        return Err(code(result["code"].as_str().unwrap_or_default()));
+    }
+    let job = result["value"]["job"]
+        .as_str()
+        .ok_or("authority_unavailable")?;
+    let Some(expires_ms) = result["value"]["expiresMs"].as_i64() else {
+        let _ = actor.close_gate_session(job.into());
+        return Err("authority_unavailable");
+    };
+    serve(
+        std::sync::Arc::downgrade(actor),
+        listener,
+        job.into(),
+        expires_ms,
+    );
+    Ok(serde_json::json!({"ok":true,"job":job,"port":port,"expiresMs":expires_ms}))
+}
+
 pub enum Request {
     Open {
-        owner: PlanCommand,
-        intent: JobIntent,
+        owner: Box<PlanCommand>,
+        intent: Box<JobIntent>,
         manifest: String,
+        bootstrap: Box<gate::BootstrapIdentity>,
     },
     Bind {
         job: String,
@@ -28,6 +95,10 @@ pub enum Request {
     Close {
         job: String,
     },
+    #[cfg(test)]
+    ExpireDeadline {
+        job: String,
+    },
 }
 
 impl std::fmt::Debug for Request {
@@ -38,6 +109,8 @@ impl std::fmt::Debug for Request {
             Self::Command { .. } => "GateSession::Command",
             Self::Alive { .. } => "GateSession::Alive",
             Self::Close { .. } => "GateSession::Close",
+            #[cfg(test)]
+            Self::ExpireDeadline { .. } => "GateSession::ExpireDeadline",
         })
     }
 }
@@ -282,7 +355,20 @@ impl RuntimeState {
                         session.owner.actor().unwrap_or_default(),
                         &session.scope,
                         at,
-                    );
+                    )
+                    .and_then(|()| {
+                        match session.registration.as_deref().or(session
+                            .scope
+                            .intent
+                            .registration
+                            .as_deref())
+                        {
+                            Some(id) => {
+                                gate::validate_job_receipt(&self.ledger, &session.scope, id)
+                            }
+                            None => Ok(()),
+                        }
+                    });
                 }
             },
         );
@@ -312,10 +398,24 @@ impl RuntimeState {
             return Err(RuntimeError::RecoveryRequired);
         }
         match request {
+            #[cfg(test)]
+            Request::ExpireDeadline { job } => {
+                let Some(session) = self.gate_jobs.rows.get_mut(&job) else {
+                    return Ok(answer(
+                        false,
+                        serde_json::Value::Null,
+                        "out_of_scope",
+                        self.revision,
+                    ));
+                };
+                session.deadline = std::time::Instant::now();
+                Ok(answer(true, serde_json::Value::Null, "", self.revision))
+            }
             Request::Open {
                 owner,
                 intent,
                 manifest,
+                bootstrap,
             } => {
                 self.prune_gate_jobs();
                 if self.gate_jobs.rows.len() >= SESSION_CAP {
@@ -339,8 +439,9 @@ impl RuntimeState {
                                 team,
                                 owner.pane(),
                                 owner.actor().unwrap_or_default(),
-                                intent.clone(),
+                                (*intent).clone(),
                                 &manifest,
+                                (*bootstrap).clone(),
                                 at,
                             );
                         }
@@ -370,7 +471,7 @@ impl RuntimeState {
                         namespace: job.clone(),
                         deadline: std::time::Instant::now()
                             + std::time::Duration::from_millis((expires_ms - at) as u64),
-                        owner,
+                        owner: *owner,
                         scope,
                         bound: false,
                         stage: Stage::Initial,
@@ -391,16 +492,19 @@ impl RuntimeState {
                 Ok(answer(true, serde_json::Value::Null, "", self.revision))
             }
             Request::Alive { job, now_ms } => {
-                let allowed = self.gate_jobs.rows.get(&job).is_some_and(|session| {
-                    self.gate_authorized(session, wall_time(now_ms)).is_ok()
-                });
-                if !allowed {
+                let checked = self
+                    .gate_jobs
+                    .rows
+                    .get(&job)
+                    .ok_or_else(|| "out_of_scope: closed gate job".to_string())
+                    .and_then(|session| self.gate_authorized(session, wall_time(now_ms)));
+                if checked.is_err() {
                     self.gate_jobs.rows.remove(&job);
                 }
                 Ok(answer(
-                    allowed,
+                    checked.is_ok(),
                     serde_json::Value::Null,
-                    "expired",
+                    checked.err().as_deref().unwrap_or_default(),
                     self.revision,
                 ))
             }
@@ -486,8 +590,22 @@ impl RuntimeState {
                 let mut command = session.owner.clone();
                 command.argv = call.argv;
                 command.now_ms = at;
-                command.gate_scope = Some(session.scope.clone());
-                let reply = self.carry_out(command)?;
+                command.gate_scope = Some(Box::new(session.scope.clone()));
+                command.gate_context = Some(
+                    gate::JobContext::from_session(&session.namespace, &session.scope)
+                        .map_err(|_| RuntimeError::AuthorityRejected)?,
+                );
+                let reply = match self.carry_out(command) {
+                    Err(RuntimeError::GateJobRefused(reason)) => {
+                        return Ok(answer(
+                            false,
+                            serde_json::Value::Null,
+                            &reason,
+                            self.revision,
+                        ));
+                    }
+                    other => other?,
+                };
                 let RuntimeReply::Planned { decided, .. } = &reply else {
                     return Err(RuntimeError::AuthorityRejected);
                 };

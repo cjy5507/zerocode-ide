@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod job_scope;
+use job_scope::JobProvenance;
 pub use job_scope::{
-    JobIntent, JobMode, JobScope, authorize_job, validate_job, validate_job_inputs,
+    BootstrapIdentity, FileIdentity, JobContext, JobIntent, JobMode, JobScope, authorize_job,
+    job_lifetime_ms, validate_job, validate_job_inputs, validate_job_receipt,
 };
 
 pub const REGISTER: &str = "gate-register";
@@ -237,6 +239,8 @@ pub struct Metadata {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Registration {
+    #[serde(default)]
+    job: Option<JobProvenance>,
     inputs: Inputs,
     #[serde(default)]
     policy_pin: String,
@@ -252,6 +256,8 @@ struct Registration {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Completion {
+    #[serde(default)]
+    job: Option<JobProvenance>,
     metadata: Metadata,
     metadata_sha256: String,
     generation: u32,
@@ -274,6 +280,42 @@ pub struct ReuseRequest {
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+pub(super) fn check_context(
+    verb: &str,
+    words: &Words,
+    job: Option<&JobContext>,
+) -> Result<(), String> {
+    let scoped = matches!(verb, REGISTER | REUSE)
+        || verb == RECORD
+            && (words.value("--cancel").is_none() || words.value("--start").is_some());
+    if scoped && job.is_none() || job.is_some() && !matches!(verb, REGISTER | RECORD | REUSE) {
+        return Err("out_of_scope: this operation needs a server-owned gate job context".into());
+    }
+    Ok(())
+}
+
+fn validate_origin(
+    run: &Run,
+    id: &str,
+    task: &str,
+    attempt: &str,
+    job: Option<&JobContext>,
+    same_job: bool,
+) -> Result<(), String> {
+    let context = job.ok_or("out_of_scope: gate operation needs a scoped job")?;
+    let (_, registered) = registration(run, id, task, attempt)?;
+    let origin = registered
+        .job
+        .as_ref()
+        .ok_or("out_of_scope: gate registration has no job provenance")?;
+    if context.provenance.bootstrap_sha256 != origin.bootstrap_sha256
+        || same_job && context.provenance.id != origin.id
+    {
+        return Err("out_of_scope: gate operation has different job provenance".into());
+    }
+    Ok(())
 }
 
 fn parse<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, String> {
@@ -404,6 +446,9 @@ fn execution<'a>(
     let row = event(run, &metadata.registration, task, attempt, "started")
         .ok_or("gate has no authenticated execution start")?;
     let value = payload(row, task, attempt, "started").ok_or("unsupported execution start")?;
+    if registered.job.is_none() || value["job"] != serde_json::json!(registered.job) {
+        return Err("out_of_scope: execution start has different job provenance".into());
+    }
     if row.id != metadata.execution
         || value["lease"] != registered.lease
         || metadata.lease != registered.lease
@@ -516,6 +561,11 @@ fn judge(
             return Err("unsupported reuse version".into());
         }
         let (registered_row, registered) = registration(run, &request.registration, task, attempt)?;
+        let job = registered
+            .job
+            .as_ref()
+            .filter(|job| !job.id.is_empty() && hex(&job.bootstrap_sha256, &[64]))
+            .ok_or("out_of_scope: gate registration has no verified job provenance")?;
         let current = run
             .coordinator_live()
             .ok_or("gate evidence needs a live coordinator")?;
@@ -525,6 +575,9 @@ fn judge(
             return Err("coordinator changed after gate registration".into());
         }
         let (completed_row, completed) = completion(run, &request.registration, task, attempt)?;
+        if completed.job.as_ref() != Some(job) {
+            return Err("out_of_scope: gate completion has different job provenance".into());
+        }
         original = Some(completed_row.id.clone());
         if handed_in(run, task, attempt, registered_row.created_ms)? != registered.handed_in_head {
             return Err("gate handed-in source or attempt changed".into());
@@ -600,6 +653,7 @@ pub(super) fn validate_replay(
     actor: &str,
     now_ms: i64,
     answer: &str,
+    job: Option<&JobContext>,
 ) -> Result<(), String> {
     let run = ledger.run(run_id).ok_or_else(|| unknown_run(run_id))?;
     let generation = coordinator(run, team, pane, actor)?;
@@ -628,6 +682,7 @@ pub(super) fn validate_replay(
     }
     if verb == REUSE {
         let request: ReuseRequest = parse(body)?;
+        validate_origin(run, &request.registration, task, attempt, job, false)?;
         return judge(run, task, attempt, &request, now_ms).1
             .map_err(|_| "gate retry no longer establishes a hit; use a fresh retry name to record the current miss".into());
     }
@@ -643,6 +698,7 @@ pub(super) fn validate_replay(
         metadata.registration
     };
     let (row, registered) = registration(run, &id, task, attempt)?;
+    validate_origin(run, &id, task, attempt, job, true)?;
     live_lease(run, &id, &registered, task, attempt, now_ms)?;
     if registered.generation != generation || registered.actor != actor || now_ms < row.created_ms {
         return Err("gate retry's coordinator or registration event changed".into());
@@ -667,6 +723,7 @@ pub(super) fn decide(
     pane: &str,
     actor: &str,
     now_ms: i64,
+    job: Option<&JobContext>,
 ) -> Result<Decided, String> {
     let run = ledger.run(run_id).ok_or_else(|| unknown_run(run_id))?;
     let generation = coordinator(run, team, pane, actor)?;
@@ -737,9 +794,21 @@ pub(super) fn decide(
             }
             let expires_ms = now_ms
                 .checked_add(LEASE_MS)
-                .ok_or("gate lease time overflow")?;
+                .ok_or("gate lease time overflow")?
+                .min(
+                    job.ok_or("out_of_scope: gate registration needs a scoped job")?
+                        .expires_ms,
+                );
+            if expires_ms <= now_ms {
+                return Err("expired: gate job lifetime ended".into());
+            }
             let lease = ledger.mint("gx-");
             let registered = Registration {
+                job: Some(
+                    job.ok_or("out_of_scope: gate registration needs a scoped job")?
+                        .provenance
+                        .clone(),
+                ),
                 inputs,
                 policy_pin,
                 attempt: attempt.into(),
@@ -760,7 +829,7 @@ pub(super) fn decide(
                 now_ms,
             )?;
             Ok(said(
-                serde_json::json!({"registration":id,"policyPin":registered.policy_pin,"lease":lease,"registeredMs":now_ms,"expiresMs":expires_ms,"executed":false}),
+                serde_json::json!({"registration":id,"policyPin":registered.policy_pin,"job":registered.job,"lease":lease,"registeredMs":now_ms,"expiresMs":expires_ms,"executed":false}),
             ))
         }
         RECORD if words.value("--start").is_some() || words.value("--cancel").is_some() => {
@@ -776,6 +845,7 @@ pub(super) fn decide(
                 return Err("gate execution lease changed".into());
             }
             if starting.is_some() {
+                validate_origin(run, id, task, attempt, job, true)?;
                 if registered.generation != generation || registered.actor != actor {
                     return Err("coordinator changed after gate registration".into());
                 }
@@ -799,7 +869,7 @@ pub(super) fn decide(
                     task,
                     attempt,
                     "started",
-                    serde_json::json!({"registration":id,"lease":registered.lease,"inputsSha256":sha256(body.as_bytes())}),
+                    serde_json::json!({"registration":id,"job":registered.job,"lease":registered.lease,"inputsSha256":sha256(body.as_bytes())}),
                     now_ms,
                 )?;
                 Ok(said(
@@ -835,6 +905,7 @@ pub(super) fn decide(
         }
         RECORD => {
             let metadata: Metadata = parse(body)?;
+            validate_origin(run, &metadata.registration, task, attempt, job, true)?;
             let (registered_row, registered) =
                 registration(run, &metadata.registration, task, attempt)?;
             live_lease(
@@ -875,6 +946,7 @@ pub(super) fn decide(
                 ));
             }
             let completed = Completion {
+                job: registered.job.clone(),
                 metadata,
                 metadata_sha256: digest.clone(),
                 generation,
@@ -895,6 +967,7 @@ pub(super) fn decide(
         }
         REUSE => {
             let request: ReuseRequest = parse(body)?;
+            validate_origin(run, &request.registration, task, attempt, job, false)?;
             let (original, result) = judge(run, task, attempt, &request, now_ms);
             let policy_pin = registration(run, &request.registration, task, attempt)
                 .ok()
@@ -902,6 +975,9 @@ pub(super) fn decide(
             let current_policy_pin = current_pin(run, &request.inputs.gate, now_ms)
                 .ok()
                 .map(|(row, _)| row.id.clone());
+            let origin_job = registration(run, &request.registration, task, attempt)
+                .ok()
+                .and_then(|(_, registered)| registered.job);
             let (decision, reason) = match result {
                 Ok(()) => (
                     "hit",
@@ -912,7 +988,7 @@ pub(super) fn decide(
             let value = serde_json::json!({"decision":decision,"reason":reason,"registration":request.registration,"original":original,"executed":false,"newExecutions":0,"gate":request.inputs.gate,"mandatoryChecks":MANDATORY_CHECKS,
                 "head":request.inputs.head,"tree":request.inputs.tree,"handedInHead":request.inputs.handed_in_head,
                 "recipe":request.inputs.recipe,"policy":request.inputs.policy,"producer":request.inputs.producer,"sourceAncestor":request.inputs.source_ancestor,
-                "policyPin":policy_pin,"currentPolicyPin":current_policy_pin});
+                "policyPin":policy_pin,"currentPolicyPin":current_policy_pin,"originalJob":origin_job,"queryJob":job.map(|job| &job.provenance)});
             let id = post(
                 ledger,
                 run_id,

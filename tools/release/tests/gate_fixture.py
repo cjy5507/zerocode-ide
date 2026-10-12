@@ -3,6 +3,7 @@
 import argparse
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -16,13 +17,17 @@ def load_module(path, name):
     return module
 
 
-def configuration_declarations(repo, home, root, producer, launcher, outputs):
+def configuration_declarations(repo, home, root, producer, launcher, outputs, scripts, dependencies):
     searches = [
         {"directory": str(Path(repo).resolve()), "ancestors": True, "names": [".cargo/config", ".cargo/config.toml"]},
         {"directory": str(home), "ancestors": False, "names": [".cargo/config", ".cargo/config.toml", ".rustup/settings.toml"]},
         {"directory": str(home / "cargo"), "ancestors": False, "names": ["config", "config.toml"]},
         {"directory": str(home / "rustup"), "ancestors": False, "names": ["settings.toml"]},
     ]
+    searches += launcher.node_searches(repo, scripts, dependencies)
+    git_paths = launcher.git_metadata_paths(repo, producer)
+    searches += [{"directory": str(path.parent), "ancestors": False, "names": [path.name]} for path in git_paths]
+    launcher.safe_git_configuration(git_paths, producer)
     entries = [{"path": str(home), "sha256": producer.paths_digest([home], excluded=outputs)}]
     for path in launcher.search_paths(searches, producer):
         if path.is_relative_to(home):
@@ -30,7 +35,12 @@ def configuration_declarations(repo, home, root, producer, launcher, outputs):
         if path.exists() or path.is_symlink():
             if not path.is_relative_to(root):
                 raise AssertionError("fixture refuses existing account or system configuration")
-            entries.append({"path": str(path), "sha256": producer.paths_digest([path])})
+            target = path
+            if path.name == "node_modules" and path.is_symlink():
+                target = path.resolve(strict=True)
+                if not any(target.is_relative_to(Path(value).resolve()) for value in dependencies):
+                    raise AssertionError("fixture Node module link leaves declared dependencies")
+            entries.append({"path": str(target), "sha256": producer.paths_digest([target])})
         else:
             entries.append({"path": str(path), "state": "absent"})
     return searches, entries
@@ -78,20 +88,30 @@ def authorize(args, root, producer, environment_overrides=None, output_roots=())
                    "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data"),
                    "APPDATA": str(home / "appdata"), "LOCALAPPDATA": str(home / "localappdata"),
                    "PATH": str(search),
-                   "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
+                   "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "NODE_OPTIONS": "--no-global-search-paths",
+                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
     if os.name == "nt":
         environment["SystemRoot"] = os.environ["SystemRoot"]
     environment.update(environment_overrides or {})
-    searches, configuration = configuration_declarations(args.repo, home, root, producer, launcher, output_roots)
+    searches, configuration = configuration_declarations(args.repo, home, root, producer, launcher, output_roots,
+                                                         [wrapper, *args.script_file], args.dependency_root)
     row = lambda path: {"path": str(Path(path).absolute()), "sha256": producer.paths_digest([path])}
-    policy = {"version": 2,
+    bootstrap = getattr(args, "fixture_bootstrap", None)
+    runtime = ({role: {"path": bootstrap[bootstrap.index(path_flag) + 1],
+                       "sha256": bootstrap[bootstrap.index(hash_flag) + 1]}
+                for role, path_flag, hash_flag in (("python", "--python", "--python-sha256"),
+                                                   ("stdlib", "--stdlib", "--stdlib-sha256"))}
+               if bootstrap else {"python": {"path": str(python), "sha256": producer.file_digest(python)},
+                                  "stdlib": row(args.toolchain_root[0])})
+    policy = {"version": 3, "runtime": runtime,
               "bundle": {role: {"path": str(path), "sha256": producer.file_digest(path)} for role, path in {
                   "launcher": folder / "gate_launcher.py", "producer": folder / "gate_receipt.py",
                   "scanner": folder / "pii-scan.py", "rules": folder / "pii-rules.json"}.items()},
-              "gates": {args.gate: {"command": args.command, "recipes": ["fixture"], "profile": args.profile,
+              "gates": {args.gate: {"command": args.command, "recipes": ["fixture"], "testRecipes": ["fixture"], "profile": args.profile,
                   "target": {"repo": str(Path(args.repo).resolve()), "head": producer.git(args.repo, "rev-parse", "--verify", "HEAD").decode().strip(), "scope": args.scope},
                   "timeout": args.timeout,
-                  "maxJobTtlSeconds": min(7200, int(args.timeout) + 60),
+                  "maxJobTtlSeconds": math.ceil(args.timeout) + 300,
+                  "overheadTimeoutSeconds": 300, "verificationTimeoutSeconds": 300,
                   "environment": environment, "dependencyRoots": [row(path) for path in args.dependency_root],
                   "toolchainRoots": [row(path) for path in [*args.toolchain_root, python, git, *transitive]],
                   "configurationRoots": configuration, "configurationSearches": searches,
@@ -123,7 +143,7 @@ def main():
     args = argparse.Namespace(repo=options.repo, gate="gate-root", profile="test-debug",
         scope="deterministic", closure="declared", dependency_root=[str(root / "deps")],
         toolchain_root=[str(root / "toolchain"), str(root / "bin")], lock_file=[], script_file=[],
-        command=[options.child, "--exact", options.test, "--nocapture"], timeout=1800)
+        command=[options.child, "--exact", options.test, "--nocapture"], timeout=120)
     producer = load_module(Path(options.producer), "fixture_producer")
     environment, outputs = {}, []
     if options.cargo:
@@ -135,6 +155,7 @@ def main():
     if options.bootstrap:
         fixture = load_module(Path(__file__).with_name("gate_bootstrap_fixture.py"), "native_bootstrap_fixture")
         bootstrap = fixture.prepare(root, Path(options.producer).with_name("gate_launcher.py"))
+        args.fixture_bootstrap = bootstrap
         args.toolchain_root.append(bootstrap[bootstrap.index("--stdlib") + 1])
     context = authorize(args, root, producer, environment_overrides=environment, output_roots=outputs)
     bundle = context["policy"]["bundle"]

@@ -19845,7 +19845,26 @@ pub fn plan_with_receipts(
     actor: Option<&str>,
     receipts: &evidence::ReceiptFiles,
 ) -> Decided {
-    match plan_inner(ledger, team, launcher, argv, pane, now_ms, actor, receipts) {
+    plan_with_gate_job(
+        ledger, team, launcher, argv, pane, now_ms, actor, receipts, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn plan_with_gate_job(
+    ledger: &mut Ledger,
+    team: &mut Team,
+    launcher: &dyn Launcher,
+    argv: &[String],
+    pane: &str,
+    now_ms: i64,
+    actor: Option<&str>,
+    receipts: &evidence::ReceiptFiles,
+    job: Option<&gate_reuse::JobContext>,
+) -> Decided {
+    match plan_inner(
+        ledger, team, launcher, argv, pane, now_ms, actor, receipts, job,
+    ) {
         Ok(decided) => decided,
         Err(why) => Decided {
             answered_from: None,
@@ -20058,6 +20077,7 @@ fn plan_inner(
     now_ms: i64,
     actor: Option<&str>,
     receipts: &evidence::ReceiptFiles,
+    job: Option<&gate_reuse::JobContext>,
 ) -> Result<Decided, String> {
     let (verb, rest) = argv
         .split_first()
@@ -20095,6 +20115,7 @@ fn plan_inner(
         ));
     }
     let actor = actor.unwrap_or_default();
+    gate_reuse::check_context(verb, &words, job)?;
     /* WHO is bound to a run, not where they are sitting.
      *
      * This was the team id and the pane, and that key does not survive a
@@ -20225,7 +20246,7 @@ fn plan_inner(
             ) {
                 let run_id = bound(ledger, &words, &caller, &seat)?;
                 gate_reuse::validate_replay(
-                    ledger, team, &run_id, verb, &words, pane, actor, now_ms, &answer,
+                    ledger, team, &run_id, verb, &words, pane, actor, now_ms, &answer, job,
                 )?;
             }
             return Ok(Decided {
@@ -22591,7 +22612,9 @@ fn plan_inner(
          * reply is the window's, written once the merge has been judged. */
         gate_reuse::PIN | gate_reuse::REGISTER | gate_reuse::RECORD | gate_reuse::REUSE => {
             let run_id = bound(ledger, &words, &caller, &seat)?;
-            gate_reuse::decide(ledger, team, &run_id, verb, &words, pane, actor, now_ms)?
+            gate_reuse::decide(
+                ledger, team, &run_id, verb, &words, pane, actor, now_ms, job,
+            )?
         }
 
         land_check::LAND_CHECK_VERB => {

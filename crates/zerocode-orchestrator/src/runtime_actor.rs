@@ -90,7 +90,8 @@ pub struct PlanCommand {
     handover: Option<Box<zerocode_core::orchestration::HandoverPlan>>,
     worker_incarnation: Option<zerocode_core::agent_teams::PaneIncarnation>,
     actor: Option<String>,
-    gate_scope: Option<zerocode_core::orchestration::gate_reuse::JobScope>,
+    gate_scope: Option<Box<zerocode_core::orchestration::gate_reuse::JobScope>>,
+    gate_context: Option<zerocode_core::orchestration::gate_reuse::JobContext>,
     now_ms: i64,
     /// The receipt files the window read for the verb's named evidence, read
     /// before the actor is asked and judged by the plan (t-26587). Empty for
@@ -132,6 +133,7 @@ impl PlanCommand {
             worker_incarnation: None,
             actor,
             gate_scope: None,
+            gate_context: None,
             now_ms,
             receipts: Default::default(),
         };
@@ -1585,6 +1587,8 @@ pub enum RuntimeError {
     /// probe which of the three it guessed.
     #[error("stale or unauthorized agent pane")]
     UnauthorizedSeat,
+    #[error("{0}")]
+    GateJobRefused(String),
     #[error("the seat this worker sits in is open on the host")]
     SeatStillOpen,
     #[error("the runtime revision is stale or non-monotonic")]
@@ -1912,11 +1916,13 @@ impl RuntimeActor {
         owner: PlanCommand,
         intent: zerocode_core::orchestration::gate_reuse::JobIntent,
         manifest: String,
+        bootstrap: zerocode_core::orchestration::gate_reuse::BootstrapIdentity,
     ) -> Result<serde_json::Value, RuntimeError> {
         self.gate_session_request(gate_session::Request::Open {
-            owner,
-            intent,
+            owner: Box::new(owner),
+            intent: Box::new(intent),
             manifest,
+            bootstrap: Box::new(bootstrap),
         })
     }
 
@@ -5795,6 +5801,7 @@ impl RuntimeState {
         let ledger = &mut self.ledger;
         let launcher = self.launcher.as_ref();
         let mut planned: Option<Decided> = None;
+        let mut gate_refusal = None;
         self.panes.with_pane_authority(
             command.team(),
             command.pane(),
@@ -5802,20 +5809,19 @@ impl RuntimeState {
             &mut |team| {
                 if let Some(team) = team {
                     if let Some(scope) = &command.gate_scope {
-                        if zerocode_core::orchestration::gate_reuse::validate_job(
+                        if let Err(reason) = zerocode_core::orchestration::gate_reuse::validate_job(
                             ledger,
                             team,
                             command.pane(),
                             command.actor().unwrap_or_default(),
                             scope,
                             command.now_ms(),
-                        )
-                        .is_err()
-                        {
+                        ) {
+                            gate_refusal = Some(reason);
                             return;
                         }
                     }
-                    planned = Some(zerocode_core::orchestration::plan_with_receipts(
+                    planned = Some(zerocode_core::orchestration::plan_with_gate_job(
                         ledger,
                         team,
                         launcher,
@@ -5824,10 +5830,14 @@ impl RuntimeState {
                         command.now_ms(),
                         command.actor(),
                         command.receipts(),
+                        command.gate_context.as_ref(),
                     ));
                 }
             },
         );
+        if let Some(reason) = gate_refusal {
+            return Err(RuntimeError::GateJobRefused(reason));
+        }
         let Some(mut decided) = planned else {
             return Err(RuntimeError::UnauthorizedSeat);
         };

@@ -338,6 +338,7 @@ struct Bench {
     /// session resumed into a new window, which is the case receipts exist
     /// for and the one a pane id can never model.
     actor: Option<String>,
+    gate_context: Option<gate_reuse::JobContext>,
 }
 
 impl Bench {
@@ -348,6 +349,7 @@ impl Bench {
             launcher: Catalog(&["claude", "codex"]),
             clock: 1_000,
             actor: None,
+            gate_context: None,
         }
     }
 
@@ -400,7 +402,13 @@ impl Bench {
         for (path, text) in readings {
             receipts.insert(*path, *text);
         }
-        let mut planned = plan_with_receipts(
+        let gate_context = matches!(
+            argv.first().map(String::as_str),
+            Some(gate_reuse::REGISTER | gate_reuse::RECORD | gate_reuse::REUSE)
+        )
+        .then_some(self.gate_context.as_ref())
+        .flatten();
+        let mut planned = plan_with_gate_job(
             &mut self.ledger,
             &mut self.team,
             &self.launcher,
@@ -409,6 +417,7 @@ impl Bench {
             self.clock,
             Some(&who),
             &receipts,
+            gate_context,
         );
         if let Effect::WorkerTerminal {
             seat,
@@ -8056,6 +8065,7 @@ fn a_receipt_an_earlier_window_filed_against_a_pane_is_refused_not_reused() {
         launcher: Catalog(&["claude", "codex"]),
         clock: 5_000,
         actor: Some(bench_actor("session", "an-agent-after-the-upgrade")),
+        gate_context: None,
     };
     let held = |bench: &Bench| {
         let run = bench.ledger.run("run-1").expect("the run");
@@ -8129,6 +8139,7 @@ fn a_receipt_an_earlier_window_filed_against_a_pane_is_refused_not_reused() {
         launcher: Catalog(&["claude", "codex"]),
         clock: 5_000,
         actor: Some(bench_actor("session", "an-agent-after-the-upgrade")),
+        gate_context: None,
     };
     let refused = coincidence.run("task-create --spec migrate --retry-request r-1");
     assert_eq!(
@@ -8188,6 +8199,7 @@ fn a_binding_belongs_to_the_agent_and_not_to_the_pane_it_was_typed_in() {
         launcher: Catalog(&["claude", "codex"]),
         clock: 5_000,
         actor: Some(agent.clone()),
+        gate_context: None,
     };
 
     // Already right, before anything is replayed. That is the whole change:
@@ -8226,6 +8238,7 @@ fn a_binding_belongs_to_the_agent_and_not_to_the_pane_it_was_typed_in() {
         launcher: Catalog(&["claude", "codex"]),
         clock: 7_000,
         actor: Some(somebody_else.clone()),
+        gate_context: None,
     };
     assert!(
         stranger.run("run-current").reply.exit_code != 0
@@ -8244,6 +8257,7 @@ fn a_binding_belongs_to_the_agent_and_not_to_the_pane_it_was_typed_in() {
         launcher: Catalog(&["claude", "codex"]),
         clock: 9_000,
         actor: Some(agent.clone()),
+        gate_context: None,
     };
     assert_eq!(
         back.json("run-current")["runId"],

@@ -9435,100 +9435,31 @@ pub(super) fn open_gate_session(
     capability: &str,
     body: &str,
 ) -> zerocode_hookd::TeamAnswer {
-    let reject = |code: &str| zerocode_hookd::TeamAnswer {
-        stdout: String::new(),
-        stderr: format!("{code}: native gate session refused"),
-        exit_code: 1,
-    };
-    let Some(held) = runtime() else {
-        return reject("authority_unavailable");
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
-        return reject("invalid_request");
-    };
-    let Some(object) = value.as_object() else {
-        return reject("invalid_request");
-    };
-    if object.len() != 2
-        || object
-            .keys()
-            .any(|key| !["intent", "manifest"].contains(&key.as_str()))
-    {
-        return reject("unknown_field");
-    }
-    let intent = match serde_json::from_value::<zerocode_core::orchestration::gate_reuse::JobIntent>(
-        value["intent"].clone(),
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            return reject(if error.to_string().contains("unknown field") {
-                "unknown_field"
-            } else {
-                "invalid_request"
-            });
-        }
-    };
-    let Some(manifest) = value["manifest"]
-        .as_str()
-        .filter(|text| text.len() <= 1024 * 1024)
-    else {
-        return reject("invalid_request");
-    };
-    let caller = crate::agent_teams::teams()
-        .get(team)
-        .and_then(|team| team.term_of(pane))
-        .and_then(|term| host.actor_for(term));
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|value| i64::try_from(value.as_millis()).ok());
-    let Some(now_ms) = now_ms else {
-        return reject("authority_unavailable");
-    };
-    let owner = match PlanCommand::checked(
-        vec!["native-gate-open".into()],
-        team,
-        pane,
-        capability,
-        caller,
-        now_ms,
-    ) {
-        Ok(value) => value,
-        Err(_) => return reject("authority_unavailable"),
-    };
-    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
-        Ok(value) => value,
-        Err(_) => return reject("authority_unavailable"),
-    };
-    let port = match listener.local_addr() {
-        Ok(value) => value.port(),
-        Err(_) => return reject("authority_unavailable"),
-    };
-    let result = match held.actor.open_gate_session(owner, intent, manifest.into()) {
-        Ok(value) => value,
-        Err(_) => return reject("authority_unavailable"),
-    };
-    if result["ok"] != true {
-        return reject(result["code"].as_str().unwrap_or("authority_unavailable"));
-    }
-    let Some(job) = result["value"]["job"].as_str() else {
-        return reject("authority_unavailable");
-    };
-    let Some(expires_ms) = result["value"]["expiresMs"].as_i64() else {
-        let _ = held.actor.close_gate_session(job.into());
-        return reject("authority_unavailable");
-    };
-    zerocode_orchestrator::runtime_actor::gate_session::serve(
-        Arc::downgrade(&held.actor),
-        listener,
-        job.into(),
-        expires_ms,
-    );
-    zerocode_hookd::TeamAnswer {
-        stdout: serde_json::json!({"ok":true,"job":job,"port":port,"expiresMs":expires_ms})
-            .to_string(),
-        stderr: String::new(),
-        exit_code: 0,
+    let result = runtime().ok_or("authority_unavailable").and_then(|held| {
+        let caller = crate::agent_teams::teams()
+            .get(team)
+            .and_then(|team| team.term_of(pane))
+            .and_then(|term| host.actor_for(term));
+        zerocode_orchestrator::runtime_actor::gate_session::open_native(
+            &held.actor,
+            team,
+            pane,
+            capability,
+            caller,
+            body,
+        )
+    });
+    match result {
+        Ok(value) => zerocode_hookd::TeamAnswer {
+            stdout: value.to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        },
+        Err(code) => zerocode_hookd::TeamAnswer {
+            stdout: String::new(),
+            stderr: format!("{code}: native gate session refused"),
+            exit_code: 1,
+        },
     }
 }
 

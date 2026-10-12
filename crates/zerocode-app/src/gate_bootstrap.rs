@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use serde_json::{Value, json};
+use zerocode_core::orchestration::gate_reuse::{
+    BootstrapIdentity, FileIdentity, JobIntent, job_lifetime_ms,
+};
 use zerocode_core::user_preferences::content_key;
 
 const LAUNCHER_CAP: u64 = 8 * 1024 * 1024;
@@ -184,7 +187,15 @@ fn startup_layout(python: &Path, runtime: &Path) -> Result<(), ()> {
 }
 
 fn execute(args: &[String]) -> Result<ExitCode, ()> {
+    let wall_started = std::time::Instant::now();
     let (options, forwarded) = parse(args)?;
+    if cfg!(not(unix)) && options.contains_key("--gate-job") {
+        println!(
+            "{}",
+            json!({"decision":"miss","code":"unsupported_platform","executed":false,"newExecutions":0})
+        );
+        return Ok(ExitCode::FAILURE);
+    }
     let launcher = canonical(options["--launcher"])?;
     let python = canonical(options["--python"])?;
     let runtime = canonical(options["--stdlib"])?;
@@ -208,6 +219,8 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
     {
         return Err(());
     }
+    let prehash_ms = wall_started.elapsed().as_millis();
+    let mut open_ms = 0;
     let mut command = Command::new(&python);
     command.env_clear();
     for key in ["PATH", "HOME", "SystemRoot", "TMPDIR", "TMP", "TEMP"] {
@@ -224,7 +237,22 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
         .arg(&launcher)
         .stdin(Stdio::piped());
     let mut child = if let Some(job) = options.get("--gate-job") {
-        let channel = match open_authority(job, forwarded) {
+        let opening = std::time::Instant::now();
+        let identity = BootstrapIdentity {
+            launcher: FileIdentity {
+                path: launcher.to_str().ok_or(())?.into(),
+                sha256: options["--launcher-sha256"].into(),
+            },
+            python: FileIdentity {
+                path: python.to_str().ok_or(())?.into(),
+                sha256: options["--python-sha256"].into(),
+            },
+            stdlib: FileIdentity {
+                path: runtime.to_str().ok_or(())?.into(),
+                sha256: options["--stdlib-sha256"].into(),
+            },
+        };
+        let channel = match open_authority(job, forwarded, &identity) {
             Ok(value) => value,
             Err(code) => {
                 println!(
@@ -234,6 +262,7 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
                 return Ok(ExitCode::FAILURE);
             }
         };
+        open_ms = opening.elapsed().as_millis();
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
@@ -258,6 +287,12 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
         return Err(());
     }
     let status = child.wait().map_err(|_| ())?;
+    if std::env::var("ZEROCODE_GATE_TIMING").as_deref() == Ok("1") {
+        eprintln!(
+            "{}",
+            json!({"nativeTiming":{"preHashMs":prehash_ms,"openMs":open_ms,"totalMs":wall_started.elapsed().as_millis()}})
+        );
+    }
     Ok(status
         .code()
         .and_then(|code| u8::try_from(code).ok())
@@ -302,13 +337,23 @@ fn capability(name: &str, file_name: &str) -> Result<String, &'static str> {
     Ok(value.into())
 }
 
-fn open_authority(job: &str, forwarded: &[String]) -> Result<std::net::TcpStream, &'static str> {
+fn open_authority(
+    job: &str,
+    forwarded: &[String],
+    bootstrap: &BootstrapIdentity,
+) -> Result<std::net::TcpStream, &'static str> {
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
     if job.len() > 16 * 1024 {
         return Err("invalid_request");
     }
-    let intent: Value = serde_json::from_str(job).map_err(|_| "invalid_request")?;
+    let intent: JobIntent = serde_json::from_str(job).map_err(|error| {
+        if error.to_string().contains("unknown field") {
+            "unknown_field"
+        } else {
+            "invalid_request"
+        }
+    })?;
     let path = option(forwarded, "--policy")?;
     let expected = option(forwarded, "--policy-sha256")?;
     let mut manifest = Vec::new();
@@ -321,6 +366,15 @@ fn open_authority(job: &str, forwarded: &[String]) -> Result<std::net::TcpStream
         return Err("digest_mismatch");
     }
     let manifest = String::from_utf8(manifest).map_err(|_| "invalid_request")?;
+    let declaration: Value = serde_json::from_str(&manifest).map_err(|_| "invalid_request")?;
+    if declaration["version"] != 3
+        || BootstrapIdentity::from_manifest(&declaration).map_err(|_| "digest_mismatch")?
+            != *bootstrap
+    {
+        return Err("digest_mismatch");
+    }
+    job_lifetime_ms(&declaration["gates"][&intent.gate], &intent.mode)
+        .map_err(|_| "invalid_request")?;
     let port = std::env::var("ZEROCODE_HOOK_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
@@ -333,8 +387,9 @@ fn open_authority(job: &str, forwarded: &[String]) -> Result<std::net::TcpStream
     )?;
     let team = capability("ZEROCODE_AGENT_TEAM_ID", "ZEROCODE_AGENT_TEAM_ID_FILE")?;
     let pane = capability("ZEROCODE_AGENT_TEAM_PANE", "ZEROCODE_AGENT_TEAM_PANE_FILE")?;
-    let body = serde_json::to_vec(&json!({"intent":intent,"manifest":manifest}))
-        .map_err(|_| "invalid_request")?;
+    let body =
+        serde_json::to_vec(&json!({"intent":intent,"manifest":manifest,"bootstrap":bootstrap}))
+            .map_err(|_| "invalid_request")?;
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let mut control = TcpStream::connect_timeout(&address, Duration::from_secs(3))
         .map_err(|_| "authority_unavailable")?;

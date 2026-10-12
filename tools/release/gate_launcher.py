@@ -7,6 +7,7 @@ not isolate arbitrary code running as the same operating-system user.
 """
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
@@ -27,6 +28,7 @@ BUILD_ENV = {
     "RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC", "RUSTDOC", "CC", "CXX", "AR", "SDKROOT", "DEVELOPER_DIR",
     "MACOSX_DEPLOYMENT_TARGET", "TMPDIR", "TMP", "TEMP", "NODE_PATH",
     "npm_config_cache", "npm_config_offline",
+    "NODE_OPTIONS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
 }
 PATH_ENV = {
     "HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "APPDATA",
@@ -38,6 +40,73 @@ CONFIGURATION_ENV = {
     "CARGO_HOME", "RUSTUP_HOME",
 }
 OUTPUT_ENV = {"XDG_CACHE_HOME", "CARGO_TARGET_DIR", "TMPDIR", "TMP", "TEMP", "npm_config_cache"}
+
+
+def node_searches(repo, scripts, dependencies):
+    bases = {Path(repo).resolve(), *(Path(value).resolve().parent for value in scripts)}
+    bases.update(Path(value).resolve() if Path(value).is_dir() else Path(value).resolve().parent for value in dependencies)
+    return [{"directory": str(base), "ancestors": True, "names": ["node_modules"]} for base in sorted(bases)]
+
+
+def git_metadata_paths(repo, producer):
+    marker = Path(repo) / ".git"
+    paths = []
+    if marker.is_symlink():
+        raise producer.UnknownInput("linked Git metadata is unsupported")
+    if marker.is_dir():
+        directory = marker.resolve()
+    else:
+        raw = read_configuration(marker, producer).decode().strip()
+        if not raw.startswith("gitdir: ") or "\n" in raw or "\0" in raw:
+            raise producer.UnknownInput("Git metadata locator is unsupported")
+        named = Path(raw[8:])
+        directory = (named if named.is_absolute() else Path(repo) / named).resolve(strict=True)
+        paths.append(marker)
+    common_marker = directory / "commondir"
+    paths.append(common_marker)
+    common = directory
+    if common_marker.exists() or common_marker.is_symlink():
+        raw = read_configuration(common_marker, producer).decode().strip()
+        if not raw or "\n" in raw or "\0" in raw:
+            raise producer.UnknownInput("Git common metadata locator is unsupported")
+        common = (directory / raw).resolve(strict=True)
+    paths += [directory / "config", common / "config", directory / "config.worktree",
+              common / "info/attributes", common / "info/exclude", common / "hooks"]
+    return sorted(set(paths))
+
+
+def read_configuration(path, producer):
+    try:
+        return read_regular(path)
+    except (Untrusted, OSError) as why:
+        raise producer.UnknownInput("configuration cannot be read without following links") from why
+
+
+def safe_git_configuration(paths, producer):
+    allowed = {
+        "core": {"repositoryformatversion", "filemode", "bare", "logallrefupdates", "ignorecase",
+                 "precomposeunicode", "abbrev", "quotepath", "autocrlf", "eol", "symlinks", "fsmonitor"},
+        "user": {"name", "email"}, "remote": {"url", "fetch", "pushurl"},
+        "branch": {"remote", "merge"}, "extensions": {"objectformat", "worktreeconfig"},
+        "init": {"defaultbranch"},
+    }
+    for path in paths:
+        if path.name == "hooks" and path.exists():
+            if any(not child.name.endswith(".sample") for child in path.iterdir()):
+                raise producer.UnknownInput("active Git hooks are unsupported by this closure")
+        if path.name not in ("config", "config.worktree") or not path.exists():
+            continue
+        parser = configparser.RawConfigParser(strict=True, allow_no_value=True, interpolation=None)
+        try:
+            parser.read_string(read_configuration(path, producer).decode())
+        except (configparser.Error, UnicodeError) as why:
+            raise producer.UnknownInput("Git configuration cannot be inspected safely") from why
+        for section in parser.sections():
+            prefix = section.split(maxsplit=1)[0].lower()
+            if prefix not in allowed or set(parser[section]) - allowed[prefix]:
+                raise producer.UnknownInput("Git configuration has an undeclared file or program dependency")
+            if prefix == "core" and "fsmonitor" in parser[section] and str(parser[section]["fsmonitor"] or "true").lower() not in ("false", "0", "no"):
+                raise producer.UnknownInput("Git fsmonitor configuration is unsupported")
 
 
 class Untrusted(Exception):
@@ -81,8 +150,17 @@ def load_policy(path, expected, repo, launcher_path=None):
     if len(raw) > MAX_POLICY or sha256(raw) != expected:
         raise Untrusted("manifest identity changed")
     policy = json.loads(raw, object_pairs_hook=unique_object)
-    if not isinstance(policy, dict) or set(policy) != {"version", "bundle", "gates"} or policy["version"] != 2:
+    if not isinstance(policy, dict) or set(policy) != {"version", "bundle", "runtime", "gates"} or policy["version"] != 3:
         raise Untrusted("unsupported trust manifest")
+    runtime = policy["runtime"]
+    if not isinstance(runtime, dict) or set(runtime) != {"python", "stdlib"}:
+        raise Untrusted("unsupported runtime declaration")
+    for entry in runtime.values():
+        if (not isinstance(entry, dict) or set(entry) != {"path", "sha256"}
+                or not isinstance(entry["path"], str) or not Path(entry["path"]).is_absolute()
+                or Path(entry["path"]).resolve().is_relative_to(repo)
+                or not isinstance(entry["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])):
+            raise Untrusted("runtime needs independently pinned external identities")
     bundle = policy["bundle"]
     if not isinstance(bundle, dict) or set(bundle) != {"launcher", "producer", "scanner", "rules"} or not isinstance(policy["gates"], dict):
         raise Untrusted("incomplete trusted bundle")
@@ -160,24 +238,34 @@ def cache_bindings(outputs, producer):
 
 
 def configure(context, args, producer):
+    producer.GIT_GUARD = lambda repo: safe_git_configuration(git_metadata_paths(repo, producer), producer)
     selected = context["policy"]["gates"].get(args.gate)
-    required = {"command", "recipes", "profile", "environment", "dependencyRoots", "toolchainRoots",
+    required = {"command", "recipes", "testRecipes", "profile", "environment", "dependencyRoots", "toolchainRoots",
                 "configurationRoots", "configurationSearches", "lockFiles", "scriptFiles", "outputRoots", "mandatoryChecks",
-                "target", "timeout", "maxJobTtlSeconds"}
+                "target", "timeout", "maxJobTtlSeconds", "overheadTimeoutSeconds", "verificationTimeoutSeconds"}
     if not isinstance(selected, dict) or set(selected) != required:
         raise producer.UnknownInput("gate has no complete independently trusted declaration")
     if selected["command"] != args.command or selected["profile"] != args.profile:
         raise producer.UnknownInput("gate command or profile differs from its trusted recipe")
-    if isinstance(selected["timeout"], bool) or not isinstance(selected["timeout"], (int, float)) or not 0 < selected["timeout"] <= 86400 or selected["timeout"] != args.timeout:
+    if isinstance(selected["timeout"], bool) or not isinstance(selected["timeout"], (int, float)) or not 0 < selected["timeout"] <= 7200 or selected["timeout"] != args.timeout:
         raise producer.UnknownInput("gate timeout differs from its trusted declaration")
-    if isinstance(selected["maxJobTtlSeconds"], bool) or not isinstance(selected["maxJobTtlSeconds"], int) or not selected["timeout"] <= selected["maxJobTtlSeconds"] <= 7200:
+    if any(type(selected[key]) is not int or not 1 <= selected[key] <= cap for key, cap in
+           (("maxJobTtlSeconds", 7200), ("overheadTimeoutSeconds", 3600), ("verificationTimeoutSeconds", 3600))):
         raise producer.UnknownInput("gate job lifetime is not bounded by its trusted declaration")
+    if (selected["timeout"] + selected["overheadTimeoutSeconds"] > selected["maxJobTtlSeconds"]
+            or selected["verificationTimeoutSeconds"] > selected["maxJobTtlSeconds"]):
+        raise producer.UnknownInput("gate phase budgets exceed the pinned maximum lifetime")
     if selected["mandatoryChecks"] != MANDATORY or not isinstance(selected["recipes"], list) or not selected["recipes"]:
         raise producer.UnknownInput("gate has no complete recipe list and mandatory non-reuse checks")
-    if len(selected["recipes"]) != len(set(selected["recipes"])) or any(
+    if any(not isinstance(name, str) for name in selected["recipes"]) or len(selected["recipes"]) != len(set(selected["recipes"])) or any(
         not re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in selected["recipes"]
     ):
         raise producer.UnknownInput("gate recipe list is invalid")
+    if (not isinstance(selected["testRecipes"], list) or not selected["testRecipes"]
+            or any(not isinstance(name, str) for name in selected["testRecipes"])
+            or len(set(selected["testRecipes"])) != len(selected["testRecipes"])
+            or not set(selected["testRecipes"]).issubset(selected["recipes"])):
+        raise producer.UnknownInput("test recipes need a nonempty unique recipe subset")
     if args.scope != "deterministic" or args.closure != "declared":
         raise producer.UnknownInput("trusted cache needs the deterministic declared scope")
     environment = selected["environment"]
@@ -187,6 +275,10 @@ def configure(context, args, producer):
         raise producer.UnknownInput("child environment includes undeclared values or authority")
     if any(environment.get(key) != value for key, value in (("LANG", "C"), ("LC_ALL", "C"), ("TZ", "UTC"))):
         raise producer.UnknownInput("child locale is not fixed")
+    if (environment.get("NODE_OPTIONS") != "--no-global-search-paths" or "NODE_PATH" in environment
+            or environment.get("GIT_CONFIG_NOSYSTEM") != "1"
+            or environment.get("GIT_CONFIG_GLOBAL") != os.devnull or environment.get("GIT_CONFIG_SYSTEM") != os.devnull):
+        raise producer.UnknownInput("Node and Git fallbacks are not explicitly disabled")
     repo = Path(args.repo).resolve()
     account = Path(os.environ.get("HOME", os.path.expanduser("~"))).resolve()
     home = Path(environment.get("HOME", ""))
@@ -228,6 +320,10 @@ def configure(context, args, producer):
     cargo_searches += [Path(environment["RUSTUP_HOME"]) / "settings.toml", home / ".rustup/settings.toml"]
     if not set(cargo_searches).issubset(searched):
         raise producer.UnknownInput("Cargo configuration search fallbacks are undeclared")
+    node_paths = search_paths(node_searches(repo, roots["scriptFiles"], roots["dependencyRoots"]), producer)
+    git_paths = git_metadata_paths(repo, producer)
+    if not node_paths.issubset(searched) or not set(git_paths).issubset(searched):
+        raise producer.UnknownInput("Node or Git configuration search scopes are undeclared")
     config_environment = [Path(environment[key]).resolve() for key in CONFIGURATION_ENV.intersection(environment)]
     if any(path.is_relative_to(repo) for path in (Path(value).resolve() for value in roots["toolchainRoots"])):
         raise producer.UnknownInput("candidate-owned toolchain is untrusted")
@@ -262,6 +358,9 @@ def configure(context, args, producer):
             if role == "configurationRoots":
                 configuration_identities.append([str(path), str(path.resolve()), row.get("state", "present"), actual])
     output_bindings = cache_bindings(outputs, producer)
+    safe_git_configuration(git_paths, producer)
+    configuration_identities += [["search", str(path), str(path.resolve()), os.readlink(path) if path.is_symlink() else None,
+                                  "present" if path.exists() or path.is_symlink() else "absent"] for path in sorted(searched)]
     for part in environment.get("NODE_PATH", "").split(os.pathsep) if "NODE_PATH" in environment else []:
         value = Path(part)
         if not value.is_absolute() or not any(value.resolve().is_relative_to(root) for root in input_paths):

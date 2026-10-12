@@ -414,6 +414,7 @@ class ReceiptTests(unittest.TestCase):
             UNITTEST.replace(b"OK\n", b"FAILED (failures=1)\n"),
             b"Ran 2 tests in 0.001s\n", b"TAP version 13\nok 1 - truncated\n",
             TAP + TAP.replace(b"1..1\n", b""),
+            SPEC_OUTPUT.splitlines()[0] + b"\n",
         ):
             with self.subTest(log=log):
                 self.assertEqual(gate.test_count(PASS + log), 0)
@@ -432,6 +433,7 @@ class ReceiptTests(unittest.TestCase):
         trust = authorize(self.args, self.root, gate)
         argv = [str(SCRIPT), "run", "--repo", self.args.repo, "--gate", "gate-root", "--task", "t-1",
                 "--attempt", "none", "--output", self.args.output, "--profile", self.args.profile,
+                "--timeout", str(self.args.timeout),
                 "--scope", "deterministic", "--closure", "declared", "--", *self.args.command]
         ledger = FakeLedger()
         captured = io.StringIO()
@@ -870,6 +872,126 @@ class ReceiptTests(unittest.TestCase):
                     gate.provenance(self.args)
                 self.repin_policy(original)
                 self.assertEqual(self.fingerprint(), baseline)
+
+    def test_each_required_recipe_runs_tests_and_a_zero_command_cannot_hide(self):
+        suite = self.root / "actual-suite"
+        suite.mkdir()
+        test_file = suite / "fixture_case.py"
+        test_file.write_text("import unittest\nclass Fixture(unittest.TestCase):\n    def test_actual(self):\n        self.assertEqual(1+1,2)\n")
+        script = self.root / "recipe-controls.py"
+        command = [sys.executable, "-I", "-S", "-B", str(script)]
+        for second_has_tests in (False, True):
+            with self.subTest(second_has_tests=second_has_tests):
+                tests = [sys.executable, "-I", "-S", "-B", "-m", "unittest", "discover", "-s", str(suite), "-p", test_file.name]
+                second = tests if second_has_tests else [sys.executable, "-I", "-S", "-B", "-c", "print('actual zero-command ran')"]
+                script.write_text("import subprocess\n" + "\n".join(
+                    "print('==> verify recipe %s', flush=True)\nresult=subprocess.run(%r, check=False)\nprint('<== verify recipe %s rc=%%d 0s' %% result.returncode, flush=True)\nassert result.returncode == 0" % (name, child, name)
+                    for name, child in (("one", tests), ("two", second))) + "\n")
+                self.args.command = command.copy()
+                self.args.script_file = [str(script), str(test_file)]
+                authorize(self.args, self.root, gate)
+                policy = copy.deepcopy(self.args.trust["policy"])
+                self.args.command = command.copy()
+                policy["gates"][self.args.gate].update(command=command, recipes=["one", "two"], testRecipes=["one", "two"])
+                self.repin_policy(policy)
+                self.args.output = str(self.root / ("recipe-positive" if second_has_tests else "recipe-zero"))
+                ledger = FakeLedger()
+                result = gate.produce(self.args, ledger)
+                log = (Path(self.args.output) / "gate.log").read_bytes()
+                self.assertEqual(ledger.metadata["rc"], 0, log)
+                self.assertTrue(ledger.metadata["executed"])
+                self.assertEqual(result["outcome"], "passed" if second_has_tests else "unknown", log)
+                self.assertEqual(result["tests"], 2 if second_has_tests else 0, log)
+                if not second_has_tests:
+                    self.assertIn(b"actual zero-command ran", log)
+                    self.assertEqual(gate.test_count(log, ["one", "two"], ["one"]), 1)
+
+    @unittest.skipIf(os.name == "nt", "module link creation needs Windows developer mode")
+    def test_declared_node_module_link_runs_and_module_changes_or_search_gaps_refuse(self):
+        import shutil
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        package = self.deps / "fixture-module"
+        package.mkdir()
+        module = package / "index.js"
+        module.write_text("module.exports = 1;\n")
+        (self.repo / "node_modules").symlink_to(self.deps, target_is_directory=True)
+        (self.repo / ".gitignore").write_text("node_modules\n")
+        script = self.repo / "fixture_module.cjs"
+        script.write_text("const test=require('node:test'); const assert=require('node:assert/strict'); test('declared module',()=>assert.equal(require('fixture-module'),1));\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "declared module fixture")
+        self.args.command = [node, "--test", "--test-reporter=tap", str(script)]
+        self.args.script_file = [str(script)]
+        result = self.produce(FakeLedger())
+        self.assertEqual(result["outcome"], "passed")
+        self.assertEqual(result["tests"], 1)
+        before = self.fingerprint()
+        module.write_text("module.exports = 2;\n")
+        self.assertIsNone(self.fingerprint()["policy"])
+        self.assertNotEqual(self.fingerprint()["deps"], before["deps"])
+        module.write_text("module.exports = 1;\n")
+        self.assertEqual(self.fingerprint(), before)
+        new_parent_modules = self.root / "node_modules"
+        new_parent_modules.mkdir()
+        self.assertIsNone(self.fingerprint()["policy"])
+        new_parent_modules.rmdir()
+        self.assertEqual(self.fingerprint(), before)
+        policy = copy.deepcopy(self.args.trust["policy"])
+        policy["gates"][self.args.gate]["configurationSearches"] = [row for row in policy["gates"][self.args.gate]["configurationSearches"] if "node_modules" not in row["names"]]
+        with self.assertRaises(gate.UnknownInput):
+            self.repin_policy(policy)
+            gate.provenance(self.args)
+
+    def test_git_configuration_absence_changes_and_unsupported_program_settings_refuse(self):
+        script = self.root / "fixture_git_case.py"
+        script.write_text("import os, subprocess, unittest\nclass Fixture(unittest.TestCase):\n    def test_git(self):\n        self.assertEqual(os.environ['GIT_CONFIG_NOSYSTEM'],'1')\n        self.assertEqual(os.environ['GIT_CONFIG_GLOBAL'],os.devnull)\n        self.assertEqual(os.environ['GIT_CONFIG_SYSTEM'],os.devnull)\n        self.assertNotIn('GIT_CONFIG_COUNT',os.environ)\n        self.assertEqual(subprocess.check_output(['git','--no-pager','config','--no-includes','--local','--get','core.repositoryformatversion']).strip(),b'0')\n")
+        self.args.command = [sys.executable, "-I", "-S", "-B", "-m", "unittest", "discover", "-s", str(self.root), "-p", script.name]
+        self.args.script_file = [str(script)]
+        with mock.patch.dict(os.environ, {"GIT_CONFIG": str(self.root / "undeclared-config"), "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_VALUE_0": "fixture-monitor"}):
+            result = self.produce(FakeLedger())
+        self.assertEqual(result["outcome"], "passed")
+        self.assertEqual(result["tests"], 1)
+        before = self.fingerprint()
+        attributes = self.repo / ".git/info/attributes"
+        attributes.write_text("*.rs text\n")
+        self.assertIsNone(self.fingerprint()["policy"])
+        attributes.unlink()
+        self.assertEqual(self.fingerprint(), before)
+        config = self.repo / ".git/config"
+        original = config.read_bytes()
+        variants = (original + b"\n[include]\npath = fixture-include\n",
+                    original.replace(b"[core]", b"[core]\nfsmonitor = fixture-monitor", 1),
+                    original + b"\n[filter \"fixture\"]\nclean = fixture-filter\n",
+                    original.replace(b"[core]", b"[core]\nhooksPath = fixture-hooks", 1))
+        for changed in variants:
+            self.assertNotEqual(changed, original)
+            config.write_bytes(changed)
+            with mock.patch.object(gate.subprocess, "run", side_effect=AssertionError("Git inspected unsupported configuration")) as executed:
+                with self.assertRaises(gate.UnknownInput):
+                    gate.git(self.repo, "rev-parse", "HEAD")
+                self.assertEqual(executed.call_count, 0)
+            config.write_bytes(original)
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_phase_budgets_are_pinned_strict_and_leave_hashing_time(self):
+        original = copy.deepcopy(self.args.trust["policy"])
+        for key in ("overheadTimeoutSeconds", "verificationTimeoutSeconds", "maxJobTtlSeconds"):
+            for value in (True, 0, 1.0, -1, 7201):
+                with self.subTest(key=key, value=value):
+                    bad = copy.deepcopy(original)
+                    bad["gates"][self.args.gate][key] = value
+                    with self.assertRaises(gate.UnknownInput):
+                        self.repin_policy(bad)
+                        gate.provenance(self.args)
+        for overhead, verification, maximum in ((20, 1, 20), (1, 12, 11)):
+            bad = copy.deepcopy(original)
+            bad["gates"][self.args.gate].update(overheadTimeoutSeconds=overhead, verificationTimeoutSeconds=verification, maxJobTtlSeconds=maximum)
+            with self.assertRaises(gate.UnknownInput):
+                self.repin_policy(bad)
+                gate.provenance(self.args)
+        self.repin_policy(original)
+        self.assertIsNotNone(gate.provenance(self.args))
 
     def test_real_offline_cargo_with_ignored_tests_and_first_writes_preserves_inputs(self):
         from gate_cargo_fixture import prepare

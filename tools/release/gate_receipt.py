@@ -27,6 +27,7 @@ import uuid
 
 GIT_EXECUTABLE = shutil.which("git", path=os.defpath)
 GIT_ENVIRONMENT = {"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"}
+GIT_GUARD = None
 MAX_METADATA = 16 * 1024
 MAX_LOG = 64 * 1024 * 1024
 SUMMARY = re.compile(
@@ -148,11 +149,14 @@ def observed(call):
 
 
 def git(repo, *args):
+    if GIT_GUARD is not None:
+        GIT_GUARD(repo)
     result = subprocess.run(
         [GIT_EXECUTABLE, "-c", "core.fsmonitor=false", "-C", str(repo), *args], check=True, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, timeout=30, env={
             **GIT_ENVIRONMENT,
             "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_COUNT": "0",
         },
     )
     return result.stdout
@@ -273,6 +277,15 @@ def provenance(args):
 
 
 def fingerprint(args, environment, command):
+    started = time.monotonic_ns()
+    try:
+        return fingerprint_inputs(args, environment, command)
+    finally:
+        if isinstance(getattr(args, "trust", None), dict):
+            args.trust.setdefault("fingerprintMs", []).append((time.monotonic_ns() - started) // 1_000_000)
+
+
+def fingerprint_inputs(args, environment, command):
     """Capture all dimensions. Unknown closure or unreadable inputs remain explicit nulls."""
     repo = Path(args.repo).resolve()
     trust = observed(lambda: provenance(args))
@@ -310,7 +323,7 @@ def fingerprint(args, environment, command):
     }
 
 
-def test_count(log, recipes=()):
+def test_count(log, recipes=(), test_recipes=None):
     """Count complete libtest, node TAP/spec and unittest runs; incomplete suites give zero."""
     text = log.decode("utf-8", errors="replace").replace("\r\n", "\n")
     lines = text.splitlines()
@@ -320,6 +333,7 @@ def test_count(log, recipes=()):
     node_summaries = 0
     node_active = False
     node_plan = False
+    spec_pending = False
     unittest_headers = 0
     index = 0
     while index < len(lines):
@@ -342,6 +356,8 @@ def test_count(log, recipes=()):
         elif re.fullmatch(r"1\.\.\d+", line):
             if node_active:
                 node_plan = True
+        elif re.match(r"^\s*[✔✖] .+ \(\d+(?:\.\d+)?ms\)$", line):
+            spec_pending = True
         elif re.fullmatch(r"(?:#|ℹ) tests \d+", line):
             prefix = line[0]
             values = {}
@@ -363,6 +379,8 @@ def test_count(log, recipes=()):
                 if not node_active or not node_plan:
                     return 0
                 node_active = False
+            else:
+                spec_pending = False
             total += values["pass"]
             continue
         elif re.fullmatch(r"Ran \d+ tests? in \d+(?:\.\d+)?s", line):
@@ -388,7 +406,7 @@ def test_count(log, recipes=()):
     running = [int(value) for value in re.findall(r"^running (\d+) tests?$", text, re.MULTILINE)]
     if running and running != libtest:
         return 0
-    if node_headers != node_summaries:
+    if node_headers != node_summaries or spec_pending:
         return 0
     if re.search(r"^OK(?:\s|$)", text, re.MULTILINE) and not unittest_headers:
         return 0
@@ -398,6 +416,26 @@ def test_count(log, recipes=()):
         return 0
     if recipes and begins != list(recipes):
         return 0
+    if recipes:
+        required_tests = set(recipes if test_recipes is None else test_recipes)
+        if not required_tests or not required_tests.issubset(recipes):
+            return 0
+        active = None
+        counts = {}
+        for position, line in enumerate(lines):
+            begin = re.fullmatch(r"==> verify recipe (\S+)", line)
+            end = re.fullmatch(r"<== verify recipe (\S+) rc=0 \d+s", line)
+            if begin:
+                if active is not None:
+                    return 0
+                active = (begin[1], position + 1)
+            elif end:
+                if active is None or active[0] != end[1]:
+                    return 0
+                counts[end[1]] = test_count(("\n".join(lines[active[1]:position]) + "\n").encode())
+                active = None
+        if active is not None or any(counts.get(name, 0) == 0 for name in required_tests) or sum(counts.values()) != total:
+            return 0
     return total
 
 
@@ -531,6 +569,7 @@ def execute(command, repo, environment, timeout):
 
 
 def produce(args, ledger=None):
+    wall_started = time.monotonic_ns()
     command = args.command
     trust = provenance(args)
     environment = execution_environment(args)
@@ -561,7 +600,7 @@ def produce(args, ledger=None):
         after = observed(lambda: fingerprint(args, environment, command))
         log = mask_log(raw_log, {**os.environ, **environment}, trust)
         recipes = trust["selected"]["recipes"]
-        raw_count, masked_count = test_count(raw_log, recipes), test_count(log, recipes)
+        raw_count, masked_count = test_count(raw_log, recipes, trust["selected"]["testRecipes"]), test_count(log, recipes, trust["selected"]["testRecipes"])
         if observed_end["outcome"] == "passed" and (raw_count == 0 or raw_count != masked_count or before != after):
             observed_end["outcome"] = "unknown"
         metadata = {
@@ -583,10 +622,12 @@ def produce(args, ledger=None):
         raise ExecutionUnattested("real execution has no acknowledged completion") from why
     return {"state": "recorded", "original": completed["original"], "registration": registration,
             "metadataSha256": digest(body), "executed": True, "newExecutions": 1,
-            "outcome": metadata["outcome"], "tests": metadata["tests"]}
+            "outcome": metadata["outcome"], "tests": metadata["tests"],
+            "timings": {"fingerprintMs": trust.get("fingerprintMs", []), "wallMs": (time.monotonic_ns() - wall_started) // 1_000_000}}
 
 
 def verify(args, ledger=None):
+    wall_started = time.monotonic_ns()
     trust = provenance(args)
     # A file supplies only the registration locator and observed bytes. The ledger supplies trust.
     metadata_path = Path(args.metadata)
@@ -606,7 +647,7 @@ def verify(args, ledger=None):
     request = {
         "version": 1, "registration": metadata["registration"], "lease": metadata.get("lease", "unknown"), "inputs": current,
         "metadataSha256": digest(raw), "logSha256": digest(log), "logBytes": len(log),
-        "tests": test_count(log, trust["selected"]["recipes"]),
+        "tests": test_count(log, trust["selected"]["recipes"], trust["selected"]["testRecipes"]),
     }
     answer = (ledger or Ledger(trust.get("authority"))).call("gate-reuse", args, request, f"gate-reuse-{uuid.uuid4().hex}")
     if answer.get("executed") is not False or answer.get("newExecutions") != 0:
@@ -618,6 +659,7 @@ def verify(args, ledger=None):
         or answer.get("mandatoryChecks") != ["native", "windows", "flake-judgment", "publish"]
     ):
         raise UnknownInput("native decision has an unsupported reuse scope")
+    answer["timings"] = {"fingerprintMs": trust.get("fingerprintMs", []), "wallMs": (time.monotonic_ns() - wall_started) // 1_000_000}
     return answer
 
 

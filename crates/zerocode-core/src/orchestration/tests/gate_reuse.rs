@@ -46,6 +46,7 @@ impl Fixture {
             worker_pane,
         };
         fixture.pin("gate-root", 'b');
+        fixture.bench.gate_context = Some(gate::JobContext::fixture());
         fixture
     }
 
@@ -157,6 +158,101 @@ fn native_evidence_survives_rebuild_and_reuse_is_not_a_second_execution() {
         .unwrap();
     assert_eq!(decision.from, LEDGER_ITSELF);
     assert!(decision.payload.as_str().contains("authenticated inputs"));
+}
+
+#[test]
+fn phase_budgets_use_strict_integers_and_bound_each_job_mode() {
+    let selected = json!({"timeout":120,"overheadTimeoutSeconds":300,"verificationTimeoutSeconds":200,"maxJobTtlSeconds":1000});
+    assert_eq!(
+        gate::job_lifetime_ms(&selected, &gate::JobMode::Run).unwrap(),
+        420_000
+    );
+    assert_eq!(
+        gate::job_lifetime_ms(&selected, &gate::JobMode::Verify).unwrap(),
+        200_000
+    );
+    for key in [
+        "overheadTimeoutSeconds",
+        "verificationTimeoutSeconds",
+        "maxJobTtlSeconds",
+    ] {
+        for invalid in [json!(true), json!(0), json!(1.0), json!(-1), json!(7201)] {
+            let mut bad = selected.clone();
+            bad[key] = invalid;
+            assert!(
+                gate::job_lifetime_ms(&bad, &gate::JobMode::Run)
+                    .unwrap_err()
+                    .starts_with("invalid_request:")
+            );
+        }
+    }
+    let mut bad = selected.clone();
+    bad["maxJobTtlSeconds"] = 419.into();
+    assert!(gate::job_lifetime_ms(&bad, &gate::JobMode::Run).is_err());
+    bad = selected;
+    bad["verificationTimeoutSeconds"] = 1001.into();
+    assert!(gate::job_lifetime_ms(&bad, &gate::JobMode::Verify).is_err());
+}
+
+#[test]
+fn general_gate_calls_require_job_context_before_a_cached_answer() {
+    let mut fixture = Fixture::new();
+    let (metadata, _) = fixture.completed();
+    let reuse = request(&metadata);
+    assert_eq!(fixture.json(gate::REUSE, &reuse)["decision"], "hit");
+    fixture.bench.gate_context = None;
+    let before = fixture.bench.ledger.runs[0].messages.len();
+    for (verb, body) in [
+        (gate::REGISTER, inputs()),
+        (gate::RECORD, metadata),
+        (gate::REUSE, reuse),
+    ] {
+        let answer = fixture.call(verb, &body);
+        assert_ne!(
+            answer.reply.exit_code, 0,
+            "general gate call accepted without scoped context"
+        );
+        assert!(answer.reply.stderr.contains("out_of_scope:"));
+    }
+    assert_eq!(fixture.bench.ledger.runs[0].messages.len(), before);
+}
+
+#[test]
+fn registration_start_and_completion_without_job_provenance_cannot_hit() {
+    let mut fixture = Fixture::new();
+    let (metadata, _) = fixture.completed();
+    let original = fixture.bench.ledger.export();
+    for phase in ["registered", "started", "completed"] {
+        fixture.bench.ledger = Ledger::rebuild(original.clone()).unwrap();
+        let row = fixture.bench.ledger.runs[0]
+            .messages
+            .iter_mut()
+            .find(|row| {
+                let body: Value = serde_json::from_str(row.payload.as_str()).unwrap_or_default();
+                body["gateEvidenceV1"]["phase"] == phase
+            })
+            .unwrap();
+        let mut body: Value = serde_json::from_str(row.payload.as_str()).unwrap();
+        body["gateEvidenceV1"]["value"]
+            .as_object_mut()
+            .unwrap()
+            .remove("job");
+        row.payload = body.to_string().into();
+        let answer = fixture.call(gate::REUSE, &request(&metadata));
+        let value: Value = serde_json::from_str(&answer.reply.stdout).unwrap_or_default();
+        assert_ne!(
+            value["decision"], "hit",
+            "missing {phase} job provenance was accepted"
+        );
+        if phase == "registered" {
+            assert_ne!(answer.reply.exit_code, 0);
+            assert!(answer.reply.stderr.contains("out_of_scope:"));
+        } else {
+            assert_eq!(answer.reply.exit_code, 0);
+            assert_eq!(value["decision"], "miss");
+            assert!(value["reason"].as_str().unwrap().contains("out_of_scope:"));
+        }
+    }
 }
 
 #[test]
