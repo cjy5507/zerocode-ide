@@ -512,13 +512,56 @@ pub(super) fn pane_channel_session_id(
     })
 }
 
-/// Resolve a session only to the private channel its pane published.
-pub(super) fn channel_addr(state: &AppState, session: &str) -> Result<String, String> {
-    state
-        .channels()
+/// What this window keeps for a session once its pane published its channel:
+/// the address alone. The bearer the channel took goes to its subscriber and
+/// is dropped here.
+pub(super) fn zo_channel_entry(addr: String, token: Option<String>) -> String {
+    drop(token);
+    addr
+}
+
+/// Resolve a session only to the private channel its pane published, and the
+/// bearer an exchange presents there: this window's one token.
+///
+/// Pure over the registry and the supervisor, so the road a card's answer
+/// takes can be asserted against a socket without an app.
+pub(super) fn zo_channel_in(
+    channels: &HashMap<String, String>,
+    supervisor: Option<&LaneSupervisor>,
+    session: &str,
+) -> Result<ZoChannel, String> {
+    let addr = channels
         .get(session)
         .cloned()
-        .ok_or_else(|| format!("세션 {session}의 이벤트 채널을 모릅니다"))
+        .ok_or_else(|| format!("세션 {session}의 이벤트 채널을 모릅니다"))?;
+    Ok(ZoChannel {
+        addr,
+        token: supervisor
+            .and_then(LaneSupervisor::token)
+            .map(str::to_string),
+    })
+}
+
+/// [`zo_channel_in`] over this window's registries — every door that talks to
+/// a session's channel goes by it.
+pub(super) fn zo_channel(state: &AppState, session: &str) -> Result<ZoChannel, String> {
+    zo_channel_in(&state.channels(), state.supervisor(), session)
+}
+
+/// Answer one prompt on a session's channel: the road a card's button takes.
+/// One blocking exchange, like every call on a pane's channel.
+pub(super) fn answer_prompt(
+    channel: ZoChannel,
+    prompt_id: u64,
+    decision: String,
+) -> Result<(), String> {
+    with_client(channel.addr, channel.token, async move |client| {
+        client
+            .respond_to_permission(prompt_id, &decision)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
 }
 
 /// Every live zo pane channel, as `(session, address)`.

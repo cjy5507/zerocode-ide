@@ -216,6 +216,47 @@ async fn a_wrong_token_is_refused_with_the_code_the_window_reads() {
     assert!(right.call(method::LIST, json!({})).await.is_ok());
 }
 
+/// 다른 토큰으로 온 IDE 의 답은 `-32002` 로 돌아가고 물음은 그대로 열려 있다 —
+/// 그래서 패인의 번호 메뉴가 같은 물음에 답할 수 있다. 창 카드가 거절된 답 아래에
+/// 「터미널에서 번호로 답할 수 있다」고 말하는 근거가 이것이다(t-49081: 셸에 친
+/// zo 는 제 토큰을 만들어 발견 파일에 적는데, 창은 그 채널에 자기 토큰으로 답했다).
+#[tokio::test]
+async fn a_refused_ide_answer_leaves_the_question_for_the_pane() {
+    let channel = open(Some("bearer-this-pane-made")).await;
+    let (block, parked, runtime_side) = parked_permission(0);
+    let prompt_id = channel.publish(&block).expect("prompt id");
+
+    let refused = connect(&channel, Some("bearer-the-window-hands-out"))
+        .await
+        .respond_to_permission(prompt_id, "allow_once")
+        .await
+        .expect_err("another bearer must not answer the question");
+    assert_eq!(
+        refused.to_string(),
+        "permission.respond failed (-32002): missing or wrong token for this events channel",
+        "the card shows this sentence as it comes"
+    );
+
+    let listed = connect(&channel, Some("bearer-this-pane-made"))
+        .await
+        .call(method::LIST, json!({}))
+        .await
+        .expect("list");
+    assert_eq!(
+        listed[0][runtime::subagent_panes::LIST_ASKING].as_u64(),
+        Some(1),
+        "a refused answer closed the question the pane still shows"
+    );
+
+    // 패인에서 번호를 누른 것과 같은 길: 파킹이 풀리고 IDE 쪽 물음은 내려간다.
+    assert!(events::resolve_pending(
+        parked,
+        &Answer::Permission(PermissionDecision::AllowOnce)
+    ));
+    channel.retire_prompt(prompt_id, ResolvedBy::Pane);
+    assert_eq!(runtime_side.await.expect("runtime side"), PermissionDecision::AllowOnce);
+}
+
 /// 패인에서 사람이 먼저 y 를 눌렀다면 창의 늦은 답은 거절돼야 한다 — 은퇴한
 /// `prompt_id` 를 조용히 받아 주면 답이 두 번 세어진다.
 #[tokio::test]

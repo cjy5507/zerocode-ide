@@ -781,6 +781,27 @@ enum ZoChannelOwner {
     Term(TermId),
 }
 
+/// A pane-owned Zo session's private events channel as an exchange reaches
+/// it: the loopback address its process published and the bearer presented
+/// there.
+#[derive(Clone, PartialEq, Eq)]
+struct ZoChannel {
+    addr: String,
+    token: Option<String>,
+}
+
+/// Never the bearer itself — a channel is printed wherever a lookup or an
+/// exchange is debugged, and its bearer opens every tool approval it asks.
+impl std::fmt::Debug for ZoChannel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ZoChannel")
+            .field("addr", &self.addr)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 struct ForegroundAgentLook {
     term: TermId,
     child_in_front: Option<bool>,
