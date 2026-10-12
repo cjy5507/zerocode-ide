@@ -849,3 +849,58 @@ fn concurrent_snapshots_cannot_give_an_old_provider_a_newer_revision() {
     );
     assert_eq!(versions.last(), Some(&100));
 }
+
+#[cfg(unix)]
+#[test]
+fn importing_a_named_pipe_refuses_it_before_opening_a_reader() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let pipe = source.path().join("model.safetensors");
+    let name = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+    // SAFETY: name is terminated, and both directories belong to this test.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let source_path = source.path().to_owned();
+    let target_path = target.path().to_owned();
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let result = test_support::copy_import(
+            &source_path,
+            &target_path,
+            &artifact("model.safetensors", b"weights"),
+            &AtomicBool::new(false),
+            |_| {},
+        );
+        send.send(result).unwrap();
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut reader_opened = false;
+    let result = loop {
+        if let Ok(result) = receive.try_recv() {
+            break result;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "named pipe import did not settle"
+        );
+        match fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&pipe)
+        {
+            Ok(writer) => {
+                reader_opened = true;
+                drop(writer);
+            }
+            Err(error) => assert_eq!(error.raw_os_error(), Some(libc::ENXIO)),
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    reader.join().unwrap();
+    assert_eq!(result, Err(Error::Integrity));
+    assert!(
+        !reader_opened,
+        "a non-file source must be refused before a blocking open"
+    );
+}

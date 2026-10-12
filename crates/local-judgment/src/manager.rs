@@ -972,6 +972,10 @@ pub(crate) fn copy_import(
     mut progress: impl FnMut(u64),
 ) -> Result<()> {
     let path = source.join(catalog::relative(&artifact.path)?);
+    let source_info = fs::metadata(&path).map_err(|_| Error::Storage)?;
+    if !source_info.is_file() {
+        return Err(Error::Integrity);
+    }
     let mut source = File::open(path).map_err(|_| Error::Storage)?;
     let metadata = source.metadata().map_err(|_| Error::Storage)?;
     if !metadata.is_file() || metadata.len() != artifact.bytes {
