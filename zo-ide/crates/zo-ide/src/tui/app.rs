@@ -1757,6 +1757,7 @@ impl Ui {
         let frame = Frame {
             composer,
             effort_tier: self.effort_tier,
+            permission: None,
             effort_effect: self.effort_effect.as_ref(),
             now,
             status: self.status.as_ref(),
@@ -8384,6 +8385,7 @@ mod tests {
         let frame = crate::tui::view::Frame {
             composer: &composer,
             effort_tier: None,
+            permission: None,
             effort_effect: None,
             now: std::time::Instant::now(),
             status: ui.status.as_ref(),

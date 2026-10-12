@@ -1322,6 +1322,9 @@ pub fn footer_location(cwd: &str, worktree_context: Option<&str>) -> String {
 pub struct Frame<'a> {
     pub composer: &'a Composer,
     pub effort_tier: Option<EffortTier>,
+    /// The footer's permission mark — the mode's name while the session may
+    /// run anything, else `None`.
+    pub permission: Option<&'a str>,
     pub effort_effect: Option<&'a EffortEffect>,
     pub now: Instant,
     pub status: Option<&'a Status>,
@@ -1664,11 +1667,13 @@ mod tests {
     };
     use crate::tui::ansi::{Line, Style};
     use crate::tui::composer::Composer;
+    use crate::tui::effort_effect::EffortTier;
 
     fn frame<'a>(composer: &'a Composer, status: Option<&'a Status>) -> Frame<'a> {
         Frame {
             composer,
             effort_tier: None,
+            permission: None,
             effort_effect: None,
             now: Instant::now(),
             status,
@@ -1699,6 +1704,34 @@ mod tests {
             max_rows: 39,
             max_height: 39,
         }
+    }
+
+    /// zo paints its footer through the frame, not through `footer()` alone
+    /// (t-48216 captures): a Full Access session at smart shows both marks on
+    /// the painted row.
+    #[test]
+    fn the_painted_footer_wears_the_permission_and_effort_marks() {
+        let composer = Composer::new();
+        let frame = Frame {
+            permission: Some("Full Access"),
+            effort_tier: Some(EffortTier::Smart),
+            model: "claude-opus-5-5",
+            effort: "smart",
+            cwd: "/tmp",
+            width: 80,
+            ..frame(&composer, None)
+        };
+        let (rows, _) = build(&frame);
+        let plain: Vec<String> = rows.iter().map(Line::plain).collect();
+        let footer_row = plain
+            .iter()
+            .find(|row| row.contains("claude-opus-5-5"))
+            .expect("the footer row");
+        assert_eq!(
+            footer_row.trim_end(),
+            "  ▲ Full Access   claude-opus-5-5 ◆ smart · /tmp",
+            "{plain:#?}"
+        );
     }
 
     #[test]
