@@ -5913,7 +5913,7 @@ await test("판단 모델은 명시적으로 적용하고 로컬 연결은 Jev �
 });
 
 await test("로컬 모델은 서버 주소 대신 다운로드 상태를 보이고 취소와 오래된 진행 이벤트를 구별한다", async () => {
-  const previous = clone(backend.zoSettings.smart);
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
   delete backend.managedModelState;
   backend.managedPendingKinds = new Set(["download"]);
   await openSettings(pageA, "api-routers");
@@ -5949,7 +5949,7 @@ await test("로컬 모델은 서버 주소 대신 다운로드 상태를 보이�
 });
 
 await test("로컬 모델은 준비와 응답 확인을 마친 같은 서버만 명시적으로 적용한다", async () => {
-  const previous = clone(backend.zoSettings.smart);
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
   delete backend.managedModelState;
   backend.managedJudgmentSettings();
   backend.managedModelState.runtime.state = "ready";
@@ -5967,6 +5967,8 @@ await test("로컬 모델은 준비와 응답 확인을 마친 같은 서버만 
     await pageA.waitForFunction(() => !managedJudgmentController.activating);
     assertEqual(backend.typesafeSettings().provider, before, "a failed response check replaced the provider");
     assert(!backend.calls.slice(failedAt).some((entry) => entry.command === "managed_judgment_apply"), "a failed check reached apply");
+    const runningWords = await pageA.evaluate(() => t("settings.managed.runningUnapplied", "실행 중 · 아직 적용하지 않음"));
+    assert((await pageA.locator(".managed-judgment-model").textContent()).includes(runningWords), "a running but unverified model was shown as merely installed");
     backend.managedCheckFailure = false;
     backend.managedChangeOnCheck = true;
     const changedAt = backend.calls.length;
@@ -5994,6 +5996,56 @@ await test("로컬 모델은 준비와 응답 확인을 마친 같은 서버만 
     await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
   }
   return "failed check cannot apply · cross-window identity guard · explicit apply · stopped is not running";
+});
+
+await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁은 화면을 지원한다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  const managedPage = await context.newPage();
+  await installTauri(managedPage, "managed-quality");
+  attachFaultRecorder(managedPage, "managed-quality");
+  try {
+    await bootPage(managedPage, "managed-quality");
+    await openSettings(managedPage, "api-routers");
+    await managedPage.selectOption("#judgment-provider-kind", "local");
+    await managedPage.waitForFunction(() => managedJudgmentController.snapshot?.models.length > 0);
+    await managedPage.locator("#managed-judgment-prepare").focus();
+    const preparedAt = backend.calls.length;
+    await managedPage.keyboard.press("Enter");
+    await backend.waitForCall("managed-quality", "managed_judgment_prepare_runtime", preparedAt);
+    await managedPage.waitForFunction(() => managedJudgmentController.snapshot?.runtime.state === "ready");
+    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      await setQualityLocale(managedPage, locale);
+      await managedPage.evaluate(() => judgmentProviderController.render());
+      for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+        await setQualityTheme(managedPage, theme);
+        const violations = await axeViolations(managedPage, AxeBuilder, "#managed-judgment-panel");
+        assertEqual(violations, [], `${locale}/${theme} local manager accessibility`);
+      }
+      for (const width of [360, 720, 1280, 1998]) {
+        await managedPage.setViewportSize({ width, height: 1069 });
+        await renderSettled(managedPage);
+        const geometry = await managedPage.locator("#managed-judgment-panel").evaluate((panel) => ({ client: panel.clientWidth, scroll: panel.scrollWidth }));
+        assert(geometry.client > 0 && geometry.scroll <= geometry.client + 1, `${locale}/${width} local manager overflows`, geometry);
+      }
+    }
+    await setQualityLocale(managedPage, "ko");
+    await managedPage.evaluate(() => judgmentProviderController.render());
+    if (process.env.MANAGED_JUDGMENT_SHOTS) {
+      for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+        await setQualityTheme(managedPage, theme);
+        await managedPage.locator("#typesafe-card").screenshot({ path: resolve(process.env.MANAGED_JUDGMENT_SHOTS, `managed-${theme}.png`), animations: "disabled" });
+      }
+    }
+    const looseButtons = await managedPage.locator("#managed-judgment-panel .btn").evaluateAll((buttons) => buttons.filter((button) => !button.closest(".settings-action-row") && button.id !== "managed-judgment-cancel").map((button) => button.id));
+    assertEqual(looseButtons, [], "managed actions are not grouped with their controls");
+  } finally {
+    await managedPage.close();
+    backend.zoSettings.smart = previous;
+    backend.managedModelState = previousManaged;
+  }
+  return "real Enter · 5 locales × 2 themes · 4 widths · model actions grouped";
 });
 
 await test("다른 서버의 키를 모델 선택 전에 저장하고 늦은 목록은 새 선택을 덮지 않는다", async () => {

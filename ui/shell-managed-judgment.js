@@ -208,6 +208,15 @@ const managedJudgmentController = {
     return { card, title, facts, source, state, buttons, signature: null };
   },
 
+  modelState(model) {
+    const snapshot = this.snapshot;
+    if (snapshot.appliedModelId === model.id) return t("settings.managed.inUse", "실행 중 · 현재 적용됨");
+    if (snapshot.server.modelId === model.id && snapshot.server.state === "starting") return t("settings.managed.starting", "모델을 시작하는 중 · 아직 적용하지 않음");
+    if (snapshot.server.modelId === model.id && snapshot.server.state === "ready") return t("settings.managed.runningUnapplied", "실행 중 · 아직 적용하지 않음");
+    if (snapshot.configuredModelId === model.id) return t("settings.managed.configuredStopped", "선택된 모델 · 실행되지 않음. 실행하고 적용을 눌러 다시 연결하세요.");
+    return model.installed ? t("settings.managed.installed", "설치됨 · 아직 적용하지 않음") : t("settings.managed.notInstalled", "아직 다운로드하지 않음");
+  },
+
   render() {
     const snapshot = this.snapshot;
     const busy = this.busy || this.operating();
@@ -238,7 +247,8 @@ const managedJudgmentController = {
         ? t("settings.managed.progress", "{{received}} / {{total}}", { received: bytesLabel(operation.receivedBytes), total: bytesLabel(operation.totalBytes) })
         : t("settings.managed.working", "작업 중… 완료될 때까지 현재 모델을 유지합니다.");
     el("managed-judgment-cancel").disabled = operation?.state !== "running";
-    if (operation?.state === "failed") this.say(this.failure(operation.error));
+    if (operation?.state === "failed" && !this.busy) this.say(this.failure(operation.error));
+    if (operation?.state === "cancelled" && !this.busy) this.say(this.failure("cancelled"));
     const models = el("managed-judgment-models");
     const kept = new Set();
     for (const model of snapshot?.models ?? []) {
@@ -252,7 +262,7 @@ const managedJudgmentController = {
       const running = snapshot.server.modelId === model.id && snapshot.server.state !== "stopped" && snapshot.server.state !== "failed";
       const applied = snapshot.appliedModelId === model.id;
       const configured = snapshot.configuredModelId === model.id;
-      const signature = JSON.stringify([model, busy, running, applied, configured, snapshot.runtime.state, t("settings.managed.download", "다운로드")]);
+      const signature = JSON.stringify([model, busy, running, applied, configured, snapshot.server.state, snapshot.runtime.state, t("settings.managed.download", "다운로드")]);
       if (row.signature === signature) continue;
       row.signature = signature;
       row.title.textContent = model.label;
@@ -266,12 +276,7 @@ const managedJudgmentController = {
         row.source.hidden = true;
         row.source.removeAttribute("href");
       }
-      row.state.textContent = applied
-        ? t("settings.managed.inUse", "실행 중 · 현재 적용됨")
-        : configured && !running
-          ? t("settings.managed.configuredStopped", "선택된 모델 · 실행되지 않음. 실행하고 적용을 눌러 다시 연결하세요.")
-          : model.installed ? t("settings.managed.installed", "설치됨 · 아직 적용하지 않음")
-            : t("settings.managed.notInstalled", "아직 다운로드하지 않음");
+      row.state.textContent = this.modelState(model);
       row.buttons.install.textContent = t("settings.managed.download", "다운로드");
       row.buttons.activate.textContent = t("settings.managed.activate", "실행하고 적용");
       row.buttons.import.textContent = t("settings.managed.import", "기존 파일 등록");
