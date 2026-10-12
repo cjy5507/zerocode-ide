@@ -1585,8 +1585,8 @@ fn rows_under_the_composer(frame: &Frame<'_>, focus: Color) -> Vec<Line> {
             frame.plan_mode,
             frame.goal_status,
             frame.loop_status,
-            None,
-            None,
+            frame.permission,
+            frame.effort_tier.map(EffortTier::caret_span),
         );
         if let Some(effect) = frame
             .effort_effect

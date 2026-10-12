@@ -1757,7 +1757,7 @@ impl Ui {
         let frame = Frame {
             composer,
             effort_tier: self.effort_tier,
-            permission: None,
+            permission: self.permission_mark(),
             effort_effect: self.effort_effect.as_ref(),
             now,
             status: self.status.as_ref(),
@@ -2686,6 +2686,13 @@ impl Ui {
         }
     }
 
+    /// The footer's amber mark: the mode's name while the session may run
+    /// anything, else nothing.
+    fn permission_mark(&self) -> Option<&'static str> {
+        matches!(self.permission_mode, PermissionMode::DangerFullAccess | PermissionMode::Allow)
+            .then(|| super::permissions::mode_label(self.permission_mode))
+    }
+
     fn passive_footer_line(&self) -> Line {
         let display_effort = fast::display_effort(&self.effort, self.fast);
         let context_used_tokens = self
@@ -2709,8 +2716,7 @@ impl Ui {
             self.permission_mode == PermissionMode::ReadOnly,
             goal::footer_status_from_snapshot(&self.goal, &self.autonomous),
             (self.loops != "none").then_some(self.loops.as_str()),
-            matches!(self.permission_mode, PermissionMode::DangerFullAccess | PermissionMode::Allow)
-                .then(|| super::permissions::mode_label(self.permission_mode)),
+            self.permission_mark(),
             self.effort_tier.map(EffortTier::caret_span),
         )
     }
