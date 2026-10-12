@@ -324,7 +324,7 @@ fn log_line(typed: &[(String, PageType)], now_ms: i64) -> String {
         })
         .collect();
     format!(
-        "- {day} {hour:02}:{minute:02} UTC — zerocode vault-types → 페이지 {}쪽에 {TYPE_KEY} 추가 ({})",
+        "- {day} {hour:02}:{minute:02} UTC — zerocode vault-types → 페이지 {}개에 {TYPE_KEY} 추가 ({})",
         typed.len(),
         counts.join(" · ")
     )
