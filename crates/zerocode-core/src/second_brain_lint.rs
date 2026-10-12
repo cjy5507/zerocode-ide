@@ -478,7 +478,7 @@ fn walk_raw(root: &Path) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::second_brain::WIKI_DIR;
-    use crate::second_brain_graph::GraphCache;
+    use crate::second_brain_graph::{GraphCache, MAX_PAGE_BYTES};
 
     /// A vault set up the way the window sets one up, plus the pages and raw
     /// items named. Paths are vault-relative.
@@ -646,6 +646,91 @@ mod tests {
         let lint = lint_of(root.path());
         assert_eq!(lint.unlogged_raw, ["raw/nested/never.md"]);
         assert_eq!(lint.counts.unlogged_raw, 1);
+    }
+
+    /// A page citing several raw files names every one of them, however its
+    /// `source:` separates them: `; ` written inline, or a block list this
+    /// reader flattens to `a,b` (t-46020).
+    #[test]
+    fn a_source_naming_several_raw_files_names_every_one_of_them() {
+        let root = vault(&[
+            ("raw/a.md", "a\n"),
+            ("raw/b.md", "b\n"),
+            ("raw/c.md", "c\n"),
+            ("raw/d.md", "d\n"),
+            ("wiki/index.md", "- [[inline]]\n- [[block]]\n"),
+            (
+                "wiki/inline.md",
+                "---\nsource: \"raw/a.md; raw/b.md\"\ningested_at: 2026-09-07\n---\ninline\n",
+            ),
+            (
+                "wiki/block.md",
+                "---\nsource:\n  - raw/c.md\n  - raw/d.md\ningested_at: 2026-09-07\n---\nblock\n",
+            ),
+        ]);
+        let lint = lint_of(root.path());
+        assert!(lint.unlogged_raw.is_empty(), "{:?}", lint.unlogged_raw);
+    }
+
+    /// The index names every page and the log every ingest, so both outgrow
+    /// the page bound while still true: a page listed, or a raw file logged,
+    /// past [`MAX_PAGE_BYTES`] is still listed and logged (t-46020).
+    #[test]
+    fn the_index_and_the_log_are_read_past_the_page_bound() {
+        let filler = format!("{}\n", "x".repeat(99)).repeat(MAX_PAGE_BYTES / 100 + 1);
+        let root = vault(&[
+            ("raw/late.md", "late\n"),
+            (
+                "wiki/index.md",
+                &format!("- [[early]]\n{filler}- [[late]]\n"),
+            ),
+            ("wiki/early.md", &format!("{FULL}early\n")),
+            ("wiki/late.md", &format!("{FULL}late\n")),
+            (
+                "wiki/log.md",
+                &format!("{filler}- 2026-10-12 09:00 — raw/late.md → [[late]]\n"),
+            ),
+        ]);
+        let graph = GraphCache::new().scan(root.path(), false);
+        assert_eq!(
+            graph.truncated, 0,
+            "neither ledger is cut at the page bound"
+        );
+        assert!(
+            graph.lint.index_gaps.is_empty(),
+            "{:?}",
+            graph.lint.index_gaps
+        );
+        assert!(
+            graph.lint.unlogged_raw.is_empty(),
+            "{:?}",
+            graph.lint.unlogged_raw
+        );
+    }
+
+    /// A relation value may carry a tail after its link — a heading
+    /// (`"[[page]]#절"`) or a note — and it still names the page, not a ghost
+    /// spelled with brackets (t-46020).
+    #[test]
+    fn a_relation_value_with_a_tail_after_its_link_still_names_the_page() {
+        let root = vault(&[
+            ("wiki/index.md", "- [[a]]\n- [[b]]\n"),
+            (
+                "wiki/a.md",
+                "---\nsource: raw/a.md\ningested_at: 2026-09-07\n\
+                 contradicts: \"[[b]]#숨은 탭에서는 칠함이 오지 않는다\"\n\
+                 related:\n  - \"[[b]]#흐르는-글은-단어-단위로-풀린다\"\n---\na answers [[b]]\n",
+            ),
+            ("wiki/b.md", &format!("{FULL}b\n")),
+        ]);
+        let lint = lint_of(root.path());
+        assert!(lint.ghost_links.is_empty(), "{:?}", lint.ghost_links);
+        assert_eq!(lint.contradictions, 1);
+        assert!(
+            lint.undeclared_relations.is_empty(),
+            "{:?}",
+            lint.undeclared_relations
+        );
     }
 
     #[test]
