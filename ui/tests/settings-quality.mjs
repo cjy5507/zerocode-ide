@@ -82,6 +82,20 @@ export async function contrastTable(page, AxeBuilder, include) {
       .some((check) => check.data?.messageKey === "hidden")) {
       const target = node.target.join(" ");
       const control = page.locator(target);
+      const hiddenBy = await control.evaluate((element) => {
+        for (let current = element; current; current = current.parentElement) {
+          if (getComputedStyle(current).display === "none") {
+            return current.id ? `#${current.id}` : current.tagName.toLowerCase();
+          }
+        }
+        return null;
+      });
+      if (hiddenBy !== null) {
+        rows.push({ verdict: "hidden", target, text: "", fg: null, bg: null,
+          ratio: null, size: null, why: `display:none at ${hiddenBy}` });
+        console.info(`contrast: skipped hidden ${target} (display:none at ${hiddenBy})`);
+        continue;
+      }
       const scroll = await control.evaluateHandle((element) => {
         const saved = [];
         for (let at = element; at; at = at.parentElement) {

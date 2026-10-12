@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import {
   SETTINGS_QUALITY_SPEC,
   axeViolations,
+  contrastTable,
   inspectSettingsLayout,
   maximalSettingsFixture,
   measureSettingsPerformance,
@@ -6093,6 +6094,8 @@ await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁�
     await managedPage.keyboard.press("Enter");
     await backend.waitForCall("managed-quality", "managed_judgment_prepare_runtime", preparedAt);
     await managedPage.waitForFunction(() => managedJudgmentController.snapshot?.runtime.state === "ready");
+    await managedPage.locator("#managed-judgment-import").evaluate((element) => { element.open = true; });
+    await managedPage.locator("#managed-judgment-import-path").fill("/models/example");
     for (const locale of SETTINGS_QUALITY_SPEC.locales) {
       traceManaged(`locale ${locale}`);
       await setQualityLocale(managedPage, locale);
@@ -6102,6 +6105,11 @@ await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁�
         await setQualityTheme(managedPage, theme);
         const violations = await axeViolations(managedPage, AxeBuilder, "#managed-judgment-panel");
         assertEqual(violations, [], `${locale}/${theme} local manager accessibility`);
+        const contrast = await contrastTable(managedPage, AxeBuilder, "#managed-judgment-import-path");
+        const importedPath = contrast.find((row) => row.target === "#managed-judgment-import-path");
+        assert(importedPath?.verdict !== "hidden" && importedPath?.ratio >= 4.5
+          && importedPath.fg !== null && importedPath.bg !== null,
+        `${locale}/${theme} visible import path has no passing contrast measurement`, importedPath);
       }
       for (const viewport of [SETTINGS_QUALITY_SPEC.viewport, { width: 1280, height: 1069 }, { width: 1998, height: 1069 }]) {
         traceManaged(`layout ${locale}/${viewport.width}x${viewport.height}`);

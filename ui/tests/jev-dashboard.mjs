@@ -1549,6 +1549,11 @@ export async function testJevDashboard(browser, origin, ok) {
           node.getBoundingClientRect().top >= node.closest(".settings-frame").getBoundingClientRect().bottom);
         const card = await contrastTable(page, AxeBuilder, "#typesafe-card");
         const scrollAfter = await frame.evaluate((node) => [node.scrollTop, node.scrollLeft]);
+        const hiddenImport = card.find((row) => row.target === "#managed-judgment-import-path");
+        ok(`${theme}: a control under a hidden provider panel is recorded as unmeasured, not passed`,
+          hiddenImport?.verdict === "hidden" && hiddenImport.ratio === null
+            && hiddenImport.why === "display:none at #managed-judgment-panel",
+          JSON.stringify(hiddenImport));
         const key = card.find((row) => row.target === "#typesafe-key-input");
         ok(`${theme}: the offscreen key placeholder is measured and the card's scroll is restored`,
           clipped && key?.ratio >= CONTRAST_FLOOR && key.fg !== null && key.bg !== null
@@ -1598,12 +1603,14 @@ export async function testJevDashboard(browser, origin, ok) {
       await writeFile(join(EVIDENCE_DIR, "jev-contrast.json"),
         `${JSON.stringify(Object.fromEntries(Object.entries(contrast).map(([theme, list]) => [theme, least(list)])), null, 2)}\n`);
     }
-    const under = rows.filter((row) => row.verdict === "fail" || (row.ratio !== null && row.ratio < CONTRAST_FLOOR));
-    const unknown = rows.filter((row) => row.verdict === "unknown" || row.ratio === null);
-    ok(`every text on the dashboard and the card clears ${CONTRAST_FLOOR}:1 in both treatments`,
-      AxeBuilder !== null && rows.length > 0 && under.length === 0 && unknown.length === 0,
+    const visible = rows.filter((row) => row.verdict !== "hidden");
+    const under = visible.filter((row) => row.verdict === "fail" || (row.ratio !== null && row.ratio < CONTRAST_FLOOR));
+    const unknown = visible.filter((row) => row.verdict === "unknown" || row.ratio === null);
+    ok(`every visible text on the dashboard and the card clears ${CONTRAST_FLOOR}:1 in both treatments`,
+      AxeBuilder !== null && visible.length > 0 && under.length === 0 && unknown.length === 0,
       AxeBuilder === null ? "@axe-core/playwright is not installed" : JSON.stringify({
-        measured: rows.length, least: Math.min(...rows.filter((row) => row.ratio !== null).map((row) => row.ratio)),
+        measured: visible.length, hidden: rows.length - visible.length,
+        least: Math.min(...visible.filter((row) => row.ratio !== null).map((row) => row.ratio)),
         under: under.slice(0, 6), unknown: unknown.slice(0, 6) }));
 
     await testJevReview(page, ok);
