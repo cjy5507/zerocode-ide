@@ -856,7 +856,7 @@ pub(crate) fn relation_target(item: &str) -> Option<String> {
 /// Byte offsets rather than `lines()`: that iterator drops a `\r` without
 /// telling anyone how many bytes it consumed, and a vault written on Windows
 /// would have its whole frontmatter read one byte out of step per line.
-fn split_frontmatter(text: &str) -> (&str, &str) {
+pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
     let whole = text.strip_prefix('\u{feff}').unwrap_or(text);
     let after = match whole.strip_prefix("---") {
         Some(rest) if rest.starts_with('\n') => &rest[1..],
@@ -883,7 +883,7 @@ fn split_frontmatter(text: &str) -> (&str, &str) {
 /// protocol writes (`second_brain::AGENTS_GUIDE`), and a graph view is not the
 /// place to grow a YAML engine — a key this reader cannot parse is simply not
 /// a fact the picture uses.
-fn parse_frontmatter(front: &str) -> BTreeMap<String, String> {
+pub(crate) fn parse_frontmatter(front: &str) -> BTreeMap<String, String> {
     let mut fields: BTreeMap<String, String> = BTreeMap::new();
     let mut open: Option<String> = None;
     for line in front.lines() {
@@ -936,7 +936,7 @@ fn split_scalar_list(value: &str) -> Vec<String> {
     held
 }
 
-fn unquote(value: &str) -> &str {
+pub(crate) fn unquote(value: &str) -> &str {
     for mark in ['"', '\''] {
         if let Some(inner) = value
             .strip_prefix(mark)

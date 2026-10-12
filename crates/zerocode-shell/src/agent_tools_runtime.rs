@@ -6693,6 +6693,12 @@ pub(super) async fn answer_browser_command(
                     if read.full && read.selector.is_none() && mode.asks() {
                         crate::browser_read::label_full_read(&read.label, &report.url);
                     }
+                    // A page read whole is the raw inbox's input (t-43992):
+                    // handed over before its words are answered, written off
+                    // this road.
+                    if read.selector.is_none() {
+                        cmd::second_brain::feed_read_page(app, pane, &report);
+                    }
                     page_said(&read.label, read_words(report))
                 }
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
