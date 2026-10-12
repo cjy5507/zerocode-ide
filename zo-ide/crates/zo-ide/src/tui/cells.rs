@@ -47,6 +47,12 @@ impl Prefix {
         )
     }
 
+    /// 답변 셀의 `  ` / `  ` — 불릿 없이 두 칸 들여 선다(t-48216).
+    #[must_use]
+    pub fn hang() -> Self {
+        Self::new(Span::raw("  "), Span::raw("  "))
+    }
+
     /// 유저 셀의 `› ` / `  `.
     #[must_use]
     pub fn user() -> Self {
@@ -1169,7 +1175,12 @@ impl MarkdownStream {
     /// 뒤의 접기를 그대로 통과한다. codex 도 답변 스트림에
     /// `current_stream_width(/*reserved_cols*/ 2)` 를 준다.
     fn content_width(&self) -> usize {
-        self.width.saturating_sub(Prefix::bullet().width()).max(1)
+        self.width.saturating_sub(self.prefix().width()).max(1)
+    }
+
+    /// Reasoning keeps its bullet; an answer hangs two columns in without one.
+    fn prefix(&self) -> Prefix {
+        if self.style.is_some() { Prefix::bullet() } else { Prefix::hang() }
     }
 
     /// 원문을 지금 폭의 표시 행으로. 마커(`• `)는 내용이 있는 첫 행이 가져가고
@@ -1194,9 +1205,9 @@ impl MarkdownStream {
             .rposition(|line| !line.plain().trim().is_empty())
             .map_or(0, |at| at + 1);
         let trailing = md.split_off(keep);
-        let (lines, marker) = prefixed_marking(&md, self.width, &Prefix::bullet(), first);
+        let (lines, marker) = prefixed_marking(&md, self.width, &self.prefix(), first);
         let (pad, _) =
-            prefixed_marking(&trailing, self.width, &Prefix::bullet(), first && !marker);
+            prefixed_marking(&trailing, self.width, &self.prefix(), first && !marker);
         Segment { lines, pad, marker }
     }
 
@@ -1261,7 +1272,7 @@ impl MarkdownStream {
             }
             let first = !self.stable_marker && self.rendered.is_empty();
             self.rendered
-                .extend(prefixed(&visible, self.width, &Prefix::bullet(), first));
+                .extend(prefixed(&visible, self.width, &self.prefix(), first));
         }
         self.open_code_fence = Some(fence);
         true
@@ -1539,23 +1550,23 @@ mod tests {
 
         stream.push("소개\n");
         let rows = drain(&mut stream, 4);
-        assert_eq!(rows, vec![String::new(), "• ### 자기소개".to_string()]);
+        assert_eq!(rows, vec![String::new(), "  자기소개".to_string()]);
         assert!(stream.tail().is_empty());
 
         stream.push("\n- 저는 개발자입니다\n");
         let rows = drain(&mut stream, 4);
-        assert_eq!(rows, vec![String::new(), "  - 저는 개발자입니다".to_string()]);
+        assert_eq!(rows, vec![String::new(), "  • 저는 개발자입니다".to_string()]);
     }
 
     /// Smooth 기어는 틱마다 한 행이다 — codex `chunking.rs` 의 기본 케이던스.
     #[test]
     fn smooth_mode_lets_one_row_out_per_tick() {
         let mut stream = MarkdownStream::answer(12);
-        // 폭 12 → `• ` 를 뺀 본문 열 칸. 세 행으로 접힌다.
+        // 폭 12 → 두 칸 들여쓰기를 뺀 본문 열 칸. 세 행으로 접힌다.
         stream.push("alpha beta gamma delta\n");
         let start = Instant::now();
         let first: Vec<String> = stream.tick(start).iter().map(Line::plain).collect();
-        assert_eq!(first, vec![String::new(), "• alpha beta".to_string()]);
+        assert_eq!(first, vec![String::new(), "  alpha beta".to_string()]);
         let second: Vec<String> = stream.tick(start).iter().map(Line::plain).collect();
         assert_eq!(second, vec!["  gamma".to_string()]);
         let third: Vec<String> = stream.tick(start).iter().map(Line::plain).collect();
@@ -1584,7 +1595,7 @@ mod tests {
             rows,
             vec![
                 String::new(),
-                "• alpha beta".to_string(),
+                "  alpha beta".to_string(),
                 "  gamma".to_string(),
             ]
         );
@@ -1620,7 +1631,7 @@ mod tests {
         let prose = drain(&mut stream, 8);
         assert_eq!(
             prose,
-            vec![String::new(), "• 여기 표가 있습니다".to_string()],
+            vec![String::new(), "  여기 표가 있습니다".to_string()],
             "prose before the table still commits"
         );
 
@@ -1719,7 +1730,7 @@ mod tests {
         let mut stream = MarkdownStream::answer(40);
         stream.push("one two three");
         let rows: Vec<String> = stream.finish().iter().map(Line::plain).collect();
-        assert_eq!(rows, vec![String::new(), "• one two three".to_string()]);
+        assert_eq!(rows, vec![String::new(), "  one two three".to_string()]);
         assert!(stream.finish().is_empty());
     }
 
@@ -1821,7 +1832,7 @@ mod tests {
         let mut stream = MarkdownStream::answer(12);
         stream.push("alpha beta gamma delta\n\nnext one\n");
         let first: Vec<String> = stream.tick(Instant::now()).iter().map(Line::plain).collect();
-        assert_eq!(first, vec![String::new(), "• alpha beta".to_string()]);
+        assert_eq!(first, vec![String::new(), "  alpha beta".to_string()]);
         stream.set_width(40);
         let rest = drain(&mut stream, 8);
         assert_eq!(rest, vec![String::new(), "  next one".to_string()]);
@@ -1835,7 +1846,7 @@ mod tests {
         stream.push("alpha beta\n");
         assert_eq!(
             drain(&mut stream, 8),
-            vec![String::new(), "• alpha beta".to_string()]
+            vec![String::new(), "  alpha beta".to_string()]
         );
         stream.set_width(60);
         assert!(drain(&mut stream, 8).is_empty());
@@ -2215,7 +2226,7 @@ mod tests {
         );
         let rows = prefixed(&lines, 14, &Prefix::bullet(), true);
         let plain: Vec<String> = rows.iter().map(Line::plain).collect();
-        assert_eq!(plain, ["• - alpha beta", "    gamma", "    delta", "    epsilon"]);
+        assert_eq!(plain, ["• • alpha beta", "    gamma", "    delta", "    epsilon"]);
     }
 
     /// A quote keeps its bar on every row it wraps into.
