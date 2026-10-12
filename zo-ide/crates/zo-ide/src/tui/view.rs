@@ -396,12 +396,15 @@ impl Status {
             spans.push(Span::dim(format!("({elapsed})")));
         }
         // The housekeeping word takes the activity's place: it is the newer
-        // fact, and the activity phrase it hides is the wait it fills.
-        if let Some(word) = self
-            .housekeeping
-            .clone()
-            .or_else(|| self.activity().map(|activity| activity.line()))
-        {
+        // fact, and the activity phrase it hides is the wait it fills. A
+        // running call names itself on its own row, with its own spinner, so
+        // the row keeps the turn's one clock and does not say it twice
+        // (t-48216).
+        if let Some(word) = self.housekeeping.clone().or_else(|| {
+            self.activity()
+                .filter(|activity| !matches!(activity, StatusActivity::Tool { .. }))
+                .map(|activity| activity.line())
+        }) {
             spans.push(Span::dim(" · "));
             spans.push(Span::dim(word));
         }
@@ -1859,9 +1862,9 @@ mod tests {
         status.note_tool_started("t1", "bash", Some("cargo test"));
         status.elapsed = Duration::from_secs(10);
         let line = status.line(140).plain();
-        assert!(
-            !line.contains("Context nearing") && line.contains("Bash"),
-            "a tool boundary retires the note: {line}"
+        assert_eq!(
+            line, "• Working (10s • esc to interrupt)",
+            "a tool boundary retires the note; the tool names itself on its own row"
         );
     }
 
