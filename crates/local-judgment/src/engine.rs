@@ -74,6 +74,9 @@ impl Engine {
             .env("TOKENIZERS_PARALLELISM", "false")
             .env("OMP_NUM_THREADS", "2")
             .env("MKL_NUM_THREADS", "2")
+            .env("OPENBLAS_NUM_THREADS", "2")
+            .env("VECLIB_MAXIMUM_THREADS", "2")
+            .env("NUMEXPR_NUM_THREADS", "2")
             .env("DO_NOT_TRACK", "1")
             .current_dir(runtime)
             .stdin(Stdio::piped())
@@ -245,6 +248,13 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
     };
     if request.get("model").and_then(Value::as_str) != Some(&state.provider.model) {
         return failure(StatusCode::BAD_REQUEST, Error::UnknownModel);
+    }
+    if request
+        .get("questions")
+        .and_then(Value::as_object)
+        .is_some_and(|questions| questions.len() > 32)
+    {
+        return failure(StatusCode::PAYLOAD_TOO_LARGE, Error::TooLarge);
     }
     request["model"] = json!(state.provider.identity());
     let prepared = match serde_json::to_vec(&request)

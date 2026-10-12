@@ -82,7 +82,9 @@ impl Store {
         private_dir(parent)?;
         let root = child(parent, "managed-judgment")?;
         private_dir(&root)?;
-        let store = Self { root };
+        let store = Self {
+            root: io(fs::canonicalize(root))?,
+        };
         for name in ["models", "runtime", "partial"] {
             private_dir(&child(&store.root, name)?)?;
         }
@@ -284,7 +286,8 @@ fn available_space(path: &Path) -> Result<u64> {
     }
     // SAFETY: statvfs succeeded above.
     let info = unsafe { info.assume_init() };
-    Ok((info.f_bavail as u64).saturating_mul(info.f_frsize as u64))
+    let bytes = u128::from(info.f_bavail).saturating_mul(u128::from(info.f_frsize));
+    Ok(u64::try_from(bytes).unwrap_or(u64::MAX))
 }
 
 #[cfg(windows)]

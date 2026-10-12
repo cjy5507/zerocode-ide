@@ -44,6 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             manager.start(&model.id, &model.revision)?;
             let started = settled(&manager).await?;
             let id = started.server.id.ok_or("server_not_ready")?;
+            let duplicate = manager.start(&model.id, &model.revision)?;
+            if duplicate.server.id.as_deref() != Some(&id) {
+                return Err("duplicate_start_changed_server".into());
+            }
             manager.check(&id)?;
             settled(&manager).await?;
             let applied = manager.apply(
@@ -72,6 +76,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if manager.snapshot().configured_model_id.as_deref() != Some(&model.id) {
                 return Err("configuration_lost".into());
             }
+        }
+        "parent-eof" => {
+            manager.start(&model.id, &model.revision)?;
+            let started = settled(&manager).await?;
+            if started.server.state != "ready" {
+                return Err("server_not_ready".into());
+            }
+            println!("{{\"parentExit\":true}}");
+            std::process::exit(0);
         }
         "status" => {}
         _ => return Err("unknown_action".into()),

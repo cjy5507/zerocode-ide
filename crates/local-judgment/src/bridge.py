@@ -67,8 +67,23 @@ while True:
     try:
         if agent is None:
             raise ValueError("model_missing")
-        result = agent.predict(request["state"], request["questions"])
-        result["model"] = initial["modelId"]
+        questions = list(request["questions"].items())
+        answers = {}
+        usage = {"input_tokens": 0, "output_tokens": 0}
+        for start in range(0, len(questions), 4):
+            native = agent.predict(request["state"], dict(questions[start:start + 4]))
+            answers.update(native["answers"])
+            measured = native["usage"]
+            for key in ("input_tokens", "output_tokens", "state_tokens_dropped"):
+                if key in measured:
+                    usage[key] = usage.get(key, 0) + measured[key]
+            if measured.get("truncated"):
+                usage["truncated"] = True
+            if measured.get("truncated_questions"):
+                usage.setdefault("truncated_questions", []).extend(measured["truncated_questions"])
+            if measured.get("options"):
+                usage.setdefault("options", {}).update(measured["options"])
+        result = {"model": initial["modelId"], "answers": answers, "usage": usage}
         reply(result)
     except Exception:
         reply({"error": "native_protocol_failed"})

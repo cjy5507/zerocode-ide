@@ -585,15 +585,29 @@ impl Manager {
         id: &str,
         cancel: &Cancel,
     ) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
         cancel.check()?;
-        let path = storage::child(destination, &artifact.path)?;
-        storage::private_dir(path.parent().ok_or(Error::UnsafePath)?)?;
+        if !catalog::https(&artifact.url) {
+            return Err(Error::Manifest);
+        }
         let client = download_client()?;
-        let mut response = tokio::select! {
+        let response = tokio::select! {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
             response = client.get(&artifact.url).send() => response.map_err(|_| Error::Transport)?,
         };
+        self.receive(response, artifact, destination, id, cancel)
+            .await
+    }
+
+    async fn receive(
+        &self,
+        mut response: reqwest::Response,
+        artifact: &Artifact,
+        destination: &Path,
+        id: &str,
+        cancel: &Cancel,
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        cancel.check()?;
         if response.status() != reqwest::StatusCode::OK {
             return Err(Error::Transport);
         }
@@ -603,6 +617,8 @@ impl Manager {
         {
             return Err(Error::Integrity);
         }
+        let path = storage::child(destination, &artifact.path)?;
+        storage::private_dir(path.parent().ok_or(Error::UnsafePath)?)?;
         let mut file = tokio::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -904,11 +920,15 @@ impl Manager {
 }
 
 async fn wait_ready(engine: &Arc<Engine>, cancel: &Cancel) -> Result<()> {
+    wait_ready_for(engine, cancel, engine::START_TIMEOUT).await
+}
+
+async fn wait_ready_for(engine: &Arc<Engine>, cancel: &Cancel, timeout: Duration) -> Result<()> {
     let process = engine.clone();
     let ready = tokio::task::spawn_blocking(move || process.ready());
     let result = tokio::select! {
         _ = cancel.cancelled() => Err(Error::Cancelled),
-        ready = tokio::time::timeout(engine::START_TIMEOUT, ready) => match ready {
+        ready = tokio::time::timeout(timeout, ready) => match ready {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(Error::RuntimeFailed),
             Err(_) => Err(Error::Timeout),
@@ -1064,5 +1084,35 @@ pub(crate) mod test_support {
         };
         inner.running = Some(running);
         (id, provider)
+    }
+
+    pub fn stream(manager: &Arc<Manager>, artifact: Artifact, address: String) -> Snapshot {
+        let (id, cancel) = manager.begin("download", None, artifact.bytes).unwrap();
+        let snapshot = manager.snapshot();
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let stage = manager.store.stage()?;
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .map_err(|_| Error::Transport)?;
+                let response = client
+                    .get(address)
+                    .send()
+                    .await
+                    .map_err(|_| Error::Transport)?;
+                manager
+                    .receive(response, &artifact, stage.path(), &id, &cancel)
+                    .await
+            }
+            .await;
+            manager.finish(&id, result);
+        });
+        snapshot
+    }
+
+    pub async fn ready_timeout(engine: &Arc<Engine>) -> Result<()> {
+        wait_ready_for(engine, &Cancel::new(), Duration::from_millis(20)).await
     }
 }

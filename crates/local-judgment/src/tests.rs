@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::catalog::{self, Artifact, Model};
 use crate::manager::test_support;
-use crate::storage::{self, Store};
+use crate::storage::Store;
 use crate::{Error, Manager};
 
 fn artifact(path: &str, bytes: &[u8]) -> Artifact {
@@ -199,6 +199,236 @@ fn archive_links_must_stay_inside_the_python_distribution() {
             Err(Error::UnsafePath)
         );
     }
+}
+
+fn python_archive(path: &Path, links: &[(&str, &str, bool)]) {
+    let file = fs::File::create(path).unwrap();
+    let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+    let mut tar = tar::Builder::new(gzip);
+    let bytes = b"executable fixture";
+    let mut header = tar::Header::new_gnu();
+    header.set_mode(0o755);
+    header.set_size(bytes.len() as u64);
+    header.set_cksum();
+    tar.append_data(&mut header, "python/bin/python3.12", &bytes[..])
+        .unwrap();
+    for (name, target, hard) in links {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o755);
+        header.set_size(0);
+        header.set_entry_type(if *hard {
+            tar::EntryType::Link
+        } else {
+            tar::EntryType::Symlink
+        });
+        tar.append_link(&mut header, name, target).unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap();
+}
+
+#[test]
+fn python_archives_reject_symlink_cycles_and_hardlink_escape() {
+    for links in [
+        vec![("python/bin/a", "b", false), ("python/bin/b", "a", false)],
+        vec![("python/bin/a", "../outside", true)],
+        vec![("python/bin/a", "../../outside", false)],
+    ] {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let archive = source.path().join("python.tar.gz");
+        python_archive(&archive, &links);
+        assert_eq!(
+            crate::archive::python(
+                &archive,
+                destination.path(),
+                &mut crate::archive::Budget::new(),
+                &AtomicBool::new(false)
+            ),
+            Err(Error::UnsafePath)
+        );
+    }
+}
+
+#[test]
+fn python_archives_accept_contained_relative_link_chains() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let archive = source.path().join("python.tar.gz");
+    python_archive(
+        &archive,
+        &[
+            ("python/bin/python", "python3", false),
+            ("python/bin/python3", "python3.12", false),
+        ],
+    );
+    crate::archive::python(
+        &archive,
+        destination.path(),
+        &mut crate::archive::Budget::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(destination.path().join("python/bin/python")).unwrap(),
+        b"executable fixture"
+    );
+}
+
+#[test]
+fn wheel_extraction_rejects_parent_paths_and_windows_streams() {
+    use std::io::Write;
+    for name in ["../outside.py", "module.py:stream", "a/CON.txt"] {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let path = source.path().join("fixture.whl");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"unsafe").unwrap();
+        zip.finish().unwrap();
+        assert_eq!(
+            crate::archive::wheel(
+                &path,
+                destination.path(),
+                "python/site",
+                &mut crate::archive::Budget::new(),
+                &AtomicBool::new(false)
+            ),
+            Err(Error::UnsafePath)
+        );
+    }
+}
+
+#[test]
+fn wheel_installation_keeps_data_and_omits_executable_startup_hooks() {
+    use std::io::Write;
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let path = source.path().join("fixture.whl");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+    for (name, bytes) in [
+        ("module/__init__.py", b"pass".as_slice()),
+        ("startup.pth", b"import unwanted".as_slice()),
+        ("fixture.data/scripts/run", b"unwanted".as_slice()),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(bytes).unwrap();
+    }
+    zip.finish().unwrap();
+    crate::archive::wheel(
+        &path,
+        destination.path(),
+        "python/site",
+        &mut crate::archive::Budget::new(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(destination.path().join("python/site/module/__init__.py")).unwrap(),
+        b"pass"
+    );
+    assert!(!destination.path().join("python/site/startup.pth").exists());
+    assert!(!destination.path().join("python/bin/run").exists());
+}
+
+async fn stream_server(
+    body: Vec<u8>,
+    declared: usize,
+    pause: bool,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 2048];
+        stream.read(&mut request).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        stream.write_all(&body).await.unwrap();
+        if pause {
+            let mut next = [0; 1];
+            let closed = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut next))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(closed, 0, "cancelled response must close its stream");
+        }
+    });
+    (address, task)
+}
+
+#[tokio::test]
+async fn cancellation_closes_the_actual_download_stream_and_cleans_partial_files() {
+    let home = tempfile::tempdir().unwrap();
+    let manager = test_support::manager(home.path(), &home.path().join("settings.json"), model());
+    let (address, server) = stream_server(vec![b'a'; 16], 32, true).await;
+    let operation = test_support::stream(
+        &manager,
+        artifact("model.safetensors", &[b'a'; 32]),
+        address,
+    )
+    .operation
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while manager
+            .snapshot()
+            .operation
+            .as_ref()
+            .unwrap()
+            .received_bytes
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    manager.cancel(&operation.id).unwrap();
+    let result = settled(&manager).await;
+    assert_eq!(result.operation.unwrap().state, "cancelled");
+    assert_eq!(
+        fs::read_dir(home.path().join("managed-judgment/partial"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert!(!result.models[0].installed);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_download_with_the_correct_length_and_wrong_digest_never_installs() {
+    let home = tempfile::tempdir().unwrap();
+    let manager = test_support::manager(home.path(), &home.path().join("settings.json"), model());
+    let (address, server) = stream_server(vec![b'b'; 32], 32, false).await;
+    test_support::stream(
+        &manager,
+        artifact("model.safetensors", &[b'a'; 32]),
+        address,
+    );
+    let result = settled(&manager).await;
+    assert_eq!(
+        result.operation.unwrap().error,
+        Some(Error::Integrity.token())
+    );
+    assert_eq!(
+        fs::read_dir(home.path().join("managed-judgment/partial"))
+            .unwrap()
+            .count(),
+        0
+    );
+    server.await.unwrap();
 }
 
 #[cfg(unix)]
@@ -425,4 +655,71 @@ async fn shutdown_reaps_the_owned_process_and_refuses_late_work() {
         manager.install("fixture-model", &model().revision, None),
         Err(Error::ServerStopped)
     ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_readiness_timeout_reaps_a_real_blocked_child() {
+    let engine = crate::engine::Engine::from_command(
+        std::process::Command::new("sh").args(["-c", "while IFS= read -r line; do :; done"]),
+    );
+    assert_eq!(
+        test_support::ready_timeout(&engine).await,
+        Err(Error::Timeout)
+    );
+    assert!(!engine.alive());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_production_parent_watcher_exits_when_its_pipe_reaches_eof() {
+    use std::process::{Command, Stdio};
+    let source = include_str!("bridge.py")
+        .split("\ntry:\n    initial")
+        .next()
+        .unwrap()
+        .to_owned()
+        + "\nthreading.Event().wait()\n";
+    let mut child = Command::new("python3")
+        .args(["-I", "-u", "-c", &source])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdin.take());
+    let status = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if status.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(status.unwrap().success());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_text_cannot_pass_the_native_connection_check() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    fs::write(&settings, b"{}").unwrap();
+    let manager = test_support::manager(home.path(), &settings, model());
+    let source = "import sys\nfor line in sys.stdin: print('{\"choices\":[{\"message\":{\"content\":\"0.9\"}}]}',flush=True)\n";
+    let engine = crate::engine::Engine::from_command(
+        std::process::Command::new("python3").args(["-I", "-u", "-c", source]),
+    );
+    let (id, _) = test_support::running(&manager, engine, false).await;
+    manager.check(&id).unwrap();
+    let failed = settled(&manager).await;
+    assert_eq!(failed.operation.unwrap().state, "failed");
+    assert!(!failed.server.checked);
+    assert_eq!(fs::read(settings).unwrap(), b"{}");
+    manager.shutdown();
 }
