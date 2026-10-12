@@ -16424,6 +16424,7 @@ fn a_reseated_continuation_reports_unknown_delivery_without_claiming_submission(
         let answer = super::continuation_answer(
             zerocode_core::agent_teams::Reply::ok("{\"workerId\":\"w-example\"}"),
             outcome,
+            false,
         );
         let body: serde_json::Value = serde_json::from_str(&answer.stdout).unwrap();
         assert_eq!(body["continuation"]["status"], "unknown");
@@ -16433,6 +16434,18 @@ fn a_reseated_continuation_reports_unknown_delivery_without_claiming_submission(
         );
         assert!(answer.stderr.contains("observe"));
     }
+}
+
+#[test]
+fn an_idle_reseated_worker_reports_no_continuation_submission() {
+    let answer = super::continuation_answer(
+        zerocode_core::agent_teams::Reply::ok("{\"workerId\":\"w-example\"}"),
+        Some(zerocode_pty::DeliveryOutcome::Delivered),
+        true,
+    );
+    let body: serde_json::Value = serde_json::from_str(&answer.stdout).unwrap();
+    assert_eq!(body["continuation"]["status"], "idle");
+    assert_eq!(body["continuation"]["pasted"], false);
 }
 
 impl Host for RestorationHost {

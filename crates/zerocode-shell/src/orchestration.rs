@@ -765,17 +765,20 @@ pub(crate) fn deliver_continuation(
 fn continuation_answer(
     mut reply: zerocode_core::agent_teams::Reply,
     outcome: Option<zerocode_pty::DeliveryOutcome>,
+    idle: bool,
 ) -> zerocode_hookd::TeamAnswer {
     use zerocode_pty::{DeliveryOutcome, ready::Refusal};
-    let (status, reason) = match outcome {
-        Some(DeliveryOutcome::Delivered) => ("submitted", None),
-        Some(DeliveryOutcome::TimedOut) => ("not_typed", Some("not_ready")),
-        Some(DeliveryOutcome::Refused(why)) => ("not_typed", Some(why.token())),
-        Some(DeliveryOutcome::Unsubmitted(why @ (Refusal::NotTaken | Refusal::LaunchChanged))) => {
-            ("unknown", Some(why.token()))
-        }
-        Some(DeliveryOutcome::Unsubmitted(why)) => ("pasted", Some(why.token())),
-        None => ("unknown", Some("delivery_unknown")),
+    let (status, reason) = match (idle, outcome) {
+        (true, _) => ("idle", None),
+        (false, Some(DeliveryOutcome::Delivered)) => ("submitted", None),
+        (false, Some(DeliveryOutcome::TimedOut)) => ("not_typed", Some("not_ready")),
+        (false, Some(DeliveryOutcome::Refused(why))) => ("not_typed", Some(why.token())),
+        (
+            false,
+            Some(DeliveryOutcome::Unsubmitted(why @ (Refusal::NotTaken | Refusal::LaunchChanged))),
+        ) => ("unknown", Some(why.token())),
+        (false, Some(DeliveryOutcome::Unsubmitted(why))) => ("pasted", Some(why.token())),
+        (false, None) => ("unknown", Some("delivery_unknown")),
     };
     if let Ok(mut body) = serde_json::from_str::<serde_json::Value>(&reply.stdout)
         && let Some(object) = body.as_object_mut()
@@ -784,7 +787,7 @@ fn continuation_answer(
             "continuation".to_string(),
             serde_json::json!({
                 "status": status,
-                "pasted": outcome.map(DeliveryOutcome::pasted),
+                "pasted": if idle { Some(false) } else { outcome.map(DeliveryOutcome::pasted) },
                 "reason": reason,
             }),
         );
@@ -10598,7 +10601,11 @@ fn carried(
                             &prepared.agent,
                             prepared.resumed,
                         );
-                        return continuation_answer(decided.reply, continuation);
+                        return continuation_answer(
+                            decided.reply,
+                            continuation,
+                            prepared.prompt.trim().is_empty(),
+                        );
                     }
                     /* The judgment's row, beside what was actually summoned
                      * (t-4711). Here rather than at the plan, because a
