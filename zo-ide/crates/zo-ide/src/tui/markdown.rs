@@ -67,13 +67,15 @@ pub mod probe {
     }
 }
 
-/// 헤딩 수준별 스타일 — codex `MarkdownStyles::default`.
+/// 헤딩 수준별 스타일 — codex `MarkdownStyles::default` 에서 h4 이하도 굵게
+/// (t-48216): 해시가 없으니 굵기가 제목을 알린다.
 fn heading_style(level: HeadingLevel) -> Style {
     match level {
         HeadingLevel::H1 => Style::new().bold().underline(),
         HeadingLevel::H2 => Style::new().bold(),
-        HeadingLevel::H3 => Style::new().bold().italic(),
-        HeadingLevel::H4 | HeadingLevel::H5 | HeadingLevel::H6 => Style::new().bold().italic(),
+        HeadingLevel::H3 | HeadingLevel::H4 | HeadingLevel::H5 | HeadingLevel::H6 => {
+            Style::new().bold().italic()
+        }
     }
 }
 
