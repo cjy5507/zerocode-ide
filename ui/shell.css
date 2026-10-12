@@ -20792,10 +20792,38 @@ button.helper-sib:hover {
   font-size: var(--text-xs);
 }
 
-#managed-judgment-progress progress {
+progress {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
   width: 100%;
   max-width: 100%;
-  accent-color: var(--ink-chalk);
+  height: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  background: var(--edge-rule);
+  color: var(--ink-chalk);
+}
+
+progress::-webkit-progress-bar {
+  background: var(--edge-rule);
+  border-radius: var(--radius-pill);
+}
+
+progress::-webkit-progress-value {
+  background: var(--ink-chalk);
+  border-radius: var(--radius-pill);
+}
+
+progress::-moz-progress-bar {
+  background: var(--ink-chalk);
+  border-radius: var(--radius-pill);
+}
+
+progress:indeterminate,
+progress:indeterminate::-webkit-progress-bar {
+  background: repeating-linear-gradient(90deg, var(--edge-rule) 0 20%, var(--ink-chalk) 20% 30%);
 }
 
 #judgment-local-mode {

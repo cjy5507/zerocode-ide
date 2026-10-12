@@ -11743,6 +11743,7 @@ mod tests {
         let claimed = [
             ("type=\"checkbox\"", ".settings-check input"),
             ("<select", ".qo--settings .settings-input"),
+            ("<progress", "progress {"),
             // t-3191: the update policy's three radios, drawn as a ring and a dot.
             ("type=\"radio\"", ".update-policy-option > input"),
         ];
@@ -11759,9 +11760,23 @@ mod tests {
 
         // A kind nobody has claimed is worse than one drawn badly, because
         // nothing points at it.
-        for unclaimed in ["type=\"range\"", "<progress", "<meter"] {
+        for unclaimed in ["type=\"range\"", "<meter"] {
             if markup.contains(unclaimed) {
                 bare.push(format!("{unclaimed} has no rule in this gate's list"));
+            }
+        }
+
+        if markup.contains("<progress") {
+            for selector in [
+                "progress::-webkit-progress-bar {",
+                "progress::-webkit-progress-value {",
+                "progress::-moz-progress-bar {",
+                "progress:indeterminate,",
+            ] {
+                assert!(
+                    block_after_css(&css, selector).contains("background:"),
+                    "progress leaves its track, fill, or indeterminate state unstyled: {selector}"
+                );
             }
         }
 

@@ -94,6 +94,10 @@ const BACKEND_PARTS: &[(&str, &str)] = &[
     ("cmd/second_brain.rs", include_str!("cmd/second_brain.rs")),
     ("cmd/worktree.rs", include_str!("cmd/worktree.rs")),
     ("cmd/settings.rs", include_str!("cmd/settings.rs")),
+    (
+        "cmd/managed_judgment.rs",
+        include_str!("cmd/managed_judgment.rs"),
+    ),
     ("cmd/session.rs", include_str!("cmd/session.rs")),
 ];
 

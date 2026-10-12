@@ -171,6 +171,10 @@ pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
     ),
     ("cmd/typesafe.rs", include_str!("../../src/cmd/typesafe.rs")),
     (
+        "cmd/managed_judgment.rs",
+        include_str!("../../src/cmd/managed_judgment.rs"),
+    ),
+    (
         "cmd/type_value.rs",
         include_str!("../../src/cmd/type_value.rs"),
     ),
@@ -683,6 +687,10 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
     (
         "shell-settings.js",
         include_str!("../../../../ui/shell-settings.js"),
+    ),
+    (
+        "shell-managed-judgment.js",
+        include_str!("../../../../ui/shell-managed-judgment.js"),
     ),
     (
         "shell-judgment.js",

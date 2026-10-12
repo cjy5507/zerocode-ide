@@ -5977,6 +5977,13 @@ await test("로컬 모델은 서버 주소 대신 다운로드 상태를 보이�
     const request = await backend.waitForCall("A", "managed_judgment_install", downloadedAt);
     assertEqual(request.args, { modelId: "fixture-decision", revision: "fixture-revision" }, "download did not bind the catalog revision");
     await pageA.waitForFunction(() => !document.getElementById("managed-judgment-progress").hidden);
+    const meterStyle = await pageA.locator("#managed-judgment-progress progress").evaluate((meter) => ({
+      appearance: getComputedStyle(meter).appearance,
+      height: meter.getBoundingClientRect().height,
+      label: document.getElementById(meter.getAttribute("aria-labelledby"))?.textContent.trim(),
+    }));
+    assertEqual(meterStyle.appearance, "none", "download progress still uses native platform decoration");
+    assert(meterStyle.height > 0 && meterStyle.label, "download progress is invisible or has no accessible label");
     const stale = clone(backend.managedModelState);
     backend.managedModelState.revision += 1;
     backend.managedModelState.operation.receivedBytes = 512;
