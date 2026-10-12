@@ -45,6 +45,18 @@ pub(crate) fn shutdown() {
     }
 }
 
+pub(crate) fn settings_changed() {
+    let manager = SERVICE.get().and_then(|service| {
+        service
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    });
+    if let Some(manager) = manager {
+        manager.notify_settings_changed();
+    }
+}
+
 #[tauri::command(async)]
 pub(crate) fn managed_judgment_status(app: AppHandle) -> Result<Snapshot, String> {
     Ok(service(&app)?.snapshot())

@@ -289,6 +289,10 @@ impl Manager {
         (self.sink)(self.snapshot());
     }
 
+    pub fn notify_settings_changed(&self) {
+        self.emit();
+    }
+
     fn model(&self, id: &str, revision: &str) -> Result<Model> {
         let model = self
             .catalog

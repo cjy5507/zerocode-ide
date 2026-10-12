@@ -751,3 +751,34 @@ async fn an_idle_child_exit_emits_failure_without_a_status_poll() {
     assert!(!engine.alive());
     drop(running);
 }
+
+#[test]
+fn a_manual_provider_change_emits_the_new_identity_without_starting_a_server() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = events.clone();
+    let manager = Manager::new(home.path(), &settings, move |snapshot| {
+        observed.lock().unwrap().push(snapshot);
+    })
+    .unwrap();
+    let before = manager.snapshot();
+    let provider = judgment_provider::Provider {
+        kind: judgment_provider::ProviderKind::Remote,
+        protocol: judgment_provider::Protocol::SystemOne,
+        base_url: "https://example.invalid".to_owned(),
+        model: "fixture-native".to_owned(),
+        requires_auth: false,
+    };
+    fs::write(
+        &settings,
+        serde_json::to_vec(&serde_json::json!({"smart":{"judgmentProvider":provider}})).unwrap(),
+    )
+    .unwrap();
+    manager.notify_settings_changed();
+    let event = events.lock().unwrap().pop().unwrap();
+    assert_eq!(event.provider_identity, Some(provider.identity()));
+    assert!(event.revision > before.revision);
+    assert!(event.configured_model_id.is_none());
+    assert_eq!(event.server.state, "stopped");
+}
