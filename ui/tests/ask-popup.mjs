@@ -50,6 +50,21 @@ export const ASK_TERMINAL_WORDS = Object.freeze({
   es: "También puedes responder en la terminal: pulsa 1/2/3, o elige con ↑↓ y pulsa Enter.",
 });
 
+/* What the window says when a press finds that nobody can take the answer any
+ * more, in the five languages the window speaks (t-51007). */
+export const ASK_GONE_WORDS = Object.freeze({
+  ko: "이 질문을 한 세션에 더는 닿을 수 없습니다 — 답을 받을 곳이 없어 질문을 닫았습니다.",
+  en: "The session that asked this can no longer be reached — nothing can take the answer, so the question was closed.",
+  ja: "この質問をしたセッションにはもう届きません — 回答を受け取る相手がいないため、質問を閉じました。",
+  zh: "已无法连接提出这个问题的会话 — 回答无处可送，问题已关闭。",
+  es: "Ya no se puede llegar a la sesión que hizo esta pregunta — nadie puede recibir la respuesta, así que la pregunta se cerró.",
+});
+
+/* What the backend answers for a card whose session it can no longer reach:
+ * it holds no channel for the session, or the channel it holds refuses the
+ * connection (`SESSION_UNREACHABLE`, shell_runtime.rs). A marker, not prose. */
+const UNREACHABLE = "zerocode:session-unreachable";
+
 /* What the window sends for a card with a line: the plain card's fields and
  * the limits the page may show (`codeAsk`, from core's one table). */
 const CODE_CARD = Object.freeze({ reason: "카카오톡 인증번호", timeoutMs: 180000, codeAsk: { min: 4, max: 10, typedMax: 20 } });
@@ -853,6 +868,151 @@ async function refused(browser, origin, ok) {
   });
 }
 
+/* ------------------------------------------- a session nobody can reach */
+
+/* A question whose session can no longer answer it must not stand (t-51007).
+ * zo raised its model-switch question, its process ended, and the window
+ * never heard the session end: every press came back refused, Escape answered
+ * through the same failing road, and the scrim held the whole window until a
+ * restart. A press the backend answers with the unreachable marker takes the
+ * question down the way a session end does — every question of that session,
+ * and no other session's — and says why; a refusal on a channel that is still
+ * there keeps the card, its buttons and its reason. */
+async function unreachable(browser, origin, ok) {
+  await scenario(browser, origin, "unreachable session", ok, async (page, faults) => {
+    const pressed = await page.evaluate(async (UNREACHABLE) => {
+      const T = window.__ASK_T__;
+      window.__ANSWER__.respond_permission = async (args) => {
+        T.sent.push(JSON.parse(JSON.stringify(args)));
+        if (args.session === "s-gone") throw UNREACHABLE;
+        return null;
+      };
+      T.frame("s-gone", {
+        type: "permission_prompt",
+        prompt_id: 7,
+        kind: "question",
+        topic: "model_switch",
+        title: "Switch models?",
+        tool_name: "",
+        reasoning: "이 요청은 지금 쓰는 모델의 안전 분류기가 거절했습니다.",
+        audit_hint: null,
+        choices: [
+          { key: "a", label: "Switch and from now on", decision: "allow_always" },
+          { key: "y", label: "Switch for this turn", decision: "allow_once" },
+          { key: "n", label: "Stay", decision: "deny" },
+        ],
+      });
+      T.frame("s-gone", { type: "permission_prompt", prompt_id: 8, tool_name: "bash", reasoning: "", audit_hint: null });
+      T.frame("s-live", { type: "permission_prompt", prompt_id: 9, tool_name: "git", reasoning: "", audit_hint: null });
+      await T.settle();
+      const before = T.look();
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(250);
+      return {
+        before,
+        after: T.look(),
+        told: [...document.querySelectorAll(".toasts .toast")].map((note) => note.textContent.trim()),
+        markerShown: document.body.innerText.includes(UNREACHABLE),
+        sent: T.sent.slice(),
+      };
+    }, UNREACHABLE);
+    ok(
+      "a press its session can no longer receive takes down every question of that session, and another session's stays up",
+      pressed.before.kind === "question" && pressed.before.more === "2개 더 대기 중"
+        && pressed.sent.length === 1 && pressed.sent[0].session === "s-gone" && pressed.sent[0].promptId === 7
+        && pressed.after.shown && pressed.after.kind === "tool" && pressed.after.mono === "git"
+        && pressed.after.more === null && pressed.after.why === null,
+      JSON.stringify(pressed),
+    );
+    ok(
+      "the person is told the question closed because nobody can take the answer, and never reads the marker",
+      pressed.told.includes(ASK_GONE_WORDS.ko) && !pressed.markerShown,
+      JSON.stringify({ told: pressed.told, markerShown: pressed.markerShown }),
+    );
+
+    // Escape answers through the same road, so it takes such a question down too.
+    await page.evaluate(async () => {
+      const T = window.__ASK_T__;
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(250);
+      T.reset();
+      T.frame("s-gone", {
+        type: "permission_prompt",
+        prompt_id: 10,
+        tool_name: "rm",
+        reasoning: "",
+        audit_hint: null,
+        choices: [
+          { key: "y", label: "한 번 허용", decision: "allow_once" },
+          { key: "n", label: "거부", decision: "deny" },
+        ],
+      });
+      await T.settle();
+    });
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(400);
+    const escaped = await page.evaluate(() => ({ look: window.__ASK_T__.look(), sent: window.__ASK_T__.sent.slice() }));
+    ok(
+      "Escape on a question its session can no longer receive takes it down instead of holding the window",
+      escaped.look.shown === false && escaped.sent.length === 1 && escaped.sent[0].promptId === 10
+        && escaped.sent[0].decision === "deny",
+      JSON.stringify(escaped),
+    );
+
+    // A refusal on a channel that is still there is today's failure: the card stays.
+    const transient = await page.evaluate(async (gone) => {
+      const T = window.__ASK_T__;
+      const goneSaid = () => [...document.querySelectorAll(".toasts .toast")]
+        .filter((note) => note.textContent.trim() === gone).length;
+      const toldBefore = goneSaid();
+      window.__ANSWER__.respond_permission = async () => {
+        throw "permission.respond failed (-32603): the channel is busy";
+      };
+      T.frame("s-live", { type: "permission_prompt", prompt_id: 11, tool_name: "git", reasoning: "", audit_hint: null });
+      await T.settle();
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(250);
+      const look = T.look();
+      const live = [...document.querySelectorAll("#ask-choices button")].every((button) => button.disabled === false);
+      return { look, live, toldMore: goneSaid() - toldBefore };
+    }, ASK_GONE_WORDS.ko);
+    ok(
+      "a refusal on a channel that is still there keeps the card, its live buttons and its reason, and closes nothing",
+      transient.look.shown && transient.look.mono === "git" && transient.look.why?.includes("the channel is busy")
+        && transient.live && transient.toldMore === 0,
+      JSON.stringify(transient),
+    );
+
+    // The words in every language the window speaks.
+    const languages = await page.evaluate(async (UNREACHABLE) => {
+      const T = window.__ASK_T__;
+      T.ended("s-live");
+      await T.settle(250);
+      window.__ANSWER__.respond_permission = async () => {
+        throw UNREACHABLE;
+      };
+      const said = {};
+      for (const [at, code] of ["ko", "en", "ja", "zh", "es"].entries()) {
+        setLocale(code, { persist: false, refresh: false });
+        T.frame("s-gone", { type: "permission_prompt", prompt_id: 20 + at, tool_name: "bash", reasoning: "", audit_hint: null });
+        await T.settle();
+        document.querySelector("#ask-choices button")?.click();
+        await T.settle(250);
+        said[code] = [...document.querySelectorAll(".toasts .toast")].at(-1)?.textContent.trim() ?? null;
+      }
+      setLocale("ko", { persist: false, refresh: false });
+      return said;
+    }, UNREACHABLE);
+    const wrong = Object.keys(ASK_GONE_WORDS).filter((code) => languages[code] !== ASK_GONE_WORDS[code]);
+    ok(
+      "why the question closed is said in all five languages",
+      wrong.length === 0,
+      JSON.stringify({ wrong, languages }),
+    );
+    ok("the unreachable session scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+}
+
 /* ------------------------------------------------------ keyboard and focus */
 
 async function keyboard(browser, origin, ok) {
@@ -1623,6 +1783,7 @@ export async function testAskPopup(browser, origin, ok) {
   await confirm(browser, origin, ok);
   await queue(browser, origin, ok);
   await refused(browser, origin, ok);
+  await unreachable(browser, origin, ok);
   await keyboard(browser, origin, ok);
   await midAnswer(browser, origin, ok);
   await oneKey(browser, origin, ok);

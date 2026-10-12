@@ -3256,3 +3256,29 @@ pub(super) fn stored_supervisor_token(state_dir: &Path, root: &Path) -> Result<S
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A channel whose address refuses the connection has no process behind
+    /// it any more, and no answer can reach the question it raised: the road
+    /// says so with the marker the window takes the question down on, not in
+    /// the transport's own words (t-51007). A zo that exited left its card on
+    /// screen, and every press — Escape too — came back refused.
+    #[test]
+    fn an_answer_whose_channel_refuses_the_connection_is_unreachable() {
+        let gone = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback channel");
+            listener.local_addr().expect("its address").to_string()
+        };
+
+        let answered = answer_prompt(
+            zo_channel_entry(gone, Some("bearer-of-a-zo-that-exited".to_string())),
+            7,
+            "deny".to_string(),
+        );
+
+        assert_eq!(answered, Err("zerocode:session-unreachable".to_string()));
+    }
+}
