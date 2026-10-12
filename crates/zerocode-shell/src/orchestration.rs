@@ -762,13 +762,12 @@ pub(crate) fn deliver_continuation(
     delivered
 }
 
-fn continuation_answer(
-    mut reply: zerocode_core::agent_teams::Reply,
+fn continuation_status(
     outcome: Option<zerocode_pty::DeliveryOutcome>,
     idle: bool,
-) -> zerocode_hookd::TeamAnswer {
+) -> (&'static str, Option<&'static str>) {
     use zerocode_pty::{DeliveryOutcome, ready::Refusal};
-    let (status, reason) = match (idle, outcome) {
+    match (idle, outcome) {
         (true, _) => ("idle", None),
         (false, Some(DeliveryOutcome::Delivered)) => ("submitted", None),
         (false, Some(DeliveryOutcome::TimedOut)) => ("not_typed", Some("not_ready")),
@@ -779,7 +778,16 @@ fn continuation_answer(
         ) => ("unknown", Some(why.token())),
         (false, Some(DeliveryOutcome::Unsubmitted(why))) => ("pasted", Some(why.token())),
         (false, None) => ("unknown", Some("delivery_unknown")),
-    };
+    }
+}
+
+fn continuation_answer(
+    mut reply: zerocode_core::agent_teams::Reply,
+    outcome: Option<zerocode_pty::DeliveryOutcome>,
+    idle: bool,
+) -> zerocode_hookd::TeamAnswer {
+    use zerocode_pty::DeliveryOutcome;
+    let (status, reason) = continuation_status(outcome, idle);
     if let Ok(mut body) = serde_json::from_str::<serde_json::Value>(&reply.stdout)
         && let Some(object) = body.as_object_mut()
     {
@@ -10595,6 +10603,18 @@ fn carried(
                          * is the adversarial ordering this fence exists for. */
                         let continuation =
                             deliver_continuation(host, term, &prepared.prompt, &prepared.worker);
+                        let idle = prepared.prompt.trim().is_empty();
+                        if let Some(root) = BLACKBOX.get() {
+                            let (status, reason) = continuation_status(continuation, idle);
+                            crate::note_window_event(
+                                root,
+                                &format!(
+                                    "orchestration: worker {} terminal {term} continuation {status} ({})",
+                                    prepared.worker,
+                                    reason.unwrap_or("none"),
+                                ),
+                            );
+                        }
                         host.announce_reseated_worker(
                             term,
                             &prepared.checkout,
@@ -10604,7 +10624,7 @@ fn carried(
                         return continuation_answer(
                             decided.reply,
                             continuation,
-                            prepared.prompt.trim().is_empty(),
+                            idle,
                         );
                     }
                     /* The judgment's row, beside what was actually summoned
