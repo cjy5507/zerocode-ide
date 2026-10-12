@@ -412,6 +412,50 @@ mod tests {
         );
     }
 
+    /// Tag words a vault also files its subjects under — `qa` for testing,
+    /// `answer` for a reply, `product` for the app's direction, `video` for a
+    /// capture feature — say nothing about a page's kind, and neither does
+    /// 「비교」, an everyday noun in a Korean title. The overview is one path:
+    /// no tag or word makes a second one.
+    #[test]
+    fn a_word_with_a_second_meaning_leaves_a_page_a_concept() {
+        let pages: [(&str, &str, &[&str]); 7] = [
+            (
+                "wiki/release-checks.md",
+                "Release checks",
+                &["qa", "testing"],
+            ),
+            (
+                "wiki/reply-door.md",
+                "A reply is typed once",
+                &["answer", "terminal"],
+            ),
+            (
+                "wiki/direction.md",
+                "Where the app goes next",
+                &["product", "direction"],
+            ),
+            (
+                "wiki/screen-capture.md",
+                "Screen capture keeps a clip",
+                &["video", "capture"],
+            ),
+            (
+                "wiki/sorted-tables.md",
+                "두 표는 비교 전에 정렬한다",
+                &["testing"],
+            ),
+            ("wiki/site-map.md", "Site map", &["map"]),
+            ("wiki/summary.md", "Summary", &["overview"]),
+        ];
+        let misread: Vec<(&str, PageType)> = pages
+            .into_iter()
+            .map(|(id, title, words)| (id, guess(id, title, &tags(words))))
+            .filter(|(_, kind)| *kind != PageType::Concept)
+            .collect();
+        assert!(misread.is_empty(), "{misread:?}");
+    }
+
     #[test]
     fn a_type_goes_first_in_the_frontmatter_and_a_written_one_stands() {
         assert_eq!(
