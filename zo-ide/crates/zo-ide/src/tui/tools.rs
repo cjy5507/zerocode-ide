@@ -2791,13 +2791,44 @@ mod tests {
         );
     }
 
-    /// 헤더에 안 들어가는 긴 명령은 `  │ ` 로 두 줄까지 흐르고 접힌다.
+    /// A finished command keeps its whole text: what its row cannot show hangs
+    /// under the row from the target's column, wrapped at the edge.
     #[test]
-    fn a_long_command_is_cut_at_the_edge_of_its_row() {
+    fn a_long_command_keeps_what_its_row_cannot_show() {
         let mut group = ToolGroup::new(bash("a", "alpha beta gamma delta epsilon zeta eta theta"));
         assert!(group.complete("a", ok("")));
-        let rows = plain(&group.lines(20, Duration::ZERO));
-        assert_eq!(rows, vec!["✓ Run     alpha bet…".to_string(), "  └ (no output)".to_string()]);
+        let rows = plain(&group.lines(30, Duration::ZERO));
+        assert_eq!(
+            rows,
+            vec![
+                "✓ Run     alpha beta gamma".to_string(),
+                "          delta epsilon zeta".to_string(),
+                "          eta theta".to_string(),
+                "  └ (no output)".to_string(),
+            ]
+        );
+    }
+
+    /// Every line of a finished multi-line command stays in the transcript,
+    /// under its row; a blank line in it stays blank. While it runs, the row
+    /// shows the first line and the rows under it are the live tail's.
+    #[test]
+    fn a_multi_line_command_keeps_every_line_under_its_row() {
+        let script = "python3 - <<'EOF'\nimport sys\n\nprint(sys.version)\nEOF";
+        let mut group = ToolGroup::new(bash("a", script));
+        assert_eq!(plain(&group.lines(60, Duration::ZERO)), vec!["⠋ Run     python3 - <<'EOF'".to_string()]);
+        assert!(group.complete("a", ok("3.12.1")));
+        assert_eq!(
+            plain(&group.lines(60, Duration::ZERO)),
+            vec![
+                edge("✓ Run     python3 - <<'EOF'", "1 line", 60),
+                "          import sys".to_string(),
+                String::new(),
+                "          print(sys.version)".to_string(),
+                "          EOF".to_string(),
+                "  └ 3.12.1".to_string(),
+            ]
+        );
     }
 
     /// Marker mode의 커밋된 도구 셀은 접기 구간이 된다.
