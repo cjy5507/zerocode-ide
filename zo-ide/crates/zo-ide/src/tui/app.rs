@@ -540,6 +540,7 @@ struct Ui {
     /// Successful spawn-family results in this foreground turn. Kept separate
     /// from live progress rows: a fast child may finish between watcher polls.
     turn_agent_count: usize,
+    turn_tally: TurnTally,
     /// 접기 마커의 id 발급기 — 세션 안에서 단조 증가한다.
     folds: FoldIds,
     /// 접기 본문을 낼지 — `ZeroCode` 패인 안인가 맨 터미널인가. 런치 env 를
@@ -861,30 +862,39 @@ fn load_submission_images(paths: &[PathBuf]) -> Result<Vec<(String, String)>, St
         .collect()
 }
 
-/// Codex `history_cell/separators.rs::FinalMessageSeparator::display_lines`,
-/// extended only when this turn successfully launched sub-agents. The
-/// ` · agents N` suffix uses Codex's own metric-label separator grammar.
-///
-/// One deliberate departure: Codex draws a bare rule for a turn under a
-/// minute and labels only the longer ones. A bare full-width line at the end
-/// of an answer read as nothing to the person watching ("끝날때 ㅡㅡㅡㅡ 이게
-/// 너무 이상함"), so every turn's rule carries its label — the line then says
-/// what it is, however short the turn was. Under a minute the label says so
-/// in words rather than seconds: a count that ticks between runs would make
-/// every short turn's screen a different screen, and the e2e goldens hold
-/// five of them.
-fn turn_separator(width: usize, elapsed_seconds: u64, agent_count: usize) -> Line {
-    let agents = if agent_count > 0 {
-        format!(" · agents {agent_count}")
-    } else {
-        String::new()
-    };
-    let worked = if elapsed_seconds < 60 {
-        "under a minute".to_string()
-    } else {
-        super::shimmer::fmt_elapsed_compact(elapsed_seconds)
-    };
-    let label = format!("─ Worked for {worked}{agents} ─");
+/// What a turn did, for the line it ends on (t-48216).
+#[derive(Default)]
+struct TurnTally {
+    calls: usize,
+    added: usize,
+    removed: usize,
+}
+
+impl TurnTally {
+    fn note(&mut self, outcome: &Outcome) {
+        self.calls += 1;
+        if let Some(change) = outcome.change.as_ref().filter(|_| outcome.ok) {
+            self.added += change.added;
+            self.removed += change.removed;
+        }
+    }
+}
+
+/// The rule a work turn ends on: `── 57s · 4 tool calls · +9 -1 ──…` — how
+/// long it took, how many calls it made and how many lines they changed,
+/// each part only when there is one, then the turn's agents.
+fn turn_separator(width: usize, elapsed_seconds: u64, agent_count: usize, tally: &TurnTally) -> Line {
+    let mut parts = vec![super::shimmer::fmt_elapsed_compact(elapsed_seconds)];
+    if tally.calls > 0 {
+        parts.push(super::strings::tool_calls(tally.calls));
+    }
+    if tally.added + tally.removed > 0 {
+        parts.push(format!("+{} -{}", tally.added, tally.removed));
+    }
+    if agent_count > 0 {
+        parts.push(format!("agents {agent_count}"));
+    }
+    let label = format!("── {} ", parts.join(" · "));
     let mut clipped = String::new();
     let mut label_width = 0usize;
     for ch in label.chars() {
@@ -1605,6 +1615,7 @@ impl Ui {
         self.quiet_loop_cell = None;
         self.quiet_candidate = None;
         self.turn_agent_count = 0;
+        self.turn_tally = TurnTally::default();
         self.status = None;
         self.tool_status_detail = None;
         self.subagent_progress.clear();
@@ -3325,6 +3336,11 @@ impl Ui {
         commands.next().is_none().then_some(command)
     }
 
+    /// The line this turn ends on, after `elapsed_seconds`.
+    fn turn_summary(&self, elapsed_seconds: u64) -> Line {
+        turn_separator(self.width(), elapsed_seconds, self.turn_agent_count, &self.turn_tally)
+    }
+
     fn park(&mut self, prompt: PendingPrompt) {
         let screen = match &prompt {
             PendingPrompt::Permission(permission) => {
@@ -3871,6 +3887,7 @@ impl Ui {
                     outcome.ok,
                     outcome.change.is_some(),
                 ));
+                self.turn_tally.note(&outcome);
                 self.complete_tool(
                     &tool_call_id.0,
                     outcome,
@@ -4461,6 +4478,7 @@ impl App {
                 had_work_activity: false,
                 context_window: ModelWindow::default(),
                 turn_agent_count: 0,
+                turn_tally: TurnTally::default(),
                 folds: FoldIds::default(),
                 fold_mode: FoldMode::from_env(),
                 last_commit: None,
@@ -5782,6 +5800,7 @@ impl App {
         let started = Instant::now();
         ui.had_work_activity = false;
         ui.turn_agent_count = 0;
+        ui.turn_tally = TurnTally::default();
         ui.committed_tool_calls.clear();
         ui.tool_status_detail = None;
         ui.subagent_wave = SubagentWave::default();
@@ -6025,11 +6044,7 @@ impl App {
             }
         }
         if ui.had_work_activity {
-            let separator = turn_separator(
-                ui.width(),
-                started.elapsed().as_secs(),
-                ui.turn_agent_count,
-            );
+            let separator = ui.turn_summary(started.elapsed().as_secs());
             // A cell of its own, so it carries the gap every cell carries:
             // drawn flush under the answer's last line it read as part of
             // the answer ("이거 붙는거") rather than as the turn's edge.
@@ -6037,6 +6052,7 @@ impl App {
             ui.had_work_activity = false;
         }
         ui.turn_agent_count = 0;
+        ui.turn_tally = TurnTally::default();
         if let Some(reporter) = ui.reporter.as_ref() {
             reporter
                 .stop(
@@ -6362,6 +6378,7 @@ fn test_ui() -> Ui {
         had_work_activity: false,
         context_window: ModelWindow::default(),
         turn_agent_count: 0,
+        turn_tally: TurnTally::default(),
         folds: FoldIds::default(),
         fold_mode: FoldMode::Bare,
         last_commit: None,
@@ -8084,42 +8101,37 @@ mod tests {
 
     #[test]
     fn work_turn_separator_is_always_labelled_and_keeps_codex_width_grammar() {
-        use super::turn_separator;
+        use super::{turn_separator, TurnTally};
 
-        // A short turn is labelled too — a bare rule reads as nothing — and
-        // its label has no ticking count, so the same turn draws the same row.
-        for seconds in [0, 23, 59] {
-            let short = turn_separator(40, seconds, 0);
-            assert!(
-                short.plain().starts_with("─ Worked for under a minute ─"),
-                "{:?}",
-                short.plain()
-            );
+        // Every turn is labelled — a bare rule reads as nothing. The row is
+        // drawn once, when the turn ends, so its count does not tick.
+        let quiet = TurnTally::default();
+        for (seconds, label) in [(0, "── 0s ─"), (23, "── 23s ─"), (59, "── 59s ─"), (60, "── 1m 00s ─")] {
+            let short = turn_separator(40, seconds, 0, &quiet);
+            assert!(short.plain().starts_with(label), "{:?}", short.plain());
             assert_eq!(short.width(), 40);
             assert!(short.style.dim);
         }
-        assert!(turn_separator(40, 60, 0).plain().starts_with("─ Worked for 1m 00s ─"));
 
-        let labelled = turn_separator(30, 125, 0);
-        assert!(labelled.plain().starts_with("─ Worked for 2m 05s ─"));
+        let labelled = turn_separator(30, 125, 0, &quiet);
+        assert!(labelled.plain().starts_with("── 2m 05s ─"));
         assert_eq!(labelled.width(), 30);
         assert!(labelled.style.dim);
 
-        let clipped = turn_separator(8, 61, 0);
-        assert_eq!(clipped.plain(), "─ Worked");
+        let clipped = turn_separator(8, 61, 0, &quiet);
+        assert_eq!(clipped.plain(), "── 1m 01");
         assert_eq!(clipped.width(), 8);
     }
 
     #[test]
     fn only_agent_turns_extend_the_separator_with_codex_dot_grammar() {
-        use super::turn_separator;
+        use super::{turn_separator, TurnTally};
 
-        assert!(!turn_separator(50, 30, 0).plain().contains("agents"));
-        let agent_turn = turn_separator(50, 30, 2);
+        let quiet = TurnTally::default();
+        assert!(!turn_separator(50, 30, 0, &quiet).plain().contains("agents"));
+        let agent_turn = turn_separator(50, 30, 2, &quiet);
         assert!(
-            agent_turn
-                .plain()
-                .starts_with("─ Worked for under a minute · agents 2 ─"),
+            agent_turn.plain().starts_with("── 30s · agents 2 ─"),
             "separator was {:?}",
             agent_turn.plain()
         );

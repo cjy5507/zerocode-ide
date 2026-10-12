@@ -356,3 +356,9 @@ pub fn exit_code(code: i32) -> String {
 pub fn risk(level: &str) -> String {
     format!("{level} risk")
 }
+
+/// How many tool calls a turn made, on the line it ends on.
+#[must_use]
+pub fn tool_calls(count: usize) -> String {
+    if count == 1 { "1 tool call".to_string() } else { format!("{count} tool calls") }
+}
