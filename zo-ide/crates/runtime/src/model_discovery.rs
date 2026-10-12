@@ -2744,6 +2744,72 @@ mod tests {
         assert_eq!(row["class"], "frontier", "and so is its declared class");
     }
 
+    /// The case that found the gap (t-47996): Opus, Sonnet and Haiku 5.5
+    /// share a release number, so the release date handed `anthropic-latest`
+    /// to Haiku 5.5, the last of the three out. A provider pointer never
+    /// steps down the ladder (`demotes_to`) below the family it names — not
+    /// for the same generation, and not for a newer one either.
+    #[test]
+    fn a_provider_pointer_never_steps_down_its_familys_ladder() {
+        let mut opus = model("anthropic", "claude-opus-5-5", 20_260_921);
+        opus.prominence = 2;
+        let mut sonnet = model("anthropic", "claude-sonnet-5-5", 20_260_928);
+        sonnet.prominence = 1;
+        let haiku = model("anthropic", "claude-haiku-5-5", 20_261_007);
+        let same_generation = catalog(vec![haiku.clone(), sonnet.clone(), opus.clone()]);
+        let newer_below = catalog(vec![
+            model("anthropic", "claude-haiku-6", 20_261_201),
+            model("anthropic", "claude-sonnet-6", 20_261_115),
+            haiku,
+            sonnet,
+            opus,
+        ]);
+        for (catalog, sonnet_head, haiku_head) in [
+            (same_generation, "claude-sonnet-5-5", "claude-haiku-5-5"),
+            (newer_below, "claude-sonnet-6", "claude-haiku-6"),
+        ] {
+            let moved: HashMap<String, String> = overlay(&catalog, UpdatePolicy::Auto)
+                .alias_updates
+                .into_iter()
+                .map(|update| (update.alias, update.to))
+                .collect();
+            for (alias, to) in [
+                ("anthropic-latest", "claude-opus-5-5"),
+                ("claude-latest", "claude-opus-5-5"),
+                ("opus", "claude-opus-5-5"),
+                ("sonnet", sonnet_head),
+                ("haiku", haiku_head),
+            ] {
+                assert_eq!(moved.get(alias).map(String::as_str), Some(to), "{alias}: {moved:?}");
+            }
+        }
+    }
+
+    /// The same ladder holds when the release a pointer names is withdrawn:
+    /// it follows the living release of its own family, older if that is
+    /// what lives, never the newest release a rung below.
+    #[test]
+    fn a_withdrawn_pointer_follows_its_own_ladder_not_the_newest_release() {
+        let mut catalog = catalog(vec![
+            model("anthropic", "claude-haiku-5-5", 20_261_007),
+            model("anthropic", "claude-sonnet-5", 20_260_629),
+            model("anthropic", "claude-opus-4-8", 20_260_528),
+        ]);
+        catalog.withdrawn.push(super::Withdrawn {
+            provider: "anthropic".to_string(),
+            id: "claude-opus-5".to_string(),
+            source: super::ANTHROPIC_SOURCE.to_string(),
+            since: 1_700_000_000,
+        });
+        let moved: HashMap<String, String> = overlay(&catalog, UpdatePolicy::Auto)
+            .alias_updates
+            .into_iter()
+            .map(|update| (update.alias, update.to))
+            .collect();
+        assert_eq!(moved.get("opus").map(String::as_str), Some("claude-opus-4-8"), "{moved:?}");
+        assert_eq!(moved.get("anthropic-latest").map(String::as_str), Some("claude-opus-4-8"), "{moved:?}");
+    }
+
     #[test]
     fn notify_keeps_aliases_but_still_adds_the_ids() {
         let catalog = catalog(vec![model("anthropic", "claude-opus-5-1", 20_260_901)]);
