@@ -270,6 +270,7 @@ pub fn graft(graph: &mut VaultGraph, layer: &CodeLayer, limits: &CodeLimits) -> 
         };
         index.insert(node.id.clone(), at);
         graph.nodes.push(GraphNode {
+            page_type: None,
             id: node.id.clone(),
             title: node.title.clone(),
             tags: Vec::new(),
@@ -388,6 +389,7 @@ mod tests {
 
     fn page(id: &str) -> GraphNode {
         GraphNode {
+            page_type: None,
             id: id.to_string(),
             title: id.to_string(),
             tags: Vec::new(),

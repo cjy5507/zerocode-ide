@@ -21,3 +21,4 @@ the recipe's numbers and the card's numbers cannot drift:
 | unsourced edges (0) | every line the scan writes names the road that wrote it (t-5966) — the row is the invariant, not a witness |
 | contradictions (1) | `linked-target.md` declares `contradicts: [[indexed-clean]]` |
 | superseded (1) | `hub.md` declares `supersedes: [[old-note]]` |
+| untyped (7) | no fixture page says `type:` — a reading, not a finding, so it does not raise the exit |

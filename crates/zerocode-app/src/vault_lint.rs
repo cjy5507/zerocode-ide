@@ -27,7 +27,8 @@ zerocode vault-lint [--vault <dir>] [--json]
     Lint the second-brain vault: pages the index does not list, links to
     pages that do not exist, orphans, pages without source/ingested_at,
     prose links no relation key declares, raw items nothing ingested,
-    relations whose provenance no road vouches for.
+    relations whose provenance no road vouches for, and - a reading,
+    not a finding - pages whose type: names no known kind.
     The vault is --vault, else $ZEROCODE_SECOND_BRAIN, else the one the
     ZeroCode window saved. Exit 0 clean, 1 with findings, 2 with no vault.
 ";
@@ -73,13 +74,13 @@ pub enum Named {
 }
 
 impl Named {
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         match self {
             Self::Argument(path) | Self::Environment(path) | Self::Settings(path) => path,
         }
     }
 
-    const fn road(&self) -> &'static str {
+    pub(crate) const fn road(&self) -> &'static str {
         match self {
             Self::Argument(_) => "--vault",
             Self::Environment(_) => VAULT_ENV,
@@ -122,7 +123,7 @@ pub fn saved_vault_in(document: &Path) -> Option<PathBuf> {
     (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
-fn saved_vault() -> Option<PathBuf> {
+pub(crate) fn saved_vault() -> Option<PathBuf> {
     let paths = AppPaths::from_platform().ok()?;
     saved_vault_in(&paths.active_root(PathClass::Config).join(PREFERENCES_FILE))
 }
@@ -290,6 +291,18 @@ pub fn render(root: &Path, road: &str, graph: &VaultGraph, scanned_ms: u128) -> 
     );
     for page in &lint.superseded {
         under(&mut out, page.clone());
+    }
+    row(
+        &mut out,
+        "untyped",
+        lint.counts.untyped.to_string(),
+        "pages without a known type (a reading, not a finding)",
+    );
+    if lint.counts.untyped > 0 {
+        under(
+            &mut out,
+            "`zerocode vault-types` lists them with the type each would get".to_string(),
+        );
     }
     row(
         &mut out,

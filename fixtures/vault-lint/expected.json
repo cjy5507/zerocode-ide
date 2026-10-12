@@ -38,6 +38,15 @@
   "superseded": [
     "wiki/old-note.md"
   ],
+  "untyped": [
+    "wiki/hub.md",
+    "wiki/index-gap.md",
+    "wiki/indexed-clean.md",
+    "wiki/linked-target.md",
+    "wiki/no-source.md",
+    "wiki/old-note.md",
+    "wiki/orphan.md"
+  ],
   "merge_candidates": [],
   "counts": {
     "index_gaps": 2,
@@ -49,6 +58,7 @@
     "unsourced_edges": 0,
     "contradictions": 1,
     "superseded": 1,
+    "untyped": 7,
     "merge_candidates": 0
   },
   "findings": 7
