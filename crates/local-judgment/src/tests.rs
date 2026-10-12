@@ -904,3 +904,56 @@ fn importing_a_named_pipe_refuses_it_before_opening_a_reader() {
         "a non-file source must be refused before a blocking open"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_apply_does_not_erase_the_previously_configured_model() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let model = model();
+    let original = judgment_provider::Provider {
+        kind: judgment_provider::ProviderKind::Local,
+        protocol: judgment_provider::Protocol::SystemOne,
+        base_url: "http://127.0.0.1:43127".to_owned(),
+        model: model.id.clone(),
+        requires_auth: false,
+    };
+    let identity = original.identity();
+    let binding = json!({"modelId":model.id,"revision":model.revision,"providerIdentity":identity});
+    let document = serde_json::to_vec(
+        &json!({"smart":{"judgmentProvider":original,"managedJudgmentModel":binding}}),
+    )
+    .unwrap();
+    fs::write(&settings, &document).unwrap();
+    let manager = test_support::manager(home.path(), &settings, model.clone());
+    let mut history = vec![binding];
+    for index in 1..16 {
+        history.push(json!({"modelId":model.id,"revision":model.revision,"providerIdentity":format!("historical-{index}")}));
+    }
+    fs::write(
+        home.path().join("managed-judgment/bindings.json"),
+        serde_json::to_vec(&history).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manager.snapshot().configured_model_id.as_deref(),
+        Some(model.id.as_str())
+    );
+    let (server, provider) = test_support::running(&manager, fake_engine(), false).await;
+    assert_ne!(provider.identity(), identity);
+    manager.check(&server).unwrap();
+    assert_eq!(settled(&manager).await.operation.unwrap().state, "done");
+    let result = test_support::fail_provider_write(&manager, &server, &identity, &settings);
+    manager.stop(&server).unwrap();
+    assert!(matches!(result, Err(Error::Storage)));
+    assert_eq!(fs::read(&settings).unwrap(), document);
+    assert_eq!(
+        manager.snapshot().configured_model_id.as_deref(),
+        Some(model.id.as_str()),
+        "a failed provider write must preserve the configured model"
+    );
+    assert!(matches!(
+        manager.remove(&model.id, &model.revision),
+        Err(Error::Configured)
+    ));
+}

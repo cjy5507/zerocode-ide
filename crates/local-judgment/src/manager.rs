@@ -1128,4 +1128,22 @@ pub(crate) mod test_support {
     pub async fn ready_timeout(engine: &Arc<Engine>) -> Result<()> {
         wait_ready_for(engine, &Cancel::new(), Duration::from_millis(20)).await
     }
+
+    #[cfg(unix)]
+    pub fn fail_provider_write(
+        manager: &Manager,
+        server: &str,
+        expected: &str,
+        settings: &Path,
+    ) -> Result<Snapshot> {
+        manager.apply(server, expected, |_, _| {
+            let backup = settings.with_extension("backup");
+            fs::rename(settings, &backup).unwrap();
+            fs::create_dir(settings).unwrap();
+            let result = fs::write(settings, b"{}");
+            fs::remove_dir(settings).unwrap();
+            fs::rename(backup, settings).unwrap();
+            result.map_err(|_| Error::Storage)
+        })
+    }
 }
