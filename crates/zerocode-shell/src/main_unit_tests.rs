@@ -18175,6 +18175,36 @@ fn a_call_to_a_name_nobody_wrote_is_caught() {
 }
 
 #[test]
+fn block_arrow_parameters_are_local_calls_not_window_globals() {
+    let code =
+        strip_literals("new Promise((complete, fail) => { complete(); fail(); stillMissing(); });");
+    let calls = called_names(&code);
+    assert!(!calls.contains("complete") && !calls.contains("fail"));
+    assert!(calls.contains("stillMissing"));
+    assert!(!declared_names(&code).contains("fail"));
+}
+
+#[test]
+fn a_callback_parameter_does_not_hide_a_missing_call_outside_its_body() {
+    let inside = "new Promise((complete, fail) => { setTimeout(() => { fail(); }, 0); });";
+    assert!(!called_names(&strip_literals(inside)).contains("fail"));
+    let outside = format!("{inside} fail();");
+    assert!(called_names(&strip_literals(&outside)).contains("fail"));
+}
+
+#[test]
+fn call_arguments_and_default_value_calls_are_not_parameter_declarations() {
+    for source in [
+        "perform(complete, missing); missing();",
+        "const callback = (complete = missing(), failure) => failure();",
+    ] {
+        let code = strip_literals(source);
+        assert!(!declared_names(&code).contains("missing"));
+        assert!(called_names(&code).contains("missing"));
+    }
+}
+
+#[test]
 fn an_object_method_is_not_a_global_call_but_a_bare_call_still_is() {
     let method = called_names(&strip_literals(
         "const clipboardText = { async write(value) { return value; } };\n",
