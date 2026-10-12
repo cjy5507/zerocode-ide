@@ -65,7 +65,10 @@ pub fn compact_line_diff(original: &str, updated: &str) -> Vec<CompactDiffHunk> 
         .take_while(|(old, new)| old == new)
         .count();
     let (old_end, new_end) = (original_lines.len() - tail, updated_lines.len() - tail);
-    if let Some(middle) = line_diff_ops(&original_lines[head..old_end], &updated_lines[head..new_end]) {
+    if let Some(middle) = line_diff_ops(
+        &original_lines[head..old_end],
+        &updated_lines[head..new_end],
+    ) {
         let context = |old_index: usize, new_index: usize| LineDiffOp {
             kind: CompactDiffLineKind::Context,
             old_index,
