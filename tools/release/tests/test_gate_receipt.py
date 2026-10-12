@@ -819,7 +819,21 @@ class ReceiptTests(unittest.TestCase):
             "pass": "const test=require('node:test'); test('control',()=>{});\n",
             "failure": "const test=require('node:test'); const assert=require('node:assert/strict'); for(let i=0;i<7;i++) test('control-'+i,()=>assert.ok(i<2));\n",
             "cancelled": "const test=require('node:test'); const controller=new AbortController(); controller.signal.addEventListener('abort',()=>console.log('fixture abort signal fired '+controller.signal.aborted),{once:true}); test('control',{signal:controller.signal},async()=>{console.log('fixture cancellation began'); setTimeout(()=>controller.abort(),100); await new Promise(()=>{});});\n",
-            "implicit-child-wait": "const test=require('node:test'); test('parent',async context=>{let signalStarted; const started=new Promise(resolve=>{signalStarted=resolve;}); context.test('child',async()=>{console.log('fixture implicit child began'); signalStarted(); await new Promise(resolve=>setTimeout(resolve,100)); console.log('fixture implicit child completed');}); await started;});\n",
+            "explicit-child-wait": (
+                "const test=require('node:test');\n"
+                "test('parent',async context=>{\n"
+                "  let signalStarted;\n"
+                "  const started=new Promise(resolve=>{signalStarted=resolve;});\n"
+                "  const childPromise=context.test('child',async()=>{\n"
+                "    console.log('fixture awaited child began');\n"
+                "    signalStarted();\n"
+                "    await new Promise(resolve=>setTimeout(resolve,100));\n"
+                "    console.log('fixture awaited child completed');\n"
+                "  });\n"
+                "  await started;\n"
+                "  await childPromise;\n"
+                "});\n"
+            ),
             "cancelled-by-parent": (
                 "const test=require('node:test');\n"
                 "const assert=require('node:assert/strict');\n"
@@ -860,10 +874,10 @@ class ReceiptTests(unittest.TestCase):
                           "log": log.decode(errors="replace")}}), file=sys.stderr)
                     self.assertTrue(ledger.metadata["executed"])
                     self.assertGreaterEqual(ledger.metadata["endedMs"], ledger.metadata["startedMs"])
-                    if label in ("pass", "implicit-child-wait"):
+                    if label in ("pass", "explicit-child-wait"):
                         self.assertEqual(ledger.metadata["rc"], 0, log)
                         self.assertEqual(result["outcome"], "passed", log)
-                        self.assertEqual(result["tests"], 2 if label == "implicit-child-wait" else 1, log)
+                        self.assertEqual(result["tests"], 2 if label == "explicit-child-wait" else 1, log)
                     else:
                         self.assertEqual(result["outcome"], "unknown" if label == "zero" else "failed", log)
                         self.assertEqual(result["tests"], 0, log)
@@ -877,7 +891,7 @@ class ReceiptTests(unittest.TestCase):
                         if label == "failure":
                             for name, count in (("tests", 7), ("pass", 2), ("fail", 5)):
                                 self.assertRegex(log.decode(), rf"(?:#|ℹ) {name} {count}\b")
-                    if label in ("cancelled", "implicit-child-wait", "cancelled-by-parent"):
+                    if label in ("cancelled", "explicit-child-wait", "cancelled-by-parent"):
                         text = log.decode()
                         fields = re.findall(r"(?m)^(?:#|ℹ) (tests|suites|pass|fail|cancelled|skipped|todo) ([0-9]+)$", text)
                         self.assertEqual(len(fields), 7, log)
@@ -887,7 +901,7 @@ class ReceiptTests(unittest.TestCase):
                         self.assertEqual(summary["suites"], 0, log)
                         self.assertEqual(summary["skipped"], 0, log)
                         self.assertEqual(summary["todo"], 0, log)
-                        self.assertEqual(ledger.metadata["rc"], 0 if label == "implicit-child-wait" else 1, log)
+                        self.assertEqual(ledger.metadata["rc"], 0 if label == "explicit-child-wait" else 1, log)
                         self.assertLess(ledger.metadata["durationMs"], int(self.args.timeout * 1000))
                         durations = re.findall(r"(?m)^(?:#|ℹ) duration_ms ([0-9]+(?:\.[0-9]+)?)$", text)
                         self.assertEqual(len(durations), 1, log)
@@ -903,9 +917,9 @@ class ReceiptTests(unittest.TestCase):
                             self.assertEqual(summary["tests"], 1, log)
                             self.assertEqual(summary["pass"], 0, log)
                             self.assertEqual(summary["fail"] + summary["cancelled"], 1, log)
-                        elif label == "implicit-child-wait":
-                            self.assertIn(b"fixture implicit child began", log)
-                            self.assertIn(b"fixture implicit child completed", log)
+                        elif label == "explicit-child-wait":
+                            self.assertIn(b"fixture awaited child began", log)
+                            self.assertIn(b"fixture awaited child completed", log)
                             self.assertEqual(summary["tests"], 2, log)
                             self.assertEqual(summary["pass"], 2, log)
                             self.assertEqual(summary["fail"], 0, log)
