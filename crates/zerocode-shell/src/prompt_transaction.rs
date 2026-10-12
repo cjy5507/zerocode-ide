@@ -337,6 +337,26 @@ pub(super) fn still_mid_turn(line: Line, last_output: Option<Instant>, now: Inst
     }
 }
 
+pub(super) fn departed(
+    term: TermId,
+    deliveries: &mut HashMap<TermId, PromptDelivery>,
+    waiters: &mut HashMap<TermId, std::sync::mpsc::SyncSender<DeliveryOutcome>>,
+    queue: &mut HashMap<TermId, VecDeque<QueuedPrompt>>,
+) {
+    let delivery = deliveries.remove(&term);
+    if let Some(waiting) = waiters.remove(&term)
+        && let Some(delivery) = delivery
+    {
+        let outcome = if delivery.pasted() {
+            DeliveryOutcome::Unsubmitted(Refusal::LaunchChanged)
+        } else {
+            DeliveryOutcome::Refused(Refusal::LaunchChanged)
+        };
+        let _ = waiting.send(outcome);
+    }
+    queue.remove(&term);
+}
+
 /// A delivery has settled: drop it, answer whoever was waiting, and put the
 /// next parked prompt on the line — under the same lock, on a fresh clock.
 ///
@@ -685,6 +705,65 @@ mod tests {
             }
             turned
         }
+    }
+
+    #[test]
+    fn a_departed_prompt_reports_its_paste_before_the_terminal_disappeared() {
+        const TERM: TermId = 8_390;
+        let start = Instant::now();
+        let mut bench = Bench::default();
+        let (waiting, receipt) = std::sync::mpsc::sync_channel(1);
+        bench
+            .deliveries
+            .insert(TERM, guarded("continue once", true, start));
+        bench.waiters.insert(TERM, waiting);
+        bench.round(TERM, composer(0), Line::default(), start);
+        assert_eq!(
+            bench.round(TERM, composer(1), Line::default(), start + SUBMIT_GAP),
+            Turned::Pasted
+        );
+        departed(
+            TERM,
+            &mut bench.deliveries,
+            &mut bench.waiters,
+            &mut bench.queue,
+        );
+        assert_eq!(
+            receipt.try_recv(),
+            Ok(DeliveryOutcome::Unsubmitted(Refusal::LaunchChanged)),
+            "a pasted prompt was reported as safe to type again"
+        );
+        assert!(bench.deliveries.is_empty() && bench.waiters.is_empty() && bench.queue.is_empty());
+    }
+
+    #[test]
+    fn a_departed_prompt_refuses_its_unstarted_input_and_discards_its_queue() {
+        const TERM: TermId = 8_391;
+        let start = Instant::now();
+        let mut bench = Bench::default();
+        let (waiting, receipt) = std::sync::mpsc::sync_channel(1);
+        bench
+            .deliveries
+            .insert(TERM, guarded("continue once", true, start));
+        bench.waiters.insert(TERM, waiting);
+        let (queued, queued_receipt) = parked("later", Guard::for_somebody_elses_line(None));
+        bench.queue.entry(TERM).or_default().push_back(queued);
+        departed(
+            TERM,
+            &mut bench.deliveries,
+            &mut bench.waiters,
+            &mut bench.queue,
+        );
+        assert_eq!(
+            receipt.try_recv(),
+            Ok(DeliveryOutcome::Refused(Refusal::LaunchChanged))
+        );
+        assert!(bench.wrote.is_empty());
+        assert_eq!(
+            queued_receipt.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        );
+        assert!(bench.deliveries.is_empty() && bench.waiters.is_empty() && bench.queue.is_empty());
     }
 
     /// The line facts as the pump gathers them, minus the two that need a
