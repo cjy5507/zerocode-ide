@@ -72,8 +72,9 @@ pub fn build_render_prompt(
         tool_name: request.tool.clone(),
         reasoning: request.reasoning.clone(),
         // A question zo puts to the person has no risk to state and nothing to
-        // unblock (t-17474): the line is a tool prompt's.
+        // unblock (t-17474): the line and the level are a tool prompt's.
         audit_hint: request.prompt_audit_hint(),
+        risk_level: request.question.is_none().then_some(request.risk_level),
         choices,
         question: request.question.clone(),
         responder: modal_tx,

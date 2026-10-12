@@ -2534,19 +2534,16 @@ mod tests {
     }
 }
 
-/// The runtime's audit hint opens with the call's risk level —
-/// `risk: high; explicitly unblock with [y] Allow or [o] Allow once`
-/// (`runtime::permission::PermissionRequest::prompt_audit_hint`).
-const AUDIT_RISK_PREFIX: &str = "risk: ";
-
 /// A permission card's words: why the call needs approval, then how risky it
 /// is — the choices are listed once, as choices.
 fn permission_body(prompt: &runtime::message_stream::PermissionPrompt) -> String {
-    let risk = prompt.audit_hint.as_deref().and_then(|hint| {
-        let level = hint.strip_prefix(AUDIT_RISK_PREFIX)?.split(';').next()?.trim();
-        let mut letters = level.chars();
-        let first = letters.next()?;
-        Some(strings::risk(&format!("{}{}", first.to_uppercase(), letters.as_str())))
+    use runtime::permission::RiskLevel;
+    let risk = prompt.risk_level.map(|level| {
+        strings::risk(match level {
+            RiskLevel::Low => "Low",
+            RiskLevel::Medium => "Medium",
+            RiskLevel::High => "High",
+        })
     });
     [Some(prompt.reasoning.trim().to_string()), risk]
         .into_iter()
@@ -2619,6 +2616,27 @@ mod card_tests {
             !text.contains("explicitly unblock"),
             "the choices are listed once, as choices:\n{text}"
         );
+    }
+
+    /// The card states the risk the prompt carries, however the runtime words
+    /// its audit sentence: a card that read the level out of that sentence lost
+    /// its risk line whenever the sentence changed.
+    #[test]
+    fn the_card_states_the_prompts_risk_however_the_audit_sentence_reads() {
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        let mut prompt = crate::session::permission_bridge::build_render_prompt(
+            &bash_request(),
+            responder,
+            runtime::message_stream::BlockId(1),
+        );
+        prompt.audit_hint = Some("explicitly unblock with [y] Allow or [o] Allow once".to_string());
+        let text = Dialog::for_permission(&prompt)
+            .lines(100)
+            .iter()
+            .map(Line::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("High risk"), "the risk is on the card:\n{text}");
     }
 
     /// The running call has its own row with its own spinner; the status row

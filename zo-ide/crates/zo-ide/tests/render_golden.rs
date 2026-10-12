@@ -690,6 +690,7 @@ fn a_permission_prompt_is_parked_not_answered() {
             tool_name: "bash".to_string(),
             reasoning: "run ls".to_string(),
             audit_hint: None,
+            risk_level: None,
             choices: vec![PermissionChoice {
                 key: 'y',
                 label: "Allow once".to_string(),

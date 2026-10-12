@@ -689,6 +689,9 @@ pub struct PermissionPrompt {
     /// Short audit line explaining risk and the explicit unblock action. None
     /// for a question: it has nothing to unblock.
     pub audit_hint: Option<String>,
+    /// The call's risk level, which the approval card states in words. None
+    /// for a question: it carries no risk.
+    pub risk_level: Option<crate::permission::RiskLevel>,
     /// The available choices, in display order.
     pub choices: Vec<PermissionChoice>,
     /// Set when the prompt is a question zo puts to the person itself — the
