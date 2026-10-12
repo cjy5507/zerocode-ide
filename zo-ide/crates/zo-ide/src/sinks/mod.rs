@@ -225,6 +225,11 @@ pub(crate) mod serializable {
             /// Short audit line explaining risk and explicit unblock action.
             #[serde(default)]
             audit_hint: Option<String>,
+            /// The call's risk level — `low`, `medium` or `high` — which the
+            /// card states in words. Only with a tool prompt; a frame older
+            /// than the field states no risk.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            risk_level: Option<String>,
             /// Selectable options in display order. Empty for a pre-F2 frame.
             #[serde(default)]
             choices: Vec<SerializablePermissionChoice>,
@@ -353,6 +358,15 @@ pub(crate) mod serializable {
             "deny_always" => PermissionDecision::DenyAlways,
             _ => PermissionDecision::Deny,
         }
+    }
+
+    /// Inverse of [`runtime::permission::RiskLevel::as_str`]. An unknown tag
+    /// states no risk rather than a wrong one.
+    fn risk_level_from_tag(tag: &str) -> Option<runtime::permission::RiskLevel> {
+        use runtime::permission::RiskLevel;
+        [RiskLevel::Low, RiskLevel::Medium, RiskLevel::High]
+            .into_iter()
+            .find(|level| level.as_str() == tag)
     }
 
     impl SerializableRenderBlock {
@@ -485,6 +499,7 @@ pub(crate) mod serializable {
                     tool_name: prompt.tool_name.clone(),
                     reasoning: prompt.reasoning.clone(),
                     audit_hint: prompt.audit_hint.clone(),
+                    risk_level: prompt.risk_level.map(|level| level.as_str().to_string()),
                     choices: prompt
                         .choices
                         .iter()
@@ -720,6 +735,7 @@ pub(crate) mod serializable {
                 tool_name,
                 reasoning,
                 audit_hint,
+                risk_level,
                 choices,
                 kind,
                 topic,
@@ -748,7 +764,7 @@ pub(crate) mod serializable {
                         tool_name: tool_name.clone(),
                         reasoning: reasoning.clone(),
                         audit_hint: audit_hint.clone(),
-                        risk_level: None,
+                        risk_level: risk_level.as_deref().and_then(risk_level_from_tag),
                         choices: choices
                             .iter()
                             .map(|c| PermissionChoice {
