@@ -3333,11 +3333,14 @@ const pass = (name, detail = "") => results.push({ name, pass: true, detail });
 const fail = (name, detail) => results.push({ name, pass: false, detail: String(detail) });
 
 async function test(name, run) {
+  if (process.env.SETTINGS_TRACE) process.stderr.write(`settings START ${name}\n`);
   try {
     const detail = await run();
     pass(name, detail ?? "");
   } catch (error) {
     fail(name, error?.stack ?? error);
+  } finally {
+    if (process.env.SETTINGS_TRACE) process.stderr.write(`settings END ${name}\n`);
   }
 }
 
