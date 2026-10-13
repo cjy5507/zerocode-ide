@@ -103,6 +103,7 @@ RELEASE_STUB_LOG=${RELEASE_STUB_LOG:-}
 UPDATER_KEY=${UPDATER_KEY:-$RELEASE_HOME/keys/updater.key}   # `tauri signer generate -w`; its .pub beside it; never in the tree (README.md)
 UPDATER_KEY_PASSWORD_FILE=${UPDATER_KEY_PASSWORD_FILE:-$UPDATER_KEY.password}   # optional; absent means the key has no password
 FEED_PY=$SELF_DIR/updater_feed.py
+UNITS_PY=$SELF_DIR/workspace_units.py   # drops the repository's own build units from a target (trim_targets)
 LEGACY_INSTALL_SH=$SELF_DIR/legacy/install.sh   # the old CLI's installer, verbatim (§2.7)
 APP_INSTALL_SH=$SELF_DIR/install.sh             # the app's installer: reads the feed beside it, so it goes up with every release
 # -------------------------------------------------------------------------------
@@ -324,11 +325,27 @@ drop_incremental() {
   stub_log "drop-incremental $1"
   log "target $1: removed $(( kb / 1024 ))M of incremental cache nothing reads (CARGO_INCREMENTAL=$CARGO_INCREMENTAL)"
 }
+# drop_workspace_units LANE — every unit of a crate this repository defines. The
+# scratch is a fresh clone, so each run rebuilds those units anyway, and the ones an
+# earlier version left (the version stamp moves their hash) are never read again: on
+# 10-13 they were 10.4 of zo-gate's 12.4 G and 11.4 of root-gate's 19 G, and the cap's
+# clean behind them cost v1.1.62's zo gate 245 registry crates. Registry units stay warm.
+drop_workspace_units() {
+  local out units bytes
+  if is_dry; then out=$(python3 "$UNITS_PY" drop --target "$(target_dir "$1")" --names "$(stub WORKSPACE_PACKAGES)")
+  else out=$(python3 "$UNITS_PY" drop --target "$(target_dir "$1")" --scratch "$SCRATCH")
+  fi || { log "target $1: workspace units left in place, $UNITS_PY failed"; return 0; }
+  read -r units bytes <<< "$out"
+  [ "${units:-0}" -gt 0 ] 2>/dev/null || return 0
+  stub_log "drop-workspace-units $1"
+  log "target $1: removed $units workspace unit(s), $(( ${bytes:-0} / 1048576 ))M — the fresh scratch rebuilds them anyway"
+}
 trim_targets() {
   local lane kb cap_kb=$(( TARGET_CAP_GB * 1024 * 1024 ))
   for lane in $TARGET_LANES; do
     mkdir -p "$(target_dir "$lane")"
     drop_incremental "$lane"
+    drop_workspace_units "$lane"
     kb=$(target_kb "$lane"); kb=${kb:-0}
     if [ "$kb" -gt "$cap_kb" ]; then
       log "target $lane is $(( kb / 1024 / 1024 ))G > ${TARGET_CAP_GB}G cap — cleaning that one"

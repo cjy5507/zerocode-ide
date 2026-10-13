@@ -111,6 +111,22 @@ Measured before the rule (three green runs): gate-root 1105–1615 s, gate-zo
 GateOwed` pins the rule with stubs (`CHANGED_PATHS`, `STAMP_REAL_CHANGES`);
 `GateOwedOnGit` runs `gate_owed` and `stamp_only` on a real repository.
 
+## The warm targets
+
+Each gate and build keeps its own cargo target under
+`~/.local/share/zerocode/release/target/` (`TARGET_LANES`), so registry crates
+are built once and stay warm. Before the gates, `trim_targets` drops two kinds
+of dead weight from each: the incremental caches (`CARGO_INCREMENTAL=0` never
+reads them), and every build unit of a crate this repository defines
+(`workspace_units.py`, which takes the names from the scratch's `Cargo.toml`
+files, minus any name `Cargo.lock` gives a registry or git source). The scratch
+is a fresh clone, so each run rebuilds those units anyway, and the ones an
+earlier version left are never read again: on 2026-10-13 they were 10.4 of
+zo-gate's 12.4 GiB and 11.4 of root-gate's 19 GiB. Only a target still over
+`TARGET_CAP_GB` after that is cleaned whole, which costs its next gate every
+registry crate (245 for v1.1.62's zo gate, about 6 minutes).
+`tests/test_workspace_units.py` proves the drop on a real cargo build.
+
 ## The two phases after the swaps
 
 - `bundle-updater` — with a key and U-B's `plugins.updater` present, and only
