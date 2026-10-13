@@ -902,8 +902,12 @@ impl ToolGroup {
         let result = call.done.as_ref().filter(|done| !done.ok).map(failure_result).unwrap_or_default();
         let mut out =
             self.uncut_row(call, super::strings::TOOL_CALL, invocation, result, width, elapsed);
-        if let Some(done) = call.done.as_ref().filter(|done| !done.output.is_empty()) {
-            out.extend(output_block(&done.output, width));
+        if let Some(done) = call.done.as_ref() {
+            let said = mcp_envelope_text(&done.output);
+            let output = said.as_deref().unwrap_or(&done.output);
+            if !output.is_empty() {
+                out.extend(output_block(output, width));
+            }
         }
         out
     }
@@ -1181,6 +1185,88 @@ fn command_text_rows(rows: Vec<Line>) -> Vec<Line> {
         count.spans.insert(0, Span::raw(" ".repeat(HANG_COLUMNS)));
     }
     kept
+}
+
+/// What an MCP tool's result envelope says, for the rows under its call: the
+/// text items in order, an image or another item as a word — `None` when
+/// the output is not an envelope (a `content` array of typed items), and
+/// empty when the envelope says nothing. Display only: the session file and
+/// the wire keep the envelope.
+///
+/// The runtime hands the cell the envelope pretty-printed and capped
+/// (`format_generic_result`), so a long one arrives cut inside its text or an
+/// image's data; it is closed where the cap left it ([`closed_json`]) and
+/// read as far as it goes, the cap's own `… +1 lines` after it.
+fn mcp_envelope_text(output: &str) -> Option<String> {
+    let (printed, cut) = match output.strip_suffix(SOURCE_TRUNCATION_NOTE) {
+        Some(printed) => (printed.trim_end_matches('\n'), true),
+        None => (output, false),
+    };
+    if !printed.starts_with('{') {
+        return None;
+    }
+    let envelope: serde_json::Value = if cut {
+        serde_json::from_str(&closed_json(printed)).ok()?
+    } else {
+        serde_json::from_str(printed).ok()?
+    };
+    let items = envelope.get("content")?.as_array()?;
+    let mut said = Vec::with_capacity(items.len() + 1);
+    for item in items {
+        said.push(match item.get("type")?.as_str()? {
+            "text" => item.get("text")?.as_str()?,
+            "image" => super::strings::MCP_IMAGE_ITEM,
+            _ => super::strings::MCP_RESOURCE_ITEM,
+        });
+    }
+    if said.iter().all(|text| text.trim().is_empty()) {
+        return Some(String::new());
+    }
+    if cut {
+        said.push(SOURCE_TRUNCATION_NOTE);
+    }
+    Some(said.join("\n"))
+}
+
+/// `printed` — a JSON document cut short — closed so it parses: an open
+/// string ended (a dangling backslash dropped), a trailing comma dropped,
+/// and the open arrays and objects closed in order. A cap cuts the pretty
+/// print inside a string or between whole lines, and either closes cleanly.
+fn closed_json(printed: &str) -> String {
+    let mut open = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in printed.chars() {
+        if in_string {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => open.push('}'),
+            '[' => open.push(']'),
+            '}' | ']' => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    let mut closed = printed.to_string();
+    if in_string {
+        if escaped {
+            closed.pop();
+        }
+        closed.push('"');
+    }
+    let kept = closed.trim_end().trim_end_matches(',').len();
+    closed.truncate(kept);
+    closed.extend(open.iter().rev());
+    closed
 }
 
 fn explored_target(item: &Explored) -> (&'static str, Vec<Span>) {
