@@ -1,6 +1,18 @@
 import XCTest
 
 final class AgentEntrypointSourceSafetyTests: XCTestCase {
+    func testAClosedSelectedWindowNeverFallsBackToAnotherWindow() throws {
+        let source = try agentEntrypointSource()
+        let start = try XCTUnwrap(source.range(of: "private func actionResult("))
+        let end = try XCTUnwrap(source.range(of: "private func observe(", range: start.upperBound..<source.endIndex))
+        let body = String(source[start.lowerBound..<end.lowerBound])
+        XCTAssertEqual(body.components(separatedBy: "observe(params:").count - 1, 1)
+        XCTAssertFalse(body.contains("removeValue(forKey:"))
+        XCTAssertTrue(body.contains("hasRequestedWindowSelector(params)"))
+        XCTAssertTrue(body.contains("action[\"targetWindowId\"] = windowID"))
+        XCTAssertTrue(body.contains("\"observation\": [\"state\": \"unavailable\", \"reason\": error.code]"))
+    }
+
     func testDeferredObservationStillPerformsThePinnedActionFirst() throws {
         let source = try agentEntrypointSource()
         let start = try XCTUnwrap(source.range(of: "private func actionResult("))

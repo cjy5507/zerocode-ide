@@ -249,6 +249,12 @@ pub(crate) struct ComputerObservation {
     pub marked_look: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ComputerTarget {
+    pub app: String,
+    pub window_id: Option<u64>,
+}
+
 /// One model's desktop frame and observation, shared by context clones. Its
 /// viewer keeps provider diffs separate from every other model's looks.
 struct ComputerSight {
@@ -600,13 +606,23 @@ impl ToolContext {
     /// The app of the last picture staged for this model, as the window
     /// resolved it — where the look after an act looks when the act named
     /// none (t-37883).
-    pub(crate) fn computer_observed_app(&self) -> Option<String> {
+    pub(crate) fn computer_observed_target(&self) -> Option<ComputerTarget> {
         self.computer
             .observation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .and_then(|seen| seen.app.clone())
+            .and_then(|seen| seen.app.as_ref().map(|app| ComputerTarget { app: app.clone(), window_id: seen.window_id }))
+    }
+
+    pub(crate) fn computer_target_frame(&self, target: &ComputerTarget) -> Option<ShotFrame> {
+        self.computer.observation.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|seen| match target.window_id {
+                Some(window_id) => seen.window_id == Some(window_id),
+                None => seen.app.as_deref() == Some(target.app.as_str()) && seen.window_id.is_none(),
+            })
+            .map(|seen| seen.frame)
     }
 
     pub(crate) fn set_computer_observation(&self, observation: Option<ComputerObservation>) {
