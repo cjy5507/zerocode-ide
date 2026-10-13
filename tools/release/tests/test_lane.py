@@ -494,18 +494,23 @@ class Syntax(LaneCase):
 
     def test_the_dmg_carries_a_sealed_app_or_the_lane_is_red(self):
         """The app the DMG and the updater archive carry is sealed the way the
-        installed app is: without a distribution identity in the env the lane
-        signs it inside-out with the install signer, packs the archive and the
-        DMG again from the sealed bundle and signs the archive with the updater
-        key; with one, Tauri's own seal is kept. Either way the bundle verifies
-        --deep --strict before it is gathered (v1.3.78 shipped the linker's adhoc
-        signature over unsealed resources and a colleague's Mac called it
-        damaged, 2026-09-15)."""
+        installed app is: without a distribution identity it is build-app's own
+        app, signed inside-out by the install signer and installed as is, so the
+        seal packs the archive and the DMG from it and signs the archive with the
+        updater key, and never signs the app again (a re-sign moved the outer
+        cdhash, 4929830f to 9cfee161 on 10-13, and would ship an app this machine
+        never installed); with an identity, Tauri's own seal is kept. Either way
+        the bundle verifies --deep --strict before it is gathered (v1.3.78
+        shipped the linker's adhoc signature over unsealed resources and a
+        colleague's Mac called it damaged, 2026-09-15)."""
         lane = LANE.read_text()
+        built_app = lane.split("run_build() {")[1].split("\n}\n")[0]
+        self.assertIn('sign-app-bundle.sh" "$target/release/bundle/macos/$APP_NAME"', built_app,
+                      "build-app signs the app inside-out")
         seal = lane.split("seal_updater_bundle() {")[1].split("\n}\n")[0]
+        self.assertNotIn("sign-app-bundle.sh", seal, "the seal never signs the installed app again")
         for words in [
             'if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then',
-            'sign-app-bundle.sh" "$app"',
             'COPYFILE_DISABLE=1 tar -czf "$APP_NAME.tar.gz" "$APP_NAME"',
             'npx --no-install tauri signer sign -f "$UPDATER_KEY" "$archive"',
             'hdiutil create -quiet -volname "${APP_NAME%.app}" -srcfolder "$staging" -ov -format UDZO "$dmg"',
