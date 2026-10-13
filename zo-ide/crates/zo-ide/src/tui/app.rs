@@ -7329,7 +7329,7 @@ mod tests {
         assert_eq!(
             (
                 frame.matches("\u{1b}[K• Updated Plan").count(),
-                plain.matches("✓ Call    TodoWrite").count() + plain.matches("✗ Call    TodoWrite").count(),
+                plain.matches("✓ Call TodoWrite").count() + plain.matches("✗ Call TodoWrite").count(),
             ),
             (1, 0),
             "one TodoWrite call must render exactly one plan cell: {frame:?}"
@@ -7838,7 +7838,7 @@ mod tests {
             vec![
                 String::new(),
                 format!(
-                    "✓ Run     python3 <<'PY' print('detail') PY {}",
+                    "✓ Run python3 <<'PY' print('detail') PY {}",
                     super::super::strings::COMMAND_BACKGROUND
                 ),
                 "  └ (no output)".to_string(),
@@ -7880,7 +7880,7 @@ mod tests {
         let foreground: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
         let foreground_head = foreground
             .iter()
-            .position(|row| row.starts_with("✗ Run     "))
+            .position(|row| row.starts_with("✗ Run "))
             .unwrap_or_else(|| panic!("no foreground Run row: {foreground:?}"));
         ui.pending_history.clear();
 
@@ -8110,7 +8110,7 @@ mod tests {
         });
         let visible: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
         assert!(
-            visible.iter().any(|line| line.contains("Call    ToolSearch"))
+            visible.iter().any(|line| line.contains("Call ToolSearch"))
                 && visible.iter().any(|line| line.contains("discovery denied")),
             "failed discovery was hidden: {visible:?}"
         );
@@ -8332,9 +8332,9 @@ mod tests {
         let frame = plain_frame(&finish_tool_frame(&mut ui));
         assert!(!frame.contains("Failed to apply patch"), "{frame}");
         assert!(!frame.contains('✗'), "{frame}");
-        assert_eq!(frame.matches("✓ Edit    ").count(), 2, "{frame}");
-        let edited_at = frame.find("✓ Edit    ").unwrap_or_else(|| panic!("{frame}"));
-        let ran_at = frame.find("✓ Run     cargo test").unwrap_or_else(|| panic!("{frame}"));
+        assert_eq!(frame.matches("✓ Edit ").count(), 2, "{frame}");
+        let edited_at = frame.find("✓ Edit ").unwrap_or_else(|| panic!("{frame}"));
+        let ran_at = frame.find("✓ Run cargo test").unwrap_or_else(|| panic!("{frame}"));
         assert!(edited_at < ran_at, "the edits stand before the command that followed them: {frame}");
     }
 
@@ -8375,10 +8375,10 @@ mod tests {
         let frame = plain_frame(&finish_tool_frame(&mut ui));
         assert!(!frame.contains('✗'), "{frame}");
         assert!(
-            frame.lines().any(|row| row.starts_with("✓ Edit    src/a.rs") && row.trim_end().ends_with("+1 -1")),
+            frame.lines().any(|row| row.starts_with("✓ Edit src/a.rs") && row.trim_end().ends_with("+1 -1")),
             "{frame}"
         );
-        assert!(frame.contains("✓ Run     cargo test"), "{frame}");
+        assert!(frame.contains("✓ Run cargo test"), "{frame}");
     }
 
     /// The `agents 1 · running 0 · done 1` line under a working header is a
@@ -8633,7 +8633,7 @@ mod tests {
     }
 
     /// A check the harness saw pass after the last edit is a row like the
-    /// calls' rows (t-48216), `✓ Check   <command>   passed after the last
+    /// calls' rows (t-48216), `✓ Check <command>   passed after the last
     /// edit`, not a dim note carrying the runtime's sentence.
     #[test]
     fn a_passed_check_is_a_check_row_not_a_note() {
@@ -8647,9 +8647,9 @@ mod tests {
         let history: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
         let row = history
             .iter()
-            .find(|row| row.starts_with("✓ Check   "))
+            .find(|row| row.starts_with("✓ Check "))
             .unwrap_or_else(|| panic!("no check row: {history:#?}"));
-        assert!(row.starts_with("✓ Check   python3 -m py_compile src/app.py "), "{row}");
+        assert!(row.starts_with("✓ Check python3 -m py_compile src/app.py "), "{row}");
         assert!(row.ends_with(" passed after the last edit"), "{row}");
         assert_eq!(row.chars().count(), ui.width(), "the result stands at the right edge: {row}");
         assert!(
