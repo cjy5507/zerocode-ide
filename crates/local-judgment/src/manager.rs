@@ -818,8 +818,14 @@ impl Manager {
             .cancel
             .as_ref()
             .is_some_and(|cancel| cancel.flag.load(Ordering::Acquire));
+        let restore_failed = inner
+            .model_switch
+            .as_ref()
+            .is_some_and(|model_switch| model_switch.state == "restore_failed");
         if let Some(operation) = &mut inner.operation {
-            let result = if cancelled {
+            let result = if restore_failed {
+                Err(Error::RestoreFailed)
+            } else if cancelled {
                 Err(Error::Cancelled)
             } else {
                 result
