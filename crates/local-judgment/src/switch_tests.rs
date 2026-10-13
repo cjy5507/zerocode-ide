@@ -461,6 +461,9 @@ async fn restore_failure_is_explicit_and_keeps_the_last_selected_settings() {
     let original = fs::read(&fixture.settings).unwrap();
     begin(&fixture, |_, _, _| panic!("failed startup must not apply"));
     let failed = crate::tests::settled_snapshot(&fixture.manager).await;
+    let operation = failed.operation.as_ref().unwrap();
+    assert_eq!(operation.state, "failed");
+    assert_eq!(operation.error, Some(Error::RestoreFailed.token()));
     assert_eq!(failed.server.error, Some(Error::RestoreFailed.token()));
     let recovery = failed.model_switch.unwrap();
     assert_eq!(recovery.state, "restore_failed");
@@ -499,6 +502,51 @@ async fn restore_failure_is_explicit_and_keeps_the_last_selected_settings() {
         fixture.manager.snapshot().applied_model_id.as_deref(),
         Some("fixture-a")
     );
+    fixture.manager.shutdown();
+}
+
+#[tokio::test]
+async fn cancellation_never_hides_a_failed_model_restoration() {
+    let loading = Arc::new(AtomicBool::new(false));
+    let observed = loading.clone();
+    let factory: EngineFactory = Arc::new(move |model| {
+        if model.id == "fixture-b" {
+            observed.store(true, Ordering::SeqCst);
+            Ok(Engine::from_command(
+                std::process::Command::new("sh")
+                    .args(["-c", "while IFS= read -r line; do :; done"]),
+            ))
+        } else {
+            Err(Error::RuntimeFailed)
+        }
+    });
+    let fixture = fixture(factory).await;
+    let original = fs::read(&fixture.settings).unwrap();
+    let snapshot = begin(&fixture, |_, _, _| {
+        panic!("cancelled switch must not apply")
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !loading.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    fixture
+        .manager
+        .cancel(&snapshot.operation.unwrap().id)
+        .unwrap();
+    let failed = crate::tests::settled_snapshot(&fixture.manager).await;
+    let operation = failed.operation.unwrap();
+    assert_eq!(operation.state, "failed");
+    assert_eq!(operation.error, Some(Error::RestoreFailed.token()));
+    assert_eq!(failed.server.error, Some(Error::RestoreFailed.token()));
+    let recovery = failed.model_switch.unwrap();
+    assert_eq!(recovery.state, "restore_failed");
+    assert_eq!(recovery.error, Some(Error::Cancelled.token()));
+    assert_eq!(recovery.restore_error, Some(Error::RuntimeFailed.token()));
+    assert_eq!(failed.applied_model_id, None);
+    assert_eq!(fs::read(&fixture.settings).unwrap(), original);
     fixture.manager.shutdown();
 }
 
