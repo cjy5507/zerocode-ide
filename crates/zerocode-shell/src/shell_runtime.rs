@@ -469,6 +469,17 @@ pub(super) fn with_client<T: Send + 'static>(
     token: Option<String>,
     exchange: impl AsyncFnOnce(&mut Client) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
+    with_client_or(addr, token, |error| error.to_string(), exchange)
+}
+
+/// [`with_client`], with the caller's own word for a channel that would not
+/// connect: the error is still typed here, and gone once it is a string.
+fn with_client_or<T: Send + 'static>(
+    addr: String,
+    token: Option<String>,
+    unconnected: fn(zerocode_harness::HarnessError) -> String,
+    exchange: impl AsyncFnOnce(&mut Client) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
     // A dedicated OS thread, unconditionally. Callers reach here from sync
     // contexts AND from tauri's async runtime (the ZO tab launch resolves
     // there), and building a runtime on a runtime worker is the "Cannot
@@ -483,9 +494,7 @@ pub(super) fn with_client<T: Send + 'static>(
                 .build()
                 .map_err(|error| error.to_string())?;
             runtime.block_on(async {
-                let mut client = Client::connect(&addr, token)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let mut client = Client::connect(&addr, token).await.map_err(unconnected)?;
                 exchange(&mut client).await
             })
         })
@@ -557,6 +566,16 @@ pub(super) fn zo_channel(state: &AppState, session: &str) -> Result<ZoChannel, S
     zo_channel_in(&state.channels(), state.supervisor(), session)
 }
 
+/// What a card's answer that no live channel can take is called, so the
+/// window can take its question down.
+///
+/// A marker, not prose, for [`STALE_SAVE`]'s reason. Two roads earn it: this
+/// window holds no channel for the session, or the channel it holds refuses
+/// the connection — the process behind the address is gone. Anything else is
+/// one exchange that failed on a channel still there, and keeps its own words
+/// (t-51007).
+pub(super) const SESSION_UNREACHABLE: &str = "zerocode:session-unreachable";
+
 /// Answer one prompt on a session's channel: the road a card's button takes.
 /// One blocking exchange, like every call on a pane's channel.
 pub(super) fn answer_prompt(
@@ -564,13 +583,31 @@ pub(super) fn answer_prompt(
     prompt_id: u64,
     decision: String,
 ) -> Result<(), String> {
-    with_client(channel.addr, channel.token, async move |client| {
-        client
-            .respond_to_permission(prompt_id, &decision)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    })
+    with_client_or(
+        channel.addr,
+        channel.token,
+        answer_unconnected,
+        async move |client| {
+            client
+                .respond_to_permission(prompt_id, &decision)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
+/// A card's answer that could not connect, told by the kind of the failure
+/// and never by its words.
+fn answer_unconnected(error: zerocode_harness::HarnessError) -> String {
+    match &error {
+        zerocode_harness::HarnessError::Io(io)
+            if io.kind() == std::io::ErrorKind::ConnectionRefused =>
+        {
+            SESSION_UNREACHABLE.to_string()
+        }
+        _ => error.to_string(),
+    }
 }
 
 /// Every live zo pane channel, as `(session, channel)` — each reached the way
@@ -1491,12 +1528,20 @@ pub(super) fn spawn_subscriber(
         // End the exact claim this thread was born from. A duplicate attach
         // never became an owner, so it can neither arrive here nor tear down
         // the winning lane/terminal's command route.
-        if !zo_integration_runtime::is_current(&app.state::<AppState>(), owner, epoch) {
-            return;
+        let state = app.state::<AppState>();
+        let current = zo_integration_runtime::is_current(&state, owner, epoch);
+        if current {
+            zo_integration_runtime::disconnected(&app, owner, epoch);
         }
-        zo_integration_runtime::disconnected(&app, owner, epoch);
-        if detach_zo_channel_if_owned(&app.state::<AppState>(), &id, owner) {
-            clear_zo_session_subagents(&app, &id);
+        let holder = state.channel_owners().get(&id).copied();
+        match reader_end(holder, owner, current) {
+            ReaderEnd::Silent => return,
+            ReaderEnd::Release => {
+                if detach_zo_channel_if_owned(&state, &id, owner) {
+                    clear_zo_session_subagents(&app, &id);
+                }
+            }
+            ReaderEnd::Announce => {}
         }
         // A subscriber dying must not take the window down — the lane keeps
         // rendering through the pty — but it must not be silent either. The
@@ -1506,6 +1551,40 @@ pub(super) fn spawn_subscriber(
         let reason = result.err().map(|_| "channel-disconnected");
         let _ = app.emit("session:ended", json!({ "session": id, "reason": reason }));
     });
+}
+
+/// What a session's channel reader owes the window when its stream ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReaderEnd {
+    /// Another claim holds the session — a newer one of the same pane, or
+    /// another pane's or lane's — and its questions stay.
+    Silent,
+    /// No claim holds the session any more, and its questions leave.
+    Announce,
+    /// The reader's own claim still holds the session: it gives it up, and
+    /// the questions leave.
+    Release,
+}
+
+/// Decide a reader's end by who holds its session now.
+///
+/// A teardown can forget the reader's claim before the reader wakes — a
+/// closed terminal forgets it while its process is still going — and a reader
+/// that went quiet on a forgotten claim left a session nobody held with its
+/// question on screen, refusing every press (t-51007). So the last claim's
+/// end is said whichever road ended it, and never while a claim still holds
+/// the session. Pure over the one fact that settles it, so every order a
+/// teardown and a reader can end in is asserted without an app.
+pub(super) fn reader_end(
+    holder: Option<ZoChannelOwner>,
+    owner: ZoChannelOwner,
+    current: bool,
+) -> ReaderEnd {
+    match holder {
+        None => ReaderEnd::Announce,
+        Some(held) if current && held == owner => ReaderEnd::Release,
+        Some(_) => ReaderEnd::Silent,
+    }
 }
 
 /// One directory level, for the file panel and the folder browser.
@@ -2832,7 +2911,6 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
     // The calls its agent left waiting on the tool guards' hindsight never
     // get it (t-10916); the next occupant of the id starts a book of its own.
     crate::pane_guard::forget_term(term);
-    zo_integration_runtime::prune_owner(state, ZoChannelOwner::Term(term));
     state.zo_worker_deliveries().remove(&term);
     state.agent_terms().remove(&term);
     state.pane_accounts().remove(&term);
@@ -2861,9 +2939,12 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
     // Removing the subscriber mark first also tells a stream already draining
     // buffered frames to stop before it can repaint a tab that no longer
     // exists. Other agents have no entry in `channels`, so this is a no-op for
-    // their provider-session records.
+    // their provider-session records. An adoption that owns nothing does not
+    // excuse it: a restored pane and its adoption report one session twice,
+    // and the claim this term holds is then the restore's own. Given up by
+    // this term's name alone, so a session another lane or pane won stays
+    // theirs.
     if agent == Some(AgentKind::Zo.slug())
-        && zo_adoption.is_none()
         && let Some(session) = pane_session
     {
         detach_zo_channel_if_owned(state, &session.id, ZoChannelOwner::Term(term));
@@ -2872,6 +2953,11 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
     // per pane this window believes holds an agent, and a pane that closed does
     // not.
     state.pane_states().remove(&term);
+    // Its claim is forgotten only once the session is given up. The claim's
+    // reader decides its end by who holds the session, and one that woke
+    // between the two would find its claim forgotten and the session still
+    // held, and say nothing (t-51007).
+    zo_integration_runtime::prune_owner(state, ZoChannelOwner::Term(term));
     // And the answer the window kept for its transcript question. A terminal id
     // is never reused, so the entry could not be mistaken for a live pane's; it
     // is dropped only so the memory does not grow with every terminal opened.

@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.62] — 2026-10-13
+- A restart no longer freezes the window: re-seating a sleeping worker and resuming a conversation took the team table and the Codex launch lease in opposite orders and could wait on each other for a minute, freezing every pane's screen (typing seemed to do nothing) and then the window's way out; both now take the lease first, and the exit's screen capture never blocks the window for more than 300 ms (t-51380).
+- zo's model-switch question is answered in zo's own terminal only: the window raises no popup for it and marks the asking lane until zo reports the question resolved (t-51267).
+- A question zo put to the person is withdrawn when its session ends, and an answer that finds no live channel takes the question down, so a stale 「Switch models?」 popup no longer traps the window (t-51072).
+
 ## [1.1.61] — 2026-10-13
 - Closing or restarting the window no longer hangs on the ledger: the restart census is read on its own thread with a bounded patience, so a close-and-restart returns promptly (t-49062, the crash on restart reported on 10-12).
 - A zo permission card answered from the window reaches a zo typed into a shell pane: each zo channel keeps its own bearer and the window answers with that channel's token; a card that cannot be answered says to answer by number in the terminal (t-49081, the switch-turn button that did nothing).

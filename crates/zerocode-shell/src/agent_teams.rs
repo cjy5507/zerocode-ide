@@ -70,6 +70,65 @@ pub(crate) fn teams() -> MutexGuard<'static, HashMap<String, Team>> {
     team_table().lock().unwrap_or_else(|held| held.into_inner())
 }
 
+/// The team table for a reader that must not wait on it — the way out
+/// (t-51380). `None` once `patience` has run out with the table held.
+///
+/// On 2026-10-13 a window's exit stood 41 s on this lock, behind a split that
+/// held it while it waited for a file lock nobody was going to release, and
+/// the window was killed for it. A reader with somewhere else to be takes the
+/// table only while it is there to take.
+pub(crate) fn teams_within(
+    patience: std::time::Duration,
+) -> Option<MutexGuard<'static, HashMap<String, Team>>> {
+    let asked = std::time::Instant::now();
+    loop {
+        match team_table().try_lock() {
+            Ok(held) => return Some(held),
+            Err(std::sync::TryLockError::Poisoned(held)) => return Some(held.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if asked.elapsed() < patience => {
+                std::thread::sleep(TABLE_POLL);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// How often [`teams_within`] asks for the table again.
+const TABLE_POLL: std::time::Duration = std::time::Duration::from_millis(2);
+
+thread_local! {
+    /// Whether this thread is running a step under the team table
+    /// ([`under_team_table`], t-51380).
+    static UNDER_TEAM_TABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `step` as a step taken while this thread holds the team table — a
+/// split's spawn, under [`run`]'s guard or the durable lane's fence
+/// (t-51380).
+///
+/// A split launches its agent there, and a Codex or zo launch takes the Codex
+/// mirror's launch lease, an operating-system file lock. On 2026-10-13 a
+/// split held the table while it waited for that lease, behind a resume that
+/// held the lease and waited for the table: neither moved again, and with
+/// them the ledger's actor, the pane pump and at last the way out.
+pub(crate) fn under_team_table<R>(step: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            UNDER_TEAM_TABLE.with(|under| under.set(self.0));
+        }
+    }
+    let _restore = Restore(UNDER_TEAM_TABLE.with(|under| under.replace(true)));
+    step()
+}
+
+/// Whether this thread is inside [`under_team_table`] — the one fact the
+/// launch door reads to never wait for the Codex launch lease from under the
+/// table (t-51380).
+pub(crate) fn launching_under_team_table() -> bool {
+    UNDER_TEAM_TABLE.with(std::cell::Cell::get)
+}
+
 /// The one static behind [`teams`].
 ///
 /// Split out so the lock itself can be asked a question, not just held. There
@@ -828,6 +887,15 @@ pub trait Host {
         token: &str,
     ) -> Option<u32>;
 
+    /// Take, before the team table, what launching `command` will wait for —
+    /// the Codex mirror's launch lease (t-51380). A caller about to take the
+    /// table and split under it asks first, so the split's own launch finds
+    /// the lease in hand and waits for nothing; what comes back is let go when
+    /// the caller drops it. Hosts that launch nothing prepare nothing.
+    fn prepare_launch(&self, _command: &str) -> Option<crate::hooks::PreparedLaunch> {
+        None
+    }
+
     /// Wait for a newly spawned orchestration worker to accept its briefing.
     ///
     /// The durable split calls this only after it has released the team-table
@@ -1342,6 +1410,23 @@ impl std::fmt::Display for HostStartFailure {
  * resolves to nothing instead of to the wrong incarnation, and there is no
  * triple left for a caller to carry. */
 
+/// The command a split or a restart planned from `argv` would launch, read
+/// off a copy of the team so the team itself is planned once, under the guard
+/// that acts on it (t-51380). The table is let go before this answers.
+fn launched_command(
+    team_id: &str,
+    pane: &str,
+    pane_token: &str,
+    argv: &[String],
+) -> Option<String> {
+    let mut held = teams();
+    let team = authorized_team_mut(&mut held, team_id, pane, pane_token)?;
+    match plan(&mut team.clone(), argv, pane).effect {
+        Effect::Split { command, .. } | Effect::Respawn { command, .. } => Some(command),
+        _ => None,
+    }
+}
+
 /// Carry out one `tmux …`, and say what the shim should print.
 ///
 /// The order inside `Respawn` is deliberate and is the one measured
@@ -1355,6 +1440,10 @@ pub fn run(
     pane_token: &str,
     argv: &[String],
 ) -> zerocode_hookd::TeamAnswer {
+    // The launch a split or a restart here makes waits for its Codex lease
+    // now, before the table is taken, never under it (t-51380).
+    let _launch = launched_command(team_id, pane, pane_token, argv)
+        .and_then(|command| host.prepare_launch(&command));
     let mut held = teams();
     // Authorization shares the team guard with planning and the effect. A
     // precheck followed by a second lock would let a respawn rotate the token
@@ -1393,9 +1482,11 @@ pub fn run(
             let _placed = helper
                 .as_deref()
                 .map(|id| SplitHelperAsk::place(&token, id));
-            match host.split(
-                &team_id, leader, from_term, &new_pane, direction, &command, &token,
-            ) {
+            match under_team_table(|| {
+                host.split(
+                    &team_id, leader, from_term, &new_pane, direction, &command, &token,
+                )
+            }) {
                 Some(term) => {
                     team.record_split(&new_pane, term, &from, direction);
                     answer(planned.reply)
@@ -1434,9 +1525,11 @@ pub fn run(
                     "could not mint a capability for the restarted pane",
                 ));
             };
-            match host.split(
-                &team_id, leader, from_term, &held_pane, direction, &command, &token,
-            ) {
+            match under_team_table(|| {
+                host.split(
+                    &team_id, leader, from_term, &held_pane, direction, &command, &token,
+                )
+            }) {
                 Some(term) => {
                     /* The old dispatch is settled BEFORE the seat is re-pointed.
                      *

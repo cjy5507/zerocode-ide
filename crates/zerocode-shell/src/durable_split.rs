@@ -346,7 +346,10 @@ impl SplitLease {
         let team = held
             .get_mut(binding.source.team())
             .ok_or(SplitLeaseError::StaleIncarnation)?;
-        Ok(apply(team, binding, &self.destination_token, &self.command))
+        // A step under the table (t-51380): the launch inside it is told so.
+        Ok(crate::agent_teams::under_team_table(|| {
+            apply(team, binding, &self.destination_token, &self.command)
+        }))
     }
 
     /// On refusal the lease comes BACK beside the error: a permit that

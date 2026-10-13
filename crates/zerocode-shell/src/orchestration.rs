@@ -10464,6 +10464,11 @@ fn carried(
              * The spawn under the table lock is today's cost kept, not a new
              * one; the host must not reach back into the table (its own
              * contract, `Host::split`). */
+            /* What the host's launch waits for — the Codex mirror's launch
+             * lease — is taken here, before the fence's table lock and the
+             * actor's fence, never under them (t-51380): a lease holder, a
+             * resume opening its team, may itself be waiting for that table. */
+            let launch = host.prepare_launch(lease.command());
             /* A host that PANICS mid-walk must not take the permit down
              * with it: a dropped permit is a fence nothing ever lifts, and
              * every later spawn in this window would wait out the line and be
@@ -10523,6 +10528,9 @@ fn carried(
                     apply()
                 }
             }));
+            // Spent by the spawn, or let go here: an untaken lease must not
+            // outlive the walk into the readiness wait below.
+            drop(launch);
             let walked = match walked {
                 Ok(walked) => walked,
                 Err(panic) => {

@@ -12607,6 +12607,72 @@ mod zo_channel_bearer {
     }
 }
 
+/// A channel whose address refuses the connection has no process behind
+/// it any more, and no answer can reach the question it raised: the road
+/// says so with the marker the window takes the question down on, not in
+/// the transport's own words (t-51007). A zo that exited left its card on
+/// screen, and every press — Escape too — came back refused.
+#[test]
+fn an_answer_whose_channel_refuses_the_connection_is_unreachable() {
+    let gone = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback channel");
+        listener.local_addr().expect("its address").to_string()
+    };
+
+    let answered = answer_prompt(
+        zo_channel_entry(gone, Some("bearer-of-a-zo-that-exited".to_string())),
+        7,
+        "deny".to_string(),
+    );
+
+    assert_eq!(answered, Err("zerocode:session-unreachable".to_string()));
+}
+
+/// The reader's own claim still holds the session when its stream ends:
+/// it gives the session up, and the session's questions leave.
+#[test]
+fn a_reader_whose_claim_still_holds_the_session_gives_it_up_and_says_so() {
+    let pane = ZoChannelOwner::Term(8);
+
+    assert_eq!(reader_end(Some(pane), pane, true), ReaderEnd::Release);
+}
+
+/// The incident's order: the terminal closed, its teardown gave the
+/// session up and forgot the claim, and only then did the reader wake to
+/// the process's end. Nobody holds the session, so the reader says it
+/// ended — however far the teardown got before it woke (t-51007).
+#[test]
+fn a_reader_whose_claim_a_teardown_ended_still_says_the_session_ended() {
+    let pane = ZoChannelOwner::Term(8);
+
+    assert_eq!(reader_end(None, pane, false), ReaderEnd::Announce);
+    assert_eq!(reader_end(None, pane, true), ReaderEnd::Announce);
+}
+
+/// A claim that still holds the session keeps its questions: the same
+/// pane claimed the session again, or another pane or a lane holds it.
+/// The old reader ends without a word and gives nothing up.
+#[test]
+fn a_reader_never_takes_down_a_newer_claims_questions() {
+    let pane = ZoChannelOwner::Term(8);
+    let other = ZoChannelOwner::Term(9);
+    let lane = ZoChannelOwner::Lane(LaneId::random());
+
+    for (holder, current) in [
+        (pane, false),
+        (other, true),
+        (other, false),
+        (lane, true),
+        (lane, false),
+    ] {
+        assert_eq!(
+            reader_end(Some(holder), pane, current),
+            ReaderEnd::Silent,
+            "current: {current}"
+        );
+    }
+}
+
 /// A session's channel is asked with that channel's own bearer (t-49081).
 ///
 /// The window's one token opens only the zo the window started: a zo typed
@@ -25841,6 +25907,238 @@ mod browser_form_fill {
         assert!(
             !plain.contains("const zcFormFields") && !plain.contains("const zcFill"),
             "an eval that reads no form carries none of it"
+        );
+    }
+}
+
+/// The exit's screen capture, held where a test can stand in for the main
+/// thread (t-51380): a busy pane's lock, a held team table and a capture stuck
+/// on any other lock each cost the way out its patience and nothing more.
+mod exit_capture {
+    use super::*;
+    use crate::system_runtime::{exit_capture_within, exit_screen, seated_teammates};
+    use std::sync::mpsc::channel;
+    use zerocode_lane::{PtyHandle, PtyTransport, PtyTransportError};
+    use zerocode_pty::{Pumped, Terminal};
+
+    /// How long a test gives the way out before calling it stuck: spent only
+    /// on failure, and long enough for a loaded machine.
+    const STUCK: Duration = Duration::from_secs(2);
+
+    /// A terminal that holds a screen and does nothing else.
+    struct Screen(Terminal);
+
+    impl PtyTransport for Screen {
+        fn pump(&mut self) -> Pumped {
+            Pumped {
+                bytes: 0,
+                ended: false,
+                answered: false,
+                unanswered_since: None,
+            }
+        }
+
+        fn terminal(&self) -> &Terminal {
+            &self.0
+        }
+
+        fn terminal_mut(&mut self) -> &mut Terminal {
+            &mut self.0
+        }
+
+        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+
+        fn resize(&mut self, _rows: u16, _cols: u16) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+
+        fn try_wait(&mut self) -> Result<Option<u32>, PtyTransportError> {
+            Ok(None)
+        }
+
+        fn kill(&mut self) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+    }
+
+    fn showing(registry: &TerminalRegistry, term: TermId, text: &str) {
+        let mut terminal = Terminal::new(4, 20);
+        terminal.feed(text.as_bytes());
+        registry.insert(term, PtyHandle::new(Screen(terminal)));
+    }
+
+    /// A one-leaf tab on `term`, with the screen an earlier save stored.
+    fn tab_on(term: TermId, stored: &str) -> pane_layout::TabLayout {
+        pane_layout::TabLayout {
+            id: None,
+            root: pane_layout::PaneNode::Leaf,
+            titles: HashMap::new(),
+            names: HashMap::new(),
+            agents: HashMap::new(),
+            running: HashMap::new(),
+            active: 0,
+            expanded: None,
+            pinned: false,
+            focused: false,
+            terms: HashMap::from([(0, term)]),
+            buffers: HashMap::from([(0, stored.to_string())]),
+            owed: Vec::new(),
+            awake: false,
+        }
+    }
+
+    /// A pane whose lock another thread holds — the pump mid-parse, or a
+    /// thread that stopped while holding it — costs the exit that pane's new
+    /// screen and nothing else (t-51380): the capture answers, the pane keeps
+    /// the screen the file held for it and still counts as standing, and the
+    /// free pane beside it is captured.
+    #[test]
+    fn the_exit_capture_does_not_wait_for_a_busy_panes_lock() {
+        let registry = Arc::new(TerminalRegistry::default());
+        showing(&registry, 1, "busy pane");
+        showing(&registry, 2, "quiet pane");
+        let busy = registry.handle(1).expect("pane 1 is open");
+        let (holding, held) = channel();
+        let (release, released) = channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _parsing = lock_pty(&busy);
+            let _ = holding.send(());
+            let _ = released.recv();
+        });
+        held.recv_timeout(STUCK)
+            .expect("the holder never took pane 1's lock");
+
+        let capturing = Arc::clone(&registry);
+        let (captured, answered) = channel();
+        let capture = std::thread::spawn(move || {
+            let mut layouts = pane_layout::Layouts::new();
+            layouts.insert(
+                "worktree-one".to_string(),
+                vec![tab_on(1, "stored busy"), tab_on(2, "stored quiet")],
+            );
+            pane_layout::capture_exit(&mut layouts, |term| exit_screen(&capturing, term));
+            let _ = captured.send(layouts);
+        });
+        let answer = answered.recv_timeout(STUCK);
+        let _ = release.send(());
+        holder.join().expect("the holder ends");
+        capture.join().expect("the capture ends");
+        let layouts = answer.expect(
+            "the exit capture waited on a pane whose lock another thread holds — \
+             the main thread stands there for as long as that thread does",
+        );
+
+        let tabs = &layouts["worktree-one"];
+        assert!(tabs[0].awake, "a pane busy at the exit was called gone");
+        assert_eq!(
+            tabs[0].buffers[&0], "stored busy",
+            "a busy pane lost the screen the file held for it"
+        );
+        assert!(tabs[1].awake, "the free pane was called gone");
+        assert!(
+            tabs[1].buffers[&0].contains("quiet pane"),
+            "the free pane's screen was not captured: {:?}",
+            tabs[1].buffers
+        );
+    }
+
+    /// A team table held by a thread that is itself stuck — on 2026-10-13, a
+    /// split waiting for a file lock — costs the exit its unheld zo panes and
+    /// nothing else (t-51380).
+    #[test]
+    fn the_exit_does_not_wait_for_a_held_team_table() {
+        // The window's tests that ask whether the table is held take turns
+        // with this one, which holds it on purpose.
+        let _window = crate::orchestration::tests::the_window();
+        let (holding, held) = channel();
+        let (release, released) = channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _table = agent_teams::teams();
+            let _ = holding.send(());
+            let _ = released.recv();
+        });
+        held.recv_timeout(STUCK)
+            .expect("the holder never took the team table");
+
+        let (read, answered) = channel();
+        let reader = std::thread::spawn(move || {
+            let _ = read.send(seated_teammates());
+        });
+        let answer = answered.recv_timeout(STUCK);
+        let _ = release.send(());
+        holder.join().expect("the holder ends");
+        reader.join().expect("the reader ends");
+        let seated = answer.expect(
+            "the exit's read of the team table waited on a table another thread \
+             holds — the main thread stands there for as long as that thread does",
+        );
+        assert!(
+            seated.is_none(),
+            "a table that was never free was read as {seated:?}"
+        );
+    }
+
+    /// Whatever else the capture waits on — the pane maps, the file's writer —
+    /// the way out waits for it no longer than its patience, and a capture
+    /// that answers after that is told not to write (t-51380).
+    #[test]
+    fn the_way_out_waits_for_the_capture_no_longer_than_its_patience() {
+        let stuck = Arc::new(Mutex::new(()));
+        let held = stuck.lock().expect("the test's own lock");
+        let blocked = Arc::clone(&stuck);
+        let (told, wanted_after) = channel();
+        let (returned, answered) = channel();
+        let way_out = std::thread::spawn(move || {
+            let finished = exit_capture_within(Duration::from_millis(100), move |wanted| {
+                let _waited = blocked.lock();
+                let _ = told.send(wanted());
+            });
+            let _ = returned.send(finished);
+        });
+        let answer = answered.recv_timeout(STUCK);
+        drop(held);
+        way_out.join().expect("the way out ends");
+        let finished = answer.expect(
+            "the way out waited for a capture stuck on a lock — the main thread \
+             stands there for as long as the capture does",
+        );
+        assert!(
+            !finished,
+            "a capture that never finished was reported finished"
+        );
+        assert_eq!(
+            wanted_after.recv_timeout(STUCK),
+            Ok(false),
+            "a capture that answered after the way out moved on was still told to write"
+        );
+    }
+
+    /// The exit reads through the bounded doors above, not around them.
+    #[test]
+    fn the_exit_capture_reads_through_its_bounded_doors() {
+        let source = include_str!("system_runtime.rs");
+        let (shipped, _) = source.split_once("#[cfg(test)]").unwrap_or((source, ""));
+        let body = |name: &str| {
+            let at = shipped
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} left system_runtime.rs"));
+            let rest = &shipped[at..];
+            &rest[..rest.find("\n}\n").unwrap_or(rest.len())]
+        };
+        let capture = body("pub(super) fn capture_scrollback_at_exit(");
+        assert!(
+            capture.contains("exit_capture_within(EXIT_CAPTURE_PATIENCE,")
+                && capture.contains("exit_screen(terminals, term)")
+                && capture.contains("wanted()")
+                && !capture.contains("lock_pty("),
+            "the exit capture reads a lock without its patience:\n{capture}"
+        );
+        let live = body("fn live_zo_panes(");
+        assert!(
+            live.contains("seated_teammates()") && !live.contains("agent_teams::teams()"),
+            "the exit reads the team table without its patience:\n{live}"
         );
     }
 }

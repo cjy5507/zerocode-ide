@@ -1486,20 +1486,103 @@ pub fn agent_launch_env(local_data_root: &Path, agent: &str) -> Vec<(String, Str
 /// Most launch roads only need the environment and keep the old helper above.
 /// A teammate is different: its caller is one of several blocking team tasks,
 /// so it carries this guard until `PtyLane::spawn` has created the child.
-pub fn agent_launch_env_with_lock(
-    local_data_root: &Path,
-    agent: &str,
-) -> (
+pub fn agent_launch_env_with_lock(local_data_root: &Path, agent: &str) -> LaunchEnv {
+    // What this thread prepared before it took the team table is handed over
+    // as it was prepared (t-51380): its lease was waited for where waiting
+    // is safe.
+    if let Some(prepared) = take_prepared_launch(agent) {
+        return prepared;
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    launch_env_for(local_data_root, agent, home.as_deref())
+}
+
+/// A launch's environment and the Codex mirror lease that must live through
+/// its spawn.
+pub type LaunchEnv = (
     Vec<(String, String)>,
     Option<zerocode_hookd::codex_runtime_auth::LaunchLock>,
-) {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let (mut env, lock) = agent_launch_env_with_lock_inner(local_data_root, agent, home.as_deref());
+);
+
+/// The door's own work: the agent's home with its lease, and a zo launch's
+/// router keys.
+fn launch_env_for(local_data_root: &Path, agent: &str, system_home: Option<&Path>) -> LaunchEnv {
+    let (mut env, lock) = agent_launch_env_with_lock_inner(local_data_root, agent, system_home);
     env.extend(router_env_for(
         agent,
         crate::api_routers::router_launch_env_from_disk,
     ));
     (env, lock)
+}
+
+thread_local! {
+    /// The launch this thread prepared before taking the team table, with the
+    /// agent it was prepared for ([`prepare_launch`], t-51380).
+    static PREPARED_LAUNCH: std::cell::RefCell<Option<(String, LaunchEnv)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Holds this thread's prepared launch until the door takes it or this goes.
+#[must_use = "the prepared launch is let go when this guard is dropped"]
+pub struct PreparedLaunch(());
+
+impl Drop for PreparedLaunch {
+    fn drop(&mut self) {
+        // A lease nobody took is let go with the guard.
+        drop(PREPARED_LAUNCH.with(|slot| slot.borrow_mut().take()));
+    }
+}
+
+/// Take an agent's launch — its environment and its Codex lease — before the
+/// team table, for the split this thread runs under it next (t-51380).
+///
+/// A split launches its agent while its caller holds the team table, and from
+/// there the door does not wait for the lease ([`launch_lease_wait`]): a
+/// lease holder may itself be waiting for the table, as a resume opening its
+/// team does. So a caller about to take the table prepares here first, where
+/// nothing waits on this thread, and the door hands what was prepared to the
+/// split that asks for the same agent on this thread.
+pub(crate) fn prepare_launch(local_data_root: &Path, agent: &str) -> PreparedLaunch {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    prepare_launch_inner(local_data_root, agent, home.as_deref())
+}
+
+/// [`prepare_launch`] with the machine's home named rather than read.
+fn prepare_launch_inner(
+    local_data_root: &Path,
+    agent: &str,
+    system_home: Option<&Path>,
+) -> PreparedLaunch {
+    let launch = launch_env_for(local_data_root, agent, system_home);
+    PREPARED_LAUNCH.with(|slot| *slot.borrow_mut() = Some((agent.to_string(), launch)));
+    PreparedLaunch(())
+}
+
+/// The launch this thread prepared for `agent`, if it prepared one.
+fn take_prepared_launch(agent: &str) -> Option<LaunchEnv> {
+    PREPARED_LAUNCH.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        match slot.take() {
+            Some((prepared, launch)) if prepared == agent => Some(launch),
+            other => {
+                *slot = other;
+                None
+            }
+        }
+    })
+}
+
+/// How long this thread may wait for the Codex launch lease (t-51380): not at
+/// all from under the team table — a lease holder may be waiting for that
+/// table — and otherwise no longer than the lease's own patience.
+fn launch_lease_wait() -> zerocode_hookd::codex_runtime_auth::LeaseWait {
+    if crate::agent_teams::launching_under_team_table() {
+        zerocode_hookd::codex_runtime_auth::LeaseWait::Never
+    } else {
+        zerocode_hookd::codex_runtime_auth::LeaseWait::Within(
+            zerocode_hookd::codex_runtime_auth::LAUNCH_LEASE_PATIENCE,
+        )
+    }
 }
 
 /// The router keys the window holds (settings → API 라우터) ride a zo launch
@@ -1553,7 +1636,11 @@ fn agent_launch_env_with_lock_inner(
         // system default. We only acquire the mirror launch lock and point
         // CODEX_HOME at the runtime mirror.
         let mirror = zerocode_hookd::codex_mirror::Home::under(local_data_root);
-        let lock = zerocode_hookd::codex_runtime_auth::acquire_launch_lock(&mirror).ok();
+        let lock = zerocode_hookd::codex_runtime_auth::acquire_launch_lock_within(
+            &mirror,
+            launch_lease_wait(),
+        )
+        .ok();
         return (
             vec![(
                 "CODEX_HOME".to_string(),
@@ -1562,7 +1649,10 @@ fn agent_launch_env_with_lock_inner(
             lock,
         );
     }
-    zerocode_hookd::codex_install::launch_env_with_lock(&codex_lane(home, local_data_root))
+    zerocode_hookd::codex_install::launch_env_with_lock(
+        &codex_lane(home, local_data_root),
+        launch_lease_wait(),
+    )
 }
 
 /// A pane ended, so return a rotated Codex credential while its provenance is
@@ -2664,6 +2754,28 @@ mod tests {
         }
     }
 
+    /// A data root whose selected Codex account is a managed one — the road on
+    /// which the launch door takes the mirror's launch lease.
+    fn select_a_managed_codex_account(root: &Path) {
+        let managed =
+            crate::codex_accounts::account_home(root, "account-a").expect("managed account home");
+        std::fs::create_dir_all(&managed).expect("managed home");
+        std::fs::write(
+            managed.join(crate::codex_accounts::AUTH_FILE),
+            r#"{"OPENAI_API_KEY":"selected"}"#,
+        )
+        .expect("managed auth");
+        std::fs::write(
+            root.join(crate::codex_accounts::ACCOUNT_STORE_FILE),
+            serde_json::json!({
+                "accounts": [{ "id": "account-a", "home_dir": managed, "added_at": 0 }],
+                "active": "account-a"
+            })
+            .to_string(),
+        )
+        .expect("account store");
+    }
+
     /// A zo pane is an OpenAI consumer, so it gets the same mirror `CODEX_HOME`
     /// (and the same launch lock) a Codex pane gets. Before the provider table
     /// this door answered `agent == "codex"` and handed zo nothing, which is
@@ -2672,23 +2784,7 @@ mod tests {
     fn a_zo_launch_is_handed_the_selected_codex_account_mirror() {
         let root = tempfile::tempdir().expect("local data root");
         let system_home = tempfile::tempdir().expect("system home");
-        let managed = crate::codex_accounts::account_home(root.path(), "account-a")
-            .expect("managed account home");
-        std::fs::create_dir_all(&managed).expect("managed home");
-        std::fs::write(
-            managed.join(crate::codex_accounts::AUTH_FILE),
-            r#"{"OPENAI_API_KEY":"selected"}"#,
-        )
-        .expect("managed auth");
-        std::fs::write(
-            root.path().join(crate::codex_accounts::ACCOUNT_STORE_FILE),
-            serde_json::json!({
-                "accounts": [{ "id": "account-a", "home_dir": managed, "added_at": 0 }],
-                "active": "account-a"
-            })
-            .to_string(),
-        )
-        .expect("account store");
+        select_a_managed_codex_account(root.path());
 
         let (zo, zo_lock) =
             agent_launch_env_with_lock_inner(root.path(), "zo", Some(system_home.path()));
@@ -2715,6 +2811,123 @@ mod tests {
             home_of(&codex),
             "a zo pane and a codex pane were pointed at different accounts"
         );
+    }
+
+    /// The two orders that met on 2026-10-13, replayed (t-51380): a resume
+    /// holds the Codex launch lease and asks for the team table to open its
+    /// team (`ResumeDoor::prepare` — this door, then `open_team`), while a
+    /// split holds the team table and reaches this door for its agent
+    /// (`TeamWindow::split`, under `run`'s guard or the durable lane's fence).
+    /// That day neither moved again. Both must end.
+    #[test]
+    fn a_split_under_the_team_table_never_waits_for_the_lease_a_resume_holds() {
+        const STUCK: std::time::Duration = std::time::Duration::from_secs(2);
+        let _window = crate::orchestration::tests::the_window();
+        let root = tempfile::tempdir().expect("local data root");
+        let system_home = tempfile::tempdir().expect("system home");
+        select_a_managed_codex_account(root.path());
+        // The resume's lease, where this test can let it go: a deadlock is
+        // broken from here, so no thread outlives the test holding the table.
+        let lease = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (leased, lease_taken) = std::sync::mpsc::channel();
+        let (tabled, table_taken) = std::sync::mpsc::channel::<()>();
+        let (ended, ends) = std::sync::mpsc::channel();
+
+        let resume = {
+            let (root, home) = (root.path().to_path_buf(), system_home.path().to_path_buf());
+            let (lease, ended) = (std::sync::Arc::clone(&lease), ended.clone());
+            std::thread::spawn(move || {
+                let (_, taken) = agent_launch_env_with_lock_inner(&root, "zo", Some(&home));
+                let took = taken.is_some();
+                *lease.lock().unwrap_or_else(|held| held.into_inner()) = taken;
+                let _ = leased.send(took);
+                let _ = table_taken.recv_timeout(STUCK);
+                let table = crate::agent_teams::teams();
+                drop(lease.lock().unwrap_or_else(|held| held.into_inner()).take());
+                drop(table);
+                let _ = ended.send("resume");
+            })
+        };
+        assert_eq!(
+            lease_taken.recv_timeout(STUCK),
+            Ok(true),
+            "the resume never held the launch lease"
+        );
+        let split = {
+            let (root, home) = (root.path().to_path_buf(), system_home.path().to_path_buf());
+            std::thread::spawn(move || {
+                let table = crate::agent_teams::teams();
+                let _ = tabled.send(());
+                let _ = crate::agent_teams::under_team_table(|| {
+                    agent_launch_env_with_lock_inner(&root, "zo", Some(&home))
+                });
+                drop(table);
+                let _ = ended.send("split");
+            })
+        };
+
+        let deadline = std::time::Instant::now() + STUCK;
+        let mut finished = Vec::new();
+        while finished.len() < 2 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match ends.recv_timeout(left) {
+                Ok(road) => finished.push(road),
+                Err(_) => break,
+            }
+        }
+        drop(lease.lock().unwrap_or_else(|held| held.into_inner()).take());
+        resume.join().expect("the resume ends");
+        split.join().expect("the split ends");
+        assert_eq!(
+            finished.len(),
+            2,
+            "a split holding the team table waited for the Codex launch lease while \
+             the resume holding that lease waited for the table — only {finished:?} \
+             ended within {STUCK:?}"
+        );
+    }
+
+    /// A caller about to take the team table prepares its split's launch
+    /// first (t-51380): the lease is taken there, and the door under the table
+    /// hands over that very launch instead of asking for the lease again, so
+    /// the lease still rides into the spawn. A launch nobody took is let go
+    /// with its guard. (Codex, not zo: a zo launch also reads the person's
+    /// router keys, which a test has no business reading.)
+    #[test]
+    fn a_launch_prepared_before_the_team_table_is_handed_to_the_split_under_it() {
+        let root = tempfile::tempdir().expect("local data root");
+        let system_home = tempfile::tempdir().expect("system home");
+        select_a_managed_codex_account(root.path());
+        let mirror = zerocode_hookd::codex_mirror::Home::under(root.path());
+        let free_now = || {
+            zerocode_hookd::codex_runtime_auth::acquire_launch_lock_within(
+                &mirror,
+                zerocode_hookd::codex_runtime_auth::LeaseWait::Never,
+            )
+            .is_ok()
+        };
+
+        let prepared = prepare_launch_inner(root.path(), "codex", Some(system_home.path()));
+        let (env, lease) = crate::agent_teams::under_team_table(|| {
+            agent_launch_env_with_lock(root.path(), "codex")
+        });
+        assert!(
+            lease.is_some(),
+            "the split under the table did not carry the lease prepared before it"
+        );
+        assert!(
+            env.iter().any(|(key, _)| key == "CODEX_HOME"),
+            "the prepared launch lost its home: {env:?}"
+        );
+        assert!(!free_now(), "the lease the split carries was not held");
+        drop(lease);
+        drop(prepared);
+        assert!(free_now(), "the split's lease outlived the split");
+
+        let untaken = prepare_launch_inner(root.path(), "codex", Some(system_home.path()));
+        assert!(!free_now(), "a prepared launch did not hold its lease");
+        drop(untaken);
+        assert!(free_now(), "a prepared launch nobody took kept the lease");
     }
 
     /// Agents this window holds no OpenAI credentials for are left alone —
