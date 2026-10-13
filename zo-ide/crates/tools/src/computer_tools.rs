@@ -2070,6 +2070,15 @@ mod tests {
     }
 
     #[test]
+    fn windows_post_action_source_keeps_the_requested_window_selector() {
+        let source = include_str!("../../../../crates/zerocode-shell/src/computer_use/windows/provider.rs");
+        let body = source.split_once("fn run_action(").unwrap().1.split_once("/// An answer as JSON;").unwrap().0;
+        assert_eq!(body.matches("self.observe(").count(), 1, "post-action observation must not retry another window");
+        assert!(!body.contains("remove(\"windowId\")"));
+        assert!(!body.contains("remove(\"windowIndex\")"));
+    }
+
+    #[test]
     fn background_reads_preserve_the_same_selected_window() {
         for action in ["screenshot", "observe", "find", "read", "wait_for"] {
             let fields = input(json!({"action": action, "app": "Fixture", "window_id": 41, "background": true, "label": "Save"}));
