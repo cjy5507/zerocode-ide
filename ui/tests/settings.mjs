@@ -6312,6 +6312,14 @@ await test("실행 중인 판단 모델은 원자적 전환 한 번으로 바꾸
     assertEqual(errors.changed, errors.expectedChanged, "Error objects lose the changed-state explanation");
     assertEqual(errors.timeout, errors.expectedTimeout, "Error objects lose the timeout explanation");
     assert(!errors.generic.includes("private-error-value"), "unknown error details reached the UI");
+    const sourceErrors = await modelPage.evaluate(() => {
+      const codes = ["source_invalid", "source_unavailable", "source_auth_required", "source_hash_unavailable", "source_inspection_changed", "source_folder_required", "destination_unavailable", "weights_format_invalid", "manager_instance_changed", "catalog_conflict", "model_manifest_missing"];
+      return codes.map((code) => ({ code, message: managedJudgmentController.failure(new Error(code)) }));
+    });
+    for (const { code, message } of sourceErrors) {
+      assert(message && message !== errors.generic, `${code} has no actionable recovery guidance`);
+      assert(!message.includes(code), `${code} leaked an internal error token`);
+    }
   } finally {
     await modelPage.close();
     backend.zoSettings.smart = previous;
