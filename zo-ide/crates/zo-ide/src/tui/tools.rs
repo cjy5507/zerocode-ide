@@ -6,9 +6,11 @@
 //! 호출마다 같은 한 줄을 입는다: `<상태> <동사> <대상>   <결과>`. 상태는 도는
 //! 동안 점자 스피너, 끝나면 `✓`, 실패하면 빨간 `✗`, 거절되면 흐린 `✗` 다.
 //! 대상은 동사 뒤 한 칸에서 시작하고(동사를 열로 채우지 않는다, t-51389),
-//! 결과는 마지막 열에서 끝난다. 끝난 호출의 대상은 잘리지 않는다 — 줄에 못
-//! 들어간 나머지는 줄 아래 네 칸 들여 걸린다. 출력의 글과 diff 가 시작하는
-//! 그 열이라, 어느 동사 아래든 걸린 줄이 한 열에 선다.
+//! 결과는 마지막 열에서 끝난다. 끝난 호출의 대상은 줄에서 잘리지 않는다 — 줄에
+//! 못 들어간 나머지는 줄 아래 네 칸 들여 걸린다. 출력의 글과 diff 가 시작하는
+//! 그 열이라, 어느 동사 아래든 걸린 줄이 한 열에 선다. 명령의 나머지는 출력과
+//! 같은 다섯 행 예산을 지키고(앞 행들과 남은 행 수), 접기 표지가 켜진 터미널의
+//! 커밋된 셀만 접힌 본문에 전부 둔다.
 //!
 //! | zo 도구 | 줄 |
 //! |---|---|
@@ -690,17 +692,24 @@ impl ToolGroup {
     fn lines_in(&self, width: usize, elapsed: Duration) -> Vec<Line> {
         self.calls
             .iter()
-            .flat_map(|call| self.call_lines(call, width, elapsed))
+            .flat_map(|call| self.call_lines(call, width, elapsed, false))
             .collect()
     }
 
-    /// 한 호출의 줄들 — 종류마다 다른 문법.
-    fn call_lines(&self, call: &ToolCall, width: usize, elapsed: Duration) -> Vec<Line> {
+    /// 한 호출의 줄들 — 종류마다 다른 문법. `whole` 은 끝난 명령의 글을
+    /// 예산 없이 전부 그린다 — 사람이 펼치는 접기 본문 안에서만.
+    fn call_lines(
+        &self,
+        call: &ToolCall,
+        width: usize,
+        elapsed: Duration,
+        whole: bool,
+    ) -> Vec<Line> {
         match &call.kind {
             ToolKind::Command {
                 command,
                 background,
-            } => self.command_row(call, command, *background, width, elapsed),
+            } => self.command_row(call, command, *background, width, elapsed, whole),
             ToolKind::Explore(items) => items
                 .iter()
                 .enumerate()
@@ -766,8 +775,9 @@ impl ToolGroup {
     }
 
     /// `✓ Run <cmd>      3 lines` and the output under it; while the
-    /// command runs, the tail of what it has printed so far. A finished
-    /// command keeps its whole text: what the row cannot show hangs under it.
+    /// command runs, the tail of what it has printed so far. What a finished
+    /// command's row cannot show hangs under it within the output's budget
+    /// ([`command_text_rows`]) — all of it when `whole`.
     fn command_row(
         &self,
         call: &ToolCall,
@@ -775,6 +785,7 @@ impl ToolGroup {
         background: bool,
         width: usize,
         elapsed: Duration,
+        whole: bool,
     ) -> Vec<Line> {
         let result = call.done.as_ref().map(command_result).unwrap_or_default();
         let marker =
@@ -800,7 +811,8 @@ impl ToolGroup {
             result,
             width,
         )];
-        out.extend(hung(&rest, width));
+        let hanging = hung(&rest, width);
+        out.extend(if whole { hanging } else { command_text_rows(hanging) });
         match call.done.as_ref() {
             Some(done) => out.extend(output_block(&done.output, width)),
             None => out.extend(live_tail(&call.id, width)),
@@ -1060,7 +1072,8 @@ impl ToolGroup {
         // teaser is a row of the region drawn only while it is collapsed
         // (`teaser=1`), so opening the row shows the body in its place.
         for call in &self.calls {
-            let mut cell = self.call_lines(call, width, Duration::ZERO);
+            // A fold the person opens holds a long command's whole text.
+            let mut cell = self.call_lines(call, width, Duration::ZERO, mode.markers_enabled());
             if mode.markers_enabled() && cell.len() >= 2 {
                 let folded = cell.len() - 1;
                 cell.insert(1, teaser_line(folded, width));
@@ -1152,6 +1165,22 @@ fn split_target(lines: Vec<Line>, budget: usize) -> (Vec<Span>, Vec<Line>) {
 fn hung(rows: &[Line], width: usize) -> Vec<Line> {
     let indent = Span::raw(" ".repeat(HANG_COLUMNS));
     prefixed(rows, width, &Prefix::new(indent.clone(), indent), true)
+}
+
+/// A finished command's hung rows held to the output's budget: its first
+/// rows and a count of the rest. A command reads better from its head than
+/// around a middle cut — the head says what ran, and a heredoc's tail is
+/// mostly its closing word; codex holds a command's own rows the same way
+/// (`ExecCell::limit_lines_from_start`, here [`limit_from_start`]).
+fn command_text_rows(rows: Vec<Line>) -> Vec<Line> {
+    if rows.len() <= OUTPUT_MAX_ROWS {
+        return rows;
+    }
+    let mut kept = limit_from_start(&rows, OUTPUT_MAX_ROWS - 1);
+    if let Some(count) = kept.last_mut() {
+        count.spans.insert(0, Span::raw(" ".repeat(HANG_COLUMNS)));
+    }
+    kept
 }
 
 fn explored_target(item: &Explored) -> (&'static str, Vec<Span>) {
@@ -2780,9 +2809,10 @@ mod tests {
         );
     }
 
-    /// Every line of a finished multi-line command stays in the transcript,
-    /// under its row; a blank line in it stays blank. While it runs, the row
-    /// shows the first line and the rows under it are the live tail's.
+    /// The lines of a finished multi-line command stay under its row, a blank
+    /// line blank, as long as they fit the output's budget, as these do. While
+    /// it runs, the row shows the first line and the rows under it are the
+    /// live tail's.
     #[test]
     fn a_multi_line_command_keeps_every_line_under_its_row() {
         let script = "python3 - <<'EOF'\nimport sys\n\nprint(sys.version)\nEOF";
