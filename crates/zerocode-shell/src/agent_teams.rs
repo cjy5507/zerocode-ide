@@ -80,9 +80,21 @@ pub(crate) fn teams() -> MutexGuard<'static, HashMap<String, Team>> {
 pub(crate) fn teams_within(
     patience: std::time::Duration,
 ) -> Option<MutexGuard<'static, HashMap<String, Team>>> {
-    let _ = patience;
-    Some(teams())
+    let asked = std::time::Instant::now();
+    loop {
+        match team_table().try_lock() {
+            Ok(held) => return Some(held),
+            Err(std::sync::TryLockError::Poisoned(held)) => return Some(held.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if asked.elapsed() < patience => {
+                std::thread::sleep(TABLE_POLL);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
 }
+
+/// How often [`teams_within`] asks for the table again.
+const TABLE_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 
 thread_local! {
     /// Whether this thread is running a step under the team table
@@ -108,6 +120,13 @@ pub(crate) fn under_team_table<R>(step: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(UNDER_TEAM_TABLE.with(|under| under.replace(true)));
     step()
+}
+
+/// Whether this thread is inside [`under_team_table`] — the one fact the
+/// launch door reads to never wait for the Codex launch lease from under the
+/// table (t-51380).
+pub(crate) fn launching_under_team_table() -> bool {
+    UNDER_TEAM_TABLE.with(std::cell::Cell::get)
 }
 
 /// The one static behind [`teams`].
@@ -868,6 +887,15 @@ pub trait Host {
         token: &str,
     ) -> Option<u32>;
 
+    /// Take, before the team table, what launching `command` will wait for —
+    /// the Codex mirror's launch lease (t-51380). A caller about to take the
+    /// table and split under it asks first, so the split's own launch finds
+    /// the lease in hand and waits for nothing; what comes back is let go when
+    /// the caller drops it. Hosts that launch nothing prepare nothing.
+    fn prepare_launch(&self, _command: &str) -> Option<crate::hooks::PreparedLaunch> {
+        None
+    }
+
     /// Wait for a newly spawned orchestration worker to accept its briefing.
     ///
     /// The durable split calls this only after it has released the team-table
@@ -1382,6 +1410,23 @@ impl std::fmt::Display for HostStartFailure {
  * resolves to nothing instead of to the wrong incarnation, and there is no
  * triple left for a caller to carry. */
 
+/// The command a split or a restart planned from `argv` would launch, read
+/// off a copy of the team so the team itself is planned once, under the guard
+/// that acts on it (t-51380). The table is let go before this answers.
+fn launched_command(
+    team_id: &str,
+    pane: &str,
+    pane_token: &str,
+    argv: &[String],
+) -> Option<String> {
+    let mut held = teams();
+    let team = authorized_team_mut(&mut held, team_id, pane, pane_token)?;
+    match plan(&mut team.clone(), argv, pane).effect {
+        Effect::Split { command, .. } | Effect::Respawn { command, .. } => Some(command),
+        _ => None,
+    }
+}
+
 /// Carry out one `tmux …`, and say what the shim should print.
 ///
 /// The order inside `Respawn` is deliberate and is the one measured
@@ -1395,6 +1440,10 @@ pub fn run(
     pane_token: &str,
     argv: &[String],
 ) -> zerocode_hookd::TeamAnswer {
+    // The launch a split or a restart here makes waits for its Codex lease
+    // now, before the table is taken, never under it (t-51380).
+    let _launch = launched_command(team_id, pane, pane_token, argv)
+        .and_then(|command| host.prepare_launch(&command));
     let mut held = teams();
     // Authorization shares the team guard with planning and the effect. A
     // precheck followed by a second lock would let a respawn rotate the token

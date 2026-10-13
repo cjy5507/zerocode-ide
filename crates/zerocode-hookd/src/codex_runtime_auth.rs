@@ -80,7 +80,40 @@ impl Drop for LaunchLock {
     }
 }
 
+/// How a launch waits for the mirror's launch lease (t-51380).
+///
+/// The lease is an operating-system file lock, and its holder can be anyone:
+/// another window still starting its Codex, or a thread of this one that is
+/// itself waiting. On 2026-10-13 a split held the window's team table while it
+/// waited here, behind a resume that held the lease and waited for that table;
+/// neither moved again. So a wait is always bounded, and a caller holding a
+/// lock a lease holder may need does not wait at all. Running out is the
+/// answer an unreadable lock file has always been: an error the launch goes
+/// on without, with the historical best-effort sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseWait {
+    /// Take the lease only if it is free this instant.
+    Never,
+    /// Wait for it this long at most.
+    Within(std::time::Duration),
+}
+
+/// How long a launch that holds no other lock waits for the lease: a holder
+/// keeps it from its auth sync to its child's spawn, so a lease still held
+/// after this is a holder that is not letting go.
+pub const LAUNCH_LEASE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often a bounded wait asks for the lease again.
+const LEASE_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The lease, waited for no longer than [`LAUNCH_LEASE_PATIENCE`].
 pub fn acquire_launch_lock(mirror: &Home) -> std::io::Result<LaunchLock> {
+    acquire_launch_lock_within(mirror, LeaseWait::Within(LAUNCH_LEASE_PATIENCE))
+}
+
+/// The lease, waited for as `wait` allows. A lease still held when the wait is
+/// over is an error of kind `WouldBlock`.
+pub fn acquire_launch_lock_within(mirror: &Home, wait: LeaseWait) -> std::io::Result<LaunchLock> {
     std::fs::create_dir_all(mirror.path())?;
     let path = mirror.path().join(LAUNCH_LOCK_FILE);
     let file = OpenOptions::new()
@@ -90,8 +123,26 @@ pub fn acquire_launch_lock(mirror: &Home) -> std::io::Result<LaunchLock> {
         .write(true)
         .open(&path)?;
     crate::private_file::make_private(&path)?;
-    file.lock()?;
-    Ok(LaunchLock { file })
+    let patience = match wait {
+        LeaseWait::Never => std::time::Duration::ZERO,
+        LeaseWait::Within(patience) => patience,
+    };
+    let asked = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(LaunchLock { file }),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            Err(std::fs::TryLockError::WouldBlock) if asked.elapsed() < patience => {
+                std::thread::sleep(LEASE_POLL);
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "the Codex launch lease is held by another launch",
+                ));
+            }
+        }
+    }
 }
 
 /// What one pre-launch sync did.
@@ -660,6 +711,41 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("the second resume did not enter after release");
         second.join().expect("second resume");
+    }
+
+    /// A lease held elsewhere is waited for no longer than the caller allows
+    /// (t-51380): `Never` answers at once and `Within` at its patience, both
+    /// as `WouldBlock`, and the holder keeps the lease until it lets go.
+    #[test]
+    fn a_held_lease_is_waited_for_no_longer_than_the_caller_allows() {
+        let (_held, mirror, _system) = homes();
+        let first = acquire_launch_lock(&mirror).expect("the first lease");
+
+        let asked = std::time::Instant::now();
+        let refused = acquire_launch_lock_within(&mirror, LeaseWait::Never)
+            .expect_err("a lease held elsewhere was taken");
+        assert_eq!(refused.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(
+            asked.elapsed() < std::time::Duration::from_millis(500),
+            "a launch that may not wait waited {:?}",
+            asked.elapsed()
+        );
+
+        let patience = std::time::Duration::from_millis(100);
+        let asked = std::time::Instant::now();
+        let waited = acquire_launch_lock_within(&mirror, LeaseWait::Within(patience))
+            .expect_err("a lease held elsewhere was taken");
+        let took = asked.elapsed();
+        assert_eq!(waited.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(
+            took >= patience && took < std::time::Duration::from_secs(2),
+            "a bounded wait for the lease lasted {took:?} against {patience:?}"
+        );
+
+        drop(first);
+        let free = acquire_launch_lock_within(&mirror, LeaseWait::Never)
+            .expect("a free lease is taken at once");
+        drop(free);
     }
 
     /// The write-back must be able to PROVE its claim. A different account,

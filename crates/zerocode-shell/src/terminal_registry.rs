@@ -72,6 +72,29 @@ pub fn lock_pty(held: &HeldTerminal) -> MutexGuard<'_, PtyHandle> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Lock one terminal, waiting for it at most `patience` — `None` when another
+/// thread still holds it then (t-51380). For a reader with somewhere else to
+/// be, the way out above all, that keeps what it already has instead.
+pub fn lock_pty_within(
+    held: &HeldTerminal,
+    patience: std::time::Duration,
+) -> Option<MutexGuard<'_, PtyHandle>> {
+    let asked = std::time::Instant::now();
+    loop {
+        match held.try_lock() {
+            Ok(pty) => return Some(pty),
+            Err(std::sync::TryLockError::Poisoned(pty)) => return Some(pty.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if asked.elapsed() < patience => {
+                std::thread::sleep(LOCK_POLL);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// How often [`lock_pty_within`] asks again.
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// The window's terminal pool. See the module documentation for the two-tier
 /// locking this type exists to enforce.
 #[derive(Default)]

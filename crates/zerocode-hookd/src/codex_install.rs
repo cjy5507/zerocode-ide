@@ -928,7 +928,13 @@ impl Lane {
 /// Empty on the system lane, which is what "the user's own Codex also reports"
 /// looks like from here. One variable on the mirror lane.
 pub fn launch_env(lane: &Lane) -> Vec<(String, String)> {
-    launch_env_with_lock(lane).0
+    launch_env_with_lock(
+        lane,
+        crate::codex_runtime_auth::LeaseWait::Within(
+            crate::codex_runtime_auth::LAUNCH_LEASE_PATIENCE,
+        ),
+    )
+    .0
 }
 
 /// Give a running mirror another chance to return rotated credentials.
@@ -948,15 +954,18 @@ pub fn sync_auth(lane: &Lane) -> std::io::Result<crate::codex_runtime_auth::Auth
 /// though: returning the lease lets the shell hold it across trust setup and
 /// `PtyLane::spawn`, so four workers cannot all present one refresh token to
 /// Codex at once. A missing lease never refuses a launch; it only falls back to
-/// the historical best-effort sync behavior.
+/// the historical best-effort sync behavior. `wait` is how long the lease is
+/// waited for (t-51380): a caller holding the window's team table must not
+/// wait for it at all.
 pub fn launch_env_with_lock(
     lane: &Lane,
+    wait: crate::codex_runtime_auth::LeaseWait,
 ) -> (
     Vec<(String, String)>,
     Option<crate::codex_runtime_auth::LaunchLock>,
 ) {
     let home = crate::codex_mirror::Home::under(&lane.user_data);
-    let lock = crate::codex_runtime_auth::acquire_launch_lock(&home).ok();
+    let lock = crate::codex_runtime_auth::acquire_launch_lock_within(&home, wait).ok();
     // The mirror is only the active lane when it actually holds a trusted hook.
     // Asking the question this way — read the files, do not remember a decision —
     // means a mirror emptied by hand stops being used on the next launch rather

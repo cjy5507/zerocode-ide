@@ -686,16 +686,37 @@ fn exit_capture_within(
     patience: Duration,
     capture: impl FnOnce(&dyn Fn() -> bool) + Send + 'static,
 ) -> bool {
-    let _ = patience;
-    capture(&|| true);
-    true
+    let wanted = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let asked = Arc::clone(&wanted);
+    let (finished, answered) = std::sync::mpsc::sync_channel(1);
+    // A thread that cannot start leaves the file as the window's own saves
+    // left it: its sender goes with it, and the wait below ends at once.
+    let _ = std::thread::Builder::new()
+        .name(EXIT_CAPTURE_THREAD.to_string())
+        .spawn(move || {
+            capture(&|| asked.load(std::sync::atomic::Ordering::SeqCst));
+            let _ = finished.send(());
+        });
+    let done = answered.recv_timeout(patience).is_ok();
+    wanted.store(false, std::sync::atomic::Ordering::SeqCst);
+    done
 }
+
+/// The capture's thread, by name, so a sample of a stuck exit says whose wait
+/// it is.
+const EXIT_CAPTURE_THREAD: &str = "zerocode-exit-screens";
 
 /// One pane's screen for the exit's capture, or `None` for a terminal that is
 /// already gone.
+///
+/// The pane's lock is waited for at most [`EXIT_LOCK_PATIENCE`] (t-51380). A
+/// pane busy past it is still standing, and an empty screen is how
+/// `pane_layout::capture_exit` keeps the one the file already holds for it.
 fn exit_screen(terminals: &TerminalRegistry, term: TermId) -> Option<String> {
     let held = terminals.handle(term)?;
-    let pty = lock_pty(&held);
+    let Some(pty) = terminal_registry::lock_pty_within(&held, EXIT_LOCK_PATIENCE) else {
+        return Some(String::new());
+    };
     Some(zerocode_pty::serialize_tail(
         pty.terminal().grid(),
         zerocode_pty::SCROLLBACK_BUFFER_BYTE_LIMIT,
@@ -712,6 +733,14 @@ fn exit_screen(terminals: &TerminalRegistry, term: TermId) -> Option<String> {
 /// somebody else's shell. Buffers already stored for panes this window
 /// never opened stay: their worktrees were not visited, and their last
 /// screens are still the truth about them.
+///
+/// The main thread runs this from the exit event and waits for it no longer
+/// than [`EXIT_CAPTURE_PATIENCE`] (t-51380). Every lock on its road — the
+/// window's pane maps, the team table, the file's writer, each pane's
+/// terminal — can be held by a thread that is itself stuck: on 2026-10-13 the
+/// team table was, and the way out stood on it for 41 s until the window was
+/// killed. A capture that does not finish in time writes nothing, and the
+/// file stays as the window's own saves left it.
 pub(super) fn capture_scrollback_at_exit(app: &AppHandle) {
     let app = app.clone();
     let _ = exit_capture_within(EXIT_CAPTURE_PATIENCE, move |wanted| {
