@@ -634,18 +634,18 @@ build_updater_bundle() { # TARGET PASSWORD LOG
 # APPLE_PASSWORD·APPLE_TEAM_ID stand beside it); without one it ships the
 # linker's adhoc signature over unsealed resources, and another Mac's
 # Gatekeeper calls that "damaged" the moment quarantine is on it (v1.3.78,
-# 2026-09-15: a colleague's MacBook Air). So without that identity the lane
-# signs the bundle inside-out with the same signer the install phase uses,
-# then packs the archive and the DMG again from the sealed app — Tauri had
-# packed both before any signature stood — and signs the archive with the
-# updater key. With the identity, Tauri's own seal is kept and only verified.
+# 2026-09-15: a colleague's MacBook Air). So without that identity the app is
+# build-app's own, signed inside-out by the install signer and installed as is:
+# the lane packs the archive and the DMG from it and signs the archive with the
+# updater key. It never signs that app again, because a re-sign moves the outer
+# cdhash (4929830f to 9cfee161 on 10-13) and the updater would ship an app this
+# machine never installed. With the identity, Tauri's own seal is kept and only verified.
 # Either way the bundle must verify --deep --strict before it is gathered.
 seal_updater_bundle() { # TARGET PASSWORD LOG -> rc; WHY on failure
   local target=$1 password=$2 log=$3 app archive dmg staging rc
   app="$target/release/bundle/macos/$APP_NAME"
   [ -d "$app" ] || { WHY="no $APP_NAME under $target/release/bundle/macos"; return 1; }
   if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-    bash "$SCRATCH/tools/signing/sign-app-bundle.sh" "$app" >> "$log" 2>&1 || { WHY="sign-app-bundle.sh on the DMG's app ($log)"; return 1; }
     archive="$target/release/bundle/macos/$APP_NAME.tar.gz"
     rm -f "$archive" "$archive.sig"
     # COPYFILE_DISABLE: no AppleDouble `._` entries — the updater unpacks the
@@ -661,7 +661,7 @@ seal_updater_bundle() { # TARGET PASSWORD LOG -> rc; WHY on failure
       && hdiutil create -quiet -volname "${APP_NAME%.app}" -srcfolder "$staging" -ov -format UDZO "$dmg" >> "$log" 2>&1
     rc=$?; rm -rf "$staging"
     [ "$rc" = 0 ] || { WHY="hdiutil create $dmg rc=$rc ($log)"; return 1; }
-    log "bundle-updater: sealed $APP_NAME with the local identity; archive and DMG packed again from it"
+    log "bundle-updater: archive and DMG packed from build-app's sealed $APP_NAME, the installed one"
   fi
   codesign --verify --deep --strict "$app" >> "$log" 2>&1 || { WHY="the DMG's app does not verify (codesign --deep --strict, $log)"; return 1; }
 }
@@ -702,8 +702,7 @@ do_bundle_updater() {
     printf '### stub\n- stub notes for %s\n' "$VERSION" > "$out/notes.md"
   else
     [ -f "$UPDATER_KEY_PASSWORD_FILE" ] && password=$(cat "$UPDATER_KEY_PASSWORD_FILE")
-    # Without a distribution identity the seal re-signs build-app's app with the same
-    # local identity and packs the archive and the DMG from it, so a second
+    # Without a distribution identity build-app's app is the one shipped, so a second
     # tauri:release would only be thrown away (1105 s on 10-13, its zo stage cold).
     # Tauri signs and notarizes only inside its own build: with an identity it stays.
     if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then

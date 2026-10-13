@@ -126,10 +126,12 @@ GateOwed` pins the rule with stubs (`CHANGED_PATHS`, `STAMP_REAL_CHANGES`);
   section lands, the phase is skipped aloud (`status.json` `phases[].skipped`,
   `status.sh` `skipped=…`) and the lane stays green.
   The app the DMG and the archive carry is sealed before it is gathered: with
-  no distribution identity in the env (`APPLE_SIGNING_IDENTITY`) the lane signs
-  it inside-out with `tools/signing/sign-app-bundle.sh` — the install phase's
-  signer — packs the archive and the DMG again from the sealed bundle and signs
-  the archive with the updater key; with one, Tauri's own seal (and its
+  no distribution identity in the env (`APPLE_SIGNING_IDENTITY`) it is
+  build-app's app, signed inside-out at build time with
+  `tools/signing/sign-app-bundle.sh` and installed as is; the lane packs the
+  archive and the DMG from it and signs the archive with the updater key, and
+  never signs the app again (a re-sign moves the outer cdhash, so the shipped
+  app would not be the installed one); with an identity, Tauri's own seal (and its
   notarization when `APPLE_ID`·`APPLE_PASSWORD`·`APPLE_TEAM_ID` stand beside it)
   is kept. Either way `codesign --verify --deep --strict` must pass or the phase
   is red: Tauri without an identity ships the linker's adhoc signature over
