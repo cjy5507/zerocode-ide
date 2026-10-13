@@ -1944,6 +1944,73 @@ impl Ui {
         self.history(&cell);
     }
 
+    /// A resumed session's earlier conversation, drawn through the handlers
+    /// the live stream feeds — `App::replay_history` hands it the items.
+    fn replay(&mut self, items: Vec<ReplayItem>) {
+        let ids = BlockIdGen::default();
+        for (index, item) in items.into_iter().enumerate() {
+            match item {
+                ReplayItem::User(text) => self.user_cell(&text),
+                ReplayItem::Assistant(text) => self.block(RenderBlock::TextDelta {
+                    id: ids.next(),
+                    text,
+                    done: true,
+                }),
+                ReplayItem::AgentResult {
+                    label,
+                    status,
+                    summary,
+                    body,
+                } => self.block(RenderBlock::AgentResult {
+                    id: ids.next(),
+                    label,
+                    status,
+                    summary,
+                    body,
+                }),
+                ReplayItem::ToolCall {
+                    name,
+                    input,
+                    output,
+                    is_error,
+                } => {
+                    // 라이브 파서와 같은 폴백이다 — 입력이 JSON 이 아니면 그
+                    // 문자열 자체를 값으로 삼는다(`parser.rs` 의
+                    // `unwrap_or(Value::String(partial_json.clone()))`).
+                    let parsed = serde_json::from_str(&input)
+                        .unwrap_or(serde_json::Value::String(input));
+                    let preview = preview_tool_input(&name, &parsed);
+                    let summary = preview_summary(&preview);
+                    // 트랜스크립트의 호출 id 는 여기 오지 않는다(재생 항목은
+                    // 이름·입력·출력만 든다). 묶임 판정은 **이 셀 안에서만**
+                    // 쓰이므로 재생 순번으로 유일하게 만든다.
+                    let tool_call_id = ToolCallId(format!("replay-{index}"));
+                    self.block(RenderBlock::ToolCall {
+                        id: ids.next(),
+                        tool_call_id: tool_call_id.clone(),
+                        name: name.clone(),
+                        summary,
+                        preview,
+                        status: ToolCallStatus::Running,
+                    });
+                    if let Some(output) = output {
+                        let body = format_tool_result_from_raw(&name, &output, is_error);
+                        self.block(RenderBlock::ToolResult {
+                            id: ids.next(),
+                            tool_call_id,
+                            is_error,
+                            body,
+                        });
+                    }
+                }
+            }
+        }
+        // 턴 끝과 같은 마무리 — 열린 스트림을 확정하고 아직 도는 도구 셀을
+        // 접는다(결과 없이 끝난 호출은 codex `mark_failed` 처럼 닫힌다).
+        self.close_segment();
+        self.retire_tool_cell();
+    }
+
     /// Codex's Ctrl/Alt-V path: clipboards can offer a Finder file list or
     /// Chrome-style image data, so capture both through `clipboard_paste`.
     fn paste_image(&mut self) {
@@ -5024,68 +5091,7 @@ impl App {
         if items.is_empty() {
             return;
         }
-        let ids = BlockIdGen::default();
-        for (index, item) in items.into_iter().enumerate() {
-            match item {
-                ReplayItem::User(text) => self.ui.user_cell(&text),
-                ReplayItem::Assistant(text) => self.ui.block(RenderBlock::TextDelta {
-                    id: ids.next(),
-                    text,
-                    done: true,
-                }),
-                ReplayItem::AgentResult {
-                    label,
-                    status,
-                    summary,
-                    body,
-                } => self.ui.block(RenderBlock::AgentResult {
-                    id: ids.next(),
-                    label,
-                    status,
-                    summary,
-                    body,
-                }),
-                ReplayItem::ToolCall {
-                    name,
-                    input,
-                    output,
-                    is_error,
-                } => {
-                    // 라이브 파서와 같은 폴백이다 — 입력이 JSON 이 아니면 그
-                    // 문자열 자체를 값으로 삼는다(`parser.rs` 의
-                    // `unwrap_or(Value::String(partial_json.clone()))`).
-                    let parsed = serde_json::from_str(&input)
-                        .unwrap_or(serde_json::Value::String(input));
-                    let preview = preview_tool_input(&name, &parsed);
-                    let summary = preview_summary(&preview);
-                    // 트랜스크립트의 호출 id 는 여기 오지 않는다(재생 항목은
-                    // 이름·입력·출력만 든다). 묶임 판정은 **이 셀 안에서만**
-                    // 쓰이므로 재생 순번으로 유일하게 만든다.
-                    let tool_call_id = ToolCallId(format!("replay-{index}"));
-                    self.ui.block(RenderBlock::ToolCall {
-                        id: ids.next(),
-                        tool_call_id: tool_call_id.clone(),
-                        name: name.clone(),
-                        summary,
-                        preview,
-                        status: ToolCallStatus::Running,
-                    });
-                    if let Some(output) = output {
-                        let body = format_tool_result_from_raw(&name, &output, is_error);
-                        self.ui.block(RenderBlock::ToolResult {
-                            id: ids.next(),
-                            tool_call_id,
-                            is_error,
-                            body,
-                        });
-                    }
-                }
-            }
-        }
-        // 턴 끝과 같은 마무리 — 열린 스트림을 확정하고 아직 도는 도구 셀을
-        // 접는다(결과 없이 끝난 호출은 codex `mark_failed` 처럼 닫힌다).
-        self.ui.close_segment();
-        self.ui.retire_tool_cell();
+        self.ui.replay(items);
     }
 
     /// 화면을 놓고 세션을 닫는다. 종료 요약을 돌려주면 [`run`] 이 찍는다.
@@ -8695,6 +8701,114 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains(long), "the whole command is on the card:\n{text}");
+    }
+
+    /// What a resumed session draws is what the live screen drew (t-51389).
+    /// The runtime stores what the model reads: a steer behind its preamble
+    /// line — one block folded into a tool result, or several after a
+    /// truncation reminder in a continuation — and the host's own blocks the
+    /// person never typed: the window's resume nudge, a turn-end reminder, a
+    /// background task's completion behind the task-notification preamble.
+    /// Live, each steer drew its echo cell (a peer's envelope for a peer's
+    /// words), the task its command cell, and the host's blocks nothing — in a
+    /// session stored before the preamble's sentence last changed as well.
+    #[test]
+    fn a_resumed_session_draws_what_the_live_screen_drew() {
+        use core_types::session::{ContentBlock, ConversationMessage};
+        use runtime::background_log::{exit_line, head, notification_header, BACKGROUND_BASH};
+        use runtime::message_stream::SystemLevel;
+
+        // The frames as the runtime writes them, read from its source so the
+        // fixture is the stored text and moves when it does.
+        let conversation = include_str!("../../../runtime/src/conversation/mod.rs");
+        let constant = |name: &str| {
+            let open = format!("const {name}: &str = \"");
+            let start = conversation
+                .find(&open)
+                .unwrap_or_else(|| panic!("the runtime no longer declares {name}"))
+                + open.len();
+            let end = start + conversation[start..].find("\";").expect("the literal closes");
+            conversation[start..end].to_string()
+        };
+        assert!(
+            conversation.contains("format!(\"{STEERING_PREAMBLE}\\n{steer}\")"),
+            "a steer is stored as the preamble line, then the words"
+        );
+        let steering = constant("STEERING_PREAMBLE");
+        let framed = |words: &str| format!("{steering}\n{words}");
+        let truncation = constant("TRUNCATION_CONTINUATION_REMINDER");
+        let notification = constant("AGENT_NOTIFICATION_PREAMBLE");
+
+        let first = "그 파일 말고 tools.rs 를 봐";
+        let second = "시험은\n두 줄로";
+        let third = "끝나면 알려줘";
+        let older = "그건 됐어";
+        // The preamble as it read until it learned to answer a question.
+        let earlier = "[User steering — the user sent this mid-turn to correct course. Treat \
+                       it as a higher-priority instruction that supersedes any conflicting \
+                       earlier guidance, and adjust your plan and current work accordingly \
+                       before continuing. If it introduces a NEW requirement that is separable \
+                       from what you are doing right now, do not serialize it: launch a \
+                       background `Agent` for it immediately and keep working on your current \
+                       task — you will be notified when that agent completes. Fold it into \
+                       your current work instead only when it modifies the very thing you are \
+                       editing.]";
+        let peer = runtime::peer_message_frame(Some("reviewer"), "look at src/lib.rs");
+        let task = format!(
+            "{}\n\n{}two\n{}",
+            notification_header("task-1"),
+            head("ls", 42),
+            exit_line(Some(0))
+        );
+
+        let mut live = test_ui();
+        let ids = BlockIdGen::default();
+        for steer in [first, second, third, older, peer.as_str()] {
+            live.block(RenderBlock::System {
+                id: ids.next(),
+                level: SystemLevel::Info,
+                text: format!("{}{steer}", runtime::STEERING_ECHO_PREFIX),
+            });
+        }
+        live.block(RenderBlock::AgentResult {
+            id: ids.next(),
+            label: BACKGROUND_BASH.to_string(),
+            status: AgentResultStatus::Completed,
+            summary: None,
+            body: task.clone(),
+        });
+
+        let mut folded = ConversationMessage::tool_result("call-1", "bash", "ok", false);
+        folded.blocks.push(ContentBlock::Text { text: framed(first) });
+        let mut later = ConversationMessage::tool_result("call-2", "bash", "ok", false);
+        later.blocks.push(ContentBlock::Text { text: framed(&peer) });
+        later.blocks.push(ContentBlock::Text { text: format!("{notification}\n\n{task}") });
+        let messages = vec![
+            folded,
+            ConversationMessage::user_text(format!(
+                "{truncation}\n\n{}\n\n{}",
+                framed(second),
+                framed(third)
+            )),
+            ConversationMessage::user_text(
+                "The window restarted and cut your last turn short. Continue exactly where \
+                 you left off; if the work was already finished, say so briefly. Worktree \
+                 now: HEAD abc1234 \"release: v1.1.61\" · 0 uncommitted file(s) · last \
+                 commit 5 min ago.",
+            ),
+            ConversationMessage::user_text(
+                "[zo:turn-end-gate] <system-reminder>Your reply ended with a question, but \
+                 nobody is present to answer it mid-run.</system-reminder>",
+            ),
+            ConversationMessage::user_text(format!("{earlier}\n{older}")),
+            later,
+        ];
+        let mut resumed = test_ui();
+        resumed.replay(crate::session::plain_session::replay_items_from(&messages));
+
+        let rows = |ui: &super::Ui| ui.pending_history.iter().map(Line::plain).collect::<Vec<_>>();
+        assert_eq!(rows(&resumed), rows(&live), "the resumed transcript is not the live one");
+        assert_eq!(resumed.pending_history, live.pending_history, "the same rows in other bytes");
     }
 }
 
