@@ -2870,6 +2870,24 @@ class StatefulBackend {
       // `smart.jev.enabled`, written as the core's press writes it.
       case "typesafe_settings": return this.typesafeSettings();
       case "managed_judgment_status": return this.managedJudgmentSettings();
+      case "managed_judgment_register_catalog": {
+        const held = this.managedModelState;
+        if (args.instanceId !== held.instanceId || args.expectedCatalogFingerprint !== held.catalogFingerprint) throw "catalog_changed";
+        let catalog;
+        try { catalog = JSON.parse(args.catalogJson); } catch { throw "manifest_invalid"; }
+        if (catalog.version !== 1 || !Array.isArray(catalog.models)) throw "manifest_invalid";
+        if (catalog.models.some((model) => held.models.some((current) => current.id === model.id))) throw "manifest_invalid";
+        held.models.push(...catalog.models.map((model) => ({ ...clone(model), installed: false, origin: "registered" })));
+        held.catalogFingerprint = `${held.catalogFingerprint}-added`;
+        held.revision += 1;
+        return this.managedJudgmentSettings();
+      }
+      case "managed_judgment_prepare_model_runtime": {
+        const model = this.managedModelState?.models.find((entry) => entry.id === args.modelId && entry.revision === args.revision);
+        if (!model?.runtime) throw "unknown_model";
+        model.runtime.state = "ready";
+        return this.managedOperation("runtime", model.id);
+      }
       case "managed_judgment_prepare_runtime": {
         this.managedJudgmentSettings();
         this.managedModelState.runtime.state = "ready";
@@ -3003,6 +3021,7 @@ class StatefulBackend {
         return this.typesafeSettings();
       }
       case "set_judgment_provider": {
+        if (args.expectedProviderIdentity && args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
         if (this.typesafeSetFailure) throw { kind: "failed", message: "fixture refused the model" };
         const provider = clone(args.provider);
         if (!provider.model?.trim() || provider.protocol !== "system_one") {
@@ -3027,6 +3046,16 @@ class StatefulBackend {
         return this.typesafeSettings();
       }
       case "judgment_models": return clone(await (this.judgmentModelsWait ?? this.judgmentModels ?? [{ id: "fixture-decision-a" }, { id: "fixture-decision-b" }]));
+      case "preflight_judgment_provider": {
+        if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
+        const check = await (this.judgmentPreflightWait ?? this.judgmentPreflight ?? {
+          candidateIdentity: `fixture-provider:${JSON.stringify(args.provider)}`,
+          activeProviderIdentity: args.expectedProviderIdentity,
+          answered: true, model: args.provider.model, failure: null, elapsedMs: 1,
+        });
+        if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
+        return clone(check);
+      }
       case "check_typesafe_key": {
         if (args.providerIdentity && args.providerIdentity !== this.typesafeSettings().providerIdentity) {
           throw "settings_changed";
@@ -5915,7 +5944,7 @@ await test("판단 모델은 명시적으로 적용하고 로컬 연결은 Jev �
     await pageA.click("#judgment-local-manual");
     await pageA.fill("#judgment-endpoint", "http://127.0.0.1:1234");
     await pageA.fill("#typesafe-model-input", "acme/new-decision-model");
-    assert(await pageA.locator("#typesafe-check-btn").isDisabled(), "an unapplied provider offered a connection check");
+    assert(await pageA.locator("#typesafe-check-btn").isEnabled(), "a complete draft cannot be checked without replacing the active provider");
     assert(await pageA.locator("#typesafe-key-input").isHidden(), "an anonymous local server asked for a key");
     assertEqual(backend.typesafeSettings().provider.kind, "jev", "typing silently changed the active provider");
     const listingAt = backend.calls.length;
@@ -6148,6 +6177,126 @@ await test("로컬 모델 실패는 실제 원인과 다음 행동을 안내하�
     await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.draft = null; return refreshApiRouters(); });
   }
   return "actionable storage refusal · no configuration change";
+});
+
+await test("카탈로그 추가는 크기와 현재 목록에 묶이고 설치나 적용을 시작하지 않는다", async () => {
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  backend.managedModelState.catalogFingerprint = "fixture-catalog";
+  await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.localMode = "managed"; });
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.catalogFingerprint === "fixture-catalog");
+    assertEqual(await pageA.locator("#managed-judgment-register").count(), 1, "the model library cannot add a new catalog");
+    await pageA.locator("#managed-judgment-register").evaluate((element) => { element.open = true; });
+    const before = clone(backend.typesafeSettings().provider);
+    const callsAt = backend.calls.length;
+    await pageA.locator("#managed-judgment-catalog-file").setInputFiles({ name: "too-large.json", mimeType: "application/json", buffer: Buffer.alloc(512 * 1024 + 1, 32) });
+    await pageA.click("#managed-judgment-register-submit");
+    assert(!backend.calls.slice(callsAt).some((entry) => entry.command === "managed_judgment_register_catalog"), "an oversized catalog crossed IPC");
+    const added = { ...clone(backend.managedModelState.models[0]), id: "fixture-added", label: "Additional Native Decision" };
+    const catalogJson = JSON.stringify({ version: 1, models: [added] });
+    await pageA.locator("#managed-judgment-catalog-file").setInputFiles({ name: "decisions.json", mimeType: "application/json", buffer: Buffer.from(catalogJson) });
+    await pageA.click("#managed-judgment-register-submit");
+    const registered = await backend.waitForCall("A", "managed_judgment_register_catalog", callsAt);
+    assertEqual(registered.args, { instanceId: "fixture-instance", expectedCatalogFingerprint: "fixture-catalog", catalogJson });
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 2);
+    assertEqual(backend.typesafeSettings().provider, before, "registration silently selected a model");
+    assert(!backend.calls.slice(callsAt).some((entry) => ["managed_judgment_prepare_runtime", "managed_judgment_install", "managed_judgment_start", "managed_judgment_apply"].includes(entry.command)), "catalog registration executed a model lifecycle action");
+  } finally {
+    backend.managedModelState = previousManaged;
+    await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "bounded file · exact instance/catalog binding · registration is not installation or application";
+});
+
+await test("모델별 실행 환경은 서로 준비됐다고 표시하지 않는다", async () => {
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  backend.managedModelState.runtime.state = "ready";
+  const model = backend.managedModelState.models[0];
+  model.runtime = { state: "missing", pythonRequirement: "fixture-model-runtime", downloadBytes: 2048, reason: null };
+  model.installed = true;
+  await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.localMode = "managed"; });
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models[0]?.runtime?.state === "missing");
+    assert(await pageA.locator('[data-model-action="activate"]').isDisabled(), "an unrelated ready runtime enabled this model");
+    assert(await pageA.locator("#managed-judgment-runtime").isHidden(), "a global ready message contradicts the model runtime");
+    const preparedAt = backend.calls.length;
+    await pageA.click('[data-model-action="prepare"]');
+    const prepared = await backend.waitForCall("A", "managed_judgment_prepare_model_runtime", preparedAt);
+    assertEqual(prepared.args, { modelId: "fixture-decision", revision: "fixture-revision" });
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models[0]?.runtime?.state === "ready");
+    assert(await pageA.locator('[data-model-action="activate"]').isEnabled(), "the prepared model is still blocked");
+  } finally {
+    backend.managedModelState = previousManaged;
+    await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "per-model preparation · no global-runtime false readiness";
+});
+
+await test("새 판단 연결은 적용 전에 확인하고 실패나 다른 창의 변경을 덮지 않는다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  let finishProbe;
+  await openSettings(pageA, "api-routers");
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.click("#judgment-local-manual");
+    await pageA.fill("#judgment-endpoint", "http://127.0.0.1:32103");
+    await pageA.fill("#typesafe-model-input", "acme/decision");
+    const before = clone(backend.typesafeSettings().provider);
+    const identity = backend.typesafeSettings().providerIdentity;
+    backend.judgmentPreflight = { candidateIdentity: "fixture-candidate", activeProviderIdentity: identity, answered: false, model: null, failure: "schema", elapsedMs: 1 };
+    const failedAt = backend.calls.length;
+    await pageA.click("#judgment-save-provider");
+    await pageA.waitForFunction(() => !typesafeBusy);
+    assertEqual(backend.typesafeSettings().provider, before, "an invalid connection replaced the working provider before it was checked");
+    assert(backend.calls.slice(failedAt).some((entry) => entry.command === "preflight_judgment_provider"), "apply did not probe the candidate");
+    assert(!backend.calls.slice(failedAt).some((entry) => entry.command === "set_judgment_provider"), "a failed probe reached apply");
+    backend.judgmentPreflight.answered = true;
+    backend.judgmentPreflight.model = "fixture-candidate:acme/decision";
+    backend.judgmentPreflight.failure = null;
+    const checkedAt = backend.calls.length;
+    await pageA.click("#typesafe-check-btn");
+    await backend.waitForCall("A", "preflight_judgment_provider", checkedAt);
+    await pageA.waitForFunction(() => !typesafeBusy);
+    assertEqual(backend.typesafeSettings().provider, before, "a standalone draft check applied its candidate");
+    backend.judgmentPreflightWait = new Promise((resolveProbe) => { finishProbe = resolveProbe; });
+    const staleAt = backend.calls.length;
+    await pageA.click("#judgment-save-provider");
+    await backend.waitForCall("A", "preflight_judgment_provider", staleAt);
+    backend.zoSettings.smart = { ...(backend.zoSettings.smart ?? {}), [JEV_MODEL_SETTING]: "jev-other-window", judgmentProvider: { ...before, kind: "jev" } };
+    finishProbe(backend.judgmentPreflight);
+    await pageA.waitForFunction(() => !typesafeBusy);
+    assertEqual(backend.typesafeSettings().provider.model, "jev-other-window", "a stale probe overwrote the other window's choice");
+    assert(!backend.calls.slice(staleAt).some((entry) => entry.command === "set_judgment_provider"), "a stale probe reached apply");
+    delete backend.judgmentPreflightWait;
+    delete backend.judgmentPreflight;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.click("#judgment-local-manual");
+    await pageA.fill("#judgment-endpoint", "http://127.0.0.1:32103");
+    await pageA.fill("#typesafe-model-input", "acme/decision");
+    const expectedProviderIdentity = backend.typesafeSettings().providerIdentity;
+    const appliedAt = backend.calls.length;
+    await pageA.click("#judgment-save-provider");
+    const applied = await backend.waitForCall("A", "set_judgment_provider", appliedAt);
+    assertEqual(applied.args.expectedProviderIdentity, expectedProviderIdentity, "apply lacks the active-identity compare-and-set guard");
+    await pageA.waitForFunction(() => !typesafeBusy);
+    assertEqual(backend.typesafeSettings().provider.model, "acme/decision");
+  } finally {
+    finishProbe?.(backend.judgmentPreflight ?? {});
+    delete backend.judgmentPreflight;
+    delete backend.judgmentPreflightWait;
+    backend.zoSettings.smart = previous;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "candidate failure preserves active model · draft check is read-only · stale probe refuses · atomic apply after success";
 });
 
 await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁은 화면을 지원한다", async () => {
