@@ -4341,7 +4341,7 @@ const floatView = makeTermView(el("terminal"), el("term"), el("caret"), {
 /* Every question the window puts to the person is a KIND of ask, and every
  * kind is shown in the same frame (`#ask-scrim`) in the middle of the window:
  * one at a time, oldest first, with the number that wait behind it. A tool
- * permission, an agent's own question (zo's model switch), Computer Use's
+ * permission, an agent's own question (zo's image retry), Computer Use's
  * confirm and its hand-over, and the window's own confirms (`askConfirm`)
  * used to be four surfaces in three places — one of them a pill along the top
  * edge that a person looking at the middle of the window did not see, and one
@@ -4679,8 +4679,19 @@ function askGateLane(session, gate) {
   if (entry) invoke("gate_lane", { id: entry.lane.id, gate }).catch(() => {});
 }
 
+/* zo's model-switch question, by session, while it stands (t-51267). zo's own
+ * terminal draws it as a numbered menu and takes the answer there, so the
+ * window raises no card for it and shows only the lane's mark — which an
+ * answer to another card of the session must not lower while the terminal
+ * still asks. */
+const terminalAsks = new Map();
+
 function askWaitsOnSession(session) {
-  return activeAsk?.session === session || askQueue.some((queued) => queued.session === session);
+  return (
+    activeAsk?.session === session ||
+    askQueue.some((queued) => queued.session === session) ||
+    terminalAsks.has(session)
+  );
 }
 
 /* The choices a permission frame offers, in its order — and the two any frame
@@ -4725,7 +4736,6 @@ function askQuestionInitial(choices) {
  * words for falls back to the title the frame carries, and a question with
  * neither says only that it is one. */
 const ASK_TOPICS = Object.freeze({
-  model_switch: { key: "ask.topic.model_switch", word: "모델을 바꿀까요?" },
   declined_images: { key: "ask.topic.declinedImages", word: "이미지 없이 다시 시도할까요?" },
 });
 
@@ -4789,7 +4799,10 @@ const askFromChannel = {
   refused: askAnswerInTerminal,
   raised: (ask) => askGateLane(ask.session, "awaiting_permission"),
   delivered: (ask) => {
-    if (!askQueue.some((queued) => queued.session === ask.session)) {
+    if (
+      !askQueue.some((queued) => queued.session === ask.session) &&
+      !terminalAsks.has(ask.session)
+    ) {
       askGateLane(ask.session, "idle");
     }
   },
@@ -4842,6 +4855,11 @@ registerAskKind("question", {
  * every older zo sends) for a tool. The window never tells one from the other
  * by what the tool is called. */
 function raisePermission(session, frame) {
+  if (frame.kind === "question" && frame.topic === "model_switch") {
+    terminalAsks.set(session, frame.prompt_id);
+    askGateLane(session, "awaiting_permission");
+    return;
+  }
   raiseAsk({
     kind: frame.kind === "question" ? "question" : "tool",
     key:
@@ -4861,6 +4879,7 @@ function raisePermission(session, frame) {
  * — the lane is gated `blocked` on the same event and keeps saying so on its
  * row (제품 원칙 1). What leaves is the door that no longer opens. */
 function withdrawPermissions(session) {
+  terminalAsks.delete(session);
   withdrawAsks((ask) => ask.session === session);
 }
 
@@ -4872,6 +4891,7 @@ function withdrawPermissions(session) {
 function withdrawPrompt(session, promptId) {
   if (promptId === undefined || promptId === null) return;
   withdrawAsks((ask) => ask.session === session && ask.frame?.prompt_id === promptId);
+  if (terminalAsks.get(session) === promptId) terminalAsks.delete(session);
   if (!askWaitsOnSession(session)) askGateLane(session, "idle");
 }
 
