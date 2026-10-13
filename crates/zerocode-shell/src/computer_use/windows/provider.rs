@@ -275,6 +275,17 @@ pub(super) fn namespace_of(params: &Map<String, Value>) -> Namespace {
     )
 }
 
+/// Every element index a request names.
+pub(super) fn requested_indexes(params: &Map<String, Value>) -> Result<Vec<usize>, ProviderError> {
+    let mut indexes = Vec::new();
+    for key in ["elementIndex", "fromElementIndex", "toElementIndex"] {
+        if let Some(index) = params::optional_index(params, key)? {
+            indexes.push(index);
+        }
+    }
+    Ok(indexes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,15 +330,4 @@ mod tests {
             assert_eq!(result.unwrap_err().code, code);
         }
     }
-}
-
-/// Every element index a request names.
-pub(super) fn requested_indexes(params: &Map<String, Value>) -> Result<Vec<usize>, ProviderError> {
-    let mut indexes = Vec::new();
-    for key in ["elementIndex", "fromElementIndex", "toElementIndex"] {
-        if let Some(index) = params::optional_index(params, key)? {
-            indexes.push(index);
-        }
-    }
-    Ok(indexes)
 }
