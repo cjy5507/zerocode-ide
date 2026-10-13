@@ -62,10 +62,33 @@ pub(crate) fn managed_judgment_status(app: AppHandle) -> Result<Snapshot, String
     Ok(service(&app)?.snapshot())
 }
 
+#[tauri::command(async)]
+pub(crate) fn managed_judgment_register_catalog(
+    app: AppHandle,
+    instance_id: String,
+    expected_catalog_fingerprint: String,
+    catalog_json: String,
+) -> Result<Snapshot, String> {
+    service(&app)?
+        .register_catalog(&instance_id, &expected_catalog_fingerprint, &catalog_json)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub(crate) async fn managed_judgment_prepare_runtime(app: AppHandle) -> Result<Snapshot, String> {
     service(&app)?
         .prepare_runtime()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn managed_judgment_prepare_model_runtime(
+    app: AppHandle,
+    model_id: String,
+    revision: String,
+) -> Result<Snapshot, String> {
+    service(&app)?
+        .prepare_model_runtime(&model_id, &revision)
         .map_err(|error| error.to_string())
 }
 

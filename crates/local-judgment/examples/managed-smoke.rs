@@ -21,19 +21,57 @@ async fn settled(manager: &Manager) -> Result<Snapshot, Box<dyn std::error::Erro
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
-    let root = PathBuf::from(
+    let first = args
+        .next()
+        .ok_or("managed-smoke requires an isolated root")?;
+    let validation = first == "--validate-candidate";
+    let root = PathBuf::from(if validation {
         args.next()
-            .ok_or("managed-smoke requires an isolated root")?,
-    );
+            .ok_or("managed-smoke requires an isolated root")?
+    } else {
+        first
+    });
     let action = args.next().ok_or("managed-smoke requires an action")?;
-    let source = args.next().map(PathBuf::from);
+    let source = args
+        .next()
+        .filter(|source| source != "-")
+        .map(PathBuf::from);
+    let model_id = args.next().map(|id| id.to_string_lossy().into_owned());
     let settings = root.join("settings.json");
-    let manager = Manager::new(&root, &settings, |_| {})?;
+    let manager = if validation {
+        #[cfg(feature = "runtime-validation")]
+        {
+            Manager::for_validation(&root, &settings, |_| {})?
+        }
+        #[cfg(not(feature = "runtime-validation"))]
+        {
+            return Err("runtime_validation_feature_required".into());
+        }
+    } else {
+        Manager::new(&root, &settings, |_| {})?
+    };
     let before = manager.snapshot();
-    let model = before.models.first().ok_or("empty_catalog")?;
+    let model = match model_id.as_deref() {
+        Some(id) => before
+            .models
+            .iter()
+            .find(|model| model.id == id)
+            .ok_or("unknown_model")?,
+        None => before.models.first().ok_or("empty_catalog")?,
+    };
+    if validation {
+        if action != "validate" {
+            return Err("candidate_requires_complete_validation".into());
+        }
+        manager.prepare_model_runtime(&model.id, &model.revision)?;
+        settled(&manager).await?;
+        manager.install(&model.id, &model.revision, source.clone())?;
+        settled(&manager).await?;
+    }
     match action.to_str().ok_or("invalid_action")? {
         "runtime" => {
-            if manager.prepare_runtime()?.runtime.state != "ready" {
+            if model.runtime.state != "ready" {
+                manager.prepare_model_runtime(&model.id, &model.revision)?;
                 settled(&manager).await?;
             }
         }
@@ -47,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 settled(&manager).await?;
             }
         }
-        "run" => {
+        "run" | "validate" => {
             manager.start(&model.id, &model.revision)?;
             let started = settled(&manager).await?;
             let id = started.server.id.ok_or("server_not_ready")?;

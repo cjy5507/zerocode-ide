@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{Artifact, Model, RuntimeProfile, relative};
+use crate::catalog::{
+    Artifact, Catalog, MAX_CATALOG_BYTES, MAX_MODELS, Model, RuntimeProfile, relative,
+};
 use crate::{Error, Result};
 
 pub struct Store {
@@ -77,7 +79,7 @@ impl Store {
         let store = Self {
             root: io(fs::canonicalize(root))?,
         };
-        for name in ["models", "runtime", "partial"] {
+        for name in ["models", "runtime", "partial", "sources"] {
             private_dir(&child(&store.root, name)?)?;
         }
         for entry in io(fs::read_dir(store.root.join("partial")))? {
@@ -99,6 +101,55 @@ impl Store {
             path,
             committed: false,
         })
+    }
+
+    pub fn registered_catalogs(&self) -> Result<Vec<Catalog>> {
+        let sources = child(&self.root, "sources")?;
+        let mut paths = Vec::new();
+        for entry in io(fs::read_dir(sources))? {
+            if paths.len() >= MAX_MODELS {
+                return Err(Error::TooLarge);
+            }
+            paths.push(io(entry)?.path());
+        }
+        paths.sort();
+        let mut catalogs = Vec::new();
+        for path in paths {
+            plain(&path)?;
+            let document = bounded_read(&child(&path, "catalog.json")?, MAX_CATALOG_BYTES)?;
+            let document = std::str::from_utf8(&document).map_err(|_| Error::Manifest)?;
+            let catalog = Catalog::parse(document)?;
+            let fingerprint = catalog.fingerprint()?;
+            if path.file_name().and_then(|name| name.to_str()) != Some(fingerprint.as_str())
+                || !valid_receipt(&path, Ok(fingerprint))
+            {
+                return Err(Error::Integrity);
+            }
+            catalogs.push(catalog);
+        }
+        Ok(catalogs)
+    }
+
+    pub fn register_catalog(&self, catalog: &Catalog) -> Result<()> {
+        catalog.validate()?;
+        let document = serde_json::to_vec(catalog).map_err(|_| Error::Manifest)?;
+        if document.len() > MAX_CATALOG_BYTES {
+            return Err(Error::TooLarge);
+        }
+        self.require_space(document.len() as u64)?;
+        let mut stage = self.stage()?;
+        let mut file = io(OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(stage.path.join("catalog.json")))?;
+        io(file.write_all(&document))?;
+        io(file.sync_all())?;
+        drop(file);
+        let fingerprint = catalog.fingerprint()?;
+        stage.commit(
+            &child(&self.root, &format!("sources/{fingerprint}"))?,
+            &fingerprint,
+        )
     }
 
     pub fn model_path(&self, model: &Model) -> Result<PathBuf> {

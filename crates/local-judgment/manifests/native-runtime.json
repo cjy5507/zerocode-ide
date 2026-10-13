@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "id": "system-one-cpu",
+      "engine": "transformers_system_one",
+      "baseProfiles": [
+        "macos-aarch64",
+        "windows-x86_64"
+      ],
+      "removePackages": [
+        "laya",
+        "transformers",
+        "huggingface-hub",
+        "httpx2",
+        "httpcore2",
+        "truststore"
+      ],
+      "wheels": [
+        {
+          "path": "transformers-5.17.0-py3-none-any.whl",
+          "bytes": 12295140,
+          "sha256": "78ec1ce21579b38dfb83950a0658cd119f87212a2fcfdff478096ce9d6c03801",
+          "url": "https://files.pythonhosted.org/packages/e8/d0/c502b60d684adbd98a8dc7d5bb866842772b816ac4354e4608be240041ae/transformers-5.17.0-py3-none-any.whl",
+          "package": "transformers",
+          "version": "5.17.0",
+          "license": "Apache-2.0"
+        },
+        {
+          "path": "huggingface_hub-1.5.0-py3-none-any.whl",
+          "bytes": 596261,
+          "sha256": "c9c0b3ab95a777fc91666111f3b3ede71c0cdced3614c553a64e98920585c4ee",
+          "url": "https://files.pythonhosted.org/packages/ec/74/2bc951622e2dbba1af9a460d93c51d15e458becd486e62c29cc0ccb08178/huggingface_hub-1.5.0-py3-none-any.whl",
+          "package": "huggingface-hub",
+          "version": "1.5.0",
+          "license": "Apache-2.0"
+        },
+        {
+          "path": "accelerate-1.12.0-py3-none-any.whl",
+          "bytes": 380935,
+          "sha256": "3e2091cd341423207e2f084a6654b1efcd250dc326f2a37d6dde446e07cabb11",
+          "url": "https://files.pythonhosted.org/packages/9f/d2/c581486aa6c4fbd7394c23c47b83fa1a919d34194e16944241daf9e762dd/accelerate-1.12.0-py3-none-any.whl",
+          "package": "accelerate",
+          "version": "1.12.0",
+          "license": "Apache-2.0"
+        },
+        {
+          "path": "httpx-0.28.1-py3-none-any.whl",
+          "bytes": 73517,
+          "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+          "url": "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl",
+          "package": "httpx",
+          "version": "0.28.1",
+          "license": "BSD-3-Clause"
+        },
+        {
+          "path": "httpcore-1.0.9-py3-none-any.whl",
+          "bytes": 78784,
+          "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+          "url": "https://files.pythonhosted.org/packages/7e/f5/f66802a942d491edb555dd61e3a9961140fd64c90bce1eafd741609d334d/httpcore-1.0.9-py3-none-any.whl",
+          "package": "httpcore",
+          "version": "1.0.9",
+          "license": "BSD-3-Clause"
+        },
+        {
+          "path": "certifi-2026.7.22-py3-none-any.whl",
+          "bytes": 136983,
+          "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+          "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+          "package": "certifi",
+          "version": "2026.7.22",
+          "license": "MPL-2.0"
+        }
+      ],
+      "platformWheels": {
+        "macos-aarch64": [
+          {
+            "path": "psutil-7.2.2-cp36-abi3-macosx_11_0_arm64.whl",
+            "bytes": 129859,
+            "sha256": "1a7b04c10f32cc88ab39cbf606e117fd74721c831c98a27dc04578deb0c16979",
+            "url": "https://files.pythonhosted.org/packages/80/c4/f5af4c1ca8c1eeb2e92ccca14ce8effdeec651d5ab6053c589b074eda6e1/psutil-7.2.2-cp36-abi3-macosx_11_0_arm64.whl",
+            "package": "psutil",
+            "version": "7.2.2",
+            "license": "BSD-3-Clause"
+          }
+        ],
+        "windows-x86_64": [
+          {
+            "path": "psutil-7.2.2-cp37-abi3-win_amd64.whl",
+            "bytes": 137737,
+            "sha256": "eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988",
+            "url": "https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl",
+            "package": "psutil",
+            "version": "7.2.2",
+            "license": "BSD-3-Clause"
+          }
+        ]
+      },
+      "runtimeFiles": [
+        {
+          "path": "native-system-one/chat_template.jinja",
+          "bytes": 7755,
+          "sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/chat_template.jinja",
+          "license": "Apache-2.0"
+        },
+        {
+          "path": "d3_runtime.py",
+          "bytes": 93871,
+          "sha256": "0d6ab3da203ae4cf9b039718f305b7dcf46e10a060c01b735d68b0ef87fcbe7c",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/d3_runtime.py",
+          "license": "Apache-2.0"
+        },
+        {
+          "path": "d3_format.py",
+          "bytes": 7008,
+          "sha256": "3badfbc70561bb3f5b8ec16a11d2c455b96ddb32caace0a8a54ca102eae1f3fa",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/d3_format.py",
+          "license": "Apache-2.0"
+        },
+        {
+          "path": "native-system-one/LICENSE",
+          "bytes": 11357,
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/LICENSE",
+          "license": "Apache-2.0"
+        },
+        {
+          "path": "native-system-one/NOTICE",
+          "bytes": 106,
+          "sha256": "e7fecd68cfb3c894924d48c642230cd2b96d3cf03ecc13907f5bcc55d52f3a9f",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/NOTICE",
+          "license": "Apache-2.0"
+        }
+      ],
+      "validatedPlatforms": [],
+      "maxRssBytes": 4294967296
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+mod adapter;
 mod archive;
 mod catalog;
 mod engine;
@@ -5,6 +6,7 @@ mod manager;
 mod selection;
 mod storage;
 
+pub use catalog::{Artifact, Catalog, EngineKind, Model};
 pub use manager::{Manager, Snapshot};
 pub use selection::{Binding, MANAGED_MODEL_KEY};
 
@@ -34,6 +36,14 @@ pub enum Error {
     Timeout,
     Configured,
     SettingsChanged,
+    CatalogConflict,
+    InstanceChanged,
+    EngineUnsupported,
+    ModelManifestMissing,
+    ExecutableArtifact,
+    InputUnsupported,
+    EngineUnverified,
+    ModelFormatUnsupported,
 }
 
 impl Error {
@@ -61,6 +71,14 @@ impl Error {
             Self::Timeout => "runtime_timeout",
             Self::Configured => "model_configured",
             Self::SettingsChanged => "settings_changed",
+            Self::CatalogConflict => "catalog_conflict",
+            Self::InstanceChanged => "manager_instance_changed",
+            Self::EngineUnsupported => "engine_not_supported",
+            Self::ModelManifestMissing => "model_manifest_missing",
+            Self::ExecutableArtifact => "executable_model_artifact",
+            Self::InputUnsupported => "input_not_supported",
+            Self::EngineUnverified => "engine_unverified",
+            Self::ModelFormatUnsupported => "model_format_not_supported",
         }
     }
 }

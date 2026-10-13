@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::adapter;
 use crate::catalog::{self, Artifact, Catalog, EngineKind, Model, RuntimeProfile};
 use crate::engine::{self, Engine, Running};
 use crate::selection::{self, Binding};
@@ -22,6 +24,7 @@ pub struct Snapshot {
     pub instance_id: String,
     pub revision: u64,
     pub catalog_version: u32,
+    pub catalog_fingerprint: String,
     pub models: Vec<ModelInfo>,
     pub runtime: RuntimeInfo,
     pub operation: Option<Operation>,
@@ -43,9 +46,35 @@ pub struct ModelInfo {
     pub source: String,
     pub quality: String,
     pub download_bytes: u64,
+    pub weights_bytes: u64,
+    pub manifest_fingerprint: String,
+    pub origin: &'static str,
+    pub server_model_id: Option<String>,
+    pub native_format: Option<String>,
+    pub local: LocalSupport,
+    pub existing_server: ExistingServerSupport,
+    pub runtime: RuntimeInfo,
     pub installed: bool,
     pub compatibility: &'static str,
     pub compatibility_reason: Option<&'static str>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSupport {
+    pub supported: bool,
+    pub reason: Option<&'static str>,
+    pub inputs: [&'static str; 2],
+    pub unsupported_inputs: [&'static str; 2],
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingServerSupport {
+    pub supported: bool,
+    pub protocol: judgment_provider::Protocol,
+    pub model_id: Option<String>,
+    pub requires_check: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -126,8 +155,11 @@ struct Inner {
 
 pub struct Manager {
     store: Store,
-    catalog: Catalog,
+    catalog: Mutex<Catalog>,
+    bundled_ids: BTreeSet<String>,
     profile: Option<RuntimeProfile>,
+    profiles: Vec<RuntimeProfile>,
+    validation_mode: bool,
     settings: PathBuf,
     instance: String,
     inner: Mutex<Inner>,
@@ -147,15 +179,39 @@ impl Manager {
         settings: &Path,
         sink: impl Fn(Snapshot) + Send + Sync + 'static,
     ) -> Result<Arc<Self>> {
-        Self::with_catalog(
+        Self::with_profiles(
             root,
             settings,
             catalog::catalog()?,
-            catalog::runtime()?,
+            catalog::runtime_profiles()?,
+            false,
             Arc::new(sink),
         )
     }
 
+    #[cfg(feature = "runtime-validation")]
+    pub fn for_validation(
+        root: &Path,
+        settings: &Path,
+        sink: impl Fn(Snapshot) + Send + Sync + 'static,
+    ) -> Result<Arc<Self>> {
+        if settings != root.join("settings.json") {
+            return Err(Error::UnsafePath);
+        }
+        storage::plain(root.parent().ok_or(Error::UnsafePath)?)?;
+        fs::create_dir(root).map_err(|_| Error::Storage)?;
+        storage::private_dir(root)?;
+        Self::with_profiles(
+            root,
+            settings,
+            catalog::catalog()?,
+            catalog::runtime_profiles()?,
+            true,
+            Arc::new(sink),
+        )
+    }
+
+    #[cfg(test)]
     fn with_catalog(
         root: &Path,
         settings: &Path,
@@ -163,10 +219,41 @@ impl Manager {
         profile: Option<RuntimeProfile>,
         sink: Arc<dyn Fn(Snapshot) + Send + Sync>,
     ) -> Result<Arc<Self>> {
-        Ok(Arc::new(Self {
-            store: Store::open(root)?,
+        Self::with_profiles(
+            root,
+            settings,
             catalog,
-            profile,
+            profile.into_iter().collect(),
+            false,
+            sink,
+        )
+    }
+
+    fn with_profiles(
+        root: &Path,
+        settings: &Path,
+        catalog: Catalog,
+        profiles: Vec<RuntimeProfile>,
+        validation_mode: bool,
+        sink: Arc<dyn Fn(Snapshot) + Send + Sync>,
+    ) -> Result<Arc<Self>> {
+        let store = Store::open(root)?;
+        let bundled_ids = catalog
+            .models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect();
+        let mut catalog = catalog;
+        for registered in store.registered_catalogs()? {
+            catalog = catalog.merge(&registered)?;
+        }
+        Ok(Arc::new(Self {
+            store,
+            catalog: Mutex::new(catalog),
+            bundled_ids,
+            profile: profiles.first().cloned(),
+            profiles,
+            validation_mode,
             settings: settings.to_owned(),
             instance: uuid::Uuid::new_v4().to_string(),
             inner: Mutex::new(Inner {
@@ -189,6 +276,7 @@ impl Manager {
 
     pub fn snapshot(&self) -> Snapshot {
         let mut inner = lock(&self.inner);
+        let catalog = lock(&self.catalog);
         let selected = selection::read(&self.settings);
         let provider_identity = selected
             .as_ref()
@@ -220,7 +308,7 @@ impl Manager {
             .ok()
             .and_then(|selected| selected.binding.as_ref())
             .filter(|binding| {
-                self.catalog
+                catalog
                     .models
                     .iter()
                     .any(|model| model.id == binding.model_id && model.revision == binding.revision)
@@ -236,61 +324,103 @@ impl Manager {
         Snapshot {
             instance_id: self.instance.clone(),
             revision: inner.revision,
-            catalog_version: self.catalog.version,
-            models: self
-                .catalog
+            catalog_version: catalog.version,
+            catalog_fingerprint: catalog.fingerprint().unwrap_or_default(),
+            models: catalog
                 .models
                 .iter()
-                .map(|model| ModelInfo {
-                    id: model.id.clone(),
-                    label: model.label.clone(),
-                    engine: model.engine.clone(),
-                    protocol: model.protocol,
-                    revision: model.revision.clone(),
-                    license: model.license.clone(),
-                    source: model.source.clone(),
-                    quality: model.quality.clone(),
-                    download_bytes: model.download_bytes(),
-                    installed: self.store.installed(model),
-                    compatibility: if self.profile.is_some() {
-                        "supported"
-                    } else {
-                        "unsupported"
-                    },
-                    compatibility_reason: self
-                        .profile
-                        .is_none()
-                        .then_some(Error::Unsupported.token()),
+                .map(|model| {
+                    let profile = self
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.engine == model.engine);
+                    let local_error = adapter::local_profile(model, profile, false).err();
+                    ModelInfo {
+                        id: model.id.clone(),
+                        label: model.label.clone(),
+                        engine: model.engine,
+                        protocol: model.protocol,
+                        revision: model.revision.clone(),
+                        license: model.license.clone(),
+                        source: model.source.clone(),
+                        quality: model.quality.clone(),
+                        download_bytes: model.download_bytes(),
+                        weights_bytes: model.weights_bytes(),
+                        manifest_fingerprint: model.fingerprint().unwrap_or_default(),
+                        origin: if self.bundled_ids.contains(&model.id) {
+                            "bundled"
+                        } else {
+                            "registered"
+                        },
+                        server_model_id: model.server_model_id.clone(),
+                        native_format: model.native_format.clone(),
+                        local: LocalSupport {
+                            supported: local_error.is_none(),
+                            reason: local_error.map(Error::token),
+                            inputs: ["text", "json"],
+                            unsupported_inputs: ["images", "videos"],
+                        },
+                        existing_server: ExistingServerSupport {
+                            supported: true,
+                            protocol: model.protocol,
+                            model_id: model.server_model_id.clone(),
+                            requires_check: true,
+                        },
+                        runtime: self.runtime_info(profile),
+                        installed: self.store.installed(model),
+                        compatibility: if local_error.is_none() {
+                            "supported"
+                        } else {
+                            "unsupported"
+                        },
+                        compatibility_reason: local_error.map(Error::token),
+                    }
                 })
                 .collect(),
-            runtime: match &self.profile {
-                Some(profile) => RuntimeInfo {
-                    state: if self.store.runtime_ready(profile) {
-                        "ready"
-                    } else {
-                        "missing"
-                    },
-                    python_requirement: profile
-                        .python
-                        .version
-                        .clone()
-                        .unwrap_or_else(|| profile.python_version.clone()),
-                    download_bytes: profile.download_bytes(),
-                    reason: None,
-                },
-                None => RuntimeInfo {
-                    state: "unsupported",
-                    python_requirement: String::new(),
-                    download_bytes: 0,
-                    reason: Some(Error::Unsupported.token()),
-                },
-            },
+            runtime: self.runtime_info(self.profile.as_ref()),
             operation: inner.operation.clone(),
             server: inner.server.clone(),
             provider_identity,
             configured_model_id: configured,
             applied_model_id: applied,
         }
+    }
+
+    fn runtime_info(&self, profile: Option<&RuntimeProfile>) -> RuntimeInfo {
+        match profile {
+            Some(profile) => RuntimeInfo {
+                state: if self.store.runtime_ready(profile) {
+                    "ready"
+                } else if !profile.validated {
+                    "unverified"
+                } else {
+                    "missing"
+                },
+                python_requirement: profile
+                    .python
+                    .version
+                    .clone()
+                    .unwrap_or_else(|| profile.python_version.clone()),
+                download_bytes: profile.download_bytes(),
+                reason: (!profile.validated).then_some(Error::EngineUnverified.token()),
+            },
+            None => RuntimeInfo {
+                state: "unsupported",
+                python_requirement: String::new(),
+                download_bytes: 0,
+                reason: Some(Error::Unsupported.token()),
+            },
+        }
+    }
+
+    fn model_profile(&self, model: &Model) -> Result<&RuntimeProfile> {
+        adapter::local_profile(
+            model,
+            self.profiles
+                .iter()
+                .find(|profile| profile.engine == model.engine),
+            self.validation_mode,
+        )
     }
 
     fn emit(&self) {
@@ -303,8 +433,8 @@ impl Manager {
     }
 
     fn model(&self, id: &str, revision: &str) -> Result<Model> {
-        let model = self
-            .catalog
+        let catalog = lock(&self.catalog);
+        let model = catalog
             .models
             .iter()
             .find(|model| model.id == id)
@@ -313,6 +443,37 @@ impl Manager {
             return Err(Error::RevisionChanged);
         }
         Ok(model.clone())
+    }
+
+    pub fn register_catalog(
+        &self,
+        instance_id: &str,
+        expected: &str,
+        document: &str,
+    ) -> Result<Snapshot> {
+        if instance_id != self.instance {
+            return Err(Error::InstanceChanged);
+        }
+        let addition = Catalog::parse(document)?;
+        let mut inner = lock(&self.inner);
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::ServerStopped);
+        }
+        if inner.cancel.is_some() {
+            return Err(Error::Busy);
+        }
+        let mut catalog = lock(&self.catalog);
+        if catalog.fingerprint()? != expected {
+            return Err(Error::RevisionChanged);
+        }
+        let merged = catalog.merge(&addition)?;
+        self.store.register_catalog(&addition)?;
+        *catalog = merged;
+        inner.revision += 1;
+        drop(catalog);
+        drop(inner);
+        self.emit();
+        Ok(self.snapshot())
     }
 
     fn begin(
@@ -440,6 +601,22 @@ impl Manager {
 
     pub fn prepare_runtime(self: &Arc<Self>) -> Result<Snapshot> {
         let profile = self.profile.clone().ok_or(Error::Unsupported)?;
+        self.prepare_profile(profile)
+    }
+
+    pub fn prepare_model_runtime(
+        self: &Arc<Self>,
+        model_id: &str,
+        revision: &str,
+    ) -> Result<Snapshot> {
+        let model = self.model(model_id, revision)?;
+        self.prepare_profile(self.model_profile(&model)?.clone())
+    }
+
+    fn prepare_profile(self: &Arc<Self>, profile: RuntimeProfile) -> Result<Snapshot> {
+        if !profile.validated && !self.validation_mode {
+            return Err(Error::EngineUnverified);
+        }
         if self.store.runtime_ready(&profile) {
             return Ok(self.snapshot());
         }
@@ -465,7 +642,10 @@ impl Manager {
         let mut stage = self.store.stage()?;
         let downloads = storage::child(stage.path(), "downloads")?;
         storage::private_dir(&downloads)?;
-        for artifact in std::iter::once(&profile.python).chain(&profile.wheels) {
+        for artifact in std::iter::once(&profile.python)
+            .chain(&profile.wheels)
+            .chain(&profile.runtime_files)
+        {
             self.download(artifact, &downloads, id, cancel).await?;
         }
         let unpack_root = stage.path().to_owned();
@@ -488,6 +668,15 @@ impl Manager {
                     &unpack_cancel.flag,
                 )?;
             }
+            for artifact in &unpack_profile.runtime_files {
+                let source = downloads.join(&artifact.path);
+                let destination = storage::child(
+                    &unpack_root,
+                    &format!("{}/{}", unpack_profile.site_packages, artifact.path),
+                )?;
+                storage::private_dir(destination.parent().ok_or(Error::UnsafePath)?)?;
+                fs::rename(source, destination).map_err(|_| Error::Storage)?;
+            }
             fs::remove_dir_all(downloads).map_err(|_| Error::Storage)
         })
         .await
@@ -509,9 +698,7 @@ impl Manager {
         source: Option<PathBuf>,
     ) -> Result<Snapshot> {
         let model = self.model(model_id, revision)?;
-        if self.profile.is_none() {
-            return Err(Error::Unsupported);
-        }
+        self.model_profile(&model)?;
         if self.store.installed(&model) {
             return Ok(self.snapshot());
         }
@@ -566,6 +753,15 @@ impl Manager {
                 self.download(artifact, stage.path(), id, cancel).await?;
             }
         }
+        cancel.check()?;
+        let verify_model = model.clone();
+        let verify_path = stage.path().to_owned();
+        let verify_cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            adapter::verify_model(&verify_path, &verify_model, &verify_cancel.flag)
+        })
+        .await
+        .map_err(|_| Error::Storage)??;
         cancel.check()?;
         self.commit(cancel, || self.store.commit_model(&mut stage, model))
     }
@@ -676,7 +872,7 @@ impl Manager {
 
     pub fn start(self: &Arc<Self>, model_id: &str, revision: &str) -> Result<Snapshot> {
         let model = self.model(model_id, revision)?;
-        let profile = self.profile.clone().ok_or(Error::Unsupported)?;
+        let profile = self.model_profile(&model)?.clone();
         if !self.store.runtime_ready(&profile) {
             return Err(Error::RuntimeMissing);
         }
@@ -724,14 +920,7 @@ impl Manager {
         let verify_path = path.clone();
         let verify_cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
-            for artifact in &verify_model.files {
-                storage::verify(
-                    &storage::child(&verify_path, &artifact.path)?,
-                    artifact,
-                    &verify_cancel.flag,
-                )?;
-            }
-            Ok(())
+            adapter::verify_model(&verify_path, &verify_model, &verify_cancel.flag)
         })
         .await
         .map_err(|_| Error::Storage)??;
@@ -838,8 +1027,8 @@ impl Manager {
             return Err(Error::NotChecked);
         }
         let provider = running.provider.clone();
-        let model = self
-            .catalog
+        let catalog = lock(&self.catalog);
+        let model = catalog
             .models
             .iter()
             .find(|model| model.id == running.model_id)
@@ -854,6 +1043,7 @@ impl Manager {
             provider_identity: provider.identity(),
         };
         apply(&provider, expected, &binding)?;
+        drop(catalog);
         inner.revision += 1;
         drop(inner);
         self.emit();
@@ -1083,14 +1273,20 @@ pub(crate) mod test_support {
         .unwrap()
     }
 
+    pub fn begin_registration_blocker(manager: &Manager) -> String {
+        manager.begin("download", None, 0).unwrap().0
+    }
+
     #[cfg(unix)]
     pub async fn running(
         manager: &Arc<Manager>,
         engine: Arc<Engine>,
         checked: bool,
     ) -> (String, Provider) {
-        let model = &manager.catalog.models[0];
-        let running = engine::serve(model, engine, Arc::new(|| {})).await.unwrap();
+        let model = lock(&manager.catalog).models[0].clone();
+        let running = engine::serve(&model, engine, Arc::new(|| {}))
+            .await
+            .unwrap();
         let id = running.id.clone();
         let provider = running.provider.clone();
         let mut inner = lock(&manager.inner);

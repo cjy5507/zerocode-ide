@@ -54,6 +54,18 @@ impl Engine {
         profile: &RuntimeProfile,
         model: Option<(&Path, &Model)>,
     ) -> Result<Arc<Self>> {
+        if let Some((_, model)) = model {
+            crate::adapter::local_profile(model, Some(profile), true)?;
+        } else if profile.engine == EngineKind::SystemOneServer {
+            return Err(Error::EngineUnsupported);
+        }
+        for artifact in &profile.runtime_files {
+            let path = child(
+                runtime,
+                &format!("{}/{}", profile.site_packages, artifact.path),
+            )?;
+            crate::storage::verify(&path, artifact, &AtomicBool::new(false))?;
+        }
         let executable = child(runtime, &profile.executable)?;
         let cache = child(runtime, "cache")?;
         crate::storage::private_dir(&cache)?;
@@ -82,6 +94,8 @@ impl Engine {
             .env("VECLIB_MAXIMUM_THREADS", "2")
             .env("NUMEXPR_NUM_THREADS", "2")
             .env("DO_NOT_TRACK", "1")
+            .env("D3_FAST", "0")
+            .env("D3_FUSED", "0")
             .current_dir(runtime)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -99,10 +113,25 @@ impl Engine {
             .filter_map(|wheel| Some((wheel.package.clone()?, json!(wheel.version.as_ref()?))))
             .collect();
         let mut initial = json!({"engine":profile.engine,"mode":"verify","packages":packages});
+        initial["rssLimitBytes"] = json!(profile.max_rss_bytes);
+        if profile.engine == EngineKind::TransformersSystemOne {
+            let template = profile
+                .runtime_files
+                .iter()
+                .find(|artifact| artifact.path == "native-system-one/chat_template.jinja")
+                .ok_or(Error::Manifest)?;
+            let path = child(
+                runtime,
+                &format!("{}/{}", profile.site_packages, template.path),
+            )?;
+            let bytes = crate::storage::bounded_read(&path, 64 * 1024)?;
+            initial["chatTemplate"] = json!(String::from_utf8(bytes).map_err(|_| Error::Manifest)?);
+        }
         if let Some((directory, model)) = model {
             initial["mode"] = json!("model");
             initial["modelDirectory"] = json!(directory);
             initial["modelId"] = json!(model.id);
+            initial["modelFiles"] = json!(model.files);
         }
         let bytes = serde_json::to_vec(&initial).map_err(|_| Error::RuntimeFailed)?;
         engine.write(&bytes)?;
@@ -285,6 +314,9 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
     if request.get("model").and_then(Value::as_str) != Some(&state.provider.model) {
         return failure(StatusCode::BAD_REQUEST, Error::UnknownModel);
     }
+    if request.get("images").is_some() || request.get("videos").is_some() {
+        return failure(StatusCode::UNPROCESSABLE_ENTITY, Error::InputUnsupported);
+    }
     if request
         .get("questions")
         .and_then(Value::as_object)
@@ -338,7 +370,8 @@ pub async fn serve(
 ) -> Result<Running> {
     engine.on_exit(failed.clone());
     match model.engine {
-        EngineKind::Laya => {}
+        EngineKind::Laya | EngineKind::TransformersSystemOne => {}
+        EngineKind::SystemOneServer => return Err(Error::EngineUnsupported),
     }
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
