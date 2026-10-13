@@ -171,6 +171,21 @@ pub fn https(address: &str) -> bool {
     })
 }
 
+pub fn local_source(address: &str) -> bool {
+    url::Url::parse(address).is_ok_and(|url| {
+        url.scheme() == "local"
+            && url.host_str().is_some_and(|host| hex(host, 64))
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && (url.path().is_empty()
+                || url.path() == "/"
+                || relative(url.path().trim_start_matches('/')).is_ok())
+    })
+}
+
 fn validate_files(files: &[Artifact]) -> Result<()> {
     if files.is_empty() || files.len() > 128 {
         return Err(Error::Manifest);
@@ -180,7 +195,7 @@ fn validate_files(files: &[Artifact]) -> Result<()> {
     for file in files {
         relative(&file.path)?;
         if !names.insert(file.path.to_ascii_lowercase())
-            || !https(&file.url)
+            || (!https(&file.url) && !local_source(&file.url))
             || file.sha256.len() != 64
             || !file.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
             || file.bytes == 0
@@ -345,7 +360,7 @@ impl Model {
             || !text(&self.license, 160)
             || !text(&self.quality, 80)
             || self.source.len() > 2048
-            || !https(&self.source)
+            || (!https(&self.source) && !local_source(&self.source))
             || self.protocol != judgment_provider::Protocol::SystemOne
             || self
                 .server_model_id
@@ -365,9 +380,23 @@ impl Model {
             return Ok(());
         }
         validate_files(&self.files)?;
+        let weights_bytes: u64 = self
+            .files
+            .iter()
+            .filter(|file| file.path.ends_with(".safetensors"))
+            .map(|file| file.bytes)
+            .sum();
+        if weights_bytes != 0
+            && self
+                .weights_bytes
+                .is_some_and(|declared| declared != weights_bytes)
+        {
+            return Err(Error::Manifest);
+        }
         for file in &self.files {
             if (!file.path.ends_with(".json") && !file.path.ends_with(".safetensors"))
                 || file.path.eq_ignore_ascii_case("receipt.json")
+                || file.path.eq_ignore_ascii_case("ownership.json")
                 || file.url.len() > 2048
                 || file.package.is_some()
                 || file.version.is_some()

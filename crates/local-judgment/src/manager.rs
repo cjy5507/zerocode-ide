@@ -1,6 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::net::{Ipv4Addr, TcpListener as StdListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -15,6 +16,7 @@ use crate::adapter;
 use crate::catalog::{self, Artifact, Catalog, EngineKind, Model, RuntimeProfile};
 use crate::engine::{self, Engine, Running};
 use crate::selection::{self, Binding};
+use crate::source::{self, Inspected, SourceInput};
 use crate::storage::{self, Store};
 use crate::{Error, Result};
 
@@ -32,6 +34,8 @@ pub struct Snapshot {
     pub provider_identity: Option<String>,
     pub configured_model_id: Option<String>,
     pub applied_model_id: Option<String>,
+    pub source_inspection: Option<SourceInspection>,
+    pub model_switch: Option<ModelSwitchInfo>,
 }
 
 #[derive(Clone, Serialize)]
@@ -55,6 +59,7 @@ pub struct ModelInfo {
     pub existing_server: ExistingServerSupport,
     pub runtime: RuntimeInfo,
     pub installed: bool,
+    pub installed_directory: Option<String>,
     pub compatibility: &'static str,
     pub compatibility_reason: Option<&'static str>,
 }
@@ -76,6 +81,64 @@ pub struct ExistingServerSupport {
     pub model_id: Option<String>,
     pub requires_check: bool,
 }
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceInspection {
+    pub inspection_id: String,
+    pub instance_id: String,
+    pub catalog_fingerprint: String,
+    pub model: ModelInfo,
+    pub local: LocalSupport,
+    pub existing_server: ExistingServerSupport,
+    pub ready_for_install: bool,
+    pub reason: Option<&'static str>,
+    pub default_destination_directory: String,
+    pub allows_destination_selection: bool,
+    pub source_kind: &'static str,
+    pub download_bytes: u64,
+    pub copy_bytes: u64,
+    pub runtime_download_bytes: u64,
+}
+
+struct PendingInspection {
+    id: String,
+    catalog_fingerprint: String,
+    inspected: Inspected,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSwitchInfo {
+    pub previous_model_id: String,
+    pub target_model_id: String,
+    pub state: &'static str,
+    pub error: Option<&'static str>,
+    pub restore_error: Option<&'static str>,
+}
+
+struct StartOptions {
+    complete: bool,
+    state: &'static str,
+    check_before_listen: bool,
+    require_listener: bool,
+}
+
+struct SwitchRequest {
+    model: Model,
+    profile: RuntimeProfile,
+    server_id: String,
+    expected: String,
+}
+
+struct PreviousServer {
+    model: Model,
+    profile: RuntimeProfile,
+    provider: Provider,
+}
+
+#[cfg(test)]
+pub(crate) type EngineFactory = Arc<dyn Fn(&Model) -> Result<Arc<Engine>> + Send + Sync>;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -151,6 +214,10 @@ struct Inner {
     pending_engine: Option<Arc<Engine>>,
     last_event: Instant,
     provider_identity: Option<String>,
+    inspection: Option<PendingInspection>,
+    model_switch: Option<ModelSwitchInfo>,
+    restoring: bool,
+    held_listeners: BTreeMap<String, StdListener>,
 }
 
 pub struct Manager {
@@ -165,12 +232,29 @@ pub struct Manager {
     inner: Mutex<Inner>,
     sink: Arc<dyn Fn(Snapshot) + Send + Sync>,
     closed: AtomicBool,
+    #[cfg(test)]
+    engine_factory: Mutex<Option<EngineFactory>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn same_model_data(left: &Model, right: &Model) -> bool {
+    if left.engine != right.engine
+        || left.revision != right.revision
+        || left.native_format != right.native_format
+        || left.files.len() != right.files.len()
+    {
+        return false;
+    }
+    left.files.iter().all(|file| {
+        right.files.iter().any(|other| {
+            file.path == other.path && file.bytes == other.bytes && file.sha256 == other.sha256
+        })
+    })
 }
 
 impl Manager {
@@ -268,9 +352,15 @@ impl Manager {
                 pending_engine: None,
                 last_event: Instant::now(),
                 provider_identity: None,
+                inspection: None,
+                model_switch: None,
+                restoring: false,
+                held_listeners: BTreeMap::new(),
             }),
             sink,
             closed: AtomicBool::new(false),
+            #[cfg(test)]
+            engine_factory: Mutex::new(None),
         }))
     }
 
@@ -330,51 +420,14 @@ impl Manager {
                 .models
                 .iter()
                 .map(|model| {
-                    let profile = self
-                        .profiles
-                        .iter()
-                        .find(|profile| profile.engine == model.engine);
-                    let local_error = adapter::local_profile(model, profile, false).err();
-                    ModelInfo {
-                        id: model.id.clone(),
-                        label: model.label.clone(),
-                        engine: model.engine,
-                        protocol: model.protocol,
-                        revision: model.revision.clone(),
-                        license: model.license.clone(),
-                        source: model.source.clone(),
-                        quality: model.quality.clone(),
-                        download_bytes: model.download_bytes(),
-                        weights_bytes: model.weights_bytes(),
-                        manifest_fingerprint: model.fingerprint().unwrap_or_default(),
-                        origin: if self.bundled_ids.contains(&model.id) {
+                    self.model_info(
+                        model,
+                        if self.bundled_ids.contains(&model.id) {
                             "bundled"
                         } else {
                             "registered"
                         },
-                        server_model_id: model.server_model_id.clone(),
-                        native_format: model.native_format.clone(),
-                        local: LocalSupport {
-                            supported: local_error.is_none(),
-                            reason: local_error.map(Error::token),
-                            inputs: ["text", "json"],
-                            unsupported_inputs: ["images", "videos"],
-                        },
-                        existing_server: ExistingServerSupport {
-                            supported: true,
-                            protocol: model.protocol,
-                            model_id: model.server_model_id.clone(),
-                            requires_check: true,
-                        },
-                        runtime: self.runtime_info(profile),
-                        installed: self.store.installed(model),
-                        compatibility: if local_error.is_none() {
-                            "supported"
-                        } else {
-                            "unsupported"
-                        },
-                        compatibility_reason: local_error.map(Error::token),
-                    }
+                    )
                 })
                 .collect(),
             runtime: self.runtime_info(self.profile.as_ref()),
@@ -383,7 +436,235 @@ impl Manager {
             provider_identity,
             configured_model_id: configured,
             applied_model_id: applied,
+            source_inspection: inner
+                .inspection
+                .as_ref()
+                .map(|pending| self.inspection_info(pending)),
+            model_switch: inner.model_switch.clone(),
         }
+    }
+
+    fn model_info(&self, model: &Model, origin: &'static str) -> ModelInfo {
+        let profile = self
+            .profiles
+            .iter()
+            .find(|profile| profile.engine == model.engine);
+        let local_error = adapter::local_profile(model, profile, false).err();
+        let installed = self.store.installed(model);
+        ModelInfo {
+            id: model.id.clone(),
+            label: model.label.clone(),
+            engine: model.engine,
+            protocol: model.protocol,
+            revision: model.revision.clone(),
+            license: model.license.clone(),
+            source: model.source.clone(),
+            quality: model.quality.clone(),
+            download_bytes: model.download_bytes(),
+            weights_bytes: model.weights_bytes(),
+            manifest_fingerprint: model.fingerprint().unwrap_or_default(),
+            origin,
+            server_model_id: model.server_model_id.clone(),
+            native_format: model.native_format.clone(),
+            local: LocalSupport {
+                supported: local_error.is_none(),
+                reason: local_error.map(Error::token),
+                inputs: ["text", "json"],
+                unsupported_inputs: ["images", "videos"],
+            },
+            existing_server: ExistingServerSupport {
+                supported: true,
+                protocol: model.protocol,
+                model_id: model.server_model_id.clone(),
+                requires_check: true,
+            },
+            runtime: self.runtime_info(profile),
+            installed,
+            installed_directory: if installed {
+                self.store
+                    .model_path(model)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            } else {
+                None
+            },
+            compatibility: if local_error.is_none() {
+                "supported"
+            } else {
+                "unsupported"
+            },
+            compatibility_reason: local_error.map(Error::token),
+        }
+    }
+
+    fn inspection_info(&self, pending: &PendingInspection) -> SourceInspection {
+        let model = self.model_info(&pending.inspected.model, "inspection");
+        let local_source = pending.inspected.directory.is_some();
+        SourceInspection {
+            inspection_id: pending.id.clone(),
+            instance_id: self.instance.clone(),
+            catalog_fingerprint: pending.catalog_fingerprint.clone(),
+            ready_for_install: model.local.supported,
+            reason: model.local.reason,
+            local: model.local.clone(),
+            existing_server: model.existing_server.clone(),
+            download_bytes: if local_source {
+                0
+            } else {
+                model.download_bytes
+            },
+            copy_bytes: if local_source {
+                model.download_bytes
+            } else {
+                0
+            },
+            runtime_download_bytes: if model.runtime.state == "ready" {
+                0
+            } else {
+                model.runtime.download_bytes
+            },
+            source_kind: if local_source {
+                "local_directory"
+            } else {
+                "hugging_face"
+            },
+            model,
+            default_destination_directory: self
+                .store
+                .default_models_directory()
+                .to_string_lossy()
+                .into_owned(),
+            allows_destination_selection: true,
+        }
+    }
+
+    pub async fn inspect_source(self: &Arc<Self>, input: SourceInput) -> Result<SourceInspection> {
+        let (operation_id, cancel) = self.begin("inspect", None, 0)?;
+        let work_stop = Arc::new(AtomicBool::new(false));
+        let stop = work_stop.clone();
+        let request_cancel = cancel.clone();
+        let cancelled: source::Cancelled = Arc::new(move || {
+            request_cancel.flag.load(Ordering::Acquire) || stop.load(Ordering::Acquire)
+        });
+        let manager = self.clone();
+        let progress_id = operation_id.clone();
+        let progress: source::Progress =
+            Arc::new(move |bytes| manager.progress(&progress_id, bytes));
+        let result = tokio::select! {
+            _ = cancel.cancelled() => Err(Error::Cancelled),
+            result = tokio::time::timeout(Duration::from_secs(300), source::inspect(input, cancelled, progress)) => result.unwrap_or(Err(Error::Timeout)),
+        };
+        work_stop.store(true, Ordering::Release);
+        let result = result.and_then(|mut inspected| {
+            cancel.check()?;
+            let mut inner = lock(&self.inner);
+            cancel.check()?;
+            if self.closed.load(Ordering::Acquire) {
+                return Err(Error::Cancelled);
+            }
+            let catalog = lock(&self.catalog);
+            if let Some(existing) = catalog
+                .models
+                .iter()
+                .find(|model| same_model_data(model, &inspected.model))
+            {
+                inspected.model = existing.clone();
+            }
+            let pending = PendingInspection {
+                id: uuid::Uuid::new_v4().to_string(),
+                catalog_fingerprint: catalog.fingerprint()?,
+                inspected,
+            };
+            let result = self.inspection_info(&pending);
+            inner.inspection = Some(pending);
+            Self::complete(&mut inner);
+            Ok(result)
+        });
+        self.finish(
+            &operation_id,
+            result.as_ref().map(|_| ()).map_err(|error| *error),
+        );
+        result
+    }
+
+    pub fn install_source(
+        self: &Arc<Self>,
+        inspection_id: &str,
+        instance_id: &str,
+        expected_catalog: &str,
+        destination: Option<PathBuf>,
+    ) -> Result<Snapshot> {
+        if instance_id != self.instance {
+            return Err(Error::InstanceChanged);
+        }
+        let mut inner = lock(&self.inner);
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::ServerStopped);
+        }
+        if inner.cancel.is_some() {
+            return Err(Error::Busy);
+        }
+        let pending = inner.inspection.as_ref().ok_or(Error::InspectionChanged)?;
+        if pending.id != inspection_id || pending.catalog_fingerprint != expected_catalog {
+            return Err(Error::InspectionChanged);
+        }
+        let mut catalog = lock(&self.catalog);
+        if catalog.fingerprint()? != expected_catalog {
+            return Err(Error::RevisionChanged);
+        }
+        let inspected = pending.inspected.clone();
+        inspected.check_source()?;
+        let model = inspected.model;
+        self.model_profile(&model)?;
+        if self.store.installed(&model) {
+            drop(catalog);
+            drop(inner);
+            return Ok(self.snapshot());
+        }
+        if inner
+            .running
+            .as_ref()
+            .is_some_and(|running| running.model_id == model.id)
+        {
+            return Err(Error::Busy);
+        }
+        self.store
+            .require_model_space(model.download_bytes(), destination.as_deref())?;
+        if let Some(existing) = catalog
+            .models
+            .iter()
+            .find(|existing| existing.id == model.id)
+        {
+            if existing.fingerprint()? != model.fingerprint()? {
+                return Err(Error::CatalogConflict);
+            }
+        } else {
+            let addition = Catalog {
+                version: 1,
+                models: vec![model.clone()],
+            };
+            let merged = catalog.merge(&addition)?;
+            self.store.register_catalog(&addition)?;
+            *catalog = merged;
+        }
+        let kind = if inspected.directory.is_some() {
+            "import"
+        } else {
+            "download"
+        };
+        let (id, cancel) = self.reserve(&mut inner, kind, Some(&model), model.download_bytes())?;
+        inner.inspection = None;
+        drop(catalog);
+        drop(inner);
+        self.emit();
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let result = manager
+                .install_model_at(&model, inspected.directory, destination, &id, &cancel)
+                .await;
+            manager.finish(&id, result);
+        });
+        Ok(self.snapshot())
     }
 
     fn runtime_info(&self, profile: Option<&RuntimeProfile>) -> RuntimeInfo {
@@ -469,6 +750,7 @@ impl Manager {
         let merged = catalog.merge(&addition)?;
         self.store.register_catalog(&addition)?;
         *catalog = merged;
+        inner.inspection = None;
         inner.revision += 1;
         drop(catalog);
         drop(inner);
@@ -482,13 +764,31 @@ impl Manager {
         model: Option<&Model>,
         total: u64,
     ) -> Result<(String, Arc<Cancel>)> {
+        let mut inner = lock(&self.inner);
+        let result = self.reserve(&mut inner, kind, model, total)?;
+        drop(inner);
+        self.emit();
+        Ok(result)
+    }
+
+    fn reserve(
+        &self,
+        inner: &mut Inner,
+        kind: &'static str,
+        model: Option<&Model>,
+        total: u64,
+    ) -> Result<(String, Arc<Cancel>)> {
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::ServerStopped);
         }
-        let mut inner = lock(&self.inner);
         if inner.cancel.is_some() {
             return Err(Error::Busy);
         }
+        if kind == "inspect" {
+            inner.inspection = None;
+        }
+        inner.model_switch = None;
+        inner.restoring = false;
         let id = uuid::Uuid::new_v4().to_string();
         let cancel = Arc::new(Cancel::new());
         inner.operation = Some(Operation {
@@ -502,8 +802,6 @@ impl Manager {
         });
         inner.cancel = Some(cancel.clone());
         inner.revision += 1;
-        drop(inner);
-        self.emit();
         Ok((id, cancel))
     }
 
@@ -545,10 +843,12 @@ impl Manager {
                 inner.server.checked = false;
             }
         }
-        inner.pending_engine.take();
+        let pending = inner.pending_engine.take();
         inner.cancel = None;
+        inner.restoring = false;
         inner.revision += 1;
         drop(inner);
+        drop(pending);
         self.emit();
     }
 
@@ -560,10 +860,10 @@ impl Manager {
         if operation.id != id {
             return;
         }
-        operation.received_bytes = operation
-            .received_bytes
-            .saturating_add(added)
-            .min(operation.total_bytes);
+        operation.received_bytes = operation.received_bytes.saturating_add(added);
+        if operation.total_bytes != 0 {
+            operation.received_bytes = operation.received_bytes.min(operation.total_bytes);
+        }
         let emit = inner.last_event.elapsed() >= Duration::from_millis(250);
         inner.revision += 1;
         if emit {
@@ -577,6 +877,22 @@ impl Manager {
 
     pub fn cancel(&self, operation_id: &str) -> Result<Snapshot> {
         let mut inner = lock(&self.inner);
+        if inner.restoring {
+            return Err(Error::Busy);
+        }
+        if inner.cancel.is_some()
+            && inner.model_switch.as_ref().is_some_and(|switch| {
+                inner.running.as_ref().is_some_and(|running| {
+                    switch.target_model_id == running.model_id
+                        && switch.previous_model_id != switch.target_model_id
+                        && Provider::read(&self.settings).is_ok_and(|provider| {
+                            provider.identity() == running.provider.identity()
+                        })
+                })
+            })
+        {
+            return Err(Error::SettingsChanged);
+        }
         if inner
             .operation
             .as_ref()
@@ -584,17 +900,21 @@ impl Manager {
         {
             return Err(Error::RevisionChanged);
         }
-        if let Some(cancel) = &inner.cancel {
+        let pending = if let Some(cancel) = &inner.cancel {
             cancel.stop();
-            if let Some(engine) = &inner.pending_engine {
-                engine.stop();
-            }
+            let pending = inner.pending_engine.clone();
             if let Some(operation) = &mut inner.operation {
                 operation.state = "cancelling";
             }
             inner.revision += 1;
-        }
+            pending
+        } else {
+            None
+        };
         drop(inner);
+        if let Some(engine) = pending {
+            engine.stop();
+        }
         self.emit();
         Ok(self.snapshot())
     }
@@ -619,9 +939,6 @@ impl Manager {
         }
         if self.store.runtime_ready(&profile) {
             return Ok(self.snapshot());
-        }
-        if lock(&self.inner).running.is_some() {
-            return Err(Error::Busy);
         }
         self.store.require_space(5 * 1024 * 1024 * 1024)?;
         let (id, cancel) = self.begin("runtime", None, profile.download_bytes())?;
@@ -699,6 +1016,14 @@ impl Manager {
     ) -> Result<Snapshot> {
         let model = self.model(model_id, revision)?;
         self.model_profile(&model)?;
+        if source.is_none()
+            && model
+                .files
+                .iter()
+                .any(|file| catalog::local_source(&file.url))
+        {
+            return Err(Error::SourceRequiresFolder);
+        }
         if self.store.installed(&model) {
             return Ok(self.snapshot());
         }
@@ -731,7 +1056,18 @@ impl Manager {
         id: &str,
         cancel: &Arc<Cancel>,
     ) -> Result<()> {
-        let mut stage = self.store.stage()?;
+        self.install_model_at(model, source, None, id, cancel).await
+    }
+
+    async fn install_model_at(
+        self: &Arc<Self>,
+        model: &Model,
+        source: Option<PathBuf>,
+        destination: Option<PathBuf>,
+        id: &str,
+        cancel: &Arc<Cancel>,
+    ) -> Result<()> {
+        let mut stage = self.store.model_stage(model, destination.as_deref())?;
         if let Some(source) = source {
             let manager = self.clone();
             let model = model.clone();
@@ -769,6 +1105,7 @@ impl Manager {
     fn complete(inner: &mut Inner) {
         inner.cancel = None;
         inner.pending_engine.take();
+        inner.restoring = false;
         if let Some(operation) = &mut inner.operation {
             operation.state = "done";
             operation.error = None;
@@ -903,7 +1240,19 @@ impl Manager {
         self.emit();
         let manager = self.clone();
         tokio::spawn(async move {
-            let result = manager.start_model(&model, &profile, &cancel).await;
+            let result = manager
+                .start_model(
+                    &model,
+                    &profile,
+                    &cancel,
+                    StartOptions {
+                        complete: true,
+                        state: "ready",
+                        check_before_listen: false,
+                        require_listener: false,
+                    },
+                )
+                .await;
             manager.finish(&id, result);
         });
         Ok(self.snapshot())
@@ -914,6 +1263,7 @@ impl Manager {
         model: &Model,
         profile: &RuntimeProfile,
         cancel: &Arc<Cancel>,
+        options: StartOptions,
     ) -> Result<()> {
         let path = self.store.model_path(model)?;
         let verify_model = model.clone();
@@ -925,12 +1275,36 @@ impl Manager {
         .await
         .map_err(|_| Error::Storage)??;
         cancel.check()?;
+        let listener = self
+            .model_listener(&model.id, options.require_listener)
+            .await?;
+        let address = listener.local_addr().map_err(|_| Error::RuntimeFailed)?;
+        let provider = Provider {
+            kind: judgment_provider::ProviderKind::Local,
+            protocol: judgment_provider::Protocol::SystemOne,
+            base_url: format!("http://127.0.0.1:{}", address.port()),
+            model: model.id.clone(),
+            requires_auth: false,
+        };
         let runtime = self.store.runtime_path(profile)?;
-        let engine = Engine::spawn(&runtime, profile, Some((&path, model)))?;
+        let engine = self.model_engine(&runtime, profile, &path, model)?;
         self.pending(engine.clone(), cancel)?;
         wait_ready(&engine, cancel).await?;
+        if options.check_before_listen {
+            {
+                let mut inner = lock(&self.inner);
+                if !inner.restoring
+                    && let Some(switch) = &mut inner.model_switch
+                {
+                    switch.state = "checking";
+                }
+                inner.revision += 1;
+            }
+            self.emit();
+            native_pipe_check(&provider, &engine, cancel).await?;
+        }
         let manager = Arc::downgrade(self);
-        let running = engine::serve(
+        let running = engine::serve_on(
             model,
             engine,
             Arc::new(move || {
@@ -938,6 +1312,7 @@ impl Manager {
                     manager.emit();
                 }
             }),
+            Some(listener),
         )
         .await?;
         let mut inner = lock(&self.inner);
@@ -950,15 +1325,399 @@ impl Manager {
         }
         inner.server = ServerInfo {
             id: Some(running.id.clone()),
-            state: "ready",
+            state: options.state,
             model_id: Some(model.id.clone()),
             provider: Some(running.provider.clone()),
-            checked: false,
+            checked: options.check_before_listen,
             error: None,
         };
+        inner.held_listeners.remove(&model.id);
         inner.running = Some(running);
-        Self::complete(&mut inner);
+        if options.complete {
+            Self::complete(&mut inner);
+        } else {
+            inner.revision += 1;
+        }
         Ok(())
+    }
+
+    async fn model_listener(&self, model_id: &str, require_existing: bool) -> Result<StdListener> {
+        {
+            let inner = lock(&self.inner);
+            if let Some(listener) = inner.held_listeners.get(model_id) {
+                return listener.try_clone().map_err(|_| Error::RuntimeFailed);
+            }
+        }
+        if require_existing {
+            return Err(Error::ServerStopped);
+        }
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(|_| Error::RuntimeFailed)?
+            .into_std()
+            .map_err(|_| Error::RuntimeFailed)?;
+        let duplicate = listener.try_clone().map_err(|_| Error::RuntimeFailed)?;
+        let mut inner = lock(&self.inner);
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        if inner.held_listeners.len() >= catalog::MAX_MODELS {
+            return Err(Error::TooLarge);
+        }
+        inner.held_listeners.insert(model_id.to_owned(), listener);
+        Ok(duplicate)
+    }
+
+    async fn retire_running(&self, mut running: Running) -> Result<()> {
+        let listener = running.take_listener()?;
+        {
+            let mut inner = lock(&self.inner);
+            if !self.closed.load(Ordering::Acquire) {
+                inner
+                    .held_listeners
+                    .insert(running.model_id.clone(), listener);
+            }
+        }
+        running.retire().await;
+        Ok(())
+    }
+
+    fn model_engine(
+        &self,
+        runtime: &Path,
+        profile: &RuntimeProfile,
+        path: &Path,
+        model: &Model,
+    ) -> Result<Arc<Engine>> {
+        #[cfg(test)]
+        if let Some(factory) = lock(&self.engine_factory).clone() {
+            return factory(model);
+        }
+        Engine::spawn(runtime, profile, Some((path, model)))
+    }
+
+    pub fn switch_model(
+        self: &Arc<Self>,
+        model_id: &str,
+        revision: &str,
+        server_id: &str,
+        expected: &str,
+        instance_id: &str,
+        apply: impl FnOnce(&Provider, &str, &Binding) -> Result<()> + Send + 'static,
+    ) -> Result<Snapshot> {
+        self.switch_model_guarded(
+            model_id,
+            revision,
+            server_id,
+            expected,
+            instance_id,
+            (apply, |action: &mut dyn FnMut() -> Result<()>| action()),
+        )
+    }
+
+    pub fn switch_model_guarded<Apply, Guard>(
+        self: &Arc<Self>,
+        model_id: &str,
+        revision: &str,
+        server_id: &str,
+        expected: &str,
+        instance_id: &str,
+        callbacks: (Apply, Guard),
+    ) -> Result<Snapshot>
+    where
+        Apply: FnOnce(&Provider, &str, &Binding) -> Result<()> + Send + 'static,
+        Guard: Fn(&mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync + 'static,
+    {
+        let (apply, guard) = callbacks;
+        if instance_id != self.instance {
+            return Err(Error::InstanceChanged);
+        }
+        let model = self.model(model_id, revision)?;
+        let profile = self.model_profile(&model)?.clone();
+        if !self.store.runtime_ready(&profile) {
+            return Err(Error::RuntimeMissing);
+        }
+        if !self.store.installed(&model) {
+            return Err(Error::ModelMissing);
+        }
+        let mut inner = lock(&self.inner);
+        let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
+        if running.id != server_id {
+            return Err(Error::ServerChanged);
+        }
+        if !running.engine.alive() {
+            return Err(Error::ServerStopped);
+        }
+        if Provider::read(&self.settings)
+            .map_err(|_| Error::SettingsChanged)?
+            .identity()
+            != expected
+        {
+            return Err(Error::SettingsChanged);
+        }
+        let previous_model_id = running.model_id.clone();
+        let (id, cancel) = self.reserve(&mut inner, "switch", Some(&model), 0)?;
+        inner.model_switch = Some(ModelSwitchInfo {
+            previous_model_id,
+            target_model_id: model.id.clone(),
+            state: "verifying",
+            error: None,
+            restore_error: None,
+        });
+        drop(inner);
+        self.emit();
+        let request = SwitchRequest {
+            model,
+            profile,
+            server_id: server_id.to_owned(),
+            expected: expected.to_owned(),
+        };
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let result = manager.transition(request, &cancel, apply, &guard).await;
+            manager.finish(&id, result);
+        });
+        Ok(self.snapshot())
+    }
+
+    async fn verify_files(&self, model: &Model, cancel: &Arc<Cancel>) -> Result<()> {
+        let path = self.store.model_path(model)?;
+        let model = model.clone();
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || adapter::verify_model(&path, &model, &cancel.flag))
+            .await
+            .map_err(|_| Error::Storage)?
+    }
+
+    async fn transition(
+        self: &Arc<Self>,
+        request: SwitchRequest,
+        cancel: &Arc<Cancel>,
+        apply: impl FnOnce(&Provider, &str, &Binding) -> Result<()> + Send,
+        guard: &(impl Fn(&mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync),
+    ) -> Result<()> {
+        let mut previous = None;
+        let result = async {
+            cancel.check()?;
+            self.verify_files(&request.model, cancel).await?;
+            cancel.check()?;
+            let mut old_running = None;
+            guard(&mut || {
+                let mut inner = lock(&self.inner);
+                cancel.check()?;
+                let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
+                if running.id != request.server_id { return Err(Error::ServerChanged); }
+                if !running.engine.alive() { return Err(Error::ServerStopped); }
+                if Provider::read(&self.settings).map_err(|_| Error::SettingsChanged)?.identity() != request.expected { return Err(Error::SettingsChanged); }
+                if running.model_id != request.model.id {
+                    let old_model = lock(&self.catalog).models.iter().find(|model| model.id == running.model_id).cloned().ok_or(Error::UnknownModel)?;
+                    previous = Some(PreviousServer { profile: self.model_profile(&old_model)?.clone(), model: old_model, provider: running.provider.clone() });
+                    old_running = inner.running.take();
+                    inner.server = ServerInfo { state: "starting", model_id: Some(request.model.id.clone()), ..ServerInfo::default() };
+                    if let Some(switch) = &mut inner.model_switch { switch.state = "starting"; }
+                    inner.revision += 1;
+                }
+                drop(inner);
+                if let Some(running) = &old_running { running.engine.stop(); }
+                Ok(())
+            })?;
+            if let Some(running) = old_running {
+                self.retire_running(running).await?;
+            }
+            if previous.is_some() {
+                self.emit();
+                self.start_model(&request.model, &request.profile, cancel, StartOptions { complete: false, state: "ready", check_before_listen: true, require_listener: false }).await?;
+            }
+            let (server_id, provider, checked) = {
+                let mut inner = lock(&self.inner);
+                let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
+                let result = (running.id.clone(), running.provider.clone(), inner.server.checked);
+                if let Some(switch) = &mut inner.model_switch { switch.state = if result.2 { "applying" } else { "checking" }; }
+                inner.revision += 1;
+                result
+            };
+            self.emit();
+            if !checked {
+                tokio::select! { _ = cancel.cancelled() => return Err(Error::Cancelled), result = native_check(&provider) => result? }
+            }
+            let mut inner = lock(&self.inner);
+            cancel.check()?;
+            let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
+            if running.id != server_id { return Err(Error::ServerChanged); }
+            if !running.engine.alive() { return Err(Error::ServerStopped); }
+            inner.server.checked = true;
+            inner.server.error = None;
+            let binding = Binding { model_id: request.model.id.clone(), revision: request.model.revision.clone(), provider_identity: provider.identity() };
+            if Provider::read(&self.settings).map_err(|_| Error::SettingsChanged)?.identity() != request.expected { return Err(Error::SettingsChanged); }
+            apply(&provider, &request.expected, &binding)?;
+            if let Some(switch) = &mut inner.model_switch { switch.state = "applied"; }
+            Self::complete(&mut inner);
+            Ok(())
+        }.await;
+        if let Err(error) = result {
+            if let Some(previous) = previous {
+                self.restore_after_switch(previous, &request.expected, error, guard)
+                    .await;
+            } else {
+                let mut inner = lock(&self.inner);
+                if matches!(
+                    error,
+                    Error::Protocol | Error::Timeout | Error::RuntimeFailed
+                ) {
+                    inner.server.checked = false;
+                    inner.server.error = Some(error.token());
+                }
+                if let Some(switch) = &mut inner.model_switch {
+                    switch.state = if error == Error::Cancelled {
+                        "cancelled"
+                    } else if error == Error::SettingsChanged {
+                        "selection_changed"
+                    } else {
+                        "failed"
+                    };
+                    switch.error = Some(error.token());
+                }
+            }
+        }
+        result
+    }
+
+    async fn restore_after_switch(
+        self: &Arc<Self>,
+        previous: PreviousServer,
+        expected: &str,
+        failure: Error,
+        guard: &(impl Fn(&mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync),
+    ) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let mut current = None;
+        let mut stopped = (None, None);
+        let mut preserve = false;
+        let guarded = guard(&mut || {
+            current = Provider::read(&self.settings)
+                .ok()
+                .map(|provider| provider.identity());
+            let mut inner = lock(&self.inner);
+            if let Some(switch) = &mut inner.model_switch {
+                switch.error = Some(failure.token());
+            }
+            if inner
+                .running
+                .as_ref()
+                .is_some_and(|running| Some(running.provider.identity()) == current)
+            {
+                if !inner.server.checked {
+                    inner.server.error = Some(failure.token());
+                }
+                if let Some(switch) = &mut inner.model_switch {
+                    switch.state = "selection_changed";
+                }
+                preserve = true;
+                return Ok(());
+            }
+            let running = inner.running.take();
+            let pending = inner.pending_engine.take();
+            inner.server = ServerInfo {
+                state: "stopped",
+                ..ServerInfo::default()
+            };
+            inner.restoring = current.as_deref() == Some(expected);
+            if let Some(switch) = &mut inner.model_switch {
+                switch.state = if current.as_deref() == Some(expected) {
+                    "restoring"
+                } else {
+                    "selection_changed"
+                };
+            }
+            inner.revision += 1;
+            stopped = (running, pending);
+            drop(inner);
+            if let Some(running) = &stopped.0 {
+                running.engine.stop();
+            }
+            if let Some(engine) = &stopped.1 {
+                engine.stop();
+            }
+            Ok(())
+        });
+        if preserve {
+            return;
+        }
+        if let Err(error) = guarded {
+            let mut inner = lock(&self.inner);
+            if let Some(switch) = &mut inner.model_switch {
+                switch.state = "selection_changed";
+                switch.error = Some(failure.token());
+                switch.restore_error = Some(error.token());
+            }
+            return;
+        }
+        if let Some(running) = stopped.0 {
+            let _ = self.retire_running(running).await;
+        }
+        self.emit();
+        if current.as_deref() != Some(expected) {
+            return;
+        }
+        let recovery_cancel = Arc::new(Cancel::new());
+        let restored = async {
+            self.start_model(
+                &previous.model,
+                &previous.profile,
+                &recovery_cancel,
+                StartOptions {
+                    complete: false,
+                    state: "restoring",
+                    check_before_listen: true,
+                    require_listener: true,
+                },
+            )
+            .await?;
+            let mut inner = lock(&self.inner);
+            let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
+            if !running.engine.alive()
+                || running.provider.identity() != previous.provider.identity()
+            {
+                return Err(Error::ServerChanged);
+            }
+            inner.server.state = "ready";
+            inner.server.checked = true;
+            inner.server.error = None;
+            inner.pending_engine.take();
+            if let Some(switch) = &mut inner.model_switch {
+                switch.state = "restored";
+            }
+            inner.revision += 1;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = restored {
+            let stopped = {
+                let mut inner = lock(&self.inner);
+                let running = inner.running.take();
+                let pending = inner.pending_engine.take();
+                inner.server = ServerInfo {
+                    state: "failed",
+                    model_id: Some(previous.model.id),
+                    error: Some(Error::RestoreFailed.token()),
+                    ..ServerInfo::default()
+                };
+                if let Some(switch) = &mut inner.model_switch {
+                    switch.state = "restore_failed";
+                    switch.restore_error = Some(error.token());
+                }
+                inner.revision += 1;
+                (running, pending)
+            };
+            if let Some(engine) = stopped.1 {
+                engine.stop();
+            }
+            if let Some(running) = stopped.0 {
+                let _ = self.retire_running(running).await;
+            }
+        }
     }
 
     pub fn check(self: &Arc<Self>, server_id: &str) -> Result<Snapshot> {
@@ -1059,13 +1818,14 @@ impl Manager {
         if running.id != server_id {
             return Err(Error::ServerChanged);
         }
-        inner.running.take();
+        let running = inner.running.take();
         inner.server = ServerInfo {
             state: "stopped",
             ..ServerInfo::default()
         };
         inner.revision += 1;
         drop(inner);
+        drop(running);
         self.emit();
         Ok(self.snapshot())
     }
@@ -1100,6 +1860,7 @@ impl Manager {
             }
             self.store.remove(&model)
         })?;
+        inner.held_listeners.remove(model_id);
         inner.revision += 1;
         drop(inner);
         self.emit();
@@ -1112,15 +1873,19 @@ impl Manager {
         if let Some(cancel) = &inner.cancel {
             cancel.stop();
         }
-        if let Some(engine) = inner.pending_engine.take() {
-            engine.stop();
-        }
-        inner.running.take();
+        let pending = inner.pending_engine.take();
+        let running = inner.running.take();
+        inner.held_listeners.clear();
         inner.server = ServerInfo {
             state: "stopped",
             ..ServerInfo::default()
         };
         inner.revision += 1;
+        drop(inner);
+        if let Some(engine) = pending {
+            engine.stop();
+        }
+        drop(running);
     }
 }
 
@@ -1213,15 +1978,47 @@ pub(crate) fn copy_import(
     target.sync_all().map_err(|_| Error::Storage)
 }
 
-pub async fn native_check(provider: &Provider) -> Result<()> {
-    let prepared = provider.prepare(serde_json::to_vec(&json!({
+fn native_probe(provider: &Provider) -> Result<Vec<u8>> {
+    serde_json::to_vec(&json!({
         "model":provider.identity(), "state":{"value":7},
         "questions":{
             "choice":{"type":"choice","instructions":"Choose the description matching value 7.","criteria":{"seven":"value equals seven","other":"another value"}},
             "score":{"type":"score","instructions":"How well does the value equal seven?","criteria":["not seven","seven"]},
             "noul":{"type":"noul","instructions":"The value equals seven."}
         }
-    })).map_err(|_| Error::Protocol)?).map_err(|_| Error::Protocol)?;
+    })).map_err(|_| Error::Protocol)
+}
+
+async fn native_pipe_check(
+    provider: &Provider,
+    engine: &Arc<Engine>,
+    cancel: &Cancel,
+) -> Result<()> {
+    let prepared = provider
+        .prepare(native_probe(provider)?)
+        .map_err(|_| Error::Protocol)?;
+    let body = prepared.body.clone();
+    let process = engine.clone();
+    let exchange = tokio::task::spawn_blocking(move || process.exchange(&body));
+    let result = tokio::select! {
+        _ = cancel.cancelled() => Err(Error::Cancelled),
+        result = tokio::time::timeout(engine::REQUEST_TIMEOUT, exchange) => match result {
+            Ok(Ok(Ok(bytes))) => provider.decode(&prepared, bytes).map(|_| ()).map_err(|_| Error::Protocol),
+            Ok(Ok(Err(error))) => Err(error),
+            Ok(Err(_)) => Err(Error::RuntimeFailed),
+            Err(_) => Err(Error::Timeout),
+        },
+    };
+    if result.is_err() {
+        engine.stop();
+    }
+    result
+}
+
+pub async fn native_check(provider: &Provider) -> Result<()> {
+    let prepared = provider
+        .prepare(native_probe(provider)?)
+        .map_err(|_| Error::Protocol)?;
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -1275,6 +2072,53 @@ pub(crate) mod test_support {
 
     pub fn begin_registration_blocker(manager: &Manager) -> String {
         manager.begin("download", None, 0).unwrap().0
+    }
+
+    #[cfg(unix)]
+    pub fn held_listener_count(manager: &Manager) -> usize {
+        lock(&manager.inner).held_listeners.len()
+    }
+
+    #[cfg(unix)]
+    pub fn switching_manager(
+        root: &Path,
+        settings: &Path,
+        previous: Model,
+        target: Model,
+        factory: EngineFactory,
+    ) -> Arc<Manager> {
+        let runtimes: serde_json::Value =
+            serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
+        let profile: RuntimeProfile =
+            serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
+        let manager = Manager::with_catalog(
+            root,
+            settings,
+            Catalog {
+                version: 1,
+                models: vec![previous.clone(), target.clone()],
+            },
+            Some(profile.clone()),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        *lock(&manager.engine_factory) = Some(factory);
+        for model in [previous, target] {
+            let mut stage = manager.store.stage().unwrap();
+            fs::write(stage.path().join("model.safetensors"), b"weights").unwrap();
+            manager.store.commit_model(&mut stage, &model).unwrap();
+        }
+        let mut stage = manager.store.stage().unwrap();
+        let executable = storage::child(stage.path(), &profile.executable).unwrap();
+        storage::private_dir(executable.parent().unwrap()).unwrap();
+        fs::write(executable, b"fixture").unwrap();
+        manager.store.commit_runtime(&mut stage, &profile).unwrap();
+        manager
+    }
+
+    #[cfg(unix)]
+    pub fn replace_engine_factory(manager: &Manager, factory: EngineFactory) {
+        *lock(&manager.engine_factory) = Some(factory);
     }
 
     #[cfg(unix)]

@@ -4,11 +4,13 @@ mod catalog;
 mod engine;
 mod manager;
 mod selection;
+mod source;
 mod storage;
 
 pub use catalog::{Artifact, Catalog, EngineKind, Model};
-pub use manager::{Manager, Snapshot};
+pub use manager::{Manager, Snapshot, SourceInspection};
 pub use selection::{Binding, MANAGED_MODEL_KEY};
+pub use source::SourceInput;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -44,6 +46,17 @@ pub enum Error {
     InputUnsupported,
     EngineUnverified,
     ModelFormatUnsupported,
+    SourceInvalid,
+    SourceUnavailable,
+    SourceAuthRequired,
+    SourceNotNative,
+    SourceHashUnavailable,
+    SourceChanged,
+    InspectionChanged,
+    SourceRequiresFolder,
+    DestinationUnavailable,
+    WeightsFormat,
+    RestoreFailed,
 }
 
 impl Error {
@@ -79,6 +92,17 @@ impl Error {
             Self::InputUnsupported => "input_not_supported",
             Self::EngineUnverified => "engine_unverified",
             Self::ModelFormatUnsupported => "model_format_not_supported",
+            Self::SourceInvalid => "source_invalid",
+            Self::SourceUnavailable => "source_unavailable",
+            Self::SourceAuthRequired => "source_auth_required",
+            Self::SourceNotNative => "not_native_decision_model",
+            Self::SourceHashUnavailable => "source_hash_unavailable",
+            Self::SourceChanged => "source_changed",
+            Self::InspectionChanged => "source_inspection_changed",
+            Self::SourceRequiresFolder => "source_folder_required",
+            Self::DestinationUnavailable => "destination_unavailable",
+            Self::WeightsFormat => "weights_format_invalid",
+            Self::RestoreFailed => "model_restore_failed",
         }
     }
 }
@@ -91,5 +115,9 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+#[cfg(test)]
+mod source_tests;
+#[cfg(all(test, unix))]
+mod switch_tests;
 #[cfg(test)]
 mod tests;

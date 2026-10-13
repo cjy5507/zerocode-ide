@@ -31,6 +31,14 @@ fn model() -> Model {
     model
 }
 
+pub(crate) fn fixture_model() -> Model {
+    model()
+}
+
+pub(crate) async fn settled_snapshot(manager: &Manager) -> crate::Snapshot {
+    settled(manager).await
+}
+
 async fn settled(manager: &Manager) -> crate::Snapshot {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -149,6 +157,16 @@ fn registration_rejects_unknown_runtime_and_loader_fields() {
     document["models"][0]["loader"] = serde_json::json!("untrusted.module");
     assert_eq!(
         Catalog::parse(&document.to_string()).unwrap_err(),
+        Error::Manifest
+    );
+}
+
+#[test]
+fn model_weight_metadata_must_match_the_pinned_artifact_sizes() {
+    let mut model = model();
+    model.weights_bytes = Some(1);
+    assert_eq!(
+        Catalog::parse(&registration_document(vec![model])).unwrap_err(),
         Error::Manifest
     );
 }
@@ -938,6 +956,21 @@ fn revision_mismatch_and_missing_runtime_leave_the_provider_unchanged() {
 
 #[cfg(unix)]
 fn fake_engine() -> std::sync::Arc<crate::engine::Engine> {
+    native_fixture_engine(false)
+}
+
+#[cfg(unix)]
+pub(crate) fn ready_fixture_engine() -> std::sync::Arc<crate::engine::Engine> {
+    native_fixture_engine(true)
+}
+
+#[cfg(unix)]
+pub(crate) fn running_fixture_engine() -> std::sync::Arc<crate::engine::Engine> {
+    fake_engine()
+}
+
+#[cfg(unix)]
+fn native_fixture_engine(ready: bool) -> std::sync::Arc<crate::engine::Engine> {
     let source = r#"import json,sys
 for line in sys.stdin:
  r=json.loads(line);a={}
@@ -949,8 +982,13 @@ for line in sys.stdin:
    n=len(q['criteria']);p={str(i):(1.0 if i==0 else 0.0) for i in range(n)};a[k]={'type':'score','score':0.0,'confidence':1.0,'probabilities':p,'legend':{str(i):v for i,v in enumerate(q['criteria'])}}
  print(json.dumps({'model':r['model'],'answers':a,'usage':{'input_tokens':1,'output_tokens':0}}),flush=True)
 "#;
+    let source = if ready {
+        "print('{\"ready\":true}',flush=True)\n".to_owned() + source
+    } else {
+        source.to_owned()
+    };
     crate::engine::Engine::from_command(
-        std::process::Command::new("python3").args(["-I", "-u", "-c", source]),
+        std::process::Command::new("python3").args(["-I", "-u", "-c", &source]),
     )
 }
 

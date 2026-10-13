@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use local_judgment::{Manager, Snapshot};
+use local_judgment::{Manager, Snapshot, SourceInput};
 
 async fn settled(manager: &Manager) -> Result<Snapshot, Box<dyn std::error::Error>> {
     loop {
@@ -32,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         first
     });
     let action = args.next().ok_or("managed-smoke requires an action")?;
+    let action = action.to_str().ok_or("invalid_action")?;
     let source = args
         .next()
         .filter(|source| source != "-")
@@ -51,24 +52,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Manager::new(&root, &settings, |_| {})?
     };
     let before = manager.snapshot();
-    let model = match model_id.as_deref() {
-        Some(id) => before
+    let mut selected_id = model_id.clone();
+    if matches!(action, "validate-hf" | "validate-local") {
+        if !validation {
+            return Err("candidate_validation_mode_required".into());
+        }
+        let source = source.as_ref().ok_or("validation_source_required")?;
+        let input = if action == "validate-hf" {
+            let expected = before
+                .models
+                .iter()
+                .find(|model| Some(&model.id) == model_id.as_ref())
+                .ok_or("pinned_validation_model_required")?;
+            SourceInput::HuggingFace {
+                repository: source.to_string_lossy().into_owned(),
+                revision: Some(expected.revision.clone()),
+                subfolder: None,
+            }
+        } else {
+            SourceInput::LocalDirectory {
+                directory: source.to_string_lossy().into_owned(),
+            }
+        };
+        let inspection = manager.inspect_source(input).await?;
+        if action == "validate-hf"
+            && !before.models.iter().any(|model| {
+                Some(&model.id) == model_id.as_ref()
+                    && model.manifest_fingerprint == inspection.model.manifest_fingerprint
+            })
+        {
+            return Err("source_manifest_changed".into());
+        }
+        manager.install_source(
+            &inspection.inspection_id,
+            &inspection.instance_id,
+            &inspection.catalog_fingerprint,
+            None,
+        )?;
+        settled(&manager).await?;
+        selected_id = Some(inspection.model.id);
+    }
+    let current = manager.snapshot();
+    let model = match selected_id.as_deref() {
+        Some(id) => current
             .models
             .iter()
             .find(|model| model.id == id)
             .ok_or("unknown_model")?,
-        None => before.models.first().ok_or("empty_catalog")?,
+        None => current.models.first().ok_or("empty_catalog")?,
     };
     if validation {
-        if action != "validate" {
+        if !matches!(action, "validate" | "validate-hf" | "validate-local") {
             return Err("candidate_requires_complete_validation".into());
         }
         manager.prepare_model_runtime(&model.id, &model.revision)?;
         settled(&manager).await?;
-        manager.install(&model.id, &model.revision, source.clone())?;
-        settled(&manager).await?;
+        if action == "validate" {
+            manager.install(&model.id, &model.revision, source.clone())?;
+            settled(&manager).await?;
+        }
     }
-    match action.to_str().ok_or("invalid_action")? {
+    match action {
         "runtime" => {
             if model.runtime.state != "ready" {
                 manager.prepare_model_runtime(&model.id, &model.revision)?;
@@ -85,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 settled(&manager).await?;
             }
         }
-        "run" | "validate" => {
+        "run" | "validate" | "validate-hf" | "validate-local" => {
             manager.start(&model.id, &model.revision)?;
             let started = settled(&manager).await?;
             let id = started.server.id.ok_or("server_not_ready")?;

@@ -68,7 +68,7 @@ pub fn verify_model(directory: &Path, model: &Model, cancel: &AtomicBool) -> Res
     Ok(())
 }
 
-fn reject_code(value: &Value, engine: EngineKind) -> Result<()> {
+pub(crate) fn reject_code(value: &Value, engine: EngineKind) -> Result<()> {
     match value {
         Value::Object(fields) => {
             for (name, value) in fields {
