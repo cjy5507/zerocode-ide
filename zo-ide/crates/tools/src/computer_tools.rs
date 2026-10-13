@@ -657,6 +657,22 @@ fn checked_window(answer: &Value, expected: Option<u64>) -> Result<Option<u64>, 
     Ok(found)
 }
 
+fn unverified_action_receipt(action: &str, window_id: Option<u64>, scope_error: &ToolError, ran: usize) -> Result<String, ToolError> {
+    to_pretty_json(json!({
+        "ok": true,
+        "action": action,
+        "input_dispatched": true,
+        "completion_verified": false,
+        "ran": ran,
+        "window_scope": { "verified": false, "requested_window_id": window_id, "reason": scope_error.to_string() },
+        "do_not_repeat": true,
+        "next": "Input was already dispatched. Its target or result could not be verified. Do not repeat it; observe the requested app/window and check the result first.",
+        "result": null,
+        "screenshot": null,
+        "looked_after": null,
+    }))
+}
+
 /// The command line an action means. Pure: the table a test pins, in three
 /// families — looking and input, apps and the system, the meaning layer.
 pub(crate) fn argv_for(input: &ComputerInput) -> Result<Vec<String>, ToolError> {
@@ -804,7 +820,7 @@ fn argv_look_and_input(action: &str, input: &ComputerInput, argv: &mut Vec<Strin
             let [from_x, from_y] = point(input.start_coordinate, action, "start_coordinate")?;
             let [to_x, to_y] = point(input.coordinate, action, "coordinate")?;
             if let Some(app) = input.app.as_deref() {
-                push(argv, &["drag", "--app", app]);
+                push(argv, &["drag", "--app", app, "--no-screenshot"]);
             } else {
                 push(argv, &["mouse-drag"]);
             }
@@ -818,7 +834,7 @@ fn argv_look_and_input(action: &str, input: &ComputerInput, argv: &mut Vec<Strin
                 if !["up", "down", "left", "right"].contains(&direction) || !pages.is_finite() || pages <= 0.0 {
                     return Err(ToolError::InvalidInput("app scrolling needs a direction and positive finite scroll_pages".into()));
                 }
-                push(argv, &["scroll", "--app", app, "--x", &number(x), "--y", &number(y), "--direction", direction, "--pages", &number(pages)]);
+                push(argv, &["scroll", "--app", app, "--x", &number(x), "--y", &number(y), "--direction", direction, "--pages", &number(pages), "--no-screenshot"]);
                 return Ok(true);
             }
             let clicks = i64::from(input.scroll_amount.unwrap_or(1)) * SCROLL_LINES_PER_CLICK;
@@ -838,7 +854,7 @@ fn argv_look_and_input(action: &str, input: &ComputerInput, argv: &mut Vec<Strin
         "key" => {
             let chord = need(input.text.as_deref(), action, "text")?;
             if let Some(app) = input.app.as_deref() {
-                push(argv, &["press-key", "--app", app, "--key", chord]);
+                push(argv, &["press-key", "--app", app, "--key", chord, "--no-screenshot"]);
             } else {
                 push(argv, &["key", "--key", chord]);
             }
@@ -854,7 +870,7 @@ fn argv_look_and_input(action: &str, input: &ComputerInput, argv: &mut Vec<Strin
                 .as_deref()
                 .ok_or_else(|| ToolError::InvalidInput("`type` needs `text`".into()))?;
             if let Some(app) = input.app.as_deref() {
-                push(argv, &["type-text", "--app", app, "--text", text]);
+                push(argv, &["type-text", "--app", app, "--text", text, "--no-screenshot"]);
             } else {
                 push(argv, &["type", "--text", text]);
             }
@@ -1613,7 +1629,12 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
         let n = report["n"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(0);
         if let Some(step) = n.checked_sub(1).and_then(|at| steps.get(at)) {
             if report["ok"] == Value::Bool(true) && step.action.trim() != "window" {
-                checked_window(report.get("result").unwrap_or(&Value::Null), step.window_id)?;
+                if let Err(error) = checked_window(report.get("result").unwrap_or(&Value::Null), step.window_id) {
+                    if steps.iter().take(ran).any(|step| acts(step.action.trim())) {
+                        return unverified_action_receipt(BATCH_ACTION, step.window_id, &error, ran);
+                    }
+                    return Err(error);
+                }
             }
             report["verb"] = Value::String(step.action.trim().to_string());
         }
@@ -1880,7 +1901,11 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
     if let Some(refused) = refusal(&answer) {
         return Err(refused.into());
     }
-    let returned_window = checked_window(&answer, input.window_id.filter(|_| action != "window"))?;
+    let returned_window = match checked_window(&answer, input.window_id.filter(|_| action != "window")) {
+        Ok(window_id) => window_id,
+        Err(error) if acts(&action) => return unverified_action_receipt(&action, input.window_id, &error, 1),
+        Err(error) => return Err(error),
+    };
     let mut after_target = if action == "window" { None } else { acted_in(&[&input], ctx) };
     if let Some(target) = &mut after_target {
         target.window_id = returned_window.or(target.window_id);
@@ -1895,6 +1920,11 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
         }
         staged
     };
+    if action == "screenshot" && input.app.is_some() {
+        if let Some(result) = answer.get_mut("result").and_then(Value::as_object_mut) {
+            result.remove("tree");
+        }
+    }
     let mut result = shown(answer.get("result").cloned().unwrap_or(Value::Null), ctx.computer_frame());
     // A picture of its own (a screenshot, a zoom) carries no numbers: after it
     // there is no marked look to click by until one is shown again.
@@ -1954,6 +1984,7 @@ mod tests {
             assert_eq!(command.params.get("app"), Some(&json!("Fixture")));
             assert_eq!(command.params.get("windowId"), Some(&json!(41)));
             assert_eq!(command.params.get("background"), Some(&json!(true)));
+            assert_eq!(command.params.get("noScreenshot"), Some(&json!(true)));
         }
     }
 
@@ -2134,17 +2165,60 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_batch_never_discloses_a_different_windows_step_result() {
+    fn a_batch_never_discloses_a_different_windows_step_result_or_invites_repeating_input() {
         let dir = tempfile::tempdir().unwrap();
         let (road, _) = fake_shim(dir.path());
         let ctx = crate::tests::tool_context_outside_cwd_windows();
         let reports = json!([{"n": 1, "ok": true, "result": {"window": {"id": 52}, "text": "unrelated-window-fixture"}}]);
         std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 1, "steps": reports}}).to_string()).unwrap();
-        let error = run_computer(&json!({"action": "batch", "steps": [{"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Save"}]}), &ctx, &road).unwrap_err();
-        assert!(error.to_string().contains("window_scope_mismatch"));
-        assert!(!error.to_string().contains("unrelated-window-fixture"));
+        let response = run_computer(&json!({"action": "batch", "steps": [{"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Save"}]}), &ctx, &road).unwrap();
+        let receipt: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(receipt["ok"], true);
+        assert_eq!(receipt["input_dispatched"], true);
+        assert_eq!(receipt["completion_verified"], false);
+        assert_eq!(receipt["do_not_repeat"], true);
+        assert!(receipt["result"].is_null());
+        assert!(response.contains("window_scope_mismatch"));
+        assert!(!response.contains("unrelated-window-fixture"));
         assert_eq!(calls(dir.path()), ["batch"]);
         assert_eq!(staged(&ctx), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sent_click_with_unverified_scope_returns_a_receipt_not_a_repeatable_error() {
+        for reported_window in ["52", "0"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            std::fs::write(dir.path().join("forced-window"), reported_window).unwrap();
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            let response = run_computer(&json!({"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Save"}), &ctx, &road).unwrap();
+            let receipt: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(receipt["ok"], true);
+            assert_eq!(receipt["input_dispatched"], true);
+            assert_eq!(receipt["completion_verified"], false);
+            assert_eq!(receipt["do_not_repeat"], true);
+            assert_eq!(receipt["window_scope"]["requested_window_id"], 41);
+            assert!(receipt["result"].is_null());
+            assert!(!response.contains("unrelated-window-fixture"));
+            assert_eq!(calls(dir.path()), ["click"]);
+            assert_eq!(staged(&ctx), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_app_screenshot_keeps_its_window_but_does_not_repeat_the_accessibility_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let script = std::fs::read_to_string(&road.program).unwrap().replace("\"cursor\":", "\"tree\":{\"text\":\"fixture tree\"},\"cursor\":");
+        std::fs::write(&road.program, script).unwrap();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let response = run_computer(&json!({"action": "screenshot", "app": "Fixture", "window_id": 41}), &ctx, &road).unwrap();
+        let receipt: Value = serde_json::from_str(&response).unwrap();
+        assert!(receipt["result"].get("tree").is_none());
+        assert_eq!(ctx.computer_observed_target().unwrap().window_id, Some(41));
+        assert_eq!(staged(&ctx), 1);
     }
 
     /// A process whose looks carry marks (`ZO_COMPUTER_MARKS`, the bench's
