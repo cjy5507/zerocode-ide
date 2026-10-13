@@ -12607,6 +12607,72 @@ mod zo_channel_bearer {
     }
 }
 
+/// A channel whose address refuses the connection has no process behind
+/// it any more, and no answer can reach the question it raised: the road
+/// says so with the marker the window takes the question down on, not in
+/// the transport's own words (t-51007). A zo that exited left its card on
+/// screen, and every press — Escape too — came back refused.
+#[test]
+fn an_answer_whose_channel_refuses_the_connection_is_unreachable() {
+    let gone = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback channel");
+        listener.local_addr().expect("its address").to_string()
+    };
+
+    let answered = answer_prompt(
+        zo_channel_entry(gone, Some("bearer-of-a-zo-that-exited".to_string())),
+        7,
+        "deny".to_string(),
+    );
+
+    assert_eq!(answered, Err("zerocode:session-unreachable".to_string()));
+}
+
+/// The reader's own claim still holds the session when its stream ends:
+/// it gives the session up, and the session's questions leave.
+#[test]
+fn a_reader_whose_claim_still_holds_the_session_gives_it_up_and_says_so() {
+    let pane = ZoChannelOwner::Term(8);
+
+    assert_eq!(reader_end(Some(pane), pane, true), ReaderEnd::Release);
+}
+
+/// The incident's order: the terminal closed, its teardown gave the
+/// session up and forgot the claim, and only then did the reader wake to
+/// the process's end. Nobody holds the session, so the reader says it
+/// ended — however far the teardown got before it woke (t-51007).
+#[test]
+fn a_reader_whose_claim_a_teardown_ended_still_says_the_session_ended() {
+    let pane = ZoChannelOwner::Term(8);
+
+    assert_eq!(reader_end(None, pane, false), ReaderEnd::Announce);
+    assert_eq!(reader_end(None, pane, true), ReaderEnd::Announce);
+}
+
+/// A claim that still holds the session keeps its questions: the same
+/// pane claimed the session again, or another pane or a lane holds it.
+/// The old reader ends without a word and gives nothing up.
+#[test]
+fn a_reader_never_takes_down_a_newer_claims_questions() {
+    let pane = ZoChannelOwner::Term(8);
+    let other = ZoChannelOwner::Term(9);
+    let lane = ZoChannelOwner::Lane(LaneId::random());
+
+    for (holder, current) in [
+        (pane, false),
+        (other, true),
+        (other, false),
+        (lane, true),
+        (lane, false),
+    ] {
+        assert_eq!(
+            reader_end(Some(holder), pane, current),
+            ReaderEnd::Silent,
+            "current: {current}"
+        );
+    }
+}
+
 /// A session's channel is asked with that channel's own bearer (t-49081).
 ///
 /// The window's one token opens only the zo the window started: a zo typed
