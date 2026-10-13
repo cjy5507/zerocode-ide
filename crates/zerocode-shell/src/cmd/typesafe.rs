@@ -174,13 +174,46 @@ pub(crate) fn set_jev_model(model: String) -> Result<TypeSafeSettings, RouterRef
     settings_now()
 }
 
+/// Select `provider`. With `expected_provider_identity` the write lands only
+/// while the settings still select that provider — what a preflight's
+/// `activeProviderIdentity` names — and is refused as `settings_changed`
+/// with nothing written otherwise; without it, it lands as it always did.
 #[tauri::command(async)]
 pub(crate) fn set_judgment_provider(
     provider: judgment_provider::Provider,
+    expected_provider_identity: Option<String>,
 ) -> Result<TypeSafeSettings, RouterRefusal> {
-    typesafe_settings::set_provider(&settings_path()?, provider)?;
+    let path = settings_path()?;
+    match expected_provider_identity.as_deref() {
+        Some(expected) => {
+            typesafe_settings::set_provider_if_identity(&path, provider, expected, None)?;
+        }
+        None => typesafe_settings::set_provider(&path, provider)?,
+    }
     super::managed_judgment::settings_changed();
     settings_now()
+}
+
+/// Ask a provider the person has not applied yet the preflight's three
+/// questions, with the key its own endpoint keeps, and change nothing
+/// ([`typesafe_settings::preflight_provider`]). An answer is a connection
+/// that speaks the native schema, not a measure of accuracy.
+#[tauri::command]
+pub(crate) async fn preflight_judgment_provider(
+    provider: judgment_provider::Provider,
+    expected_provider_identity: String,
+) -> Result<typesafe_settings::ProviderPreflight, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        typesafe_settings::preflight_provider(
+            &settings_path().map_err(|error| error.message)?,
+            provider,
+            &expected_provider_identity,
+            &Keychain::of_this_machine(),
+            &crate::systemone::Wire::of_this_machine(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
