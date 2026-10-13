@@ -1549,10 +1549,62 @@ class BundleUpdater(LaneCase):
         self.assertEqual(darwin["signature"], archive.with_name(archive.name + ".sig").read_text().strip())
         self.assertEqual(darwin["url"],
                          f"https://github.com/{GITHUB_REPO}/releases/download/v{VERSION}/ZeroCode_{VERSION}_aarch64.app.tar.gz")
-        built = [l for l in self.lane.stub_lines() if "bundle-updater" in l]
-        self.assertEqual(len(built), 1, built)
-        self.assertIn(f"target={self.lane.target('root-release')}", built[0])
-        self.assertIn("key=" + str(self.lane.key), built[0], "the build is told the private key, never its bytes")
+        sealed = [l for l in self.lane.stub_lines() if " bundle-updater seal " in l]
+        self.assertEqual(len(sealed), 1, sealed)
+        self.assertIn(f"target={self.lane.target('root-release')}", sealed[0])
+        self.assertIn("key=" + str(self.lane.key), sealed[0], "the archive is signed by the key's path, never its bytes")
+
+    def test_a_publish_run_builds_the_app_once_and_seals_that_build(self):
+        """A publish run's build-app is the publish build itself, so
+        bundle-updater seals and packs that app instead of running
+        tauri:release a second time (1105 s on 10-13, a cold zo stage inside)."""
+        pub = self.lane.write_key(keyid=bytes.fromhex("0102030405060708"))
+        self.lane.extra_env["RELEASE_PUBLISH"] = "1"
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=pub)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = self.lane.stub_lines()
+        installs = [l for l in lines if " build-app target=" in l]
+        self.assertEqual(len(installs), 1, lines)
+        self.assertNotIn("key=", installs[0], "the install build never holds the updater key")
+        self.assertFalse([l for l in lines if " bundle-updater target=" in l], "no second tauri:release")
+        sealed = [l for l in lines if " bundle-updater seal " in l]
+        self.assertEqual(len(sealed), 1, lines)
+        self.assertIn(f"target={self.lane.target('root-release')}", sealed[0])
+
+    def test_the_sealed_app_must_be_the_installed_app_or_the_lane_is_red(self):
+        """One build serves both, so what the updater ships is what this
+        machine installed: a sealed app whose code signature differs from the
+        installed one is red, and nothing is gathered for publish."""
+        pub = self.lane.write_key(keyid=bytes.fromhex("0102030405060708"))
+        self.lane.extra_env["RELEASE_PUBLISH"] = "1"
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=pub, CDHASH_INSTALLED="aa11", CDHASH_SEALED="bb22")
+        self.assertNotEqual(r.returncode, 0)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "red")
+        self.assertIn("aa11", st["reason"])
+        self.assertIn("bb22", st["reason"])
+        self.assertFalse((self.lane.out(SHA_A) / "latest.json").exists())
+
+    def test_with_a_distribution_identity_the_publish_builds_its_own_signed_app(self):
+        """Tauri signs (and notarizes) only in the publish build when a
+        distribution identity is in the env, and the install build re-signs
+        with the local identity, so with one the two builds stay."""
+        pub = self.lane.write_key(keyid=bytes.fromhex("0102030405060708"))
+        self.lane.extra_env["RELEASE_PUBLISH"] = "1"
+        self.lane.extra_env["APPLE_SIGNING_IDENTITY"] = "Developer ID Application: Fixture"
+        self.lane.enqueue(SHA_A)
+        # Two builds, two identities: the installed app is not the shipped one by design.
+        r = self.lane.run(PLUGIN_PUBKEY=pub, CDHASH_INSTALLED="aa11", CDHASH_SEALED="bb22")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = self.lane.stub_lines()
+        installs = [l for l in lines if " build-app target=" in l]
+        self.assertEqual(len(installs), 1, lines)
+        self.assertNotIn("key=", installs[0], "the install build never holds the updater key")
+        second = [l for l in lines if " bundle-updater target=" in l]
+        self.assertEqual(len(second), 1, lines)
+        self.assertIn("key=" + str(self.lane.key), second[0])
 
     def test_a_pubkey_that_is_not_the_configured_one_is_red(self):
         self.lane.write_key(keyid=bytes.fromhex("0102030405060708"))
