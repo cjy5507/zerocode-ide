@@ -2916,6 +2916,39 @@ mod tests {
         assert_eq!(marked.len(), 45, "the gap, the row, the teaser, 41 rows, the output");
     }
 
+    /// An MCP tool answers with an envelope — `content` items beside
+    /// `structuredContent` — and the rows under its call show what the items
+    /// say, not the envelope (t-51389): the text, an image as a word, and
+    /// nothing for an envelope with nothing in it.
+    #[test]
+    fn an_mcp_call_shows_what_its_envelope_says() {
+        let call = |name: &str, raw: &str| {
+            let mut group = ToolGroup::new(ToolCall::new(
+                "m".to_string(),
+                ToolKind::Call { name: name.to_string(), detail: String::new() },
+            ));
+            let body = format_tool_result_from_raw(name, raw, false);
+            assert!(group.complete("m", Outcome::from_result(false, &body, "")));
+            plain(&group.lines(80, Duration::ZERO))
+        };
+        assert_eq!(
+            call(
+                "mcp__playwright__browser_take_screenshot",
+                r####"{"content":[{"type":"text","text":"### Result\nTook the viewport screenshot and saved it as page-1.png"},{"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}],"structuredContent":null}"####,
+            ),
+            vec![
+                "✓ Call mcp__playwright__browser_take_screenshot".to_string(),
+                "  └ ### Result".to_string(),
+                "    Took the viewport screenshot and saved it as page-1.png".to_string(),
+                "    [image]".to_string(),
+            ]
+        );
+        assert_eq!(
+            call("mcp__playwright__browser_resize", r#"{"content":[],"structuredContent":null}"#),
+            vec!["✓ Call mcp__playwright__browser_resize".to_string()]
+        );
+    }
+
     /// Marker mode의 커밋된 도구 셀은 접기 구간이 된다.
     #[test]
     fn a_committed_cell_with_output_carries_the_fold_markers() {
