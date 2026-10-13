@@ -187,15 +187,21 @@ pub(crate) fn managed_judgment_switch_model(
                     save_checked_provider(&path, provider, expected, binding)
                 },
                 move |action| {
+                    let mut action_error = None;
                     typesafe_settings::with_provider_locked(&guard_path, || {
-                        action().map_err(|error| error.to_string())
+                        action().map_err(|error| {
+                            action_error = Some(error);
+                            error.to_string()
+                        })
                     })
                     .map_err(|error| {
-                        if error == "settings_changed" {
-                            local_judgment::Error::SettingsChanged
-                        } else {
-                            local_judgment::Error::Storage
-                        }
+                        action_error.unwrap_or_else(|| {
+                            if error == "settings_changed" {
+                                local_judgment::Error::SettingsChanged
+                            } else {
+                                local_judgment::Error::Storage
+                            }
+                        })
                     })
                 },
             ),
