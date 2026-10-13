@@ -8849,6 +8849,56 @@ mod tests {
         assert_eq!(resumed.pending_history, live.pending_history, "the same rows in other bytes");
     }
 
+    /// A steer folded into a call's result was echoed after that call's cell
+    /// live — the echo commits the finished cell first — and a resumed
+    /// transcript draws them in the same order (t-51389).
+    #[test]
+    fn a_resumed_steer_stands_after_the_call_it_followed() {
+        use core_types::session::{ContentBlock, ConversationMessage};
+        use runtime::message_stream::SystemLevel;
+
+        let steering = {
+            let conversation = include_str!("../../../runtime/src/conversation/mod.rs");
+            let open = "const STEERING_PREAMBLE: &str = \"";
+            let start = conversation.find(open).expect("the runtime declares its preamble") + open.len();
+            let end = start + conversation[start..].find("\";").expect("the literal closes");
+            conversation[start..end].to_string()
+        };
+        let output = r#"{"stdout":"a.txt","stderr":"","exitCode":0}"#;
+        let steer = "그거 말고 b.txt";
+
+        let mut live = test_ui();
+        let ids = BlockIdGen::default();
+        live.block(tool_call(&ids, "t1", "bash", &json!({"command": "ls"})));
+        live.block(RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId("t1".to_string()),
+            is_error: false,
+            body: format_tool_result_from_raw("bash", output, false),
+        });
+        live.block(RenderBlock::System {
+            id: ids.next(),
+            level: SystemLevel::Info,
+            text: format!("{}{steer}", runtime::STEERING_ECHO_PREFIX),
+        });
+
+        let mut result = ConversationMessage::tool_result("t1", "bash", output, false);
+        result.blocks.push(ContentBlock::Text { text: format!("{steering}\n{steer}") });
+        let messages = vec![
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                input: json!({"command": "ls"}).to_string(),
+            }]),
+            result,
+        ];
+        let mut resumed = test_ui();
+        resumed.replay(crate::session::plain_session::replay_items_from(&messages));
+
+        let rows = |ui: &super::Ui| ui.pending_history.iter().map(Line::plain).collect::<Vec<_>>();
+        assert_eq!(rows(&resumed), rows(&live), "the steer moved above the call it followed");
+    }
+
     /// A run of calls with nothing said between them is one block (t-51389):
     /// each `Call` is a cell of its own, and five of them in the screenshot
     /// each wore its own blank row. The gap stands before the first row of
