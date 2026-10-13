@@ -3101,6 +3101,7 @@ class StatefulBackend {
       case "judgment_models": return clone(await (this.judgmentModelsWait ?? this.judgmentModels ?? [{ id: "fixture-decision-a" }, { id: "fixture-decision-b" }]));
       case "preflight_judgment_provider": {
         if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
+        if (args.provider.kind === "jev" && !jevModelPin(args.provider.model)) throw "provider_model";
         const check = await (this.judgmentPreflightWait ?? this.judgmentPreflight ?? {
           candidateIdentity: `fixture-provider:${JSON.stringify(args.provider)}`,
           activeProviderIdentity: args.expectedProviderIdentity,
@@ -6039,7 +6040,7 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assert(!backend.calls.slice(pinAt).some((call) => call.command === "set_judgment_provider"), "editing applied a provider");
   await pageA.click("#judgment-save-provider");
   assertEqual((await backend.waitForCall("A", "set_judgment_provider", pinAt)).args.provider.model, "jev-1.13.0");
-  await statusIs(await said("settings.judgment.applied", "판단 모델을 적용했습니다. 연결 확인은 정확도 검증과 별개입니다."));
+  await statusIs(await said("settings.judgment.checkedAndApplied", "응답을 확인한 모델을 적용했습니다. 연결 확인은 작업 정확도 검증과 별개입니다."));
   assertEqual(backend.zoSettings.smart[JEV_MODEL_SETTING], "jev-1.13.0");
   await pageA.evaluate(() => refreshApiRouters());
   assertEqual(await modelInput.inputValue(), "jev-1.13.0", "a reopened card lost the pin");
@@ -6047,14 +6048,16 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   await modelInput.fill("jev 1.13");
   await modelInput.dispatchEvent("change");
   await pageA.click("#judgment-save-provider");
-  await backend.waitForCall("A", "set_judgment_provider", slipAt);
+  await backend.waitForCall("A", "preflight_judgment_provider", slipAt);
+  await pageA.waitForFunction(() => !typesafeBusy);
+  assert(!backend.calls.slice(slipAt).some((call) => call.command === "set_judgment_provider"), "an invalid pin passed preflight and reached apply");
   assertEqual(backend.zoSettings.smart[JEV_MODEL_SETTING], "jev-1.13.0", "a refused pin was written");
   const unpinAt = backend.calls.length;
   await modelInput.fill("");
   await modelInput.dispatchEvent("change");
   await pageA.click("#judgment-save-provider");
   await backend.waitForCall("A", "set_judgment_provider", unpinAt);
-  await statusIs(await said("settings.judgment.applied", "판단 모델을 적용했습니다. 연결 확인은 정확도 검증과 별개입니다."));
+  await statusIs(await said("settings.judgment.checkedAndApplied", "응답을 확인한 모델을 적용했습니다. 연결 확인은 작업 정확도 검증과 별개입니다."));
   assert(!(JEV_MODEL_SETTING in backend.zoSettings.smart), "an unpin left the key in the file");
   await pageA.locator("#typesafe-advanced > summary").click();
 
@@ -6559,6 +6562,8 @@ await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁�
       for (const theme of SETTINGS_QUALITY_SPEC.themes) {
         traceManaged(`accessibility ${locale}/${theme}`);
         await setQualityTheme(managedPage, theme);
+        await managedPage.locator("#managed-judgment-import-path").evaluate((input) => input.scrollIntoView({ block: "center", inline: "nearest" }));
+        await renderSettled(managedPage);
         const violations = await axeViolations(managedPage, AxeBuilder, "#managed-judgment-panel");
         assertEqual(violations, [], `${locale}/${theme} local manager accessibility`);
         const contrast = await contrastTable(managedPage, AxeBuilder, "#managed-judgment-import-path");
@@ -7020,7 +7025,9 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   const said = (key, fallback) => pageA.evaluate(([one, words]) => t(one, words), [key, fallback]);
   const unreachable = pageA.locator("[data-jev-unreachable]");
   // The classifier is folded under 고급 (§6.1): open it to reach it.
-  await pageA.locator("#typesafe-advanced > summary").click();
+  if (!await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)) {
+    await pageA.locator("#typesafe-advanced > summary").click();
+  }
 
   // The gate is on the card, and it offers the four words the classifier has —
   // named by what each does, never by the word it writes.
