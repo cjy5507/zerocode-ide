@@ -2847,6 +2847,45 @@ mod tests {
         );
     }
 
+    /// A long command's text does not fill the screen (t-51389, 「출력부분도」):
+    /// under its row it keeps the output's budget — its first rows and a
+    /// count of the rest — in the live cell and in a committed one on a bare
+    /// terminal, while with fold markers the committed cell keeps every row
+    /// inside the fold the person opens.
+    #[test]
+    fn a_long_heredoc_keeps_to_the_output_budget_under_its_row() {
+        use crate::tui::folds::{FoldIds, FoldMode};
+        let prints = (1..=40).map(|n| format!("print({n})")).collect::<Vec<_>>();
+        let script = format!("python3 - <<'PY'\n{}\nPY", prints.join("\n"));
+        let mut group = ToolGroup::new(bash("a", &script));
+        assert!(group.complete("a", ok("40")));
+
+        let live = plain(&group.lines(60, Duration::ZERO));
+        assert_eq!(
+            live,
+            vec![
+                edge("✓ Run python3 - <<'PY'", "1 line", 60),
+                "    print(1)".to_string(),
+                "    print(2)".to_string(),
+                "    print(3)".to_string(),
+                "    print(4)".to_string(),
+                "    … +37 lines".to_string(),
+                "  └ 40".to_string(),
+            ]
+        );
+        let bare = plain(&group.committed(60, &mut FoldIds::default(), FoldMode::Bare));
+        assert_eq!(bare[0], "", "the gap before the cell");
+        assert_eq!(bare[1..], live[..], "a bare terminal commits what the live cell drew");
+
+        let marked = plain(&group.committed(60, &mut FoldIds::default(), FoldMode::Markers));
+        assert_eq!(marked[2], "  └ … +42 lines", "the fold hides every row under the row");
+        assert!(
+            marked.contains(&"    print(40)".to_string()) && marked.contains(&"    PY".to_string()),
+            "the opened fold has the whole command: {marked:#?}"
+        );
+        assert_eq!(marked.len(), 45, "the gap, the row, the teaser, 41 rows, the output");
+    }
+
     /// Marker mode의 커밋된 도구 셀은 접기 구간이 된다.
     #[test]
     fn a_committed_cell_with_output_carries_the_fold_markers() {
