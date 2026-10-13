@@ -1401,6 +1401,22 @@ pub(crate) fn persisted_agent_result(
     }
 
     let (header, body) = leading_line(cursor);
+    // A background command's completion names no agent: the card is the
+    // command cell its log draws (`background_command_cell`), and the verdict
+    // is the log's exit code — a log with none ended on a signal.
+    if runtime::background_log::is_notification_header(header) {
+        let log = strip_agent_result_harness(body);
+        let status = match runtime::background_log::exit_code(log) {
+            Some(0) => AgentResultStatus::Completed,
+            _ => AgentResultStatus::Failed,
+        };
+        return Some((
+            runtime::background_log::BACKGROUND_BASH.to_string(),
+            status,
+            None,
+            log.to_string(),
+        ));
+    }
     if !is_completion_notification_header(header) {
         return None;
     }
@@ -1503,7 +1519,7 @@ fn is_agent_result_harness_line(line: &str) -> bool {
         || runtime::background_log::is_notification_header(line)
 }
 
-fn is_runtime_agent_notification_preamble(line: &str) -> bool {
+pub(crate) fn is_runtime_agent_notification_preamble(line: &str) -> bool {
     is_task_notification_bracket(line)
         && line
             .to_ascii_lowercase()

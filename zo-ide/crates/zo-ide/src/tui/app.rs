@@ -1944,13 +1944,27 @@ impl Ui {
         self.history(&cell);
     }
 
+    /// What the person said — or a peer, through `SendMessage` — drawn the one
+    /// way the live steer echo and a resumed transcript both draw it. A peer's
+    /// words are not the person's: they wear the envelope cell, never the
+    /// tinted user band.
+    fn said(&mut self, text: &str) {
+        match runtime::parse_peer_message(text) {
+            Some(peer) => {
+                let cell = cells::peer_message_cell(peer.from, peer.body, self.width());
+                self.history(&cell);
+            }
+            None => self.user_cell(text),
+        }
+    }
+
     /// A resumed session's earlier conversation, drawn through the handlers
     /// the live stream feeds — `App::replay_history` hands it the items.
     fn replay(&mut self, items: Vec<ReplayItem>) {
         let ids = BlockIdGen::default();
         for (index, item) in items.into_iter().enumerate() {
             match item {
-                ReplayItem::User(text) => self.user_cell(&text),
+                ReplayItem::User(text) => self.said(&text),
                 ReplayItem::Assistant(text) => self.block(RenderBlock::TextDelta {
                     id: ids.next(),
                     text,
@@ -4025,15 +4039,7 @@ impl Ui {
                     self.close_segment();
                     self.flush_tool_cell();
                     self.pending_input.acknowledge_steer(steer);
-                    // A peer's words (`SendMessage`) are not the person's: they
-                    // wear the envelope cell, never the tinted user band.
-                    match runtime::parse_peer_message(steer) {
-                        Some(peer) => {
-                            let cell = cells::peer_message_cell(peer.from, peer.body, width);
-                            self.history(&cell);
-                        }
-                        None => self.user_cell(steer),
-                    }
+                    self.said(steer);
                 } else if let Some(checks) = text
                     .strip_prefix(runtime::COMPLETION_RECEIPT_LEAD)
                     .filter(|_| level == SystemLevel::Info)
