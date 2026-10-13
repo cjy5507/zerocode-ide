@@ -112,7 +112,7 @@ const managedJudgmentController = {
       source_hash_unavailable: ["sourceHash", "출처에서 파일 검증 정보를 확인하지 못했습니다. 검증 가능한 모델 버전을 고르거나 직접 받은 로컬 폴더를 선택하세요."],
       source_folder_required: ["sourceFolder", "파일 하나가 아닌 모델 폴더를 선택하세요. 모델 설정과 가중치 파일이 함께 있어야 합니다."],
       destination_unavailable: ["destination", "선택한 저장 폴더를 사용할 수 없습니다. 기본 저장 위치로 돌아가거나 쓰기 가능한 다른 폴더를 선택하세요."],
-      weights_format_invalid: ["format", "이 모델 형식의 실행 엔진은 아직 지원하지 않습니다. 호환 판단 서버를 연결하거나 지원되는 모델을 선택하세요."],
+      weights_format_invalid: ["weightsFormat", "가중치 파일을 읽을 수 없거나 파일 구조가 올바르지 않습니다. 파일을 다시 받거나 완전한 모델 폴더를 선택하세요."],
       manager_instance_changed: ["changed", "서버 상태가 바뀌었습니다. 상태를 새로 읽고 다시 연결하세요."],
       catalog_conflict: ["catalogConflict", "같은 모델 ID가 다른 정보로 이미 등록돼 있습니다. 모델 목록을 새로 읽고 등록된 모델과 출처를 확인하세요."],
       model_manifest_missing: ["modelManifest", "등록된 모델 정보를 찾지 못했습니다. 모델 목록을 새로 읽거나 원래 출처·폴더에서 다시 추가하세요."],
