@@ -1,5 +1,5 @@
 //! Every question the window puts to the person is one popup (t-17514): a tool
-//! permission, an agent's own question (zo's model switch), Computer Use's
+//! permission, an agent's own question (zo's image retry), Computer Use's
 //! confirm and its hand-over, and the window's own confirms are KINDS of ask
 //! that share one frame in the middle of the window, one queue, and one
 //! keyboard. The browser suite (`ui/tests/ask-popup.mjs`) drives it; these
@@ -160,12 +160,40 @@ fn a_question_is_told_from_a_tool_by_its_kind_and_never_by_its_tool_string() {
         "a question's title lost the topic, the frame's title, or the generic one:\n{title}"
     );
     let topics = block_after(window, "const ASK_TOPICS = Object.freeze({");
-    for topic in ["model_switch", "declined_images"] {
-        assert!(
-            topics.contains(topic),
-            "the topic `{topic}` has no words:\n{topics}"
-        );
-    }
+    assert!(
+        topics.contains("declined_images"),
+        "the topic `declined_images` has no words:\n{topics}"
+    );
+}
+
+/// zo's model-switch question is answered in zo's own terminal alone
+/// (t-51267). zo draws it there as a numbered menu, and the card only stood in
+/// the middle of the window over a question the terminal at the bottom was
+/// already asking. The window raises no card for it — told by the frame's kind
+/// and topic, never by a tool string — and marks the lane as waiting instead;
+/// it keeps no words for a card it never draws.
+#[test]
+fn the_model_switch_question_is_asked_in_the_terminal_alone() {
+    let window = window_source();
+    let raising = block_after(window, "function raisePermission(session, frame) {");
+    let carded = raising
+        .find("raiseAsk(")
+        .expect("raisePermission no longer raises a card");
+    let rule = raising[..carded]
+        .find("frame.kind === \"question\" && frame.topic === \"model_switch\"")
+        .map(|at| &raising[at..carded]);
+    assert!(
+        rule.is_some_and(|rule| {
+            rule.contains("askGateLane(session, \"awaiting_permission\")")
+                && rule.contains("return;")
+        }),
+        "the model-switch question raises a card instead of marking its lane:\n{raising}"
+    );
+    let topics = block_after(window, "const ASK_TOPICS = Object.freeze({");
+    assert!(
+        !topics.contains("model_switch") && !window.contains("ask.topic.model_switch"),
+        "the window keeps words for a card it never draws:\n{topics}"
+    );
 }
 
 /// One keyboard, whatever the kind: Enter gives the SAFE answer of its kind and
