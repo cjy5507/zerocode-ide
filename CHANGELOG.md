@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.63] — 2026-10-13
+- zo's terminal draws a resumed conversation the way the live screen drew it: the host's framing no longer appears as the person's words, a steer typed mid-turn stands after the call it followed, and a user message in a terminal without a color palette no longer sits between blank rows (t-51389).
+- zo's tool rows read tighter: a run of calls with nothing said between them is one block, a tool row's target starts one space after its verb, and a long command's text leaves its output room on the screen (t-51389).
+- An MCP call's rows show what its result says rather than its raw envelope, including the last item of a result cut at 4,000 characters (t-51389).
+
 ## [1.1.62] — 2026-10-13
 - A restart no longer freezes the window: re-seating a sleeping worker and resuming a conversation took the team table and the Codex launch lease in opposite orders and could wait on each other for a minute, freezing every pane's screen (typing seemed to do nothing) and then the window's way out; both now take the lease first, and the exit's screen capture never blocks the window for more than 300 ms (t-51380).
 - zo's model-switch question is answered in zo's own terminal only: the window raises no popup for it and marks the asking lane until zo reports the question resolved (t-51267).
