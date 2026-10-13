@@ -3004,8 +3004,9 @@ mod tests {
 
     /// An MCP tool answers with an envelope — `content` items beside
     /// `structuredContent` — and the rows under its call show what the items
-    /// say, not the envelope (t-51389): the text, an image as a word, and
-    /// nothing for an envelope with nothing in it.
+    /// say, not the envelope (t-51389): the text, an image as a word, nothing
+    /// for an envelope with nothing in it, and for a long one the runtime cut
+    /// at its display cap, the text as far as it goes.
     #[test]
     fn an_mcp_call_shows_what_its_envelope_says() {
         let call = |name: &str, raw: &str| {
@@ -3032,6 +3033,43 @@ mod tests {
         assert_eq!(
             call("mcp__playwright__browser_resize", r#"{"content":[],"structuredContent":null}"#),
             vec!["✓ Call mcp__playwright__browser_resize".to_string()]
+        );
+        let snapshot = (1..=300)
+            .map(|n| format!("- generic [ref=e{n}]: row {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let page = json!({
+            "content": [{"type": "text", "text": format!("### Page state\n{snapshot}")}],
+            "structuredContent": null,
+        });
+        let rows = call("mcp__playwright__browser_navigate", &page.to_string());
+        assert_eq!(rows[1], "  └ ### Page state", "{rows:#?}");
+        assert_eq!(rows[2], "    - generic [ref=e1]: row 1", "{rows:#?}");
+        assert!(rows[3].starts_with("    … +"), "{rows:#?}");
+        assert!(rows.iter().all(|row| !row.contains("\"content\"")), "{rows:#?}");
+    }
+
+    /// The cap can cut an envelope's last item before its `type` is printed:
+    /// keys print in their own order, and `text` comes before `type` when they
+    /// are sorted or when the server sent them so. The text still shows, and
+    /// the cap's `… +1 lines` after it (t-51389).
+    #[test]
+    fn a_cut_envelope_item_shows_its_text_before_its_type_was_printed() {
+        let printed = "{\n  \"content\": [\n    {\n      \"text\": \"### Page state\\n- generic [ref=e1]: row 1\\n- generic [ref=e2]: ro";
+        let mut group = ToolGroup::new(ToolCall::new(
+            "m".to_string(),
+            ToolKind::Call { name: "mcp__playwright__browser_navigate".to_string(), detail: String::new() },
+        ));
+        assert!(group.complete("m", ok(&format!("{printed}\n{}", super::SOURCE_TRUNCATION_NOTE))));
+        assert_eq!(
+            plain(&group.lines(80, Duration::ZERO)),
+            vec![
+                "✓ Call mcp__playwright__browser_navigate".to_string(),
+                "  └ ### Page state".to_string(),
+                "    - generic [ref=e1]: row 1".to_string(),
+                "    - generic [ref=e2]: ro".to_string(),
+                "    … +1 lines".to_string(),
+            ]
         );
     }
 
