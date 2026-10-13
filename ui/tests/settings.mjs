@@ -6067,6 +6067,89 @@ await test("로컬 모델은 준비와 응답 확인을 마친 같은 서버만 
   return "failed check cannot apply · cross-window identity guard · explicit apply · stopped is not running";
 });
 
+await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 모델을 현재 설정 변경 없이 고른다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  const local = backend.managedModelState.models[0];
+  local.local = { supported: true, reason: null };
+  local.existingServer = { supported: true, protocol: "system_one", modelId: local.id, requiresCheck: true };
+  backend.managedModelState.models.push({
+    ...clone(local), id: "fixture-server-decision", label: "Example Decision Server", engine: "transformers_system_one",
+    serverModelId: "acme/decision", compatibility: "unsupported", compatibilityReason: "engine_not_supported",
+    local: { supported: false, reason: "engine_not_supported" },
+    existingServer: { supported: true, protocol: "system_one", modelId: "acme/decision", requiresCheck: true },
+  });
+  await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => {
+    managedJudgmentController.snapshot = null;
+    managedJudgmentController.query = "";
+    managedJudgmentController.filter = "all";
+    judgmentProviderController.localMode = "managed";
+  });
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 2);
+    assertEqual(await pageA.locator("#managed-judgment-search").count(), 1, "a multi-model library has no search control");
+    const before = clone(backend.typesafeSettings().provider);
+    const requestsAt = backend.calls.length;
+    await pageA.fill("#managed-judgment-search", "EXAMPLE");
+    assert(await pageA.locator('[data-model-id="fixture-decision"].managed-judgment-model').isHidden(), "search did not filter unrelated models");
+    const server = pageA.locator('[data-model-id="fixture-server-decision"].managed-judgment-model');
+    assert(await server.isVisible(), "search is not case-insensitive");
+    assert(await server.locator('[data-model-action="install"]').isHidden(), "an unsupported local adapter offers a download that cannot run");
+    assert(await server.locator('[data-model-action="connect"]').isVisible(), "a compatible server model has no connection path");
+    await pageA.fill("#managed-judgment-search", "");
+    await pageA.selectOption("#managed-judgment-filter", "local");
+    assert(await server.isHidden(), "the local filter includes server-only models");
+    await pageA.selectOption("#managed-judgment-filter", "all");
+    assert(!backend.calls.slice(requestsAt).some((entry) => entry.command.startsWith("managed_judgment_")), "filtering models performs backend work");
+    await pageA.click("#judgment-local-manual");
+    await pageA.fill("#judgment-endpoint", "http://127.0.0.1:32102");
+    await pageA.click("#judgment-local-managed");
+    await server.locator('[data-model-action="connect"]').click();
+    assert(await pageA.locator("#judgment-endpoint").isVisible(), "connecting a server model did not open its connection form");
+    assertEqual(await pageA.inputValue("#typesafe-model-input"), "acme/decision", "connection did not use the server model ID");
+    assertEqual(await pageA.inputValue("#judgment-endpoint"), "http://127.0.0.1:32102", "selecting a model discarded the configured server address");
+    assertEqual(backend.typesafeSettings().provider, before, "choosing a library model changed the applied provider");
+  } finally {
+    backend.zoSettings.smart = previous;
+    backend.managedModelState = previousManaged;
+    await pageA.evaluate(() => {
+      managedJudgmentController.snapshot = null;
+      managedJudgmentController.query = "";
+      managedJudgmentController.filter = "all";
+      judgmentProviderController.draft = null;
+      return refreshApiRouters();
+    });
+  }
+  return "search and support filters · no backend polling · no fake local download · exact server ID and address preserved";
+});
+
+await test("로컬 모델 실패는 실제 원인과 다음 행동을 안내하고 적용된 모델을 보존한다", async () => {
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.localMode = "managed"; });
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "local");
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models.length > 0);
+    const before = clone(backend.typesafeSettings().provider);
+    backend.managedModelState.operation = { id: "fixture-space-failure", kind: "download", modelId: "fixture-decision", state: "failed", error: "insufficient_space", receivedBytes: 0, totalBytes: 1024 };
+    backend.managedModelState.revision += 1;
+    await backend.emitManaged(backend.managedJudgmentSettings());
+    const words = await pageA.evaluate(() => t("settings.managed.error.space", "저장 공간이 부족합니다. 사용하지 않는 모델을 정리한 뒤 다시 시도하세요."));
+    assertEqual(await pageA.locator("#managed-judgment-status").textContent(), words, "a storage failure is hidden behind a generic refresh message");
+    assertEqual(backend.typesafeSettings().provider, before, "a failed installation replaced the provider");
+  } finally {
+    backend.managedModelState = previousManaged;
+    await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "actionable storage refusal · no configuration change";
+});
+
 await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁은 화면을 지원한다", async () => {
   const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
   const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
