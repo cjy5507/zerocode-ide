@@ -48,6 +48,7 @@ shell-lint:
 tools-test:
     python3 -I -S -B tools/release/tests/test_gate_receipt.py --receipt-mode routine -v
     python3 tools/release/tests/test_lane.py
+    python3 tools/release/tests/test_workspace_units.py
     python3 tools/release/tests/test_win_check.py
     python3 tools/release/tests/test_bump.py
     python3 tools/release/tests/test_pii_scan.py

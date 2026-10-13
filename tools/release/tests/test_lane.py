@@ -890,6 +890,42 @@ class Cap(LaneCase):
         out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
         self.assertIn("CARGO_INCREMENTAL='0'", out.stdout.splitlines())
 
+    def test_the_repositorys_own_units_are_dropped_and_the_registry_ones_stay_warm(self):
+        """Every unit of a crate this repository defines is rebuilt in every run
+        (the scratch is a fresh clone), and the ones an earlier version left are
+        never read again (the version stamp moves their hash), so they go before
+        the gates: on 10-13 they were 10.4 of zo-gate's 12.4 G and 11.4 of
+        root-gate's 19 G, 1 G under the cap whose clean made v1.1.62's zo gate
+        rebuild 245 registry crates. A registry crate's units stay warm."""
+        self.warm_all()
+        own, reg = "0123456789abcdef", "fedcba9876543210"
+        files = (f".fingerprint/zerocode-core-{own}/lib-zerocode_core.json", f"deps/libzerocode_core-{own}.rlib",
+                 f"deps/e2e_hermetic-{own}", f"deps/e2e_hermetic-{own}.d", f"build/zerocode-core-{own}/out/stamp",
+                 f".fingerprint/serde-{reg}/lib-serde.json", f"deps/libserde-{reg}.rlib", f"build/serde-{reg}/out/stamp")
+        profiles = ("debug", "x86_64-pc-windows-msvc/debug")
+        for lane in TARGET_LANES:
+            for profile in profiles:
+                for rel in files:
+                    p = self.lane.target(lane) / profile / rel
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text("a build product")
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(DISK_FREE_GB=100, WORKSPACE_PACKAGES="zerocode-core zo-ide")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        for lane in TARGET_LANES:
+            t = self.lane.target(lane)
+            left = sorted(str(q.relative_to(t)) for q in t.rglob("*") if own in q.name)
+            self.assertEqual(left, [], f"{lane} keeps a unit of the repository's own crate")
+            for profile in profiles:
+                for rel in files[5:]:
+                    self.assertTrue((t / profile / rel).exists(), f"{lane} lost the registry unit {profile}/{rel}")
+            self.assertTrue((t / "warm").exists(), f"{lane} must stay warm otherwise")
+        events = [line.split(" ", 1)[1] for line in self.lane.stub_lines()]
+        drops = [i for i, e in enumerate(events) if e.startswith("drop-workspace-units ")]
+        self.assertEqual(len(drops), len(TARGET_LANES), events)
+        self.assertLess(max(drops), next(i for i, e in enumerate(events) if e.startswith("gate root target=")))
+        self.assertIn("workspace unit", r.stdout)
+
     def solos_run(self):
         return [l for l in self.lane.stub_lines() if " solo " in l]
 
