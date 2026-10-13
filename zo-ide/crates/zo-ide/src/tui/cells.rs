@@ -1494,6 +1494,27 @@ mod tests {
         assert!(marker.style.bold && marker.style.dim);
     }
 
+    /// A terminal that answers no palette query draws no tinted band — the
+    /// window's grid answers none (t-51389) — so the band's blank rows were
+    /// only more gap: two blank rows over the message and, with the next
+    /// cell's, two under it. Without a palette the cell is its one gap row
+    /// and the message; with one, the band keeps codex's shape.
+    #[test]
+    fn a_user_message_without_a_palette_is_its_gap_and_its_words() {
+        use crate::tui::palette::{ColorLevel, TerminalPalette};
+
+        let plain = |lines: &[Line]| lines.iter().map(Line::plain).collect::<Vec<_>>();
+        assert_eq!(
+            plain(&user_cell_for_palette("안녕!", 40, None)),
+            vec![String::new(), "› 안녕!".to_string()]
+        );
+        let terminal = TerminalPalette::new((255, 255, 255), (0, 0, 0), ColorLevel::TrueColor);
+        assert_eq!(
+            plain(&user_cell_for_palette("안녕!", 40, Some(terminal))),
+            vec![String::new(), String::new(), "› 안녕!".to_string(), String::new()]
+        );
+    }
+
     #[test]
     fn a_long_user_line_wraps_under_the_two_space_indent() {
         let lines = user_cell("alpha beta gamma delta", 14);
