@@ -388,7 +388,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
 pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "Computer",
-        description: "Drive desktop apps through the ZeroCode window; use its built-in browser for websites. \
+        description: "Drive desktop apps through the ZeroCode window. \
             For background work, observe {app}, keep app and the returned window_id on actions, and set \
             background: true. Never substitute activation or global input when background input is refused. \
             Look (screenshot, zoom), \
