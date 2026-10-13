@@ -669,8 +669,13 @@ seal_updater_bundle() { # TARGET PASSWORD LOG -> rc; WHY on failure
 # build inside is heavy. Skips — no key, no plugins.updater yet — are green
 # and said; a pubkey that is not the configured one is red, because the
 # updater would refuse what that key signs.
+# One build serves the install and the publish, so what the updater ships is what
+# this machine installed; the dry twin answers from RELEASE_STUB_CDHASH_<KIND>.
+app_cdhash() { # INSTALLED|SEALED APP -> its CDHash, or nothing
+  if is_dry; then stub "CDHASH_$1" stub-cdhash; else codesign -dvvv "$2" 2>&1 | sed -n 's/^CDHash=//p' | head -1; fi
+}
 do_bundle_updater() {
-  local target pub conf_pub conf_fp out log="$OUT/bundle-updater-$SHA8.log" archive dmg rc password=
+  local target pub conf_pub conf_fp out log="$OUT/bundle-updater-$SHA8.log" archive dmg rc password= installed sealed
   target=$(target_dir root-release); out=$(out_dir)
   [ -n "$VERSION" ] || { WHY="no [workspace.package] version in the scratch"; return 1; }
   [ -f "$UPDATER_KEY" ] || { SKIP="no updater key at $UPDATER_KEY (tools/release/README.md)"; return 0; }
@@ -681,13 +686,15 @@ do_bundle_updater() {
   [ -n "$conf_pub" ] || { SKIP="no plugins.updater.pubkey in the scratch tauri.conf.json (U-B)"; return 0; }
   conf_fp=$(python3 "$FEED_PY" fingerprint --text "$conf_pub" 2>/dev/null)
   [ "$conf_fp" = "$UPDATER_PUBKEY" ] || { WHY="pubkey mismatch: key $UPDATER_PUBKEY, tauri.conf.json ${conf_fp:-unreadable} — the updater would refuse the signature"; return 1; }
-  # The archive is only ever shipped by a publish run, which builds it again on its
-  # own sha; an install run skips the second app,dmg build aloud (529 s on 09-08).
-  [ "$RELEASE_PUBLISH" = 1 ] || { SKIP="RELEASE_PUBLISH=0 (the publish run builds the archive)"; return 0; }
+  # The archive is only ever shipped by a publish run; an install run skips the phase aloud.
+  [ "$RELEASE_PUBLISH" = 1 ] || { SKIP="RELEASE_PUBLISH=0 (the publish run packs the archive)"; return 0; }
   mkdir -p "$out" || return 1
   if is_dry; then
-    stub_log "bundle-updater target=$target key=$UPDATER_KEY"; rc=$(stub BUNDLE_UPDATER_RC 0)
-    [ "$rc" = 0 ] || { WHY="build rc=$rc"; return 1; }
+    if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+      stub_log "bundle-updater target=$target key=$UPDATER_KEY"; rc=$(stub BUNDLE_UPDATER_RC 0)
+      [ "$rc" = 0 ] || { WHY="build rc=$rc"; return 1; }
+    fi
+    stub_log "bundle-updater seal target=$target key=$UPDATER_KEY"
     mkdir -p "$target/release/bundle/macos" "$target/release/bundle/dmg"
     printf 'stub archive %s\n' "$SHA" > "$target/release/bundle/macos/$APP_NAME.tar.gz"
     printf 'STUBSIG%s\n' "$SHA8" > "$target/release/bundle/macos/$APP_NAME.tar.gz.sig"
@@ -695,11 +702,22 @@ do_bundle_updater() {
     printf '### stub\n- stub notes for %s\n' "$VERSION" > "$out/notes.md"
   else
     [ -f "$UPDATER_KEY_PASSWORD_FILE" ] && password=$(cat "$UPDATER_KEY_PASSWORD_FILE")
-    heavy build_updater_bundle "$target" "$password" "$log"; rc=$?
-    [ "$rc" = 0 ] || { WHY="tauri build rc=$rc ($log)"; return 1; }
+    # Without a distribution identity the seal re-signs build-app's app with the same
+    # local identity and packs the archive and the DMG from it, so a second
+    # tauri:release would only be thrown away (1105 s on 10-13, its zo stage cold).
+    # Tauri signs and notarizes only inside its own build: with an identity it stays.
+    if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+      heavy build_updater_bundle "$target" "$password" "$log"; rc=$?
+      [ "$rc" = 0 ] || { WHY="tauri build rc=$rc ($log)"; return 1; }
+    fi
     seal_updater_bundle "$target" "$password" "$log" || return 1
     python3 "$FEED_PY" section --changelog "$SCRATCH/CHANGELOG.md" --version "$VERSION" > "$out/notes.md" \
       || { WHY="CHANGELOG.md has no [$VERSION] section — run tools/release/bump.sh before queueing"; return 1; }
+  fi
+  if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+    installed=$(app_cdhash INSTALLED "$RELEASE_APP_DIR/$APP_NAME"); sealed=$(app_cdhash SEALED "$target/release/bundle/macos/$APP_NAME")
+    { [ -n "$sealed" ] && [ "$sealed" = "$installed" ]; } \
+      || { WHY="the sealed app is not the installed one: cdhash ${sealed:-unreadable}, installed ${installed:-unreadable}"; return 1; }
   fi
   archive="$target/release/bundle/macos/$APP_NAME.tar.gz"
   { [ -f "$archive" ] && [ -f "$archive.sig" ]; } || { WHY="no signed updater archive under $target/release/bundle/macos"; return 1; }

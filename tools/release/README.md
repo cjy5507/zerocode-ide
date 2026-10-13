@@ -114,12 +114,15 @@ GateOwed` pins the rule with stubs (`CHANGED_PATHS`, `STAMP_REAL_CHANGES`);
 ## The two phases after the swaps
 
 - `bundle-updater` — with a key and U-B's `plugins.updater` present, and only
-  under `RELEASE_PUBLISH=1` (an install run skips the second build aloud: the
-  publish run builds the archive on its own sha), builds
-  `app,dmg` with `createUpdaterArtifacts` on and gathers
+  under `RELEASE_PUBLISH=1` (an install run skips the phase aloud), gathers
   `ZeroCode_<version>_<arch>.app.tar.gz`, its `.sig`, the `.dmg`, the CHANGELOG
   section (`notes.md`) and `latest.json` under
-  `~/.local/share/zerocode/release/out/<sha8>/`. Without a key, or before U-B's
+  `~/.local/share/zerocode/release/out/<sha8>/`. Without a distribution identity
+  it ships build-app's app, the one the install phase put in place: one build
+  serves both, and the phase is red when the sealed app's cdhash is not the
+  installed app's. With an identity it builds `app,dmg` again with
+  `createUpdaterArtifacts` on, because Tauri signs and notarizes only inside
+  its own build. Without a key, or before U-B's
   section lands, the phase is skipped aloud (`status.json` `phases[].skipped`,
   `status.sh` `skipped=…`) and the lane stays green.
   The app the DMG and the archive carry is sealed before it is gathered: with
