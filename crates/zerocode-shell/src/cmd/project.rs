@@ -574,7 +574,9 @@ pub(crate) async fn open_lane(
 ///
 /// The answer goes back on the session's own channel with that channel's own
 /// bearer, so it needs no zo of this window's: a zo somebody typed into a
-/// shell is answered whether or not this window found one (t-49081).
+/// shell is answered whether or not this window found one (t-49081). A
+/// session this window holds no channel for has nobody left to take it, and
+/// says so with [`SESSION_UNREACHABLE`] (t-51007).
 #[tauri::command]
 pub(crate) async fn respond_permission(
     state: State<'_, AppState>,
@@ -582,7 +584,7 @@ pub(crate) async fn respond_permission(
     prompt_id: u64,
     decision: String,
 ) -> Result<(), String> {
-    let channel = zo_channel(&state, &session)?;
+    let channel = zo_channel(&state, &session).map_err(|_| SESSION_UNREACHABLE.to_string())?;
     tauri::async_runtime::spawn_blocking(move || answer_prompt(channel, prompt_id, decision))
         .await
         .map_err(|join| join.to_string())?

@@ -4341,7 +4341,7 @@ const floatView = makeTermView(el("terminal"), el("term"), el("caret"), {
 /* Every question the window puts to the person is a KIND of ask, and every
  * kind is shown in the same frame (`#ask-scrim`) in the middle of the window:
  * one at a time, oldest first, with the number that wait behind it. A tool
- * permission, an agent's own question (zo's model switch), Computer Use's
+ * permission, an agent's own question (zo's image retry), Computer Use's
  * confirm and its hand-over, and the window's own confirms (`askConfirm`)
  * used to be four surfaces in three places — one of them a pill along the top
  * edge that a person looking at the middle of the window did not see, and one
@@ -4679,8 +4679,19 @@ function askGateLane(session, gate) {
   if (entry) invoke("gate_lane", { id: entry.lane.id, gate }).catch(() => {});
 }
 
+/* zo's model-switch question, by session, while it stands (t-51267). zo's own
+ * terminal draws it as a numbered menu and takes the answer there, so the
+ * window raises no card for it and shows only the lane's mark — which an
+ * answer to another card of the session must not lower while the terminal
+ * still asks. */
+const terminalAsks = new Map();
+
 function askWaitsOnSession(session) {
-  return activeAsk?.session === session || askQueue.some((queued) => queued.session === session);
+  return (
+    activeAsk?.session === session ||
+    askQueue.some((queued) => queued.session === session) ||
+    terminalAsks.has(session)
+  );
 }
 
 /* The choices a permission frame offers, in its order — and the two any frame
@@ -4725,7 +4736,6 @@ function askQuestionInitial(choices) {
  * words for falls back to the title the frame carries, and a question with
  * neither says only that it is one. */
 const ASK_TOPICS = Object.freeze({
-  model_switch: { key: "ask.topic.model_switch", word: "모델을 바꿀까요?" },
   declined_images: { key: "ask.topic.declinedImages", word: "이미지 없이 다시 시도할까요?" },
 });
 
@@ -4755,20 +4765,44 @@ function askAnswerInTerminal(ask) {
   );
 }
 
+/* What the backend answers for a card whose session it can no longer reach:
+ * it holds no channel for the session, or the channel it holds refuses the
+ * connection (`SESSION_UNREACHABLE`, shell_runtime.rs). A marker, not prose —
+ * the sentence is the window's own. */
+const ASK_SESSION_UNREACHABLE = "zerocode:session-unreachable";
+
 /* What the two kinds an agent's channel raises share: the road their answer
  * takes (`permission.respond`, by the prompt's own id), the other place they
- * can be answered, and what they do to the lane behind them. */
+ * can be answered, and what they do to the lane behind them. An answer that
+ * nobody is left to take cannot succeed on a retry, so the session's
+ * questions leave the way a session end takes them, and the person is told
+ * the answer went nowhere (t-51007). */
 const askFromChannel = {
   deliver: (ask, choice) =>
     invoke("respond_permission", {
       session: ask.session,
       promptId: ask.frame.prompt_id,
       decision: choice.decision,
+    }).catch((error) => {
+      if (error === ASK_SESSION_UNREACHABLE) {
+        withdrawPermissions(ask.session);
+        toast(
+          t(
+            "perm.unreachable",
+            "이 질문을 한 세션에 더는 닿을 수 없습니다 — 답을 받을 곳이 없어 질문을 닫았습니다.",
+          ),
+          "halt",
+        );
+      }
+      throw error;
     }),
   refused: askAnswerInTerminal,
   raised: (ask) => askGateLane(ask.session, "awaiting_permission"),
   delivered: (ask) => {
-    if (!askQueue.some((queued) => queued.session === ask.session)) {
+    if (
+      !askQueue.some((queued) => queued.session === ask.session) &&
+      !terminalAsks.has(ask.session)
+    ) {
       askGateLane(ask.session, "idle");
     }
   },
@@ -4821,6 +4855,11 @@ registerAskKind("question", {
  * every older zo sends) for a tool. The window never tells one from the other
  * by what the tool is called. */
 function raisePermission(session, frame) {
+  if (frame.kind === "question" && frame.topic === "model_switch") {
+    terminalAsks.set(session, frame.prompt_id);
+    askGateLane(session, "awaiting_permission");
+    return;
+  }
   raiseAsk({
     kind: frame.kind === "question" ? "question" : "tool",
     key:
@@ -4840,6 +4879,7 @@ function raisePermission(session, frame) {
  * — the lane is gated `blocked` on the same event and keeps saying so on its
  * row (제품 원칙 1). What leaves is the door that no longer opens. */
 function withdrawPermissions(session) {
+  terminalAsks.delete(session);
   withdrawAsks((ask) => ask.session === session);
 }
 
@@ -4851,6 +4891,7 @@ function withdrawPermissions(session) {
 function withdrawPrompt(session, promptId) {
   if (promptId === undefined || promptId === null) return;
   withdrawAsks((ask) => ask.session === session && ask.frame?.prompt_id === promptId);
+  if (terminalAsks.get(session) === promptId) terminalAsks.delete(session);
   if (!askWaitsOnSession(session)) askGateLane(session, "idle");
 }
 

@@ -37,9 +37,9 @@ const TOOL_FRAME = {
     { key: "n", label: "거부", decision: "deny" },
   ],
 };
-const QUESTION_TEXT = "이 요청은 지금 쓰는 모델의 안전 분류기가 거절했습니다. 다른 모델로 바꿔 다시 시도할까요?";
+const QUESTION_TEXT = "거절된 요청에 이미지가 2장 있었습니다. 이미지 없이 다시 보낼까요?";
 const QUESTION_CHOICES = [
-  { key: "y", label: "모델 바꾸기", decision: "allow_once" },
+  { key: "o", label: "이미지 빼고 다시 시도", decision: "allow_once" },
   { key: "n", label: "그대로 두기", decision: "deny" },
 ];
 const QUESTION_FRAME = variant === "before"
@@ -48,15 +48,15 @@ const QUESTION_FRAME = variant === "before"
       prompt_id: 102,
       tool_name: "safety-classifier decline",
       reasoning: QUESTION_TEXT,
-      audit_hint: "risk: high; explicitly unblock with [y] 모델 바꾸기",
+      audit_hint: "risk: high; explicitly unblock with [o] 이미지 빼고 다시 시도",
       choices: QUESTION_CHOICES,
     }
   : {
       type: "permission_prompt",
       prompt_id: 102,
       kind: "question",
-      topic: "model_switch",
-      title: "Switch models?",
+      topic: "declined_images",
+      title: "Retry without the images?",
       tool_name: "",
       reasoning: QUESTION_TEXT,
       audit_hint: null,
@@ -106,7 +106,7 @@ const take = async (name, setup) => {
 };
 
 await take("1-tool", (page) => frame(page, "s-tool", TOOL_FRAME));
-await take("2-model-switch", (page) => frame(page, "s-zo", QUESTION_FRAME));
+await take("2-question", (page) => frame(page, "s-zo", QUESTION_FRAME));
 await take("3-computer-confirm", (page) => event(page, "computer:confirm", CONFIRM));
 await take("4-computer-handoff", (page) => event(page, "computer:handoff", HANDOFF));
 await take("5-computer-handoff-cover", (page) => event(page, "computer:handoff", COVER));
@@ -132,7 +132,7 @@ await take("7b-three-waiting", async (page) => {
   await event(page, "computer:confirm", CONFIRM);
 });
 await take("8-band-stays", (page) => event(page, "computer:activity", { active: true, verb: "mouse-click", actions: 3, stopped: null }));
-await take("9-model-switch-en", async (page) => {
+await take("9-question-en", async (page) => {
   await page.evaluate(() => {
     locale = "en";
     applyLocale();

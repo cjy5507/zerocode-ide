@@ -2,7 +2,7 @@ import { openWindowTestPage } from "./window-boot.mjs";
 
 /* The ask popup: every question the window puts to the person, in one place.
  *
- * A tool permission, a question an agent asks (zo's model switch), the
+ * A tool permission, a question an agent asks (zo's image retry), the
  * Computer Use confirm and its hand-over, and the window's own confirm
  * (`askConfirm`) are five KINDS of ask. They share one frame, one queue, one
  * keyboard and one seat in the middle of the window, and each kind wears its
@@ -18,7 +18,6 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * translated, fails instead of agreeing with itself. */
 export const ASK_TITLES = Object.freeze({
   tool: { ko: "이 도구를 실행할까요?", en: "Run this tool?", ja: "このツールを実行しますか？", zh: "要运行这个工具吗？", es: "¿Ejecutar esta herramienta?" },
-  model_switch: { ko: "모델을 바꿀까요?", en: "Switch models?", ja: "モデルを切り替えますか？", zh: "要切换模型吗？", es: "¿Cambiar de modelo?" },
   declined_images: { ko: "이미지 없이 다시 시도할까요?", en: "Retry without the images?", ja: "画像なしで再試行しますか？", zh: "要不带图片重试吗？", es: "¿Reintentar sin las imágenes?" },
   question: { ko: "에이전트가 묻습니다", en: "The agent has a question", ja: "エージェントから質問があります", zh: "智能体有个问题", es: "El agente tiene una pregunta" },
   payment: { ko: "결제 단추를 누를까요?", en: "Press the payment control?", ja: "支払いボタンを押しますか？", zh: "要按下支付按钮吗？", es: "¿Pulsar el control de pago?" },
@@ -49,6 +48,21 @@ export const ASK_TERMINAL_WORDS = Object.freeze({
   zh: "也可以在终端里回答 — 按数字(1/2/3)，或用 ↑↓ 选好后按 Enter。",
   es: "También puedes responder en la terminal: pulsa 1/2/3, o elige con ↑↓ y pulsa Enter.",
 });
+
+/* What the window says when a press finds that nobody can take the answer any
+ * more, in the five languages the window speaks (t-51007). */
+export const ASK_GONE_WORDS = Object.freeze({
+  ko: "이 질문을 한 세션에 더는 닿을 수 없습니다 — 답을 받을 곳이 없어 질문을 닫았습니다.",
+  en: "The session that asked this can no longer be reached — nothing can take the answer, so the question was closed.",
+  ja: "この質問をしたセッションにはもう届きません — 回答を受け取る相手がいないため、質問を閉じました。",
+  zh: "已无法连接提出这个问题的会话 — 回答无处可送，问题已关闭。",
+  es: "Ya no se puede llegar a la sesión que hizo esta pregunta — nadie puede recibir la respuesta, así que la pregunta se cerró.",
+});
+
+/* What the backend answers for a card whose session it can no longer reach:
+ * it holds no channel for the session, or the channel it holds refuses the
+ * connection (`SESSION_UNREACHABLE`, shell_runtime.rs). A marker, not prose. */
+const UNREACHABLE = "zerocode:session-unreachable";
 
 /* What the window sends for a card with a line: the plain card's fields and
  * the limits the page may show (`codeAsk`, from core's one table). */
@@ -275,20 +289,20 @@ async function tool(browser, origin, ok) {
 }
 
 async function question(browser, origin, ok) {
-  await scenario(browser, origin, "model switch", ok, async (page, faults) => {
+  await scenario(browser, origin, "agent question", ok, async (page, faults) => {
     const seen = await page.evaluate(async () => {
       const T = window.__ASK_T__;
       T.frame("s-zo", {
         type: "permission_prompt",
         prompt_id: 21,
         kind: "question",
-        topic: "model_switch",
-        title: "Switch models?",
+        topic: "declined_images",
+        title: "Retry without the images?",
         tool_name: "",
-        reasoning: "이 요청은 지금 쓰는 모델의 안전 분류기가 거절했습니다. 다른 모델로 바꿔 다시 시도할까요?",
+        reasoning: "거절된 요청에 이미지가 2장 있었습니다. 이미지 없이 다시 보낼까요?",
         audit_hint: null,
         choices: [
-          { key: "y", label: "모델 바꾸기", decision: "allow_once" },
+          { key: "o", label: "이미지 빼고 다시 시도", decision: "allow_once" },
           { key: "n", label: "그대로 두기", decision: "deny" },
         ],
       });
@@ -296,15 +310,15 @@ async function question(browser, origin, ok) {
       return { ...T.look(), shortSession: shortSession("s-zo") };
     });
     ok(
-      "zo's model-switch question reads 「모델을 바꿀까요?」 with no tool chip and no risk line",
-      seen.shown && seen.kind === "question" && seen.title === ASK_TITLES.model_switch.ko && seen.mono === null
-        && seen.why === "이 요청은 지금 쓰는 모델의 안전 분류기가 거절했습니다. 다른 모델로 바꿔 다시 시도할까요?"
+      "zo's declined-images question reads 「이미지 없이 다시 시도할까요?」 with no tool chip and no risk line",
+      seen.shown && seen.kind === "question" && seen.title === ASK_TITLES.declined_images.ko && seen.mono === null
+        && seen.why === "거절된 요청에 이미지가 2장 있었습니다. 이미지 없이 다시 보낼까요?"
         && !JSON.stringify(seen).includes("risk") && !JSON.stringify(seen).includes("이 도구"),
       JSON.stringify(seen),
     );
     ok(
       "the question keeps its own choices, opens on the first, and names who asks",
-      seen.buttons.join() === "모델 바꾸기,그대로 두기" && seen.focus === "모델 바꾸기" && seen.agent.includes(seen.shortSession),
+      seen.buttons.join() === "이미지 빼고 다시 시도,그대로 두기" && seen.focus === "이미지 빼고 다시 시도" && seen.agent.includes(seen.shortSession),
       JSON.stringify(seen),
     );
     await page.locator("#ask-scrim").getByRole("button", { name: "그대로 두기", exact: true }).click();
@@ -334,7 +348,7 @@ async function question(browser, origin, ok) {
       return T.look();
     });
     ok(
-      "a question never draws a tool chip or a risk line even if the frame carries them, and the other topic has its own title",
+      "a question never draws a tool chip or a risk line even if the frame carries them, and its topic still gives its title",
       hinted.kind === "question" && hinted.title === ASK_TITLES.declined_images.ko && hinted.mono === null
         && hinted.why === "이미지를 빼고 다시 시도할까요?",
       JSON.stringify(hinted),
@@ -379,7 +393,7 @@ async function question(browser, origin, ok) {
       const T = window.__ASK_T__;
       T.reset();
       T.frame("s-zo", {
-        type: "permission_prompt", prompt_id: 25, kind: "question", topic: "model_switch", reasoning: "질문", audit_hint: null,
+        type: "permission_prompt", prompt_id: 25, kind: "question", topic: "declined_images", reasoning: "질문", audit_hint: null,
         choices: [
           { key: "a", label: "이후로 계속", decision: "allow_always" },
           { key: "y", label: "이번만", decision: "allow_once" },
@@ -403,7 +417,7 @@ async function question(browser, origin, ok) {
       const T = window.__ASK_T__;
       T.reset();
       T.frame("s-zo", {
-        type: "permission_prompt", prompt_id: 26, kind: "question", topic: "model_switch", reasoning: "질문", audit_hint: null,
+        type: "permission_prompt", prompt_id: 26, kind: "question", topic: "declined_images", reasoning: "질문", audit_hint: null,
         choices: [
           { key: "a", label: "이후로 계속", decision: "allow_always" },
           { key: "n", label: "그대로 두기", decision: "deny" },
@@ -419,7 +433,7 @@ async function question(browser, origin, ok) {
       const T = window.__ASK_T__;
       T.reset();
       T.frame("s-zo", {
-        type: "permission_prompt", prompt_id: 27, kind: "question", topic: "model_switch", reasoning: "질문", audit_hint: null,
+        type: "permission_prompt", prompt_id: 27, kind: "question", topic: "declined_images", reasoning: "질문", audit_hint: null,
         choices: [{ key: "a", label: "이후로 계속", decision: "allow_always" }],
       });
       await T.settle(300);
@@ -434,7 +448,7 @@ async function question(browser, origin, ok) {
         && nothing === "(dialog)" && nothingSent.length === 0,
       JSON.stringify({ stays, staysSent, nothing, nothingSent }),
     );
-    ok("the model switch scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+    ok("the agent question scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   });
 }
 
@@ -649,7 +663,7 @@ async function queue(browser, origin, ok) {
       const note = () => { const one = T.look(); trail.push({ kind: one.kind, title: one.title, more: one.more }); return one; };
       // Four kinds at once, in the order they arrive.
       T.frame("s-a", { type: "permission_prompt", prompt_id: 41, tool_name: "bash", reasoning: "", audit_hint: null });
-      T.frame("s-b", { type: "permission_prompt", prompt_id: 42, kind: "question", topic: "model_switch", tool_name: "", reasoning: "질문", audit_hint: null });
+      T.frame("s-b", { type: "permission_prompt", prompt_id: 42, kind: "question", topic: "declined_images", tool_name: "", reasoning: "질문", audit_hint: null });
       T.fire("computer:confirm", { id: "confirm-9", kind: "payment", label: "Pay", timeoutMs: 120000 });
       T.fire("computer:handoff", { id: "handoff-9", reason: "코드를 입력해 주세요", timeoutMs: 600000 });
       await T.settle();
@@ -764,15 +778,15 @@ async function refused(browser, origin, ok) {
         type: "permission_prompt",
         prompt_id: 4,
         kind: "question",
-        topic: "model_switch",
-        title: "Switch models?",
+        topic: "declined_images",
+        title: "Retry without the images?",
         tool_name: "",
-        reasoning: "이 요청은 지금 쓰는 모델의 안전 분류기가 거절했습니다. 다른 모델로 바꿔 다시 시도할까요?",
+        reasoning: "거절된 요청에 이미지가 2장 있었습니다. 이미지 없이 다시 보낼까요?",
         audit_hint: null,
         choices: [
-          { key: "a", label: "Switch and from now on", decision: "allow_always" },
-          { key: "y", label: "Switch for this turn", decision: "allow_once" },
-          { key: "n", label: "Stay", decision: "deny" },
+          { key: "a", label: "Always retry without them", decision: "allow_always" },
+          { key: "o", label: "Retry without them", decision: "allow_once" },
+          { key: "n", label: "Keep them", decision: "deny" },
         ],
       });
       await T.settle();
@@ -812,7 +826,7 @@ async function refused(browser, origin, ok) {
       "a refused answer keeps the card, its reason and its buttons, and says the terminal answers the same question by its number",
       seen.before.fallback === null
         && seen.after.shown && seen.after.kind === "question" && seen.after.why?.includes(refusal)
-        && seen.after.buttons.join() === "Switch and from now on,Switch for this turn,Stay"
+        && seen.after.buttons.join() === "Always retry without them,Retry without them,Keep them"
         && seen.after.fallback === ASK_TERMINAL_WORDS.ko,
       JSON.stringify(seen),
     );
@@ -850,6 +864,335 @@ async function refused(browser, origin, ok) {
       JSON.stringify(computer),
     );
     ok("the refused answer scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+}
+
+/* ------------------------------------------- a session nobody can reach */
+
+/* A question whose session can no longer answer it must not stand (t-51007).
+ * zo raised its model-switch question, its process ended, and the window
+ * never heard the session end: every press came back refused, Escape answered
+ * through the same failing road, and the scrim held the whole window until a
+ * restart. A press the backend answers with the unreachable marker takes the
+ * question down the way a session end does — every question of that session,
+ * and no other session's — and says why; a refusal on a channel that is still
+ * there keeps the card, its buttons and its reason. */
+async function unreachable(browser, origin, ok) {
+  await scenario(browser, origin, "unreachable session", ok, async (page, faults) => {
+    const pressed = await page.evaluate(async (UNREACHABLE) => {
+      const T = window.__ASK_T__;
+      window.__ANSWER__.respond_permission = async (args) => {
+        T.sent.push(JSON.parse(JSON.stringify(args)));
+        if (args.session === "s-gone") throw UNREACHABLE;
+        return null;
+      };
+      T.frame("s-gone", {
+        type: "permission_prompt",
+        prompt_id: 7,
+        kind: "question",
+        topic: "declined_images",
+        title: "Retry without the images?",
+        tool_name: "",
+        reasoning: "거절된 요청에 이미지가 2장 있었습니다.",
+        audit_hint: null,
+        choices: [
+          { key: "a", label: "Always retry without them", decision: "allow_always" },
+          { key: "o", label: "Retry without them", decision: "allow_once" },
+          { key: "n", label: "Keep them", decision: "deny" },
+        ],
+      });
+      T.frame("s-gone", { type: "permission_prompt", prompt_id: 8, tool_name: "bash", reasoning: "", audit_hint: null });
+      T.frame("s-live", { type: "permission_prompt", prompt_id: 9, tool_name: "git", reasoning: "", audit_hint: null });
+      await T.settle();
+      const before = T.look();
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(250);
+      return {
+        before,
+        after: T.look(),
+        told: [...document.querySelectorAll(".toasts .toast")].map((note) => note.textContent.trim()),
+        markerShown: document.body.innerText.includes(UNREACHABLE),
+        sent: T.sent.slice(),
+      };
+    }, UNREACHABLE);
+    ok(
+      "a press its session can no longer receive takes down every question of that session, and another session's stays up",
+      pressed.before.kind === "question" && pressed.before.more === "2개 더 대기 중"
+        && pressed.sent.length === 1 && pressed.sent[0].session === "s-gone" && pressed.sent[0].promptId === 7
+        && pressed.after.shown && pressed.after.kind === "tool" && pressed.after.mono === "git"
+        && pressed.after.more === null && pressed.after.why === null,
+      JSON.stringify(pressed),
+    );
+    ok(
+      "the person is told the question closed because nobody can take the answer, and never reads the marker",
+      pressed.told.includes(ASK_GONE_WORDS.ko) && !pressed.markerShown,
+      JSON.stringify({ told: pressed.told, markerShown: pressed.markerShown }),
+    );
+
+    // Escape answers through the same road, so it takes such a question down too.
+    await page.evaluate(async () => {
+      const T = window.__ASK_T__;
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(250);
+      T.reset();
+      T.frame("s-gone", {
+        type: "permission_prompt",
+        prompt_id: 10,
+        tool_name: "rm",
+        reasoning: "",
+        audit_hint: null,
+        choices: [
+          { key: "y", label: "한 번 허용", decision: "allow_once" },
+          { key: "n", label: "거부", decision: "deny" },
+        ],
+      });
+      await T.settle();
+    });
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(400);
+    const escaped = await page.evaluate(() => ({ look: window.__ASK_T__.look(), sent: window.__ASK_T__.sent.slice() }));
+    ok(
+      "Escape on a question its session can no longer receive takes it down instead of holding the window",
+      escaped.look.shown === false && escaped.sent.length === 1 && escaped.sent[0].promptId === 10
+        && escaped.sent[0].decision === "deny",
+      JSON.stringify(escaped),
+    );
+
+    // A refusal on a channel that is still there is today's failure: the card stays.
+    const transient = await page.evaluate(async (gone) => {
+      const T = window.__ASK_T__;
+      const goneSaid = () => [...document.querySelectorAll(".toasts .toast")]
+        .filter((note) => note.textContent.trim() === gone).length;
+      const toldBefore = goneSaid();
+      window.__ANSWER__.respond_permission = async () => {
+        throw "permission.respond failed (-32603): the channel is busy";
+      };
+      T.frame("s-live", { type: "permission_prompt", prompt_id: 11, tool_name: "git", reasoning: "", audit_hint: null });
+      await T.settle();
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(250);
+      const look = T.look();
+      const live = [...document.querySelectorAll("#ask-choices button")].every((button) => button.disabled === false);
+      return { look, live, toldMore: goneSaid() - toldBefore };
+    }, ASK_GONE_WORDS.ko);
+    ok(
+      "a refusal on a channel that is still there keeps the card, its live buttons and its reason, and closes nothing",
+      transient.look.shown && transient.look.mono === "git" && transient.look.why?.includes("the channel is busy")
+        && transient.live && transient.toldMore === 0,
+      JSON.stringify(transient),
+    );
+
+    // The words in every language the window speaks.
+    const languages = await page.evaluate(async (UNREACHABLE) => {
+      const T = window.__ASK_T__;
+      T.ended("s-live");
+      await T.settle(250);
+      window.__ANSWER__.respond_permission = async () => {
+        throw UNREACHABLE;
+      };
+      const said = {};
+      for (const [at, code] of ["ko", "en", "ja", "zh", "es"].entries()) {
+        setLocale(code, { persist: false, refresh: false });
+        T.frame("s-gone", { type: "permission_prompt", prompt_id: 20 + at, tool_name: "bash", reasoning: "", audit_hint: null });
+        await T.settle();
+        document.querySelector("#ask-choices button")?.click();
+        await T.settle(250);
+        said[code] = [...document.querySelectorAll(".toasts .toast")].at(-1)?.textContent.trim() ?? null;
+      }
+      setLocale("ko", { persist: false, refresh: false });
+      return said;
+    }, UNREACHABLE);
+    const wrong = Object.keys(ASK_GONE_WORDS).filter((code) => languages[code] !== ASK_GONE_WORDS[code]);
+    ok(
+      "why the question closed is said in all five languages",
+      wrong.length === 0,
+      JSON.stringify({ wrong, languages }),
+    );
+    ok("the unreachable session scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+}
+
+/* ------------------------------------------- a question the terminal asks */
+
+/* zo's model-switch question is answered in zo's own terminal (t-51267). zo
+ * draws it there as a numbered menu and takes a number for the answer, and the
+ * card only stood over a question the terminal at the bottom was already
+ * asking. So it raises no card: the window marks the lane that asks as
+ * waiting, and calms the lane when zo says the prompt is resolved — answered in
+ * the terminal, or dismissed by the end of its turn. Every other question of
+ * the same session keeps its card, and an answer to one of those cards does not
+ * calm a lane whose terminal is still asking. */
+const SWITCH_QUESTION = Object.freeze({
+  type: "permission_prompt",
+  kind: "question",
+  topic: "model_switch",
+  title: "Switch models?",
+  tool_name: "",
+  reasoning: "The safety classifier declined claude-sonnet-5-5's answer twice. Continue this turn on claude-opus-5-5, the category's route?",
+  audit_hint: null,
+  choices: [
+    { key: "y", label: "Switch, and from now on", decision: "allow_always" },
+    { key: "o", label: "Switch for this turn", decision: "allow_once" },
+    { key: "n", label: "Stay on claude-sonnet-5-5", decision: "deny" },
+  ],
+});
+
+/* The question zo asks just before it when the declined request carried
+ * images. */
+const IMAGES_QUESTION = Object.freeze({
+  type: "permission_prompt",
+  kind: "question",
+  topic: "declined_images",
+  title: "Retry without the images?",
+  tool_name: "",
+  reasoning: "The declined request carried images (2). Retry without the 2?",
+  audit_hint: null,
+  choices: [
+    { key: "o", label: "Retry without them", decision: "allow_once" },
+    { key: "n", label: "Keep them", decision: "deny" },
+  ],
+});
+
+async function terminalOnly(browser, origin, ok) {
+  await scenario(browser, origin, "model switch in the terminal", ok, async (page, faults) => {
+    const seen = await page.evaluate(async ({ asked, images }) => {
+      const T = window.__ASK_T__;
+      const gates = [];
+      window.__ANSWER__.gate_lane = (args) => {
+        gates.push(JSON.parse(JSON.stringify(args)));
+        return null;
+      };
+      // What the backend was last told about a lane's mark.
+      const mark = (lane) => gates.filter((one) => one.id === lane).at(-1)?.gate ?? null;
+      const press = (label) =>
+        [...document.querySelectorAll("#ask-choices button")].find((one) => one.textContent.trim() === label)?.click();
+      for (const [id, session] of [["lane-switch", "s-switch"], ["lane-ended", "s-ended"], ["lane-history", "s-history"]]) {
+        upsertLane({ id, title: "zo", state: "streaming", session_id: session, worktree_id: null, agent: "zo" });
+      }
+      const out = {};
+
+      T.frame("s-switch", { ...asked, prompt_id: 601 });
+      await T.settle(300);
+      out.asked = { look: T.look(), hidden: document.getElementById("ask-scrim").hidden, mark: mark("lane-switch") };
+      // Another session's card stands alone, and once it is answered nothing is behind it.
+      T.frame("s-other", { type: "permission_prompt", prompt_id: 1, tool_name: "bash", reasoning: "", audit_hint: null });
+      await T.settle(300);
+      out.next = T.look();
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(300);
+      out.drained = { look: T.look(), sent: T.sent.slice(), mark: mark("lane-switch") };
+      // The terminal answered: zo resolves the prompt.
+      T.frame("s-switch", { type: "prompt_resolved", prompt_id: 601, by: "pane" });
+      await T.settle(120);
+      out.answered = { look: T.look(), mark: mark("lane-switch") };
+
+      // The turn ends with the question unanswered: zo dismisses the prompt, then says the turn ended.
+      T.frame("s-switch", { ...asked, prompt_id: 602 });
+      await T.settle(120);
+      const raised = { look: T.look(), mark: mark("lane-switch") };
+      T.frame("s-switch", { type: "prompt_resolved", prompt_id: 602, by: "dismissed" });
+      T.frame("s-switch", { type: "turn", turn_id: 2, phase: "end", outcome: "completed" });
+      await T.settle(120);
+      out.turnEnded = { raised, look: T.look(), mark: mark("lane-switch") };
+
+      // The same session's tool prompt and images question keep their cards.
+      T.reset();
+      T.frame("s-switch", { type: "permission_prompt", prompt_id: 603, tool_name: "bash", reasoning: "", audit_hint: null });
+      T.frame("s-switch", { ...images, prompt_id: 604 });
+      await T.settle(300);
+      const toolCard = { look: T.look(), mark: mark("lane-switch") };
+      document.querySelector("#ask-choices button")?.click();
+      await T.settle(300);
+      const imagesCard = T.look();
+      press("Keep them");
+      await T.settle(300);
+      out.cards = { tool: toolCard, images: imagesCard, sent: T.sent.slice(), look: T.look(), mark: mark("lane-switch") };
+
+      // zo asks the switch question as soon as the images answer reaches it, and
+      // the road that answer took can come back after the question arrived.
+      T.reset();
+      window.__ANSWER__.respond_permission = (args) => new Promise((done) => setTimeout(() => {
+        T.sent.push(JSON.parse(JSON.stringify(args)));
+        done(null);
+      }, 250));
+      T.frame("s-switch", { ...images, prompt_id: 605 });
+      await T.settle(300);
+      press("Keep them");
+      await T.settle(30);
+      T.frame("s-switch", { type: "prompt_resolved", prompt_id: 605, by: "ide" });
+      T.frame("s-switch", { ...asked, prompt_id: 606 });
+      await T.settle(500);
+      out.late = { look: T.look(), sent: T.sent.slice(), mark: mark("lane-switch") };
+      T.frame("s-switch", { type: "prompt_resolved", prompt_id: 606, by: "pane" });
+      await T.settle(120);
+      out.late.resolved = mark("lane-switch");
+
+      // The session ends while its question stands.
+      T.frame("s-ended", { ...asked, prompt_id: 607 });
+      await T.settle(120);
+      const before = mark("lane-ended");
+      T.ended("s-ended");
+      await T.settle(120);
+      out.ended = { before, look: T.look(), mark: mark("lane-ended") };
+
+      // The hydration road: the question unanswered, as the history's last word.
+      T.fire("session:history", {
+        session: "s-history",
+        history: [{ type: "turn", turn_id: 9, phase: "start" }, { ...asked, prompt_id: 608 }],
+      });
+      await T.settle(300);
+      out.history = { look: T.look(), hidden: document.getElementById("ask-scrim").hidden, mark: mark("lane-history") };
+      return out;
+    }, { asked: SWITCH_QUESTION, images: IMAGES_QUESTION });
+    ok(
+      "zo's model-switch question raises no card: the popup stays down and the lane that asks is marked as waiting",
+      seen.asked.look.shown === false && seen.asked.hidden === true && seen.asked.mark === "awaiting_permission",
+      JSON.stringify(seen.asked),
+    );
+    ok(
+      "nothing of it waits in line: the next card stands alone, and once it is answered the popup goes down with nothing behind it",
+      seen.next.shown && seen.next.kind === "tool" && seen.next.more === null
+        && seen.drained.look.shown === false && seen.drained.sent.length === 1 && seen.drained.sent[0].session === "s-other"
+        && seen.drained.mark === "awaiting_permission",
+      JSON.stringify({ next: seen.next, drained: seen.drained }),
+    );
+    ok(
+      "zo resolving the prompt the terminal answered calms the lane, and no card is left",
+      seen.answered.look.shown === false && seen.answered.mark === "idle",
+      JSON.stringify(seen.answered),
+    );
+    ok(
+      "a turn that ends with the question unanswered dismisses the prompt first, and that calms the lane too",
+      seen.turnEnded.raised.look.shown === false && seen.turnEnded.raised.mark === "awaiting_permission"
+        && seen.turnEnded.look.shown === false && seen.turnEnded.mark === "idle",
+      JSON.stringify(seen.turnEnded),
+    );
+    ok(
+      "the same session's tool prompt and declined-images question still raise their cards, one after the other",
+      seen.cards.tool.look.shown && seen.cards.tool.look.kind === "tool" && seen.cards.tool.look.more === "1개 더 대기 중"
+        && seen.cards.tool.mark === "awaiting_permission"
+        && seen.cards.images.shown && seen.cards.images.kind === "question" && seen.cards.images.title === ASK_TITLES.declined_images.ko
+        && JSON.stringify(seen.cards.sent.map((one) => [one.promptId, one.decision])) === JSON.stringify([[603, "allow_once"], [604, "deny"]])
+        && seen.cards.look.shown === false && seen.cards.mark === "idle",
+      JSON.stringify(seen.cards),
+    );
+    ok(
+      "an answer to the session's card that comes back after the switch question arrived leaves the lane marked until zo resolves the question",
+      seen.late.look.shown === false && seen.late.sent.length === 1 && seen.late.sent[0].promptId === 605
+        && seen.late.sent[0].decision === "deny" && seen.late.mark === "awaiting_permission" && seen.late.resolved === "idle",
+      JSON.stringify(seen.late),
+    );
+    ok(
+      "a session that ends while its switch question stands leaves its lane blocked, with no card",
+      seen.ended.before === "awaiting_permission" && seen.ended.look.shown === false && seen.ended.mark === "blocked",
+      JSON.stringify(seen.ended),
+    );
+    ok(
+      "an unanswered switch question replayed as the history's last word raises no card either, and marks its lane",
+      seen.history.look.shown === false && seen.history.hidden === true && seen.history.mark === "awaiting_permission",
+      JSON.stringify(seen.history),
+    );
+    ok("the model switch in the terminal scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   });
 }
 
@@ -933,9 +1276,9 @@ async function languages(browser, origin, ok) {
         seen[code].tool = T.look().title;
         T.frame(`s-${code}`, { type: "prompt_resolved", prompt_id: 100, by: "pane" });
         await T.settle(260);
-        T.frame(`s-${code}`, { type: "permission_prompt", prompt_id: 101, kind: "question", topic: "model_switch", reasoning: "?", audit_hint: null });
+        T.frame(`s-${code}`, { type: "permission_prompt", prompt_id: 101, kind: "question", reasoning: "?", audit_hint: null });
         await T.settle(120);
-        seen[code].model_switch = T.look().title;
+        seen[code].question = T.look().title;
         // The language changes under an ask that is already up: it is redrawn, not consumed.
         const others = code === "ko" ? "en" : "ko";
         setLocale(others, { persist: false, refresh: false });
@@ -966,13 +1309,13 @@ async function languages(browser, origin, ok) {
     }, ASK_TITLES);
     const wrong = [];
     for (const code of ["ko", "en", "ja", "zh", "es"]) {
-      for (const kind of ["tool", "model_switch", "declined_images", "payment", "transfer", "delete", "handoff"]) {
+      for (const kind of ["tool", "question", "declined_images", "payment", "transfer", "delete", "handoff"]) {
         if (titles[code]?.[kind] !== ASK_TITLES[kind][code]) {
           wrong.push(`${code}/${kind}: ${JSON.stringify(titles[code]?.[kind])} != ${JSON.stringify(ASK_TITLES[kind][code])}`);
         }
       }
       const other = code === "ko" ? "en" : "ko";
-      if (titles[code]?.redrawn !== ASK_TITLES.model_switch[other]) wrong.push(`${code}: an ask on screen did not follow a language change`);
+      if (titles[code]?.redrawn !== ASK_TITLES.question[other]) wrong.push(`${code}: an ask on screen did not follow a language change`);
     }
     ok("every kind of ask is titled in its own words in all five languages, and a language change redraws an ask already up", wrong.length === 0, wrong.join(" | "));
     ok("the ask languages scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
@@ -1032,7 +1375,7 @@ async function ink(browser, origin, ok) {
       await page.evaluate((one) => { document.documentElement.dataset.theme = one; }, theme);
       for (const [name, raise] of [
         ["tool", () => window.__ASK_T__.frame("s-i", { type: "permission_prompt", prompt_id: 201, tool_name: "bash", reasoning: "명령을 실행합니다", audit_hint: "risk: medium" })],
-        ["question", () => window.__ASK_T__.frame("s-i", { type: "permission_prompt", prompt_id: 202, kind: "question", topic: "model_switch", reasoning: "모델을 바꿔 다시 시도할까요?", audit_hint: null })],
+        ["question", () => window.__ASK_T__.frame("s-i", { type: "permission_prompt", prompt_id: 202, kind: "question", topic: "declined_images", reasoning: "이미지 없이 다시 시도할까요?", audit_hint: null })],
         ["confirm", () => window.__ASK_T__.fire("computer:confirm", { id: "ink-c", kind: "payment", label: "Pay", timeoutMs: 120000 })],
         ["handoff", () => window.__ASK_T__.fire("computer:handoff", { id: "ink-h", reason: "코드를 입력해 주세요", timeoutMs: 600000 })],
         ["handoff-code", () => window.__ASK_T__.fire("computer:handoff", { id: "ink-hc", reason: "카카오톡 인증번호", timeoutMs: 180000, codeAsk: { min: 4, max: 10, typedMax: 20 } })],
@@ -1149,7 +1492,7 @@ async function midAnswer(browser, origin, ok) {
       await T.settle(30);
       const before = { off: button.disabled, mono: T.look().mono };
       T.frame("s-m", { type: "permission_prompt", prompt_id: 92, tool_name: "second", reasoning: "", audit_hint: null });
-      T.frame("s-n", { type: "permission_prompt", prompt_id: 93, kind: "question", topic: "model_switch", reasoning: "질문", audit_hint: null });
+      T.frame("s-n", { type: "permission_prompt", prompt_id: 93, kind: "question", topic: "declined_images", reasoning: "질문", audit_hint: null });
       await T.settle(30);
       const during = {
         sameNode: document.querySelector("#ask-choices button") === button && button.isConnected,
@@ -1623,6 +1966,8 @@ export async function testAskPopup(browser, origin, ok) {
   await confirm(browser, origin, ok);
   await queue(browser, origin, ok);
   await refused(browser, origin, ok);
+  await unreachable(browser, origin, ok);
+  await terminalOnly(browser, origin, ok);
   await keyboard(browser, origin, ok);
   await midAnswer(browser, origin, ok);
   await oneKey(browser, origin, ok);

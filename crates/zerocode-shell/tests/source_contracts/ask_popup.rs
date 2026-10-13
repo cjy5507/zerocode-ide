@@ -1,5 +1,5 @@
 //! Every question the window puts to the person is one popup (t-17514): a tool
-//! permission, an agent's own question (zo's model switch), Computer Use's
+//! permission, an agent's own question (zo's image retry), Computer Use's
 //! confirm and its hand-over, and the window's own confirms are KINDS of ask
 //! that share one frame in the middle of the window, one queue, and one
 //! keyboard. The browser suite (`ui/tests/ask-popup.mjs`) drives it; these
@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use super::support::{block_after, block_after_css, window_source};
+use super::support::{block_after, block_after_css, shipped_backend, window_source};
 
 fn ui_file(name: &str) -> String {
     let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
@@ -160,12 +160,40 @@ fn a_question_is_told_from_a_tool_by_its_kind_and_never_by_its_tool_string() {
         "a question's title lost the topic, the frame's title, or the generic one:\n{title}"
     );
     let topics = block_after(window, "const ASK_TOPICS = Object.freeze({");
-    for topic in ["model_switch", "declined_images"] {
-        assert!(
-            topics.contains(topic),
-            "the topic `{topic}` has no words:\n{topics}"
-        );
-    }
+    assert!(
+        topics.contains("declined_images"),
+        "the topic `declined_images` has no words:\n{topics}"
+    );
+}
+
+/// zo's model-switch question is answered in zo's own terminal alone
+/// (t-51267). zo draws it there as a numbered menu, and the card only stood in
+/// the middle of the window over a question the terminal at the bottom was
+/// already asking. The window raises no card for it — told by the frame's kind
+/// and topic, never by a tool string — and marks the lane as waiting instead;
+/// it keeps no words for a card it never draws.
+#[test]
+fn the_model_switch_question_is_asked_in_the_terminal_alone() {
+    let window = window_source();
+    let raising = block_after(window, "function raisePermission(session, frame) {");
+    let carded = raising
+        .find("raiseAsk(")
+        .expect("raisePermission no longer raises a card");
+    let rule = raising[..carded]
+        .find("frame.kind === \"question\" && frame.topic === \"model_switch\"")
+        .map(|at| &raising[at..carded]);
+    assert!(
+        rule.is_some_and(|rule| {
+            rule.contains("askGateLane(session, \"awaiting_permission\")")
+                && rule.contains("return;")
+        }),
+        "the model-switch question raises a card instead of marking its lane:\n{raising}"
+    );
+    let topics = block_after(window, "const ASK_TOPICS = Object.freeze({");
+    assert!(
+        !topics.contains("model_switch") && !window.contains("ask.topic.model_switch"),
+        "the window keeps words for a card it never draws:\n{topics}"
+    );
 }
 
 /// One keyboard, whatever the kind: Enter gives the SAFE answer of its kind and
@@ -301,5 +329,88 @@ fn the_popup_is_dressed_by_kind_and_carries_no_motion_of_its_own() {
         !frame.contains("animation")
             && !block_after_css(&sheet, ".ask-clock {").contains("animation"),
         "the popup carries motion of its own"
+    );
+}
+
+/// A question whose session can no longer answer it leaves the window
+/// (t-51007). A zo that exited left its model-switch question standing: every
+/// press came back refused, Escape answered through the same road, and the
+/// popup held the window until a restart. An answer that can reach no live
+/// channel comes back as a marker — never prose the window would have to read
+/// — and the window takes the session's questions down on it, through the
+/// withdrawal a session end uses.
+#[test]
+fn an_answer_nobody_can_receive_takes_its_sessions_questions_down() {
+    let backend = shipped_backend();
+    let window = window_source();
+
+    // One spelling, on both sides of the bridge.
+    assert!(
+        backend.contains(r#"const SESSION_UNREACHABLE: &str = "zerocode:session-unreachable";"#)
+            && window
+                .contains(r#"const ASK_SESSION_UNREACHABLE = "zerocode:session-unreachable";"#),
+        "the window and the backend no longer spell the unreachable marker alike"
+    );
+    // Both ways a session goes out of reach earn it: no channel held, and a
+    // held channel that refuses the connection — told by its kind, never by
+    // the transport's words.
+    let answering = block_after(backend, "pub(crate) async fn respond_permission(");
+    assert!(
+        answering.contains("zo_channel(&state, &session)")
+            && answering.contains("SESSION_UNREACHABLE"),
+        "an answer for a session with no channel held is not called unreachable:\n{answering}"
+    );
+    let refused = block_after(backend, "fn answer_unconnected(");
+    assert!(
+        refused.contains("std::io::ErrorKind::ConnectionRefused")
+            && refused.contains("SESSION_UNREACHABLE"),
+        "a channel that refuses the connection is not called unreachable by its kind:\n{refused}"
+    );
+    assert!(
+        block_after(backend, "fn answer_prompt(").contains("answer_unconnected"),
+        "the answer road does not tell a refused connection apart"
+    );
+    // The window's side: the channel asks take the session's questions down
+    // through the session end's own withdrawal, and say why.
+    let delivering = block_after(window, "const askFromChannel = {");
+    assert!(
+        delivering.contains("ASK_SESSION_UNREACHABLE")
+            && delivering.contains("withdrawPermissions(ask.session)")
+            && delivering.contains("\"perm.unreachable\""),
+        "an unreachable session's question still stands on the window:\n{delivering}"
+    );
+}
+
+/// The end of a session's last claim takes its questions with it, whichever
+/// road ends it (t-51007). A closed terminal forgot its claim before it gave
+/// the session up, and said nothing; the claim's reader, waking to a claim
+/// forgotten, said nothing either — so a zo that exited left its question
+/// standing. The teardown gives the session up first, and the reader decides
+/// by who holds the session now: nobody, and the window hears the session
+/// ended; a newer claim, and its questions stay.
+#[test]
+fn the_end_of_a_sessions_last_claim_takes_its_questions_with_it() {
+    let backend = shipped_backend();
+    let closing = block_after(backend, "fn forget_term_state(");
+    let released = closing
+        .find("detach_zo_channel_if_owned(state, &session.id, ZoChannelOwner::Term(term))")
+        .expect("a closed terminal no longer gives up the session it held");
+    let forgotten = closing
+        .find("prune_owner(state, ZoChannelOwner::Term(term))")
+        .expect("a closed terminal no longer forgets its claim");
+    assert!(
+        released < forgotten,
+        "a closed terminal forgets its claim before giving the session up, and a reader \
+         waking between the two says nothing:\n{closing}"
+    );
+    assert!(
+        !closing.contains("zo_adoption.is_none()"),
+        "a restored terminal whose adoption owns nothing keeps its session registered \
+         after it closes:\n{closing}"
+    );
+    let reading = block_after(backend, "fn spawn_subscriber(");
+    assert!(
+        reading.contains("reader_end(") && reading.contains("ReaderEnd::Silent"),
+        "the reader still goes quiet on a claim a teardown forgot:\n{reading}"
     );
 }
