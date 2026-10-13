@@ -394,31 +394,25 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             Look (screenshot, zoom), \
             move/click/drag/scroll the mouse, press keys, type, wait; launch, activate, quit and open \
             apps; find/wait_for/read elements or screen text (ocr reads pixels); place windows; \
-            read/write the clipboard; run a program. Every position \
-            you give — coordinate, start_coordinate, region [x0, y0, x1, y1], a window's x/y/width/height \
-            — is in the pixels of the last full screenshot you were shown, and every position the tool \
-            answers is in those pixels too; the tool places them on the screen. A zoom only shows a \
-            region closer: keep speaking in the screenshot's pixels. After an action that changes the \
-            screen the tool gives it a moment to repaint and looks for you; when nothing changed it says \
-            changed: false and shows no new picture. listen_start hears the machine or one app; sound_wait \
+            read/write the clipboard; run a program. All positions and sizes use the last full screenshot's \
+            pixels, including returned positions and region [x0, y0, x1, y1]. Zoom does not change that frame. \
+            After a screen-changing action the tool waits for repaint and observes the same target; \
+            changed: false omits unchanged pixels. listen_start hears the machine or one app; sound_wait \
             waits for a label (text: \"alarm_clock,siren\"), sound_read reads, listen_stop ends it. watch waits \
             for screen changes (until: quiet for stillness), without pictures. observe with app shows its \
             accessibility tree; left_click with app, window_id and element_index presses a listed control. \
-            A label (and role) resolves a fresh control in that same window, also within a batch. A familiar run \
-            of hand steps you would not look between is one batch (steps: [...]): one call, one look after — plan it \
-            whole (left_click by label, type, key, wait_for) rather than a look per press. A window with no tree (a \
+            A label (and role) resolves a fresh control in that same window, also within a batch. Plan familiar \
+            steps as one batch (steps: [...]): left_click by label, type, key, wait_for; one call and one look after. A window with no tree (a \
             mirrored phone): left_click {app, label: the words shown, ocr: true, after_text: the line they follow} \
             presses them as read at the press — batch a whole screen, wait_for {app, ocr: true, text} checks each \
-            value, a wait after a press ends once the screen is still, and the look after shows that app. recipe_save \
-            keeps a procedure that worked; recipe_run walks it again in one call (params fill its \
-            {{names}}) and says where it stopped and the start to resume from. walk (goal: one sentence; one of \
+            value. recipe_save keeps successful steps; recipe_run replays them (params fill {{names}}) \
+            and reports where it stopped and the start to resume from. walk (goal: one sentence; one of \
             app, pane, or platform with device; until: the text on screen when it worked; max_steps) walks there \
             in one call on the window's own judgment and answers a status to act on. A CAPTCHA or password \
             field (secure_input) is the person's: handoff (text: what they do) waits for them. A one-time code they read out: \
             handoff with ask_code and into (the input command's words, e.g. [\"set-value\",\"--app\",\"A\",\"--element-index\",\"3\"]) — \
             the window types it, you never receive it, and a look after may show it. \
-            The person keeps one hand on you: a \
-            `stopped` answer means stop and report; a press on a payment, transfer or delete control is \
+            A `stopped` answer means stop and report; a press on a payment, transfer or delete control is \
             held while the window asks them — say confirming: payment|transfer|delete when you know you \
             are there. Only works inside a ZeroCode pane.",
         input_schema: {
@@ -2081,8 +2075,9 @@ mod tests {
     #[test]
     fn background_reads_preserve_the_same_selected_window() {
         for action in ["screenshot", "observe", "find", "read", "wait_for"] {
-            let fields = input(json!({"action": action, "app": "Fixture", "window_id": 41, "background": true, "label": "Save"}));
-            let command = zerocode_core::computer_use::parse_command(&argv_for(&fields).unwrap()).unwrap();
+            let mut fields = json!({"action": action, "app": "Fixture", "window_id": 41, "background": true});
+            if matches!(action, "find" | "wait_for") { fields["label"] = json!("Save"); }
+            let command = zerocode_core::computer_use::parse_command(&argv_for(&input(fields)).unwrap()).unwrap();
             assert_eq!(command.params.get("windowId"), Some(&json!(41)), "{action}");
             assert_eq!(command.params.get("background"), Some(&json!(true)), "{action}");
         }
