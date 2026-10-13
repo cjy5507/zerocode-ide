@@ -1992,7 +1992,12 @@ impl Ui {
         let ids = BlockIdGen::default();
         for (index, item) in items.into_iter().enumerate() {
             match item {
-                ReplayItem::User(text) => self.said(&text),
+                ReplayItem::User(text) => {
+                    // As the live echo does: the finished cell goes first.
+                    self.close_segment();
+                    self.flush_tool_cell();
+                    self.said(&text);
+                }
                 ReplayItem::Assistant(text) => self.block(RenderBlock::TextDelta {
                     id: ids.next(),
                     text,
