@@ -2801,6 +2801,51 @@ mod tests {
         );
     }
 
+    /// The verb is a word, not a column (t-51389, 「ran call 등 도구 옆
+    /// 빈공백이」): one space after it, the target right after, the result
+    /// still on the last column — and what hangs under a row starts on one
+    /// column whatever the verb, the column the output's text starts on.
+    #[test]
+    fn the_target_follows_its_verb_after_one_space() {
+        let mut group = ToolGroup::new(bash("a", "cargo test"));
+        assert!(group.complete("a", ok("ok")));
+        group.push(read("b", "src/lib.rs"));
+        assert_eq!(
+            plain(&group.lines(40, Duration::ZERO)),
+            vec![
+                edge("✓ Run cargo test", "1 line", 40),
+                "  └ ok".to_string(),
+                "⠋ Read src/lib.rs".to_string(),
+            ]
+        );
+        let finished = |kind: ToolKind| {
+            let mut group = ToolGroup::new(ToolCall::new("c".to_string(), kind));
+            assert!(group.complete("c", ok("")));
+            plain(&group.lines(24, Duration::ZERO))
+        };
+        assert_eq!(
+            finished(ToolKind::Command {
+                command: "alpha beta gamma delta epsilon".to_string(),
+                background: false,
+            }),
+            vec![
+                "✓ Run alpha beta gamma".to_string(),
+                "    delta epsilon".to_string(),
+                "  └ (no output)".to_string(),
+            ]
+        );
+        assert_eq!(
+            finished(ToolKind::Call {
+                name: "Lookup".to_string(),
+                detail: "alpha beta gamma delta".to_string(),
+            }),
+            vec![
+                "✓ Call Lookup(alpha beta".to_string(),
+                "    gamma delta)".to_string(),
+            ]
+        );
+    }
+
     /// Marker mode의 커밋된 도구 셀은 접기 구간이 된다.
     #[test]
     fn a_committed_cell_with_output_carries_the_fold_markers() {
