@@ -388,7 +388,10 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
 pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "Computer",
-        description: "Drive the person's desktop through the ZeroCode window: look (screenshot, zoom), \
+        description: "Drive desktop apps through the ZeroCode window; use its built-in browser for websites. \
+            For background work, observe {app}, keep app and the returned window_id on actions, and set \
+            background: true. Never substitute activation or global input when background input is refused. \
+            Look (screenshot, zoom), \
             move/click/drag/scroll the mouse, press keys, type, wait; launch, activate, quit and open \
             apps; find/wait_for/read elements or screen text (ocr reads pixels); place windows; \
             read/write the clipboard; run a program. Every position \
@@ -397,13 +400,11 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             answers is in those pixels too; the tool places them on the screen. A zoom only shows a \
             region closer: keep speaking in the screenshot's pixels. After an action that changes the \
             screen the tool gives it a moment to repaint and looks for you; when nothing changed it says \
-            changed: false and shows no new picture. The tool hears too: listen_start (the whole \
-            machine, or one app), then sound_wait for a sound by label (text: \"alarm_clock,siren\"; \
-            the system's classifier names speech, music, knock, bell, beep, siren and some 300 more) \
-            or sound_read what was heard; listen_stop when done. watch waits for the screen to change (until: \
-            quiet, to go still) without pictures and says where. observe with app shows its accessibility \
-            tree, each line led by an element_index a left_click with app presses; app + label (and role) presses \
-            the control that reads so, chosen at the press — never stale, so a batch step can name it. A familiar run \
+            changed: false and shows no new picture. listen_start hears the machine or one app; sound_wait \
+            waits for a label (text: \"alarm_clock,siren\"), sound_read reads, listen_stop ends it. watch waits \
+            for screen changes (until: quiet for stillness), without pictures. observe with app shows its \
+            accessibility tree; left_click with app, window_id and element_index presses a listed control. \
+            A label (and role) resolves a fresh control in that same window, also within a batch. A familiar run \
             of hand steps you would not look between is one batch (steps: [...]): one call, one look after — plan it \
             whole (left_click by label, type, key, wait_for) rather than a look per press. A window with no tree (a \
             mirrored phone): left_click {app, label: the words shown, ocr: true, after_text: the line they follow} \
@@ -442,7 +443,8 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "additionalProperties": false
                 },
                 "description": "batch: the actions to run in order in one call, each spelled exactly as alone, positions \
-                    in the same screenshot's pixels; a wait_for or sound_wait step gives timeout_ms. Stops at the first \
+                    in the same screenshot's pixels. App steps use labels, not coordinates; keep app/window_id on each. \
+                    wait_for or sound_wait gives timeout_ms. Stops at the first \
                     refusal; the tool looks once, after."
             });
             json!({
