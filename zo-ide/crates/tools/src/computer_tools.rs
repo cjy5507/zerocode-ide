@@ -1770,6 +1770,93 @@ mod tests {
         json!({ "marks": { "lookId": look, "items": [] } })
     }
 
+    #[test]
+    fn an_app_click_keeps_the_selected_window_for_each_target_kind() {
+        for target in [json!({"element_index": 32}), json!({"label": "Save"}), json!({"label": "Save", "ocr": true})] {
+            let mut fields = json!({"action": "left_click", "app": "Fixture", "window_id": 41});
+            fields.as_object_mut().unwrap().extend(target.as_object().unwrap().clone());
+            let command = zerocode_core::computer_use::parse_command(&argv_for(&input(fields)).unwrap()).unwrap();
+            assert_eq!(command.params.get("windowId"), Some(&json!(41)), "a click must not choose the app's other window");
+        }
+    }
+
+    #[test]
+    fn background_app_input_never_becomes_global_desktop_input() {
+        for (action, extra, method) in [
+            ("left_click", json!({"label": "Save"}), ComputerMethod::Click),
+            ("key", json!({"text": "Tab"}), ComputerMethod::PressKey),
+            ("type", json!({"text": "fixture text"}), ComputerMethod::TypeText),
+            ("scroll", json!({"coordinate": [20, 40], "scroll_direction": "down"}), ComputerMethod::Scroll),
+        ] {
+            let mut fields = json!({"action": action, "app": "Fixture", "window_id": 41, "background": true});
+            fields.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let command = zerocode_core::computer_use::parse_command(&argv_for(&input(fields)).expect("scoped background input")).unwrap();
+            assert_eq!(command.method, method);
+            assert_eq!(command.params.get("app"), Some(&json!("Fixture")));
+            assert_eq!(command.params.get("windowId"), Some(&json!(41)));
+            assert_eq!(command.params.get("background"), Some(&json!(true)));
+        }
+    }
+
+    #[test]
+    fn a_selected_app_coordinate_is_window_local_not_a_global_mouse_click() {
+        let fields = input(json!({"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [20, 40]}));
+        let translated = in_points(fields, ShotFrame::new((1000.0, 500.0), 0.5).unwrap()).unwrap();
+        assert_eq!(translated.coordinate, Some([40.0, 80.0]));
+        let command = zerocode_core::computer_use::parse_command(&argv_for(&translated).unwrap()).unwrap();
+        assert_eq!(command.method, ComputerMethod::Click);
+        assert_eq!(command.params.get("windowId"), Some(&json!(41)));
+    }
+
+    #[test]
+    fn unsupported_window_or_app_selectors_are_refused_instead_of_discarded() {
+        for fields in [
+            json!({"action": "left_click", "app": "Fixture", "window": "Target document", "label": "Save"}),
+            json!({"action": "left_click", "window_id": 41, "coordinate": [20, 40]}),
+            json!({"action": "left_click", "app": "Fixture", "window_id": 0, "label": "Save"}),
+            json!({"action": "cursor_position", "app": "Fixture"}),
+            json!({"action": "hold_key", "app": "Fixture", "window_id": 41, "text": "Tab", "duration": 0.1}),
+            json!({"action": "walk", "app": "Fixture", "window_id": 41, "goal": "Read the target document"}),
+        ] {
+            assert!(argv_for(&input(fields.clone())).is_err(), "unsupported scope was silently ignored: {fields}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_first_find_picture_is_of_the_same_selected_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let answer: Value = serde_json::from_str(&run_computer(&json!({"action":"find","app":"Fixture","window_id":41,"label":"Save"}), &ctx, &road).unwrap()).unwrap();
+        let asked = answer["first_look"]["screen"]["said"].as_str().unwrap_or_default();
+        assert!(asked.contains("--app Fixture") && asked.contains("--window-id 41"), "preparation observed another surface: {asked}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_picture_after_a_click_keeps_the_clicked_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let answer: Value = serde_json::from_str(&run_computer(&json!({"action":"left_click","app":"Fixture","window_id":41,"label":"Save"}), &ctx, &road).unwrap()).unwrap();
+        let asked = answer["looked_after"]["screen"]["said"].as_str().unwrap_or_default();
+        assert!(asked.contains("--app Fixture") && asked.contains("--window-id 41"), "verification observed another window: {asked}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn another_windows_answer_is_never_staged_or_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        std::fs::write(dir.path().join("forced-window"), "52").unwrap();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let error = run_computer(&json!({"action":"observe","app":"Fixture","window_id":41}), &ctx, &road)
+            .expect_err("a different window must not reach the model");
+        assert!(!error.to_string().contains("unrelated-window-fixture"));
+        assert_eq!(staged(&ctx), 0);
+    }
+
     /// A process whose looks carry marks (`ZO_COMPUTER_MARKS`, the bench's
     /// A/B) numbers both of its looks and offers the `mark` field; one whose
     /// looks do not spells them as before and the field costs nothing. A
@@ -2146,6 +2233,15 @@ mod tests {
         let script = r#"#!/bin/sh
 verb="$1"
 echo "$verb" >> '@DIR@/calls'
+window=''
+previous=''
+for word in "$@"; do
+  [ "$previous" = --window-id ] && window="$word"
+  previous="$word"
+done
+[ -f '@DIR@/forced-window' ] && window="$(cat '@DIR@/forced-window')"
+target=''
+[ -n "$window" ] && target=',"window":{"id":'"$window"'},"fixture":"unrelated-window-fixture"'
 [ "$verb" = batch ] && { printf '%s' "$3" > '@DIR@/batch-commands'; cat '@DIR@/batch'; echo; exit 0; }
 [ "$verb" = walk ] && [ -f '@DIR@/walk' ] && { printf '%s\n' "$*" > '@DIR@/walk-argv'; cat '@DIR@/walk'; echo; exit 0; }
 if [ "$verb" = handoff ]; then
@@ -2163,7 +2259,7 @@ case "$verb" in
   *) look='' ;;
 esac
 printf '%s
-' '{"ok":true,"result":{"verb":"'"$verb"'","said":"'"$*"'","cursor":{"x":200,"y":80}'"$look"'}}'
+' '{"ok":true,"result":{"verb":"'"$verb"'","said":"'"$*"'","cursor":{"x":200,"y":80}'"$look$target"'}}'
 "#
         .replace("@PNG@", &png.display().to_string())
         .replace("@CHANGED@", &changed.display().to_string())
