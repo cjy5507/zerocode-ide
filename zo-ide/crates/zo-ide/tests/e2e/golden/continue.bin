@@ -5,17 +5,12 @@
 [2m│ directory: <cwd>
 [2m╰──────────────────────────────────────────────────────────╯
 
-
 [1m[2m› [22m[22mPARITY_SCENARIO:streaming_text first deterministic turn
 
-
   Mock streaming says hello from the parity harness.
-
 
 [1m[2m› [22m[22mPARITY_SCENARIO:streaming_text second deterministic turn
 
-
   Mock streaming says hello from the parity harness.
-
 
 [1m[2m› [22m[22m/exit
