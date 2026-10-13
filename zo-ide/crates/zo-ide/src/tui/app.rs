@@ -8816,6 +8816,49 @@ mod tests {
         assert_eq!(rows(&resumed), rows(&live), "the resumed transcript is not the live one");
         assert_eq!(resumed.pending_history, live.pending_history, "the same rows in other bytes");
     }
+
+    /// A run of calls with nothing said between them is one block (t-51389):
+    /// each `Call` is a cell of its own, and five of them in the screenshot
+    /// each wore its own blank row. The gap stands before the first row of
+    /// the run only, and the answer after the run keeps its own.
+    #[test]
+    fn a_run_of_calls_with_nothing_between_them_is_one_block() {
+        use runtime::message_stream::ToolResultBody;
+
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        let calls = [
+            ("c1", "mcp__playwright__browser_navigate"),
+            ("c2", "mcp__playwright__browser_take_screenshot"),
+            ("c3", "mcp__playwright__browser_console_messages"),
+        ];
+        for (call, name) in calls {
+            ui.block(tool_call(&ids, call, name, &json!({"url": "https://example.com"})));
+            ui.block(RenderBlock::ToolResult {
+                id: ids.next(),
+                tool_call_id: ToolCallId(call.to_string()),
+                is_error: false,
+                body: ToolResultBody::Text { content: String::new(), truncated: false },
+            });
+        }
+        ui.block(RenderBlock::TextDelta { id: ids.next(), text: "Done.".to_string(), done: true });
+        ui.close_segment();
+
+        let rows: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
+        let first = rows
+            .iter()
+            .position(|row| row.starts_with(&format!("✓ Call {}", calls[0].1)))
+            .unwrap_or_else(|| panic!("no first call row: {rows:#?}"));
+        assert!(first > 0 && rows[first - 1].is_empty(), "the run keeps its gap: {rows:#?}");
+        for (offset, (_, name)) in calls.iter().enumerate().skip(1) {
+            assert!(
+                rows[first + offset].starts_with(&format!("✓ Call {name}")),
+                "no blank row between the calls: {rows:#?}"
+            );
+        }
+        assert!(rows[first + calls.len()].is_empty(), "the answer keeps its gap: {rows:#?}");
+        assert!(rows[first + calls.len()..].iter().any(|row| row.contains("Done.")), "{rows:#?}");
+    }
 }
 
 /// The footer's second row and its three keys (t-10232): codex 0.157.1's
