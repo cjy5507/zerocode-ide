@@ -20867,6 +20867,12 @@ button.helper-sib:hover {
   margin-inline: 0;
 }
 
+#typesafe-card .settings-fold > summary {
+  min-height: 32px;
+  box-sizing: border-box;
+  padding-block: var(--space-2);
+}
+
 #managed-judgment-catalog-file::file-selector-button {
   color: var(--ink-chalk);
   background: var(--surface-raised);

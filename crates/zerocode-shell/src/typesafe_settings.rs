@@ -1454,15 +1454,34 @@ mod tests {
             }
         }
 
-        // The card offers one switch and no choice of mode: its only select
-        // is the classifier, folded under 고급 and closed until asked for.
         let page = include_str!("../../../ui/index.html");
         let card = &page[page.find("id=\"typesafe-card\"").expect("the key card")..];
         let card = &card[..card
             .find("<template id=\"jev-features\">")
             .expect("the features follow the card")];
         assert_eq!(card.matches("data-jev-switch ").count(), 1, "one switch");
-        assert_eq!(card.matches("<select").count(), 2, "{card}");
+        let select_ids: Vec<&str> = card
+            .split("<select")
+            .skip(1)
+            .map(|select| {
+                let attributes = select.split_once('>').expect("select opening tag").0;
+                attributes
+                    .split_once("id=\"")
+                    .and_then(|(_, value)| value.split_once('"'))
+                    .expect("every model setting select has an id")
+                    .0
+            })
+            .collect();
+        assert_eq!(
+            select_ids,
+            [
+                "managed-judgment-filter",
+                "judgment-provider-kind",
+                "judgment-listed-model",
+                "route-classifier-select",
+            ],
+            "model selection and library filters do not add per-feature mode controls"
+        );
         assert!(card.contains("id=\"judgment-provider-kind\""));
         let advanced = &card[card
             .find("<details class=\"settings-fold settings-jev-advanced\"")

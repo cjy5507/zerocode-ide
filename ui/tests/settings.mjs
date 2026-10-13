@@ -2945,7 +2945,10 @@ class StatefulBackend {
       }
       case "managed_judgment_switch_model": {
         const held = this.managedModelState;
-        if (this.managedSwitchOtherWindow) this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), judgmentProvider: { kind: "jev", protocol: "system_one", baseUrl: "https://api.typesafe.ai", model: "jev-other-window", requiresAuth: true } };
+        if (this.managedSwitchOtherWindow) {
+          this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), [JEV_MODEL_SETTING]: "jev-other-window" };
+          delete this.zoSettings.smart.judgmentProvider;
+        }
         if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
         if (args.instanceId !== held.instanceId || args.serverId !== held.server.id) throw "server_changed";
         const model = held.models.find((entry) => entry.id === args.modelId && entry.revision === args.revision);
@@ -5888,19 +5891,19 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   for (const id of ["#typesafe-check-btn", "#typesafe-remove-btn", "#typesafe-save-btn"]) {
     assert(await pageA.locator(id).isDisabled(), `${id} was offered with no key saved`);
   }
-  // The card asks one thing (§6.1): a switch, off on a machine that never met
-  // Jev, and no mode to choose — its one select, the classifier, is folded
-  // under 고급 and closed.
   assert(await toggle.isVisible(), "the card has no switch");
   assert(!(await toggle.isChecked()), "a machine that never met Jev reads as using it");
   assert(await partial.isHidden(), "a switch that is off says where it is used");
   // A closed fold keeps its body's boxes (content-visibility) while nobody
   // sees them, so what is folded away is counted as out of sight.
   const selects = await pageA.locator("#typesafe-card select").evaluateAll((all) => ({
-    total: all.length,
-    visible: all.filter((one) => !one.closest("details:not([open])") && one.getClientRects().length > 0).length,
+    ids: all.map((select) => select.id),
+    visible: all.filter((select) => !select.closest("details:not([open])") && select.getClientRects().length > 0).map((select) => select.id),
   }));
-  assertEqual(selects, { total: 2, visible: 1 }, "the provider is visible while the classifier stays folded");
+  assertEqual(selects, {
+    ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-listed-model", "route-classifier-select"],
+    visible: ["managed-judgment-filter", "judgment-provider-kind"],
+  }, "model filters and the provider are visible while classifier and inactive server choices stay folded");
   assert(!(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)), "고급 starts open");
 
   // A save sends the trimmed key once, clears the field, and paints the answer.
