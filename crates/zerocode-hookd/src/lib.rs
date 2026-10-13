@@ -243,6 +243,7 @@ pub const FEDERATION_HOME_HEADER: &str = "x-zerocode-federation-home";
 pub const FEDERATION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
 
 pub struct TeamRequest {
+    gate_open: Option<String>,
     pub team_id: String,
     /// The pane that ran the command, out of its own `TMUX_PANE`.
     pub pane: String,
@@ -269,6 +270,7 @@ impl TeamRequest {
         answer: tokio::sync::oneshot::Sender<TeamAnswer>,
     ) -> Self {
         Self {
+            gate_open: None,
             team_id,
             pane,
             pane_token,
@@ -276,6 +278,10 @@ impl TeamRequest {
             answer,
             _wait_permit: None,
         }
+    }
+
+    pub fn gate_open(&self) -> Option<&str> {
+        self.gate_open.as_deref()
     }
 
     fn with_wait_permit(mut self, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
@@ -832,6 +838,7 @@ pub fn router(state: BridgeState) -> Router {
         // second listener for a second protocol would be a second secret to
         // keep and a second port to explain.
         .route("/agent-teams", post(receive_team_command))
+        .route("/gate-sessions/open", post(receive_gate_open))
         // The browser road. Same server, same token, same reasons — and no
         // team headers, because a browser pane belongs to the window rather
         // than to any one team.
@@ -1037,6 +1044,55 @@ async fn receive_team_command(State(state): State<BridgeState>, request: Request
         // finish. Its outcome is unknown to this layer; a retry protocol must
         // reconcile it rather than infer failure from the timeout.
         Err(_) => refused("tmux: timed out waiting for the window\n"),
+    }
+}
+
+async fn receive_gate_open(State(state): State<BridgeState>, request: Request) -> Response {
+    let (team, pane, capability) = {
+        let headers = request.headers();
+        let text = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string()
+        };
+        (
+            text(TEAM_ID_HEADER),
+            text(TEAM_PANE_HEADER),
+            text(TEAM_TOKEN_HEADER),
+        )
+    };
+    if team.is_empty() || pane.is_empty() || capability.is_empty() {
+        return refused("authority_unavailable: native gate owner");
+    }
+    let Ok(permit) = Arc::clone(&state.team_bodies).try_acquire_owned() else {
+        return (StatusCode::TOO_MANY_REQUESTS, TEAM_BUSY_MESSAGE).into_response();
+    };
+    let body = match axum::body::to_bytes(request.into_body(), MAX_HOOK_BODY_BYTES).await {
+        Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
+            Ok(value) => value,
+            Err(_) => return refused("invalid_request: native gate declaration"),
+        },
+        Err(_) => return refused("invalid_request: native gate declaration"),
+    };
+    let (answer, wait) = tokio::sync::oneshot::channel();
+    let mut request = TeamRequest::new(
+        team,
+        pane,
+        capability,
+        vec!["native-gate-open".into()],
+        answer,
+    );
+    request.gate_open = Some(body);
+    if state.teams.try_send(request).is_err() {
+        return (StatusCode::SERVICE_UNAVAILABLE, TEAM_CLOSED_MESSAGE).into_response();
+    }
+    drop(permit);
+    match tokio::time::timeout(TEAM_DEADLINE, wait).await {
+        Ok(Ok(answer)) if answer.exit_code == 0 => (StatusCode::OK, answer.stdout).into_response(),
+        Ok(Ok(answer)) => refused(answer.stderr),
+        _ => refused("authority_unavailable: native gate owner unavailable"),
     }
 }
 

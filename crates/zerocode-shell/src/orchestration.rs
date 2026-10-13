@@ -228,7 +228,7 @@ struct PaneReconciler {
 /// Named fields rather than a tuple, so a road reads `held.actor` and not a
 /// position it has to look up.
 struct RuntimeSeat {
-    actor: RuntimeActor,
+    actor: Arc<RuntimeActor>,
     overrides: LiveOverrides,
     cache: LiveLedgerCache,
     board: std::sync::RwLock<Arc<BoardLedgerSnapshot>>,
@@ -2863,7 +2863,7 @@ fn install_runtime(actor: RuntimeActor, overrides: LiveOverrides, usage: UsageSo
     *runtime_cell()
         .lock()
         .unwrap_or_else(|held| held.into_inner()) = Some(Arc::new(RuntimeSeat {
-        actor,
+        actor: Arc::new(actor),
         overrides,
         cache: Arc::new(Mutex::new(LedgerCache::default())),
         board: std::sync::RwLock::default(),
@@ -9619,6 +9619,41 @@ fn read_receipt_text(path: &str) -> Option<String> {
         .read_to_string(&mut text)
         .ok()?;
     Some(text)
+}
+
+pub(super) fn open_gate_session(
+    host: &dyn Host,
+    team: &str,
+    pane: &str,
+    capability: &str,
+    body: &str,
+) -> zerocode_hookd::TeamAnswer {
+    let result = runtime().ok_or("authority_unavailable").and_then(|held| {
+        let caller = crate::agent_teams::teams()
+            .get(team)
+            .and_then(|team| team.term_of(pane))
+            .and_then(|term| host.actor_for(term));
+        zerocode_orchestrator::runtime_actor::gate_session::open_native(
+            &held.actor,
+            team,
+            pane,
+            capability,
+            caller,
+            body,
+        )
+    });
+    match result {
+        Ok(value) => zerocode_hookd::TeamAnswer {
+            stdout: value.to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        },
+        Err(code) => zerocode_hookd::TeamAnswer {
+            stdout: String::new(),
+            stderr: format!("{code}: native gate session refused"),
+            exit_code: 1,
+        },
+    }
 }
 
 fn run_seated(

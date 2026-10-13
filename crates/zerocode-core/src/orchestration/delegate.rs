@@ -154,6 +154,7 @@ pub(super) fn plan(
         now_ms,
         Some(actor),
         &super::evidence::ReceiptFiles::default(),
+        None,
     );
     let mut decided = match started {
         Ok(decided) if decided.reply.exit_code == 0 => decided,

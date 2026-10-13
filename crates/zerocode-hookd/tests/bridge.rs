@@ -50,6 +50,100 @@ fn team_post(body: impl Into<String>) -> Request<Body> {
         .expect("team request")
 }
 
+#[tokio::test]
+async fn gate_open_keeps_the_native_request_separate_from_general_commands() {
+    let (state, _events, mut teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let declaration = r#"{"intent":{"version":1},"manifest":"fixture manifest bytes"}"#;
+    let mut request = team_post(declaration);
+    *request.uri_mut() = "/gate-sessions/open".parse().unwrap();
+    let pending = tokio::spawn(router(state).oneshot(request));
+    let request = timeout(Duration::from_secs(2), teams.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.gate_open(), Some(declaration));
+    assert_eq!(request.argv, ["native-gate-open"]);
+    assert_eq!(request.team_id, "team-test");
+    assert_eq!(request.pane, "%1");
+    assert_eq!(request.pane_token, "pane-token");
+    request
+        .answer
+        .send(zerocode_hookd::TeamAnswer {
+            stdout: r#"{"ok":true,"job":"gj-fixture","port":12345}"#.into(),
+            stderr: String::new(),
+            exit_code: 0,
+        })
+        .unwrap();
+    let reply = timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(reply.into_body(), 4096).await.unwrap();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(text.contains("gj-fixture"));
+    assert!(!text.contains("pane-token"));
+}
+
+#[tokio::test]
+async fn gate_open_refuses_missing_authority_and_oversized_bodies_before_dispatch() {
+    let (state, _events, mut teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(state);
+    for missing in [
+        HOOK_TOKEN_HEADER,
+        zerocode_hookd::TEAM_ID_HEADER,
+        zerocode_hookd::TEAM_PANE_HEADER,
+        zerocode_hookd::TEAM_TOKEN_HEADER,
+    ] {
+        let mut request = team_post("{}");
+        *request.uri_mut() = "/gate-sessions/open".parse().unwrap();
+        request.headers_mut().remove(missing);
+        let reply = service.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            reply.status(),
+            if missing == HOOK_TOKEN_HEADER {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::CONFLICT
+            }
+        );
+        assert!(teams.try_recv().is_err());
+    }
+    let mut request = team_post("x".repeat(MAX_HOOK_BODY_BYTES + 1));
+    *request.uri_mut() = "/gate-sessions/open".parse().unwrap();
+    assert_eq!(
+        service.oneshot(request).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    assert!(teams.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_general_team_command_cannot_set_the_native_gate_request_context() {
+    let (state, _events, mut teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let pending = tokio::spawn(router(state).oneshot(team_post("native-gate-open\u{1f}{}\u{1f}")));
+    let request = timeout(Duration::from_secs(2), teams.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(request.gate_open().is_none());
+    request
+        .answer
+        .send(zerocode_hookd::TeamAnswer {
+            stdout: String::new(),
+            stderr: "unknown verb".into(),
+            exit_code: 1,
+        })
+        .unwrap();
+    let reply = timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::CONFLICT);
+}
+
 struct NeverTeamBody {
     polled: Arc<AtomicUsize>,
     seen: bool,

@@ -24,6 +24,8 @@ use crate::effect_journal::{
 };
 use crate::workflow_store::{StoreHold, WorkflowStore};
 use zerocode_core::ProviderSession;
+
+pub mod gate_session;
 use zerocode_core::agent_teams::{Effect, Team};
 use zerocode_core::orchestration::{
     Decided, Launcher, Ledger, LedgerProjectionV1, MAX_LIST, MAX_NAME, MAX_PROSE,
@@ -88,6 +90,8 @@ pub struct PlanCommand {
     handover: Option<Box<zerocode_core::orchestration::HandoverPlan>>,
     worker_incarnation: Option<zerocode_core::agent_teams::PaneIncarnation>,
     actor: Option<String>,
+    gate_scope: Option<Box<zerocode_core::orchestration::gate_reuse::JobScope>>,
+    gate_context: Option<zerocode_core::orchestration::gate_reuse::JobContext>,
     now_ms: i64,
     /// The receipt files the window read for the verb's named evidence, read
     /// before the actor is asked and judged by the plan (t-26587). Empty for
@@ -128,6 +132,8 @@ impl PlanCommand {
             handover: None,
             worker_incarnation: None,
             actor,
+            gate_scope: None,
+            gate_context: None,
             now_ms,
             receipts: Default::default(),
         };
@@ -366,6 +372,7 @@ struct PendingEffect {
 
 /// One caller request. Payload bytes remain opaque to this crate.
 pub enum RuntimeRequest {
+    GateSession(gate_session::Request),
     /// Show me the ledger.
     View,
     /// Carry out one verb.
@@ -502,7 +509,10 @@ pub enum RuntimeRequest {
         now_ms: i64,
     },
     /// Workers whose live panes the host can see again.
-    PanesSeen { workers: Vec<String>, now_ms: i64 },
+    PanesSeen {
+        workers: Vec<String>,
+        now_ms: i64,
+    },
     /// What the window's reclaimer found in a dead worker's checkout. Facts
     /// only: whether that resolves the hold the ledger opened at the death
     /// or tells the coordinator is the ledger's call.
@@ -527,10 +537,15 @@ pub enum RuntimeRequest {
     /// The beat's retention sweep — give up what a finished run no longer
     /// has to cost. Carries only a clock, because the policy and the last
     /// sweep's stamp are the ledger's own.
-    RetentionSweep { now_ms: i64 },
+    RetentionSweep {
+        now_ms: i64,
+    },
     /// A person's hand landed real keys in a terminal — the fifth host
     /// fact. From that moment the pane is theirs, durably.
-    PaneTakenOver { term: u32, now_ms: i64 },
+    PaneTakenOver {
+        term: u32,
+        now_ms: i64,
+    },
     /// A hook report said a seat's composer holds a question for the
     /// person since `since_ms` (t-6740): every asker waiting on that seat
     /// is told, once per wait.
@@ -553,7 +568,9 @@ pub enum RuntimeRequest {
     /// The window is on its way out and every pane goes with it (t-3058):
     /// seated workers sleep now, before their panes' own deaths can settle
     /// them.
-    WindowExiting { now_ms: i64 },
+    WindowExiting {
+        now_ms: i64,
+    },
     /// The window resumed a conversation into a terminal: the checkout it
     /// stands in, the agent, and the provider session id — the witness a
     /// sleeper is seated again by (t-3058). The seat is resolved from the
@@ -568,10 +585,16 @@ pub enum RuntimeRequest {
     /// The pane the window seated a sleeper in never started (t-7812): the
     /// sleeper goes back to sleep. A host fact, like the one above, and the
     /// actor proves the seat is not open before it believes it.
-    ResumedPaneNeverStarted { worker: String, now_ms: i64 },
+    ResumedPaneNeverStarted {
+        worker: String,
+        now_ms: i64,
+    },
     /// A sleeper the grace ran out on: its attempt ends and its death is
     /// announced with the dispatch id a replacement needs (t-3058).
-    SleeperExpired { worker: String, now_ms: i64 },
+    SleeperExpired {
+        worker: String,
+        now_ms: i64,
+    },
     /// A sleeper that cannot come back, ended and announced with the reason
     /// the moment that is known rather than at the grace (t-7812).
     SleeperUnrecoverable {
@@ -679,7 +702,10 @@ pub enum RuntimeRequest {
     /// A pane the plan asked for never opened: the worker row it minted
     /// goes back, durably — the third host fact, and the rollback half of
     /// the effect round trip.
-    SeatNeverOpened { worker: String, now_ms: i64 },
+    SeatNeverOpened {
+        worker: String,
+        now_ms: i64,
+    },
     /// One federation call, home or worker-server side — a single statement
     /// because the ten calls share one shape: ledger law in, durable iff it
     /// moved, and the transport stays outside the actor entirely.
@@ -688,7 +714,10 @@ pub enum RuntimeRequest {
     /// transaction. The digests inside arrived from the lane that will walk
     /// the effect; this door only brackets them with authority and
     /// revision.
-    PrepareEffect { request: EffectRequest, now_ms: i64 },
+    PrepareEffect {
+        request: EffectRequest,
+        now_ms: i64,
+    },
     /// Keep this standing order current through the split lease's host action.
     HandoverSplit {
         prepared: Box<zerocode_core::orchestration::PreparedWorkerStart>,
@@ -706,14 +735,19 @@ pub enum RuntimeRequest {
     ///
     /// Called once at boot, AFTER recovery has settled any in-flight effect:
     /// the recovery fence guards this door like every other mutation.
-    WindowRestarted { now_ms: i64 },
+    WindowRestarted {
+        now_ms: i64,
+    },
     /// A leader's terminal closed, taking its whole team with it: settle the
     /// team's workers and put its standing orders down. The seat itself goes
     /// through [`TerminalGone`]; this carries the dissolution, which the
     /// table cannot answer for once the team is dropped from it.
     ///
     /// [`TerminalGone`]: RuntimeRequest::TerminalGone
-    TeamDissolved { team: String, now_ms: i64 },
+    TeamDissolved {
+        team: String,
+        now_ms: i64,
+    },
     /// A `check --wait` woke up: look once more, and if something arrived,
     /// take the delivery and remember the answer under `receipt` — one
     /// transaction, so a second verb cannot land between the answer and the
@@ -727,7 +761,10 @@ pub enum RuntimeRequest {
     /// happened — the close that ended a terminal, the wait that timed out
     /// on its own empty answer. The decision is one this actor handed out;
     /// the shell brings it back once the world matches it.
-    ServeReceipt { decided: Box<Decided>, now_ms: i64 },
+    ServeReceipt {
+        decided: Box<Decided>,
+        now_ms: i64,
+    },
     HandoverRevoked {
         run: String,
         handover: String,
@@ -746,7 +783,10 @@ pub enum RuntimeRequest {
     },
     /// A planned release could not prove its caller or target. Settle only
     /// that reservation and file its retry answer in the same transaction.
-    ReleaseUnobserved { decided: Box<Decided>, now_ms: i64 },
+    ReleaseUnobserved {
+        decided: Box<Decided>,
+        now_ms: i64,
+    },
     /// A release read its screen (or could not): write the worker's end.
     /// `screen: Some` is the shell saying the read completed against the
     /// same incarnation it started on; `None` is `release_unknown` — asked
@@ -771,7 +811,9 @@ pub enum RuntimeRequest {
     /// bring the OUTCOME, and the actor pairs it with the permit it already
     /// holds. This is the door that lifts the recovery fence; without it a
     /// window that died mid-effect would refuse every mutation forever.
-    SettleRecovered { settlement: EffectSettlement },
+    SettleRecovered {
+        settlement: EffectSettlement,
+    },
 }
 
 impl std::fmt::Debug for RuntimeRequest {
@@ -779,6 +821,7 @@ impl std::fmt::Debug for RuntimeRequest {
         match self {
             Self::View => formatter.write_str("RuntimeRequest::View"),
             Self::Plan(command) => command.fmt(formatter),
+            Self::GateSession(request) => request.fmt(formatter),
             Self::TerminalGone {
                 term,
                 screen,
@@ -1330,6 +1373,10 @@ pub enum FederationAnswer {
 
 #[derive(Debug)]
 pub enum RuntimeReply {
+    GateSession {
+        value: serde_json::Value,
+        revision: u64,
+    },
     /// The verb was carried out AND made durable. A decision that could not be
     /// written never becomes one of these.
     Planned {
@@ -1390,6 +1437,7 @@ impl RuntimeReply {
     pub const fn revision(&self) -> u64 {
         match self {
             Self::Planned { revision, .. }
+            | Self::GateSession { revision, .. }
             | Self::ReseatPlanned { revision, .. }
             | Self::Settled { revision, .. }
             | Self::Effect { revision, .. }
@@ -1539,6 +1587,8 @@ pub enum RuntimeError {
     /// probe which of the three it guessed.
     #[error("stale or unauthorized agent pane")]
     UnauthorizedSeat,
+    #[error("{0}")]
+    GateJobRefused(String),
     #[error("the seat this worker sits in is open on the host")]
     SeatStillOpen,
     #[error("the runtime revision is stale or non-monotonic")]
@@ -1857,6 +1907,63 @@ impl RuntimeActor {
     pub fn plan(&self, command: PlanCommand) -> Result<(Box<Decided>, u64), RuntimeError> {
         match self.request(RuntimeRequest::Plan(command))? {
             RuntimeReply::Planned { decided, revision } => Ok((decided, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    pub fn open_gate_session(
+        &self,
+        owner: PlanCommand,
+        intent: zerocode_core::orchestration::gate_reuse::JobIntent,
+        manifest: String,
+        bootstrap: zerocode_core::orchestration::gate_reuse::BootstrapIdentity,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        self.gate_session_request(gate_session::Request::Open {
+            owner: Box::new(owner),
+            intent: Box::new(intent),
+            manifest,
+            bootstrap: Box::new(bootstrap),
+        })
+    }
+
+    pub fn bind_gate_session(
+        &self,
+        job: String,
+        capability: String,
+        now_ms: i64,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        self.gate_session_request(gate_session::Request::Bind {
+            job,
+            capability,
+            now_ms,
+        })
+    }
+
+    pub fn command_gate_session(
+        &self,
+        job: String,
+        body: serde_json::Value,
+        now_ms: i64,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        self.gate_session_request(gate_session::Request::Command { job, body, now_ms })
+    }
+
+    pub fn gate_session_alive(&self, job: String, now_ms: i64) -> Result<bool, RuntimeError> {
+        self.gate_session_request(gate_session::Request::Alive { job, now_ms })
+            .map(|value| value["ok"] == true)
+    }
+
+    pub fn close_gate_session(&self, job: String) -> Result<(), RuntimeError> {
+        self.gate_session_request(gate_session::Request::Close { job })
+            .map(|_| ())
+    }
+
+    fn gate_session_request(
+        &self,
+        request: gate_session::Request,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        match self.request(RuntimeRequest::GateSession(request))? {
+            RuntimeReply::GateSession { value, .. } => Ok(value),
             _ => Err(RuntimeError::AuthorityRejected),
         }
     }
@@ -2924,6 +3031,7 @@ impl Drop for RuntimeState {
 }
 
 struct RuntimeState {
+    gate_jobs: gate_session::Jobs,
     journal: EffectJournal,
     lease: AuthorityLease,
     store: WorkflowStore,
@@ -3131,6 +3239,7 @@ impl RuntimeState {
             return Err(RuntimeError::MultipleInFlightEffects);
         }
         Ok(Self {
+            gate_jobs: Default::default(),
             journal,
             lease,
             store,
@@ -3277,7 +3386,12 @@ impl RuntimeState {
         self.verify_authority()?;
         match request {
             RuntimeRequest::View => Ok(RuntimeReply::View(self.image())),
-            RuntimeRequest::Plan(command) => self.carry_out(command),
+            RuntimeRequest::Plan(command) => {
+                let reply = self.carry_out(command);
+                self.prune_gate_jobs();
+                reply
+            }
+            RuntimeRequest::GateSession(request) => self.gate_request(request),
             RuntimeRequest::TerminalGone {
                 term,
                 screen,
@@ -5458,6 +5572,7 @@ impl RuntimeState {
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
+        self.gate_jobs.clear();
         let swept = self.ledger.window_restarted(now_ms);
         /* Asked of the sweep, not recomputed from its counts. A restart that
          * ended no attempt and put nothing to sleep still converges pending
@@ -5686,13 +5801,27 @@ impl RuntimeState {
         let ledger = &mut self.ledger;
         let launcher = self.launcher.as_ref();
         let mut planned: Option<Decided> = None;
+        let mut gate_refusal = None;
         self.panes.with_pane_authority(
             command.team(),
             command.pane(),
             command.presented(),
             &mut |team| {
                 if let Some(team) = team {
-                    planned = Some(zerocode_core::orchestration::plan_with_receipts(
+                    if let Some(scope) = &command.gate_scope
+                        && let Err(reason) = zerocode_core::orchestration::gate_reuse::validate_job(
+                            ledger,
+                            team,
+                            command.pane(),
+                            command.actor().unwrap_or_default(),
+                            scope,
+                            command.now_ms(),
+                        )
+                    {
+                        gate_refusal = Some(reason);
+                        return;
+                    }
+                    planned = Some(zerocode_core::orchestration::plan_with_gate_job(
                         ledger,
                         team,
                         launcher,
@@ -5701,10 +5830,14 @@ impl RuntimeState {
                         command.now_ms(),
                         command.actor(),
                         command.receipts(),
+                        command.gate_context.as_ref(),
                     ));
                 }
             },
         );
+        if let Some(reason) = gate_refusal {
+            return Err(RuntimeError::GateJobRefused(reason));
+        }
         let Some(mut decided) = planned else {
             return Err(RuntimeError::UnauthorizedSeat);
         };
@@ -6025,6 +6158,8 @@ mod tests {
     #[cfg(unix)]
     mod outside_reader;
 
+    #[cfg(unix)]
+    mod gate_reuse;
     /// t-34501 stage 3 (t-42447): the window's evidence reaches the ledger through the actor.
     mod land_check;
 
