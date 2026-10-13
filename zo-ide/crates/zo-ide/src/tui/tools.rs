@@ -1196,7 +1196,9 @@ fn command_text_rows(rows: Vec<Line>) -> Vec<Line> {
 /// The runtime hands the cell the envelope pretty-printed and capped
 /// (`format_generic_result`), so a long one arrives cut inside its text or an
 /// image's data; it is closed where the cap left it ([`closed_json`]) and
-/// read as far as it goes, the cap's own `… +1 lines` after it.
+/// read as far as it goes, the cap's own `… +1 lines` after it. Its last item
+/// may then lack its `type`, or its text: an untyped one with text shows the
+/// text, and one with neither is left out.
 fn mcp_envelope_text(output: &str) -> Option<String> {
     let (printed, cut) = match output.strip_suffix(SOURCE_TRUNCATION_NOTE) {
         Some(printed) => (printed.trim_end_matches('\n'), true),
@@ -1212,18 +1214,29 @@ fn mcp_envelope_text(output: &str) -> Option<String> {
     };
     let items = envelope.get("content")?.as_array()?;
     let mut said = Vec::with_capacity(items.len() + 1);
-    for item in items {
-        said.push(match item.get("type")?.as_str()? {
-            "text" => item.get("text")?.as_str()?,
-            "image" => super::strings::MCP_IMAGE_ITEM,
-            _ => super::strings::MCP_RESOURCE_ITEM,
-        });
+    for (index, item) in items.iter().enumerate() {
+        let text = item.get("text").and_then(serde_json::Value::as_str);
+        let word = match item.get("type").and_then(serde_json::Value::as_str) {
+            Some("text") => text,
+            Some("image") => Some(super::strings::MCP_IMAGE_ITEM),
+            Some(_) => Some(super::strings::MCP_RESOURCE_ITEM),
+            None => text.filter(|_| cut),
+        };
+        match word {
+            Some(word) => said.push(word),
+            // The cap cut the last item before what it needs was printed —
+            // keys print in their own order, `text` or `data` may come first.
+            None if cut && index + 1 == items.len() => {}
+            None => return None,
+        }
+    }
+    // A cut envelope always says it was cut, even when nothing before the cut
+    // could be shown.
+    if cut {
+        said.push(SOURCE_TRUNCATION_NOTE);
     }
     if said.iter().all(|text| text.trim().is_empty()) {
         return Some(String::new());
-    }
-    if cut {
-        said.push(SOURCE_TRUNCATION_NOTE);
     }
     Some(said.join("\n"))
 }
