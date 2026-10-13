@@ -2664,6 +2664,28 @@ mod tests {
         }
     }
 
+    /// A data root whose selected Codex account is a managed one — the road on
+    /// which the launch door takes the mirror's launch lease.
+    fn select_a_managed_codex_account(root: &Path) {
+        let managed =
+            crate::codex_accounts::account_home(root, "account-a").expect("managed account home");
+        std::fs::create_dir_all(&managed).expect("managed home");
+        std::fs::write(
+            managed.join(crate::codex_accounts::AUTH_FILE),
+            r#"{"OPENAI_API_KEY":"selected"}"#,
+        )
+        .expect("managed auth");
+        std::fs::write(
+            root.join(crate::codex_accounts::ACCOUNT_STORE_FILE),
+            serde_json::json!({
+                "accounts": [{ "id": "account-a", "home_dir": managed, "added_at": 0 }],
+                "active": "account-a"
+            })
+            .to_string(),
+        )
+        .expect("account store");
+    }
+
     /// A zo pane is an OpenAI consumer, so it gets the same mirror `CODEX_HOME`
     /// (and the same launch lock) a Codex pane gets. Before the provider table
     /// this door answered `agent == "codex"` and handed zo nothing, which is
@@ -2672,23 +2694,7 @@ mod tests {
     fn a_zo_launch_is_handed_the_selected_codex_account_mirror() {
         let root = tempfile::tempdir().expect("local data root");
         let system_home = tempfile::tempdir().expect("system home");
-        let managed = crate::codex_accounts::account_home(root.path(), "account-a")
-            .expect("managed account home");
-        std::fs::create_dir_all(&managed).expect("managed home");
-        std::fs::write(
-            managed.join(crate::codex_accounts::AUTH_FILE),
-            r#"{"OPENAI_API_KEY":"selected"}"#,
-        )
-        .expect("managed auth");
-        std::fs::write(
-            root.path().join(crate::codex_accounts::ACCOUNT_STORE_FILE),
-            serde_json::json!({
-                "accounts": [{ "id": "account-a", "home_dir": managed, "added_at": 0 }],
-                "active": "account-a"
-            })
-            .to_string(),
-        )
-        .expect("account store");
+        select_a_managed_codex_account(root.path());
 
         let (zo, zo_lock) =
             agent_launch_env_with_lock_inner(root.path(), "zo", Some(system_home.path()));
@@ -2714,6 +2720,80 @@ mod tests {
             Some(mirror),
             home_of(&codex),
             "a zo pane and a codex pane were pointed at different accounts"
+        );
+    }
+
+    /// The two orders that met on 2026-10-13, replayed (t-51380): a resume
+    /// holds the Codex launch lease and asks for the team table to open its
+    /// team (`ResumeDoor::prepare` — this door, then `open_team`), while a
+    /// split holds the team table and reaches this door for its agent
+    /// (`TeamWindow::split`, under `run`'s guard or the durable lane's fence).
+    /// That day neither moved again. Both must end.
+    #[test]
+    fn a_split_under_the_team_table_never_waits_for_the_lease_a_resume_holds() {
+        const STUCK: std::time::Duration = std::time::Duration::from_secs(2);
+        let _window = crate::orchestration::tests::the_window();
+        let root = tempfile::tempdir().expect("local data root");
+        let system_home = tempfile::tempdir().expect("system home");
+        select_a_managed_codex_account(root.path());
+        // The resume's lease, where this test can let it go: a deadlock is
+        // broken from here, so no thread outlives the test holding the table.
+        let lease = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (leased, lease_taken) = std::sync::mpsc::channel();
+        let (tabled, table_taken) = std::sync::mpsc::channel::<()>();
+        let (ended, ends) = std::sync::mpsc::channel();
+
+        let resume = {
+            let (root, home) = (root.path().to_path_buf(), system_home.path().to_path_buf());
+            let (lease, ended) = (std::sync::Arc::clone(&lease), ended.clone());
+            std::thread::spawn(move || {
+                let (_, taken) = agent_launch_env_with_lock_inner(&root, "zo", Some(&home));
+                let took = taken.is_some();
+                *lease.lock().unwrap_or_else(|held| held.into_inner()) = taken;
+                let _ = leased.send(took);
+                let _ = table_taken.recv_timeout(STUCK);
+                let table = crate::agent_teams::teams();
+                drop(lease.lock().unwrap_or_else(|held| held.into_inner()).take());
+                drop(table);
+                let _ = ended.send("resume");
+            })
+        };
+        assert_eq!(
+            lease_taken.recv_timeout(STUCK),
+            Ok(true),
+            "the resume never held the launch lease"
+        );
+        let split = {
+            let (root, home) = (root.path().to_path_buf(), system_home.path().to_path_buf());
+            std::thread::spawn(move || {
+                let table = crate::agent_teams::teams();
+                let _ = tabled.send(());
+                let _ = crate::agent_teams::under_team_table(|| {
+                    agent_launch_env_with_lock_inner(&root, "zo", Some(&home))
+                });
+                drop(table);
+                let _ = ended.send("split");
+            })
+        };
+
+        let deadline = std::time::Instant::now() + STUCK;
+        let mut finished = Vec::new();
+        while finished.len() < 2 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match ends.recv_timeout(left) {
+                Ok(road) => finished.push(road),
+                Err(_) => break,
+            }
+        }
+        drop(lease.lock().unwrap_or_else(|held| held.into_inner()).take());
+        resume.join().expect("the resume ends");
+        split.join().expect("the split ends");
+        assert_eq!(
+            finished.len(),
+            2,
+            "a split holding the team table waited for the Codex launch lease while \
+             the resume holding that lease waited for the table — only {finished:?} \
+             ended within {STUCK:?}"
         );
     }
 

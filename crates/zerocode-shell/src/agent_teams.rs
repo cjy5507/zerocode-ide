@@ -70,6 +70,46 @@ pub(crate) fn teams() -> MutexGuard<'static, HashMap<String, Team>> {
     team_table().lock().unwrap_or_else(|held| held.into_inner())
 }
 
+/// The team table for a reader that must not wait on it — the way out
+/// (t-51380). `None` once `patience` has run out with the table held.
+///
+/// On 2026-10-13 a window's exit stood 41 s on this lock, behind a split that
+/// held it while it waited for a file lock nobody was going to release, and
+/// the window was killed for it. A reader with somewhere else to be takes the
+/// table only while it is there to take.
+pub(crate) fn teams_within(
+    patience: std::time::Duration,
+) -> Option<MutexGuard<'static, HashMap<String, Team>>> {
+    let _ = patience;
+    Some(teams())
+}
+
+thread_local! {
+    /// Whether this thread is running a step under the team table
+    /// ([`under_team_table`], t-51380).
+    static UNDER_TEAM_TABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `step` as a step taken while this thread holds the team table — a
+/// split's spawn, under [`run`]'s guard or the durable lane's fence
+/// (t-51380).
+///
+/// A split launches its agent there, and a Codex or zo launch takes the Codex
+/// mirror's launch lease, an operating-system file lock. On 2026-10-13 a
+/// split held the table while it waited for that lease, behind a resume that
+/// held the lease and waited for the table: neither moved again, and with
+/// them the ledger's actor, the pane pump and at last the way out.
+pub(crate) fn under_team_table<R>(step: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            UNDER_TEAM_TABLE.with(|under| under.set(self.0));
+        }
+    }
+    let _restore = Restore(UNDER_TEAM_TABLE.with(|under| under.replace(true)));
+    step()
+}
+
 /// The one static behind [`teams`].
 ///
 /// Split out so the lock itself can be asked a question, not just held. There
@@ -1393,9 +1433,11 @@ pub fn run(
             let _placed = helper
                 .as_deref()
                 .map(|id| SplitHelperAsk::place(&token, id));
-            match host.split(
-                &team_id, leader, from_term, &new_pane, direction, &command, &token,
-            ) {
+            match under_team_table(|| {
+                host.split(
+                    &team_id, leader, from_term, &new_pane, direction, &command, &token,
+                )
+            }) {
                 Some(term) => {
                     team.record_split(&new_pane, term, &from, direction);
                     answer(planned.reply)
@@ -1434,9 +1476,11 @@ pub fn run(
                     "could not mint a capability for the restarted pane",
                 ));
             };
-            match host.split(
-                &team_id, leader, from_term, &held_pane, direction, &command, &token,
-            ) {
+            match under_team_table(|| {
+                host.split(
+                    &team_id, leader, from_term, &held_pane, direction, &command, &token,
+                )
+            }) {
                 Some(term) => {
                     /* The old dispatch is settled BEFORE the seat is re-pointed.
                      *
