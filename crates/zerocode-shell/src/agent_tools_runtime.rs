@@ -805,7 +805,30 @@ impl TeamWindow {
     }
 }
 
+/// The agent a split's command starts, read the way `TeamWindow::split`
+/// reads it — the program a shell line leaves running, else the line's own
+/// program — so its Codex launch lease can be taken before the team table
+/// (t-51380). A command the split resolves otherwise (an empty one runs the
+/// settings' terminal) costs that launch its prepared lease, never a wait.
+fn split_launch_agent(command: &str) -> Option<&'static str> {
+    let words = split_command(command);
+    let spoken = if command_is_shell(&words) {
+        shell_spoken_program(&words)
+    } else {
+        words.first().cloned()
+    };
+    spoken.as_deref().and_then(agent_for_program)
+}
+
 impl agent_teams::Host for TeamWindow {
+    /// The Codex lease a split of `command` will need, taken now — before its
+    /// caller takes the team table (t-51380).
+    fn prepare_launch(&self, command: &str) -> Option<hooks::PreparedLaunch> {
+        let agent = split_launch_agent(command)?;
+        let state = self.app.state::<AppState>();
+        Some(hooks::prepare_launch(state.local_data_root(), agent))
+    }
+
     /// Who the agent in this terminal is, asked by the ledger road under its
     /// own guard. See [`receipt_actor_of`] for why the answer is a digest of
     /// the agent's session and why `None` is a real answer.

@@ -599,18 +599,14 @@ pub(super) fn stage_layouts_file(config_root: &Path) -> PathBuf {
 /// and never a conversation the window cannot place: the workspace is the
 /// one the pane's own hooks named for that conversation, or nothing.
 fn live_zo_panes(state: &AppState) -> Vec<pane_layout::LivePane> {
+    // Without the teammates a teammate would be filed as a tab of its own, so
+    // a team table held past the patience files nothing this time (t-51380).
+    let Some(seated) = seated_teammates() else {
+        return Vec::new();
+    };
     let agents = state.agent_terms().clone();
     let sessions = state.pane_sessions().clone();
     let statuses = state.last_statuses().clone();
-    let seated: std::collections::HashSet<u32> = agent_teams::teams()
-        .values()
-        .flat_map(|team| {
-            team.panes()
-                .filter(|pane| pane.term != team.leader_term)
-                .map(|pane| pane.term)
-                .collect::<Vec<_>>()
-        })
-        .collect();
     let terminals = state.terminals();
     agents
         .into_iter()
@@ -651,6 +647,82 @@ fn live_zo_panes(state: &AppState) -> Vec<pane_layout::LivePane> {
         .collect()
 }
 
+/// Every pane a team seats under its leader — the teammates the exit does not
+/// file as tabs of their own — or `None` when the team table stayed held past
+/// [`EXIT_LOCK_PATIENCE`] (t-51380).
+pub(super) fn seated_teammates() -> Option<std::collections::HashSet<u32>> {
+    let teams = agent_teams::teams_within(EXIT_LOCK_PATIENCE)?;
+    Some(
+        teams
+            .values()
+            .flat_map(|team| {
+                team.panes()
+                    .filter(|pane| pane.term != team.leader_term)
+                    .map(|pane| pane.term)
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+    )
+}
+
+/// How long the way out waits for the screens (t-51380). The goodbye before
+/// it waits at most [`crate::exit_runtime::LEDGER_PATIENCE`] (1.5 s), and the two
+/// together stay under the hang watchdog's first threshold (2 s).
+const EXIT_CAPTURE_PATIENCE: Duration = Duration::from_millis(300);
+
+/// How long the capture waits for any one lock on its road — the team table, a
+/// pane's terminal — before it keeps what the file already holds (t-51380).
+/// The pump holds a pane for one round's drain, [`crate::DRAIN_BUDGET`] (8 ms).
+const EXIT_LOCK_PATIENCE: Duration = Duration::from_millis(50);
+
+/// The capture, run on the way out and waited for at most `patience`
+/// (t-51380). `true` when it finished in time.
+///
+/// `capture` is told through `wanted` whether the way out still waits for it.
+/// A capture that answers past the patience must not write: the panes it reads
+/// are being ended by then, and a pane read on its way out is not the screen
+/// it last showed.
+pub(super) fn exit_capture_within(
+    patience: Duration,
+    capture: impl FnOnce(&dyn Fn() -> bool) + Send + 'static,
+) -> bool {
+    let wanted = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let asked = Arc::clone(&wanted);
+    let (finished, answered) = std::sync::mpsc::sync_channel(1);
+    // A thread that cannot start leaves the file as the window's own saves
+    // left it: its sender goes with it, and the wait below ends at once.
+    let _ = std::thread::Builder::new()
+        .name(EXIT_CAPTURE_THREAD.to_string())
+        .spawn(move || {
+            capture(&|| asked.load(std::sync::atomic::Ordering::SeqCst));
+            let _ = finished.send(());
+        });
+    let done = answered.recv_timeout(patience).is_ok();
+    wanted.store(false, std::sync::atomic::Ordering::SeqCst);
+    done
+}
+
+/// The capture's thread, by name, so a sample of a stuck exit says whose wait
+/// it is.
+const EXIT_CAPTURE_THREAD: &str = "zerocode-exit-screens";
+
+/// One pane's screen for the exit's capture, or `None` for a terminal that is
+/// already gone.
+///
+/// The pane's lock is waited for at most [`EXIT_LOCK_PATIENCE`] (t-51380). A
+/// pane busy past it is still standing, and an empty screen is how
+/// `pane_layout::capture_exit` keeps the one the file already holds for it.
+pub(super) fn exit_screen(terminals: &TerminalRegistry, term: TermId) -> Option<String> {
+    let held = terminals.handle(term)?;
+    let Some(pty) = terminal_registry::lock_pty_within(&held, EXIT_LOCK_PATIENCE) else {
+        return Some(String::new());
+    };
+    Some(zerocode_pty::serialize_tail(
+        pty.terminal().grid(),
+        zerocode_pty::SCROLLBACK_BUFFER_BYTE_LIMIT,
+    ))
+}
+
 /// Write what every remembered leaf's screen holds, on the way out.
 ///
 /// Orca's shutdown capture (`captureTerminalShutdownLayout`,
@@ -661,26 +733,30 @@ fn live_zo_panes(state: &AppState) -> Vec<pane_layout::LivePane> {
 /// somebody else's shell. Buffers already stored for panes this window
 /// never opened stay: their worktrees were not visited, and their last
 /// screens are still the truth about them.
+///
+/// The main thread runs this from the exit event and waits for it no longer
+/// than [`EXIT_CAPTURE_PATIENCE`] (t-51380). Every lock on its road — the
+/// window's pane maps, the team table, the file's writer, each pane's
+/// terminal — can be held by a thread that is itself stuck: on 2026-10-13 the
+/// team table was, and the way out stood on it for 41 s until the window was
+/// killed. A capture that does not finish in time writes nothing, and the
+/// file stays as the window's own saves left it.
 pub(super) fn capture_scrollback_at_exit(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    let file = pane_layouts_file(state.config_root());
-    let live = live_zo_panes(&state);
-    let terminals = state.terminals();
-    // Through the file's one writer (t-7812 D) — the exit's own snapshot, so
-    // it is the one write a leaving window still makes.
-    let _ = pane_layout::rewrite(&file, |layouts| {
-        // First the zo panes no saved tab holds (t-12063), so their screens
-        // are captured below with everyone else's.
-        pane_layout::file_unheld(layouts, live);
-        // Every leaf's screen, and which tabs were standing (t-14036).
-        pane_layout::capture_exit(layouts, |term| {
-            let held = terminals.handle(term)?;
-            let pty = lock_pty(&held);
-            Some(zerocode_pty::serialize_tail(
-                pty.terminal().grid(),
-                zerocode_pty::SCROLLBACK_BUFFER_BYTE_LIMIT,
-            ))
+    let app = app.clone();
+    let _ = exit_capture_within(EXIT_CAPTURE_PATIENCE, move |wanted| {
+        let state = app.state::<AppState>();
+        let file = pane_layouts_file(state.config_root());
+        let live = live_zo_panes(&state);
+        let terminals = state.terminals();
+        // Through the file's one writer (t-7812 D) — the exit's own snapshot,
+        // so it is the one write a leaving window still makes.
+        let _ = pane_layout::rewrite(&file, |layouts| {
+            // First the zo panes no saved tab holds (t-12063), so their
+            // screens are captured below with everyone else's.
+            pane_layout::file_unheld(layouts, live);
+            // Every leaf's screen, and which tabs were standing (t-14036).
+            pane_layout::capture_exit(layouts, |term| exit_screen(terminals, term));
+            wanted()
         });
-        true
     });
 }
