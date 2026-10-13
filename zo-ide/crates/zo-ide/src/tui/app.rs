@@ -490,6 +490,14 @@ enum PublishedActivity {
     Value(Option<events::ActivityCard>),
 }
 
+/// What history took last — a tool cell's rows, or any other cell's
+/// ([`Ui::commit_tool_rows`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryTail {
+    ToolCell,
+    Other,
+}
+
 struct Ui {
     flags: RenderFlags,
     painter: Painter<std::io::Stdout>,
@@ -548,6 +556,10 @@ struct Ui {
     fold_mode: FoldMode,
     /// 마지막으로 돌린 커밋 애니메이션 틱의 시각.
     last_commit: Option<Instant>,
+    /// Whether the newest rows history took were a tool cell's: the next tool
+    /// cell joins them without its gap row, so a run of calls with nothing
+    /// said between them is one block (t-51389). Any other cell ends the run.
+    history_tail: HistoryTail,
     /// 턴이 끝나면 풀 일.
     deferred: Vec<Deferred>,
     status: Option<Status>,
@@ -1828,12 +1840,27 @@ impl Ui {
         if lines.is_empty() {
             return;
         }
+        self.history_tail = HistoryTail::Other;
         if let Some(candidate) = self.quiet_candidate.as_mut() {
             candidate.extend_from_slice(lines);
             return;
         }
         self.commit_quiet_loop_cell();
         self.pending_history.extend_from_slice(lines);
+    }
+
+    /// A committed tool cell into history. Right after another tool cell it
+    /// leaves off the gap row it opens with ([`ToolGroup::committed`]).
+    fn commit_tool_rows(&mut self, mut lines: Vec<Line>) {
+        if self.history_tail == HistoryTail::ToolCell
+            && lines.first().is_some_and(|line| *line == Line::empty())
+        {
+            lines.remove(0);
+        }
+        self.history(&lines);
+        if !lines.is_empty() {
+            self.history_tail = HistoryTail::ToolCell;
+        }
     }
 
     fn begin_quiet_candidate(&mut self) {
@@ -1872,6 +1899,7 @@ impl Ui {
         let Some(cell) = self.quiet_loop_cell.take() else {
             return;
         };
+        self.history_tail = HistoryTail::Other;
         self.pending_history.push(Line::empty());
         self.pending_history.extend(cell.lines);
     }
@@ -1942,6 +1970,92 @@ impl Ui {
         self.record_transcript(ReplayItem::User(text.to_string()));
         let cell = cells::user_cell(text, width);
         self.history(&cell);
+    }
+
+    /// What the person said — or a peer, through `SendMessage` — drawn the one
+    /// way the live steer echo and a resumed transcript both draw it. A peer's
+    /// words are not the person's: they wear the envelope cell, never the
+    /// tinted user band.
+    fn said(&mut self, text: &str) {
+        match runtime::parse_peer_message(text) {
+            Some(peer) => {
+                let cell = cells::peer_message_cell(peer.from, peer.body, self.width());
+                self.history(&cell);
+            }
+            None => self.user_cell(text),
+        }
+    }
+
+    /// A resumed session's earlier conversation, drawn through the handlers
+    /// the live stream feeds — `App::replay_history` hands it the items.
+    fn replay(&mut self, items: Vec<ReplayItem>) {
+        let ids = BlockIdGen::default();
+        for (index, item) in items.into_iter().enumerate() {
+            match item {
+                ReplayItem::User(text) => {
+                    // As the live echo does: the finished cell goes first.
+                    self.close_segment();
+                    self.flush_tool_cell();
+                    self.said(&text);
+                }
+                ReplayItem::Assistant(text) => self.block(RenderBlock::TextDelta {
+                    id: ids.next(),
+                    text,
+                    done: true,
+                }),
+                ReplayItem::AgentResult {
+                    label,
+                    status,
+                    summary,
+                    body,
+                } => self.block(RenderBlock::AgentResult {
+                    id: ids.next(),
+                    label,
+                    status,
+                    summary,
+                    body,
+                }),
+                ReplayItem::ToolCall {
+                    name,
+                    input,
+                    output,
+                    is_error,
+                } => {
+                    // 라이브 파서와 같은 폴백이다 — 입력이 JSON 이 아니면 그
+                    // 문자열 자체를 값으로 삼는다(`parser.rs` 의
+                    // `unwrap_or(Value::String(partial_json.clone()))`).
+                    let parsed = serde_json::from_str(&input)
+                        .unwrap_or(serde_json::Value::String(input));
+                    let preview = preview_tool_input(&name, &parsed);
+                    let summary = preview_summary(&preview);
+                    // 트랜스크립트의 호출 id 는 여기 오지 않는다(재생 항목은
+                    // 이름·입력·출력만 든다). 묶임 판정은 **이 셀 안에서만**
+                    // 쓰이므로 재생 순번으로 유일하게 만든다.
+                    let tool_call_id = ToolCallId(format!("replay-{index}"));
+                    self.block(RenderBlock::ToolCall {
+                        id: ids.next(),
+                        tool_call_id: tool_call_id.clone(),
+                        name: name.clone(),
+                        summary,
+                        preview,
+                        status: ToolCallStatus::Running,
+                    });
+                    if let Some(output) = output {
+                        let body = format_tool_result_from_raw(&name, &output, is_error);
+                        self.block(RenderBlock::ToolResult {
+                            id: ids.next(),
+                            tool_call_id,
+                            is_error,
+                            body,
+                        });
+                    }
+                }
+            }
+        }
+        // 턴 끝과 같은 마무리 — 열린 스트림을 확정하고 아직 도는 도구 셀을
+        // 접는다(결과 없이 끝난 호출은 codex `mark_failed` 처럼 닫힌다).
+        self.close_segment();
+        self.retire_tool_cell();
     }
 
     /// Codex's Ctrl/Alt-V path: clipboards can offer a Finder file list or
@@ -3947,7 +4061,7 @@ impl Ui {
                 let mut group = ToolGroup::new(ToolCall::new(AGENT_RESULT_ID.to_string(), kind));
                 group.complete(AGENT_RESULT_ID, outcome);
                 let cell = group.committed(width, &mut self.folds, self.fold_mode);
-                self.history(&cell);
+                self.commit_tool_rows(cell);
             }
             RenderBlock::System { level, text, .. } => {
                 if let Some(steer) = text.strip_prefix(runtime::STEERING_ECHO_PREFIX) {
@@ -3958,15 +4072,7 @@ impl Ui {
                     self.close_segment();
                     self.flush_tool_cell();
                     self.pending_input.acknowledge_steer(steer);
-                    // A peer's words (`SendMessage`) are not the person's: they
-                    // wear the envelope cell, never the tinted user band.
-                    match runtime::parse_peer_message(steer) {
-                        Some(peer) => {
-                            let cell = cells::peer_message_cell(peer.from, peer.body, width);
-                            self.history(&cell);
-                        }
-                        None => self.user_cell(steer),
-                    }
+                    self.said(steer);
                 } else if let Some(checks) = text
                     .strip_prefix(runtime::COMPLETION_RECEIPT_LEAD)
                     .filter(|_| level == SystemLevel::Info)
@@ -4217,7 +4323,7 @@ impl Ui {
             orphan.complete(id, outcome);
             let width = self.width();
             let cell = orphan.committed(width, &mut self.folds, self.fold_mode);
-            self.history(&cell);
+            self.commit_tool_rows(cell);
             self.committed_tool_calls.insert(id.to_string());
             self.seat_waiting_tools();
             return;
@@ -4267,7 +4373,7 @@ impl Ui {
             .extend(cell.call_ids().map(str::to_string));
         let width = self.width();
         let lines = cell.committed(width, &mut self.folds, self.fold_mode);
-        self.history(&lines);
+        self.commit_tool_rows(lines);
     }
 
     /// 훅 보고용 관찰 — 블록을 소비하지 않는다.
@@ -4504,6 +4610,7 @@ impl App {
                 folds: FoldIds::default(),
                 fold_mode: FoldMode::from_env(),
                 last_commit: None,
+                history_tail: HistoryTail::Other,
                 deferred: Vec::new(),
                 pending_history: Vec::new(),
                 passport_gate: PassportGate::default(),
@@ -5024,68 +5131,7 @@ impl App {
         if items.is_empty() {
             return;
         }
-        let ids = BlockIdGen::default();
-        for (index, item) in items.into_iter().enumerate() {
-            match item {
-                ReplayItem::User(text) => self.ui.user_cell(&text),
-                ReplayItem::Assistant(text) => self.ui.block(RenderBlock::TextDelta {
-                    id: ids.next(),
-                    text,
-                    done: true,
-                }),
-                ReplayItem::AgentResult {
-                    label,
-                    status,
-                    summary,
-                    body,
-                } => self.ui.block(RenderBlock::AgentResult {
-                    id: ids.next(),
-                    label,
-                    status,
-                    summary,
-                    body,
-                }),
-                ReplayItem::ToolCall {
-                    name,
-                    input,
-                    output,
-                    is_error,
-                } => {
-                    // 라이브 파서와 같은 폴백이다 — 입력이 JSON 이 아니면 그
-                    // 문자열 자체를 값으로 삼는다(`parser.rs` 의
-                    // `unwrap_or(Value::String(partial_json.clone()))`).
-                    let parsed = serde_json::from_str(&input)
-                        .unwrap_or(serde_json::Value::String(input));
-                    let preview = preview_tool_input(&name, &parsed);
-                    let summary = preview_summary(&preview);
-                    // 트랜스크립트의 호출 id 는 여기 오지 않는다(재생 항목은
-                    // 이름·입력·출력만 든다). 묶임 판정은 **이 셀 안에서만**
-                    // 쓰이므로 재생 순번으로 유일하게 만든다.
-                    let tool_call_id = ToolCallId(format!("replay-{index}"));
-                    self.ui.block(RenderBlock::ToolCall {
-                        id: ids.next(),
-                        tool_call_id: tool_call_id.clone(),
-                        name: name.clone(),
-                        summary,
-                        preview,
-                        status: ToolCallStatus::Running,
-                    });
-                    if let Some(output) = output {
-                        let body = format_tool_result_from_raw(&name, &output, is_error);
-                        self.ui.block(RenderBlock::ToolResult {
-                            id: ids.next(),
-                            tool_call_id,
-                            is_error,
-                            body,
-                        });
-                    }
-                }
-            }
-        }
-        // 턴 끝과 같은 마무리 — 열린 스트림을 확정하고 아직 도는 도구 셀을
-        // 접는다(결과 없이 끝난 호출은 codex `mark_failed` 처럼 닫힌다).
-        self.ui.close_segment();
-        self.ui.retire_tool_cell();
+        self.ui.replay(items);
     }
 
     /// 화면을 놓고 세션을 닫는다. 종료 요약을 돌려주면 [`run`] 이 찍는다.
@@ -6404,6 +6450,7 @@ fn test_ui() -> Ui {
         folds: FoldIds::default(),
         fold_mode: FoldMode::Bare,
         last_commit: None,
+        history_tail: HistoryTail::Other,
         deferred: Vec::new(),
         pending_history: Vec::new(),
         passport_gate: PassportGate::default(),
@@ -7317,7 +7364,7 @@ mod tests {
         assert_eq!(
             (
                 frame.matches("\u{1b}[K• Updated Plan").count(),
-                plain.matches("✓ Call    TodoWrite").count() + plain.matches("✗ Call    TodoWrite").count(),
+                plain.matches("✓ Call TodoWrite").count() + plain.matches("✗ Call TodoWrite").count(),
             ),
             (1, 0),
             "one TodoWrite call must render exactly one plan cell: {frame:?}"
@@ -7826,7 +7873,7 @@ mod tests {
             vec![
                 String::new(),
                 format!(
-                    "✓ Run     python3 <<'PY' print('detail') PY {}",
+                    "✓ Run python3 <<'PY' print('detail') PY {}",
                     super::super::strings::COMMAND_BACKGROUND
                 ),
                 "  └ (no output)".to_string(),
@@ -7868,9 +7915,11 @@ mod tests {
         let foreground: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
         let foreground_head = foreground
             .iter()
-            .position(|row| row.starts_with("✗ Run     "))
+            .position(|row| row.starts_with("✗ Run "))
             .unwrap_or_else(|| panic!("no foreground Run row: {foreground:?}"));
-        ui.pending_history.clear();
+        // The completion on a screen of its own: right after the foreground
+        // cell it would join that cell without its gap row (t-51389).
+        let mut ui = test_ui();
 
         // The background completion, exactly as the pump re-injects it: the
         // host header, then the task log with its `$ command` / `[pid]` head,
@@ -8098,7 +8147,7 @@ mod tests {
         });
         let visible: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
         assert!(
-            visible.iter().any(|line| line.contains("Call    ToolSearch"))
+            visible.iter().any(|line| line.contains("Call ToolSearch"))
                 && visible.iter().any(|line| line.contains("discovery denied")),
             "failed discovery was hidden: {visible:?}"
         );
@@ -8320,9 +8369,9 @@ mod tests {
         let frame = plain_frame(&finish_tool_frame(&mut ui));
         assert!(!frame.contains("Failed to apply patch"), "{frame}");
         assert!(!frame.contains('✗'), "{frame}");
-        assert_eq!(frame.matches("✓ Edit    ").count(), 2, "{frame}");
-        let edited_at = frame.find("✓ Edit    ").unwrap_or_else(|| panic!("{frame}"));
-        let ran_at = frame.find("✓ Run     cargo test").unwrap_or_else(|| panic!("{frame}"));
+        assert_eq!(frame.matches("✓ Edit ").count(), 2, "{frame}");
+        let edited_at = frame.find("✓ Edit ").unwrap_or_else(|| panic!("{frame}"));
+        let ran_at = frame.find("✓ Run cargo test").unwrap_or_else(|| panic!("{frame}"));
         assert!(edited_at < ran_at, "the edits stand before the command that followed them: {frame}");
     }
 
@@ -8363,10 +8412,10 @@ mod tests {
         let frame = plain_frame(&finish_tool_frame(&mut ui));
         assert!(!frame.contains('✗'), "{frame}");
         assert!(
-            frame.lines().any(|row| row.starts_with("✓ Edit    src/a.rs") && row.trim_end().ends_with("+1 -1")),
+            frame.lines().any(|row| row.starts_with("✓ Edit src/a.rs") && row.trim_end().ends_with("+1 -1")),
             "{frame}"
         );
-        assert!(frame.contains("✓ Run     cargo test"), "{frame}");
+        assert!(frame.contains("✓ Run cargo test"), "{frame}");
     }
 
     /// The `agents 1 · running 0 · done 1` line under a working header is a
@@ -8621,7 +8670,7 @@ mod tests {
     }
 
     /// A check the harness saw pass after the last edit is a row like the
-    /// calls' rows (t-48216), `✓ Check   <command>   passed after the last
+    /// calls' rows (t-48216), `✓ Check <command>   passed after the last
     /// edit`, not a dim note carrying the runtime's sentence.
     #[test]
     fn a_passed_check_is_a_check_row_not_a_note() {
@@ -8635,9 +8684,9 @@ mod tests {
         let history: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
         let row = history
             .iter()
-            .find(|row| row.starts_with("✓ Check   "))
+            .find(|row| row.starts_with("✓ Check "))
             .unwrap_or_else(|| panic!("no check row: {history:#?}"));
-        assert!(row.starts_with("✓ Check   python3 -m py_compile src/app.py "), "{row}");
+        assert!(row.starts_with("✓ Check python3 -m py_compile src/app.py "), "{row}");
         assert!(row.ends_with(" passed after the last edit"), "{row}");
         assert_eq!(row.chars().count(), ui.width(), "the result stands at the right edge: {row}");
         assert!(
@@ -8695,6 +8744,207 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains(long), "the whole command is on the card:\n{text}");
+    }
+
+    /// What a resumed session draws is what the live screen drew (t-51389).
+    /// The runtime stores what the model reads: a steer behind its preamble
+    /// line — one block folded into a tool result, or several after a
+    /// truncation reminder in a continuation — and the host's own blocks the
+    /// person never typed: the window's resume nudge, a turn-end reminder, a
+    /// background task's completion behind the task-notification preamble.
+    /// Live, each steer drew its echo cell (a peer's envelope for a peer's
+    /// words), the task its command cell, and the host's blocks nothing — in a
+    /// session stored before the preamble's sentence last changed as well.
+    #[test]
+    fn a_resumed_session_draws_what_the_live_screen_drew() {
+        use core_types::session::{ContentBlock, ConversationMessage};
+        use runtime::background_log::{exit_line, head, notification_header, BACKGROUND_BASH};
+        use runtime::message_stream::SystemLevel;
+
+        // The frames as the runtime writes them, read from its source so the
+        // fixture is the stored text and moves when it does.
+        let conversation = include_str!("../../../runtime/src/conversation/mod.rs");
+        let constant = |name: &str| {
+            let open = format!("const {name}: &str = \"");
+            let start = conversation
+                .find(&open)
+                .unwrap_or_else(|| panic!("the runtime no longer declares {name}"))
+                + open.len();
+            let end = start + conversation[start..].find("\";").expect("the literal closes");
+            conversation[start..end].to_string()
+        };
+        assert!(
+            conversation.contains("format!(\"{STEERING_PREAMBLE}\\n{steer}\")"),
+            "a steer is stored as the preamble line, then the words"
+        );
+        let steering = constant("STEERING_PREAMBLE");
+        let framed = |words: &str| format!("{steering}\n{words}");
+        let truncation = constant("TRUNCATION_CONTINUATION_REMINDER");
+        let notification = constant("AGENT_NOTIFICATION_PREAMBLE");
+
+        let first = "그 파일 말고 tools.rs 를 봐";
+        let second = "시험은\n두 줄로";
+        let third = "끝나면 알려줘";
+        let older = "그건 됐어";
+        // The preamble as it read until it learned to answer a question.
+        let earlier = "[User steering — the user sent this mid-turn to correct course. Treat \
+                       it as a higher-priority instruction that supersedes any conflicting \
+                       earlier guidance, and adjust your plan and current work accordingly \
+                       before continuing. If it introduces a NEW requirement that is separable \
+                       from what you are doing right now, do not serialize it: launch a \
+                       background `Agent` for it immediately and keep working on your current \
+                       task — you will be notified when that agent completes. Fold it into \
+                       your current work instead only when it modifies the very thing you are \
+                       editing.]";
+        let peer = runtime::peer_message_frame(Some("reviewer"), "look at src/lib.rs");
+        let task = format!(
+            "{}\n\n{}two\n{}",
+            notification_header("task-1"),
+            head("ls", 42),
+            exit_line(Some(0))
+        );
+
+        let mut live = test_ui();
+        let ids = BlockIdGen::default();
+        for steer in [first, second, third, older, peer.as_str()] {
+            live.block(RenderBlock::System {
+                id: ids.next(),
+                level: SystemLevel::Info,
+                text: format!("{}{steer}", runtime::STEERING_ECHO_PREFIX),
+            });
+        }
+        live.block(RenderBlock::AgentResult {
+            id: ids.next(),
+            label: BACKGROUND_BASH.to_string(),
+            status: AgentResultStatus::Completed,
+            summary: None,
+            body: task.clone(),
+        });
+
+        let mut folded = ConversationMessage::tool_result("call-1", "bash", "ok", false);
+        folded.blocks.push(ContentBlock::Text { text: framed(first) });
+        let mut later = ConversationMessage::tool_result("call-2", "bash", "ok", false);
+        later.blocks.push(ContentBlock::Text { text: framed(&peer) });
+        later.blocks.push(ContentBlock::Text { text: format!("{notification}\n\n{task}") });
+        let messages = vec![
+            folded,
+            ConversationMessage::user_text(format!(
+                "{truncation}\n\n{}\n\n{}",
+                framed(second),
+                framed(third)
+            )),
+            ConversationMessage::user_text(
+                "The window restarted and cut your last turn short. Continue exactly where \
+                 you left off; if the work was already finished, say so briefly. Worktree \
+                 now: HEAD abc1234 \"release: v1.1.61\" · 0 uncommitted file(s) · last \
+                 commit 5 min ago.",
+            ),
+            ConversationMessage::user_text(
+                "[zo:turn-end-gate] <system-reminder>Your reply ended with a question, but \
+                 nobody is present to answer it mid-run.</system-reminder>",
+            ),
+            ConversationMessage::user_text(format!("{earlier}\n{older}")),
+            later,
+        ];
+        let mut resumed = test_ui();
+        resumed.replay(crate::session::plain_session::replay_items_from(&messages));
+
+        let rows = |ui: &super::Ui| ui.pending_history.iter().map(Line::plain).collect::<Vec<_>>();
+        assert_eq!(rows(&resumed), rows(&live), "the resumed transcript is not the live one");
+        assert_eq!(resumed.pending_history, live.pending_history, "the same rows in other bytes");
+    }
+
+    /// A steer folded into a call's result was echoed after that call's cell
+    /// live — the echo commits the finished cell first — and a resumed
+    /// transcript draws them in the same order (t-51389).
+    #[test]
+    fn a_resumed_steer_stands_after_the_call_it_followed() {
+        use core_types::session::{ContentBlock, ConversationMessage};
+        use runtime::message_stream::SystemLevel;
+
+        let steering = {
+            let conversation = include_str!("../../../runtime/src/conversation/mod.rs");
+            let open = "const STEERING_PREAMBLE: &str = \"";
+            let start = conversation.find(open).expect("the runtime declares its preamble") + open.len();
+            let end = start + conversation[start..].find("\";").expect("the literal closes");
+            conversation[start..end].to_string()
+        };
+        let output = r#"{"stdout":"a.txt","stderr":"","exitCode":0}"#;
+        let steer = "그거 말고 b.txt";
+
+        let mut live = test_ui();
+        let ids = BlockIdGen::default();
+        live.block(tool_call(&ids, "t1", "bash", &json!({"command": "ls"})));
+        live.block(RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId("t1".to_string()),
+            is_error: false,
+            body: format_tool_result_from_raw("bash", output, false),
+        });
+        live.block(RenderBlock::System {
+            id: ids.next(),
+            level: SystemLevel::Info,
+            text: format!("{}{steer}", runtime::STEERING_ECHO_PREFIX),
+        });
+
+        let mut result = ConversationMessage::tool_result("t1", "bash", output, false);
+        result.blocks.push(ContentBlock::Text { text: format!("{steering}\n{steer}") });
+        let messages = vec![
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                input: json!({"command": "ls"}).to_string(),
+            }]),
+            result,
+        ];
+        let mut resumed = test_ui();
+        resumed.replay(crate::session::plain_session::replay_items_from(&messages));
+
+        let rows = |ui: &super::Ui| ui.pending_history.iter().map(Line::plain).collect::<Vec<_>>();
+        assert_eq!(rows(&resumed), rows(&live), "the steer moved above the call it followed");
+    }
+
+    /// A run of calls with nothing said between them is one block (t-51389):
+    /// each `Call` is a cell of its own, and five of them in the screenshot
+    /// each wore its own blank row. The gap stands before the first row of
+    /// the run only, and the answer after the run keeps its own.
+    #[test]
+    fn a_run_of_calls_with_nothing_between_them_is_one_block() {
+        use runtime::message_stream::ToolResultBody;
+
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        let calls = [
+            ("c1", "mcp__playwright__browser_navigate"),
+            ("c2", "mcp__playwright__browser_take_screenshot"),
+            ("c3", "mcp__playwright__browser_console_messages"),
+        ];
+        for (call, name) in calls {
+            ui.block(tool_call(&ids, call, name, &json!({"url": "https://example.com"})));
+            ui.block(RenderBlock::ToolResult {
+                id: ids.next(),
+                tool_call_id: ToolCallId(call.to_string()),
+                is_error: false,
+                body: ToolResultBody::Text { content: String::new(), truncated: false },
+            });
+        }
+        ui.block(RenderBlock::TextDelta { id: ids.next(), text: "Done.".to_string(), done: true });
+        ui.close_segment();
+
+        let rows: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
+        let first = rows
+            .iter()
+            .position(|row| row.starts_with(&format!("✓ Call {}", calls[0].1)))
+            .unwrap_or_else(|| panic!("no first call row: {rows:#?}"));
+        assert!(first > 0 && rows[first - 1].is_empty(), "the run keeps its gap: {rows:#?}");
+        for (offset, (_, name)) in calls.iter().enumerate().skip(1) {
+            assert!(
+                rows[first + offset].starts_with(&format!("✓ Call {name}")),
+                "no blank row between the calls: {rows:#?}"
+            );
+        }
+        assert!(rows[first + calls.len()].is_empty(), "the answer keeps its gap: {rows:#?}");
+        assert!(rows[first + calls.len()..].iter().any(|row| row.contains("Done.")), "{rows:#?}");
     }
 }
 

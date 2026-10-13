@@ -5,13 +5,11 @@
 [2m│ directory: <cwd>
 [2m╰──────────────────────────────────────────────────────────╯
 
-
 [1m[2m› [22m[22mRun Bash once and Read fixture.txt once, then summarize
 
-
-[1m[38;5;2;49m✓[22m[39;49m [1mRun     [22m[38;2;137;180;250;49mprintf[38;2;205;214;244;49m [38;2;166;227;161;49m'bash deterministic'[39;49m                                                                             [2m1 line
+[1m[38;5;2;49m✓[22m[39;49m [1mRun [22m[38;2;137;180;250;49mprintf[38;2;205;214;244;49m [38;2;166;227;161;49m'bash deterministic'[39;49m                                                                                 [2m1 line
 [2m  └ bash deterministic
-[1m[38;5;2;49m✓[22m[39;49m [1mRead    [22mfixture.txt                                                                                             [2m1 line
+[1m[38;5;2;49m✓[22m[39;49m [1mRead [22mfixture.txt                                                                                                [2m1 line
 
   [1m[3mTool answer
 

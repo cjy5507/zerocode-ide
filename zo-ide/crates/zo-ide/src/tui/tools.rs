@@ -3,19 +3,23 @@
 //!
 //! # 어휘 (t-48216)
 //!
-//! 호출마다 같은 한 줄을 입는다: `<상태> <동사>  <대상>   <결과>`. 상태는 도는
+//! 호출마다 같은 한 줄을 입는다: `<상태> <동사> <대상>   <결과>`. 상태는 도는
 //! 동안 점자 스피너, 끝나면 `✓`, 실패하면 빨간 `✗`, 거절되면 흐린 `✗` 다.
-//! 끝난 호출의 대상은 잘리지 않는다 — 줄에 못 들어간 나머지는 대상의 열에서
-//! 줄 아래로 걸린다.
+//! 대상은 동사 뒤 한 칸에서 시작하고(동사를 열로 채우지 않는다, t-51389),
+//! 결과는 마지막 열에서 끝난다. 끝난 호출의 대상은 줄에서 잘리지 않는다 — 줄에
+//! 못 들어간 나머지는 줄 아래 네 칸 들여 걸린다. 출력의 글과 diff 가 시작하는
+//! 그 열이라, 어느 동사 아래든 걸린 줄이 한 열에 선다. 명령의 나머지는 출력과
+//! 같은 다섯 행 예산을 지키고(앞 행들과 남은 행 수), 접기 표지가 켜진 터미널의
+//! 커밋된 셀만 접힌 본문에 전부 둔다.
 //!
 //! | zo 도구 | 줄 |
 //! |---|---|
-//! | Bash | `✓ Run     <cmd>      3 lines` |
-//! | Read·Grep·Glob | `✓ Read    <path>` · `✓ Search  <q> in <path>` · `✓ List    <glob>` |
-//! | Edit·Write | `✓ Edit    <path>      +A -B` 과 그 아래 diff |
-//! | 웹 검색 | `✓ Search  <q> on the web` |
-//! | 스폰 | `✓ Spawn   <label> [role] (request)` 과 그 아래 진행·결과 한 줄 |
-//! | 그 외(MCP 등) | `✓ Call    <name>(<args>)` 과 그 아래 결과 |
+//! | Bash | `✓ Run <cmd>      3 lines` |
+//! | Read·Grep·Glob | `✓ Read <path>` · `✓ Search <q> in <path>` · `✓ List <glob>` |
+//! | Edit·Write | `✓ Edit <path>      +A -B` 과 그 아래 diff |
+//! | 웹 검색 | `✓ Search <q> on the web` |
+//! | 스폰 | `✓ Spawn <label> [role] (request)` 과 그 아래 진행·결과 한 줄 |
+//! | 그 외(MCP 등) | `✓ Call <name>(<args>)` 과 그 아래 결과 |
 //!
 //! # 트랜스크립트 힌트를 뺀 이유
 //!
@@ -688,17 +692,24 @@ impl ToolGroup {
     fn lines_in(&self, width: usize, elapsed: Duration) -> Vec<Line> {
         self.calls
             .iter()
-            .flat_map(|call| self.call_lines(call, width, elapsed))
+            .flat_map(|call| self.call_lines(call, width, elapsed, false))
             .collect()
     }
 
-    /// 한 호출의 줄들 — 종류마다 다른 문법.
-    fn call_lines(&self, call: &ToolCall, width: usize, elapsed: Duration) -> Vec<Line> {
+    /// 한 호출의 줄들 — 종류마다 다른 문법. `whole` 은 끝난 명령의 글을
+    /// 예산 없이 전부 그린다 — 사람이 펼치는 접기 본문 안에서만.
+    fn call_lines(
+        &self,
+        call: &ToolCall,
+        width: usize,
+        elapsed: Duration,
+        whole: bool,
+    ) -> Vec<Line> {
         match &call.kind {
             ToolKind::Command {
                 command,
                 background,
-            } => self.command_row(call, command, *background, width, elapsed),
+            } => self.command_row(call, command, *background, width, elapsed, whole),
             ToolKind::Explore(items) => items
                 .iter()
                 .enumerate()
@@ -763,9 +774,10 @@ impl ToolGroup {
         lines
     }
 
-    /// `✓ Run     <cmd>      3 lines` and the output under it; while the
-    /// command runs, the tail of what it has printed so far. A finished
-    /// command keeps its whole text: what the row cannot show hangs under it.
+    /// `✓ Run <cmd>      3 lines` and the output under it; while the
+    /// command runs, the tail of what it has printed so far. What a finished
+    /// command's row cannot show hangs under it within the output's budget
+    /// ([`command_text_rows`]) — all of it when `whole`.
     fn command_row(
         &self,
         call: &ToolCall,
@@ -773,6 +785,7 @@ impl ToolGroup {
         background: bool,
         width: usize,
         elapsed: Duration,
+        whole: bool,
     ) -> Vec<Line> {
         let result = call.done.as_ref().map(command_result).unwrap_or_default();
         let marker =
@@ -780,7 +793,7 @@ impl ToolGroup {
         let (mut target, rest) = if call.done.is_some() {
             let lines = super::highlight::highlight_block_to_lines(command, "bash")
                 .unwrap_or_else(|| command.lines().map(Line::from_text).collect());
-            let budget = target_budget(&result, width)
+            let budget = target_budget(super::strings::TOOL_RUN, &result, width)
                 .saturating_sub(marker.as_ref().map_or(0, Span::width));
             split_target(lines, budget)
         } else {
@@ -798,7 +811,8 @@ impl ToolGroup {
             result,
             width,
         )];
-        out.extend(hung(&rest, width));
+        let hanging = hung(&rest, width);
+        out.extend(if whole { hanging } else { command_text_rows(hanging) });
         match call.done.as_ref() {
             Some(done) => out.extend(output_block(&done.output, width)),
             None => out.extend(live_tail(&call.id, width)),
@@ -806,7 +820,7 @@ impl ToolGroup {
         out
     }
 
-    /// `✓ Edit    <path>      +A -B` and the change's diff hung under it.
+    /// `✓ Edit <path>      +A -B` and the change's diff hung under it.
     fn edit_row(&self, call: &ToolCall, path: &str, width: usize, elapsed: Duration) -> Vec<Line> {
         let done = call.done.as_ref();
         let change = done.filter(|done| done.ok).and_then(|done| done.change.as_ref());
@@ -866,7 +880,7 @@ impl ToolGroup {
         }
     }
 
-    /// `✓ Call    <name>(<args>)` and what the call returned under it; an
+    /// `✓ Call <name>(<args>)` and what the call returned under it; an
     /// empty result adds no row.
     fn mcp_lines(
         &self,
@@ -888,13 +902,17 @@ impl ToolGroup {
         let result = call.done.as_ref().filter(|done| !done.ok).map(failure_result).unwrap_or_default();
         let mut out =
             self.uncut_row(call, super::strings::TOOL_CALL, invocation, result, width, elapsed);
-        if let Some(done) = call.done.as_ref().filter(|done| !done.output.is_empty()) {
-            out.extend(output_block(&done.output, width));
+        if let Some(done) = call.done.as_ref() {
+            let said = mcp_envelope_text(&done.output);
+            let output = said.as_deref().unwrap_or(&done.output);
+            if !output.is_empty() {
+                out.extend(output_block(output, width));
+            }
         }
         out
     }
 
-    /// `✓ Search  <query> on the web` — a file search's row, with the web
+    /// `✓ Search <query> on the web` — a file search's row, with the web
     /// where a file search names its path.
     fn web_search_lines(
         &self,
@@ -1027,7 +1045,7 @@ impl ToolGroup {
         elapsed: Duration,
     ) -> Vec<Line> {
         let (target, rest) = if call.done.is_some() {
-            split_target(vec![Line::new(target)], target_budget(&result, width))
+            split_target(vec![Line::new(target)], target_budget(verb, &result, width))
         } else {
             (target, Vec::new())
         };
@@ -1058,7 +1076,8 @@ impl ToolGroup {
         // teaser is a row of the region drawn only while it is collapsed
         // (`teaser=1`), so opening the row shows the body in its place.
         for call in &self.calls {
-            let mut cell = self.call_lines(call, width, Duration::ZERO);
+            // A fold the person opens holds a long command's whole text.
+            let mut cell = self.call_lines(call, width, Duration::ZERO, mode.markers_enabled());
             if mode.markers_enabled() && cell.len() >= 2 {
                 let folded = cell.len() - 1;
                 cell.insert(1, teaser_line(folded, width));
@@ -1082,7 +1101,7 @@ impl ToolGroup {
 /// `N` being the body rows the fold hides. Same grammar as the in-body
 /// elision marker, so a person reads one vocabulary whether the cell is
 /// folded or its preview was capped.
-/// `✓ Check   <command>      passed after the last edit` — a check the
+/// `✓ Check <command>      passed after the last edit` — a check the
 /// harness saw pass after the turn's last edit, shaped like a call's row.
 #[must_use]
 pub fn check_row(command: &str, width: usize) -> Line {
@@ -1098,10 +1117,9 @@ pub fn check_row(command: &str, width: usize) -> Line {
     )
 }
 
-/// The verb column's width, so every row's target starts on one column.
-const VERB_COLUMNS: usize = 8;
-/// That column: the glyph, a space, then the verb's.
-const TARGET_COLUMN: usize = 2 + VERB_COLUMNS;
+/// How far the rows under a call hang in — the column its output's text
+/// (`  └ `) and an edit's diff ([`DIFF_INDENT`]) start on, whatever the verb.
+const HANG_COLUMNS: usize = 4;
 /// How far an edit's diff hangs in under its row.
 const DIFF_INDENT: usize = 4;
 /// A running call's spinner, one frame per [`SPINNER_FRAME_MILLIS`].
@@ -1112,13 +1130,14 @@ const SPINNER_FRAME_MILLIS: u128 = 80;
 const LIVE_TAIL_BYTES: usize = 4096;
 const LIVE_TAIL_ROWS: usize = 4;
 
-/// `<glyph> <Verb>    <target>   <result>` — the result ends on the last
-/// column, and the target gives way to it when the row is short.
+/// `<glyph> <Verb> <target>   <result>` — the target follows its verb after
+/// one space, the result ends on the last column, and the target gives way
+/// to it when the row is short.
 fn tool_row(glyph: Span, verb: &str, target: Vec<Span>, result: Vec<Span>, width: usize) -> Line {
-    let mut spans = vec![glyph, Span::raw(" "), Span::bold(format!("{verb:<VERB_COLUMNS$}"))];
+    let mut spans = vec![glyph, Span::raw(" "), Span::bold(format!("{verb} "))];
     let head: usize = spans.iter().map(Span::width).sum();
     let result_width: usize = result.iter().map(Span::width).sum();
-    let target = Line::new(target).truncated(target_budget(&result, width));
+    let target = Line::new(target).truncated(target_budget(verb, &result, width));
     let used = head + target.width();
     spans.extend(target.spans);
     if result_width > 0 {
@@ -1128,12 +1147,12 @@ fn tool_row(glyph: Span, verb: &str, target: Vec<Span>, result: Vec<Span>, width
     Line::new(spans).truncated(width)
 }
 
-/// The columns a row leaves its target: the width less the glyph and the verb,
-/// and less the result with the space before it.
-fn target_budget(result: &[Span], width: usize) -> usize {
+/// The columns a row leaves its target: the width less the glyph, the verb
+/// and the space after each, and less the result with the space before it.
+fn target_budget(verb: &str, result: &[Span], width: usize) -> usize {
     let result_width: usize = result.iter().map(Span::width).sum();
     let reserved = if result_width == 0 { 0 } else { result_width + 1 };
-    width.saturating_sub(TARGET_COLUMN + reserved)
+    width.saturating_sub(2 + super::ansi::str_width(verb) + 1 + reserved)
 }
 
 /// A target that is not cut, split for its row: the stretch of its first line
@@ -1146,10 +1165,121 @@ fn split_target(lines: Vec<Line>, budget: usize) -> (Vec<Span>, Vec<Line>) {
     (head, stretches.chain(lines).collect())
 }
 
-/// Rows hung under a row from its target's column, wrapped at the edge.
+/// Rows hung under a row, [`HANG_COLUMNS`] in, wrapped at the edge.
 fn hung(rows: &[Line], width: usize) -> Vec<Line> {
-    let indent = Span::raw(" ".repeat(TARGET_COLUMN));
+    let indent = Span::raw(" ".repeat(HANG_COLUMNS));
     prefixed(rows, width, &Prefix::new(indent.clone(), indent), true)
+}
+
+/// A finished command's hung rows held to the output's budget: its first
+/// rows and a count of the rest. A command reads better from its head than
+/// around a middle cut — the head says what ran, and a heredoc's tail is
+/// mostly its closing word; codex holds a command's own rows the same way
+/// (`ExecCell::limit_lines_from_start`, here [`limit_from_start`]).
+fn command_text_rows(rows: Vec<Line>) -> Vec<Line> {
+    if rows.len() <= OUTPUT_MAX_ROWS {
+        return rows;
+    }
+    let mut kept = limit_from_start(&rows, OUTPUT_MAX_ROWS - 1);
+    if let Some(count) = kept.last_mut() {
+        count.spans.insert(0, Span::raw(" ".repeat(HANG_COLUMNS)));
+    }
+    kept
+}
+
+/// What an MCP tool's result envelope says, for the rows under its call: the
+/// text items in order, an image or another item as a word — `None` when
+/// the output is not an envelope (a `content` array of typed items), and
+/// empty when the envelope says nothing. Display only: the session file and
+/// the wire keep the envelope.
+///
+/// The runtime hands the cell the envelope pretty-printed and capped
+/// (`format_generic_result`), so a long one arrives cut inside its text or an
+/// image's data; it is closed where the cap left it ([`closed_json`]) and
+/// read as far as it goes, the cap's own `… +1 lines` after it. Its last item
+/// may then lack its `type`, or its text: an untyped one with text shows the
+/// text, and one with neither is left out.
+fn mcp_envelope_text(output: &str) -> Option<String> {
+    let (printed, cut) = match output.strip_suffix(SOURCE_TRUNCATION_NOTE) {
+        Some(printed) => (printed.trim_end_matches('\n'), true),
+        None => (output, false),
+    };
+    if !printed.starts_with('{') {
+        return None;
+    }
+    let envelope: serde_json::Value = if cut {
+        serde_json::from_str(&closed_json(printed)).ok()?
+    } else {
+        serde_json::from_str(printed).ok()?
+    };
+    let items = envelope.get("content")?.as_array()?;
+    let mut said = Vec::with_capacity(items.len() + 1);
+    for (index, item) in items.iter().enumerate() {
+        let text = item.get("text").and_then(serde_json::Value::as_str);
+        let word = match item.get("type").and_then(serde_json::Value::as_str) {
+            Some("text") => text,
+            Some("image") => Some(super::strings::MCP_IMAGE_ITEM),
+            Some(_) => Some(super::strings::MCP_RESOURCE_ITEM),
+            None => text.filter(|_| cut),
+        };
+        match word {
+            Some(word) => said.push(word),
+            // The cap cut the last item before what it needs was printed —
+            // keys print in their own order, `text` or `data` may come first.
+            None if cut && index + 1 == items.len() => {}
+            None => return None,
+        }
+    }
+    // A cut envelope always says it was cut, even when nothing before the cut
+    // could be shown.
+    if cut {
+        said.push(SOURCE_TRUNCATION_NOTE);
+    }
+    if said.iter().all(|text| text.trim().is_empty()) {
+        return Some(String::new());
+    }
+    Some(said.join("\n"))
+}
+
+/// `printed` — a JSON document cut short — closed so it parses: an open
+/// string ended (a dangling backslash dropped), a trailing comma dropped,
+/// and the open arrays and objects closed in order. A cap cuts the pretty
+/// print inside a string or between whole lines, and either closes cleanly.
+fn closed_json(printed: &str) -> String {
+    let mut open = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in printed.chars() {
+        if in_string {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => open.push('}'),
+            '[' => open.push(']'),
+            '}' | ']' => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    let mut closed = printed.to_string();
+    if in_string {
+        if escaped {
+            closed.pop();
+        }
+        closed.push('"');
+    }
+    let kept = closed.trim_end().trim_end_matches(',').len();
+    closed.truncate(kept);
+    closed.extend(open.iter().rev());
+    closed
 }
 
 fn explored_target(item: &Explored) -> (&'static str, Vec<Span>) {
@@ -1401,6 +1531,22 @@ pub(crate) fn persisted_agent_result(
     }
 
     let (header, body) = leading_line(cursor);
+    // A background command's completion names no agent: the card is the
+    // command cell its log draws (`background_command_cell`), and the verdict
+    // is the log's exit code — a log with none ended on a signal.
+    if runtime::background_log::is_notification_header(header) {
+        let log = strip_agent_result_harness(body);
+        let status = match runtime::background_log::exit_code(log) {
+            Some(0) => AgentResultStatus::Completed,
+            _ => AgentResultStatus::Failed,
+        };
+        return Some((
+            runtime::background_log::BACKGROUND_BASH.to_string(),
+            status,
+            None,
+            log.to_string(),
+        ));
+    }
     if !is_completion_notification_header(header) {
         return None;
     }
@@ -1503,7 +1649,7 @@ fn is_agent_result_harness_line(line: &str) -> bool {
         || runtime::background_log::is_notification_header(line)
 }
 
-fn is_runtime_agent_notification_preamble(line: &str) -> bool {
+pub(crate) fn is_runtime_agent_notification_preamble(line: &str) -> bool {
     is_task_notification_bracket(line)
         && line
             .to_ascii_lowercase()
@@ -1753,13 +1899,13 @@ mod tests {
     #[test]
     fn a_running_command_spins_and_a_finished_one_wears_a_check() {
         let mut group = ToolGroup::new(bash("a", "ls -la"));
-        assert_eq!(plain(&group.lines(60, Duration::ZERO))[0], "⠋ Run     ls -la");
+        assert_eq!(plain(&group.lines(60, Duration::ZERO))[0], "⠋ Run ls -la");
         assert!(group.complete("a", ok("total 16\nsrc")));
         let lines = group.lines(60, Duration::ZERO);
         assert_eq!(
             plain(&lines),
             vec![
-                edge("✓ Run     ls -la", "2 lines", 60),
+                edge("✓ Run ls -la", "2 lines", 60),
                 "  └ total 16".to_string(),
                 "    src".to_string(),
             ]
@@ -1782,7 +1928,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                edge("✓ Run     seq 20", "20 lines", 60),
+                edge("✓ Run seq 20", "20 lines", 60),
                 "  └ 1".to_string(),
                 "    2".to_string(),
                 "    … +16 lines".to_string(),
@@ -1795,7 +1941,7 @@ mod tests {
     #[test]
     fn a_live_read_is_one_spinning_row() {
         let group = ToolGroup::new(read("a", "README.md"));
-        assert_eq!(plain(&group.lines(60, Duration::ZERO)), vec!["⠋ Read    README.md".to_string()]);
+        assert_eq!(plain(&group.lines(60, Duration::ZERO)), vec!["⠋ Read README.md".to_string()]);
     }
 
     #[test]
@@ -1810,9 +1956,9 @@ mod tests {
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
             vec![
-                "⠋ Read    a.rs".to_string(),
-                "⠋ Read    b.rs".to_string(),
-                "⠋ Read    a.rs".to_string(),
+                "⠋ Read a.rs".to_string(),
+                "⠋ Read b.rs".to_string(),
+                "⠋ Read a.rs".to_string(),
             ]
         );
     }
@@ -1825,7 +1971,7 @@ mod tests {
         assert!(group.complete("b", ok("")));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec![edge("✓ Read    a.rs", "0 lines", 60), edge("✓ Read    b.rs", "0 lines", 60)]
+            vec![edge("✓ Read a.rs", "0 lines", 60), edge("✓ Read b.rs", "0 lines", 60)]
         );
     }
 
@@ -1835,7 +1981,7 @@ mod tests {
         assert!(group.complete("a", ok("")));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec![edge("✓ Read    README.md", "0 lines", 60)]
+            vec![edge("✓ Read README.md", "0 lines", 60)]
         );
     }
 
@@ -1852,9 +1998,9 @@ mod tests {
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
             vec![
-                edge("✓ Run     ls -la", "1 line", 60),
+                edge("✓ Run ls -la", "1 line", 60),
                 "  └ x".to_string(),
-                edge("✓ Run     pwd", "1 line", 60),
+                edge("✓ Run pwd", "1 line", 60),
                 "  └ /tmp".to_string(),
             ]
         );
@@ -1874,9 +2020,9 @@ mod tests {
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
             vec![
-                edge("✓ Run     ls -la", "1 line", 60),
+                edge("✓ Run ls -la", "1 line", 60),
                 "  └ total 8".to_string(),
-                edge("✓ Read    README.md", "1 line", 60),
+                edge("✓ Read README.md", "1 line", 60),
             ]
         );
     }
@@ -1958,7 +2104,7 @@ mod tests {
         ));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO))[0],
-            "⠋ Edit    a.rs"
+            "⠋ Edit a.rs"
         );
         assert!(group.complete(
             "a",
@@ -1966,7 +2112,7 @@ mod tests {
         ));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO))[0],
-            edge("✓ Edit    a.rs", "+2 -1", 60)
+            edge("✓ Edit a.rs", "+2 -1", 60)
         );
     }
 
@@ -1983,7 +2129,7 @@ mod tests {
         // the invocation as its target while it runs and once it is done.
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO))[0],
-            "⠋ Call    TodoWrite(3 items)"
+            "⠋ Call TodoWrite(3 items)"
         );
         assert!(group.complete(
             "a",
@@ -1999,7 +2145,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
             vec![
-                "✓ Call    TodoWrite(3 items)".to_string(),
+                "✓ Call TodoWrite(3 items)".to_string(),
                 "  └ done".to_string()
             ]
         );
@@ -2023,7 +2169,7 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO))[0],
-            "⠋ Call    TodoWrite"
+            "⠋ Call TodoWrite"
         );
     }
 
@@ -2042,7 +2188,7 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["⠋ Read    src/lib.rs".to_string()]
+            vec!["⠋ Read src/lib.rs".to_string()]
         );
     }
 
@@ -2101,7 +2247,7 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["✓ Call    Sleep".to_string()]
+            vec!["✓ Call Sleep".to_string()]
         );
     }
 
@@ -2119,7 +2265,7 @@ mod tests {
     }
 
     /// A finished call keeps its whole invocation: what the row cannot show
-    /// hangs under it from the target's column, as a long command's text does.
+    /// hangs under it, four columns in, as a long command's text does.
     #[test]
     fn a_long_call_keeps_its_whole_invocation_under_its_row() {
         let preview = preview_tool_input(
@@ -2133,10 +2279,10 @@ mod tests {
         assert!(group.complete("a", Outcome::from_result(false, &body, "")));
         let rows = plain(&group.lines(24, Duration::ZERO));
 
-        assert!(rows[0].starts_with("✓ Call    Lookup("), "rows were {rows:?}");
+        assert!(rows[0].starts_with("✓ Call Lookup("), "rows were {rows:?}");
         assert!(rows.len() >= 3, "rows were {rows:?}");
         assert!(
-            rows[1..rows.len() - 1].iter().all(|row| row.starts_with("          ")),
+            rows[1..rows.len() - 1].iter().all(|row| row.starts_with("    ")),
             "rows were {rows:?}"
         );
         assert!(rows.iter().all(|row| !row.contains('…')), "rows were {rows:?}");
@@ -2153,13 +2299,13 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["⠋ Search  rust async on the web".to_string()]
+            vec!["⠋ Search rust async on the web".to_string()]
         );
 
         let body = format_tool_result_from_raw("WebSearch", "raw search result", false);
         assert!(group.complete("a", Outcome::from_result(false, &body, "")));
         let lines = group.lines(60, Duration::ZERO);
-        assert_eq!(plain(&lines), vec!["✓ Search  rust async on the web".to_string()]);
+        assert_eq!(plain(&lines), vec!["✓ Search rust async on the web".to_string()]);
         assert_eq!(lines[0].spans[0].style.fg, Some(super::palette::TOOL_OK));
     }
 
@@ -2174,7 +2320,7 @@ mod tests {
         let lines = group.lines(100, Duration::ZERO);
         let rows = plain(&lines);
         let text = rows.join("\n");
-        assert!(rows[0].starts_with("✗ Spawn   "), "{text}");
+        assert!(rows[0].starts_with("✗ Spawn "), "{text}");
         assert!(rows[0].ends_with("declined — kept inline") && text.contains(reason), "{text}");
         // A policy verdict is not a failure: it does not say so, and its ✗ is
         // dimmed rather than red.
@@ -2186,7 +2332,7 @@ mod tests {
         let body = format_tool_result_from_raw("Agent", "execution error: child died", true);
         failed.complete("b", Outcome::from_result(true, &body, "child died"));
         let rows = plain(&failed.lines(100, Duration::ZERO));
-        assert!(rows[0].starts_with("✗ Spawn   ") && rows[0].ends_with("failed"), "{rows:?}");
+        assert!(rows[0].starts_with("✗ Spawn ") && rows[0].ends_with("failed"), "{rows:?}");
     }
 
     #[test]
@@ -2209,7 +2355,7 @@ mod tests {
         // names the helper and, once the poller has a manifest, its live row.
         assert_eq!(
             plain(&group.lines(100, Duration::ZERO)),
-            vec!["⠋ Spawn   robie [worker] (gpt-5.1 high)".to_string()]
+            vec!["⠋ Spawn robie [worker] (gpt-5.1 high)".to_string()]
         );
         assert!(group.set_spawn_progress(&[(
             "a".to_string(),
@@ -2218,7 +2364,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(100, Duration::ZERO)),
             vec![
-                "⠋ Spawn   robie [worker] (gpt-5.1 high)".to_string(),
+                "⠋ Spawn robie [worker] (gpt-5.1 high)".to_string(),
                 "  └ 12 tool uses · 1m 20s · Read · src/main.rs".to_string(),
             ]
         );
@@ -2238,7 +2384,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(100, Duration::ZERO)),
             vec![
-                "✓ Spawn   robie [worker] (gpt-5.1 high)".to_string(),
+                "✓ Spawn robie [worker] (gpt-5.1 high)".to_string(),
                 "  └ Investigate the flaky orchestration test".to_string(),
             ]
         );
@@ -2301,9 +2447,9 @@ mod tests {
         assert_eq!(
             plain(&group.lines(100, Duration::ZERO)),
             vec![
-                "⠋ Spawn   scout".to_string(),
+                "⠋ Spawn scout".to_string(),
                 "  └ 3 tool uses · 9s · reading".to_string(),
-                "⠋ Spawn   verifier".to_string(),
+                "⠋ Spawn verifier".to_string(),
                 "  └ 1 tool use · 4s · thinking".to_string(),
             ]
         );
@@ -2317,9 +2463,9 @@ mod tests {
         assert_eq!(
             plain(&group.lines(100, Duration::ZERO)),
             vec![
-                "⠋ Spawn   scout".to_string(),
+                "⠋ Spawn scout".to_string(),
                 "  └ 3 tool uses · 9s · reading".to_string(),
-                "⠋ Spawn   verifier".to_string(),
+                "⠋ Spawn verifier".to_string(),
             ]
         );
     }
@@ -2516,9 +2662,9 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                edge("✗ Edit    src/a.rs", "failed", 140),
+                edge("✗ Edit src/a.rs", "failed", 140),
                 why.clone(),
-                edge("✗ Edit    src/b.rs", "failed", 140),
+                edge("✗ Edit src/b.rs", "failed", 140),
                 why,
             ],
             "each interrupted edit says why"
@@ -2554,8 +2700,8 @@ mod tests {
         assert!(group.complete("w2", Outcome::from_result(true, &refused, "src/b.ts")));
 
         let lines = plain(&group.lines(140, Duration::ZERO));
-        assert_eq!(lines[0], edge("✓ Create  src/a.ts", "+2 -0", 140), "{lines:?}");
-        let failed_row = edge("✗ Edit    src/b.ts", "failed", 140);
+        assert_eq!(lines[0], edge("✓ Create src/a.ts", "+2 -0", 140), "{lines:?}");
+        let failed_row = edge("✗ Edit src/b.ts", "failed", 140);
         let at = lines
             .iter()
             .position(|line| *line == failed_row)
@@ -2586,7 +2732,7 @@ mod tests {
         let ok = format_tool_result_from_raw("write_file", &created.to_string(), false);
         assert!(group.complete("w1", Outcome::from_result(false, &ok, "src/big.ts")));
         let lines = plain(&group.lines(120, Duration::ZERO));
-        assert_eq!(lines[0], edge("✓ Create  src/big.ts", "+60 -0", 120), "{lines:?}");
+        assert_eq!(lines[0], edge("✓ Create src/big.ts", "+60 -0", 120), "{lines:?}");
         assert!(
             lines.len() < 30,
             "a 60-line create is a head and a count, not 60 rows: {} rows",
@@ -2635,8 +2781,8 @@ mod tests {
         assert!(group.complete("m2", Outcome::from_result(true, &failed, "ui/shell.css")));
 
         let lines = plain(&group.lines(100, Duration::ZERO));
-        assert_eq!(lines[0], edge("✓ Edit    ui/tokens.css", "+2 -1", 100), "the edited file keeps its counts");
-        let failed_row = edge("✗ Edit    ui/shell.css", "failed", 100);
+        assert_eq!(lines[0], edge("✓ Edit ui/tokens.css", "+2 -1", 100), "the edited file keeps its counts");
+        let failed_row = edge("✗ Edit ui/shell.css", "failed", 100);
         let at = lines.iter().position(|line| *line == failed_row).expect("the failed file stands");
         assert_eq!(
             lines[at + 1], "  └ io error: edit[5] failed: old_string not found in file",
@@ -2663,7 +2809,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(80, Duration::ZERO)),
             vec![
-                edge("✗ Edit    src/lib.rs", "failed", 80),
+                edge("✗ Edit src/lib.rs", "failed", 80),
                 "  └ context mismatch".to_string(),
                 "    try again".to_string(),
             ]
@@ -2697,8 +2843,8 @@ mod tests {
         assert!(group.complete("a", Outcome::from_result(false, &a_body, "a.rs")));
 
         let rows = plain(&group.lines(80, Duration::ZERO));
-        assert_eq!(rows[0], edge("✓ Edit    b.rs", "+2 -0", 80));
-        let a_row = rows.iter().position(|row| *row == edge("✓ Edit    a.rs", "+1 -1", 80)).expect("a row");
+        assert_eq!(rows[0], edge("✓ Edit b.rs", "+2 -0", 80));
+        let a_row = rows.iter().position(|row| *row == edge("✓ Edit a.rs", "+1 -1", 80)).expect("a row");
         assert!(a_row > 0, "each edit is its own row, in the order the calls ran: {rows:?}");
     }
 
@@ -2723,7 +2869,7 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(80, Duration::ZERO))[0],
-            edge("✓ Edit    old.rs → new.rs", "+0 -0", 80)
+            edge("✓ Edit old.rs → new.rs", "+0 -0", 80)
         );
     }
 
@@ -2746,7 +2892,7 @@ mod tests {
     }
 
     /// A finished command keeps its whole text: what its row cannot show hangs
-    /// under the row from the target's column, wrapped at the edge.
+    /// under the row, four columns in, wrapped at the edge.
     #[test]
     fn a_long_command_keeps_what_its_row_cannot_show() {
         let mut group = ToolGroup::new(bash("a", "alpha beta gamma delta epsilon zeta eta theta"));
@@ -2755,32 +2901,187 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "✓ Run     alpha beta gamma".to_string(),
-                "          delta epsilon zeta".to_string(),
-                "          eta theta".to_string(),
+                "✓ Run alpha beta gamma delta".to_string(),
+                "    epsilon zeta eta theta".to_string(),
                 "  └ (no output)".to_string(),
             ]
         );
     }
 
-    /// Every line of a finished multi-line command stays in the transcript,
-    /// under its row; a blank line in it stays blank. While it runs, the row
-    /// shows the first line and the rows under it are the live tail's.
+    /// The lines of a finished multi-line command stay under its row, a blank
+    /// line blank, as long as they fit the output's budget, as these do. While
+    /// it runs, the row shows the first line and the rows under it are the
+    /// live tail's.
     #[test]
     fn a_multi_line_command_keeps_every_line_under_its_row() {
         let script = "python3 - <<'EOF'\nimport sys\n\nprint(sys.version)\nEOF";
         let mut group = ToolGroup::new(bash("a", script));
-        assert_eq!(plain(&group.lines(60, Duration::ZERO)), vec!["⠋ Run     python3 - <<'EOF'".to_string()]);
+        assert_eq!(plain(&group.lines(60, Duration::ZERO)), vec!["⠋ Run python3 - <<'EOF'".to_string()]);
         assert!(group.complete("a", ok("3.12.1")));
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
             vec![
-                edge("✓ Run     python3 - <<'EOF'", "1 line", 60),
-                "          import sys".to_string(),
+                edge("✓ Run python3 - <<'EOF'", "1 line", 60),
+                "    import sys".to_string(),
                 String::new(),
-                "          print(sys.version)".to_string(),
-                "          EOF".to_string(),
+                "    print(sys.version)".to_string(),
+                "    EOF".to_string(),
                 "  └ 3.12.1".to_string(),
+            ]
+        );
+    }
+
+    /// The verb is a word, not a column (t-51389, 「ran call 등 도구 옆
+    /// 빈공백이」): one space after it, the target right after, the result
+    /// still on the last column — and what hangs under a row starts on one
+    /// column whatever the verb, the column the output's text starts on.
+    #[test]
+    fn the_target_follows_its_verb_after_one_space() {
+        let mut group = ToolGroup::new(bash("a", "cargo test"));
+        assert!(group.complete("a", ok("ok")));
+        group.push(read("b", "src/lib.rs"));
+        assert_eq!(
+            plain(&group.lines(40, Duration::ZERO)),
+            vec![
+                edge("✓ Run cargo test", "1 line", 40),
+                "  └ ok".to_string(),
+                "⠋ Read src/lib.rs".to_string(),
+            ]
+        );
+        let finished = |kind: ToolKind| {
+            let mut group = ToolGroup::new(ToolCall::new("c".to_string(), kind));
+            assert!(group.complete("c", ok("")));
+            plain(&group.lines(24, Duration::ZERO))
+        };
+        assert_eq!(
+            finished(ToolKind::Command {
+                command: "alpha beta gamma delta epsilon".to_string(),
+                background: false,
+            }),
+            vec![
+                "✓ Run alpha beta gamma".to_string(),
+                "    delta epsilon".to_string(),
+                "  └ (no output)".to_string(),
+            ]
+        );
+        assert_eq!(
+            finished(ToolKind::Call {
+                name: "Lookup".to_string(),
+                detail: "alpha beta gamma delta".to_string(),
+            }),
+            vec![
+                "✓ Call Lookup(alpha beta".to_string(),
+                "    gamma delta)".to_string(),
+            ]
+        );
+    }
+
+    /// A long command's text does not fill the screen (t-51389, 「출력부분도」):
+    /// under its row it keeps the output's budget — its first rows and a
+    /// count of the rest — in the live cell and in a committed one on a bare
+    /// terminal, while with fold markers the committed cell keeps every row
+    /// inside the fold the person opens.
+    #[test]
+    fn a_long_heredoc_keeps_to_the_output_budget_under_its_row() {
+        use crate::tui::folds::{FoldIds, FoldMode};
+        let prints = (1..=40).map(|n| format!("print({n})")).collect::<Vec<_>>();
+        let script = format!("python3 - <<'PY'\n{}\nPY", prints.join("\n"));
+        let mut group = ToolGroup::new(bash("a", &script));
+        assert!(group.complete("a", ok("40")));
+
+        let live = plain(&group.lines(60, Duration::ZERO));
+        assert_eq!(
+            live,
+            vec![
+                edge("✓ Run python3 - <<'PY'", "1 line", 60),
+                "    print(1)".to_string(),
+                "    print(2)".to_string(),
+                "    print(3)".to_string(),
+                "    print(4)".to_string(),
+                "    … +37 lines".to_string(),
+                "  └ 40".to_string(),
+            ]
+        );
+        let bare = plain(&group.committed(60, &mut FoldIds::default(), FoldMode::Bare));
+        assert_eq!(bare[0], "", "the gap before the cell");
+        assert_eq!(bare[1..], live[..], "a bare terminal commits what the live cell drew");
+
+        let marked = plain(&group.committed(60, &mut FoldIds::default(), FoldMode::Markers));
+        assert_eq!(marked[2], "  └ … +42 lines", "the fold hides every row under the row");
+        assert!(
+            marked.contains(&"    print(40)".to_string()) && marked.contains(&"    PY".to_string()),
+            "the opened fold has the whole command: {marked:#?}"
+        );
+        assert_eq!(marked.len(), 45, "the gap, the row, the teaser, 41 rows, the output");
+    }
+
+    /// An MCP tool answers with an envelope — `content` items beside
+    /// `structuredContent` — and the rows under its call show what the items
+    /// say, not the envelope (t-51389): the text, an image as a word, nothing
+    /// for an envelope with nothing in it, and for a long one the runtime cut
+    /// at its display cap, the text as far as it goes.
+    #[test]
+    fn an_mcp_call_shows_what_its_envelope_says() {
+        let call = |name: &str, raw: &str| {
+            let mut group = ToolGroup::new(ToolCall::new(
+                "m".to_string(),
+                ToolKind::Call { name: name.to_string(), detail: String::new() },
+            ));
+            let body = format_tool_result_from_raw(name, raw, false);
+            assert!(group.complete("m", Outcome::from_result(false, &body, "")));
+            plain(&group.lines(80, Duration::ZERO))
+        };
+        assert_eq!(
+            call(
+                "mcp__playwright__browser_take_screenshot",
+                r####"{"content":[{"type":"text","text":"### Result\nTook the viewport screenshot and saved it as page-1.png"},{"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}],"structuredContent":null}"####,
+            ),
+            vec![
+                "✓ Call mcp__playwright__browser_take_screenshot".to_string(),
+                "  └ ### Result".to_string(),
+                "    Took the viewport screenshot and saved it as page-1.png".to_string(),
+                "    [image]".to_string(),
+            ]
+        );
+        assert_eq!(
+            call("mcp__playwright__browser_resize", r#"{"content":[],"structuredContent":null}"#),
+            vec!["✓ Call mcp__playwright__browser_resize".to_string()]
+        );
+        let snapshot = (1..=300)
+            .map(|n| format!("- generic [ref=e{n}]: row {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let page = json!({
+            "content": [{"type": "text", "text": format!("### Page state\n{snapshot}")}],
+            "structuredContent": null,
+        });
+        let rows = call("mcp__playwright__browser_navigate", &page.to_string());
+        assert_eq!(rows[1], "  └ ### Page state", "{rows:#?}");
+        assert_eq!(rows[2], "    - generic [ref=e1]: row 1", "{rows:#?}");
+        assert!(rows[3].starts_with("    … +"), "{rows:#?}");
+        assert!(rows.iter().all(|row| !row.contains("\"content\"")), "{rows:#?}");
+    }
+
+    /// The cap can cut an envelope's last item before its `type` is printed:
+    /// keys print in their own order, and `text` comes before `type` when they
+    /// are sorted or when the server sent them so. The text still shows, and
+    /// the cap's `… +1 lines` after it (t-51389).
+    #[test]
+    fn a_cut_envelope_item_shows_its_text_before_its_type_was_printed() {
+        let printed = "{\n  \"content\": [\n    {\n      \"text\": \"### Page state\\n- generic [ref=e1]: row 1\\n- generic [ref=e2]: ro";
+        let mut group = ToolGroup::new(ToolCall::new(
+            "m".to_string(),
+            ToolKind::Call { name: "mcp__playwright__browser_navigate".to_string(), detail: String::new() },
+        ));
+        assert!(group.complete("m", ok(&format!("{printed}\n{}", super::SOURCE_TRUNCATION_NOTE))));
+        assert_eq!(
+            plain(&group.lines(80, Duration::ZERO)),
+            vec![
+                "✓ Call mcp__playwright__browser_navigate".to_string(),
+                "  └ ### Page state".to_string(),
+                "    - generic [ref=e1]: row 1".to_string(),
+                "    - generic [ref=e2]: ro".to_string(),
+                "    … +1 lines".to_string(),
             ]
         );
     }
@@ -2797,7 +3098,7 @@ mod tests {
             plain(&rows),
             vec![
                 String::new(),
-                edge("✓ Run     ls -la", "1 line", 60),
+                edge("✓ Run ls -la", "1 line", 60),
                 "  └ … +1 lines".to_string(),
                 "  └ total 16".to_string(),
             ]
@@ -2825,9 +3126,9 @@ mod tests {
             plain(&rows),
             vec![
                 String::new(),
-                edge("✓ Run     ls", "1 line", 60),
+                edge("✓ Run ls", "1 line", 60),
                 "  └ x".to_string(),
-                edge("✓ Run     pwd", "1 line", 60),
+                edge("✓ Run pwd", "1 line", 60),
                 "  └ /tmp".to_string(),
             ]
         );
@@ -2849,10 +3150,10 @@ mod tests {
             plain(&rows),
             vec![
                 String::new(),
-                edge("✓ Run     ls", "1 line", 60),
+                edge("✓ Run ls", "1 line", 60),
                 "  └ … +1 lines".to_string(),
                 "  └ x".to_string(),
-                edge("✓ Run     pwd", "1 line", 60),
+                edge("✓ Run pwd", "1 line", 60),
                 "  └ … +1 lines".to_string(),
                 "  └ /tmp".to_string(),
             ]
@@ -2886,8 +3187,8 @@ mod tests {
             plain(&rows),
             vec![
                 String::new(),
-                edge("✓ Read    README.md", "1 line", 60),
-                edge("✓ Run     pwd", "1 line", 60),
+                edge("✓ Read README.md", "1 line", 60),
+                edge("✓ Run pwd", "1 line", 60),
                 "  └ … +1 lines".to_string(),
                 "  └ /tmp".to_string(),
             ]
@@ -2910,14 +3211,14 @@ mod tests {
             plain(&rows),
             vec![
                 String::new(),
-                edge("✓ Run     seq", "9 lines", 60),
+                edge("✓ Run seq", "9 lines", 60),
                 "  └ … +5 lines".to_string(),
                 "  └ line1".to_string(),
                 "    line2".to_string(),
                 "    … +5 lines".to_string(),
                 "    line8".to_string(),
                 "    line9".to_string(),
-                edge("✓ Run     pwd", "1 line", 60),
+                edge("✓ Run pwd", "1 line", 60),
                 "  └ … +1 lines".to_string(),
                 "  └ /tmp".to_string(),
             ]
@@ -2937,9 +3238,9 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                edge("✓ Run     ls", "1 line", 60),
+                edge("✓ Run ls", "1 line", 60),
                 "  └ x".to_string(),
-                edge("✓ Run     pwd", "1 line", 60),
+                edge("✓ Run pwd", "1 line", 60),
                 "  └ /tmp".to_string(),
             ]
         );
@@ -2975,7 +3276,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
             vec![
-                edge("✓ Run     seq 8", "8+ lines", 60),
+                edge("✓ Run seq 8", "8+ lines", 60),
                 "  └ line1".to_string(),
                 "    line2".to_string(),
                 "    … +5 lines".to_string(),
@@ -3060,8 +3361,8 @@ mod row_tests {
         assert_eq!(
             plain(&group.lines(WIDTH, Duration::ZERO)),
             vec![
-                edge("✓ Read    src/app.py", "12 lines", WIDTH),
-                edge("✓ Search  do_(GET|POST) in src", "1 match", WIDTH),
+                edge("✓ Read src/app.py", "12 lines", WIDTH),
+                edge("✓ Search do_(GET|POST) in src", "1 match", WIDTH),
             ]
         );
     }
@@ -3077,9 +3378,9 @@ mod row_tests {
         assert_eq!(
             rows,
             vec![
-                edge("✓ Run     echo one", "1 line", WIDTH),
+                edge("✓ Run echo one", "1 line", WIDTH),
                 "  └ one".to_string(),
-                edge("✓ Run     echo two", "1 line", WIDTH),
+                edge("✓ Run echo two", "1 line", WIDTH),
                 "  └ two".to_string(),
             ]
         );
@@ -3096,7 +3397,7 @@ mod row_tests {
         });
         assert!(group.complete("a", Outcome::from_result(false, &body, "")));
         let rows = plain(&group.lines(WIDTH, Duration::ZERO));
-        assert_eq!(rows[0], edge("✗ Run     cargo test", "exit 101", WIDTH));
+        assert_eq!(rows[0], edge("✗ Run cargo test", "exit 101", WIDTH));
         assert_eq!(rows[1], "  └ error: test failed");
     }
 
@@ -3111,7 +3412,7 @@ mod row_tests {
             ('\u{2800}'..='\u{28ff}').contains(&glyph),
             "a running call spins a braille frame, got {glyph:?}"
         );
-        assert_eq!(chars.as_str().trim_end(), " Read    README.md");
+        assert_eq!(chars.as_str().trim_end(), " Read README.md");
     }
 
     #[test]
@@ -3163,7 +3464,7 @@ mod row_tests {
         assert_eq!(
             plain(&lines),
             vec![
-                edge("✓ Edit    src/app.py", "+1 -0", WIDTH),
+                edge("✓ Edit src/app.py", "+1 -0", WIDTH),
                 "       1 + import json".to_string(),
                 "    1  2   TODOS = []".to_string(),
             ]
@@ -3216,10 +3517,10 @@ mod row_tests {
         assert_eq!(
             plain(&group.lines(WIDTH, Duration::ZERO)),
             vec![
-                edge("✓ Edit    alpha.txt", "+2 -0", WIDTH),
+                edge("✓ Edit alpha.txt", "+2 -0", WIDTH),
                 "       1 + alpha one".to_string(),
                 "       2 + alpha two".to_string(),
-                edge("✓ Edit    beta.txt", "+1 -0", WIDTH),
+                edge("✓ Edit beta.txt", "+1 -0", WIDTH),
                 "       1 + beta one".to_string(),
             ]
         );
@@ -3236,7 +3537,7 @@ mod row_tests {
         let sep = std::path::MAIN_SEPARATOR;
         assert_eq!(
             plain(&group.lines(WIDTH, Duration::ZERO))[0],
-            edge(&format!("✓ Read    src{sep}app.py"), "1 line", WIDTH)
+            edge(&format!("✓ Read src{sep}app.py"), "1 line", WIDTH)
         );
     }
 

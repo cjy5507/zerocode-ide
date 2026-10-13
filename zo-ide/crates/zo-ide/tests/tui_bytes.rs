@@ -1326,16 +1326,16 @@ fn two_finished_commands_are_two_rows_with_a_green_check() {
     assert_eq!(
         plain,
         vec![
-            "✓ Run     ls -la                                                                                                  1 line".to_string(),
+            "✓ Run ls -la                                                                                                      1 line".to_string(),
             "  └ total 16".to_string(),
-            "✓ Run     cat README.md                                                                                           1 line".to_string(),
+            "✓ Run cat README.md                                                                                               1 line".to_string(),
             "  └ hello".to_string(),
         ]
     );
     let mut rendered = String::new();
     write_spans(&lines[0], &mut rendered);
     assert!(
-        rendered.starts_with("\u{1b}[1m\u{1b}[38;5;2;49m✓\u{1b}[22m\u{1b}[39;49m \u{1b}[1mRun     "),
+        rendered.starts_with("\u{1b}[1m\u{1b}[38;5;2;49m✓\u{1b}[22m\u{1b}[39;49m \u{1b}[1mRun "),
         "the check is green and bold, the verb bold: {rendered:?}"
     );
 }
@@ -1352,10 +1352,10 @@ fn a_live_read_is_one_spinning_row() {
     ));
     let lines = group.lines(120, Duration::ZERO);
     let plain: Vec<String> = lines.iter().map(Line::plain).collect();
-    assert_eq!(plain, vec!["⠋ Read    README.md".to_string()]);
+    assert_eq!(plain, vec!["⠋ Read README.md".to_string()]);
     let mut row = String::new();
     write_spans(&lines[0], &mut row);
-    assert!(row.contains("\u{1b}[1mRead    "), "the verb is bold: {row:?}");
+    assert!(row.contains("\u{1b}[1mRead "), "the verb is bold: {row:?}");
 }
 
 /// Generic calls retain their semantic target while running, but narrow panes
@@ -1373,7 +1373,7 @@ fn a_running_generic_call_is_compact_at_narrow_width_with_cjk_detail() {
 
     let lines = group.lines(24, Duration::ZERO);
     assert_eq!(lines.len(), 1, "running generic calls must not grow the viewport");
-    assert!(lines[0].plain().starts_with("⠋ Call    ToolSearch"));
+    assert!(lines[0].plain().starts_with("⠋ Call ToolSearch"));
     assert!(lines[0].width() <= 24, "line was {:?}", lines[0].plain());
 
     let lines = group.lines(80, Duration::ZERO);
@@ -1416,7 +1416,7 @@ fn a_committed_tool_cell_carries_the_fold_markers() {
     // 앞 빈 줄은 구간 밖 — 접어도 셀 사이의 숨은 남는다.
     assert_eq!(rows[0].plain(), "");
     assert_eq!(rows[0].lead, None);
-    assert_eq!(rows[1].plain(), "✓ Run     grep -n 'a;b' src                                                                                       1 line");
+    assert_eq!(rows[1].plain(), "✓ Run grep -n 'a;b' src                                                                                           1 line");
     assert_eq!(
         rows[1].lead.as_deref(),
         Some("\u{1b}]7788;begin;0;collapsed,teaser=1;✓ Run grep -n 'a%3Bb' src 1 line\u{1b}\\")
@@ -1473,11 +1473,11 @@ fn marker_mode_folds_group_output_into_the_body() {
         plain,
         vec![
             String::new(),
-            "✓ Run     ls -la                                                                                                  1 line".to_string(),
+            "✓ Run ls -la                                                                                                      1 line".to_string(),
             // 접힌 동안 보이는 밀도 줄(teaser) — 펼치면 사라지고 본문이 선다.
             "  └ … +1 lines".to_string(),
             "  └ total 16".to_string(),
-            "✓ Run     cat README.md                                                                                           1 line".to_string(),
+            "✓ Run cat README.md                                                                                               1 line".to_string(),
             "  └ … +1 lines".to_string(),
             "  └ hello".to_string(),
         ]
@@ -1530,9 +1530,9 @@ fn default_mode_grouped_cell_emits_no_fold_bytes() {
         plain,
         vec![
             String::new(),
-            "✓ Run     ls -la                                                                                                  1 line".to_string(),
+            "✓ Run ls -la                                                                                                      1 line".to_string(),
             "  └ total 16".to_string(),
-            "✓ Run     cat README.md                                                                                           1 line".to_string(),
+            "✓ Run cat README.md                                                                                               1 line".to_string(),
             "  └ hello".to_string(),
         ]
     );

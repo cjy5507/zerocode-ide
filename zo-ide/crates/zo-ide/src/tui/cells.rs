@@ -281,7 +281,8 @@ fn user_message_style_for_palette(
     ))
 }
 
-/// 유저 셀 — 캡처는 앞 빈 줄 둘, 뒤 빈 줄 하나를 함께 넣는다.
+/// 유저 셀 — 셀 사이 빈 줄 하나와 본문. 터미널 팔레트가 있으면 본문은 codex
+/// 의 띠(빈 줄·본문·빈 줄, 색칠)에 선다.
 #[must_use]
 pub fn user_cell(text: &str, width: usize) -> Vec<Line> {
     user_cell_for_palette(text, width, palette::terminal_palette())
@@ -301,8 +302,15 @@ fn user_cell_for_palette(
     // The first blank is the untinted breathing gap between cells; the tinted
     // band below it is codex's shape exactly — one leading blank + body + one
     // trailing blank (history_cell/messages.rs:265-270) — so the text sits in
-    // the band's vertical center instead of hugging its top edge.
+    // the band's vertical center instead of hugging its top edge. A terminal
+    // that answered no palette query draws no tint, and there the band's
+    // blank rows are only more gap: the message stands under its gap alone
+    // (t-51389).
     let mut out = vec![Line::empty()];
+    if terminal_palette.is_none() {
+        out.extend(prefixed(&body, width, &Prefix::user(), true));
+        return out;
+    }
     let band_start = out.len();
     out.push(Line::empty());
     out.extend(prefixed(&body, width, &Prefix::user(), true));
@@ -1483,23 +1491,42 @@ mod tests {
 
     #[test]
     fn the_user_cell_matches_the_captured_shape() {
+        // A test runs with no terminal palette: the gap row and the message.
         let lines = user_cell("안녕!", 40);
         let plain: Vec<String> = lines.iter().map(Line::plain).collect();
-        assert_eq!(
-            plain,
-            vec![String::new(), String::new(), "› 안녕!".to_string(), String::new()]
-        );
-        let marker = &lines[2].spans[0];
+        assert_eq!(plain, vec![String::new(), "› 안녕!".to_string()]);
+        let marker = &lines[1].spans[0];
         assert_eq!(marker.text, "› ");
         assert!(marker.style.bold && marker.style.dim);
+    }
+
+    /// A terminal that answers no palette query draws no tinted band — the
+    /// window's grid answers none (t-51389) — so the band's blank rows were
+    /// only more gap: two blank rows over the message and, with the next
+    /// cell's, two under it. Without a palette the cell is its one gap row
+    /// and the message; with one, the band keeps codex's shape.
+    #[test]
+    fn a_user_message_without_a_palette_is_its_gap_and_its_words() {
+        use crate::tui::palette::{ColorLevel, TerminalPalette};
+
+        let plain = |lines: &[Line]| lines.iter().map(Line::plain).collect::<Vec<_>>();
+        assert_eq!(
+            plain(&user_cell_for_palette("안녕!", 40, None)),
+            vec![String::new(), "› 안녕!".to_string()]
+        );
+        let terminal = TerminalPalette::new((255, 255, 255), (0, 0, 0), ColorLevel::TrueColor);
+        assert_eq!(
+            plain(&user_cell_for_palette("안녕!", 40, Some(terminal))),
+            vec![String::new(), String::new(), "› 안녕!".to_string(), String::new()]
+        );
     }
 
     #[test]
     fn a_long_user_line_wraps_under_the_two_space_indent() {
         let lines = user_cell("alpha beta gamma delta", 14);
         let plain: Vec<String> = lines.iter().map(Line::plain).collect();
-        assert_eq!(plain[2], "› alpha beta");
-        assert_eq!(plain[3], "  gamma delta");
+        assert_eq!(plain[1], "› alpha beta");
+        assert_eq!(plain[2], "  gamma delta");
     }
 
     #[test]

@@ -1256,8 +1256,9 @@ async fn e2e_tool_turn_runs_bash_and_read_and_compacts_to_two_commands() {
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"Run Bash once and Read fixture.txt once, then summarize\r")
         .expect("send tool prompt");
-    // The read's row: its bold verb padded to the column (t-48216).
-    run.wait_for("Read    ", TEST_TIMEOUT);
+    // The read's row: its bold verb, one space before the path (t-51389) —
+    // the bold is what tells it from the prompt, which names `Read` too.
+    run.wait_for("\u{1b}[1mRead \u{1b}[22m", TEST_TIMEOUT);
     run.wait_for_history_row("fixture read", TEST_TIMEOUT);
     let capture = run.finish();
 
@@ -1960,7 +1961,7 @@ async fn e2e_a_delegation_cell_shows_its_task_not_its_arguments() {
     // A detached spawn commits the collab-shaped completion cell and suppresses
     // the result envelope; the report arrives later as its own AgentResult cell.
     assert!(
-        plain_screen.contains("Spawn   agent [general-purpose]"),
+        plain_screen.contains("Spawn agent [general-purpose]"),
         "the result cell must use the spawn row"
     );
     for syntax in ["agentId", "outputFile", "subagentType"] {
@@ -4090,7 +4091,7 @@ async fn e2e_a_background_bash_completes_as_the_foreground_ran_cell() {
     let capture = run.finish();
     dump_capture(&capture, "background-bash-foreground-control");
     let foreground = settled_screen(&capture, 40).transcript();
-    let control = command_cell(&foreground, "Run     sh -c")
+    let control = command_cell(&foreground, "Run sh -c")
         .unwrap_or_else(|| panic!("no foreground Run row: {foreground:#?}"));
     assert_eq!(control[1], "  └ x", "the control cell is not the one expected: {control:#?}");
 
@@ -4129,18 +4130,18 @@ async fn e2e_a_background_bash_completes_as_the_foreground_ran_cell() {
     // the task exited 1. So the completion is the foreground row's verb and
     // command, the one dim word, and its own result at the edge.
     let command = control[0]
-        .split_once("Run     ")
+        .split_once("Run ")
         .and_then(|(_, rest)| rest.split("  ").next())
         .unwrap_or_else(|| panic!("the foreground row names its command: {:?}", control[0]));
     assert!(
-        transcript[completion_at].starts_with(&format!("✗ Run     {command} {BACKGROUND_WORD}")),
+        transcript[completion_at].starts_with(&format!("✗ Run {command} {BACKGROUND_WORD}")),
         "the row is the foreground row's command plus one dim word: {transcript:#?}"
     );
     assert!(
         transcript[completion_at].trim_end().ends_with("exit 1"),
         "the completion carries its own exit: {transcript:#?}"
     );
-    let completion = command_cell(&transcript[completion_at..], "Run     sh -c")
+    let completion = command_cell(&transcript[completion_at..], "Run sh -c")
         .unwrap_or_else(|| panic!("no completion cell: {transcript:#?}"));
     assert!(completion.iter().any(|row| row.trim() == "x"), "original command output remains: {completion:?}");
     assert_eq!(completion.iter().filter(|row| row.contains("background task") && row.contains("exited (code 1)")).count(), 1);
@@ -4250,7 +4251,7 @@ async fn e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
         );
     }
     assert!(
-        screen.transcript().iter().filter(|row| row.contains(" Run     ")).count() >= 1,
+        screen.transcript().iter().filter(|row| row.contains(" Run seq -f")).count() >= 1,
         "the commands themselves are still in the transcript: {:#?}",
         screen.transcript()
     );
@@ -4314,9 +4315,9 @@ async fn e2e_writes_announced_beside_a_bash_are_edited_files_never_a_failed_patc
             .position(|row| row.starts_with(lead))
             .unwrap_or_else(|| panic!("no {lead:?} row: {transcript:#?}"))
     };
-    let alpha = row("✓ Create  alpha.txt");
-    let beta = row("✓ Create  beta.txt");
-    let ran = row("✓ Run     printf");
+    let alpha = row("✓ Create alpha.txt");
+    let beta = row("✓ Create beta.txt");
+    let ran = row("✓ Run printf");
     assert!(
         alpha < beta && beta < ran,
         "the command stands before the writes it followed: {transcript:#?}"
@@ -4344,7 +4345,7 @@ async fn e2e_writes_announced_beside_a_bash_are_edited_files_never_a_failed_patc
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
     const ROWS: u16 = 24;
-    const FIRST_ROW: &str = "✓ Create  file1.txt";
+    const FIRST_ROW: &str = "✓ Create file1.txt";
     let layout = Layout::new();
     let files: Vec<(String, String)> = (1..=5)
         .map(|file| {
@@ -8267,7 +8268,7 @@ async fn e2e_housekeeping_refuses_small_spawn_and_continues_inline() {
     assert!(requests[1].contains("Small delegated task: do it inline"));
     let screen = strip_ansi(&String::from_utf8_lossy(&capture));
     assert!(screen.contains("declined — kept inline") && screen.contains("Small delegated task"), "{screen}");
-    assert!(!screen.lines().any(|line| line.contains("Spawn   ") && line.contains("failed")), "a policy verdict is not drawn as a failure:\n{screen}");
+    assert!(!screen.lines().any(|line| line.contains("Spawn ") && line.contains("failed")), "a policy verdict is not drawn as a failure:\n{screen}");
 }
 
 /// t-2999: a model-authored reserved implementation model is refused; the

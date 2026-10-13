@@ -302,7 +302,7 @@ pub fn unchanged_lines(count: usize) -> String {
     if count == 1 { "⋯ 1 unchanged line".to_string() } else { format!("⋯ {count} unchanged lines") }
 }
 
-/// A tool row's verb (t-48216): `✓ Read    src/app.py      12 lines`.
+/// A tool row's verb (t-48216): `✓ Read src/app.py      12 lines`.
 pub const TOOL_READ: &str = "Read";
 pub const TOOL_SEARCH: &str = "Search";
 pub const TOOL_LIST: &str = "List";
@@ -314,8 +314,13 @@ pub const TOOL_CHECK: &str = "Check";
 pub const TOOL_CALL: &str = "Call";
 pub const TOOL_SPAWN: &str = "Spawn";
 /// Where a web search looks, in the place a file search names its path:
-/// `✓ Search  rust async on the web`.
+/// `✓ Search rust async on the web`.
 pub const THE_WEB: &str = "the web";
+/// What an image item of an MCP tool's result stands as among its text
+/// items, under the call's row (t-51389).
+pub const MCP_IMAGE_ITEM: &str = "[image]";
+/// What any other item that is not text stands as there — a resource, a link.
+pub const MCP_RESOURCE_ITEM: &str = "[resource]";
 /// A spawn row's result when the dispatch kept the work inline: a policy
 /// verdict, not a failure.
 pub const SPAWN_DECLINED_RESULT: &str = "declined — kept inline";

@@ -237,6 +237,105 @@ pub enum ReplayItem {
     },
 }
 
+/// How the first line of every stored steer opens — `runtime`'s
+/// `STEERING_PREAMBLE` (`conversation/mod.rs`). Matched as this head and the
+/// line's closing `]`, not as the whole sentence, so a session stored before
+/// the sentence last changed still reads back.
+const STEERING_FRAME_HEAD: &str = "[User steering — ";
+/// The tag a zo reminder may wear ahead of its wrapper:
+/// `[zo:truncation-continuation] <system-reminder>…</system-reminder>`.
+const HOST_REMINDER_TAG: &str = "[zo:";
+/// How a reminder's wrapper closes; it opens with
+/// [`core_types::session::REMINDER_TAG_OPEN`].
+const REMINDER_TAG_CLOSE: &str = "</system-reminder>";
+/// How the window's resume nudges open — `RESTART_NUDGE` (the window's
+/// `window_runtime.rs`), `COORDINATOR_NUDGE` and `CUT_COMMANDS_NUDGE`
+/// (`restart_nudge_runtime.rs`). The window types one into a pane it brought
+/// back, as one line with what it adds (the checkout, the seat): words for
+/// the agent, never the person's.
+const WINDOW_RESUME_NUDGES: [&str; 3] = [
+    "The window restarted and cut your last turn short.",
+    "The window restarted while your run was still working.",
+    "Commands still running under you when the window restarted were cut:",
+];
+
+/// The person's words in one stored text block, with the host's framing taken
+/// off — `None` when the block carries no framing and is shown as stored.
+///
+/// The runtime stores what the model reads: each steer behind its preamble
+/// line (one block folded into a tool result, or several joined by a blank
+/// line in a continuation, after a truncation reminder), `[zo:…]` reminders
+/// for the turn-end gate and the truncation, and the task-notification
+/// preamble; the window adds its resume nudge. The live screen drew only a
+/// steer's words (`runtime::STEERING_ECHO_PREFIX`) and none of the rest, so a
+/// resumed transcript takes the same words back out. Display only: the
+/// session file and the wire keep every byte.
+fn person_words(block: &str) -> Option<Vec<&str>> {
+    let mut rest = block;
+    let mut framed = false;
+    while let Some(after) = after_host_reminder(rest)
+        .or_else(|| after_window_nudge(rest))
+        .or_else(|| after_notification_preamble(rest))
+    {
+        rest = after.trim_start_matches(['\r', '\n']);
+        framed = true;
+    }
+    if let Some(steers) = steered_words(rest) {
+        return Some(steers);
+    }
+    framed.then(|| if rest.trim().is_empty() { Vec::new() } else { vec![rest] })
+}
+
+/// What follows a leading reminder, `[zo:tag]` or not.
+fn after_host_reminder(text: &str) -> Option<&str> {
+    let wrapped = match text.strip_prefix(HOST_REMINDER_TAG) {
+        Some(tagged) => tagged[tagged.find(']')? + 1..].trim_start(),
+        None => text,
+    };
+    let body = wrapped.strip_prefix(core_types::session::REMINDER_TAG_OPEN)?;
+    let close = body.find(REMINDER_TAG_CLOSE)?;
+    Some(&body[close + REMINDER_TAG_CLOSE.len()..])
+}
+
+/// What follows the window's resume nudge: the rest of the text after its line.
+fn after_window_nudge(text: &str) -> Option<&str> {
+    WINDOW_RESUME_NUDGES
+        .iter()
+        .any(|nudge| text.starts_with(nudge))
+        .then(|| text.split_once('\n').map_or("", |(_, rest)| rest))
+}
+
+/// What follows the runtime's task-notification preamble line.
+fn after_notification_preamble(text: &str) -> Option<&str> {
+    let (line, rest) = text.split_once('\n').unwrap_or((text, ""));
+    crate::tui::tools::is_runtime_agent_notification_preamble(line).then_some(rest)
+}
+
+/// Each steer's words in a run of steer frames — `<preamble line>\n<words>`,
+/// joined by a blank line when one message carries several — or `None` when
+/// the text does not open with a frame.
+fn steered_words(text: &str) -> Option<Vec<&str>> {
+    let next_frame = format!("\n\n{STEERING_FRAME_HEAD}");
+    let mut steers = Vec::new();
+    let mut rest = text;
+    while let Some(frame) = rest.strip_prefix(STEERING_FRAME_HEAD) {
+        let Some((preamble, said)) = frame.split_once('\n') else {
+            break;
+        };
+        if !preamble.trim_end().ends_with(']') {
+            break;
+        }
+        let (words, after) = said
+            .find(&next_frame)
+            .map_or((said, ""), |at| (&said[..at], &said[at + 2..]));
+        if !words.trim().is_empty() {
+            steers.push(words);
+        }
+        rest = after;
+    }
+    (!steers.is_empty()).then_some(steers)
+}
+
 /// 트랜스크립트 메시지 → 재생 항목. System 메시지와 thinking 은 화면에 없던
 /// 것이므로 뺀다. `ToolResult` 는 `tool_use_id` 로 앞선 호출에 붙인다.
 #[must_use]
@@ -264,6 +363,14 @@ pub fn replay_items_from(messages: &[core_types::session::ConversationMessage]) 
                                     summary,
                                     body,
                                 });
+                            } else if let Some(steers) = person_words(t) {
+                                // Each steer was its own cell on the live screen.
+                                for words in steers {
+                                    if !text.trim().is_empty() {
+                                        items.push(ReplayItem::User(std::mem::take(&mut text)));
+                                    }
+                                    items.push(ReplayItem::User(words.to_string()));
+                                }
                             } else {
                                 if !text.is_empty() {
                                     text.push('\n');
