@@ -490,6 +490,14 @@ enum PublishedActivity {
     Value(Option<events::ActivityCard>),
 }
 
+/// What history took last — a tool cell's rows, or any other cell's
+/// ([`Ui::commit_tool_rows`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryTail {
+    ToolCell,
+    Other,
+}
+
 struct Ui {
     flags: RenderFlags,
     painter: Painter<std::io::Stdout>,
@@ -548,6 +556,10 @@ struct Ui {
     fold_mode: FoldMode,
     /// 마지막으로 돌린 커밋 애니메이션 틱의 시각.
     last_commit: Option<Instant>,
+    /// Whether the newest rows history took were a tool cell's: the next tool
+    /// cell joins them without its gap row, so a run of calls with nothing
+    /// said between them is one block (t-51389). Any other cell ends the run.
+    history_tail: HistoryTail,
     /// 턴이 끝나면 풀 일.
     deferred: Vec<Deferred>,
     status: Option<Status>,
@@ -1828,12 +1840,27 @@ impl Ui {
         if lines.is_empty() {
             return;
         }
+        self.history_tail = HistoryTail::Other;
         if let Some(candidate) = self.quiet_candidate.as_mut() {
             candidate.extend_from_slice(lines);
             return;
         }
         self.commit_quiet_loop_cell();
         self.pending_history.extend_from_slice(lines);
+    }
+
+    /// A committed tool cell into history. Right after another tool cell it
+    /// leaves off the gap row it opens with ([`ToolGroup::committed`]).
+    fn commit_tool_rows(&mut self, mut lines: Vec<Line>) {
+        if self.history_tail == HistoryTail::ToolCell
+            && lines.first().is_some_and(|line| *line == Line::empty())
+        {
+            lines.remove(0);
+        }
+        self.history(&lines);
+        if !lines.is_empty() {
+            self.history_tail = HistoryTail::ToolCell;
+        }
     }
 
     fn begin_quiet_candidate(&mut self) {
@@ -1872,6 +1899,7 @@ impl Ui {
         let Some(cell) = self.quiet_loop_cell.take() else {
             return;
         };
+        self.history_tail = HistoryTail::Other;
         self.pending_history.push(Line::empty());
         self.pending_history.extend(cell.lines);
     }
@@ -4028,7 +4056,7 @@ impl Ui {
                 let mut group = ToolGroup::new(ToolCall::new(AGENT_RESULT_ID.to_string(), kind));
                 group.complete(AGENT_RESULT_ID, outcome);
                 let cell = group.committed(width, &mut self.folds, self.fold_mode);
-                self.history(&cell);
+                self.commit_tool_rows(cell);
             }
             RenderBlock::System { level, text, .. } => {
                 if let Some(steer) = text.strip_prefix(runtime::STEERING_ECHO_PREFIX) {
@@ -4290,7 +4318,7 @@ impl Ui {
             orphan.complete(id, outcome);
             let width = self.width();
             let cell = orphan.committed(width, &mut self.folds, self.fold_mode);
-            self.history(&cell);
+            self.commit_tool_rows(cell);
             self.committed_tool_calls.insert(id.to_string());
             self.seat_waiting_tools();
             return;
@@ -4340,7 +4368,7 @@ impl Ui {
             .extend(cell.call_ids().map(str::to_string));
         let width = self.width();
         let lines = cell.committed(width, &mut self.folds, self.fold_mode);
-        self.history(&lines);
+        self.commit_tool_rows(lines);
     }
 
     /// 훅 보고용 관찰 — 블록을 소비하지 않는다.
@@ -4577,6 +4605,7 @@ impl App {
                 folds: FoldIds::default(),
                 fold_mode: FoldMode::from_env(),
                 last_commit: None,
+                history_tail: HistoryTail::Other,
                 deferred: Vec::new(),
                 pending_history: Vec::new(),
                 passport_gate: PassportGate::default(),
@@ -6416,6 +6445,7 @@ fn test_ui() -> Ui {
         folds: FoldIds::default(),
         fold_mode: FoldMode::Bare,
         last_commit: None,
+        history_tail: HistoryTail::Other,
         deferred: Vec::new(),
         pending_history: Vec::new(),
         passport_gate: PassportGate::default(),
@@ -7882,7 +7912,9 @@ mod tests {
             .iter()
             .position(|row| row.starts_with("✗ Run "))
             .unwrap_or_else(|| panic!("no foreground Run row: {foreground:?}"));
-        ui.pending_history.clear();
+        // The completion on a screen of its own: right after the foreground
+        // cell it would join that cell without its gap row (t-51389).
+        let mut ui = test_ui();
 
         // The background completion, exactly as the pump re-injects it: the
         // host header, then the task log with its `$ command` / `[pid]` head,
