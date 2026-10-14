@@ -5700,7 +5700,7 @@ fn browser_type_refuses_a_password_field_and_value_stdin_uses_the_setter_only() 
         run_evidence::redacted("browser", &words(&["type", "b", "#pw", "hunter2"]))[3],
         "[7 chars]"
     );
-    let dispatcher = block_after(shipped_backend(), "async fn answer_browser_command(");
+    let dispatcher = block_after(shipped_backend(), "async fn dispatch_browser_command(");
     assert!(
         dispatcher.contains("(\"type\", 5)") && dispatcher.contains("TypeRoad::Setter"),
         "the door dispatches the stdin shape to the setter road:\n{dispatcher}"
@@ -15846,6 +15846,7 @@ fn non_default_settings_are_the_next_boot_snapshot() {
             default_zoom_level: 1.5,
             open_tabs: vec![StoredBrowserTab {
                 url: "https://example.com/work".to_string(),
+                agent_workspace: false,
                 viewport: Some("mobile-m".to_string()),
                 mobile: true,
                 reader: None,
@@ -16044,6 +16045,7 @@ fn non_default_settings_are_the_next_boot_snapshot() {
         boot.document.browser.open_tabs,
         [StoredBrowserTab {
             url: "https://example.com/work".to_string(),
+            agent_workspace: false,
             viewport: Some("mobile-m".to_string()),
             mobile: true,
             reader: None,
@@ -16071,6 +16073,7 @@ fn non_default_settings_are_the_next_boot_snapshot() {
         migrated.open_tabs[0],
         StoredBrowserTab {
             url: "https://a.example/".to_string(),
+            agent_workspace: false,
             viewport: None,
             mobile: false,
             reader: None,
@@ -16079,6 +16082,15 @@ fn non_default_settings_are_the_next_boot_snapshot() {
     );
     assert_eq!(migrated.open_tabs[1].viewport.as_deref(), Some("mobile-m"));
     assert!(migrated.open_tabs[1].mobile);
+    let workspaces: BrowserPrefs = serde_json::from_value(serde_json::json!({
+        "open_tabs": [{ "url": "https://example.com/work", "agentWorkspace": true }],
+    }))
+    .expect("workspace marker reads");
+    assert!(workspaces.open_tabs[0].agent_workspace);
+    let stored_workspace = serde_json::to_value(&workspaces).expect("workspace marker writes");
+    assert_eq!(stored_workspace["open_tabs"][0]["agentWorkspace"], true);
+    let stored_legacy = serde_json::to_value(&migrated).expect("legacy tabs write");
+    assert!(stored_legacy["open_tabs"][0].get("agentWorkspace").is_none());
     assert_eq!(
         migrated.open_tabs[1].reader, None,
         "the old spelling names no reader string"

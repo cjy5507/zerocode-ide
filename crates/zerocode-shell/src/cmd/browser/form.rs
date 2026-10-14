@@ -2249,6 +2249,17 @@ fn form_buttons() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     BUTTONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+pub(crate) fn forget_form(label: &str) {
+    form_prints()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(label);
+    form_buttons()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(label);
+}
+
 /// Remember the buttons of the form a pane's agent now knows.
 pub(crate) fn remember_buttons(label: &str, buttons: &[FormAction]) {
     form_buttons()

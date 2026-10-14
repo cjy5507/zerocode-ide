@@ -93,6 +93,20 @@ person's input setting, or substitute a shared-input shell command. Only the
 person can explicitly enable shared desktop input in Computer Use settings.
 A background run cannot inherit that weaker policy partway through its steps.
 
+For websites, open a dedicated working tab with `zerocode-browser open <url>`.
+This is a real page in the window's browser, not another Chrome or Safari
+window and not a copy of an external browser's login. Opening it does not
+switch the person's tab. The person can watch its actual snapshots, collapse
+the viewer without stopping the page, or pause and take control. Watching
+does not grant shared mouse or keyboard access. Capture runs only while the
+viewer is visible, at most once per second with one request in flight.
+The browser door stops new input while paused or controlled by the person,
+including `eval` and browser steps inside a walk. Never bypass that refusal
+with another surface. Once control returns, read the page again before
+acting; previous form and numbered-element observations have been discarded.
+Returning control permits the agent to continue; it is not evidence that
+the agent's task has resumed or completed.
+
 Under background-only policy, recipes never watch the person's shared pointer;
 each desktop input is admitted independently and an unsupported step stops.
 Recipes containing only built-in browser, emulator or explicitly background

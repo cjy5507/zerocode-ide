@@ -9618,7 +9618,7 @@ mod tests {
     #[test]
     fn every_answer_with_a_pages_words_rides_inside_the_untrusted_fence() {
         let shell = shipped_backend();
-        let answering = block_after(shell, "async fn answer_browser_command(");
+        let answering = block_after(shell, "async fn dispatch_browser_command(");
         for arm in [
             "(\"list\", 1) => {",
             "(\"tabs\", 1) => {",
@@ -9670,7 +9670,12 @@ mod tests {
     #[test]
     fn the_agents_browser_door_rides_the_guarded_roads() {
         let shell = shipped_backend();
-        let answering = block_after(shell, "async fn answer_browser_command(");
+        let guarded = block_after(shell, "async fn answer_browser_command(");
+        let admitted = guarded.find(".begin(label, pane, verb)").expect("workspace input guard");
+        let dispatched = guarded.find("dispatch_browser_command(app, argv, pane).await").expect("dispatch");
+        assert!(admitted < dispatched);
+        assert!(guarded.contains("operation.finish(answer.exit_code == 0)"));
+        let answering = block_after(shell, "async fn dispatch_browser_command(");
         for verb in zerocode_core::agent_browser::VERBS {
             assert!(
                 answering.contains(&format!(r#"("{verb}","#)),

@@ -2781,15 +2781,12 @@ pub(super) async fn computer_loop(
                                 zerocode_core::computer_recipe::RecipeTool::Browser => {
                                     tauri::async_runtime::block_on(browser_step(
                                         &app,
-                                        None,
+                                        pane.as_deref(),
                                         dir.as_deref(),
                                         step,
                                         logged,
                                     ))
                                 }
-                                // A walk is asked through the Computer Use
-                                // door, which names no pane: like its browser
-                                // steps, its `open` has no checkout to go to.
                                 zerocode_core::computer_recipe::RecipeTool::Emulator => {
                                     tauri::async_runtime::block_on(emulator_step(
                                         &app,
@@ -5171,6 +5168,7 @@ pub(super) fn answer_computer_command(
         workspace,
         &mut LiveTyper {
             window: permission_window,
+            pane: run_evidence::actor_pane(),
         },
     )
 }
@@ -5183,6 +5181,7 @@ pub(super) fn answer_computer_command(
 /// dropped (`computer_use::enter`).
 struct LiveTyper<'a> {
     window: Option<&'a tauri::AppHandle>,
+    pane: Option<String>,
 }
 
 impl LiveTyper<'_> {
@@ -5234,7 +5233,9 @@ impl computer_use::enter::Typer for LiveTyper<'_> {
     fn browser(&mut self, words: &[String]) -> Result<(), computer_use::ComputerUseError> {
         let app = self.window()?;
         input_answered(&tauri::async_runtime::block_on(answer_browser_command(
-            app, words, None,
+            app,
+            words,
+            self.pane.as_deref(),
         )))
     }
 
@@ -6600,6 +6601,39 @@ pub(super) async fn answer_browser_command(
 ) -> zerocode_hookd::TeamAnswer {
     let state = app.state::<AppState>();
     let verb = argv.first().map(String::as_str).unwrap_or_default();
+    let label = (!matches!(verb, "open" | "list" | "tabs"))
+        .then(|| argv.get(1))
+        .flatten();
+    let operation = match label {
+        Some(label) => match state
+            .shell_runtime()
+            .browser_workspaces
+            .begin(label, pane, verb)
+        {
+            Ok(operation) => operation,
+            Err(error) => return browser_refused(format!("zerocode-browser: {error}\n")),
+        },
+        None => None,
+    };
+    let answer = dispatch_browser_command(app, argv, pane).await;
+    if let Some(operation) = operation {
+        operation.finish(answer.exit_code == 0);
+        if let Some(label) = label
+            && let Ok(Some(snapshot)) = state.shell_runtime().browser_workspaces.snapshot(label)
+        {
+            let _ = app.emit("browser:workspace", snapshot);
+        }
+    }
+    answer
+}
+
+async fn dispatch_browser_command(
+    app: &AppHandle,
+    argv: &[String],
+    pane: Option<&str>,
+) -> zerocode_hookd::TeamAnswer {
+    let state = app.state::<AppState>();
+    let verb = argv.first().map(String::as_str).unwrap_or_default();
     match (verb, argv.len()) {
         ("list", 1) => {
             let mut labels: Vec<String> = state.browser_panes().iter().cloned().collect();
@@ -6641,6 +6675,14 @@ pub(super) async fn answer_browser_command(
             // the door's budget for the pane to appear in the mint. Lock
             // order born→reserved, the same as the claim.
             let label = reserve_label(&mut state.browser_born(), &mut state.browser_reserved());
+            if let Err(error) = state
+                .shell_runtime()
+                .browser_workspaces
+                .register(&label, pane, false)
+            {
+                state.browser_reserved().remove(&label);
+                return browser_refused(format!("zerocode-browser: {error}\n"));
+            }
             // The WINDOW opens it — the tab, the toolbar and the pane's seat
             // are the frontend's, and this is the same road a popup walks.
             // An emit that failed is a request that never left, and saying
@@ -6657,6 +6699,8 @@ pub(super) async fn answer_browser_command(
                 },
             );
             if let Err(error) = asked {
+                state.browser_reserved().remove(&label);
+                let _ = state.shell_runtime().browser_workspaces.remove(&label);
                 return browser_refused(format!("zerocode-browser: {error}\n"));
             }
             let opened = cmd::browser::wait_until(

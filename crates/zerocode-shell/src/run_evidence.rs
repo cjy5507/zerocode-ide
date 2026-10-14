@@ -346,6 +346,10 @@ pub fn acting_for(actor: Actor) -> ActingFor {
     ActingFor(ACTOR.with(|held| held.replace(Some(actor))))
 }
 
+pub(crate) fn actor_pane() -> Option<String> {
+    ACTOR.with(|held| held.borrow().as_ref().and_then(|actor| actor.pane.clone()))
+}
+
 /// The synchronous recipe/goal road's measured context, with the thread's
 /// actor laid on it ([`acting_for`]). A road entering an async operation
 /// copies it before awaiting, so another task cannot own it.

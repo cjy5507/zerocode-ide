@@ -17,6 +17,8 @@ pub(crate) use wire::{
     wire_start, wire_stop,
 };
 pub(crate) mod browser;
+pub(crate) mod browser_workspace;
+pub(crate) use browser_workspace::{get_browser_workspaces, set_browser_workspace_mode};
 pub(crate) mod fs;
 pub(crate) mod github_pr;
 pub(crate) mod integration_prefs;

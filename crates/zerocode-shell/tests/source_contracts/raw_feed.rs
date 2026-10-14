@@ -32,7 +32,7 @@ fn block<'a>(source: &'a str, marker: &str) -> &'a str {
 #[test]
 fn a_page_read_whole_is_handed_to_the_feed_before_its_words_are_answered() {
     let tools = shell_source("agent_tools_runtime.rs");
-    let answering = block(&tools, "async fn answer_browser_command(");
+    let answering = block(&tools, "async fn dispatch_browser_command(");
     let read = block(answering, "(\"read\", 2) | (\"read\", 3) => {");
     let whole = at(read, "if read.selector.is_none() {");
     let fed = at(

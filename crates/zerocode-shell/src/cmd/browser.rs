@@ -1047,6 +1047,8 @@ pub(crate) fn open_browser_pane(
     user_agent: Option<String>,
     profile: Option<String>,
     label: Option<String>,
+    agent_workspace: Option<bool>,
+    workspace_restored: Option<bool>,
 ) -> Result<String, String> {
     from_the_main_webview(&webview)?;
     // An id that is not one of ours never reaches an engine — the hex shape is
@@ -1070,6 +1072,19 @@ pub(crate) fn open_browser_pane(
         let mut reserved = state.browser_reserved();
         claim_label(&mut born, &mut reserved, label.as_deref())?
     };
+    if agent_workspace == Some(true)
+        && state
+            .shell_runtime()
+            .browser_workspaces
+            .snapshot(&label)?
+            .is_none()
+    {
+        state.shell_runtime().browser_workspaces.register(
+            &label,
+            None,
+            workspace_restored == Some(true),
+        )?;
+    }
     // Imported cookies waiting for this profile decide WHERE the pane is
     // born. wry sends `loadRequest` the moment the view exists (wkwebview
     // `new`), and `set_cookie` is a per-cookie round trip to the network
@@ -1085,13 +1100,39 @@ pub(crate) fn open_browser_pane(
     // The one door forks here into exactly one engine's body — cfg strips the
     // other whole, so neither build carries the other's dead code.
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-    return open_chromium_browser_pane(
-        &app, &state, parsed, x, y, width, height, user_agent, profile, label, staged,
+    let opened = open_chromium_browser_pane(
+        &app,
+        &state,
+        parsed,
+        x,
+        y,
+        width,
+        height,
+        user_agent,
+        profile,
+        label.clone(),
+        staged,
     );
     #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
-    return open_webkit_browser_pane(
-        &app, &state, parsed, x, y, width, height, user_agent, profile, label, staged,
+    let opened = open_webkit_browser_pane(
+        &app,
+        &state,
+        parsed,
+        x,
+        y,
+        width,
+        height,
+        user_agent,
+        profile,
+        label.clone(),
+        staged,
     );
+    if opened.is_err() {
+        let _ = state.shell_runtime().browser_workspaces.remove(&label);
+    } else if let Some(snapshot) = state.shell_runtime().browser_workspaces.snapshot(&label)? {
+        let _ = app.emit("browser:workspace", snapshot);
+    }
+    opened
 }
 
 /// The wry pane — every build but macOS-with-Chromium. A user agent is
@@ -1572,6 +1613,7 @@ pub(crate) fn browser_navigate(
     url: String,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
+    super::browser_workspace::require_person_control(&state, &label)?;
     let parsed = browsable(&url)?;
     let pane = browser_pane_of(&app, &state, &label)?;
     state
@@ -1593,6 +1635,7 @@ pub(crate) fn browser_history(
     delta: i32,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
+    super::browser_workspace::require_person_control(&state, &label)?;
     let pane = browser_pane_of(&app, &state, &label)?;
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     match delta {
@@ -1613,6 +1656,7 @@ pub(crate) fn browser_reload(
     label: String,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
+    super::browser_workspace::require_person_control(&state, &label)?;
     browser_pane_of(&app, &state, &label)?
         .reload()
         .map_err(|error| error.to_string())
@@ -1628,6 +1672,7 @@ pub(crate) fn browser_stop(
     label: String,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
+    super::browser_workspace::require_person_control(&state, &label)?;
     let pane = browser_pane_of(&app, &state, &label)?;
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     return pane.stop();
@@ -1655,6 +1700,17 @@ pub(crate) fn browser_place(
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
     let pane = browser_pane_of(&app, &state, &label)?;
+    if shown
+        && !state
+            .shell_runtime()
+            .browser_workspaces
+            .allows_person(&label)?
+    {
+        hide_browser_pane(&pane, &webview)?;
+        return Err(
+            "작업 브라우저는 관전 중입니다 — 직접 조작은 제어권 전환 후 가능합니다".to_string(),
+        );
+    }
     if shown {
         #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
         pane.set_bounds(x, y, width.max(1.0), height.max(1.0))?;
@@ -1672,7 +1728,10 @@ pub(crate) fn browser_place(
 }
 
 /// Return the keyboard only when the hidden native view was receiving it.
-fn hide_browser_pane(pane: &BrowserPane, main_webview: &tauri::Webview) -> Result<(), String> {
+pub(super) fn hide_browser_pane(
+    pane: &BrowserPane,
+    main_webview: &tauri::Webview,
+) -> Result<(), String> {
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     {
         pane.hide(main_webview.clone())
@@ -1720,6 +1779,7 @@ pub(crate) fn browser_devtools(
     label: String,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
+    super::browser_workspace::require_person_control(&state, &label)?;
     let pane = browser_pane_of(&app, &state, &label)?;
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     return pane.toggle_devtools();
@@ -1748,6 +1808,7 @@ pub(crate) async fn browser_find(
     match_case: bool,
 ) -> Result<Option<serde_json::Value>, String> {
     from_the_main_webview(&webview)?;
+    super::browser_workspace::require_person_control(&state, &label)?;
     automate_find(&app, &state, &label, &query, forward, match_case).await
 }
 
@@ -1829,6 +1890,7 @@ pub(crate) async fn browser_scroll(
     target: String,
 ) -> Result<(i64, i64), String> {
     from_the_main_webview(&webview)?;
+    super::browser_workspace::require_person_control(&state, &label)?;
     let target = zerocode_core::agent_browser::parse_scroll(&target)?;
     automate_scroll(&app, &state, &label, &target).await
 }
@@ -2099,6 +2161,7 @@ pub(crate) async fn browser_eval(
     expression: String,
 ) -> Result<serde_json::Value, String> {
     from_the_main_webview(&webview)?;
+    super::browser_workspace::require_person_control(&state, &label)?;
     automate_eval(&app, &state, &label, &expression).await
 }
 
@@ -2612,6 +2675,7 @@ pub(crate) async fn browser_click(
     selector: String,
 ) -> Result<BrowserInputReport, String> {
     from_the_main_webview(&webview)?;
+    super::browser_workspace::require_person_control(&state, &label)?;
     automate_click(&app, &state, &label, &selector).await
 }
 
@@ -3018,6 +3082,16 @@ fn browser_marks_store()
         std::sync::Mutex<std::collections::HashMap<String, BrowserMarkTable>>,
     > = std::sync::OnceLock::new();
     MARKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) fn forget_workspace_observation(label: &str) {
+    browser_marks_store()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(label);
+    take_held_settle(label);
+    form::forget_form(label);
+    crate::browser_read::forget(label);
 }
 
 fn remember_marks(label: &str, look: &BrowserLook) {
@@ -3812,6 +3886,7 @@ pub(crate) async fn browser_type(
     text: String,
 ) -> Result<BrowserInputReport, String> {
     from_the_main_webview(&webview)?;
+    super::browser_workspace::require_person_control(&state, &label)?;
     automate_type(&app, &state, &label, &selector, &text, TypeRoad::Keys).await
 }
 
@@ -4189,6 +4264,8 @@ pub(crate) fn close_browser_pane(
     state.browser_panes().remove(&label);
     state.browser_urls().remove(&label);
     state.browser_records().remove(&label);
+    state.shell_runtime().browser_workspaces.remove(&label)?;
+    forget_workspace_observation(&label);
     Ok(())
 }
 
