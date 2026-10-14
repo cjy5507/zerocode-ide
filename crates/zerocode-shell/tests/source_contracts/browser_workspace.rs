@@ -537,3 +537,164 @@ fn handoff_waits_for_a_known_navigation_before_the_page_fence() {
     let placement = block_after(source, "fn with_placement<T>(");
     assert!(!placement.contains("in_flight"));
 }
+
+#[test]
+fn a_capture_starts_only_inside_its_steps_control_and_a_transfer_waits_for_the_send() {
+    let source = include_str!("../../src/browser_workspace.rs");
+    let start = block_after(source, "pub(crate) fn start<T>(");
+    let held = start.find("agent_holds(&state, control)").unwrap();
+    let counted = start.find("state.capturing += 1").unwrap();
+    let guarded = start.find("Sending(workspace)").unwrap();
+    let sent = start.rfind("send()").unwrap();
+    assert!(held < counted && counted < guarded && guarded < sent);
+    let sending = block_after(source, "impl Drop for Sending");
+    assert!(sending.contains("state.capturing = state.capturing.saturating_sub(1)"));
+    assert!(sending.contains("drained.notify_waiters()"));
+    let wait = block_after(source, "pub(crate) async fn wait(&self)");
+    assert!(wait.contains("state.capturing == 0"));
+    let finish = block_after(
+        source,
+        "pub(crate) fn finish(mut self) -> Result<Snapshot, String>",
+    );
+    assert!(finish.contains("state.capturing != 0"));
+    let webkit = block_after(SNAPSHOT, "async fn snapshot_webview_png_held(");
+    assert!(webkit.find("check.start(").unwrap() < webkit.find("take_snapshot_png_held(").unwrap());
+    let cef = block_after(CEF, "pub(crate) fn snapshot_png<F>(");
+    assert!(cef.find("check.start(").unwrap() < cef.find("\"Page.captureScreenshot\"").unwrap());
+    let evidence = block_after(SNAPSHOT, "async fn browser_evidence_png(");
+    assert!(
+        evidence.find("if !check.holds()").unwrap() < evidence.find("bytes.map(Some)").unwrap()
+    );
+}
+
+#[test]
+fn only_the_documents_own_finish_or_failure_releases_a_known_navigation() {
+    let nav = include_str!("../../src/browser_nav_state.rs");
+    let pending = block_after(nav, "pub(super) fn pending(&self) -> bool {");
+    for clock in ["Instant", "Duration", "now", "observed(", "state"] {
+        assert!(!pending.contains(clock), "{clock}");
+    }
+    for visual in ["pub(super) fn observed(", "pub(super) fn dead_if_still("] {
+        assert!(!block_after(nav, visual).contains("awaiting"), "{visual}");
+    }
+    for (event, mark) in [
+        ("pub(super) fn requested(", "Some(Awaiting::Request)"),
+        (
+            "pub(super) fn started(",
+            "Some(Awaiting::Load(self.generation))",
+        ),
+        (
+            "pub(super) fn finished(",
+            "Some(Awaiting::Load(self.generation))",
+        ),
+        ("pub(super) fn failed(", "self.awaiting = None"),
+    ] {
+        assert!(block_after(nav, event).contains(mark), "{event}");
+    }
+    let settle = block_after(BROWSER, "async fn settle_known_navigation(");
+    for release in [
+        ".nav.requested(",
+        ".nav.started(",
+        ".nav.finished(",
+        ".nav.failed(",
+    ] {
+        assert!(!settle.contains(release), "{release}");
+    }
+}
+
+#[test]
+fn an_executors_refusal_before_its_first_send_keeps_control_and_one_after_it_does_not() {
+    let sending = block_after(BROWSER, "pub(crate) async fn send_after_checks<");
+    let checked = sending
+        .find("checked.map_err(BrowserRefusal::Unsent)?")
+        .unwrap();
+    let minted = sending
+        .find("pane().map_err(BrowserRefusal::Unsent)?")
+        .unwrap();
+    let sent = sending
+        .find("send(checked, pane).await.map_err(BrowserRefusal::Sent)")
+        .unwrap();
+    assert!(checked < minted && minted < sent);
+    let form = include_str!("../../src/cmd/browser/form.rs");
+    for (source, executor) in [
+        (BROWSER, "async fn automate_click("),
+        (BROWSER, "async fn automate_type("),
+        (BROWSER, "async fn automate_scroll("),
+        (BROWSER, "async fn automate_eval("),
+        (BROWSER, "async fn automate_find("),
+        (BROWSER, "async fn press_mark("),
+        (form, "async fn automate_fill("),
+    ] {
+        let body = block_after(source, executor);
+        let routed = body
+            .find("send_after_checks(")
+            .unwrap_or_else(|| panic!("{executor}"));
+        assert!(
+            body.contains("|| browser_pane_of(app, state, label),"),
+            "{executor}"
+        );
+        for early in [
+            "page_json(",
+            "press(",
+            "browser_pane_of(app, state, label)?",
+        ] {
+            assert!(!body[..routed].contains(early), "{executor}: {early}");
+        }
+    }
+    let refused = block_after(RUNTIME, "fn executor_refused(");
+    let unsent = refused.find("BrowserRefusal::Unsent(why)").unwrap();
+    let not_sent = refused.find("refused_unsent(dispatched,").unwrap();
+    let after = refused.find("BrowserRefusal::Sent(why)").unwrap();
+    let uncertain = refused.find("browser_refused(").unwrap();
+    assert!(unsent < not_sent && not_sent < after && after < uncertain);
+    for inferred in ["contains(", "starts_with(", "PAGE_", "Dispatch::NotSent"] {
+        assert!(!refused.contains(inferred), "{inferred}");
+    }
+    let dispatch = block_after(RUNTIME, "async fn dispatch_browser_command(");
+    for (opens, next) in [
+        ("(\"scroll\", 3) =>", "(\"diagnose\", _) =>"),
+        (
+            "(\"eval\", 3) | (\"eval\", 4) =>",
+            "(\"read\", 2) | (\"read\", 3) =>",
+        ),
+        (
+            "(\"click\", 3) | (\"click\", 4) | (\"click\", 5) =>",
+            "(\"type\", 4) =>",
+        ),
+        ("(\"fill\", _) =>", "(\"screenshot\", _) =>"),
+    ] {
+        let arm = arm(dispatch, opens, next);
+        assert!(
+            arm.contains("executor_refused(dispatched, refusal)"),
+            "{opens}"
+        );
+        assert!(!arm.contains("Err(why) => browser_refused("), "{opens}");
+    }
+    for (opens, next, answer) in [
+        ("(\"find\", 3) =>", "(\"goto\", 3) =>", "found_answer("),
+        ("(\"type\", 4) =>", "(\"type\", 5) if", "typed_answer("),
+        (
+            "(\"type\", 5) if",
+            "(\"wait\", 3) | (\"wait\", 4) =>",
+            "typed_answer(",
+        ),
+    ] {
+        let arm = arm(dispatch, opens, next);
+        assert!(
+            arm.contains(answer) && arm.contains("dispatched,"),
+            "{opens}"
+        );
+    }
+    for answer in ["fn typed_answer(", "fn found_answer("] {
+        assert!(
+            block_after(RUNTIME, answer)
+                .contains("Err(refusal) => executor_refused(dispatched, refusal)"),
+            "{answer}"
+        );
+    }
+    let found = block_after(RUNTIME, "fn found_answer(");
+    let whole = found.find("Ok(Some(found)) =>").unwrap();
+    let missing = found.find("Ok(None) => browser_refused(").unwrap();
+    assert!(whole < missing);
+    assert!(!found.contains("\"count\": 0") && !found.contains("unwrap_or"));
+}

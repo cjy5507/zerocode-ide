@@ -2716,3 +2716,139 @@ mod handoff_followup_regressions {
         }
     }
 }
+
+#[cfg(test)]
+mod capture_start_regressions {
+    use super::*;
+    use std::cell::Cell;
+
+    fn stepped(observed: bool, verb: &str) -> (Workspaces, StepControl) {
+        let workspaces = Workspaces::default();
+        workspaces
+            .register("browser-1", Some("term-1"), false)
+            .unwrap();
+        if observed {
+            workspaces
+                .begin("browser-1", Some("term-1"), "read")
+                .unwrap()
+                .unwrap()
+                .finish(true);
+        }
+        let operation = workspaces
+            .begin("browser-1", Some("term-1"), verb)
+            .unwrap()
+            .unwrap();
+        let control = operation.step_control().unwrap();
+        operation.finish(true);
+        (workspaces, control)
+    }
+
+    #[test]
+    fn a_capture_queued_before_a_transfer_starts_nothing_once_the_person_holds_the_tab() {
+        let (workspaces, control) = stepped(true, "click");
+        let (frame, check) = workspaces
+            .admit_evidence("browser-1", Some(&control))
+            .unwrap()
+            .unwrap();
+        let revision = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        let mut transition = workspaces
+            .transition("browser-1", Mode::Human, revision)
+            .unwrap();
+        transition.confirm_fence().unwrap();
+        assert_eq!(transition.finish().unwrap().mode, Mode::Human);
+        let sends = Cell::new(0);
+        let started = check.start(|| {
+            sends.set(sends.get() + 1);
+            Ok(())
+        });
+        assert!(started.is_err());
+        assert_eq!(
+            sends.get(),
+            0,
+            "a native capture started while the person held the tab"
+        );
+        assert!(!check.holds());
+        drop(frame);
+    }
+
+    #[tokio::test]
+    async fn a_transfer_waits_for_a_capture_send_in_progress_but_not_for_its_picture() {
+        let (workspaces, control) = stepped(true, "click");
+        let (frame, check) = workspaces
+            .admit_evidence("browser-1", Some(&control))
+            .unwrap()
+            .unwrap();
+        let (entered, entering) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let sender = check.clone();
+        let native = std::thread::spawn(move || {
+            sender.start(|| {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(())
+            })
+        });
+        entering.recv().unwrap();
+        let revision = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        let mut transition = workspaces
+            .transition("browser-1", Mode::Human, revision)
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), transition.wait())
+                .await
+                .is_err(),
+            "the person was handed the tab while a capture was still being sent"
+        );
+        release.send(()).unwrap();
+        native.join().unwrap().unwrap();
+        tokio::time::timeout(Duration::from_millis(100), transition.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        transition.confirm_fence().unwrap();
+        assert_eq!(transition.finish().unwrap().mode, Mode::Human);
+        assert!(
+            !check.holds(),
+            "a picture that arrives after the transfer is kept"
+        );
+        drop(frame);
+        assert!(
+            workspaces
+                .admit_evidence("browser-1", Some(&control))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_capture_sent_under_agent_control_keeps_its_lease_and_issues_no_observation() {
+        let (workspaces, control) = stepped(false, "wait");
+        let before = workspaces.snapshot("browser-1").unwrap().unwrap();
+        let (frame, check) = workspaces
+            .admit_evidence("browser-1", Some(&control))
+            .unwrap()
+            .unwrap();
+        let sends = Cell::new(0);
+        check
+            .start(|| {
+                sends.set(sends.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sends.get(), 1);
+        assert!(workspaces.begin_snapshot_for("browser-1", false).is_err());
+        assert!(check.holds());
+        drop(frame);
+        let after = workspaces.snapshot("browser-1").unwrap().unwrap();
+        assert_eq!(
+            (after.revision, after.needs_observation, after.mode),
+            (before.revision, true, Mode::Agent)
+        );
+        assert!(
+            EvidenceCheck::default()
+                .start(|| Ok::<_, String>(sends.get()))
+                .is_ok_and(|seen| seen == 1)
+        );
+        drop(workspaces.begin_snapshot_for("browser-1", false).unwrap());
+    }
+}

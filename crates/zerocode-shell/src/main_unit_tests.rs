@@ -5233,6 +5233,267 @@ fn a_requested_navigation_is_pending_until_its_document_settles() {
     assert!(!NavRecord::born(false, stood).pending());
 }
 
+#[test]
+fn a_known_navigation_is_not_settled_by_the_clock_alone() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let stood = now
+        .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS + 1))
+        .unwrap();
+    let mut started = NavRecord::born(true, stood);
+    let generation = started.started(stood);
+    assert_eq!(started.observed(now), NavState::Dead);
+    assert!(
+        started.pending(),
+        "a Started that outlived the dead clock has not finished"
+    );
+    assert!(started.dead_if_still(generation, now));
+    assert!(started.pending(), "the spinner's dead mark is not a finish");
+    assert!(
+        started.pending(),
+        "a second handoff reads the same record and still waits"
+    );
+    started.finished(false);
+    assert!(!started.pending(), "the load's own Finished settles it");
+    let mut born = NavRecord::born(false, stood);
+    assert_eq!(born.observed(now), NavState::Dead);
+    assert!(
+        born.pending(),
+        "a first document past the dead clock has not finished"
+    );
+    born.finished(false);
+    assert!(!born.pending());
+}
+
+#[test]
+fn a_requested_navigation_waits_for_the_finish_after_its_own_started() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let stood = now
+        .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS + 1))
+        .unwrap();
+    let mut record = NavRecord::born(true, stood);
+    record.requested();
+    record.finished(false);
+    assert!(
+        record.pending(),
+        "a Finished before the request's own Started belongs to the page before it"
+    );
+    let generation = record.started(stood);
+    assert!(
+        record.pending(),
+        "a request whose Started came late and stood past the clock has not finished"
+    );
+    assert!(record.dead_if_still(generation, now));
+    assert!(record.pending());
+    record.finished(false);
+    assert!(!record.pending());
+}
+
+mod browser_dispatch_outcome_tests {
+    use super::*;
+    use crate::browser_workspace::{Dispatch, Mode, Workspaces};
+    use std::cell::Cell;
+
+    const MUTATORS: [(&str, &str); 6] = [
+        ("click", "browser-1"),
+        ("type", "browser-1"),
+        ("scroll", "browser-1"),
+        ("eval", "browser-person"),
+        ("find", "browser-1"),
+        ("fill", "browser-1"),
+    ];
+
+    fn owned_tabs() -> Workspaces {
+        let workspaces = Workspaces::default();
+        for label in ["browser-1", "browser-2"] {
+            workspaces.register(label, Some("term-1"), false).unwrap();
+            let revision = workspaces.snapshot(label).unwrap().unwrap().revision;
+            workspaces
+                .begin_at(label, Some("term-1"), "read", Some(revision))
+                .unwrap()
+                .unwrap()
+                .finish_observation()
+                .unwrap();
+        }
+        workspaces
+    }
+
+    fn settled(
+        workspaces: &Workspaces,
+        verb: &str,
+        label: &str,
+        answer: impl FnOnce(&mut Dispatch) -> zerocode_hookd::TeamAnswer,
+    ) -> (zerocode_hookd::TeamAnswer, Dispatch) {
+        let revision = workspaces
+            .snapshot(label)
+            .unwrap()
+            .map(|snapshot| snapshot.revision);
+        let operation = workspaces
+            .begin_at(label, Some("term-1"), verb, revision)
+            .unwrap();
+        let actor = workspaces
+            .begin_actor_target(Some("term-1"), verb, Some(label))
+            .unwrap()
+            .unwrap();
+        let mut dispatched = Dispatch::Uncertain;
+        let answer = answer(&mut dispatched);
+        if answer.exit_code == 0 {
+            dispatched = Dispatch::Completed;
+        }
+        if let Some(operation) = operation {
+            operation.settle(dispatched);
+        }
+        actor.settle(dispatched);
+        (answer, dispatched)
+    }
+
+    fn modes(workspaces: &Workspaces) -> [Mode; 2] {
+        ["browser-1", "browser-2"].map(|label| workspaces.snapshot(label).unwrap().unwrap().mode)
+    }
+
+    #[tokio::test]
+    async fn a_mutators_own_check_refuses_before_its_first_send_and_keeps_every_owned_tab() {
+        let long_text = "x".repeat(100_001);
+        let long_expression = "1".repeat(64_001);
+        let blank_scroll = zerocode_core::agent_browser::ScrollTarget::Selector(" ".to_string());
+        let checks: [(&str, &str, Result<(), String>); 7] = [
+            ("click", "browser-1", cmd::browser::checked_selector("   ")),
+            (
+                "click",
+                "browser-1",
+                cmd::browser::pressable_mark("browser-dispatch-unmarked", 1).map(|_| ()),
+            ),
+            (
+                "type",
+                "browser-1",
+                cmd::browser::type_checked("   ", "words"),
+            ),
+            (
+                "type",
+                "browser-1",
+                cmd::browser::type_checked("#name", &long_text),
+            ),
+            (
+                "scroll",
+                "browser-1",
+                cmd::browser::scroll_request(&blank_scroll).map(|_| ()),
+            ),
+            (
+                "eval",
+                "browser-person",
+                cmd::browser::checked_expression(&long_expression),
+            ),
+            (
+                "eval",
+                "browser-person",
+                cmd::browser::checked_expression("document.cookie"),
+            ),
+        ];
+        for (verb, label, checked) in checks {
+            let workspaces = owned_tabs();
+            let sends = Cell::new(0);
+            let refusal = cmd::browser::send_after_checks(
+                checked,
+                || Ok::<_, String>(()),
+                |(), ()| async {
+                    sends.set(sends.get() + 1);
+                    Ok::<_, String>(())
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(sends.get(), 0, "{verb}: a script reached the page");
+            let (answer, dispatched) = settled(&workspaces, verb, label, |dispatched| {
+                executor_refused(dispatched, refusal)
+            });
+            assert_eq!(answer.exit_code, 1, "{verb}");
+            assert_eq!(dispatched, Dispatch::NotSent, "{verb}");
+            assert_eq!(modes(&workspaces), [Mode::Agent; 2], "{verb}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pane_gone_before_the_first_send_refuses_without_pausing_its_owner() {
+        for (verb, label) in MUTATORS {
+            let workspaces = owned_tabs();
+            let sends = Cell::new(0);
+            let refusal = cmd::browser::send_after_checks(
+                Ok(()),
+                || Err::<(), _>("브라우저 판이 이미 닫혔습니다".to_string()),
+                |(), ()| async {
+                    sends.set(sends.get() + 1);
+                    Ok::<_, String>(())
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(sends.get(), 0, "{verb}");
+            let (_, dispatched) = settled(&workspaces, verb, label, |dispatched| {
+                executor_refused(dispatched, refusal)
+            });
+            assert_eq!(dispatched, Dispatch::NotSent, "{verb}");
+            assert_eq!(modes(&workspaces), [Mode::Agent; 2], "{verb}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_after_the_first_send_stays_uncertain_and_pauses_the_owner() {
+        for (verb, label) in MUTATORS {
+            let workspaces = owned_tabs();
+            let sends = Cell::new(0);
+            let refusal = cmd::browser::send_after_checks(
+                Ok(()),
+                || Ok::<_, String>(()),
+                |(), ()| async {
+                    sends.set(sends.get() + 1);
+                    Err::<(), _>(cmd::browser::PAGE_TIMED_OUT.to_string())
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(sends.get(), 1, "{verb}");
+            let (answer, dispatched) = settled(&workspaces, verb, label, |dispatched| {
+                executor_refused(dispatched, refusal)
+            });
+            assert_eq!(answer.exit_code, 1, "{verb}");
+            assert_eq!(dispatched, Dispatch::Uncertain, "{verb}");
+            assert_eq!(modes(&workspaces), [Mode::Paused; 2], "{verb}");
+        }
+    }
+
+    #[test]
+    fn a_find_answer_without_a_whole_tally_is_refused_and_stays_uncertain() {
+        for malformed in [
+            json!({ "count": "invalid", "index": 0 }),
+            json!({ "index": 0 }),
+            json!({ "count": 1 }),
+            json!({ "count": -1, "index": 0 }),
+            json!({ "count": 1.5, "index": 0 }),
+            json!(null),
+        ] {
+            let workspaces = owned_tabs();
+            let found = cmd::browser::find_tally(&malformed);
+            let (answer, dispatched) = settled(&workspaces, "find", "browser-1", |dispatched| {
+                found_answer(Ok(found), dispatched)
+            });
+            assert_eq!(answer.exit_code, 1, "{malformed}");
+            assert!(answer.stdout.is_empty(), "{malformed}");
+            assert_eq!(dispatched, Dispatch::Uncertain, "{malformed}");
+            assert_eq!(modes(&workspaces), [Mode::Paused; 2], "{malformed}");
+        }
+        let workspaces = owned_tabs();
+        let found = cmd::browser::find_tally(&json!({ "count": 0, "index": 0 }));
+        let (answer, dispatched) = settled(&workspaces, "find", "browser-1", |dispatched| {
+            found_answer(Ok(found), dispatched)
+        });
+        assert_eq!(answer.exit_code, 0);
+        assert_eq!(answer.stdout, "{\"count\":0,\"index\":0}\n");
+        assert_eq!(dispatched, Dispatch::Completed);
+        assert_eq!(modes(&workspaces), [Mode::Agent; 2]);
+    }
+}
+
 mod browser_observation_stamp_tests {
     use super::*;
 
