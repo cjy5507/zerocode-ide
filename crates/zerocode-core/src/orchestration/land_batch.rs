@@ -1090,10 +1090,10 @@ fn press_on(
             took_ms,
         } => {
             still_open(&state)?;
-            if !state
+            if state
                 .prepared
                 .as_ref()
-                .is_some_and(|held| held.check == check)
+                .is_none_or(|held| held.check != check)
             {
                 return Err(format!(
                     "batch {} has no prepared gate {check} — record the check its --prepare \
