@@ -157,6 +157,39 @@ fn fake_ledger_launch_settles_the_existing_completion_channel_and_acks_afterward
     }
 }
 
+/// A ledger worker is a CLI of its own that builds its own session prompt for its own checkout. The task it is
+/// handed carries this agent's role and the delegated work — not a second copy of the launching session's prompt,
+/// which the worker would send again in every request (about 17 KB a turn on 2026-10-14) and which names the
+/// launching session's directory instead of the worker's.
+#[cfg(unix)]
+#[test]
+fn a_ledger_task_carries_the_agent_role_not_a_second_session_prompt() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let client = fake_door(root.path(), "worker_done", true);
+    let mut input: AgentInput = serde_json::from_value(json!({"description":"survey fixture","prompt":"report the fixture","subagent_type":"general-purpose","agent":"codex","model":"exact-model","effort":"low","worktree":true})).unwrap();
+    input.launch.selected = true;
+    input.registry = Some(super::super::AgentRegistry::at_root_for_tests("ledger-role", &root.path().join("store")));
+    let launch = input.launch.clone();
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input, move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None).unwrap();
+    let results = super::super::wait_for_agent_completions(std::slice::from_ref(&manifest.agent_id), Duration::from_secs(10));
+    assert_eq!(results.len(), 1);
+    let until = Instant::now() + Duration::from_secs(5);
+    while !root.path().join("acked").exists() && Instant::now() < until { std::thread::sleep(Duration::from_millis(10)); }
+
+    let calls: Vec<Vec<String>> = std::fs::read_to_string(root.path().join("argv.jsonl")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let spec = calls.iter().find(|call| call[0] == "task-create").and_then(|call| call.windows(2).find(|words| words[0] == "--spec")).map(|words| words[1].clone()).expect("task-create carries the task text");
+    assert!(calls.iter().any(|call| call[0] == "worker-start" && call.contains(&spec)), "worker-start hands over the same task text");
+    let role = super::super::subagent_profile::builtin_harness_instruction("general-purpose");
+    assert!(spec.starts_with(&format!("{role}\n\nTask:\n")), "{spec}");
+    assert!(spec.contains("report the fixture"));
+    let session_prompt = runtime::load_system_prompt(std::env::current_dir().unwrap(), core_types::date::current_local_date(), std::env::consts::OS, "unknown", Some("exact-model")).unwrap();
+    for section in &session_prompt {
+        let section = section.trim();
+        assert!(section.is_empty() || !spec.contains(section), "the launching session's prompt reached the worker's task: {section}");
+    }
+}
+
 #[test]
 fn worktree_defaults_to_isolation_and_an_explicit_reader_can_omit_it() {
     assert!(start_args(&Launch::default(), None, "t-4", "read", "start-4").unwrap().contains(&"--worktree".into()));

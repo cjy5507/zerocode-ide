@@ -150,7 +150,7 @@ use self::spawn::spawn_agent_job;
 pub(crate) use self::spawn::AgentJob;
 pub(crate) use self::subagent_profile::{resolve_subagent_type, implementation_task, supports_file_edits};
 use self::subagent_profile::{
-    build_agent_system_prompt, smart_routed_model_selection, AgentModelSelection,
+    agent_role_prompt, build_agent_system_prompt, smart_routed_model_selection, AgentModelSelection,
 };
 
 // --- Input/Output structs ---
@@ -1326,9 +1326,14 @@ where
     let created_at = epoch_seconds_now();
     // A fork's prompt is the parent's, as the parent's runtime holds it — no
     // harness instruction of its own. One harness either way: `AgentJob::
-    // harness` reads this value like any other.
+    // harness` reads this value like any other. A ledger worker builds its own
+    // session prompt, so its task carries only the agent's role
+    // (`ledger::spawn`); a ledger agent is never resumed here.
     let system_prompt = match fork_source.as_ref() {
         Some(source) => source.system_prompt.clone(),
+        None if input.launch.selected => {
+            agent_role_prompt(&resolved_subagent_type, custom_agent.as_ref())
+        }
         None => build_agent_system_prompt(
             &resolved_subagent_type,
             custom_agent.as_ref(),

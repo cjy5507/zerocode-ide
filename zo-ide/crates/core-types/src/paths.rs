@@ -1113,8 +1113,28 @@ pub fn append_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> 
 pub fn read_private_file(path: &Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read as _;
 
+    let mut file = open_private_file_for_read(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// `len` bytes at `offset` of the file [`read_private_file`] would read, under
+/// the same checks — for a reader that remembers where a record sits instead
+/// of holding the record.
+pub fn read_private_file_range(path: &Path, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read as _, Seek as _};
+
+    let mut file = open_private_file_for_read(path)?;
+    file.seek(std::io::SeekFrom::Start(offset))?;
+    let mut bytes = vec![0; len];
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn open_private_file_for_read(path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
-    let mut file = {
+    let file = {
         use std::os::unix::fs::OpenOptionsExt as _;
 
         std::fs::OpenOptions::new()
@@ -1123,7 +1143,7 @@ pub fn read_private_file(path: &Path) -> std::io::Result<Vec<u8>> {
             .open(path)?
     };
     #[cfg(windows)]
-    let mut file = open_windows_owner_only_regular_file(path, false)?;
+    let file = open_windows_owner_only_regular_file(path, false)?;
     #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
@@ -1149,9 +1169,7 @@ pub fn read_private_file(path: &Path) -> std::io::Result<Vec<u8>> {
             ));
         }
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    Ok(file)
 }
 
 /// Lexically normalize a path: drop `.` (current-dir) components and resolve
