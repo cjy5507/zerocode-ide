@@ -378,14 +378,9 @@ pub(super) fn build_agent_system_prompt(
     // stay first: the Claude Max OAuth path rejects any other first system
     // block as a fingerprint mismatch (surfaced as a 429).
     if custom.is_none() && subagent_type == "classifier" {
-        return Ok(vec![
-            runtime::CLAUDE_CODE_IDENTITY.to_string(),
-            format!(
-                "You are a fast classification agent. Answer the delegated question about the \
-                 given text directly and return ONLY the requested output format — no preamble, \
-                 no tool exploration, no questions. {AGENT_COMPLETION_CONTRACT}"
-            ),
-        ]);
+        let mut prompt = vec![runtime::CLAUDE_CODE_IDENTITY.to_string()];
+        prompt.extend(agent_role_prompt(subagent_type, custom));
+        return Ok(prompt);
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     // Sub-agents get the live local date, same source as the main session's
@@ -398,24 +393,40 @@ pub(super) fn build_agent_system_prompt(
         model,
     )
     .map_err(|error| error.to_string())?;
-    if let Some(custom) = custom {
-        let header = if custom.description.is_empty() {
-            format!("You are the `{}` sub-agent.", custom.name)
-        } else {
-            format!(
-                "You are the `{}` sub-agent — {}.",
-                custom.name,
-                custom.description.trim_end_matches('.')
-            )
-        };
-        prompt.push(format!(
-            "{header} Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result. {AGENT_COMPLETION_CONTRACT}"
-        ));
-        prompt.push(custom.system_prompt.clone());
-    } else {
-        prompt.push(builtin_harness_instruction(subagent_type));
-    }
+    prompt.extend(agent_role_prompt(subagent_type, custom));
     Ok(prompt)
+}
+
+/// What makes a sub-agent this agent: its custom definition, or the built-in
+/// harness instruction for its type. The rest of its system prompt is the
+/// session prompt every Zo session builds for itself, which is why a ledger
+/// worker — a CLI of its own — is handed only this part.
+pub(super) fn agent_role_prompt(subagent_type: &str, custom: Option<&CustomAgent>) -> Vec<String> {
+    let Some(custom) = custom else {
+        if subagent_type == "classifier" {
+            return vec![format!(
+                "You are a fast classification agent. Answer the delegated question about the \
+                 given text directly and return ONLY the requested output format — no preamble, \
+                 no tool exploration, no questions. {AGENT_COMPLETION_CONTRACT}"
+            )];
+        }
+        return vec![builtin_harness_instruction(subagent_type)];
+    };
+    let header = if custom.description.is_empty() {
+        format!("You are the `{}` sub-agent.", custom.name)
+    } else {
+        format!(
+            "You are the `{}` sub-agent — {}.",
+            custom.name,
+            custom.description.trim_end_matches('.')
+        )
+    };
+    vec![
+        format!(
+            "{header} Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result. {AGENT_COMPLETION_CONTRACT}"
+        ),
+        custom.system_prompt.clone(),
+    ]
 }
 
 /// Pick the model for a sub-agent. Precedence (first non-empty wins):
