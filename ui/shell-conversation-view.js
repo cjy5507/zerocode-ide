@@ -154,17 +154,21 @@ function diffRowsNode(edit, words) {
  * The extension measures a message (`scrollHeight > maxHeight`) and cuts one
  * taller than the clip. Measured here too, in one pass after the rows of a
  * paint stand: every read first, then every write — a paint that brought ten
- * long messages lays the list out once for them, not ten times. How tall a
- * message stands depends on the pane's width, so none is judged by its
- * length alone. */
+ * long messages lays the list out once for them, not ten times — and in the
+ * frame they first stand in, before it is drawn (`syncHelperTurns`): a read in
+ * the task that built them laid the page out once more than its frame does
+ * (t-55369). How tall a message stands depends on the pane's width, so none is
+ * judged by its length alone. */
 function clipPersonRows(rows) {
   const tall = [];
+  let clip = null;
   for (const row of rows) {
     const said = row.querySelector(":scope > .helper-said");
     if (!said) continue;
     const style = getComputedStyle(said);
+    clip ??= parseFloat(style.getPropertyValue("--chat-user-clip-h"));
     const words = said.scrollHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
-    if (words > parseFloat(style.getPropertyValue("--chat-user-clip-h")) + 1) tall.push(said);
+    if (words > clip + 1) tall.push(said);
   }
   for (const said of tall) clipWith(said, true);
 }
@@ -314,6 +318,11 @@ function chatAway(list) {
  * every new turn dragged them to the foot at each poll). */
 function chatFollows(list) {
   if (!list) return false;
+  // A list not yet placed is placed at its first box (`standChatPlace`, from
+  // its watch): until then it follows unless its reader's place says not, and
+  // nothing is read off it — a read in the task that built the page laid it
+  // out once more before its first frame (t-55369).
+  if (list.__follow?.placed === false) return !list.__follow.away;
   const state = chatFollowState(list);
   return !state.away && (chatFootGap(list) < CHAT_FOLLOW.slack || state.gliding !== null);
 }
@@ -321,6 +330,8 @@ function chatFollows(list) {
 /* To the foot — gliding while a send's glide is young and motion is welcome,
  * at once otherwise. */
 function carryToFoot(list) {
+  // A list not yet placed goes to its foot when it is placed.
+  if (list.__follow?.placed === false) return;
   const state = chatFollowState(list);
   const young = state.gliding !== null && Date.now() - state.gliding < CHAT_FOLLOW.glide;
   if (!young) state.gliding = null;

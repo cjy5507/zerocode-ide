@@ -13102,6 +13102,8 @@ async function setPaneChat(term, on, { wire = true } = {}) {
     return;
   }
   if (!on) held.wireRefusal = null;
+  // The late line's wait, read while nothing on the page has moved yet.
+  if (on) chatLateMs();
   held.on = on;
   held.arriving = on ? "chat" : "term";
   updateStage();
@@ -13200,9 +13202,13 @@ function placePaneChat(term, slot, shown) {
 }
 
 function arriveView(node) {
-  node.classList.remove("is-arriving");
-  // Restart the animation on a node that wore it a moment ago.
-  void node.offsetWidth;
+  // Restart the animation on a node that wore it a moment ago — the read is
+  // what restarts it, so a node that does not wear it is spared the layout
+  // the read would force in the press (t-55369).
+  if (node.classList.contains("is-arriving")) {
+    node.classList.remove("is-arriving");
+    void node.offsetWidth;
+  }
   node.classList.add("is-arriving");
   node.addEventListener("animationend", () => node.classList.remove("is-arriving"), { once: true });
 }
@@ -13342,8 +13348,20 @@ function noticeOnPaneChat(held, key, wanted, words) {
  * since it first stood (t-54304). Once a line. */
 function sayLate(notice) {
   if (!notice || notice.__late !== undefined) return;
-  const wait = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--chat-late-ms"));
-  notice.__late = setTimeout(() => notice.classList.add("is-late"), Number.isFinite(wait) ? wait : 0);
+  notice.__late = setTimeout(() => notice.classList.add("is-late"), chatLateMs());
+}
+
+/* `--chat-late-ms`, read once: the token does not move while the window lives,
+ * and a read styles whatever the press has changed so far — so the press reads
+ * it first, before it builds anything (`setPaneChat`, t-55369). */
+let chatLateRead = null;
+
+function chatLateMs() {
+  if (chatLateRead === null) {
+    const wait = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--chat-late-ms"));
+    chatLateRead = Number.isFinite(wait) ? wait : 0;
+  }
+  return chatLateRead;
 }
 
 /* The question the pane's program is asking, as the extension's card in the
@@ -14123,8 +14141,9 @@ function scrollHelperToBottom(list) {
     // 바닥이던 사람이 프레임이 오기 전에 위를 읽기 시작했을 수 있고, 부하가
     // 클수록 그 틈이 넓다. 다시 묻고 나서 옮긴다 — 떠났다는 것은 거리가
     // 아니라 사람의 뜻이므로(`chatAway`), 늦게 선 행이 바닥을 밀어냈어도
-    // 따라가던 사람은 그대로 따라간다.
-    if (!list.isConnected || chatAway(list)) return;
+    // 따라가던 사람은 그대로 따라간다. 아직 자리를 잡지 않은 목록은 첫
+    // 상자에서 잡는다(`standChatPlace`, t-55369).
+    if (!list.isConnected || list.__follow?.placed === false || chatAway(list)) return;
     // The list is the one thing on this page that scrolls, so it is the one
     // thing this moves. `scrollIntoView` on the last row is not the same
     // move: it scrolls every scrollable ancestor as well — the document
@@ -14439,8 +14458,9 @@ function syncHelperTurns(list, run) {
   }
   const first = held[0].seq;
   const follow = chatFollows(list);
-  const beforeHeight = list.scrollHeight;
-  const beforeTop = list.scrollTop;
+  // Where the list stood, read only when a row is about to go from its front:
+  // a read here lays out a page whose rows just changed (t-55369).
+  let before = null;
   let dropped = false;
   // 앞에서 지워지는 것은 장부가 놓은 턴들이다. 그 사이에 선 묶음 머리는
   // `data-turn`이 없으므로 건너뛰고(`Number(undefined) < first`는 거짓이라
@@ -14456,6 +14476,7 @@ function syncHelperTurns(list, run) {
       continue;
     }
     if (Number(front.dataset.turn) >= first) break;
+    before ??= { height: list.scrollHeight, top: list.scrollTop };
     dropFocusMember(front);
     forgetShelf(list, front);
     front.remove();
@@ -14463,7 +14484,7 @@ function syncHelperTurns(list, run) {
     front = next;
   }
   if (dropped && !follow) {
-    list.scrollTop = Math.max(0, beforeTop - (beforeHeight - list.scrollHeight));
+    list.scrollTop = Math.max(0, before.top - (before.height - list.scrollHeight));
   }
   // The last turn drawn: the streaming rows under it carry no turn number,
   // and a new turn goes above them — it is what they were becoming.
@@ -14550,10 +14571,11 @@ function syncHelperTurns(list, run) {
   // A finished helper's page opens on its report, at the top (t-15682).
   const reported = syncHelperReport(list, run);
   // What the person said is cut at the clip when it stands taller — measured
-  // once for every new row of this paint, and on the list's first frame when
-  // it was built before the page took it in (a detached row has no height).
-  if (people.length && list.isConnected) clipPersonRows(people);
-  else if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
+  // once for every new row of this paint, in the frame the rows first stand
+  // in and before it is drawn: a row built before the page took it in has no
+  // height yet, and a read in this task would lay the page out once more than
+  // its frame does (t-55369).
+  if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
   if (follow && !reported) scrollHelperToBottom(list);
   // The rows changed: the rail is asked on the next frame (t-22100).
   askTurnRail(list);
@@ -15988,7 +16010,8 @@ function paintHelperPageOwn(host, tab, run, owner) {
   };
   host.append(page.head, page.sibs, page.brief, page.tally, body, page.foot);
   updateHelperPageChrome(page, run, owner);
-  standChatPlace(turns);
+  // The list takes its place at its first box, from its own watch
+  // (`keepToFoot` → `standChatPlace`), as the conversation's page does.
   askTurnRail(turns);
   host.__helperPage = page;
   interruptOnEscape(host);
@@ -16058,8 +16081,10 @@ function paintHelperPage(host, tab) {
   }
   if (run.wire) paintWireAsk(host, run);
   // 처음 서는 페이지는 끝에서 연다 — 사람이 읽는 것은 언제나 끝이다. 읽던
-  // 사람이 위에 두고 간 페이지는 그 행에서 연다(t-6824).
-  standChatPlace(turns);
+  // 사람이 위에 두고 간 페이지는 그 행에서 연다(t-6824). 그 자리는 목록이 첫
+  // 상자를 얻는 순간 제 감시가 잡는다(`keepToFoot` → `standChatPlace`): 여기서
+  // 크기를 읽으면 막 지은 페이지를 그 프레임보다 한 번 더 배치한다 — 판의
+  // 「대화」가 서는 누름에서 CPU×4로 24 ms(t-55369).
   askTurnRail(turns);
   host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status, run, stack, dock };
   // A plain Esc on the page interrupts its turn (t-6323 A3).
@@ -16125,23 +16150,31 @@ function chatDockNode(host, composer, stack = null) {
   return dock;
 }
 
+/* The height a dock stood at when it was last measured: a new page's readers
+ * wear it before their rows are first styled, so the watch's first answer is
+ * most often the height already written and changes nothing (t-55369). */
+let chatDockSeen = null;
+
 /* The dock's height, watched: it rides the list as room under its words. Asked
  * when the dock is built and again when a kept page comes back (t-54304). */
 function watchChatDock(host, dock) {
   if (typeof ResizeObserver !== "function") return null;
+  // The two that read the height, and no further — it is not inherited
+  // (shell.css): written on the page, every row restyled at the key that
+  // wrapped a draft (t-22095). Even on the list alone a new value restyles
+  // every row it holds (Chromium, 2.5 ms for 400 turns; ten times the rows of
+  // a pane's first page at a 4x CPU), so it is written before they stand.
+  const readers = () => host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door)");
+  if (chatDockSeen !== null) for (const reader of readers()) reader.style.setProperty("--chat-dock-h", chatDockSeen);
   const watch = new ResizeObserver(() => {
     // The list's foot moves with the dock (the dock's height is the list's
     // padding): a list at its foot stays there, as the extension's follows
-    // its input's height (t-6323 A5). The height is written on the two
-    // that read it and no further — it is not inherited (shell.css): written
-    // on the page, every row restyled at the key that wrapped a draft
-    // (t-22095).
+    // its input's height (t-6323 A5).
     const list = host.__helperPage?.turns ?? null;
     const follow = chatFollows(list);
     const height = `${dock.offsetHeight}px`;
-    for (const reader of host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door)")) {
-      reader.style.setProperty("--chat-dock-h", height);
-    }
+    chatDockSeen = height;
+    for (const reader of readers()) reader.style.setProperty("--chat-dock-h", height);
     if (follow) carryToFoot(list);
   });
   watch.observe(dock);
