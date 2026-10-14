@@ -13,6 +13,121 @@ pub(crate) enum Mode {
     Human,
 }
 
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+
+    fn owned() -> Workspaces {
+        let workspaces = Workspaces::default();
+        workspaces
+            .register("browser-1", Some("term-1"), false)
+            .unwrap();
+        workspaces
+    }
+
+    #[test]
+    fn a_failed_mutation_pauses_before_a_late_page_reply() {
+        let workspaces = owned();
+        workspaces
+            .begin("browser-1", Some("term-1"), "read")
+            .unwrap()
+            .unwrap()
+            .finish(true);
+        workspaces
+            .begin("browser-1", Some("term-1"), "click")
+            .unwrap()
+            .unwrap()
+            .finish(false);
+        assert_eq!(
+            workspaces.snapshot("browser-1").unwrap().unwrap().mode,
+            Mode::Paused
+        );
+    }
+
+    #[test]
+    fn an_unbound_workspace_is_paused_without_a_restore_flag() {
+        let workspaces = Workspaces::default();
+        assert_eq!(
+            workspaces.register("browser-1", None, false).unwrap().mode,
+            Mode::Paused
+        );
+    }
+
+    #[test]
+    fn an_unbound_workspace_cannot_be_resumed_by_the_first_agent() {
+        let workspaces = Workspaces::default();
+        workspaces.register("browser-1", None, false).unwrap();
+        assert!(workspaces.transition("browser-1", Mode::Agent, 1).is_err());
+    }
+
+    #[test]
+    fn arbitrary_eval_cannot_schedule_a_write_in_a_managed_workspace() {
+        let workspaces = owned();
+        workspaces
+            .begin("browser-1", Some("term-1"), "read")
+            .unwrap()
+            .unwrap()
+            .finish(true);
+        assert!(workspaces
+            .begin("browser-1", Some("term-1"), "eval")
+            .is_err());
+    }
+
+    #[test]
+    fn an_unknown_verb_is_refused_before_an_operation_is_created() {
+        let workspaces = owned();
+        workspaces
+            .begin("browser-1", Some("term-1"), "read")
+            .unwrap()
+            .unwrap()
+            .finish(true);
+        assert!(workspaces
+            .begin("browser-1", Some("term-1"), "unknown")
+            .is_err());
+    }
+
+    #[test]
+    fn dropping_a_transition_leaves_actionable_paused_state() {
+        let workspaces = owned();
+        drop(workspaces.transition("browser-1", Mode::Human, 1).unwrap());
+        assert_eq!(
+            workspaces.snapshot("browser-1").unwrap().unwrap().mode,
+            Mode::Paused
+        );
+    }
+
+    #[test]
+    fn one_paused_tab_blocks_its_owners_other_tab_mutations() {
+        let workspaces = owned();
+        workspaces
+            .register("browser-2", Some("term-1"), false)
+            .unwrap();
+        workspaces
+            .begin("browser-2", Some("term-1"), "read")
+            .unwrap()
+            .unwrap()
+            .finish(true);
+        workspaces
+            .transition("browser-1", Mode::Paused, 1)
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert!(workspaces
+            .begin("browser-2", Some("term-1"), "click")
+            .is_err());
+        assert!(workspaces
+            .begin("browser-person", Some("term-1"), "goto")
+            .is_err());
+    }
+
+    #[test]
+    fn nil_actors_cannot_use_unmanaged_tabs() {
+        assert!(Workspaces::default()
+            .begin("browser-person", None, "read")
+            .is_err());
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Snapshot {
@@ -343,11 +458,9 @@ mod tests {
     fn a_new_workspace_hides_native_input_and_requires_a_fresh_observation() {
         let workspaces = opened();
         assert!(!workspaces.allows_person("browser-1").unwrap());
-        assert!(
-            workspaces
-                .begin("browser-1", Some("pane-a"), "click")
-                .is_err()
-        );
+        assert!(workspaces
+            .begin("browser-1", Some("pane-a"), "click")
+            .is_err());
         observe(&workspaces);
         workspaces
             .begin("browser-1", Some("pane-a"), "click")
@@ -359,12 +472,10 @@ mod tests {
     #[test]
     fn an_unmanaged_person_tab_is_not_silently_registered() {
         let workspaces = opened();
-        assert!(
-            workspaces
-                .begin("browser-2", Some("pane-a"), "read")
-                .unwrap()
-                .is_none()
-        );
+        assert!(workspaces
+            .begin("browser-2", Some("pane-a"), "read")
+            .unwrap()
+            .is_none());
         assert!(workspaces.allows_person("browser-2").unwrap());
         assert_eq!(workspaces.snapshots().unwrap().len(), 1);
     }
@@ -374,11 +485,9 @@ mod tests {
         let workspaces = Workspaces::default();
         let snapshot = workspaces.register("browser-1", None, true).unwrap();
         assert_eq!(snapshot.mode, Mode::Paused);
-        assert!(
-            workspaces
-                .begin("browser-1", Some("pane-a"), "goto")
-                .is_err()
-        );
+        assert!(workspaces
+            .begin("browser-1", Some("pane-a"), "goto")
+            .is_err());
         assert!(!workspaces.allows_person("browser-1").unwrap());
     }
 
@@ -398,11 +507,9 @@ mod tests {
             .unwrap()
             .unwrap()
             .finish(true);
-        assert!(
-            workspaces
-                .begin("browser-1", Some("pane-b"), "read")
-                .is_err()
-        );
+        assert!(workspaces
+            .begin("browser-1", Some("pane-b"), "read")
+            .is_err());
     }
 
     #[test]
@@ -425,11 +532,9 @@ mod tests {
         let transition = workspaces.transition("browser-1", Mode::Human, 1).unwrap();
         assert_eq!(transition.snapshot().unwrap().mode, Mode::Pausing);
         assert!(!workspaces.allows_person("browser-1").unwrap());
-        assert!(
-            workspaces
-                .begin("browser-1", Some("pane-a"), "eval")
-                .is_err()
-        );
+        assert!(workspaces
+            .begin("browser-1", Some("pane-a"), "eval")
+            .is_err());
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(5), transition.wait())
                 .await
@@ -470,11 +575,9 @@ mod tests {
         change(&workspaces, Mode::Human).await;
         observe(&workspaces);
         change(&workspaces, Mode::Agent).await;
-        assert!(
-            workspaces
-                .begin("browser-1", Some("pane-a"), "fill")
-                .is_err()
-        );
+        assert!(workspaces
+            .begin("browser-1", Some("pane-a"), "fill")
+            .is_err());
         observe(&workspaces);
         workspaces
             .begin("browser-1", Some("pane-a"), "fill")
@@ -523,11 +626,9 @@ mod tests {
             .begin("browser-1", Some("pane-a"), "read")
             .unwrap()
             .unwrap();
-        assert!(
-            workspaces
-                .begin("browser-1", Some("pane-a"), "marks")
-                .is_err()
-        );
+        assert!(workspaces
+            .begin("browser-1", Some("pane-a"), "marks")
+            .is_err());
         operation.finish(true);
         assert_eq!(
             workspaces.snapshot("browser-1").unwrap().unwrap().in_flight,
