@@ -480,44 +480,56 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
     );
 
     if (capture) {
-      // The rows of uncommitted work close up, B's tooltip open beside them (AT-②-1, t-45314). The list's
-      // scroll is put back afterwards, so the whole-list pictures are taken as before.
-      const closeUp = async (name) => {
-        const clip = await page.evaluate((paths) => {
-          const rows = paths.map((path) => document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(path)}"]`));
+      // The rows of uncommitted work close up (AT-②-1, t-45314): the four rows together, then B with its
+      // tooltip open where the window puts it. The tooltip opens only once the list has scrolled and painted:
+      // a scroll closes it, and the scroll's event lands after `scrollIntoView` returns. The list's scroll is
+      // put back afterwards, so the whole-list pictures are taken as before.
+      const clipAround = (paths, tip) => page.evaluate(async ([paths, tip]) => {
+        const nodes = paths.map((path) => document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(path)}"]`));
+        if (tip) {
+          showTip(nodes[0].querySelector(".wt-landing"));
+          await window.__PAINTED__();
+          nodes.push(document.querySelector(".tooltip"));
+        }
+        const boxes = nodes.map((node) => node.getBoundingClientRect());
+        const x = Math.max(0, Math.min(...boxes.map((box) => box.left)) - 8);
+        const y = Math.max(0, Math.min(...boxes.map((box) => box.top)) - 8);
+        return {
+          x, y,
+          width: Math.min(window.innerWidth, Math.max(...boxes.map((box) => box.right)) + 8) - x,
+          height: Math.min(window.innerHeight, Math.max(...boxes.map((box) => box.bottom)) + 8) - y,
+        };
+      }, [paths, tip]);
+      const closeUp = async (suffix, tip) => {
+        await page.evaluate(async (first) => {
+          const row = document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(first)}"]`);
           window.__SCROLLED__ = [];
-          for (let node = rows[0].parentElement; node; node = node.parentElement) window.__SCROLLED__.push([node, node.scrollTop]);
-          rows[0].scrollIntoView({ block: "nearest" });
-          showTip(rows[0].querySelector(".wt-landing"));
-          const boxes = [...rows, document.querySelector(".tooltip")].map((node) => node.getBoundingClientRect());
-          const x = Math.max(0, Math.min(...boxes.map((box) => box.left)) - 8);
-          const y = Math.max(0, Math.min(...boxes.map((box) => box.top)) - 8);
-          return {
-            x, y,
-            width: Math.min(window.innerWidth, Math.max(...boxes.map((box) => box.right)) + 8) - x,
-            height: Math.min(window.innerHeight, Math.max(...boxes.map((box) => box.bottom)) + 8) - y,
-          };
-        }, UNSAVED);
-        await page.screenshot({ path: resolve(capture, name), clip, animations: "disabled" });
-        await page.evaluate(() => {
+          for (let node = row.parentElement; node; node = node.parentElement) window.__SCROLLED__.push([node, node.scrollTop]);
+          row.scrollIntoView({ block: "start" });
+          await window.__PAINTED__();
+        }, UNSAVED[0]);
+        await page.screenshot({ path: resolve(capture, `landing-overlap-${suffix}.png`), clip: await clipAround(UNSAVED, false), animations: "disabled" });
+        if (tip) {
+          await page.screenshot({ path: resolve(capture, `landing-overlap-tip-${suffix}.png`), clip: await clipAround(UNSAVED.slice(0, 1), true), animations: "disabled" });
+        }
+        await page.evaluate(async () => {
           hideTip();
           for (const [node, top] of window.__SCROLLED__) node.scrollTop = top;
+          await window.__PAINTED__();
         });
       };
-      for (const theme of ["dark", "light"]) {
-        await page.evaluate(async (which) => { document.documentElement.dataset.theme = which; await window.__PAINTED__(); }, theme);
-        await page.locator(".threads").screenshot({ path: resolve(capture, `landing-${theme}.png`), animations: "disabled" });
-        await closeUp(`landing-overlap-${theme}.png`);
-      }
-      // The narrowest the sidebar allows (panel limits: 180 px), where the ellipsis cuts the chip.
-      for (const theme of ["dark", "light"]) {
-        await page.evaluate(async (which) => {
-          document.documentElement.dataset.theme = which;
-          document.documentElement.style.setProperty("--sidebar-width", "180px");
-          await window.__PAINTED__();
-        }, theme);
-        await page.locator(".threads").screenshot({ path: resolve(capture, `landing-${theme}-narrow.png`), animations: "disabled" });
-        await closeUp(`landing-overlap-${theme}-narrow.png`);
+      // The default width; the narrowest the sidebar allows (panel limits: 180 px), where the ellipsis cuts
+      // the chip; and the widest it allows (560 px), the most room a chip gets. The tooltip is the same there.
+      for (const [width, suffix, tip] of [[null, "", true], ["180px", "-narrow", true], ["560px", "-wide", false]]) {
+        for (const theme of ["dark", "light"]) {
+          await page.evaluate(async ([which, wide]) => {
+            document.documentElement.dataset.theme = which;
+            if (wide) document.documentElement.style.setProperty("--sidebar-width", wide);
+            await window.__PAINTED__();
+          }, [theme, width]);
+          await page.locator(".threads").screenshot({ path: resolve(capture, `landing-${theme}${suffix}.png`), animations: "disabled" });
+          await closeUp(`${theme}${suffix}`, tip);
+        }
       }
     }
   } finally {
