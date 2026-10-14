@@ -37905,6 +37905,8 @@ fn a_pane_conversations_notices_are_keyed_by_what_they_say_and_speak_four_locale
     for key in [
         "worker.noPaneTranscript",
         "worker.handoverPending",
+        "worker.handingOver",
+        "worker.readingTranscript",
         "worker.wireRefused",
         "worker.historyFolded",
     ] {

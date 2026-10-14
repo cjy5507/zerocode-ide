@@ -538,6 +538,14 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   font-size: var(--text-xs);
 }
 
+/* 「대화를 읽는 중…」 stands hidden until it is late — `--chat-late-ms`, read
+ * by `sayLate` — and a read that comes sooner takes the line away unseen
+ * (t-54304). A class, not an animation: reduced motion stills every animation,
+ * and a wait is no motion. */
+.pane-chat-notice[data-says="worker.readingTranscript"]:not(.is-late) {
+  visibility: hidden;
+}
+
 .chrome-run-label {
   font-family: var(--font-mono);
   max-width: 14ch;
