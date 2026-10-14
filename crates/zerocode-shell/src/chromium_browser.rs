@@ -896,8 +896,31 @@ fn cef_cookie(cookie: &StagedCookie) -> Cookie {
 
 type EvalCallback = Box<dyn FnOnce(String) + Send>;
 type NavigationCallback = Box<dyn FnOnce(crate::NavAnswer)>;
-type Navigations = Rc<RefCell<HashMap<i32, NavigationCallback>>>;
+type Navigations = Rc<RefCell<NavigationReply>>;
 type SnapshotCallback = Box<dyn FnOnce(Result<Vec<u8>, String>) + Send>;
+
+#[derive(Default)]
+struct NavigationReply {
+    pending: Option<(i32, NavigationCallback)>,
+}
+
+impl NavigationReply {
+    fn insert(&mut self, message_id: i32, callback: NavigationCallback) {
+        self.pending = Some((message_id, callback));
+    }
+
+    fn remove(&mut self, message_id: &i32) -> Option<NavigationCallback> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(pending_id, _)| pending_id == message_id)
+        {
+            self.pending.take().map(|(_, callback)| callback)
+        } else {
+            None
+        }
+    }
+}
 
 enum Pending {
     Eval(EvalCallback),
@@ -1271,7 +1294,7 @@ fn finish_create_pane(
         .and_then(|host| host.request_context())
         .ok_or_else(|| "Chromium request context is unavailable".to_string())?;
     let pending = Rc::new(RefCell::new(HashMap::new()));
-    let navigations = Rc::new(RefCell::new(HashMap::new()));
+    let navigations = Navigations::default();
     let mut observer = DevToolsObserver::new(pending.clone(), navigations.clone());
     let registration = browser
         .host()
