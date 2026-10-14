@@ -9488,6 +9488,9 @@ function setSettingsOpen(on, focus = null) {
   settingsView.hidden = !on;
   if (on && focus) {
     const at = el(focus);
+    for (let details = at?.closest("details:not([open])"); details; details = details.parentElement?.closest("details:not([open])")) {
+      details.open = true;
+    }
     at?.scrollIntoView({ block: "center" });
     // A no-op on the sections that are not focusable, which is the honest
     // outcome: bring it into view and leave the caret where it was.
