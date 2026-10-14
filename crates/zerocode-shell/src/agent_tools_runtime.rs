@@ -6057,8 +6057,6 @@ fn desktop_wait_for_with(
                     .is_some_and(|regions| !regions.is_empty());
                 Some(answer)
             }
-            // A missing window is an unread observation, not an empty one.
-            // In particular, an earlier poll's identity cannot verify absence.
             Err(error) if wait_for_retries(&error.code) => None,
             Err(error) => return Err(error),
         };
@@ -6133,8 +6131,6 @@ fn checked_wait_scope(
             "the wait observation came from a different window",
         ));
     }
-    // The trusted helper resolves app aliases and selects this window from
-    // that app's candidates. Its display name need not equal the alias.
     if params.get("app").is_some()
         && answer
             .get("app")
@@ -6175,9 +6171,10 @@ mod desktop_wait_for_tests {
         helper: computer_use::eye::Call<'_>,
     ) -> Result<Value, computer_use::ComputerUseError> {
         let elapsed = Cell::new(Duration::ZERO);
+        let memory = computer_use::eye::Memory::new();
         desktop_wait_for_with(
             params,
-            &computer_use::eye::MEMORY,
+            &memory,
             helper,
             &mut || elapsed.get(),
             &mut |pause| elapsed.set(elapsed.get() + pause),

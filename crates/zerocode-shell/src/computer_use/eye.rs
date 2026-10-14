@@ -38,7 +38,7 @@ pub struct Memory {
 }
 
 impl Memory {
-    pub(super) const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             refused: Mutex::new(None),
         }
