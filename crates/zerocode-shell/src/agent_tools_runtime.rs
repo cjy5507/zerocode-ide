@@ -6686,12 +6686,17 @@ pub(super) async fn answer_browser_command(
         }),
         Err(error) => {
             if let Some(operation) = operation {
-                operation.finish(true);
+                operation.settle(crate::browser_workspace::Dispatch::NotSent);
             }
             return browser_refused(format!("zerocode-browser: {error}\n"));
         }
     };
-    let mut answer = dispatch_browser_command(app, argv, pane, expected_revision).await;
+    let mut dispatched = crate::browser_workspace::Dispatch::Uncertain;
+    let mut answer =
+        dispatch_browser_command(app, argv, pane, expected_revision, &mut dispatched).await;
+    if answer.exit_code == 0 {
+        dispatched = crate::browser_workspace::Dispatch::Completed;
+    }
     if let Some(operation) = operation {
         if answer.exit_code == 0 && zerocode_core::agent_browser::observes(verb) {
             if step_actor(app, pane).pane.as_deref() != pane {
@@ -6710,11 +6715,11 @@ pub(super) async fn answer_browser_command(
                 }
             }
         } else {
-            operation.finish(answer.exit_code == 0);
+            operation.settle(dispatched);
         }
     }
     if let Some(operation) = actor_operation {
-        operation.finish(answer.exit_code == 0);
+        operation.settle(dispatched);
     }
     answer
 }
@@ -6811,6 +6816,7 @@ async fn dispatch_browser_command(
     argv: &[String],
     pane: Option<&str>,
     expected_revision: Option<u64>,
+    dispatched: &mut crate::browser_workspace::Dispatch,
 ) -> zerocode_hookd::TeamAnswer {
     let state = app.state::<AppState>();
     let verb = argv.first().map(String::as_str).unwrap_or_default();
@@ -6865,7 +6871,9 @@ async fn dispatch_browser_command(
             // would still have let an agent see a laxer door.
             let url = match browsable(&argv[1]) {
                 Ok(parsed) => parsed.to_string(),
-                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+                Err(why) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
+                }
             };
             // The label is reserved BEFORE the window opens anything, so the
             // answer is the label itself (§2.2): the window claims the
@@ -6881,7 +6889,7 @@ async fn dispatch_browser_command(
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     state.browser_reserved().remove(&label);
-                    return browser_refused(format!("zerocode-browser: {error}\n"));
+                    return refused_unsent(dispatched, format!("zerocode-browser: {error}\n"));
                 }
             };
             let mut pending = PendingBrowserOpen {
@@ -6930,8 +6938,19 @@ async fn dispatch_browser_command(
         ("close", 2) => {
             let label = argv[1].clone();
             if !state.browser_panes().contains(&label) {
-                return browser_refused("zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n");
+                return refused_unsent(
+                    dispatched,
+                    "zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n",
+                );
             }
+            let revision = match expected_revision
+                .map_or_else(|| cmd::browser::close_revision(&state, &label), Ok)
+            {
+                Ok(revision) => revision,
+                Err(error) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {error}\n"));
+                }
+            };
             // The WINDOW closes it, through the one `closeTab` every close
             // walks (hide→close→burn); this side watches the mint for the
             // label to leave, inside the budget.
@@ -6940,14 +6959,7 @@ async fn dispatch_browser_command(
                 "browser:agent-close",
                 BrowserAgentClose {
                     label: label.clone(),
-                    revision: match expected_revision
-                        .map_or_else(|| cmd::browser::close_revision(&state, &label), Ok)
-                    {
-                        Ok(revision) => Some(revision),
-                        Err(error) => {
-                            return browser_refused(format!("zerocode-browser: {error}\n"));
-                        }
-                    },
+                    revision: Some(revision),
                 },
             );
             if let Err(error) = asked {
@@ -6969,10 +6981,15 @@ async fn dispatch_browser_command(
         ("viewport", 3) => {
             let viewport = match zerocode_core::agent_browser::parse_viewport(&argv[2]) {
                 Ok(viewport) => viewport,
-                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+                Err(why) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
+                }
             };
             if !state.browser_panes().contains(&argv[1]) {
-                return browser_refused("zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n");
+                return refused_unsent(
+                    dispatched,
+                    "zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n",
+                );
             }
             // A size is the window's to apply — the pane is placed by the
             // window's own preset road (`viewportBox`), so the box the agent
@@ -6993,7 +7010,9 @@ async fn dispatch_browser_command(
         ("scroll", 3) => {
             let target = match zerocode_core::agent_browser::parse_scroll(&argv[2]) {
                 Ok(target) => target,
-                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+                Err(why) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
+                }
             };
             match cmd::browser::automate_scroll(app, &state, &argv[1], &target).await {
                 Ok((x, y)) => browser_said(format!("스크롤 x={x} y={y}\n")),
@@ -7031,14 +7050,19 @@ async fn dispatch_browser_command(
         ("goto", 3) => {
             let url = match browsable(&argv[2]) {
                 Ok(parsed) => parsed,
-                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+                Err(why) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
+                }
             };
-            match browser_pane_of(app, &state, &argv[1]) {
-                Ok(pane) => match pane.navigate(url) {
-                    Ok(()) => browser_said("가는 중\n"),
-                    Err(_) => browser_refused("zerocode-browser: 이동 요청을 보낼 수 없습니다\n"),
-                },
-                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+            let pane = match browser_pane_of(app, &state, &argv[1]) {
+                Ok(pane) => pane,
+                Err(why) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
+                }
+            };
+            match pane.navigate(url) {
+                Ok(()) => browser_said("가는 중\n"),
+                Err(_) => browser_refused("zerocode-browser: 이동 요청을 보낼 수 없습니다\n"),
             }
         }
         // `eval <label> <expr>`, or `eval <label> --value <expr>` — the shape
@@ -7051,7 +7075,8 @@ async fn dispatch_browser_command(
                     expression
                 }
                 _ => {
-                    return browser_refused(
+                    return refused_unsent(
+                        dispatched,
                         "zerocode-browser: eval <label> <expr> 또는 eval <label> --value-stdin\n",
                     );
                 }
@@ -7136,7 +7161,9 @@ async fn dispatch_browser_command(
                         Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
                     };
                 }
-                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+                Err(why) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
+                }
             };
             match pressed {
                 Ok(report) => {
@@ -7319,7 +7346,9 @@ async fn dispatch_browser_command(
         ("fill", _) => {
             let command = match zerocode_core::agent_browser::parse_fill(argv) {
                 Ok(command) => command,
-                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+                Err(why) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
+                }
             };
             let label = command.label.clone();
             match cmd::browser::automate_fill(app, &state, &label, command.entries).await {
@@ -7374,8 +7403,19 @@ async fn dispatch_browser_command(
                 Err(why) => browser_screenshot_refused(command.json, &why),
             }
         }
-        _ => browser_refused(format!("{}\n", zerocode_core::agent_browser::usage())),
+        _ => refused_unsent(
+            dispatched,
+            format!("{}\n", zerocode_core::agent_browser::usage()),
+        ),
     }
+}
+
+fn refused_unsent(
+    dispatched: &mut crate::browser_workspace::Dispatch,
+    stderr: impl Into<String>,
+) -> zerocode_hookd::TeamAnswer {
+    *dispatched = crate::browser_workspace::Dispatch::NotSent;
+    browser_refused(stderr)
 }
 
 pub(super) fn browser_screenshot_refused(json: bool, message: &str) -> zerocode_hookd::TeamAnswer {

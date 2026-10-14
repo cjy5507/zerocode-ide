@@ -410,10 +410,7 @@ fn only_a_refusal_before_dispatch_is_known_to_have_no_effect() {
     ] {
         let arm = arm(dispatch, opens, next);
         let sent = arm.find(sent).unwrap_or_else(|| panic!("{opens}"));
-        assert!(
-            arm[..sent].contains("refused_unsent(dispatched,"),
-            "{opens}"
-        );
+        assert!(arm[..sent].contains("refused_unsent("), "{opens}");
         assert!(!arm[sent..].contains("refused_unsent("), "{opens}");
     }
     let click = arm(
@@ -422,9 +419,7 @@ fn only_a_refusal_before_dispatch_is_known_to_have_no_effect() {
         "(\"type\", 4) =>",
     );
     assert_eq!(click.matches("refused_unsent(").count(), 1);
-    assert!(
-        click.find("refused_unsent(dispatched,").unwrap() < click.find("match pressed {").unwrap()
-    );
+    assert!(click.find("refused_unsent(").unwrap() < click.find("match pressed {").unwrap());
     let later = click.find("match later.await {").unwrap();
     let later = &click[later..later + click[later..].find("};").unwrap()];
     assert!(!later.contains("refused_unsent("));
@@ -440,7 +435,9 @@ fn only_a_refusal_before_dispatch_is_known_to_have_no_effect() {
     let fill = arm(dispatch, "(\"fill\", _) =>", "(\"screenshot\", _) =>");
     assert!(fill.contains("page_refused(&label, words)"));
     assert!(fill.contains("return browser_refused(format!(\"zerocode-browser: {words}\"));"));
-    assert!(dispatch.contains("_ => refused_unsent(dispatched, format!(\"{}\\n\", zerocode_core::agent_browser::usage())),"));
+    let usage = &dispatch[dispatch.rfind("_ => ").unwrap()..];
+    assert!(usage.starts_with("_ => refused_unsent("));
+    assert!(usage.contains("zerocode_core::agent_browser::usage()"));
 }
 
 #[test]

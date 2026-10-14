@@ -182,6 +182,23 @@ pub(crate) struct Snapshot {
     pub(crate) snapshot_supported: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Dispatch {
+    Completed,
+    NotSent,
+    Uncertain,
+}
+
+impl Dispatch {
+    fn of(succeeded: bool) -> Self {
+        if succeeded {
+            Self::Completed
+        } else {
+            Self::Uncertain
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StepControl {
     label: String,
@@ -946,8 +963,12 @@ impl ActorOperation {
         self
     }
 
-    pub(crate) fn finish(mut self, succeeded: bool) {
-        self.completed = succeeded;
+    pub(crate) fn finish(self, succeeded: bool) {
+        self.settle(Dispatch::of(succeeded));
+    }
+
+    pub(crate) fn settle(mut self, dispatch: Dispatch) {
+        self.completed = dispatch != Dispatch::Uncertain;
     }
 }
 
@@ -1034,18 +1055,22 @@ impl Operation {
         Ok(self.revision)
     }
 
-    pub(crate) fn finish(mut self, succeeded: bool) {
-        if let Ok(mut state) = self.workspace.lock() {
-            if !state.closed
-                && state.revision == self.revision
-                && state.mode == Mode::Agent
-                && state.owner == self.owner
-                && self.observes
-            {
-                state.needs_observation = !succeeded;
-            }
+    pub(crate) fn finish(self, succeeded: bool) {
+        self.settle(Dispatch::of(succeeded));
+    }
+
+    pub(crate) fn settle(mut self, dispatch: Dispatch) {
+        if dispatch != Dispatch::NotSent
+            && let Ok(mut state) = self.workspace.lock()
+            && !state.closed
+            && state.revision == self.revision
+            && state.mode == Mode::Agent
+            && state.owner == self.owner
+            && self.observes
+        {
+            state.needs_observation = dispatch == Dispatch::Uncertain;
         }
-        self.completed = succeeded || !self.changes_page;
+        self.completed = dispatch != Dispatch::Uncertain || !self.changes_page;
     }
 }
 
