@@ -112,22 +112,25 @@ Managed working tabs refuse arbitrary `eval`. Use `read`, `marks`,
 Ordinary website scripts and network requests can continue while paused,
 and a script, timer or request the site already started can still finish
 after a handoff. A handoff first waits briefly for a main-document
-navigation this window already sent (`goto`, or the person's address bar);
-if it does not finish, control stays paused. A mutation the command refused
-before anything was sent (its arguments, URL or pane) leaves control as it
-was. A mutation that was sent and then failed, timed out or was canceled,
-including the page's own error answer, an unreadable `eval` result and a
-`fill` that wrote only some fields, pauses that tab and the owner's other
-writes. Control returns only when the person hands it back, after the
+navigation this window already sent (`goto`, or the person's address bar)
+or saw start. Only that document's own finish or failure ends the wait;
+time alone never does, so a navigation that has not ended keeps control
+paused, and asking again stays paused until it ends or the tab is closed.
+A mutation the command refused before anything was sent (its arguments,
+URL, selector, mark, text length, scroll target, expression or pane)
+leaves control as it was. A mutation that was sent and then failed, timed
+out or was canceled, including the page's own error answer, an unreadable
+`eval` or `find` result and a `fill` that wrote only some fields, pauses
+that tab and the owner's other writes. Control returns only when the person hands it back, after the
 affected page answers a bounded confirmation request. Never bypass a refusal
 with another surface. Once control returns, read the page again before
 acting, including navigation; previous form and numbered-element
 observations have been discarded. After a person has controlled a working
 tab, `console`, `network` and `diagnose` refuse that tab for the rest of its
 life (`workspace_history_unsupported`); open a new working tab when you need
-them. A working tab's step frame is kept only while the same agent still
-controls it at the same revision; otherwise the step's evidence line says
-`control_changed`. A frame is never an observation.
+them. A working tab's step frame is taken and kept only while the same
+agent still controls it at the same revision; otherwise the step's evidence
+line says `control_changed`. A frame is never an observation.
 Every model uses the same original-observation rule. A successful managed-tab
 `read`, `marks`, `fields`, or agent `screenshot` returns `workspaceRevision`.
 The backend issues it only if owner, mode, and revision still match at read
