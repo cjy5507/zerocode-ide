@@ -9704,12 +9704,13 @@ mod tests {
         // `tabs` answers from the records the hooks wrote — the state by the
         // clock (`observed(now)`), the title, the jar and the reader — and
         // never asks a webview anything but whether it is still alive.
+        let simple_listing = block_after(answering, "(\"list\", 1) => {");
         let listing = block_after(answering, "(\"tabs\", 1) => {");
         assert!(
             listing.contains("browser_records()")
                 && listing.contains("nav.observed(now)")
                 && listing.contains("tabs_lines(&rows)")
-                && listing.contains("browser_pane_of(app, &state, label).is_ok()"),
+                && listing.contains("browser_pane_of(app, &state, &label).is_err()"),
             "`tabs` stopped answering from the hooks' records:\n{listing}"
         );
         for road in [
@@ -9815,7 +9816,9 @@ mod tests {
             "the automation executor lost its cap or pane mint:\n{browser}"
         );
         let filesystem = include_str!("../../src/cmd/fs.rs");
-        let snapshot = block_after(filesystem, "async fn browser_snapshot_png(");
+        let agent_snapshot = block_after(filesystem, "async fn browser_snapshot_png(");
+        assert!(agent_snapshot.contains("browser_snapshot_png_for(app, state, label, false)"));
+        let snapshot = block_after(filesystem, "async fn browser_snapshot_png_for(");
         assert!(
             snapshot.contains("browser_pane_of(app, state, label)?"),
             "an agent snapshot can bypass the live minted browser check:\n{snapshot}"
@@ -9823,13 +9826,15 @@ mod tests {
         assert!(
             snapshot.contains("pane.snapshot_png(")
                 && snapshot.contains("timeout(SNAPSHOT_BUDGET, rx)")
-                && snapshot.contains("snapshot_webview_png(pane, None)"),
+                && snapshot
+                    .contains("snapshot_webview_png_held(pane, None, Some(Box::new(frame)))")
+                && snapshot.contains(".begin_snapshot_for(label, spectator)"),
             "snapshot must select Chromium without losing the existing native fallback or deadline"
         );
         assert!(
             !answering.contains("app.get_webview(")
-                && answering.contains("browser_pane_of(app, &state, &label).is_err()")
-                && answering.contains("browser_pane_of(app, &state, label).is_ok()"),
+                && simple_listing.contains("browser_pane_of(app, &state, &label).is_err()")
+                && listing.contains("browser_pane_of(app, &state, &label).is_err()"),
             "browser list/tabs must recognize Chromium panes without consulting Tauri's webview registry"
         );
         // The shim is installed beside the mirror shims — the dir already on

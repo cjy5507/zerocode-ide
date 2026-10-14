@@ -219,3 +219,26 @@ fn agent_close_requires_the_origin_epoch_and_only_confirmed_native_close_can_be_
     assert!(pending.contains("cancel_workspace_open("));
     assert!(pending.contains("self.revision"));
 }
+
+#[test]
+fn ownership_adapters_use_held_terminal_identity_and_do_not_select_a_model() {
+    assert!(
+        CONTROL.contains("fn owner_actor("),
+        "ownership must resolve an actual held terminal"
+    );
+    let owner = block_after(CONTROL, "fn owner_actor(");
+    assert!(owner.contains("let term: u32"));
+    assert!(owner.contains("crate::artifact_runtime::held_pane(app, &hooks::pane_key_of(term))"));
+    assert!(
+        !owner.contains("facts.agent") && !owner.contains(".model") && !owner.contains(".provider")
+    );
+    let admission = block_after(RUNTIME, "async fn answer_browser_command(");
+    assert!(admission.contains("let actor = step_actor(app, pane)"));
+    assert!(!admission.contains(".model") && !admission.contains(".provider"));
+    let artifacts = include_str!("../../src/artifact_runtime.rs");
+    let held = block_after(artifacts, "fn held_pane(");
+    assert!(held.contains("facts_of_pane(app, term)?"));
+    let facts = block_after(artifacts, "fn facts_of_pane(");
+    assert!(facts.contains("state.terminals().contains_key(&term)"));
+    assert!(facts.contains("Some(pane_facts(heard, seat))"));
+}
