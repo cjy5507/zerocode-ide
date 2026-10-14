@@ -602,3 +602,7 @@ impl Drop for Running {
         self.engine.stop();
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "engine_boundary_tests.rs"]
+mod boundary_tests;
