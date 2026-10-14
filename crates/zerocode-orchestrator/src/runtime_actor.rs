@@ -699,6 +699,12 @@ pub enum RuntimeRequest {
         receipt: Box<zerocode_core::orchestration::land_check::LandCheckReceipt>,
         now_ms: i64,
     },
+    /// The window moved an integration batch, and the ledger judges the record against the
+    /// batch's own records before it writes its letter (t-45315).
+    LandBatch {
+        receipt: Box<zerocode_core::orchestration::land_batch::LandBatchReceipt>,
+        now_ms: i64,
+    },
     /// A pane the plan asked for never opened: the worker row it minted
     /// goes back, durably — the third host fact, and the rollback half of
     /// the effect round trip.
@@ -1172,6 +1178,14 @@ impl std::fmt::Debug for RuntimeRequest {
                 .field("evidence_bytes", &receipt.evidence.len())
                 .field("now_ms", now_ms)
                 .finish(),
+            // Sizes: a record names the person's checkout and the members' heads.
+            Self::LandBatch { receipt, now_ms } => formatter
+                .debug_struct("RuntimeRequest::LandBatch")
+                .field("batch_bytes", &receipt.batch.len())
+                .field("generation", &receipt.generation)
+                .field("phase", &receipt.record.phase())
+                .field("now_ms", now_ms)
+                .finish(),
             Self::FinishSleepingReseat {
                 worker,
                 reason,
@@ -1589,6 +1603,9 @@ pub enum RuntimeError {
     UnauthorizedSeat,
     #[error("{0}")]
     GateJobRefused(String),
+    /// The ledger refused an integration batch's record, in its own words (t-45315).
+    #[error("{0}")]
+    LandBatchRefused(String),
     #[error("the seat this worker sits in is open on the host")]
     SeatStillOpen,
     #[error("the runtime revision is stale or non-monotonic")]
@@ -2694,6 +2711,23 @@ impl RuntimeActor {
         }
     }
 
+    /// One record of an integration batch (t-45315). Answers whether a letter was written — the
+    /// same record again writes none — and the revision; a record the batch does not take comes
+    /// back as [`RuntimeError::LandBatchRefused`] with the ledger's reason.
+    pub fn land_batched(
+        &self,
+        receipt: zerocode_core::orchestration::land_batch::LandBatchReceipt,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::LandBatch {
+            receipt: Box::new(receipt),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// A pane the plan asked for never opened; the worker row goes back.
     pub fn seat_never_opened(
         &self,
@@ -3554,6 +3588,7 @@ impl RuntimeState {
             }
             RuntimeRequest::GateJudged { receipt, now_ms } => self.gate_judged(&receipt, now_ms),
             RuntimeRequest::LandCheck { receipt, now_ms } => self.land_checked(&receipt, now_ms),
+            RuntimeRequest::LandBatch { receipt, now_ms } => self.land_batched(&receipt, now_ms),
             RuntimeRequest::SeatNeverOpened { worker, now_ms } => {
                 self.seat_never_opened(&worker, now_ms)
             }
@@ -4490,6 +4525,38 @@ impl RuntimeState {
             .land_checked(receipt, now_ms)
             .map_err(|_| RuntimeError::AuthorityRejected)?;
         if written.is_none() {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn land_batched(
+        &mut self,
+        receipt: &zerocode_core::orchestration::land_batch::LandBatchReceipt,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || [&receipt.run, &receipt.batch]
+                .iter()
+                .any(|name| name.is_empty() || name.len() > MAX_NAME)
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let written = self
+            .ledger
+            .land_batched(receipt, now_ms)
+            .map_err(RuntimeError::LandBatchRefused)?;
+        if written.letters.is_empty() {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,

@@ -47,6 +47,21 @@ pub(crate) struct DeskSnapshot {
     /// ([`NewsTable::folded_ack`], t-9548): the folded count offers each
     /// one's acknowledgement, since no line of news stands to offer it.
     pub(crate) folded_batches: Vec<DeskBatch>,
+    /// The integration batches of those runs (t-45315): every open one, and
+    /// one that ended within the news's own window, so its end is seen.
+    pub(crate) land_batches: Vec<DeskLandBatch>,
+}
+
+/// One integration batch the board draws a card for: the batch as the
+/// ledger holds it, and whether its repository has the queue on — an open
+/// batch in a repository that turned it off keeps its cancel alone. `on` is
+/// the project's setting, laid over on the beat outside the ledger's view
+/// (`land_batch::dress_desk`); the snapshot itself says off.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct DeskLandBatch {
+    pub(crate) run: String,
+    pub(crate) on: bool,
+    pub(crate) batch: zerocode_core::orchestration::land_batch::BatchState,
 }
 
 /// A batch a coordinator holds open — what an acknowledgement names — and
@@ -259,6 +274,10 @@ pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
     let mut folded_in_open = false;
     for message in run.messages().iter().filter(|one| one.to == address) {
         if zerocode_core::orchestration::gate_reuse::is_gate_evidence(message) {
+            continue;
+        }
+        // An integration batch's records are its card, not lines of news.
+        if zerocode_core::orchestration::land_batch::BatchRecord::of(message).is_some() {
             continue;
         }
         if run.awaits_answer(message) {
@@ -611,12 +630,25 @@ pub(crate) fn desk_snapshot(
     let mut news = Vec::new();
     let mut folded = 0;
     let mut folded_batches = Vec::new();
+    let mut land_batches = Vec::new();
     for run in ledger.runs().iter().filter(|run| in_play(run)) {
         let owed = desk_letters(run, now_ms);
         mail.extend(owed.mail);
         news.extend(owed.news);
         folded += owed.folded;
         folded_batches.extend(owed.folded_batch);
+        land_batches.extend(
+            zerocode_core::orchestration::land_batch::batches(run)
+                .into_iter()
+                .filter(|batch| {
+                    !batch.ended() || now_ms.saturating_sub(batch.last_at) < DESK_NEWS.stands_ms
+                })
+                .map(|batch| DeskLandBatch {
+                    run: run.id.clone(),
+                    on: false,
+                    batch,
+                }),
+        );
         // The seat as the ledger keeps it: the live one names its pane, an
         // empty one keeps its generation and when its holder was proven gone.
         let chair = run.coordinator.as_ref();
@@ -700,6 +732,7 @@ pub(crate) fn desk_snapshot(
         mail,
         news,
         folded_batches,
+        land_batches,
     }
 }
 

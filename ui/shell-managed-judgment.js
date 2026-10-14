@@ -4,10 +4,11 @@ const managedJudgmentController = {
   loading: false,
   busy: false,
   activating: false,
-  fetchSequence: 0,
+  statusError: false,
   rows: new Map(),
   waiters: new Set(),
   importModel: null,
+  importAttempt: null,
   subscription: null,
   query: "",
   filter: "all",
@@ -34,6 +35,7 @@ const managedJudgmentController = {
       if (!this.importModel || !sourceDirectory) return;
       void this.perform("managed_judgment_install", { ...this.modelArgs(this.importModel), sourceDirectory });
     });
+    el("managed-judgment-import-path")?.addEventListener("input", () => this.sayImport(""));
     el("managed-judgment-models")?.addEventListener("click", (event) => {
       const button = event.target.closest("button[data-model-action]");
       if (!button || button.disabled) return;
@@ -48,6 +50,7 @@ const managedJudgmentController = {
       else if (action === "connect") judgmentProviderController.connectModel(model);
       else if (action === "import") {
         this.importModel = model;
+        this.sayImport("");
         el("managed-judgment-import").open = true;
         el("managed-judgment-import-model").textContent = model.label;
         el("managed-judgment-import-path").focus();
@@ -68,11 +71,20 @@ const managedJudgmentController = {
   },
 
   visible() {
-    return !settingsView.hidden && settingsPane === "judgment-models" && !el("managed-judgment-panel").hidden;
+    const pane = el("typesafe-card")?.closest(".settings-pane");
+    return Boolean(pane && !pane.hidden && !settingsView.hidden && settingsPane === "judgment-models" && !document.hidden);
   },
 
   say(words) {
     el("managed-judgment-status").textContent = words;
+  },
+
+  sayImport(words) {
+    el("managed-judgment-import-status").textContent = words;
+  },
+
+  importKey() {
+    return JSON.stringify([this.importModel?.id, this.importModel?.revision, el("managed-judgment-import-path").value.trim()]);
   },
 
   failure(error) {
@@ -218,38 +230,37 @@ const managedJudgmentController = {
       if (snapshot.instanceId === this.snapshot.instanceId && snapshot.revision < this.snapshot.revision) return false;
     }
     this.snapshot = snapshot;
+    this.statusError = false;
+    if (this.importAttempt && !this.importAttempt.operationId && this.busy &&
+        snapshot.operation?.id !== this.importAttempt.previousId && snapshot.operation?.kind === "download" && snapshot.operation?.modelId === this.importModel?.id) {
+      this.importAttempt.operationId = snapshot.operation.id;
+    }
     for (const notify of this.waiters) notify();
     if (this.visible()) this.render();
     return true;
   },
 
   async refresh() {
-    this.init();
-    if (this.loading) return;
-    const sequence = ++this.fetchSequence;
-    this.loading = true;
-    this.render();
-    try {
-      const snapshot = await invoke("managed_judgment_status");
-      if (sequence === this.fetchSequence && !this.accept(snapshot, true)) throw new Error("invalid_snapshot");
-      this.say("");
-    } catch (error) {
-      this.say(this.failure(error));
-    } finally {
-      this.loading = false;
-      if (this.visible()) this.render();
-    }
+    if (!this.visible()) return;
+    await refreshTypeSafe();
   },
 
   async perform(command, args = {}) {
     if (this.busy || this.operating() || typesafeBusy || judgmentModelSourceController.busy) return;
     this.busy = true;
+    const importing = typeof args.sourceDirectory === "string";
+    if (importing) {
+      this.importAttempt = { key: this.importKey(), operationId: null, previousId: this.snapshot?.operation?.id };
+      this.sayImport("");
+    }
     this.render();
     this.say("");
     try {
       if (!this.accept(await invoke(command, args))) throw new Error("invalid_snapshot");
     } catch (error) {
-      this.say(this.failure(error));
+      if (importing) {
+        if (this.importAttempt.key === this.importKey()) this.sayImport(this.failure(error));
+      } else this.say(this.failure(error));
     } finally {
       this.busy = false;
       if (this.visible()) this.render();
@@ -341,8 +352,7 @@ const managedJudgmentController = {
         this.accept(await invoke("managed_judgment_apply", { serverId, expectedProviderIdentity }));
       }
       if (this.snapshot.appliedModelId !== model.id) throw new Error("model_not_applied");
-      judgmentProviderController.draft = null;
-      await refreshTypeSafe();
+      await judgmentProviderController.refreshAfterApply();
       this.say(t("settings.managed.applied", "로컬 모델을 적용했습니다. 응답 확인은 작업 정확도 검증과 별개입니다."));
       return true;
     } catch (error) {
@@ -398,17 +408,31 @@ const managedJudgmentController = {
 
   modelState(model) {
     const snapshot = this.snapshot;
-    if (snapshot.appliedModelId === model.id) return t("settings.managed.inUse", "실행 중 · 현재 적용됨");
+    if (this.appliedModel(model)) return t("settings.managed.inUse", "실행 중 · 현재 적용됨");
+    if ((this.statusError || snapshot.providerIdentity !== judgmentProviderController.state?.providerIdentity) &&
+        [snapshot.appliedModelId, snapshot.configuredModelId].includes(model.id)) return t("settings.judgment.modelStateUnknown", "현재 설정과 실행 상태를 함께 확인해야 합니다.");
     if (snapshot.server.modelId === model.id && snapshot.server.state === "starting") return t("settings.managed.starting", "모델을 시작하는 중 · 아직 적용하지 않음");
     if (snapshot.server.modelId === model.id && snapshot.server.state === "ready") return t("settings.managed.runningUnapplied", "실행 중 · 아직 적용하지 않음");
-    if (snapshot.configuredModelId === model.id) return t("settings.managed.configuredStopped", "선택된 모델 · 실행되지 않음. 실행하고 적용을 눌러 다시 연결하세요.");
+    if (this.configuredModel(model)) return t("settings.managed.configuredStopped", "선택된 모델 · 실행되지 않음. 실행하고 적용을 눌러 다시 연결하세요.");
     if (!this.localSupported(model)) return this.failure(model.local?.reason ?? model.compatibilityReason ?? "platform_unsupported");
     if (model.installed && this.runtimeFor(model)?.state !== "ready") return t("settings.managed.needsRuntime", "모델 파일 설치됨 · 이 모델의 실행 환경을 설치한 뒤 연결하세요.");
     return model.installed ? t("settings.managed.installed", "설치됨 · 아직 적용하지 않음") : t("settings.managed.notInstalled", "아직 다운로드하지 않음");
   },
 
+  configuredModel(model) {
+    const state = judgmentProviderController.state;
+    return this.snapshot?.providerIdentity === state?.providerIdentity && state?.provider?.kind === "local" &&
+      this.snapshot.configuredModelId === model.id && state.provider.model === model.id;
+  },
+
+  appliedModel(model) {
+    const server = judgmentProviderController.managedServer();
+    return this.snapshot?.appliedModelId === model.id && server?.modelId === model.id && server.state === "ready" && server.checked === true;
+  },
+
   render() {
     judgmentModelSourceController.render();
+    judgmentProviderController.renderStatus();
     const snapshot = this.snapshot;
     const busy = this.busy || this.operating() || typesafeBusy || judgmentModelSourceController.busy;
     if (document.activeElement !== el("managed-judgment-search")) el("managed-judgment-search").value = this.query;
@@ -446,8 +470,12 @@ const managedJudgmentController = {
         ? t("settings.managed.progress", "{{received}} / {{total}}", { received: bytesLabel(operation.receivedBytes), total: bytesLabel(operation.totalBytes) })
         : t("settings.managed.working", "작업 중… 완료될 때까지 현재 모델을 유지합니다.");
     el("managed-judgment-cancel").disabled = operation?.state !== "running";
-    if (operation?.state === "failed" && !this.busy) this.say(this.failure(operation.error));
-    if (operation?.state === "cancelled" && !this.busy) this.say(this.failure("cancelled"));
+    if (["failed", "cancelled"].includes(operation?.state) && !this.busy && operation.kind !== "inspect") {
+      const words = this.failure(operation.state === "cancelled" ? "cancelled" : operation.error);
+      if (operation.id === this.importAttempt?.operationId) {
+        if (this.importAttempt.key === this.importKey()) this.sayImport(words);
+      } else this.say(words);
+    }
     const models = el("managed-judgment-models");
     const kept = new Set();
     let shown = 0;
@@ -462,9 +490,10 @@ const managedJudgmentController = {
       row.card.hidden = !this.matches(model);
       if (!row.card.hidden) shown += 1;
       const running = snapshot.server.modelId === model.id && snapshot.server.state !== "stopped" && snapshot.server.state !== "failed";
-      const applied = snapshot.appliedModelId === model.id;
+      const applied = this.appliedModel(model);
       const configured = snapshot.configuredModelId === model.id;
-      const signature = JSON.stringify([model, busy, running, applied, configured, snapshot.server.state, snapshot.runtime.state, t("settings.managed.download", "다운로드")]);
+      const signature = JSON.stringify([model, busy, running, applied, configured, snapshot.server.state, snapshot.runtime.state,
+        snapshot.providerIdentity, judgmentProviderController.state?.providerIdentity, this.statusError, t("settings.managed.download", "다운로드")]);
       if (row.signature === signature) continue;
       row.signature = signature;
       row.title.textContent = model.label;

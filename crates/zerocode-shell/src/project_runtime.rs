@@ -1282,6 +1282,10 @@ pub(super) struct ProjectSettings {
     /// zero means the default limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) landing_check_timeout_secs: Option<u64>,
+    /// Whether this repository runs the integration queue (`land-batch`, t-45315). Missing or
+    /// false is off: the verb refuses, no ref is made and the board draws no batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) integration_queue_enabled: Option<bool>,
 }
 
 /// Whether nobody has said anything about this project's external worktrees.
@@ -1320,6 +1324,7 @@ impl ProjectSettings {
             && self.worktree_base_ref.is_none()
             && self.landing_check_command.is_none()
             && self.landing_check_timeout_secs.is_none()
+            && self.integration_queue_enabled.is_none()
             && untouched_visibility(&self.external_worktrees)
     }
 }

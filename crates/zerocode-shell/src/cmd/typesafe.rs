@@ -194,6 +194,18 @@ pub(crate) fn set_judgment_provider(
     settings_now()
 }
 
+/// What this machine's records say of the selected judgment model's real
+/// use: the newest request a feature put to the client the settings select
+/// now ([`crate::systemone::latest::read`], t-53792). Reads the records'
+/// newest bytes; sends nothing and moves no setting.
+#[tauri::command(async)]
+pub(crate) fn judgment_latest_request() -> crate::systemone::latest::LatestRequest {
+    crate::systemone::latest::read(
+        &crate::systemone::Wire::of_this_machine(),
+        crate::now_epoch_ms(),
+    )
+}
+
 /// Ask a provider the person has not applied yet the preflight's three
 /// questions, with the key its own endpoint keeps, and change nothing
 /// ([`typesafe_settings::preflight_provider`]). An answer is a connection

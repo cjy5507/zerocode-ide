@@ -1493,7 +1493,11 @@ impl Manager {
         };
         let manager = self.clone();
         tokio::spawn(async move {
-            let result = manager.transition(request, &cancel, apply, &guard).await;
+            let result = manager
+                .transition(request, &cancel, apply, &guard, |provider| async move {
+                    native_check(&provider).await
+                })
+                .await;
             manager.finish(&id, result);
         });
         Ok(self.snapshot())
@@ -1508,13 +1512,17 @@ impl Manager {
             .map_err(|_| Error::Storage)?
     }
 
-    async fn transition(
+    async fn transition<ProbeResult>(
         self: &Arc<Self>,
         request: SwitchRequest,
         cancel: &Arc<Cancel>,
         apply: impl FnOnce(&Provider, &str, &Binding) -> Result<()> + Send,
         guard: &(impl Fn(&mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync),
-    ) -> Result<()> {
+        probe: impl FnOnce(Provider) -> ProbeResult + Send,
+    ) -> Result<()>
+    where
+        ProbeResult: std::future::Future<Output = Result<()>> + Send,
+    {
         let mut previous = None;
         let result = async {
             cancel.check()?;
@@ -1525,19 +1533,46 @@ impl Manager {
                 let mut inner = lock(&self.inner);
                 cancel.check()?;
                 let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
-                if running.id != request.server_id { return Err(Error::ServerChanged); }
-                if !running.engine.alive() { return Err(Error::ServerStopped); }
-                if Provider::read(&self.settings).map_err(|_| Error::SettingsChanged)?.identity() != request.expected { return Err(Error::SettingsChanged); }
+                if running.id != request.server_id {
+                    return Err(Error::ServerChanged);
+                }
+                if !running.engine.alive() {
+                    return Err(Error::ServerStopped);
+                }
+                if Provider::read(&self.settings)
+                    .map_err(|_| Error::SettingsChanged)?
+                    .identity()
+                    != request.expected
+                {
+                    return Err(Error::SettingsChanged);
+                }
                 if running.model_id != request.model.id {
-                    let old_model = lock(&self.catalog).models.iter().find(|model| model.id == running.model_id).cloned().ok_or(Error::UnknownModel)?;
-                    previous = Some(PreviousServer { profile: self.model_profile(&old_model)?.clone(), model: old_model, provider: running.provider.clone() });
+                    let old_model = lock(&self.catalog)
+                        .models
+                        .iter()
+                        .find(|model| model.id == running.model_id)
+                        .cloned()
+                        .ok_or(Error::UnknownModel)?;
+                    previous = Some(PreviousServer {
+                        profile: self.model_profile(&old_model)?.clone(),
+                        model: old_model,
+                        provider: running.provider.clone(),
+                    });
                     old_running = inner.running.take();
-                    inner.server = ServerInfo { state: "starting", model_id: Some(request.model.id.clone()), ..ServerInfo::default() };
-                    if let Some(switch) = &mut inner.model_switch { switch.state = "starting"; }
+                    inner.server = ServerInfo {
+                        state: "starting",
+                        model_id: Some(request.model.id.clone()),
+                        ..ServerInfo::default()
+                    };
+                    if let Some(switch) = &mut inner.model_switch {
+                        switch.state = "starting";
+                    }
                     inner.revision += 1;
                 }
                 drop(inner);
-                if let Some(running) = &old_running { running.engine.stop(); }
+                if let Some(running) = &old_running {
+                    running.engine.stop();
+                }
                 Ok(())
             })?;
             if let Some(running) = old_running {
@@ -1545,34 +1580,68 @@ impl Manager {
             }
             if previous.is_some() {
                 self.emit();
-                self.start_model(&request.model, &request.profile, cancel, StartOptions { complete: false, state: "ready", check_before_listen: true, require_listener: false }).await?;
+                self.start_model(
+                    &request.model,
+                    &request.profile,
+                    cancel,
+                    StartOptions {
+                        complete: false,
+                        state: "ready",
+                        check_before_listen: true,
+                        require_listener: false,
+                    },
+                )
+                .await?;
             }
             let (server_id, provider, checked) = {
                 let mut inner = lock(&self.inner);
                 let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
-                let result = (running.id.clone(), running.provider.clone(), inner.server.checked);
-                if let Some(switch) = &mut inner.model_switch { switch.state = if result.2 { "applying" } else { "checking" }; }
+                let result = (
+                    running.id.clone(),
+                    running.provider.clone(),
+                    inner.server.checked,
+                );
+                if let Some(switch) = &mut inner.model_switch {
+                    switch.state = if result.2 { "applying" } else { "checking" };
+                }
                 inner.revision += 1;
                 result
             };
             self.emit();
             if !checked {
-                tokio::select! { _ = cancel.cancelled() => return Err(Error::Cancelled), result = native_check(&provider) => result? }
+                cancel.until_cancelled(probe(provider.clone())).await?;
             }
             let mut inner = lock(&self.inner);
             cancel.check()?;
             let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
-            if running.id != server_id { return Err(Error::ServerChanged); }
-            if !running.engine.alive() { return Err(Error::ServerStopped); }
+            if running.id != server_id {
+                return Err(Error::ServerChanged);
+            }
+            if !running.engine.alive() {
+                return Err(Error::ServerStopped);
+            }
             inner.server.checked = true;
             inner.server.error = None;
-            let binding = Binding { model_id: request.model.id.clone(), revision: request.model.revision.clone(), provider_identity: provider.identity() };
-            if Provider::read(&self.settings).map_err(|_| Error::SettingsChanged)?.identity() != request.expected { return Err(Error::SettingsChanged); }
+            let binding = Binding {
+                model_id: request.model.id.clone(),
+                revision: request.model.revision.clone(),
+                provider_identity: provider.identity(),
+            };
+            if Provider::read(&self.settings)
+                .map_err(|_| Error::SettingsChanged)?
+                .identity()
+                != request.expected
+            {
+                return Err(Error::SettingsChanged);
+            }
             apply(&provider, &request.expected, &binding)?;
-            if let Some(switch) = &mut inner.model_switch { switch.state = "applied"; }
+            if let Some(switch) = &mut inner.model_switch {
+                switch.state = "applied";
+            }
             Self::complete(&mut inner);
             Ok(())
-        }.await;
+        }
+        .await;
         if let Err(error) = result {
             if let Some(previous) = previous {
                 self.restore_after_switch(previous, &request.expected, error, guard)
@@ -2278,5 +2347,191 @@ mod cancellation_tests {
     async fn an_uninterrupted_operation_completes() {
         let cancellation = Cancel::new();
         assert_eq!(cancellation.until_cancelled(async { Ok(()) }).await, Ok(()));
+    }
+
+    #[cfg(unix)]
+    mod existing_model_probe {
+        use super::super::*;
+        use std::sync::atomic::AtomicUsize;
+
+        struct Fixture {
+            _home: tempfile::TempDir,
+            manager: Arc<Manager>,
+            model: Model,
+            server_id: String,
+            expected: String,
+            operation_id: String,
+            cancel: Arc<Cancel>,
+        }
+
+        impl Fixture {
+            fn request(&self) -> SwitchRequest {
+                SwitchRequest {
+                    model: self.model.clone(),
+                    profile: self.manager.model_profile(&self.model).unwrap().clone(),
+                    server_id: self.server_id.clone(),
+                    expected: self.expected.clone(),
+                }
+            }
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                self.manager.shutdown();
+            }
+        }
+
+        async fn fixture(checked: bool) -> Fixture {
+            let home = tempfile::tempdir().unwrap();
+            let settings = home.path().join("settings.json");
+            fs::write(&settings, b"{}").unwrap();
+            let model = crate::tests::fixture_model();
+            let mut unused = model.clone();
+            unused.id = "unused-fixture".to_string();
+            let manager = test_support::switching_manager(
+                &home.path().join("data"),
+                &settings,
+                model.clone(),
+                unused,
+                Arc::new(|_| panic!("the existing model must not be restarted")),
+            );
+            let engine = crate::tests::running_fixture_engine();
+            let (server_id, provider) = test_support::running(&manager, engine, checked).await;
+            fs::write(
+                &settings,
+                serde_json::to_vec(&serde_json::json!({"smart":{"judgmentProvider":provider}}))
+                    .unwrap(),
+            )
+            .unwrap();
+            let mut inner = lock(&manager.inner);
+            let (operation_id, cancel) = manager
+                .reserve(&mut inner, "switch", Some(&model), 0)
+                .unwrap();
+            inner.model_switch = Some(ModelSwitchInfo {
+                previous_model_id: model.id.clone(),
+                target_model_id: model.id.clone(),
+                state: "verifying",
+                error: None,
+                restore_error: None,
+            });
+            drop(inner);
+            Fixture {
+                _home: home,
+                manager,
+                model,
+                server_id,
+                expected: provider.identity(),
+                operation_id,
+                cancel,
+            }
+        }
+
+        fn allow(change: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+            change()
+        }
+
+        #[tokio::test]
+        async fn a_cancelled_existing_model_probe_is_not_a_model_failure() {
+            let fixture = fixture(false).await;
+            let original = fs::read(&fixture.manager.settings).unwrap();
+            let probes = Arc::new(AtomicUsize::new(0));
+            let counted = probes.clone();
+            let cancelled = fixture.cancel.clone();
+            let result = fixture
+                .manager
+                .transition(
+                    fixture.request(),
+                    &fixture.cancel,
+                    |_, _, _| panic!("a cancelled probe must not apply a provider"),
+                    &allow,
+                    move |_| async move {
+                        counted.fetch_add(1, Ordering::Relaxed);
+                        cancelled.stop();
+                        Err(Error::Protocol)
+                    },
+                )
+                .await;
+            let outcome = result.as_ref().err().map(|error| error.token());
+            fixture.manager.finish(&fixture.operation_id, result);
+            let snapshot = fixture.manager.snapshot();
+            assert_eq!(probes.load(Ordering::Relaxed), 1);
+            assert_eq!(outcome, Some(Error::Cancelled.token()));
+            assert_eq!(snapshot.operation.unwrap().state, "cancelled");
+            let switching = snapshot.model_switch.unwrap();
+            assert_eq!(switching.state, "cancelled");
+            assert_eq!(switching.error, Some(Error::Cancelled.token()));
+            assert!(!snapshot.server.checked);
+            assert_eq!(snapshot.server.error, None);
+            assert_eq!(
+                snapshot.server.id.as_deref(),
+                Some(fixture.server_id.as_str())
+            );
+            assert!(
+                lock(&fixture.manager.inner)
+                    .running
+                    .as_ref()
+                    .unwrap()
+                    .engine
+                    .alive()
+            );
+            assert_eq!(fs::read(&fixture.manager.settings).unwrap(), original);
+        }
+
+        #[tokio::test]
+        async fn an_unchecked_existing_model_probes_once_before_applying() {
+            let fixture = fixture(false).await;
+            let probes = Arc::new(AtomicUsize::new(0));
+            let counted = probes.clone();
+            let applications = AtomicUsize::new(0);
+            let result = fixture
+                .manager
+                .transition(
+                    fixture.request(),
+                    &fixture.cancel,
+                    |provider, expected, binding| {
+                        assert_eq!(provider.identity(), fixture.expected);
+                        assert_eq!(expected, fixture.expected);
+                        assert_eq!(binding.model_id, fixture.model.id);
+                        assert_eq!(probes.load(Ordering::Relaxed), 1);
+                        applications.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    },
+                    &allow,
+                    move |_| async move {
+                        counted.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    },
+                )
+                .await;
+            assert_eq!(result, Ok(()));
+            assert_eq!(applications.load(Ordering::Relaxed), 1);
+            assert!(fixture.manager.snapshot().server.checked);
+            assert_eq!(
+                fixture.manager.snapshot().model_switch.unwrap().state,
+                "applied"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_already_checked_existing_model_does_not_probe_again() {
+            let fixture = fixture(true).await;
+            let applications = AtomicUsize::new(0);
+            let result = fixture
+                .manager
+                .transition(
+                    fixture.request(),
+                    &fixture.cancel,
+                    |_, _, _| {
+                        applications.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    },
+                    &allow,
+                    |_| async { panic!("a checked running model must not be probed again") },
+                )
+                .await;
+            assert_eq!(result, Ok(()));
+            assert_eq!(applications.load(Ordering::Relaxed), 1);
+            assert!(fixture.manager.snapshot().server.checked);
+        }
     }
 }

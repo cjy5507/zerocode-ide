@@ -2450,6 +2450,15 @@ class StatefulBackend {
           source: "shared-only",
           setup_run_policy: "run-by-default",
         };
+      // The integration queue's switch for the active project (t-45315): off until a person
+      // turns it on, and on only where this machine runs the queue (macOS for now).
+      case "integration_queue_setting": return clone(this.integrationQueue ?? { enabled: false, supported: true });
+      case "set_integration_queue_enabled": {
+        const held = this.integrationQueue ?? { enabled: false, supported: true };
+        if (args.enabled === true && !held.supported) throw "the integration queue can be turned on only on macOS for now";
+        this.integrationQueue = { ...held, enabled: args.enabled === true };
+        return clone(this.integrationQueue);
+      }
       case "worktree_prefs": return { branch_prefix: "none", custom_prefix: null };
       case "claude_accounts": return clone(this.claudeAccounts ?? { accounts: [], can_add: true });
       case "resolve_claude_account_identity": {
@@ -2868,9 +2877,17 @@ class StatefulBackend {
       // Mirrors `typesafe_settings.rs`: the key is kept trimmed under the one
       // item every zo reads and never sent back; the switch is
       // `smart.jev.enabled`, written as the core's press writes it.
-      case "typesafe_settings": return this.typesafeSettings();
-      case "managed_judgment_status": return this.managedJudgmentSettings();
+      case "typesafe_settings": return clone(await (this.judgmentSettingsWait ?? this.typesafeSettings()));
+      case "managed_judgment_status": return clone(await (this.judgmentStatusWait ?? this.managedJudgmentSettings()));
+      case "judgment_latest_request": {
+        if (this.judgmentUsageError) throw this.judgmentUsageError;
+        return clone(await (this.judgmentUsageWait ?? this.judgmentUsage ?? {
+          providerIdentity: this.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "none",
+          state: "unknown", reason: "unattributed", unattributedNewer: false, lastRequest: null,
+        }));
+      }
       case "managed_judgment_inspect_source": {
+        if (this.managedSourceError) throw this.managedSourceError;
         const snapshot = this.managedJudgmentSettings();
         const model = {
           ...clone(snapshot.models[0]), id: "fixture-imported", label: "Imported Native Model", installed: false,
@@ -3461,6 +3478,43 @@ async function openJudgmentSettings(page) {
   await openSettings(page, pane);
   const advanced = page.locator("#judgment-connection-settings");
   if (await advanced.count()) await advanced.evaluate((element) => { element.open = true; });
+}
+
+async function withJudgmentStatus(run) {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  const provider = { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32104", model: "fixture-decision", requiresAuth: false };
+  backend.zoSettings.smart = { judgmentProvider: provider, [JEV_SETTINGS_KEY]: { enabled: false, workspaces: [JEV_EVERY_WORKSPACE] } };
+  backend.managedJudgmentSettings();
+  Object.assign(backend.managedModelState, {
+    configuredModelId: provider.model, appliedModelId: provider.model,
+    runtime: { state: "ready", downloadBytes: 0, reason: null },
+    server: { id: "fixture-active-server", state: "ready", modelId: provider.model, provider, checked: true, error: null },
+  });
+  backend.managedModelState.models[0].installed = true;
+  const page = await context.newPage();
+  await installTauri(page, "judgment-status");
+  attachFaultRecorder(page, "judgment-status");
+  try {
+    await bootPage(page, "judgment-status");
+    await openSettings(page, "judgment-models");
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.server.id === "fixture-active-server");
+    return await run(page, provider);
+  } finally {
+    delete backend.judgmentSettingsWait;
+    delete backend.judgmentStatusWait;
+    delete backend.judgmentUsageWait;
+    delete backend.judgmentUsage;
+    delete backend.judgmentUsageError;
+    delete backend.managedSourceWait;
+    delete backend.managedSourceResult;
+    delete backend.managedSourceError;
+    delete backend.managedSourceInspection;
+    await page.close();
+    backend.zoSettings.smart = previous;
+    backend.managedModelState = previousManaged;
+  }
 }
 
 async function openSettings(page, pane = null) {
@@ -6089,6 +6143,256 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assert(!(await pageA.locator("#typesafe-key-input").isDisabled()), "a machine with a keychain was left without the key field");
   return `one switch · ${selects.total} selects · ${selects.visible} visible`;
 });
+
+await test("현재 판단 상태는 실행·요청 허용·응답 점검·실제 사용을 구분한다", async () => withJudgmentStatus(async (page, provider) => {
+  assert(await page.locator("#judgment-current-status").isVisible(), "the applied model has no primary status area");
+  assert((await page.locator("#judgment-active-model").textContent()).includes(provider.model));
+  assertEqual(await page.locator("#judgment-current-enablement").getAttribute("data-state"), "disabled", "a running service enabled judgment requests");
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "ready");
+  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected", "a matching native check was ignored");
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a native check was presented as task use");
+  assert(!/\d/.test(await page.locator("#judgment-current-usage").textContent()), "usage without evidence invented a count or timestamp");
+  assertEqual(await page.locator('.settings-pane[data-pane="judgment-models"] > header #typesafe-key-state').count(), 0, "the key/check badge still looks like the whole page's state");
+  const reopenedAt = backend.calls.length;
+  await page.evaluate(() => { setSettingsOpen(false); setSettingsOpen(true); });
+  await backend.waitForCall("judgment-status", "managed_judgment_status", reopenedAt);
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(backend.calls.slice(reopenedAt).filter((call) => call.window_id === "judgment-status" && call.command === "typesafe_settings").length, 1, "reopening duplicated the settings read");
+  assertEqual(backend.calls.slice(reopenedAt).filter((call) => call.window_id === "judgment-status" && call.command === "managed_judgment_status").length, 1, "reopening did not share one current server read");
+  const order = await page.evaluate(() => Boolean(document.getElementById("judgment-current-status").compareDocumentPosition(document.getElementById("judgment-model-changes")) & Node.DOCUMENT_POSITION_FOLLOWING));
+  assert(order, "model changes precede current status");
+  const before = backend.calls.length;
+  await page.click("#judgment-source-jev");
+  assert((await page.locator("#judgment-provider-draft").textContent()).includes("Jev"));
+  assertEqual(await page.locator("#judgment-provider-draft").getAttribute("data-state"), "unapplied");
+  assert(await page.locator("#typesafe-key-state").isHidden(), "the active provider's key/check badge was attributed to a draft provider");
+  assert((await page.locator("#judgment-active-model").textContent()).includes(provider.model), "a Jev draft replaced the applied identity");
+  assert(!backend.calls.slice(before).some((call) => ["set_judgment_provider", "managed_judgment_start", "managed_judgment_check"].includes(call.command)), "opening a change performed a model action");
+  await page.click("#typesafe-check-btn");
+  await page.waitForFunction(() => !typesafeBusy);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a draft probe became actual usage");
+  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected", "a draft probe replaced the current model's check");
+  return "running with requests disabled · matching check · usage unknown · explicit Jev draft";
+}));
+
+await test("현재 모델과 다른 서버·점검 기록은 현재 상태로 표시하지 않는다", async () => withJudgmentStatus(async (page, provider) => {
+  const snapshot = backend.managedJudgmentSettings();
+  snapshot.revision += 1;
+  snapshot.server.provider = { ...provider, model: "other-decision" };
+  snapshot.server.modelId = "other-decision";
+  snapshot.appliedModelId = "other-decision";
+  await backend.emitManaged(snapshot);
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown", "another running model was attributed to the active provider");
+  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "unchecked", "another model's native check approved the active provider");
+  snapshot.revision += 1;
+  snapshot.providerIdentity = "other-provider-identity";
+  snapshot.server.provider = provider;
+  snapshot.server.modelId = provider.model;
+  snapshot.appliedModelId = provider.model;
+  await backend.emitManaged(snapshot);
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown", "a stale settings identity supplied current server status");
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown");
+  backend.judgmentSettingsWait = Promise.resolve({ ...backend.typesafeSettings(), provider: null, providerIdentity: null });
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-enablement").getAttribute("data-state"), "disabled", "missing provider metadata erased known request permission");
+  assert(await page.locator("#jev-enabled").isEnabled(), "missing provider metadata disabled the existing consent switch");
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown");
+  return "server provider, model and canonical identity must agree";
+}));
+
+await test("현재 상태 새로고침은 초안을 보존하고 늦은 응답을 버린다", async () => withJudgmentStatus(async (page, provider) => {
+  await page.click("#judgment-source-jev");
+  await page.fill("#typesafe-model-input", "unapplied-cloud-model");
+  const before = backend.calls.length;
+  let finishSettings;
+  let finishStatus;
+  let finishUsage;
+  const oldSettings = backend.typesafeSettings();
+  const oldStatus = backend.managedJudgmentSettings();
+  backend.judgmentSettingsWait = new Promise((resolve) => { finishSettings = resolve; });
+  backend.judgmentStatusWait = new Promise((resolve) => { finishStatus = resolve; });
+  backend.judgmentUsageWait = new Promise((resolve) => { finishUsage = resolve; });
+  await page.click("#judgment-status-refresh");
+  await backend.waitForCall("judgment-status", "typesafe_settings", before);
+  await backend.waitForCall("judgment-status", "managed_judgment_status", before);
+  await backend.waitForCall("judgment-status", "judgment_latest_request", before);
+  await page.evaluate(() => { void refreshTypeSafe(); void managedJudgmentController.refresh(); });
+  assertEqual(backend.calls.slice(before).filter((call) => call.window_id === "judgment-status" && call.command === "typesafe_settings").length, 1, "refresh duplicated the canonical settings request");
+  assertEqual(backend.calls.slice(before).filter((call) => call.window_id === "judgment-status" && call.command === "judgment_latest_request").length, 1, "refresh duplicated the actual-use read");
+  const next = clone(oldSettings);
+  next.provider.model = "new-current-decision";
+  next.providerIdentity = "new-current-identity";
+  await page.evaluate((state) => paintTypeSafe(state), next);
+  finishSettings(oldSettings);
+  finishStatus(oldStatus);
+  finishUsage({
+    providerIdentity: oldSettings.providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+    state: "observed", reason: null, unattributedNewer: false,
+    lastRequest: { feature: "stall", atMs: Date.now() - 60_000, outcome: "answered", elapsedMs: 12, applied: true },
+  });
+  delete backend.judgmentSettingsWait;
+  delete backend.judgmentStatusWait;
+  delete backend.judgmentUsageWait;
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assert((await page.locator("#judgment-active-model").textContent()).includes("new-current-decision"), "a late read restored the old identity");
+  assertEqual(await page.inputValue("#typesafe-model-input"), "unapplied-cloud-model", "refresh discarded an unsaved draft");
+  assertEqual(await page.locator("#judgment-provider-draft").getAttribute("data-state"), "unapplied");
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown");
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a late usage read was assigned to a new model");
+  await page.evaluate(() => setSettingsOpen(false));
+  const hiddenAt = backend.calls.length;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await renderSettled(page);
+  assert(!backend.calls.slice(hiddenAt).some((call) => call.window_id === "judgment-status" && ["typesafe_settings", "managed_judgment_status", "judgment_latest_request"].includes(call.command)), "a hidden settings page polls current status");
+  await page.evaluate(() => setSettingsOpen(true));
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  await page.fill("#settings-search", "no-such-judgment-setting-fixture");
+  assert(await page.locator("#judgment-current-status").isHidden());
+  const filteredAt = backend.calls.length;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await renderSettled(page);
+  assert(!backend.calls.slice(filteredAt).some((call) => call.window_id === "judgment-status" && ["typesafe_settings", "managed_judgment_status", "judgment_latest_request"].includes(call.command)), "a settings pane hidden by search reads current status");
+  assertEqual(backend.typesafeSettings().provider, provider, "status refresh changed saved settings");
+  return "one settings/status read · late identity discarded · unsaved draft kept · no hidden refresh";
+}));
+
+await test("실제 요청의 성공·실패·적용 결과는 응답 점검과 서버 실행을 바꾸지 않는다", async () => withJudgmentStatus(async (page) => {
+  const atMs = Date.parse("2026-10-01T10:20:30Z");
+  backend.judgmentUsage = {
+    providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+    state: "observed", reason: null, unattributedNewer: false,
+    lastRequest: { feature: "stall", atMs, outcome: "answered", elapsedMs: 37, applied: true },
+  };
+  const words = (key, fallback) => page.evaluate(([name, source]) => t(name, source), [key, fallback]);
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed", "a real request remained permanently unknown");
+  const feature = await page.evaluate(() => { const name = jevFeature("stall").name; return t(name.key, name.source); });
+  const when = await page.evaluate((at) => new Intl.DateTimeFormat(document.documentElement.lang || "ko", { dateStyle: "short", timeStyle: "medium" }).format(new Date(at)), atMs);
+  const used = await page.locator("#judgment-current-usage").textContent();
+  assert(used.includes(feature) && used.includes(when), "the real feature and source timestamp were not displayed", used);
+  assert(used.includes(await words("settings.judgment.usageApplied", "결과 적용됨")), "an explicitly applied result was not distinguished");
+  backend.judgmentUsage.lastRequest = { feature: "stall", atMs, outcome: "http_503", elapsedMs: 0, applied: false };
+  backend.judgmentUsage.unattributedNewer = true;
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  const failed = await page.locator("#judgment-current-usage").textContent();
+  assert(failed.includes(await words("settings.judgment.usageFailed", "요청 실패")), "HTTP failure was hidden");
+  assert(failed.includes(await words("settings.judgment.usageNotApplied", "결과 미적용")), "a failed request was presented as an applied result");
+  assert(failed.includes(await words("settings.judgment.usageNewerUnknown", "더 새 기록에는 요청 당시 모델 정보가 없어 결과를 확인할 수 없습니다.")), "a newer unattributed request was hidden");
+  assert(failed.includes("0 ms"), "the source's measured zero latency was replaced with an invented value");
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "ready", "a request failure was presented as a stopped server");
+  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected", "a real request overwrote a separate connection check");
+  return "real source time and feature · explicit application · HTTP failure is not server shutdown · newer history gap disclosed";
+}));
+
+await test("실제 사용은 최근 미관측·출처 부족·다른 제공자·지원 없는 명령을 구분한다", async () => withJudgmentStatus(async (page) => {
+  backend.judgmentUsage = {
+    providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+    state: "none_observed", reason: null, unattributedNewer: false, lastRequest: null,
+  };
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "none_observed");
+  assert(!/\d/.test(await page.locator("#judgment-current-usage").textContent()), "bounded non-observation invented a total or last-used time");
+  backend.judgmentUsage.state = "unknown";
+  backend.judgmentUsage.reason = "unattributed";
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown");
+  backend.judgmentUsage = {
+    ...backend.judgmentUsage, providerIdentity: "another-provider", state: "observed", reason: null,
+    lastRequest: { feature: "stall", atMs: Date.now() - 60_000, outcome: "answered", elapsedMs: 31, applied: true },
+  };
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "old provider history became current use");
+  backend.judgmentUsageError = "command_not_supported";
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "unsupported usage reporting fabricated activity");
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "ready");
+  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected");
+  return "recent evidence only · unknown legacy provenance · different provider discarded · old backend tolerated";
+}));
+
+await test("실제 요청에 없는 시각과 적용 여부는 만들어 내지 않는다", async () => withJudgmentStatus(async (page) => {
+  backend.judgmentUsage = {
+    providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+    state: "observed", reason: null, unattributedNewer: false,
+    lastRequest: { feature: "stall", atMs: null, outcome: "answered", elapsedMs: null, applied: null },
+  };
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed");
+  const used = await page.locator("#judgment-current-usage").textContent();
+  const missing = await page.evaluate(() => [t("settings.judgment.usageTimeUnknown", "시각 정보 없음"), t("settings.judgment.usageAppliedUnknown", "결과 적용 여부 모름")]);
+  assert(missing.every((words) => used.includes(words)), "missing source facts were inferred", used);
+  assert(!/\d/.test(used), "a missing timestamp or latency became an invented number", used);
+  return "known real request · unknown source timestamp/latency/application kept unknown";
+}));
+
+await test("가져오기 실패는 해당 초안 옆에 한 번만 표시한다", async () => withJudgmentStatus(async (page, provider) => {
+  await page.evaluate(() => {
+    judgmentModelSourceController.kind = "local_directory";
+    judgmentModelSourceController.directory = "/models/unsupported";
+    judgmentModelSourceController.invalidate();
+  });
+  const snapshot = backend.managedJudgmentSettings();
+  backend.managedSourceError = "not_native_decision_model";
+  const current = await page.locator("#judgment-current-status").textContent();
+  await page.click("#judgment-source-inspect");
+  await page.waitForFunction(() => !judgmentModelSourceController.busy);
+  snapshot.revision += 1;
+  snapshot.operation = { id: "unsupported-inspection", kind: "inspect", state: "failed", error: "not_native_decision_model", receivedBytes: 0, totalBytes: 0 };
+  await backend.emitManaged(snapshot);
+  const error = await page.evaluate(() => managedJudgmentController.failure("not_native_decision_model"));
+  assertEqual(await page.locator("#judgment-source-status").textContent(), error);
+  assertEqual(await page.locator("#managed-judgment-status").textContent(), "", "the import warning leaked into model management");
+  assertEqual(await page.locator("#judgment-current-status").textContent(), current, "an unsupported import changed active status");
+  assertEqual(backend.typesafeSettings().provider, provider);
+  await page.click("#judgment-source-hub");
+  assertEqual(await page.locator("#judgment-source-status").textContent(), "", "an import warning followed a different draft");
+  return "one local input warning · current provider preserved · warning cleared for another source";
+}));
+
+await test("판단 상태는 다섯 언어·두 테마·좁은 폭에서 읽을 수 있다", async () => withJudgmentStatus(async (page) => {
+  backend.judgmentUsage = {
+    providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+    state: "observed", reason: null, unattributedNewer: true,
+    lastRequest: { feature: "stall", atMs: Date.parse("2026-10-01T10:20:30Z"), outcome: "http_503", elapsedMs: 0, applied: null },
+  };
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed");
+  for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+    await setQualityLocale(page, locale);
+    await page.evaluate(() => judgmentProviderController.controls());
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(page, theme);
+      assertEqual(await axeViolations(page, AxeBuilder, "#judgment-current-status"), [], `${locale}/${theme} current judgment accessibility`);
+      const usageWidth = await page.locator("#judgment-current-usage").evaluate((usage) => ({ row: usage.parentElement.getBoundingClientRect().width, grid: usage.closest("dl").getBoundingClientRect().width }));
+      assert(Math.abs(usageWidth.row - usageWidth.grid) <= 1, `${locale}/${theme} request history should use the status card's full width`, usageWidth);
+      if (process.env.JUDGMENT_STATUS_SHOTS && locale === "ko") {
+        const status = page.locator("#judgment-current-status");
+        await status.scrollIntoViewIfNeeded();
+        await status.screenshot({ path: resolve(process.env.JUDGMENT_STATUS_SHOTS, `judgment-status-${theme}.png`), animations: "disabled" });
+      }
+    }
+    await page.setViewportSize({ width: 980, height: 1069 });
+    const size = await page.locator("#judgment-current-status").evaluate((status) => ({ client: status.clientWidth, scroll: status.scrollWidth }));
+    assert(size.client > 0 && size.scroll <= size.client + 1, `${locale} current judgment status overflows`, size);
+    const untranslated = await page.locator("#judgment-current-status").evaluate((status) => [...status.querySelectorAll("[data-i18n]")].filter((node) => !node.textContent.trim()).map((node) => node.dataset.i18n));
+    assertEqual(untranslated, [], `${locale} empty judgment status label`);
+  }
+  await page.locator("#judgment-status-refresh").focus();
+  const before = backend.calls.length;
+  await page.keyboard.press("Enter");
+  await backend.waitForCall("judgment-status", "typesafe_settings", before);
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  return "five languages · light/dark · narrow layout · keyboard refresh";
+}));
 
 await test("판단 모델은 명시적으로 적용하고 로컬 연결은 Jev 키를 쓰지 않는다", async () => {
   await openJudgmentSettings(pageA);
@@ -12683,6 +12987,77 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
   } finally {
     await pageA.setViewportSize({ width: 1280, height: 860 });
     await renderSettled(pageA);
+  }
+});
+
+// The integration queue's switch in the project pane (t-45315, test 29): off until a person turns
+// it on, saved for the repository by `set_integration_queue_enabled` and read back when the pane
+// opens again. Where this machine does not run the queue (Windows for now) the row is locked and
+// says why.
+await test("the project pane's integration queue switch starts off, and turning it on and off is saved", async () => {
+  backend.integrationQueue = { enabled: false, supported: true };
+  try {
+    await pageA.evaluate(() => setSettingsOpen(false));
+    const from = backend.calls.length;
+    await openSettings(pageA, "project");
+    await backend.waitForCall("A", "integration_queue_setting", from);
+    await renderSettled(pageA);
+    const box = pageA.locator("#project-integration-queue");
+    assert(await box.isVisible(), "the project pane shows no integration queue switch");
+    assert(!(await box.isChecked()), "the integration queue switch was on before anyone turned it on");
+    assert(!(await box.isDisabled()), "the integration queue switch was locked on macOS");
+    assert(await pageA.locator("#project-integration-queue-why").isHidden(), "the switch gave a lock reason on macOS");
+    const on = await gestureAndWait(pageA, "A", "set_integration_queue_enabled", () => box.click());
+    assertEqual(on.args, { enabled: true }, "turning the switch on did not save it on");
+    await pageA.waitForFunction(
+      () => document.getElementById("project-integration-queue")?.checked === true,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    assertEqual(backend.integrationQueue, { enabled: true, supported: true }, "the backend did not hold the switch on");
+    const reread = backend.calls.length;
+    await reopenSettings(pageA, "A", "project");
+    await backend.waitForCall("A", "integration_queue_setting", reread);
+    await renderSettled(pageA);
+    assert(await box.isChecked(), "the switch did not read back on when the pane opened again");
+    const off = await gestureAndWait(pageA, "A", "set_integration_queue_enabled", () => box.click());
+    assertEqual(off.args, { enabled: false }, "turning the switch off did not save it off");
+    await pageA.waitForFunction(
+      () => document.getElementById("project-integration-queue")?.checked === false,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    assertEqual(backend.integrationQueue, { enabled: false, supported: true }, "the backend did not hold the switch off");
+  } finally {
+    backend.integrationQueue = { enabled: false, supported: true };
+    await pageA.evaluate(() => setSettingsOpen(false));
+  }
+});
+
+await test("on Windows the integration queue switch is locked and says why", async () => {
+  backend.integrationQueue = { enabled: false, supported: false };
+  try {
+    await pageA.evaluate(() => setSettingsOpen(false));
+    const from = backend.calls.length;
+    await openSettings(pageA, "project");
+    await backend.waitForCall("A", "integration_queue_setting", from);
+    await pageA.waitForFunction(
+      () => document.getElementById("project-integration-queue")?.disabled === true,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    const why = pageA.locator("#project-integration-queue-why");
+    assert(await why.isVisible(), "the locked switch did not say why");
+    const said = await why.textContent();
+    assert(said.includes("macOS"), "the lock reason did not name macOS", said);
+    const before = backend.count("A", "set_integration_queue_enabled");
+    await pageA.locator("#project-integration-queue").click({ force: true, timeout: 2_000 }).catch(() => {});
+    await renderSettled(pageA);
+    assertEqual(backend.count("A", "set_integration_queue_enabled"), before, "the locked switch still asked to save");
+    assert(!(await pageA.locator("#project-integration-queue").isChecked()), "the locked switch turned on");
+  } finally {
+    backend.integrationQueue = { enabled: false, supported: true };
+    await pageA.evaluate(() => setSettingsOpen(false));
   }
 });
 

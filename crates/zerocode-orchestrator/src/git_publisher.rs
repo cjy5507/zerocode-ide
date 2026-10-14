@@ -1,17 +1,20 @@
 //! Local Git implementation of the workflow publication contract.
 //!
-//! This publisher never infers a target. It accepts a source branch and only a
+//! This publisher never infers a target. It accepts a source branch, or one of
+//! the app's own stack refs under `refs/zerocode/stack/` (t-45315), and only a
 //! target under `refs/zerocode/integration/`, refuses that target when any
 //! worktree has explicitly put its HEAD there, and moves it together with an
 //! immutable operation receipt in one `git update-ref --stdin` transaction.
 //! Recovery creates the cancellation tombstone through the same transaction
 //! mechanism, so commit and cancellation cannot both win.
 //!
-//! This first adapter is Unix-only. Git and its ordinary descendants share a
-//! process group; nonblocking pipes keep the call deadline bounded even if a
-//! deliberately daemonized process leaves that group. The configured Git is a
-//! trusted host executable, not an adversarial-code sandbox. Windows needs a
-//! Job Object before construction can be enabled there.
+//! Every Git call goes through the bounded process boundary. On Unix, Git and
+//! its ordinary descendants share a process group and nonblocking pipes keep
+//! the call deadline bounded even if a deliberately daemonized process leaves
+//! that group; on Windows the child runs in a Job Object the deadline
+//! terminates. The configured Git is a trusted host executable, not an
+//! adversarial-code sandbox. The tests below run on Unix only, so the Windows
+//! road has no evidence of its own yet.
 //! A hostile same-UID process that manually rewrites a worktree's `HEAD` during
 //! publication remains outside this foundation's boundary; ordinary Git
 //! worktree/checkout flows cannot attach this non-branch target namespace.
@@ -25,7 +28,9 @@ use crate::publish::{
     AppliedPublication, PublishAttempt, PublishObservation, PublishVerification, Publisher,
     PublisherFailure,
 };
-use crate::workflow::{PublishExpectation, valid_branch_ref, valid_oid, valid_publish_target_ref};
+use crate::workflow::{
+    PublishExpectation, RefBinding, valid_oid, valid_publish_source_ref, valid_publish_target_ref,
+};
 use crate::{Orchestrator, git_command};
 
 pub const LOCAL_GIT_SCOPE_PREFIX: &str = "local-git:";
@@ -322,6 +327,80 @@ impl LocalGitRefPublisher {
     }
 }
 
+/// One stacked generation's publication (t-45315): the stack ref at the tip the
+/// window built, and the integration ref still at the base it was stacked on.
+///
+/// The publish kernel's attempt cannot be built outside this crate, so the batch
+/// queue reaches the same transaction through
+/// [`LocalGitRefPublisher::move_integration_ref`] and
+/// [`LocalGitRefPublisher::settle_operation`]; neither adds a rule of its own.
+#[derive(Clone, PartialEq, Eq)]
+pub struct StackPublication {
+    pub batch: String,
+    pub generation: u64,
+    /// Lowercase hex, 64 digits: the same id for every retry of one generation.
+    pub operation_id: String,
+    pub stack: RefBinding,
+    pub integration: RefBinding,
+}
+
+impl std::fmt::Debug for StackPublication {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StackPublication")
+            .field("batch", &self.batch)
+            .field("generation", &self.generation)
+            .field("stack", &self.stack.name)
+            .field("integration", &self.integration.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StackPublication {
+    /// The kernel's expectation for this generation. The publisher compares only
+    /// the two refs, their objects and its own identity; the workflow fields name
+    /// the batch for whoever reads one.
+    fn expectation(&self, publisher: &LocalGitRefPublisher) -> PublishExpectation {
+        PublishExpectation {
+            workflow_id: self.batch.clone(),
+            generation: self.generation,
+            manifest_id: String::new(),
+            repository_id: publisher.repository_id.clone(),
+            worktree_id: String::new(),
+            publisher_scope: publisher.publisher_scope.clone(),
+            source: self.stack.clone(),
+            target: self.integration.clone(),
+            policy_digest: String::new(),
+        }
+    }
+}
+
+impl LocalGitRefPublisher {
+    /// Move the integration ref from the stack's base to its tip, with the
+    /// operation's receipt, in one transaction: [`Publisher::commit`] as it is.
+    /// A retry of the same generation is answered from its receipt, and a
+    /// tombstoned operation is refused.
+    pub fn move_integration_ref(
+        &self,
+        publication: &StackPublication,
+    ) -> Result<(), PublisherFailure> {
+        let expected = publication.expectation(self);
+        self.commit(&PublishAttempt::new(&expected, &publication.operation_id))
+    }
+
+    /// Settle one generation's operation id: [`Publisher::verify`] as it is. An
+    /// applied operation answers what it applied; one that never applied gets
+    /// its tombstone first, so no later [`Self::move_integration_ref`] with
+    /// that id can win.
+    pub fn settle_operation(
+        &self,
+        publication: &StackPublication,
+    ) -> Result<PublishVerification, PublisherFailure> {
+        let expected = publication.expectation(self);
+        self.verify(&PublishAttempt::new(&expected, &publication.operation_id))
+    }
+}
+
 impl Publisher for LocalGitRefPublisher {
     fn observe(
         &self,
@@ -442,7 +521,7 @@ impl Publisher for LocalGitRefPublisher {
 }
 
 fn validate_expectation(expected: &PublishExpectation) -> Result<(), PublisherFailure> {
-    if !valid_branch_ref(&expected.source.name)
+    if !valid_publish_source_ref(&expected.source.name)
         || !valid_publish_target_ref(&expected.target.name)
         || expected.source.name == expected.target.name
         || !valid_lower_oid(&expected.source.oid)
@@ -503,7 +582,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::workflow::{PublishExpectation, RefBinding};
+    use crate::workflow::{
+        INTEGRATION_REF_PREFIX, PublishExpectation, RefBinding, STACK_REF_PREFIX,
+    };
 
     const TEST_TARGET: &str = "refs/zerocode/integration/main";
 
@@ -1150,5 +1231,132 @@ mod tests {
                 ));
             }
         }
+    }
+
+    /// One generation of a batch stacked at the fixture's feature commit on its base.
+    fn stack_publication(
+        repository: &Repository,
+        stack: &str,
+        integration: &str,
+        index: usize,
+    ) -> StackPublication {
+        StackPublication {
+            batch: "lb-1-1".to_string(),
+            generation: 1,
+            operation_id: operation(index),
+            stack: RefBinding {
+                name: stack.to_string(),
+                oid: repository.source_oid.clone(),
+            },
+            integration: RefBinding {
+                name: integration.to_string(),
+                oid: repository.base_oid.clone(),
+            },
+        }
+    }
+
+    /// t-45315 test 8: the app's stack ref is a source the publisher takes, and no other ref outside
+    /// `refs/heads/` is: not the app's other refs, not a lookalike prefix, not a tag.
+    #[test]
+    fn stack_source_publishes_and_other_sources_are_refused() {
+        let repository = repository();
+        let root = repository.root.path();
+        let stack = format!("{STACK_REF_PREFIX}lb-1-1/g1");
+        let integration = format!("{INTEGRATION_REF_PREFIX}lb-1-1/g1");
+        git(root, &["update-ref", &stack, &repository.source_oid]);
+        git(root, &["update-ref", &integration, &repository.base_oid]);
+        let publication = stack_publication(&repository, &stack, &integration, 64);
+        repository
+            .publisher
+            .move_integration_ref(&publication)
+            .expect("a stack ref publishes");
+        assert_eq!(
+            git(root, &["rev-parse", &integration]),
+            repository.source_oid
+        );
+        assert_eq!(
+            git(
+                root,
+                &[
+                    "rev-parse",
+                    &format!("{APPLIED_REF_PREFIX}{}", publication.operation_id)
+                ]
+            ),
+            repository.source_oid
+        );
+        assert!(matches!(
+            repository.publisher.settle_operation(&publication),
+            Ok(PublishVerification::Applied(AppliedPublication { ref applied_oid, .. }))
+                if applied_oid == &repository.source_oid
+        ));
+
+        let others = [
+            format!("{APPLIED_REF_PREFIX}{}", operation(65)),
+            format!("{INTEGRATION_REF_PREFIX}other"),
+            "refs/zerocode/stacked/lb-1-1/g1".to_string(),
+            "refs/tags/v1".to_string(),
+        ];
+        for (index, source) in others.iter().enumerate() {
+            git(root, &["update-ref", source, &repository.source_oid]);
+            let target = format!("{INTEGRATION_REF_PREFIX}lb-2-{index}/g1");
+            git(root, &["update-ref", &target, &repository.base_oid]);
+            let refused = stack_publication(&repository, source, &target, 66 + index);
+            assert_eq!(
+                repository.publisher.move_integration_ref(&refused),
+                Err(PublisherFailure::Refused),
+                "{source} was taken as a source"
+            );
+            assert_eq!(
+                git(root, &["rev-parse", &target]),
+                repository.base_oid,
+                "{source} moved {target}"
+            );
+            assert!(
+                repository
+                    .publisher
+                    .read_ref(&format!("{APPLIED_REF_PREFIX}{}", refused.operation_id))
+                    .expect("read applied")
+                    .is_none(),
+                "{source} left a receipt"
+            );
+        }
+    }
+
+    /// t-45315 test 20, the publisher's half: settling a generation that never published tombstones
+    /// its operation, and a stacker that finishes after that cannot move the integration ref.
+    #[test]
+    fn cancel_tombstones_the_generation_and_a_late_stacker_cannot_publish() {
+        let repository = repository();
+        let root = repository.root.path();
+        let stack = format!("{STACK_REF_PREFIX}lb-3-1/g1");
+        let integration = format!("{INTEGRATION_REF_PREFIX}lb-3-1/g1");
+        git(root, &["update-ref", &stack, &repository.source_oid]);
+        git(root, &["update-ref", &integration, &repository.base_oid]);
+        let publication = stack_publication(&repository, &stack, &integration, 80);
+        assert!(
+            matches!(
+                repository.publisher.settle_operation(&publication),
+                Ok(PublishVerification::NotAppliedFinal(_))
+            ),
+            "an unpublished generation is settled as final"
+        );
+        let tombstone = format!("{CANCELLED_REF_PREFIX}{}", publication.operation_id);
+        assert_eq!(git(root, &["rev-parse", &tombstone]), repository.base_oid);
+        assert_eq!(
+            repository.publisher.move_integration_ref(&publication),
+            Err(PublisherFailure::Refused)
+        );
+        assert_eq!(git(root, &["rev-parse", &integration]), repository.base_oid);
+        assert!(
+            repository
+                .publisher
+                .read_ref(&format!("{APPLIED_REF_PREFIX}{}", publication.operation_id))
+                .expect("read applied")
+                .is_none()
+        );
+        assert!(matches!(
+            repository.publisher.settle_operation(&publication),
+            Ok(PublishVerification::NotAppliedFinal(_))
+        ));
     }
 }

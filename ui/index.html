@@ -4211,12 +4211,35 @@
                 선택·점수·참/거짓을 반환하는 판단 모델을 고릅니다. 컴퓨터 유즈와 라우팅을 포함한 모든 판단 기능이 같은 선택을 사용합니다. 일반 채팅 모델은 지원하지 않습니다.
               </p>
             </div>
-            <span class="settings-state" id="typesafe-key-state" data-state="unchecked"
-                  role="status" aria-live="polite"></span>
           </div>
         </header>
         <div class="settings-card" id="typesafe-card">
-          <p class="settings-notice judgment-active-model" id="judgment-active-model" role="status" aria-live="polite"></p>
+          <section class="judgment-current-status" id="judgment-current-status" aria-labelledby="judgment-current-title">
+            <div class="judgment-current-heading">
+              <h3 id="judgment-current-title" data-i18n="settings.judgment.currentTitle">현재 판단 모델</h3>
+              <button type="button" class="settings-jev-link" id="judgment-status-refresh" data-i18n="settings.managed.refresh">상태 새로고침</button>
+            </div>
+            <p class="judgment-active-model" id="judgment-active-model" role="status" aria-live="polite"></p>
+            <dl class="judgment-status-facts" aria-live="polite">
+              <div>
+                <dt data-i18n="settings.judgment.enablementLabel">판단 요청 허용</dt>
+                <dd id="judgment-current-enablement" data-state="unknown"></dd>
+              </div>
+              <div>
+                <dt data-i18n="settings.judgment.serverLabel">현재 모델 서버</dt>
+                <dd id="judgment-current-server" data-state="unknown"></dd>
+              </div>
+              <div>
+                <dt data-i18n="settings.judgment.checkLabel">마지막 응답 확인</dt>
+                <dd id="judgment-current-check" data-state="unchecked"></dd>
+              </div>
+              <div class="judgment-status-usage">
+                <dt data-i18n="settings.judgment.usageLabel">실제 작업 요청</dt>
+                <dd id="judgment-current-usage" data-state="unknown"></dd>
+              </div>
+            </dl>
+            <p class="settings-row-desc" id="judgment-current-note" role="status"></p>
+          </section>
           <div class="settings-option-row settings-option-row--copy settings-jev-switch" data-jev-switch-row>
             <label class="settings-check" for="jev-enabled">
               <input type="checkbox" role="switch" id="jev-enabled" data-jev-switch />
@@ -4232,6 +4255,9 @@
             <span class="settings-jev-partial-said" data-jev-partial-said></span>
             <button class="btn" type="button" data-jev-everywhere data-i18n="settings.typesafe.everyFolder">모든 폴더에서 사용</button>
           </div>
+          <section class="judgment-model-changes" id="judgment-model-changes" aria-labelledby="judgment-changes-title">
+            <h3 id="judgment-changes-title" data-i18n="settings.judgment.changesTitle">모델 변경</h3>
+            <p class="settings-row-desc" data-i18n="settings.judgment.changesAbout">아래에서 고른 모델은 변경 초안입니다. 응답 확인과 적용을 마쳐야 현재 모델이 바뀝니다.</p>
           <section class="judgment-model-source" aria-labelledby="judgment-source-title">
             <h4 id="judgment-source-title" data-i18n="settings.models.add">모델 불러오기</h4>
             <div class="settings-action-row judgment-source-choices">
@@ -4242,13 +4268,13 @@
             <div id="judgment-source-hub-fields">
               <label class="settings-field" data-field="full" for="judgment-source-repository">
                 <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.models.address">Hugging Face 모델 주소 또는 ID</span></span>
-                <input class="settings-input" type="text" id="judgment-source-repository" placeholder="https://huggingface.co/..." maxlength="8192" autocomplete="off" spellcheck="false" />
+                <input class="settings-input" type="text" id="judgment-source-repository" aria-describedby="judgment-source-status" placeholder="https://huggingface.co/..." maxlength="8192" autocomplete="off" spellcheck="false" />
               </label>
             </div>
             <div id="judgment-source-local-fields" hidden>
               <p class="settings-row-desc" id="judgment-source-directory">이미 받은 모델의 폴더를 선택하세요. 원본 파일은 그대로 둡니다.</p>
               <div class="settings-action-row">
-                <button type="button" class="btn" id="judgment-source-browse" data-i18n="settings.models.pickFolder">모델 폴더 선택</button>
+                <button type="button" class="btn" id="judgment-source-browse" aria-describedby="judgment-source-directory judgment-source-status" data-i18n="settings.models.pickFolder">모델 폴더 선택</button>
               </div>
             </div>
             <div class="judgment-model-destination">
@@ -4319,18 +4345,20 @@
                 <p id="managed-judgment-import-model"></p>
                 <label class="settings-field" data-field="lg" for="managed-judgment-import-path">
                   <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.importPath">선택한 모델 파일이 있는 폴더</span></span>
-                  <input type="text" class="settings-input" id="managed-judgment-import-path" autocomplete="off" spellcheck="false" />
+                  <input type="text" class="settings-input" id="managed-judgment-import-path" aria-describedby="managed-judgment-import-status" autocomplete="off" spellcheck="false" />
                 </label>
                 <p class="settings-row-desc" data-i18n="settings.managed.importHint">목록에서 등록할 모델을 고르세요. 파일의 무결성을 확인해 앱에 복사하며, 원본은 이동하거나 삭제하지 않습니다.</p>
                 <div class="settings-action-row">
                   <button type="button" class="btn" id="managed-judgment-import-submit" data-i18n="settings.managed.importSubmit" disabled>검사하고 등록</button>
                 </div>
+                <p class="settings-status" id="managed-judgment-import-status" role="status" aria-live="polite"></p>
               </details>
               <p class="settings-status" id="managed-judgment-status" role="status" aria-live="polite"></p>
             </section>
           <details class="settings-fold judgment-connection-settings" id="judgment-connection-settings">
             <summary data-i18n="settings.models.advancedConnection">Jev · 기존 서버 연결 설정</summary>
           <section id="judgment-provider-editor" aria-label="판단 모델 연결">
+            <p class="settings-row-desc" id="judgment-provider-draft" role="status" aria-live="polite"></p>
             <label class="settings-field" data-field="md" for="judgment-provider-kind">
               <span class="settings-field-copy">
                 <span class="settings-label" data-i18n="settings.judgment.location">1. 어디에서 판단할까요?</span>
@@ -4366,6 +4394,7 @@
             <label class="settings-field" data-field="lg" for="typesafe-key-input">
               <span class="settings-field-copy">
                 <span class="settings-label" data-i18n="settings.typesafe.apiKey">API 키</span>
+                <span class="settings-state" id="typesafe-key-state" data-state="unchecked" role="status" aria-live="polite"></span>
                 <span class="settings-row-desc" id="typesafe-no-keychain-hint" data-i18n="settings.typesafe.noKeychainHint" hidden>
                   이 컴퓨터에는 API 키를 보관할 키체인이 없습니다.
                 </span>
@@ -4400,12 +4429,14 @@
             <button class="btn btn--primary" id="judgment-save-provider" type="button" data-i18n="settings.judgment.apply" disabled>확인하고 사용</button>
           </div>
           </details>
+          </section>
           <!-- Where each feature stands while Jev is on (t-11989): acting,
                or still recording with the samples its next judgment waits
                on — the numbers `zo jev summary` answers, the dashboard's own
                reading (`paintJevStandings`). Hidden while the switch is off. -->
           <details class="settings-fold settings-jev-features" id="judgment-feature-details">
             <summary data-i18n="settings.judgment.featureDetails">기능별 상태와 진단 보기</summary>
+            <p class="settings-row-desc" data-i18n="settings.judgment.historyAbout">아래는 과거 기능별 기록입니다. 현재 모델로 한정한 기록이 아니므로 현재 모델의 실제 사용 증거로 볼 수 없습니다.</p>
           <section class="settings-jev-standings" data-jev-standings aria-labelledby="jev-standings-title" hidden>
             <h4 class="settings-jev-standings-title" id="jev-standings-title" data-i18n="settings.typesafe.standings">기능별 상태</h4>
             <p class="settings-row-desc" data-i18n="settings.typesafe.standingsAbout">켠 동안 기능마다 판단을 실제로 적용하는지, 아직 기록만 하는지 보여 줍니다. 기록 중인 기능 옆의 숫자는 다음 판정에 필요한 표본 중 모인 수입니다.</p>
@@ -6662,6 +6693,16 @@
               <option value="ask" data-i18n="project.askFirst">물어보기</option>
               <option value="never" data-i18n="project.never">실행하지 않기</option>
             </select>
+          </label>
+          <!-- 묶음 통합 큐(t-45315): 저장소마다 따로 두고 기본은 꺼짐이다. 이 기계가 큐를 돌리지
+               못하면(지금은 macOS만 돌린다) 줄은 잠긴 채 까닭을 보인다. -->
+          <label class="settings-check" for="project-integration-queue">
+            <input type="checkbox" id="project-integration-queue" />
+            <span>
+              <span class="settings-label" data-i18n="board.batch.settingLabel">묶음 통합 큐</span>
+              <span class="settings-row-desc" data-i18n="board.batch.settingDesc">준비된 과업 여럿을 main 위에 함께 쌓아 한 번 게이트하고, 초록이면 main을 빨리감기합니다. 이 저장소에만 적용됩니다.</span>
+              <span class="settings-row-desc" id="project-integration-queue-why" data-i18n="board.batch.settingLocked" hidden>macOS에서만 켤 수 있습니다 — 다른 플랫폼에서는 아직 시험되지 않았습니다.</span>
+            </span>
           </label>
         </div>
         </section>

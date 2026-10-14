@@ -425,3 +425,61 @@ pub(crate) fn set_project_script_setting(
     })?;
     project_scripts_for(state.settings(), state.config_root(), &context)
 }
+
+/// The integration queue's switch for the active project (t-45315), keyed the way every
+/// `land-batch` press reads it: by the repository the checkout belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct IntegrationQueueSetting {
+    /// What the project stores; missing is off.
+    pub(crate) enabled: bool,
+    /// Whether this machine runs the queue at all — macOS only for now. Elsewhere the settings
+    /// row stays locked and says why.
+    pub(crate) supported: bool,
+}
+
+fn integration_queue_setting_at(
+    settings: &settings::SettingsRepository,
+    repo_root: &Path,
+) -> Result<IntegrationQueueSetting, String> {
+    let key = project_settings_key(crate::land_batch::settings_repository(repo_root));
+    let stored = stored_project_settings_at(settings, &key)?;
+    Ok(IntegrationQueueSetting {
+        enabled: stored.integration_queue_enabled == Some(true),
+        supported: zerocode_core::orchestration::land_batch::integration_queue_supported(),
+    })
+}
+
+/// Read the integration queue's switch for the active project.
+#[tauri::command(async)]
+pub(crate) fn integration_queue_setting(
+    state: State<'_, AppState>,
+) -> Result<IntegrationQueueSetting, String> {
+    let context = state.active_project_context();
+    integration_queue_setting_at(state.settings(), &context.repo_root)
+}
+
+/// Turn the integration queue on or off for the active project's repository. Turning it on where
+/// this machine does not run the queue is refused and nothing is saved; off is always taken.
+#[tauri::command(async)]
+pub(crate) fn set_integration_queue_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<IntegrationQueueSetting, String> {
+    if enabled && !zerocode_core::orchestration::land_batch::integration_queue_supported() {
+        return Err("the integration queue can be turned on only on macOS for now".to_string());
+    }
+    let context = state.active_project_context();
+    let key = project_settings_key(crate::land_batch::settings_repository(&context.repo_root));
+    mutate_project_settings(state.settings(), |held| {
+        let entry = held.entry(key.clone()).or_default();
+        entry.integration_queue_enabled = enabled.then_some(true);
+        if entry.says_nothing() {
+            held.remove(&key);
+        }
+        Ok(())
+    })?;
+    // The desk lays the switch over its batch cards only when it is published, and a setting does
+    // not move the ledger, so publish it again now: the card follows the switch, not the next beat.
+    crate::orchestration::refresh_board_ledger();
+    integration_queue_setting_at(state.settings(), &context.repo_root)
+}
