@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use super::ansi::{Color, Line, Span, Style};
+use super::ansi::{Color, Hyperlink, Line, Span, Style};
 use super::highlight::{
     MAX_HIGHLIGHT_LINE_BYTES, StreamingCodeHighlighter, highlight_code_to_lines,
 };
@@ -366,6 +366,8 @@ struct Writer<'a> {
     current_continuation: Option<Span>,
     /// 지금 줄에 이미 접두어가 붙었는지 — 두 번 붙이지 않기 위한 표식.
     inline: Vec<Style>,
+    /// 열린 링크마다 그 주소 — 창이 열 수 없는 목적지면 `None` 이고 이름표만 그린다.
+    links: Vec<Option<Hyperlink>>,
     indent: Vec<Indent>,
     list_indices: Vec<Option<u64>>,
     needs_newline: bool,
@@ -499,7 +501,10 @@ impl Writer<'_> {
             Tag::Emphasis => self.inline.push(Style::new().italic()),
             Tag::Strong => self.inline.push(Style::new().bold()),
             Tag::Strikethrough => self.inline.push(Style::new().strike()),
-            Tag::Link { .. } => self.inline.push(LINK_STYLE),
+            Tag::Link { dest_url, .. } => {
+                self.inline.push(LINK_STYLE);
+                self.links.push(Hyperlink::checked(dest_url));
+            }
             _ => {}
         }
     }
@@ -541,11 +546,12 @@ impl Writer<'_> {
                 self.indent.pop();
                 self.pending_marker = false;
             }
-            TagEnd::Emphasis
-            | TagEnd::Strong
-            | TagEnd::Strikethrough
-            | TagEnd::Link => {
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                 self.inline.pop();
+            }
+            TagEnd::Link => {
+                self.inline.pop();
+                self.links.pop();
             }
             _ => {}
         }
@@ -651,8 +657,9 @@ impl Writer<'_> {
     fn text(&mut self, text: &str) {
         if self.table.is_some() {
             let style = self.style();
+            let link = self.link();
             if let Some(cell) = self.table.as_mut().and_then(tables::State::cell_mut) {
-                cell.push_span(Span::new(text.to_string(), style));
+                cell.push_span(Span::new(text.to_string(), style).linked(link));
             }
             return;
         }
@@ -697,6 +704,11 @@ impl Writer<'_> {
         self.inline
             .iter()
             .fold(Style::new(), |acc, style| acc.patch(*style))
+    }
+
+    /// 지금 열린 링크의 주소.
+    fn link(&self) -> Option<Hyperlink> {
+        self.links.last().cloned().flatten()
     }
 
     /// 지금 스택으로 만든 줄 접두어. 리스트는 가장 안쪽 것만 쓴다.
@@ -775,6 +787,7 @@ impl Writer<'_> {
     }
 
     fn push_span(&mut self, span: Span) {
+        let span = span.linked(self.link());
         if let Some(cell) = self.table.as_mut().and_then(tables::State::cell_mut) {
             cell.push_span(span);
             return;

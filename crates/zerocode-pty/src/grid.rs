@@ -75,6 +75,15 @@ const MAX_HYPERLINKS: usize = 4_096;
 /// memory a URI at a time.
 const MAX_HYPERLINK_URI_BYTES: usize = 4_096;
 
+/// How many `;`-separated pieces of one OSC the parser hands over — vte 0.14's
+/// `MAX_OSC_PARAMS`. The pieces past it are dropped without a word.
+const VTE_OSC_PARAMS: usize = 16;
+
+/// How many bytes of one OSC the parser keeps, its `;` not counted — vte
+/// 0.14's `MAX_OSC_RAW` under its default `no_std` buffer. The bytes past it
+/// are dropped without a word.
+const VTE_OSC_BYTES: usize = 1_024;
+
 /// How many OSC 7788 fold regions one terminal remembers.
 const MAX_FOLDS: usize = 4_096;
 
@@ -4405,7 +4414,10 @@ impl Perform for TerminalGrid {
         // path — so a window that only linkifies text that LOOKS like a URL
         // shows those as ordinary words.
         if params.first() == Some(&b"8".as_slice()) {
-            self.open_hyperlink(params.get(2).copied().unwrap_or(b""));
+            match hyperlink_uri(params) {
+                Some(uri) => self.open_hyperlink(&uri),
+                None => self.pen.link = None,
+            }
             return;
         }
         if params.first() == Some(&b"7788".as_slice()) {
@@ -4489,6 +4501,19 @@ fn percent_decode(raw: &[u8]) -> String {
     }
     out.truncate(MAX_FOLD_SUMMARY_BYTES);
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The URI of an `OSC 8 ; params ; URI`, put back together: vte splits on
+/// every `;`, and an address may hold its own (`;jsessionid=…`). `None` when
+/// the parser may have dropped part of it — at [`VTE_OSC_PARAMS`] pieces or
+/// [`VTE_OSC_BYTES`] bytes — since the front of an address is a link to
+/// somewhere the program never named.
+fn hyperlink_uri(params: &[&[u8]]) -> Option<Vec<u8>> {
+    let held: usize = params.iter().map(|param| param.len()).sum();
+    if params.len() >= VTE_OSC_PARAMS || held >= VTE_OSC_BYTES {
+        return None;
+    }
+    Some(params.get(2..).unwrap_or_default().join(&b';'))
 }
 
 fn parse_osc52_clipboard_write(params: &[&[u8]]) -> Option<String> {
