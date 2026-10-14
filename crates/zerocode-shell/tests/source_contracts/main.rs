@@ -4,6 +4,7 @@ mod answer_door;
 mod artifact_export;
 mod ask_popup;
 mod beat_lock_order;
+mod browser_workspace;
 mod bundle_resources;
 mod cli_login;
 mod computer_use_mirrors;
@@ -9671,8 +9672,10 @@ mod tests {
     fn the_agents_browser_door_rides_the_guarded_roads() {
         let shell = shipped_backend();
         let guarded = block_after(shell, "async fn answer_browser_command(");
-        let admitted = guarded.find(".begin(label, pane, verb)").expect("workspace input guard");
-        let dispatched = guarded.find("dispatch_browser_command(app, argv, pane).await").expect("dispatch");
+        let admitted = guarded.find(".begin_at(").expect("workspace input guard");
+        let dispatched = guarded
+            .find("dispatch_browser_command(app, argv, pane).await")
+            .expect("dispatch");
         assert!(admitted < dispatched);
         assert!(guarded.contains("operation.finish(answer.exit_code == 0)"));
         let answering = block_after(shell, "async fn dispatch_browser_command(");

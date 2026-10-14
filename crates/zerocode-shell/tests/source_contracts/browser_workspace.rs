@@ -1,0 +1,168 @@
+use super::support::block_after;
+
+const BROWSER: &str = include_str!("../../src/cmd/browser.rs");
+const CONTROL: &str = include_str!("../../src/cmd/browser_workspace.rs");
+const CEF: &str = include_str!("../../src/chromium_browser.rs");
+const RUNTIME: &str = include_str!("../../src/agent_tools_runtime.rs");
+const SNAPSHOT: &str = include_str!("../../src/cmd/fs.rs");
+
+#[test]
+fn human_reads_arbitrary_eval_and_unknown_verbs_are_refused_before_dispatch() {
+    let source = include_str!("../../src/browser_workspace.rs");
+    assert!(source.contains("pub(crate) fn begin_at("));
+    let admission = block_after(source, "fn begin_at(");
+    assert!(admission.contains("browser_verb(verb)"));
+    assert!(admission.contains("if state.mode != Mode::Agent"));
+    assert!(admission.contains("if verb == \"eval\""));
+    assert!(!admission.contains("state.owner ="));
+}
+
+#[test]
+fn every_main_page_mutator_checks_revision_and_keeps_its_operation_until_completion() {
+    for name in [
+        "browser_navigate",
+        "browser_history",
+        "browser_reload",
+        "browser_stop",
+        "browser_devtools",
+        "browser_find",
+        "browser_find_clear",
+        "browser_zoom",
+        "browser_scroll",
+        "browser_eval",
+        "browser_click",
+        "browser_type",
+        "browser_grab_arm",
+        "browser_grab_disarm",
+    ] {
+        let command = block_after(BROWSER, &format!("fn {name}("));
+        assert!(command.contains("expected_revision: Option<u64>"), "{name}");
+        let authenticated = command.find("from_the_main_webview(&webview)?").unwrap();
+        let admitted = command
+            .find("begin_person_control(&app, &state, &label, expected_revision)")
+            .unwrap();
+        let finished = command
+            .find("finish_person_control(operation, result)")
+            .unwrap();
+        assert!(authenticated < admitted && admitted < finished, "{name}");
+    }
+}
+
+#[test]
+fn handoff_waits_for_old_requests_then_same_pane_fences_before_granting_control() {
+    let command = block_after(CONTROL, "async fn set_browser_workspace_mode(");
+    let hidden = command.find("hide_browser_pane(").unwrap();
+    let drained = command.find("transition.wait()").unwrap();
+    let labels = command.find("transition.fence_labels()").unwrap();
+    let fenced = command.find("workspace_page_fence(&pane)").unwrap();
+    let confirmed = command.find("transition.confirm_fence()").unwrap();
+    let granted = command.find("transition.finish()").unwrap();
+    assert!(
+        hidden < drained
+            && drained < labels
+            && labels < fenced
+            && fenced < confirmed
+            && confirmed < granted
+    );
+    assert!(command.contains("BROWSER_DOOR_BUDGET + super::browser::BROWSER_CALLBACK_DEADLINE"));
+    let fence = block_after(BROWSER, "async fn workspace_page_fence(");
+    assert!(fence.contains("page_json(pane, \"1\", BROWSER_CALLBACK_DEADLINE)"));
+}
+
+#[test]
+fn both_native_engines_create_managed_views_without_an_interactive_visible_frame() {
+    let cef_birth = block_after(CEF, "fn begin_create_pane(");
+    assert!(cef_birth.contains("window.hidden = i32::from(options.hidden)"));
+    let cef_finish = block_after(CEF, "fn finish_create_pane(");
+    assert!(
+        cef_finish.find("pane.set_hidden(options.hidden)").unwrap()
+            < cef_finish.find("pane.set_bounds(").unwrap()
+    );
+    let wry = block_after(BROWSER, "fn open_webkit_browser_pane(");
+    assert!(wry.contains("builder.focused(false)"));
+    assert!(wry.contains("if managed { 0.0 } else { width.max(1.0) }"));
+    assert!(wry.contains("if managed { 0.0 } else { height.max(1.0) }"));
+    assert!(
+        wry.find("place_native_browser(").unwrap()
+            < wry.find("state.browser_panes().insert(").unwrap()
+    );
+}
+
+#[test]
+fn visibility_decision_and_bounds_run_together_on_the_native_ui_thread() {
+    let wry = block_after(BROWSER, "fn place_native_browser(");
+    assert!(wry.contains("pane.with_webview(move |platform|"));
+    assert!(wry.contains(".with_placement(&label, revision, |allowed|"));
+    assert!(wry.find("setHidden: true").unwrap() < wry.find(".with_placement(").unwrap());
+    assert!(wry.find("SetIsVisible(false)").unwrap() < wry.find(".with_placement(").unwrap());
+    assert!(wry.contains("SetBounds("));
+    assert!(wry.contains("setFrame: frame"));
+    let cef = block_after(CEF, "fn place(");
+    assert!(cef.contains("on_ui(&self.app, &self.label"));
+    assert!(cef.contains(".with_placement(&label, revision, |allowed|"));
+    assert!(cef.find("pane.set_hidden(true)").unwrap() < cef.find(".with_placement(").unwrap());
+    assert!(cef.contains("pane.set_bounds("));
+}
+
+#[test]
+fn managed_popups_use_one_deferred_backend_route_with_the_captured_revision() {
+    assert_eq!(
+        CEF.matches("crate::cmd::browser::workspace_popup(").count(),
+        2
+    );
+    assert!(BROWSER.contains("workspace_popup(&popup_app, &popup_label, url.as_str())"));
+    let route = block_after(BROWSER, "fn workspace_popup(");
+    assert!(route.contains("snapshot.mode == crate::browser_workspace::Mode::Human"));
+    assert!(route.contains("revision: Some(snapshot.revision)"));
+    assert!(route.contains("snapshot.mode == crate::browser_workspace::Mode::Agent"));
+    let deferred = route.find("tauri::async_runtime::spawn(").unwrap();
+    let main = route.find("app.run_on_main_thread(").unwrap();
+    let checked = route.find(".with_agent_popup(").unwrap();
+    assert!(deferred < main && main < checked);
+    assert!(!route.contains("set_focus(") && !route.contains("open_browser_pane("));
+}
+
+#[test]
+fn initial_zoom_uses_the_existing_setting_before_the_native_label_is_published() {
+    for name in ["open_webkit_browser_pane", "open_chromium_browser_pane"] {
+        let birth = block_after(BROWSER, &format!("fn {name}("));
+        assert!(
+            birth.contains(".browser.default_zoom_level") || birth.contains(".default_zoom_level")
+        );
+        let applied = birth
+            .find("pane.set_zoom(zoom_level_to_scale(level))")
+            .unwrap();
+        let published = birth.find("state.browser_panes().insert(").unwrap();
+        assert!(applied < published, "{name}");
+    }
+    assert!(!BROWSER.contains("initial: Option<bool>"));
+}
+
+#[test]
+fn timed_out_open_is_cancelled_and_managed_viewport_does_not_claim_unconfirmed_success() {
+    let dispatch = block_after(RUNTIME, "async fn dispatch_browser_command(");
+    assert!(dispatch.contains("cmd::browser::cancel_workspace_open(app, &state, &label)"));
+    assert!(dispatch.contains("workspace_open_timeout"));
+    let guarded = block_after(RUNTIME, "async fn answer_browser_command(");
+    let refusal = guarded.find("workspace_viewport_unconfirmed").unwrap();
+    assert!(refusal < guarded.find("dispatch_browser_command(").unwrap());
+    assert!(guarded.contains("begin_actor_target("));
+    assert!(guarded.contains("let actor = step_actor(app, pane)"));
+    let loop_body = block_after(RUNTIME, "async fn browser_loop(");
+    assert!(loop_body.contains("browser_revision(&app, &request.argv)"));
+    assert!(loop_body.contains("reply.closed()"));
+}
+
+#[test]
+fn capture_limits_survive_caller_cancellation_until_the_native_callback_completes() {
+    let capture = block_after(SNAPSHOT, "async fn browser_snapshot_png(");
+    assert!(capture.contains(".begin_snapshot(label)"));
+    assert!(capture.contains("let _frame = frame"));
+    assert!(capture.contains("snapshot_webview_png_held(pane, None, Some(Box::new(frame)))"));
+    let webkit = include_str!("../../src/artifact_webkit.rs");
+    let callback = block_after(webkit, "fn take_snapshot_png_held(");
+    assert!(callback.contains("let _held = held.borrow_mut().take()"));
+    let ipc = block_after(SNAPSHOT, "async fn browser_snapshot(");
+    assert!(ipc.contains("workspace_snapshot_unsupported"));
+    assert!(ipc.contains("AGENT_SCREENSHOT_MAX_BYTES"));
+}
