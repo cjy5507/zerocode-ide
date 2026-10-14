@@ -6615,10 +6615,8 @@ pub(super) fn found_answer(
     dispatched: &mut crate::browser_workspace::Dispatch,
 ) -> zerocode_hookd::TeamAnswer {
     match found {
-        Ok(found) => browser_said(format!(
-            "{}\n",
-            found.unwrap_or_else(|| json!({ "count": 0, "index": 0 }))
-        )),
+        Ok(Some(found)) => browser_said(format!("{found}\n")),
+        Ok(None) => browser_refused("zerocode-browser: 찾기 결과를 읽을 수 없습니다\n"),
         Err(refusal) => executor_refused(dispatched, refusal),
     }
 }
