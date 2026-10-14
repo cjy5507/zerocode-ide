@@ -65,6 +65,7 @@ class TheNamesAreTheRusts(unittest.TestCase):
             rust("zo-ide/crates/runtime/src/config/mod.rs"),
         )
         self.assertIn('.join("state")', rust("zo-ide/crates/runtime/src/config/mod.rs"))
+        self.assertIn(f'base.join("{replay.PROVIDER_LEDGERS}")', rust("crates/judgment-provider/src/lib.rs"))
 
     def test_the_slug_keeps_the_stem_zo_keeps_and_a_hash_of_its_width(self) -> None:
         # zo's rule, kept in the core since t-11349 so the window names a

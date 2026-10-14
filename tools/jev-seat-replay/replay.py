@@ -52,6 +52,10 @@ WINDOW_LEDGERS = "jev"
 # (`runtime::jev_ledger_dir`).
 PROJECT_LEDGERS = ("state", "smart-router")
 
+# Under either folder, the one every provider but Jev keeps its own rows in,
+# one folder per provider (`judgment_provider::Provider::evidence_dir`).
+PROVIDER_LEDGERS = "providers"
+
 # How many characters of a sanitized path a project slug keeps before its
 # hash (`runtime::project_slug`), and the hash's own spelling.
 SLUG_STEM_CHARS = 80
