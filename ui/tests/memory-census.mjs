@@ -56,6 +56,18 @@ const PICTURES = Object.freeze([
 const KNOWLEDGE_PAGES = 1500;
 /* 장면을 세운 뒤 재기 전에 기다리는 시간 — 지연 그리기와 디코드가 끝나도록. */
 const SETTLE_MS = 2000;
+/* 장면 하나를 세우는 데 주는 시간. 넘으면 그 장면은 실패로 적고 다음 장면으로 간다 — 한 장면이
+ * 멈춰 나머지 장면의 수까지 잃지 않게. */
+const SCENARIO_PATIENCE_MS = 180000;
+
+/* `promise`, 또는 `ms` 뒤의 실패. */
+function within(ms, promise, what) {
+  let timer;
+  const late = new Promise((unused, fail) => {
+    timer = setTimeout(() => fail(new Error(`${what}: not done in ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
 
 /* 합성 PNG 하나: 창 배경 같은 평평한 행 사이사이에 무늬 행. 어떤 사람의 화면도 아니다. */
 export function syntheticPng({ width, height, noisyEvery }) {
@@ -104,22 +116,26 @@ export function syntheticPng({ width, height, noisyEvery }) {
 /* ---- 프로세스 읽기: 이 스크립트가 띄운 것만 ---------------------------------------- */
 
 function processTable() {
-  const said = execFileSync("ps", ["-axo", "pid=,ppid=,command="], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  return said.split("\n").map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/))
-    .filter(Boolean).map((match) => ({ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }));
+  const said = execFileSync("ps", ["-axo", "pid=,ppid=,rss=,command="], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return said.split("\n").map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/))
+    .filter(Boolean).map((match) => ({ pid: Number(match[1]), ppid: Number(match[2]), rss: Number(match[3]), command: match[4] }));
 }
+
+/* Of the processes that could be the page's, the one holding the most — a browser keeps a spare
+ * content process beside the page's, and the spare holds next to nothing. */
+const largest = (rows) => rows.reduce((most, row) => (most === null || row.rss > most.rss ? row : most), null)?.pid ?? null;
 
 /* 페이지가 사는 프로세스: WebKit은 Playwright 빌드의 WebContent(launchd 아래 XPC), Chromium은
  * 이 노드가 띄운 브라우저의 렌더러. `before`는 브라우저를 띄우기 전에 서 있던 pid들이다. */
 function pageProcess(engine, before) {
   const rows = processTable();
   if (engine === "webkit") {
-    return rows.find((row) => /ms-playwright\/webkit-\d+/.test(row.command) && /WebContent/.test(row.command)
-      && !before.has(row.pid))?.pid ?? null;
+    return largest(rows.filter((row) => /ms-playwright\/webkit-\d+/.test(row.command) && /WebContent/.test(row.command)
+      && !before.has(row.pid)));
   }
   const browsers = new Set(rows.filter((row) => row.ppid === process.pid).map((row) => row.pid));
-  return rows.find((row) => browsers.has(row.ppid) && /--type=renderer/.test(row.command)
-    && !before.has(row.pid))?.pid ?? null;
+  return largest(rows.filter((row) => browsers.has(row.ppid) && /--type=renderer/.test(row.command)
+    && !before.has(row.pid)));
 }
 
 function footprintOf(pid, folder) {
@@ -279,7 +295,7 @@ async function openKnowledge(page) {
     const view = document.querySelector(".knowledge-view:not([hidden])");
     const layout = view === null ? undefined : knowledgeLayouts.get(view);
     return layout !== undefined && layout.count >= pages && layout.left === 0;
-  }, KNOWLEDGE_PAGES, { timeout: 600000, polling: 250 });
+  }, KNOWLEDGE_PAGES, { timeout: SCENARIO_PATIENCE_MS, polling: 250 });
   return page.evaluate(() => ({ nodes: document.querySelectorAll(".knowledge-view:not([hidden]) *").length }));
 }
 
@@ -304,13 +320,16 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
       ({ page, faults } = await openWindowTestPage(browser, origin));
     }
     const cdp = engine === "chromium" ? await page.context().newCDPSession(page) : null;
-    let detail = {};
-    if (name.startsWith("panes-")) detail = await openPanes(page, Number(name.slice("panes-".length)));
-    else if (name === "scrollback") detail = await scrollHistory(page);
-    else if (name === "conversation") await openFixtureConversation(page, conversationFixture());
-    else if (name === "gallery") detail = await openGallery(page, pictures);
-    else if (name === "knowledge") detail = await openKnowledge(page);
-    else if (name !== "empty") throw new Error(`no scenario named ${name}`);
+    const stand = async () => {
+      if (name.startsWith("panes-")) return openPanes(page, Number(name.slice("panes-".length)));
+      if (name === "scrollback") return scrollHistory(page);
+      if (name === "conversation") return (await openFixtureConversation(page, conversationFixture())) ?? {};
+      if (name === "gallery") return openGallery(page, pictures);
+      if (name === "knowledge") return openKnowledge(page);
+      if (name !== "empty") throw new Error(`no scenario named ${name}`);
+      return {};
+    };
+    const detail = await within(SCENARIO_PATIENCE_MS, stand(), name);
     await page.waitForTimeout(SETTLE_MS);
     const row = { engine, scenario: name, ...detail };
     if (cdp) {
@@ -334,7 +353,7 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
   }
 }
 
-export async function census({ engine = "webkit", scenarios = SCENARIOS, lowSpec = false } = {}) {
+export async function census({ engine = "webkit", scenarios = SCENARIOS, lowSpec = false, out = null } = {}) {
   const pictures = PICTURES.map((picture) => {
     const bytes = syntheticPng(picture);
     return { ...picture, bytes: bytes.length, base64: bytes.toString("base64") };
@@ -344,15 +363,22 @@ export async function census({ engine = "webkit", scenarios = SCENARIOS, lowSpec
   const rows = [];
   try {
     for (const name of scenarios) {
-      const row = await measureScenario({ engine, name, origin, pictures, folder });
+      let row;
+      try {
+        row = await measureScenario({ engine, name, origin, pictures, folder });
+      } catch (error) {
+        row = { engine, scenario: name, error: String(error?.stack ?? error).slice(0, 600) };
+      }
       rows.push({ lowSpec, ...row });
+      if (out) writeFileSync(out, `${JSON.stringify({ engine, lowSpec, rows }, null, 1)}\n`);
       const mib = (bytes) => (bytes === undefined || bytes === null ? "-" : (bytes / 1048576).toFixed(1));
       console.log(`${engine.padEnd(8)} ${lowSpec ? "low " : "    "}${name.padEnd(13)} footprint ${mib(row.process?.footprint)} MiB`
         + ` dirty ${mib(row.process?.dirty)} malloc ${mib(row.process?.malloc)}`
         + (row.heap ? ` heap ${mib(row.heap.bytes)} MiB/${row.heap.nodes} nodes` : "")
         + (row.jsHeap !== undefined ? ` js ${mib(row.jsHeap)} MiB dom ${row.domNodes}` : "")
         + (row.previewBytesHeld !== undefined ? ` previews ${row.previewsHeld}/${row.previewAsks} asks ${mib(row.previewBytesHeld)} MiB held` : "")
-        + (row.faults?.length ? ` FAULT ${row.faults[0]}` : ""));
+        + (row.faults?.length ? ` FAULT ${row.faults[0]}` : "")
+        + (row.error ? ` ERROR ${row.error.split("\n")[0]}` : ""));
     }
   } finally {
     files.close();
@@ -368,7 +394,9 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     return at >= 0 && at + 1 < argv.length ? argv[at + 1] : fallback;
   };
   const scenarios = option("--scenarios", SCENARIOS.join(",")).split(",").filter(Boolean);
-  const result = await census({ engine: option("--engine", "webkit"), scenarios, lowSpec: argv.includes("--low-spec") });
   const out = option("--json", null);
+  const result = await census({ engine: option("--engine", "webkit"), scenarios, lowSpec: argv.includes("--low-spec"), out });
   if (out) writeFileSync(out, `${JSON.stringify(result, null, 1)}\n`);
+  // A scenario that could not be stood is a failed census, its row says why.
+  if (result.rows.some((row) => row.error)) process.exitCode = 1;
 }
