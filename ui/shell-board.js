@@ -1111,6 +1111,70 @@ function deskWallStrip(view, row) {
   return strip;
 }
 
+/* 원장과 창은 거절을 문장이 아니라 코드와 그 문장이 이름하는 사실로 보낸다(t-47935). 이 표가 그
+ * 코드를 사람의 언어로 말하는 한 곳이다 — 원장의 `WallRefusal`과 창의 `WindowRefusal`이 가진
+ * 코드마다 한 줄이고, 소스 계약이 두 열거형에서 코드를 읽어 빠진 줄을 잡는다. */
+const QUOTA_WALL_REFUSALS = {
+  worker_not_live: (said) => said.state === "sleeping"
+    ? t("quotaWall.why.workerSleeping", "워커 {{worker}}가 계정 이동으로 잠들어 있습니다", { worker: said.worker })
+    : said.state === "released"
+      ? t("quotaWall.why.workerReleased", "워커 {{worker}}는 이미 손을 놓았습니다 — 끝났거나 다른 에이전트로 넘어갔습니다", { worker: said.worker })
+      : t("quotaWall.why.workerReleasing", "워커 {{worker}}가 손을 놓는 중이거나, 놓았는지 아직 확인되지 않았습니다", { worker: said.worker }),
+  pane_taken_over: (said) => t("quotaWall.why.paneTakenOver", "워커 {{worker}}의 판을 사람이 가져갔습니다 — 그 터미널은 이제 사람의 것입니다", { worker: said.worker }),
+  no_open_attempt: (said) => t("quotaWall.why.noOpenAttempt", "워커 {{worker}}에게 열린 시도가 없습니다", { worker: said.worker }),
+  no_wall: (said) => t("quotaWall.why.noWall", "원장이 본 한도 벽이 워커 {{worker}}에게 없습니다", { worker: said.worker }),
+  wall_lifted: (said) => t("quotaWall.why.wallLifted", "워커 {{worker}}의 한도가 이미 풀렸습니다", { worker: said.worker }),
+  account_moved: (said) => t("quotaWall.why.accountMoved", "워커 {{worker}}는 이 벽 뒤에 다른 계정으로 다시 앉았습니다 — 그 벽은 떠난 계정의 것입니다", { worker: said.worker }),
+  pane_not_here: (said) => t("quotaWall.why.paneNotHere", "이 창은 워커 {{worker}}의 판을 갖고 있지 않습니다", { worker: said.worker }),
+  no_transient_order: (said) => t("quotaWall.why.noTransientOrder", "일시 오류 뒤에 이어서 하라는 지시가 이 실행에 없습니다"),
+  unknown_run: (said) => t("quotaWall.why.unknownRun", "실행 {{run}}을 원장에서 찾을 수 없습니다", { run: said.run }),
+  unknown_worker: (said) => t("quotaWall.why.unknownWorker", "워커 {{worker}}를 원장에서 찾을 수 없습니다", { worker: said.worker }),
+  unknown_dispatch: (said) => t("quotaWall.why.unknownDispatch", "시도 {{dispatch}}를 원장에서 찾을 수 없습니다", { dispatch: said.dispatch }),
+  unknown_task: (said) => t("quotaWall.why.unknownTask", "과업 {{task}}를 원장에서 찾을 수 없습니다", { task: said.task }),
+  seat_lost: (said) => t("quotaWall.why.seatLost", "워커 {{worker}}의 판을 다른 워커가 차지했습니다", { worker: said.worker }),
+  awaiting_answer: (said) => t("quotaWall.why.awaitingAnswer", "워커 {{worker}}가 자기가 물은 질문의 답을 기다리고 있습니다", { worker: said.worker }),
+  at_wall: (said) => t("quotaWall.why.atWall", "시도 {{dispatch}}는 한도 벽에 서 있습니다 — 넘기기가 그 답입니다", { dispatch: said.dispatch }),
+  wall_not_now: (said) => t("quotaWall.why.wallNotNow", "이 누름은 시도 {{dispatch}}가 지금 서 있지 않은 지난 벽에 대한 것입니다", { dispatch: said.dispatch }),
+  resume_in_flight: (said) => t("quotaWall.why.resumeInFlight", "이어서 하라는 한 줄을 지금 넣는 중입니다"),
+  resume_ceiling: (said) => t("quotaWall.why.resumeCeiling", "시도 {{dispatch}}에 이미 {{count}}번 이어 쓰기를 넣어 상한에 닿았습니다", { dispatch: said.dispatch, count: said.count }),
+  already_typed: (said) => t("quotaWall.why.alreadyTyped", "이 벽에 대해 시도 {{dispatch}}에 이미 한 줄을 넣었습니다 — 그 글이 입력 칸에 남아 있을 수 있습니다", { dispatch: said.dispatch }),
+  too_soon: (said) => t("quotaWall.why.tooSoon", "시도 {{dispatch}}의 마지막 이어 쓰기가 {{seconds}}초 전이라 아직 간격이 지나지 않았습니다",
+    { dispatch: said.dispatch, seconds: Math.ceil(Number(said.typed_ms_ago) / 1_000) }),
+  coordinator_seat_elsewhere: (said) => t("quotaWall.why.coordinatorSeatElsewhere", "이 창은 실행 {{run}}의 코디네이터 자리를 갖고 있지 않습니다", { run: said.run }),
+  no_live_coordinator: (said) => t("quotaWall.why.noLiveCoordinator", "실행 {{run}}의 코디네이터 자리가 비어 있습니다", { run: said.run }),
+  handover_waits_for_typing: (said) => t("quotaWall.why.handoverWaitsForTyping", "시도 {{dispatch}}에 이어 쓰기를 넣는 중입니다 — 넘기기는 그것이 끝난 뒤에 됩니다", { dispatch: said.dispatch }),
+  attempt_ended: (said) => t("quotaWall.why.attemptEnded", "시도 {{dispatch}}는 이미 끝났습니다 — 넘기기는 열린 시도에만 됩니다", { dispatch: said.dispatch }),
+  no_checkout: (said) => t("quotaWall.why.noCheckout", "워커 {{worker}}가 체크아웃을 알리지 않아 물려줄 것이 없습니다", { worker: said.worker }),
+  already_walked: (said) => t("quotaWall.why.alreadyWalked", "시도 {{dispatch}}는 이미 넘어갔습니다 — 한 시도는 한 번만 넘깁니다", { dispatch: said.dispatch }),
+  handover_ceiling: (said) => t("quotaWall.why.handoverCeiling", "과업 {{task}}는 이미 {{count}}번 넘어가 상한에 닿았습니다", { task: said.task, count: said.count }),
+  wall_row_gone: (said) => t("quotaWall.why.wallRowGone", "벽 {{wall}}의 기록이 원장에서 사라졌습니다", { wall: said.wall }),
+  no_runtime: (said) => t("quotaWall.why.noRuntime", "이 창에서 오케스트레이션이 시작되지 않았습니다"),
+  ledger_unread: (said) => t("quotaWall.why.ledgerUnread", "원장을 읽지 못했습니다: {{detail}}", { detail: said.detail }),
+  composer_never_heard: (said) => t("quotaWall.why.composerNeverHeard", "이 창이 워커 {{worker}}의 판에서 아직 아무것도 듣지 못해 넣지 않았습니다", { worker: said.worker }),
+  composer_held_by_person: (said) => t("quotaWall.why.composerHeldByPerson", "워커 {{worker}}의 지난 차례를 사람이 끊었습니다 — 그 입력 칸은 사람의 것입니다", { worker: said.worker }),
+  composer_shell_in_front: (said) => t("quotaWall.why.composerShellInFront", "워커 {{worker}}의 판 앞에 에이전트가 아니라 셸이 있습니다 — 한 줄이 명령으로 실행되므로 넣지 않았습니다", { worker: said.worker }),
+  composer_turn_running: (said) => t("quotaWall.why.composerTurnRunning", "워커 {{worker}}의 판에서 차례가 진행 중입니다", { worker: said.worker }),
+  switch_in_flight: (said) => t("quotaWall.why.switchInFlight", "계정 전환이 지금 판을 옮기고 있습니다 — 잠시 뒤 다시 누르세요"),
+  attempt_changed: (said) => t("quotaWall.why.attemptChanged", "누르는 사이에 워커나 그 자리, 그 시도가 바뀌었습니다 — 다시 누르세요"),
+  not_addressed: (said) => t("quotaWall.why.notAddressed", "판에 글을 보낼 수 없어 아무것도 넣지 않았습니다"),
+  target_unreadable: (said) => t("quotaWall.why.targetUnreadable", "넘길 에이전트 {{to}}를 읽을 수 없습니다", { to: said.to }),
+  no_alternative: (said) => t("quotaWall.why.noAlternative", "이 워커에게 지정된 대안이 없습니다 — 과업을 받을 에이전트를 고르세요"),
+  at_work_again: (said) => t("quotaWall.why.atWorkAgain", "워커 {{worker}}가 다시 일하고 있어 넘기지 않았습니다", { worker: said.worker }),
+  stop_refused: (said) => t("quotaWall.why.stopRefused", "워커를 멈추지 못했습니다: {{detail}}", { detail: said.detail }),
+  replacement_not_started: (said) => t("quotaWall.why.replacementNotStarted", "시도 {{dispatch}}는 끝났지만 대신할 워커가 시작되지 않았습니다 — 과업은 다시 대기 중입니다: {{detail}}",
+    { dispatch: said.dispatch, detail: said.detail }),
+  press_failed: (said) => t("quotaWall.why.pressFailed", "누르기가 이뤄지지 않았습니다: {{detail}}", { detail: said.detail }),
+};
+
+/* 거절 하나를 사람의 말로. 표에 없는 코드나 코드가 아닌 답은 모른다고 말한다 — 날것의 코드도
+ * 영어 문장도 화면에 오르지 않는다. */
+function quotaWallRefusalWords(said) {
+  const code = typeof said?.code === "string" ? said.code : "";
+  return Object.prototype.hasOwnProperty.call(QUOTA_WALL_REFUSALS, code)
+    ? QUOTA_WALL_REFUSALS[code](said)
+    : t("quotaWall.why.unknown", "까닭을 이 창이 알아듣지 못했습니다");
+}
+
 function paintDeskWall(node, row, now) {
   const strip = node.querySelector(".board-desk-worker-wall");
   const chip = quotaWallStanding(row.quota_wall, now) ? row.quota_wall : null;
@@ -1132,9 +1196,11 @@ function paintDeskWall(node, row, now) {
   writeDisabled(hand, sending || Boolean(chip.hand_over_refusal) || targets === 0);
   writeAttribute(hand, "data-tip", t("quotaWall.handOverTip", "이 워커를 멈추고 같은 체크아웃에서 고른 에이전트에게 과업을 넘깁니다"));
   const why = [
-    chip.retry_refusal ? t("quotaWall.retryRefused", "다시 시도 안 됨 — {{why}}", { why: chip.retry_refusal }) : "",
+    chip.retry_refusal
+      ? t("quotaWall.retryRefused", "다시 시도 안 됨 — {{why}}", { why: quotaWallRefusalWords(chip.retry_refusal) })
+      : "",
     chip.hand_over_refusal
-      ? t("quotaWall.handOverRefused", "넘기기 안 됨 — {{why}}", { why: chip.hand_over_refusal })
+      ? t("quotaWall.handOverRefused", "넘기기 안 됨 — {{why}}", { why: quotaWallRefusalWords(chip.hand_over_refusal) })
       : targets === 0 ? t("quotaWall.noTarget", "넘길 에이전트가 이 기계에 없음") : "",
   ].filter(Boolean).join(" · ");
   const whyLine = strip.querySelector(".board-desk-worker-wall-why");
@@ -1148,7 +1214,7 @@ function paintDeskWall(node, row, now) {
 
 /* 칩 곁의 두 단추. 사람이 확인 창에서 「예」라고 해야만 창의 명령을 부른다 — 그 명령은 주
  * 창에서만 받고, 눌린 때의 원장을 다시 읽어 거절할 것은 거절한다. 답은 그 벽에 대한 말로 띠에
- * 남고(안 됐으면 원장의 까닭 그대로), 원장을 다시 읽는다. */
+ * 남고(안 됐으면 그 까닭의 코드를 사람의 말로), 원장을 다시 읽는다. */
 async function pressQuotaWall(view, row, act, to) {
   const chip = row?.quota_wall;
   if (!chip) return;
@@ -1188,7 +1254,7 @@ async function pressQuotaWall(view, row, act, to) {
         : t("quotaWall.handedOver", "{{worker}}에게 넘겼습니다", { worker: String(answer?.replacement ?? "") });
     refreshDeskLedger();
   } catch (error) {
-    held.text = t("quotaWall.refused", "안 됨 — {{why}}", { why: String(error) });
+    held.text = t("quotaWall.refused", "안 됨 — {{why}}", { why: quotaWallRefusalWords(error) });
   } finally {
     held.sending = false;
     paintCoordinatorDesk(view);
