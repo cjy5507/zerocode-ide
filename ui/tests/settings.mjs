@@ -6173,6 +6173,12 @@ await test("현재 모델과 다른 서버·점검 기록은 현재 상태로 �
   await backend.emitManaged(snapshot);
   assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown", "a stale settings identity supplied current server status");
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown");
+  backend.judgmentSettingsWait = Promise.resolve({ ...backend.typesafeSettings(), provider: null, providerIdentity: null });
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-enablement").getAttribute("data-state"), "disabled", "missing provider metadata erased known request permission");
+  assert(await page.locator("#jev-enabled").isEnabled(), "missing provider metadata disabled the existing consent switch");
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown");
   return "server provider, model and canonical identity must agree";
 }));
 
