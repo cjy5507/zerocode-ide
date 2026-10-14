@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
-"""Contract for `tools/jev-answered/answered.py` — the share of each Jev
-seat's requests that came back answered, by provider folder and time window,
-and the failure words of the rest (t-55423).
+"""Contract for `tools/jev-answered/answered.py` — how each Jev seat's
+judgments ended, by provider folder and time window, counted straight from
+the ledgers' raw rows (t-55423).
 
-It must count only rows that carry an outcome, split them by the folder the
-provider keeps them in and by the windows asked for, print no part of a row
-but its outcome word, and leave the home it reads exactly as it was. The
-keys, the answered word and the folder names are read from the Rust they
-mirror.
+It must count a row by its own fields: a judgment only when it carries an
+outcome; sent and attempts by `requests`; a memo hit and an outcome decided
+before sending apart from what was sent; answered and failures of what was
+sent; applied, retried and probed rows; a row naming another folder's
+provider, the request-time routes rows name, and a sent judgment naming
+neither; every seat and place summed by provider folder and window; and per
+file the corrupt and untimed lines beside the sha256 of the very bytes
+counted. It prints no part of a row but those words, names windows in UTC,
+the versions it was told and a window a version file changed inside,
+and leaves the home it reads as it was. Every key, word and folder name is
+read from the Rust it mirrors.
 
 Run: python3 tools/tests/test_jev_answered.py   (stdlib only)
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
 import os
+import plistlib
+import stat
 import sys
 import tempfile
 import unittest
@@ -30,6 +39,7 @@ _spec = importlib.util.spec_from_file_location("jev_answered", REPO / "tools" / 
 answered = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = answered
 _spec.loader.exec_module(answered)
+replay = answered.replay
 
 PROVIDER = "judgment-" + "ab" * 32
 OTHER = "judgment-" + "cd" * 32
@@ -49,98 +59,176 @@ def write(path: Path, rows: list) -> None:
 
 
 class TheNamesAreTheRusts(unittest.TestCase):
-    def test_the_keys_and_the_answered_word_are_the_summarys(self) -> None:
+    def test_every_key_is_the_summarys_spelling(self) -> None:
         summary = rust("crates/zerocode-core/src/jev/summary.rs")
+        for name, key in [
+            ("AT", answered.AT_KEY),
+            ("OUTCOME", answered.OUTCOME_KEY),
+            ("REQUESTS", answered.REQUESTS_KEY),
+            ("CACHED", answered.CACHED_KEY),
+            ("APPLIED", answered.APPLIED_KEY),
+            ("MODEL", answered.MODEL_KEY),
+            ("CLIENT_ROUTE", answered.CLIENT_ROUTE_KEY),
+        ]:
+            self.assertIn(f'pub const {name}: LedgerKey = LedgerKey {{\n    canonical: "{key}",\n    also: &[],', summary)
+        canonical, *also = answered.RUBRIC_KEYS
+        spelled = ", ".join(f'"{one}"' for one in also)
+        self.assertIn(f'pub const RUBRIC_VERSION: LedgerKey = LedgerKey {{\n    canonical: "{canonical}",\n    also: &[{spelled}],', summary)
         self.assertIn(f'pub const ANSWERED: &str = "{answered.ANSWERED}";', summary)
-        self.assertIn(f'pub const AT: LedgerKey = LedgerKey {{\n    canonical: "{answered.AT_KEY}",', summary)
-        self.assertIn(f'pub const OUTCOME: LedgerKey = LedgerKey {{\n    canonical: "{answered.OUTCOME_KEY}",', summary)
+
+    def test_the_probe_word_and_the_provider_mark_are_the_products(self) -> None:
+        self.assertIn(
+            f'const PROBE_NOT_ASKED: &str = "{answered.PROBE_NOT_ASKED}";',
+            rust("zo-ide/crates/tools/src/misc_tools/smart_router/decision_shadow.rs"),
+        )
+        self.assertIn(
+            f'model.starts_with(&format!("{{}}{answered.PROVIDER_MARK}", provider.identity()))',
+            rust("crates/zerocode-shell/src/typesafe_settings.rs"),
+        )
 
     def test_the_provider_folder_is_the_one_the_evidence_goes_to(self) -> None:
         self.assertIn(
-            f'base.join("{answered.replay.PROVIDER_LEDGERS}").join(self.identity())',
+            f'base.join("{replay.PROVIDER_LEDGERS}").join(self.identity())',
             rust("crates/judgment-provider/src/lib.rs"),
         )
+
+    def test_a_route_is_spelled_as_the_provider_spells_its_fingerprint(self) -> None:
+        lib = rust("crates/judgment-provider/src/lib.rs")
+        self.assertIn('let mut route = String::from("route-");', lib)
+        self.assertIn('let _ = write!(route, "{byte:02x}");', lib)
+        self.assertTrue(answered.ROUTE.fullmatch("route-" + "0f" * 8))
+        self.assertFalse(answered.ROUTE.fullmatch("judgment-" + "0f" * 8))
 
 
 class TheCount(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = tempfile.TemporaryDirectory()
         self.home = Path(self.dir.name) / ".zo"
-        window = self.home / answered.replay.WINDOW_LEDGERS
+        window = self.home / replay.WINDOW_LEDGERS
         before, after = ms("2026-10-15T07:00"), ms("2026-10-15T07:30")
+        own, other = f"{PROVIDER}:acme/judge", f"{OTHER}:acme/judge"
+        self.route = "route-" + "ef" * 8
+        self.ledger = window / replay.PROVIDER_LEDGERS / PROVIDER / "command-guard.jsonl"
         write(
-            window / answered.replay.PROVIDER_LEDGERS / PROVIDER / "command-guard.jsonl",
+            self.ledger,
             [
-                {"at": before, "outcome": "answered", "command": "secret words"},
-                {"at": before + 1, "outcome": "http_503"},
-                {"at": before + 2, "outcome": "http_503"},
-                {"at": before + 3, "outcome": "timeout"},
-                {"at": before + 4, "label": "allow", "agreed": True},
-                {"at": after, "outcome": "answered"},
+                {"at": before, "outcome": "answered", "requests": 1, "model": own, "command": "secret words", "rubricVersion": 3},
+                {"at": before + 1, "outcome": "answered", "requests": 0, "cached": True, "model": own, "rubricVersion": 3},
+                {"at": before + 2, "outcome": "http_503", "requests": 1, "rubricVersion": 3, "clientRoute": "a person's words"},
+                {"at": before + 3, "outcome": "http_503", "requests": 2, "rubricVersion": 3},
+                {"at": before + 4, "outcome": "timeout", "requests": 1, "rubric_version": 2, "clientRoute": self.route},
+                {"at": before + 5, "outcome": "http_503", "requests": 0},
+                {"at": before + 6, "outcome": "answered", "requests": 1, "model": other, "applied": True},
+                {"at": before + 7, "label": "allow", "agreed": True},
+                {"at": before + 8, "outcome": "answered"},
+                {"at": after, "outcome": "answered", "requests": 1, "model": own},
                 "{not json",
-                {"outcome": "answered"},
+                {"outcome": "answered", "requests": 1},
             ],
         )
-        write(window / answered.replay.PROVIDER_LEDGERS / OTHER / "command-guard.jsonl", [{"at": after, "outcome": "http_502"}])
-        write(window / "command-guard.jsonl", [{"at": before, "outcome": "answered"}])
+        write(window / "command-guard.jsonl", [{"at": before, "outcome": "answered", "requests": 1, "model": "jev-1.13.0"}])
+        write(window / "decision-labels.draft.jsonl", [{"words": "a person's prompt"}])
         for slug, outcome in [("Users-dev-a-0123456789abcdef", "answered"), ("Users-dev-b-fedcba9876543210", "http_502")]:
             write(
-                self.home / "projects" / slug / Path(*answered.replay.PROJECT_LEDGERS) / answered.replay.PROVIDER_LEDGERS / PROVIDER / "rerank-shadow.jsonl",
-                [{"at": before, "outcome": outcome}],
+                self.home / "projects" / slug / Path(*replay.PROJECT_LEDGERS) / replay.PROVIDER_LEDGERS / PROVIDER / "rerank-shadow.jsonl",
+                [{"at": before, "outcome": outcome, "requests": 1}],
             )
-        write(window / "decision-labels.draft.jsonl", [{"words": "a person's prompt"}])
+        write(
+            self.home / "projects" / "Users-dev-a-0123456789abcdef" / Path(*replay.PROJECT_LEDGERS) / replay.PROVIDER_LEDGERS / PROVIDER / "decision-shadow.jsonl",
+            [
+                {"at": before, "outcome": "answered", "requests": 1, "probe": answered.PROBE_NOT_ASKED, "model": own},
+                {"at": before + 1, "outcome": "http_503", "requests": 1, "probe": "timeout"},
+            ],
+        )
         self.windows = [answered.window("before=2026-10-14T19:10..2026-10-15T07:10"), answered.window("after=2026-10-15T07:12..")]
 
     def tearDown(self) -> None:
         self.dir.cleanup()
 
-    def table(self) -> list[dict]:
-        tally, self.unplaced = answered.count(self.home, self.windows)
-        return answered.rows_of(tally, self.windows)
+    def table(self, projects=()) -> list[dict]:
+        tallies, self.reads = answered.count(self.home, self.windows, list(projects))
+        return answered.rows_of(tallies, self.windows)
 
-    def test_each_seat_folder_and_window_gets_its_own_share_and_failure_words(self) -> None:
+    def test_a_judgment_is_counted_by_its_own_fields(self) -> None:
         rows = {(row["place"], row["seat"], row["folder"], row["window"]): row for row in self.table()}
         held = rows[("window", "command-guard", PROVIDER, "before")]
-        self.assertEqual((held["requests"], held["answered"]), (4, 1), "the label row is no request")
-        self.assertEqual(held["share"], 0.25)
+        self.assertEqual(held["judgments"], 8, "the label row is no judgment; the untimed one falls in no window")
+        self.assertEqual((held["sent"], held["attempts"], held["answered"]), (5, 6, 2))
+        self.assertEqual(held["share"], 0.4, "answered of what was sent; a memo hit is not sent")
+        self.assertEqual(held["unsent"], {"cached": 1, "http_503": 1})
+        self.assertEqual((held["noRequests"], held["retried"], held["applied"], held["probed"]), (1, 1, 1, 0))
+        self.assertEqual((held["otherProvider"], held["unattributed"]), (1, 2), "a sent failure naming no route and no provider")
+        self.assertEqual(held["routes"], {self.route: 1}, "a value that is not a route is none")
         self.assertEqual(list(held["failures"].items()), [("http_503", 2), ("timeout", 1)], "most first")
-        self.assertEqual(rows[("window", "command-guard", PROVIDER, "after")]["requests"], 1)
-        self.assertEqual(rows[("window", "command-guard", OTHER, "after")]["failures"], {"http_502": 1})
-        self.assertEqual(rows[("window", "command-guard", answered.JEV_FOLDER, "before")]["answered"], 1)
+        self.assertEqual(held["rubrics"], [2, 3], "both spellings of the rubric")
+        self.assertEqual(rows[("window", "command-guard", PROVIDER, "after")]["answered"], 1)
+        jev = rows[("window", "command-guard", answered.JEV_FOLDER, "before")]
+        self.assertEqual((jev["answered"], jev["unattributed"]), (1, 0), "in Jev's own folder the model names Jev")
         projects = rows[("projects", "rerank-shadow", PROVIDER, "before")]
-        self.assertEqual((projects["requests"], projects["answered"]), (2, 1), "every project's folder is summed")
-        self.assertNotIn("decision-labels.draft", {key[1] for key in rows}, "a file with no request is no seat")
-        self.assertEqual(self.unplaced, {"command-guard": 2}, "a line that does not parse and a request without a time")
+        self.assertEqual((projects["sent"], projects["answered"]), (2, 1), "every project's folder is summed")
+        self.assertEqual(rows[("projects", "decision-shadow", PROVIDER, "before")]["probed"], 1, "not_asked asked nothing")
+        self.assertNotIn("decision-labels.draft", {key[1] for key in rows}, "a file with no judgment is no seat")
+
+    def test_each_file_is_named_by_the_hash_of_the_bytes_counted(self) -> None:
+        self.table()
+        read = next(one for one in self.reads if one.path == str(self.ledger.relative_to(self.home)))
+        data = self.ledger.read_bytes()
+        self.assertEqual((read.bytes, read.sha256), (len(data), hashlib.sha256(data).hexdigest()))
+        self.assertEqual((read.lines, read.corrupt, read.untimed), (12, 1, 1))
 
     def test_the_table_says_counts_and_words_and_nothing_else_of_a_row(self) -> None:
         write(
-            self.home / answered.replay.WINDOW_LEDGERS / "mail-triage.jsonl",
-            [{"at": ms("2026-10-15T07:00"), "outcome": "refused: the person's words here"}],
+            self.home / replay.WINDOW_LEDGERS / "mail-triage.jsonl",
+            [{"at": ms("2026-10-15T07:00"), "outcome": "refused: the person's words here", "requests": 1}],
         )
-        text = answered.render(self.table(), self.unplaced)
-        self.assertIn(f"| command-guard | window | judgment-{'ab' * 4} | before | 4 | 1 | 25.0% | http_503 2 · timeout 1 |", text)
-        self.assertIn(f"| mail-triage | window | {answered.JEV_FOLDER} | before | 1 | 0 | 0.0% | {answered.NOT_A_WORD} 1 |", text)
+        rows = self.table()
+        changed = answered.utc(ms("2026-10-15T07:20"))
+        counted = {"countedAt": "2026-10-15T00:00:00Z", "home": "/Users/dev/.zo", "versions": {"app": {"version": "9.9.9", "modified": changed}, "zo": None}}
+        text = answered.render(rows, answered.totals_of(rows, self.windows), self.reads, self.windows, counted)
+        self.assertIn(
+            f"| command-guard | window | judgment-{'ab' * 4} | before | 2,3 | 8 | 5 | 6 | 2 | 40.0% | 1 "
+            f"| cached 1 · http_503 1 · no requests count 1 | 1 | 0 | 1 | 2 | route-{'ef' * 4} 1 | http_503 2 · timeout 1 |",
+            text,
+        )
+        self.assertIn(
+            f"| judgment-{'ab' * 4} | before | 12 | 9 | 10 | 4 | 44.4% | cached 1 · http_503 1 · no requests count 1 "
+            "| http_503 3 · http_502 1 · timeout 1 |",
+            text,
+            "every seat and place summed",
+        )
+        self.assertIn(f"| mail-triage | window | {answered.JEV_FOLDER} | before | — | 1 | 1 | 1 | 0 | 0.0% |", text)
+        self.assertIn(f"{answered.NOT_A_WORD} 1", text)
         self.assertNotIn("secret", text)
         self.assertNotIn("person's", text)
-        self.assertIn("in no window: command-guard 2.", text)
-        lines = text.splitlines()
-        self.assertLess(lines.index(next(line for line in lines if "| window |" in line)), lines.index(next(line for line in lines if "| projects |" in line)))
+        start, end = answered.utc(ms("2026-10-14T19:10")), answered.utc(ms("2026-10-15T07:10"))
+        self.assertIn(
+            f"Windows (UTC): before {start}..{end} · after {answered.utc(ms('2026-10-15T07:12'))}..open [app file changed inside]",
+            text,
+        )
+        self.assertIn(f"· app 9.9.9 (file changed {changed}) · zo not named", text)
+        data = self.ledger.read_bytes()
+        self.assertIn(f"| {self.ledger.relative_to(self.home)} | {len(data):,} | 12 | 1 | 1 | {hashlib.sha256(data).hexdigest()[:answered.SHA_DIGITS]} |", text)
+        places = [line.split(" | ")[1] for line in text.splitlines() if line.startswith(f"| {self.ledger.stem} | ") or line.startswith("| rerank-shadow | ")]
+        self.assertEqual(places, sorted(places, key=lambda place: place != answered.WINDOW_PLACE), "the window's rows first")
+        self.assertEqual(set(places), {answered.WINDOW_PLACE, answered.PROJECTS_PLACE})
 
     def test_a_named_project_is_read_alone_by_zos_slug_and_an_unknown_one_is_refused(self) -> None:
-        tally, _ = answered.count(self.home, self.windows, [Path("/Users/dev/a")])
-        named = answered.rows_of(tally, self.windows)
-        projects = [row for row in named if row["place"] == answered.PROJECTS_PLACE]
-        self.assertEqual([(row["seat"], row["requests"], row["answered"]) for row in projects], [("rerank-shadow", 1, 1)])
+        named = self.table([Path("/Users/dev/a")])
+        projects = sorted((row["seat"], row["sent"], row["answered"]) for row in named if row["place"] == answered.PROJECTS_PLACE)
+        self.assertEqual(projects, [("decision-shadow", 2, 1), ("rerank-shadow", 1, 1)])
         self.assertTrue(any(row["place"] == answered.WINDOW_PLACE for row in named), "the window's folder is read still")
         with self.assertRaises(SystemExit):
             answered.count(self.home, self.windows, [Path("/Users/dev/elsewhere")])
 
-    def test_a_window_holds_its_start_and_not_its_end(self) -> None:
+    def test_a_window_holds_its_start_and_not_its_end_and_is_said_in_utc(self) -> None:
         one = answered.window("w=2026-10-15T07:00..2026-10-15T08:00")
         self.assertTrue(one.holds(ms("2026-10-15T07:00")))
         self.assertFalse(one.holds(ms("2026-10-15T08:00")))
         self.assertEqual(answered.window("w=1000..").end, None)
         self.assertEqual(answered.window("w=..1000"), answered.Window("w", None, 1000))
+        zoned = answered.moment("2026-10-15T09:00:00+09:00")
+        self.assertEqual(zoned, answered.moment("2026-10-15T00:00:00Z"))
+        self.assertEqual(answered.utc(zoned), "2026-10-15T00:00:00Z")
         for bad in ["no-equals", "w=2026-10-15", "w=yesterday..today"]:
             with self.assertRaises(SystemExit):
                 answered.window(bad)
@@ -150,17 +238,32 @@ class TheHomeIsOnlyRead(unittest.TestCase):
     def test_nothing_under_the_home_changes_and_only_the_named_file_is_written(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             home = Path(root) / ".zo"
-            write(home / answered.replay.WINDOW_LEDGERS / answered.replay.PROVIDER_LEDGERS / PROVIDER / "notify-call.jsonl", [{"at": 5, "outcome": "answered"}])
+            write(home / replay.WINDOW_LEDGERS / replay.PROVIDER_LEDGERS / PROVIDER / "notify-call.jsonl", [{"at": 5, "outcome": "answered", "requests": 1}])
+            app = Path(root) / "Acme.app"
+            app.joinpath(*answered.APP_INFO).parent.mkdir(parents=True)
+            with app.joinpath(*answered.APP_INFO).open("wb") as handle:
+                plistlib.dump({answered.APP_VERSION_KEY: "9.9.9"}, handle)
+            zo = Path(root) / "zo"
+            zo.write_text("#!/bin/sh\necho 'zo 9.9.9'\n")
+            zo.chmod(zo.stat().st_mode | stat.S_IXUSR)
             before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in home.rglob("*") if path.is_file()}
             out = Path(root) / "out"
             out.mkdir()
             with redirect_stdout(io.StringIO()) as printed:
-                self.assertEqual(answered.main(["--home", str(home), "--json", str(out / "rows.json")]), 0)
+                self.assertEqual(answered.main(["--home", str(home), "--app", str(app), "--zo", str(zo), "--json", str(out / "rows.json")]), 0)
             after = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in home.rglob("*") if path.is_file()}
             self.assertEqual(before, after, "the home changed")
             self.assertEqual(os.listdir(out), ["rows.json"])
             kept = json.loads((out / "rows.json").read_text())
+            self.assertEqual({name: seen["version"] for name, seen in kept["versions"].items()}, {"app": "9.9.9", "zo": "zo 9.9.9"})
+            self.assertEqual(kept["versions"]["zo"]["modified"], answered.utc(int(zo.stat().st_mtime * 1000)))
             self.assertEqual([(row["seat"], row["window"], row["share"]) for row in kept["rows"]], [("notify-call", answered.ALL_WINDOW, 1.0)])
+            self.assertEqual([(total["folder"], total["judgments"], total["sent"], total["answered"]) for total in kept["totals"]], [(PROVIDER, 1, 1, 1)])
+            self.assertEqual([(one["lines"], one["corrupt"], one["untimed"]) for one in kept["files"]], [(1, 0, 0)])
+            self.assertEqual(
+                kept["windows"],
+                [{"label": answered.ALL_WINDOW, "start": None, "end": None, "startUtc": None, "endUtc": None, "changedInside": ["app", "zo"]}],
+            )
             self.assertIn("| notify-call | window |", printed.getvalue())
 
 
