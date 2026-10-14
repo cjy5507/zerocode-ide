@@ -520,6 +520,11 @@ impl Composer {
         self.images.clear();
     }
 
+    #[cfg(test)]
+    fn resident_history_bytes(&self) -> usize {
+        self.history.iter().map(String::len).sum()
+    }
+
     fn previous_boundary(&self, from: usize) -> Option<usize> {
         if from == 0 {
             return None;
@@ -1264,6 +1269,58 @@ mod tests {
         assert_eq!(restored.text(), "new question");
         restored.history_prev();
         assert_eq!(restored.text(), "new question");
+    }
+
+    /// 전역 기록은 사람이 zo 를 쓸수록 자라는데, 패인마다 그것을 통째로 들고 있을 수는
+    /// 없다. 행의 본문은 사람이 그 행으로 걸어갈 때 읽고, 걷는 길은 전과 같아야 한다.
+    #[test]
+    fn stored_history_rows_stay_on_disk_until_browsed() {
+        const STORED_ROWS: usize = 120;
+        const ROW_TEXT_BYTES: usize = 400;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join(HISTORY_FILE_NAME);
+        let writer = HistoryFile {
+            path: path.clone(),
+            session_id: "session-a".to_string(),
+        };
+        let rows = (0..STORED_ROWS)
+            .map(|row| format!("stored question {row} {}", "x".repeat(ROW_TEXT_BYTES)))
+            .collect::<Vec<_>>();
+        for row in &rows {
+            append_history(&writer, row).expect("append history row");
+        }
+        append_history(&writer, "   ").expect("append blank row");
+
+        let seed = "resumed question".to_string();
+        let mut composer = Composer::with_history_file(path, "session-b", vec![seed.clone()]);
+        assert_eq!(
+            composer.resident_history_bytes(),
+            seed.len(),
+            "only this session's own prompts are held; stored rows are read when browsed"
+        );
+
+        composer.insert_str("draft");
+        composer.history_prev();
+        assert_eq!(composer.text(), seed);
+        for row in rows.iter().rev() {
+            composer.history_prev();
+            assert_eq!(composer.text(), row);
+        }
+        composer.history_prev();
+        assert_eq!(composer.text(), rows[0], "the oldest row is where browsing stops");
+        for row in rows.iter().skip(1) {
+            composer.history_next();
+            assert_eq!(composer.text(), row);
+        }
+        composer.history_next();
+        assert_eq!(composer.text(), seed);
+        composer.history_next();
+        assert_eq!(composer.text(), "draft");
+
+        composer.insert_str(" sent");
+        assert_eq!(composer.submit().text, "draft sent");
+        composer.history_prev();
+        assert_eq!(composer.text(), "draft sent");
     }
 
     #[test]
