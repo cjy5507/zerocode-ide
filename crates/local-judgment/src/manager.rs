@@ -208,10 +208,13 @@ impl Cancel {
         &self,
         operation: impl std::future::Future<Output = Result<()>>,
     ) -> Result<()> {
-        tokio::select! {
+        self.check()?;
+        let result = tokio::select! {
             _ = self.cancelled() => Err(Error::Cancelled),
             result = operation => result,
-        }
+        };
+        self.check()?;
+        result
     }
 }
 
