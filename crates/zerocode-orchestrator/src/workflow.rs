@@ -12,6 +12,11 @@ use crate::handoff::{HandoffManifestV1, PublishPolicy, TestRequirement};
 /// Publication refs owned by ZeroCode rather than by a checked-out branch.
 pub const INTEGRATION_REF_PREFIX: &str = "refs/zerocode/integration/";
 
+/// The app's own refs a batch is stacked on before its integration ref moves
+/// (t-45315). No worktree checks them out and no person's branch list shows
+/// them, so a stack never needs a temporary branch the app would have to delete.
+pub const STACK_REF_PREFIX: &str = "refs/zerocode/stack/";
+
 /// A Git ref and the exact object it must name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
