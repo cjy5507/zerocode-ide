@@ -268,6 +268,7 @@ mod tests {
 
     #[test]
     fn preferences_round_trip_and_preserve_unrelated_settings() {
+        let _lock = crate::test_env_lock();
         let settings = path("round-trip");
         fs::write(&settings, r#"{"mcpServers":{},"custom":true}"#)
             .expect("seed settings");
@@ -289,6 +290,7 @@ mod tests {
     /// disk is pinned to the alias once, with a migration record.
     #[test]
     fn family_heads_are_pinned_to_their_alias() {
+        let _lock = crate::test_env_lock();
         let opus = api::resolve_catalog_alias(api::ANTHROPIC_OPUS_MODEL_ALIAS);
         assert_eq!(super::pinned_model_id(&opus), "opus");
         assert_eq!(super::pinned_model_id("claude-opus-4-8"), "claude-opus-4-8", "not a family head");

@@ -47,6 +47,10 @@ fn main() -> ExitCode {
     // An expired Claude Code login is renewed by its own CLI, never by zo
     // (t-11045): this is the road the credential chain asks.
     zo_ide::claude_renewal::install();
+    // Before anything can ask the model catalog: its first question loads the
+    // catalog this process declares instead of answering from the shipped
+    // seed alone (t-44087).
+    api::install_model_catalog_loader(zo_ide::runtime_support::load_model_catalog);
     // This process owns its workspaces: zo's own bookkeeping (`.zo/turns`,
     // `.zo/dream`) lives beside the transcript under `~/.zo/projects/<slug>`,
     // never in the person's checkout. The crates keep the in-tree default for

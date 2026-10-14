@@ -402,6 +402,14 @@ pub(crate) fn test_env_mutex() -> &'static std::sync::Mutex<()> {
         // any config folder a test sets (t-11045). Tests that want one set it
         // themselves.
         std::env::remove_var(api::managed_account::CLAUDE_SECURE_STORAGE_DIR_ENV);
+        // A pane hands whatever it starts the catalog its zo published (the
+        // bridge variables): a test run from one would answer from the
+        // person's catalog. Tests that want a catalog publish their own.
+        for variable in crate::model_wire_env::BRIDGE_VARIABLES {
+            std::env::remove_var(variable);
+        }
+        // The first catalog question loads the catalog, as `main` arranges.
+        api::install_model_catalog_loader(crate::runtime_support::load_model_catalog);
         std::sync::Mutex::new(())
     })
 }

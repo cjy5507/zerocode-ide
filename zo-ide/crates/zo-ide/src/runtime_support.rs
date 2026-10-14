@@ -1571,6 +1571,11 @@ pub(crate) fn alias_move_words(update: &runtime::model_discovery::AliasUpdate) -
 /// picks up a background discovery refresh that completed since the last call.
 #[allow(clippy::must_use_candidate)] // every runtime rebuild calls this for the effect; the answer is for `zo models`
 pub fn publish_model_catalog() -> Option<crate::model_wire_env::Published> {
+    // A test publishes only from the home the harness gave it: whichever test
+    // publishes first must not read the job's home or the catalog the pane
+    // that started the run handed it (t-44087).
+    #[cfg(test)]
+    crate::support::test_env_mutex();
     let declared = runtime::model_catalog::ModelCatalog::load()
         .ok()
         .and_then(|catalog| catalog.catalog_overlay_json());
@@ -1611,6 +1616,13 @@ pub fn connect_model_catalog() -> Option<crate::model_wire_env::Published> {
     let published = publish_model_catalog();
     spawn_model_discovery_refresh(runtime::model_discovery::UpdatePolicy::load());
     published
+}
+
+/// The loader `api` runs at the first catalog question (t-44087): publish what
+/// this process declares, so no answer comes from the shipped seed alone.
+/// `main` installs it before anything can ask, and so does the test harness.
+pub fn load_model_catalog() {
+    publish_model_catalog();
 }
 
 /// `fetched_at` of the discovery snapshot the last publish layered in — so
