@@ -18247,6 +18247,20 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::Mutation,
     ),
     (
+        land_batch::LAND_BATCH_VERB,
+        "[--batch <id>] · read this run's integration batches | --members <t-1,t-2,…> \
+         --message-dir <dir> · stack ready, verified tasks on the base branch, one merge each, \
+         on an app-only ref (refs/zerocode/stack/) — no checkout, index or branch is touched | \
+         --batch <id> --prepare | --record <check> --rc <n> --log <path> [--took-ms <ms>] | \
+         --promote | --bisect | --restack [--drop <t-1,…>] | --abort | --record-merged · \
+         --prepare readies the tip (or the culprit search's next step) for the gate; the gate is \
+         a set of build-line jobs, so --record takes the whole set's result — --rc 0 only when \
+         every job passed — and --log names the per-job RC summary; --promote fast-forwards the \
+         base branch to a green tip; --record-merged writes the merged records after the \
+         person's promote. macOS only, and off until the repository turns it on",
+        Doing::Policy,
+    ),
+    (
         gate_reuse::PIN,
         "--gate <gate-root|gate-zo> --body <policy-json> · pin exact policy and producer identities for the current authenticated coordinator",
         Doing::Mutation,
@@ -20023,6 +20037,8 @@ const BOUNDED_INPUT: &[(&str, Destination)] = &[
     ("--rc", Destination::Name),
     ("--took-ms", Destination::Name),
     ("--log", Destination::Prose),
+    // The integration queue's folder of landing messages (t-45315), a path like the log's.
+    ("--message-dir", Destination::Prose),
 ];
 
 /// Refuse an oversized field before anything happens, not while saving.
@@ -22656,7 +22672,7 @@ fn plan_inner(
                 land_batch::Planned::Said(value) => said(value),
                 land_batch::Planned::Carry(ask) => {
                     let mut planned = said(serde_json::Value::Null);
-                    planned.effect = Effect::LandBatch(Box::new(ask));
+                    planned.effect = Effect::LandBatch(ask);
                     planned
                 }
             }
