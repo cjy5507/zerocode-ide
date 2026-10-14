@@ -9,7 +9,7 @@ pub(crate) use form::{automate_fields, automate_fill, eval_script};
 /// The callback channel is shared by find/grab/menu and the automation
 /// surface below. A page owns every byte it returns, so both the engine wait
 /// and the amount accepted back into Rust are bounded here, once.
-const BROWSER_CALLBACK_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const BROWSER_CALLBACK_DEADLINE: Duration = Duration::from_secs(5);
 const BROWSER_CALLBACK_CAP: usize = 256_000;
 const BROWSER_READ_CAP: usize = 20_000;
 const BROWSER_DOM_CAP: usize = 20_000;
