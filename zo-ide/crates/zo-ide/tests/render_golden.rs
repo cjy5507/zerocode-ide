@@ -109,6 +109,7 @@ fn bash_call(call_id: &str, command: &str, status: ToolCallStatus) -> RenderBloc
         preview: ToolPreview::Bash {
             command: command.to_string(),
         },
+        input_print: None,
         status,
     }
 }
@@ -652,6 +653,7 @@ fn a_non_bash_call_borrows_the_exec_grammar() {
                     path: "src/lib.rs".to_string(),
                     range: Some((1, 40)),
                 },
+                input_print: None,
                 status: ToolCallStatus::Running,
             },
             RenderBlock::ToolResult {

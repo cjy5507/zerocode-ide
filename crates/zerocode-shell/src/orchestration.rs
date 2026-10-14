@@ -3281,6 +3281,29 @@ const NO_AGENT_IN_FRONT: &str = "— its shell is in front; the agent that ended
 /// [`pane_turn_began`] writes both down as running.
 const A_TURN_IS_RUNNING: &str = "— a turn is under way in it";
 
+/// Why the window may not type at a pane's composer on its own: one per door
+/// [`composer_at_rest`] keeps — a code a person's screen says in its own
+/// language (t-47935), and the sentence the window's log and a coordinator
+/// read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerBusy {
+    NeverHeard,
+    HeldByPerson,
+    ShellInFront,
+    TurnRunning,
+}
+
+impl ComposerBusy {
+    const fn sentence(self) -> &'static str {
+        match self {
+            Self::NeverHeard => NOTHING_WAS_EVER_HEARD,
+            Self::HeldByPerson => THE_PERSON_HOLDS_IT,
+            Self::ShellInFront => NO_AGENT_IN_FRONT,
+            Self::TurnRunning => A_TURN_IS_RUNNING,
+        }
+    }
+}
+
 /// Whether the window may type at this pane's composer on its own, off the
 /// turn facts it measured: `Ok` for a pane whose last turn ended at rest with
 /// its agent still in front, and otherwise the reason it may not.
@@ -3296,18 +3319,18 @@ fn composer_at_rest(
     host: &dyn Host,
     term: u32,
     heard: Option<PaneTurn>,
-) -> Result<(), &'static str> {
+) -> Result<(), ComposerBusy> {
     match heard {
         Some(PaneTurn::Ended { interrupted: false }) => {
             if host.shell_in_front(term) {
-                Err(NO_AGENT_IN_FRONT)
+                Err(ComposerBusy::ShellInFront)
             } else {
                 Ok(())
             }
         }
-        Some(PaneTurn::Ended { interrupted: true }) => Err(THE_PERSON_HOLDS_IT),
-        Some(PaneTurn::Running { .. }) => Err(A_TURN_IS_RUNNING),
-        None => Err(NOTHING_WAS_EVER_HEARD),
+        Some(PaneTurn::Ended { interrupted: true }) => Err(ComposerBusy::HeldByPerson),
+        Some(PaneTurn::Running { .. }) => Err(ComposerBusy::TurnRunning),
+        None => Err(ComposerBusy::NeverHeard),
     }
 }
 
@@ -8093,7 +8116,9 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                 // terminal: a hand-started agent quit after its last turn
                 // leaves the shell in front, and nothing reports that. A
                 // running turn was answered above.
-                let unattended = composer_at_rest(host, term, heard).err();
+                let unattended = composer_at_rest(host, term, heard)
+                    .err()
+                    .map(ComposerBusy::sentence);
                 // The third: a sleeper is already the better pointer — for an
                 // unattended pane most of all. An agent asleep in a
                 // `check --wait` is told the instant mail lands, with the mail

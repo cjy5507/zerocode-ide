@@ -43428,6 +43428,7 @@ h4.knowledge-inspector-head::after {
   text-align: left;
   color: var(--ink-mist);
   font-size: var(--jev-meta-size);
+  overflow-wrap: anywhere;
 }
 
 /* A feature's state (t-6243 D2): the chip in its state's tone, one sentence

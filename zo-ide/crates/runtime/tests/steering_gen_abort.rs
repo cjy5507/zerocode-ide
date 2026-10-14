@@ -600,6 +600,7 @@ impl AsyncApiClient for SteeredAfterToolUseAsyncApi {
                         name: "echo".to_string(),
                         input_summary: "hi".to_string(),
                     },
+                    input_print: None,
                     status: ToolCallStatus::Pending,
                 })
                 .await
