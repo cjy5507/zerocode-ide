@@ -308,6 +308,8 @@ const judgmentProviderController = {
     }
     const notice = el("judgment-provider-dirty");
     if (notice) notice.hidden = !dirty;
+    const keyState = el("typesafe-key-state");
+    if (keyState) keyState.hidden = dirty;
     const keyField = el("typesafe-key-input")?.closest("label");
     if (keyField) keyField.hidden = !auth;
     const saveKey = el("typesafe-save-btn");
