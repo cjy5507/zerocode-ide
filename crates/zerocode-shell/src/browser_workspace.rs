@@ -5,6 +5,49 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+#[cfg(test)]
+mod original_observation_regressions {
+    use super::*;
+
+    #[test]
+    fn an_agent_read_captures_its_revision_without_a_prior_revision_input() {
+        let workspaces = Workspaces::default();
+        workspaces
+            .register("browser-1", Some("pane-a"), false)
+            .unwrap();
+        for verb in ["read", "marks", "fields", "screenshot"] {
+            let result = workspaces.begin_at("browser-1", Some("pane-a"), verb, None);
+            assert!(
+                result.is_ok(),
+                "{verb} must capture the read's own revision"
+            );
+            if let Ok(Some(operation)) = result {
+                operation.finish(true);
+            }
+        }
+    }
+
+    #[test]
+    fn a_managed_write_requires_an_explicit_original_observation_revision() {
+        let workspaces = Workspaces::default();
+        workspaces
+            .register("browser-1", Some("pane-a"), false)
+            .unwrap();
+        workspaces
+            .begin_at("browser-1", Some("pane-a"), "read", Some(1))
+            .unwrap()
+            .unwrap()
+            .finish(true);
+        for verb in ["click", "type", "fill", "goto", "close", "scroll", "find"] {
+            let result = workspaces.begin_at("browser-1", Some("pane-a"), verb, None);
+            assert!(
+                matches!(result, Err(ref error) if error.starts_with("workspace_revision_required:")),
+                "{verb}"
+            );
+        }
+    }
+}
+
 const WORKSPACE_CAP: usize = 128;
 const FRAME_INTERVAL: Duration = Duration::from_secs(1);
 type Notice = Box<dyn Fn(Snapshot) + Send + Sync>;

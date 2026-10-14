@@ -176,7 +176,8 @@ fn timed_out_open_is_cancelled_and_managed_viewport_does_not_claim_unconfirmed_s
     assert!(guarded.contains("begin_actor_target("));
     assert!(guarded.contains("let actor = step_actor(app, pane)"));
     let loop_body = block_after(RUNTIME, "async fn browser_loop(");
-    assert!(loop_body.contains("browser_revision(&app, &request.argv)"));
+    assert!(loop_body.contains("request.workspace_revision"));
+    assert!(!loop_body.contains("browser_revision("));
     assert!(loop_body.contains("reply.closed()"));
 }
 
@@ -241,4 +242,54 @@ fn ownership_adapters_use_held_terminal_identity_and_do_not_select_a_model() {
     let facts = block_after(artifacts, "fn facts_of_pane(");
     assert!(facts.contains("state.terminals().contains_key(&term)"));
     assert!(facts.contains("Some(pane_facts(heard, seat))"));
+}
+
+#[test]
+fn original_revision_admission_and_observation_completion_share_backend_state() {
+    let source = include_str!("../../src/browser_workspace.rs");
+    let admission = block_after(source, "fn begin_at(");
+    assert!(admission.contains("workspace_revision_required:"));
+    assert!(
+        source.contains("fn finish_observation("),
+        "a read needs a checked completion"
+    );
+    let completion = block_after(source, "fn finish_observation(");
+    for guard in [
+        "state.closed",
+        "state.revision",
+        "state.mode",
+        "state.owner",
+    ] {
+        assert!(completion.contains(guard), "completion must check {guard}");
+    }
+    let answer = block_after(RUNTIME, "async fn answer_browser_command(");
+    assert!(answer.contains("parse_workspace_command("));
+    assert!(answer.contains("finish_observation("));
+    assert!(answer.contains("stamp_browser_observation("));
+    assert!(!RUNTIME.contains("fn browser_revision("));
+}
+
+#[test]
+fn wire_validates_revision_before_the_request_enters_the_browser_queue() {
+    let hookd = include_str!("../../../zerocode-hookd/src/lib.rs");
+    let receiver = block_after(hookd, "async fn receive_browser_command(");
+    assert!(receiver.contains("workspace_revision_of("));
+    assert!(
+        receiver.find("workspace_revision_of(").unwrap()
+            < receiver.find("state.browser.send(").unwrap()
+    );
+    assert!(hookd.contains("pub workspace_revision: Option<u64>"));
+}
+
+#[test]
+fn nested_walk_recipe_and_code_entry_keep_their_own_observation_revision() {
+    let walk = include_str!("../../src/computer_use/errand/walk.rs");
+    let recipe = include_str!("../../src/computer_use/recipe_run.rs");
+    let enter = include_str!("../../src/computer_use/enter.rs");
+    assert!(walk.contains("workspace_revision"));
+    assert!(recipe.contains("observation_revision("));
+    assert!(enter.contains("into.workspace_revision()"));
+    let typer = block_after(RUNTIME, "impl computer_use::enter::Typer for LiveTyper");
+    assert!(typer.contains("workspace_revision: Option<u64>"));
+    assert!(!typer.contains(".snapshot(") && !typer.contains("browser_revision("));
 }

@@ -1705,6 +1705,51 @@ mod tests {
         WALKED_STEP_UNFRAMED_FLAGS,
     };
 
+    #[test]
+    fn a_recipe_uses_this_runs_observation_instead_of_the_recorded_revision() {
+        let bench = Bench::new();
+        let text = mixed_doc(&[
+            (RecipeTool::Browser, "marks browser-1 --json"),
+            (
+                RecipeTool::Browser,
+                "click browser-1 #submit --workspace-revision 3",
+            ),
+        ]);
+        let mut sent = Vec::new();
+        let result = run_lines(
+            &command(&[]),
+            ("f.md", &text),
+            DEADLINE,
+            |argv, _| {
+                sent.push(argv.to_vec());
+                if argv[0] == "marks" {
+                    TeamAnswer {
+                        stdout: "{\"items\":[],\"workspaceRevision\":7}\n".into(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                    }
+                } else {
+                    ok()
+                }
+            },
+            |_, _, _| {},
+            bench.desk(false, None),
+            || true,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(sent.len(), 2);
+        assert!(
+            sent[1]
+                .windows(2)
+                .any(|words| words == ["--workspace-revision", "7"])
+        );
+        assert!(
+            !sent[1]
+                .windows(2)
+                .any(|words| words == ["--workspace-revision", "3"])
+        );
+    }
+
     /// The walk as the older tests call it: desktop lines, one road, no
     /// evidence folder, no Flow.
     fn run_lines(

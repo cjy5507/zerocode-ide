@@ -2195,6 +2195,54 @@ pub fn hook_script(agent: AgentKind) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn malformed_original_workspace_revisions_never_reach_the_browser_queue() {
+        for raw in [
+            "",
+            "-1",
+            "+1",
+            "1.5",
+            " 1",
+            "1,2",
+            "18446744073709551616",
+            "x",
+        ] {
+            let (state, _events, _teams, mut browser) = BridgeState::new("hook", "browser");
+            let request = Request::builder()
+                .header(BROWSER_TOKEN_HEADER, "browser")
+                .header("x-zerocode-workspace-revision", raw)
+                .body(axum::body::Body::from(
+                    "click\u{1f}browser-1\u{1f}#submit\u{1f}",
+                ))
+                .unwrap();
+            let pending = tokio::spawn(receive_browser_command(State(state), request));
+            tokio::select! {
+                response = pending => assert_eq!(response.unwrap().status(), StatusCode::CONFLICT),
+                queued = browser.recv() => assert!(queued.is_none(), "malformed revision {raw:?} was dispatched"),
+            }
+            assert!(browser.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_original_workspace_revision_headers_never_reach_the_browser_queue() {
+        let (state, _events, _teams, mut browser) = BridgeState::new("hook", "browser");
+        let request = Request::builder()
+            .header(BROWSER_TOKEN_HEADER, "browser")
+            .header("x-zerocode-workspace-revision", "7")
+            .header("x-zerocode-workspace-revision", "7")
+            .body(axum::body::Body::from(
+                "click\u{1f}browser-1\u{1f}#submit\u{1f}",
+            ))
+            .unwrap();
+        let pending = tokio::spawn(receive_browser_command(State(state), request));
+        tokio::select! {
+            response = pending => assert_eq!(response.unwrap().status(), StatusCode::CONFLICT),
+            queued = browser.recv() => assert!(queued.is_none(), "duplicate revision headers were dispatched"),
+        }
+        assert!(browser.try_recv().is_err());
+    }
+
     /// Every vendor, both dialects, one assertion each — the shape the
     /// upstream fix (#15520) taught: a per-vendor test cannot see a vendor's
     /// copy drift. The Windows script posts with curl.exe and starts no

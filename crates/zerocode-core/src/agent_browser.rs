@@ -1401,6 +1401,27 @@ mod tests {
     use super::*;
     use crate::agent_teams::unpack_argv;
 
+    #[test]
+    fn common_workspace_revision_does_not_change_verb_arity() {
+        for raw in ["0", "42", "18446744073709551615"] {
+            let argv =
+                ["click", "browser-1", "#submit", "--workspace-revision", raw].map(str::to_string);
+            assert!(arity_ok(&argv).is_ok(), "valid original revision {raw}");
+        }
+    }
+
+    #[test]
+    fn both_browser_shims_send_the_original_workspace_revision_header() {
+        for script in [
+            shim_script("P", "B", "H"),
+            shim_script_powershell("P", "B", "H"),
+        ] {
+            assert!(script.contains("--workspace-revision"));
+            assert!(script.contains("x-zerocode-workspace-revision"));
+            assert!(script.contains("18446744073709551615"));
+        }
+    }
+
     /// The shim fails closed and speaks to the right door with the right
     /// header — the script is a string, so the contract is held by reading
     /// it.

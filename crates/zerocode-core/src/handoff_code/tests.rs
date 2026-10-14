@@ -13,6 +13,23 @@ fn words(argv: &[&str]) -> Vec<String> {
     argv.iter().map(|word| (*word).to_string()).collect()
 }
 
+#[test]
+fn a_browser_code_target_keeps_the_original_observation_until_the_person_answers() {
+    let given = words(&[
+        "browser",
+        "type",
+        "browser-1",
+        "#otp",
+        "--workspace-revision",
+        "7",
+    ]);
+    let into = EnterInto::from_words(&given);
+    assert!(into.is_ok(), "{into:?}");
+    let into = into.unwrap();
+    assert_eq!(into.verb(), "type");
+    assert_eq!(into.to_words(), given);
+}
+
 /// What a code is: four to ten ASCII letters or digits, the person's own case
 /// kept, and nothing else.
 #[test]
