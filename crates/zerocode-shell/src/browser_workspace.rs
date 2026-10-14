@@ -292,6 +292,10 @@ fn paused() -> String {
     "workspace_paused: 작업 브라우저가 일시정지 또는 직접 조작 중입니다 — 자동으로 재시도하지 마세요".to_string()
 }
 
+fn busy() -> String {
+    "workspace_busy: 작업 브라우저의 이전 요청이 끝나지 않았습니다".to_string()
+}
+
 fn next_revision(state: &mut State) -> Result<(), String> {
     state.revision = state
         .revision
@@ -537,9 +541,7 @@ impl Workspaces {
             return Err("workspace_revision_required: 작업 브라우저 변경에는 원관측의 workspaceRevision이 필요합니다".to_string());
         }
         if state.in_flight != 0 {
-            return Err(
-                "workspace_busy: 작업 브라우저의 이전 요청이 끝나지 않았습니다".to_string(),
-            );
+            return Err(busy());
         }
         if row.changes_page && state.needs_observation {
             return Err("workspace_observation_required: 작업 브라우저의 화면을 다시 확인하세요 — 먼저 read, marks 또는 fields를 실행하세요".to_string());
@@ -575,8 +577,11 @@ impl Workspaces {
         if state.closed || expected_revision != Some(state.revision) {
             return Err(changed());
         }
-        if state.mode != Mode::Human || state.in_flight != 0 {
+        if state.mode != Mode::Human {
             return Err(paused());
+        }
+        if state.in_flight != 0 {
+            return Err(busy());
         }
         state.in_flight = 1;
         let revision = state.revision;
@@ -603,10 +608,7 @@ impl Workspaces {
         };
         let state = workspace.lock()?;
         operation(
-            !state.closed
-                && expected_revision == Some(state.revision)
-                && state.mode == Mode::Human
-                && state.in_flight == 0,
+            !state.closed && expected_revision == Some(state.revision) && state.mode == Mode::Human,
         )
     }
 

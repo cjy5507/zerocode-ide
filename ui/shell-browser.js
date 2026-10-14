@@ -426,7 +426,7 @@ function browserWorkspaceLive(tab, label = tab?.label) {
 
 function browserWorkspaceCanControl(tab) {
   return tab != null && (!tab.agentWorkspace || (
-    tab.workspace?.mode === "human" && tab.workspace.inFlight === 0
+    tab.workspace?.mode === "human"
     && tab.workspaceViewing === true && !tab.workspacePending && !tab.workspaceError
   ));
 }
@@ -516,7 +516,7 @@ function browserWorkspaceStateOf(said, label) {
     || typeof said.needsObservation !== "boolean"
     || typeof said.snapshotSupported !== "boolean"
     || !(said.ownerTerm === null || (typeof said.ownerTerm === "string" && /^(0|[1-9]\d*)$/.test(said.ownerTerm)))
-    || (["human", "paused"].includes(said.mode) && said.inFlight !== 0)) return null;
+    || (said.mode === "paused" && said.inFlight !== 0)) return null;
   return {
     label, mode: said.mode, revision: said.revision,
     inFlight: said.inFlight, needsObservation: said.needsObservation,
@@ -693,7 +693,8 @@ async function setBrowserWorkspaceMode(tab, mode) {
     });
     if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return;
     const applied = applyBrowserWorkspaceState(tab, said);
-    if (!applied || tab.workspace?.mode !== mode || (owner.ownerTerm && tab.workspace.ownerTerm !== owner.ownerTerm)) {
+    if (!applied || tab.workspace?.mode !== mode || tab.workspace.inFlight !== 0
+      || (owner.ownerTerm && tab.workspace.ownerTerm !== owner.ownerTerm)) {
       tab.workspaceError = "transition";
     } else if ((tab.workspaceViewEpoch ?? 0) === token.viewEpoch && mode !== "paused") {
       tab.workspaceViewing = true;
