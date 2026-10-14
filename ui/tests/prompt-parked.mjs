@@ -57,4 +57,26 @@ assert.equal(errors.length, 2);
 deliver({ term: 4, delivered: false, pasted: false, why: "holds_a_draft", text: "mail" });
 assert.equal(toasts.length, 2, "a refusal is still a toast of its own");
 assert.ok(toasts[1].words.includes("입력 중인 글이 있어"), "a refusal is worded by the withheld table");
+
+// The window's own words are not the person's to paste (t-52566): the mail
+// pointer's advice that ran out of time at a restored zo worker came back as
+// an error and landed on the person's clipboard. A timeout of the window's
+// words is the sender's to answer — no error, nothing copied, even had words
+// come with it; a refusal of them is still said, without the words; and a
+// park of them is not the person's to hear about.
+const pointer = "\nYou have 1 orchestration message. Run `zerocode-orc check`.\n";
+const before = { toasts: toasts.length, errors: errors.length, copied: copied.length };
+deliver({ term: 11, delivered: false, pasted: false, why: "not_ready", text: null, theirs: false });
+deliver({ term: 14, delivered: false, pasted: false, why: "not_ready", text: pointer, theirs: false });
+assert.equal(errors.length, before.errors, "the window's own words that ran out of time were said as the person's loss");
+assert.equal(copied.length, before.copied, "the window's own words that ran out of time reached the clipboard");
+deliver({ term: 12, delivered: false, pasted: false, why: "holds_a_draft", text: pointer, theirs: false });
+assert.equal(toasts.length, before.toasts + 1, "a refusal of the window's own words is no longer said");
+assert.equal(copied.length, before.copied, "a refusal handed the window's own words to the clipboard");
+deliver({ term: 13, delivered: false, pasted: false, why: "busy", text: null, theirs: false });
+assert.equal(toasts.length, before.toasts + 1, "the window's own words parked behind a working agent were announced");
+// The person's own words keep their road, said as theirs.
+deliver({ term: 15, delivered: false, pasted: false, why: "not_ready", text: "my own words", theirs: true });
+assert.deepEqual(copied.slice(before.copied), ["my own words"], "the person's own words that ran out of time left the clipboard road");
+assert.equal(errors.length, before.errors + 1, "the person's own lost words are no longer said");
 console.log("prompt parked behind a working agent: passed");

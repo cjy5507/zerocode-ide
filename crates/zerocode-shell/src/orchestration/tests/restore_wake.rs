@@ -895,3 +895,161 @@ fn a_persons_tab_whose_turn_the_restart_cut_is_told_once_to_go_on() {
             .remove(&term);
     }
 }
+
+/// The window a ledger's reseat walks through (t-52566), with the beat's
+/// pointer pass run where the product's beat thread runs it while the
+/// reseat walks: once the worker's seat is durable and before its
+/// continuation is typed, and while the continuation waits for the pane to
+/// take it. Each moment is written down with how many advice lines had been
+/// typed at the pane by then.
+///
+/// The pass alone, not the whole beat: the rest of a beat waits on the
+/// restore line the walk holds (`expire_sleepers`), which on the beat's own
+/// thread is a wait and on this one would be a deadlock — while the pointer
+/// pass takes no part of that line and runs, as it ran at 10:46.
+struct Reseating<'a> {
+    beat: Beat<'a>,
+    moments: Mutex<Vec<(&'static str, usize)>>,
+}
+
+impl Reseating<'_> {
+    /// The pointer's pass, twice, at `moment`, and the advice lines typed at
+    /// `term` by then.
+    fn beats_at(&self, moment: &'static str, term: u32) {
+        for _ in 0..2 {
+            super::super::point_at_waiting_mail(&self.beat, clock());
+        }
+        let (asked, _) = self.beat.pointed_at(term);
+        self.moments.lock().unwrap().push((moment, asked));
+    }
+}
+
+impl Host for Reseating<'_> {
+    fn split(
+        &self,
+        team: &str,
+        leader_term: u32,
+        from_term: u32,
+        pane: &str,
+        direction: zerocode_core::agent_teams::Direction,
+        command: &str,
+        token: &str,
+    ) -> Option<u32> {
+        self.beat.inner.split(
+            team,
+            leader_term,
+            from_term,
+            pane,
+            direction,
+            command,
+            token,
+        )
+    }
+    fn send(&self, term: u32, text: &str) -> bool {
+        self.beat.inner.send(term, text)
+    }
+    fn capture(&self, term: u32) -> Option<String> {
+        self.beat.inner.capture(term)
+    }
+    fn focus(&self, term: u32) -> bool {
+        self.beat.inner.focus(term)
+    }
+    fn close(&self, term: u32) {
+        self.beat.inner.close(term);
+    }
+    fn actor_for(&self, term: u32) -> Option<String> {
+        self.beat.inner.actor_for(term)
+    }
+    /// zo's `SessionStart`, heard while the restored pane waits for its
+    /// composer: a boundary that lands as the rest it is, and the window
+    /// writes that rest down.
+    fn await_worker_ready(&self, term: u32) -> Result<(), crate::agent_teams::HostStartFailure> {
+        super::super::pane_lead_rested(term, clock(), false);
+        Ok(())
+    }
+    /// The seat is durable, and the continuation is not typed yet.
+    fn carry_session(&self, term: u32, _session: &zerocode_core::ProviderSession) {
+        self.beats_at("seated", term);
+    }
+    /// The continuation is on its way, and the pane has not taken it yet.
+    fn paste_continuation(&self, term: u32, text: &str, _worker: &str) -> Option<DeliveryOutcome> {
+        self.beats_at("continuing", term);
+        self.send(term, text).then_some(DeliveryOutcome::Delivered)
+    }
+}
+
+/// t-52566, the person's 「또 이버그」 (10-14 10:46): two zo workers the
+/// ledger reseated after a restart (terms 11 and 14) took their
+/// continuations — and the mail waiting for each was pointed at in the
+/// breath before. zo's `SessionStart` lands as the rest it is a moment
+/// before the continuation begins the worker's turn, and on this road
+/// nothing held the composer for the continuation: the wake road keeps its
+/// words in its own table, the reseat kept none. The pointer's line queued
+/// behind the continuation, took the line inside the turn the continuation
+/// began, ran out its eight seconds against the spinner and came back to
+/// the person as words they had lost. The continuation owns the pane from
+/// before its seat is durable until its delivery answers; the pointer
+/// speaks once the turn the continuation began is over.
+#[test]
+fn a_reseated_workers_mail_waits_for_its_continuation_and_the_turn_it_begins() {
+    const OLD_LEADER: u32 = 1_152_560;
+    const WORKER: u32 = 1_152_561;
+    const NEW_LEADER: u32 = 1_152_570;
+    let (_window, _store) = PrivateWindow::boot();
+    let _beat = one_beat_at_a_time();
+    a_pointer_that_has_said_nothing();
+    let checkout = tempfile::tempdir().expect("the worker's checkout");
+    let host = Restoring::new(
+        checkout.path(),
+        WORKER,
+        (NEW_LEADER, test_actor(OLD_LEADER)),
+    );
+    let (team, _run) = a_run(&host, OLD_LEADER, "reseated-mail");
+    let (_, worker, term) = a_worker(&host, &team, "--agent zo", Some("session-1791942400720-0"));
+    // Its turn was under way when the window went, and a status waits for it.
+    super::super::pane_turn_began(term, clock());
+    a_status_to(&host, &team, &worker);
+    the_window_goes(&census_without_commands, &[term]);
+    the_next_boot(OLD_LEADER);
+    host.cut.lock().unwrap().clear();
+
+    let reseating = Reseating {
+        beat: Beat::new(&host),
+        moments: Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        coordinator_back(&reseating, "reseated-mail", OLD_LEADER, NEW_LEADER),
+        1,
+        "the sleeper was not seated again"
+    );
+    let at = host.cuts()[0].0;
+    let continued = host.typed_at(at);
+    assert_eq!(continued.len(), 1, "{continued:?}");
+    assert!(
+        continued[0].starts_with(crate::RESTART_NUDGE),
+        "{continued:?}"
+    );
+    assert_eq!(
+        *reseating.moments.lock().unwrap(),
+        [("seated", 0), ("continuing", 0)],
+        "the mail was pointed at before the pane had taken its continuation"
+    );
+    // The continued turn runs, and ends: the ordinary road speaks, once.
+    super::super::pane_turn_began(at, clock());
+    reseating.beat.beats(2);
+    assert_eq!(
+        reseating.beat.pointed_at(at),
+        (0, 0),
+        "typed into the continued turn"
+    );
+    super::super::pane_turn_ended(at, clock(), false, clock());
+    reseating.beat.beats(2);
+    assert_eq!(reseating.beat.pointed_at(at), (1, 1));
+    for term in [at, NEW_LEADER] {
+        crate::agent_teams::forget_term(term);
+    }
+    super::super::pane_turns()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .remove(&at);
+}
