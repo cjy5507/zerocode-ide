@@ -127,6 +127,13 @@ pub const BUDGET_NEAR_PERMILLE: u32 = 800;
 /// agent for nothing.
 pub const PRINT_BYTES: usize = 4_096;
 
+/// The key zo's hook carries a print of a call's whole input under — a hash,
+/// never the input — beside a `tool_input` that is the compact one zo's working
+/// line shows: a command's first word, a file's path without the offset it is
+/// read at. Two different calls look alike there; their prints do not. zo's
+/// reporter names the same key, and a source contract holds the two equal.
+pub const INPUT_PRINT_KEY: &str = "tool_input_print";
+
 /// The largest budget a settings file may name, in dollars: a typo guard. No
 /// worker's task costs a hundred thousand dollars; a budget that large is a
 /// slipped key and is read as none.
