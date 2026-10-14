@@ -25,6 +25,7 @@ export async function testConversationSwitch(browser, origin, ok) {
   await testColoursAfterAside(browser, origin, ok);
   await testPaneHandover(browser, origin, ok, { refuse: false });
   await testPaneHandover(browser, origin, ok, { refuse: true });
+  await testPressReadsNoSize(browser, origin, ok);
   await testLateFirstRead(browser, origin, ok);
 }
 
@@ -563,6 +564,99 @@ async function testPaneHandover(browser, origin, ok, { refuse }) {
       );
     }
     ok(`pane hand-over (${refuse ? "refused" : "stands"}): no page errors`, faults.length === 0, faults.slice(0, 3).join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* A page that stands — a pane's 「대화」 — is laid out by its first frame, and
+ * once: no size is read off it in the press that builds it nor in the task that
+ * brings its turns (each such read laid the new page out once more; six of them
+ * stood in one press, t-55369), the frame placing it at its foot by itself. And
+ * a page built after another starts with the room its dock last took, so the
+ * dock's first measure has nothing to rewrite (a new value on the list restyles
+ * every row it holds). */
+async function testPressReadsNoSize(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const term = await standHandover(page, { refuse: false, standMs: 5000 });
+    const seen = await page.evaluate(async (term) => {
+      const reads = [];
+      const counting = { on: false };
+      const onPage = (node) => node instanceof Element && node.closest(".pane-chat") !== null;
+      const spy = (proto, name, kind) => {
+        const held = Object.getOwnPropertyDescriptor(proto, name);
+        Object.defineProperty(proto, name, {
+          ...held,
+          [kind](...args) {
+            if (counting.on && onPage(this)) reads.push(`${String(this.className).split(" ")[0] || this.tagName}.${name}`);
+            return held[kind].apply(this, args);
+          },
+        });
+        return () => Object.defineProperty(proto, name, held);
+      };
+      const undo = [
+        spy(Element.prototype, "getBoundingClientRect", "value"),
+        spy(Element.prototype, "getClientRects", "value"),
+        spy(Element.prototype, "clientHeight", "get"),
+        spy(Element.prototype, "clientWidth", "get"),
+        spy(Element.prototype, "scrollHeight", "get"),
+        spy(Element.prototype, "scrollTop", "get"),
+        spy(HTMLElement.prototype, "offsetHeight", "get"),
+        spy(HTMLElement.prototype, "offsetWidth", "get"),
+      ];
+      const list = () => document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat .helper-turns`);
+      // Counting stops at the start of the first frame that has the turns to
+      // draw: a frame's own work — its callbacks, its layout, the watches it
+      // wakes — is the one layout the page is owed.
+      const stood = new Promise((done) => {
+        const look = () => requestAnimationFrame(() => {
+          if (list()?.querySelector(":scope > [data-turn]")) {
+            counting.on = false;
+            done();
+          } else look();
+        });
+        look();
+      });
+      counting.on = true;
+      el("view-toggle-chat").click();
+      await stood;
+      for (const one of undo) one();
+      await window.__PAINTED__();
+      await window.__PAINTED__();
+      const held = list();
+      const dock = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat .chat-dock`);
+      return {
+        reads,
+        rows: held?.querySelectorAll(":scope > [data-turn]").length ?? 0,
+        gap: held ? Math.round(held.scrollHeight - held.scrollTop - held.clientHeight) : null,
+        dock: dock ? `${dock.offsetHeight}px` : null,
+      };
+    }, term);
+    // A conversation opened after it: the room its readers wear the moment its
+    // dock is first watched, before any frame measures that dock.
+    seen.next = await page.evaluate(async (history) => {
+      const watch = watchChatDock;
+      let worn = null;
+      window.watchChatDock = (host, dock) => {
+        const made = watch(host, dock);
+        worn ??= host.querySelector(":scope > .helper-body > .helper-turns")?.style.getPropertyValue("--chat-dock-h") ?? null;
+        return made;
+      };
+      try {
+        window.__ANSWER__.wire_start = (args) => ({ id: 78, agent: args.agent, protocol: "claude-stream", version: "2.1.280", model: null, session: null });
+        await openWirePage("claude", "/tmp/zerocode-window-test", { history });
+      } finally {
+        window.watchChatDock = watch;
+      }
+      return worn;
+    }, [{ role: "user", text: "다음 대화", at_ms: 1_790_000_000_000 }, { role: "assistant", text: "다음 답", at_ms: 1_790_000_001_000 }]);
+    ok(
+      "a_page_that_stands_reads_no_size_before_its_first_frame: from a Claude pane's 「대화」 press until the first frame that draws its turns, nothing reads a box off the new page — the press builds, the turns arrive, the frame lays it out once and stands it at its foot — and the next page built starts with the room its dock last took",
+      seen.rows > 0 && seen.reads.length === 0 && seen.gap !== null && seen.gap <= 1 && seen.dock !== null && seen.next === seen.dock,
+      JSON.stringify({ reads: seen.reads.slice(0, 12), count: seen.reads.length, rows: seen.rows, gap: seen.gap, dock: seen.dock, next: seen.next }),
+    );
+    ok("press reads no size: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
   } finally {
     await page.close();
   }
