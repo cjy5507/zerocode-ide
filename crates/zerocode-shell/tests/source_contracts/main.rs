@@ -16,6 +16,7 @@ mod git_doors;
 mod hand_in_keep;
 mod handoff_code;
 mod jev_pane_seats;
+mod land_batch;
 mod quiet_children;
 mod quota_wall;
 mod raw_feed;

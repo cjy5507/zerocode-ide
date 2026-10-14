@@ -882,7 +882,7 @@ fn commits_behind(host: &Host, path: &Path, head: &str, target: &str) -> Option<
 
 /// 병합 시험(`merge-tree --write-tree --name-only`)의 답.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum MergeProbe {
+pub(crate) enum MergeProbe {
     /// 충돌 없이 합쳐진다 — 합친 나무의 oid.
     Clean(String),
     /// 충돌한다 — 충돌한 파일(중복 없이, git이 적은 순서).
@@ -896,7 +896,7 @@ enum MergeProbe {
 /// `--name-only`의 표준 출력은 첫 줄이 합친 나무, 충돌이면 이어서 파일 이름이고,
 /// 빈 줄 뒤는 사람이 읽는 메시지다. 종료값 1만 충돌이다 — 128 같은 값은 git이
 /// 답하지 못한 것이라 충돌 없음으로 읽지 않는다.
-fn parse_merge_probe(code: i32, said: &str) -> MergeProbe {
+pub(crate) fn parse_merge_probe(code: i32, said: &str) -> MergeProbe {
     let mut lines = said.lines().map(str::trim_end);
     let Some(tree) = lines.next().map(str::trim).filter(|tree| !tree.is_empty()) else {
         return MergeProbe::Failed;
