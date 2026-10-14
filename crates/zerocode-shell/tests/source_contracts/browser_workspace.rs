@@ -444,7 +444,7 @@ fn only_a_refusal_before_dispatch_is_known_to_have_no_effect() {
 fn windows_placement_moves_sizes_and_shows_the_wry_container_without_activation() {
     let wry = block_after(BROWSER, "fn place_native_browser(");
     let decided = wry.find(".with_placement(").unwrap();
-    let parent = wry.find("controller.ParentWindow(&mut container)").unwrap();
+    let parent = wry.find(".ParentWindow(&mut container)").unwrap();
     let hidden = wry
         .find("set_native_container_shown(container, false)")
         .unwrap();

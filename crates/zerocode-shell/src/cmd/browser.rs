@@ -2093,16 +2093,23 @@ fn place_native_browser(
                         (view, parent, owned)
                     };
                     #[cfg(target_os = "windows")]
-                    let controller = {
+                    let (controller, container, owned) = {
                         let controller = platform.controller();
+                        let mut container = windows::Win32::Foundation::HWND::default();
+                        unsafe {
+                            controller
+                                .ParentWindow(&mut container)
+                                .map_err(|error| error.to_string())?;
+                        }
+                        let owned = native_container_holds_focus(container);
                         unsafe {
                             controller
                                 .SetIsVisible(false)
                                 .map_err(|error| error.to_string())?;
                         }
-                        controller
+                        set_native_container_shown(container, false)?;
+                        (controller, container, owned)
                     };
-                    #[cfg(target_os = "macos")]
                     let mut displayed = false;
                     let result = app
                         .state::<AppState>()
@@ -2132,16 +2139,32 @@ fn place_native_browser(
                             }
                             #[cfg(target_os = "windows")]
                             unsafe {
-                                let _ = &main_webview;
+                                displayed = visible;
+                                let left = (bounds[0] * scale).round() as i32;
+                                let top = (bounds[1] * scale).round() as i32;
+                                let width = ((bounds[0] + bounds[2]) * scale).round() as i32 - left;
+                                let height = ((bounds[1] + bounds[3]) * scale).round() as i32 - top;
+                                windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                                    container,
+                                    None,
+                                    left,
+                                    top,
+                                    width,
+                                    height,
+                                    windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE
+                                        | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+                                )
+                                .map_err(|error| error.to_string())?;
                                 controller
                                     .SetBounds(windows::Win32::Foundation::RECT {
-                                        left: (bounds[0] * scale).round() as i32,
-                                        top: (bounds[1] * scale).round() as i32,
-                                        right: ((bounds[0] + bounds[2]) * scale).round() as i32,
-                                        bottom: ((bounds[1] + bounds[3]) * scale).round() as i32,
+                                        left: 0,
+                                        top: 0,
+                                        right: width,
+                                        bottom: height,
                                     })
                                     .map_err(|error| error.to_string())?;
                                 if visible {
+                                    set_native_container_shown(container, true)?;
                                     controller
                                         .SetIsVisible(true)
                                         .map_err(|error| error.to_string())?;
@@ -2155,7 +2178,6 @@ fn place_native_browser(
                             }
                             Ok(())
                         });
-                    #[cfg(target_os = "macos")]
                     if (!displayed || result.is_err()) && owned {
                         let _ = main_webview.set_focus();
                     }
@@ -2199,11 +2221,69 @@ pub(super) fn hide_browser_pane(
         read.recv_timeout(BROWSER_CALLBACK_DEADLINE)
             .map_err(|error| format!("browser hide timed out: {error}"))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let main_webview = main_webview.clone();
+        let (answer, read) = std::sync::mpsc::sync_channel(1);
+        pane.with_webview(move |platform| {
+            let controller = platform.controller();
+            let mut container = windows::Win32::Foundation::HWND::default();
+            let parent = unsafe { controller.ParentWindow(&mut container) };
+            let owned = parent.is_ok() && native_container_holds_focus(container);
+            let hidden = unsafe { controller.SetIsVisible(false) }
+                .and(parent)
+                .map_err(|error| error.to_string())
+                .and_then(|()| set_native_container_shown(container, false));
+            if owned {
+                let _ = main_webview.set_focus();
+            }
+            let _ = answer.send(hidden);
+        })
+        .map_err(|error| error.to_string())?;
+        read.recv_timeout(BROWSER_CALLBACK_DEADLINE)
+            .map_err(|error| format!("browser hide timed out: {error}"))?
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = main_webview;
         pane.hide().map_err(|error| error.to_string())
     }
+}
+
+#[cfg(target_os = "windows")]
+fn set_native_container_shown(
+    container: windows::Win32::Foundation::HWND,
+    shown: bool,
+) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+        SetWindowPos,
+    };
+    let visibility = if shown {
+        SWP_SHOWWINDOW
+    } else {
+        SWP_HIDEWINDOW
+    };
+    unsafe {
+        SetWindowPos(
+            container,
+            None,
+            0,
+            0,
+            0,
+            0,
+            visibility | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+        )
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn native_container_holds_focus(container: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::IsChild;
+    let focus = unsafe { GetFocus() };
+    !focus.is_invalid() && (focus == container || unsafe { IsChild(container, focus) }.as_bool())
 }
 
 /// Orca's "Open browser devtools" — the engine's inspector on the guest
