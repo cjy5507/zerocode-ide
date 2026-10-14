@@ -219,7 +219,29 @@ impl EvidenceCheck {
     }
 
     pub(crate) fn start<T>(&self, send: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        let Some((workspace, control)) = &self.0 else {
+            return send();
+        };
+        let _sending = {
+            let mut state = workspace.lock()?;
+            if !agent_holds(&state, control) {
+                return Err(changed());
+            }
+            state.capturing += 1;
+            Sending(workspace)
+        };
         send()
+    }
+}
+
+struct Sending<'a>(&'a Workspace);
+
+impl Drop for Sending<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.capturing = state.capturing.saturating_sub(1);
+        }
+        self.0.drained.notify_waiters();
     }
 }
 
@@ -227,6 +249,7 @@ struct State {
     mode: Mode,
     revision: u64,
     in_flight: usize,
+    capturing: usize,
     needs_observation: bool,
     owner: Option<String>,
     popup_pending: bool,
@@ -360,6 +383,7 @@ impl Workspaces {
                 },
                 revision: 1,
                 in_flight: 0,
+                capturing: 0,
                 needs_observation: true,
                 owner: owner.map(str::to_string),
                 popup_pending: false,
@@ -1150,7 +1174,7 @@ impl Transition {
                 if state.closed || state.revision != self.revision || state.mode != Mode::Pausing {
                     return Err(changed());
                 }
-                if state.in_flight == 0 && actor_drained {
+                if state.in_flight == 0 && state.capturing == 0 && actor_drained {
                     return Ok(());
                 }
             }
@@ -1229,6 +1253,7 @@ impl Transition {
                 || state.revision != self.revision
                 || state.mode != Mode::Pausing
                 || state.in_flight != 0
+                || state.capturing != 0
                 || !self.fenced
             {
                 return Err(changed());

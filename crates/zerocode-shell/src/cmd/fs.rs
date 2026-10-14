@@ -610,8 +610,11 @@ pub(crate) async fn browser_evidence_png(
     else {
         return Ok(None);
     };
-    let bytes = snapshot_leased(pane, frame, check.clone()).await?;
-    Ok(check.holds().then_some(bytes))
+    let bytes = snapshot_leased(pane, frame, check.clone()).await;
+    if !check.holds() {
+        return Ok(None);
+    }
+    bytes.map(Some)
 }
 
 async fn snapshot_leased(
