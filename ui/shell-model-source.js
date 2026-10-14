@@ -158,7 +158,7 @@ const judgmentModelSourceController = {
     say(location, () => this.currentInspection()?.allowsDestinationSelection === false && this.currentInspection()?.model.installed
       ? t("settings.models.keepLocation", "이미 설치한 모델의 현재 폴더를 사용합니다.")
       : this.destination ?? t("settings.models.defaultFolder", "기본 모델 폴더"));
-    location.title = this.destination ?? inspection?.defaultDestinationDirectory ?? "";
+    location.dataset.tip = this.destination ?? inspection?.defaultDestinationDirectory ?? "";
     el("judgment-source-inspect").disabled = locked || !this.source() || !snapshot?.catalogFingerprint;
     el("judgment-source-inspect").classList.toggle("btn--primary", !inspection);
     el("judgment-source-preview").hidden = !inspection;
