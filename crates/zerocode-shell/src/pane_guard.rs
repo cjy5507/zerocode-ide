@@ -1345,7 +1345,7 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
     };
     let now_ms = crate::usage_runtime::epoch_ms_now();
     let at = u64::try_from(now_ms).unwrap_or_default();
-    let (row, verdict, confidence) = match question {
+    let (row, verdict, confidence, route) = match question {
         Question::Command {
             judged,
             attempt,
@@ -1357,7 +1357,7 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
             moment,
         } => {
             let questions = command_questions(noul::question);
-            let asked = put_nouls(
+            let (asked, route) = put_nouls(
                 wire,
                 guard,
                 &cwd,
@@ -1383,7 +1383,7 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
                 pane: pane.place(),
                 asked,
             };
-            (serde_json::to_value(row).ok(), verdict, confidence)
+            (serde_json::to_value(row).ok(), verdict, confidence, route)
         }
         Question::Text {
             judged,
@@ -1393,7 +1393,7 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
             text,
         } => {
             let questions = text_questions(noul::question);
-            let asked = put_nouls(
+            let (asked, route) = put_nouls(
                 wire,
                 guard,
                 &pane.worktree,
@@ -1419,11 +1419,12 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
                 pane: pane.place(),
                 asked,
             };
-            (serde_json::to_value(row).ok(), verdict, confidence)
+            (serde_json::to_value(row).ok(), verdict, confidence, route)
         }
         Question::Claim { .. } | Question::FilePick { .. } | Question::ProjectRules(_) => return,
     };
-    if let Some(row) = row {
+    if let Some(mut row) = row {
+        systemone::stamp_route(&mut row, route.as_deref());
         systemone::record_rows(guard.seat, &ledger, &[row], now_ms);
     }
     settle(guards, wire, pane, judged, verdict, confidence);
@@ -1870,6 +1871,7 @@ struct Trip {
     request_bytes: Option<usize>,
     cached: bool,
     rejected: Option<String>,
+    route: Option<String>,
 }
 
 /// Put `questions` over `state`, from words of `workspace`, through the door
@@ -1917,6 +1919,7 @@ fn put<R>(
         cached,
         input_tokens: answered.spent.input_tokens,
         output_tokens: answered.spent.output_tokens,
+        route: answered.spent.route.clone(),
         ..Trip::default()
     };
     let body = match answered.answer {
@@ -1953,7 +1956,8 @@ fn put<R>(
 }
 
 /// A guard's Nouls through [`put`], read the way zo reads the same answer:
-/// every Noul, or the rule that broke.
+/// every Noul, or the rule that broke — beside the client the request was
+/// put to, for the guard's row to name ([`systemone::stamp_route`]).
 fn put_nouls(
     wire: &Wire,
     guard: &Guard,
@@ -1961,7 +1965,7 @@ fn put_nouls(
     state: Value,
     questions: &BTreeMap<String, Value>,
     mode: JevMode,
-) -> Asked {
+) -> (Asked, Option<String>) {
     let (trip, answers) = put(wire, guard.seat, workspace, state, questions, |answers| {
         questions
             .keys()
@@ -1972,7 +1976,7 @@ fn put_nouls(
             })
             .collect::<Result<BTreeMap<String, f64>, String>>()
     });
-    Asked {
+    let asked = Asked {
         outcome: trip.outcome,
         route_use: if answers.is_some() {
             mode.key()
@@ -1992,7 +1996,8 @@ fn put_nouls(
         request_digest: None,
         rejected: trip.rejected,
         cached: trip.cached,
-    }
+    };
+    (asked, trip.route)
 }
 
 /// The verdict of the call `judged` names has answered — or has not: one
