@@ -209,11 +209,13 @@ fn input_refers_to_past_conversation(user_input: &str) -> bool {
             .any(|cue| user_input.contains(cue))
 }
 
-/// Whether `phrase` occurs in `text` with no letter or digit joined to either end.
+/// Whether `phrase` occurs in `text` as words of its own — one plural `s` may
+/// follow it ("previous sessions") — with no letter or digit joined to either end.
 fn contains_whole_words(text: &str, phrase: &str) -> bool {
     text.match_indices(phrase).any(|(at, _)| {
         let before = text[..at].chars().next_back();
-        let after = text[at + phrase.len()..].chars().next();
+        let rest = &text[at + phrase.len()..];
+        let after = rest.strip_prefix('s').unwrap_or(rest).chars().next();
         !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
     })
 }
