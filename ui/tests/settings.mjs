@@ -2868,9 +2868,10 @@ class StatefulBackend {
       // Mirrors `typesafe_settings.rs`: the key is kept trimmed under the one
       // item every zo reads and never sent back; the switch is
       // `smart.jev.enabled`, written as the core's press writes it.
-      case "typesafe_settings": return this.typesafeSettings();
-      case "managed_judgment_status": return this.managedJudgmentSettings();
+      case "typesafe_settings": return clone(await (this.judgmentSettingsWait ?? this.typesafeSettings()));
+      case "managed_judgment_status": return clone(await (this.judgmentStatusWait ?? this.managedJudgmentSettings()));
       case "managed_judgment_inspect_source": {
+        if (this.managedSourceError) throw this.managedSourceError;
         const snapshot = this.managedJudgmentSettings();
         const model = {
           ...clone(snapshot.models[0]), id: "fixture-imported", label: "Imported Native Model", installed: false,
@@ -3461,6 +3462,40 @@ async function openJudgmentSettings(page) {
   await openSettings(page, pane);
   const advanced = page.locator("#judgment-connection-settings");
   if (await advanced.count()) await advanced.evaluate((element) => { element.open = true; });
+}
+
+async function withJudgmentStatus(run) {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  const provider = { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32104", model: "fixture-decision", requiresAuth: false };
+  backend.zoSettings.smart = { judgmentProvider: provider, [JEV_SETTINGS_KEY]: { enabled: false, workspaces: [JEV_EVERY_WORKSPACE] } };
+  backend.managedJudgmentSettings();
+  Object.assign(backend.managedModelState, {
+    configuredModelId: provider.model, appliedModelId: provider.model,
+    runtime: { state: "ready", downloadBytes: 0, reason: null },
+    server: { id: "fixture-active-server", state: "ready", modelId: provider.model, provider, checked: true, error: null },
+  });
+  backend.managedModelState.models[0].installed = true;
+  const page = await context.newPage();
+  await installTauri(page, "judgment-status");
+  attachFaultRecorder(page, "judgment-status");
+  try {
+    await bootPage(page, "judgment-status");
+    await openSettings(page, "judgment-models");
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.server.id === "fixture-active-server");
+    return await run(page, provider);
+  } finally {
+    delete backend.judgmentSettingsWait;
+    delete backend.judgmentStatusWait;
+    delete backend.managedSourceWait;
+    delete backend.managedSourceResult;
+    delete backend.managedSourceError;
+    delete backend.managedSourceInspection;
+    await page.close();
+    backend.zoSettings.smart = previous;
+    backend.managedModelState = previousManaged;
+  }
 }
 
 async function openSettings(page, pane = null) {
@@ -6089,6 +6124,132 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assert(!(await pageA.locator("#typesafe-key-input").isDisabled()), "a machine with a keychain was left without the key field");
   return `one switch · ${selects.total} selects · ${selects.visible} visible`;
 });
+
+await test("현재 판단 상태는 실행·요청 허용·응답 점검·실제 사용을 구분한다", async () => withJudgmentStatus(async (page, provider) => {
+  assert(await page.locator("#judgment-current-status").isVisible(), "the applied model has no primary status area");
+  assert((await page.locator("#judgment-active-model").textContent()).includes(provider.model));
+  assertEqual(await page.locator("#judgment-current-enablement").getAttribute("data-state"), "disabled", "a running service enabled judgment requests");
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "ready");
+  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected", "a matching native check was ignored");
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a native check was presented as task use");
+  assert(!/\d/.test(await page.locator("#judgment-current-usage").textContent()), "usage without evidence invented a count or timestamp");
+  assertEqual(await page.locator("#judgment-current-check #typesafe-key-state").count(), 1, "the check badge still looks like the whole page's state");
+  const order = await page.evaluate(() => Boolean(document.getElementById("judgment-current-status").compareDocumentPosition(document.getElementById("judgment-model-changes")) & Node.DOCUMENT_POSITION_FOLLOWING));
+  assert(order, "model changes precede current status");
+  const before = backend.calls.length;
+  await page.click("#judgment-source-jev");
+  assert((await page.locator("#judgment-provider-draft").textContent()).includes("Jev"));
+  assertEqual(await page.locator("#judgment-provider-draft").getAttribute("data-state"), "unapplied");
+  assert((await page.locator("#judgment-active-model").textContent()).includes(provider.model), "a Jev draft replaced the applied identity");
+  assert(!backend.calls.slice(before).some((call) => ["set_judgment_provider", "managed_judgment_start", "managed_judgment_check"].includes(call.command)), "opening a change performed a model action");
+  await page.click("#typesafe-check-btn");
+  await page.waitForFunction(() => !typesafeBusy);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a draft probe became actual usage");
+  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected", "a draft probe replaced the current model's check");
+  return "running with requests disabled · matching check · usage unknown · explicit Jev draft";
+}));
+
+await test("현재 모델과 다른 서버·점검 기록은 현재 상태로 표시하지 않는다", async () => withJudgmentStatus(async (page, provider) => {
+  const snapshot = backend.managedJudgmentSettings();
+  snapshot.revision += 1;
+  snapshot.server.provider = { ...provider, model: "other-decision" };
+  snapshot.server.modelId = "other-decision";
+  snapshot.appliedModelId = "other-decision";
+  await backend.emitManaged(snapshot);
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown", "another running model was attributed to the active provider");
+  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "unchecked", "another model's native check approved the active provider");
+  snapshot.revision += 1;
+  snapshot.providerIdentity = "other-provider-identity";
+  snapshot.server.provider = provider;
+  snapshot.server.modelId = provider.model;
+  snapshot.appliedModelId = provider.model;
+  await backend.emitManaged(snapshot);
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown", "a stale settings identity supplied current server status");
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown");
+  return "server provider, model and canonical identity must agree";
+}));
+
+await test("현재 상태 새로고침은 초안을 보존하고 늦은 응답을 버린다", async () => withJudgmentStatus(async (page, provider) => {
+  await page.click("#judgment-source-jev");
+  await page.fill("#typesafe-model-input", "unapplied-cloud-model");
+  const before = backend.calls.length;
+  let finishSettings;
+  let finishStatus;
+  const oldSettings = backend.typesafeSettings();
+  const oldStatus = backend.managedJudgmentSettings();
+  backend.judgmentSettingsWait = new Promise((resolve) => { finishSettings = resolve; });
+  backend.judgmentStatusWait = new Promise((resolve) => { finishStatus = resolve; });
+  await page.click("#judgment-status-refresh");
+  await backend.waitForCall("judgment-status", "typesafe_settings", before);
+  await backend.waitForCall("judgment-status", "managed_judgment_status", before);
+  await page.evaluate(() => { void refreshTypeSafe(); void managedJudgmentController.refresh(); });
+  assertEqual(backend.calls.slice(before).filter((call) => call.window_id === "judgment-status" && call.command === "typesafe_settings").length, 1, "refresh duplicated the canonical settings request");
+  const next = clone(oldSettings);
+  next.provider.model = "new-current-decision";
+  next.providerIdentity = "new-current-identity";
+  await page.evaluate((state) => paintTypeSafe(state), next);
+  finishSettings(oldSettings);
+  finishStatus(oldStatus);
+  delete backend.judgmentSettingsWait;
+  delete backend.judgmentStatusWait;
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assert((await page.locator("#judgment-active-model").textContent()).includes("new-current-decision"), "a late read restored the old identity");
+  assertEqual(await page.inputValue("#typesafe-model-input"), "unapplied-cloud-model", "refresh discarded an unsaved draft");
+  assertEqual(await page.locator("#judgment-provider-draft").getAttribute("data-state"), "unapplied");
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown");
+  await page.evaluate(() => setSettingsOpen(false));
+  const hiddenAt = backend.calls.length;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await renderSettled(page);
+  assert(!backend.calls.slice(hiddenAt).some((call) => call.window_id === "judgment-status" && ["typesafe_settings", "managed_judgment_status"].includes(call.command)), "a hidden settings page polls current status");
+  assertEqual(backend.typesafeSettings().provider, provider, "status refresh changed saved settings");
+  return "one settings/status read · late identity discarded · unsaved draft kept · no hidden refresh";
+}));
+
+await test("가져오기 실패는 해당 초안 옆에 한 번만 표시한다", async () => withJudgmentStatus(async (page, provider) => {
+  await page.evaluate(() => {
+    judgmentModelSourceController.kind = "local_directory";
+    judgmentModelSourceController.directory = "/models/unsupported";
+    judgmentModelSourceController.invalidate();
+  });
+  const snapshot = backend.managedJudgmentSettings();
+  backend.managedSourceError = "not_native_decision_model";
+  const current = await page.locator("#judgment-current-status").textContent();
+  await page.click("#judgment-source-inspect");
+  await page.waitForFunction(() => !judgmentModelSourceController.busy);
+  snapshot.revision += 1;
+  snapshot.operation = { id: "unsupported-inspection", kind: "inspect", state: "failed", error: "not_native_decision_model", receivedBytes: 0, totalBytes: 0 };
+  await backend.emitManaged(snapshot);
+  const error = await page.evaluate(() => managedJudgmentController.failure("not_native_decision_model"));
+  assertEqual(await page.locator("#judgment-source-status").textContent(), error);
+  assertEqual(await page.locator("#managed-judgment-status").textContent(), "", "the import warning leaked into model management");
+  assertEqual(await page.locator("#judgment-current-status").textContent(), current, "an unsupported import changed active status");
+  assertEqual(backend.typesafeSettings().provider, provider);
+  await page.click("#judgment-source-hub");
+  assertEqual(await page.locator("#judgment-source-status").textContent(), "", "an import warning followed a different draft");
+  return "one local input warning · current provider preserved · warning cleared for another source";
+}));
+
+await test("판단 상태는 다섯 언어·두 테마·좁은 폭에서 읽을 수 있다", async () => withJudgmentStatus(async (page) => {
+  for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+    await setQualityLocale(page, locale);
+    await page.evaluate(() => judgmentProviderController.controls());
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(page, theme);
+      assertEqual(await axeViolations(page, AxeBuilder, "#judgment-current-status"), [], `${locale}/${theme} current judgment accessibility`);
+    }
+    await page.setViewportSize({ width: 980, height: 1069 });
+    const size = await page.locator("#judgment-current-status").evaluate((status) => ({ client: status.clientWidth, scroll: status.scrollWidth }));
+    assert(size.client > 0 && size.scroll <= size.client + 1, `${locale} current judgment status overflows`, size);
+    const untranslated = await page.locator("#judgment-current-status").evaluate((status) => [...status.querySelectorAll("[data-i18n]")].filter((node) => !node.textContent.trim()).map((node) => node.dataset.i18n));
+    assertEqual(untranslated, [], `${locale} empty judgment status label`);
+  }
+  await page.locator("#judgment-status-refresh").focus();
+  const before = backend.calls.length;
+  await page.keyboard.press("Enter");
+  await backend.waitForCall("judgment-status", "typesafe_settings", before);
+  return "five languages · light/dark · narrow layout · keyboard refresh";
+}));
 
 await test("판단 모델은 명시적으로 적용하고 로컬 연결은 Jev 키를 쓰지 않는다", async () => {
   await openJudgmentSettings(pageA);
