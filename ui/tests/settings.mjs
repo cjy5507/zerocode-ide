@@ -6146,6 +6146,7 @@ await test("현재 판단 상태는 실행·요청 허용·응답 점검·실제
   await page.click("#judgment-source-jev");
   assert((await page.locator("#judgment-provider-draft").textContent()).includes("Jev"));
   assertEqual(await page.locator("#judgment-provider-draft").getAttribute("data-state"), "unapplied");
+  assert(await page.locator("#typesafe-key-state").isHidden(), "the active provider's key/check badge was attributed to a draft provider");
   assert((await page.locator("#judgment-active-model").textContent()).includes(provider.model), "a Jev draft replaced the applied identity");
   assert(!backend.calls.slice(before).some((call) => ["set_judgment_provider", "managed_judgment_start", "managed_judgment_check"].includes(call.command)), "opening a change performed a model action");
   await page.click("#typesafe-check-btn");
