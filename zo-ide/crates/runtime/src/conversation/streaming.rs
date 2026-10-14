@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::message_stream::anthropic::tools::preview_tool_input;
+use crate::message_stream::anthropic::tools::{preview_tool_input, tool_input_print};
 use crate::message_stream::types::ToolPreview;
 use crate::permission::{
     PermissionChoice as AsyncPermissionChoice, PermissionDecision as AsyncPermissionDecision,
@@ -196,6 +196,15 @@ pub(crate) fn tool_preview_from(tool_name: &str, input: &str) -> ToolPreview {
         name: tool_name.to_string(),
         input_summary: summary,
     }
+}
+
+/// The print of a dispatched call's whole input ([`tool_input_print`]), read
+/// the way the streaming parser reads the input — as JSON, else as the text
+/// it is — so one call prints alike on both roads.
+pub(crate) fn tool_input_print_from(input: &str) -> String {
+    let parsed =
+        serde_json::from_str::<Value>(input).unwrap_or_else(|_| Value::String(input.to_string()));
+    tool_input_print(&parsed)
 }
 
 pub(crate) fn tool_summary_line(tool_name: &str, input: &str) -> String {

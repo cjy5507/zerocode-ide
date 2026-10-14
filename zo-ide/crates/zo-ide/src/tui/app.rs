@@ -30,7 +30,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use futures_util::StreamExt;
 use runtime::message_stream::anthropic::tools::{
     format_indirected_tool_result, format_tool_result_from_raw, preview_summary,
-    preview_tool_input,
+    preview_tool_input, tool_input_print,
 };
 use runtime::message_stream::{
     AgentResultStatus, BlockIdGen, NotificationRoad, PermissionDecision, RenderBlock, SystemLevel,
@@ -2038,6 +2038,7 @@ impl Ui {
                         name: name.clone(),
                         summary,
                         preview,
+                        input_print: Some(tool_input_print(&parsed)),
                         status: ToolCallStatus::Running,
                     });
                     if let Some(output) = output {
@@ -4389,6 +4390,7 @@ impl Ui {
                 name,
                 summary,
                 preview,
+                input_print,
                 status,
                 ..
             } => {
@@ -4406,6 +4408,7 @@ impl Ui {
                             file: super::activity::file_of(preview),
                         },
                         activity.hook_input(summary),
+                        input_print.as_deref(),
                         &activity.started_card(),
                         session_id,
                     );
@@ -6357,6 +6360,29 @@ fn an_imitated_passport_label_never_reaches_the_screen() {
     assert!(frame.contains("[note] kept"), "a bracket that is not the label was held back: {frame:?}");
 }
 
+/// A resumed session draws its earlier answers through the handlers a live turn
+/// feeds, so a Markdown link in a saved answer still writes its address around
+/// its label (OSC 8) when the transcript is replayed.
+#[test]
+fn a_resumed_answer_keeps_its_links() {
+    let address = "https://gitlab.example.com/group/project/-/merge_requests/489";
+    let mut ui = test_ui();
+    // `test_ui` draws without colour, which writes the text alone.
+    ui.painter = Painter::new(std::io::stdout(), 80, 24, 1, true);
+    ui.painter.set_height(1);
+    ui.painter.take_frame();
+    let saved = core_types::session::ConversationMessage::assistant(vec![
+        core_types::session::ContentBlock::Text { text: format!("Merged [!489]({address}).") },
+    ]);
+    ui.replay(crate::session::plain_session::replay_items_from(&[saved]));
+    ui.flush_history();
+    let frame = ui.painter.take_frame();
+    assert!(
+        frame.contains(&format!("\u{1b}]8;;{address}\u{1b}\\!489\u{1b}]8;;\u{1b}\\")),
+        "the resumed answer lost its link: {frame:?}"
+    );
+}
+
 #[test]
 fn five_quiet_candidates_collapse_before_scrollback() {
     let mut ui = test_ui();
@@ -6727,6 +6753,7 @@ mod tests {
             name: name.to_string(),
             summary,
             preview,
+            input_print: Some(super::tool_input_print(input)),
             status: ToolCallStatus::Running,
         }
     }
@@ -6827,6 +6854,173 @@ mod tests {
                 "phase": "started",
                 "elapsed_secs": 0
             })
+        );
+    }
+
+    /// The blocks the runtime's own stream parser makes of one tool call:
+    /// streamed — a start with no input yet, the input, the stop — or given
+    /// whole at its start, as a provider that does not stream gives it. A hook
+    /// test fed these reads what a real call gives the screen, not a block the
+    /// test put together.
+    fn parsed_call(ids: &BlockIdGen, call_id: &str, name: &str, input: &Value, streamed: bool) -> Vec<RenderBlock> {
+        use api::{
+            ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
+            OutputContentBlock, StreamEvent,
+        };
+        let start = |input: Value| {
+            StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: 0,
+                content_block: OutputContentBlock::ToolUse { id: call_id.to_string(), name: name.to_string(), input },
+            })
+        };
+        let mut events = Vec::new();
+        if streamed {
+            events.push(start(json!({})));
+            events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                index: 0,
+                delta: ContentBlockDelta::InputJsonDelta { partial_json: input.to_string() },
+            }));
+        } else {
+            events.push(start(input.clone()));
+        }
+        events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent { index: 0 }));
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let (out, mut made) = tokio::sync::mpsc::channel(8);
+                let mut parser = runtime::message_stream::anthropic::parser::StreamParser::new();
+                for event in events {
+                    parser.handle_event(event, &out, ids).await.expect("the call parses");
+                }
+                drop(out);
+                let mut blocks = Vec::new();
+                while let Some(block) = made.recv().await {
+                    blocks.push(block);
+                }
+                blocks
+            })
+    }
+
+    /// The tool starts the hook road posted, by their payloads.
+    fn tool_starts(
+        captured: &std::sync::Arc<std::sync::Mutex<Vec<crate::ide::reporter::HookEnvelope>>>,
+    ) -> Vec<Value> {
+        captured
+            .lock()
+            .expect("hook capture")
+            .iter()
+            .filter(|envelope| envelope.hook_event_name == "PreToolUse")
+            .map(|envelope| envelope.payload.clone())
+            .collect()
+    }
+
+    /// The window's step gate counts a call as rework when it is the call just
+    /// before it, and zo's `tool_input` is the compact one its working line
+    /// shows: a command's first word, a file without the offset it is read at.
+    /// So a start also carries a print of the call's whole input, made where
+    /// the runtime holds it. Two greps that differ after their first word, and
+    /// one file read at offsets 0 and 480, keep the `tool_input` they had and
+    /// differ in their print.
+    #[test]
+    fn calls_alike_on_the_working_line_differ_in_their_print() {
+        use crate::ide::reporter::INPUT_PRINT_KEY;
+
+        let (mut ui, captured) = hooked_ui();
+        let ids = BlockIdGen::default();
+        let file = "/repo/zo-ide/crates/zo-ide/src/tui/tables.rs";
+        for (call_id, name, input) in [
+            ("toolu_1", "bash", json!({ "command": "grep -n a x" })),
+            ("toolu_2", "bash", json!({ "command": "grep -n b y" })),
+            ("toolu_3", "read_file", json!({ "path": file, "offset": 0, "limit": 480 })),
+            ("toolu_4", "read_file", json!({ "path": file, "offset": 480, "limit": 480 })),
+        ] {
+            for block in parsed_call(&ids, call_id, name, &input, true) {
+                arrive(&mut ui, block);
+            }
+        }
+
+        let starts = tool_starts(&captured);
+        assert_eq!(starts.len(), 4, "{starts:?}");
+        let print = |at: usize| starts[at][INPUT_PRINT_KEY].as_str().expect("a start carries its print");
+        assert_eq!(starts[0]["tool_input"], "grep");
+        assert_eq!(starts[1]["tool_input"], "grep");
+        assert_ne!(print(0), print(1));
+        assert_eq!(starts[2]["tool_input"], json!({ "file_path": file }));
+        assert_eq!(starts[3]["tool_input"], json!({ "file_path": file }));
+        assert_ne!(print(2), print(3));
+    }
+
+    /// The print says what the call is and nothing that changes between two of
+    /// the same call: not its id, not a time, not whether the model's input
+    /// came streamed or whole.
+    #[test]
+    fn the_same_call_twice_carries_the_same_print() {
+        use crate::ide::reporter::INPUT_PRINT_KEY;
+
+        let (mut ui, captured) = hooked_ui();
+        let ids = BlockIdGen::default();
+        let input = json!({ "command": "cargo test -p zerocode-core", "timeout": 600 });
+        for block in parsed_call(&ids, "toolu_a", "bash", &input, true) {
+            arrive(&mut ui, block);
+        }
+        for block in parsed_call(&ids, "toolu_b", "bash", &input, false) {
+            arrive(&mut ui, block);
+        }
+
+        let starts = tool_starts(&captured);
+        assert_eq!(starts.len(), 2, "{starts:?}");
+        assert_ne!(starts[0]["tool_use_id"], starts[1]["tool_use_id"]);
+        let print = starts[0][INPUT_PRINT_KEY].as_str().expect("a start carries its print");
+        assert_eq!(starts[1][INPUT_PRINT_KEY], print);
+    }
+
+    /// The print rides beside what the window already reads and changes none
+    /// of it: a start's `tool_input` and `activity` are what they were, and an
+    /// end carries no print at all.
+    #[test]
+    fn the_print_leaves_the_rest_of_a_start_and_its_end_as_they_were() {
+        use crate::ide::reporter::INPUT_PRINT_KEY;
+        use runtime::message_stream::types::ToolResultBody;
+
+        let (mut ui, captured) = hooked_ui();
+        let ids = BlockIdGen::default();
+        for block in parsed_call(&ids, "toolu_1", "bash", &json!({ "command": "grep -n a x" }), true) {
+            arrive(&mut ui, block);
+        }
+        arrive(
+            &mut ui,
+            RenderBlock::ToolResult {
+                id: ids.next(),
+                tool_call_id: ToolCallId("toolu_1".to_string()),
+                is_error: false,
+                body: ToolResultBody::Text { content: "x:1:a".to_string(), truncated: false },
+            },
+        );
+
+        assert_eq!(hook_events(&captured), [ev("PreToolUse", "bash"), ev("PostToolUse", "bash")]);
+        let posted = captured.lock().expect("hook capture");
+        let mut start = posted[0].payload.clone();
+        let print = start.as_object_mut().expect("a start is an object").remove(INPUT_PRINT_KEY);
+        assert!(print.as_ref().is_some_and(Value::is_string), "{:?}", posted[0].payload);
+        assert_eq!(
+            start,
+            json!({
+                "tool_name": "bash",
+                "tool_use_id": "toolu_1",
+                "tool_input": "grep",
+                "activity": {
+                    "verb": "bash",
+                    "target": "grep -n a x",
+                    "phase": "started",
+                    "elapsed_secs": 0
+                },
+                "session_id": "session-a"
+            })
+        );
+        assert_eq!(
+            posted[1].payload,
+            json!({ "tool_name": "bash", "tool_use_id": "toolu_1", "session_id": "session-a" })
         );
     }
 
@@ -7207,6 +7401,7 @@ mod tests {
             name: name.to_string(),
             summary,
             preview,
+            input_print: None,
             status: ToolCallStatus::Running,
         });
     }
@@ -7431,6 +7626,7 @@ mod tests {
                 name: name.to_string(),
                 summary,
                 preview,
+                input_print: None,
                 status: ToolCallStatus::Running,
             });
             let result = json!({
@@ -8074,6 +8270,7 @@ mod tests {
                 name: "ToolSearch".to_string(),
                 summary,
                 preview,
+                input_print: None,
                 status: ToolCallStatus::Running,
             });
         };
@@ -8123,6 +8320,7 @@ mod tests {
             name: "TaskOutput".to_string(),
             summary: preview_summary(&task_preview),
             preview: task_preview,
+            input_print: None,
             status: ToolCallStatus::Running,
         });
         task_ui.block(RenderBlock::ToolResult {
@@ -8229,6 +8427,7 @@ mod tests {
                 name: "Agent".to_string(),
                 summary,
                 preview,
+                input_print: None,
                 status: ToolCallStatus::Running,
             });
             ui.block(RenderBlock::ToolResult {
@@ -8263,6 +8462,7 @@ mod tests {
                 name: name.to_string(),
                 summary,
                 preview,
+                input_print: None,
                 status: ToolCallStatus::Running,
             });
         };

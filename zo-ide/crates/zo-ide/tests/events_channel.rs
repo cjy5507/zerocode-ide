@@ -391,6 +391,7 @@ fn tool_call(call: &str, status: ToolCallStatus) -> RenderBlock {
         preview: ToolPreview::Bash {
             command: "cargo build".to_string(),
         },
+        input_print: None,
         status,
     }
 }

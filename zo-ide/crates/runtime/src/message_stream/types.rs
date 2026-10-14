@@ -118,6 +118,13 @@ pub enum RenderBlock {
         summary: String,
         /// Structured preview of the tool input.
         preview: ToolPreview,
+        /// A stable print of the call's whole input as the model gave it
+        /// ([`crate::message_stream::anthropic::tools::tool_input_print`]):
+        /// what tells two calls apart where `summary` and `preview` keep
+        /// only part of the input. `None` while the input is still
+        /// arriving, and on a block rebuilt from a wire frame, which does
+        /// not carry it.
+        input_print: Option<String>,
         /// Lifecycle status of the call.
         status: ToolCallStatus,
     },

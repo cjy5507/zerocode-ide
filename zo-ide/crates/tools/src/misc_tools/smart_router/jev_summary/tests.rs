@@ -217,14 +217,19 @@ fn a_guard_seats_week_is_counted_by_who_asked_it_from_the_machines_ledger() {
 
 /// The machine's place is asked before the project's: a seat whose rows the
 /// machine keeps is the same seat whichever project asks.
+///
+/// The machine's place is the requests folder of zo's config home as the
+/// chosen judgment provider files it — the folder itself for Jev, a folder of
+/// the provider's own under it otherwise — so the case reads it down the same
+/// road instead of assuming the provider this machine happens to have.
 #[test]
 fn the_machines_place_is_asked_before_the_projects() {
     let _env = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let cwd = Path::new("/w/project");
-    assert_eq!(
-        ledger_roots(cwd),
-        [runtime::default_config_home().join(REQUESTS_DIR), shadow_ledger_dir(cwd)]
-    );
+    let requests = runtime::default_config_home().join(REQUESTS_DIR);
+    let roots = ledger_roots(cwd);
+    assert!(roots[0].starts_with(&requests), "{roots:?}");
+    assert_eq!(roots, [runtime::judgment_evidence_dir(&requests), shadow_ledger_dir(cwd)]);
 }
 
 /// The rows a walk writes under `~/.zo/jev` are read by the same counter the

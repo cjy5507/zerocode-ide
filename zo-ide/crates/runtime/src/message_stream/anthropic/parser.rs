@@ -21,7 +21,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::source::EventSource;
-use super::tools::{format_tool_result, preview_tool_input};
+use super::tools::{format_tool_result, preview_tool_input, tool_input_print};
 use crate::conversation::{redacted_thinking_data_to_string, AssistantEvent, ProviderStateBlob};
 use crate::message_stream::provider::{StreamError, TurnSummary};
 use crate::message_stream::types::{
@@ -873,6 +873,7 @@ async fn start_block(
                 name: name.clone(),
                 summary,
                 preview,
+                input_print: running_sent_on_start.then(|| tool_input_print(input)),
                 status: if running_sent_on_start {
                     ToolCallStatus::Running
                 } else {
@@ -969,6 +970,7 @@ async fn apply_delta(
                             name: name.clone(),
                             input_summary: format!("receiving input… {received} bytes"),
                         },
+                        input_print: None,
                         status: ToolCallStatus::Pending,
                     })
                     .await?;
@@ -1063,6 +1065,7 @@ async fn finish_block(
                 name,
                 summary,
                 preview,
+                input_print: Some(tool_input_print(&parsed)),
                 status: ToolCallStatus::Running,
             })
             .await?;

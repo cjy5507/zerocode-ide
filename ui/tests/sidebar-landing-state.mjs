@@ -1,5 +1,6 @@
-import { mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdir, readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { openWindowTestPage } from "./window-boot.mjs";
 
 /* The sidebar and the git panel say whether a checkout's work is in main, from
@@ -27,7 +28,13 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *   - an unlanded row also says how far behind the compare ref it runs and what a merge would
  *     conflict on (t-34501): a clash is the second word of the chip in its own colour, a branch
  *     `far_behind` says 「main보다 N 뒤」 after it, the tooltip always has the commit count, the files
- *     and the next thing to do, and a conflict nobody looked at is said as not read — never as none. */
+ *     and the next thing to do, and a conflict nobody looked at is said as not read — never as none;
+ *   - work nobody has committed yet (t-45314, AT-②-1 ⑧): a row with unsaved changes also says how far
+ *     behind the compare ref it runs, and its chip says 「main과 겹침 N」 when the compare ref changed some
+ *     of the same files since the two split — by file, so never called a conflict, in word or colour; the
+ *     tooltip names the files, and an overlap nobody read is said as not read, never as none. Those rows
+ *     are the backend's own serialization (`sidebar-landing-overlap.json`, which `worktree_landing.rs`
+ *     compares its answer with). */
 
 const REF = "origin/main";
 const NOW = Date.now();
@@ -36,6 +43,13 @@ const CLEAN = { total: 0, files: [] };
 const base = (state, over = {}) => ({
   state, detached: false, ahead: 0, dirty: false, dirty_checked_ms: NOW - 1000, compare_ref: REF, ref_updated_ms: NOW - 2 * 86_400_000, ...over,
 });
+/* AT-②-1 (t-45314): checkouts B, C and D as the backend tells the window of them, with the two clock
+ * stamps it also sends put back. */
+const OVERLAP = JSON.parse(await readFile(
+  resolve(dirname(fileURLToPath(import.meta.url)), "sidebar-landing-overlap.json"), "utf8",
+)).rows;
+const stamped = (landing) => ({ ...landing, dirty_checked_ms: NOW - 1000, ref_updated_ms: NOW - 2 * 86_400_000 });
+const UNSAVED = ["/r/overlap-b", "/r/overlap-c", "/r/overlap-d", "/r/overlap-unread"];
 
 const SCENE = [
   { path: "/r/landed", landing: base("landed", { landed_in: LANDED_IN }) },
@@ -70,6 +84,12 @@ const SCENE = [
   { path: "/r/clashdirty", landing: base("unlanded", { ahead: 2, behind: 4, far_behind: false, dirty: true,
     conflict: { total: 1, files: ["x.js"] } }) },
   { path: "/r/unseen", landing: base("unlanded", { ahead: 2, far_behind: false }) },
+  // Work nobody has committed yet, beside a main that moved one commit (AT-②-1, t-45314).
+  { path: "/r/overlap-b", landing: stamped(OVERLAP.B) },
+  { path: "/r/overlap-c", landing: stamped(OVERLAP.C) },
+  { path: "/r/overlap-d", landing: stamped(OVERLAP.D) },
+  // Unsaved changes whose overlap git could not read: the backend sends no `overlap` at all.
+  { path: "/r/overlap-unread", landing: base("no_commits", { dirty: true, behind: 2 }) },
   { path: "/r/plain" },
 ];
 
@@ -237,6 +257,51 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       chips["/r/clash"].color === chips["/r/lm"].color && chips["/r/clash"].color !== chips["/r/ahead"].color &&
         chips["/r/farclash"].color === chips["/r/lm"].color && chips["/r/far"].color === chips["/r/ahead"].color,
       JSON.stringify({ clash: chips["/r/clash"].color, check: chips["/r/lm"].color, ahead: chips["/r/ahead"].color, far: chips["/r/far"].color }),
+    );
+
+    const heads = await page.evaluate((paths) => Object.fromEntries(paths.map((path) => [path, worktreeLandingSayFor(path)?.head ?? null])),
+      UNSAVED);
+    const [b, c, d, unread] = UNSAVED.map((path) => chips[path]);
+    ok(
+      "AT-②-1 ⑧ (t-45314): laid out from the backend's own rows, B — an edit nobody committed, of a file main changed too — says 커밋 없음 · 저장 안 한 변경 · main과 겹침 1 and never calls it a conflict, in word or colour; its tooltip names src/login.rs, says it runs 1 commit behind origin/main and that the overlap is by file; its head word stays 커밋 없음; C and D say nothing of an overlap",
+      b.word === "커밋 없음 · 저장 안 한 변경 · main과 겹침 1" && !b.word.includes("충돌") &&
+        b.tone === "none" && b.color === chips["/r/nocommit"].color &&
+        b.tip.includes("src/login.rs") && b.tip.includes(`${REF}보다 1커밋 뒤처져`) && b.tip.includes("파일 단위 겹침") &&
+        !b.tip.includes("충돌") && heads["/r/overlap-b"] === "커밋 없음" &&
+        c.word === "커밋 없음 · 저장 안 한 변경" && d.word === "커밋 없음" && !c.word.includes("겹침") && !d.word.includes("겹침"),
+      JSON.stringify({ b, c, d, heads }),
+    );
+
+    ok(
+      "an overlap that was read and is empty is said as none in the tooltip, beside how far behind the row runs; one git could not read is said as not read — never as none, and never on the chip; a checkout with nothing unsaved says neither",
+      c.tip.includes(`${REF}보다 1커밋 뒤처져`) && c.tip.includes("바뀐 파일은 없습니다") && !c.tip.includes("읽지 못했습니다") &&
+        unread.word === "커밋 없음 · 저장 안 한 변경" && unread.tip.includes("겹치는지는 읽지 못했습니다") &&
+        !unread.tip.includes("바뀐 파일은 없습니다") && unread.tip.includes(`${REF}보다 2커밋 뒤처져`) &&
+        !d.tip.includes("겹치") && !d.tip.includes("바뀐 파일") && !d.tip.includes("뒤처져"),
+      JSON.stringify({ c: c.tip, unread: unread.tip, d: d.tip }),
+    );
+
+    const catalogs = await page.evaluate(() => {
+      const keys = ["worktree.landOverlap", "worktree.landTipOverlap", "worktree.landTipOverlapMore",
+        "worktree.landTipOverlapScope", "worktree.landTipOverlapNone", "worktree.landTipOverlapUnknown"];
+      const holes = (text) => [...text.matchAll(/\{\{(\w+)\}\}/g)].map((one) => one[1]).sort().join(",");
+      const missing = [];
+      const uneven = [];
+      for (const key of keys) {
+        const shapes = new Set();
+        for (const code of ["ko", "en", "ja", "zh", "es"]) {
+          const said = CATALOG[code]?.[key];
+          if (typeof said !== "string" || said.trim() === "") missing.push(`${code}:${key}`);
+          else shapes.add(holes(said));
+        }
+        if (shapes.size > 1) uneven.push(key);
+      }
+      return { missing, uneven };
+    });
+    ok(
+      "the words for unsaved work against the compare ref stand in all five catalogs — ko, en, ja, zh and es — with the same placeholders in each",
+      catalogs.missing.length === 0 && catalogs.uneven.length === 0,
+      JSON.stringify(catalogs),
     );
 
     ok(
@@ -415,18 +480,56 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
     );
 
     if (capture) {
-      for (const theme of ["dark", "light"]) {
-        await page.evaluate(async (which) => { document.documentElement.dataset.theme = which; await window.__PAINTED__(); }, theme);
-        await page.locator(".threads").screenshot({ path: resolve(capture, `landing-${theme}.png`), animations: "disabled" });
-      }
-      // The narrowest the sidebar allows (panel limits: 180 px), where the ellipsis cuts the chip.
-      for (const theme of ["dark", "light"]) {
-        await page.evaluate(async (which) => {
-          document.documentElement.dataset.theme = which;
-          document.documentElement.style.setProperty("--sidebar-width", "180px");
+      // The rows of uncommitted work close up (AT-②-1, t-45314): the four rows together, then B with its
+      // tooltip open where the window puts it. The tooltip opens only once the list has scrolled and painted:
+      // a scroll closes it, and the scroll's event lands after `scrollIntoView` returns. The list's scroll is
+      // put back afterwards, so the whole-list pictures are taken as before.
+      const clipAround = (paths, tip) => page.evaluate(async ([paths, tip]) => {
+        const nodes = paths.map((path) => document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(path)}"]`));
+        if (tip) {
+          showTip(nodes[0].querySelector(".wt-landing"));
           await window.__PAINTED__();
-        }, theme);
-        await page.locator(".threads").screenshot({ path: resolve(capture, `landing-${theme}-narrow.png`), animations: "disabled" });
+          nodes.push(document.querySelector(".tooltip"));
+        }
+        const boxes = nodes.map((node) => node.getBoundingClientRect());
+        const x = Math.max(0, Math.min(...boxes.map((box) => box.left)) - 8);
+        const y = Math.max(0, Math.min(...boxes.map((box) => box.top)) - 8);
+        return {
+          x, y,
+          width: Math.min(window.innerWidth, Math.max(...boxes.map((box) => box.right)) + 8) - x,
+          height: Math.min(window.innerHeight, Math.max(...boxes.map((box) => box.bottom)) + 8) - y,
+        };
+      }, [paths, tip]);
+      const closeUp = async (suffix, tip) => {
+        await page.evaluate(async (first) => {
+          const row = document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(first)}"]`);
+          window.__SCROLLED__ = [];
+          for (let node = row.parentElement; node; node = node.parentElement) window.__SCROLLED__.push([node, node.scrollTop]);
+          row.scrollIntoView({ block: "start" });
+          await window.__PAINTED__();
+        }, UNSAVED[0]);
+        await page.screenshot({ path: resolve(capture, `landing-overlap-${suffix}.png`), clip: await clipAround(UNSAVED, false), animations: "disabled" });
+        if (tip) {
+          await page.screenshot({ path: resolve(capture, `landing-overlap-tip-${suffix}.png`), clip: await clipAround(UNSAVED.slice(0, 1), true), animations: "disabled" });
+        }
+        await page.evaluate(async () => {
+          hideTip();
+          for (const [node, top] of window.__SCROLLED__) node.scrollTop = top;
+          await window.__PAINTED__();
+        });
+      };
+      // The default width; the narrowest the sidebar allows (panel limits: 180 px), where the ellipsis cuts
+      // the chip; and the widest it allows (560 px), the most room a chip gets. The tooltip is the same there.
+      for (const [width, suffix, tip] of [[null, "", true], ["180px", "-narrow", true], ["560px", "-wide", false]]) {
+        for (const theme of ["dark", "light"]) {
+          await page.evaluate(async ([which, wide]) => {
+            document.documentElement.dataset.theme = which;
+            if (wide) document.documentElement.style.setProperty("--sidebar-width", wide);
+            await window.__PAINTED__();
+          }, [theme, width]);
+          await page.locator(".threads").screenshot({ path: resolve(capture, `landing-${theme}${suffix}.png`), animations: "disabled" });
+          await closeUp(`${theme}${suffix}`, tip);
+        }
       }
     }
   } finally {
