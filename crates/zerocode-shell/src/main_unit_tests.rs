@@ -5290,6 +5290,182 @@ fn a_requested_navigation_waits_for_the_finish_after_its_own_started() {
     assert!(!record.pending());
 }
 
+mod known_navigation_proof_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn sent_and_loading(record: &mut NavRecord) -> u64 {
+        let number = record.admit();
+        assert!(record.sent(number));
+        record.answered(number, NavAnswer::Loading);
+        number
+    }
+
+    #[test]
+    fn a_late_finish_of_the_page_before_does_not_settle_a_newer_request() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(true, now);
+        let mut other_tab = NavRecord::born(true, now);
+        record.started(now);
+        sent_and_loading(&mut record);
+        sent_and_loading(&mut other_tab);
+        record.started(now);
+        record.finished(false);
+        assert!(
+            record.pending(),
+            "the page before finished after the request's own Started"
+        );
+        assert_eq!(record.settle_if_idle(true), NavProof::Waiting);
+        assert_eq!(record.settle_if_idle(false), NavProof::Ready);
+        assert!(
+            other_tab.pending(),
+            "one tab's idle engine settles no other tab"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    #[test]
+    fn a_late_failure_of_the_page_before_does_not_settle_a_newer_request() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(true, now);
+        record.started(now);
+        sent_and_loading(&mut record);
+        record.started(now);
+        record.failed();
+        assert!(record.pending());
+        assert_eq!(record.settle_if_idle(false), NavProof::Ready);
+    }
+
+    #[test]
+    fn a_page_load_between_admission_and_send_does_not_take_the_request() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(true, now);
+        let number = record.admit();
+        record.started(now);
+        record.finished(false);
+        assert!(
+            record.pending(),
+            "a page's own load before the send is not the request"
+        );
+        assert_eq!(
+            record.settle_if_idle(false),
+            NavProof::Waiting,
+            "an idle engine before the send proves nothing"
+        );
+        assert!(record.sent(number));
+        assert_eq!(
+            record.settle_if_idle(false),
+            NavProof::Waiting,
+            "an idle engine before its answer proves nothing"
+        );
+        record.answered(number, NavAnswer::Loading);
+        assert_eq!(record.settle_if_idle(false), NavProof::Ready);
+    }
+
+    #[test]
+    fn an_engine_answer_without_a_new_document_settles_once_the_engine_is_idle() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(false, now);
+        let number = record.admit();
+        assert!(record.sent(number));
+        record.answered(number, NavAnswer::Resolved);
+        assert_eq!(record.settle_if_idle(true), NavProof::Waiting);
+        assert_eq!(
+            record.settle_if_idle(false),
+            NavProof::Ready,
+            "a same-document move or a failure before commit has no Started or Finished"
+        );
+    }
+
+    #[test]
+    fn a_request_refused_before_its_send_stands_no_longer_and_one_sent_still_does() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(true, now);
+        let number = record.admit();
+        record.withdrawn(number);
+        assert_eq!(record.proof(), NavProof::Ready);
+        let number = record.admit();
+        assert!(record.sent(number));
+        record.withdrawn(number);
+        assert_eq!(
+            record.proof(),
+            NavProof::Waiting,
+            "a request already sent is not withdrawn"
+        );
+    }
+
+    #[test]
+    fn an_answer_for_another_request_changes_nothing() {
+        let now = Instant::now();
+        let mut closed = NavRecord::born(true, now);
+        let old = closed.admit();
+        let mut reopened = NavRecord::born(true, now);
+        let fresh = reopened.admit();
+        assert_ne!(old, fresh);
+        assert!(
+            !reopened.sent(old),
+            "a send queued for the closed record is not the reopened record's"
+        );
+        reopened.answered(old, NavAnswer::Loading);
+        assert_eq!(reopened.settle_if_idle(false), NavProof::Waiting);
+        assert!(reopened.sent(fresh));
+        let newer = reopened.admit();
+        reopened.answered(fresh, NavAnswer::Loading);
+        assert!(!reopened.sent(fresh));
+        assert_eq!(
+            reopened.settle_if_idle(false),
+            NavProof::Waiting,
+            "the older request's answer does not settle the newer one"
+        );
+        assert!(reopened.sent(newer));
+        reopened.answered(newer, NavAnswer::Resolved);
+        assert_eq!(reopened.settle_if_idle(false), NavProof::Ready);
+    }
+
+    #[test]
+    fn an_engine_that_shows_no_load_is_unproven_until_a_newer_request_settles() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(true, now);
+        let number = record.admit();
+        assert!(record.sent(number));
+        record.answered(number, NavAnswer::Silent);
+        assert_eq!(record.proof(), NavProof::Unproven);
+        assert_eq!(record.settle_if_idle(false), NavProof::Unproven);
+        sent_and_loading(&mut record);
+        assert_eq!(record.settle_if_idle(false), NavProof::Ready);
+    }
+
+    #[test]
+    fn the_dead_clock_marks_once_and_never_settles_a_request() {
+        let now = Instant::now();
+        let stood = now
+            .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS + 1))
+            .unwrap();
+        let mut record = NavRecord::born(true, stood);
+        sent_and_loading(&mut record);
+        let generation = record.started(stood);
+        assert!(record.dead_if_still(generation, now), "the first timeout");
+        assert!(
+            !record.dead_if_still(generation, now),
+            "the same generation's clock marks a dead load once"
+        );
+        assert!(record.pending(), "the clock's mark is not a finish");
+        assert_eq!(record.settle_if_idle(true), NavProof::Waiting);
+        let generation = record.started(stood);
+        record.finished(false);
+        assert!(
+            !record.dead_if_still(generation, now),
+            "a load that finished is never marked dead"
+        );
+        let stale = record.started(stood);
+        record.started(stood);
+        assert!(
+            !record.dead_if_still(stale, now),
+            "a newer load's clock is its own"
+        );
+    }
+}
+
 mod browser_dispatch_outcome_tests {
     use super::*;
     use crate::browser_workspace::{Dispatch, Mode, Workspaces};
