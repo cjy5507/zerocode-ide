@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "d3-lite",
+      "label": "D3 lite 0.85B",
+      "engine": "transformers_system_one",
+      "nativeFormat": "d3-code-readout-v1",
+      "protocol": "system_one",
+      "revision": "3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61",
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/vllm-sr/d3-lite/tree/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61",
+      "quality": "upstream_native_unverified",
+      "files": [
+        {
+          "path": "model-00001-of-00001.safetensors",
+          "bytes": 1706027688,
+          "sha256": "ca6222dbf2b72899ae45580ed84d26d1f0e69a8de212edda295072000e34a4c2",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/model-00001-of-00001.safetensors"
+        },
+        {
+          "path": "readout.safetensors",
+          "bytes": 1044560,
+          "sha256": "fe11cfac5c79b6a83e35b707581b1260214279bb22b003c215c62719186ef629",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/readout.safetensors"
+        },
+        {
+          "path": "config.json",
+          "bytes": 2884,
+          "sha256": "a9071195384e1fc2c68f9fe0fae007a22182ab77eb14fe8228a1a24b37d3cee9",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/config.json"
+        },
+        {
+          "path": "decision_config.json",
+          "bytes": 5504,
+          "sha256": "30b6095b945d5a93697868afdf9be9123ea892085fbaff3078112c48da20dc6b",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/decision_config.json"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "bytes": 41066,
+          "sha256": "d2ff81f32fc8ad51c20e3b76abf1689da6246280dad39be981567c7b4367f668",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/model.safetensors.index.json"
+        },
+        {
+          "path": "tokenizer.json",
+          "bytes": 12807982,
+          "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/tokenizer.json"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "bytes": 16709,
+          "sha256": "49e2b6e395f959f077f1e992b338919c0d4a9732fc6e613995e06557f843500c",
+          "url": "https://huggingface.co/vllm-sr/d3-lite/resolve/3c49f5c0bd48a4b28e29b8ec1f38f56e199f3d61/tokenizer_config.json"
+        }
+      ],
+      "serverModelId": "vllm-sr/d3-lite",
+      "weightsBytes": 1707072248
+    }
+  ]
+}
