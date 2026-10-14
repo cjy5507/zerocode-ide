@@ -2358,4 +2358,376 @@ mod tests {
         assert!(said.values().all(|landing| landing.state == "unknown"));
         assert_eq!(said.len(), words.len());
     }
+
+    /// AT-②-1 (t-45314): work nobody has committed yet, beside a main that
+    /// moved.
+    ///
+    /// 1a and 1b judge a checkout by its commits, so one that was still being
+    /// edited said nothing until a side landed: two of them could edit the same
+    /// file unseen (gap G1). This is the acceptance test the stage-1c design
+    /// wrote down — ① to ⑦ here, ⑧ in `ui/tests/sidebar-landing-state.mjs`,
+    /// which lays out the rows ① to ③ compare with — on a real repository in a
+    /// temporary folder.
+    mod uncommitted {
+        use super::*;
+        use serde_json::json;
+
+        /// B, C and D as the window is told of them, without the two clock
+        /// stamps: the rows the window's half of the test lays out.
+        const ROWS: &str = include_str!("../../../ui/tests/sidebar-landing-overlap.json");
+
+        fn row(name: &str) -> serde_json::Value {
+            let rows: serde_json::Value = serde_json::from_str(ROWS).expect("the window's rows");
+            rows["rows"][name].clone()
+        }
+
+        /// Synthetic `src/login.rs` and `docs/note.md` on a published main, and
+        /// three checkouts cut from it: B edits `src/login.rs` without a commit
+        /// and leaves an untracked `scratch.txt`, C edits `docs/note.md` without
+        /// a commit, and D is left alone.
+        struct Scene {
+            bench: Bench,
+            b: PathBuf,
+            c: PathBuf,
+            d: PathBuf,
+        }
+
+        impl Scene {
+            fn cut() -> Self {
+                let bench = Bench::open();
+                for (file, text) in [
+                    ("src/login.rs", "fn login() {}\n"),
+                    ("docs/note.md", "# note\n"),
+                ] {
+                    let at = bench.repo.join(file);
+                    std::fs::create_dir_all(at.parent().expect("a folder")).expect("its folder");
+                    std::fs::write(&at, text).expect("a synthetic file");
+                }
+                git(&bench.repo, &["add", "."]);
+                git(&bench.repo, &["commit", "-q", "-m", "synthetic files"]);
+                bench.publish();
+                let (b, c, d) = (
+                    bench.worktree("b"),
+                    bench.worktree("c"),
+                    bench.worktree("d"),
+                );
+                std::fs::write(b.join("src/login.rs"), "fn login() { b }\n").expect("B edits");
+                std::fs::write(b.join("scratch.txt"), "B's notes\n").expect("B's untracked file");
+                std::fs::write(c.join("docs/note.md"), "# note\nC\n").expect("C edits");
+                Self { bench, b, c, d }
+            }
+
+            /// Somebody else's work lands: main changes `src/login.rs` and adds
+            /// `scratch.txt` in one commit, published only when the caller says.
+            fn main_moves(&self) {
+                let repo = &self.bench.repo;
+                std::fs::write(repo.join("src/login.rs"), "fn login() { main }\n")
+                    .expect("main edits");
+                std::fs::write(repo.join("scratch.txt"), "main's scratch\n").expect("main adds");
+                git(repo, &["add", "src/login.rs", "scratch.txt"]);
+                git(repo, &["commit", "-q", "-m", "main moves"]);
+            }
+
+            /// The scene with main's commit published: origin/main is one commit
+            /// ahead of every checkout.
+            fn published() -> Self {
+                let scene = Self::cut();
+                scene.main_moves();
+                scene.bench.publish();
+                scene
+            }
+
+            /// What the window is told of one checkout now, without the two
+            /// stamps that are times of the run rather than facts of the work:
+            /// when the unsaved mark was read and when the compare ref moved.
+            fn said(&self, at: &Path) -> serde_json::Value {
+                let mut said = told(&self.bench.landing(at));
+                let fields = said.as_object_mut().expect("a landing is an object");
+                fields.remove("dirty_checked_ms");
+                fields.remove("ref_updated_ms");
+                said
+            }
+        }
+
+        /// ① B edited a file main has changed since B was cut, and committed
+        /// nothing: the overlap names that file, and the row says how far
+        /// behind it runs.
+        #[test]
+        fn an_unsaved_edit_of_a_file_main_changed_is_an_overlap_and_the_row_counts_behind() {
+            let scene = Scene::published();
+            let b = scene.said(&scene.b);
+            assert_eq!(
+                (&b["state"], &b["dirty"]),
+                (&json!("no_commits"), &json!(true)),
+                "{b}"
+            );
+            assert_eq!(
+                b["behind"],
+                json!(1),
+                "a row with unsaved changes says how far behind it runs: {b}"
+            );
+            assert_eq!(
+                b["overlap"],
+                json!({ "total": 1, "files": ["src/login.rs"] }),
+                "{b}"
+            );
+            assert_eq!(b, row("B"), "the window's rows are what the backend says");
+        }
+
+        /// ② C edited a file main has not touched: the overlap was read and is
+        /// empty, which is said as none rather than left unsaid.
+        #[test]
+        fn an_unsaved_edit_main_did_not_touch_is_read_as_no_overlap() {
+            let scene = Scene::published();
+            let c = scene.said(&scene.c);
+            assert_eq!(
+                (&c["state"], &c["dirty"]),
+                (&json!("no_commits"), &json!(true)),
+                "{c}"
+            );
+            assert_eq!(c["behind"], json!(1), "{c}");
+            assert_eq!(
+                c["overlap"],
+                json!({ "total": 0, "files": [] }),
+                "read, and nothing overlaps: {c}"
+            );
+            assert_eq!(c, row("C"), "the window's rows are what the backend says");
+        }
+
+        /// ③ D was left alone: no distance and no overlap are said of it, as of
+        /// any idle checkout (`a_landed_or_idle_row_carries_no_drift`).
+        #[test]
+        fn an_untouched_checkout_beside_them_carries_no_drift_and_no_overlap() {
+            let scene = Scene::published();
+            let d = scene.said(&scene.d);
+            assert_eq!(
+                (&d["state"], &d["dirty"]),
+                (&json!("no_commits"), &json!(false)),
+                "{d}"
+            );
+            for field in ["behind", "conflict", "overlap"] {
+                assert!(
+                    d.get(field).is_none(),
+                    "an idle checkout carries `{field}`: {d}"
+                );
+            }
+            assert_eq!(d, row("D"), "the window's rows are what the backend says");
+        }
+
+        /// ④ An untracked file is not an unsaved change — `dirty` does not count
+        /// it either — so main adding a file of the same name is no overlap. A
+        /// known limit, said in the stage report.
+        #[test]
+        fn an_untracked_file_main_added_under_the_same_name_is_no_overlap() {
+            let scene = Scene::published();
+            // The scene is what it says: main has the name, and in B it is untracked.
+            assert_eq!(
+                git(
+                    &scene.bench.repo,
+                    &["ls-tree", "--name-only", "origin/main", "scratch.txt"]
+                ),
+                "scratch.txt"
+            );
+            assert!(scene.b.join("scratch.txt").is_file());
+            assert_eq!(git(&scene.b, &["ls-files", "scratch.txt"]), "");
+            let overlap = scene.said(&scene.b)["overlap"].clone();
+            let named = overlap["files"]
+                .as_array()
+                .is_some_and(|files| files.iter().any(|one| one == "scratch.txt"));
+            assert!(!named, "the untracked file was named: {overlap}");
+            // Counted without being named is the same mistake: src/login.rs is
+            // B's only tracked change that main made too.
+            assert!(
+                overlap["total"].as_u64().is_none_or(|total| total <= 1),
+                "the untracked file was counted: {overlap}"
+            );
+        }
+
+        /// ⑤ The reading writes nothing: B's index (its bytes and its time),
+        /// HEAD, the edited file, main and origin/main are as they were, and no
+        /// `index.lock` is left behind.
+        #[test]
+        fn reading_unsaved_work_writes_no_index_head_file_or_ref_and_leaves_no_lock() {
+            let scene = Scene::published();
+            let b = &scene.b;
+            let at = |name: &str| b.join(git(b, &["rev-parse", "--git-path", name]));
+            let index = at("index");
+            let looked = || {
+                (
+                    std::fs::read(&index).expect("B's index"),
+                    std::fs::metadata(&index)
+                        .and_then(|meta| meta.modified())
+                        .expect("its time"),
+                    std::fs::read(at("HEAD")).expect("B's HEAD"),
+                    std::fs::read(b.join("src/login.rs")).expect("B's edit"),
+                    git(b, &["rev-parse", "refs/heads/main"]),
+                    git(b, &["rev-parse", "refs/remotes/origin/main"]),
+                )
+            };
+            let before = looked();
+            assert!(
+                scene.bench.landing(b).dirty,
+                "the reading this guards is the one that saw the edit"
+            );
+            assert!(
+                looked() == before,
+                "reading B changed its index, HEAD, file or a ref"
+            );
+            assert!(!at("index.lock").exists(), "reading B left an index.lock");
+        }
+
+        /// ⑥ Once B commits its edit, 1b's answer takes over: the work is
+        /// unlanded, and a merge would conflict on the one file main changed.
+        #[test]
+        fn the_edit_once_committed_is_unlanded_and_conflicts_on_the_file_main_changed() {
+            let scene = Scene::published();
+            git(&scene.b, &["add", "src/login.rs"]);
+            git(&scene.b, &["commit", "-q", "-m", "B commits"]);
+            let b = scene.said(&scene.b);
+            assert_eq!(b["state"], json!("unlanded"), "{b}");
+            assert_eq!(
+                b["conflict"],
+                json!({ "total": 1, "files": ["src/login.rs"] }),
+                "{b}"
+            );
+        }
+
+        /// ⑦ Publishing main moves the stamp the window polls, which is what
+        /// makes it read the rows again — and with them the overlap against the
+        /// compare ref's new commit.
+        #[test]
+        fn publishing_main_moves_the_stamp_the_window_reads_again_on() {
+            let scene = Scene::cut();
+            scene.main_moves();
+            let host = Host::for_workspace(&scene.bench.repo);
+            // The window's first read resolves the compare ref and keeps its name.
+            landing_base(&host, &scene.bench.repo, None);
+            let roots = vec![scene.bench.repo.to_string_lossy().into_owned()];
+            let before = landing_stamp_of(roots.clone());
+            assert_eq!(
+                landing_stamp_of(roots.clone()),
+                before,
+                "nothing moved, and neither did the stamp"
+            );
+            scene.bench.publish();
+            assert_ne!(
+                landing_stamp_of(roots),
+                before,
+                "publishing main moved nothing the window watches"
+            );
+        }
+
+        /// The overlap stands on the head, the compare ref and the set of
+        /// changed files together. With the first two still, a file staged for
+        /// its first commit counts the moment it is, an edit taken back is let
+        /// go, and a checkout left with nothing unsaved says no overlap and no
+        /// distance at all.
+        #[test]
+        fn the_overlap_follows_the_unsaved_files_at_the_same_head_and_compare_ref() {
+            let scene = Scene::published();
+            let b = &scene.b;
+            let overlap = || scene.said(b)["overlap"].clone();
+            assert_eq!(overlap(), json!({ "total": 1, "files": ["src/login.rs"] }));
+            git(b, &["add", "scratch.txt"]);
+            assert_eq!(
+                overlap(),
+                json!({ "total": 2, "files": ["scratch.txt", "src/login.rs"] }),
+                "a file staged for its first commit is an unsaved change"
+            );
+            git(b, &["checkout", "--", "src/login.rs"]);
+            assert_eq!(
+                overlap(),
+                json!({ "total": 1, "files": ["scratch.txt"] }),
+                "an edit taken back is let go"
+            );
+            git(b, &["rm", "-q", "--cached", "scratch.txt"]);
+            let left = scene.said(b);
+            assert_eq!(left["dirty"], json!(false), "{left}");
+            assert!(
+                left.get("overlap").is_none() && left.get("behind").is_none(),
+                "a checkout with nothing unsaved is said as D is: {left}"
+            );
+        }
+
+        /// Names are compared as each side has them: a file main renamed
+        /// overlaps an unsaved edit under the name the checkout edits, and an
+        /// unsaved rename of a file main changed overlaps under the name main
+        /// changed.
+        #[test]
+        fn a_rename_on_either_side_overlaps_under_the_name_the_other_side_changed() {
+            let scene = Scene::cut();
+            git(&scene.c, &["mv", "docs/note.md", "docs/notes.md"]);
+            let repo = &scene.bench.repo;
+            git(repo, &["mv", "src/login.rs", "src/auth.rs"]);
+            std::fs::write(repo.join("docs/note.md"), "# note\nmain\n").expect("main edits");
+            git(repo, &["add", "docs/note.md"]);
+            git(repo, &["commit", "-q", "-m", "main renames and edits"]);
+            scene.bench.publish();
+            assert_eq!(
+                scene.said(&scene.b)["overlap"],
+                json!({ "total": 1, "files": ["src/login.rs"] })
+            );
+            assert_eq!(
+                scene.said(&scene.c)["overlap"],
+                json!({ "total": 1, "files": ["docs/note.md"] })
+            );
+        }
+
+        /// An overlap git cannot read is not said as none. After a criss-cross
+        /// merge the checkout and the compare ref have two merge bases, no one
+        /// place to compare from, and git refuses: the row carries no overlap at
+        /// all, while its unsaved mark and its distance behind still stand.
+        #[test]
+        fn an_overlap_git_cannot_read_is_left_unsaid_never_zero() {
+            let bench = Bench::open();
+            git(&bench.repo, &["checkout", "-q", "-b", "side"]);
+            bench.commit(&bench.repo, "side.txt", "side\n");
+            git(&bench.repo, &["checkout", "-q", "main"]);
+            bench.commit(&bench.repo, "main.txt", "main\n");
+            let main_before = git(&bench.repo, &["rev-parse", "main"]);
+            git(
+                &bench.repo,
+                &["merge", "-q", "--no-ff", "--no-edit", "side"],
+            );
+            git(&bench.repo, &["checkout", "-q", "side"]);
+            git(
+                &bench.repo,
+                &["merge", "-q", "--no-ff", "--no-edit", &main_before],
+            );
+            git(&bench.repo, &["checkout", "-q", "main"]);
+            bench.publish();
+            assert_eq!(
+                git(&bench.repo, &["merge-base", "--all", "side", "main"])
+                    .lines()
+                    .count(),
+                2,
+                "a criss-cross: two merge bases"
+            );
+            let wt = bench.root.join("criss");
+            git(
+                &bench.repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "wt/criss",
+                    &wt.to_string_lossy(),
+                    "side",
+                ],
+            );
+            std::fs::write(wt.join("a.txt"), "edited\n").expect("an unsaved edit");
+            let said = told(&bench.landing(&wt));
+            assert_eq!(said["dirty"], json!(true), "{said}");
+            assert_eq!(
+                said["behind"],
+                json!(1),
+                "the distance is read all the same: {said}"
+            );
+            assert!(
+                said.get("overlap").is_none(),
+                "an overlap git refused to read was said: {said}"
+            );
+        }
+    }
 }
