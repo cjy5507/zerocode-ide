@@ -157,6 +157,63 @@ fn a_delayed_local_reply_cannot_survive_a_provider_switch() {
     });
 }
 
+/// A reply that lands after the person selected another model names the
+/// client it was put to, not the one selected when its row is filed — and
+/// filed where the new model's records are, it is no use of the new model
+/// (t-53792): the folder a row lands in is read after the reply, the client
+/// before the request.
+#[test]
+fn a_reply_after_a_provider_switch_names_the_client_asked_and_is_no_use_of_the_next() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let path = home.path().join("settings.json");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(), 100);
+    let provider = provider(endpoint.base());
+    let root = settings(&provider, workspace.path());
+    std::fs::write(&path, root.to_string()).expect("settings");
+    let wire = Wire::at("http://127.0.0.1:1", "", Some(path.clone()));
+    let asked_route = route_of(&wire);
+    let mut next = provider.clone();
+    next.model = "next-decision-model".to_string();
+    let asked = thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            wire.ask(
+                &zerocode_core::jev::STALL,
+                Some(workspace.path()),
+                request_body(&json!("Open help; routine and ready."), &questions()),
+                Duration::from_secs(5),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while endpoint.asked().is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(endpoint.asked().len(), 1);
+        let mut switched = root.clone();
+        switched["smart"]["judgmentProvider"] = json!(next);
+        std::fs::write(&path, switched.to_string()).expect("new settings");
+        waiting.join().expect("join")
+    });
+    assert_eq!(asked.answer, Err("settings_changed".to_string()));
+    assert_eq!(asked.spent.requests, 1);
+    assert!(asked_route.is_some());
+    assert_eq!(asked.spent.route, asked_route, "the client it was put to");
+    assert_ne!(
+        route_of(&wire),
+        asked_route,
+        "not the one selected after it"
+    );
+
+    let mut row = json!({"at": 1_000, "outcome": "settings_changed"});
+    asked.spent.stamp(&mut row);
+    let filed = ledger_of(&wire, &zerocode_core::jev::STALL).expect("the next model's folder");
+    append_rows(&filed, &[row]);
+    let reading = latest::read(&wire, 2_000);
+    assert_eq!(reading.provider_identity, Some(next.identity()));
+    assert_eq!(reading.state, latest::State::NoneObserved, "{reading:?}");
+    assert_eq!(reading.last_request, None);
+}
+
 #[test]
 fn a_local_model_cannot_inherit_a_cloud_models_promoted_standing() {
     use zerocode_core::jev::promote::{ROSE, Stand};

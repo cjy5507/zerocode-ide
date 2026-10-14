@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
 };
-use zerocode_core::jev::summary::{HTTP_VERSION, INPUT_TOKENS, MODEL};
+use zerocode_core::jev::summary::{CLIENT_ROUTE, HTTP_VERSION, INPUT_TOKENS, MODEL};
 use zerocode_core::jev::{JevUse, count, memo};
 
 use crate::api_routers::{Keychain, RouterKeys};
@@ -397,6 +397,11 @@ pub struct Spent {
     /// t-13199); `None` when nothing came back, and for the memo's answer,
     /// which crossed no wire.
     pub version: Option<String>,
+    /// The judgment client the request this ask sent was put to
+    /// ([`Provider::route_fingerprint`], t-53792), read with the provider
+    /// before it left — on a row riding that request, the same one; `None`
+    /// when nothing was sent: a refusal at the door, the memo's answer.
+    pub route: Option<String>,
 }
 
 impl Spent {
@@ -436,6 +441,9 @@ impl Spent {
         if let Some(version) = self.version.as_deref() {
             fields.insert(HTTP_VERSION.canonical.to_string(), json!(version));
         }
+        if let Some(route) = self.route.as_deref() {
+            fields.insert(CLIENT_ROUTE.canonical.to_string(), json!(route));
+        }
     }
 
     /// What a row that rides a request another row paid for is charged: no
@@ -456,6 +464,7 @@ impl Spent {
             output_tokens: Some(0),
             model: self.model.clone(),
             version: self.version.clone(),
+            route: self.route.clone(),
         }
     }
 
@@ -488,6 +497,9 @@ impl Spent {
             }
             if all.version.is_none() {
                 all.version.clone_from(&one.version);
+            }
+            if all.route.is_none() {
+                all.route.clone_from(&one.route);
             }
             all
         })
@@ -985,6 +997,7 @@ impl Wire {
                     // the body the memo kept whole.
                     model: answered_by(&remembered.answer),
                     version: None,
+                    route: None,
                 },
                 request_bytes,
                 memo,
@@ -1045,6 +1058,7 @@ impl Wire {
                 .and_then(Value::as_u64),
             model: answer.as_deref().ok().and_then(answered_by),
             version,
+            route: None,
         };
         // Keep the actual wire usage even when a late reply loses permission.
         let answer = if answer.is_ok() && !self.response_is_current(row, workspace, &allowed, mode)
@@ -1308,6 +1322,7 @@ pub(crate) fn today() -> String {
     count::day_of(now_ms, offset_minutes)
 }
 
+pub(crate) mod latest;
 mod standing;
 
 #[cfg(test)]

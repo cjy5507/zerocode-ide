@@ -1541,6 +1541,34 @@ mod tests {
         }
     }
 
+    /// The reading of the current model's real use is a door of its own
+    /// (t-53792): registered with the webview, beside the settings it does
+    /// not change, and a read — it asks no model and writes nothing.
+    #[test]
+    fn the_latest_request_reading_is_a_registered_door_that_only_reads() {
+        let main = include_str!("main.rs");
+        let handlers = main
+            .split_once("tauri::generate_handler![")
+            .map(|(_, list)| list)
+            .expect("the handler list");
+        assert!(
+            handlers.contains("judgment_latest_request,"),
+            "judgment_latest_request is not registered"
+        );
+        let doors = include_str!("cmd/typesafe.rs");
+        let door = &doors[doors
+            .find("fn judgment_latest_request(")
+            .expect("the reading's door")..];
+        let door = &door[..door.find("\n}\n").expect("the door closes")];
+        assert!(door.contains("systemone::latest::read("), "{door}");
+        for acting in ["ask(", "ask_candidate(", "set_", "write", "remove"] {
+            assert!(
+                !door.contains(acting),
+                "the reading does `{acting}`: {door}"
+            );
+        }
+    }
+
     /// Every feature names itself in the markup's own language and in each of
     /// the four catalogs — its name, the one-line summary and the paragraph of
     /// what it sends — so no language falls back to another feature's words or

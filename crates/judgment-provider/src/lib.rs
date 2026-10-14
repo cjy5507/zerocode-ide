@@ -245,6 +245,11 @@ impl Provider {
         }
         format!("judgment-{:x}", hash.finalize())
     }
+
+    #[must_use]
+    pub fn route_fingerprint(&self) -> String {
+        self.identity()
+    }
 }
 
 fn loopback(address: &Url) -> bool {

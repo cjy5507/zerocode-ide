@@ -469,6 +469,37 @@ fn a_candidate_an_apply_would_refuse_is_refused_before_anything_is_sent() {
     assert_eq!(std::fs::read_to_string(&path).expect("settings"), before);
 }
 
+/// A preflight of the very provider the settings select sends a real request
+/// to the client a feature would ask, and is still no feature's use of it
+/// (t-53792): a probe files no feature record, so the reading of that
+/// client's real use says none was observed.
+#[test]
+fn a_preflight_of_the_selected_provider_is_not_read_as_its_use() {
+    use crate::systemone::latest::{self, State};
+
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
+    let selected = candidate(endpoint.base());
+    set_provider(&path, selected.clone()).expect("select the served provider");
+    let wire = settings_wire(&path);
+    let preflight = preflight_provider(
+        &path,
+        selected.clone(),
+        &selected.identity(),
+        &HeldKeys::default(),
+        &wire,
+    )
+    .expect("preflight");
+    assert!(preflight.answered, "{preflight:?}");
+    assert_eq!(endpoint.count(), 1);
+    assert_eq!(requests_today(&path), 1, "the request left and was counted");
+    let reading = latest::read(&wire, 1);
+    assert_eq!(reading.provider_identity, Some(selected.identity()));
+    assert_eq!(reading.state, State::NoneObserved, "{reading:?}");
+    assert_eq!(reading.last_request, None);
+}
+
 #[test]
 fn a_moved_selection_refuses_the_preflight_and_its_stale_apply() {
     let home = tempfile::tempdir().expect("home");
