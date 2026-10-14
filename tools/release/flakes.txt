@@ -123,3 +123,8 @@ root:computer_use::reflex::autopilot::tests::a_stale_or_mismatched_or_late_answe
 # (09-30, v1.1.44's gate-root), and in the coordinator's t-18551 gate beside a second lane (10-01 00:2x, 2534/2535);
 # judged solo 3/3 green each time. The product's wall and process-group end are not what goes red.
 # t-19329 (10-01): the callback-seat test and the errand wall test were taken off this list — the seat test starts over on a new port when a neighbour took the first, the wall test's fake starts its child before any other work and a run whose fake never started is begun again; 16/16 green beside 12 CPU loops, 10/10 alone.
+# 2026-10-14: the orchestrator's test_evidence counts the whole process's open descriptors,
+# so pipes another test in the same binary holds move it; red in full runs at the 09-28 gate,
+# the l27 landing gate and the v1.1.64 root gate (unlisted.txt 0951f1a8), green alone 3/3
+# each time. The fix (count only the descriptors the test made) is in the flake group.
+root:test_evidence::tests::a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence

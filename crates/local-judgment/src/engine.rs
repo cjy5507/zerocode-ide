@@ -39,7 +39,8 @@ pub struct Running {
     pub model_id: String,
     pub provider: Provider,
     pub engine: Arc<Engine>,
-    task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    reservation: Option<std::net::TcpListener>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -54,6 +55,18 @@ impl Engine {
         profile: &RuntimeProfile,
         model: Option<(&Path, &Model)>,
     ) -> Result<Arc<Self>> {
+        if let Some((_, model)) = model {
+            crate::adapter::local_profile(model, Some(profile), true)?;
+        } else if profile.engine == EngineKind::SystemOneServer {
+            return Err(Error::EngineUnsupported);
+        }
+        for artifact in &profile.runtime_files {
+            let path = child(
+                runtime,
+                &format!("{}/{}", profile.site_packages, artifact.path),
+            )?;
+            crate::storage::verify(&path, artifact, &AtomicBool::new(false))?;
+        }
         let executable = child(runtime, &profile.executable)?;
         let cache = child(runtime, "cache")?;
         crate::storage::private_dir(&cache)?;
@@ -82,6 +95,8 @@ impl Engine {
             .env("VECLIB_MAXIMUM_THREADS", "2")
             .env("NUMEXPR_NUM_THREADS", "2")
             .env("DO_NOT_TRACK", "1")
+            .env("D3_FAST", "0")
+            .env("D3_FUSED", "0")
             .current_dir(runtime)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -99,10 +114,25 @@ impl Engine {
             .filter_map(|wheel| Some((wheel.package.clone()?, json!(wheel.version.as_ref()?))))
             .collect();
         let mut initial = json!({"engine":profile.engine,"mode":"verify","packages":packages});
+        initial["rssLimitBytes"] = json!(profile.max_rss_bytes);
+        if profile.engine == EngineKind::TransformersSystemOne {
+            let template = profile
+                .runtime_files
+                .iter()
+                .find(|artifact| artifact.path == "native-system-one/chat_template.jinja")
+                .ok_or(Error::Manifest)?;
+            let path = child(
+                runtime,
+                &format!("{}/{}", profile.site_packages, template.path),
+            )?;
+            let bytes = crate::storage::bounded_read(&path, 64 * 1024)?;
+            initial["chatTemplate"] = json!(String::from_utf8(bytes).map_err(|_| Error::Manifest)?);
+        }
         if let Some((directory, model)) = model {
             initial["mode"] = json!("model");
             initial["modelDirectory"] = json!(directory);
             initial["modelId"] = json!(model.id);
+            initial["modelFiles"] = json!(model.files);
         }
         let bytes = serde_json::to_vec(&initial).map_err(|_| Error::RuntimeFailed)?;
         engine.write(&bytes)?;
@@ -181,7 +211,7 @@ impl Engine {
         Ok(())
     }
 
-    fn exchange(&self, bytes: &[u8]) -> Result<Vec<u8>> {
+    pub(crate) fn exchange(&self, bytes: &[u8]) -> Result<Vec<u8>> {
         if bytes.len() >= MAX_FRAME {
             return Err(Error::TooLarge);
         }
@@ -285,6 +315,9 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
     if request.get("model").and_then(Value::as_str) != Some(&state.provider.model) {
         return failure(StatusCode::BAD_REQUEST, Error::UnknownModel);
     }
+    if request.get("images").is_some() || request.get("videos").is_some() {
+        return failure(StatusCode::UNPROCESSABLE_ENTITY, Error::InputUnsupported);
+    }
     if request
         .get("questions")
         .and_then(Value::as_object)
@@ -331,18 +364,50 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
     }
 }
 
+#[cfg(all(test, unix))]
 pub async fn serve(
     model: &Model,
     engine: Arc<Engine>,
     failed: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<Running> {
+    serve_on(model, engine, failed, None).await
+}
+
+pub async fn serve_on(
+    model: &Model,
+    engine: Arc<Engine>,
+    failed: Arc<dyn Fn() + Send + Sync>,
+    listener: Option<std::net::TcpListener>,
+) -> Result<Running> {
     engine.on_exit(failed.clone());
     match model.engine {
-        EngineKind::Laya => {}
+        EngineKind::Laya | EngineKind::TransformersSystemOne => {}
+        EngineKind::SystemOneServer => return Err(Error::EngineUnsupported),
     }
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .await
+    let listener = match listener {
+        Some(listener) => listener,
+        None => tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(|_| Error::RuntimeFailed)?
+            .into_std()
+            .map_err(|_| Error::RuntimeFailed)?,
+    };
+    let address = listener.local_addr().map_err(|_| Error::RuntimeFailed)?;
+    if address.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) || address.port() == 0 {
+        return Err(Error::Protocol);
+    }
+    listener
+        .set_nonblocking(true)
         .map_err(|_| Error::RuntimeFailed)?;
+    for _ in 0..32 {
+        match listener.accept() {
+            Ok((stream, _)) => drop(stream),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => return Err(Error::RuntimeFailed),
+        }
+    }
+    let reservation = listener.try_clone().map_err(|_| Error::RuntimeFailed)?;
+    let listener = tokio::net::TcpListener::from_std(listener).map_err(|_| Error::RuntimeFailed)?;
     let port = listener
         .local_addr()
         .map_err(|_| Error::RuntimeFailed)?
@@ -373,13 +438,30 @@ pub async fn serve(
         model_id: model.id.clone(),
         provider,
         engine,
-        task,
+        task: Some(task),
+        reservation: Some(reservation),
     })
+}
+
+impl Running {
+    pub(crate) fn take_listener(&mut self) -> Result<std::net::TcpListener> {
+        self.reservation.take().ok_or(Error::RuntimeFailed)
+    }
+
+    pub(crate) async fn retire(mut self) {
+        self.engine.stop();
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
         self.engine.stop();
     }
 }

@@ -11820,6 +11820,118 @@ fn the_beat_points_an_idle_coordinator_at_its_mail_and_enters_once() {
     crate::agent_teams::forget_term(WORKER);
 }
 
+/// t-52566: a pane words are still on their way to is not pointed at. The
+/// mail pointer's line, queued behind a restored zo worker's continuation,
+/// took the line inside the turn the continuation began and ran out its
+/// eight seconds there; behind any delivery it would meet whatever that
+/// delivery begins. Once the words have landed, the ordinary road speaks.
+#[test]
+fn the_pointer_waits_for_words_already_on_their_way_to_the_pane() {
+    const LEADER: u32 = 52_566;
+    const WORKER: u32 = 52_567;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let team = format!("team-pointer-behind-{LEADER}");
+    let (_run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+
+    /// Sends always land; the panes the window is still typing at are
+    /// whatever the test says.
+    struct Typing {
+        sent: Mutex<Vec<(u32, String)>>,
+        typing_at: Mutex<std::collections::HashSet<u32>>,
+    }
+    impl Host for Typing {
+        fn split(
+            &self,
+            _team: &str,
+            _leader_term: u32,
+            _from_term: u32,
+            _pane: &str,
+            _direction: zerocode_core::agent_teams::Direction,
+            _command: &str,
+            _token: &str,
+        ) -> Option<u32> {
+            None
+        }
+        fn send(&self, term: u32, text: &str) -> bool {
+            self.sent
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .push((term, text.to_string()));
+            true
+        }
+        fn capture(&self, _term: u32) -> Option<String> {
+            None
+        }
+        fn focus(&self, _term: u32) -> bool {
+            false
+        }
+        fn close(&self, _term: u32) {}
+        fn actor_for(&self, term: u32) -> Option<String> {
+            Some(test_actor(term))
+        }
+        fn prompts_on_their_way(&self) -> std::collections::HashSet<u32> {
+            self.typing_at
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .clone()
+        }
+    }
+    let host = Typing {
+        sent: Mutex::new(Vec::new()),
+        typing_at: Mutex::new(std::collections::HashSet::from([LEADER])),
+    };
+    let typed = |host: &Typing| -> Vec<(u32, String)> {
+        host.sent
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
+    };
+
+    // The worker reports, and the coordinator's turn has ended: mail waits
+    // at a pane at rest — but the window is still typing something there.
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let done = run(
+        &host,
+        Vec::new(),
+        &team,
+        &pane,
+        &held,
+        &words(&format!(
+            "send --type worker_done --body {{\"ok\":true}} --retry-request done-{worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(done.exit_code, 0, "{}", done.stderr);
+    super::pane_turn_ended(LEADER, 50, false, clock());
+    super::tick(&host, &[], clock());
+    super::tick(&host, &[], clock());
+    assert_eq!(
+        typed(&host),
+        Vec::new(),
+        "advice was queued behind words still on their way to the pane"
+    );
+
+    // Those words have landed: the next beat points, once.
+    host.typing_at
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clear();
+    super::tick(&host, &[], clock());
+    assert_eq!(
+        typed(&host),
+        vec![
+            (LEADER, zerocode_core::orchestration::pointer_text(1)),
+            (LEADER, "\r".to_string())
+        ]
+    );
+
+    super::pane_turn_began(LEADER, clock());
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+}
+
 /// A pointer that reached Enter is written down under the window's data
 /// root, so the window that comes back after a restart — its in-memory
 /// marks gone, the mail still unacknowledged — does not type the same

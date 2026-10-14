@@ -20792,6 +20792,96 @@ button.helper-sib:hover {
   font-size: var(--text-xs);
 }
 
+.settings-pane[data-pane="judgment-models"] > .settings-card {
+  max-width: 72rem;
+  margin-inline: auto;
+}
+
+.judgment-model-source,
+.judgment-connection-settings {
+  margin: var(--space-4);
+  min-width: 0;
+}
+
+.judgment-model-source h4 {
+  font-size: var(--text-sm);
+  margin-block: var(--space-3);
+}
+
+.judgment-model-source .settings-action-row {
+  flex-wrap: wrap;
+  margin-inline: 0;
+}
+
+.judgment-source-choices {
+  justify-content: flex-start;
+}
+
+.judgment-source-choices [aria-pressed="true"] {
+  background: var(--row-selected);
+  border-color: var(--ink-chalk);
+}
+
+.judgment-model-destination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  overflow-wrap: anywhere;
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+}
+
+.judgment-model-destination .settings-action-row {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.managed-judgment-library-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.managed-judgment-library-tools > .settings-field {
+  flex: 1 1 260px;
+  min-width: 0;
+  margin-inline: 0;
+}
+
+.managed-judgment-model-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.managed-judgment-route {
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.managed-judgment-model .settings-fold {
+  margin-inline: 0;
+}
+
+#typesafe-card .settings-fold > summary {
+  min-height: 32px;
+  box-sizing: border-box;
+  padding-block: var(--space-2);
+}
+
+#managed-judgment-catalog-file::file-selector-button {
+  color: var(--ink-chalk);
+  background: var(--surface-raised);
+  border: var(--rule-width) solid var(--edge-mark);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  font: inherit;
+}
+
 progress {
   appearance: none;
   -webkit-appearance: none;

@@ -1062,6 +1062,45 @@ impl Wire {
         }
     }
 
+    /// One check's questions — words no person wrote — put to `candidate`,
+    /// which the settings need not select yet, with the `key` its own
+    /// endpoint keeps. The door's key check reads the person's switch and the
+    /// day's budget now and counts the request as it counts every request it
+    /// clears; the bytes it clears name the candidate's model rather than the
+    /// selected one's, and ride the one POST every question rides. Nothing is
+    /// remembered and no setting moves. Blocks like [`Self::ask`].
+    pub(crate) fn ask_candidate(
+        &self,
+        candidate: &Provider,
+        key: Option<&str>,
+        body: &Value,
+        deadline: Duration,
+    ) -> Result<String, String> {
+        let deadline = Instant::now() + deadline;
+        let mut candidate = candidate.clone();
+        if candidate.kind == ProviderKind::Jev {
+            candidate.base_url.clone_from(&self.base);
+        }
+        let mut settings = JevSettings::from_root(&self.settings_root());
+        settings.model = candidate.identity();
+        let requests = self
+            .config_home()
+            .map(|home| count::requests_path(home, &today()))
+            .unwrap_or_default();
+        let cleared = door::pass(
+            |asking| door::may_check_key(asking, body),
+            candidate.ready_with_key(key),
+            &settings,
+            None,
+            &requests,
+        )
+        .map_err(|refused| refused.token().to_string())?;
+        let prepared = candidate
+            .prepare(cleared.into_bytes())
+            .map_err(|reason| reason.token().to_string())?;
+        tauri::async_runtime::block_on(self.ask_once(&candidate, key, prepared, deadline)).0
+    }
+
     /// One call carrying the door's bytes, bounded whole by `deadline`: the
     /// endpoint's body or the word it failed with, and the HTTP version the
     /// response came back on — `None` when none came back.

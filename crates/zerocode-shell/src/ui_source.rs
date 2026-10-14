@@ -97,6 +97,10 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
         include_str!("../../../ui/shell-managed-judgment.js"),
     ),
     (
+        "shell-model-source.js",
+        include_str!("../../../ui/shell-model-source.js"),
+    ),
+    (
         "shell-judgment.js",
         include_str!("../../../ui/shell-judgment.js"),
     ),
