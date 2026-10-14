@@ -1067,7 +1067,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Instant;
 
-    use super::{Composer, EffortTier, PASTE_TAB_SPACES};
+    use super::{
+        append_history, Composer, EffortTier, HistoryFile, HISTORY_FILE_NAME, PASTE_TAB_SPACES,
+    };
     use crate::tui::ansi::{write_spans_for_palette, Color, Line};
     use crate::tui::palette::{ColorLevel, TerminalPalette};
 
