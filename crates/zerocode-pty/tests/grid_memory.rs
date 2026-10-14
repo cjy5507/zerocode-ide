@@ -13,10 +13,11 @@
 mod support;
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use support::live_bytes;
-use zerocode_pty::{DEFAULT_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES, Terminal};
+use zerocode_pty::{Cell, DEFAULT_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES, Terminal};
 
 /// The pane a person actually opens — the window's own fixtures measure the
 /// same size (`REAL_PANE`, ui/tests/terminal-frames.mjs).
@@ -135,6 +136,14 @@ fn panes(count: usize) -> Vec<Terminal> {
         .collect()
 }
 
+/// The counting allocator is one per process; the tests that read it take
+/// turns, so one test's allocations never land in another's count.
+static MEASURING: Mutex<()> = Mutex::new(());
+
+fn measuring() -> MutexGuard<'static, ()> {
+    MEASURING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A history line's bill: at most this many bytes for each character it
 /// shows, plus this many for the line itself (its place in the history and
 /// the style runs that dress it).
@@ -148,6 +157,7 @@ const HISTORY_BYTES_PER_LINE: usize = 160;
 /// transcript held about 19 MiB for one pane, and a window runs ten such panes.
 #[test]
 fn a_full_history_costs_its_text_not_a_screen_cell_per_column() {
+    let _turn = measuring();
     let mut terminal = Terminal::new(ROWS, COLS);
     terminal
         .grid_mut()
@@ -170,6 +180,30 @@ fn a_full_history_costs_its_text_not_a_screen_cell_per_column() {
          and {HISTORY_BYTES_PER_LINE} a line)",
         held / lines.max(1)
     );
+}
+
+/// A pane draws on one screen of cells; the other screens it keeps cost what
+/// they show.
+///
+/// A full-screen agent (Claude Code) parks the primary screen under its
+/// alternate one for its whole session, and every pane keeps a copy of each
+/// row the window was last sent, to answer "did this row change?". Kept as
+/// cells, each was another screen — 580 KB at 220×60 — so one full-screen pane
+/// held three screens' worth, and a window runs fifteen of them.
+#[test]
+fn a_panes_kept_screens_cost_what_they_show() {
+    let _turn = measuring();
+    let before = live_bytes();
+    let terminal = fullscreen_pane();
+    let held = live_bytes().saturating_sub(before);
+    let screen = ROWS * COLS * size_of::<Cell>();
+    assert!(
+        held <= screen + screen / 2,
+        "a full-screen pane held {held} bytes, {:.2} screens of cells ({screen} bytes each): \
+         the parked primary screen and the sent copy cost more than what they show",
+        held as f64 / screen as f64
+    );
+    drop(terminal);
 }
 
 /// The window's scenarios, by the name the census script asks for.
@@ -216,6 +250,7 @@ fn census() {
     let Some(folder) = std::env::var_os("ZEROCODE_GRID_CENSUS").map(PathBuf::from) else {
         return;
     };
+    let _turn = measuring();
     let names = std::env::var("ZEROCODE_GRID_CENSUS_SCENARIOS").unwrap_or_default();
     let baseline = live_bytes();
     for name in names.split(',').filter(|name| !name.is_empty()) {

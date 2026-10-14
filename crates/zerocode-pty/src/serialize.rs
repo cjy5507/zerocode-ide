@@ -370,6 +370,33 @@ mod tests {
         assert_eq!(serialize_tail(terminal.grid(), 0), "");
     }
 
+    /// The kept tail is the LARGEST that fits — the binary search's answer:
+    /// under every cap it is exactly the newest rows whose bytes and line
+    /// breaks the cap holds, and one row more would not fit.
+    #[test]
+    fn the_cap_keeps_as_many_newest_rows_as_fit() {
+        let mut terminal = Terminal::new(4, 12);
+        for line in 0..120 {
+            terminal.feed(format!("\x1b[3{}mline {line}\x1b[0m\r\n", line % 8).as_bytes());
+        }
+        let whole = serialize_tail(terminal.grid(), SCROLLBACK_BUFFER_BYTE_LIMIT);
+        let rows: Vec<&str> = whole.split("\r\n").collect();
+        for cap in [0, 1, 17, 64, 200, 999, whole.len() - 1, whole.len()] {
+            let kept = serialize_tail(terminal.grid(), cap);
+            let count = if kept.is_empty() {
+                0
+            } else {
+                kept.split("\r\n").count()
+            };
+            assert_eq!(kept, rows[rows.len() - count..].join("\r\n"), "cap {cap}");
+            assert!(kept.len() <= cap, "cap {cap} kept {} bytes", kept.len());
+            if count < rows.len() {
+                let more = rows[rows.len() - count - 1..].join("\r\n");
+                assert!(more.len() > cap, "cap {cap} left out a row that fits");
+            }
+        }
+    }
+
     /// The replay strip: a buffer that ends inside the alternate screen is
     /// cut at the entry — the scrollback restores, the dead TUI does not —
     /// while one that LEFT the alternate screen keeps everything. Both

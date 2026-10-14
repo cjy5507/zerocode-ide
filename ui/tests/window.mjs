@@ -28,7 +28,7 @@ import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
 
 import { testVaultSubagents } from "./vault-subagents.mjs";
 import { testKnowledgeLive } from "./knowledge-live.mjs";
-import { testArtifactBand, testArtifactBeside, testArtifactFollowed, testArtifactOtherProject, testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
+import { testArtifactBand, testArtifactBeside, testArtifactFollowed, testArtifactOtherProject, testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership, testArtifactWordFacedCards } from "./artifact-gallery.mjs";
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
@@ -184,6 +184,7 @@ const artifactGallery = async (page, ok) => {
   await testArtifactChrome(page, ok);
   await testArtifactPages(page, ok);
   await testArtifactFirstScreen(page, ok);
+  await testArtifactWordFacedCards(page, ok);
   await testArtifactRecall(page, ok);
   await testArtifactProvenance(page, ok);
   await testArtifactStudio(page, ok);
