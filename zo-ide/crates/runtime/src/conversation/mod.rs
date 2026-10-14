@@ -89,7 +89,7 @@ use helpers::{
     AssistantTurn,
 };
 use streaming::{
-    build_async_permission_request, tool_preview_from, tool_summary_line, CapturePrompter,
+    build_async_permission_request, tool_input_print_from, tool_preview_from, tool_summary_line, CapturePrompter,
 };
 use tool::{
     is_concurrency_safe, is_long_running, sleep_tool_cut_short, sleep_tool_execution_input,

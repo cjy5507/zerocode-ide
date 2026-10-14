@@ -409,16 +409,19 @@ fn ratio_permille(top: f64, bottom: f64) -> u32 {
 
 /// What a tool call is, for the question "is this the call it just made": a
 /// hash of the tool's name and the first [`PRINT_BYTES`] bytes of its input's
-/// words. `None` for an event that names no tool — it cannot repeat anything.
+/// words — or, where the payload carries one, of the print of its whole input
+/// ([`INPUT_PRINT_KEY`]) in the input's place. `None` for an event that names
+/// no tool — it cannot repeat anything.
 fn call_print(payload: &str) -> Option<u64> {
     let payload = HookPayload::of(payload);
     let name = tool_name_in_parsed(&payload)?;
     let mut hasher = DefaultHasher::new();
     name.hash(&mut hasher);
-    if let Some(input) = payload
-        .tree()
-        .and_then(|tree| INPUT_KEYS.iter().find_map(|key| tree.get(*key)))
-    {
+    if let Some(input) = payload.tree().and_then(|tree| {
+        tree.get(INPUT_PRINT_KEY)
+            .filter(|print| print.as_str().is_some_and(|print| !print.is_empty()))
+            .or_else(|| INPUT_KEYS.iter().find_map(|key| tree.get(*key)))
+    }) {
         let mut room = PRINT_BYTES;
         feed(input, &mut hasher, &mut room);
     }

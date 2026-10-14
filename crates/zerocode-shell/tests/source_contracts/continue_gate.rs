@@ -209,9 +209,9 @@ fn no_road_runs_an_agents_cli_headless_except_through_the_launch_ledgers_door() 
 }
 
 /// zo's hook carries the print of a call's whole input under the key the step
-/// gate reads ([`zerocode_core::continue_gate::INPUT_PRINT_KEY`]). zo is its own
-/// workspace and cannot use core's constant, so each side names the key once — and
-/// a key spelled otherwise on one side would leave every zo worker judged on its
+/// gate reads ([`zerocode_core::continue_gate::INPUT_PRINT_KEY`]). zo's reporter spells
+/// each key of the payloads the window reads itself, so each side names this one once —
+/// and a key spelled otherwise on one side would leave every zo worker judged on its
 /// compact input again, with no error anywhere.
 #[test]
 fn zo_sends_its_input_print_under_the_key_the_gate_reads() {

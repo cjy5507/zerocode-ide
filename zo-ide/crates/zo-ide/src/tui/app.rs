@@ -30,7 +30,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use futures_util::StreamExt;
 use runtime::message_stream::anthropic::tools::{
     format_indirected_tool_result, format_tool_result_from_raw, preview_summary,
-    preview_tool_input,
+    preview_tool_input, tool_input_print,
 };
 use runtime::message_stream::{
     AgentResultStatus, BlockIdGen, NotificationRoad, PermissionDecision, RenderBlock, SystemLevel,
@@ -2038,6 +2038,7 @@ impl Ui {
                         name: name.clone(),
                         summary,
                         preview,
+                        input_print: Some(tool_input_print(&parsed)),
                         status: ToolCallStatus::Running,
                     });
                     if let Some(output) = output {
@@ -4389,6 +4390,7 @@ impl Ui {
                 name,
                 summary,
                 preview,
+                input_print,
                 status,
                 ..
             } => {
@@ -4406,6 +4408,7 @@ impl Ui {
                             file: super::activity::file_of(preview),
                         },
                         activity.hook_input(summary),
+                        input_print.as_deref(),
                         &activity.started_card(),
                         session_id,
                     );
@@ -6727,6 +6730,7 @@ mod tests {
             name: name.to_string(),
             summary,
             preview,
+            input_print: Some(super::tool_input_print(input)),
             status: ToolCallStatus::Running,
         }
     }
@@ -7374,6 +7378,7 @@ mod tests {
             name: name.to_string(),
             summary,
             preview,
+            input_print: None,
             status: ToolCallStatus::Running,
         });
     }
@@ -7598,6 +7603,7 @@ mod tests {
                 name: name.to_string(),
                 summary,
                 preview,
+                input_print: None,
                 status: ToolCallStatus::Running,
             });
             let result = json!({
@@ -8241,6 +8247,7 @@ mod tests {
                 name: "ToolSearch".to_string(),
                 summary,
                 preview,
+                input_print: None,
                 status: ToolCallStatus::Running,
             });
         };
@@ -8290,6 +8297,7 @@ mod tests {
             name: "TaskOutput".to_string(),
             summary: preview_summary(&task_preview),
             preview: task_preview,
+            input_print: None,
             status: ToolCallStatus::Running,
         });
         task_ui.block(RenderBlock::ToolResult {
@@ -8396,6 +8404,7 @@ mod tests {
                 name: "Agent".to_string(),
                 summary,
                 preview,
+                input_print: None,
                 status: ToolCallStatus::Running,
             });
             ui.block(RenderBlock::ToolResult {
@@ -8430,6 +8439,7 @@ mod tests {
                 name: name.to_string(),
                 summary,
                 preview,
+                input_print: None,
                 status: ToolCallStatus::Running,
             });
         };
