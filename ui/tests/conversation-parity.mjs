@@ -799,9 +799,11 @@ export async function testConversationFoot(browser, origin, ok) {
         window.__ANSWER__.wire_start = (args) => ({ id: wire, agent: args.agent, protocol: "claude-stream", version: "2.1.280", model: null, session: null });
       };
       // The list on screen, its door, and where both stand once the list has
-      // stopped moving (the door's glide included).
+      // stopped moving (the door's glide included). A conversation set aside
+      // stands in the document behind the one in front, hidden from assistive
+      // technology (t-55369): the list on screen is the one not hidden.
       window.__FOOT__ = {
-        list: () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility()) ?? null,
+        list: () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]')) ?? null,
         door: () => window.__FOOT__.list()?.parentElement.querySelector(":scope > .chat-foot-door") ?? null,
         async still() {
           const list = window.__FOOT__.list();

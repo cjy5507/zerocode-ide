@@ -18,6 +18,10 @@ import { openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 
 export async function testConversationSwitch(browser, origin, ok) {
   await testParkedPages(browser, origin, ok);
+  await testPageBehind(browser, origin, ok);
+  await testKeepingAcrossLeaves(browser, origin, ok);
+  await testBehindUnseen(browser, origin, ok);
+  await testFocusPassesAside(browser, origin, ok);
   await testColoursAfterAside(browser, origin, ok);
   await testPaneHandover(browser, origin, ok, { refuse: false });
   await testPaneHandover(browser, origin, ok, { refuse: true });
@@ -27,7 +31,7 @@ export async function testConversationSwitch(browser, origin, ok) {
 /* The leaf's host and what it keeps aside, read without assuming the keeping
  * exists (a red tree has none: the checks fail at their assertions). */
 const PARKED = () => {
-  const host = document.querySelector("#worker-view") ?? [...document.querySelectorAll(".worker-view")].find((one) => one.checkVisibility()) ?? null;
+  const host = document.querySelector("#worker-view") ?? [...document.querySelectorAll(".worker-view")].find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]')) ?? null;
   const parked = host?.__parked ?? null;
   return { size: parked ? parked.size : null, ids: parked ? [...parked.keys()] : null };
 };
@@ -63,7 +67,7 @@ async function testParkedPages(browser, origin, ok) {
     await page.evaluate(() => window.__SWITCH__.still());
     seen.returned = await page.evaluate(() => window.__SWITCH__.reading());
     seen.door = await page.evaluate(() => {
-      const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility());
+      const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]'));
       const door = list?.parentElement.querySelector(":scope > .chat-foot-door");
       return door ? door.classList.contains("is-shown") : null;
     });
@@ -96,11 +100,11 @@ async function testParkedPages(browser, origin, ok) {
     seen.beforeClose = await page.evaluate(PARKED);
     seen.closed = await page.evaluate((tab) => {
       closeTab(tab);
-      const host = [...document.querySelectorAll(".worker-view")].find((one) => one.checkVisibility());
+      const host = document.querySelector("#worker-view");
       return { size: host?.__parked?.size ?? null, holds: host?.__parked?.has(tab) ?? null };
     }, d);
     seen.expired = await page.evaluate(() => {
-      const host = [...document.querySelectorAll(".worker-view")].find((one) => one.checkVisibility());
+      const host = document.querySelector("#worker-view");
       if (typeof sweepParkedPages !== "function" || typeof CHAT_PARK === "undefined") return null;
       const before = host.__parked.size;
       sweepParkedPages(host, Date.now() + CHAT_PARK.ttlMs + 1);
@@ -113,6 +117,245 @@ async function testParkedPages(browser, origin, ok) {
       JSON.stringify({ beforeClose: seen.beforeClose, closed: seen.closed, expired: seen.expired }),
     );
     ok("parked pages: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* The conversation list in front: shown, and not in a page set aside behind
+ * it (t-55369 — a page set aside stands in the document under the one in
+ * front, hidden from assistive technology, so `checkVisibility` alone would
+ * find it). */
+const FRONT_LIST = () => [...document.querySelectorAll(".helper-turns")]
+  .find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]')) ?? null;
+
+/* 2단계(t-55369): 돌아온 대화가 아직 37 ms(CPU×4 127 ms, WebKit 86 ms)였던
+ * 것은 떼어 둔 화면을 다시 붙이는 순간 요소 약 2,800개의 스타일과 배치를
+ * 처음부터 계산했기 때문이다 — 문서에서 뗀 요소는 계산된 스타일을 잃는다.
+ * 방금 떠난 대화는 이제 문서 안에, 앞 화면 뒤에 선 채로 남는다: 돌아올 때
+ * 문서에 다시 들어가는 노드가 없다. 그 전에 떠난 것은 1단계처럼 문서 밖에서
+ * 기다린다(렌더된 화면 한 장은 약 11 MB, 뗀 화면은 약 2.9 MB). */
+async function testPageBehind(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standSwitcher(page);
+    const seen = await page.evaluate(async ({ a, b, c, list }) => {
+      const front = new Function(`return (${list})()`);
+      const tabA = await window.__SWITCH__.open(a);
+      const listA = front();
+      const tabB = await window.__SWITCH__.open(b);
+      const listB = front();
+      const hostOf = (one) => one?.closest(".worker-view") ?? null;
+      const hostA = hostOf(listA);
+      const hostB = hostOf(listB);
+      const box = hostB.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      const behind = {
+        connected: listA.isConnected,
+        ownHost: hostA !== hostB,
+        sameLeaf: hostA?.parentElement === hostB?.parentElement,
+        hidden: hostA?.getAttribute("aria-hidden") ?? null,
+        frontId: hostB.id,
+        frontHit: hostB.contains(hit),
+        asideHit: hostA?.contains(hit) ?? null,
+      };
+      // Back to A: whatever moves in the leaf, no node that holds A's rows goes
+      // into it — the page never left.
+      const leaf = hostB.parentElement;
+      const put = [];
+      const watch = new MutationObserver((records) => {
+        for (const record of records) for (const node of record.addedNodes) if (node.contains?.(listA)) put.push(node.className ?? node.nodeName);
+      });
+      watch.observe(leaf, { childList: true, subtree: true });
+      const backA = await window.__SWITCH__.hop(tabA);
+      await new Promise((done) => setTimeout(done, 0));
+      watch.disconnect();
+      const back = { put, frontId: hostOf(front())?.id ?? null, sameList: front() === listA, rowsBuilt: backA.rowsBuilt, bHidden: hostB.getAttribute("aria-hidden") };
+      // Two kept aside: the one left last behind the front, the one before it
+      // out of the document.
+      await window.__SWITCH__.hop(tabB);
+      const tabC = await window.__SWITCH__.open(c);
+      const tiers = { b: listB.isConnected, a: listA.isConnected, kept: document.querySelector("#worker-view")?.__parked?.size ?? null };
+      const fromOut = await window.__SWITCH__.hop(tabA);
+      const fromBehind = await window.__SWITCH__.hop(tabC);
+      return { behind, back, tiers, fromOut: { rowsBuilt: fromOut.rowsBuilt, rows: fromOut.rows }, fromBehind: { rowsBuilt: fromBehind.rowsBuilt, rows: fromBehind.rows } };
+    }, { a: conversationFixture({ blocks: 20 }), b: conversationFixture({ blocks: 10 }), c: conversationFixture({ blocks: 5 }), list: FRONT_LIST.toString() });
+    ok(
+      "a_conversation_looked_away_from_stays_in_the_document_behind_the_one_in_front: the conversation left a moment ago keeps its own page in the same leaf, under the one in front — its list still in the document, its page hidden from assistive technology and under no pointer — and the window's `#worker-view` is the page in front",
+      seen.behind.connected && seen.behind.ownHost && seen.behind.sameLeaf && seen.behind.hidden === "true" &&
+        seen.behind.frontId === "worker-view" && seen.behind.frontHit && seen.behind.asideHit === false,
+      JSON.stringify(seen.behind),
+    );
+    ok(
+      "coming_back_puts_no_node_back_into_the_document: returning to the conversation left last brings its own list to the front with no node holding its rows put into the leaf (nothing to style or lay out again), the one it covered set aside in turn",
+      seen.back.put.length === 0 && seen.back.sameList && seen.back.frontId === "worker-view" && seen.back.rowsBuilt === 0 && seen.back.bHidden === "true",
+      JSON.stringify(seen.back),
+    );
+    ok(
+      "of_two_conversations_kept_aside_the_older_waits_out_of_the_document: with a third conversation opened the leaf still keeps two aside — the one left last stays behind the front, the one before it waits out of the document — and both come back with every row they stood with",
+      seen.tiers.b === true && seen.tiers.a === false && seen.tiers.kept === 2 &&
+        seen.fromOut.rowsBuilt === 0 && seen.fromOut.rows > 300 && seen.fromBehind.rowsBuilt === 0 && seen.fromBehind.rows > 0,
+      JSON.stringify({ tiers: seen.tiers, fromOut: seen.fromOut, fromBehind: seen.fromBehind }),
+    );
+    ok("page behind: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* The window's share of the keeping: three leaves side by side, each with a
+ * conversation set aside under another. Only `CHAT_PARK.leaves` (2) of them —
+ * the ones that set theirs aside last — keep it standing behind the front; the
+ * first leaf's waits out of the document. When the window must give memory
+ * back (`sweepParkedPages(…, { tight: true })`) every page behind goes out of
+ * the document, still kept, and comes back with every row it stood with. */
+async function testKeepingAcrossLeaves(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standSwitcher(page);
+    const seen = await page.evaluate(async ({ one }) => {
+      const leaves = [focusedPane];
+      for (let k = 0; k < 2; k += 1) {
+        const group = nextGroupId;
+        nextGroupId += 1;
+        setStageTree(splitStageLeaf(stageTree(), leaves.at(-1), group, "horizontal", "second"));
+        leaves.push(group);
+      }
+      const listIn = (leaf) => groups.get(leaf)?.workerView?.querySelector(".helper-turns") ?? null;
+      const first = [];
+      for (const leaf of leaves) {
+        focusedPane = leaf;
+        const tab = await window.__SWITCH__.open(one);
+        first.push({ tab, leaf, list: listIn(leaf), opened: tabs.find((held) => held.id === tab)?.pane });
+        await window.__SWITCH__.open(one);
+      }
+      const where = () => first.map((held) => ({
+        behind: held.list?.isConnected === true,
+        kept: groups.get(held.leaf)?.workerView?.__parked?.size ?? null,
+        rows: held.list?.querySelectorAll(":scope > [data-turn]").length ?? 0,
+      }));
+      const capped = where();
+      if (typeof sweepParkedPages === "function") sweepParkedPages(groups.get(leaves[2]).workerView, Date.now(), { tight: true });
+      const tight = where();
+      focusedPane = leaves[2];
+      await window.__SWITCH__.hop(first[2].tab);
+      return {
+        leaves: typeof CHAT_PARK === "undefined" ? null : CHAT_PARK.leaves,
+        opened: first.map((held) => held.opened === held.leaf),
+        capped,
+        tight,
+        back: { same: listIn(leaves[2]) === first[2].list, rows: first[2].list?.querySelectorAll(":scope > [data-turn]").length ?? 0, before: capped[2].rows },
+      };
+    }, { one: conversationFixture({ blocks: 2 }) });
+    ok(
+      "a_window_keeps_pages_behind_in_its_last_two_leaves: with a conversation set aside in each of three leaves, the two leaves that set theirs aside last (`CHAT_PARK.leaves`) keep it standing behind the front and the first leaf's waits out of the document — each leaf still keeping its one",
+      seen.leaves === 2 && seen.opened.every(Boolean) &&
+        JSON.stringify(seen.capped.map((one) => [one.behind, one.kept])) === JSON.stringify([[false, 1], [true, 1], [true, 1]]),
+      JSON.stringify({ leaves: seen.leaves, opened: seen.opened, capped: seen.capped }),
+    );
+    ok(
+      "a_tight_sweep_takes_every_page_behind_out_of_the_document: `sweepParkedPages(host, now, { tight: true })` — the window giving memory back — leaves no page standing behind in any leaf, keeps every one of them, and the one asked for again comes back with its own rows",
+      seen.tight.every((one) => one.behind === false && one.kept === 1) && seen.back.same && seen.back.rows === seen.back.before && seen.back.rows > 0,
+      JSON.stringify({ tight: seen.tight, back: seen.back }),
+    );
+    ok("keeping across leaves: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* A page behind the front is in the document and nowhere else a person or a
+ * program meets it: not in the accessibility tree a screen reader reads, not
+ * answering to the window's own name for the page in front (`#worker-view`,
+ * `docHost`), and lending no id a second time. Its words are its own, so
+ * the tree is read for them. */
+async function testBehindUnseen(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standSwitcher(page);
+    const said = (word) => [
+      { role: "user", text: `${word} 부탁: 이 대화만의 낱말이다.`, at_ms: 1_790_000_000_000 },
+      { role: "assistant", text: `${word} 답: 이 대화만의 낱말로 답한다.`, at_ms: 1_790_000_001_000 },
+    ];
+    const seen = await page.evaluate(async ({ a, b, list }) => {
+      const front = new Function(`return (${list})()`);
+      await window.__SWITCH__.open(a);
+      const listA = front();
+      await window.__SWITCH__.open(b);
+      const listB = front();
+      const ids = [...document.querySelectorAll("[id]")].map((node) => node.id);
+      const view = docHost(focusedPane, "worker");
+      return {
+        behindInDocument: listA?.isConnected === true,
+        named: document.querySelectorAll("#worker-view").length,
+        namedFront: document.querySelector("#worker-view")?.contains(listB) === true,
+        viewFront: view.contains(listB) && !view.contains(listA),
+        duplicateIds: ids.filter((id, at) => ids.indexOf(id) !== at),
+      };
+    }, { a: said("갈매기"), b: said("두루미"), list: FRONT_LIST.toString() });
+    const cdp = await page.context().newCDPSession(page);
+    const { nodes } = await cdp.send("Accessibility.getFullAXTree");
+    const read = nodes.filter((node) => !node.ignored).map((node) => `${node.name?.value ?? ""} ${node.value?.value ?? ""}`).join("\n");
+    seen.readBehind = read.includes("갈매기");
+    seen.readFront = read.includes("두루미");
+    ok(
+      "a_page_behind_is_not_read_named_or_doubled: the conversation standing behind the front is absent from the accessibility tree (its words unread while the front's are read), `#worker-view` and the leaf's view (`docHost`) are the page in front alone, and no id in the window stands twice",
+      seen.behindInDocument && seen.readBehind === false && seen.readFront === true && seen.named === 1 && seen.namedFront && seen.viewFront &&
+        seen.duplicateIds.length === 0,
+      JSON.stringify(seen),
+    );
+    ok("page behind unseen: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* A page behind the front is in the document, so its controls could take the
+ * keyboard's focus: one pressed on before the switch, a `focus()` a late answer
+ * asks for, a Tab from the page in front. None of them stays there — the focus
+ * goes on to the next control past the page (or back before it), as if the
+ * page were not there. */
+async function testFocusPassesAside(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standSwitcher(page);
+    const tabs = await page.evaluate(
+      async ({ a, b }) => [await window.__SWITCH__.open(a), await window.__SWITCH__.open(b)],
+      { a: conversationFixture({ blocks: 2 }), b: conversationFixture({ blocks: 2 }) },
+    );
+    // A in front, its composer focused — then B comes over it.
+    await page.evaluate((tab) => window.__SWITCH__.hop(tab), tabs[0]);
+    await page.focus("#worker-view .worker-composer-box");
+    const seen = {};
+    seen.before = await page.evaluate(() => document.activeElement?.className ?? null);
+    await page.evaluate((tab) => window.__SWITCH__.hop(tab), tabs[1]);
+    const aside = () => document.activeElement?.closest?.('.worker-view[aria-hidden="true"]') !== null && document.activeElement?.closest?.('.worker-view[aria-hidden="true"]') !== undefined;
+    seen.switched = await page.evaluate(`(${aside})()`);
+    // A late `focus()` on the page behind.
+    seen.asked = await page.evaluate(`(() => {
+      const behind = document.querySelector('.worker-view[aria-hidden="true"] .worker-composer-box');
+      if (!behind) return { behind: false };
+      behind.focus();
+      return { behind: true, stayed: (${aside})() };
+    })()`);
+    // Tab from the last control of the page in front.
+    seen.tabbed = await page.evaluate(`(() => {
+      const stops = [...document.querySelectorAll("#worker-view " + "button, textarea, summary, [tabindex]:not([tabindex='-1']), a[href]")].filter((one) => one.getClientRects().length > 0);
+      const last = stops.at(-1);
+      last?.focus();
+      return { focused: document.activeElement === last };
+    })()`);
+    await page.keyboard.press("Tab");
+    seen.afterTab = await page.evaluate(`(${aside})()`);
+    await page.keyboard.press("Shift+Tab");
+    seen.afterBack = await page.evaluate(`(${aside})()`);
+    ok(
+      "focus_never_stays_in_a_conversation_set_aside: the focus the conversation held when another came over it, a `focus()` asked on its page behind the front, and a Tab or a Shift+Tab across it never leave the keyboard on the page set aside",
+      seen.before === "worker-composer-box" && seen.switched === false &&
+        (seen.asked.behind === false || seen.asked.stayed === false) && seen.tabbed.focused && seen.afterTab === false && seen.afterBack === false,
+      JSON.stringify(seen),
+    );
+    ok("focus passes aside: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
   } finally {
     await page.close();
   }
@@ -131,7 +374,7 @@ async function testColoursAfterAside(browser, origin, ok) {
     await standSwitcher(page);
     const fenced = JSON.parse(JSON.stringify(conversationFixture({ blocks: 2 })).replaceAll("paint_", "aside_"));
     const seen = await page.evaluate(async ({ fenced, other }) => {
-      const list = () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility()) ?? null;
+      const list = () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]')) ?? null;
       const fences = () => [...(list()?.querySelectorAll("pre.md-block") ?? [])];
       const read = () => ({ fences: fences().length, coloured: fences().filter((pre) => pre.querySelector("[class^='chat-code-']") !== null).length });
       const idle = [];
@@ -142,6 +385,13 @@ async function testColoursAfterAside(browser, origin, ok) {
       };
       try {
         const aside = await window.__SWITCH__.open(fenced);
+        // The page as it stands once its shelf has judged the rows it opened
+        // with (a frame and the watcher's answer): rows far from the view give
+        // up their bodies, fences and all, whether or not the page is looked
+        // away from after.
+        await window.__PAINTED__();
+        await new Promise((done) => setTimeout(done, 0));
+        await window.__PAINTED__();
         const opened = read();
         await window.__SWITCH__.open(other);
         runIdle();
@@ -224,7 +474,7 @@ async function standHandover(page, { refuse, standMs }) {
 
 /* The conversation list on screen and the row its reader reads, by its words. */
 const READING = () => {
-  const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility()) ?? null;
+  const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]')) ?? null;
   if (!list) return null;
   const top = list.getBoundingClientRect().top;
   const row = [...list.querySelectorAll(":scope > [data-turn]:not(.is-user)")].find((one) => one.getBoundingClientRect().bottom > top);
@@ -260,7 +510,7 @@ async function testPaneHandover(browser, origin, ok, { refuse }) {
         await page.evaluate(() => window.__PAINTED__());
       }
       const at = await page.evaluate(() => {
-        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility());
+        const list = [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]'));
         const rect = list.getBoundingClientRect();
         return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 3 };
       });
