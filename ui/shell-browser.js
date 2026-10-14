@@ -418,6 +418,7 @@ let browserWorkspaceCaptureTarget = null;
 let browserWorkspaceCaptureHost = null;
 let browserWorkspaceCaptureRevision = null;
 let browserWorkspaceCaptureEpoch = 0;
+const browserWorkspaceOpening = new Map();
 
 function browserWorkspaceLive(tab, label = tab?.label) {
   return tab?.kind === "browser" && tab.label === label && tabs.includes(tab);
@@ -435,6 +436,70 @@ function browserWorkspaceArgs(tab, extra = {}) {
     label: tab.label, ...extra,
     ...(tab.agentWorkspace ? { expectedRevision: tab.workspace?.revision } : {}),
   };
+}
+
+async function confirmAgentBrowserClose(label, revision) {
+  if (!Number.isSafeInteger(revision) || revision < 0) return false;
+  try {
+    return await invoke("close_browser_pane", { label, expectedRevision: revision }) === null;
+  } catch {
+    return false;
+  }
+}
+
+async function discardBrowserOpen(label, managed, revision = null) {
+  if (managed) return confirmAgentBrowserClose(label, revision);
+  await invoke("close_browser_pane", { label }).catch(() => {});
+  return true;
+}
+
+async function closeAgentBrowserTab(said) {
+  const label = agentPaneLabel(said?.label);
+  const revision = said?.revision;
+  if (label === null || !Number.isSafeInteger(revision) || revision < 0) return;
+  const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
+  if (!tab) {
+    const opening = browserWorkspaceOpening.get(label);
+    if (opening) opening.closeRevision = Math.max(opening.closeRevision ?? -1, revision);
+    return;
+  }
+  if (tab.pinned) {
+    tab.workspaceCloseError = "pinned";
+    paintBrowserWorkspaceTab(tab);
+    return;
+  }
+  if (tab.workspaceClosing || tab.workspacePending || (tab.agentWorkspace && tab.workspace
+    && (tab.workspace.mode === "human" || tab.workspace.revision !== revision))) return;
+  const token = {};
+  tab.workspaceClosing = token;
+  tab.workspaceCloseError = null;
+  paintBrowserWorkspaceTab(tab);
+  const closed = await confirmAgentBrowserClose(label, revision);
+  if (!browserWorkspaceLive(tab, label) || tab.workspaceClosing !== token) return;
+  tab.workspaceClosing = null;
+  if (!closed) {
+    tab.workspaceCloseError = "failed";
+    paintBrowserWorkspaceTab(tab);
+    return;
+  }
+  const host = groups.get(tab.pane)?.browserView;
+  const receiver = document.activeElement;
+  const preserve = receiver instanceof HTMLElement && receiver.isConnected && !host?.contains(receiver);
+  dropTab(tab.id, { closed: true, nativeClosed: true });
+  renderTabs();
+  updateStage();
+  syncBrowserPanes();
+  if (preserve && receiver.isConnected && !receiver.closest("[hidden]") && document.activeElement !== receiver) receiver.focus();
+}
+
+function paintBrowserCloseNote(host, tab) {
+  const note = host.querySelector(".browser-agent-close-note");
+  note.hidden = !tab.workspaceClosing && !tab.workspaceCloseError;
+  writeTextContent(note, tab.workspaceClosing
+    ? t("browser.workspace.closePending", "탭 닫기 응답을 기다리는 중입니다…")
+    : tab.workspaceCloseError === "pinned"
+      ? t("browser.workspace.closePinned", "고정한 탭은 에이전트가 닫을 수 없습니다. 직접 닫아 주세요.")
+      : t("browser.workspace.closeError", "탭 닫기를 확인하지 못해 탭을 유지했습니다."));
 }
 
 function browserWorkspaceOnScreen(tab) {
@@ -465,10 +530,15 @@ function browserWorkspaceOwnerCandidates(tab) {
     if (owner.kind !== "term" || owner.worktree !== tab.worktree || owner.asleep || owner.wakeRefused) continue;
     for (const term of paneLeaves(owner.layout)) {
       const agent = paneSessions.get(term)?.agent ?? paneAgents.get(term);
-      if (!agent || !/^(0|[1-9]\d*)$/.test(String(term))) continue;
+      if (typeof agent !== "string" || !agent.trim() || !/^(0|[1-9]\d*)$/.test(String(term))) continue;
+      let name = agent;
+      try {
+        const known = agentName(agent);
+        if (typeof known === "string" && known) name = known;
+      } catch { name = agent; }
       choices.set(String(term), {
         value: String(term),
-        label: t("browser.workspace.ownerOption", "{{agent}} · 터미널 {{term}}", { agent: agentName(agent), term }),
+        label: t("browser.workspace.ownerOption", "{{agent}} · 터미널 {{term}}", { agent: name, term }),
       });
     }
   }
@@ -491,7 +561,7 @@ function paintBrowserWorkspaceOwner(host, tab) {
   writeTextContent(row.querySelector(".browser-workspace-owner-name"), owner === null
     ? t("browser.workspace.ownerNone", "배정된 에이전트 없음")
     : t("browser.workspace.ownerCurrent", "현재 배정: {{agent}}", {
-      agent: current?.label ?? t("browser.workspace.ownerTerminal", "에이전트 터미널 {{term}}", { term: owner }),
+      agent: current?.label ?? t("browser.workspace.ownerTerminal", "터미널 {{term}} · 에이전트 정보 미확인", { term: owner }),
     }));
   const select = row.querySelector(".browser-workspace-owner-select");
   const rows = [{ value: "", label: owner === null
@@ -1139,7 +1209,11 @@ function buildBrowserView() {
   body.append(failure, buildBrowserWorkspaceSurface());
   // 아티팩트 페이지의 머리띠(t-3233 §5): 갤러리에서 연 페이지에만 서고, 판이
   // .browser-body 사각형을 따라가므로 이 줄도 서면 판이 내려앉는다.
-  host.append(bar, buildBrowserWorkspaceBar(), artifactStripNode(), artifactHintNode(), suggest, dlbar, notes, grabbar, findbar, body);
+  const closeNote = document.createElement("div");
+  closeNote.className = "browser-agent-close-note";
+  closeNote.hidden = true;
+  closeNote.setAttribute("role", "status");
+  host.append(bar, buildBrowserWorkspaceBar(), closeNote, artifactStripNode(), artifactHintNode(), suggest, dlbar, notes, grabbar, findbar, body);
   return host;
 }
 
@@ -4171,6 +4245,7 @@ function paintBrowserView(tab) {
   const host = docHost(tab.pane, "browser");
   wireBrowserHost(host);
   host._browserTab = tab;
+  paintBrowserCloseNote(host, tab);
   paintBrowserFailure(host, tab);
   // 머리띠의 「주석」은 도구줄의 연필과 같은 모드 스위치다(t-11959).
   paintArtifactStrip(host.querySelector(".artifact-strip"), tab, (version) => {
@@ -4976,7 +5051,7 @@ async function reopenBrowserPane(tab, { profile = tab.profile ?? null } = {}) {
   }
   if (!browserWorkspaceLive(tab, was) || (tab.agentWorkspace
     && (tab.workspaceRevision !== revision || !browserWorkspaceCanControl(tab)))) {
-    await invoke("close_browser_pane", { label }).catch(() => {});
+    await discardBrowserOpen(label, tab.agentWorkspace === true);
     return false;
   }
   void invoke("close_browser_pane", { label: was }).catch(() => {});
@@ -4990,6 +5065,8 @@ async function reopenBrowserPane(tab, { profile = tab.profile ?? null } = {}) {
   const oldId = tab.id;
   tab.label = label;
   tab.id = "browser:" + label;
+  tab.workspaceClosing = null;
+  tab.workspaceCloseError = null;
   if (tab.agentWorkspace) {
     tab.workspace = null;
     tab.workspaceRevision = undefined;
@@ -5466,6 +5543,7 @@ async function openBrowserTab(
     makerSeat = null,
     agentWorkspace = false,
     workspaceRestored = false,
+    agentOpen = null,
   } = {},
 ) {
   // The pop-out runs this same script, but a pane it opened would attach to
@@ -5536,9 +5614,13 @@ async function openBrowserTab(
     showError(String(error));
     return;
   }
+  if (reserved !== null && label !== reserved) {
+    showError(t("browser.workspace.openError", "요청한 작업 브라우저를 확인할 수 없습니다."));
+    return;
+  }
   if (expectedWorktree !== null && activeWorktreePath !== expectedWorktree) {
     browserEarly.delete(label);
-    await invoke("close_browser_pane", { label }).catch(() => {});
+    await discardBrowserOpen(label, agentWorkspace, agentOpen?.closeRevision);
     return;
   }
   try {
@@ -5547,14 +5629,24 @@ async function openBrowserTab(
     if (!agentWorkspace) await invoke("browser_zoom", { label, scale: defaultZoom.scale });
   } catch (error) {
     browserEarly.delete(label);
-    await invoke("close_browser_pane", { label }).catch(() => {});
+    await discardBrowserOpen(label, agentWorkspace, agentOpen?.closeRevision);
     showError(String(error));
     return;
   }
   if (expectedWorktree !== null && activeWorktreePath !== expectedWorktree) {
     browserEarly.delete(label);
-    await invoke("close_browser_pane", { label }).catch(() => {});
+    await discardBrowserOpen(label, agentWorkspace, agentOpen?.closeRevision);
     return;
+  }
+  let closeError = false;
+  let closeRevision = null;
+  if (agentOpen?.closeRevision != null) {
+    closeRevision = agentOpen.closeRevision;
+    if (await confirmAgentBrowserClose(label, closeRevision)) {
+      browserEarly.delete(label);
+      return;
+    }
+    closeError = true;
   }
   // `beside` is the + palette's word only: a restored session or a popup
   // replays MANY opens, and each splitting the stage would shatter it.
@@ -5578,6 +5670,7 @@ async function openBrowserTab(
     zoom: defaultZoom.scale,
     ...(agentWorkspace ? {
       agentWorkspace: true, workspace: null, workspaceViewing: false, workspaceOwnerChoice: suggestedOwner,
+      workspaceCloseError: closeError ? "failed" : null,
     } : {}),
     ...(expectedWorktree === null ? {} : { worktree: expectedWorktree }),
     ...(home === null ? {} : { worktree: home }),
@@ -5590,6 +5683,9 @@ async function openBrowserTab(
   if (agentWorkspace) {
     const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
     if (tab) void refreshBrowserWorkspace(tab);
+  }
+  if (closeError && agentOpen?.closeRevision !== closeRevision) {
+    void closeAgentBrowserTab({ label, revision: agentOpen.closeRevision });
   }
   if (stood !== null) persistStageLayouts();
   rememberBrowserOpenTabs();
@@ -5849,12 +5945,18 @@ const agentPaneLabel = (label) =>
 listen("browser:agent-open", (event) => {
   if (isPopout) return;
   const label = agentPaneLabel(event.payload?.label);
-  if (label === null) return;
+  if (label === null || typeof event.payload?.url !== "string"
+    || browserWorkspaceOpening.has(label) || tabs.some((one) => one.kind === "browser" && one.label === label)) return;
+  const opening = { closeRevision: null };
+  browserWorkspaceOpening.set(label, opening);
   void openBrowserTab(event.payload.url, {
     from: event.payload.term ?? null,
     label,
     focus: false,
     agentWorkspace: true,
+    agentOpen: opening,
+  }).finally(() => {
+    if (browserWorkspaceOpening.get(label) === opening) browserWorkspaceOpening.delete(label);
   });
 });
 
@@ -5873,15 +5975,9 @@ listen("browser:workspace", (event) => {
 
 document.addEventListener("visibilitychange", syncBrowserPanes);
 
-/* An agent asked to close a tab (`zerocode-browser close`). The ordinary
- * close — `closeTab`, hide→close→burn — and nothing shorter, so the bridge
- * sees the label leave the mint the way a person's close makes it leave. */
 listen("browser:agent-close", (event) => {
   if (isPopout) return;
-  const label = agentPaneLabel(event.payload?.label);
-  if (label === null) return;
-  const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
-  if (tab) closeTab(tab.id);
+  return closeAgentBrowserTab(event.payload);
 });
 
 /* An agent asked for a viewport (`zerocode-browser viewport`): a preset id

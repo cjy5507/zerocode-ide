@@ -2,11 +2,11 @@ import { openWindowTestPage, PRIMARY_EVENT } from "./window-boot.mjs";
 
 const FRAME = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jr1sAAAAASUVORK5CYII=";
 
-async function standWorkspace(browser, origin, { holdState = false } = {}) {
+async function standWorkspace(browser, origin, { holdState = false, actorName = "codex" } = {}) {
   const opened = await openWindowTestPage(browser, origin);
-  await opened.page.evaluate(({ frame, holdState }) => {
+  await opened.page.evaluate(({ frame, holdState, actorName }) => {
     window.__WORKSPACE__ = {
-      opened: [], placed: [], modes: [], snapshots: [], closed: [], saved: [],
+      opened: [], placed: [], modes: [], snapshots: [], closed: [], closeCalls: [], saved: [],
       state: [], holdState, holdMode: false, holdSnapshot: false,
       releaseState: null, releaseMode: null, releaseSnapshot: null,
     };
@@ -15,21 +15,31 @@ async function standWorkspace(browser, origin, { holdState = false } = {}) {
     const actorTab = tabs.find((tab) => tab.kind === "term");
     const actorTerm = activePaneOf(actorTab) ?? actorTab.term;
     paneSessions.delete(actorTerm);
-    paneAgents.set(actorTerm, "codex");
+    paneAgents.set(actorTerm, actorName);
     mock.actorTerm = String(actorTerm);
     const snapshot = (state) => state && typeof state === "object"
       ? { ownerTerm: mock.actorTerm, snapshotSupported: true, ...state } : state;
     const snapshots = (states) => Array.isArray(states) ? states.map(snapshot) : states;
     window.__ANSWER__.open_browser_pane = (args) => {
       mock.opened.push(args);
-      return args.label ?? `browser-${++minted}`;
+      const label = args.label ?? `browser-${++minted}`;
+      return mock.holdOpen ? new Promise((resolve) => { mock.releaseOpen = () => resolve(label); }) : label;
     };
     window.__ANSWER__.browser_place = (args) => {
       mock.placed.push(args);
       return mock.holdPlacement ? new Promise((resolve) => { mock.releasePlacement = resolve; }) : null;
     };
     window.__ANSWER__.browser_zoom = () => null;
-    window.__ANSWER__.close_browser_pane = ({ label }) => { mock.closed.push(label); return null; };
+    window.__ANSWER__.close_browser_pane = (args) => {
+      mock.closeCalls.push(args);
+      if (mock.unknownCloseAck) return {};
+      if (mock.holdClose) return new Promise((resolve, reject) => {
+        mock.releaseClose = () => { mock.closed.push(args.label); resolve(null); };
+        mock.rejectClose = reject;
+      });
+      mock.closed.push(args.label);
+      return null;
+    };
     window.__ANSWER__.set_browser_open_tabs = ({ tabs: records }) => {
       mock.saved.push(records);
       return { browser: { ...browserPrefs, open_tabs: records } };
@@ -68,7 +78,7 @@ async function standWorkspace(browser, origin, { holdState = false } = {}) {
       button.click();
       return true;
     };
-  }, { frame: FRAME, holdState });
+  }, { frame: FRAME, holdState, actorName });
   return opened;
 }
 
@@ -963,6 +973,214 @@ export async function testBrowserWorkspace(browser, origin, ok) {
       });
       ok("a reload action whose browser closed does nothing", missing.exists && missing.error === null && missing.added === 0, JSON.stringify(missing));
       ok("workspace mutator revision handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 200, inFlight: 0, needsObservation: false });
+        window.__WORKSPACE__.holdClose = true;
+        for (let repeat = 0; repeat < 2; repeat += 1) {
+          for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label, revision: 200 } });
+        }
+      }, label);
+      await page.waitForTimeout(40);
+      const pending = await page.evaluate((label) => ({
+        exists: tabs.some((one) => one.label === label),
+        stored: browserOpenTabRecords().some((one) => one.url === "https://example.com/workspace"),
+        calls: window.__WORKSPACE__.closeCalls,
+        closed: window.__WORKSPACE__.closed,
+      }), label);
+      ok("agent close waits for native acknowledgment and coalesces duplicate events", pending.exists && pending.stored
+        && pending.calls.length === 1 && pending.calls[0]?.expectedRevision === 200 && pending.closed.length === 0, JSON.stringify(pending));
+      await page.evaluate(() => window.__WORKSPACE__.releaseClose?.());
+      await page.waitForTimeout(60);
+      const done = await page.evaluate((label) => ({
+        exists: tabs.some((one) => one.label === label),
+        stored: browserOpenTabRecords().some((one) => one.url === "https://example.com/workspace"),
+        calls: window.__WORKSPACE__.closeCalls,
+      }), label);
+      ok("a confirmed agent close removes the tab and record without an unversioned second close",
+        !done.exists && !done.stored && done.calls.length === 1 && done.calls[0]?.expectedRevision === 200, JSON.stringify(done));
+      ok("workspace confirmed-close handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => window.__workspaceEmit({ label, mode: "agent", revision: 210, inFlight: 0, needsObservation: false }), label);
+      await observe(page, label);
+      await page.evaluate((label) => {
+        window.__WORKSPACE__.holdClose = true;
+        for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label, revision: 210 } });
+      }, label);
+      await page.waitForTimeout(30);
+      await page.evaluate(() => window.__WORKSPACE__.rejectClose?.(new Error("stale_close")));
+      await page.waitForTimeout(50);
+      const rejected = await page.evaluate((label) => ({
+        exists: tabs.some((one) => one.label === label), closed: window.__WORKSPACE__.closed,
+        note: groupOf(tabs.find((one) => one.label === label)?.pane)?.browserView?.querySelector(".browser-agent-close-note")?.textContent,
+      }), label);
+      ok("a rejected native close retains the tab and shows an inline refusal", rejected.exists && rejected.closed.length === 0
+        && /탭을 유지/.test(rejected.note ?? ""), JSON.stringify(rejected));
+      await page.evaluate((label) => {
+        window.__WORKSPACE__.holdClose = false;
+        window.__WORKSPACE__.unknownCloseAck = true;
+        for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label, revision: 210 } });
+      }, label);
+      await page.waitForTimeout(50);
+      const unknown = await page.evaluate((label) => tabs.some((one) => one.label === label), label);
+      ok("an unknown native close acknowledgment cannot remove a tab", unknown, String(unknown));
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "human", revision: 211, inFlight: 0, needsObservation: false });
+        const before = window.__WORKSPACE__.closeCalls.length;
+        for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label, revision: 210 } });
+        window.__WORKSPACE__.staleCloseAdded = window.__WORKSPACE__.closeCalls.length - before;
+      }, label);
+      const stale = await page.evaluate((label) => ({ exists: tabs.some((one) => one.label === label), added: window.__WORKSPACE__.staleCloseAdded }), label);
+      ok("a close event from before human handoff sends no close request", stale.exists && stale.added === 0, JSON.stringify(stale));
+      ok("workspace close-refusal handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      const pinned = await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 220, inFlight: 0, needsObservation: false });
+        const tab = tabs.find((one) => one.label === label);
+        tab.pinned = true;
+        const input = document.createElement("input");
+        input.id = "agent-close-focus";
+        document.body.appendChild(input);
+        input.focus();
+        for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label, revision: 220 } });
+        return { exists: tabs.includes(tab), pinned: tab.pinned, calls: window.__WORKSPACE__.closeCalls.length, focus: document.activeElement?.id };
+      }, label);
+      ok("a pinned task rejects agent close before native input and keeps the typing receiver", pinned.exists && pinned.pinned
+        && pinned.calls === 0 && pinned.focus === "agent-close-focus", JSON.stringify(pinned));
+      await page.evaluate((label) => {
+        const tab = tabs.find((one) => one.label === label);
+        tab.pinned = false;
+        for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label } });
+        for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label: "browser-999", revision: 220 } });
+      }, label);
+      const missing = await page.evaluate((label) => ({ exists: tabs.some((one) => one.label === label), calls: window.__WORKSPACE__.closeCalls.length }), label);
+      ok("missing close revisions and unknown origins cannot close another tab", missing.exists && missing.calls === 0, JSON.stringify(missing));
+      ok("workspace pinned-close handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const old = await page.evaluate(async () => {
+        const label = await openBrowserTab("https://example.com/close-reopen");
+        window.__WORKSPACE__.holdClose = true;
+        const revision = Number(label.slice("browser-".length));
+        for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label, revision } });
+        return label;
+      });
+      await page.waitForTimeout(30);
+      const next = await page.evaluate(async (old) => {
+        const tab = tabs.find((one) => one.label === old);
+        if (!tab) return { label: null };
+        const finishOld = window.__WORKSPACE__.releaseClose;
+        window.__WORKSPACE__.holdClose = false;
+        await reopenBrowserPane(tab);
+        finishOld?.();
+        return { label: tab.label };
+      }, old);
+      await page.waitForTimeout(60);
+      const renamed = await page.evaluate((label) => ({
+        exists: tabs.some((one) => one.label === label),
+        closed: window.__WORKSPACE__.closed.includes(label),
+      }), next.label);
+      ok("a late close acknowledgment never removes a replacement label", next.label !== null && next.label !== old
+        && renamed.exists && !renamed.closed, JSON.stringify({ old, next, renamed }));
+      ok("workspace replacement-close handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      await page.evaluate(() => {
+        window.__WORKSPACE__.holdOpen = true;
+        for (const hear of window.__LISTENERS__["browser:agent-open"] ?? []) hear({ payload: { label: "browser-901", url: "https://example.com/cancel-open" } });
+      });
+      await page.waitForFunction(() => typeof window.__WORKSPACE__.releaseOpen === "function");
+      await page.evaluate(() => {
+        for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label: "browser-901", revision: 300 } });
+        window.__WORKSPACE__.releaseOpen();
+      });
+      await page.waitForTimeout(100);
+      const canceled = await page.evaluate(() => ({
+        exists: tabs.some((one) => one.label === "browser-901"), calls: window.__WORKSPACE__.closeCalls,
+      }));
+      ok("a canceled pending open uses its captured close epoch and creates no phantom tab", !canceled.exists
+        && canceled.calls.length === 1 && canceled.calls[0]?.label === "browser-901" && canceled.calls[0]?.expectedRevision === 300, JSON.stringify(canceled));
+      ok("workspace canceled-open handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin, { actorName: "fixture-runner" });
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "paused", revision: 400, inFlight: 0, needsObservation: true, ownerTerm: null });
+        setActiveTab(`browser:${label}`);
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        const select = host?.querySelector(".browser-workspace-owner-select");
+        if (select) { select.value = window.__WORKSPACE__.actorTerm; select.dispatchEvent(new Event("change", { bubbles: true })); }
+        window.__workspaceClick(label, "agent");
+      }, label);
+      await page.waitForTimeout(60);
+      await page.evaluate((label) => window.__workspaceClick(label, "pause"), label);
+      await page.waitForTimeout(60);
+      await page.evaluate((label) => window.__workspaceClick(label, "human"), label);
+      await page.waitForTimeout(60);
+      const generic = await page.evaluate((label) => ({
+        actor: window.__WORKSPACE__.actorTerm, calls: window.__WORKSPACE__.modes,
+        last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+      }), label);
+      ok("an actor outside fixed provider names uses the same explicit ownership and pause contract", generic.calls.length === 3
+        && generic.calls[0]?.ownerTerm === generic.actor && generic.calls[0]?.expectedRevision === 400
+        && generic.calls[1]?.mode === "paused" && generic.calls[1]?.expectedRevision === 401
+        && generic.calls[2]?.mode === "human" && generic.calls[2]?.expectedRevision === 402 && generic.last?.shown === true, JSON.stringify(generic));
+      ok("workspace generic-actor handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      await page.evaluate(() => {
+        const mock = window.__WORKSPACE__;
+        mock.holdOpen = true;
+        mock.originalWorktree = activeWorktreePath;
+        mock.openPromise = openBrowserTab("https://example.com/cancel-without-epoch", {
+          agentWorkspace: true, expectedWorktree: activeWorktreePath,
+        });
+      });
+      await page.waitForFunction(() => typeof window.__WORKSPACE__.releaseOpen === "function");
+      const unknown = await page.evaluate(async () => {
+        const mock = window.__WORKSPACE__;
+        activeWorktreePath = "/tmp/zerocode-window-test/other";
+        mock.releaseOpen();
+        await mock.openPromise;
+        activeWorktreePath = mock.originalWorktree;
+        return { calls: mock.closeCalls, exists: tabs.some((one) => one.kind === "browser") };
+      });
+      ok("managed open cancellation never guesses an absent creation epoch or sends user close", unknown.calls.length === 0 && !unknown.exists, JSON.stringify(unknown));
+      ok("workspace unknown-open-epoch handling raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
 }

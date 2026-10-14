@@ -39097,6 +39097,20 @@ details.task-board-section > summary {
   color: var(--ink-chalk);
 }
 
+.browser-agent-close-note {
+  flex: none;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.browser-agent-close-note[hidden] {
+  display: none;
+}
+
 .browser-workspace-status {
   flex: 1 1 180px;
   min-width: 0;
