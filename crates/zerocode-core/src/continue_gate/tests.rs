@@ -722,6 +722,189 @@ fn only_the_first_bytes_of_an_input_make_its_print() {
     assert_ne!(short("one"), short("another"));
 }
 
+/// A tool start as zo's hook sends it (zo-ide's `HookReporter::pre_tool_use`):
+/// under `tool_input` the compact input zo's working line shows, and — from a
+/// zo that sends one — the print of the call's whole input under
+/// [`INPUT_PRINT_KEY`].
+fn zo_start(call: usize, tool: &str, compact: &serde_json::Value, print: Option<&str>) -> String {
+    let mut start = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_use_id": format!("toolu_{call}"),
+        "tool_input": compact,
+        "session_id": "zo-session",
+    });
+    if let Some(print) = print {
+        start[INPUT_PRINT_KEY] = print.into();
+    }
+    start.to_string()
+}
+
+/// A print as zo makes one, a hash of the call's whole input: the gate only
+/// compares two, so any stable hash stands in for zo's.
+fn print_of(whole: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    whole.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Whether the last of `starts`, each made after the one before it, is rework.
+fn last_is_rework(starts: &[String]) -> bool {
+    let mut book = StepBook::default();
+    for start in starts {
+        book.note_activity(&activity(Phase::Started), start);
+    }
+    book.window.back() == Some(&true)
+}
+
+#[test]
+fn zo_bash_calls_that_start_with_the_same_program_are_not_rework() {
+    let grep = serde_json::json!("grep");
+    assert!(!last_is_rework(&[
+        zo_start(1, "bash", &grep, Some(&print_of("grep -n a x"))),
+        zo_start(2, "bash", &grep, Some(&print_of("grep -n b y"))),
+    ]));
+}
+
+#[test]
+fn zo_reads_of_one_file_at_other_offsets_are_not_rework() {
+    let file = serde_json::json!({ "file_path": "/repo/ui/shell-term.js" });
+    assert!(!last_is_rework(&[
+        zo_start(1, "read_file", &file, Some(&print_of("offset 0"))),
+        zo_start(2, "read_file", &file, Some(&print_of("offset 480"))),
+    ]));
+}
+
+/// Where a payload carries a print, the print alone says which call it is:
+/// the same print is the same call, whatever the compact input beside it.
+#[test]
+fn zo_calls_with_the_same_print_are_rework() {
+    let print = print_of("cargo test -p zerocode-core");
+    let cargo = serde_json::json!("cargo");
+    assert!(last_is_rework(&[
+        zo_start(1, "bash", &cargo, Some(&print)),
+        zo_start(2, "bash", &cargo, Some(&print)),
+    ]));
+    assert!(last_is_rework(&[
+        zo_start(1, "bash", &cargo, Some(&print)),
+        zo_start(2, "bash", &serde_json::json!("make"), Some(&print)),
+    ]));
+}
+
+/// A payload with no print — every other agent's, and an older zo's — is
+/// judged on its input exactly as before, and a print that is not a word is
+/// no print.
+#[test]
+fn payloads_without_a_print_are_judged_on_their_input_as_before() {
+    let (grep, sed) = (serde_json::json!("grep"), serde_json::json!("sed"));
+    assert!(last_is_rework(&[
+        zo_start(1, "bash", &grep, None),
+        zo_start(2, "bash", &grep, None),
+    ]));
+    assert!(!last_is_rework(&[
+        zo_start(1, "bash", &grep, None),
+        zo_start(2, "bash", &sed, None),
+    ]));
+    for blank in [
+        serde_json::Value::Null,
+        serde_json::json!(""),
+        serde_json::json!(7),
+    ] {
+        let start = |call: usize, compact: &serde_json::Value| {
+            let mut start: serde_json::Value =
+                serde_json::from_str(&zo_start(call, "bash", compact, None)).expect("json");
+            start[INPUT_PRINT_KEY] = blank.clone();
+            start.to_string()
+        };
+        assert!(
+            last_is_rework(&[start(1, &grep), start(2, &grep)]),
+            "{blank}"
+        );
+        assert!(
+            !last_is_rework(&[start(1, &grep), start(2, &sed)]),
+            "{blank}"
+        );
+    }
+    let read = |path: &str| payload("Read", &format!(r#"{{"file_path":"{path}"}}"#));
+    assert!(last_is_rework(&[read("/a.rs"), read("/a.rs")]));
+    assert!(!last_is_rework(&[read("/a.rs"), read("/b.rs")]));
+}
+
+/// w-52465's last twenty-four calls when the gate paused it on 10-14 at 10:33
+/// (calls 26 to 49 of its zo session): each call's tool, what zo's hook said of
+/// it under `tool_input`, and the rest of the call. Eight start the way the call
+/// before them did — the same file at another offset, the same program with
+/// other words — and none repeats it.
+const W52465_WINDOW: [(&str, &str, &str); 24] = [
+    ("read_file", "src/tui/transcript.rs", "offset 225 limit 70"),
+    ("grep_search", r"fn prefixed|wrap_line\(", "cells.rs"),
+    ("read_file", "src/tui/cells.rs", "offset 60 limit 80"),
+    ("read_file", "src/tui/cells.rs", "offset 1195 limit 80"),
+    ("grep_search", "fn replay|replay_session", "path src"),
+    ("read_file", "src/tui/app.rs", "offset 1988 limit 75"),
+    ("bash", "sed", "-n 1,80p tests/tui_bytes.rs"),
+    ("read_file", "tests/tui_bytes.rs", "offset 1870 limit 180"),
+    ("read_file", "tests/tui_bytes.rs", "offset 2262 limit 110"),
+    ("bash", "grep", "-n -i resume tests/e2e_hermetic.rs"),
+    ("bash", "grep", "-n 'mod plain_session' src/session/mod.rs"),
+    ("read_file", "src/tui/tables.rs", "offset 0 limit 480"),
+    ("read_file", "src/tui/tables.rs", "offset 480 limit 480"),
+    ("bash", "grep", "-n -E 'MAX_HYPERLINK|hyperlink' grid.rs"),
+    ("bash", "sed", "-n 60,80p grid.rs"),
+    ("bash", "grep", "-n -E '^vte|vte' Cargo.toml"),
+    ("bash", "grep", "-n -E 'MAX_OSC|osc_num_params' src/lib.rs"),
+    ("bash", "sed", "-n 415,440p src/lib.rs"),
+    ("bash", "grep", "-n -E 'vte::|Parser<' *.rs"),
+    ("bash", "sed", "-n 6926,6940p Cargo.lock"),
+    ("read_file", "ui/shell-term.js", "offset 1655 limit 70"),
+    ("read_file", "ui/shell-term.js", "offset 1780 limit 60"),
+    ("read_file", "ui/shell-term.js", "offset 2190 limit 110"),
+    ("read_file", "ui/shell-term.js", "offset 2096 limit 95"),
+];
+
+#[test]
+fn a_zo_window_shaped_like_w_52465s_is_not_a_loop_once_zo_sends_its_print() {
+    let judge = |with_print: bool| {
+        let mut book = StepBook::default();
+        for (call, (tool, compact, rest)) in W52465_WINDOW.into_iter().enumerate() {
+            let input = if tool == "read_file" {
+                serde_json::json!({ "file_path": compact })
+            } else {
+                serde_json::json!(compact)
+            };
+            let print = with_print.then(|| print_of(&format!("{compact} {rest}")));
+            book.note_activity(
+                &activity(Phase::Started),
+                &zo_start(call, tool, &input, print.as_deref()),
+            );
+        }
+        book.judge(&Allowance::default(), T0)
+    };
+    let (before, after) = (judge(false), judge(true));
+    println!(
+        "w-52465's {} calls without zo's print: rework {:?}‰, {:?}; with it: rework {:?}‰, {:?}",
+        W52465_WINDOW.len(),
+        before.metrics.rework_permille,
+        before.verdict,
+        after.metrics.rework_permille,
+        after.verdict,
+    );
+    // As the gate read zo before the print: eight of twenty-four look like the
+    // call before them, and a worker that repeated nothing is paused — what the
+    // gate said of w-52465 at 10:33.
+    assert_eq!(before.metrics.rework_permille, Some(333));
+    assert_eq!(before.verdict, Verdict::Pause);
+    assert_eq!(codes(&before), vec![Code::ReworkLoop]);
+    // With it, twenty-four different calls are twenty-four different calls.
+    assert_eq!(
+        after.metrics.rework_permille,
+        Some(0),
+        "{:?}",
+        after.reasons
+    );
+    assert_eq!(after.verdict, Verdict::Continue);
+}
+
 #[test]
 fn what_a_book_remembers_is_bounded() {
     let mut drive = Drive::new();

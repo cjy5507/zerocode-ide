@@ -732,6 +732,7 @@ mod tests {
             name: "bash".to_string(),
             summary: "cargo build".to_string(),
             preview: ToolPreview::Bash { command: "cargo build".to_string() },
+            input_print: None,
             status,
         }
     }
