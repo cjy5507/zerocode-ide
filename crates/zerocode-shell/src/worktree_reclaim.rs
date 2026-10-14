@@ -232,6 +232,12 @@ pub(crate) struct Reclaimed {
     /// taken every commit on it.
     pub(crate) branch: String,
     pub(crate) base: String,
+    /// The task whose hand-in this checkout stood beside (t-45336) — a red, a
+    /// verify, an evidence checkout — when that is why it went: `base` is then
+    /// the branch and head the worker handed in, and the window says so in
+    /// its own sentence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) beside: Option<String>,
 }
 
 /// One pass over the checkouts the ledger has finished with.
@@ -368,6 +374,243 @@ pub(crate) fn judge_reported(
     );
 }
 
+/// How many hand-ins one pass looks beside. A look lists the repository's
+/// worktrees and may judge several checkouts, each a handful of git
+/// processes, so one hand-in a pass is the same order of work the sweep's
+/// [`JUDGMENTS_PER_PASS`] allows.
+const HAND_INS_PER_PASS: usize = 1;
+
+/// What the road beside hand-ins remembers of one hand-in it looked at.
+struct Looked {
+    at_ms: i64,
+    /// The checkouts of the task it found standing beside the worker's own on
+    /// its first look — what the ledger is told was left at the hand-in.
+    found: Vec<String>,
+    /// Whether one of them is still standing, so the pass looks again after
+    /// [`RE_JUDGE_AFTER`]. A hand-in with nothing left beside it is not looked
+    /// at again by this window.
+    standing: bool,
+}
+
+/// A hand-in, as the road beside hand-ins remembers it: the worker checkout,
+/// the task and the head.
+type LookedKey = (String, String, String);
+
+/// Every hand-in looked at.
+fn looked() -> &'static Mutex<HashMap<LookedKey, Looked>> {
+    static LOOKED: OnceLock<Mutex<HashMap<LookedKey, Looked>>> = OnceLock::new();
+    LOOKED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn looked_key(one: &orchestration::HandedIn) -> LookedKey {
+    (one.checkout.clone(), one.task.clone(), one.head.clone())
+}
+
+/// One pass beside the hand-ins the ledger holds (t-45336).
+///
+/// A worker that handed in a head leaves the checkouts it cut beside its own
+/// — a red to prove the test fails, a detached verify, a folder of evidence —
+/// and the ledger never named them, so no other road ever judges them: one task
+/// came to stand in the sidebar four times, each row saying it had unlanded
+/// commits and no agent. This judges every OTHER checkout of the task, in the
+/// repository that owns the worker's own, with the handed-in head as the
+/// measure (`Holding::HandIn`): one the head holds — every commit in it
+/// already in the head, on the branch the worker handed in from — and nobody
+/// uses goes, without force; anything else stays, with its reason.
+///
+/// A hand-in is looked at when it is new to this window and again
+/// [`RE_JUDGE_AFTER`] after a look that left something standing. One whose
+/// worker checkout is gone is not looked at: there is no branch left to name
+/// as the holder, and once the work lands the cleanup review takes what is
+/// left. An idle pass costs one ledger read, one `is_dir` per hand-in and a
+/// lookup in memory.
+pub(crate) fn sweep_handed_in(app: &AppHandle, now_ms: i64) {
+    let handed: Vec<orchestration::HandedIn> = orchestration::handed_in_heads()
+        .into_iter()
+        .filter(|one| Path::new(&one.checkout).is_dir())
+        .collect();
+    let due: Vec<orchestration::HandedIn> = {
+        let mut marks = looked().lock().unwrap_or_else(|held| held.into_inner());
+        let live: std::collections::HashSet<LookedKey> = handed.iter().map(looked_key).collect();
+        marks.retain(|key, _| live.contains(key));
+        handed
+            .into_iter()
+            .filter(|one| {
+                marks.get(&looked_key(one)).is_none_or(|mark| {
+                    mark.standing && now_ms.saturating_sub(mark.at_ms) >= RE_JUDGE_AFTER
+                })
+            })
+            .take(HAND_INS_PER_PASS)
+            .collect()
+    };
+    if due.is_empty() {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let projects = crate::stored_projects(state.config_root());
+    let prefs = crate::load_settings_for_boot(state.settings())
+        .document
+        .workspace_creation_prefs;
+    let here = Where {
+        active: state.active_root(),
+        data_root: state.local_data_root().to_path_buf(),
+    };
+    for one in due {
+        let (found, standing) = look_beside(app, &one, &projects, &prefs, &here, now_ms);
+        let mut marks = looked().lock().unwrap_or_else(|held| held.into_inner());
+        let found = marks
+            .get(&looked_key(&one))
+            .map_or(found, |earlier| earlier.found.clone());
+        marks.insert(
+            looked_key(&one),
+            Looked {
+                at_ms: now_ms,
+                found,
+                standing,
+            },
+        );
+    }
+}
+
+/// What a look beside one hand-in finds before it judges anything.
+enum Besides {
+    /// No holder to name — the worker's own checkout is detached, or its branch
+    /// no longer holds the head it handed in — so nothing beside it can go on
+    /// this road.
+    NoHolder,
+    /// Git could not list the repository's worktrees; looked at again later.
+    Unlisted,
+    /// The road, and every other checkout of the task beside the worker's own.
+    Found(Road, Vec<Worktree>),
+}
+
+/// The road beside one hand-in and the checkouts it is to judge (t-45336), in
+/// the repository `owner` that lists the worker's own checkout `own`. The
+/// branch `own` is on must hold the handed-in head: that branch is what keeps
+/// a detached checkout's commits reachable once it goes, and a worker that
+/// moved it elsewhere after handing in leaves a head this road cannot vouch for.
+fn besides_of_hand_in(
+    owner: Orchestrator,
+    own: Worktree,
+    one: &orchestration::HandedIn,
+) -> Besides {
+    let Some(holder) = own.branch.clone() else {
+        return Besides::NoHolder;
+    };
+    if !matches!(
+        owner.commits_beyond(&own.path, &format!("refs/heads/{holder}"), &one.head),
+        Ok(Some(0))
+    ) {
+        return Besides::NoHolder;
+    }
+    let Ok(beside) = beside_of(&owner, &own, &one.task) else {
+        return Besides::Unlisted;
+    };
+    let road = Road::HandedIn(Box::new(Beside {
+        owner,
+        task: one.task.clone(),
+        head: one.head.clone(),
+        holder,
+        checkout: own.path,
+    }));
+    Besides::Found(road, beside)
+}
+
+/// Every OTHER checkout of `task` the repository lists beside the worker's own
+/// (t-45336): not the repository's own checkout, not the worker's, and named
+/// for the task by the window's one reading of those names ([`carries_task`]).
+/// Locked, dirty or busy ones are listed too — the judgment says why each one
+/// stays — because what is listed here is also what the ledger is told was left.
+fn beside_of(
+    owner: &Orchestrator,
+    own: &Worktree,
+    task: &str,
+) -> Result<Vec<Worktree>, zerocode_orchestrator::OrchestratorError> {
+    Ok(owner
+        .list()?
+        .into_iter()
+        .filter(|known| {
+            !known.is_main
+                && !same_worktree_path(&known.path, &own.path)
+                && carries_task(known, task, owner.branch_prefix())
+        })
+        .collect())
+}
+
+/// The checkouts of a task found beside a worker's own when its hand-in was
+/// first looked at (t-45336) — what the landing watch tells the ledger was
+/// left, by the worker checkout it hands the ledger as a witness. Empty for a
+/// checkout no hand-in was looked beside.
+pub(crate) fn found_beside(checkout: &str) -> Vec<String> {
+    let wanted = checkout.trim_end_matches('/');
+    let marks = looked().lock().unwrap_or_else(|held| held.into_inner());
+    let mut found: Vec<String> = marks
+        .iter()
+        .filter(|((at, _, _), _)| at.as_str() == wanted)
+        .flat_map(|(_, mark)| mark.found.iter().cloned())
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Look beside one hand-in: every other checkout of its task in the repository
+/// that owns the worker's own, judged against the head. Answers what it found
+/// there and whether one of them still stands.
+fn look_beside(
+    app: &AppHandle,
+    one: &orchestration::HandedIn,
+    projects: &[String],
+    prefs: &WorkspaceCreationPrefs,
+    here: &Where,
+    now_ms: i64,
+) -> (Vec<String>, bool) {
+    // The worker's own checkout names the repository; unlisted, nothing beside
+    // it can be measured.
+    let Ok((owner, own)) = owning_repository(projects, prefs, Path::new(&one.checkout)) else {
+        return (Vec::new(), false);
+    };
+    let (road, beside) = match besides_of_hand_in(owner, own, one) {
+        Besides::NoHolder => return (Vec::new(), false),
+        Besides::Unlisted => return (Vec::new(), true),
+        Besides::Found(road, beside) => (road, beside),
+    };
+    let found: Vec<String> = beside
+        .iter()
+        .map(|known| known.path.to_string_lossy().into_owned())
+        .collect();
+    if beside.is_empty() {
+        return (found, false);
+    }
+    let occupied = crate::occupied_checkouts(&app.state::<AppState>());
+    let mut standing = false;
+    for known in beside {
+        let candidate = orchestration::SettledCheckout {
+            path: known.path.to_string_lossy().into_owned(),
+            worker: one.worker.clone(),
+            agent: one.agent.clone(),
+        };
+        // What the sweep drops before any git: a pane of this window in it, or
+        // a worker the ledger still counts summoned seated in it — and a
+        // refusal remembered less than `RE_JUDGE_AFTER` ago.
+        let recently_kept = judged()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&candidate.path)
+            .is_some_and(|held| now_ms.saturating_sub(held.at_ms) < RE_JUDGE_AFTER);
+        if crate::occupancy_of(&occupied, &known.path) == 0
+            && !orchestration::checkout_is_summoned(&candidate.path)
+            && !recently_kept
+        {
+            judge_and_act(app, &candidate, &road, here, now_ms);
+        }
+        if known.path.is_dir() {
+            standing = true;
+        }
+    }
+    (found, standing)
+}
+
 /// The road a judgment came in by, and the one thing each road holds that the
 /// other does not: how the repository that owns the checkout is found.
 enum Road {
@@ -384,6 +627,42 @@ enum Road {
     /// A worker's `ok:true` report: the repository that cut its checkout,
     /// which this process still holds.
     Report(Orchestrator),
+    /// A worker handed in a head (t-45336), and this is a checkout it cut
+    /// BESIDE its own for the same task — a red, a verify, an evidence
+    /// checkout. Judged against the head it handed in rather than against a
+    /// recorded base, in the repository that owns the worker's own checkout.
+    HandedIn(Box<Beside>),
+}
+
+/// What a judgment of a checkout beside a hand-in holds that the other roads
+/// do not (t-45336).
+struct Beside {
+    /// The repository that owns the worker's own checkout, found through the
+    /// sidebar's catalog with this person's workspace root on top.
+    owner: Orchestrator,
+    task: String,
+    /// The commit the worker handed in.
+    head: String,
+    /// The local branch of the worker's own checkout, which holds `head` — the
+    /// branch a detached checkout's commits stay reachable from once it goes.
+    holder: String,
+    /// The worker's own checkout: what it handed in is kept before anything
+    /// beside it goes, because the keeping reads the task's checkouts too.
+    checkout: PathBuf,
+}
+
+/// What a checkout's commits must already be in for it to go.
+#[derive(Clone, Copy)]
+enum Holding<'a> {
+    /// The base its branch was cut from — a finished worker's own checkout.
+    Base,
+    /// The head a worker handed in, on the branch that holds it — a checkout
+    /// beside that worker's own (t-45336).
+    HandIn {
+        task: &'a str,
+        head: &'a str,
+        holder: &'a str,
+    },
 }
 
 impl Road {
@@ -393,6 +672,28 @@ impl Road {
         match self {
             Self::Sweep { .. } => "reclaim",
             Self::Report(_) => "completed-worker",
+            Self::HandedIn(_) => "handed-in",
+        }
+    }
+
+    /// What this road measures a checkout's commits against.
+    fn holding(&self) -> Holding<'_> {
+        match self {
+            Self::Sweep { .. } | Self::Report(_) => Holding::Base,
+            Self::HandedIn(beside) => Holding::HandIn {
+                task: &beside.task,
+                head: &beside.head,
+                holder: &beside.holder,
+            },
+        }
+    }
+
+    /// The branch that keeps a detached checkout's commits reachable, on the
+    /// one road that may take a detached checkout at all.
+    fn holder(&self) -> Option<&str> {
+        match self {
+            Self::Sweep { .. } | Self::Report(_) => None,
+            Self::HandedIn(beside) => Some(&beside.holder),
         }
     }
 }
@@ -404,6 +705,10 @@ struct Where {
     active: PathBuf,
     data_root: PathBuf,
 }
+
+/// How many processes on this machine stand inside a folder; `None` is "could
+/// not tell".
+type ProcessCount<'a> = &'a dyn Fn(&Path) -> Option<usize>;
 
 /// The two questions asked again once git has answered, because every git
 /// process is time for the world to move: a coordinator coming back seats its
@@ -420,6 +725,13 @@ struct Recheck<'a> {
     /// them — and asked again by every road that takes a checkout, so the answer
     /// is one.
     keeping: &'a dyn Fn(&Path) -> Clearance,
+    /// How many processes on this machine stand inside it — any process, not
+    /// only this window's panes. Asked only on the road beside a hand-in
+    /// (t-45336): a checkout a worker cut by hand is where a person's shell in
+    /// another app, or a build the coordinator runs, may be standing, and this
+    /// window's pane registry knows neither. `None` from the question is
+    /// "could not tell", which keeps the checkout.
+    processes: Option<ProcessCount<'a>>,
 }
 
 /// What one judgment came to, for the road that asked.
@@ -444,12 +756,28 @@ fn judge_and_act(
     let state = app.state::<AppState>();
     let terminals = |path: &Path| crate::checkout_occupancy(&state, path);
     // The beat asks without reading a file: a hand-in not yet kept is started on
-    // a thread of its own and the checkout waits for the next beat.
-    let keeping = |path: &Path| before_cleanup(path, Mode::Wait);
+    // a thread of its own and the checkout waits for the next beat. Beside a
+    // hand-in, the worker's own hand-in is asked too: the keeping reads the
+    // task's other checkouts, so what it named in this one is kept first.
+    let keeping = |path: &Path| match road {
+        Road::HandedIn(beside) => {
+            before_cleanup(path, Mode::Wait).worse(before_cleanup(&beside.checkout, Mode::Wait))
+        }
+        Road::Sweep { .. } | Road::Report(_) => before_cleanup(path, Mode::Wait),
+    };
+    // A finished worker's checkout goes only while the ledger still counts it
+    // finished with; one beside a hand-in, which the ledger never named, only
+    // while nobody the ledger still counts summoned has been seated in it.
+    let settled = |path: &str| match road {
+        Road::HandedIn(_) => !orchestration::checkout_is_summoned(path),
+        Road::Sweep { .. } | Road::Report(_) => orchestration::checkout_is_settled(path),
+    };
+    let processes = crate::system_runtime::processes_standing_in;
     let recheck = Recheck {
-        settled: &orchestration::checkout_is_settled,
+        settled: &settled,
         terminals: &terminals,
         keeping: &keeping,
+        processes: matches!(road, Road::HandedIn(_)).then_some(&processes as ProcessCount<'_>),
     };
     match settle(candidate, road, here, &recheck, now_ms) {
         Settled::Reclaimed { branch, base } => {
@@ -470,6 +798,10 @@ fn judge_and_act(
                     agent: candidate.agent.clone(),
                     branch,
                     base,
+                    beside: match road {
+                        Road::HandedIn(beside) => Some(beside.task.clone()),
+                        Road::Sweep { .. } | Road::Report(_) => None,
+                    },
                 },
             );
         }
@@ -521,25 +853,47 @@ fn settle(
             return Settled::Kept;
         }
     }
+    // Beside a hand-in, before git is asked anything: a process standing in
+    // the directory is a person's shell, a build, an agent another window runs
+    // — somebody's, whatever git would say (t-45336). Remembered like every
+    // refusal, so a shell left open there is asked about again after
+    // `RE_JUDGE_AFTER` and not once a second.
+    if let Some(processes) = recheck.processes {
+        let refusal = match processes(&path) {
+            Some(0) => None,
+            Some(count) => Some(format!("{count} process(es) on this machine stand in it")),
+            None => Some("the processes standing in it could not be read".to_string()),
+        };
+        if let Some(because) = refusal {
+            remember(candidate, Standing::Kept, &because, data_root, now_ms);
+            return Settled::Kept;
+        }
+    }
+    // A checkout beside a hand-in is not the dead worker's own, so nothing
+    // read of it is told to that worker's hold.
+    let tells_the_hold = !matches!(road, Road::HandedIn(_));
     let owner = match road {
         Road::Sweep { projects, prefs } => owning_repository(projects, prefs, &path),
         Road::Report(cutter) => listed_by(cutter, &path),
+        Road::HandedIn(beside) => listed_by(&beside.owner, &path),
     };
     let (orchestrator, known) = match owner {
         Ok(found) => found,
         Err(refusal) => {
-            orchestration::checkout_examined(
-                &candidate.worker,
-                Examined::Unknown {
-                    why: refusal.clone(),
-                },
-                now_ms,
-            );
+            if tells_the_hold {
+                orchestration::checkout_examined(
+                    &candidate.worker,
+                    Examined::Unknown {
+                        why: refusal.clone(),
+                    },
+                    now_ms,
+                );
+            }
             remember(candidate, Standing::NotOurs, &refusal, data_root, now_ms);
             return Settled::Kept;
         }
     };
-    let (verdict, examined) = look(&orchestrator, &known, &here.active);
+    let (verdict, examined) = look(&orchestrator, &known, &here.active, road.holding());
     let standing = if matches!(examined, Examined::Shared) {
         Standing::NotOurs
     } else {
@@ -548,7 +902,9 @@ fn settle(
     // What the look found reaches the hold the ledger opened at the worker's
     // death, whatever the verdict below does with the directory: the same
     // reading answers both, so the two can never disagree.
-    orchestration::checkout_examined(&candidate.worker, examined, now_ms);
+    if tells_the_hold {
+        orchestration::checkout_examined(&candidate.worker, examined, now_ms);
+    }
     let (branch, base, takes) = match verdict {
         Verdict::Keep(because) => {
             remember(candidate, standing, &because, data_root, now_ms);
@@ -594,22 +950,43 @@ fn settle(
         );
         return Settled::Kept;
     }
-    match reclaim(&orchestrator, &held, data_root) {
+    // And every process on this machine, on the road that asks (t-45336), for
+    // the reason the panes are asked again: one may have come to stand in it
+    // while git was answering. Written to the log, never remembered — the
+    // early question above remembers it on the next beat.
+    if let Some(processes) = recheck.processes
+        && processes(&path) != Some(0)
+    {
+        crate::note_window_event(
+            data_root,
+            &format!(
+                "orchestration: the checkout beside worker {}'s hand-in at {} was kept: a \
+                 process came to stand in it while it was being judged",
+                candidate.worker,
+                path.display()
+            ),
+        );
+        return Settled::Kept;
+    }
+    match reclaim(&orchestrator, &held, data_root, road.holder()) {
         Ok(()) => {
-            crate::note_worktree_removal(
-                data_root,
-                road.source(),
-                &path,
-                &format!(
-                    "worker {} left it; {branch} is clean and fully in {base}; it took {}",
-                    candidate.worker,
-                    if takes.is_empty() {
-                        "no ignored path with it".to_string()
-                    } else {
-                        takes.join(", ")
-                    }
+            let took = if takes.is_empty() {
+                "no ignored path with it".to_string()
+            } else {
+                takes.join(", ")
+            };
+            let because = match road {
+                Road::HandedIn(beside) => format!(
+                    "it stood beside worker {}'s hand-in of {}; {branch} is clean and held by \
+                     {base}; it took {took}",
+                    candidate.worker, beside.task
                 ),
-            );
+                Road::Sweep { .. } | Road::Report(_) => format!(
+                    "worker {} left it; {branch} is clean and fully in {base}; it took {took}",
+                    candidate.worker
+                ),
+            };
+            crate::note_worktree_removal(data_root, road.source(), &path, &because);
             Settled::Reclaimed { branch, base }
         }
         Err(refusal) => {
@@ -746,14 +1123,19 @@ fn shared(because: String) -> (Verdict, Examined) {
 /// itself reads both halves through `look`.
 #[cfg(test)]
 fn judge(orchestrator: &Orchestrator, known: &Worktree, active: &Path) -> Verdict {
-    look(orchestrator, known, active).0
+    look(orchestrator, known, active, Holding::Base).0
 }
 
 /// One reading of a settled checkout, answering two questions from it: what
 /// the reclaimer may do with the directory, and what a dead worker left in
 /// it. Kept as one function on purpose — a second reading for the second
 /// question would be a second chance to disagree.
-fn look(orchestrator: &Orchestrator, known: &Worktree, active: &Path) -> (Verdict, Examined) {
+fn look(
+    orchestrator: &Orchestrator,
+    known: &Worktree,
+    active: &Path,
+    holding: Holding<'_>,
+) -> (Verdict, Examined) {
     let path = known.path.as_path();
     if same_worktree_path(active, path) {
         return shared("the window is standing in it".to_string());
@@ -832,6 +1214,11 @@ fn look(orchestrator: &Orchestrator, known: &Worktree, active: &Path) -> (Verdic
         }
         Err(error) => return unknown(format!("git could not read its status: {error}")),
     };
+    // Beside a hand-in the last questions are the hand-in's own (t-45336): the
+    // same task, and every commit already in the head the worker handed in.
+    if let Holding::HandIn { task, head, holder } = holding {
+        return held_by_hand_in(orchestrator, known, task, head, holder, takes);
+    }
     let Some(branch) = known.branch.as_deref() else {
         return unknown(
             "its HEAD is detached, so removal would leave no branch holding its commits"
@@ -871,6 +1258,73 @@ fn look(orchestrator: &Orchestrator, known: &Worktree, active: &Path) -> (Verdic
     }
 }
 
+/// The last questions for a checkout beside a hand-in (t-45336): is it the
+/// same task's by the names this window gives its checkouts, and does the head
+/// the worker handed in already hold every commit in it. Asked after the
+/// questions every checkout answers — standing, ownership, halfway operations,
+/// uncommitted changes, ignored files — so what reaches here is clean.
+///
+/// `holder` is the branch of the worker's own checkout; `base` in the verdict
+/// names it with the head, the two facts that make the removal safe: the
+/// commits stay reachable from that branch once the directory is gone.
+fn held_by_hand_in(
+    orchestrator: &Orchestrator,
+    known: &Worktree,
+    task: &str,
+    head: &str,
+    holder: &str,
+    takes: Vec<String>,
+) -> (Verdict, Examined) {
+    if !carries_task(known, task, orchestrator.branch_prefix()) {
+        return shared(format!("its name does not carry {task}"));
+    }
+    let Some(at) = known.head.as_deref() else {
+        return unknown("git did not say which commit it is on".to_string());
+    };
+    match orchestrator.commits_beyond(&known.path, head, at) {
+        Ok(Some(0)) => (
+            Verdict::Reclaim {
+                branch: known
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| format!("the detached HEAD {}", short_commit(at))),
+                base: format!("{holder} at {}", short_commit(head)),
+                takes,
+            },
+            Examined::Landed,
+        ),
+        Ok(Some(outstanding)) => unknown(format!(
+            "{outstanding} commit(s) in it are not in the head {task} handed in"
+        )),
+        Ok(None) => unknown(format!(
+            "{head} cannot be resolved here, so whether it holds this checkout is unknown"
+        )),
+        Err(error) => unknown(format!("git could not compare it with {head}: {error}")),
+    }
+}
+
+/// Whether a checkout is one of `task`'s by the names this window gives them
+/// (t-45336): read by the one reader of those names,
+/// [`zerocode_orchestrator::naming::checkout_task_id`] — the sidebar folds a
+/// task's checkouts under one row by the same answer.
+fn carries_task(known: &Worktree, task: &str, prefix: &str) -> bool {
+    known
+        .path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .and_then(|folder| {
+            zerocode_orchestrator::naming::checkout_task_id(folder, known.branch.as_deref(), prefix)
+        })
+        == Some(task)
+}
+
+/// A commit as a sentence carries it: the first nine digits — what
+/// `git log --oneline` prints for a repository with this many objects, so the
+/// line can be pasted back into git.
+fn short_commit(commit: &str) -> &str {
+    commit.get(..9).unwrap_or(commit)
+}
+
 /// Take the checkout away, through the gate every automatic removal goes
 /// through.
 ///
@@ -888,10 +1342,16 @@ fn reclaim(
     orchestrator: &Orchestrator,
     held: &CheckoutHeld,
     data_root: &Path,
+    holder: Option<&str>,
 ) -> Result<(), String> {
     let path = held.path();
     crate::unshare_project_directories(orchestrator.repo_root(), path);
-    crate::remove_automatic_worktree(orchestrator, held)?;
+    match holder {
+        // Beside a hand-in (t-45336): a detached checkout goes only while the
+        // branch that holds the handed-in head holds its commit too.
+        Some(holder) => crate::remove_automatic_held_by(orchestrator, held, holder)?,
+        None => crate::remove_automatic_worktree(orchestrator, held)?,
+    }
     // After the removal and not before, exactly as the hand road orders it:
     // history is the one thing somebody who lands back on a refused removal
     // still wants.
@@ -928,13 +1388,18 @@ mod tests {
     impl Bench {
         fn open() -> Self {
             let temp = tempfile::tempdir().expect("a reclaim repository");
-            let repo = temp.path().join("repo");
+            // Git writes down a checkout's real path (macOS's temporary folder
+            // is a link into /private) and the ownership rule reads the root as
+            // text, so the bench's root is the real one, as a window's is —
+            // or only a checkout on a prefixed branch would count as its own.
+            let real = temp.path().canonicalize().expect("the real temporary path");
+            let repo = real.join("repo");
             std::fs::create_dir_all(&repo).expect("repo");
             git(&repo, &["init", "-q", "-b", "main"]);
             git(&repo, &["config", "user.name", "ZeroCode Test"]);
             git(&repo, &["config", "user.email", "test@zerocode"]);
             git(&repo, &["commit", "--allow-empty", "-q", "-m", "first"]);
-            let worktrees = temp.path().join("managed");
+            let worktrees = real.join("managed");
             Self {
                 _temp: temp,
                 repo,
@@ -1064,6 +1529,7 @@ mod tests {
             settled: &settled,
             terminals: &terminals,
             keeping: &kept,
+            processes: None,
         }
     }
 
@@ -1133,7 +1599,13 @@ mod tests {
 
         let landed = bench.cut("landed");
         assert_eq!(
-            look(&orchestrator, &bench.listed(&landed), &elsewhere).1,
+            look(
+                &orchestrator,
+                &bench.listed(&landed),
+                &elsewhere,
+                Holding::Base
+            )
+            .1,
             Examined::Landed
         );
 
@@ -1143,23 +1615,46 @@ mod tests {
         git(&unlanded, &["commit", "-q", "-m", "real work"]);
         assert!(
             matches!(
-                look(&orchestrator, &bench.listed(&unlanded), &elsewhere).1,
+                look(
+                    &orchestrator,
+                    &bench.listed(&unlanded),
+                    &elsewhere,
+                    Holding::Base
+                )
+                .1,
                 Examined::Unlanded { commits: 1, .. }
             ),
             "{:?}",
-            look(&orchestrator, &bench.listed(&unlanded), &elsewhere).1
+            look(
+                &orchestrator,
+                &bench.listed(&unlanded),
+                &elsewhere,
+                Holding::Base
+            )
+            .1
         );
 
         let dirty = bench.cut("dirty-look");
         std::fs::write(dirty.join("notes.txt"), "half a thought\n").expect("write");
         assert_eq!(
-            look(&orchestrator, &bench.listed(&dirty), &elsewhere).1,
+            look(
+                &orchestrator,
+                &bench.listed(&dirty),
+                &elsewhere,
+                Holding::Base
+            )
+            .1,
             Examined::Uncommitted { changes: 1 }
         );
 
         // Standing in it makes it the coordinator's own tree, not a cut to
         // harvest — and the verdict says so in the same breath.
-        let (verdict, examined) = look(&orchestrator, &bench.listed(&landed), &landed);
+        let (verdict, examined) = look(
+            &orchestrator,
+            &bench.listed(&landed),
+            &landed,
+            Holding::Base,
+        );
         assert_eq!(examined, Examined::Shared);
         assert!(matches!(verdict, Verdict::Keep(ref because) if because.contains("standing")));
     }
@@ -1235,7 +1730,7 @@ mod tests {
         ));
         let data_root = tempfile::tempdir().expect("data root");
         let held = CheckoutHeld::take(&path).expect("no other road holds it");
-        reclaim(&orchestrator, &held, data_root.path()).expect("reclaim");
+        reclaim(&orchestrator, &held, data_root.path(), None).expect("reclaim");
         assert!(!path.exists(), "the checkout survived its own reclaim");
     }
 
@@ -1709,6 +2204,7 @@ mod tests {
                     settled: &settled,
                     terminals: &terminals,
                     keeping,
+                    processes: None,
                 };
                 assert!(
                     matches!(
@@ -1741,6 +2237,7 @@ mod tests {
                 settled: &settled,
                 terminals: &terminals,
                 keeping: &clear,
+                processes: None,
             };
             assert!(
                 matches!(
@@ -1754,6 +2251,267 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&candidate.path);
+        }
+    }
+
+    /// The commit `what` names in `repo`, as git spells it.
+    fn rev(repo: &Path, what: &str) -> String {
+        let output = crate::proc::quiet_command("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "--verify", what])
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git rev-parse {what} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// The person's report (10-11, again 10-14): one task, t-26584, stood in
+    /// the sidebar four times — `before`, `jev-evidence`, `jev-green`,
+    /// `verify`, the checkouts its worker cut beside its own — each row saying
+    /// it had unlanded commits and no agent, long after the worker had handed
+    /// its head in, and finished work piled up (t-45336). The hand-in takes
+    /// back every checkout beside it that the handed-in head holds, that is
+    /// clean and that nobody stands in, without force, and the window log says
+    /// which road took it. A dirty one, a locked one, one holding a commit the
+    /// head does not, one a process stands in, and another task's all stay —
+    /// and the branch a checkout was on, the worker's own checkout and every
+    /// commit survive.
+    #[test]
+    fn a_hand_in_takes_back_the_checkouts_beside_it_that_its_head_holds() {
+        let bench = Bench::open();
+        bench.ignore_on_main("target/\n");
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        // The worker's own checkout, cut by the window: a red, then the green
+        // it hands in.
+        let own = bench.cut("t-26584");
+        let commit = |at: &Path, file: &str| {
+            std::fs::write(at.join(file), format!("// {file}\n")).expect("work");
+            git(at, &["add", file]);
+            git(at, &["commit", "-q", "-m", file]);
+            rev(at, "HEAD")
+        };
+        let red = commit(&own, "red.rs");
+        let head = commit(&own, "green.rs");
+        // The checkouts beside it, cut the way a worker cuts them by hand:
+        // detached at a commit, or on a branch of their own.
+        let cut_beside = |name: &str, branch: Option<&str>, at: &str| {
+            let path = bench.worktrees.join(name);
+            let spelled = path.to_string_lossy().into_owned();
+            let mut args = vec!["worktree", "add"];
+            match branch {
+                Some(branch) => args.extend(["-b", branch]),
+                None => args.push("--detach"),
+            }
+            args.extend([spelled.as_str(), at]);
+            git(&bench.repo, &args);
+            path
+        };
+        let taken = [
+            cut_beside("t-26584-before", None, "main"),
+            cut_beside("t-26584-jev-evidence", None, &red),
+            cut_beside("t-26584-jev-green", Some("wt/t-26584-jev-green"), &head),
+            cut_beside("t-26584-verify", None, &head),
+        ];
+        Bench::build_tree(&taken[1].join("target"));
+        let dirty = cut_beside("t-26584-dirty", None, &red);
+        std::fs::write(dirty.join("notes.md"), "not committed\n").expect("a note");
+        let locked = cut_beside("t-26584-locked", None, &red);
+        git(
+            &bench.repo,
+            &["worktree", "lock", &locked.to_string_lossy()],
+        );
+        let stray = cut_beside("t-26584-stray", None, &red);
+        commit(&stray, "stray.rs");
+        let busy = cut_beside("t-26584-busy", None, &red);
+        let another_task = cut_beside("t-26585-red", None, &red);
+
+        let one = orchestration::HandedIn {
+            task: "t-26584".to_string(),
+            worker: "w-26585".to_string(),
+            agent: "claude".to_string(),
+            checkout: own.to_string_lossy().into_owned(),
+            head: head.clone(),
+        };
+        // Nobody left but a process standing in `busy` — a person's shell.
+        let settled = |_: &str| true;
+        let terminals = |_: &Path| 0_usize;
+        let clear = |_: &Path| Clearance::Clear;
+        let processes = |path: &Path| Some(usize::from(same_worktree_path(path, &busy)));
+        let recheck = Recheck {
+            settled: &settled,
+            terminals: &terminals,
+            keeping: &clear,
+            processes: Some(&processes as ProcessCount<'_>),
+        };
+        let mut found: Vec<PathBuf> = Vec::new();
+        if let Besides::Found(road, beside) =
+            besides_of_hand_in(bench.orchestrator(), bench.listed(&own), &one)
+        {
+            for known in &beside {
+                found.push(known.path.clone());
+                let candidate = finished(&known.path, &one.worker);
+                settle(&candidate, &road, &here, &recheck, 1_000);
+            }
+        }
+
+        let name = |path: &PathBuf| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let mut standing: Vec<String> = taken
+            .iter()
+            .chain([&dirty, &locked, &stray, &busy])
+            .filter(|path| path.exists())
+            .map(name)
+            .collect();
+        standing.sort();
+        assert_eq!(
+            standing,
+            [
+                "t-26584-busy",
+                "t-26584-dirty",
+                "t-26584-locked",
+                "t-26584-stray"
+            ],
+            "after the hand-in, the checkouts its head holds still stand beside the worker's \
+             own — one task, several rows"
+        );
+        let mut found: Vec<String> = found.iter().map(name).collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "t-26584-before",
+                "t-26584-busy",
+                "t-26584-dirty",
+                "t-26584-jev-evidence",
+                "t-26584-jev-green",
+                "t-26584-locked",
+                "t-26584-stray",
+                "t-26584-verify"
+            ],
+            "the task's checkouts beside the worker's own are not what was found"
+        );
+        assert!(another_task.exists(), "another task's checkout was taken");
+        assert!(own.exists(), "the worker's own checkout was taken");
+        for commit in [&red, &head] {
+            rev(&bench.repo, &format!("{commit}^{{commit}}"));
+        }
+        rev(&bench.repo, "refs/heads/wt/t-26584-jev-green");
+
+        let said = std::fs::read_to_string(data_root.path().join("window-errors.log"))
+            .expect("the window log");
+        for path in &taken {
+            let removal = format!("worktree removed [handed-in] {}", path.display());
+            assert!(
+                said.lines().any(|line| line.contains(&removal)),
+                "no removal line names the road beside the hand-in for {}:\n{said}",
+                path.display()
+            );
+        }
+        for (path, because) in [
+            (&dirty, "uncommitted"),
+            (&locked, "locked"),
+            (&stray, "not in the head t-26584 handed in"),
+            (&busy, "process(es) on this machine stand in it"),
+        ] {
+            assert!(
+                said.lines()
+                    .any(|line| line.contains(&*path.to_string_lossy()) && line.contains(because)),
+                "{} stays without saying `{because}`:\n{said}",
+                path.display()
+            );
+        }
+        let mut marks = judged()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for path in [&dirty, &locked, &stray, &busy] {
+            marks.remove(&*path.to_string_lossy());
+        }
+    }
+
+    /// A hand-in whose worker moved its branch away from the head, or whose own
+    /// checkout is detached, names no branch to hold what goes: nothing beside
+    /// it is judged at all (t-45336).
+    #[test]
+    fn a_hand_in_no_branch_holds_takes_nothing_back() {
+        let bench = Bench::open();
+        let own = bench.cut("t-30001");
+        std::fs::write(own.join("work.rs"), "// work\n").expect("work");
+        git(&own, &["add", "work.rs"]);
+        git(&own, &["commit", "-q", "-m", "work"]);
+        let head = rev(&own, "HEAD");
+        let beside = bench.worktrees.join("t-30001-verify");
+        git(
+            &bench.repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                &beside.to_string_lossy(),
+                &head,
+            ],
+        );
+        // The branch moved back: it no longer holds the head handed in.
+        git(&own, &["reset", "-q", "--keep", "main"]);
+        let one = orchestration::HandedIn {
+            task: "t-30001".to_string(),
+            worker: "w-30001".to_string(),
+            agent: "claude".to_string(),
+            checkout: own.to_string_lossy().into_owned(),
+            head,
+        };
+        assert!(
+            matches!(
+                besides_of_hand_in(bench.orchestrator(), bench.listed(&own), &one),
+                Besides::NoHolder
+            ),
+            "a head no branch holds was measured against"
+        );
+        assert!(beside.exists());
+    }
+
+    /// A checkout is a task's by the names this window gives them, read by the
+    /// one reader of those names: its folder, and its branch under the window's
+    /// prefix when it is on one (t-45336). A coordinator's `coord-…` checkout,
+    /// a longer id, a branch outside the prefix and a branch of another task
+    /// are nobody's intermediate.
+    #[test]
+    fn a_checkout_is_a_tasks_by_its_folder_and_its_branch_under_the_prefix() {
+        let at = |path: &str, branch: Option<&str>| Worktree {
+            path: PathBuf::from(path),
+            head: Some("abc1234".to_string()),
+            branch: branch.map(str::to_string),
+            is_main: false,
+            bare: false,
+            detached: branch.is_none(),
+            locked: false,
+            prunable: false,
+        };
+        for (path, branch, carries) in [
+            ("/w/t-26584-before", None, true),
+            ("/w/t-26584-jev-green", Some("wt/t-26584-jev-green"), true),
+            ("/w/t-26584", Some("wt/t-26584/fix-the-gate"), true),
+            ("/w/t-265840-red", None, false),
+            ("/w/coord-t26584", None, false),
+            ("/w/t-26584-gate", Some("coord/t-26584-gate"), false),
+            ("/w/t-26584-mixed", Some("wt/t-26585-mixed"), false),
+        ] {
+            assert_eq!(
+                carries_task(&at(path, branch), "t-26584", "wt"),
+                carries,
+                "{path} on {branch:?}"
+            );
         }
     }
 }

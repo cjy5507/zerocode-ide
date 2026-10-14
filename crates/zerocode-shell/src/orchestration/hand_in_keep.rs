@@ -62,6 +62,11 @@ const SNIFF_BYTES: u64 = 8192;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Roots {
     checkout: Option<PathBuf>,
+    /// The task the hand-in was filed on (t-45336). A checkout the worker cut
+    /// beside its own for that task — a red, a verify, an evidence checkout —
+    /// is a root too: it is where the window takes things back from once the
+    /// head is handed in, so what the worker named in it is kept first.
+    task: Option<String>,
     temps: Vec<PathBuf>,
 }
 
@@ -76,8 +81,16 @@ impl Roots {
     pub(crate) fn of(checkout: Option<&str>) -> Self {
         Self {
             checkout: checkout.and_then(|at| Path::new(at).canonicalize().ok()),
+            task: None,
             temps: temp_roots(),
         }
+    }
+
+    /// The same roots, and the checkouts of `task` beside the worker's own
+    /// (t-45336).
+    pub(crate) fn for_task(mut self, task: Option<&str>) -> Self {
+        self.task = task.map(str::to_string);
+        self
     }
 
     fn holds(&self, path: &Path) -> bool {
@@ -85,7 +98,51 @@ impl Roots {
             .iter()
             .chain(self.temps.iter())
             .any(|root| path.starts_with(root))
+            || self.beside(path)
     }
+
+    /// Whether `path` lies in a checkout cut beside the worker's own for the
+    /// same task (t-45336): the nearest folder at or above it that git marks as
+    /// a checkout is a LINKED worktree (its `.git` is a file), its name carries
+    /// the task's id by the window's one reading of those names
+    /// ([`zerocode_orchestrator::naming::worker_task_id`]), and git lists it in
+    /// the same repository as the worker's own checkout. Two small files and a
+    /// few stats, no git process — so the stat survey a cleanup asks stays one.
+    fn beside(&self, path: &Path) -> bool {
+        let (Some(task), Some(checkout)) = (self.task.as_deref(), self.checkout.as_deref()) else {
+            return false;
+        };
+        let Some(root) = path.ancestors().find(|dir| dir.join(".git").exists()) else {
+            return false;
+        };
+        root.join(".git").is_file()
+            && root
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .and_then(zerocode_orchestrator::naming::worker_task_id)
+                == Some(task)
+            && linked_worktrees_of(root).is_some_and(|listed| {
+                linked_worktrees_of(checkout).as_deref() == Some(listed.as_path())
+            })
+    }
+}
+
+/// The folder in which git lists a checkout's repository's linked worktrees —
+/// `<repository>/.git/worktrees` — read from the checkout's own `.git`: a folder
+/// in the repository's own checkout, a file naming the checkout's place in that
+/// list in a linked one (an absolute path, or one relative to the checkout).
+/// Resolved, so two spellings of one repository are one answer.
+fn linked_worktrees_of(checkout: &Path) -> Option<PathBuf> {
+    let marker = checkout.join(".git");
+    if marker.is_dir() {
+        return marker.join("worktrees").canonicalize().ok();
+    }
+    let said = std::fs::read_to_string(&marker).ok()?;
+    let gitdir = said
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))?
+        .trim();
+    checkout.join(gitdir).parent()?.canonicalize().ok()
 }
 
 /// The temporary folders this machine has, resolved and without repeats.
@@ -802,7 +859,7 @@ fn job_for(ledger: &Ledger, hand_in: HandIn) -> Option<Job> {
     }
     Some(Job {
         origin,
-        roots: Roots::of(worker.checkout.as_deref()),
+        roots: Roots::of(worker.checkout.as_deref()).for_task(hand_in.task.as_deref()),
         hand_in,
     })
 }
@@ -905,7 +962,7 @@ pub(crate) enum Clearance {
 
 impl Clearance {
     /// The worse of two answers: a failure over a wait over a go-ahead.
-    fn worse(self, other: Self) -> Self {
+    pub(crate) fn worse(self, other: Self) -> Self {
         let rank = |clearance: &Self| match clearance {
             Self::Clear => 0,
             Self::Keeping(_) => 1,

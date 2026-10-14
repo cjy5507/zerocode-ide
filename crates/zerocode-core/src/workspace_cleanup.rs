@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 /// 지문([`fingerprint`])에 섞여 들어간다. 규칙이 바뀌면 예전 규칙 아래에서 눌러
 /// 둔 "무시"는 스스로 풀려야 한다 — 지금은 위험하다고 볼 워크스페이스를, 예전
 /// 규칙에서 한 번 무시했다는 이유로 영영 숨기는 것이 최악이다.
-pub const CLASSIFIER_VERSION: u32 = 1;
+pub const CLASSIFIER_VERSION: u32 = 2;
 
 /// 하루, 밀리초.
 pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -48,6 +48,10 @@ pub enum Reason {
     Archived,
     /// 보관 표시는 없지만 [`IDLE_CLEAN_DAYS`]일 넘게 조용하다.
     IdleClean,
+    /// 이 체크아웃의 커밋이 모두 비교 기준에 들어 있다 — 착지된 작업(t-45336). 조용한 날 수를
+    /// 기다리지 않는다: 사람의 말 「네비바에 완벽하게 끝난 과업들은 … 정리해」, 「일이 끝나면 정리를
+    /// 안하는거야」. 잃을 것이 없다는 증명은 다른 사유와 똑같이 git 증거가 한다.
+    Landed,
 }
 
 impl Reason {
@@ -56,6 +60,7 @@ impl Reason {
         match self {
             Reason::Archived => "archived",
             Reason::IdleClean => "idle-clean",
+            Reason::Landed => "landed",
         }
     }
 }
@@ -252,6 +257,9 @@ pub struct WorktreeFacts {
     pub last_activity_ms: i64,
     /// 사람이 눌러 둔 무시가 아직 유효한가. [`dismissal_holds`]가 만든다.
     pub dismissed: bool,
+    /// 이 체크아웃의 작업이 비교 기준에 모두 들어 있다고 사이드바의 착지 분류가 답했다 (t-45336).
+    /// 창만이 아는 사실이고, 모르면 거짓이다 — 착지됐다고 부를 근거가 없으면 사유도 없다.
+    pub landed: bool,
     /// git에게 물어 알아낸 것.
     pub git: GitEvidence,
 }
@@ -297,13 +305,16 @@ pub fn idle_days(last_activity_ms: i64, now_ms: i64) -> i64 {
 }
 
 /// 후보로 올릴 사유들. 비어 있으면 후보가 아니다.
-pub fn reasons(archived: bool, idle_days: i64) -> Vec<Reason> {
+pub fn reasons(archived: bool, idle_days: i64, landed: bool) -> Vec<Reason> {
     let mut found = Vec::new();
     if archived && idle_days >= ARCHIVED_IDLE_DAYS {
         found.push(Reason::Archived);
     }
     if idle_days >= IDLE_CLEAN_DAYS {
         found.push(Reason::IdleClean);
+    }
+    if landed {
+        found.push(Reason::Landed);
     }
     found
 }
@@ -349,7 +360,7 @@ pub fn blockers(facts: &WorktreeFacts) -> Vec<Blocker> {
 /// 사실 하나를 티어 하나로.
 pub fn classify(facts: &WorktreeFacts, now_ms: i64) -> Verdict {
     let idle = idle_days(facts.last_activity_ms, now_ms);
-    let reasons = reasons(facts.archived, idle);
+    let reasons = reasons(facts.archived, idle, facts.landed);
     let blockers = blockers(facts);
     let clean = facts.git.provably_clean();
     let tier = if facts.dismissed {
@@ -441,15 +452,18 @@ mod tests {
     #[test]
     fn a_reason_needs_the_days_it_names() {
         // 7일 경계: 6일은 아니고, 7일은 맞다.
-        assert_eq!(reasons(true, 6), vec![]);
-        assert_eq!(reasons(true, 7), vec![Reason::Archived]);
+        assert_eq!(reasons(true, 6, false), vec![]);
+        assert_eq!(reasons(true, 7, false), vec![Reason::Archived]);
         // 보관되지 않았으면 7일로는 아무것도 아니다.
-        assert_eq!(reasons(false, 7), vec![]);
+        assert_eq!(reasons(false, 7, false), vec![]);
         // 30일 경계.
-        assert_eq!(reasons(false, 29), vec![]);
-        assert_eq!(reasons(false, 30), vec![Reason::IdleClean]);
+        assert_eq!(reasons(false, 29, false), vec![]);
+        assert_eq!(reasons(false, 30, false), vec![Reason::IdleClean]);
         // 보관된 채 30일이면 둘 다 — 목록은 이유를 하나로 줄이지 않는다.
-        assert_eq!(reasons(true, 30), vec![Reason::Archived, Reason::IdleClean]);
+        assert_eq!(
+            reasons(true, 30, false),
+            vec![Reason::Archived, Reason::IdleClean]
+        );
     }
 
     #[test]
@@ -470,6 +484,39 @@ mod tests {
         assert_eq!(idle_days(days_ago(NOW, 30), NOW), 30);
         // 하루에서 1밀리초 모자라면 아직 그 하루가 아니다.
         assert_eq!(idle_days(NOW - (DAY_MS - 1), NOW), 0);
+    }
+
+    /// Landed work is a candidate the day it lands (t-45336): the person's 「일이 끝나면 정리를
+    /// 안하는거야」. It is suggested only when git proves nothing would be lost, and a blocker still
+    /// takes it out of the suggestions, as for every other reason.
+    #[test]
+    fn landed_work_is_a_candidate_the_day_it_lands_and_still_needs_the_proof() {
+        assert_eq!(reasons(false, 0, true), vec![Reason::Landed]);
+        assert_eq!(
+            reasons(true, 30, true),
+            vec![Reason::Archived, Reason::IdleClean, Reason::Landed]
+        );
+        let landed = WorktreeFacts {
+            landed: true,
+            last_activity_ms: NOW,
+            git: GitEvidence::clean(),
+            ..WorktreeFacts::default()
+        };
+        let said = classify(&landed, NOW);
+        assert_eq!(said.tier, Tier::Suggested);
+        assert_eq!(said.reasons, vec![Reason::Landed]);
+        assert!(!said.force);
+        let unproven = WorktreeFacts {
+            git: GitEvidence::unknown(),
+            ..landed.clone()
+        };
+        assert_eq!(classify(&unproven, NOW).tier, Tier::NotSuggested);
+        let busy = WorktreeFacts {
+            running_terminal: true,
+            ..landed
+        };
+        assert_eq!(classify(&busy, NOW).tier, Tier::NotSuggested);
+        assert_eq!(Reason::Landed.slug(), "landed");
     }
 
     #[test]

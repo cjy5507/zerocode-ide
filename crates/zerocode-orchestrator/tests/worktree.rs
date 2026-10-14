@@ -600,6 +600,130 @@ fn a_detached_worktree_is_refused_because_no_branch_would_survive_it() {
     assert!(!detached.exists());
 }
 
+/// A detached checkout whose commit a branch already holds loses nothing when
+/// it goes (t-45336): a worker's red or verify checkout, whose commit is in the
+/// head it handed in on its own branch. `remove_held_by` takes it without
+/// force; a commit the branch does not hold, or a file nobody committed, still
+/// keeps it.
+#[test]
+fn a_detached_checkout_a_branch_holds_goes_without_force_and_nothing_else_does() {
+    let (dir, root, orchestrator) = fixture();
+    git(&root, &["branch", "wt/t-9"]);
+    let work = dir.path().join("t-9");
+    git(
+        &root,
+        &["worktree", "add", work.to_str().unwrap(), "wt/t-9"],
+    );
+    fs::write(work.join("red.txt"), "the red\n").expect("write");
+    git(&work, &["add", "red.txt"]);
+    git(&work, &["commit", "-m", "red"]);
+    let red = git(&work, &["rev-parse", "HEAD"]).trim().to_string();
+    fs::write(work.join("green.txt"), "the green\n").expect("write");
+    git(&work, &["add", "green.txt"]);
+    git(&work, &["commit", "-m", "green"]);
+
+    // The red checkout: detached at a commit the branch holds.
+    let red_checkout = dir.path().join("t-9-red");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            red_checkout.to_str().unwrap(),
+            &red,
+        ],
+    );
+    orchestrator
+        .remove_held_by(&red_checkout, "wt/t-9")
+        .expect("a detached checkout the branch holds goes without force");
+    assert!(!red_checkout.exists(), "the held checkout is still on disk");
+    assert!(
+        git_succeeds(&root, &["cat-file", "-e", &format!("{red}^{{commit}}")]),
+        "the red commit must survive"
+    );
+
+    // A commit only the detached checkout has: the branch does not hold it.
+    let stray = dir.path().join("t-9-stray");
+    git(
+        &root,
+        &["worktree", "add", "--detach", stray.to_str().unwrap(), &red],
+    );
+    fs::write(stray.join("only.txt"), "only here\n").expect("write");
+    git(&stray, &["add", "only.txt"]);
+    git(&stray, &["commit", "-m", "only here"]);
+    let error = orchestrator
+        .remove_held_by(&stray, "wt/t-9")
+        .expect_err("a commit no branch holds must keep its checkout");
+    assert!(
+        matches!(error, OrchestratorError::DetachedHead { .. }),
+        "unexpected error: {error}"
+    );
+    assert!(stray.join("only.txt").exists());
+
+    // A file nobody committed keeps a held checkout too.
+    let dirty = dir.path().join("t-9-dirty");
+    git(
+        &root,
+        &["worktree", "add", "--detach", dirty.to_str().unwrap(), &red],
+    );
+    fs::write(dirty.join("notes.txt"), "unsaved\n").expect("write");
+    let error = orchestrator
+        .remove_held_by(&dirty, "wt/t-9")
+        .expect_err("an untracked file must keep the checkout");
+    assert!(
+        matches!(error, OrchestratorError::UncommittedChanges { .. }),
+        "unexpected error: {error}"
+    );
+    assert!(dirty.join("notes.txt").exists());
+}
+
+/// A landed branch goes the way a person deletes one, `git branch -d`; one
+/// holding a commit the compare ref does not have, or one a worktree has
+/// checked out, stays (t-45336).
+#[test]
+fn a_landed_branch_is_deleted_without_force_and_nothing_else_is() {
+    let (dir, root, orchestrator) = fixture();
+    git(&root, &["branch", "wt/t-7"]);
+    git(&root, &["branch", "wt/t-8"]);
+    let work = dir.path().join("t-8");
+    git(
+        &root,
+        &["worktree", "add", work.to_str().unwrap(), "wt/t-8"],
+    );
+    fs::write(work.join("more.txt"), "not in main\n").expect("write");
+    git(&work, &["add", "more.txt"]);
+    git(&work, &["commit", "-m", "not landed"]);
+
+    orchestrator
+        .delete_landed_branch("wt/t-7", "main")
+        .expect("a branch main holds goes");
+    assert!(
+        !branch_exists(&root, "wt/t-7"),
+        "the landed branch is still there"
+    );
+
+    let error = orchestrator
+        .delete_landed_branch("wt/t-8", "main")
+        .expect_err("a branch with commits main lacks must stay");
+    assert!(
+        matches!(error, OrchestratorError::BranchNotLanded { .. }),
+        "unexpected error: {error}"
+    );
+    assert!(branch_exists(&root, "wt/t-8"));
+
+    // Landed, but checked out in a worktree: git refuses, and so does this.
+    git(&root, &["merge", "--no-edit", "-q", "wt/t-8"]);
+    let error = orchestrator
+        .delete_landed_branch("wt/t-8", "main")
+        .expect_err("a branch a worktree has checked out must stay");
+    assert!(
+        matches!(error, OrchestratorError::Git { .. }),
+        "unexpected error: {error}"
+    );
+    assert!(branch_exists(&root, "wt/t-8"));
+}
+
 #[test]
 fn the_repository_itself_is_never_removed() {
     let (_dir, root, orchestrator) = fixture();

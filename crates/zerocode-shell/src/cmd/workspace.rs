@@ -108,6 +108,10 @@ pub(crate) async fn workspace_cleanup_scan(
                     running_terminal: busy.contains_key(&worktree.path),
                     unsaved_edits: unsaved.contains(&worktree.path),
                     archived: cleanup_looks_archived(&runs, &listed),
+                    // The sidebar's own landing answer, from its cache (t-45336):
+                    // landed work is offered the day it lands, the proof that
+                    // nothing would be lost still being git's below.
+                    landed: crate::worktree_landing::landed_compare_ref(&worktree.path).is_some(),
                     last_activity_ms: cleanup::last_activity(
                         stored_activity,
                         &worktree_activity_marks(&host, &worktree.path),
@@ -132,6 +136,7 @@ pub(crate) async fn workspace_cleanup_scan(
             !cleanup::reasons(
                 subject.facts.archived,
                 cleanup::idle_days(subject.facts.last_activity_ms, now),
+                subject.facts.landed,
             )
             .is_empty()
         });
@@ -393,6 +398,8 @@ pub(crate) async fn workspace_space_scan(
                     // 크기를 묻는 화면이 저쪽의 서랍을 열어 행을 감추면, 사람은
                     // 자기가 어디서 무엇을 눌렀는지 영영 알 수 없다.
                     archived: false,
+                    // Nor is landing: this screen asks about size.
+                    landed: false,
                     dismissed: false,
                     last_activity_ms: cleanup::last_activity(
                         cleanup_stored_activity(&runs, &listed),
@@ -553,6 +560,7 @@ pub(crate) async fn workspace_space_git(
                     running_terminal: lanes.contains_key(&worktree.path),
                     unsaved_edits: unsaved.contains(&worktree.path),
                     archived: false,
+                    landed: false,
                     dismissed: false,
                     last_activity_ms: now,
                     git,

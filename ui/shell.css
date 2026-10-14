@@ -1500,6 +1500,46 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   color: var(--ink-mist);
 }
 
+/* What holds the work back, in one word after its stage (t-45336): the stage cell's shape, in the waiting ink. */
+.wt-blocker {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 30%;
+  margin-inline-start: var(--space-1);
+  overflow: hidden;
+  color: var(--signal-wait-ink);
+  font-size: var(--text-2xs);
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The checkouts of a task folded under its row (t-45336): a small press at the end of the line, as tall as the
+ * line's words so a row with it is as tall as one without. */
+.wt-fold {
+  flex: none;
+  margin-inline-start: var(--space-1);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--edge-rule);
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--text-2xs);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.wt-fold:hover,
+.wt-fold:focus-visible {
+  color: var(--ink-chalk);
+}
+
+.wt-fold[hidden] {
+  display: none;
+}
+
 /* A run's empty coordinator seat, said once on a line of its work (t-45938): the stage cell's shape, in the
  * waiting ink — nobody reads the workers' reports until a coordinator sits again. */
 .wt-coordinator-vacant {
@@ -26043,6 +26083,7 @@ select {
 .agent-row-link,
 .agent-row-door,
 .wt-ports,
+.wt-fold,
 .prc-draft,
 .prc-field,
 .browser-suggest-row,

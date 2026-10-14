@@ -51,6 +51,28 @@ fn worker_briefings_ask_for_a_plain_report_by_the_skills_name() {
     }
 }
 
+/// A worker is told once, at launch, to keep one checkout per task and to take
+/// a checkout it cut beside its own away before it hands in (t-45336) — in the
+/// shared briefing and the federated one, before the task.
+#[test]
+fn worker_briefings_keep_one_checkout_per_task() {
+    for briefing in [
+        worker_briefing("t-1", "lint", ""),
+        federated_briefing("d-1"),
+    ] {
+        let (before, _) = briefing
+            .split_once(BRIEFING_HANDS_OVER)
+            .expect("the briefing hands over");
+        assert_eq!(
+            before.matches("one checkout per task").count(),
+            1,
+            "{before}"
+        );
+        assert!(before.contains("goes before you hand in"), "{before}");
+        assert!(before.contains("never with force"), "{before}");
+    }
+}
+
 /// What the board lints is what the worker itself wrote for a person: the
 /// `summary` of its own `worker_done` body. A coordinator's correction, a body
 /// without prose and a result nobody is known to have written are not read.

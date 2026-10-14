@@ -479,6 +479,22 @@ pub(super) fn remove_automatic_worktree(
         .map_err(|error| error.to_string())
 }
 
+/// The same gate for a checkout a worker cut beside its own (t-45336): clean,
+/// owned, unlocked and held — and a detached `HEAD` only while `holder`, the
+/// branch that holds the head the worker handed in, holds its commit too
+/// ([`Orchestrator::remove_held_by`]). Never a forced removal.
+pub(super) fn remove_automatic_held_by(
+    orchestrator: &Orchestrator,
+    held: &CheckoutHeld,
+    holder: &str,
+) -> Result<(), String> {
+    let path = held.path();
+    automatic_cleanup_allowed(orchestrator, path)?;
+    orchestrator
+        .remove_held_by(path, holder)
+        .map_err(|error| error.to_string())
+}
+
 /// One line in the window log for one checkout this window took away, naming
 /// the road that took it.
 ///
@@ -2218,6 +2234,11 @@ pub(super) fn beat_standing_orders(app: &AppHandle) {
         // See [`worktree_reclaim`] for what the pass costs when it finds
         // nothing, which is the reason it can ride a one-second beat at all.
         worktree_reclaim::sweep(&beating, now_ms);
+        // And the checkouts a worker cut beside its own for a task it has handed
+        // in (t-45336) — a red, a verify, an evidence checkout the ledger never
+        // named — judged against the head it handed in. Its own pace: one hand-in
+        // a pass, each looked at once until something it kept is due again.
+        worktree_reclaim::sweep_handed_in(&beating, now_ms);
         // And the ledger's record held against git's, once a minute, from the landing cache the
         // sidebar already keeps (t-34501): what is late is told, nothing is merged or deleted.
         crate::landing_watch_sweep::sweep(&beating, now_ms);

@@ -2022,6 +2022,105 @@ pub(crate) fn checkout_is_settled(checkout: &str) -> bool {
     settled_checkouts().iter().any(|one| one.path == wanted)
 }
 
+/// A commit a worker handed in, and the checkout it sat in (t-45336): what the
+/// reclaim measures the task's OTHER checkouts against — the red, the verify,
+/// the evidence checkout a worker cut beside its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HandedIn {
+    pub(crate) task: String,
+    pub(crate) worker: String,
+    pub(crate) agent: String,
+    /// The worker's own checkout, as the ledger holds it, trailing separator
+    /// shed.
+    pub(crate) checkout: String,
+    /// The commit the report named under `head`, as the ledger wrote it.
+    pub(crate) head: String,
+}
+
+/// Every task whose newest attempt ended in `worker_done ok:true` naming a
+/// commit, with the checkout its worker sat in (t-45336).
+///
+/// The newest attempt only: a task sent back and handed in again is measured
+/// against the head it stands at now. A dispatch whose worker lives in another
+/// window is left out — its checkout is on another machine — and so is an
+/// attempt whose report named no commit: there is nothing to measure against.
+/// Sorted, so a sweep that judges a few per pass walks them in the same order
+/// every time. Empty for a window with no durable runtime, the answer
+/// [`settled_checkouts`] gives too.
+pub(crate) fn handed_in_heads() -> Vec<HandedIn> {
+    let Some(held) = runtime() else {
+        return Vec::new();
+    };
+    let Ok(image) = held.actor.view() else {
+        return Vec::new();
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return Vec::new();
+    };
+    drop(image);
+    let mut answered: Vec<HandedIn> = ledger
+        .runs()
+        .iter()
+        .flat_map(|run| {
+            run.tasks.iter().filter_map(move |task| {
+                let attempt = run.newest_attempt(&task.id)?;
+                if attempt.succeeded != Some(true) || attempt.remote.is_some() {
+                    return None;
+                }
+                let head = zerocode_core::orchestration::commit_named(attempt.source.as_deref()?)?;
+                let worker = run.worker(&attempt.worker)?;
+                let checkout = worker.checkout.as_deref()?.trim_end_matches('/');
+                (!checkout.is_empty()).then(|| HandedIn {
+                    task: task.id.clone(),
+                    worker: worker.id.clone(),
+                    agent: worker.agent.clone(),
+                    checkout: checkout.to_string(),
+                    head,
+                })
+            })
+        })
+        .collect();
+    answered.sort_by(|left, right| {
+        left.checkout
+            .cmp(&right.checkout)
+            .then_with(|| left.task.cmp(&right.task))
+    });
+    answered
+}
+
+/// Whether a worker the ledger still counts summoned sits in `checkout` — the
+/// question a checkout beside a hand-in is asked before it goes and again
+/// right before (t-45336): a coordinator can seat a retry in it at any moment.
+/// Compared the way the hand-in keeping compares a ledger path with git's
+/// (last component first, then the filesystem), because the ledger holds the
+/// path a pane reported and git hands back the resolved one.
+pub(crate) fn checkout_is_summoned(checkout: &str) -> bool {
+    let Some(held) = runtime() else {
+        // No ledger to ask: somebody may be seated, so the answer that keeps
+        // the directory.
+        return true;
+    };
+    let Ok(image) = held.actor.view() else {
+        return true;
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return true;
+    };
+    drop(image);
+    let wanted = Path::new(checkout.trim_end_matches('/'));
+    ledger
+        .runs()
+        .iter()
+        .flat_map(|run| run.workers.iter())
+        .filter(|worker| worker.state.still_summoned())
+        .filter_map(|worker| worker.checkout.as_deref())
+        .any(|at| {
+            let at = Path::new(at.trim_end_matches('/'));
+            at.file_name() == wanted.file_name()
+                && (at == wanted || zerocode_orchestrator::same_worktree_path(at, wanted))
+        })
+}
+
 fn runtime_report_value(revision: u64, ledger: &Ledger) -> serde_json::Value {
     let runs = ledger
         .runs()
@@ -2285,6 +2384,13 @@ pub(crate) struct LedgerAgent {
     /// (`Run::progress_from`, t-47538) — the stage every surface draws.
     /// `None` for a worker with neither a task nor an attempt.
     pub(crate) progress: Option<zerocode_core::orchestration::WorkProgress>,
+    /// The ledger's own reasons this attempt's head is late on its way to
+    /// main (`landing_stalled`, t-22105), newest first and each once — what
+    /// the sidebar says in one word beside the stage (t-45336). The window
+    /// keeps the one that still fits where the work stands; the ledger never
+    /// takes a told reason back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) stalled: Vec<String>,
     /// Why the task is closed — folded into a task, handed to a run, or
     /// outdated — when it is. A closed task is neither reported nor failed:
     /// the board says 닫힘 and its reason, and the card leaves the open lanes.
@@ -2841,6 +2947,32 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 (true, Some(_)) if !review.merged && !review.nothing_to_land => review.verified_ms,
                 _ => None,
             };
+            // The reasons the ledger told the coordinator this attempt's head
+            // is late (t-45336): read off this run's letters like the time
+            // above, newest first, each reason once.
+            let stalled: Vec<String> = match dispatch {
+                Some(attempt) if attempt.source.is_some() => {
+                    let head = attempt.source.as_deref();
+                    let mut told: Vec<String> = Vec::new();
+                    for one in run.messages().iter().rev().filter(|one| {
+                        one.kind == zerocode_core::orchestration::MessageKind::LandingStalled
+                            && one.dispatch.as_deref() == Some(attempt.id.as_str())
+                    }) {
+                        let said: serde_json::Value =
+                            serde_json::from_str(one.body.as_str()).unwrap_or_default();
+                        if said["head"].as_str() != head {
+                            continue;
+                        }
+                        if let Some(reason) = said["reason"].as_str()
+                            && !told.iter().any(|held| held == reason)
+                        {
+                            told.push(reason.to_string());
+                        }
+                    }
+                    told
+                }
+                _ => Vec::new(),
+            };
             let wall =
                 dispatch.and_then(|one| zerocode_core::orchestration::newest_wall(run, &one.id));
             // Asked only of a row with a wall: the chip is that wall's.
@@ -2892,6 +3024,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 review,
                 review_since_ms,
                 progress,
+                stalled,
                 closed: carried.and_then(|held| held.closed.clone()),
                 term,
                 // Finished work is dated by when its attempt ended — the

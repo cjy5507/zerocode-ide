@@ -143,6 +143,8 @@ pub enum OrchestratorError {
     BranchTaken { branch: String },
     #[error("branch `{branch}` does not exist, so there is nothing to check out")]
     NoSuchBranch { branch: String },
+    #[error("branch `{branch}` holds commits `{into}` does not, so it is not deleted")]
+    BranchNotLanded { branch: String, into: String },
 }
 
 /// What a create is being asked for beyond a name.
@@ -685,6 +687,32 @@ impl Orchestrator {
     /// [`OrchestratorError::GitUnavailable`] if git cannot be run.
     pub fn has_branch(&self, branch: &str) -> Result<bool, OrchestratorError> {
         self.branch_exists(branch)
+    }
+
+    /// The local branches below `under/` — this window's own when `under` is
+    /// [`Orchestrator::branch_prefix`] — by their short names (t-45336): what a
+    /// landed task's cleanup looks through for the task's other branches.
+    ///
+    /// # Errors
+    ///
+    /// [`OrchestratorError::Git`] if git refuses to list them.
+    pub fn local_branches(&self, under: &str) -> Result<Vec<String>, OrchestratorError> {
+        let pattern = format!("refs/heads/{under}/");
+        let output = self.git(&[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            pattern.as_str(),
+        ])?;
+        if !output.ok {
+            return Err(self.failure("for-each-ref", &output));
+        }
+        Ok(output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 
     /// Did `git worktree add` fail because this name is taken?
@@ -1549,7 +1577,80 @@ impl Orchestrator {
         worktree: impl AsRef<Path>,
         removal: Removal,
     ) -> Result<(), OrchestratorError> {
-        let worktree = worktree.as_ref();
+        self.remove_checked(worktree.as_ref(), removal, None)
+    }
+
+    /// Remove a clean worktree whose commit `holder`, a local branch, already
+    /// holds (t-45336).
+    ///
+    /// The argument [`Removal::ConfirmedIfClean`] rests on — committed work
+    /// stays reachable after the directory goes — needs a branch, not THIS
+    /// worktree's branch. A worker cuts a detached checkout to run its red
+    /// commit or to verify its head, and hands in a head on its own branch that
+    /// contains that commit: removing the checkout then loses nothing, and
+    /// refusing it is how one task came to stand in the sidebar four times. So a
+    /// detached `HEAD` is allowed here exactly when `holder` holds it, and is
+    /// refused as [`OrchestratorError::DetachedHead`] otherwise. Everything else
+    /// is the clean removal: never `--force`, uncommitted and untracked files
+    /// refuse, and a worktree on a branch keeps that branch.
+    ///
+    /// # Errors
+    ///
+    /// As [`Orchestrator::remove`] with [`Removal::ConfirmedIfClean`].
+    pub fn remove_held_by(
+        &self,
+        worktree: impl AsRef<Path>,
+        holder: &str,
+    ) -> Result<(), OrchestratorError> {
+        self.remove_checked(worktree.as_ref(), Removal::ConfirmedIfClean, Some(holder))
+    }
+
+    /// Delete a local branch whose every commit is already in `into`, the way
+    /// a person would after the work landed (t-45336): `git branch -d`, never
+    /// `-D`.
+    ///
+    /// Two answers have to agree. This asks git how many commits the branch
+    /// holds that `into` does not, and only zero goes on; then `git branch -d`
+    /// asks its own question — merged into `HEAD` (or the branch's upstream) —
+    /// and its refusal stands. So a branch goes only when it is provably in the
+    /// compare ref AND git agrees it may go without force; anything else is
+    /// left, with the reason. A branch some worktree has checked out is refused
+    /// by git.
+    ///
+    /// # Errors
+    ///
+    /// [`OrchestratorError::BranchNotLanded`] when `into` does not hold every
+    /// commit (or either name does not resolve), [`OrchestratorError::Git`]
+    /// when `git branch -d` refuses.
+    pub fn delete_landed_branch(&self, branch: &str, into: &str) -> Result<(), OrchestratorError> {
+        // A name that begins with a dash would be read as an option; git
+        // forbids such branch names, so one is never a branch of ours.
+        if branch.is_empty() || branch.starts_with('-') {
+            return Err(OrchestratorError::NoSuchBranch {
+                branch: branch.to_string(),
+            });
+        }
+        let outstanding =
+            self.commits_beyond(&self.repo_root, into, &format!("refs/heads/{branch}"))?;
+        if outstanding != Some(0) {
+            return Err(OrchestratorError::BranchNotLanded {
+                branch: branch.to_string(),
+                into: into.to_string(),
+            });
+        }
+        let output = self.git(&["branch", "-d", branch])?;
+        if !output.ok {
+            return Err(self.failure("branch -d", &output));
+        }
+        Ok(())
+    }
+
+    fn remove_checked(
+        &self,
+        worktree: &Path,
+        removal: Removal,
+        holder: Option<&str>,
+    ) -> Result<(), OrchestratorError> {
         let known = self
             .list()?
             .into_iter()
@@ -1572,14 +1673,26 @@ impl Orchestrator {
                 // has no branch, and that argument collapses — `git status` is
                 // empty, git removes the worktree without complaint, and the
                 // commits become unreachable. So this variant refuses, and
-                // names the commit the user would need to save.
+                // names the commit the user would need to save — unless the
+                // caller named a branch that already holds that commit
+                // ([`Orchestrator::remove_held_by`]), which is the argument
+                // restored.
                 if known.branch.is_none() {
-                    return Err(OrchestratorError::DetachedHead {
-                        head: known
-                            .head
-                            .unwrap_or_else(|| "an unrecorded commit".to_string()),
-                        path: known.path,
-                    });
+                    let held = match (holder, known.head.as_deref()) {
+                        (Some(holder), Some(head)) => {
+                            self.commits_beyond(&known.path, &format!("refs/heads/{holder}"), head)?
+                                == Some(0)
+                        }
+                        _ => false,
+                    };
+                    if !held {
+                        return Err(OrchestratorError::DetachedHead {
+                            head: known
+                                .head
+                                .unwrap_or_else(|| "an unrecorded commit".to_string()),
+                            path: known.path,
+                        });
+                    }
                 }
                 let changes = self.pending_loss(&known.path)?.uncommitted;
                 if !changes.is_empty() {

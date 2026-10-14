@@ -1394,8 +1394,17 @@ pub(crate) async fn remove_worktree(
     state: State<'_, AppState>,
     path: String,
     discard_changes: bool,
+    // The cleanup review removing work that has landed (t-45336): the task's
+    // branches go with its checkout, each only if the compare ref holds it.
+    landed_branches: Option<bool>,
 ) -> Result<(), String> {
     let (orchestrator, chosen) = known_worktree_context(state.config_root(), &path)?;
+    // Read before the directory goes: the compare ref the sidebar found the work
+    // landed in, from its cache, which is keyed by the path.
+    let landed_into = landed_branches
+        .unwrap_or(false)
+        .then(|| crate::worktree_landing::landed_compare_ref(&chosen.path))
+        .flatten();
     if chosen.locked {
         let reason = format!(
             "worktree cleanup skipped for {}: git reports that the worktree is locked",
@@ -1521,6 +1530,9 @@ pub(crate) async fn remove_worktree(
                 "somebody confirmed it and git found nothing to lose"
             },
         );
+        if let Some(into) = landed_into.as_deref() {
+            delete_landed_branches(&orchestrator, &chosen, into, &history_root);
+        }
         Ok::<PathBuf, String>(chosen.path)
     })
     .await
@@ -1669,6 +1681,63 @@ pub(crate) fn worktree_evidence(
     }
 }
 
+/// A landed task's branches, once its checkout went from the cleanup review
+/// (t-45336) — the person's word: 「정리할때 워커와 브런치도 같이 정리 해야해 그래야
+/// 안햇갈림 main만 있어야」. The checkout's own branch and every other branch under
+/// this window's prefix named for the same task (`naming::checkout_task_id`, the
+/// reading the sidebar folds a task's checkouts by), each deleted with
+/// `git branch -d` and only when `into` — the compare ref the work was found
+/// landed in — holds every commit on it ([`Orchestrator::delete_landed_branch`]).
+/// A person's own branch outside the prefix is never one of them. The checkout
+/// is already gone and stays gone; a branch that stays is written to the window
+/// log with git's reason.
+fn delete_landed_branches(orchestrator: &Orchestrator, chosen: &Worktree, into: &str, log: &Path) {
+    let prefix = orchestrator.branch_prefix();
+    let ours = |branch: &str| {
+        branch
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some()
+    };
+    let task = chosen
+        .path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .and_then(|folder| {
+            zerocode_orchestrator::naming::checkout_task_id(
+                folder,
+                chosen.branch.as_deref(),
+                prefix,
+            )
+        });
+    let mut going: Vec<String> = chosen
+        .branch
+        .iter()
+        .filter(|branch| ours(branch.as_str()))
+        .cloned()
+        .collect();
+    if let Some(task) = task {
+        for branch in orchestrator.local_branches(prefix).unwrap_or_default() {
+            let named = branch
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_prefix('/'))
+                .and_then(zerocode_orchestrator::naming::worker_task_id);
+            if named == Some(task) && !going.contains(&branch) {
+                going.push(branch);
+            }
+        }
+    }
+    for branch in going {
+        let said = match orchestrator.delete_landed_branch(&branch, into) {
+            Ok(()) => format!(
+                "branch deleted [landed-cleanup] {branch} — every commit on it is in {into}"
+            ),
+            Err(error) => format!("branch kept after the landed cleanup: {branch} — {error}"),
+        };
+        note_window_event(log, &said);
+    }
+}
+
 /// Merge a worktree's branch into the base repository and remove the worktree (Squash & Delete).
 #[tauri::command]
 pub(crate) async fn merge_and_remove_worktree(
@@ -1729,7 +1798,7 @@ pub(crate) async fn merge_and_remove_worktree(
     .map_err(|e| format!("커밋 작업 스레드 오류: {e}"))??;
 
     // 3. 워크트리 제거
-    remove_worktree(app, webview, state, path, true).await?;
+    remove_worktree(app, webview, state, path, true, None).await?;
 
     Ok(format!("{target}에 {branch} 병합 및 워크트리 정리 완료"))
 }

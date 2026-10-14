@@ -386,6 +386,23 @@ pub(super) fn decide_external_visibility(
         // (`isSelectedCheckout` is the first branch of `shouldShowWorktree`).
         let itself = entry.active || entry.is_main || entry.path == repo_root;
         entry.ownership = zerocode_core::classify(facts, ours).slug();
+        // The task this checkout is named for — the same reading the reclaim
+        // beside a hand-in takes a checkout by (t-45336). The repository's own
+        // checkout and a folder are nobody's task row; the one the window
+        // stands in still is its task's.
+        let folder = Path::new(&entry.path)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str);
+        entry.task_id = folder
+            .filter(|_| !entry.is_main && !entry.is_folder && entry.path != repo_root)
+            .and_then(|folder| {
+                zerocode_orchestrator::naming::checkout_task_id(
+                    folder,
+                    entry.branch.as_deref(),
+                    ours.branch_prefix,
+                )
+            })
+            .map(str::to_string);
         let visible = zerocode_core::should_show(facts, ours, stored, added_at, itself);
         entry.external_hidden = !visible;
         // Counted only where a listing really happened, and only for the rows a
