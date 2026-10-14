@@ -9507,7 +9507,10 @@ mod tests {
                 "the emulator screenshot route lost {owned}"
             );
         }
-        let evidence = block_after(shell, "async fn take(self) -> Option<Picture>");
+        let evidence = block_after(
+            shell,
+            "async fn take(self) -> Result<Picture, FrameSkipped>",
+        );
         assert!(
             evidence.contains("Self::Emulator") && evidence.contains("emulator_screenshot_bytes"),
             "a run's evidence frames the emulator by some road other than the pane's own backend"
@@ -9680,10 +9683,10 @@ mod tests {
         let guarded = block_after(shell, "async fn answer_browser_command(");
         let admitted = guarded.find(".begin_at(").expect("workspace input guard");
         let dispatched = guarded
-            .find("dispatch_browser_command(app, argv, pane, expected_revision).await")
+            .find("dispatch_browser_command(app, argv, pane, expected_revision, &mut dispatched).await")
             .expect("dispatch");
         assert!(admitted < dispatched);
-        assert!(guarded.contains("operation.finish(answer.exit_code == 0)"));
+        assert!(guarded.contains("operation.settle(dispatched)"));
         let answering = block_after(shell, "async fn dispatch_browser_command(");
         for verb in zerocode_core::agent_browser::VERBS {
             assert!(
@@ -9823,12 +9826,13 @@ mod tests {
             snapshot.contains("browser_pane_of(app, state, label)?"),
             "an agent snapshot can bypass the live minted browser check:\n{snapshot}"
         );
+        let leased = block_after(filesystem, "async fn snapshot_leased(");
         assert!(
-            snapshot.contains("pane.snapshot_png(")
-                && snapshot.contains("timeout(SNAPSHOT_BUDGET, rx)")
-                && snapshot
-                    .contains("snapshot_webview_png_held(pane, None, Some(Box::new(frame)))")
-                && snapshot.contains(".begin_snapshot_for(label, spectator)"),
+            leased.contains("pane.snapshot_png(")
+                && leased.contains("timeout(SNAPSHOT_BUDGET, rx)")
+                && leased.contains("snapshot_webview_png_held(pane, None, Some(Box::new(frame)))")
+                && snapshot.contains(".begin_snapshot_for(label, spectator)")
+                && snapshot.contains("snapshot_leased(pane, frame)"),
             "snapshot must select Chromium without losing the existing native fallback or deadline"
         );
         assert!(
