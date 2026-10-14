@@ -6363,6 +6363,8 @@ await test("판단 상태는 다섯 언어·두 테마·좁은 폭에서 읽을 
     for (const theme of SETTINGS_QUALITY_SPEC.themes) {
       await setQualityTheme(page, theme);
       assertEqual(await axeViolations(page, AxeBuilder, "#judgment-current-status"), [], `${locale}/${theme} current judgment accessibility`);
+      const usageWidth = await page.locator("#judgment-current-usage").evaluate((usage) => ({ row: usage.parentElement.getBoundingClientRect().width, grid: usage.closest("dl").getBoundingClientRect().width }));
+      assert(Math.abs(usageWidth.row - usageWidth.grid) <= 1, `${locale}/${theme} request history should use the status card's full width`, usageWidth);
       if (process.env.JUDGMENT_STATUS_SHOTS && locale === "ko") {
         const status = page.locator("#judgment-current-status");
         await status.scrollIntoViewIfNeeded();
