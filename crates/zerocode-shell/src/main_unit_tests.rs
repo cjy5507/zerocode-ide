@@ -21786,6 +21786,53 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(crate::computer_use::guard::stopped_reason(), None);
     }
 
+    /// The report the window's page paints from says who holds the operator
+    /// and in which order the backend changed it (t-55387): every stop, lift
+    /// and answered action moves `revision` forward, so a report made before
+    /// the person's stop is older than the stop's own and the page can refuse
+    /// it, and `owner` is the person's only while the person's stop stands.
+    #[test]
+    fn the_operators_report_orders_every_change_of_hand_and_names_its_owner() {
+        use zerocode_core::computer_use::{STOP_REASON_REQUEST, STOP_REASON_WINDOW};
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let report = || crate::computer_use::guard::activity_report(None);
+        let revision = |seen: &serde_json::Value| seen["revision"].as_u64();
+        crate::computer_use::guard::lift();
+        let agents = report();
+        assert_eq!(agents["owner"], "agent", "{agents}");
+        let first = revision(&agents).expect("the report carries a revision");
+        crate::computer_use::guard::note_action("click", 1);
+        let acted = revision(&report()).expect("revision");
+        assert!(
+            acted > first,
+            "an answered action moves the revision: {first} → {acted}"
+        );
+        crate::computer_use::guard::stop(STOP_REASON_WINDOW);
+        let persons = report();
+        assert_eq!(persons["owner"], "person", "{persons}");
+        let stopped = revision(&persons).expect("revision");
+        assert!(
+            stopped > acted,
+            "the person's stop moves the revision: {acted} → {stopped}"
+        );
+        crate::computer_use::guard::lift();
+        let lifted = report();
+        assert_eq!(lifted["owner"], "agent", "{lifted}");
+        assert!(
+            revision(&lifted).expect("revision") > stopped,
+            "lifting the stop moves the revision too: {lifted}"
+        );
+        crate::computer_use::guard::stop(STOP_REASON_REQUEST);
+        let requested = report();
+        assert_eq!(
+            requested["owner"], "none",
+            "a stop an agent asked for is nobody's hand: {requested}"
+        );
+        crate::computer_use::guard::lift();
+    }
+
     /// A desk that sees nothing: the walk judges no landing and watches no
     /// hand, and says so.
     struct BlindDesk(std::time::Instant);

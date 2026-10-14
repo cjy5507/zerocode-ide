@@ -99,6 +99,7 @@ import { testAnswerDoor } from "./answer-door.mjs";
 import { testExplain } from "./explain.mjs";
 import { testAskPopup } from "./ask-popup.mjs";
 import { testSecretPrompt } from "./secret-prompt.mjs";
+import { testComputerProgress } from "./computer-progress.mjs";
 import { testEditorSelection } from "./editor-selection.mjs";
 import { testEditorRecovery } from "./editor-recovery.mjs";
 import { testComposerAttach } from "./attach.mjs";
@@ -333,6 +334,7 @@ suite("permission-card", ({ browser, origin, ok }) => testPermissionCard(browser
 suite("ask-popup", ({ browser, origin, ok }) => testAskPopup(browser, origin, ok));
 // The secret card: a pane that waits for a password gets a field, typed once (herdr 3, t-26596).
 suite("secret-prompt", ({ browser, origin, ok }) => testSecretPrompt(browser, origin, ok));
+suite("computer-progress", ({ browser, origin, ok }) => testComputerProgress(browser, origin, ok));
 suite("editor-selection", ({ browser, origin, ok }) => testEditorSelection(browser, origin, ok));
 suite("editor-recovery", ({ browser, origin, ok }) => testEditorRecovery(browser, origin, ok));
 suite("ime-broken-commit", ({ browser, origin, ok }) => testImeBrokenCommit(browser, origin, ok));
