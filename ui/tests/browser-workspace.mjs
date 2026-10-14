@@ -463,11 +463,12 @@ export async function testBrowserWorkspace(browser, origin, ok) {
         const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
         const bar = host?.querySelector(".browser-workspace-bar");
         const box = host?.getBoundingClientRect();
+        const image = host?.querySelector(".browser-workspace-frame");
         return {
           host: box?.width, bar: bar?.getBoundingClientRect().width,
           actionsFit: [...(bar?.querySelectorAll("button") ?? [])].filter((button) => !button.hidden)
             .every((button) => button.getBoundingClientRect().right <= (box?.right ?? 0) + 1),
-          imageFit: getComputedStyle(host.querySelector(".browser-workspace-frame")).objectFit,
+          imageFit: image ? getComputedStyle(image).objectFit : null,
         };
       }, label);
       ok("narrow task controls stay inside their pane and preserve the image proportions",
