@@ -20803,6 +20803,10 @@ button.helper-sib:hover {
   min-width: 0;
 }
 
+.judgment-status-usage {
+  grid-column: 1 / -1;
+}
+
 .judgment-status-facts dt {
   color: var(--ink-mist);
   font-size: var(--text-2xs);
