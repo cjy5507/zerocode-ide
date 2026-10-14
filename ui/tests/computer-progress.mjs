@@ -1,361 +1,719 @@
 import { openWindowTestPage } from "./window-boot.mjs";
 
-/* Computer Use beside the conversation, stage 1 (t-55387, parent t-54014).
- *
- * The band over the window (`ui/shell-computer.js`) already says the operator
- * is acting and offers the person's stop. What it does not do, and what this
- * suite holds the window to:
- *
- *  - the person's stop is the backend's to grant: the page shows the person
- *    holding the operator only after the backend answered, and a report the
- *    backend made before that answer cannot take the stop back off the screen
- *    (every report carries the backend's `revision`, and an older one is
- *    stale);
- *  - one press takes control once, however fast it is pressed again;
- *  - giving control back needs the person's explicit second press and a
- *    target the backend pinned, still the newest one — an unknown or replaced
- *    target sends nothing;
- *  - a panel beside the conversation shows the newest frame the operator's own
- *    look already took, fetched once per announced frame, for the one viewer it
- *    was opened for — another pane's, run's or target's frame or report never
- *    reaches it;
- *  - while nothing happens the panel does nothing: no request, no repaint;
- *    closing it lets go of its frame, and opening it again adds no listener.
- *
- * The contract the page is held to, all of it the backend's to decide:
- *
- *   computer:activity  { revision, owner: "agent"|"person"|"none", viewer,
- *                        target: { key, app } | null, stopped, active, actions, verb }
- *   computer:frame     { revision, viewer, target: { key, app }, at }   (no pixels)
- *   computer_progress_frame { viewer, revision } → { revision, png } | null
- *   computer_stop      { revision } → the backend's activity report
- *   computer_resume    { reset: false, revision, target } → the backend's report
- *   openComputerProgress(viewer) / closeComputerProgress()
- *   #computer-progress[data-owner] · #computer-progress-frame[data-revision]
- *   #computer-progress-take · #computer-progress-give
- *   #computer-progress-give-confirm · #computer-progress-give-cancel
- *
- * Every frame here is a synthetic one-pixel picture; no real screen, app or
- * code is read. A headless page cannot prove the native hand-over — that the
- * helper is stopped, or that a hidden browser tab took no global input — and
- * no check here claims it does.
- *
- *   WINDOW_SUITES=computer-progress node ui/tests/window.mjs */
-
-const VIEWER = "pane:term-1";
-const OTHER_VIEWER = "pane:term-2";
-const TARGET = Object.freeze({ key: "viewer:pane:term-1/app:Fixture/window:front", app: "Fixture" });
-const OTHER_TARGET = Object.freeze({ key: "viewer:pane:term-1/app:Other/window:front", app: "Other" });
-const ONE_PIXEL_PNG =
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-/* How long the idle check watches, in milliseconds: longer than the band's
- * own 8,000 ms slip-away would be a slow suite, and any timer the panel
- * armed for itself would fire well inside this. */
-const IDLE_WATCH_MS = 1500;
+const STOP_HOTKEY = "control+option+escape";
+const SUBJECT = Object.freeze({ run: "run-a", viewer: "viewer-a", target: "target-a" });
+const OTHER_VIEWER = "viewer-b";
+const OTHER_TARGET = "target-b";
+const NEXT_RUN = "run-b";
+const BURST_FRAMES = 8;
 const OPEN_CLOSE_CYCLES = 5;
 
-/* The page-side hands every case shares: fire a backend event, wait a beat,
- * hold an answer until the case lets it go, and read what the panel shows.
- * A missing piece of the panel is said, not thrown, so each case reports its
- * own verdict. */
-const installHands = () => {
-  window.__cu = {
-    fire: (name, payload) => {
+const installComputerSurfaceCensus = () => {
+  const surfaceFiles = "/shell-computer";
+  const bandSlipAway = "computerBandSlipAway";
+  const live = { timeouts: new Map(), intervals: new Map(), animationFrames: new Map(), objectUrls: new Map() };
+  const native = {
+    setTimeout: window.setTimeout.bind(window),
+    clearTimeout: window.clearTimeout.bind(window),
+    setInterval: window.setInterval.bind(window),
+    clearInterval: window.clearInterval.bind(window),
+    requestAnimationFrame: window.requestAnimationFrame.bind(window),
+    cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
+    createObjectURL: URL.createObjectURL.bind(URL),
+    revokeObjectURL: URL.revokeObjectURL.bind(URL),
+  };
+  const creatorOfThisCall = () => {
+    const stack = new Error().stack ?? "";
+    return { surface: stack.includes(surfaceFiles), bandSlipAway: stack.includes(bandSlipAway) };
+  };
+  window.setTimeout = (callback, ...rest) => {
+    if (typeof callback !== "function") return native.setTimeout(callback, ...rest);
+    const creator = creatorOfThisCall();
+    const handle = native.setTimeout((...fired) => {
+      live.timeouts.delete(handle);
+      return callback(...fired);
+    }, ...rest);
+    live.timeouts.set(handle, creator);
+    return handle;
+  };
+  window.clearTimeout = (handle) => {
+    live.timeouts.delete(handle);
+    live.intervals.delete(handle);
+    return native.clearTimeout(handle);
+  };
+  window.setInterval = (callback, ...rest) => {
+    const creator = creatorOfThisCall();
+    const handle = native.setInterval(callback, ...rest);
+    live.intervals.set(handle, creator);
+    return handle;
+  };
+  window.clearInterval = (handle) => {
+    live.intervals.delete(handle);
+    live.timeouts.delete(handle);
+    return native.clearInterval(handle);
+  };
+  window.requestAnimationFrame = (callback) => {
+    const creator = creatorOfThisCall();
+    const handle = native.requestAnimationFrame((time) => {
+      live.animationFrames.delete(handle);
+      return callback(time);
+    });
+    live.animationFrames.set(handle, creator);
+    return handle;
+  };
+  window.cancelAnimationFrame = (handle) => {
+    live.animationFrames.delete(handle);
+    return native.cancelAnimationFrame(handle);
+  };
+  URL.createObjectURL = (object) => {
+    const creator = creatorOfThisCall();
+    const url = native.createObjectURL(object);
+    live.objectUrls.set(url, creator);
+    return url;
+  };
+  URL.revokeObjectURL = (url) => {
+    live.objectUrls.delete(url);
+    return native.revokeObjectURL(url);
+  };
+  const countFromSurface = (table, wanted = () => true) =>
+    [...table.values()].filter((creator) => creator.surface && wanted(creator)).length;
+  window.__COMPUTER_SURFACE_CENSUS__ = {
+    native,
+    live: () => ({
+      timeouts: countFromSurface(live.timeouts, (creator) => !creator.bandSlipAway),
+      bandSlipAway: countFromSurface(live.timeouts, (creator) => creator.bandSlipAway),
+      intervals: countFromSurface(live.intervals),
+      animationFrames: countFromSurface(live.animationFrames),
+      objectUrls: countFromSurface(live.objectUrls),
+    }),
+  };
+};
+
+const installComputerHands = ({ hotkey }) => {
+  const census = window.__COMPUTER_SURFACE_CENSUS__;
+  const nextFrame = () => new Promise((done) => census.native.requestAnimationFrame(() => done()));
+  const nextTask = () => new Promise((done) => census.native.setTimeout(done, 0));
+  const copyOf = (args) => (args === undefined ? null : JSON.parse(JSON.stringify(args)));
+  window.__COMPUTER_HANDS__ = {
+    census,
+    settle: async () => {
+      await nextTask();
+      await nextFrame();
+      await nextTask();
+      await nextFrame();
+    },
+    announce: (name, payload) => {
       for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
     },
-    settle: () => new Promise((done) => setTimeout(done, 80)),
-    held: (command) => {
-      const hold = { calls: [], release: null };
-      window.__ANSWER__[command] = (args) => new Promise((answer) => {
-        hold.calls.push(args);
-        hold.release = answer;
-      });
-      return hold;
+    operatorReport: (fields) => ({
+      active: false, verb: "click", actions: 3, at: 1791990000000, stopped: null, hotkey, ...fields,
+    }),
+    readBand: () => {
+      const band = document.getElementById("computer-band");
+      return {
+        shown: !band.hidden,
+        showsStop: band.classList.contains("is-stopped"),
+        offersStop: !document.getElementById("computer-band-stop").hidden,
+        offersResume: !document.getElementById("computer-band-resume").hidden,
+      };
     },
-    count: (command) => window.__COUNTS__?.[command] ?? 0,
-    panel: () => document.getElementById("computer-progress"),
-    piece: (id) => document.getElementById(id),
-    open: (viewer) => {
+    pressBand: (button) => document.getElementById(`computer-band-${button}`).click(),
+    sentCount: (command) => window.__COUNTS__[command] ?? 0,
+    recordCommand: (command, answer) => {
+      const calls = [];
+      window.__ANSWER__[command] = (args) => {
+        calls.push(copyOf(args));
+        return answer(args);
+      };
+      return calls;
+    },
+    holdCommand: (command) => {
+      const waiting = [];
+      const held = { calls: [], fromComputerFiles: [], inFlight: 0, mostInFlight: 0 };
+      window.__ANSWER__[command] = (args) => new Promise((resolve, reject) => {
+        held.calls.push(copyOf(args));
+        held.fromComputerFiles.push((new Error().stack ?? "").includes("/shell-computer"));
+        held.inFlight += 1;
+        held.mostInFlight = Math.max(held.mostInFlight, held.inFlight);
+        waiting.push({ resolve, reject });
+      });
+      held.answerOldest = (value) => {
+        const oldest = waiting.shift();
+        if (!oldest) return false;
+        held.inFlight -= 1;
+        oldest.resolve(value);
+        return true;
+      };
+      held.refuseOldest = (reason) => {
+        const oldest = waiting.shift();
+        if (!oldest) return false;
+        held.inFlight -= 1;
+        oldest.reject(new Error(reason));
+        return true;
+      };
+      held.outstanding = () => waiting.length;
+      return held;
+    },
+    refuseCommand: (command) => {
+      window.__ANSWER__[command] = () => {
+        throw new Error(`refused: ${command}`);
+      };
+    },
+    releaseCommands: () => {
+      for (const command of ["computer_stop", "computer_resume", "computer_progress_frame"]) {
+        delete window.__ANSWER__[command];
+      }
+    },
+    framePicture: (revision) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 2;
+      canvas.height = 2;
+      const drawing = canvas.getContext("2d");
+      drawing.fillStyle = `rgb(${revision % 256}, ${(revision * 7) % 256}, ${(revision * 13) % 256})`;
+      drawing.fillRect(0, 0, 2, 2);
+      return canvas.toDataURL("image/png").split(",")[1];
+    },
+    openPanel: (subject) => {
       if (typeof openComputerProgress !== "function") return false;
-      openComputerProgress(viewer);
+      openComputerProgress(subject);
       return true;
     },
-    close: () => {
+    closePanel: () => {
       if (typeof closeComputerProgress !== "function") return false;
       closeComputerProgress();
       return true;
     },
-    activity: (fields) => ({
-      active: true, verb: "click", actions: 1, stopped: null, hotkey: "control+option+escape",
-      owner: "agent", viewer: "pane:term-1", target: null, ...fields,
-    }),
-    reset: () => {
-      for (const name of ["computer_stop", "computer_resume", "computer_progress_frame"]) delete window.__ANSWER__[name];
+    readPanel: () => {
+      const panel = document.getElementById("computer-progress");
+      const frame = document.getElementById("computer-progress-frame");
+      return {
+        shown: panel !== null && !panel.hidden,
+        revision: frame?.dataset.revision ?? null,
+        picture: frame?.getAttribute("src") ?? null,
+      };
     },
+    frameListeners: () => ["computer:frame", "computer:activity"]
+      .reduce((total, name) => total + (window.__LISTENERS__[name]?.length ?? 0), 0),
   };
 };
 
 const evaluateCase = (page, body, args) =>
   page.evaluate(body, args).catch((error) => ({ thrown: String(error?.message ?? error).slice(0, 300) }));
 
-export async function testComputerProgress(browser, origin, ok) {
-  const { page } = await openWindowTestPage(browser, origin);
-  try {
-    await page.evaluate(installHands);
+const asksFor = (asked, subject) =>
+  asked?.run === subject.run && asked?.viewer === subject.viewer && asked?.target === subject.target;
 
-    /* Take control: the person's stop shows only after the backend answered,
-     * and a report the backend made before that answer cannot undo it. */
-    const take = await evaluateCase(page, async () => {
-      const { fire, settle, held, count, panel } = window.__cu;
-      const seen = {};
-      fire("computer:activity", window.__cu.activity({ revision: 10, target: { key: "t", app: "Fixture" } }));
-      await settle();
-      const stop = held("computer_stop");
-      const before = count("computer_stop");
-      document.getElementById("computer-band-stop").click();
-      document.getElementById("computer-band-stop").click();
-      await settle();
-      seen.stopsSent = count("computer_stop") - before;
-      seen.stopArgs = stop.calls[0] ?? null;
-      seen.wordWhileWaiting = document.getElementById("computer-band-word").textContent;
-      seen.stopShownWhileWaiting = !document.getElementById("computer-band-stop").hidden;
-      stop.release?.(window.__cu.activity({ revision: 11, owner: "person", stopped: "window", active: false }));
-      fire("computer:activity", window.__cu.activity({ revision: 11, owner: "person", stopped: "window", active: false }));
-      await settle();
-      seen.resumeShownAfterAck = !document.getElementById("computer-band-resume").hidden;
-      fire("computer:activity", window.__cu.activity({ revision: 10, owner: "agent", stopped: null, active: true }));
-      await settle();
-      seen.resumeShownAfterStale = !document.getElementById("computer-band-resume").hidden;
-      seen.stopShownAfterStale = !document.getElementById("computer-band-stop").hidden;
-      seen.panelOwner = panel()?.dataset.owner ?? null;
-      window.__cu.reset();
-      return seen;
+const censusIsEmpty = (census) =>
+  census?.timeouts === 0 && census?.intervals === 0 && census?.animationFrames === 0 && census?.objectUrls === 0;
+
+async function openComputerPage(browser, origin) {
+  const opened = await openWindowTestPage(browser, origin, {
+    before: (page) => page.addInitScript(installComputerSurfaceCensus),
+  });
+  await opened.page.evaluate(installComputerHands, { hotkey: STOP_HOTKEY });
+  return opened;
+}
+
+async function testTheBand(browser, origin, ok) {
+  const { page, faults } = await openComputerPage(browser, origin);
+  try {
+    const legacy = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ active: true }));
+      await hands.settle();
+      const working = hands.readBand();
+      hands.announce("computer:activity", hands.operatorReport({ stopped: "window" }));
+      await hands.settle();
+      const stopped = hands.readBand();
+      const resumes = hands.recordCommand("computer_resume", () => ({ resumed: true, helper: "idle" }));
+      hands.pressBand("resume");
+      await hands.settle();
+      hands.releaseCommands();
+      return {
+        working,
+        stopped,
+        resumes,
+        resumesWithoutRevision: resumes.filter((args) => typeof args?.revision !== "number").length,
+      };
     });
     ok(
-      "the person's stop is sent once however fast it is pressed, and carries the revision the page last saw",
-      take.stopsSent === 1 && take.stopArgs?.revision === 10,
-      JSON.stringify(take),
+      "before any versioned report, a report without a revision still paints the band as it does today",
+      legacy.working?.shown === true && legacy.working?.showsStop === false && legacy.stopped?.showsStop === true,
+      JSON.stringify(legacy),
     );
     ok(
-      "the page does not show the person holding the operator before the backend answered the stop",
-      take.stopShownWhileWaiting === true && !String(take.wordWhileWaiting ?? "").includes("window"),
-      JSON.stringify(take),
-    );
-    ok(
-      "a report older than the backend's answer cannot take the person's stop back off the screen",
-      take.resumeShownAfterAck === true && take.resumeShownAfterStale === true && take.stopShownAfterStale === false,
-      JSON.stringify(take),
+      "a report without a revision gives no authority: no resume is sent without a revision the backend gave",
+      legacy.resumesWithoutRevision === 0,
+      JSON.stringify(legacy),
     );
 
-    /* The panel beside the conversation: one announced frame, one fetch, one
-     * repaint — for the viewer it was opened for, and the newest only. */
-    const frames = await evaluateCase(page, async ({ viewer, otherViewer, target, otherTarget, png }) => {
-      const { fire, settle, held, count, panel, piece, open } = window.__cu;
-      const seen = { opened: open(viewer) };
-      seen.panelShown = panel() !== null && !panel().hidden;
-      const fetch = held("computer_progress_frame");
-      const base = count("computer_progress_frame");
-      fire("computer:frame", { revision: 20, viewer, target, at: 1 });
-      await settle();
-      seen.fetchesForOne = count("computer_progress_frame") - base;
-      seen.fetchArgs = fetch.calls[0] ?? null;
-      fetch.release?.({ revision: 20, png });
-      await settle();
-      seen.frameRevision = piece("computer-progress-frame")?.dataset.revision ?? null;
-      const afterFirst = count("computer_progress_frame");
-      fire("computer:frame", { revision: 19, viewer, target, at: 2 });
-      fire("computer:frame", { revision: 30, viewer: otherViewer, target, at: 3 });
-      fire("computer:frame", { revision: 31, viewer, target: { ...otherTarget, key: otherTarget.key.replace(viewer, otherViewer) }, at: 4 });
-      fire("computer:activity", window.__cu.activity({ revision: 32, viewer: otherViewer, owner: "person", stopped: "window", active: false }));
-      await settle();
-      seen.fetchesForForeignOrStale = count("computer_progress_frame") - afterFirst;
-      seen.ownerAfterForeign = panel()?.dataset.owner ?? null;
-      seen.frameAfterForeign = piece("computer-progress-frame")?.dataset.revision ?? null;
-      const late = held("computer_progress_frame");
-      fire("computer:frame", { revision: 40, viewer, target, at: 5 });
-      await settle();
-      const lateFirst = late.release;
-      fire("computer:frame", { revision: 41, viewer, target, at: 6 });
-      await settle();
-      late.release?.({ revision: 41, png });
-      lateFirst?.({ revision: 40, png });
-      await settle();
-      seen.frameAfterLateReply = piece("computer-progress-frame")?.dataset.revision ?? null;
-      window.__cu.close();
-      window.__cu.reset();
-      return seen;
-    }, { viewer: VIEWER, otherViewer: OTHER_VIEWER, target: TARGET, otherTarget: OTHER_TARGET, png: ONE_PIXEL_PNG });
-    ok(
-      "the progress panel opens beside the conversation for one viewer",
-      frames.opened === true && frames.panelShown === true,
-      JSON.stringify(frames),
-    );
-    ok(
-      "one announced frame is fetched once, for its own viewer and revision, and painted once",
-      frames.fetchesForOne === 1 && frames.fetchArgs?.viewer === VIEWER && frames.fetchArgs?.revision === 20 &&
-        frames.frameRevision === "20",
-      JSON.stringify(frames),
-    );
-    ok(
-      "a stale frame, another pane's frame or report, or another viewer's target never reaches the panel",
-      frames.fetchesForForeignOrStale === 0 && frames.frameAfterForeign === "20" && frames.ownerAfterForeign !== "person",
-      JSON.stringify(frames),
-    );
-    ok(
-      "a late reply for an older frame cannot replace the newer frame on screen",
-      frames.frameAfterLateReply === "41",
-      JSON.stringify(frames),
-    );
-
-    /* Giving control back: two presses, a pinned target, still the newest. */
-    const give = await evaluateCase(page, async ({ viewer, target, otherTarget }) => {
-      const { fire, settle, count, piece, open } = window.__cu;
-      const seen = { opened: open(viewer) };
-      const resumed = [];
-      window.__ANSWER__.computer_resume = (args) => {
-        resumed.push(args);
-        return window.__cu.activity({ revision: 60, owner: "agent", stopped: null, active: false, target: args?.target ?? null });
+    const take = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 10, active: true }));
+      await hands.settle();
+      const stops = hands.holdCommand("computer_stop");
+      const resumesBefore = hands.sentCount("computer_resume");
+      hands.pressBand("stop");
+      hands.pressBand("stop");
+      await hands.settle();
+      const whileStopWaits = hands.readBand();
+      hands.pressBand("resume");
+      await hands.settle();
+      const resumesWhileStopWaits = hands.sentCount("computer_resume") - resumesBefore;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 11, stopped: "window" }));
+      stops.answerOldest({ stopped: true, reason: "window", helperSignalled: false });
+      await hands.settle();
+      const granted = hands.readBand();
+      hands.announce("computer:activity", hands.operatorReport({ revision: 10, active: true }));
+      await hands.settle();
+      const afterOlderReport = hands.readBand();
+      hands.announce("computer:activity", hands.operatorReport({ active: true }));
+      await hands.settle();
+      const afterUnversionedReport = hands.readBand();
+      while (stops.outstanding() > 0) stops.answerOldest({ stopped: true, reason: "window", helperSignalled: false });
+      await hands.settle();
+      hands.releaseCommands();
+      return {
+        stopsSent: stops.calls.length,
+        whileStopWaits,
+        resumesWhileStopWaits,
+        granted,
+        afterOlderReport,
+        afterUnversionedReport,
       };
-      const base = count("computer_resume");
-      fire("computer:activity", window.__cu.activity({ revision: 50, owner: "person", stopped: "window", active: false, target: null }));
-      await settle();
-      seen.giveDisabledWithoutTarget = piece("computer-progress-give")?.disabled ?? null;
-      piece("computer-progress-give")?.click();
-      await settle();
-      piece("computer-progress-give-confirm")?.click();
-      await settle();
-      seen.sentWithoutTarget = count("computer_resume") - base;
-      fire("computer:activity", window.__cu.activity({ revision: 51, owner: "person", stopped: "window", active: false, target }));
-      await settle();
-      piece("computer-progress-give")?.click();
-      await settle();
-      seen.sentOnFirstPress = count("computer_resume") - base;
-      seen.confirmShown = piece("computer-progress-give-confirm") !== null && !piece("computer-progress-give-confirm").hidden;
-      piece("computer-progress-give-cancel")?.click();
-      await settle();
-      seen.sentAfterCancel = count("computer_resume") - base;
-      piece("computer-progress-give")?.click();
-      await settle();
-      fire("computer:activity", window.__cu.activity({ revision: 52, owner: "person", stopped: "window", active: false, target: otherTarget }));
-      await settle();
-      seen.confirmAfterTargetMoved = piece("computer-progress-give-confirm") !== null && !piece("computer-progress-give-confirm").hidden;
-      piece("computer-progress-give-confirm")?.click();
-      await settle();
-      seen.sentForMovedTarget = count("computer_resume") - base;
-      piece("computer-progress-give")?.click();
-      await settle();
-      piece("computer-progress-give-confirm")?.click();
-      piece("computer-progress-give-confirm")?.click();
-      await settle();
-      seen.sentForFreshTarget = count("computer_resume") - base;
-      seen.resumeArgs = resumed[0] ?? null;
-      window.__cu.close();
-      window.__cu.reset();
-      return seen;
-    }, { viewer: VIEWER, target: TARGET, otherTarget: OTHER_TARGET });
+    });
     ok(
-      "give-back sends nothing while the backend has pinned no target",
-      give.opened === true && give.giveDisabledWithoutTarget === true && give.sentWithoutTarget === 0,
-      JSON.stringify(give),
+      "one press of the band's stop sends one stop, however fast it is pressed again",
+      take.stopsSent === 1,
+      JSON.stringify(take),
     );
     ok(
-      "give-back needs the person's explicit second press, and cancelling it sends nothing",
-      give.sentOnFirstPress === 0 && give.confirmShown === true && give.sentAfterCancel === 0,
-      JSON.stringify(give),
+      "while the stop waits for the backend the band neither shows it granted nor offers the resume, and a resume pressed then sends nothing",
+      take.whileStopWaits?.showsStop === false && take.whileStopWaits?.offersResume === false &&
+        take.resumesWhileStopWaits === 0,
+      JSON.stringify(take),
     );
     ok(
-      "a target the backend replaced takes the person's confirmation away and sends nothing for it",
-      give.opened === true && give.confirmAfterTargetMoved === false && give.sentForMovedTarget === 0,
-      JSON.stringify(give),
+      "the band shows the person's stop once the backend's versioned report grants it",
+      take.granted?.showsStop === true && take.granted?.offersResume === true,
+      JSON.stringify(take),
     );
     ok(
-      "a confirmed give-back is sent once, for the newest revision and its pinned target",
-      give.sentForFreshTarget === 1 && give.resumeArgs?.revision === 52 &&
-        give.resumeArgs?.target?.key === OTHER_TARGET.key && give.resumeArgs?.reset === false,
-      JSON.stringify(give),
+      "a versioned report older than the granted stop cannot take it off the band",
+      take.afterOlderReport?.showsStop === true && take.afterOlderReport?.offersResume === true &&
+        take.afterOlderReport?.offersStop === false,
+      JSON.stringify(take),
+    );
+    ok(
+      "a report without a revision that arrives after the granted stop cannot take it off the band",
+      take.afterUnversionedReport?.showsStop === true && take.afterUnversionedReport?.offersResume === true,
+      JSON.stringify(take),
     );
 
-    /* Idle, closed, opened again: no request, no repaint, nothing kept. */
-    const quiet = await evaluateCase(page, async ({ viewer, target, png, watchMs, cycles }) => {
-      const { fire, settle, count, panel, piece, open, close } = window.__cu;
-      const seen = {};
-      const listeners = () => ["computer:activity", "computer:frame"]
-        .reduce((sum, name) => sum + (window.__LISTENERS__[name]?.length ?? 0), 0);
-      const listenersBefore = listeners();
-      window.__ANSWER__.computer_progress_frame = (args) => ({ revision: args.revision, png });
-      seen.opened = open(viewer);
-      fire("computer:frame", { revision: 70, viewer, target, at: 1 });
-      await settle();
-      const commands = () => Object.entries(window.__COUNTS__ ?? {})
-        .filter(([name]) => name.startsWith("computer_"))
-        .reduce((sum, [, n]) => sum + n, 0);
-      const requestsBefore = commands();
-      let mutations = 0;
-      const watcher = panel() ? new MutationObserver((records) => { mutations += records.length; }) : null;
-      watcher?.observe(panel(), { subtree: true, childList: true, attributes: true, characterData: true });
-      await new Promise((done) => setTimeout(done, watchMs));
-      watcher?.disconnect();
-      seen.idleRequests = commands() - requestsBefore;
-      seen.idleMutations = watcher ? mutations : null;
-      seen.frameBeforeClose = piece("computer-progress-frame")?.getAttribute("src") ?? null;
-      seen.closed = close();
-      await settle();
-      seen.hiddenAfterClose = panel()?.hidden ?? null;
-      seen.frameAfterClose = piece("computer-progress-frame")?.getAttribute("src") ?? null;
-      const fetchedClosed = count("computer_progress_frame");
-      fire("computer:frame", { revision: 71, viewer, target, at: 2 });
-      await settle();
-      seen.fetchesWhileClosed = count("computer_progress_frame") - fetchedClosed;
-      for (let round = 0; round < cycles; round += 1) {
-        open(viewer);
-        close();
+    const refusedStop = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 20, active: true }));
+      await hands.settle();
+      const stopsBefore = hands.sentCount("computer_stop");
+      hands.refuseCommand("computer_stop");
+      hands.pressBand("stop");
+      await hands.settle();
+      const afterRefusal = hands.readBand();
+      hands.pressBand("stop");
+      await hands.settle();
+      hands.releaseCommands();
+      return { afterRefusal, stopsSent: hands.sentCount("computer_stop") - stopsBefore };
+    });
+    ok(
+      "a stop the backend refused is not shown as granted, and the band offers the stop again",
+      refusedStop.afterRefusal?.showsStop === false && refusedStop.afterRefusal?.offersStop === true &&
+        refusedStop.stopsSent === 2,
+      JSON.stringify(refusedStop),
+    );
+
+    const resume = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 30, stopped: "window" }));
+      await hands.settle();
+      const resumes = hands.holdCommand("computer_resume");
+      hands.pressBand("resume");
+      hands.pressBand("resume");
+      await hands.settle();
+      const whileResumeWaits = hands.readBand();
+      resumes.answerOldest({ resumed: true, helper: "idle" });
+      hands.announce("computer:activity", hands.operatorReport({ revision: 31 }));
+      await hands.settle();
+      const lifted = hands.readBand();
+      while (resumes.outstanding() > 0) resumes.answerOldest({ resumed: true, helper: "idle" });
+      await hands.settle();
+      hands.releaseCommands();
+      return { resumesSent: resumes.calls.length, resumeArgs: resumes.calls[0] ?? null, whileResumeWaits, lifted };
+    });
+    ok(
+      "one press of resume sends one resume, carrying the revision of the stop it lifts and reset false",
+      resume.resumesSent === 1 && resume.resumeArgs?.revision === 30 && resume.resumeArgs?.reset === false,
+      JSON.stringify(resume),
+    );
+    ok(
+      "while the resume waits for the backend the band keeps showing the person's stop",
+      resume.whileResumeWaits?.showsStop === true,
+      JSON.stringify(resume),
+    );
+    ok(
+      "the stop leaves the band once the backend's versioned report lifts it",
+      resume.lifted?.showsStop === false && resume.lifted?.offersResume === false,
+      JSON.stringify(resume),
+    );
+
+    const refusedResume = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 40, stopped: "window" }));
+      await hands.settle();
+      const resumesBefore = hands.sentCount("computer_resume");
+      hands.refuseCommand("computer_resume");
+      hands.pressBand("resume");
+      await hands.settle();
+      const afterRefusal = hands.readBand();
+      hands.pressBand("resume");
+      await hands.settle();
+      hands.releaseCommands();
+      return { afterRefusal, resumesSent: hands.sentCount("computer_resume") - resumesBefore };
+    });
+    ok(
+      "a resume the backend refused leaves the person's stop on the band and offers the resume again",
+      refusedResume.afterRefusal?.showsStop === true && refusedResume.afterRefusal?.offersResume === true &&
+        refusedResume.resumesSent === 2,
+      JSON.stringify(refusedResume),
+    );
+
+    const lateLift = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 50, stopped: "window" }));
+      await hands.settle();
+      const resumes = hands.holdCommand("computer_resume");
+      hands.pressBand("resume");
+      await hands.settle();
+      hands.announce("computer:activity", hands.operatorReport({ revision: 52, stopped: "hotkey" }));
+      hands.announce("computer:activity", hands.operatorReport({ revision: 51 }));
+      resumes.answerOldest({ resumed: true, helper: "idle" });
+      await hands.settle();
+      const afterLateLift = hands.readBand();
+      while (resumes.outstanding() > 0) resumes.answerOldest({ resumed: true, helper: "idle" });
+      await hands.settle();
+      hands.releaseCommands();
+      return { resumeArgs: resumes.calls[0] ?? null, afterLateLift };
+    });
+    ok(
+      "a lift report and a resume answer that arrive after the person's next stop cannot take that stop off the band",
+      lateLift.afterLateLift?.showsStop === true && lateLift.afterLateLift?.offersResume === true,
+      JSON.stringify(lateLift),
+    );
+    ok("the band scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
+async function testTheProgressPanel(browser, origin, ok) {
+  const { page, faults } = await openComputerPage(browser, origin);
+  const nextRunSubject = { ...SUBJECT, run: NEXT_RUN };
+  try {
+    const opening = await evaluateCase(page, async ({ subject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const frames = hands.holdCommand("computer_progress_frame");
+      const opened = hands.openPanel(subject);
+      await hands.settle();
+      const onOpen = {
+        panel: hands.readPanel(),
+        fetches: frames.calls.length,
+        asked: frames.calls[0] ?? null,
+        fromComputerFiles: frames.fromComputerFiles[0] ?? null,
+      };
+      frames.answerOldest(null);
+      await hands.settle();
+      const withNothingYet = { panel: hands.readPanel(), fetches: frames.calls.length };
+      hands.announce("computer:frame", { ...subject, revision: 20 });
+      await hands.settle();
+      const announcedAsk = frames.calls[1] ?? null;
+      frames.answerOldest({ revision: 20, png: hands.framePicture(20) });
+      await hands.settle();
+      return {
+        opened,
+        onOpen,
+        withNothingYet,
+        announcedAsk,
+        fetchesInAll: frames.calls.length,
+        painted: hands.readPanel(),
+        outstanding: frames.outstanding(),
+      };
+    }, { subject: SUBJECT });
+    ok(
+      "the progress panel opens for one subject and asks once for that subject's newest frame, from the Computer Use files",
+      opening.opened === true && opening.onOpen?.panel.shown === true && opening.onOpen?.fetches === 1 &&
+        asksFor(opening.onOpen?.asked, SUBJECT) && opening.onOpen?.fromComputerFiles === true,
+      JSON.stringify(opening),
+    );
+    ok(
+      "with no frame yet the panel shows no picture and asks nothing more until a frame is announced",
+      opening.withNothingYet?.panel.shown === true && !opening.withNothingYet?.panel.picture &&
+        opening.withNothingYet?.fetches === 1,
+      JSON.stringify(opening),
+    );
+    ok(
+      "an announced newer frame is fetched once, for its subject and revision, and painted with that revision",
+      opening.fetchesInAll === 2 && asksFor(opening.announcedAsk, SUBJECT) && opening.announcedAsk?.revision === 20 &&
+        opening.painted?.revision === "20" && Boolean(opening.painted?.picture) && opening.outstanding === 0,
+      JSON.stringify(opening),
+    );
+
+    const foreign = await evaluateCase(page, async ({ subject, otherViewer, otherTarget, nextRun }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const frames = hands.holdCommand("computer_progress_frame");
+      hands.announce("computer:frame", { ...subject, viewer: otherViewer, revision: 35 });
+      hands.announce("computer:frame", { ...subject, target: otherTarget, revision: 36 });
+      hands.announce("computer:frame", { ...subject, run: nextRun, revision: 37 });
+      hands.announce("computer:frame", { ...subject, revision: 19 });
+      hands.announce("computer:frame", { ...subject, revision: 20 });
+      await hands.settle();
+      const fetchesForForeignOrOld = frames.calls.length;
+      const afterForeign = hands.readPanel();
+      hands.announce("computer:frame", { ...subject, revision: 21 });
+      await hands.settle();
+      const ownAsk = frames.calls.at(-1) ?? null;
+      frames.answerOldest({ revision: 21, png: hands.framePicture(21) });
+      await hands.settle();
+      return {
+        fetchesForForeignOrOld,
+        afterForeign,
+        ownAsk,
+        fetchesInAll: frames.calls.length,
+        painted: hands.readPanel(),
+        outstanding: frames.outstanding(),
+      };
+    }, { subject: SUBJECT, otherViewer: OTHER_VIEWER, otherTarget: OTHER_TARGET, nextRun: NEXT_RUN });
+    ok(
+      "a frame of another viewer, of another target of the same viewer, of another run, or not newer than the frame shown is never fetched",
+      foreign.fetchesForForeignOrOld === 0 && foreign.afterForeign?.revision === "20",
+      JSON.stringify(foreign),
+    );
+    ok(
+      "a foreign frame numbered above the next own frame does not keep the own frame from being fetched and painted",
+      foreign.fetchesInAll === 1 && asksFor(foreign.ownAsk, SUBJECT) && foreign.ownAsk?.revision === 21 &&
+        foreign.painted?.revision === "21" && foreign.outstanding === 0,
+      JSON.stringify(foreign),
+    );
+
+    const newestOfBurst = 22 + BURST_FRAMES;
+    const burst = await evaluateCase(page, async ({ subject, burstFrames }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const frames = hands.holdCommand("computer_progress_frame");
+      hands.announce("computer:frame", { ...subject, revision: 22 });
+      await hands.settle();
+      const fetchesBeforeBurst = frames.calls.length;
+      for (let revision = 23; revision <= 22 + burstFrames; revision += 1) {
+        hands.announce("computer:frame", { ...subject, revision });
       }
-      await settle();
-      seen.listenerGrowth = listeners() - listenersBefore;
-      window.__cu.reset();
-      return seen;
-    }, { viewer: VIEWER, target: TARGET, png: ONE_PIXEL_PNG, watchMs: IDLE_WATCH_MS, cycles: OPEN_CLOSE_CYCLES });
+      await hands.settle();
+      const fetchesDuringBurst = frames.calls.length;
+      frames.answerOldest({ revision: 22, png: hands.framePicture(22) });
+      await hands.settle();
+      const fetchesAfterFirstAnswer = frames.calls.length;
+      const nextAsk = frames.calls[1] ?? null;
+      frames.answerOldest({ revision: 22 + burstFrames, png: hands.framePicture(22 + burstFrames) });
+      await hands.settle();
+      return {
+        fetchesBeforeBurst,
+        fetchesDuringBurst,
+        fetchesAfterFirstAnswer,
+        nextAsk,
+        fetchesInAll: frames.calls.length,
+        mostInFlight: frames.mostInFlight,
+        outstanding: frames.outstanding(),
+        painted: hands.readPanel(),
+        census: hands.census.live(),
+      };
+    }, { subject: SUBJECT, burstFrames: BURST_FRAMES });
     ok(
-      "an open panel with nothing happening sends no request and repaints nothing",
-      quiet.opened === true && quiet.idleRequests === 0 && quiet.idleMutations === 0 && Boolean(quiet.frameBeforeClose),
-      JSON.stringify(quiet),
+      "while one frame fetch is out, a burst of announcements asks for nothing more, and the next fetch asks only for the newest",
+      burst.fetchesBeforeBurst === 1 && burst.fetchesDuringBurst === 1 && burst.fetchesAfterFirstAnswer === 2 &&
+        burst.nextAsk?.revision === newestOfBurst && burst.fetchesInAll === 2,
+      JSON.stringify(burst),
     );
     ok(
-      "closing the panel lets go of its frame, and a frame announced while it is closed is not fetched",
-      quiet.closed === true && quiet.hiddenAfterClose === true && !quiet.frameAfterClose && quiet.fetchesWhileClosed === 0,
-      JSON.stringify(quiet),
+      "at most one frame fetch is out at a time, and the panel holds at most one picture of its own",
+      burst.mostInFlight === 1 && burst.outstanding === 0 && typeof burst.census?.objectUrls === "number" &&
+        burst.census.objectUrls <= 1,
+      JSON.stringify(burst),
     );
     ok(
-      "opening and closing the panel again adds no listener",
-      quiet.opened === true && quiet.listenerGrowth === 0,
-      JSON.stringify(quiet),
+      "the newest frame of the burst is the one on screen",
+      burst.painted?.revision === String(newestOfBurst),
+      JSON.stringify(burst),
     );
 
-    /* A frame the backend could not give: the last good frame stays, and
-     * nothing is asked again on its own. */
-    const failed = await evaluateCase(page, async ({ viewer, target, png, watchMs }) => {
-      const { fire, settle, count, piece, open } = window.__cu;
-      const seen = { opened: open(viewer) };
-      window.__ANSWER__.computer_progress_frame = (args) => ({ revision: args.revision, png });
-      fire("computer:frame", { revision: 80, viewer, target, at: 1 });
-      await settle();
-      window.__ANSWER__.computer_progress_frame = () => { throw new Error("no frame"); };
-      const base = count("computer_progress_frame");
-      fire("computer:frame", { revision: 81, viewer, target, at: 2 });
-      await new Promise((done) => setTimeout(done, watchMs));
-      seen.fetchesAfterFailure = count("computer_progress_frame") - base;
-      seen.frameAfterFailure = piece("computer-progress-frame")?.dataset.revision ?? null;
-      window.__cu.close();
-      window.__cu.reset();
-      await settle();
-      return seen;
-    }, { viewer: VIEWER, target: TARGET, png: ONE_PIXEL_PNG, watchMs: IDLE_WATCH_MS });
+    const olderAnswer = await evaluateCase(page, async ({ subject, shown }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const frames = hands.holdCommand("computer_progress_frame");
+      hands.announce("computer:frame", { ...subject, revision: shown + 1 });
+      await hands.settle();
+      frames.answerOldest({ revision: shown - 1, png: hands.framePicture(shown - 1) });
+      await hands.settle();
+      await hands.settle();
+      return { fetchesInAll: frames.calls.length, outstanding: frames.outstanding(), painted: hands.readPanel() };
+    }, { subject: SUBJECT, shown: newestOfBurst });
     ok(
-      "a frame that failed to arrive keeps the last good frame and is not retried on a timer",
-      failed.opened === true && failed.fetchesAfterFailure === 1 && failed.frameAfterFailure === "80",
+      "an answer older than the frame on screen does not replace it and is not asked for again",
+      olderAnswer.fetchesInAll === 1 && olderAnswer.outstanding === 0 &&
+        olderAnswer.painted?.revision === String(newestOfBurst),
+      JSON.stringify(olderAnswer),
+    );
+
+    const nextRun = await evaluateCase(page, async ({ subject, nextRunSubject, oldRevision }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const frames = hands.holdCommand("computer_progress_frame");
+      hands.announce("computer:frame", { ...subject, revision: oldRevision });
+      await hands.settle();
+      const reopened = hands.openPanel(nextRunSubject);
+      await hands.settle();
+      const afterReplacement = hands.readPanel();
+      hands.announce("computer:frame", { ...nextRunSubject, revision: 3 });
+      hands.announce("computer:frame", { ...subject, revision: oldRevision + 1 });
+      await hands.settle();
+      const fetchesWhileOldIsOut = frames.calls.length;
+      frames.answerOldest({ revision: oldRevision, png: hands.framePicture(oldRevision) });
+      await hands.settle();
+      const afterOldAnswer = hands.readPanel();
+      for (let round = 0; round < 3 && frames.outstanding() > 0; round += 1) {
+        frames.answerOldest({ revision: 3, png: hands.framePicture(3) });
+        await hands.settle();
+      }
+      return {
+        reopened,
+        afterReplacement,
+        fetchesWhileOldIsOut,
+        afterOldAnswer,
+        laterAsks: frames.calls.slice(1),
+        mostInFlight: frames.mostInFlight,
+        outstanding: frames.outstanding(),
+        painted: hands.readPanel(),
+      };
+    }, { subject: SUBJECT, nextRunSubject, oldRevision: newestOfBurst + 2 });
+    ok(
+      "opening the panel for another run takes the old run's frame off the panel at once",
+      nextRun.reopened === true && nextRun.afterReplacement?.shown === true &&
+        nextRun.afterReplacement?.revision !== String(newestOfBurst) && !nextRun.afterReplacement?.picture,
+      JSON.stringify(nextRun),
+    );
+    ok(
+      "the old run's late answer paints nothing, and only the new run's frame is asked for after it, one fetch at a time",
+      nextRun.fetchesWhileOldIsOut === 1 && nextRun.afterOldAnswer?.revision !== String(newestOfBurst + 2) &&
+        nextRun.laterAsks?.length === 1 && asksFor(nextRun.laterAsks[0], nextRunSubject) &&
+        nextRun.mostInFlight === 1 && nextRun.outstanding === 0,
+      JSON.stringify(nextRun),
+    );
+    ok(
+      "the new run's frame is painted although its number is lower than the old run's",
+      nextRun.painted?.revision === "3" && Boolean(nextRun.painted?.picture),
+      JSON.stringify(nextRun),
+    );
+
+    const failed = await evaluateCase(page, async ({ nextRunSubject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const frames = hands.holdCommand("computer_progress_frame");
+      hands.announce("computer:frame", { ...nextRunSubject, revision: 4 });
+      await hands.settle();
+      frames.refuseOldest("no frame");
+      await hands.settle();
+      const afterFailure = hands.readPanel();
+      await hands.settle();
+      return {
+        afterFailure,
+        fetchesInAll: frames.calls.length,
+        outstanding: frames.outstanding(),
+        census: hands.census.live(),
+      };
+    }, { nextRunSubject });
+    ok(
+      "a frame that failed to arrive leaves the last good frame on screen",
+      failed.afterFailure?.revision === "3" && Boolean(failed.afterFailure?.picture),
       JSON.stringify(failed),
     );
+    ok(
+      "after a failed fetch the open panel holds no timer, animation frame or fetch of the Computer Use files, so nothing is asked again until a frame is announced",
+      failed.fetchesInAll === 1 && failed.outstanding === 0 && failed.census?.timeouts === 0 &&
+        failed.census?.intervals === 0 && failed.census?.animationFrames === 0,
+      JSON.stringify(failed),
+    );
+
+    const closing = await evaluateCase(page, async ({ nextRunSubject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const frames = hands.holdCommand("computer_progress_frame");
+      hands.announce("computer:frame", { ...nextRunSubject, revision: 5 });
+      await hands.settle();
+      const fetchesBeforeClose = frames.calls.length;
+      const closed = hands.closePanel();
+      await hands.settle();
+      const afterClose = hands.readPanel();
+      frames.answerOldest({ revision: 5, png: hands.framePicture(5) });
+      await hands.settle();
+      const afterLateAnswer = hands.readPanel();
+      const censusAfterClose = hands.census.live();
+      hands.announce("computer:frame", { ...nextRunSubject, revision: 6 });
+      await hands.settle();
+      return {
+        fetchesBeforeClose,
+        closed,
+        afterClose,
+        afterLateAnswer,
+        censusAfterClose,
+        fetchesWhileClosed: frames.calls.length - fetchesBeforeClose,
+        outstanding: frames.outstanding(),
+      };
+    }, { nextRunSubject });
+    ok(
+      "closing the panel with a fetch out lets go of its picture, and the late answer paints nothing",
+      closing.fetchesBeforeClose === 1 && closing.closed === true && closing.afterClose?.shown === false &&
+        !closing.afterClose?.picture && !closing.afterLateAnswer?.picture && closing.afterLateAnswer?.shown === false &&
+        censusIsEmpty(closing.censusAfterClose),
+      JSON.stringify(closing),
+    );
+    ok(
+      "a frame announced while the panel is closed is not fetched",
+      closing.closed === true && closing.fetchesWhileClosed === 0 && closing.outstanding === 0,
+      JSON.stringify(closing),
+    );
+
+    const reopening = await evaluateCase(page, async ({ subject, cycles }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.recordCommand("computer_progress_frame", () => null);
+      const firstOpen = hands.openPanel(subject);
+      hands.closePanel();
+      await hands.settle();
+      const listenersAfterFirstOpen = hands.frameListeners();
+      for (let round = 0; round < cycles; round += 1) {
+        hands.openPanel(subject);
+        hands.closePanel();
+      }
+      await hands.settle();
+      const census = hands.census.live();
+      hands.releaseCommands();
+      return {
+        firstOpen,
+        listenersAfterFirstOpen,
+        listenerGrowth: hands.frameListeners() - listenersAfterFirstOpen,
+        census,
+      };
+    }, { subject: SUBJECT, cycles: OPEN_CLOSE_CYCLES });
+    ok(
+      "opening and closing the panel again adds no event listener and leaves no timer, animation frame or picture behind",
+      reopening.firstOpen === true && reopening.listenerGrowth === 0 && censusIsEmpty(reopening.census),
+      JSON.stringify(reopening),
+    );
+    ok("the progress panel scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   } finally { await page.close(); }
+}
+
+export async function testComputerProgress(browser, origin, ok) {
+  await testTheBand(browser, origin, ok);
+  await testTheProgressPanel(browser, origin, ok);
 }
 
 if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {
