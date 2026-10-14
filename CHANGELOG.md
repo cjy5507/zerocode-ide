@@ -1,7 +1,7 @@
 # Changelog
 
 ## [1.1.66] — 2026-10-14
-- Computer Use batches keep their window: a wait step inside a batch inherits the batch's app, window and background scope instead of being refused, a conditional wait keeps the scope it actually observed, and the Computer tool's description is about 16% shorter (2281 → 1918 tokens on every request) while keeping every safety rule, including that a one-time code is typed by the window and never handed back (t-53224).
+- Computer Use batches keep their window: a wait step inside a batch inherits the batch's app, window and background scope instead of being refused, a conditional wait keeps the scope it actually observed, and the Computer tool's description is trimmed to 1918 tokens per request (the unreleased candidate had grown it to 2281) while keeping every safety rule, including that a one-time code is typed by the window and never handed back (t-53224).
 - The Jev dashboard keeps a long model name inside its card: a local model's 96-character identifier wraps within a narrow window instead of pushing the table off the page (t-53875).
 - A worktree with uncommitted changes says how it stands against main: its sidebar chip adds "overlaps main N" when it touches files main has changed since it forked, and its tooltip names them and how far behind it is (t-52375).
 - A refused press at a quota wall says why in your language instead of a log sentence in English (t-52388).
