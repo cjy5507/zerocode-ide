@@ -505,13 +505,17 @@ final class Provider {
         do {
             return try renderActionResult(action: action, snapshot: observe(params: params))
         } catch let error as ProviderError where (error.code == "window_not_found" || error.code == "window_stale") && hasRequestedWindowSelector(params) {
-            var fallbackParams = params
-            fallbackParams.removeValue(forKey: "windowId")
-            fallbackParams.removeValue(forKey: "windowIndex")
             if action["verification"] == nil {
                 action["verification"] = ["state": "unverified", "reason": "window_changed"]
             }
-            return try renderActionResult(action: action, snapshot: observe(params: fallbackParams))
+            if let windowID = params["windowId"]?.number {
+                action["targetWindowId"] = windowID
+            }
+            return [
+                "action": action,
+                "observationDeferred": true,
+                "observation": ["state": "unavailable", "reason": error.code],
+            ]
         }
     }
 

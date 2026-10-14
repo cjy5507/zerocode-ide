@@ -58,17 +58,15 @@ impl Provider {
                         .observation_with(faces),
                 )
             }
-            "click" => json(self.run_action(&params, Self::click)?),
-            "performSecondaryAction" => {
-                json(self.run_action(&params, Self::perform_secondary_action)?)
-            }
-            "setValue" => json(self.run_action(&params, Self::set_value)?),
-            "typeText" => json(self.run_action(&params, Self::type_text)?),
-            "pressKey" => json(self.run_action(&params, Self::press_key)?),
-            "hotkey" => json(self.run_action(&params, Self::hotkey)?),
-            "pasteText" => json(self.run_action(&params, Self::paste_text)?),
-            "scroll" => json(self.run_action(&params, Self::scroll)?),
-            "drag" => json(self.run_action(&params, Self::drag)?),
+            "click" => self.run_action(&params, Self::click),
+            "performSecondaryAction" => self.run_action(&params, Self::perform_secondary_action),
+            "setValue" => self.run_action(&params, Self::set_value),
+            "typeText" => self.run_action(&params, Self::type_text),
+            "pressKey" => self.run_action(&params, Self::press_key),
+            "hotkey" => self.run_action(&params, Self::hotkey),
+            "pasteText" => self.run_action(&params, Self::paste_text),
+            "scroll" => self.run_action(&params, Self::scroll),
+            "drag" => self.run_action(&params, Self::drag),
             "terminate" => Ok(serde_json::json!({ "ok": true })),
             // The window's stop is the only stop on Windows: this provider
             // has no chord of its own to hear and no signal to be stopped by,
@@ -201,16 +199,24 @@ impl Provider {
     }
 
     /// `actionResult`: run the action, observe after it, and when the
-    /// requested window is gone observe without the selector and say so.
+    /// requested window is gone report its unavailable observation.
     fn run_action(
         &mut self,
         params: &Map<String, Value>,
         action: fn(&mut Self, &Map<String, Value>) -> Result<ActionMetadata, ProviderError>,
-    ) -> Result<ActionResult, ProviderError> {
-        let mut metadata = action(self, params)?;
+    ) -> Result<Value, ProviderError> {
+        let metadata = action(self, params)?;
         let include_screenshot = !params::flag(params, "noScreenshot");
+        Self::action_result(params, metadata, self.observe(params, include_screenshot))
+    }
+
+    fn action_result(
+        params: &Map<String, Value>,
+        mut metadata: ActionMetadata,
+        observed: Result<Snapshot, ProviderError>,
+    ) -> Result<Value, ProviderError> {
         let has_selector = params.contains_key("windowId") || params.contains_key("windowIndex");
-        let observed = match self.observe(params, include_screenshot) {
+        let observed = match observed {
             Ok(snapshot) => snapshot,
             Err(error)
                 if has_selector
@@ -219,9 +225,6 @@ impl Provider {
                         error_code::WINDOW_NOT_FOUND | error_code::WINDOW_STALE
                     ) =>
             {
-                let mut fallback = params.clone();
-                fallback.remove("windowId");
-                fallback.remove("windowIndex");
                 if metadata.verification.is_none() {
                     metadata.verification = Some(Verification::unverified(
                         zerocode_core::computer_use_protocol::unverified_reason::WINDOW_CHANGED,
@@ -229,12 +232,18 @@ impl Provider {
                         None,
                     ));
                 }
-                self.observe(&fallback, include_screenshot)?
+                metadata.target_window_id =
+                    params::optional_window_id(params)?.unwrap_or(metadata.target_window_id);
+                return Ok(serde_json::json!({
+                    "action": metadata,
+                    "observationDeferred": true,
+                    "observation": { "state": "unavailable", "reason": error.code },
+                }));
             }
             Err(error) => return Err(error),
         };
         metadata.target_window_id = observed.window.id();
-        Ok(ActionResult {
+        json(ActionResult {
             observation: observed.observation(),
             action: metadata,
         })
@@ -275,4 +284,50 @@ pub(super) fn requested_indexes(params: &Map<String, Value>) -> Result<Vec<usize
         }
     }
     Ok(indexes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zerocode_core::computer_use_protocol::ActionPath;
+
+    #[test]
+    fn a_disappeared_selected_window_returns_the_action_without_another_observation() {
+        let params = serde_json::json!({ "app": "Fixture", "windowId": 41 });
+        for code in [error_code::WINDOW_NOT_FOUND, error_code::WINDOW_STALE] {
+            let result = Provider::action_result(
+                params.as_object().unwrap(),
+                ActionMetadata::new(ActionPath::Accessibility),
+                Err(ProviderError::new(code, "fixture window closed")),
+            )
+            .unwrap();
+            assert_eq!(result["action"]["targetWindowId"], 41);
+            assert_eq!(result["observationDeferred"], true);
+            assert_eq!(result["observation"]["state"], "unavailable");
+            assert_eq!(result["observation"]["reason"], code);
+            assert!(result.get("snapshot").is_none());
+            assert!(result.get("screenshot").is_none());
+        }
+    }
+
+    #[test]
+    fn unrelated_observation_failures_are_not_relabelled_as_a_closed_selected_window() {
+        for (params, code) in [
+            (
+                serde_json::json!({ "app": "Fixture" }),
+                error_code::WINDOW_NOT_FOUND,
+            ),
+            (
+                serde_json::json!({ "app": "Fixture", "windowId": 41 }),
+                error_code::PERMISSION_DENIED,
+            ),
+        ] {
+            let result = Provider::action_result(
+                params.as_object().unwrap(),
+                ActionMetadata::new(ActionPath::Accessibility),
+                Err(ProviderError::new(code, "fixture refusal")),
+            );
+            assert_eq!(result.unwrap_err().code, code);
+        }
+    }
 }

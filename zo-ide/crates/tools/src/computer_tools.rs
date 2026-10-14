@@ -44,7 +44,7 @@ use zerocode_core::computer_use_protocol::marks::{legend_line, ITEMS_KEY, LEGEND
 use super::{
     from_value, maybe_enforce_permission_check, to_pretty_json, ToolContext, ToolError, ToolSpec,
 };
-use crate::context::ComputerObservation;
+use crate::context::{ComputerObservation, ComputerTarget};
 
 /// The pane's shim — the one road to the window, named as the core names it.
 pub const COMPUTER_SHIM: &str = zerocode_core::computer_use::COMPUTER_CLI;
@@ -154,6 +154,8 @@ const STEP_FIELDS: &[&str] = &[
     "text",
     "scroll_direction",
     "scroll_amount",
+    "scroll_pages",
+    "background",
     "duration",
     "region",
     "app",
@@ -211,6 +213,7 @@ pub(crate) struct ComputerInput {
     pub text: Option<String>,
     pub scroll_direction: Option<String>,
     pub scroll_amount: Option<u32>,
+    pub scroll_pages: Option<f64>,
     /// Seconds, the Anthropic way, for `hold_key` and `wait`.
     pub duration: Option<f64>,
     /// `[x0, y0, x1, y1]` — two corners, the Anthropic way — in the last
@@ -310,6 +313,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "text": { "type": "string" },
         "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
         "scroll_amount": { "type": "integer", "minimum": 1 },
+        "scroll_pages": { "type": "number", "exclusiveMinimum": 0, "description": "App viewport pages; default 1. Desktop uses scroll_amount." },
         "duration": { "type": "number", "minimum": 0 },
         "region": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4,
             "description": "[x0, y0, x1, y1]: the top-left and bottom-right corners, in the last screenshot's pixels" },
@@ -321,8 +325,8 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "role": { "type": "string" },
         "label": { "type": "string" },
         "ocr": { "type": "boolean" },
-        "window": { "type": "string" },
-        "window_id": { "type": "integer", "minimum": 0 },
+        "window": { "type": "string", "description": "wait_for title condition only; actions use window_id." },
+        "window_id": { "type": "integer", "minimum": 1, "description": "Keep the observed app window ID on subsequent actions." },
         "kind": { "type": "string", "enum": kinds },
         "x": { "type": "number" },
         "y": { "type": "number" },
@@ -351,7 +355,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
     });
     // A walk's own fields: what the CLI's walk takes, and nothing it lacks.
     let walk = json!({
-        "background": { "type": "boolean", "description": "App walk only." },
+        "background": { "type": "boolean", "description": "App-only input; no global fallback. Inherited by batch steps." },
         "goal": { "type": "string", "maxLength": GOAL_CHAR_CAP },
         "pane": { "type": "string" },
         "platform": { "type": "string" },
@@ -372,6 +376,11 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
     }
     if let (Some(fields), Some(object)) = (fields, properties.as_object_mut()) {
         object.retain(|name, _| fields.contains(&name.as_str()));
+        for name in ["scroll_pages", "window", "window_id", "background"] {
+            if let Some(field) = object.get_mut(name).and_then(Value::as_object_mut) {
+                field.remove("description");
+            }
+        }
     }
     properties
 }
@@ -379,36 +388,31 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
 pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "Computer",
-        description: "Drive the person's desktop through the ZeroCode window: look (screenshot, zoom), \
+        description: "Drive desktop apps through the ZeroCode window. \
+            For background work, observe {app}, keep app and the returned window_id on actions, and set \
+            background: true. Never substitute activation or global input when background input is refused. \
+            Look (screenshot, zoom), \
             move/click/drag/scroll the mouse, press keys, type, wait; launch, activate, quit and open \
             apps; find/wait_for/read elements or screen text (ocr reads pixels); place windows; \
-            read/write the clipboard; run a program. Every position \
-            you give — coordinate, start_coordinate, region [x0, y0, x1, y1], a window's x/y/width/height \
-            — is in the pixels of the last full screenshot you were shown, and every position the tool \
-            answers is in those pixels too; the tool places them on the screen. A zoom only shows a \
-            region closer: keep speaking in the screenshot's pixels. After an action that changes the \
-            screen the tool gives it a moment to repaint and looks for you; when nothing changed it says \
-            changed: false and shows no new picture. The tool hears too: listen_start (the whole \
-            machine, or one app), then sound_wait for a sound by label (text: \"alarm_clock,siren\"; \
-            the system's classifier names speech, music, knock, bell, beep, siren and some 300 more) \
-            or sound_read what was heard; listen_stop when done. watch waits for the screen to change (until: \
-            quiet, to go still) without pictures and says where. observe with app shows its accessibility \
-            tree, each line led by an element_index a left_click with app presses; app + label (and role) presses \
-            the control that reads so, chosen at the press — never stale, so a batch step can name it. A familiar run \
-            of hand steps you would not look between is one batch (steps: [...]): one call, one look after — plan it \
-            whole (left_click by label, type, key, wait_for) rather than a look per press. A window with no tree (a \
+            read/write the clipboard; run a program. All positions and sizes use the last full screenshot's \
+            pixels, including returned positions and region [x0, y0, x1, y1]. Zoom does not change that frame. \
+            After a screen-changing action the tool waits for repaint and observes the same target; \
+            changed: false omits unchanged pixels. listen_start hears the machine or one app; sound_wait \
+            waits for a label (text: \"alarm_clock,siren\"), sound_read reads, listen_stop ends it. watch waits \
+            for screen changes (until: quiet for stillness), without pictures. observe with app shows its \
+            accessibility tree; left_click with app, window_id and element_index presses a listed control. \
+            A label (and role) resolves a fresh control in that same window, also within a batch. Plan familiar \
+            steps as one batch (steps: [...]): left_click by label, type, key, wait_for; one call and one look after. A window with no tree (a \
             mirrored phone): left_click {app, label: the words shown, ocr: true, after_text: the line they follow} \
             presses them as read at the press — batch a whole screen, wait_for {app, ocr: true, text} checks each \
-            value, a wait after a press ends once the screen is still, and the look after shows that app. recipe_save \
-            keeps a procedure that worked; recipe_run walks it again in one call (params fill its \
-            {{names}}) and says where it stopped and the start to resume from. walk (goal: one sentence; one of \
+            value. recipe_save keeps successful steps; recipe_run replays them (params fill {{names}}) \
+            and reports where it stopped and the start to resume from. walk (goal: one sentence; one of \
             app, pane, or platform with device; until: the text on screen when it worked; max_steps) walks there \
             in one call on the window's own judgment and answers a status to act on. A CAPTCHA or password \
             field (secure_input) is the person's: handoff (text: what they do) waits for them. A one-time code they read out: \
             handoff with ask_code and into (the input command's words, e.g. [\"set-value\",\"--app\",\"A\",\"--element-index\",\"3\"]) — \
             the window types it, you never receive it, and a look after may show it. \
-            The person keeps one hand on you: a \
-            `stopped` answer means stop and report; a press on a payment, transfer or delete control is \
+            A `stopped` answer means stop and report; a press on a payment, transfer or delete control is \
             held while the window asks them — say confirming: payment|transfer|delete when you know you \
             are there. Only works inside a ZeroCode pane.",
         input_schema: {
@@ -433,7 +437,8 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "additionalProperties": false
                 },
                 "description": "batch: the actions to run in order in one call, each spelled exactly as alone, positions \
-                    in the same screenshot's pixels; a wait_for or sound_wait step gives timeout_ms. Stops at the first \
+                    in the same screenshot's pixels. App steps use labels, not coordinates; keep app/window_id on each. \
+                    wait_for or sound_wait gives timeout_ms. Stops at the first \
                     refusal; the tool looks once, after."
             });
             json!({
@@ -525,9 +530,15 @@ fn speaks_in_pixels(input: &ComputerInput) -> bool {
 /// position and length it gave is read as pixels of `frame`'s picture, and a
 /// region's two corners become the CLI's corner and size.
 fn in_points(mut input: ComputerInput, frame: ShotFrame) -> Result<ComputerInput, ToolError> {
-    input.coordinate = input.coordinate.map(|pixel| frame.to_point(pixel));
+    let app_coordinates = input.app.is_some()
+        && (MARK_CLICKS.contains(&input.action.trim()) || matches!(input.action.trim(), "scroll" | "left_click_drag"));
+    let point = |pixel: [f64; 2]| {
+        if app_coordinates { [frame.length_to_point(pixel[0]), frame.length_to_point(pixel[1])] }
+        else { frame.to_point(pixel) }
+    };
+    input.coordinate = input.coordinate.map(point);
     input.offset = input.offset.map(|[dx, dy]| [frame.length_to_point(dx), frame.length_to_point(dy)]);
-    input.start_coordinate = input.start_coordinate.map(|pixel| frame.to_point(pixel));
+    input.start_coordinate = input.start_coordinate.map(point);
     input.region = match input.region {
         Some([x0, y0, x1, y1]) if x1 > x0 && y1 > y0 => Some(frame.rect_to_point([x0, y0, x1 - x0, y1 - y0])),
         Some(_) => {
@@ -576,13 +587,91 @@ fn spelled_region(region: [f64; 4]) -> String {
     region.iter().map(|side| number(*side)).collect::<Vec<_>>().join(",")
 }
 
+fn app_scoped_action(action: &str) -> bool {
+    matches!(action, "screenshot" | "observe" | "find" | "read" | "wait_for" | "type" | "key" | "scroll" | "left_click_drag")
+        || MARK_CLICKS.contains(&action)
+}
+
+fn validate_scope(input: &ComputerInput) -> Result<(), ToolError> {
+    let action = input.action.trim();
+    if input.window.is_some() && action != "wait_for" {
+        return Err(ToolError::InvalidInput("`window` is only a wait_for title condition; use app and window_id to select an action's window".into()));
+    }
+    if input.mark.is_some() && (input.app.is_some() || input.window_id.is_some()) {
+        return Err(ToolError::InvalidInput("a mark already pins its app and window; do not combine it with another app/window selector".into()));
+    }
+    if let Some(window_id) = input.window_id {
+        if window_id == 0 || (action != "window" && (!app_scoped_action(action) || input.app.as_deref().is_none_or(|app| app.trim().is_empty()))) {
+            return Err(ToolError::InvalidInput("window_id needs a supported app-scoped action and a positive window ID; this selector cannot be ignored".into()));
+        }
+    }
+    if input.app.is_some() && !app_scoped_action(action)
+        && !matches!(action, "launch" | "quit" | "activate" | "open" | "listen_start" | WALK_ACTION)
+    {
+        return Err(ToolError::InvalidInput(format!("`app` is not supported by `{action}`; no desktop fallback was attempted")));
+    }
+    if input.background == Some(true) && action != WALK_ACTION {
+        let supported = matches!(action, "observe" | "screenshot" | "find" | "read" | "wait_for" | "type" | "key" | "scroll") || MARK_CLICKS.contains(&action);
+        if !supported || (input.app.as_deref().is_none_or(|app| app.trim().is_empty()) && input.mark.is_none()) {
+            return Err(ToolError::InvalidInput("background input requires a supported app-scoped action or a pinned mark; global input is never a fallback".into()));
+        }
+    }
+    if input.scroll_pages.is_some() && (action != "scroll" || input.app.is_none()) {
+        return Err(ToolError::InvalidInput("scroll_pages belongs to app-scoped scrolling".into()));
+    }
+    if input.app.is_some() && action == "scroll" && input.scroll_amount.is_some() {
+        return Err(ToolError::InvalidInput("app-scoped scroll uses scroll_pages, not desktop wheel scroll_amount".into()));
+    }
+    if input.app.is_some() && (input.coordinate.is_some() || input.start_coordinate.is_some()) && input.window_id.is_none() {
+        return Err(ToolError::InvalidInput("app coordinates require the window_id from an observation of that window".into()));
+    }
+    Ok(())
+}
+
+fn target_of(input: &ComputerInput) -> Option<ComputerTarget> {
+    input.app.as_ref().map(|app| ComputerTarget { app: app.clone(), window_id: input.window_id })
+}
+
+fn checked_window(answer: &Value, expected: Option<u64>) -> Result<Option<u64>, ToolError> {
+    let mut found = None;
+    for pointer in [
+        "/result/action/targetWindowId", "/result/snapshot/window/id", "/result/tree/window/id", "/result/window/id",
+        "/action/targetWindowId", "/snapshot/window/id", "/tree/window/id", "/window/id",
+    ] {
+        if let Some(window_id) = answer.pointer(pointer).and_then(Value::as_u64).filter(|window_id| *window_id > 0) {
+            if expected.is_some_and(|expected| expected != window_id) || found.is_some_and(|found| found != window_id) {
+                return Err(ToolError::Execution("window_scope_mismatch: the selected window did not answer; its contents were not returned".into()));
+            }
+            found = Some(window_id);
+        }
+    }
+    if expected.is_some() && found.is_none() {
+        return Err(ToolError::Execution("window_scope_unverified: the answer did not identify the selected window; its contents were not returned".into()));
+    }
+    Ok(found)
+}
+
+fn unverified_action_receipt(action: &str, window_id: Option<u64>, scope_error: &ToolError, ran: usize) -> Result<String, ToolError> {
+    to_pretty_json(json!({
+        "ok": true,
+        "action": action,
+        "input_dispatched": true,
+        "completion_verified": false,
+        "ran": ran,
+        "window_scope": { "verified": false, "requested_window_id": window_id, "reason": scope_error.to_string() },
+        "do_not_repeat": true,
+        "next": "Input was already dispatched. Its target or result could not be verified. Do not repeat it; observe the requested app/window and check the result first.",
+        "result": null,
+        "screenshot": null,
+        "looked_after": null,
+    }))
+}
+
 /// The command line an action means. Pure: the table a test pins, in three
 /// families — looking and input, apps and the system, the meaning layer.
 pub(crate) fn argv_for(input: &ComputerInput) -> Result<Vec<String>, ToolError> {
     let action = input.action.trim();
-    if input.background == Some(true) && action != WALK_ACTION {
-        return Err(ToolError::InvalidInput("background is supported by app walks; it cannot be dropped or applied to global input".into()));
-    }
+    validate_scope(input)?;
     if input.mark.is_some() && !MARK_CLICKS.contains(&action) {
         return Err(ToolError::InvalidInput(format!("`mark` belongs to the clicks ({}), not `{action}`", MARK_CLICKS.join(", "))));
     }
@@ -603,6 +692,14 @@ pub(crate) fn argv_for(input: &ComputerInput) -> Result<Vec<String>, ToolError> 
             "unknown Computer action {action:?}; one of {}",
             action_names(|_| true).join(", ")
         )));
+    }
+    if let Some(window_id) = input.window_id {
+        if !matches!(action, "window" | "observe" | "find" | "read" | "wait_for") {
+            push(&mut argv, &["--window-id", &window_id.to_string()]);
+        }
+    }
+    if input.background == Some(true) && action != WALK_ACTION {
+        argv.push("--background".into());
     }
     if presses(action) {
         if let Some(kind) = input.confirming.as_deref() {
@@ -666,6 +763,9 @@ fn argv_click(action: &str, input: &ComputerInput, argv: &mut Vec<String>) -> Re
             push(argv, &["--mouse-button", button, "--click-count", count, "--no-screenshot"]);
         } else if let Some(mark) = input.mark {
             push(argv, &["click", "--mark", &mark.to_string(), "--mouse-button", button, "--click-count", count]);
+        } else if let Some(app) = input.app.as_deref() {
+            let [horizontal, vertical] = point(input.coordinate, action, "coordinate")?;
+            push(argv, &["click", "--app", app, "--x", &number(horizontal), "--y", &number(vertical), "--mouse-button", button, "--click-count", count, "--no-screenshot"]);
         } else {
             let [x, y] = point(input.coordinate, action, "coordinate")?;
             push(argv, &["mouse-click", "--x", &number(x), "--y", &number(y), "--mouse-button", button, "--click-count", count]);
@@ -679,7 +779,13 @@ fn argv_click(action: &str, input: &ComputerInput, argv: &mut Vec<String>) -> Re
 
 fn argv_look_and_input(action: &str, input: &ComputerInput, argv: &mut Vec<String>) -> Result<bool, ToolError> {
     match action {
-        "screenshot" => push(argv, &["screenshot"]),
+        "screenshot" => {
+            if let Some(app) = input.app.as_deref() {
+                push(argv, &["observe", "--app", app]);
+            } else {
+                push(argv, &["screenshot"]);
+            }
+        }
         "observe" => {
             // An explicit look says what changed since this model's last one.
             push(argv, &["observe", "--diff"]);
@@ -707,12 +813,24 @@ fn argv_look_and_input(action: &str, input: &ComputerInput, argv: &mut Vec<Strin
         "left_click_drag" => {
             let [from_x, from_y] = point(input.start_coordinate, action, "start_coordinate")?;
             let [to_x, to_y] = point(input.coordinate, action, "coordinate")?;
-            push(argv, &[
-                "mouse-drag", "--from-x", &number(from_x), "--from-y", &number(from_y), "--to-x", &number(to_x), "--to-y", &number(to_y),
-            ]);
+            if let Some(app) = input.app.as_deref() {
+                push(argv, &["drag", "--app", app, "--no-screenshot"]);
+            } else {
+                push(argv, &["mouse-drag"]);
+            }
+            push(argv, &["--from-x", &number(from_x), "--from-y", &number(from_y), "--to-x", &number(to_x), "--to-y", &number(to_y)]);
         }
         "scroll" => {
             let [x, y] = point(input.coordinate, action, "coordinate")?;
+            if let Some(app) = input.app.as_deref() {
+                let direction = need(input.scroll_direction.as_deref(), action, "scroll_direction")?;
+                let pages = input.scroll_pages.unwrap_or(1.0);
+                if !["up", "down", "left", "right"].contains(&direction) || !pages.is_finite() || pages <= 0.0 {
+                    return Err(ToolError::InvalidInput("app scrolling needs a direction and positive finite scroll_pages".into()));
+                }
+                push(argv, &["scroll", "--app", app, "--x", &number(x), "--y", &number(y), "--direction", direction, "--pages", &number(pages), "--no-screenshot"]);
+                return Ok(true);
+            }
             let clicks = i64::from(input.scroll_amount.unwrap_or(1)) * SCROLL_LINES_PER_CLICK;
             let (flag, lines) = match need(input.scroll_direction.as_deref(), action, "scroll_direction")? {
                 "up" => ("--dy", clicks),
@@ -729,7 +847,11 @@ fn argv_look_and_input(action: &str, input: &ComputerInput, argv: &mut Vec<Strin
         }
         "key" => {
             let chord = need(input.text.as_deref(), action, "text")?;
-            push(argv, &["key", "--key", chord]);
+            if let Some(app) = input.app.as_deref() {
+                push(argv, &["press-key", "--app", app, "--key", chord, "--no-screenshot"]);
+            } else {
+                push(argv, &["key", "--key", chord]);
+            }
         }
         "hold_key" => {
             let chord = need(input.text.as_deref(), action, "text")?;
@@ -741,7 +863,11 @@ fn argv_look_and_input(action: &str, input: &ComputerInput, argv: &mut Vec<Strin
                 .text
                 .as_deref()
                 .ok_or_else(|| ToolError::InvalidInput("`type` needs `text`".into()))?;
-            push(argv, &["type", "--text", text]);
+            if let Some(app) = input.app.as_deref() {
+                push(argv, &["type-text", "--app", app, "--text", text, "--no-screenshot"]);
+            } else {
+                push(argv, &["type", "--text", text]);
+            }
         }
         "wait" => {
             let ms = seconds_to_ms(input.duration, action)?;
@@ -1165,6 +1291,7 @@ fn present_observation(
     window_id: Option<u64>,
     diff: bool,
 ) -> Option<Value> {
+    let window_id = checked_window(answer, None).ok().flatten().or(window_id);
     // An app's look is the app the window resolved, whatever name the
     // model asked it by — one window under three names is one observation.
     let app = answer
@@ -1307,22 +1434,27 @@ fn with_marked_look(mut argv: Vec<String>, ctx: &ToolContext) -> Result<Vec<Stri
 /// changed since the model's own last look is not shown — the model's last
 /// picture is still the screen — and says so (`changed` is null when there
 /// was nothing to compare with).
-fn look(road: &ComputerRoad, ctx: &ToolContext, words: &[&str], app: Option<&str>) -> Result<Value, LookError> {
+fn look(road: &ComputerRoad, ctx: &ToolContext, words: &[&str], target: Option<&ComputerTarget>) -> Result<Value, LookError> {
     let mut asked = words.to_vec();
-    if let Some(app) = app {
-        asked.extend(["--app", app]);
+    let window_id = target.and_then(|target| target.window_id).map(|window_id| window_id.to_string());
+    if let Some(target) = target {
+        asked.extend(["--app", target.app.as_str()]);
+    }
+    if let Some(window_id) = window_id.as_deref() {
+        asked.extend(["--window-id", window_id]);
     }
     let argv = look_argv(&asked, looks_carry_marks());
     let mut answer = call_shim(road, &as_viewer(argv, ctx), ctx.cwd.as_deref()).map_err(LookError::Road)?;
     if let Some(refused) = refusal(&answer) {
         return Err(LookError::Refused(refused));
     }
+    checked_window(&answer, target.and_then(|target| target.window_id)).map_err(LookError::Road)?;
     let changed = if words.contains(&LOOK_DIFF_FLAG) {
         answer.pointer("/result/changed").and_then(Value::as_array).map(|regions| !regions.is_empty())
     } else {
         None
     };
-    let staged = present_observation(&mut answer, ctx, app, None, words.contains(&LOOK_DIFF_FLAG));
+    let staged = present_observation(&mut answer, ctx, target.map(|target| target.app.as_str()), target.and_then(|target| target.window_id), words.contains(&LOOK_DIFF_FLAG));
     let mut screen = shown(answer.get("result").cloned().unwrap_or(Value::Null), ctx.computer_frame());
     // This look is a picture: an app's whole tree is the model's to ask for
     // (`observe` with `app`), not a cost every look after a batch pays.
@@ -1363,10 +1495,10 @@ fn looks_carry_marks() -> bool {
 /// painting (`observe --settle`: on the eye's repaints, or by looking until
 /// the table's settle), then looks once; nothing changed says
 /// `changed: false`. It looks at `app`'s window when the acts were in one.
-fn look_after(road: &ComputerRoad, ctx: &ToolContext, settle: bool, app: Option<&str>) -> Value {
+fn look_after(road: &ComputerRoad, ctx: &ToolContext, settle: bool, target: Option<&ComputerTarget>) -> Value {
     let words = if settle { LOOK_AFTER_ARGV } else { FRAME_LOOK_ARGV };
     let mut answer =
-        look(road, ctx, words, app).unwrap_or_else(|error| json!({ "error": ToolError::from(error).to_string() }));
+        look(road, ctx, words, target).unwrap_or_else(|error| json!({ "error": ToolError::from(error).to_string() }));
     if !settle {
         answer["waited_for_settle"] = Value::Bool(false);
     }
@@ -1379,15 +1511,24 @@ fn look_after(road: &ComputerRoad, ctx: &ToolContext, settle: bool, app: Option<
 /// screen recording) is still one the hand can move: the frame is then the
 /// screen itself, and what goes in and what comes out stay in points.
 fn first_look(inputs: &[&ComputerInput], ctx: &ToolContext, road: &ComputerRoad) -> Result<Option<Value>, ToolError> {
-    if ctx.computer_frame().is_some() || !inputs.iter().any(|input| needs_a_frame(input)) {
+    let Some(input) = inputs.iter().find(|input| needs_a_frame(input)) else {
         return Ok(None);
+    };
+    let target = target_of(input);
+    if ctx.computer_frame().is_some() {
+        if target.as_ref().is_none_or(|target| ctx.computer_target_frame(target).is_some()) {
+            return Ok(None);
+        }
+        if speaks_in_pixels(input) {
+            return Err(ToolError::InvalidInput("the last picture is not of this app/window; observe the selected window before using its coordinates".into()));
+        }
     }
-    match look(road, ctx, FRAME_LOOK_ARGV, None) {
+    match look(road, ctx, FRAME_LOOK_ARGV, target.as_ref()) {
         Ok(seen) if seen["staged"] != true || ctx.computer_frame().is_none() => Err(ToolError::Execution(
             "the first desktop picture could not be shown with its coordinate frame; observe again before acting in picture pixels".into(),
         )),
         Ok(seen) => Ok(Some(seen)),
-        Err(LookError::Refused(refused)) if refused.code == error_code::PERMISSION_DENIED => {
+        Err(LookError::Refused(refused)) if refused.code == error_code::PERMISSION_DENIED && target.is_none() => {
             ctx.set_computer_frame(ShotFrame::UNIT);
             Ok(Some(json!({ "blind": true, "why": refused.message })))
         }
@@ -1400,12 +1541,12 @@ fn first_look(inputs: &[&ComputerInput], ctx: &ToolContext, road: &ComputerRoad)
 /// looked at — so a batch on a phone's mirrored window is shown that window,
 /// settled and legible, not the whole desktop the model would only look at
 /// again.
-fn acted_in(acts: &[&ComputerInput], ctx: &ToolContext) -> Option<String> {
+fn acted_in(acts: &[&ComputerInput], ctx: &ToolContext) -> Option<ComputerTarget> {
     acts.iter()
         .rev()
         .filter(|act| act.action.trim() != QUIT_ACTION)
-        .find_map(|act| act.app.clone())
-        .or_else(|| ctx.computer_observed_app())
+        .find_map(|act| target_of(act))
+        .or_else(|| ctx.computer_observed_target())
 }
 
 /// A batch's command line: each step spelled exactly as the same action
@@ -1445,11 +1586,26 @@ fn batch_argv(steps: &[ComputerInput], frame: ShotFrame) -> Result<Vec<String>, 
 /// One batch: checked whole by the core before any look is paid, one trip
 /// down the shim, one look after — and each step answered under the model's
 /// own action name, in its picture's pixels.
-fn run_computer_batch(input: ComputerInput, ctx: &ToolContext, road: &ComputerRoad) -> Result<String, ToolError> {
+fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &ComputerRoad) -> Result<String, ToolError> {
+    if input.app.is_some() || input.window_id.is_some() || input.window.is_some() {
+        return Err(ToolError::InvalidInput("put app/window_id on each batch step; a batch-level window selector cannot be ignored".into()));
+    }
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
-    let steps = input
+    let mut steps = input
         .steps
+        .take()
         .ok_or_else(|| ToolError::InvalidInput("`batch` needs `steps`: the actions to run in order".into()))?;
+    for step in &mut steps {
+        if input.background == Some(true) {
+            if step.background == Some(false) {
+                return Err(ToolError::InvalidInput("a background batch cannot contain a foreground step".into()));
+            }
+            step.background = Some(true);
+        }
+        if step.app.is_some() && (step.coordinate.is_some() || step.start_coordinate.is_some()) {
+            return Err(ToolError::InvalidInput("an app-coordinate action needs its own observed window frame; run it separately or use label-based batch steps".into()));
+        }
+    }
     zerocode_core::computer_use::parse_command(&batch_argv(&steps, ShotFrame::UNIT)?).map_err(ToolError::InvalidInput)?;
     let first_look = first_look(&steps.iter().collect::<Vec<_>>(), ctx, road)?;
     let frame = ctx.computer_frame().unwrap_or(ShotFrame::UNIT);
@@ -1466,6 +1622,14 @@ fn run_computer_batch(input: ComputerInput, ctx: &ToolContext, road: &ComputerRo
     for report in &mut reports {
         let n = report["n"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(0);
         if let Some(step) = n.checked_sub(1).and_then(|at| steps.get(at)) {
+            if report["ok"] == Value::Bool(true) && step.action.trim() != "window" {
+                if let Err(error) = checked_window(report.get("result").unwrap_or(&Value::Null), step.window_id) {
+                    if steps.iter().take(ran).any(|step| acts(step.action.trim())) {
+                        return unverified_action_receipt(BATCH_ACTION, step.window_id, &error, ran);
+                    }
+                    return Err(error);
+                }
+            }
             report["verb"] = Value::String(step.action.trim().to_string());
         }
     }
@@ -1482,7 +1646,7 @@ fn run_computer_batch(input: ComputerInput, ctx: &ToolContext, road: &ComputerRo
     });
     let ran_steps: Vec<&ComputerInput> = steps.iter().take(ran).collect();
     let acted = ran_steps.iter().any(|step| acts(step.action.trim()));
-    let looked_after = (LOOK_AFTER_ACT && acted).then(|| look_after(road, ctx, settle, acted_in(&ran_steps, ctx).as_deref()));
+    let looked_after = (LOOK_AFTER_ACT && acted).then(|| look_after(road, ctx, settle, acted_in(&ran_steps, ctx).as_ref()));
     to_pretty_json(json!({
         "ok": refused.is_none(),
         "action": BATCH_ACTION,
@@ -1673,7 +1837,7 @@ fn run_computer_walk(input: &ComputerInput, ctx: &ToolContext, road: &ComputerRo
         .find_map(|(surface, target)| target.as_deref().map(|target| (surface, target)))
         .unwrap_or_default();
     let looked_after = (LOOK_AFTER_ACT && walked.pressed > 0 && walked.status.leaves_an_unread_screen() && input.app.is_some())
-        .then(|| look_after(road, ctx, settle, input.app.as_deref()));
+        .then(|| look_after(road, ctx, settle, target_of(input).as_ref()));
     let mut result = answer.get("result").cloned().unwrap_or(Value::Null);
     let last = result.get(walk_words::ROWS).and_then(Value::as_array).and_then(|rows| rows.last()).cloned();
     if let Some(result) = result.as_object_mut() {
@@ -1696,7 +1860,7 @@ fn run_computer_walk(input: &ComputerInput, ctx: &ToolContext, road: &ComputerRo
 
 pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<String, ToolError> {
     let input: ComputerInput = from_value(input)?;
-    if input.background == Some(true) {
+    if input.background == Some(true) && input.action.trim() != BATCH_ACTION {
         argv_for(&input)?;
     }
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
@@ -1713,7 +1877,11 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
     // A command the tool cannot spell costs no look.
     argv_for(&input)?;
     let first_look = first_look(&[&input], ctx, road)?;
-    let frame = ctx.computer_frame();
+    let frame = if let Some(target) = target_of(&input).filter(|_| input.coordinate.is_some() || input.start_coordinate.is_some()) {
+        Some(ctx.computer_target_frame(&target).ok_or_else(|| ToolError::InvalidInput("the selected window has no matching picture frame".into()))?)
+    } else {
+        ctx.computer_frame()
+    };
     let input = in_points(input, frame.unwrap_or(ShotFrame::UNIT))?;
     let mut argv = with_marked_look(argv_for(&input)?, ctx)?;
     // A process whose looks carry marks numbers its own looks too.
@@ -1727,8 +1895,17 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
     if let Some(refused) = refusal(&answer) {
         return Err(refused.into());
     }
+    let returned_window = match checked_window(&answer, input.window_id.filter(|_| action != "window")) {
+        Ok(window_id) => window_id,
+        Err(error) if acts(&action) => return unverified_action_receipt(&action, input.window_id, &error, 1),
+        Err(error) => return Err(error),
+    };
+    let mut after_target = if action == "window" { None } else { acted_in(&[&input], ctx) };
+    if let Some(target) = &mut after_target {
+        target.window_id = returned_window.or(target.window_id);
+    }
     let staged = if LOOKS.contains(&action.as_str()) {
-        let (app, window_id) = if action == "observe" { (input.app.as_deref(), input.window_id) } else { (None, None) };
+        let (app, window_id) = (input.app.as_deref(), input.window_id);
         present_observation(&mut answer, ctx, app, window_id, action == "observe")
     } else {
         let staged = stage_screenshot(&mut answer, ctx);
@@ -1737,6 +1914,11 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
         }
         staged
     };
+    if action == "screenshot" && input.app.is_some() {
+        if let Some(result) = answer.get_mut("result").and_then(Value::as_object_mut) {
+            result.remove("tree");
+        }
+    }
     let mut result = shown(answer.get("result").cloned().unwrap_or(Value::Null), ctx.computer_frame());
     // A picture of its own (a screenshot, a zoom) carries no numbers: after it
     // there is no marked look to click by until one is shown again.
@@ -1745,7 +1927,8 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
     }
     // One look after the act, so the model sees what it did.
     let looked_after =
-        (LOOK_AFTER_ACT && acts(&action)).then(|| look_after(road, ctx, settle, acted_in(&[&input], ctx).as_deref()));
+        (LOOK_AFTER_ACT && acts(&action) && (input.window_id.is_none() || after_target.is_some()))
+            .then(|| look_after(road, ctx, settle, after_target.as_ref()));
     to_pretty_json(json!({
         "ok": true,
         "action": action,
@@ -1768,6 +1951,278 @@ mod tests {
 
     fn screen_with_look(look: &str) -> Value {
         json!({ "marks": { "lookId": look, "items": [] } })
+    }
+
+    #[test]
+    fn an_app_click_keeps_the_selected_window_for_each_target_kind() {
+        for target in [json!({"element_index": 32}), json!({"label": "Save"}), json!({"label": "Save", "ocr": true})] {
+            let mut fields = json!({"action": "left_click", "app": "Fixture", "window_id": 41});
+            fields.as_object_mut().unwrap().extend(target.as_object().unwrap().clone());
+            let command = zerocode_core::computer_use::parse_command(&argv_for(&input(fields)).unwrap()).unwrap();
+            assert_eq!(command.params.get("windowId"), Some(&json!(41)), "a click must not choose the app's other window");
+        }
+    }
+
+    #[test]
+    fn background_app_input_never_becomes_global_desktop_input() {
+        for (action, extra, method) in [
+            ("left_click", json!({"label": "Save"}), ComputerMethod::Click),
+            ("key", json!({"text": "Tab"}), ComputerMethod::PressKey),
+            ("type", json!({"text": "fixture text"}), ComputerMethod::TypeText),
+            ("scroll", json!({"coordinate": [20, 40], "scroll_direction": "down"}), ComputerMethod::Scroll),
+        ] {
+            let mut fields = json!({"action": action, "app": "Fixture", "window_id": 41, "background": true});
+            fields.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let command = zerocode_core::computer_use::parse_command(&argv_for(&input(fields)).expect("scoped background input")).unwrap();
+            assert_eq!(command.method, method);
+            assert_eq!(command.params.get("app"), Some(&json!("Fixture")));
+            assert_eq!(command.params.get("windowId"), Some(&json!(41)));
+            assert_eq!(command.params.get("background"), Some(&json!(true)));
+            assert_eq!(command.params.get("noScreenshot"), Some(&json!(true)));
+        }
+    }
+
+    #[test]
+    fn a_selected_app_coordinate_is_window_local_not_a_global_mouse_click() {
+        let fields = input(json!({"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [20, 40]}));
+        let translated = in_points(fields, ShotFrame::new((1000.0, 500.0), 0.5).unwrap()).unwrap();
+        assert_eq!(translated.coordinate, Some([40.0, 80.0]));
+        let command = zerocode_core::computer_use::parse_command(&argv_for(&translated).unwrap()).unwrap();
+        assert_eq!(command.method, ComputerMethod::Click);
+        assert_eq!(command.params.get("windowId"), Some(&json!(41)));
+    }
+
+    #[test]
+    fn unsupported_window_or_app_selectors_are_refused_instead_of_discarded() {
+        for fields in [
+            json!({"action": "left_click", "app": "Fixture", "window": "Target document", "label": "Save"}),
+            json!({"action": "left_click", "window_id": 41, "coordinate": [20, 40]}),
+            json!({"action": "left_click", "app": "Fixture", "window_id": 0, "label": "Save"}),
+            json!({"action": "cursor_position", "app": "Fixture"}),
+            json!({"action": "hold_key", "app": "Fixture", "window_id": 41, "text": "Tab", "duration": 0.1}),
+            json!({"action": "walk", "app": "Fixture", "window_id": 41, "goal": "Read the target document"}),
+        ] {
+            assert!(argv_for(&input(fields.clone())).is_err(), "unsupported scope was silently ignored: {fields}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_first_find_picture_is_of_the_same_selected_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let answer: Value = serde_json::from_str(&run_computer(&json!({"action":"find","app":"Fixture","window_id":41,"label":"Save"}), &ctx, &road).unwrap()).unwrap();
+        let asked = answer["first_look"]["screen"]["said"].as_str().unwrap_or_default();
+        assert!(asked.contains("--app Fixture") && asked.contains("--window-id 41"), "preparation observed another surface: {asked}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_picture_after_a_click_keeps_the_clicked_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let answer: Value = serde_json::from_str(&run_computer(&json!({"action":"left_click","app":"Fixture","window_id":41,"label":"Save"}), &ctx, &road).unwrap()).unwrap();
+        let asked = answer["looked_after"]["screen"]["said"].as_str().unwrap_or_default();
+        assert!(asked.contains("--app Fixture") && asked.contains("--window-id 41"), "verification observed another window: {asked}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn another_windows_answer_is_never_staged_or_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        std::fs::write(dir.path().join("forced-window"), "52").unwrap();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let error = run_computer(&json!({"action":"observe","app":"Fixture","window_id":41}), &ctx, &road)
+            .expect_err("a different window must not reach the model");
+        assert!(!error.to_string().contains("unrelated-window-fixture"));
+        assert_eq!(staged(&ctx), 0);
+    }
+
+    #[test]
+    fn every_window_identity_must_agree_before_its_contents_are_used() {
+        for result in [
+            json!({"window": {"id": 41}}),
+            json!({"tree": {"window": {"id": 41}}}),
+            json!({"snapshot": {"window": {"id": 41}}}),
+            json!({"action": {"targetWindowId": 41}}),
+        ] {
+            assert_eq!(checked_window(&result, Some(41)).unwrap(), Some(41));
+            assert_eq!(checked_window(&json!({"result": result}), Some(41)).unwrap(), Some(41));
+        }
+        for answer in [
+            json!({}),
+            json!({"result": {"window": {"id": 0}}}),
+            json!({"result": {"window": {"id": 52}}}),
+            json!({"result": {"action": {"targetWindowId": 41}, "snapshot": {"window": {"id": 52}}}}),
+        ] {
+            assert!(checked_window(&answer, Some(41)).is_err(), "unproved scope: {answer}");
+        }
+        assert!(checked_window(&json!({"window": {"id": 41}, "tree": {"window": {"id": 52}}}), None).is_err());
+    }
+
+    #[test]
+    fn windows_post_action_source_keeps_the_requested_window_selector() {
+        let source = include_str!("../../../../crates/zerocode-shell/src/computer_use/windows/provider.rs");
+        let body = source.split_once("fn run_action(").unwrap().1.split_once("/// An answer as JSON;").unwrap().0;
+        assert_eq!(body.matches("self.observe(").count(), 1, "post-action observation must not retry another window");
+        assert!(!body.contains("remove(\"windowId\")"));
+        assert!(!body.contains("remove(\"windowIndex\")"));
+    }
+
+    #[test]
+    fn background_reads_preserve_the_same_selected_window() {
+        for action in ["screenshot", "observe", "find", "read", "wait_for"] {
+            let mut fields = json!({"action": action, "app": "Fixture", "window_id": 41, "background": true});
+            if matches!(action, "find" | "wait_for") { fields["label"] = json!("Save"); }
+            let command = zerocode_core::computer_use::parse_command(&argv_for(&input(fields)).unwrap()).unwrap();
+            assert_eq!(command.params.get("windowId"), Some(&json!(41)), "{action}");
+            assert_eq!(command.params.get("background"), Some(&json!(true)), "{action}");
+        }
+    }
+
+    #[test]
+    fn app_scrolling_keeps_its_units_and_never_accepts_desktop_wheel_clicks() {
+        let fields = input(json!({"action": "scroll", "app": "Fixture", "window_id": 41, "coordinate": [20, 40], "scroll_direction": "down", "scroll_pages": 0.25}));
+        let command = zerocode_core::computer_use::parse_command(&argv_for(&fields).unwrap()).unwrap();
+        assert_eq!(command.params.get("pages"), Some(&json!(0.25)));
+        for fields in [
+            json!({"action": "scroll", "app": "Fixture", "window_id": 41, "coordinate": [20, 40], "scroll_direction": "down", "scroll_amount": 2}),
+            json!({"action": "scroll", "coordinate": [20, 40], "scroll_direction": "down", "scroll_pages": 2}),
+            json!({"action": "scroll", "app": "Fixture", "window_id": 41, "coordinate": [20, 40], "scroll_direction": "down", "scroll_pages": 0}),
+        ] {
+            assert!(argv_for(&input(fields)).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coordinates_from_one_window_cannot_be_used_in_another_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        run_computer(&json!({"action": "observe", "app": "Fixture", "window_id": 41}), &ctx, &road).unwrap();
+        let error = run_computer(&json!({"action": "left_click", "app": "Fixture", "window_id": 52, "coordinate": [20, 40]}), &ctx, &road).unwrap_err();
+        assert!(error.to_string().contains("last picture is not of this app/window"));
+        assert_eq!(calls(dir.path()), ["observe"]);
+        run_computer(&json!({"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [20, 40]}), &ctx, &road).unwrap();
+        assert_eq!(calls(dir.path()), ["observe", "click", "observe"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn actual_observed_window_is_kept_even_when_the_request_named_only_the_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        std::fs::write(dir.path().join("forced-window"), "41").unwrap();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        run_computer(&json!({"action": "observe", "app": "Fixture"}), &ctx, &road).unwrap();
+        assert_eq!(ctx.computer_observed_target(), Some(ComputerTarget { app: "Fixture".into(), window_id: Some(41) }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_scope_is_refused_before_any_read_or_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        for fields in [
+            json!({"action": "left_click", "app": "Fixture", "window": "A document", "label": "Save"}),
+            json!({"action": "key", "window_id": 41, "text": "Tab"}),
+            json!({"action": "batch", "window_id": 41, "steps": [{"action": "type", "text": "fixture"}]}),
+            json!({"action": "batch", "background": true, "steps": [{"action": "key", "app": "Fixture", "window_id": 41, "text": "Tab", "background": false}]}),
+            json!({"action": "batch", "background": true, "steps": [{"action": "key", "text": "Tab"}]}),
+            json!({"action": "batch", "steps": [{"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [20, 40]}]}),
+        ] {
+            assert!(run_computer(&fields, &ctx, &road).is_err(), "{fields}");
+        }
+        assert!(calls(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_batches_pin_every_step_and_the_final_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let steps = json!([
+            {"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Save"},
+            {"action": "type", "app": "Fixture", "window_id": 52, "text": "fixture"},
+        ]);
+        let reports = json!([
+            {"n": 1, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+            {"n": 2, "ok": true, "result": {"snapshot": {"window": {"id": 52}}}},
+        ]);
+        std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 2, "steps": reports}}).to_string()).unwrap();
+        let answer: Value = serde_json::from_str(&run_computer(&json!({"action": "batch", "background": true, "steps": steps}), &ctx, &road).unwrap()).unwrap();
+        let commands: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(dir.path().join("batch-commands")).unwrap()).unwrap();
+        for (command, window_id) in commands.iter().zip([41, 52]) {
+            let parsed = zerocode_core::computer_use::parse_command(command).unwrap();
+            assert_eq!(parsed.params.get("windowId"), Some(&json!(window_id)));
+            assert_eq!(parsed.params.get("background"), Some(&json!(true)));
+        }
+        let observed = answer["looked_after"]["screen"]["said"].as_str().unwrap();
+        assert!(observed.contains("--app Fixture") && observed.contains("--window-id 52"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_batch_never_discloses_a_different_windows_step_result_or_invites_repeating_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let reports = json!([{"n": 1, "ok": true, "result": {"window": {"id": 52}, "text": "unrelated-window-fixture"}}]);
+        std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 1, "steps": reports}}).to_string()).unwrap();
+        let response = run_computer(&json!({"action": "batch", "steps": [{"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Save"}]}), &ctx, &road).unwrap();
+        let receipt: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(receipt["ok"], true);
+        assert_eq!(receipt["input_dispatched"], true);
+        assert_eq!(receipt["completion_verified"], false);
+        assert_eq!(receipt["do_not_repeat"], true);
+        assert!(receipt["result"].is_null());
+        assert!(response.contains("window_scope_mismatch"));
+        assert!(!response.contains("unrelated-window-fixture"));
+        assert_eq!(calls(dir.path()), ["batch"]);
+        assert_eq!(staged(&ctx), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sent_click_with_unverified_scope_returns_a_receipt_not_a_repeatable_error() {
+        for reported_window in ["52", "0"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            std::fs::write(dir.path().join("forced-window"), reported_window).unwrap();
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            let response = run_computer(&json!({"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Save"}), &ctx, &road).unwrap();
+            let receipt: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(receipt["ok"], true);
+            assert_eq!(receipt["input_dispatched"], true);
+            assert_eq!(receipt["completion_verified"], false);
+            assert_eq!(receipt["do_not_repeat"], true);
+            assert_eq!(receipt["window_scope"]["requested_window_id"], 41);
+            assert!(receipt["result"].is_null());
+            assert!(!response.contains("unrelated-window-fixture"));
+            assert_eq!(calls(dir.path()), ["click"]);
+            assert_eq!(staged(&ctx), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_app_screenshot_keeps_its_window_but_does_not_repeat_the_accessibility_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let script = std::fs::read_to_string(&road.program).unwrap().replace("\"cursor\":", "\"tree\":{\"text\":\"fixture tree\"},\"cursor\":");
+        std::fs::write(&road.program, script).unwrap();
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let response = run_computer(&json!({"action": "screenshot", "app": "Fixture", "window_id": 41}), &ctx, &road).unwrap();
+        let receipt: Value = serde_json::from_str(&response).unwrap();
+        assert!(receipt["result"].get("tree").is_none());
+        assert_eq!(ctx.computer_observed_target().unwrap().window_id, Some(41));
+        assert_eq!(staged(&ctx), 1);
     }
 
     /// A process whose looks carry marks (`ZO_COMPUTER_MARKS`, the bench's
@@ -2146,6 +2601,15 @@ mod tests {
         let script = r#"#!/bin/sh
 verb="$1"
 echo "$verb" >> '@DIR@/calls'
+window=''
+previous=''
+for word in "$@"; do
+  [ "$previous" = --window-id ] && window="$word"
+  previous="$word"
+done
+[ -f '@DIR@/forced-window' ] && window="$(cat '@DIR@/forced-window')"
+target=''
+[ -n "$window" ] && target=',"window":{"id":'"$window"'},"fixture":"unrelated-window-fixture"'
 [ "$verb" = batch ] && { printf '%s' "$3" > '@DIR@/batch-commands'; cat '@DIR@/batch'; echo; exit 0; }
 [ "$verb" = walk ] && [ -f '@DIR@/walk' ] && { printf '%s\n' "$*" > '@DIR@/walk-argv'; cat '@DIR@/walk'; echo; exit 0; }
 if [ "$verb" = handoff ]; then
@@ -2163,7 +2627,7 @@ case "$verb" in
   *) look='' ;;
 esac
 printf '%s
-' '{"ok":true,"result":{"verb":"'"$verb"'","said":"'"$*"'","cursor":{"x":200,"y":80}'"$look"'}}'
+' '{"ok":true,"result":{"verb":"'"$verb"'","said":"'"$*"'","cursor":{"x":200,"y":80}'"$look$target"'}}'
 "#
         .replace("@PNG@", &png.display().to_string())
         .replace("@CHANGED@", &changed.display().to_string())
@@ -2861,7 +3325,7 @@ printf '%s
                 "ocr": true, "window": "w", "window_id": 7, "kind": "move", "x": 5, "y": 6, "width": 7, "height": 8,
                 "timeout_ms": 100, "absent": true, "confirming": "payment", "force": true, "reset_budget": true,
                 "last": 3, "after": 2, "min_confidence": 0.5, "until": "quiet", "after_text": "f",
-                "offset": [1, 2]
+                "offset": [1, 2], "scroll_pages": 0.5, "background": true
             })
         };
         let argv = |fields: &Value| argv_for(&input(fields.clone())).map_err(|error| error.to_string());
@@ -2873,14 +3337,27 @@ printf '%s
         };
         let mut read = std::collections::BTreeSet::from(["action".to_string()]);
         for action in action_names(|action| methods(action).any(ComputerMethod::batches)) {
-            for whole in [full(action), without_coordinate(full(action))] {
-            for field in whole.as_object().unwrap().keys().filter(|field| *field != "action") {
-                let mut without = whole.clone();
-                without.as_object_mut().unwrap().remove(field);
-                if argv(&whole) != argv(&without) {
-                    read.insert(field.clone());
+            for app_scope in [false, true] {
+                let mut fields = full(action);
+                let object = fields.as_object_mut().unwrap();
+                if action != "wait_for" { object.remove("window"); }
+                if !app_scope || (!app_scoped_action(action) && action != "activate") { object.remove("app"); }
+                if action != "window" && (!object.contains_key("app") || !app_scoped_action(action)) { object.remove("window_id"); }
+                if !object.contains_key("app") || matches!(action, "left_click_drag" | "activate") { object.remove("background"); }
+                if action == "scroll" && object.contains_key("app") {
+                    object.remove("scroll_amount");
+                } else {
+                    object.remove("scroll_pages");
                 }
-            }
+                for whole in [fields.clone(), without_coordinate(fields)] {
+                    for field in whole.as_object().unwrap().keys().filter(|field| *field != "action") {
+                        let mut without = whole.clone();
+                        without.as_object_mut().unwrap().remove(field);
+                        if argv(&whole) != argv(&without) {
+                            read.insert(field.clone());
+                        }
+                    }
+                }
             }
         }
         let listed: std::collections::BTreeSet<String> = STEP_FIELDS.iter().map(|field| (*field).to_string()).collect();
