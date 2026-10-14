@@ -62,8 +62,9 @@ pub(super) struct WorktreeLanding {
     /// 경우에만 안다 — 내용으로만 들어간 것은 그런 커밋이 없다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) landed_in: Option<LandedIn>,
-    /// `unlanded`일 때 비교 ref에는 있고 이 머리에는 없는 **커밋** 수(`ahead`는
-    /// 내용 기준, 이것은 커밋 기준이다). 못 읽었거나 `unlanded`가 아니면 없다.
+    /// 비교 ref에는 있고 이 머리에는 없는 **커밋** 수(`ahead`는 내용 기준, 이것은 커밋
+    /// 기준이다). `unlanded`인 행과, 저장 안 한 변경이 있는 행(커밋 없이 고치는 중인 폴더도,
+    /// t-45314)에만 센다. 못 읽었거나 둘 다 아니면 없다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) behind: Option<u32>,
     /// `unlanded`일 때 비교 ref에 합쳐 본 결과. `Some`에 `total`이 0이면 합쳐 보았고
@@ -71,7 +72,14 @@ pub(super) struct WorktreeLanding {
     /// `unlanded`가 아니거나 git이 답하지 못했다. 못 본 것을 충돌 없음이라 하지 않는다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) conflict: Option<LandingConflict>,
-    /// `behind`가 [`LANDING_BEHIND_WARN`] 이상이다 — 사이드바가 칩에 「main보다 N 뒤」를
+    /// 저장 안 한 변경과, 이 폴더가 비교 ref와 갈라진 뒤(merge-base) 비교 ref가 바꾼 파일의
+    /// 교집합 (t-45314). 파일 단위다 — 같은 줄을 고쳤는지는 보지 않으므로 충돌이라 하지 않는다.
+    /// 추적하지 않는 파일은 `dirty`처럼 세지 않는다. `Some`에 `total`이 0이면 읽었고 겹치는
+    /// 파일이 없다. 없으면 저장 안 한 변경이 없거나 **읽지 못했다** — 읽지 못한 것을 겹침 없음이라
+    /// 하지 않는다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) overlap: Option<LandingOverlap>,
+    /// `unlanded`인 행의 `behind`가 [`LANDING_BEHIND_WARN`] 이상이다 — 사이드바가 칩에 「main보다 N 뒤」를
     /// 말할 만큼 멀다. 기준을 화면이 아니라 이 파일이 쥔다: 뒤따르는 원장 알림이 같은
     /// 기준으로 워커를 깨우므로, 화면과 알림이 서로 다른 숫자를 쓰지 않는다.
     pub(super) far_behind: bool,
@@ -84,9 +92,19 @@ pub(super) const LANDING_CONFLICT_NAMES: usize = 5;
 /// 드러나는 것은 뒤처진 수가 클수록 잦다 — 10-04에 71·74커밋 뒤처진 두 브랜치가 그랬다.
 pub(super) const LANDING_BEHIND_WARN: u32 = 20;
 
+/// 이름을 적는 겹친 파일의 수. 더 있으면 `total`만 센다.
+pub(super) const LANDING_OVERLAP_NAMES: usize = 5;
+
 /// 합치면 충돌하는 파일: 전체 수와, 이름을 적는 앞쪽 몇 개.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct LandingConflict {
+    pub(super) total: u32,
+    pub(super) files: Vec<String>,
+}
+
+/// 저장 안 한 변경 가운데 비교 ref도 바꾼 파일: 전체 수와, 이름순으로 이름을 적는 앞쪽 몇 개.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct LandingOverlap {
     pub(super) total: u32,
     pub(super) files: Vec<String>,
 }
@@ -118,6 +136,7 @@ impl WorktreeLanding {
             landed_in: None,
             behind: None,
             conflict: None,
+            overlap: None,
             far_behind: false,
         }
     }
@@ -259,6 +278,9 @@ fn unpoisoned<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[derive(Clone)]
 struct HeldLanding {
     key: String,
+    /// `overlap`을 읽은 작업 폴더 변경의 지문([`changes_mark`]). 열쇠(머리·비교 ref·브랜치)와
+    /// 이것이 같으면 겹침도 같다 — 겹침이 읽는 것은 그 셋과 바뀐 추적 파일의 목록뿐이다.
+    changes: Option<u64>,
     landing: WorktreeLanding,
 }
 
@@ -514,6 +536,7 @@ fn hold_failure(path: &Path, base: Option<&LandingBase>) {
         path.to_path_buf(),
         HeldLanding {
             key: String::new(),
+            changes: None,
             landing: WorktreeLanding::failed(base),
         },
     );
@@ -584,31 +607,85 @@ fn worktree_landing_within(
     // The `status` goes first: it is what proves git can answer for this
     // directory at all. A directory that is gone, or not a repository, is
     // `failed` — held so it is asked again, never answered with a guess.
+    // Version two under `-z` also names the changed files as they are — a
+    // rename by both its names, nothing quoted — for the overlap (t-45314),
+    // out of the one `status` the row already pays for.
     let Ok(status) = landing_git(
         host,
         path,
-        &["status", "--porcelain", "--untracked-files=no"],
+        &["status", "--porcelain=v2", "-z", "--untracked-files=no"],
     ) else {
         hold_failure(path, Some(base));
         return WorktreeLanding::failed(Some(base));
     };
-    let mut landing = match held {
-        Some(held) if held.key == key => held.landing,
-        _ => classify_landing(host, path, branch, head, base),
+    let changed = zerocode_orchestrator::changed_tracked_paths(&status);
+    let changes = changes_mark(&changed);
+    let (mut landing, same_changes) = match held {
+        Some(held) if held.key == key => (held.landing, held.changes == Some(changes)),
+        _ => (classify_landing(host, path, branch, head, base), false),
     };
     landing.compare_ref = base.name.clone();
     landing.ref_updated_ms = base.updated_ms;
     landing.dirty = !status.trim().is_empty();
+    refresh_unsaved(host, path, head, base, &mut landing, &changed, same_changes);
     refresh_ignored(host, path, &mut landing, dirty_ttl);
     landing.dirty_checked_ms = Some(now_ms());
     unpoisoned(landing_cache()).insert(
         path.to_path_buf(),
         HeldLanding {
             key,
+            changes: Some(changes),
             landing: landing.clone(),
         },
     );
     landing
+}
+
+/// 바뀐 추적 파일 목록의 지문. 같은 파일을 더 고쳐도 파일 단위 겹침은 그대로이므로 내용이 아니라
+/// 이름만 본다.
+fn changes_mark(changed: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    changed.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// 저장 안 한 변경이 있는 행의 뒤처진 수와 겹침을 맞춘다 (t-45314).
+///
+/// 커밋 없이 고치는 중인 폴더는 1a·1b의 칸이 모두 비어, 두 작업이 같은 파일을 고쳐도 한쪽이
+/// main에 들어가기 전에는 아무도 몰랐다(격차 G1). 둘 다 저장 안 한 변경이 있는 행에만 선다:
+/// 깨끗한 행은 겹칠 것이 없고, `unlanded`가 아닌 깨끗한 행(손대지 않은 폴더)은 1b처럼 뒤처진
+/// 수도 싣지 않는다. `unlanded`의 뒤처진 수는 분류가 이미 세었으므로 그대로 둔다.
+///
+/// 뒤처진 수는 머리와 비교 ref에만 매이므로 열쇠가 같은 동안 한 번 센다. 겹침은 바뀐 파일
+/// 목록에도 매이므로, 열쇠와 변경의 지문이 함께 같은 동안(`same_changes`) 다시 묻지 않는다.
+/// 읽지 못한 겹침은 없음으로 두고 다음 새로고침이 다시 묻는다.
+fn refresh_unsaved(
+    host: &Host,
+    path: &Path,
+    head: Option<&str>,
+    base: &LandingBase,
+    landing: &mut WorktreeLanding,
+    changed: &[String],
+    same_changes: bool,
+) {
+    if !landing.dirty {
+        if landing.state != "unlanded" {
+            landing.behind = None;
+        }
+        landing.overlap = None;
+        return;
+    }
+    let (Some(head), Some(target)) = (head, base.oid.as_deref()) else {
+        landing.overlap = None;
+        return;
+    };
+    if landing.state != "unlanded" && landing.behind.is_none() {
+        landing.behind = commits_behind(host, path, head, target);
+    }
+    if !same_changes || landing.overlap.is_none() {
+        landing.overlap = overlap_of(host, path, head, target, changed);
+    }
 }
 
 /// Bring a landed row's ignored-files reading up to date — and only once it has
@@ -802,6 +879,7 @@ fn classify_landing(
         landed_in: None,
         behind: None,
         conflict: None,
+        overlap: None,
         far_behind: false,
     };
     let Some(target) = base.oid.as_deref() else {
@@ -878,6 +956,52 @@ fn commits_behind(host: &Host, path: &Path, head: &str, target: &str) -> Option<
         &["rev-list", "--count", &format!("{head}..{target}")],
     )
     .and_then(|said| said.parse().ok())
+}
+
+/// 저장 안 한 변경 가운데, 이 폴더가 비교 ref와 갈라진 뒤(merge-base) 비교 ref도 바꾼 파일
+/// (t-45314). `changed`는 `status`가 이미 읽은 바뀐 추적 파일이다(이름 바꾸기는 옛 이름까지).
+///
+/// 파일 단위다: 같은 파일이면 같은 줄을 고치지 않았어도 센다. 비교 ref 쪽의 이름 바꾸기는
+/// 지운 이름과 새 이름 둘로 센다(`--no-renames`) — 저장 안 한 변경이 옛 이름의 파일을 고쳤어도
+/// 겹침이다. 갈라진 곳이 하나가 아니면(교차 병합) git은 답하지 않는다. 그때와 git이 답하지
+/// 못한 때, 바뀐 파일을 하나도 읽지 못한 때는 없다 — 0이라 하지 않는다.
+fn overlap_of(
+    host: &Host,
+    path: &Path,
+    head: &str,
+    target: &str,
+    changed: &[String],
+) -> Option<LandingOverlap> {
+    if changed.is_empty() {
+        return None;
+    }
+    let said = landing_git(
+        host,
+        path,
+        &[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            "--merge-base",
+            head,
+            target,
+        ],
+    )
+    .ok()?;
+    let moved: std::collections::HashSet<&str> =
+        said.split('\0').filter(|name| !name.is_empty()).collect();
+    let mut files: Vec<String> = changed
+        .iter()
+        .filter(|name| moved.contains(name.as_str()))
+        .cloned()
+        .collect();
+    files.sort_unstable();
+    files.dedup();
+    let total = u32::try_from(files.len()).unwrap_or(u32::MAX);
+    files.truncate(LANDING_OVERLAP_NAMES);
+    Some(LandingOverlap { total, files })
 }
 
 /// 병합 시험(`merge-tree --write-tree --name-only`)의 답.
@@ -2728,6 +2852,129 @@ mod tests {
                 said.get("overlap").is_none(),
                 "an overlap git refused to read was said: {said}"
             );
+        }
+
+        /// MEASUREMENT (ignored): the git time a row with unsaved changes adds
+        /// to its refresh — its distance behind and its overlap with the
+        /// compare ref — on the checkouts this repository really has, reading
+        /// only: every git call goes through the landing's own lock-free door,
+        /// and nothing is written to a checkout, an index or a ref.
+        ///
+        /// For each linked checkout the sidebar classifies, it times the
+        /// `status` the refresh ran before this stage (`--porcelain`) beside
+        /// the one it runs now (`--porcelain=v2 -z`, which also names the
+        /// changed files); for each one with unsaved changes, the two reads
+        /// this stage adds (`rev-list --count`, `diff-tree --merge-base`).
+        /// Medians of `ROUNDS`. The sum over the dirty rows is the most one
+        /// refresh of the whole list adds: the two reads run again only when a
+        /// row's head, its compare ref or its set of changed files moves, not
+        /// every `LANDING_DIRTY_TTL`. No path is printed; the rows are numbered.
+        ///
+        /// Run on purpose:
+        /// `cargo test -p zerocode-shell --bin zerocode-shell worktree_landing::tests::uncommitted::measure -- --ignored --nocapture`.
+        #[test]
+        #[ignore = "a measurement, run on purpose: -- --ignored --nocapture"]
+        fn measure_what_a_row_with_unsaved_changes_adds_on_this_repositorys_checkouts() {
+            use std::time::Instant;
+            const ROUNDS: usize = 5;
+            fn median(mut times: Vec<f64>) -> f64 {
+                times.sort_by(f64::total_cmp);
+                times[times.len() / 2]
+            }
+            fn timed(run: &mut dyn FnMut()) -> f64 {
+                median(
+                    (0..ROUNDS)
+                        .map(|_| {
+                            let began = Instant::now();
+                            run();
+                            began.elapsed().as_secs_f64() * 1_000.0
+                        })
+                        .collect(),
+                )
+            }
+
+            let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let checkouts = zerocode_orchestrator::Orchestrator::open(here)
+                .and_then(|repository| repository.list())
+                .expect("this repository's checkouts");
+            let main = checkouts
+                .iter()
+                .find(|one| one.is_main)
+                .expect("its own checkout");
+            let host = Host::for_workspace(&main.path);
+            let base = resolve_landing_base(&host, &main.path, None);
+            let target = base.oid.clone().expect("a compare ref");
+            let mut rows = Vec::new();
+            let mut added = Vec::new();
+            let (mut before_sum, mut after_sum) = (0.0, 0.0);
+            for (number, checkout) in checkouts
+                .iter()
+                .filter(|one| !one.is_main && !one.bare && !one.prunable && one.path.is_dir())
+                .enumerate()
+            {
+                let Some(head) = checkout.head.as_deref() else {
+                    continue;
+                };
+                let at = checkout.path.as_path();
+                let before = timed(&mut || {
+                    let _ = landing_git(
+                        &host,
+                        at,
+                        &["status", "--porcelain", "--untracked-files=no"],
+                    );
+                });
+                let mut status = String::new();
+                let after = timed(&mut || {
+                    status = landing_git(
+                        &host,
+                        at,
+                        &["status", "--porcelain=v2", "-z", "--untracked-files=no"],
+                    )
+                    .unwrap_or_default();
+                });
+                before_sum += before;
+                after_sum += after;
+                let changed = zerocode_orchestrator::changed_tracked_paths(&status);
+                let dirty = !status.trim().is_empty();
+                let mut row = json!({
+                    "row": number + 1,
+                    "dirty": dirty,
+                    "changedFiles": changed.len(),
+                    "statusBeforeMs": before,
+                    "statusAfterMs": after,
+                });
+                if dirty {
+                    let mut behind = None;
+                    let behind_ms =
+                        timed(&mut || behind = commits_behind(&host, at, head, &target));
+                    let mut overlap = None;
+                    let overlap_ms =
+                        timed(&mut || overlap = overlap_of(&host, at, head, &target, &changed));
+                    added.push(behind_ms + overlap_ms);
+                    row["behind"] = json!(behind);
+                    row["overlapTotal"] = json!(overlap.map(|one| one.total));
+                    row["behindMs"] = json!(behind_ms);
+                    row["overlapMs"] = json!(overlap_ms);
+                    row["addedMs"] = json!(behind_ms + overlap_ms);
+                }
+                rows.push(row);
+            }
+            assert!(
+                !rows.is_empty(),
+                "this repository has no linked checkout to measure"
+            );
+            let summary = json!({
+                "checkouts": rows.len(),
+                "dirty": added.len(),
+                "rounds": ROUNDS,
+                "addedMedianMs": (!added.is_empty()).then(|| median(added.clone())),
+                "addedMaxMs": added.iter().copied().reduce(f64::max),
+                "addedSumMs": added.iter().sum::<f64>(),
+                "statusBeforeSumMs": before_sum,
+                "statusAfterSumMs": after_sum,
+                "rows": rows,
+            });
+            println!("LANDING_UNSAVED_COST {summary}");
         }
     }
 }
