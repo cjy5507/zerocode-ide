@@ -1136,6 +1136,27 @@ mod tests {
         assert_eq!(code.style.fg, Some(crate::tui::ansi::Color::CYAN));
     }
 
+    /// 링크의 이름표는 글자와 스타일(청록 밑줄)이 그대로이고, 주소는 이름표를 감싼
+    /// OSC 8 로 터미널에 간다. 비ASCII 바이트는 퍼센트 인코딩되고, 상대 경로처럼 열 수
+    /// 없는 목적지는 주소 없이 이름표만 남는다.
+    #[test]
+    fn a_link_label_keeps_its_style_and_carries_its_checked_address() {
+        let line = &render("[문서](https://example.com/문서/a) and [notes](docs/notes.md)")[0];
+        assert_eq!(line.plain(), "문서 and notes");
+        for label in ["문서", "notes"] {
+            let span = line.spans.iter().find(|span| span.text == label).expect("label");
+            assert!(span.style.underline, "{label}");
+            assert_eq!(span.style.fg, Some(crate::tui::ansi::Color::CYAN), "{label}");
+        }
+        let mut rendered = String::new();
+        crate::tui::ansi::write_spans(line, &mut rendered);
+        assert!(
+            rendered.contains("\u{1b}]8;;https://example.com/%EB%AC%B8%EC%84%9C/a\u{1b}\\문서\u{1b}]8;;\u{1b}\\"),
+            "{rendered:?}"
+        );
+        assert_eq!(rendered.matches("\u{1b}]8;;").count(), 2, "one link opened and closed: {rendered:?}");
+    }
+
     #[test]
     fn blockquotes_get_the_green_marker() {
         let lines = render("> quoted");

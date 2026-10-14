@@ -761,6 +761,27 @@ mod tests {
         let wide = Line::from_text("한글한글").truncated(5);
         assert_eq!(wide.plain(), "한글…");
     }
+
+    /// 나란히 선 두 링크: 앞 링크를 닫고서야 다음 링크를 연다. 같은 주소가 이어지면
+    /// 열린 채로 가고, 줄이 끝나기 전에는 늘 닫는다.
+    #[test]
+    fn a_link_closes_before_the_next_one_opens_and_before_the_row_ends() {
+        let line = &crate::tui::markdown::render(
+            "[a](https://a.example/)[b](https://b.example/)[**c**](https://b.example/) d",
+        )[0];
+        let mut out = String::new();
+        write_spans(line, &mut out);
+        let open = |address: &str| format!("\u{1b}]8;;{address}\u{1b}\\");
+        let close = "\u{1b}]8;;\u{1b}\\";
+        assert_eq!(
+            out,
+            format!(
+                "\u{1b}[4m\u{1b}[36;49m{}a{close}{}b\u{1b}[1mc{close}\u{1b}[22m\u{1b}[24m\u{1b}[39;49m d",
+                open("https://a.example/"),
+                open("https://b.example/"),
+            )
+        );
+    }
 }
 
 #[cfg(test)]
