@@ -1091,7 +1091,10 @@ pub const NO_ATTEMPT: &str = "none";
 
 /// A commit, as a person or an agent writes one: seven hex digits or more.
 /// Anything else is not a commit — a report id, a branch name, a sentence.
-pub(crate) fn commit_named(text: &str) -> Option<String> {
+/// Public because the window measures a task's other checkouts against the
+/// commit an attempt handed in (t-45336) and must read [`Dispatch::source`] the
+/// way the ledger wrote it.
+pub fn commit_named(text: &str) -> Option<String> {
     let text = text.trim();
     (text.len() >= 7 && text.chars().all(|c| c.is_ascii_hexdigit())).then(|| text.to_string())
 }
@@ -18832,6 +18835,15 @@ const WORKER_GATE_CONTEXT: &str = "For code changes in a Rust workspace, the wor
 /// the same for every agent that takes a task, so every agent is told the same.
 /// The sentence says the rule's gist itself, so a CLI that has not installed the
 /// skill yet is still told what to do.
+/// What a worker is told, once and at launch, about the checkouts it cuts
+/// (t-45336): one per task, and a checkout cut beside it for a red, a verify
+/// or evidence goes before the hand-in. The person saw one task stand in the
+/// sidebar four times — a worker's before, evidence, green and verify
+/// checkouts — and finished work pile up. The window takes back what the
+/// handed-in head holds, and the ledger tells the coordinator when a hand-in
+/// leaves one standing; this is the rule both of those enforce.
+const WORKER_ONE_CHECKOUT_CONTEXT: &str = "Keep one checkout per task: a checkout you cut beside your own — for a red, a verify or evidence — goes before you hand in (`git worktree remove`, never with force), and evidence you name lives outside every checkout. The ledger tells the coordinator when a hand-in leaves one standing, and the window takes back what your handed-in head holds.";
+
 const WORKER_PLAIN_REPORT_CONTEXT: &str = "What you write for a person to read — the summary, a report, a notice — follows the `plain-report` skill. Put the result first, write one fact in a sentence, give every number a unit, and use no codebase metaphors.";
 
 /// The sentence that sends a worker to `zerocode-find` before it reads code

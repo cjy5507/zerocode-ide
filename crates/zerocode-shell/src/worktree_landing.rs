@@ -284,6 +284,19 @@ fn held_landing(path: &Path) -> Option<HeldLanding> {
     unpoisoned(landing_cache()).get(path).cloned()
 }
 
+/// The compare ref a checkout's work is in, when the sidebar's last answer for
+/// it was `landed` (t-45336): what the cleanup review offers landed work for,
+/// and what a landed task's branches are measured against before they go. Read
+/// from the cache only, like the ledger's witness — a checkout the sidebar
+/// never classified is not called landed.
+pub(crate) fn landed_compare_ref(path: &Path) -> Option<String> {
+    let held = held_landing(path)?;
+    (held.landing.state == "landed")
+        .then_some(held.landing.compare_ref)
+        .flatten()
+        .filter(|compare| !compare.is_empty())
+}
+
 /// A TTL in the epoch milliseconds the readings are stamped in.
 fn millis(ttl: Duration) -> i64 {
     i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX)
@@ -327,6 +340,9 @@ pub(crate) fn witness_for(
         compare_oid: compare_oid.to_string(),
         git,
         occupied,
+        // What a hand-in left beside this checkout is the reclaim's to say, not
+        // the landing cache's; the sweep that hands this to the ledger adds it.
+        beside: Vec::new(),
     })
 }
 

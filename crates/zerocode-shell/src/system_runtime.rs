@@ -150,6 +150,37 @@ pub(super) fn process_cwds(_pids: &[u32]) -> HashMap<u32, String> {
     HashMap::new()
 }
 
+/// How many processes on this machine stand anywhere inside `dir` — any
+/// process, not only this window's panes (t-45336): a person's shell in another
+/// terminal app, a build running there, an agent another window launched.
+///
+/// `None` when the table could not be read — no `lsof`, an empty answer (this
+/// process always has a working directory, so an empty table is a failure and
+/// not a quiet machine), or a platform this does not read. A caller deciding
+/// whether a directory may be deleted keeps it on `None`.
+///
+/// The whole table in one call, a few hundred rows: asked only of a checkout
+/// that every other question has already let go, right before it would go.
+#[cfg(target_os = "macos")]
+pub(super) fn processes_standing_in(dir: &Path) -> Option<usize> {
+    let raw = run_lsof(&["-nP", "-d", "cwd", "-F", "pn"])?;
+    let cwds = parse_lsof_cwds(&raw);
+    if cwds.is_empty() {
+        return None;
+    }
+    let real = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    Some(
+        cwds.values()
+            .filter(|cwd| Path::new(cwd).starts_with(&real) || Path::new(cwd).starts_with(dir))
+            .count(),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn processes_standing_in(_dir: &Path) -> Option<usize> {
+    None
+}
+
 /// Read lsof's field output into rows.
 ///
 /// The format is stateful: `p` opens a process and `c` names it, then each

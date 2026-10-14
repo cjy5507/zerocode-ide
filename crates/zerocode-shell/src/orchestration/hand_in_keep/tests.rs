@@ -85,6 +85,7 @@ impl Bench {
             },
             roots: Roots {
                 checkout: Some(self.checkout().canonicalize().expect("canonical")),
+                task: None,
                 temps: Vec::new(),
             },
         }
@@ -485,6 +486,67 @@ fn a_link_is_not_followed_out_of_a_folder_and_a_named_link_is_judged_where_it_po
     assert!(
         !walk_text(bench.store.root()).contains("# outside"),
         "a link led out of the checkout"
+    );
+}
+
+/// A checkout the worker cut beside its own for the same task is a root too
+/// (t-45336): a file the hand-in names in its red checkout is kept before the
+/// window takes that checkout back. Another task's checkout, another
+/// repository's, and a folder that is no checkout stay outside — and without
+/// the task the checkout beside is outside, as it always was.
+#[test]
+fn a_checkout_beside_the_workers_own_for_the_same_task_is_a_root_and_nothing_else_is() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let base = dir.path().canonicalize().expect("a real folder");
+    // Two repositories' records of their linked worktrees, the way git keeps them.
+    let listed = base.join("repo/.git/worktrees");
+    let other_listed = base.join("other/.git/worktrees");
+    let linked = |folder: &str, list: &Path| {
+        let at = base.join(folder);
+        std::fs::create_dir_all(list.join(folder)).expect("git's record of it");
+        std::fs::create_dir_all(&at).expect("the checkout");
+        std::fs::write(
+            at.join(".git"),
+            format!("gitdir: {}\n", list.join(folder).display()),
+        )
+        .expect("its .git file");
+        at
+    };
+    let own = linked("t-1", &listed);
+    let red = linked("t-1-red", &listed);
+    let another_task = linked("t-2-red", &listed);
+    let another_repository = linked("t-1-copy", &other_listed);
+    let loose = base.join("t-1-loose");
+    std::fs::create_dir_all(&loose).expect("a folder");
+    for folder in [&red, &another_task, &another_repository, &loose] {
+        std::fs::write(folder.join("red.log"), "the red\n").expect("a file");
+    }
+    // No temporary folders: the scratch directory is one, and would hold everything.
+    let roots = |task: Option<&str>| Roots {
+        checkout: Some(own.clone()),
+        task: task.map(str::to_string),
+        temps: Vec::new(),
+    };
+    let task = roots(Some("t-1"));
+    assert!(
+        task.holds(&red.join("red.log")),
+        "the task's red checkout is outside the roots"
+    );
+    assert!(
+        !task.holds(&another_task.join("red.log")),
+        "another task's checkout is inside the roots"
+    );
+    assert!(
+        !task.holds(&another_repository.join("red.log")),
+        "another repository's checkout is inside the roots"
+    );
+    assert!(
+        !task.holds(&loose.join("red.log")),
+        "a folder that is no checkout is inside the roots"
+    );
+    assert!(
+        !roots(None).holds(&red.join("red.log")),
+        "roots without a task reach beside the checkout"
     );
 }
 

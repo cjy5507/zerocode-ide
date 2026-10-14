@@ -105,6 +105,7 @@ import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
 import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testSidebarRoles } from "./sidebar-roles.mjs";
+import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
 import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
@@ -337,6 +338,8 @@ suite("sidebar-landing-state", testSidebarLandingState);
 suite("sidebar-activity", testSidebarActivity);
 // Who is the coordinator, a worker or the person, read off the sidebar, the tabs and the desk (t-45938).
 suite("sidebar-roles", testSidebarRoles);
+// One task, one sidebar row: the checkouts a worker cut beside its own fold under it (t-45336).
+suite("sidebar-task-fold", testSidebarTaskFold);
 suite("landing-alerts", testLandingAlerts);
 suite("land-check-letter", testLandCheckLetter);
 /* The conversation view against the Claude Code extension's own webview
