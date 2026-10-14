@@ -2611,15 +2611,6 @@ pub(super) async fn browser_loop(
         // whose bridge deadline already passed must not have its command
         // run late as a surprise side effect — `is_closed` is that caller
         // hanging up (1-g4 리뷰 발견 3).
-        let revision = match browser_revision(&app, &request.argv) {
-            Ok(revision) => revision,
-            Err(error) => {
-                let _ = request
-                    .answer
-                    .send(browser_refused(format!("zerocode-browser: {error}\n")));
-                continue;
-            }
-        };
         let steering = app.clone();
         tauri::async_runtime::spawn(async move {
             if request.answer.is_closed() {
@@ -2636,7 +2627,7 @@ pub(super) async fn browser_loop(
             .or_else(|| computer_use::evidence::session_dir(now_epoch_ms()));
             let mut reply = request.answer;
             tokio::select! {
-                answer = browser_step_at(&steering, request.pane.as_deref(), evidence.as_deref(), &request.argv, &request.argv, revision) => { let _ = reply.send(answer); }
+                answer = browser_step_at(&steering, request.pane.as_deref(), evidence.as_deref(), &request.argv, &request.argv, request.workspace_revision) => { let _ = reply.send(answer); }
                 _ = reply.closed() => {}
             }
         });
@@ -3119,30 +3110,9 @@ pub(super) async fn browser_step(
     argv: &[String],
     logged: &[String],
 ) -> zerocode_hookd::TeamAnswer {
-    // Read before the await, and with the pane's own actor laid on it: a lone
-    // command names its pane, a walk's step stands under the walk's actor.
-    let revision = match browser_revision(app, argv) {
-        Ok(revision) => revision,
-        Err(error) => return browser_refused(format!("zerocode-browser: {error}\n")),
-    };
-    browser_step_at(app, pane, dir, argv, logged, revision).await
-}
-
-fn browser_revision(app: &AppHandle, argv: &[String]) -> Result<Option<u64>, String> {
-    let Some(label) = argv.get(1).filter(|_| {
-        !matches!(
-            argv.first().map(String::as_str),
-            Some("open" | "list" | "tabs")
-        )
-    }) else {
-        return Ok(None);
-    };
-    Ok(app
-        .state::<AppState>()
-        .shell_runtime()
-        .browser_workspaces
-        .snapshot(label)?
-        .map(|snapshot| snapshot.revision))
+    // Nested callers carry the selected observation in the same common
+    // option as the CLI. Missing input stays missing until admission.
+    browser_step_at(app, pane, dir, argv, logged, None).await
 }
 
 async fn browser_step_at(
@@ -5267,14 +5237,17 @@ impl computer_use::enter::Typer for LiveTyper<'_> {
         )
     }
 
-    fn browser(&mut self, words: &[String]) -> Result<(), computer_use::ComputerUseError> {
+    fn browser(
+        &mut self,
+        words: &[String],
+        workspace_revision: Option<u64>,
+    ) -> Result<(), computer_use::ComputerUseError> {
         let app = self.window()?;
         input_answered(&tauri::async_runtime::block_on(answer_browser_command(
             app,
             words,
             self.pane.as_deref(),
-            browser_revision(app, words)
-                .map_err(|error| computer_use::ComputerUseError::new("input_failed", error))?,
+            workspace_revision,
         )))
     }
 
@@ -6639,6 +6612,13 @@ pub(super) async fn answer_browser_command(
     pane: Option<&str>,
     expected_revision: Option<u64>,
 ) -> zerocode_hookd::TeamAnswer {
+    let command =
+        match zerocode_core::agent_browser::parse_workspace_command(argv, expected_revision) {
+            Ok(command) => command,
+            Err(error) => return browser_refused(format!("zerocode-browser: {error}\n")),
+        };
+    let argv = &command.argv;
+    let expected_revision = command.workspace_revision;
     let state = app.state::<AppState>();
     let actor = step_actor(app, pane);
     let pane = actor.pane.as_deref();
@@ -6704,14 +6684,99 @@ pub(super) async fn answer_browser_command(
             return browser_refused(format!("zerocode-browser: {error}\n"));
         }
     };
-    let answer = dispatch_browser_command(app, argv, pane, expected_revision).await;
+    let mut answer = dispatch_browser_command(app, argv, pane, expected_revision).await;
     if let Some(operation) = operation {
-        operation.finish(answer.exit_code == 0);
+        if answer.exit_code == 0 && zerocode_core::agent_browser::observes(verb) {
+            if step_actor(app, pane).pane.as_deref() != pane {
+                operation.finish(false);
+                answer = browser_refused(
+                    "zerocode-browser: workspace_actor_required: 관측을 요청한 에이전트 판이 더 이상 없습니다\n",
+                );
+            } else {
+                match operation.finish_observation() {
+                    Ok(revision) => {
+                        if let Err(error) = stamp_browser_observation(&mut answer, argv, revision) {
+                            answer = browser_refused(format!("zerocode-browser: {error}\n"));
+                        }
+                    }
+                    Err(error) => answer = browser_refused(format!("zerocode-browser: {error}\n")),
+                }
+            }
+        } else {
+            operation.finish(answer.exit_code == 0);
+        }
     }
     if let Some(operation) = actor_operation {
         operation.finish(answer.exit_code == 0);
     }
     answer
+}
+
+/// Add only the backend's checked read-completion revision. Page words stay
+/// inside their existing fence; watch snapshots never pass this function.
+fn stamp_browser_observation(
+    answer: &mut zerocode_hookd::TeamAnswer,
+    argv: &[String],
+    revision: u64,
+) -> Result<(), String> {
+    use zerocode_core::agent_browser::{WORKSPACE_REVISION_KEY, WORKSPACE_REVISION_LINE};
+    let json = argv.first().is_some_and(|verb| verb != "read")
+        && argv.iter().skip(2).any(|word| word == "--json");
+    if json {
+        let mut value: serde_json::Value = serde_json::from_str(&answer.stdout)
+            .map_err(|_| "workspace_observation_invalid: 관측 JSON을 확인할 수 없습니다")?;
+        let object = value
+            .as_object_mut()
+            .ok_or("workspace_observation_invalid: 관측 JSON 객체가 필요합니다")?;
+        object.insert(WORKSPACE_REVISION_KEY.into(), json!(revision));
+        answer.stdout = format!("{value}\n");
+    } else {
+        if !answer.stdout.ends_with('\n') {
+            answer.stdout.push('\n');
+        }
+        answer
+            .stdout
+            .push_str(&format!("{WORKSPACE_REVISION_LINE}{revision}\n"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod browser_observation_stamp_tests {
+    use super::*;
+
+    #[test]
+    fn json_stamps_use_the_backend_revision_and_preserve_page_result_keys() {
+        for verb in ["marks", "fields", "screenshot"] {
+            let argv = [verb, "browser-1", "--json"].map(str::to_string);
+            let mut answer = browser_said(
+                "{\"items\":[],\"untrustedExternalContent\":true,\"workspaceRevision\":99,\"result\":{\"bytes\":12}}\n",
+            );
+            stamp_browser_observation(&mut answer, &argv, 7).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&answer.stdout).unwrap();
+            assert_eq!(value["workspaceRevision"], 7);
+            assert_eq!(value["untrustedExternalContent"], true);
+            assert_eq!(value["result"]["bytes"], 12);
+            assert_eq!(value["items"], json!([]));
+        }
+    }
+
+    #[test]
+    fn plain_and_full_reads_put_the_stamp_after_the_existing_page_fence() {
+        for argv in [
+            vec!["read".into(), "browser-1".into()],
+            vec!["read".into(), "browser-1".into(), "--full".into()],
+        ] {
+            let mut answer = page_said("browser-1", "workspaceRevision: 99\n");
+            stamp_browser_observation(&mut answer, &argv, 7).unwrap();
+            assert!(answer.stdout.ends_with("workspaceRevision: 7\n"));
+            assert!(answer.stdout.contains("END UNTRUSTED EXTERNAL CONTENT"));
+            assert_eq!(
+                zerocode_core::agent_browser::observation_revision(&answer.stdout),
+                Some(7)
+            );
+        }
+    }
 }
 
 struct PendingBrowserOpen {

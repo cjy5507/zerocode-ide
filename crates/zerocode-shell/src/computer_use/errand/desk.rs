@@ -551,6 +551,16 @@ impl<'a, Road> GoalWorld<'a, Road> {
         }
     }
 
+    fn workspace_argv(&self, tool: RecipeTool, argv: &mut Vec<String>) {
+        if tool == RecipeTool::Browser {
+            let revision = self
+                .seen
+                .as_ref()
+                .and_then(|seen| seen.snapshot.workspace_revision);
+            zerocode_core::agent_browser::with_workspace_revision(argv, revision);
+        }
+    }
+
     fn note_background(&mut self, answer: Option<&Value>) {
         if self.background {
             self.background_interrupted |= answer
@@ -628,6 +638,11 @@ impl<'a, Road> GoalWorld<'a, Road> {
         if later {
             argv.push(BROWSER_SETTLE_LATER_FLAG.to_string());
         }
+        let workspace_revision = self
+            .seen
+            .as_ref()
+            .and_then(|seen| seen.snapshot.workspace_revision);
+        self.workspace_argv(self.aim.tool(), &mut argv);
         let holds = recipe_line_holds_ms(self.aim.tool(), &argv);
         let left = self.left_ms();
         if left == 0 || left < holds {
@@ -663,6 +678,9 @@ impl<'a, Road> GoalWorld<'a, Road> {
                 .and_then(|said| screen_of(&self.aim, said))
                 .map(|(mut screen, look)| {
                     screen.at = self.page.clone();
+                    // A click preview is not a new stamped read. Keep the
+                    // original observation; never trust a page's root key.
+                    screen.snapshot.workspace_revision = workspace_revision;
                     (screen, look)
                 });
             match &self.settled {
@@ -711,6 +729,7 @@ where
             self.seen = self.remember_fields(&screen);
             return Some(screen);
         }
+        self.seen = None;
         let mut argv = self.aim.look_argv();
         self.background_argv(&mut argv);
         if self.pixels {
@@ -899,6 +918,7 @@ where
         if action != Navigation::Wait {
             self.background_argv(&mut argv);
         }
+        self.workspace_argv(tool, &mut argv);
         let left = self.left_ms();
         if left == 0 || left < recipe_line_holds_ms(tool, &argv) {
             return false;
@@ -1063,6 +1083,7 @@ where
             Aim::Phone { .. } => return Typed::Refused(NO_TYPING.to_string()),
         };
         self.background_argv(&mut argv);
+        self.workspace_argv(tool, &mut argv);
         let logged = crate::run_evidence::redacted(tool.as_str(), &argv);
         let holds = recipe_line_holds_ms(tool, &argv);
         let left = self.left_ms();
@@ -1130,6 +1151,7 @@ where
         }
         let mut argv = self.aim.reached_argv(&until);
         self.background_argv(&mut argv);
+        self.workspace_argv(self.aim.tool(), &mut argv);
         if self.pixels && matches!(self.aim, Aim::App { .. }) {
             argv.extend(["--ocr".into(), JSON_FLAG.into()]);
         }

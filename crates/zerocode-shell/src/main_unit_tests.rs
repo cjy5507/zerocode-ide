@@ -24334,6 +24334,7 @@ mod handoff_code_road {
         doors: Vec<&'static str>,
         computer: Vec<ComputerCommand>,
         browser: Vec<Vec<String>>,
+        browser_revisions: Vec<Option<u64>>,
         emulator: Vec<Vec<String>>,
         /// What the form refuses with instead of taking the text.
         refuses_with: Option<ComputerUseError>,
@@ -24371,10 +24372,15 @@ mod handoff_code_road {
             }))
         }
 
-        fn browser(&mut self, words: &[String]) -> Result<(), ComputerUseError> {
+        fn browser(
+            &mut self,
+            words: &[String],
+            workspace_revision: Option<u64>,
+        ) -> Result<(), ComputerUseError> {
             let mut form = self.0.borrow_mut();
             form.doors.push("browser");
             form.browser.push(words.to_vec());
+            form.browser_revisions.push(workspace_revision);
             if let Some(error) = form.refuses_with.clone() {
                 return Err(error);
             }
@@ -24395,6 +24401,30 @@ mod handoff_code_road {
                 .map(|pair| pair[1].clone());
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_browser_code_entry_uses_the_revision_given_before_the_person_answered() {
+        let _hand = one_hand();
+        seat_a_person();
+        person_types(TYPED);
+        let form = RefCell::new(Form::default());
+        let said = at_the_door(
+            &[
+                "handoff",
+                "--ask-code",
+                "--reason",
+                A_CODE_REASON,
+                "--into",
+                r##"["browser","type","browser-1","#otp","--workspace-revision","7"]"##,
+                "--json",
+            ],
+            &form,
+        );
+        assert_eq!(said.exit_code, 0, "{}{}", said.stdout, said.stderr);
+        assert_eq!(form.borrow().browser_revisions, [Some(7)]);
+        assert_eq!(form.borrow().doors, ["browser"]);
+        assert!(!holds_the_code(&told(&said)));
     }
 
     fn at_the_door_with(argv: &[String], typer: &mut dyn Typer) -> zerocode_hookd::TeamAnswer {

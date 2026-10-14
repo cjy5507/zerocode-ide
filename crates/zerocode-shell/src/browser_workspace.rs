@@ -46,6 +46,115 @@ mod original_observation_regressions {
             );
         }
     }
+
+    async fn switch(workspaces: &Workspaces, mode: Mode) {
+        let revision = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        let mut transition = workspaces.transition("browser-1", mode, revision).unwrap();
+        transition.wait().await.unwrap();
+        transition.confirm_fence().unwrap();
+        transition.finish().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_request_delayed_before_send_cannot_borrow_a_resumed_agents_new_read() {
+        let workspaces = Workspaces::default();
+        workspaces
+            .register("browser-1", Some("pane-a"), false)
+            .unwrap();
+        let original = workspaces
+            .begin_at("browser-1", Some("pane-a"), "marks", None)
+            .unwrap()
+            .unwrap()
+            .finish_observation()
+            .unwrap();
+        switch(&workspaces, Mode::Human).await;
+        switch(&workspaces, Mode::Agent).await;
+        let current = workspaces
+            .begin_at("browser-1", Some("pane-a"), "marks", None)
+            .unwrap()
+            .unwrap()
+            .finish_observation()
+            .unwrap();
+        assert_ne!(original, current);
+        let delayed = workspaces.begin_at("browser-1", Some("pane-a"), "click", Some(original));
+        assert!(matches!(delayed, Err(error) if error.starts_with("workspace_stale:")));
+        workspaces
+            .begin_at("browser-1", Some("pane-a"), "click", Some(current))
+            .unwrap()
+            .unwrap()
+            .finish(true);
+    }
+
+    #[tokio::test]
+    async fn a_read_interrupted_by_handoff_cannot_issue_a_completion_stamp() {
+        let workspaces = Workspaces::default();
+        workspaces
+            .register("browser-1", Some("pane-a"), false)
+            .unwrap();
+        let reading = workspaces
+            .begin_at("browser-1", Some("pane-a"), "read", None)
+            .unwrap()
+            .unwrap();
+        let revision = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        let mut transition = workspaces
+            .transition("browser-1", Mode::Human, revision)
+            .unwrap();
+        assert!(reading.finish_observation().is_err());
+        transition.wait().await.unwrap();
+        transition.confirm_fence().unwrap();
+        transition.finish().unwrap();
+        assert!(
+            workspaces
+                .snapshot("browser-1")
+                .unwrap()
+                .unwrap()
+                .needs_observation
+        );
+    }
+
+    #[test]
+    fn observation_completion_checks_owner_even_when_the_revision_is_unchanged() {
+        let workspaces = Workspaces::default();
+        workspaces
+            .register("browser-1", Some("pane-a"), false)
+            .unwrap();
+        let reading = workspaces
+            .begin_at("browser-1", Some("pane-a"), "read", None)
+            .unwrap()
+            .unwrap();
+        workspaces
+            .get("browser-1")
+            .unwrap()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .owner = Some("pane-b".into());
+        assert!(reading.finish_observation().is_err());
+    }
+
+    #[test]
+    fn an_original_revision_does_not_authorize_another_actor_or_managed_eval() {
+        let workspaces = Workspaces::default();
+        workspaces
+            .register("browser-1", Some("pane-a"), false)
+            .unwrap();
+        let revision = workspaces
+            .begin_at("browser-1", Some("pane-a"), "fields", None)
+            .unwrap()
+            .unwrap()
+            .finish_observation()
+            .unwrap();
+        let other = workspaces.begin_at("browser-1", Some("pane-b"), "click", Some(revision));
+        assert!(matches!(other, Err(error) if error.starts_with("workspace_owner_mismatch:")));
+        let eval = workspaces.begin_at("browser-1", Some("pane-a"), "eval", Some(revision));
+        assert!(matches!(eval, Err(error) if error.starts_with("workspace_eval_refused:")));
+        assert!(
+            workspaces
+                .begin_at("ordinary", Some("pane-a"), "click", None)
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 const WORKSPACE_CAP: usize = 128;
@@ -369,7 +478,7 @@ impl Workspaces {
             return Ok(None);
         };
         let mut state = workspace.lock()?;
-        if state.closed || expected_revision != Some(state.revision) {
+        if state.closed || expected_revision.is_some_and(|revision| revision != state.revision) {
             return Err(changed());
         }
         if state.owner.as_deref() != Some(actor) {
@@ -380,6 +489,9 @@ impl Workspaces {
         }
         if verb == "eval" {
             return Err("workspace_eval_refused: 전용 작업 브라우저는 임의 eval을 받지 않습니다 — read, fields, fill을 사용하세요".to_string());
+        }
+        if row.changes_page && expected_revision.is_none() {
+            return Err("workspace_revision_required: 작업 브라우저 변경에는 원관측의 workspaceRevision이 필요합니다".to_string());
         }
         if state.in_flight != 0 {
             return Err(
@@ -396,8 +508,9 @@ impl Workspaces {
         Ok(Some(Operation {
             workspace,
             revision,
+            owner: Some(actor.to_string()),
             changes_page: row.changes_page,
-            observes: matches!(verb, "read" | "marks" | "fields" | "screenshot"),
+            observes: zerocode_core::agent_browser::observes(verb),
             completed: false,
             notice: None,
         }))
@@ -428,6 +541,7 @@ impl Workspaces {
         Ok(Some(Operation {
             workspace,
             revision,
+            owner: None,
             changes_page: true,
             observes: false,
             completed: false,
@@ -828,6 +942,7 @@ impl Drop for Frame {
 pub(crate) struct Operation {
     workspace: Arc<Workspace>,
     revision: u64,
+    owner: Option<String>,
     changes_page: bool,
     observes: bool,
     completed: bool,
@@ -840,11 +955,31 @@ impl Operation {
         self
     }
 
+    /// Issue the read's captured revision only while the same actor still
+    /// owns the same Agent control interval. A transition during the await
+    /// makes the whole observation unusable, including an otherwise good PNG.
+    pub(crate) fn finish_observation(mut self) -> Result<u64, String> {
+        let mut state = self.workspace.lock()?;
+        if !self.observes
+            || state.closed
+            || state.revision != self.revision
+            || state.mode != Mode::Agent
+            || state.owner != self.owner
+            || self.owner.is_none()
+        {
+            return Err(changed());
+        }
+        state.needs_observation = false;
+        self.completed = true;
+        Ok(self.revision)
+    }
+
     pub(crate) fn finish(mut self, succeeded: bool) {
         if let Ok(mut state) = self.workspace.lock() {
             if !state.closed
                 && state.revision == self.revision
                 && state.mode == Mode::Agent
+                && state.owner == self.owner
                 && self.observes
             {
                 state.needs_observation = !succeeded;
