@@ -420,6 +420,95 @@ pub(crate) async fn quota_wall_handover(
     .map_err(|error| error.to_string())?
 }
 
+/// 「main으로 올리기」 on an integration batch's card (t-45315): fast-forward the base branch to
+/// the batch's green tip. Like the three presses below: the main window only, after the
+/// renderer's own confirm; the press is the person's, judged by the rules the coordinator's
+/// verb meets and carried on the same road (`press_land_batch`).
+#[tauri::command]
+pub(crate) async fn land_batch_promote(
+    webview: tauri::Webview,
+    run: String,
+    batch: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::press_land_batch(
+            &run,
+            &batch,
+            zerocode_core::orchestration::land_batch::Press::Promote,
+            zerocode_core::orchestration::land_batch::person_press(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 「범인 찾기」 on a red batch's card (t-45315): start the culprit search over its steps.
+#[tauri::command]
+pub(crate) async fn land_batch_bisect(
+    webview: tauri::Webview,
+    run: String,
+    batch: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::press_land_batch(
+            &run,
+            &batch,
+            zerocode_core::orchestration::land_batch::Press::Bisect,
+            zerocode_core::orchestration::land_batch::person_press(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 「범인 빼고 다시 쌓기」 and 「새 main 위에 다시 쌓기」 (t-45315): stack the next generation on
+/// the base branch as it stands, without the members in `drop` — the culprit, or none.
+#[tauri::command]
+pub(crate) async fn land_batch_restack(
+    webview: tauri::Webview,
+    run: String,
+    batch: String,
+    drop: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::press_land_batch(
+            &run,
+            &batch,
+            zerocode_core::orchestration::land_batch::Press::Restack { drop },
+            zerocode_core::orchestration::land_batch::person_press(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 「취소」 on a batch's card (t-45315): end the batch and tombstone its generation's publish.
+#[tauri::command]
+pub(crate) async fn land_batch_cancel(
+    webview: tauri::Webview,
+    run: String,
+    batch: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::press_land_batch(
+            &run,
+            &batch,
+            zerocode_core::orchestration::land_batch::Press::Cancel,
+            zerocode_core::orchestration::land_batch::person_press(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// The task board's worker roster's git facts (t-6588): commits past the
 /// base and changed files for each worker checkout this window catalogues
 /// (`desk_checkout_facts`). git is a process, so the blocking pool.

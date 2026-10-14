@@ -1626,7 +1626,8 @@ pub fn run(
         | Effect::WorkerTerminal { .. }
         | Effect::WorktreeEvidence { .. }
         | Effect::WorkerTranscript { .. }
-        | Effect::LandCheck(..) => answer(zerocode_core::agent_teams::Reply::refused(
+        | Effect::LandCheck(..)
+        | Effect::LandBatch(..) => answer(zerocode_core::agent_teams::Reply::refused(
             "the tmux road reads its own panes only",
         )),
         Effect::Focus { term } => {

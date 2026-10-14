@@ -9966,6 +9966,54 @@ el("project-run-policy").addEventListener("change", (event) => {
   void saveProjectScriptSetting("setup_run_policy", event.target.value);
 });
 
+/* ---- 묶음 통합 큐의 스위치 (t-45315) ----
+ *
+ * 프로젝트 설정의 한 줄. 저장소마다 따로 저장되고(`integration_queue_enabled`) 기본은 꺼짐이다.
+ * 이 기계가 큐를 돌리지 못하면(지금은 macOS만) 줄은 잠긴 채 까닭을 보인다 — 켜기는 백엔드도
+ * 거절한다. 답을 못 받았으면 줄은 잠기기만 하고 까닭을 지어내지 않는다. 켜고 끈 것은 데스크가
+ * 서 있으면 곧바로 다시 읽어 묶음 카드가 따른다. */
+let integrationQueue = null;
+let integrationQueueGeneration = 0;
+
+async function refreshIntegrationQueue() {
+  const generation = ++integrationQueueGeneration;
+  let answer = null;
+  try {
+    answer = await invoke("integration_queue_setting");
+  } catch {
+    answer = null;
+  }
+  if (generation !== integrationQueueGeneration) return;
+  integrationQueue = answer && typeof answer === "object" ? answer : null;
+  paintIntegrationQueue();
+}
+
+function paintIntegrationQueue() {
+  const box = el("project-integration-queue");
+  const supported = integrationQueue?.supported === true;
+  box.checked = integrationQueue?.enabled === true;
+  box.disabled = !supported;
+  el("project-integration-queue-why").hidden = integrationQueue === null || supported;
+}
+
+async function saveIntegrationQueue(enabled) {
+  const generation = ++integrationQueueGeneration;
+  try {
+    const answer = await invoke("set_integration_queue_enabled", { enabled });
+    if (generation !== integrationQueueGeneration) return;
+    integrationQueue = answer && typeof answer === "object" ? answer : null;
+    paintIntegrationQueue();
+    if (deskViews().length > 0) refreshDeskLedger();
+  } catch (error) {
+    if (generation === integrationQueueGeneration) await refreshIntegrationQueue();
+    showError(error);
+  }
+}
+
+el("project-integration-queue").addEventListener("change", (event) => {
+  void saveIntegrationQueue(event.target.checked);
+});
+
 /* One question, three answers: yes, no, and backing out.
  *
  * A promise rather than a callback, because every caller's next move depends on

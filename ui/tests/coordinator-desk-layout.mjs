@@ -547,7 +547,7 @@ export async function testCoordinatorDeskLayout(browser, origin, ok) {
       }, REPLY);
       ok("a reply being written keeps its node, its words, its focus and its caret through the unfold, the roster's growth, a quiet poll, the tier crossing and the fold",
         kept.sameField && kept.value === "그대로 main에 올리세요." && kept.focused && kept.caret.join() === "3,3" &&
-        kept.sameLetter && kept.sameBlocks && kept.order === "machine,mail,workers,pipeline,release" && refolded.mailRows === 5,
+        kept.sameLetter && kept.sameBlocks && kept.order === "machine,batches,mail,workers,pipeline,release" && refolded.mailRows === 5,
         JSON.stringify({ kept, rows: refolded.mailRows }));
       const refoldedFaults = wideFaults(refolded);
       ok("a_long_mail_column_keeps_the_workers_beside_it (folded back to five with the reply open: the placement the heights now call for stands, re-dealt on the same nodes)",

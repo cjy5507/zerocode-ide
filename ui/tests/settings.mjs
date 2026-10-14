@@ -2450,6 +2450,15 @@ class StatefulBackend {
           source: "shared-only",
           setup_run_policy: "run-by-default",
         };
+      // The integration queue's switch for the active project (t-45315): off until a person
+      // turns it on, and on only where this machine runs the queue (macOS for now).
+      case "integration_queue_setting": return clone(this.integrationQueue ?? { enabled: false, supported: true });
+      case "set_integration_queue_enabled": {
+        const held = this.integrationQueue ?? { enabled: false, supported: true };
+        if (args.enabled === true && !held.supported) throw "the integration queue can be turned on only on macOS for now";
+        this.integrationQueue = { ...held, enabled: args.enabled === true };
+        return clone(this.integrationQueue);
+      }
       case "worktree_prefs": return { branch_prefix: "none", custom_prefix: null };
       case "claude_accounts": return clone(this.claudeAccounts ?? { accounts: [], can_add: true });
       case "resolve_claude_account_identity": {
@@ -12978,6 +12987,77 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
   } finally {
     await pageA.setViewportSize({ width: 1280, height: 860 });
     await renderSettled(pageA);
+  }
+});
+
+// The integration queue's switch in the project pane (t-45315, test 29): off until a person turns
+// it on, saved for the repository by `set_integration_queue_enabled` and read back when the pane
+// opens again. Where this machine does not run the queue (Windows for now) the row is locked and
+// says why.
+await test("the project pane's integration queue switch starts off, and turning it on and off is saved", async () => {
+  backend.integrationQueue = { enabled: false, supported: true };
+  try {
+    await pageA.evaluate(() => setSettingsOpen(false));
+    const from = backend.calls.length;
+    await openSettings(pageA, "project");
+    await backend.waitForCall("A", "integration_queue_setting", from);
+    await renderSettled(pageA);
+    const box = pageA.locator("#project-integration-queue");
+    assert(await box.isVisible(), "the project pane shows no integration queue switch");
+    assert(!(await box.isChecked()), "the integration queue switch was on before anyone turned it on");
+    assert(!(await box.isDisabled()), "the integration queue switch was locked on macOS");
+    assert(await pageA.locator("#project-integration-queue-why").isHidden(), "the switch gave a lock reason on macOS");
+    const on = await gestureAndWait(pageA, "A", "set_integration_queue_enabled", () => box.click());
+    assertEqual(on.args, { enabled: true }, "turning the switch on did not save it on");
+    await pageA.waitForFunction(
+      () => document.getElementById("project-integration-queue")?.checked === true,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    assertEqual(backend.integrationQueue, { enabled: true, supported: true }, "the backend did not hold the switch on");
+    const reread = backend.calls.length;
+    await reopenSettings(pageA, "A", "project");
+    await backend.waitForCall("A", "integration_queue_setting", reread);
+    await renderSettled(pageA);
+    assert(await box.isChecked(), "the switch did not read back on when the pane opened again");
+    const off = await gestureAndWait(pageA, "A", "set_integration_queue_enabled", () => box.click());
+    assertEqual(off.args, { enabled: false }, "turning the switch off did not save it off");
+    await pageA.waitForFunction(
+      () => document.getElementById("project-integration-queue")?.checked === false,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    assertEqual(backend.integrationQueue, { enabled: false, supported: true }, "the backend did not hold the switch off");
+  } finally {
+    backend.integrationQueue = { enabled: false, supported: true };
+    await pageA.evaluate(() => setSettingsOpen(false));
+  }
+});
+
+await test("on Windows the integration queue switch is locked and says why", async () => {
+  backend.integrationQueue = { enabled: false, supported: false };
+  try {
+    await pageA.evaluate(() => setSettingsOpen(false));
+    const from = backend.calls.length;
+    await openSettings(pageA, "project");
+    await backend.waitForCall("A", "integration_queue_setting", from);
+    await pageA.waitForFunction(
+      () => document.getElementById("project-integration-queue")?.disabled === true,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    const why = pageA.locator("#project-integration-queue-why");
+    assert(await why.isVisible(), "the locked switch did not say why");
+    const said = await why.textContent();
+    assert(said.includes("macOS"), "the lock reason did not name macOS", said);
+    const before = backend.count("A", "set_integration_queue_enabled");
+    await pageA.locator("#project-integration-queue").click({ force: true, timeout: 2_000 }).catch(() => {});
+    await renderSettled(pageA);
+    assertEqual(backend.count("A", "set_integration_queue_enabled"), before, "the locked switch still asked to save");
+    assert(!(await pageA.locator("#project-integration-queue").isChecked()), "the locked switch turned on");
+  } finally {
+    backend.integrationQueue = { enabled: false, supported: true };
+    await pageA.evaluate(() => setSettingsOpen(false));
   }
 });
 
