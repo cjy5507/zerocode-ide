@@ -1006,7 +1006,6 @@ function showSettingsPane(pane) {
   }
   if (pane === "judgment-models" && arriving) {
     void refreshTypeSafe();
-    if (judgmentProviderController.current()?.kind === "local" && judgmentProviderController.localMode === "managed") void managedJudgmentController.refresh();
   }
   if (pane === "onboarding" && arriving) {
     paintSettingsOnboarding();
@@ -6683,6 +6682,8 @@ let typesafeInitialized = false;
  * somebody asks TypeSafe. `null` means nobody has asked since it was saved,
  * and the standing is read off the key itself. */
 let typesafeChecked = null;
+let typesafeRefreshing = null;
+let typesafeRefreshFailed = false;
 
 /* The switch's own paint and door live in shell-jev.js
  * (`paintJevSwitches`, `setJevEnabled`): one state and one command for this
@@ -6910,19 +6911,62 @@ function paintClassifierGate(state) {
 
 async function refreshTypeSafe() {
   initTypeSafeEvents();
-  try {
-    paintTypeSafe(await invoke("typesafe_settings"));
-  } catch (error) {
-    typesafeState = null;
-    typesafeChecked = null;
-    judgmentProviderController.paint({});
-    paintSettingsStanding(el("typesafe-key-state"), "failed");
-    paintTypeSafeStatus(typesafeRefusal(error), typesafeRefusalEvidence(error));
+  const settled = (pending) => new Promise((resolve) => {
+    const deadline = setTimeout(() => resolve({ error: "status_timeout" }), 10_000);
+    pending.then((value) => {
+      clearTimeout(deadline);
+      resolve({ value });
+    }, (error) => {
+      clearTimeout(deadline);
+      resolve({ error });
+    });
+  });
+  let request = typesafeRefreshing;
+  if (!request) {
+    request = {
+      previous: judgmentProviderController.state,
+      settings: settled(invoke("typesafe_settings")),
+      managed: null,
+      promise: null,
+    };
+    typesafeRefreshing = request;
+    request.promise = Promise.resolve().then(async () => {
+      const settings = await request.settings;
+      const managed = request.managed ? await request.managed : null;
+      if (judgmentProviderController.state !== request.previous) return;
+      typesafeRefreshFailed = false;
+      if (managed) {
+        const snapshot = managed.value;
+        const held = managedJudgmentController.snapshot;
+        const superseded = held?.instanceId === snapshot?.instanceId && held?.revision > snapshot?.revision;
+        managedJudgmentController.statusError = Boolean(managed.error || (!superseded && !managedJudgmentController.accept(snapshot, true)));
+      }
+      if (settings.error || !settings.value?.provider || !settings.value?.providerIdentity) {
+        typesafeRefreshFailed = true;
+        typesafeState = null;
+        typesafeChecked = null;
+        judgmentProviderController.paint({});
+        paintSettingsStanding(el("typesafe-key-state"), "failed");
+        paintTypeSafeStatus(typesafeRefusal(settings.error), typesafeRefusalEvidence(settings.error));
+      } else {
+        paintTypeSafe(settings.value);
+      }
+      if (jevViewsShowing() || (!settingsView.hidden && settingsPane === "judgment-models" && typesafeState?.jev?.on)) void loadJevNumbers();
+    }).finally(() => {
+      if (typesafeRefreshing !== request) return;
+      typesafeRefreshing = null;
+      if (request.managed) managedJudgmentController.loading = false;
+      judgmentProviderController.controls();
+      if (managedJudgmentController.visible()) managedJudgmentController.render();
+    });
   }
-  // A dashboard on stage refreshes its numbers with its recent rows; the
-  // card's standing lines, while Jev is on, read the same numbers without
-  // them (t-11989).
-  if (jevViewsShowing() || typesafeState?.jev?.on) void loadJevNumbers();
+  if (managedJudgmentController.visible() && !request.managed) {
+    managedJudgmentController.init();
+    managedJudgmentController.loading = true;
+    request.managed = settled(invoke("managed_judgment_status"));
+  }
+  judgmentProviderController.renderStatus();
+  return request.promise;
 }
 
 /* Where the card stands: what the last check answered if anything has been

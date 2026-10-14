@@ -177,8 +177,9 @@ const judgmentModelSourceController = {
       const inputs = managedJudgmentController.inputSupport({ ...model, local: inspection.local ?? model.local });
       const support = this.usable(inspection)
         ? t("settings.models.ready", "지원되는 판단 모델 형식입니다. 설치 뒤 실행과 응답을 확인합니다.")
-        : managedJudgmentController.failure(inspection.reason ?? inspection.local?.reason ?? "model_format_not_supported");
+        : "";
       el("judgment-source-model-support").textContent = [support, inputs].filter(Boolean).join(" · ");
+      el("judgment-source-model-support").hidden = !support && !inputs;
     }
   },
 };
