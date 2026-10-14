@@ -46012,6 +46012,15 @@ button.jev-token:hover {
   background: var(--surface-raised);
 }
 
+/* 머리의 「열기」(t-55370): 창 안에서 열리는 아티팩트를 한 번에 연다 — 세부 정보 단추와 같은 높이. */
+.artifact-detail-open {
+  gap: var(--space-1);
+  box-sizing: border-box;
+  height: var(--artifact-press-min);
+  padding: 0 var(--space-2);
+  white-space: nowrap;
+}
+
 /* 「세부 정보」 뒤: 크기·경로·런·워커·커밋, 그리고 행동들. */
 .artifact-detail-facts {
   display: flex;
