@@ -1792,6 +1792,100 @@ pub(crate) fn record_land_check(
     }
 }
 
+/// One record of an integration batch, judged by the ledger against the batch's records and
+/// written as its letter (t-45315). Rings the bell when a letter is new; a record the batch does
+/// not take comes back in the ledger's own words.
+pub(crate) fn record_land_batch(
+    receipt: zerocode_core::orchestration::land_batch::LandBatchReceipt,
+    now_ms: i64,
+) -> Result<(), String> {
+    let held = runtime().ok_or(NO_RUNTIME)?;
+    let (moved, _) = held
+        .actor
+        .land_batched(receipt, now_ms)
+        .map_err(|why| why.to_string())?;
+    rang(moved);
+    Ok(())
+}
+
+/// Every batch of one run as the ledger holds it now: what a press settles and is judged against.
+fn land_batches_of(run: &str) -> Vec<zerocode_core::orchestration::land_batch::BatchState> {
+    let Some(held) = runtime() else {
+        return Vec::new();
+    };
+    let Ok(image) = held.actor.view() else {
+        return Vec::new();
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return Vec::new();
+    };
+    ledger
+        .run(run)
+        .map(zerocode_core::orchestration::land_batch::batches)
+        .unwrap_or_default()
+}
+
+/// A person's press on a batch's card (t-45315): the ledger judges it by the rules the
+/// coordinator's verb meets, and the same road carries it. `by` comes from the board's command,
+/// the one place a press is the person's.
+pub(crate) fn press_land_batch(
+    run: &str,
+    batch: &str,
+    asked: zerocode_core::orchestration::land_batch::Press,
+    by: zerocode_core::orchestration::land_batch::PressedBy,
+    now_ms: i64,
+) -> Result<serde_json::Value, String> {
+    let held = runtime().ok_or(NO_RUNTIME)?;
+    let image = held.actor.view().map_err(|why| why.to_string())?;
+    let ledger = cached_ledger(&held, &image).map_err(|why| why.to_string())?;
+    let ask = zerocode_core::orchestration::land_batch::press(&ledger, run, batch, asked, by)?;
+    let batches = ledger
+        .run(run)
+        .map(zerocode_core::orchestration::land_batch::batches)
+        .unwrap_or_default();
+    let root = land_check_root().ok_or("the orchestration data root is not open")?;
+    let said = crate::land_batch::carry(&root, &ask, &batches, now_ms)?;
+    serde_json::from_str(&said)
+        .map_err(|_| format!("the integration queue answered what is not JSON: {said}"))
+}
+
+/// The integration queue's next run at the window's start (t-45315): every run's batches settled
+/// and swept as the next `land-batch` call would, on a thread of its own — git is a process.
+pub(crate) fn settle_land_batches_at_start(now_ms: i64) {
+    let Some(root) = land_check_root() else {
+        return;
+    };
+    let Some(held) = runtime() else {
+        return;
+    };
+    let Ok(image) = held.actor.view() else {
+        return;
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return;
+    };
+    let runs: Vec<(
+        String,
+        Vec<zerocode_core::orchestration::land_batch::BatchState>,
+    )> = ledger
+        .runs()
+        .iter()
+        .map(|run| {
+            (
+                run.id.clone(),
+                zerocode_core::orchestration::land_batch::batches(run),
+            )
+        })
+        .filter(|(_, batches)| !batches.is_empty())
+        .collect();
+    if runs.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("land-batch-settle".to_string())
+        .spawn(move || crate::land_batch::settle_at_start(&root, &runs, now_ms));
+}
+
 /// Hand the ledger what the window saw of git, so it can write what is late. A pass that finds
 /// nothing writes nothing; one that wrote rings the bell for whoever sleeps on the mail.
 pub(crate) fn watch_landings(
@@ -2546,6 +2640,9 @@ pub(crate) fn refresh_board_ledger() {
     // store's book in memory, outside the ledger's view (t-32798).
     let mut next = next;
     hand_in_keep::dress(&mut next);
+    // Whether each batch's repository has the integration queue on is the project's setting,
+    // laid over the desk the same way, outside the ledger's view (t-45315).
+    crate::land_batch::dress_desk(Arc::make_mut(&mut next.desk));
     // Build, allocate and drop old rows outside the publication lock. The
     // main-thread reader holds it only long enough to clone an Arc.
     let next = Arc::new(next);
@@ -10950,9 +11047,27 @@ fn carried(
                 Err(why) => refused(why),
             }
         }
-        /* The integration queue (t-45315). Carried from stage 6's window half on; until then
-         * the window refuses rather than leave a press unanswered. */
-        Effect::LandBatch(_) => refused("the integration queue is not carried by this window yet"),
+        /* The integration queue (t-45315). The ledger judged the press; the window does its git
+         * and hands every record back through the actor, which judges it again against the
+         * batch's records. The answer is filed as the receipt, as land-check's is. */
+        Effect::LandBatch(ask) => {
+            let Some(root) = land_check_root() else {
+                return refused("the orchestration data root is not open");
+            };
+            let held = land_batches_of(&ask.run);
+            match crate::land_batch::carry(&root, &ask, &held, now_ms) {
+                Ok(said) => {
+                    let text = format!("{said}\n");
+                    if let Some(key) = decided.receipt.clone()
+                        && let Err(why) = actor.remember_served(key, text.clone(), now_ms)
+                    {
+                        return refused_by_runtime(why);
+                    }
+                    answer(zerocode_core::agent_teams::Reply::ok(text))
+                }
+                Err(why) => refused(why),
+            }
+        }
         /* One checkout's evidence, assembled where the sources live.
          *
          * The decision named the tree; this resolves it and reads. Three

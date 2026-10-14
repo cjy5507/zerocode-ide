@@ -400,6 +400,10 @@ use cmd::{
     claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs, coordinator_seats,
     set_coordinator_handover,
 };
+use cmd::{
+    integration_queue_setting, land_batch_bisect, land_batch_cancel, land_batch_promote,
+    land_batch_restack, set_integration_queue_enabled,
+};
 use emulator::{
     acknowledge_emulator_payload, android_accessibility_tree, android_accessibility_tree_direct,
     android_button, android_button_direct, android_emulators, android_emulators_direct,
@@ -2319,6 +2323,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
     let remote_servers = remote_servers::RemoteServerService::new();
     let settings = Arc::new(settings::SettingsRepository::new(settings_root.clone()));
     land_check::hold_settings(Arc::clone(&settings));
+    land_batch::hold_settings(Arc::clone(&settings));
     if let Err(error) = migrate_legacy_project_settings(&settings) {
         eprintln!("zerocode-shell: could not migrate project settings: {error}");
     }
@@ -2963,6 +2968,8 @@ fn main() -> ExitCode {
             mark_default_tabs_applied,
             set_project_script_policy,
             set_project_script_setting,
+            integration_queue_setting,
+            set_integration_queue_enabled,
             repo_trust_standing,
             record_repo_trust,
             archive_trust_standing,
@@ -3048,6 +3055,10 @@ fn main() -> ExitCode {
             desk_ack,
             quota_wall_retry,
             quota_wall_handover,
+            land_batch_promote,
+            land_batch_bisect,
+            land_batch_restack,
+            land_batch_cancel,
             desk_checkouts,
             machine_load,
             coordinator_handover_status,
@@ -3466,6 +3477,9 @@ fn main() -> ExitCode {
                     ),
                 );
             }
+            // The integration queue's next run (t-45315): batches a crash left half way are
+            // settled from what git holds, on a thread of their own.
+            orchestration::settle_land_batches_at_start(now_epoch_ms());
             boot_timeline::mark(boot_timeline::Phase::LedgerReady);
             crumbs::record("boot", format_args!("hooks"));
             if let Some((events, teams, browser, computer, federation)) =
