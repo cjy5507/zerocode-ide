@@ -3696,6 +3696,84 @@ mod tests {
         );
     }
 
+    /// Set in the child [`a_test_never_asks_a_model_source`] runs.
+    const SOURCE_ASKING_CHILD_ENV: &str = "ZO_TEST_SOURCE_ASKING_CHILD";
+
+    /// No test asks a model source (t-44087). A session start's connection
+    /// refreshes discovery, and a refresh asks each provider it finds a
+    /// credential for over the network, with whatever credential the process
+    /// holds. The child, a fresh run of this test alone, holds one: a made-up
+    /// Anthropic key whose API is a socket this test listens on. It connects
+    /// as a session start does and waits out any refresh that started; the
+    /// socket must hear nothing.
+    #[test]
+    fn a_test_never_asks_a_model_source() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        if std::env::var_os(SOURCE_ASKING_CHILD_ENV).is_some() {
+            let _lock = crate::test_env_lock();
+            connect_model_catalog();
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while DISCOVERY_REFRESH_RUNNING.load(Ordering::Acquire) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return;
+        }
+        let provider = std::net::TcpListener::bind("127.0.0.1:0").expect("a socket for the stand-in provider");
+        provider.set_nonblocking(true).expect("a socket asked without waiting");
+        let port = provider.local_addr().expect("its port").port();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let child_done = Arc::new(AtomicBool::new(false));
+        let listening = {
+            let (asked, child_done) = (Arc::clone(&asked), Arc::clone(&child_done));
+            // Each connection is counted and closed at once, so a refresh that
+            // asks fails fast instead of waiting out its timeout.
+            std::thread::spawn(move || loop {
+                let last_look = child_done.load(Ordering::Acquire);
+                while provider.accept().is_ok() {
+                    asked.fetch_add(1, Ordering::AcqRel);
+                }
+                if last_look {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            })
+        };
+        let home = crate::support::temp_dir("source-asking-child");
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_crate, path)| path);
+        let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .arg(format!("{module}::a_test_never_asks_a_model_source"))
+            .args(["--exact", "--nocapture", "--test-threads=1"])
+            .env_clear()
+            .env(SOURCE_ASKING_CHILD_ENV, "1")
+            .env("HOME", &home)
+            .env("ZO_CONFIG_HOME", &home)
+            .env("ZO_HOME", &home)
+            .env("ZO_DISABLE_KEYCHAIN", "1")
+            .env("ANTHROPIC_API_KEY", "a-made-up-key")
+            .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{port}"))
+            .output()
+            .expect("run a child");
+        child_done.store(true, Ordering::Release);
+        listening.join().expect("the stand-in provider stops listening");
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(
+            output.status.success(),
+            "the child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            asked.load(Ordering::Acquire),
+            0,
+            "a test asked a model source: the discovery refresh a session start makes reached the network"
+        );
+    }
+
     /// Production installs `dispatch_concurrent_tool` on every plain/JSON,
     /// TUI, and IDE runtime. Finding a deferred schema is useful only if that
     /// exact seam accepts the stable on-wire address and reaches the selected
