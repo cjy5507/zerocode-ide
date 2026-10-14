@@ -83,6 +83,7 @@ pub struct BrowserVerb {
     /// The verb acts on the page it aims at — a Flow binds such a step to
     /// the hosts of its recording before sending it (plan D8).
     pub acts: bool,
+    pub changes_page: bool,
 }
 
 /// One row of a door's verb table — a plain verb that acts on nothing and
@@ -95,6 +96,7 @@ pub const fn verb(word: &'static str, min: usize, max: usize, hold_ms: u64) -> B
         hold_ms,
         check: false,
         acts: false,
+        changes_page: false,
     }
 }
 
@@ -103,7 +105,15 @@ pub const fn verb(word: &'static str, min: usize, max: usize, hold_ms: u64) -> B
 pub const fn act_verb(word: &'static str, min: usize, max: usize, hold_ms: u64) -> BrowserVerb {
     BrowserVerb {
         acts: true,
+        changes_page: true,
         ..verb(word, min, max, hold_ms)
+    }
+}
+
+const fn changes_page(row: BrowserVerb) -> BrowserVerb {
+    BrowserVerb {
+        changes_page: true,
+        ..row
     }
 }
 
@@ -176,7 +186,7 @@ pub fn arity_ok_in(table: &[BrowserVerb], cli: &str, argv: &[String]) -> Result<
 /// — the shape the shim sends for `--value-stdin`; so does `fill` its bundle.
 pub const BROWSER_VERBS: [BrowserVerb; 20] = [
     verb("list", 0, 0, 0),
-    verb("open", 1, 1, BROWSER_DOOR_BUDGET_MS),
+    changes_page(verb("open", 1, 1, BROWSER_DOOR_BUDGET_MS)),
     act_verb("goto", 2, 2, BROWSER_DOOR_BUDGET_MS),
     // `eval <label> <expr>` or `eval <label> --value <expr>` — the stdin road,
     // for a script that carries a person's details (t-37883).
@@ -197,10 +207,10 @@ pub const BROWSER_VERBS: [BrowserVerb; 20] = [
     verb("console", 1, 5, BROWSER_CALLBACK_DEADLINE_MS),
     verb("network", 1, 4, BROWSER_CALLBACK_DEADLINE_MS),
     verb("tabs", 0, 0, 0),
-    verb("close", 1, 1, BROWSER_DOOR_BUDGET_MS),
-    verb("viewport", 2, 2, BROWSER_CALLBACK_DEADLINE_MS),
+    changes_page(verb("close", 1, 1, BROWSER_DOOR_BUDGET_MS)),
+    changes_page(verb("viewport", 2, 2, BROWSER_CALLBACK_DEADLINE_MS)),
     act_verb("scroll", 2, 2, BROWSER_CALLBACK_DEADLINE_MS),
-    check_verb("find", 2, 2, BROWSER_CALLBACK_DEADLINE_MS),
+    changes_page(check_verb("find", 2, 2, BROWSER_CALLBACK_DEADLINE_MS)),
     verb("diagnose", 1, 2, BROWSER_CALLBACK_DEADLINE_MS),
     // `marks <label> [--json]` numbers the controls a person could hit; the
     // picture with the numbers on it is `screenshot --marks` (the line stays,

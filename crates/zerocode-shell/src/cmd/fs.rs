@@ -555,7 +555,17 @@ pub(crate) async fn browser_snapshot(
     label: String,
 ) -> Result<String, String> {
     from_the_main_webview(&webview)?;
-    let bytes = browser_snapshot_png(&app, &state, &label).await?;
+    let _ = browser_pane_of(&app, &state, &label)?;
+    if !cfg!(target_os = "macos") {
+        return Err(
+            "workspace_snapshot_unsupported: 이 플랫폼은 아직 페이지 스냅샷을 지원하지 않습니다"
+                .to_string(),
+        );
+    }
+    let bytes = browser_snapshot_png_for(&app, &state, &label, true).await?;
+    if bytes.len() > AGENT_SCREENSHOT_MAX_BYTES {
+        return Err("workspace_snapshot_limit: 관전 화면 크기가 한도를 넘었습니다".to_string());
+    }
     use base64::Engine as _;
     Ok(format!(
         "data:image/png;base64,{}",
@@ -569,11 +579,25 @@ pub(crate) async fn browser_snapshot_png(
     state: &AppState,
     label: &str,
 ) -> Result<Vec<u8>, String> {
+    browser_snapshot_png_for(app, state, label, false).await
+}
+
+async fn browser_snapshot_png_for(
+    app: &AppHandle,
+    state: &AppState,
+    label: &str,
+    spectator: bool,
+) -> Result<Vec<u8>, String> {
     let pane = browser_pane_of(app, state, label)?;
+    let frame = state
+        .shell_runtime()
+        .browser_workspaces
+        .begin_snapshot_for(label, spectator)?;
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         pane.snapshot_png(move |answer| {
+            let _frame = frame;
             let _ = tx.send(answer);
         })?;
         tokio::time::timeout(SNAPSHOT_BUDGET, rx)
@@ -582,7 +606,7 @@ pub(crate) async fn browser_snapshot_png(
             .map_err(|_| "스냅샷 응답이 끊겼습니다".to_string())?
     }
     #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
-    snapshot_webview_png(pane, None).await
+    snapshot_webview_png_held(pane, None, Some(Box::new(frame))).await
 }
 
 /// Snapshot an IDE-owned Tauri webview, including the artifact thumbnail pane.
@@ -590,6 +614,14 @@ pub(crate) async fn browser_snapshot_png(
 pub(crate) async fn snapshot_webview_png(
     pane: tauri::Webview,
     width: Option<f64>,
+) -> Result<Vec<u8>, String> {
+    snapshot_webview_png_held(pane, width, None).await
+}
+
+async fn snapshot_webview_png_held(
+    pane: tauri::Webview,
+    width: Option<f64>,
+    held: Option<Box<dyn Send>>,
 ) -> Result<Vec<u8>, String> {
     #[cfg(target_os = "macos")]
     {
@@ -604,7 +636,12 @@ pub(crate) async fn snapshot_webview_png(
             // knows. The snapshot itself lives in `artifact_webkit`, where the
             // artifact exports (t-18558) take theirs by the same road.
             let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
-            crate::artifact_webkit::take_snapshot_png(mtm, view, width, tx);
+            match held {
+                Some(held) => {
+                    crate::artifact_webkit::take_snapshot_png_held(mtm, view, width, tx, Some(held))
+                }
+                None => crate::artifact_webkit::take_snapshot_png(mtm, view, width, tx),
+            }
         })
         .map_err(|error| error.to_string())?;
         let bytes = tauri::async_runtime::spawn_blocking(move || {
@@ -618,7 +655,7 @@ pub(crate) async fn snapshot_webview_png(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (pane, width);
+        let _ = (pane, width, held);
         Err("이 플랫폼은 아직 페이지 스냅샷을 지원하지 않습니다".to_string())
     }
 }

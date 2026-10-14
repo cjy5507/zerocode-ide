@@ -2611,6 +2611,15 @@ pub(super) async fn browser_loop(
         // whose bridge deadline already passed must not have its command
         // run late as a surprise side effect — `is_closed` is that caller
         // hanging up (1-g4 리뷰 발견 3).
+        let revision = match browser_revision(&app, &request.argv) {
+            Ok(revision) => revision,
+            Err(error) => {
+                let _ = request
+                    .answer
+                    .send(browser_refused(format!("zerocode-browser: {error}\n")));
+                continue;
+            }
+        };
         let steering = app.clone();
         tauri::async_runtime::spawn(async move {
             if request.answer.is_closed() {
@@ -2625,15 +2634,11 @@ pub(super) async fn browser_loop(
                 request.evidence.as_deref(),
             )
             .or_else(|| computer_use::evidence::session_dir(now_epoch_ms()));
-            let answer = browser_step(
-                &steering,
-                request.pane.as_deref(),
-                evidence.as_deref(),
-                &request.argv,
-                &request.argv,
-            )
-            .await;
-            let _ = request.answer.send(answer);
+            let mut reply = request.answer;
+            tokio::select! {
+                answer = browser_step_at(&steering, request.pane.as_deref(), evidence.as_deref(), &request.argv, &request.argv, revision) => { let _ = reply.send(answer); }
+                _ = reply.closed() => {}
+            }
         });
     }
 }
@@ -3116,9 +3121,41 @@ pub(super) async fn browser_step(
 ) -> zerocode_hookd::TeamAnswer {
     // Read before the await, and with the pane's own actor laid on it: a lone
     // command names its pane, a walk's step stands under the walk's actor.
+    let revision = match browser_revision(app, argv) {
+        Ok(revision) => revision,
+        Err(error) => return browser_refused(format!("zerocode-browser: {error}\n")),
+    };
+    browser_step_at(app, pane, dir, argv, logged, revision).await
+}
+
+fn browser_revision(app: &AppHandle, argv: &[String]) -> Result<Option<u64>, String> {
+    let Some(label) = argv.get(1).filter(|_| {
+        !matches!(
+            argv.first().map(String::as_str),
+            Some("open" | "list" | "tabs")
+        )
+    }) else {
+        return Ok(None);
+    };
+    Ok(app
+        .state::<AppState>()
+        .shell_runtime()
+        .browser_workspaces
+        .snapshot(label)?
+        .map(|snapshot| snapshot.revision))
+}
+
+async fn browser_step_at(
+    app: &AppHandle,
+    pane: Option<&str>,
+    dir: Option<&Path>,
+    argv: &[String],
+    logged: &[String],
+    expected_revision: Option<u64>,
+) -> zerocode_hookd::TeamAnswer {
     let observation = step_actor(app, pane).on(run_evidence::observation());
     let began = std::time::Instant::now();
-    let answer = answer_browser_command(app, argv, pane).await;
+    let answer = answer_browser_command(app, argv, pane, expected_revision).await;
     if let Some(dir) = dir {
         evidence_runtime::leave_browser_evidence(
             app,
@@ -5236,6 +5273,8 @@ impl computer_use::enter::Typer for LiveTyper<'_> {
             app,
             words,
             self.pane.as_deref(),
+            browser_revision(app, words)
+                .map_err(|error| computer_use::ComputerUseError::new("input_failed", error))?,
         )))
     }
 
@@ -6598,39 +6637,108 @@ pub(super) async fn answer_browser_command(
     app: &AppHandle,
     argv: &[String],
     pane: Option<&str>,
+    expected_revision: Option<u64>,
 ) -> zerocode_hookd::TeamAnswer {
     let state = app.state::<AppState>();
+    let actor = step_actor(app, pane);
+    let pane = actor.pane.as_deref();
     let verb = argv.first().map(String::as_str).unwrap_or_default();
     let label = (!matches!(verb, "open" | "list" | "tabs"))
         .then(|| argv.get(1))
         .flatten();
+    if label.is_some_and(|label| !state.browser_panes().contains(label)) {
+        return browser_refused("zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n");
+    }
+    if let Err(error) = state
+        .shell_runtime()
+        .browser_workspaces
+        .check_actor(pane, verb)
+    {
+        return browser_refused(format!("zerocode-browser: {error}\n"));
+    }
+    if verb == "viewport"
+        && let Some(label) = label
+    {
+        match state.shell_runtime().browser_workspaces.snapshot(label) {
+            Ok(Some(_)) => {
+                return browser_refused(
+                    "zerocode-browser: workspace_viewport_unconfirmed: 전용 작업 브라우저의 viewport는 적용 확인을 지원하지 않습니다\n",
+                );
+            }
+            Err(error) => return browser_refused(format!("zerocode-browser: {error}\n")),
+            Ok(None) => {}
+        }
+    }
+    let notify_app = app.clone();
     let operation = match label {
-        Some(label) => match state
-            .shell_runtime()
-            .browser_workspaces
-            .begin(label, pane, verb)
-        {
-            Ok(operation) => operation,
+        Some(label) => match state.shell_runtime().browser_workspaces.begin_at(
+            label,
+            pane,
+            verb,
+            expected_revision,
+        ) {
+            Ok(operation) => operation.map(|operation| {
+                operation.notifying(move |snapshot| {
+                    let _ = notify_app.emit_to("main", "browser:workspace", snapshot);
+                })
+            }),
             Err(error) => return browser_refused(format!("zerocode-browser: {error}\n")),
         },
         None => None,
     };
-    let answer = dispatch_browser_command(app, argv, pane).await;
+    let actor_app = app.clone();
+    let actor_operation = match state.shell_runtime().browser_workspaces.begin_actor_target(
+        pane,
+        verb,
+        label.map(String::as_str),
+    ) {
+        Ok(operation) => operation.map(|operation| {
+            operation.notifying(move |snapshot| {
+                let _ = actor_app.emit_to("main", "browser:workspace", snapshot);
+            })
+        }),
+        Err(error) => {
+            if let Some(operation) = operation {
+                operation.finish(true);
+            }
+            return browser_refused(format!("zerocode-browser: {error}\n"));
+        }
+    };
+    let answer = dispatch_browser_command(app, argv, pane, expected_revision).await;
     if let Some(operation) = operation {
         operation.finish(answer.exit_code == 0);
-        if let Some(label) = label
-            && let Ok(Some(snapshot)) = state.shell_runtime().browser_workspaces.snapshot(label)
-        {
-            let _ = app.emit("browser:workspace", snapshot);
-        }
+    }
+    if let Some(operation) = actor_operation {
+        operation.finish(answer.exit_code == 0);
     }
     answer
+}
+
+struct PendingBrowserOpen {
+    app: AppHandle,
+    label: String,
+    revision: u64,
+    completed: bool,
+}
+
+impl Drop for PendingBrowserOpen {
+    fn drop(&mut self) {
+        if !self.completed {
+            cmd::browser::cancel_workspace_open(
+                &self.app,
+                &self.app.state::<AppState>(),
+                &self.label,
+                self.revision,
+            );
+        }
+    }
 }
 
 async fn dispatch_browser_command(
     app: &AppHandle,
     argv: &[String],
     pane: Option<&str>,
+    expected_revision: Option<u64>,
 ) -> zerocode_hookd::TeamAnswer {
     let state = app.state::<AppState>();
     let verb = argv.first().map(String::as_str).unwrap_or_default();
@@ -6643,6 +6751,21 @@ async fn dispatch_browser_command(
                 if browser_pane_of(app, &state, &label).is_err() {
                     continue;
                 }
+                let operation = match state
+                    .shell_runtime()
+                    .browser_workspaces
+                    .snapshot(&label)
+                    .and_then(|snapshot| {
+                        state.shell_runtime().browser_workspaces.begin_at(
+                            &label,
+                            pane,
+                            "list",
+                            snapshot.map(|snapshot| snapshot.revision),
+                        )
+                    }) {
+                    Ok(operation) => operation,
+                    Err(_) => continue,
+                };
                 // The pane's recorded address, never the webview's answer: wry
                 // unwraps a nil URL (a failed load) on the main thread and the
                 // window dies with it (2026-09-07, three times).
@@ -6652,6 +6775,9 @@ async fn dispatch_browser_command(
                     .map(|url| cmd::browser::scrub_url_credentials(url))
                     .unwrap_or_default();
                 lines.push_str(&format!("{label}\t{url}\n"));
+                if let Some(operation) = operation {
+                    operation.finish(true);
+                }
             }
             if lines.is_empty() {
                 // The host's own hint, not a page's words: no fence.
@@ -6675,14 +6801,23 @@ async fn dispatch_browser_command(
             // the door's budget for the pane to appear in the mint. Lock
             // order born→reserved, the same as the claim.
             let label = reserve_label(&mut state.browser_born(), &mut state.browser_reserved());
-            if let Err(error) = state
+            let creation = match state
                 .shell_runtime()
                 .browser_workspaces
                 .register(&label, pane, false)
             {
-                state.browser_reserved().remove(&label);
-                return browser_refused(format!("zerocode-browser: {error}\n"));
-            }
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    state.browser_reserved().remove(&label);
+                    return browser_refused(format!("zerocode-browser: {error}\n"));
+                }
+            };
+            let mut pending = PendingBrowserOpen {
+                app: app.clone(),
+                label: label.clone(),
+                revision: creation.revision,
+                completed: false,
+            };
             // The WINDOW opens it — the tab, the toolbar and the pane's seat
             // are the frontend's, and this is the same road a popup walks.
             // An emit that failed is a request that never left, and saying
@@ -6696,6 +6831,7 @@ async fn dispatch_browser_command(
                     // Seated where it was asked for, not where the person is
                     // looking (live report 2026-09-03).
                     term: pane.and_then(hooks::term_of_pane_key),
+                    revision: None,
                 },
             );
             if let Err(error) = asked {
@@ -6709,6 +6845,14 @@ async fn dispatch_browser_command(
                 || state.browser_panes().contains(&label),
             )
             .await;
+            if !opened {
+                cmd::browser::cancel_workspace_open(app, &state, &label, creation.revision);
+                pending.completed = true;
+                return browser_refused(
+                    "zerocode-browser: workspace_open_timeout: 작업 브라우저를 열지 못했습니다\n",
+                );
+            }
+            pending.completed = true;
             browser_said(cmd::browser::open_answer(&label, opened))
         }
         ("close", 2) => {
@@ -6724,6 +6868,14 @@ async fn dispatch_browser_command(
                 "browser:agent-close",
                 BrowserAgentClose {
                     label: label.clone(),
+                    revision: match expected_revision
+                        .map_or_else(|| cmd::browser::close_revision(&state, &label), Ok)
+                    {
+                        Ok(revision) => Some(revision),
+                        Err(error) => {
+                            return browser_refused(format!("zerocode-browser: {error}\n"));
+                        }
+                    },
                 },
             );
             if let Err(error) = asked {
@@ -6735,6 +6887,11 @@ async fn dispatch_browser_command(
                 || !state.browser_panes().contains(&label),
             )
             .await;
+            if !closed {
+                return browser_refused(
+                    "zerocode-browser: workspace_close_timeout: 브라우저 닫기를 확인하지 못했습니다\n",
+                );
+            }
             browser_said(cmd::browser::close_answer(&label, closed))
         }
         ("viewport", 3) => {
@@ -6976,15 +7133,30 @@ async fn dispatch_browser_command(
             labels.sort_by_key(|label| birth_number(label));
             let rows: Vec<TabRow> = labels
                 .into_iter()
-                .filter(|label| browser_pane_of(app, &state, label).is_ok())
-                .map(|label| {
+                .filter_map(|label| {
+                    if browser_pane_of(app, &state, &label).is_err() {
+                        return None;
+                    }
+                    let operation = state
+                        .shell_runtime()
+                        .browser_workspaces
+                        .snapshot(&label)
+                        .and_then(|snapshot| {
+                            state.shell_runtime().browser_workspaces.begin_at(
+                                &label,
+                                pane,
+                                "tabs",
+                                snapshot.map(|snapshot| snapshot.revision),
+                            )
+                        })
+                        .ok()?;
                     let record = state.browser_records().get(&label).cloned();
                     let url = state
                         .browser_urls()
                         .get(&label)
                         .map(|url| cmd::browser::scrub_url_credentials(url))
                         .unwrap_or_default();
-                    TabRow {
+                    let row = TabRow {
                         label,
                         state: record
                             .as_ref()
@@ -6996,7 +7168,11 @@ async fn dispatch_browser_command(
                         url,
                         profile: record.as_ref().and_then(|record| record.profile.clone()),
                         reader: record.and_then(|record| record.reader),
+                    };
+                    if let Some(operation) = operation {
+                        operation.finish(true);
                     }
+                    Some(row)
                 })
                 .collect();
             if rows.is_empty() {

@@ -27,7 +27,7 @@ use crate::{
     AppState, ShellStateExt,
     browser_cookie_import::{self, StagedCookie},
     browser_cookies::SameSite,
-    browser_runtime::{BrowserDownload, BrowserNav, BrowserPopup, BrowserTitle, browsable_target},
+    browser_runtime::{BrowserDownload, BrowserNav, BrowserTitle, browsable_target},
 };
 
 const FRAMEWORK: &str = "Chromium Embedded Framework.framework/Chromium Embedded Framework";
@@ -631,14 +631,42 @@ impl BrowserPane {
         })
     }
 
-    pub(crate) fn set_bounds(&self, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
+    pub(crate) fn place(
+        &self,
+        bounds: [f64; 4],
+        shown: bool,
+        revision: Option<u64>,
+        main_webview: tauri::Webview,
+    ) -> Result<(), String> {
+        let app = self.app.clone();
+        let label = self.label.clone();
         on_ui(&self.app, &self.label, move |pane| {
-            pane.set_bounds(x, y, width, height)
+            let view = pane.native_view()?;
+            let owned = unsafe { crate::browser_runtime::browser_view_owns_first_responder(view) };
+            pane.set_hidden(true)?;
+            let mut displayed = false;
+            let result =
+                app.state::<AppState>()
+                    .shell_runtime()
+                    .browser_workspaces
+                    .with_placement(&label, revision, |allowed| {
+                        let visible = shown && allowed;
+                        displayed = visible;
+                        pane.set_bounds(bounds[0], bounds[1], bounds[2], bounds[3])?;
+                        if visible {
+                            pane.set_hidden(false)?;
+                        }
+                        if shown && !allowed {
+                            return Err("workspace_paused: 직접 조작은 제어권 전환 후 가능합니다"
+                                .to_string());
+                        }
+                        Ok(())
+                    });
+            if (!displayed || result.is_err()) && owned {
+                let _ = main_webview.set_focus();
+            }
+            result
         })
-    }
-
-    pub(crate) fn show(&self) -> Result<(), String> {
-        on_ui(&self.app, &self.label, |pane| pane.set_hidden(false))
     }
 
     pub(crate) fn hide(&self, main_webview: tauri::Webview) -> Result<(), String> {
@@ -1009,6 +1037,7 @@ pub(crate) struct CreatePane {
     pub(crate) y: f64,
     pub(crate) width: f64,
     pub(crate) height: f64,
+    pub(crate) hidden: bool,
     pub(crate) initialization_scripts: Vec<String>,
 }
 
@@ -1107,7 +1136,7 @@ fn begin_create_pane(
     };
     let mut request_context = request_context_create_context(Some(&context_settings), None)
         .ok_or_else(|| "Chromium request context creation failed".to_string())?;
-    let window = WindowInfo::default().set_as_child(
+    let mut window = WindowInfo::default().set_as_child(
         parent_view,
         &Rect {
             x: options.x.round() as i32,
@@ -1116,6 +1145,7 @@ fn begin_create_pane(
             height: options.height.max(1.0).round() as i32,
         },
     );
+    window.hidden = i32::from(options.hidden);
     let handler = HandlerState {
         app: options.app.clone(),
         label: options.label.clone(),
@@ -1169,6 +1199,7 @@ fn finish_create_pane(
         pending,
     };
     let prepared = (|| {
+        pane.set_hidden(options.hidden)?;
         pane.set_bounds(options.x, options.y, options.width, options.height)?;
         for (method, params) in initialization_commands(
             &options.initialization_scripts,
@@ -1493,11 +1524,7 @@ wrap_life_span_handler! {
             _no_javascript_access: Option<&mut i32>,
         ) -> i32 {
             let url = target_url.map(CefString::to_string).unwrap_or_default();
-            let _ = self.inner.app.emit_to("main", "browser:popup", BrowserPopup {
-                label: self.inner.label.clone(),
-                url,
-                term: None,
-            });
+            crate::cmd::browser::workspace_popup(&self.inner.app, &self.inner.label, &url);
             1
         }
 
@@ -1542,11 +1569,7 @@ wrap_request_handler! {
             _user_gesture: i32,
         ) -> i32 {
             let url = target_url.map(CefString::to_string).unwrap_or_default();
-            let _ = self.inner.app.emit_to("main", "browser:popup", BrowserPopup {
-                label: self.inner.label.clone(),
-                url,
-                term: None,
-            });
+            crate::cmd::browser::workspace_popup(&self.inner.app, &self.inner.label, &url);
             1
         }
     }

@@ -99,11 +99,26 @@ window and not a copy of an external browser's login. Opening it does not
 switch the person's tab. The person can watch its actual snapshots, collapse
 the viewer without stopping the page, or pause and take control. Watching
 does not grant shared mouse or keyboard access. Capture runs only while the
-viewer is visible, at most once per second with one request in flight.
-The browser door stops new input while paused or controlled by the person,
-including `eval` and browser steps inside a walk. Never bypass that refusal
-with another surface. Once control returns, read the page again before
-acting; previous form and numbered-element observations have been discarded.
+viewer is visible on platforms that support page snapshots. The backend
+limits watch captures to one per second and keeps one native capture in
+flight per tab. Agent screenshots share that concurrency limit.
+Restored and unassigned working tabs start paused. The person selects an
+existing terminal before assigning an unbound tab to an agent.
+Human control rejects every agent request for that tab, including reads.
+Pausing an owned tab also blocks that agent's new writes to other tabs and
+new working tabs. Browser steps inside a walk use the same checks.
+Managed working tabs refuse arbitrary `eval`. Use `read`, `marks`,
+`fields`, `fill`, and the other known browser commands.
+Ordinary website scripts and network requests can continue while paused.
+A failed or canceled mutation leaves control paused until the affected page
+answers a bounded confirmation request. Never bypass a refusal with another
+surface. Once control returns, read the page again before acting, including
+navigation; previous form and numbered-element observations have been discarded.
+Working-tab `viewport` requests report that application cannot be confirmed.
+The ownership check uses the current window's terminal identity. The browser
+bridge also requires its existing capability token. Ownership prevents
+accidental interference between agents; it does not bind that shared token
+to a terminal's reported identity.
 Returning control permits the agent to continue; it is not evidence that
 the agent's task has resumed or completed.
 

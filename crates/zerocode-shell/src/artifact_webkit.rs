@@ -38,7 +38,19 @@ pub(crate) fn take_snapshot_png(
     width: Option<f64>,
     tx: Sender<Result<Vec<u8>, String>>,
 ) {
+    take_snapshot_png_held(mtm, view, width, tx, None);
+}
+
+pub(crate) fn take_snapshot_png_held(
+    mtm: MainThreadMarker,
+    view: &WKWebView,
+    width: Option<f64>,
+    tx: Sender<Result<Vec<u8>, String>>,
+    held: Option<Box<dyn Send>>,
+) {
+    let held = std::cell::RefCell::new(held);
     let block = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+        let _held = held.borrow_mut().take();
         let answer = if image.is_null() {
             Err(if error.is_null() {
                 "스냅샷이 비어 왔습니다".to_string()

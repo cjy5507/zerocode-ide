@@ -325,6 +325,14 @@ async fn page_json(
     decode_page_json(&raw)
 }
 
+pub(crate) async fn workspace_page_fence(pane: &BrowserPane) -> Result<(), String> {
+    if page_json(pane, "1", BROWSER_CALLBACK_DEADLINE).await? == serde_json::json!(1) {
+        Ok(())
+    } else {
+        Err("workspace_paused: 페이지 확인 응답이 올바르지 않습니다".to_string())
+    }
+}
+
 pub(crate) fn decode_page_json(raw: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(raw)
         .ok()
@@ -1051,6 +1059,7 @@ pub(crate) fn open_browser_pane(
     workspace_restored: Option<bool>,
 ) -> Result<String, String> {
     from_the_main_webview(&webview)?;
+    let _ = workspace_restored;
     // An id that is not one of ours never reaches an engine — the hex shape is
     // minted only by `create_browser_profile`, and the shape check IS the
     // security check for BOTH engines. The wry path recomputes the store bytes
@@ -1067,11 +1076,21 @@ pub(crate) fn open_browser_pane(
     // agents' door reserved it first (`zerocode-browser open` answers the
     // label before the pane exists). Only a reserved label is accepted —
     // and only the main webview reaches this command at all.
+    let reserved_open = label.is_some();
     let label = {
         let mut born = state.browser_born();
         let mut reserved = state.browser_reserved();
         claim_label(&mut born, &mut reserved, label.as_deref())?
     };
+    if reserved_open
+        && state
+            .shell_runtime()
+            .browser_workspaces
+            .snapshot(&label)?
+            .is_none()
+    {
+        return Err("workspace_open_cancelled: 작업 브라우저 열기가 취소됐습니다".to_string());
+    }
     if agent_workspace == Some(true)
         && state
             .shell_runtime()
@@ -1079,11 +1098,10 @@ pub(crate) fn open_browser_pane(
             .snapshot(&label)?
             .is_none()
     {
-        state.shell_runtime().browser_workspaces.register(
-            &label,
-            None,
-            workspace_restored == Some(true),
-        )?;
+        state
+            .shell_runtime()
+            .browser_workspaces
+            .register(&label, None, true)?;
     }
     // Imported cookies waiting for this profile decide WHERE the pane is
     // born. wry sends `loadRequest` the moment the view exists (wkwebview
@@ -1094,6 +1112,12 @@ pub(crate) fn open_browser_pane(
     // report 2026-08-26 "쿠키를 가져왔는데 로그인이 풀려 있다"). Such a pane is
     // born on about:blank instead, drinks the staging, and only then leaves
     // by `navigate` — the first real request carries the cookies.
+    let creation_revision = state
+        .shell_runtime()
+        .browser_workspaces
+        .snapshot(&label)?
+        .map(|snapshot| snapshot.revision);
+    let managed = creation_revision.is_some();
     let staged = profile.as_deref().map_or_else(Vec::new, |id| {
         browser_cookie_import::peek_staged_cookies(state.config_root(), id)
     });
@@ -1112,6 +1136,7 @@ pub(crate) fn open_browser_pane(
         profile,
         label.clone(),
         staged,
+        managed,
     );
     #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
     let opened = open_webkit_browser_pane(
@@ -1126,11 +1151,35 @@ pub(crate) fn open_browser_pane(
         profile,
         label.clone(),
         staged,
+        managed,
     );
-    if opened.is_err() {
+    if opened.is_ok() {
+        let published = if let Some(revision) = creation_revision {
+            state
+                .shell_runtime()
+                .browser_workspaces
+                .publish(&label, revision, || {
+                    state.browser_panes().insert(label.clone());
+                    Ok(())
+                })
+        } else {
+            state.browser_panes().insert(label.clone());
+            Ok(())
+        };
+        if let Err(error) = published {
+            let cleanup = dispose_unpublished_browser(&app, &label);
+            state.browser_urls().remove(&label);
+            state.browser_records().remove(&label);
+            return Err(cleanup.err().unwrap_or(error));
+        }
+        if let Some(snapshot) = state.shell_runtime().browser_workspaces.snapshot(&label)? {
+            let _ = app.emit_to("main", "browser:workspace", snapshot);
+        }
+    } else {
+        forget_workspace_observation(&label);
+        state.browser_urls().remove(&label);
+        state.browser_records().remove(&label);
         let _ = state.shell_runtime().browser_workspaces.remove(&label);
-    } else if let Some(snapshot) = state.shell_runtime().browser_workspaces.snapshot(&label)? {
-        let _ = app.emit("browser:workspace", snapshot);
     }
     opened
 }
@@ -1156,6 +1205,7 @@ fn open_webkit_browser_pane(
     profile: Option<String>,
     label: String,
     staged: Vec<browser_cookie_import::StagedCookie>,
+    managed: bool,
 ) -> Result<String, String> {
     let store = match profile.as_deref() {
         Some(id) => Some(browser_profile_store(id).ok_or("프로필 id가 아닙니다")?),
@@ -1309,16 +1359,7 @@ fn open_webkit_browser_pane(
             );
         })
         .on_new_window(move |url, _| {
-            let _ = popup_app.emit_to(
-                "main",
-                "browser:popup",
-                BrowserPopup {
-                    label: popup_label.clone(),
-                    url: url.to_string(),
-                    // A popup lands beside the page that spawned it; no pane asked for it.
-                    term: None,
-                },
-            );
+            workspace_popup(&popup_app, &popup_label, url.as_str());
             tauri::webview::NewWindowResponse::Deny
         })
         // A download lands in the downloads folder under a unique name — no
@@ -1442,13 +1483,44 @@ fn open_webkit_browser_pane(
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = store;
+    let workspace = state.shell_runtime().browser_workspaces.snapshot(&label)?;
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    if workspace.is_some() {
+        return Err("workspace_platform_unsupported: 이 플랫폼은 안전한 작업 브라우저 생성을 지원하지 않습니다".to_string());
+    }
+    if managed && workspace.is_none() {
+        return Err("workspace_open_cancelled: 작업 브라우저 열기가 취소됐습니다".to_string());
+    }
+    let builder = if managed {
+        builder.focused(false)
+    } else {
+        builder
+    };
     let pane = window
         .add_child(
             builder,
             tauri::LogicalPosition::new(x, y),
-            tauri::LogicalSize::new(width.max(1.0), height.max(1.0)),
+            tauri::LogicalSize::new(
+                if managed { 0.0 } else { width.max(1.0) },
+                if managed { 0.0 } else { height.max(1.0) },
+            ),
         )
         .map_err(|error| error.to_string())?;
+    if let Some(workspace) = workspace {
+        let main = app.get_webview("main").ok_or("창이 없습니다")?;
+        if let Err(error) = place_native_browser(
+            app,
+            &pane,
+            &main,
+            &label,
+            [x, y, width.max(1.0), height.max(1.0)],
+            false,
+            Some(workspace.revision),
+        ) {
+            let _ = pane.close();
+            return Err(error);
+        }
+    }
     #[cfg(target_os = "macos")]
     if let Err(error) = prepare_browser_guest(&pane, WEBVIEW_NATIVE_QUERY_TIMEOUT) {
         // Never let a remote document run with a partially prepared host
@@ -1469,7 +1541,17 @@ fn open_webkit_browser_pane(
             staged,
         );
     }
-    state.browser_panes().insert(label.clone());
+    if managed {
+        let level = load_settings_resilient(state.settings())
+            .document
+            .browser
+            .default_zoom_level;
+        if let Err(error) = initialize_workspace_zoom(&pane, zoom_level_to_scale(level)) {
+            let _ = pane.close();
+            return Err(error.to_string());
+        }
+    }
+
     // The birth facts `tabs` and `diagnose` answer from, and the navigation
     // record the dead-load clock writes. The agent the pane actually wears
     // is remembered because a builder-time agent cannot be asked back.
@@ -1520,6 +1602,7 @@ fn open_chromium_browser_pane(
     profile: Option<String>,
     label: String,
     staged: Vec<browser_cookie_import::StagedCookie>,
+    managed: bool,
 ) -> Result<String, String> {
     let reader = user_agent
         .as_deref()
@@ -1558,6 +1641,7 @@ fn open_chromium_browser_pane(
         width: width.max(1.0),
         height: height.max(1.0),
         initialization_scripts: scripts,
+        hidden: managed,
     })
     .inspect_err(|error| {
         note_window_event(
@@ -1566,7 +1650,17 @@ fn open_chromium_browser_pane(
         );
     })?;
 
-    state.browser_panes().insert(label.clone());
+    if managed {
+        let level = load_settings_resilient(state.settings())
+            .document
+            .browser
+            .default_zoom_level;
+        if let Err(error) = initialize_workspace_zoom(&pane, zoom_level_to_scale(level)) {
+            let _ = pane.close();
+            return Err(error.to_string());
+        }
+    }
+
     state.browser_records().insert(
         label.clone(),
         BrowserPaneRecord {
@@ -1604,6 +1698,181 @@ fn open_chromium_browser_pane(
     Ok(label)
 }
 
+fn initialize_workspace_zoom(pane: &BrowserPane, scale: f64) -> Result<(), String> {
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    {
+        pane.set_zoom(scale)
+    }
+    #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+    {
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (pane, scale);
+            Err("workspace_platform_unsupported: 이 플랫폼은 안전한 작업 브라우저 초기화를 지원하지 않습니다".to_string())
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let (answer, read) = std::sync::mpsc::sync_channel(1);
+            pane.with_webview(move |platform| {
+                let result = (|| {
+                    #[cfg(target_os = "macos")]
+                    let actual: f64 = unsafe {
+                        let view = platform.inner().cast::<objc2::runtime::AnyObject>();
+                        if view.is_null() { return Err("workspace_native_unavailable: 브라우저 화면이 없습니다".to_string()); }
+                        let settable: bool = objc2::msg_send![view, respondsToSelector: objc2::sel!(setPageZoom:)];
+                        let readable: bool = objc2::msg_send![view, respondsToSelector: objc2::sel!(pageZoom)];
+                        if !settable || !readable { return Err("workspace_zoom_unsupported: 브라우저 기본 확대를 적용할 수 없습니다".to_string()); }
+                        let _: () = objc2::msg_send![view, setPageZoom: scale];
+                        objc2::msg_send![view, pageZoom]
+                    };
+                    #[cfg(target_os = "windows")]
+                    let actual = unsafe {
+                        let controller = platform.controller();
+                        controller.SetZoomFactor(scale).map_err(|error| error.to_string())?;
+                        let mut actual = 0.0;
+                        controller.ZoomFactor(&mut actual).map_err(|error| error.to_string())?;
+                        actual
+                    };
+                    if !actual.is_finite() || (actual - scale).abs() > f64::EPSILON * scale.abs().max(1.0) {
+                        return Err("workspace_zoom_unconfirmed: 브라우저 기본 확대를 확인하지 못했습니다".to_string());
+                    }
+                    Ok(())
+                })();
+                let _ = answer.send(result);
+            }).map_err(|error| error.to_string())?;
+            read.recv_timeout(BROWSER_CALLBACK_DEADLINE).map_err(|_| {
+                "workspace_native_timeout: 브라우저 초기화 응답 시간이 지났습니다".to_string()
+            })?
+        }
+    }
+}
+
+fn dispose_unpublished_browser(app: &AppHandle, label: &str) -> Result<(), String> {
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    let pane = BrowserPane::new(app, label.to_string());
+    #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+    let pane = app
+        .get_webview(label)
+        .ok_or("workspace_native_unavailable: 브라우저 생성 결과를 닫지 못했습니다")?;
+    let main = app.get_webview("main").ok_or("창이 없습니다")?;
+    hide_browser_pane(&pane, &main)?;
+    pane.close().map_err(|error| error.to_string())
+}
+
+pub(crate) fn close_revision(state: &AppState, label: &str) -> Result<u64, String> {
+    if let Some(snapshot) = state.shell_runtime().browser_workspaces.snapshot(label)? {
+        return Ok(snapshot.revision);
+    }
+    if !state.browser_panes().contains(label) {
+        return Err("workspace_missing: 이 창이 만든 브라우저 판이 아닙니다".to_string());
+    }
+    Ok(birth_number(label))
+}
+
+pub(crate) fn cancel_workspace_open(app: &AppHandle, state: &AppState, label: &str, revision: u64) {
+    state.browser_reserved().remove(label);
+    match state
+        .shell_runtime()
+        .browser_workspaces
+        .cancel_unpublished(label, revision, || state.browser_panes().contains(label))
+    {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(_) => return,
+    }
+    let Some(main) = app.get_webview("main") else {
+        return;
+    };
+    let _ = close_native_browser(app, &main, state, label, Some(revision));
+    let _ = app.emit_to(
+        "main",
+        "browser:agent-close",
+        BrowserAgentClose {
+            label: label.to_string(),
+            revision: Some(revision),
+        },
+    );
+}
+
+pub(crate) fn workspace_popup(app: &AppHandle, label: &str, url: &str) {
+    let Ok(url) = browsable(url) else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let Ok(snapshot) = state.shell_runtime().browser_workspaces.snapshot(label) else {
+        return;
+    };
+    match snapshot {
+        None => {
+            if state.browser_panes().contains(label) {
+                let _ = app.emit_to(
+                    "main",
+                    "browser:popup",
+                    BrowserPopup {
+                        label: label.to_string(),
+                        url: url.to_string(),
+                        term: None,
+                        revision: None,
+                    },
+                );
+            }
+        }
+        Some(snapshot) if snapshot.mode == crate::browser_workspace::Mode::Human => {
+            let _ = app.emit_to(
+                "main",
+                "browser:popup",
+                BrowserPopup {
+                    label: label.to_string(),
+                    url: url.to_string(),
+                    term: None,
+                    revision: Some(snapshot.revision),
+                },
+            );
+        }
+        Some(snapshot) if snapshot.mode == crate::browser_workspace::Mode::Agent => {
+            if !state
+                .shell_runtime()
+                .browser_workspaces
+                .reserve_popup(label, snapshot.revision)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let app = app.clone();
+            let label = label.to_string();
+            tauri::async_runtime::spawn(async move {
+                let queued = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    let state = queued.state::<AppState>();
+                    let Ok(pane) = browser_pane_of(&queued, &state, &label) else {
+                        let _ = state
+                            .shell_runtime()
+                            .browser_workspaces
+                            .release_popup(&label);
+                        return;
+                    };
+                    let result = state.shell_runtime().browser_workspaces.with_agent_popup(
+                        &label,
+                        snapshot.revision,
+                        || pane.navigate(url).map_err(|error| error.to_string()),
+                    );
+                    if matches!(result, Ok(true) | Err(_)) {
+                        forget_workspace_observation(&label);
+                    }
+                    if let Ok(Some(snapshot)) =
+                        state.shell_runtime().browser_workspaces.snapshot(&label)
+                    {
+                        let _ = queued.emit_to("main", "browser:workspace", snapshot);
+                    }
+                });
+            });
+        }
+        Some(snapshot) => {
+            let _ = app.emit_to("main", "browser:workspace", snapshot);
+        }
+    }
+}
+
 #[tauri::command(async)]
 pub(crate) fn browser_navigate(
     app: AppHandle,
@@ -1611,16 +1880,21 @@ pub(crate) fn browser_navigate(
     state: State<'_, AppState>,
     label: String,
     url: String,
+    expected_revision: Option<u64>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    super::browser_workspace::require_person_control(&state, &label)?;
-    let parsed = browsable(&url)?;
-    let pane = browser_pane_of(&app, &state, &label)?;
-    state
-        .browser_urls()
-        .insert(label.clone(), parsed.to_string());
-    pane.navigate(parsed)
-        .map_err(|_| "브라우저 판에 이동 요청을 보낼 수 없습니다".to_string())
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = (|| {
+        let parsed = browsable(&url)?;
+        let pane = browser_pane_of(&app, &state, &label)?;
+        state
+            .browser_urls()
+            .insert(label.clone(), parsed.to_string());
+        pane.navigate(parsed)
+            .map_err(|_| "브라우저 판에 이동 요청을 보낼 수 없습니다".to_string())
+    })();
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 /// Back and forward are the page's own history walked in place — the webview
@@ -1633,19 +1907,24 @@ pub(crate) fn browser_history(
     state: State<'_, AppState>,
     label: String,
     delta: i32,
+    expected_revision: Option<u64>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    super::browser_workspace::require_person_control(&state, &label)?;
-    let pane = browser_pane_of(&app, &state, &label)?;
-    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-    match delta {
-        -1 => return pane.go_back(),
-        0 => return pane.reload(),
-        1 => return pane.go_forward(),
-        _ => {}
-    }
-    pane.eval(format!("history.go({delta})"))
-        .map_err(|error| error.to_string())
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = (|| {
+        let pane = browser_pane_of(&app, &state, &label)?;
+        #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+        match delta {
+            -1 => return pane.go_back(),
+            0 => return pane.reload(),
+            1 => return pane.go_forward(),
+            _ => {}
+        }
+        pane.eval(format!("history.go({delta})"))
+            .map_err(|error| error.to_string())
+    })();
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 #[tauri::command(async)]
@@ -1654,12 +1933,17 @@ pub(crate) fn browser_reload(
     webview: tauri::Webview,
     state: State<'_, AppState>,
     label: String,
+    expected_revision: Option<u64>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    super::browser_workspace::require_person_control(&state, &label)?;
-    browser_pane_of(&app, &state, &label)?
-        .reload()
-        .map_err(|error| error.to_string())
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = (|| {
+        browser_pane_of(&app, &state, &label)?
+            .reload()
+            .map_err(|error| error.to_string())
+    })();
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 /// The reload button while the page still loads — Orca's same button stops
@@ -1670,15 +1954,20 @@ pub(crate) fn browser_stop(
     webview: tauri::Webview,
     state: State<'_, AppState>,
     label: String,
+    expected_revision: Option<u64>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    super::browser_workspace::require_person_control(&state, &label)?;
-    let pane = browser_pane_of(&app, &state, &label)?;
-    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-    return pane.stop();
-    #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
-    pane.eval("window.stop()")
-        .map_err(|error| error.to_string())
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = (|| {
+        let pane = browser_pane_of(&app, &state, &label)?;
+        #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+        return pane.stop();
+        #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+        pane.eval("window.stop()")
+            .map_err(|error| error.to_string())
+    })();
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 /// Where the pane sits and whether it may be seen — ONE command, because the
@@ -1700,30 +1989,185 @@ pub(crate) fn browser_place(
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
     let pane = browser_pane_of(&app, &state, &label)?;
-    if shown
-        && !state
-            .shell_runtime()
-            .browser_workspaces
-            .allows_person(&label)?
+    let revision = match state.shell_runtime().browser_workspaces.snapshot(&label) {
+        Ok(snapshot) => snapshot.map(|snapshot| snapshot.revision),
+        Err(error) => {
+            let _ = hide_browser_pane(&pane, &webview);
+            return Err(error);
+        }
+    };
+    place_native_browser(
+        &app,
+        &pane,
+        &webview,
+        &label,
+        [x, y, width, height],
+        shown,
+        revision,
+    )
+}
+
+fn place_native_browser(
+    app: &AppHandle,
+    pane: &BrowserPane,
+    main_webview: &tauri::Webview,
+    label: &str,
+    bounds: [f64; 4],
+    shown: bool,
+    revision: Option<u64>,
+) -> Result<(), String> {
+    let size_limit = f64::from(zerocode_core::agent_browser::VIEWPORT_MAX);
+    if bounds.iter().any(|value| !value.is_finite())
+        || bounds[2] < 1.0
+        || bounds[3] < 1.0
+        || (revision.is_some() && (bounds[2] > size_limit || bounds[3] > size_limit))
     {
-        hide_browser_pane(&pane, &webview)?;
+        let hidden = hide_browser_pane(pane, main_webview);
+        if !shown {
+            return hidden;
+        }
+        hidden?;
         return Err(
-            "작업 브라우저는 관전 중입니다 — 직접 조작은 제어권 전환 후 가능합니다".to_string(),
+            "workspace_bounds_invalid: 브라우저 크기가 허용 범위를 벗어났습니다".to_string(),
         );
     }
-    if shown {
-        #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-        pane.set_bounds(x, y, width.max(1.0), height.max(1.0))?;
-        #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    {
+        let _ = (app, label);
+        pane.place(bounds, shown, revision, main_webview.clone())
+    }
+    #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+    {
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            pane.set_position(tauri::LogicalPosition::new(x, y))
+            let state = app.state::<AppState>();
+            let _ = (main_webview, revision);
+            if state
+                .shell_runtime()
+                .browser_workspaces
+                .snapshot(label)?
+                .is_some()
+            {
+                let _ = pane.hide();
+                return Err("workspace_platform_unsupported: 이 플랫폼은 안전한 작업 브라우저 배치를 지원하지 않습니다".to_string());
+            }
+            pane.set_position(tauri::LogicalPosition::new(bounds[0], bounds[1]))
                 .map_err(|error| error.to_string())?;
-            pane.set_size(tauri::LogicalSize::new(width.max(1.0), height.max(1.0)))
+            pane.set_size(tauri::LogicalSize::new(bounds[2], bounds[3]))
                 .map_err(|error| error.to_string())?;
+            if shown { pane.show() } else { pane.hide() }.map_err(|error| error.to_string())
         }
-        pane.show().map_err(|error| error.to_string())
-    } else {
-        hide_browser_pane(&pane, &webview)
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let app = app.clone();
+            let label = label.to_string();
+            let main_webview = main_webview.clone();
+            let (answer, read) = std::sync::mpsc::sync_channel(1);
+            #[cfg(target_os = "windows")]
+            let scale = pane
+                .window()
+                .scale_factor()
+                .map_err(|error| error.to_string())?;
+            pane.with_webview(move |platform| {
+                let result = (|| {
+                    #[cfg(target_os = "macos")]
+                    let (view, parent, owned) = unsafe {
+                        let view = platform.inner().cast::<objc2::runtime::AnyObject>();
+                        if view.is_null() {
+                            return Err("workspace_native_unavailable: 브라우저 화면이 없습니다"
+                                .to_string());
+                        }
+                        let owned = crate::browser_runtime::browser_view_owns_first_responder(view);
+                        let _: () = objc2::msg_send![view, setHidden: true];
+                        let parent: *mut objc2::runtime::AnyObject =
+                            objc2::msg_send![view, superview];
+                        if parent.is_null() {
+                            if owned {
+                                let _ = main_webview.set_focus();
+                            }
+                            return Err(
+                                "workspace_native_unavailable: 브라우저 부모 화면이 없습니다"
+                                    .to_string(),
+                            );
+                        }
+                        (view, parent, owned)
+                    };
+                    #[cfg(target_os = "windows")]
+                    let controller = {
+                        let controller = platform.controller();
+                        unsafe {
+                            controller
+                                .SetIsVisible(false)
+                                .map_err(|error| error.to_string())?;
+                        }
+                        controller
+                    };
+                    #[cfg(target_os = "macos")]
+                    let mut displayed = false;
+                    let result = app
+                        .state::<AppState>()
+                        .shell_runtime()
+                        .browser_workspaces
+                        .with_placement(&label, revision, |allowed| {
+                            let visible = shown && allowed;
+                            #[cfg(target_os = "macos")]
+                            unsafe {
+                                displayed = visible;
+                                let flipped: bool = objc2::msg_send![parent, isFlipped];
+                                let parent_bounds: objc2_foundation::NSRect =
+                                    objc2::msg_send![parent, bounds];
+                                let y = if flipped {
+                                    bounds[1]
+                                } else {
+                                    parent_bounds.size.height - bounds[1] - bounds[3]
+                                };
+                                let frame = objc2_foundation::NSRect::new(
+                                    objc2_foundation::NSPoint::new(bounds[0], y),
+                                    objc2_foundation::NSSize::new(bounds[2], bounds[3]),
+                                );
+                                let _: () = objc2::msg_send![view, setFrame: frame];
+                                if visible {
+                                    let _: () = objc2::msg_send![view, setHidden: false];
+                                }
+                            }
+                            #[cfg(target_os = "windows")]
+                            unsafe {
+                                let _ = &main_webview;
+                                controller
+                                    .SetBounds(windows::Win32::Foundation::RECT {
+                                        left: (bounds[0] * scale).round() as i32,
+                                        top: (bounds[1] * scale).round() as i32,
+                                        right: ((bounds[0] + bounds[2]) * scale).round() as i32,
+                                        bottom: ((bounds[1] + bounds[3]) * scale).round() as i32,
+                                    })
+                                    .map_err(|error| error.to_string())?;
+                                if visible {
+                                    controller
+                                        .SetIsVisible(true)
+                                        .map_err(|error| error.to_string())?;
+                                }
+                            }
+                            if shown && !allowed {
+                                return Err(
+                                    "workspace_paused: 직접 조작은 제어권 전환 후 가능합니다"
+                                        .to_string(),
+                                );
+                            }
+                            Ok(())
+                        });
+                    #[cfg(target_os = "macos")]
+                    if (!displayed || result.is_err()) && owned {
+                        let _ = main_webview.set_focus();
+                    }
+                    result
+                })();
+                let _ = answer.send(result);
+            })
+            .map_err(|error| error.to_string())?;
+            read.recv_timeout(BROWSER_CALLBACK_DEADLINE).map_err(|_| {
+                "workspace_native_timeout: 브라우저 배치 응답 시간이 지났습니다".to_string()
+            })?
+        }
     }
 }
 
@@ -1777,26 +2221,35 @@ pub(crate) fn browser_devtools(
     webview: tauri::Webview,
     state: State<'_, AppState>,
     label: String,
+    expected_revision: Option<u64>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    super::browser_workspace::require_person_control(&state, &label)?;
-    let pane = browser_pane_of(&app, &state, &label)?;
-    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
-    return pane.toggle_devtools();
-    #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
-    {
-        if pane.is_devtools_open() {
-            pane.close_devtools();
-        } else {
-            pane.open_devtools();
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = (|| {
+        let pane = browser_pane_of(&app, &state, &label)?;
+        #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+        return pane.toggle_devtools();
+        #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+        {
+            if pane.is_devtools_open() {
+                pane.close_devtools();
+            } else {
+                pane.open_devtools();
+            }
+            Ok(())
         }
-        Ok(())
-    }
+    })();
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 /// Find on the page (1-g32/1-g33): install the highlighter if needed, run it,
 /// and read back `{count,index}` over the same eval-callback channel the grab
 /// tools use. A count of 0 means nothing matched.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri command arguments are the IPC contract"
+)]
 #[tauri::command]
 pub(crate) async fn browser_find(
     app: AppHandle,
@@ -1806,10 +2259,14 @@ pub(crate) async fn browser_find(
     query: String,
     forward: bool,
     match_case: bool,
+    expected_revision: Option<u64>,
 ) -> Result<Option<serde_json::Value>, String> {
     from_the_main_webview(&webview)?;
-    super::browser_workspace::require_person_control(&state, &label)?;
-    automate_find(&app, &state, &label, &query, forward, match_case).await
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result =
+        async { automate_find(&app, &state, &label, &query, forward, match_case).await }.await;
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 /// The one find executor — the window's toolbar and the door's `find` are
@@ -1852,11 +2309,17 @@ pub(crate) fn browser_find_clear(
     webview: tauri::Webview,
     state: State<'_, AppState>,
     label: String,
+    expected_revision: Option<u64>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    let pane = browser_pane_of(&app, &state, &label)?;
-    pane.eval("(function(){if(window.__zerocodeFind)window.__zerocodeFind.clear();var s=window.getSelection&&window.getSelection();if(s)s.removeAllRanges();})()")
-        .map_err(|error| error.to_string())
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = (|| {
+        let pane = browser_pane_of(&app, &state, &label)?;
+        pane.eval("(function(){if(window.__zerocodeFind)window.__zerocodeFind.clear();var s=window.getSelection&&window.getSelection();if(s)s.removeAllRanges();})()")
+                .map_err(|error| error.to_string())
+    })();
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 /// The page's zoom, as a factor. The ladder of steps lives in the window —
@@ -1869,14 +2332,20 @@ pub(crate) fn browser_zoom(
     state: State<'_, AppState>,
     label: String,
     scale: f64,
+    expected_revision: Option<u64>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    if !(0.25..=5.0).contains(&scale) {
-        return Err("확대 범위를 벗어났습니다".to_string());
-    }
-    browser_pane_of(&app, &state, &label)?
-        .set_zoom(scale)
-        .map_err(|error| error.to_string())
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = (|| {
+        if !(0.25..=5.0).contains(&scale) {
+            return Err("확대 범위를 벗어났습니다".to_string());
+        }
+        browser_pane_of(&app, &state, &label)?
+            .set_zoom(scale)
+            .map_err(|error| error.to_string())
+    })();
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 /// Scroll the page — to a selector's middle, to the top or the bottom, or
@@ -1888,11 +2357,17 @@ pub(crate) async fn browser_scroll(
     state: State<'_, AppState>,
     label: String,
     target: String,
+    expected_revision: Option<u64>,
 ) -> Result<(i64, i64), String> {
     from_the_main_webview(&webview)?;
-    super::browser_workspace::require_person_control(&state, &label)?;
-    let target = zerocode_core::agent_browser::parse_scroll(&target)?;
-    automate_scroll(&app, &state, &label, &target).await
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = async {
+        let target = zerocode_core::agent_browser::parse_scroll(&target)?;
+        automate_scroll(&app, &state, &label, &target).await
+    }
+    .await;
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 pub(crate) async fn automate_scroll(
@@ -2159,10 +2634,13 @@ pub(crate) async fn browser_eval(
     state: State<'_, AppState>,
     label: String,
     expression: String,
+    expected_revision: Option<u64>,
 ) -> Result<serde_json::Value, String> {
     from_the_main_webview(&webview)?;
-    super::browser_workspace::require_person_control(&state, &label)?;
-    automate_eval(&app, &state, &label, &expression).await
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = async { automate_eval(&app, &state, &label, &expression).await }.await;
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 pub(crate) async fn automate_eval(
@@ -2673,10 +3151,13 @@ pub(crate) async fn browser_click(
     state: State<'_, AppState>,
     label: String,
     selector: String,
+    expected_revision: Option<u64>,
 ) -> Result<BrowserInputReport, String> {
     from_the_main_webview(&webview)?;
-    super::browser_workspace::require_person_control(&state, &label)?;
-    automate_click(&app, &state, &label, &selector).await
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = async { automate_click(&app, &state, &label, &selector).await }.await;
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 pub(crate) async fn automate_click(
@@ -3884,10 +4365,14 @@ pub(crate) async fn browser_type(
     label: String,
     selector: String,
     text: String,
+    expected_revision: Option<u64>,
 ) -> Result<BrowserInputReport, String> {
     from_the_main_webview(&webview)?;
-    super::browser_workspace::require_person_control(&state, &label)?;
-    automate_type(&app, &state, &label, &selector, &text, TypeRoad::Keys).await
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result =
+        async { automate_type(&app, &state, &label, &selector, &text, TypeRoad::Keys).await }.await;
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 pub(crate) async fn automate_type(
@@ -4133,25 +4618,31 @@ pub(crate) fn browser_grab_arm(
     state: State<'_, AppState>,
     label: String,
     mode: Option<String>,
+    expected_revision: Option<u64>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    // Two intents, one door — Orca's copy and annotate (1-g8). The page gets
-    // the installer that matches, and everything downstream (take, disarm)
-    // reads the same globals either way.
-    let installer = if mode.as_deref() == Some("annotate") {
-        BROWSER_ANNOTATE_INSTALLER
-    } else {
-        BROWSER_GRAB_INSTALLER
-    };
-    let pane = browser_pane_of(&app, &state, &label)?;
-    // The harvest first: both installers spread `__zerocodeHarvest(el)` into
-    // their payloads, and an installer that runs without it throws at pick.
-    pane.eval(GRAB_HARVEST_JS)
-        .map_err(|error| error.to_string())?;
-    // And the hover tag, for the same reason (1-g18 shares it like 1-g12
-    // shares the harvest).
-    pane.eval(GRAB_DIM_JS).map_err(|error| error.to_string())?;
-    pane.eval(installer).map_err(|error| error.to_string())
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = (|| {
+        // Two intents, one door — Orca's copy and annotate (1-g8). The page gets
+        // the installer that matches, and everything downstream (take, disarm)
+        // reads the same globals either way.
+        let installer = if mode.as_deref() == Some("annotate") {
+            BROWSER_ANNOTATE_INSTALLER
+        } else {
+            BROWSER_GRAB_INSTALLER
+        };
+        let pane = browser_pane_of(&app, &state, &label)?;
+        // The harvest first: both installers spread `__zerocodeHarvest(el)` into
+        // their payloads, and an installer that runs without it throws at pick.
+        pane.eval(GRAB_HARVEST_JS)
+            .map_err(|error| error.to_string())?;
+        // And the hover tag, for the same reason (1-g18 shares it like 1-g12
+        // shares the harvest).
+        pane.eval(GRAB_DIM_JS).map_err(|error| error.to_string())?;
+        pane.eval(installer).map_err(|error| error.to_string())
+    })();
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 #[tauri::command]
@@ -4212,11 +4703,17 @@ pub(crate) fn browser_grab_disarm(
     webview: tauri::Webview,
     state: State<'_, AppState>,
     label: String,
+    expected_revision: Option<u64>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    browser_pane_of(&app, &state, &label)?
-        .eval(BROWSER_GRAB_REMOVER)
-        .map_err(|error| error.to_string())
+    let operation =
+        super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
+    let result = (|| {
+        browser_pane_of(&app, &state, &label)?
+            .eval(BROWSER_GRAB_REMOVER)
+            .map_err(|error| error.to_string())
+    })();
+    super::browser_workspace::finish_person_control(operation, result)
 }
 
 /// Give the keyboard back to the window on demand.
@@ -4240,32 +4737,59 @@ pub(crate) fn close_browser_pane(
     webview: tauri::Webview,
     state: State<'_, AppState>,
     label: String,
+    expected_revision: Option<u64>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
-    if !state.browser_panes().contains(&label) {
-        return Err("이 창이 만든 브라우저 판이 아닙니다".to_string());
+    close_native_browser(&app, &webview, &state, &label, expected_revision)
+}
+
+fn close_native_browser(
+    app: &AppHandle,
+    webview: &tauri::Webview,
+    state: &AppState,
+    label: &str,
+    expected_revision: Option<u64>,
+) -> Result<(), String> {
+    if let Some(revision) = expected_revision
+        && state
+            .shell_runtime()
+            .browser_workspaces
+            .closed_at(label, revision)?
+    {
+        return Ok(());
     }
-    // Hidden first, consumed LAST (gpt-sol review of 1-fy, finding 6): a
-    // close that fails after the mint burned would leave a native pane
-    // nobody can ever address again. Hiding is the best-effort mercy — even
-    // a close that keeps failing leaves no page COVERING the window — and
-    // the mint survives an error so the close can be tried again.
-    //
-    // Through the ENGINE-NEUTRAL handle: a Tauri webview lookup knows
-    // nothing of a Chromium pane, so the close burned the mint and walked
-    // away while the CEF view stayed painted over the stage — a closed tab's
-    // page covering the terminal that took its place (live report
-    // 2026-09-09: "터미널창을 덮어버리는 버그"). A pane the engine already
-    // lost still gives up its label, as before.
-    if let Ok(pane) = browser_pane_of(&app, &state, &label) {
-        let _ = hide_browser_pane(&pane, &webview);
-        pane.close().map_err(|error| error.to_string())?;
+    if !state.browser_panes().contains(label) {
+        return Err("workspace_missing: 이 창이 만든 브라우저 판이 아닙니다".to_string());
     }
-    state.browser_panes().remove(&label);
-    state.browser_urls().remove(&label);
-    state.browser_records().remove(&label);
-    state.shell_runtime().browser_workspaces.remove(&label)?;
-    forget_workspace_observation(&label);
+    let revision = close_revision(state, label)?;
+    if expected_revision.is_some_and(|expected| expected != revision) {
+        return Err("workspace_stale: 닫기 요청 뒤 브라우저 상태가 바뀌었습니다".to_string());
+    }
+    let notify_app = app.clone();
+    let closing = state
+        .shell_runtime()
+        .browser_workspaces
+        .begin_close(label, expected_revision)?
+        .map(|closing| {
+            closing.notifying(move |snapshot| {
+                let _ = notify_app.emit_to("main", "browser:workspace", snapshot);
+            })
+        });
+    let pane = browser_pane_of(app, state, label)?;
+    hide_browser_pane(&pane, webview)?;
+    pane.close().map_err(|error| error.to_string())?;
+    state.browser_panes().remove(label);
+    state.browser_urls().remove(label);
+    state.browser_records().remove(label);
+    forget_workspace_observation(label);
+    state.shell_runtime().browser_workspaces.remove(label)?;
+    state
+        .shell_runtime()
+        .browser_workspaces
+        .confirm_closed(label, revision)?;
+    if let Some(closing) = closing {
+        closing.finish();
+    }
     Ok(())
 }
 
