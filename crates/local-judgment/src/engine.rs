@@ -22,6 +22,28 @@ pub const MAX_FRAME: usize = 2 * 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const START_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How the owned server admits requests to its runtime: how long one
+/// exchange may run, how long a request may wait for its turn, and how many
+/// may wait at once.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // queue_wait and waiting are read once requests wait for their turn.
+pub(crate) struct Limits {
+    pub request: Duration,
+    pub queue_wait: Duration,
+    pub waiting: usize,
+}
+
+impl Limits {
+    /// A waiting request never waits longer than one exchange may run, and
+    /// the bodies held while waiting never pass the bytes one provider
+    /// response may carry.
+    pub(crate) const DEFAULT: Self = Self {
+        request: REQUEST_TIMEOUT,
+        queue_wait: REQUEST_TIMEOUT,
+        waiting: judgment_provider::MAX_RESPONSE_BYTES / MAX_FRAME,
+    };
+}
+
 pub struct Engine {
     child: Mutex<Child>,
     io: Mutex<Pipe>,
@@ -41,6 +63,8 @@ pub struct Running {
     pub engine: Arc<Engine>,
     task: Option<tokio::task::JoinHandle<()>>,
     reservation: Option<std::net::TcpListener>,
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
+    permit: Arc<tokio::sync::Semaphore>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -277,6 +301,7 @@ struct HttpState {
     engine: Arc<Engine>,
     provider: Provider,
     permit: Arc<tokio::sync::Semaphore>,
+    limits: Limits,
     failed: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -339,7 +364,7 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
         let _permit = permit;
         engine.exchange(&bytes)
     });
-    let result = tokio::time::timeout(REQUEST_TIMEOUT, &mut task).await;
+    let result = tokio::time::timeout(state.limits.request, &mut task).await;
     match result {
         Ok(Ok(Ok(bytes))) => {
             if state.provider.decode(&prepared, bytes.clone()).is_err() {
@@ -373,11 +398,31 @@ pub async fn serve(
     serve_on(model, engine, failed, None).await
 }
 
+#[cfg(all(test, unix))]
+pub(crate) async fn serve_limited(
+    model: &Model,
+    engine: Arc<Engine>,
+    failed: Arc<dyn Fn() + Send + Sync>,
+    limits: Limits,
+) -> Result<Running> {
+    serve_with(model, engine, failed, None, limits).await
+}
+
 pub async fn serve_on(
     model: &Model,
     engine: Arc<Engine>,
     failed: Arc<dyn Fn() + Send + Sync>,
     listener: Option<std::net::TcpListener>,
+) -> Result<Running> {
+    serve_with(model, engine, failed, listener, Limits::DEFAULT).await
+}
+
+async fn serve_with(
+    model: &Model,
+    engine: Arc<Engine>,
+    failed: Arc<dyn Fn() + Send + Sync>,
+    listener: Option<std::net::TcpListener>,
+    limits: Limits,
 ) -> Result<Running> {
     engine.on_exit(failed.clone());
     match model.engine {
@@ -419,10 +464,12 @@ pub async fn serve_on(
         model: model.id.clone(),
         requires_auth: false,
     };
+    let permit = Arc::new(tokio::sync::Semaphore::new(1));
     let state = HttpState {
         engine: engine.clone(),
         provider: provider.clone(),
-        permit: Arc::new(tokio::sync::Semaphore::new(1)),
+        permit: permit.clone(),
+        limits,
         failed,
     };
     let router = axum::Router::new()
@@ -440,10 +487,18 @@ pub async fn serve_on(
         engine,
         task: Some(task),
         reservation: Some(reservation),
+        permit,
     })
 }
 
 impl Running {
+    /// Requests the server holds right now: the one its runtime is answering
+    /// and the ones waiting for their turn.
+    #[cfg(all(test, unix))]
+    pub(crate) fn admitted(&self) -> usize {
+        1 - self.permit.available_permits()
+    }
+
     pub(crate) fn take_listener(&mut self) -> Result<std::net::TcpListener> {
         self.reservation.take().ok_or(Error::RuntimeFailed)
     }
