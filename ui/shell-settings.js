@@ -25,9 +25,9 @@ const PANE_OF = {
   // The Jev dashboard's "in settings" and its consent chip land on the one
   // switch (§6.1), its key chip on the key field and its budget chip on the
   // key card's status (t-6243 D5).
-  "jev-enabled": "api-routers",
-  "typesafe-key-input": "api-routers",
-  "typesafe-status": "api-routers",
+  "jev-enabled": "judgment-models",
+  "typesafe-key-input": "judgment-models",
+  "typesafe-status": "judgment-models",
   // The field of the key a page's typing asks with now (t-9537) — drawn per
   // key, and this id is the one a walk reads (`paintTypeValueSlot`).
   "type-value-key-input": "computer-use",
@@ -1003,6 +1003,9 @@ function showSettingsPane(pane) {
   }
   if (pane === "api-routers" && arriving) {
     void refreshApiRouters();
+  }
+  if (pane === "judgment-models" && arriving) {
+    void refreshTypeSafe();
     if (judgmentProviderController.current()?.kind === "local" && judgmentProviderController.localMode === "managed") void managedJudgmentController.refresh();
   }
   if (pane === "onboarding" && arriving) {
@@ -6999,7 +7002,8 @@ async function saveTypeSafeKey() {
 }
 
 async function checkTypeSafeKey() {
-  if (typesafeBusy || judgmentProviderController.dirty()) return;
+  if (typesafeBusy) return;
+  if (judgmentProviderController.dirty()) return judgmentProviderController.checkDraft();
   const identity = typesafeState?.providerIdentity;
   typesafeBusy = true;
   if (typesafeState) paintTypeSafe(typesafeState);
@@ -9484,6 +9488,9 @@ function setSettingsOpen(on, focus = null) {
   settingsView.hidden = !on;
   if (on && focus) {
     const at = el(focus);
+    for (let details = at?.closest("details:not([open])"); details; details = details.parentElement?.closest("details:not([open])")) {
+      details.open = true;
+    }
     at?.scrollIntoView({ block: "center" });
     // A no-op on the sections that are not focusable, which is the honest
     // outcome: bring it into view and leave the caret where it was.

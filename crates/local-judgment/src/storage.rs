@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{Artifact, Model, RuntimeProfile, relative};
+use crate::catalog::{
+    Artifact, Catalog, MAX_CATALOG_BYTES, MAX_MODELS, Model, RuntimeProfile, relative,
+};
 use crate::{Error, Result};
 
 pub struct Store {
@@ -16,6 +18,24 @@ pub struct Store {
 pub struct Stage {
     path: PathBuf,
     committed: bool,
+    external: Option<Location>,
+    tracker: Option<PathBuf>,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Location {
+    parent: PathBuf,
+    model_id: String,
+    fingerprint: String,
+    nonce: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Ownership {
+    fingerprint: String,
+    nonce: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,7 +97,14 @@ impl Store {
         let store = Self {
             root: io(fs::canonicalize(root))?,
         };
-        for name in ["models", "runtime", "partial"] {
+        for name in [
+            "models",
+            "runtime",
+            "partial",
+            "sources",
+            "locations",
+            "external-partial",
+        ] {
             private_dir(&child(&store.root, name)?)?;
         }
         for entry in io(fs::read_dir(store.root.join("partial")))? {
@@ -89,6 +116,7 @@ impl Store {
                 io(fs::remove_file(path))?;
             }
         }
+        store.clean_external_partial()?;
         Ok(store)
     }
 
@@ -98,10 +126,181 @@ impl Store {
         Ok(Stage {
             path,
             committed: false,
+            external: None,
+            tracker: None,
         })
     }
 
+    pub fn default_models_directory(&self) -> PathBuf {
+        self.root.join("models")
+    }
+
+    pub fn require_model_space(&self, bytes: u64, destination: Option<&Path>) -> Result<()> {
+        let directory = match destination {
+            Some(directory) => selected_parent(directory)?,
+            None => self.root.clone(),
+        };
+        if available_space(&directory)? < bytes.saturating_add(512 * 1024 * 1024) {
+            return Err(Error::Space);
+        }
+        Ok(())
+    }
+
+    pub fn model_stage(&self, model: &Model, destination: Option<&Path>) -> Result<Stage> {
+        let Some(destination) = destination else {
+            return self.stage();
+        };
+        let parent = selected_parent(destination)?;
+        if parent == self.default_models_directory() {
+            return self.stage();
+        }
+        if self.location(model)?.is_some() || self.model_path(model)?.exists() {
+            return Err(Error::DestinationUnavailable);
+        }
+        let location = Location {
+            parent,
+            model_id: model.id.clone(),
+            fingerprint: model.fingerprint()?,
+            nonce: uuid::Uuid::new_v4().to_string(),
+        };
+        let path = location_path(&location, true)?;
+        io(fs::create_dir(&path))?;
+        let mut stage = Stage {
+            path,
+            committed: false,
+            external: Some(location.clone()),
+            tracker: None,
+        };
+        private_dir(stage.path())?;
+        let ownership = serde_json::to_vec(&Ownership {
+            fingerprint: location.fingerprint.clone(),
+            nonce: location.nonce.clone(),
+        })
+        .map_err(|_| Error::Storage)?;
+        write_new(&child(stage.path(), "ownership.json")?, &ownership)?;
+        let tracker = child(
+            &self.root,
+            &format!("external-partial/{}.json", location.nonce),
+        )?;
+        write_new(
+            &tracker,
+            &serde_json::to_vec(&location).map_err(|_| Error::Storage)?,
+        )?;
+        stage.tracker = Some(tracker);
+        Ok(stage)
+    }
+
+    fn location(&self, model: &Model) -> Result<Option<Location>> {
+        let path = child(&self.root, &format!("locations/{}", model.id))?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = bounded_read(&child(&path, "location.json")?, 16 * 1024)?;
+        let location: Location = serde_json::from_slice(&bytes).map_err(|_| Error::Integrity)?;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        if location.model_id != model.id
+            || location.fingerprint != model.fingerprint()?
+            || !valid_receipt(&path, Ok(digest))
+        {
+            return Err(Error::Integrity);
+        }
+        Ok(Some(location))
+    }
+
+    fn commit_location(&self, location: &Location) -> Result<()> {
+        let bytes = serde_json::to_vec(location).map_err(|_| Error::Storage)?;
+        let mut stage = self.stage()?;
+        write_new(&child(stage.path(), "location.json")?, &bytes)?;
+        stage.commit(
+            &child(&self.root, &format!("locations/{}", location.model_id))?,
+            &format!("{:x}", Sha256::digest(&bytes)),
+        )
+    }
+
+    fn clean_external_partial(&self) -> Result<()> {
+        let directory = child(&self.root, "external-partial")?;
+        let mut count = 0usize;
+        for entry in io(fs::read_dir(directory))? {
+            count += 1;
+            if count > MAX_MODELS {
+                return Err(Error::TooLarge);
+            }
+            let tracker = io(entry)?.path();
+            let location: Location = serde_json::from_slice(&bounded_read(&tracker, 16 * 1024)?)
+                .map_err(|_| Error::Integrity)?;
+            let partial = location_path(&location, true)?;
+            if partial.exists() {
+                owned_location(&partial, &location)?;
+                io(fs::remove_dir_all(&partial))?;
+            }
+            let destination = location_path(&location, false)?;
+            let registered = child(&self.root, &format!("locations/{}", location.model_id))?;
+            if destination.exists() && !registered.exists() {
+                owned_location(&destination, &location)?;
+                io(fs::remove_dir_all(destination))?;
+            }
+            io(fs::remove_file(tracker))?;
+        }
+        Ok(())
+    }
+
+    pub fn registered_catalogs(&self) -> Result<Vec<Catalog>> {
+        let sources = child(&self.root, "sources")?;
+        let mut paths = Vec::new();
+        for entry in io(fs::read_dir(sources))? {
+            if paths.len() >= MAX_MODELS {
+                return Err(Error::TooLarge);
+            }
+            paths.push(io(entry)?.path());
+        }
+        paths.sort();
+        let mut catalogs = Vec::new();
+        for path in paths {
+            plain(&path)?;
+            let document = bounded_read(&child(&path, "catalog.json")?, MAX_CATALOG_BYTES)?;
+            let document = std::str::from_utf8(&document).map_err(|_| Error::Manifest)?;
+            let catalog = Catalog::parse(document)?;
+            let fingerprint = catalog.fingerprint()?;
+            if path.file_name().and_then(|name| name.to_str()) != Some(fingerprint.as_str())
+                || !valid_receipt(&path, Ok(fingerprint))
+            {
+                return Err(Error::Integrity);
+            }
+            catalogs.push(catalog);
+        }
+        Ok(catalogs)
+    }
+
+    pub fn register_catalog(&self, catalog: &Catalog) -> Result<()> {
+        catalog.validate()?;
+        let document = serde_json::to_vec(catalog).map_err(|_| Error::Manifest)?;
+        if document.len() > MAX_CATALOG_BYTES {
+            return Err(Error::TooLarge);
+        }
+        self.require_space(document.len() as u64)?;
+        let mut stage = self.stage()?;
+        let mut file = io(OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(stage.path.join("catalog.json")))?;
+        io(file.write_all(&document))?;
+        io(file.sync_all())?;
+        drop(file);
+        let fingerprint = catalog.fingerprint()?;
+        stage.commit(
+            &child(&self.root, &format!("sources/{fingerprint}"))?,
+            &fingerprint,
+        )
+    }
+
     pub fn model_path(&self, model: &Model) -> Result<PathBuf> {
+        if let Some(location) = self.location(model)? {
+            let path = location_path(&location, false)?;
+            if path.exists() {
+                owned_location(&path, &location)?;
+            }
+            return Ok(path);
+        }
         child(&self.root, &format!("models/{}", model.id))
     }
 
@@ -129,6 +328,20 @@ impl Store {
     }
 
     pub fn commit_model(&self, stage: &mut Stage, model: &Model) -> Result<()> {
+        if let Some(location) = stage.external.clone() {
+            if location.fingerprint != model.fingerprint()? {
+                return Err(Error::Integrity);
+            }
+            owned_location(stage.path(), &location)?;
+            let destination = location_path(&location, false)?;
+            stage.commit(&destination, &location.fingerprint)?;
+            if let Err(error) = self.commit_location(&location) {
+                owned_location(&destination, &location)?;
+                io(fs::remove_dir_all(destination))?;
+                return Err(error);
+            }
+            return Ok(());
+        }
         stage.commit(&self.model_path(model)?, &model.fingerprint()?)
     }
 
@@ -141,6 +354,12 @@ impl Store {
         if path.exists() {
             plain(&path)?;
             io(fs::remove_dir_all(path))?;
+        }
+        if self.location(model)?.is_some() {
+            io(fs::remove_dir_all(child(
+                &self.root,
+                &format!("locations/{}", model.id),
+            )?))?;
         }
         Ok(())
     }
@@ -182,10 +401,75 @@ impl Stage {
 
 impl Drop for Stage {
     fn drop(&mut self) {
+        let mut cleaned = true;
         if !self.committed {
-            let _ = fs::remove_dir_all(&self.path);
+            cleaned = if let Some(location) = &self.external {
+                if owned_location(&self.path, location).is_ok() {
+                    fs::remove_dir_all(&self.path).is_ok()
+                } else {
+                    fs::remove_dir(&self.path).is_ok()
+                }
+            } else {
+                fs::remove_dir_all(&self.path).is_ok()
+            };
+        }
+        if cleaned && let Some(tracker) = &self.tracker {
+            let _ = fs::remove_file(tracker);
         }
     }
+}
+
+fn selected_parent(directory: &Path) -> Result<PathBuf> {
+    plain(directory).map_err(|error| {
+        if error == Error::UnsafePath {
+            error
+        } else {
+            Error::DestinationUnavailable
+        }
+    })?;
+    let parent = fs::canonicalize(directory).map_err(|_| Error::DestinationUnavailable)?;
+    if !parent.is_dir() {
+        return Err(Error::DestinationUnavailable);
+    }
+    Ok(parent)
+}
+
+fn location_path(location: &Location, partial: bool) -> Result<PathBuf> {
+    relative(&location.model_id)?;
+    if location.model_id.contains('/')
+        || uuid::Uuid::parse_str(&location.nonce).is_err()
+        || location.fingerprint.len() != 64
+        || !location
+            .fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !location.parent.is_absolute()
+        || selected_parent(&location.parent)? != location.parent
+    {
+        return Err(Error::UnsafePath);
+    }
+    let name = if partial {
+        format!(".zerocode-native-{}.partial", location.nonce)
+    } else {
+        format!("zerocode-native-{}-{}", location.model_id, location.nonce)
+    };
+    child(&location.parent, &name)
+}
+
+fn owned_location(path: &Path, location: &Location) -> Result<()> {
+    plain(path)?;
+    let bytes = bounded_read(&child(path, "ownership.json")?, 1024)?;
+    let ownership: Ownership = serde_json::from_slice(&bytes).map_err(|_| Error::Integrity)?;
+    if ownership.nonce != location.nonce || ownership.fingerprint != location.fingerprint {
+        return Err(Error::Integrity);
+    }
+    Ok(())
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = io(OpenOptions::new().create_new(true).write(true).open(path))?;
+    io(file.write_all(bytes))?;
+    io(file.sync_all())
 }
 
 fn valid_receipt(path: &Path, expected: Result<String>) -> bool {
