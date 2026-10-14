@@ -6341,6 +6341,14 @@ await test("가져오기 실패는 해당 초안 옆에 한 번만 표시한다"
 }));
 
 await test("판단 상태는 다섯 언어·두 테마·좁은 폭에서 읽을 수 있다", async () => withJudgmentStatus(async (page) => {
+  backend.judgmentUsage = {
+    providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+    state: "observed", reason: null, unattributedNewer: true,
+    lastRequest: { feature: "stall", atMs: Date.parse("2026-10-01T10:20:30Z"), outcome: "http_503", elapsedMs: 0, applied: null },
+  };
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed");
   for (const locale of SETTINGS_QUALITY_SPEC.locales) {
     await setQualityLocale(page, locale);
     await page.evaluate(() => judgmentProviderController.controls());
