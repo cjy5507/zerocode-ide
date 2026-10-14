@@ -5213,12 +5213,16 @@ fn a_requested_navigation_is_pending_until_its_document_settles() {
     let t0 = Instant::now();
     let mut record = NavRecord::born(true, t0);
     assert!(!record.pending());
-    record.admit();
+    let number = record.admit();
     assert!(record.pending());
     assert_eq!(record.observed(t0), NavState::Blank);
+    assert!(record.sent(number));
+    record.answered(number, NavAnswer::Loading);
     record.started(t0);
     assert!(record.pending());
     record.finished(false);
+    assert!(record.pending(), "a Finished carries no request number");
+    assert_eq!(record.settle_if_idle(false), NavProof::Ready);
     assert!(!record.pending());
     record.admit();
     record.finished(true);
@@ -5226,7 +5230,12 @@ fn a_requested_navigation_is_pending_until_its_document_settles() {
     let mut loading = NavRecord::born(false, t0);
     assert!(loading.pending());
     loading.finished(false);
-    assert!(!loading.pending());
+    assert!(loading.pending(), "a Finished carries no request number");
+    assert_eq!(
+        loading.settle_if_idle(false),
+        NavProof::Waiting,
+        "the first document's send has no engine answer yet"
+    );
     let stood = t0
         .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS))
         .unwrap();
@@ -5243,18 +5252,28 @@ fn a_known_navigation_is_not_settled_by_the_clock_alone() {
     let mut started = NavRecord::born(true, stood);
     let generation = started.started(stood);
     assert_eq!(started.observed(now), NavState::Dead);
-    assert!(
-        started.pending(),
+    assert_eq!(
+        started.settle_if_idle(true),
+        NavProof::Waiting,
         "a Started that outlived the dead clock has not finished"
     );
     assert!(started.dead_if_still(generation, now));
-    assert!(started.pending(), "the spinner's dead mark is not a finish");
-    assert!(
-        started.pending(),
+    assert_eq!(
+        started.settle_if_idle(true),
+        NavProof::Waiting,
+        "the spinner's dead mark is not a finish"
+    );
+    assert_eq!(
+        started.settle_if_idle(true),
+        NavProof::Waiting,
         "a second handoff reads the same record and still waits"
     );
     started.finished(false);
-    assert!(!started.pending(), "the load's own Finished settles it");
+    assert_eq!(
+        started.settle_if_idle(false),
+        NavProof::Ready,
+        "the engine's own idle settles it"
+    );
     let mut born = NavRecord::born(false, stood);
     assert_eq!(born.observed(now), NavState::Dead);
     assert!(
@@ -5262,6 +5281,11 @@ fn a_known_navigation_is_not_settled_by_the_clock_alone() {
         "a first document past the dead clock has not finished"
     );
     born.finished(false);
+    assert!(born.pending(), "a Finished carries no request number");
+    let number = born.admit();
+    assert!(born.sent(number));
+    born.answered(number, NavAnswer::Loading);
+    assert_eq!(born.settle_if_idle(false), NavProof::Ready);
     assert!(!born.pending());
 }
 
@@ -5273,12 +5297,14 @@ fn a_requested_navigation_waits_for_the_finish_after_its_own_started() {
         .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS + 1))
         .unwrap();
     let mut record = NavRecord::born(true, stood);
-    record.admit();
+    let number = record.admit();
     record.finished(false);
     assert!(
         record.pending(),
         "a Finished before the request's own Started belongs to the page before it"
     );
+    assert!(record.sent(number));
+    record.answered(number, NavAnswer::Loading);
     let generation = record.started(stood);
     assert!(
         record.pending(),
@@ -5287,6 +5313,9 @@ fn a_requested_navigation_waits_for_the_finish_after_its_own_started() {
     assert!(record.dead_if_still(generation, now));
     assert!(record.pending());
     record.finished(false);
+    assert!(record.pending(), "a Finished carries no request number");
+    assert_eq!(record.settle_if_idle(true), NavProof::Waiting);
+    assert_eq!(record.settle_if_idle(false), NavProof::Ready);
     assert!(!record.pending());
 }
 

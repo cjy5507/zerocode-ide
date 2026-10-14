@@ -67,36 +67,53 @@ impl NavState {
 /// Started armed can tell whether ITS load is the one still standing — a
 /// second navigation inside the twenty seconds must not be called dead by
 /// the first one's clock.
+/// `request` is the one known navigation a handoff waits for. Started,
+/// Finished and failure carry no request number, so they never touch it.
 #[derive(Debug, Clone)]
 pub(super) struct NavRecord {
     state: NavState,
     started_at: Option<Instant>,
-    awaiting: Option<Awaiting>,
+    request: Option<Request>,
     generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Awaiting {
-    Request,
-    Load(u64),
+struct Request {
+    number: u64,
+    stage: Stage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Admitted,
+    Sent,
+    Answered(NavAnswer),
+}
+
+fn next_request() -> u64 {
+    NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
 }
 
 impl NavRecord {
     /// A pane at birth: blank when born on the blank page, otherwise its
-    /// first document is already on its way.
+    /// first document is already on its way — sent by the pane's creation,
+    /// and not yet answered by the engine.
     pub(super) fn born(blank: bool, now: Instant) -> Self {
         if blank {
             NavRecord {
                 state: NavState::Blank,
                 started_at: None,
-                awaiting: None,
+                request: None,
                 generation: 0,
             }
         } else {
             NavRecord {
                 state: NavState::Loading,
                 started_at: Some(now),
-                awaiting: Some(Awaiting::Load(1)),
+                request: Some(Request {
+                    number: next_request(),
+                    stage: Stage::Sent,
+                }),
                 generation: 1,
             }
         }
@@ -108,40 +125,81 @@ impl NavRecord {
         self.state = NavState::Loading;
         self.started_at = Some(now);
         self.generation += 1;
-        self.awaiting = Some(Awaiting::Load(self.generation));
         self.generation
     }
 
     /// A known request is admitted: answers the number its native send and
     /// the engine's answer must present.
     pub(super) fn admit(&mut self) -> u64 {
-        self.awaiting = Some(Awaiting::Request);
-        NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
+        let number = next_request();
+        self.request = Some(Request {
+            number,
+            stage: Stage::Admitted,
+        });
+        number
     }
 
     /// Called on the engine's thread just before the native send: `false`
     /// when the request is no longer the one admitted, so nothing is sent.
-    pub(super) fn sent(&mut self, _number: u64) -> bool {
-        true
+    pub(super) fn sent(&mut self, number: u64) -> bool {
+        match &mut self.request {
+            Some(request) if request.number == number && request.stage == Stage::Admitted => {
+                request.stage = Stage::Sent;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The request was refused before any native send.
-    pub(super) fn withdrawn(&mut self, _number: u64) {}
+    pub(super) fn withdrawn(&mut self, number: u64) {
+        if self.request
+            == Some(Request {
+                number,
+                stage: Stage::Admitted,
+            })
+        {
+            self.request = None;
+        }
+    }
 
     /// The engine's own answer to the request it took.
-    pub(super) fn answered(&mut self, _number: u64, _answer: NavAnswer) {}
+    pub(super) fn answered(&mut self, number: u64, answer: NavAnswer) {
+        if let Some(request) = &mut self.request
+            && request.number == number
+            && request.stage == Stage::Sent
+        {
+            request.stage = Stage::Answered(answer);
+        }
+    }
 
     /// The engine's loading state, read on its thread in the same turn as
-    /// this record.
-    pub(super) fn settle_if_idle(&mut self, _loading: bool) -> NavProof {
-        self.proof()
+    /// this record. Only an answered request, with nothing loading after
+    /// that answer, is settled; a load the page began itself keeps the
+    /// handoff waiting while the engine still carries it.
+    pub(super) fn settle_if_idle(&mut self, loading: bool) -> NavProof {
+        if !loading
+            && let Some(Request {
+                stage: Stage::Answered(NavAnswer::Loading | NavAnswer::Resolved),
+                ..
+            }) = self.request
+        {
+            self.request = None;
+        }
+        match self.proof() {
+            NavProof::Ready if loading => NavProof::Waiting,
+            proof => proof,
+        }
     }
 
     pub(super) fn proof(&self) -> NavProof {
-        if self.awaiting.is_some() {
-            NavProof::Waiting
-        } else {
-            NavProof::Ready
+        match self.request {
+            None => NavProof::Ready,
+            Some(Request {
+                stage: Stage::Answered(NavAnswer::Silent),
+                ..
+            }) => NavProof::Unproven,
+            Some(_) => NavProof::Waiting,
         }
     }
 
@@ -157,15 +215,11 @@ impl NavRecord {
             NavState::Finished
         };
         self.started_at = None;
-        if self.awaiting == Some(Awaiting::Load(self.generation)) {
-            self.awaiting = None;
-        }
     }
 
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     pub(super) fn failed(&mut self) {
         self.state = NavState::Dead;
-        self.awaiting = None;
     }
 
     /// The state as a reader sees it NOW: a load past the clock reads dead
@@ -197,7 +251,10 @@ impl NavRecord {
         allow(dead_code)
     )]
     pub(super) fn dead_if_still(&mut self, generation: u64, now: Instant) -> bool {
-        if self.generation != generation || self.observed(now) != NavState::Dead {
+        if self.generation != generation
+            || self.state != NavState::Loading
+            || self.observed(now) != NavState::Dead
+        {
             return false;
         }
         self.state = NavState::Dead;
