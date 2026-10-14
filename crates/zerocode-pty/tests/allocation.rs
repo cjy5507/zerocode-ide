@@ -1,31 +1,9 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+mod support;
 
+use std::sync::atomic::Ordering;
+
+use support::{ALLOCATIONS, live_bytes};
 use zerocode_pty::{Cell, MIN_SCROLLBACK_LINES, Terminal};
-
-struct CountingAllocator;
-
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
-
-#[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-            LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-        LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
-    }
-}
 
 /// Pin both sides of the grid's allocation contract: plain ASCII needs no
 /// temporary grapheme buffer, and shrinking history releases whole row
@@ -108,12 +86,12 @@ fn hot_path_allocation_contracts() {
     let input = format!("{ROW_TEXT}\r\n")
         .repeat(FILLED_LINES + 64)
         .into_bytes();
-    let before = LIVE_BYTES.load(Ordering::Relaxed);
+    let before = live_bytes();
     let mut terminal = Terminal::new(24, COLS);
     terminal.grid_mut().set_scrollback_cap(FILLED_LINES);
     terminal.feed(&input);
     assert_eq!(terminal.grid().scrollback_len(), FILLED_LINES);
-    let filled = LIVE_BYTES.load(Ordering::Relaxed);
+    let filled = live_bytes();
     let full_width_storage = FILLED_LINES * COLS * size_of::<Cell>();
     assert!(
         filled.saturating_sub(before) < full_width_storage,
@@ -124,7 +102,7 @@ fn hot_path_allocation_contracts() {
     terminal.grid_mut().set_scrollback_cap(MIN_SCROLLBACK_LINES);
 
     assert_eq!(terminal.grid().scrollback_len(), MIN_SCROLLBACK_LINES);
-    let shrunk = LIVE_BYTES.load(Ordering::Relaxed);
+    let shrunk = live_bytes();
     let released = filled.saturating_sub(shrunk);
     let written_width = ROW_TEXT.chars().count();
     let row_storage = (FILLED_LINES - MIN_SCROLLBACK_LINES) * written_width * size_of::<Cell>();
