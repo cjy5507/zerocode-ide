@@ -346,6 +346,7 @@ function sayBrowserZoom(tab, level) {
 }
 
 function browserZoomStep(tab, direction) {
+  if (!browserWorkspaceCanControl(tab)) return;
   const levels = browserZoomLevels();
   const configured = browserZoomTarget(browserPrefs.default_zoom_level);
   if (levels.length === 0 || configured === null) return;
@@ -398,6 +399,410 @@ const browserEarly = new Map();
 const browserWired = new WeakSet();
 
 const browserBodyWatch = new ResizeObserver(() => syncBrowserPanes());
+
+const BROWSER_WORKSPACE_CAPTURE_MS = 1000;
+const BROWSER_WORKSPACE_FRAME_MAX_BYTES = 32 * 1024 * 1024;
+const BROWSER_WORKSPACE_MODES = new Set(["agent", "pausing", "paused", "human"]);
+const BROWSER_WORKSPACE_ACTIONS = [
+  ["watch", "지금 보기"],
+  ["collapse", "원래 창으로 접기"],
+  ["pause", "일시정지"],
+  ["human", "내가 조작"],
+  ["agent", "다시 맡기기"],
+  ["refresh", "상태 다시 확인"],
+];
+let browserWorkspaceCaptureTimer = 0;
+let browserWorkspaceCaptureBusy = false;
+let browserWorkspaceCaptureAt = -Infinity;
+let browserWorkspaceCaptureTarget = null;
+let browserWorkspaceCaptureHost = null;
+let browserWorkspaceCaptureEpoch = 0;
+
+function browserWorkspaceLive(tab, label = tab?.label) {
+  return tab?.kind === "browser" && tab.label === label && tabs.includes(tab);
+}
+
+function browserWorkspaceCanControl(tab) {
+  return tab != null && (!tab.agentWorkspace || (
+    tab.workspace?.mode === "human" && tab.workspace.inFlight === 0
+    && tab.workspaceViewing === true && !tab.workspacePending && !tab.workspaceError
+  ));
+}
+
+function browserWorkspaceOnScreen(tab) {
+  const host = groupOf(tab.pane)?.browserView;
+  return browserWorkspaceLive(tab) && !document.hidden && !browserCovered()
+    && tab.worktree === activeWorktreePath && host && !host.hidden
+    && host._browserTab === tab && activeTabIn(tab.pane)?.id === tab.id;
+}
+
+function browserWorkspaceStateOf(said, label) {
+  if (!said || said.label !== label || !BROWSER_WORKSPACE_MODES.has(said.mode)
+    || !Number.isSafeInteger(said.revision) || said.revision < 0
+    || !Number.isSafeInteger(said.inFlight) || said.inFlight < 0
+    || typeof said.needsObservation !== "boolean"
+    || (["human", "paused"].includes(said.mode) && said.inFlight !== 0)) return null;
+  return {
+    label, mode: said.mode, revision: said.revision,
+    inFlight: said.inFlight, needsObservation: said.needsObservation,
+  };
+}
+
+function browserWorkspaceStopTools(tab) {
+  cancelBrowserRetry(tab);
+  clearTimeout(tab.findTimer);
+  tab.findTimer = null;
+  tab.finding = false;
+  tab.findLast = null;
+  tab.findCount = null;
+  if (tab.marking) tab.marking = null;
+  if (browserGrab?.label === tab.label) stopBrowserGrab(false);
+}
+
+function paintBrowserWorkspaceTab(tab) {
+  const host = groupOf(tab.pane)?.browserView;
+  if (host?._browserTab === tab && !host.hidden) paintBrowserView(tab);
+  syncBrowserPanes();
+  browserMenuPoll.sync();
+}
+
+function applyBrowserWorkspaceState(tab, said) {
+  if (!browserWorkspaceLive(tab)) return false;
+  const revision = tab.workspaceRevision ?? -1;
+  if (Number.isSafeInteger(said?.revision) && said.revision < revision) return false;
+  const state = browserWorkspaceStateOf(said, tab.label);
+  if (!state || (state.revision === revision && tab.workspaceLastMode
+    && tab.workspaceLastMode !== state.mode)) {
+    if (tab.agentWorkspace) {
+      tab.workspace = null;
+      tab.workspaceError = "invalid";
+      browserWorkspaceStopTools(tab);
+    }
+    return false;
+  }
+  tab.agentWorkspace = true;
+  tab.workspace = state;
+  tab.workspaceRevision = state.revision;
+  tab.workspaceLastMode = state.mode;
+  tab.workspaceError = null;
+  if (!browserWorkspaceCanControl(tab)) browserWorkspaceStopTools(tab);
+  return true;
+}
+
+async function refreshBrowserWorkspace(tab, { keepError = false } = {}) {
+  if (!browserWorkspaceLive(tab) || !tab.agentWorkspace) return;
+  const token = {};
+  const label = tab.label;
+  const revision = tab.workspaceRevision ?? -1;
+  const error = tab.workspaceError;
+  tab.workspaceReading = token;
+  paintBrowserWorkspaceTab(tab);
+  try {
+    const states = await invoke("get_browser_workspaces");
+    if (!browserWorkspaceLive(tab, label) || tab.workspaceReading !== token) return;
+    const matching = Array.isArray(states) ? states.filter((state) => state?.label === label) : [];
+    if (matching.length !== 1) {
+      if ((tab.workspaceRevision ?? -1) <= revision) {
+        tab.workspace = null;
+        tab.workspaceError = "unavailable";
+      }
+    } else {
+      applyBrowserWorkspaceState(tab, matching[0]);
+    }
+    if (keepError && error) tab.workspaceError = error;
+  } catch {
+    if (!browserWorkspaceLive(tab, label) || tab.workspaceReading !== token) return;
+    if ((tab.workspaceRevision ?? -1) <= revision) {
+      tab.workspace = null;
+      tab.workspaceError = "unavailable";
+    }
+  } finally {
+    if (browserWorkspaceLive(tab, label) && tab.workspaceReading === token) {
+      tab.workspaceReading = null;
+      paintBrowserWorkspaceTab(tab);
+    }
+  }
+}
+
+async function setBrowserWorkspaceMode(tab, mode) {
+  if (!browserWorkspaceLive(tab) || !tab.agentWorkspace || !tab.workspace
+    || tab.workspacePending || tab.workspaceError || !["agent", "paused", "human"].includes(mode)) return;
+  const label = tab.label;
+  const token = { revision: tab.workspace.revision, viewEpoch: tab.workspaceViewEpoch ?? 0 };
+  tab.workspacePending = token;
+  tab.workspaceError = null;
+  browserWorkspaceStopTools(tab);
+  paintBrowserWorkspaceTab(tab);
+  try {
+    await browserPlacing;
+    if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return;
+    const said = await invoke("set_browser_workspace_mode", {
+      label, mode, expectedRevision: token.revision,
+    });
+    if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return;
+    const applied = applyBrowserWorkspaceState(tab, said);
+    if (!applied || tab.workspace?.mode !== mode) {
+      tab.workspaceError = "transition";
+    } else if ((tab.workspaceViewEpoch ?? 0) === token.viewEpoch && mode !== "paused") {
+      tab.workspaceViewing = true;
+    }
+  } catch {
+    if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return;
+    tab.workspace = null;
+    tab.workspaceError = "transition";
+    void refreshBrowserWorkspace(tab, { keepError: true });
+  } finally {
+    if (browserWorkspaceLive(tab, label) && tab.workspacePending === token) {
+      tab.workspacePending = null;
+      paintBrowserWorkspaceTab(tab);
+    }
+  }
+}
+
+function watchBrowserWorkspace(tab, { beside = false } = {}) {
+  if (!browserWorkspaceLive(tab) || !tab.agentWorkspace) return;
+  if (beside && !browserWorkspaceOnScreen(tab)) {
+    const source = currentTab();
+    const priorPane = tab.pane;
+    const nextPane = standBesideFocused();
+    tab.workspaceReturn = { id: source?.id, pane: priorPane, viewPane: nextPane };
+    if (nextPane !== null && nextPane !== tab.pane) {
+      dropRecentTab(tab.pane, tab.id);
+      tab.pane = nextPane;
+      optimizeRichStageGroup(nextPane);
+    }
+  }
+  tab.workspaceViewEpoch = (tab.workspaceViewEpoch ?? 0) + 1;
+  tab.workspaceViewing = true;
+  setActiveTab(tab.id);
+  paintBrowserWorkspaceTab(tab);
+  if (!tab.workspace && !tab.workspaceReading) void refreshBrowserWorkspace(tab);
+}
+
+function collapseBrowserWorkspace(tab) {
+  if (!browserWorkspaceLive(tab)) return;
+  tab.workspaceViewEpoch = (tab.workspaceViewEpoch ?? 0) + 1;
+  tab.workspaceViewing = false;
+  browserWorkspaceStopTools(tab);
+  const back = tab.workspaceReturn;
+  tab.workspaceReturn = null;
+  if (back && back.viewPane !== null && back.viewPane !== back.pane) {
+    dropRecentTab(tab.pane, tab.id);
+    tab.pane = back.pane;
+    collapseStageGroup(back.viewPane);
+  }
+  const original = back?.id && tabs.find((one) => one.id === back.id && one.worktree === activeWorktreePath);
+  if (original) setActiveTab(original.id);
+  else {
+    renderTabs();
+    updateStage();
+  }
+  paintBrowserWorkspaceTab(tab);
+}
+
+function browserWorkspaceWords(tab) {
+  if (tab.workspacePending) return t("browser.workspace.pending", "제어권을 전환하는 중입니다…");
+  if (tab.workspaceError === "transition") return t("browser.workspace.transitionError", "전환을 확인하지 못했습니다. 상태를 다시 확인해 주세요.");
+  if (tab.workspaceError === "capture") return t("browser.workspace.captureError", "화면을 가져오지 못했습니다. 상태를 다시 확인해 주세요.");
+  if (tab.workspaceError === "placement") return t("browser.workspace.placementError", "페이지 표시를 확인하지 못했습니다. 상태를 다시 확인해 주세요.");
+  if (tab.workspaceError || !tab.workspace) return tab.workspaceReading
+    ? t("browser.workspace.checking", "작업 브라우저 상태를 확인하는 중입니다…")
+    : t("browser.workspace.stateError", "상태를 확인할 수 없어 페이지를 숨겼습니다. 다시 확인해 주세요.");
+  if (tab.workspace.mode === "pausing") return t("browser.workspace.pausing", "진행 중인 입력을 마칠 때까지 기다립니다…");
+  if (tab.workspace.mode === "paused") return t("browser.workspace.paused", "작업 일시정지");
+  if (tab.workspace.mode === "human") return t("browser.workspace.human", "직접 제어 · 에이전트 입력 차단");
+  return tab.workspace.needsObservation
+    ? t("browser.workspace.observation", "에이전트 제어 · 새 화면 확인 후 입력 가능")
+    : t("browser.workspace.agent", "에이전트 제어");
+}
+
+function buildBrowserWorkspaceBar() {
+  const bar = document.createElement("section");
+  bar.className = "browser-workspace-bar";
+  bar.hidden = true;
+  const heading = document.createElement("strong");
+  heading.className = "browser-workspace-label";
+  const status = document.createElement("span");
+  status.className = "browser-workspace-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  const actions = document.createElement("div");
+  actions.className = "browser-workspace-actions";
+  for (const [name, fallback] of BROWSER_WORKSPACE_ACTIONS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `btn browser-workspace-${name}`;
+    button.dataset.i18n = `browser.workspace.${name}Action`;
+    button.textContent = t(button.dataset.i18n, fallback);
+    actions.appendChild(button);
+  }
+  bar.append(heading, status, actions);
+  return bar;
+}
+
+function buildBrowserWorkspaceSurface() {
+  const surface = document.createElement("div");
+  surface.className = "browser-workspace-surface";
+  surface.hidden = true;
+  const frame = document.createElement("img");
+  frame.className = "browser-workspace-frame";
+  frame.draggable = false;
+  frame.hidden = true;
+  const caption = document.createElement("p");
+  caption.className = "browser-workspace-caption";
+  surface.append(frame, caption);
+  return surface;
+}
+
+function paintBrowserWorkspace(host, tab) {
+  const managed = tab.agentWorkspace === true;
+  const control = browserWorkspaceCanControl(tab);
+  host.classList.toggle("is-browser-workspace", managed);
+  host.querySelector(".browser-workspace-bar").hidden = !managed;
+  host.querySelector(".browser-address").readOnly = !control;
+  host.querySelector(".browser-address").setAttribute("aria-label", managed
+    ? t("browser.workspace.address", "작업 페이지 주소") : t("browser.address", "주소를 입력하거나 검색"));
+  for (const name of ["back", "forward", "reload", "find", "devtools", "menu", "markup"]) {
+    host.querySelector(`.browser-${name}`).disabled = !control;
+  }
+  for (const name of ["grab", "annotate"]) {
+    host.querySelector(`.browser-${name}`).disabled = !control || !tab.url || tab.url === BROWSER_BLANK_URL;
+  }
+  const surface = host.querySelector(".browser-workspace-surface");
+  surface.hidden = !managed || control;
+  if (browserWorkspaceCaptureTarget !== tab || browserWorkspaceCaptureHost !== host) {
+    surface.querySelector("img").removeAttribute("src");
+    surface.querySelector("img").hidden = true;
+  }
+  if (!managed) {
+    surface.querySelector("img").removeAttribute("src");
+    return;
+  }
+  writeTextContent(host.querySelector(".browser-workspace-label"), t("browser.workspace.title", "전용 작업 브라우저"));
+  writeTextContent(host.querySelector(".browser-workspace-status"), browserWorkspaceWords(tab));
+  host.querySelector(".browser-workspace-bar").setAttribute("aria-busy", String(!!tab.workspacePending));
+  host.querySelector(".browser-workspace-watch").hidden = tab.workspaceViewing === true;
+  host.querySelector(".browser-workspace-collapse").hidden = tab.workspaceViewing !== true;
+  const blocked = !!tab.workspacePending || !tab.workspace || !!tab.workspaceError || tab.workspace.mode === "pausing";
+  for (const [name, fallback] of BROWSER_WORKSPACE_ACTIONS) {
+    writeTextContent(host.querySelector(`.browser-workspace-${name}`), t(`browser.workspace.${name}Action`, fallback));
+  }
+  for (const [name, mode] of [["pause", "paused"], ["human", "human"], ["agent", "agent"]]) {
+    const button = host.querySelector(`.browser-workspace-${name}`);
+    button.disabled = blocked || tab.workspace?.mode === mode;
+    button.setAttribute("aria-pressed", String(tab.workspace?.mode === mode));
+  }
+  const refresh = host.querySelector(".browser-workspace-refresh");
+  refresh.hidden = !!tab.workspace && !tab.workspaceError && tab.workspace.mode !== "pausing";
+  refresh.disabled = !!tab.workspacePending || !!tab.workspaceReading;
+  surface.querySelector("img").alt = t("browser.workspace.frame", "작업 브라우저의 현재 화면");
+  writeTextContent(surface.querySelector(".browser-workspace-caption"), tab.workspaceViewing
+    ? t("browser.workspace.watching", "보기만 가능합니다. 페이지를 조작하려면 ‘내가 조작’을 누르세요.")
+    : t("browser.workspace.folded", "화면을 접어도 작업 브라우저는 유지됩니다. ‘지금 보기’로 화면을 확인하세요."));
+  host.querySelector(".browser-failure").hidden = !control || !tab.navFailure;
+  host.querySelector(".browser-external").disabled = !control || externalBrowserUrl(tab.url) === null;
+}
+
+function clearBrowserWorkspaceFrames() {
+  for (const frame of document.querySelectorAll(".browser-workspace-frame[src]")) {
+    frame.removeAttribute("src");
+    frame.hidden = true;
+  }
+}
+
+function browserWorkspaceWatcher() {
+  const visible = tabs.filter((tab) => tab.kind === "browser" && tab.agentWorkspace && tab.workspaceViewing
+    && tab.workspace && tab.workspace.mode !== "human" && !tab.workspaceError && !tab.workspacePending
+    && browserWorkspaceOnScreen(tab));
+  return visible.find((tab) => tab.id === activeTabId) ?? visible[0] ?? null;
+}
+
+function syncBrowserWorkspaceCapture() {
+  const wanted = browserWorkspaceWatcher();
+  const host = wanted ? groupOf(wanted.pane)?.browserView : null;
+  if (browserWorkspaceCaptureTarget !== wanted || browserWorkspaceCaptureHost !== host) {
+    clearTimeout(browserWorkspaceCaptureTimer);
+    browserWorkspaceCaptureTimer = 0;
+    browserWorkspaceCaptureEpoch += 1;
+    browserWorkspaceCaptureTarget = wanted;
+    browserWorkspaceCaptureHost = host;
+    clearBrowserWorkspaceFrames();
+  }
+  if (!wanted || browserWorkspaceCaptureTimer || browserWorkspaceCaptureBusy) return;
+  const epoch = browserWorkspaceCaptureEpoch;
+  const delay = Math.max(0, browserWorkspaceCaptureAt + BROWSER_WORKSPACE_CAPTURE_MS - performance.now());
+  browserWorkspaceCaptureTimer = setTimeout(() => {
+    browserWorkspaceCaptureTimer = 0;
+    void captureBrowserWorkspace(wanted, epoch);
+  }, delay);
+}
+
+async function captureBrowserWorkspace(tab, epoch) {
+  if (browserWorkspaceCaptureBusy || epoch !== browserWorkspaceCaptureEpoch || browserWorkspaceWatcher() !== tab) return;
+  browserWorkspaceCaptureBusy = true;
+  const label = tab.label;
+  try {
+    await browserPlacing;
+    if (epoch !== browserWorkspaceCaptureEpoch || browserWorkspaceWatcher() !== tab) return;
+    browserWorkspaceCaptureAt = performance.now();
+    const frame = await invoke("browser_snapshot", { label });
+    if (epoch !== browserWorkspaceCaptureEpoch || !browserWorkspaceLive(tab, label) || browserWorkspaceWatcher() !== tab) return;
+    if (typeof frame !== "string" || frame.length > BROWSER_WORKSPACE_FRAME_MAX_BYTES
+      || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=\r\n]+$/.test(frame)) throw new Error("invalid_frame");
+    const host = groupOf(tab.pane)?.browserView;
+    const image = host?.querySelector(".browser-workspace-frame");
+    if (host?._browserTab !== tab || !image) return;
+    clearBrowserWorkspaceFrames();
+    image.src = frame;
+    image.hidden = false;
+  } catch {
+    if (epoch === browserWorkspaceCaptureEpoch && browserWorkspaceLive(tab, label) && browserWorkspaceWatcher() === tab) {
+      tab.workspaceError = "capture";
+      paintBrowserWorkspaceTab(tab);
+    }
+  } finally {
+    browserWorkspaceCaptureBusy = false;
+    syncBrowserWorkspaceCapture();
+  }
+}
+
+function paintBrowserWorkspaceChrome() {
+  const managed = tabs.filter((tab) => tab.kind === "browser" && tab.agentWorkspace && tab.worktree === activeWorktreePath);
+  const run = el("run-command");
+  let launcher = el("browser-workspace-launcher");
+  if (!launcher && run) {
+    launcher = document.createElement("button");
+    launcher.id = "browser-workspace-launcher";
+    launcher.type = "button";
+    launcher.className = "chrome-run browser-workspace-launcher";
+    launcher.addEventListener("click", () => {
+      const owned = tabs.filter((tab) => tab.kind === "browser" && tab.agentWorkspace && tab.worktree === activeWorktreePath);
+      const shown = owned.find((tab) => tab.workspaceViewing && browserWorkspaceOnScreen(tab));
+      if (shown) collapseBrowserWorkspace(shown);
+      else if (owned.length) watchBrowserWorkspace(owned.at(-1), { beside: true });
+    });
+    run.before(launcher);
+  }
+  if (launcher) {
+    launcher.hidden = managed.length === 0 || stagePagesCover();
+    const shown = managed.some((tab) => tab.workspaceViewing && browserWorkspaceOnScreen(tab));
+    writeTextContent(launcher, shown ? t("browser.workspace.collapseAction", "원래 창으로 접기")
+      : t("browser.workspace.launcher", "옆에 작업 보기 · {{n}}개", { n: managed.length }));
+    launcher.setAttribute("aria-expanded", String(shown));
+  }
+  for (const tab of managed) {
+    for (const node of document.querySelectorAll(".tab[data-tab]")) {
+      if (node.dataset.tab !== tab.id) continue;
+      let badge = node.querySelector(".browser-workspace-tab-badge");
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "browser-workspace-tab-badge";
+        node.querySelector(".tab-label")?.before(badge);
+      }
+      writeTextContent(badge, t("browser.workspace.badge", "작업"));
+    }
+  }
+}
 
 /* 좁은 판의 주소창(실측 browser-address-bar-expansion.ts): 다른 툴바
  * 컨트롤은 전부 flex:none이라 판이 좁아지면 짜부라드는 것은 주소창의
@@ -606,10 +1011,10 @@ function buildBrowserView() {
     failureActions.appendChild(action);
   }
   failure.append(failureTitle, failureUrl, failureCopy, failureActions);
-  body.appendChild(failure);
+  body.append(failure, buildBrowserWorkspaceSurface());
   // 아티팩트 페이지의 머리띠(t-3233 §5): 갤러리에서 연 페이지에만 서고, 판이
   // .browser-body 사각형을 따라가므로 이 줄도 서면 판이 내려앉는다.
-  host.append(bar, artifactStripNode(), artifactHintNode(), suggest, dlbar, notes, grabbar, findbar, body);
+  host.append(bar, buildBrowserWorkspaceBar(), artifactStripNode(), artifactHintNode(), suggest, dlbar, notes, grabbar, findbar, body);
   return host;
 }
 
@@ -625,13 +1030,30 @@ function wireBrowserHost(host) {
   watchBrowserMenu();
   browserBodyWatch.observe(host.querySelector(".browser-body"));
   const held = () => host._browserTab;
+  for (const [name] of BROWSER_WORKSPACE_ACTIONS) {
+    host.querySelector(`.browser-workspace-${name}`).addEventListener("click", () => {
+      const tab = held();
+      if (!browserWorkspaceLive(tab) || !tab.agentWorkspace) return;
+      if (name === "watch") watchBrowserWorkspace(tab);
+      else if (name === "collapse") collapseBrowserWorkspace(tab);
+      else if (name === "refresh") void refreshBrowserWorkspace(tab);
+      else void setBrowserWorkspaceMode(tab, name === "pause" ? "paused" : name);
+    });
+  }
+  const surface = host.querySelector(".browser-workspace-surface");
+  for (const type of ["pointerdown", "pointerup", "click", "dblclick", "contextmenu", "wheel", "keydown", "keyup", "dragstart", "touchstart"]) {
+    surface.addEventListener(type, (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    }, { passive: false });
+  }
   host.querySelector(".browser-failure-retry").addEventListener("click", () => {
     const tab = held();
-    if (tab?.navFailure) void retryBrowserFailure(tab, { manual: true });
+    if (tab?.navFailure && browserWorkspaceCanControl(tab)) void retryBrowserFailure(tab, { manual: true });
   });
   host.querySelector(".browser-failure-auto").addEventListener("click", () => {
     const tab = held();
-    if (!tab?.navFailure) return;
+    if (!tab?.navFailure || !browserWorkspaceCanControl(tab)) return;
     tab.navFailure.paused = !tab.navFailure.paused;
     cancelBrowserRetry(tab);
     paintBrowserView(tab);
@@ -639,16 +1061,16 @@ function wireBrowserHost(host) {
   });
   host.querySelector(".browser-back").addEventListener("click", () => {
     const tab = held();
-    if (tab) invoke("browser_history", { label: tab.label, delta: -1 }).catch(() => {});
+    if (browserWorkspaceCanControl(tab)) invoke("browser_history", { label: tab.label, delta: -1 }).catch(() => {});
   });
   host.querySelector(".browser-forward").addEventListener("click", () => {
     const tab = held();
-    if (tab) invoke("browser_history", { label: tab.label, delta: 1 }).catch(() => {});
+    if (browserWorkspaceCanControl(tab)) invoke("browser_history", { label: tab.label, delta: 1 }).catch(() => {});
   });
   // Orca's same button: loading → stop, else reload.
   host.querySelector(".browser-reload").addEventListener("click", () => {
     const tab = held();
-    if (!tab) return;
+    if (!browserWorkspaceCanControl(tab)) return;
     if (tab.navFailure) {
       if (tab.loading) {
         tab.navFailure.paused = true;
@@ -668,7 +1090,7 @@ function wireBrowserHost(host) {
   });
   host.querySelector(".browser-devtools").addEventListener("click", () => {
     const tab = held();
-    if (!tab) return;
+    if (!browserWorkspaceCanControl(tab)) return;
     invoke("browser_devtools", { label: tab.label }).catch(() => {});
     // macOS의 인스펙터는 이 창 안에 도킹하며 창을 다시 나눈다 — 문서가
     // 줄어드는 동안 판이 옛 자리에 떠 있으면 인스펙터를 덮는 흰 면이 된다
@@ -728,12 +1150,13 @@ function wireBrowserHost(host) {
   // `import_browser_cookies`), 설정 문.
   host.querySelector(".browser-menu").addEventListener("click", async (event) => {
     const tab = held();
-    if (!tab) return;
+    if (!browserWorkspaceCanControl(tab)) return;
     const box = event.currentTarget.getBoundingClientRect();
     const check = (chosen, label) => (chosen ? "✓ " + label : label);
     // 목록은 문을 열 때마다 새로 읽는다 — 다른 창이 만든 프로필도 이 메뉴의
     // 것이다.
     await refreshBrowserProfiles();
+    if (!browserWorkspaceLive(tab) || held() !== tab || !browserWorkspaceCanControl(tab)) return;
     const items = [
       { label: t("browser.profile", "프로필"), disabled: true, run: () => {} },
       {
@@ -851,7 +1274,7 @@ function wireBrowserHost(host) {
   };
   const paintSuggest = () => {
     const tab = held();
-    if (!tab || document.activeElement !== address) {
+    if (!browserWorkspaceCanControl(tab) || document.activeElement !== address) {
       closeSuggest();
       return;
     }
@@ -980,6 +1403,7 @@ function wireBrowserHost(host) {
 }
 
 function submitBrowserAddress(tab, raw) {
+  if (!browserWorkspaceCanControl(tab)) return;
   const said = navigableUrlOf(raw);
   if (said === null) return;
   cancelBrowserRetry(tab);
@@ -3049,7 +3473,7 @@ function markupRedo(held) {
 
 /* 캡처 → 편집기. 실패는 토스트로 말하고 아무것도 남기지 않는다(실측 문장). */
 async function startBrowserMarkup(tab) {
-  if (tab.marking) return;
+  if (tab.marking || !browserWorkspaceCanControl(tab)) return;
   const host = groupOf(tab.pane)?.browserView;
   const body = host?.querySelector(".browser-body");
   const rect = body?.getBoundingClientRect();
@@ -3064,6 +3488,7 @@ async function startBrowserMarkup(tab) {
     toast(t("browser.markup.captureFailed", "그릴 페이지를 캡처하지 못했습니다"), "halt");
     return;
   }
+  if (!browserWorkspaceLive(tab) || !browserWorkspaceCanControl(tab)) return;
   tab.marking = {
     base,
     cssWidth: rect.width,
@@ -3699,6 +4124,7 @@ function paintBrowserView(tab) {
     findCount.textContent = `${tab.findCount.index} / ${tab.findCount.count}`;
   }
   // 줄이 서고 눕는 것은 판의 사각형이 변하는 일 — 곧장 다시 잰다.
+  paintBrowserWorkspace(host, tab);
   if (wasHidden !== notes.hidden || grabbarWas !== grabbar.hidden) syncBrowserPanes();
   syncBrowserPanes();
 }
@@ -3874,6 +4300,7 @@ async function pollBrowserGrab(label) {
  * there was one, then the three navigations, then the two page rows —
  * separated exactly where Orca separates them. */
 function browserMenuItems(tab, said) {
+  if (!browserWorkspaceCanControl(tab)) return [];
   const items = [];
   const linkUrl = typeof said.linkUrl === "string" ? said.linkUrl : "";
   if (linkUrl) {
@@ -3932,7 +4359,10 @@ function browserMenuItems(tab, said) {
       run: () => void clipboardText.write(tab.url ?? ""),
     },
   );
-  return items;
+  return items.map((item) => item.run ? {
+    ...item,
+    run: () => browserWorkspaceCanControl(tab) && item.run(),
+  } : item);
 }
 
 /* The window asks the page whether it was right-clicked, and only while a
@@ -3941,7 +4371,7 @@ function browserMenuItems(tab, said) {
  * heartbeat nobody is listening to. */
 const BROWSER_MENU_POLL_MS = 300;
 const browserMenuPoll = idlePoller({
-  wanted: () => currentTab()?.kind === "browser",
+  wanted: () => currentTab()?.kind === "browser" && browserWorkspaceCanControl(currentTab()),
   every: BROWSER_MENU_POLL_MS,
   tick: takeBrowserMenu,
 });
@@ -3952,10 +4382,10 @@ function watchBrowserMenu() {
 
 function takeBrowserMenu() {
   const tab = currentTab();
-  if (tab?.kind !== "browser" || browserCovered() || !sidebarMenu.hidden) return;
+  if (tab?.kind !== "browser" || !browserWorkspaceCanControl(tab) || browserCovered() || !sidebarMenu.hidden) return;
   invoke("browser_menu_take", { label: tab.label })
     .then((said) => {
-      if (!said) return;
+      if (!said || !browserWorkspaceLive(tab) || !browserWorkspaceCanControl(tab)) return;
       // The page's coordinates are the BODY's; the menu lives in the
       // window, so the pane's own corner is the offset.
       const view = [...document.querySelectorAll(".browser-view")].find(
@@ -3977,6 +4407,7 @@ function takeBrowserMenu() {
  * 살아 있다(1-g34) — 타이핑이 멎고 200ms 뒤 스스로 감기고, 비면 기다리지 않고
  * 그 자리에서 걷힌다. */
 function toggleBrowserFind(host, tab) {
+  if (!browserWorkspaceCanControl(tab)) return;
   if (tab.finding) {
     closeBrowserFind(host, tab);
     return;
@@ -4010,6 +4441,7 @@ function findableBrowserQuery(raw) {
 /* 타이핑의 문: 타이핑이 멎고 200ms 뒤 스스로 찾는다. 이미 감긴 질의면
  * 잠자코, 비거나 과대한 질의는 기다리지 않고 즉시 걷는다. */
 function scheduleBrowserFind(tab, raw) {
+  if (!browserWorkspaceCanControl(tab)) return;
   if (tab.findTimer) {
     clearTimeout(tab.findTimer);
     tab.findTimer = null;
@@ -4038,6 +4470,7 @@ function pressBrowserFind(tab, raw, forward) {
 }
 
 async function runBrowserFind(tab, query, forward) {
+  if (!browserWorkspaceCanControl(tab)) return;
   const needle = findableBrowserQuery(query);
   tab.findQuery = query ?? "";
   if (!needle) {
@@ -4051,6 +4484,7 @@ async function runBrowserFind(tab, query, forward) {
       forward,
       matchCase: false,
     });
+    if (!browserWorkspaceLive(tab) || !browserWorkspaceCanControl(tab)) return;
     tab.findLast = needle;
     tab.findCount = hit ? { count: hit.count ?? 0, index: hit.index ?? 0 } : { count: 0, index: 0 };
   } catch (error) {
@@ -4086,7 +4520,7 @@ function closeBrowserFind(host, tab) {
 
 function toggleBrowserGrab(host, mode = "copy") {
   const tab = host._browserTab;
-  if (!tab) return;
+  if (!browserWorkspaceCanControl(tab)) return;
   // A second click on the armed pane's SAME mode stands the crosshair down;
   // the other mode takes the crosshair over.
   if (browserGrab !== null && browserGrab.label === tab.label && browserGrab.mode === mode) {
@@ -4102,6 +4536,8 @@ function toggleBrowserGrab(host, mode = "copy") {
 
 /* Arm (and re-arm after each added annotation — Orca's `grab.rearm()`). */
 function armBrowserGrab(label, mode) {
+  const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
+  if (!browserWorkspaceCanControl(tab)) return;
   invoke("browser_grab_arm", { label, mode })
     .then(() => {
       if (browserGrab !== null && browserGrab.label === label) {
@@ -4285,6 +4721,7 @@ function browserOpenTabRecords() {
       // 부팅에도 표가 입히므로, 기록이 그 이름을 굳히면 안 된다.
       reader: tab.reader ?? null,
       profile: tab.profile ?? null,
+      ...(tab.agentWorkspace ? { agentWorkspace: true } : {}),
     }));
 }
 
@@ -4303,6 +4740,7 @@ function storedTabRecordOf(one) {
     viewport: one.viewport ?? null,
     reader,
     profile: one.profile ?? null,
+    ...(one.agentWorkspace === true ? { agentWorkspace: true } : {}),
   };
 }
 
@@ -4311,7 +4749,8 @@ function sameTabRecord(left, right) {
     left.url === right.url &&
     (left.viewport ?? null) === (right.viewport ?? null) &&
     (left.reader ?? null) === (right.reader ?? null) &&
-    (left.profile ?? null) === (right.profile ?? null)
+    (left.profile ?? null) === (right.profile ?? null) &&
+    (left.agentWorkspace === true) === (right.agentWorkspace === true)
   );
 }
 
@@ -4341,6 +4780,8 @@ async function restoreBrowserTabs() {
       await openBrowserTab(record.url, {
         userAgent: record.reader,
         profile: record.profile ?? null,
+        agentWorkspace: record.agentWorkspace === true,
+        workspaceRestored: record.agentWorkspace === true,
       });
       const born = tabs.at(-1);
       // 실패한 열기는 아무도 입히지 않는다 — at(-1)은 그때 옛 탭이다.
@@ -4359,7 +4800,9 @@ async function restoreBrowserTabs() {
  * 생성 시에만 입으므로(wry), 갈아입기는 곧 재생성이다(1-g26). 탭 객체는
  * 그대로 두고 이름표만 바꿔, 스트립·본-순서·주석이 제자리를 지킨다. */
 async function reopenBrowserPane(tab, { profile = tab.profile ?? null } = {}) {
+  if (!browserWorkspaceCanControl(tab)) return false;
   const was = tab.label;
+  const revision = tab.workspaceRevision;
   const body = groupOf(tab.pane)?.browserView?.querySelector(".browser-body");
   const seat = body?.getBoundingClientRect() ?? { x: 0, y: 0, width: 800, height: 600 };
   let label;
@@ -4372,9 +4815,15 @@ async function reopenBrowserPane(tab, { profile = tab.profile ?? null } = {}) {
       height: Math.max(seat.height, 1),
       ...(tab.reader ? { userAgent: tab.reader } : {}),
       ...(profile ? { profile } : {}),
+      ...(tab.agentWorkspace ? { agentWorkspace: true } : {}),
     });
   } catch (error) {
     showError(String(error));
+    return false;
+  }
+  if (!browserWorkspaceLive(tab, was) || (tab.agentWorkspace
+    && (tab.workspaceRevision !== revision || !browserWorkspaceCanControl(tab)))) {
+    await invoke("close_browser_pane", { label }).catch(() => {});
     return false;
   }
   void invoke("close_browser_pane", { label: was }).catch(() => {});
@@ -4388,6 +4837,14 @@ async function reopenBrowserPane(tab, { profile = tab.profile ?? null } = {}) {
   const oldId = tab.id;
   tab.label = label;
   tab.id = "browser:" + label;
+  if (tab.agentWorkspace) {
+    tab.workspace = null;
+    tab.workspaceRevision = undefined;
+    tab.workspaceLastMode = undefined;
+    tab.workspacePending = null;
+    tab.workspaceError = null;
+    void refreshBrowserWorkspace(tab);
+  }
   tab.profile = profile ?? undefined;
   tab.loading = true;
   tab.pageTitle = null;
@@ -4672,12 +5129,14 @@ function syncBrowserPanes() {
     const host = groupOf(tab.pane)?.browserView;
     const visible = !covered && host && !host.hidden && !tab.marking &&
       tab.worktree === activeWorktreePath && activeTabIn(tab.pane)?.id === tab.id;
-    if (visible && !document.hidden) scheduleBrowserRetry(tab);
+    if (visible && !document.hidden && browserWorkspaceCanControl(tab)) scheduleBrowserRetry(tab);
     else cancelBrowserRetry(tab);
     const body =
       !covered &&
       host &&
       !host.hidden &&
+      !document.hidden &&
+      browserWorkspaceCanControl(tab) &&
       // 마크업 중엔 편집기가 그 사각형의 주인이다 — 판은 눕는다.
       !tab.marking &&
       !tab.navFailure &&
@@ -4711,12 +5170,30 @@ function syncBrowserPanes() {
     const place = rect
       ? { label, x: rect.x, y: rect.y, width: rect.width, height: rect.height, shown: true }
       : { label, x: 0, y: 0, width: 1, height: 1, shown: false };
-    browserPlacing = browserPlacing.then(() =>
-      invoke("browser_place", place).catch(() => {
+    browserPlacing = browserPlacing.then(async () => {
+      const currentHost = groupOf(tab.pane)?.browserView;
+      const canShow = browserWorkspaceLive(tab, label) && !document.hidden && !browserCovered()
+        && browserWorkspaceCanControl(tab) && currentHost && !currentHost.hidden
+        && !tab.marking && !tab.navFailure && tab.worktree === activeWorktreePath
+        && activeTabIn(tab.pane)?.id === tab.id;
+      const currentPlace = place.shown && !canShow ? { ...place, shown: false } : place;
+      if (currentPlace !== place && browserSaid.get(label) === said) browserSaid.delete(label);
+      try {
+        await invoke("browser_place", currentPlace);
+      } catch {
         browserSaid.delete(label);
-      }),
-    );
+        if (browserWorkspaceLive(tab, label) && tab.agentWorkspace) {
+          tab.workspace = null;
+          tab.workspaceError = "placement";
+          if (currentHost?._browserTab === tab) paintBrowserWorkspace(currentHost, tab);
+          syncBrowserWorkspaceCapture();
+          await invoke("browser_place", { ...currentPlace, shown: false }).catch(() => {});
+        }
+      }
+    });
   }
+  syncBrowserWorkspaceCapture();
+  paintBrowserWorkspaceChrome();
 }
 
 /* A rough seat for the pane's first frame — the leaf's rect, minus a toolbar
@@ -4824,6 +5301,8 @@ async function openBrowserTab(
     label: reserved = null,
     focus = true,
     makerSeat = null,
+    agentWorkspace = false,
+    workspaceRestored = false,
   } = {},
 ) {
   // The pop-out runs this same script, but a pane it opened would attach to
@@ -4882,6 +5361,8 @@ async function openBrowserTab(
       // An agent's `open` reserved its label at the bridge and answered it
       // before this open ran; the backend accepts exactly that reservation.
       ...(reserved ? { label: reserved } : {}),
+      ...(agentWorkspace ? { agentWorkspace: true } : {}),
+      ...(agentWorkspace && workspaceRestored ? { workspaceRestored: true } : {}),
     });
   } catch (error) {
     showError(String(error));
@@ -4927,6 +5408,7 @@ async function openBrowserTab(
     loading: true,
     zoomLevel: defaultZoom.level,
     zoom: defaultZoom.scale,
+    ...(agentWorkspace ? { agentWorkspace: true, workspace: null, workspaceViewing: false } : {}),
     ...(expectedWorktree === null ? {} : { worktree: expectedWorktree }),
     ...(home === null ? {} : { worktree: home }),
     // 독자·프로필은 생성 시에만 정해지니(wry) 탭이 평생 기억한다 — 복원
@@ -4935,6 +5417,10 @@ async function openBrowserTab(
     ...(jar ? { profile: jar } : {}),
     ...(stood === null ? {} : { pane: stood }),
   }, { focus: focus && !away });
+  if (agentWorkspace) {
+    const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
+    if (tab) void refreshBrowserWorkspace(tab);
+  }
   if (stood !== null) persistStageLayouts();
   rememberBrowserOpenTabs();
   // What the page said while the open was still in flight.
@@ -4953,7 +5439,7 @@ async function openBrowserTab(
   }
   // Orca's `focusAddressBar: true`, and only for the tab a PERSON opened —
   // a popup's tab arrives with an address already meant.
-  if (rawUrl === undefined) {
+  if (rawUrl === undefined && !agentWorkspace && focus && !away) {
     const tab = tabs.find((one) => one.id === "browser:" + label);
     if (tab) docHost(tab.pane, "browser").querySelector(".browser-address")?.focus();
   }
@@ -5017,6 +5503,7 @@ function scheduleBrowserRetry(tab) {
 }
 
 async function retryBrowserFailure(tab, { manual = false } = {}) {
+  if (!browserWorkspaceCanControl(tab)) return;
   const failure = tab.navFailure;
   if (!failure || tab.loading || !tabs.includes(tab)) return;
   cancelBrowserRetry(tab);
@@ -5190,12 +5677,29 @@ const agentPaneLabel = (label) =>
 listen("browser:agent-open", (event) => {
   if (isPopout) return;
   const label = agentPaneLabel(event.payload?.label);
+  if (label === null) return;
   void openBrowserTab(event.payload.url, {
     from: event.payload.term ?? null,
     label,
     focus: false,
+    agentWorkspace: true,
   });
 });
+
+listen("browser:workspace", (event) => {
+  if (isPopout) return;
+  const said = event.payload;
+  const label = agentPaneLabel(said?.label);
+  if (label === null) return;
+  const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
+  if (!tab) return;
+  const wasManaged = tab.agentWorkspace === true;
+  applyBrowserWorkspaceState(tab, said);
+  if (!wasManaged && tab.agentWorkspace) rememberBrowserOpenTabs();
+  paintBrowserWorkspaceTab(tab);
+});
+
+document.addEventListener("visibilitychange", syncBrowserPanes);
 
 /* An agent asked to close a tab (`zerocode-browser close`). The ordinary
  * close — `closeTab`, hide→close→burn — and nothing shorter, so the bridge
@@ -5433,6 +5937,15 @@ async function paintTabCreate() {
   for (const row of browserRows) {
     if (!query || tcMatches(query, row.words)) acts.push(row);
   }
+  const workspaceRow = {
+    glyph: "globe",
+    label: t("browser.workspace.new", "새 전용 작업 브라우저"),
+    hint: t("browser.workspace.newHint", "관전 · 일시정지 · 직접 조작"),
+    words: ["browser", "workspace", "agent", "watch", "브라우저", "작업", "관전",
+      t("browser.workspace.new", "새 전용 작업 브라우저")],
+    run: () => void openBrowserTab(undefined, { agentWorkspace: true, beside: true }),
+  };
+  if (!query || tcMatches(query, workspaceRow.words)) acts.push(workspaceRow);
   paint(false);
   // Orca의 시뮬레이터 행(hasSimulator·new/goto 한 쌍): 우리의 모바일
   // 에뮬레이터는 뷰포트 상자를 입은 브라우저 판이다(1-g19 프리셋 — DPR·
