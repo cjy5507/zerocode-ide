@@ -356,12 +356,36 @@ fn a_restart_brings_no_ledger_pane_back_on_a_superseded_release() {
         ZO_DOOR,
         PERSONS_TAB,
         NEW_LEADER,
-    ] {
+    ]
+    .into_iter()
+    .chain(cuts.iter().map(|(term, _)| *term))
+    {
+        super::super::superseded::forget(term);
         crate::agent_teams::forget_term(term);
     }
-    for (term, _) in &cuts {
-        crate::agent_teams::forget_term(*term);
-    }
+}
+
+/// t-46882: the beat reads a restored pane's release at its rest BEFORE the
+/// mail pointer can type into that pane and start its next turn — the first
+/// gap after a turn, kept by the source.
+#[test]
+fn the_beat_moves_a_restored_pane_before_the_pointer_types() {
+    let shipped = include_str!("../../orchestration.rs");
+    let start = shipped
+        .find("pub(crate) fn tick(")
+        .expect("the beat's tick");
+    let tick = &shipped[start..];
+    let tick = &tick[..tick.find("\n}\n").expect("the end of the tick")];
+    let moved = tick
+        .find("superseded::sweep(host);")
+        .expect("the beat reads restored panes' releases");
+    let point = tick
+        .find("point_at_waiting_mail(host, now_ms);")
+        .expect("the beat points at mail");
+    assert!(
+        moved < point,
+        "the pointer types before the release is moved"
+    );
 }
 
 /// t-46882 ③: a ledger pane that came back before the window held a lineup
@@ -431,7 +455,7 @@ fn a_ledger_pane_that_came_back_before_the_lineup_was_read_is_moved_at_its_first
     for (term, _) in &transcripts {
         super::super::pane_lead_rested(*term, clock(), false);
     }
-    super::super::superseded::sweep(&host, clock());
+    super::super::superseded::sweep(&host);
     for (term, _) in &transcripts {
         assert!(
             host.typed_at(*term).is_empty(),
@@ -448,8 +472,8 @@ fn a_ledger_pane_that_came_back_before_the_lineup_was_read_is_moved_at_its_first
         super::super::pane_turn_began(*term, answered);
         super::super::pane_lead_rested(*term, answered + 1, false);
     }
-    super::super::superseded::sweep(&host, answered + 2);
-    super::super::superseded::sweep(&host, answered + 3);
+    super::super::superseded::sweep(&host);
+    super::super::superseded::sweep(&host);
     assert_eq!(
         host.typed_at(COORDINATOR_TAB),
         ["/model claude-fable-5-1", "\r"],

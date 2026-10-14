@@ -292,6 +292,14 @@ pub(super) fn classify_model_tiers_with(
             });
         }
         for model in superseded {
+            // The release its line keeps in its place — only one that is
+            // newer: a twin of the same release folds here too, and is no
+            // older than the one that stands.
+            let successor = ordered
+                .iter()
+                .find(|kept| lineage(kept) == lineage(model))
+                .filter(|kept| kept.release_rank_value() > model.release_rank_value())
+                .map(|kept| kept.id().to_string());
             assignments.push(ModelTierAssignment {
                 id: model.id().to_string(),
                 provider: provider.to_string(),
@@ -300,7 +308,7 @@ pub(super) fn classify_model_tiers_with(
                 rungs: BTreeSet::new(),
                 source: TierSource::FactRule,
                 confidence_permille: None,
-                successor: None,
+                successor,
             });
         }
     }

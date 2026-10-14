@@ -1476,19 +1476,32 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         tab.as_deref()
             .and_then(|key| restart_nudge_runtime::tab_nudge(&data_root, key, Some(root.as_path())))
     });
-    // And a sleeper's conversation comes back as the launch the ledger would
-    // have cut (t-7812 B): its model, its effort, its peer name. The pane the
-    // 2026-09-25 restart reopened without them was a default-model CLI that
-    // nobody had summoned.
-    let tuning = match reseating.as_deref() {
-        Some(worker) => crate::orchestration::sleeper_launch_tuning(worker)?,
-        None => Vec::new(),
-    };
     // Whose pane this is (t-46882): the ledger's — a sleeper no person took,
     // or the conversation a run's seat names — or the person's own.
     let owned_by_the_ledger = match reseating.as_deref() {
         Some(worker) => !crate::orchestration::worker_taken_over_now(worker),
         None => !fresh && crate::orchestration::coordinates_a_run(agent, &session),
+    };
+    // A run's coordinator comes back on the release that stands today for
+    // the one its conversation last ran (t-46882): a resume that names no
+    // `--model` runs the selection its session saved, and on 2026-10-11 that
+    // was `claude-fable-5` beside the catalog's `claude-fable-5-1`. A person's
+    // own tab runs what it runs.
+    let moved = (owned_by_the_ledger && reseating.is_none())
+        .then(|| moved_release(agent, &session))
+        .flatten();
+    // And a sleeper's conversation comes back as the launch the ledger would
+    // have cut (t-7812 B): its model, its effort, its peer name. The pane the
+    // 2026-09-25 restart reopened without them was a default-model CLI that
+    // nobody had summoned. Its row's release is moved by the same lookup,
+    // in the ledger's own words (`kept_worker_tuning`, t-46882).
+    let (tuning, named) = match (reseating.as_deref(), &moved) {
+        (Some(worker), _) => (
+            crate::orchestration::sleeper_launch_tuning(worker)?,
+            crate::orchestration::sleeper_launch_model(worker),
+        ),
+        (None, Some(moved)) => (moved.words.clone(), Some(moved.to.clone())),
+        (None, None) => (Vec::new(), None),
     };
     let command = if fresh {
         fresh_command(agent, launch_override.as_ref())?
@@ -1557,6 +1570,9 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         &session.id,
         &root,
     ));
+    if let Some(moved) = &moved {
+        window.note(&moved.line(term, kind.slug()));
+    }
     if fresh {
         // Not that conversation: the fresh agent's own SessionStart names
         // the one this pane now holds.
@@ -1583,12 +1599,18 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         None => session,
     };
     let resumed_session_id = session.id.clone();
+    let written_at = session.transcript_path.clone();
     window.record(term, session);
     // A ledger pane — a sleeper no person took, or a run's coordinator — is
     // read at its first rest for the release it came back on (t-46882); a
     // person's own tab runs whatever they run.
     if owned_by_the_ledger {
-        crate::orchestration::superseded::came_back(term, kind.slug(), now_epoch_ms());
+        crate::orchestration::superseded::came_back(
+            term,
+            kind.slug(),
+            written_at.as_deref(),
+            now_epoch_ms(),
+        );
     }
     // Whose word in the goodbye's note this wake speaks for: the sleeper's,
     // the coordinator's run's, or the person's tab's.
@@ -1637,7 +1659,42 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         window.seat_run(term);
     }
     window.stir();
-    Ok(ConversationWake::opened(term))
+    Ok(ConversationWake::opened(term).naming(named))
+}
+
+/// A resumed conversation moved off the release it last ran (t-46882): the
+/// one its own record names, the one that stands for it today, and the
+/// launch words that name that one.
+struct MovedRelease {
+    from: String,
+    to: String,
+    words: Vec<String>,
+}
+
+impl MovedRelease {
+    /// The window's log line for it.
+    fn line(&self, term: TermId, agent: &str) -> String {
+        format!(
+            "term {term} resumed {agent} on {}: its conversation last ran {}, which the catalog \
+             superseded",
+            self.to, self.from
+        )
+    }
+}
+
+/// The release a resumed conversation's own transcript says it last ran,
+/// when the catalog has superseded it and names the one standing for it
+/// today (`orchestration::current_release`) — read the way the account
+/// switch reads a pane's model (`account_switch::pane_tuning`). `None` for a
+/// conversation whose transcript the window cannot read, one on a current
+/// release, and an agent whose CLI takes no measured `--model`.
+fn moved_release(agent: &str, session: &zerocode_core::ProviderSession) -> Option<MovedRelease> {
+    let path = session.transcript_path.as_deref()?;
+    let lines = zerocode_core::transcript::tail_lines(Path::new(path))?;
+    let from = zerocode_core::transcript::model_in(&lines.join("\n"))?;
+    let to = crate::orchestration::current_release(agent, &from)?;
+    let words = zerocode_core::orchestration::model_words(agent, &to).ok()?;
+    Some(MovedRelease { from, to, words })
 }
 
 /// The product's wake window: this window's app and state, and the screen a

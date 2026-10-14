@@ -312,7 +312,11 @@ impl Lineup {
                     unlisted: row
                         .get("unlistedSince")
                         .is_some_and(|since| !since.is_null()),
-                    superseded_by: None,
+                    superseded_by: row
+                        .get("supersededBy")
+                        .and_then(Value::as_str)
+                        .filter(|successor| !successor.is_empty())
+                        .map(str::to_string),
                 })
             })
             .collect();
@@ -363,7 +367,19 @@ impl Lineup {
     /// release whose successor this lineup does not hold — nothing is
     /// guessed.
     #[must_use]
-    pub fn current_release(&self, _model: &str) -> Option<&str> {
+    pub fn current_release(&self, model: &str) -> Option<&str> {
+        let mut held = self.find(model)?;
+        if held.band != Some(Band::Superseded) {
+            return None;
+        }
+        // A release followed past every row the lineup holds has met itself
+        // again: a catalog that says so is answered with nothing.
+        for _ in 0..self.models.len() {
+            held = self.find(held.superseded_by.as_deref()?)?;
+            if held.band != Some(Band::Superseded) {
+                return (!held.folded()).then_some(held.id.as_str());
+            }
+        }
         None
     }
 

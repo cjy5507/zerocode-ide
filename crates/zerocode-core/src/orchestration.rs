@@ -12529,6 +12529,21 @@ impl Ledger {
             .unwrap_or_else(|| Err(format!("unknown worker: {worker_id}")))
     }
 
+    /// The model the sleeper `worker_id` comes back on — the release
+    /// [`Self::sleeper_resume_tuning`] names, alone, for the window to show
+    /// on its pane before the agent says (t-46882). A read; `None` for a row
+    /// that names none.
+    pub fn sleeper_resume_model(
+        &self,
+        worker_id: &str,
+        current: &dyn Fn(&str, &str) -> Option<String>,
+    ) -> Option<String> {
+        self.runs
+            .iter()
+            .find_map(|run| run.worker(worker_id))
+            .and_then(|worker| kept_worker_model(worker, current))
+    }
+
     /// The window resumed a conversation into a checkout, and a sleeper is
     /// that conversation: seat it there, as the same worker (t-3058).
     ///
@@ -12792,9 +12807,8 @@ impl Ledger {
             .checkout
             .clone()
             .ok_or_else(|| format!("{kept} worker {worker_id} has no checkout"))?;
-        let tuning = kept_worker_tuning(run_id, worker, &|agent, model| {
-            launcher.current_release(agent, model)
-        })?;
+        let current = |agent: &str, model: &str| launcher.current_release(agent, model);
+        let tuning = kept_worker_tuning(run_id, worker, &current)?;
         /* Resume the conversation without starting the interrupted work yet.
          *
          * The host has to spawn the process before `worker_reseated` can prove
@@ -12845,6 +12859,7 @@ impl Ledger {
             prompt,
             prompt_timeout_ms: READY_TIMEOUT_DEFAULT_MS,
             resumed,
+            model: kept_worker_model(worker, &current),
         };
         Ok(Decided {
             answered_from: None,
@@ -17440,11 +17455,11 @@ fn continue_past_classifier_declines(agent: &str, pinned: bool, words: &mut Vec<
 fn kept_worker_tuning(
     run_id: &str,
     worker: &Worker,
-    _current: &dyn Fn(&str, &str) -> Option<String>,
+    current: &dyn Fn(&str, &str) -> Option<String>,
 ) -> Result<Vec<String>, String> {
     let mut tuning = launch_tuning(
         &worker.agent,
-        worker.model.as_deref(),
+        kept_worker_model(worker, current).as_deref(),
         worker.effort.as_deref(),
     )?;
     if let Some(peer) = provider_peer(&worker.agent, run_id, &worker.id) {
@@ -17458,6 +17473,25 @@ fn kept_worker_tuning(
         &mut tuning,
     );
     Ok(tuning)
+}
+
+/// The model a kept worker comes back on (t-46882): the one its row names —
+/// or, for a worker no person took, the release that stands for it today
+/// when the classifier has since superseded the row's (`claude-fable-5` →
+/// `claude-fable-5-1`, the person's 10-11 「페이블 5.1이 있는데 5를 왜」). A
+/// pane the person took is theirs, and so is the model its row names; a row
+/// that names none comes back naming none.
+fn kept_worker_model(
+    worker: &Worker,
+    current: &dyn Fn(&str, &str) -> Option<String>,
+) -> Option<String> {
+    let named = worker.model.as_deref()?;
+    Some(
+        (!worker.taken_over)
+            .then(|| current(&worker.agent, named))
+            .flatten()
+            .unwrap_or_else(|| named.to_string()),
+    )
 }
 
 /// Assemble a reserved worker's command or put the reservation back exactly.
@@ -17772,6 +17806,18 @@ fn launch_tuning(
         }
     }
     Ok(words)
+}
+
+/// The launch words that name `model` for `agent`'s CLI — the measured
+/// launch table's own spelling (`TUNABLE`), for a road that names a model
+/// the ledger did not summon with: the release that stands for the one a
+/// resumed conversation last ran (t-46882).
+///
+/// # Errors
+/// An agent the table measured no model flag for, or an empty id — the
+/// refusals a summons' own `--model` meets.
+pub fn model_words(agent: &str, model: &str) -> Result<Vec<String>, String> {
+    launch_tuning(agent, Some(model), None)
 }
 
 /// Say which launch choices this summons left to the agent CLI.
@@ -18558,6 +18604,9 @@ pub struct PreparedWorkerReseat {
     pub prompt: String,
     pub prompt_timeout_ms: u32,
     pub resumed: WorkerResume,
+    /// The model the pane is launched on, when its launch names one — what
+    /// the window shows for it before its agent first says (t-46882).
+    pub model: Option<String>,
 }
 
 impl std::fmt::Debug for PreparedWorkerReseat {
@@ -18573,6 +18622,7 @@ impl std::fmt::Debug for PreparedWorkerReseat {
             .field("prompt", &format_args!("<{} bytes>", self.prompt.len()))
             .field("prompt_timeout_ms", &self.prompt_timeout_ms)
             .field("resumed", &self.resumed)
+            .field("model", &self.model)
             .finish()
     }
 }

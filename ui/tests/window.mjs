@@ -100,6 +100,7 @@ import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testImeKoreanRegression } from "./ime-korean-regression.mjs";
 import { testWorkers } from "./workers.mjs";
+import { testSupersededModel } from "./superseded-model.mjs";
 import { testSidebarAgents } from "./sidebar-agents.mjs";
 import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
@@ -329,6 +330,8 @@ suite("vault", async ({ browser, origin }) => {
   }
 });
 suite("workers", testWorkers);
+// A pane on a release the catalog superseded says so, in one word (t-46882).
+suite("superseded-model", testSupersededModel);
 suite("sidebar-agents", testSidebarAgents);
 // The sidebar tells 작업 중, 검증 대기 and 완료 apart, by the ledger (t-18902).
 suite("sidebar-review-state", testSidebarReviewState);

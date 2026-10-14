@@ -1018,6 +1018,15 @@ pub(crate) fn sleeper_launch_tuning(worker: &str) -> Result<Vec<String>, String>
     ledger.sleeper_resume_tuning(worker, &current_release)
 }
 
+/// The model those words name for the sleeper `worker`, when they name one —
+/// what the window shows on the pane its resume road opens (t-46882).
+pub(crate) fn sleeper_launch_model(worker: &str) -> Option<String> {
+    let held = runtime()?;
+    let image = held.actor.view().ok()?;
+    let ledger = cached_ledger(&held, &image).ok()?;
+    ledger.sleeper_resume_model(worker, &current_release)
+}
+
 /// The release that stands today for `model` in `agent`'s lineup, when the
 /// classifier superseded it (t-46882) — the one question every road that
 /// brings a ledger pane back asks of the catalog: the ledger's reseat (the
@@ -1026,15 +1035,28 @@ pub(crate) fn sleeper_launch_tuning(worker: &str) -> Result<Vec<String>, String>
 /// never fetched; `None` before the first read, for a current model, and for
 /// one the lineup does not list.
 pub(crate) fn current_release(agent: &str, model: &str) -> Option<String> {
+    crate::summon_lineup::current_release(&lineup_now(), agent, model)
+}
+
+/// Whether the window has read a lineup for `agent` at all — the difference
+/// between "this release stands" and "nothing has said yet" that
+/// [`current_release`] answers alike (t-46882).
+pub(crate) fn lineup_held(agent: &str) -> bool {
+    lineup_now().lineups.contains_key(agent)
+}
+
+/// The lineup the restore roads read: the window's own, or a private test
+/// window's.
+fn lineup_now() -> crate::summon_lineup::Snapshot {
     #[cfg(test)]
     if let Some(held) = private_lineup()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
-        .as_ref()
+        .clone()
     {
-        return crate::summon_lineup::current_release(held, agent, model);
+        return held;
     }
-    crate::summon_lineup::current_release(&crate::summon_lineup::snapshot(), agent, model)
+    crate::summon_lineup::snapshot()
 }
 
 /// The lineup a private test window holds in place of the window's own
@@ -7646,7 +7668,7 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // A pane a restore brought back on a superseded release is moved at its
     // first rest, here, before the pointer below can start its next turn
     // (t-46882).
-    superseded::sweep(host, now_ms);
+    superseded::sweep(host);
     point_at_waiting_mail(host, now_ms);
     // The readiness sweep, on the beat that already exists: the sounds heard
     // since the last one retire their windows, and whoever stayed silent past
@@ -10881,7 +10903,14 @@ fn carried(
                         // model and all (t-46882): only the ledger's own is
                         // read at its first rest.
                         if !worker_taken_over_now(&prepared.worker) {
-                            superseded::came_back(term, &prepared.agent, now_ms);
+                            superseded::came_back(
+                                term,
+                                &prepared.agent,
+                                sleeper_record(&prepared.worker)
+                                    .and_then(|session| session.transcript_path)
+                                    .as_deref(),
+                                now_ms,
+                            );
                         }
                         /* The replacement was started at an idle composer.
                          * Only now, after the row and run binding are durable,
@@ -10907,6 +10936,7 @@ fn carried(
                             &prepared.checkout,
                             &prepared.agent,
                             prepared.resumed,
+                            prepared.model.as_deref(),
                         );
                         return continuation_answer(decided.reply, continuation, idle);
                     }

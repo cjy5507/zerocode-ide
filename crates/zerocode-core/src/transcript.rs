@@ -1793,15 +1793,34 @@ fn tool_result_turn(
 pub fn model_in(chunk: &str) -> Option<String> {
     chunk.lines().rev().find_map(|line| {
         let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-        let model = row
-            .get("message")
-            .and_then(|message| message.get("model"))
-            // Codex writes it once per turn, on the turn's own context record.
-            .or_else(|| turn_context(&row)?.get("model"))?
-            .as_str()?
-            .trim();
-        (!model.is_empty() && !model.starts_with('<')).then(|| model.to_string())
+        model_of(&row)
     })
+}
+
+/// The model the newest record written at or after `since_ms` says wrote it
+/// — [`model_in`] for what a conversation ran since a moment, such as the
+/// one its resumed process started at (t-46882). A record with no time of
+/// its own cannot say it is since, and is passed over.
+#[must_use]
+pub fn model_written_since(chunk: &str, since_ms: i64) -> Option<String> {
+    chunk.lines().rev().find_map(|line| {
+        let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        moment_of(&row)
+            .filter(|at| *at >= since_ms)
+            .and_then(|_| model_of(&row))
+    })
+}
+
+/// The model one record names, where the vendors write it.
+fn model_of(row: &serde_json::Value) -> Option<String> {
+    let model = row
+        .get("message")
+        .and_then(|message| message.get("model"))
+        // Codex writes it once per turn, on the turn's own context record.
+        .or_else(|| turn_context(row)?.get("model"))?
+        .as_str()?
+        .trim();
+    (!model.is_empty() && !model.starts_with('<')).then(|| model.to_string())
 }
 
 /// The spelling of the field [`usage_in`] looks for, used as a byte filter
@@ -3133,6 +3152,47 @@ mod tests {
         );
         assert_eq!(model_in(""), None);
         assert_eq!(model_in("not json at all"), None);
+    }
+
+    /// t-46882: what a conversation ran since its resumed process started —
+    /// the newest record stamped at or after that moment, in each vendor's
+    /// own stamp (Claude Code's and Codex's ISO `timestamp`, zo's
+    /// `updated_at_ms`). Records from before, and records with no stamp,
+    /// say nothing about since.
+    #[test]
+    fn a_transcript_says_which_model_wrote_since_a_moment() {
+        let at = |ms: i64| crate::civil::iso_utc_of(ms);
+        let chunk = [
+            serde_json::json!({"type": "assistant", "timestamp": at(1_000), "message": {"role": "assistant", "model": "claude-fable-5", "content": "a"}}),
+            serde_json::json!({"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-5", "content": "unstamped"}}),
+        ]
+        .map(|row| row.to_string())
+        .join("\n");
+        assert_eq!(model_written_since(&chunk, 2_000), None, "nothing since");
+        assert_eq!(
+            model_written_since(&chunk, 1_000).as_deref(),
+            Some("claude-fable-5"),
+            "the unstamped record says nothing about since"
+        );
+        let later = format!(
+            "{chunk}\n{}",
+            serde_json::json!({"type": "assistant", "timestamp": at(3_000), "message": {"role": "assistant", "model": "claude-fable-5-1", "content": "b"}})
+        );
+        assert_eq!(
+            model_written_since(&later, 2_000).as_deref(),
+            Some("claude-fable-5-1")
+        );
+        let zo = serde_json::json!({"type": "message", "updated_at_ms": 5_000, "message": {"role": "assistant", "model": "gpt-6.1-sol", "blocks": []}}).to_string();
+        assert_eq!(
+            model_written_since(&zo, 4_000).as_deref(),
+            Some("gpt-6.1-sol")
+        );
+        let codex = serde_json::json!({"type": "turn_context", "timestamp": at(7_000), "payload": {"model": "gpt-6-sol"}}).to_string();
+        assert_eq!(
+            model_written_since(&codex, 7_000).as_deref(),
+            Some("gpt-6-sol")
+        );
+        assert_eq!(model_written_since(&codex, 7_001), None);
     }
 
     /// A slash command's replay is the CLI's own plumbing, not a person

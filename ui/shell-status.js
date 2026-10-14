@@ -5215,6 +5215,7 @@ function setActiveTab(id) {
   updateStage();
   renderTabs();
   paintViewToggle();
+  paintStatusModel();
   const active = currentTab();
   if ((active?.kind === "lane" || active?.kind === "term") && termFloat.hidden) keySink.focus();
   // Which shell holds the keyboard just changed, and a program that asked to

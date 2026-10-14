@@ -637,7 +637,11 @@ fn a_sleeper_the_ledger_will_not_seat_starts_nothing_and_comes_back_once_it_can(
 
     // The ledger writes again: the same road brings it back, once.
     let back = door.wake(DOOR, "claude", session).expect("the wake");
-    assert_eq!(back, ConversationWake::opened(DOOR));
+    // And says the model its launch named, for the window to show (t-46882).
+    assert_eq!(
+        back,
+        ConversationWake::opened(DOOR).naming(Some("claude-fable-5-1".to_string()))
+    );
     let started = door.started();
     assert_eq!(started.len(), 1, "{started:?}");
     let command = &started[0].1;
