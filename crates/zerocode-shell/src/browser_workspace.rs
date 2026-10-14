@@ -218,6 +218,7 @@ impl EvidenceCheck {
         })
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn start<T>(&self, send: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
         let Some((workspace, control)) = &self.0 else {
             return send();
@@ -234,8 +235,10 @@ impl EvidenceCheck {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 struct Sending<'a>(&'a Workspace);
 
+#[cfg(any(target_os = "macos", test))]
 impl Drop for Sending<'_> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.0.lock() {
