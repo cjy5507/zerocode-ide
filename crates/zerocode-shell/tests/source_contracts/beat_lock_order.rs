@@ -17,11 +17,13 @@ use super::support::strip_rust_comments;
 /// The roads that take a window: a private one, a walled Claude, the shared one.
 const WINDOW_ROADS: [&str; 3] = ["PrivateWindow::boot", "WalledClaude::stand", "the_window()"];
 
-/// A function with a body: its name, and the bytes of its `{` and its `}`.
-struct Body<'a> {
-    name: &'a str,
-    open: usize,
-    close: usize,
+/// A function with a body: its name, and the bytes of its `fn`, its `{` and
+/// its `}`.
+pub(crate) struct Body<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) at: usize,
+    pub(crate) open: usize,
+    pub(crate) close: usize,
 }
 
 /// What the order check reads from one source.
@@ -44,7 +46,7 @@ fn follows_a_name(code: &str, at: usize) -> bool {
 }
 
 /// Every place `needle` stands in `code` as a whole name.
-fn stands(code: &str, needle: &str) -> Vec<usize> {
+pub(crate) fn stands(code: &str, needle: &str) -> Vec<usize> {
     code.match_indices(needle)
         .map(|(at, _)| at)
         .filter(|at| !follows_a_name(code, *at))
@@ -93,7 +95,7 @@ fn body_opens(code: &str, from: usize) -> Option<usize> {
 
 /// Where the block whose `{` is at `open` closes, stepping over char literals.
 /// Strings and comments are already gone from `code`.
-fn block_closes(code: &str, open: usize) -> Option<usize> {
+pub(crate) fn block_closes(code: &str, open: usize) -> Option<usize> {
     let bytes = code.as_bytes();
     let mut depth = 0usize;
     let mut at = open;
@@ -121,7 +123,7 @@ fn block_closes(code: &str, open: usize) -> Option<usize> {
 
 /// Every function in `code` that has a body. Comments and strings are gone, so a
 /// `fn` in prose is not one, and no brace inside a string closes a body early.
-fn fn_bodies(code: &str) -> Vec<Body<'_>> {
+pub(crate) fn fn_bodies(code: &str) -> Vec<Body<'_>> {
     code.match_indices("fn ")
         .filter(|(at, _)| !follows_a_name(code, *at))
         .filter_map(|(at, _)| {
@@ -133,6 +135,7 @@ fn fn_bodies(code: &str) -> Vec<Body<'_>> {
             let close = block_closes(code, open)?;
             Some(Body {
                 name: &code[name_at..name_at + name_len],
+                at,
                 open,
                 close,
             })
@@ -141,7 +144,7 @@ fn fn_bodies(code: &str) -> Vec<Body<'_>> {
 }
 
 /// The innermost function whose body holds the byte at `at`, as its index.
-fn owner(bodies: &[Body<'_>], at: usize) -> Option<usize> {
+pub(crate) fn owner(bodies: &[Body<'_>], at: usize) -> Option<usize> {
     bodies
         .iter()
         .enumerate()

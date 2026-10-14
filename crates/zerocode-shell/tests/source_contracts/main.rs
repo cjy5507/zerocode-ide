@@ -21,6 +21,7 @@ mod quota_wall;
 mod raw_feed;
 mod readiness;
 mod release_versions;
+mod scm_observer_lock;
 mod secret_prompt;
 mod skills_view;
 mod support;

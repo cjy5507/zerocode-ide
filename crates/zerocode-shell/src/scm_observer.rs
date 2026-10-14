@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use tauri::{AppHandle, Emitter, Manager};
 use zerocode_core::checks::Limits;
 use zerocode_core::scm_observer::{
@@ -141,6 +142,24 @@ impl Observer {
             &mut WindowEffects { path, now_ms },
         )
     }
+
+    /// The checkouts a tick looks at: the live ones and the ones a person
+    /// asked to retry, each once, in order.
+    fn tick_roots(&mut self, path: &Path, mut live: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
+        self.load(path)?;
+        live.extend(self.retry_roots.iter().cloned());
+        live.sort();
+        live.dedup();
+        Ok(live)
+    }
+}
+
+/// The observer, held. Every reader and writer of the observer comes through
+/// here.
+fn hold(observer: &Mutex<Observer>) -> MutexGuard<'_, Observer> {
+    observer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The window showed a condition's toast, or the person closed it. The mark
@@ -153,9 +172,7 @@ pub(crate) fn set_notice_mark(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let path = state_path(&state);
-    let mut held = checks_runtime::remembered()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut held = hold(checks_runtime::remembered());
     held.mark_notice(&path, id, opened_at, mark, crate::now_epoch_ms())?;
     Ok(())
 }
@@ -262,21 +279,17 @@ pub(crate) fn sweep(app: &AppHandle, now_ms: i64) {
 fn poll(app: &AppHandle, limits: &Limits, now_ms: i64) -> Result<(), String> {
     let started = std::time::Instant::now();
     let state = app.state::<AppState>();
-    let mut roots = live_roots(&state);
+    let observer = checks_runtime::remembered();
+    let live = live_roots(&state);
     let path = state_path(&state);
-    let mut held = checks_runtime::remembered()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    held.load(&path)?;
-    roots.extend(held.retry_roots.iter().cloned());
-    roots.sort();
-    roots.dedup();
+    let roots = hold(observer).tick_roots(&path, live)?;
     if roots.is_empty() {
-        publish_notices(app, &held.book, &roots);
+        publish_notices(app, &hold(observer).book, &roots);
         return Ok(());
     }
     let mut budget = Budget::new(limits);
-    held.observe(
+    observe(
+        observer,
         &roots,
         &mut budget,
         &mut WindowEffects {
@@ -287,7 +300,7 @@ fn poll(app: &AppHandle, limits: &Limits, now_ms: i64) -> Result<(), String> {
         now_ms,
         state.local_data_root(),
     )?;
-    publish_notices(app, &held.book, &roots);
+    publish_notices(app, &hold(observer).book, &roots);
     // The tick's numbers go into the window's event log only when they are
     // news: a tick that ran past one gh call's own ceiling, or one that spent
     // its whole call budget. An ordinary tick every thirty seconds was a
@@ -306,10 +319,22 @@ fn poll(app: &AppHandle, limits: &Limits, now_ms: i64) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// One tick over the live checkouts, apart from the window: the caller
+/// brings the roots, the tick's `gh` budget, the durable effects and the
+/// directory of the event log.
+fn observe(
+    observer: &Mutex<Observer>,
+    roots: &[PathBuf],
+    budget: &mut Budget,
+    effects: &mut impl Effects,
+    limits: &Limits,
+    now_ms: i64,
+    log_root: &Path,
+) -> Result<(), String> {
+    hold(observer).observe(roots, budget, effects, limits, now_ms, log_root)
+}
 impl Observer {
-    /// One tick over the live checkouts, apart from the window: the caller
-    /// brings the roots, the tick's `gh` budget, the durable effects and the
-    /// directory of the event log.
     fn observe(
         &mut self,
         roots: &[PathBuf],
@@ -527,9 +552,7 @@ pub(crate) fn note_checks(
         return Ok(());
     }
     let path = state_path(&state);
-    let mut held = checks_runtime::remembered()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut held = hold(checks_runtime::remembered());
     held.load(&path)?;
     let subject = subject(root, review, checkout_token(root)?);
     let key = subject.key();
@@ -619,10 +642,17 @@ pub(crate) struct HealthSnapshot {
 
 pub(crate) fn health_snapshot(state: &AppState) -> Result<HealthSnapshot, String> {
     let root = state.active().root.to_string_lossy().into_owned();
-    let mut held = checks_runtime::remembered()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    held.load(&state_path(state))?;
+    health_rows(checks_runtime::remembered(), &state_path(state), root)
+}
+
+/// The health rows of the checkout at `root`, as `observer`'s book has them.
+fn health_rows(
+    observer: &Mutex<Observer>,
+    path: &Path,
+    root: String,
+) -> Result<HealthSnapshot, String> {
+    let mut held = hold(observer);
+    held.load(path)?;
     Ok(HealthSnapshot {
         rows: held
             .book
@@ -644,9 +674,7 @@ pub(crate) fn retry(app: &AppHandle, root: &Path) -> Result<HealthSnapshot, Stri
     let now_ms = crate::now_epoch_ms();
     let path = state_path(&state);
     {
-        let mut held = checks_runtime::remembered()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut held = hold(checks_runtime::remembered());
         held.load(&path)?;
         held.request_retry(
             root,
@@ -702,7 +730,11 @@ mod tests {
         assert_eq!(held.times[Path::new("/wt/a")].reviews, Some(60_000));
     }
 
-    use crate::vendor_cli::{CliError, CliOutput, FakeAnswer, FakeCall, FakeRunner};
+    use crate::vendor_cli::{
+        CliCall, CliError, CliOutput, CliRunner, FakeAnswer, FakeCall, FakeRunner, VendorCli,
+    };
+    use std::sync::{Condvar, mpsc};
+    use std::time::{Duration, Instant};
     use zerocode_core::host::Host;
 
     /// A git checkout `name` under `parent` with one commit: on `branch`, or
@@ -839,7 +871,8 @@ mod tests {
         }
     }
 
-    /// One observer tick against `github`; the `gh` calls it made.
+    /// One observer tick against `github`, run the way the window runs it;
+    /// the `gh` calls it made.
     fn tick(
         held: &mut Observer,
         roots: &[PathBuf],
@@ -850,10 +883,159 @@ mod tests {
     ) -> Vec<FakeCall> {
         let runner = FakeRunner::answering(github);
         let mut budget = Budget::over(&runner, limits);
-        held.observe(roots, &mut budget, &mut Accepted, limits, now_ms, log_root)
-            .expect("an observer tick");
+        let observer = Mutex::new(std::mem::take(held));
+        observe(
+            &observer,
+            roots,
+            &mut budget,
+            &mut Accepted,
+            limits,
+            now_ms,
+            log_root,
+        )
+        .expect("an observer tick");
+        *held = observer
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(budget.used, runner.calls().len());
         runner.calls()
+    }
+
+    /// `gh` as [`github`] answers it, except that no call comes back until the
+    /// test lets GitHub answer: GitHub at its slowest, for as long as a test
+    /// needs it to be.
+    struct SlowGitHub {
+        github: FakeRunner,
+        /// The calls that came in, and whether GitHub answers yet.
+        gate: Mutex<(usize, bool)>,
+        moved: Condvar,
+    }
+    impl SlowGitHub {
+        fn new() -> Self {
+            Self {
+                github: FakeRunner::answering(github),
+                gate: Mutex::new((0, false)),
+                moved: Condvar::new(),
+            }
+        }
+        /// Whether a call is out within `limit`.
+        fn asked_within(&self, limit: Duration) -> bool {
+            let gate = self.gate.lock().expect("the gate");
+            let (gate, _) = self
+                .moved
+                .wait_timeout_while(gate, limit, |(calls, _)| *calls == 0)
+                .expect("the gate");
+            gate.0 > 0
+        }
+        fn answer(&self) {
+            self.gate.lock().expect("the gate").1 = true;
+            self.moved.notify_all();
+        }
+    }
+    impl CliRunner for SlowGitHub {
+        fn run(&self, cli: VendorCli, call: &CliCall<'_>) -> Result<CliOutput, CliError> {
+            {
+                let mut gate = self.gate.lock().expect("the gate");
+                gate.0 += 1;
+                self.moved.notify_all();
+                let _answering = self
+                    .moved
+                    .wait_while(gate, |(_, answering)| !*answering)
+                    .expect("the gate");
+            }
+            self.github.run(cli, call)
+        }
+    }
+    /// GitHub answers once this goes, however the test ends: a tick still
+    /// waiting on it would keep the test's threads from ever joining.
+    struct AnswerOnDrop<'a>(&'a SlowGitHub);
+    impl Drop for AnswerOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.answer();
+        }
+    }
+
+    /// The Checks pane reads the observer's health while a tick is out asking
+    /// GitHub, and the read comes back without waiting for GitHub (t-47457).
+    /// A tick that held the observer for every `gh` call kept the read
+    /// waiting through all of them: up to `gh_calls_max` calls of
+    /// `gh_call_ms` each, 32 × 10 s = 320 s with the table's numbers. Here
+    /// GitHub answers nothing until the read is back or `READ_WAIT_MAX` has
+    /// passed.
+    #[test]
+    fn the_health_read_comes_back_while_a_tick_waits_on_gh() {
+        /// Well over what the read takes when nothing holds the observer
+        /// (under a millisecond): room for a loaded test machine.
+        const READ_WAIT_MAX: Duration = Duration::from_secs(1);
+        let dir = tempfile::tempdir().expect("checkouts");
+        let topic = checkout(dir.path(), "topic", Some("topic"));
+        let path = dir.path().join("scm-observer.json");
+        let observer = Mutex::new(Observer::default());
+        hold(&observer).load(&path).expect("the observer's book");
+        let limits = Limits::default();
+        let slow = SlowGitHub::new();
+        let (read, waited, ticked) = std::thread::scope(|scope| {
+            let answering = AnswerOnDrop(&slow);
+            let ticking = scope.spawn(|| {
+                let mut budget = Budget::over(&slow, &limits);
+                observe(
+                    &observer,
+                    std::slice::from_ref(&topic),
+                    &mut budget,
+                    &mut Accepted,
+                    &limits,
+                    1_000_000,
+                    dir.path(),
+                )
+            });
+            assert!(
+                slow.asked_within(Duration::from_secs(60)),
+                "the tick never asked gh anything"
+            );
+            let (sent, came) = mpsc::channel();
+            let (observer, path) = (&observer, &path);
+            let root = topic.to_string_lossy().into_owned();
+            let started = Instant::now();
+            let _reading = scope.spawn(move || sent.send(health_rows(observer, path, root)));
+            let read = came.recv_timeout(READ_WAIT_MAX);
+            let waited = started.elapsed();
+            drop(answering);
+            (read, waited, ticking.join().expect("the tick's thread"))
+        });
+        let held_for_ms = u64::try_from(limits.gh_calls_max)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(limits.gh_call_ms);
+        println!(
+            "SCM health read while a tick waits on gh: waited_ms={:.3} (a tick that holds \
+             the observer through its calls: up to {} calls x {} ms = {held_for_ms} ms)",
+            waited.as_secs_f64() * 1000.0,
+            limits.gh_calls_max,
+            limits.gh_call_ms,
+        );
+        let snapshot = read
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the health read waited {waited:?}, past {READ_WAIT_MAX:?}, for a tick \
+                     that was waiting on gh"
+                )
+            })
+            .expect("a health snapshot");
+        assert_eq!(snapshot.root, topic.to_string_lossy());
+        ticked.expect("the tick, once GitHub answered");
+        assert_eq!(
+            slow.github.calls().len(),
+            5,
+            "once GitHub answered, the tick asked what a first tick asks: discovery, three \
+             CI reads and the reviews"
+        );
+        assert!(
+            hold(&observer)
+                .book
+                .subjects
+                .values()
+                .any(|tracked| tracked.subject.number == 7),
+            "the tick did not write down the PR GitHub named"
+        );
     }
 
     fn logged_discovery_refusals(log_root: &Path) -> usize {
