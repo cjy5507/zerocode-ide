@@ -640,6 +640,33 @@ where
 }
 
 #[cfg(test)]
+mod past_reference_tests {
+    use super::input_refers_to_past_conversation;
+
+    #[test]
+    fn a_cue_inside_a_longer_word_is_not_a_past_reference() {
+        // The first line is zo's own `# System` section: a ledger task that
+        // carried the launching session's prompt armed the recall hint for the
+        // worker's whole turn through "feedback when".
+        for input in [
+            "Users may configure hooks that behave like user feedback when they block or redirect a tool call.",
+            "use the fallback when the key is missing",
+            "fire the callback when the stream ends",
+        ] {
+            assert!(!input_refers_to_past_conversation(input), "{input:?}");
+        }
+        for input in [
+            "Back when we set this up, which port did we pick?",
+            "as you said earlier, keep it short",
+            "(earlier) the parser failed",
+            "저번에 얘기했던 그 버그 다시 보자",
+        ] {
+            assert!(input_refers_to_past_conversation(input), "{input:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod design_guidance_tests {
     use super::{build_design_guidance_reminder, DESIGN_GUIDANCE_REMINDER_PREFIX};
 
