@@ -309,24 +309,24 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "coordinate": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2,
             "description": "[x, y] in the last screenshot's pixels" },
         "start_coordinate": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2,
-            "description": "[x, y] where a drag starts, in the last screenshot's pixels" },
+            "description": "Drag start [x, y], in last screenshot pixels" },
         "text": { "type": "string" },
         "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
         "scroll_amount": { "type": "integer", "minimum": 1 },
         "scroll_pages": { "type": "number", "exclusiveMinimum": 0, "description": "App viewport pages; default 1. Desktop uses scroll_amount." },
         "duration": { "type": "number", "minimum": 0 },
         "region": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4,
-            "description": "[x0, y0, x1, y1]: the top-left and bottom-right corners, in the last screenshot's pixels" },
+            "description": "[x0, y0, x1, y1] corners in last screenshot pixels" },
         "app": { "type": "string" },
         "url": { "type": "string" },
         "path": { "type": "string" },
         "program": { "type": "string" },
         "args": { "type": "string" },
-        "role": { "type": "string", "description": "Role identifier returned by find; tree role descriptions may be localized." },
+        "role": { "type": "string", "description": "find's role ID, not localized descriptions" },
         "label": { "type": "string" },
         "ocr": { "type": "boolean" },
-        "window": { "type": "string", "description": "Unscoped wait_for title condition only; app/window selectors cannot restrict a title search." },
-        "window_id": { "type": "integer", "minimum": 1, "description": "Keep the observed app window ID on subsequent actions. A batch default needs both app and window_id." },
+        "window": { "type": "string", "description": "Unscoped wait_for title only; no app/window selectors" },
+        "window_id": { "type": "integer", "minimum": 1, "description": "Keep the observed app window; batch defaults need app too" },
         "kind": { "type": "string", "enum": kinds },
         "x": { "type": "number" },
         "y": { "type": "number" },
@@ -341,21 +341,21 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "reset_budget": { "type": "boolean" },
         "last": { "type": "integer", "minimum": 1 },
         "after": { "type": "integer", "minimum": 0,
-            "description": "sound_read/sound_wait: only sounds heard after this event number" },
+            "description": "sound_read/sound_wait: events after this number" },
         "min_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
         "until": { "type": "string", "description": format!("watch: {}; walk: the text on screen when it worked", WATCH_UNTIL.join("|")) },
         "element_index": { "type": "integer", "minimum": 0 },
         "after_text": { "type": "string" },
         "offset": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
         "settle": { "type": "boolean",
-            "description": "Action/batch: false samples immediately, without confirming completion. Default true waits for quiet." },
+            "description": "false samples without verifying completion; true (default) waits for quiet" },
         "name": { "type": "string" },
         "params": { "type": "object" },
         "start": { "type": "integer", "minimum": 1 }
     });
     // A walk's own fields: what the CLI's walk takes, and nothing it lacks.
     let walk = json!({
-        "background": { "type": "boolean", "description": "App-only input; no global fallback. Inherited by supported batch steps; non-input waits send no input flags." },
+        "background": { "type": "boolean", "description": "App-only input; no global fallback. Supported batch steps inherit it." },
         "goal": { "type": "string", "maxLength": GOAL_CHAR_CAP },
         "pane": { "type": "string" },
         "platform": { "type": "string" },
@@ -388,37 +388,25 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
 pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "Computer",
-        description: "Drive desktop apps through the ZeroCode window. \
-            For background work, observe {app}, keep app and the returned window_id on actions, and set \
-            background: true. Never substitute activation or global input when background input is refused. \
-            An unverified keyboard receiver requires a verified writable-field capability; if unavailable, use handoff. \
-            Look (screenshot, zoom), \
-            move/click/drag/scroll the mouse, press keys, type, wait; launch, activate, quit and open \
-            apps; find/wait_for/read elements or screen text (ocr reads pixels); place windows; \
-            read/write the clipboard; run a program. All positions and sizes use the last full screenshot's \
-            pixels, including returned positions and region [x0, y0, x1, y1]. Zoom does not change that frame. \
-            After a screen-changing action the tool waits for repaint and observes the same target; \
-            changed: false omits unchanged pixels. listen_start hears the machine or one app; sound_wait \
-            waits for a label (text: \"alarm_clock,siren\"), sound_read reads, listen_stop ends it. watch waits \
-            for screen changes (until: quiet for stillness), without pictures. observe with app shows its \
-            accessibility tree; left_click with app, window_id and element_index presses a listed control. \
-            A label (and role) resolves a fresh control in that same window, also within a batch. Use the role \
-            identifier returned by find; tree descriptions may be localized. Plan familiar steps as one batch \
-            (app and window_id as defaults, steps: [...]): left_click by label, type, key, wait, wait_for; \
-            one call and one look after. Defaults must agree with each step. A timer wait keeps scope only as \
-            context and sends no native scope flags. Sound and screen waits cannot inherit a window scope. A window with no tree (a \
-            mirrored phone): left_click {app, label: the words shown, ocr: true, after_text: the line they follow} \
-            presses them as read at the press — batch a whole screen, wait_for {app, ocr: true, text} checks each \
-            value. recipe_save keeps successful steps; recipe_run replays them (params fill {{names}}) \
-            and reports where it stopped and the start to resume from. walk (goal: one sentence; one of \
-            app, pane, or platform with device; until: the text on screen when it worked; max_steps) walks there \
-            in one call on the window's own judgment and answers a status to act on. A CAPTCHA or password \
-            field (secure_input) is the person's: handoff (text: what they do) waits for them. A one-time code they read out: \
-            handoff with ask_code and into (the input command's words, e.g. [\"set-value\",\"--app\",\"A\",\"--element-index\",\"3\"]) — \
-            the window types it, you never receive it, and a look after may show it. \
-            A `stopped` answer means stop and report; a press on a payment, transfer or delete control is \
-            held while the window asks them — say confirming: payment|transfer|delete when you know you \
-            are there. Only works inside a ZeroCode pane.",
+        description: "Drive desktop apps inside a ZeroCode pane. For background work, observe {app}, retain \
+            app/window_id and set background: true. Never fall back to activation or global input. \
+            Unverified keyboard receiver: use a verified writable-field capability or handoff. \
+            Positions/sizes, including returned positions and regions, use the last full screenshot's pixels; \
+            zoom does not change that frame. Actions wait for repaint and observe the same target; unchanged \
+            pixels are omitted. observe {app} shows the accessibility tree; left_click {app, window_id, \
+            element_index} presses its control. label/role resolve a fresh control in that window. \
+            Batch familiar steps once with one final look; see steps for scope/waits. For windows without \
+            trees (mirrored phones), left_click {app, label, ocr: true, after_text: the preceding line} presses \
+            freshly read words; wait_for {app, ocr: true, text} checks values. listen_start hears machine/app; \
+            sound_wait {text: \"alarm_clock,siren\"} waits, sound_read reads, listen_stop ends. watch waits \
+            for change or quiet without pictures. recipe_save keeps successful steps; recipe_run substitutes \
+            params for {{names}}, reports where it stopped and start for resuming. walk {goal: one sentence, \
+            app|pane|(platform,device), until: success text, max_steps} runs the window's judgment loop and \
+            returns status. CAPTCHA/password (secure_input): handoff {text: what the person must do}. \
+            One-time code: handoff {ask_code: true, into: input command words, e.g. \
+            [\"set-value\",\"--app\",\"A\",\"--element-index\",\"3\"]} has the window type it. The code never \
+            returns, but later looks may show it. stopped means stop/report. Payment/transfer/delete \
+            requires the person's confirmation; set confirming: payment|transfer|delete.",
         input_schema: {
             let mut properties =
                 action_properties(&action_names(|_| true), &window_kinds(|_| true), None, looks_carry_marks());
@@ -440,12 +428,11 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "required": ["action"],
                     "additionalProperties": false
                 },
-                "description": "batch: the actions to run in order in one call, each spelled exactly as alone, positions \
-                    in the same screenshot's pixels. App steps use labels, not coordinates. Set both app/window_id \
-                    as batch defaults or scope each step; explicit selectors must agree with the defaults. A timer \
-                    wait sends only duration; wait_for keeps its scope and needs a window receipt. Unscoped sound_wait \
-                    and watch send no background flags. wait_for or sound_wait gives timeout_ms. Stops at the first \
-                    refusal; the tool looks once, after."
+                "description": "batch: ordered actions, same parameters/pixel frame as single actions. App steps \
+                    use labels, not coordinates. Default app+window_id or scope each step; overrides must agree. \
+                    wait sends duration only; scoped wait_for requires a matching window receipt. sound_wait/watch \
+                    stay unscoped, without background flags. wait_for/sound_wait take timeout_ms. Stop on refusal; \
+                    one final look."
             });
             json!({
                 "type": "object",
@@ -2065,6 +2052,12 @@ mod tests {
             let (road, _) = fake_shim(dir.path());
             let ctx = crate::tests::tool_context_outside_cwd_windows();
             ctx.set_computer_frame(ShotFrame::UNIT);
+            ctx.set_computer_observation(Some(ComputerObservation {
+                app: case["input"]["app"].as_str().map(str::to_string),
+                window_id: case["input"]["window_id"].as_u64(),
+                frame: ShotFrame::UNIT,
+                marked_look: None,
+            }));
             std::fs::write(dir.path().join("wait-for"), json!({"ok":true,"result":case["result"]}).to_string()).unwrap();
             let response = run_computer(&case["input"], &ctx, &road).unwrap();
             let answer: Value = serde_json::from_str(&response).unwrap();
@@ -2074,6 +2067,7 @@ mod tests {
             let argv: Vec<String> = std::fs::read_to_string(dir.path().join("wait-for-argv")).unwrap().lines().map(str::to_string).collect();
             assert_eq!(zerocode_core::computer_use::parse_command(&argv).unwrap().params, case["params"]);
             assert_eq!(calls(dir.path()), ["wait-for"]);
+            assert!(answer["first_look"].is_null());
             assert!(answer["looked_after"].is_null());
         }
     }
@@ -2086,6 +2080,12 @@ mod tests {
             let (road, _) = fake_shim(dir.path());
             let ctx = crate::tests::tool_context_outside_cwd_windows();
             ctx.set_computer_frame(ShotFrame::UNIT);
+            ctx.set_computer_observation(Some(ComputerObservation {
+                app: case["input"]["app"].as_str().map(str::to_string),
+                window_id: case["input"]["window_id"].as_u64(),
+                frame: ShotFrame::UNIT,
+                marked_look: None,
+            }));
             let mut wait = case["input"].clone();
             for key in ["app", "window_id", "background"] { wait.as_object_mut().unwrap().remove(key); }
             let steps = json!([wait, {"action":"left_click", "label":"Save", "role":"AXButton"}]);
@@ -2103,6 +2103,7 @@ mod tests {
             let observed = answer["looked_after"]["screen"]["said"].as_str().unwrap();
             assert!(observed.contains("--app org.example.fixture") && observed.contains("--window-id 41"));
             assert_eq!(calls(dir.path()), ["batch", "observe"]);
+            assert!(answer["first_look"].is_null());
         }
     }
 
