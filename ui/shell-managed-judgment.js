@@ -79,48 +79,78 @@ const managedJudgmentController = {
     const token = typeof error === "string" ? error : error?.code ?? error?.kind ?? error?.message;
     if (token === "settings_changed") return judgmentProviderController.failure(token);
     if (token === "cancelled") return t("settings.managed.cancelled", "취소했습니다. 현재 적용된 모델은 바꾸지 않았습니다.");
-    const reasons = {
-      insufficient_space: ["space", "저장 공간이 부족합니다. 사용하지 않는 모델을 정리한 뒤 다시 시도하세요."],
-      runtime_missing: ["runtime", "실행 환경을 먼저 설치하세요. 이미 실행 중인 판단 서버를 연결할 수도 있습니다."],
-      platform_unsupported: ["platform", "이 컴퓨터의 직접 실행은 지원하지 않습니다. 호환 판단 서버를 연결하세요."],
-      engine_not_supported: ["engine", "이 모델의 실행 엔진은 아직 지원하지 않습니다. 모델을 실행 중인 System One 서버를 연결하세요."],
-      engine_unverified: ["unverified", "이 모델의 직접 실행은 아직 검증 중입니다. 다운로드가 가능하다는 뜻은 아닙니다."],
-      runtime_unverified: ["unverified", "이 모델의 직접 실행은 아직 검증 중입니다. 다운로드가 가능하다는 뜻은 아닙니다."],
-      integrity_failed: ["integrity", "파일이 고정된 모델 버전과 일치하지 않습니다. 올바른 파일을 선택하거나 다시 다운로드하세요."],
-      download_failed: ["download", "다운로드하지 못했습니다. 네트워크와 모델 출처를 확인한 뒤 다시 시도하세요."],
-      native_protocol_failed: ["protocol", "판단 응답 형식이 맞지 않습니다. System One 호환 모델과 서버인지 확인하세요."],
-      runtime_failed: ["start", "모델을 시작하지 못했습니다. 실행 환경과 필요한 메모리를 확인하세요. 현재 모델은 유지됩니다."],
-      runtime_timeout: ["timeout", "모델이 제한 시간 안에 응답하지 않았습니다. 더 작은 모델을 선택하거나 서버 상태를 확인하세요."],
-      operation_timeout: ["timeout", "모델이 제한 시간 안에 응답하지 않았습니다. 더 작은 모델을 선택하거나 서버 상태를 확인하세요."],
-      model_configured: ["configured", "현재 선택된 모델입니다. 다른 모델을 적용한 뒤 이 파일을 삭제하세요."],
-      model_missing: ["missing", "모델 파일이 없습니다. 먼저 다운로드하거나 기존 파일을 등록하세요."],
-      server_stopped: ["stopped", "모델 서버가 중지됐습니다. 다시 실행하고 응답을 확인하세요."],
-      server_changed: ["changed", "서버 상태가 바뀌었습니다. 상태를 새로 읽고 다시 연결하세요."],
-      operation_changed: ["changed", "서버 상태가 바뀌었습니다. 상태를 새로 읽고 다시 연결하세요."],
-      catalog_changed: ["catalogChanged", "모델 목록이 다른 곳에서 바뀌었습니다. 새로고침한 뒤 다시 추가하세요."],
-      manifest_invalid: ["catalog", "지원되는 모델 카탈로그가 아닙니다. 고정 버전·파일 크기·해시가 포함된 JSON 파일을 선택하세요."],
-      unsafe_path: ["path", "안전하지 않은 파일 경로가 포함돼 있습니다. 올바른 모델 카탈로그와 폴더를 선택하세요."],
-      size_limit: ["size", "지원하는 파일 크기 제한을 넘었습니다. 더 작은 모델이나 호환 판단 서버를 선택하세요."],
-      not_native_decision_model: ["notDecision", "이 파일은 지원되는 판단 모델 형식이 아닙니다. 일반 채팅 모델이 아닌 선택·점수·참/거짓 판단 모델을 고르세요."],
-      model_format_not_supported: ["format", "이 모델 형식의 실행 엔진은 아직 지원하지 않습니다. 호환 판단 서버를 연결하거나 지원되는 모델을 선택하세요."],
-      source_changed: ["sourceChanged", "확인한 뒤 모델 파일이나 출처가 바뀌었습니다. 모델 확인부터 다시 진행하세요."],
-      inspection_expired: ["sourceChanged", "확인한 뒤 모델 파일이나 출처가 바뀌었습니다. 모델 확인부터 다시 진행하세요."],
-      source_inspection_changed: ["sourceChanged", "확인한 뒤 모델 파일이나 출처가 바뀌었습니다. 모델 확인부터 다시 진행하세요."],
-      source_invalid: ["source", "Hugging Face 모델 주소나 저장소 ID를 확인하세요. 로컬 모델은 설정과 가중치 파일이 함께 있는 폴더를 선택하세요."],
-      source_unavailable: ["sourceUnavailable", "모델 출처에 연결할 수 없습니다. 주소·모델 버전·네트워크를 확인하거나 이미 받은 로컬 폴더를 선택하세요."],
-      source_auth_required: ["sourceAuth", "로그인이나 이용 동의가 필요한 모델입니다. 접근 가능한 공개 모델을 고르거나, 이용 권한으로 직접 받은 로컬 폴더를 선택하세요."],
-      source_hash_unavailable: ["sourceHash", "출처에서 파일 검증 정보를 확인하지 못했습니다. 검증 가능한 모델 버전을 고르거나 직접 받은 로컬 폴더를 선택하세요."],
-      source_folder_required: ["sourceFolder", "파일 하나가 아닌 모델 폴더를 선택하세요. 모델 설정과 가중치 파일이 함께 있어야 합니다."],
-      destination_unavailable: ["destination", "선택한 저장 폴더를 사용할 수 없습니다. 기본 저장 위치로 돌아가거나 쓰기 가능한 다른 폴더를 선택하세요."],
-      weights_format_invalid: ["weightsFormat", "가중치 파일을 읽을 수 없거나 파일 구조가 올바르지 않습니다. 파일을 다시 받거나 완전한 모델 폴더를 선택하세요."],
-      manager_instance_changed: ["changed", "서버 상태가 바뀌었습니다. 상태를 새로 읽고 다시 연결하세요."],
-      catalog_conflict: ["catalogConflict", "같은 모델 ID가 다른 정보로 이미 등록돼 있습니다. 모델 목록을 새로 읽고 등록된 모델과 출처를 확인하세요."],
-      model_manifest_missing: ["modelManifest", "등록된 모델 정보를 찾지 못했습니다. 모델 목록을 새로 읽거나 원래 출처·폴더에서 다시 추가하세요."],
-      model_restore_failed: ["restore", "새 모델로 전환하지 못했고 이전 모델의 자동 복구도 실패했습니다. 이전 모델 카드에서 다시 사용을 눌러 복구하세요."],
-      operation_busy: ["busy", "다른 모델 작업이 진행 중입니다. 완료하거나 취소한 뒤 다시 시도하세요."],
-    };
-    const reason = reasons[token];
-    if (reason) return t(`settings.managed.error.${reason[0]}`, reason[1]);
+    switch (token) {
+      case "insufficient_space":
+        return t("settings.managed.error.space", "저장 공간이 부족합니다. 사용하지 않는 모델을 정리한 뒤 다시 시도하세요.");
+      case "runtime_missing":
+        return t("settings.managed.error.runtime", "실행 환경을 먼저 설치하세요. 이미 실행 중인 판단 서버를 연결할 수도 있습니다.");
+      case "platform_unsupported":
+        return t("settings.managed.error.platform", "이 컴퓨터의 직접 실행은 지원하지 않습니다. 호환 판단 서버를 연결하세요.");
+      case "engine_not_supported":
+        return t("settings.managed.error.engine", "이 모델의 실행 엔진은 아직 지원하지 않습니다. 모델을 실행 중인 System One 서버를 연결하세요.");
+      case "engine_unverified":
+      case "runtime_unverified":
+        return t("settings.managed.error.unverified", "이 모델의 직접 실행은 아직 검증 중입니다. 다운로드가 가능하다는 뜻은 아닙니다.");
+      case "integrity_failed":
+        return t("settings.managed.error.integrity", "파일이 고정된 모델 버전과 일치하지 않습니다. 올바른 파일을 선택하거나 다시 다운로드하세요.");
+      case "download_failed":
+        return t("settings.managed.error.download", "다운로드하지 못했습니다. 네트워크와 모델 출처를 확인한 뒤 다시 시도하세요.");
+      case "native_protocol_failed":
+        return t("settings.managed.error.protocol", "판단 응답 형식이 맞지 않습니다. System One 호환 모델과 서버인지 확인하세요.");
+      case "runtime_failed":
+        return t("settings.managed.error.start", "모델을 시작하지 못했습니다. 실행 환경과 필요한 메모리를 확인하세요. 현재 모델은 유지됩니다.");
+      case "runtime_timeout":
+      case "operation_timeout":
+        return t("settings.managed.error.timeout", "모델이 제한 시간 안에 응답하지 않았습니다. 더 작은 모델을 선택하거나 서버 상태를 확인하세요.");
+      case "model_configured":
+        return t("settings.managed.error.configured", "현재 선택된 모델입니다. 다른 모델을 적용한 뒤 이 파일을 삭제하세요.");
+      case "model_missing":
+        return t("settings.managed.error.missing", "모델 파일이 없습니다. 먼저 다운로드하거나 기존 파일을 등록하세요.");
+      case "server_stopped":
+        return t("settings.managed.error.stopped", "모델 서버가 중지됐습니다. 다시 실행하고 응답을 확인하세요.");
+      case "server_changed":
+      case "operation_changed":
+      case "manager_instance_changed":
+        return t("settings.managed.error.changed", "서버 상태가 바뀌었습니다. 상태를 새로 읽고 다시 연결하세요.");
+      case "catalog_changed":
+        return t("settings.managed.error.catalogChanged", "모델 목록이 다른 곳에서 바뀌었습니다. 새로고침한 뒤 다시 추가하세요.");
+      case "manifest_invalid":
+        return t("settings.managed.error.catalog", "지원되는 모델 카탈로그가 아닙니다. 고정 버전·파일 크기·해시가 포함된 JSON 파일을 선택하세요.");
+      case "unsafe_path":
+        return t("settings.managed.error.path", "안전하지 않은 파일 경로가 포함돼 있습니다. 올바른 모델 카탈로그와 폴더를 선택하세요.");
+      case "size_limit":
+        return t("settings.managed.error.size", "지원하는 파일 크기 제한을 넘었습니다. 더 작은 모델이나 호환 판단 서버를 선택하세요.");
+      case "not_native_decision_model":
+        return t("settings.managed.error.notDecision", "이 파일은 지원되는 판단 모델 형식이 아닙니다. 일반 채팅 모델이 아닌 선택·점수·참/거짓 판단 모델을 고르세요.");
+      case "model_format_not_supported":
+        return t("settings.managed.error.format", "이 모델 형식의 실행 엔진은 아직 지원하지 않습니다. 호환 판단 서버를 연결하거나 지원되는 모델을 선택하세요.");
+      case "source_changed":
+      case "inspection_expired":
+      case "source_inspection_changed":
+        return t("settings.managed.error.sourceChanged", "확인한 뒤 모델 파일이나 출처가 바뀌었습니다. 모델 확인부터 다시 진행하세요.");
+      case "source_invalid":
+        return t("settings.managed.error.source", "Hugging Face 모델 주소나 저장소 ID를 확인하세요. 로컬 모델은 설정과 가중치 파일이 함께 있는 폴더를 선택하세요.");
+      case "source_unavailable":
+        return t("settings.managed.error.sourceUnavailable", "모델 출처에 연결할 수 없습니다. 주소·모델 버전·네트워크를 확인하거나 이미 받은 로컬 폴더를 선택하세요.");
+      case "source_auth_required":
+        return t("settings.managed.error.sourceAuth", "로그인이나 이용 동의가 필요한 모델입니다. 접근 가능한 공개 모델을 고르거나, 이용 권한으로 직접 받은 로컬 폴더를 선택하세요.");
+      case "source_hash_unavailable":
+        return t("settings.managed.error.sourceHash", "출처에서 파일 검증 정보를 확인하지 못했습니다. 검증 가능한 모델 버전을 고르거나 직접 받은 로컬 폴더를 선택하세요.");
+      case "source_folder_required":
+        return t("settings.managed.error.sourceFolder", "파일 하나가 아닌 모델 폴더를 선택하세요. 모델 설정과 가중치 파일이 함께 있어야 합니다.");
+      case "destination_unavailable":
+        return t("settings.managed.error.destination", "선택한 저장 폴더를 사용할 수 없습니다. 기본 저장 위치로 돌아가거나 쓰기 가능한 다른 폴더를 선택하세요.");
+      case "weights_format_invalid":
+        return t("settings.managed.error.weightsFormat", "가중치 파일을 읽을 수 없거나 파일 구조가 올바르지 않습니다. 파일을 다시 받거나 완전한 모델 폴더를 선택하세요.");
+      case "catalog_conflict":
+        return t("settings.managed.error.catalogConflict", "같은 모델 ID가 다른 정보로 이미 등록돼 있습니다. 모델 목록을 새로 읽고 등록된 모델과 출처를 확인하세요.");
+      case "model_manifest_missing":
+        return t("settings.managed.error.modelManifest", "등록된 모델 정보를 찾지 못했습니다. 모델 목록을 새로 읽거나 원래 출처·폴더에서 다시 추가하세요.");
+      case "model_restore_failed":
+        return t("settings.managed.error.restore", "새 모델로 전환하지 못했고 이전 모델의 자동 복구도 실패했습니다. 이전 모델 카드에서 다시 사용을 눌러 복구하세요.");
+      case "operation_busy":
+        return t("settings.managed.error.busy", "다른 모델 작업이 진행 중입니다. 완료하거나 취소한 뒤 다시 시도하세요.");
+    }
     return t("settings.managed.failed", "작업 결과를 확인하지 못했습니다. 상태를 새로 읽어 실제 설치·실행·적용 상태를 확인하세요.");
   },
 

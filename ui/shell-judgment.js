@@ -327,10 +327,10 @@ const judgmentProviderController = {
       });
       el("judgment-model-options").replaceChildren(...options);
       const listed = el("judgment-listed-model");
-      const placeholder = document.createElement("option");
-      placeholder.value = "";
-      placeholder.textContent = t("settings.judgment.chooseListed", "서버에서 읽은 모델 선택");
-      listed.replaceChildren(placeholder, ...this.modelIds.map((id) => {
+      const unselectedOption = document.createElement("option");
+      unselectedOption.value = "";
+      unselectedOption.textContent = t("settings.judgment.chooseListed", "서버에서 읽은 모델 선택");
+      listed.replaceChildren(unselectedOption, ...this.modelIds.map((id) => {
         const option = document.createElement("option");
         option.value = id;
         option.textContent = id;

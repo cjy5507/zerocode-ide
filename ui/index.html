@@ -4203,17 +4203,19 @@
              것만 알면 된다」). Where each feature stands is the dashboard's. -->
         </section>
         <section class="settings-pane" data-pane="judgment-models" data-keywords="Hugging Face local model System One Jev 모델 다운로드 불러오기" hidden>
-        <div class="settings-card" id="typesafe-card">
+        <header class="settings-section-head">
           <div class="settings-subhead settings-subhead--acts">
             <div>
-              <h3 class="settings-subhead-title" data-i18n="settings.judgment.title">판단 모델</h3>
-              <p class="settings-subhead-desc" data-i18n="settings.judgment.about">
+              <h2 class="settings-section-title" data-i18n="settings.judgment.title">판단 모델</h2>
+              <p class="settings-section-desc" data-i18n="settings.judgment.about">
                 선택·점수·참/거짓을 반환하는 판단 모델을 고릅니다. 컴퓨터 유즈와 라우팅을 포함한 모든 판단 기능이 같은 선택을 사용합니다. 일반 채팅 모델은 지원하지 않습니다.
               </p>
             </div>
             <span class="settings-state" id="typesafe-key-state" data-state="unchecked"
                   role="status" aria-live="polite"></span>
           </div>
+        </header>
+        <div class="settings-card" id="typesafe-card">
           <p class="settings-notice judgment-active-model" id="judgment-active-model" role="status" aria-live="polite"></p>
           <div class="settings-option-row settings-option-row--copy settings-jev-switch" data-jev-switch-row>
             <label class="settings-check" for="jev-enabled">
