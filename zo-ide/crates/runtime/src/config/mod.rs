@@ -3241,6 +3241,10 @@ mod feature_toggle_tests {
 mod traces_base_tests {
     #[test]
     fn traces_stay_in_the_tree_until_the_host_relocates_them() {
+        // zo_project_state_dir reads the environment, and the case that moves
+        // ZO_CONFIG_HOME and HOME holds this lock while it does: two reads here
+        // must see one environment.
+        let _env = crate::test_env_lock();
         let cwd = std::path::Path::new("/tmp/some-repo");
         assert_eq!(super::traces_base_from(false, cwd), cwd);
         let moved = super::traces_base_from(true, cwd);

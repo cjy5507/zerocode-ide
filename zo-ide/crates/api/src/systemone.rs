@@ -1311,6 +1311,11 @@ mod tests {
         // under the crate's lock, and the lock is released before any await.
         let (without, empty, with) = {
             let _env = crate::test_env_lock();
+            // zo's settings name the provider, and the person's machine may
+            // have chosen one that needs no key: read a config home nobody set.
+            let unset = tempfile::tempdir().expect("a zo home nobody set");
+            let previous_home = std::env::var_os(core_types::paths::ZO_CONFIG_HOME_ENV);
+            std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, unset.path());
             let previous_key = std::env::var_os(SYSTEMONE_API_KEY_ENV);
             let previous_base = std::env::var_os(SYSTEMONE_BASE_URL_ENV);
             std::env::remove_var(SYSTEMONE_API_KEY_ENV);
@@ -1327,6 +1332,10 @@ mod tests {
             match previous_base {
                 Some(value) => std::env::set_var(SYSTEMONE_BASE_URL_ENV, value),
                 None => std::env::remove_var(SYSTEMONE_BASE_URL_ENV),
+            }
+            match previous_home {
+                Some(value) => std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, value),
+                None => std::env::remove_var(core_types::paths::ZO_CONFIG_HOME_ENV),
             }
             (without, empty, with)
         };
