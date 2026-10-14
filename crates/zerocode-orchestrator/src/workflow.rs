@@ -259,6 +259,12 @@ pub(crate) fn valid_branch_ref(value: &str) -> bool {
     valid_ref_below(value, "refs/heads/")
 }
 
+/// A source the publisher may move a target to: a branch, or one of the app's
+/// own stack refs (t-45315). Nothing else under `refs/zerocode/`, and no tag.
+pub(crate) fn valid_publish_source_ref(value: &str) -> bool {
+    valid_branch_ref(value) || valid_ref_below(value, STACK_REF_PREFIX)
+}
+
 pub(crate) fn valid_publish_target_ref(value: &str) -> bool {
     valid_ref_below(value, INTEGRATION_REF_PREFIX)
 }

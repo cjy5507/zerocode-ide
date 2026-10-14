@@ -1,17 +1,20 @@
 //! Local Git implementation of the workflow publication contract.
 //!
-//! This publisher never infers a target. It accepts a source branch and only a
+//! This publisher never infers a target. It accepts a source branch, or one of
+//! the app's own stack refs under `refs/zerocode/stack/` (t-45315), and only a
 //! target under `refs/zerocode/integration/`, refuses that target when any
 //! worktree has explicitly put its HEAD there, and moves it together with an
 //! immutable operation receipt in one `git update-ref --stdin` transaction.
 //! Recovery creates the cancellation tombstone through the same transaction
 //! mechanism, so commit and cancellation cannot both win.
 //!
-//! This first adapter is Unix-only. Git and its ordinary descendants share a
-//! process group; nonblocking pipes keep the call deadline bounded even if a
-//! deliberately daemonized process leaves that group. The configured Git is a
-//! trusted host executable, not an adversarial-code sandbox. Windows needs a
-//! Job Object before construction can be enabled there.
+//! Every Git call goes through the bounded process boundary. On Unix, Git and
+//! its ordinary descendants share a process group and nonblocking pipes keep
+//! the call deadline bounded even if a deliberately daemonized process leaves
+//! that group; on Windows the child runs in a Job Object the deadline
+//! terminates. The configured Git is a trusted host executable, not an
+//! adversarial-code sandbox. The tests below run on Unix only, so the Windows
+//! road has no evidence of its own yet.
 //! A hostile same-UID process that manually rewrites a worktree's `HEAD` during
 //! publication remains outside this foundation's boundary; ordinary Git
 //! worktree/checkout flows cannot attach this non-branch target namespace.
@@ -26,7 +29,7 @@ use crate::publish::{
     PublisherFailure,
 };
 use crate::workflow::{
-    PublishExpectation, RefBinding, valid_branch_ref, valid_oid, valid_publish_target_ref,
+    PublishExpectation, RefBinding, valid_oid, valid_publish_source_ref, valid_publish_target_ref,
 };
 use crate::{Orchestrator, git_command};
 
@@ -353,23 +356,48 @@ impl std::fmt::Debug for StackPublication {
     }
 }
 
+impl StackPublication {
+    /// The kernel's expectation for this generation. The publisher compares only
+    /// the two refs, their objects and its own identity; the workflow fields name
+    /// the batch for whoever reads one.
+    fn expectation(&self, publisher: &LocalGitRefPublisher) -> PublishExpectation {
+        PublishExpectation {
+            workflow_id: self.batch.clone(),
+            generation: self.generation,
+            manifest_id: String::new(),
+            repository_id: publisher.repository_id.clone(),
+            worktree_id: String::new(),
+            publisher_scope: publisher.publisher_scope.clone(),
+            source: self.stack.clone(),
+            target: self.integration.clone(),
+            policy_digest: String::new(),
+        }
+    }
+}
+
 impl LocalGitRefPublisher {
-    /// Move the integration ref from the stack's base to its tip.
+    /// Move the integration ref from the stack's base to its tip, with the
+    /// operation's receipt, in one transaction: [`Publisher::commit`] as it is.
+    /// A retry of the same generation is answered from its receipt, and a
+    /// tombstoned operation is refused.
     pub fn move_integration_ref(
         &self,
         publication: &StackPublication,
     ) -> Result<(), PublisherFailure> {
-        let _ = publication;
-        Err(PublisherFailure::Refused)
+        let expected = publication.expectation(self);
+        self.commit(&PublishAttempt::new(&expected, &publication.operation_id))
     }
 
-    /// Settle one generation's operation id.
+    /// Settle one generation's operation id: [`Publisher::verify`] as it is. An
+    /// applied operation answers what it applied; one that never applied gets
+    /// its tombstone first, so no later [`Self::move_integration_ref`] with
+    /// that id can win.
     pub fn settle_operation(
         &self,
         publication: &StackPublication,
     ) -> Result<PublishVerification, PublisherFailure> {
-        let _ = publication;
-        Ok(PublishVerification::Pending)
+        let expected = publication.expectation(self);
+        self.verify(&PublishAttempt::new(&expected, &publication.operation_id))
     }
 }
 
@@ -493,7 +521,7 @@ impl Publisher for LocalGitRefPublisher {
 }
 
 fn validate_expectation(expected: &PublishExpectation) -> Result<(), PublisherFailure> {
-    if !valid_branch_ref(&expected.source.name)
+    if !valid_publish_source_ref(&expected.source.name)
         || !valid_publish_target_ref(&expected.target.name)
         || expected.source.name == expected.target.name
         || !valid_lower_oid(&expected.source.oid)
