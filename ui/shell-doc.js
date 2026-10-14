@@ -8036,11 +8036,15 @@ function dressArtifactCard(node, row, selected) {
     doc.hidden = block === "";
     const thumb = node.querySelector(".artifact-card-thumb");
     const rendered = ARTIFACT_THUMB_KINDS.has(row.kind) ? artifactThumbs.get(row.id) ?? null : null;
-    const held = row.kind === "screenshot" ? artifactPreviews.get(row.id) : null;
+    // 글이 얼굴인 카드(`plain`)에는 그림을 띄울 얼굴이 없다 — 그 카드가 스크린숏을 청하면 원본
+    // 파일 전체(최대 4 MiB)가 서랍의 캐시로 와서, 보이지 않는 그림을 카드 120장 몫까지 들고
+    // 있었다(t-54317). 그림은 서랍이 열 때 청한다.
+    const pictured = row.kind === "screenshot" && !plain;
+    const held = pictured ? artifactPreviews.get(row.id) : null;
     const src = rendered ?? held?.data_url ?? "";
     thumb.hidden = src === "";
     thumb.src = src;
-    if (row.kind === "screenshot" && !held && !artifactMissing.has(row.id)) void askArtifactThumb(node, row.id);
+    if (pictured && !held && !artifactMissing.has(row.id)) void askArtifactThumb(node, row.id);
   }
   if (ARTIFACT_THUMB_KINDS.has(row.kind) && !artifactMissing.has(row.id)) askArtifactThumbnail(row);
   // 반영 상태는 행과 따로 움직인다(git의 답이 뒤에 온다): 행이 바뀌었거나 그 답이 움직인

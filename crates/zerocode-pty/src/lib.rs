@@ -17,6 +17,7 @@ pub mod gate_channel;
 pub mod grid;
 pub mod input;
 pub mod lane;
+mod packed_row;
 pub mod readers;
 pub mod ready;
 pub mod recording;

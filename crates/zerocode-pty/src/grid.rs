@@ -33,17 +33,20 @@ use vte::{Params, Parser, Perform};
 use crate::colors::{
     Rgb, TerminalColors, format_x_color_rgb_spec, parse_x_color_spec, reads_as_dark,
 };
+use crate::packed_row::PackedRow;
 use crate::readers::FrameReaders;
 
 /// Scrollback lines kept per lane.
 ///
-/// The full-width ceiling is not "a few MB": at the measured 95 columns a
-/// row requests `95 * 44` bytes and occupies a 5,120-byte macOS allocation,
-/// so 5,000 rows are 25.1 MiB per lane (201 MiB for eight) and 50,000 rows are
-/// 246 MiB per lane. Compact history below removes each default tail, but a
-/// fully painted transcript still reaches that ceiling. Measurement and the
-/// arithmetic live in `docs/measurements/pty-footprint-verdict-20260831.md`
-/// sections 2.3 and 3.3.
+/// What a full history costs is what its rows show. Kept as screen cells it
+/// was not "a few MB": at the measured 95 columns a row requested `95 * 44`
+/// bytes and occupied a 5,120-byte macOS allocation, so 5,000 rows were
+/// 25.1 MiB per lane and 50,000 rows 246 MiB
+/// (`docs/measurements/pty-footprint-verdict-20260831.md` sections 2.3 and
+/// 3.3). A history row is now packed when it leaves the screen (`packed_row.rs`:
+/// four bytes a written column, plus the style runs and the zero-width riders
+/// it has), so the same 95 columns cost about a tenth of that (t-54317,
+/// `tests/grid_memory.rs`).
 ///
 /// 5000 is also Orca's default, arrived at independently and then confirmed:
 /// `DESKTOP_TERMINAL_SCROLLBACK_ROWS_DEFAULT` (store-BgJxB0hr.js:3419).
@@ -375,7 +378,7 @@ struct Pending {
 ///
 /// NUL is the only safe choice — it is what no program prints and what a
 /// blank cell never holds. A space would make every empty column look claimed.
-const CONTINUATION: char = '\0';
+pub(crate) const CONTINUATION: char = '\0';
 
 /// One screen cell: a character and how to paint it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -533,13 +536,38 @@ pub enum FoldRole {
 /// `evaluateJavaScript` the webview parses as source, and then
 /// `expandPackedRow`/`runsOf`/`paintRow` on the other side.
 ///
-/// The three fields together are what a row IS on the wire ([`GridRow`]), so
-/// comparing them is comparing the frame the consumer already has.
+/// The cells, the wrap and the fold together are what a row IS on the wire
+/// ([`GridRow`]), so comparing them is comparing the frame the consumer
+/// already has. The cells are kept packed (`PackedRow`): this copy is only
+/// ever compared against, never read cell by cell, and a screen of it held as
+/// cells cost every pane another 580 KB at 220×60 (t-54317).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SentRow {
-    cells: Vec<Cell>,
+    cells: PackedRow,
+    /// How many cells the row had: the packed copy keeps only its ink.
+    width: usize,
     wrap: Option<u16>,
     fold: Option<RowFold>,
+}
+
+impl SentRow {
+    fn of(cells: &[Cell], wrap: Option<u16>, fold: Option<RowFold>) -> Self {
+        Self {
+            cells: PackedRow::pack(cells),
+            width: cells.len(),
+            wrap,
+            fold,
+        }
+    }
+
+    /// Whether the consumer already holds this row as `cells`, `wrap` and
+    /// `fold` would send it.
+    fn holds(&self, cells: &[Cell], wrap: Option<u16>, fold: Option<RowFold>) -> bool {
+        self.wrap == wrap
+            && self.fold == fold
+            && self.width == cells.len()
+            && self.cells.matches(cells)
+    }
 }
 
 /// The fold region attached to one row.
@@ -991,7 +1019,12 @@ pub struct TermPoint {
 /// The primary screen parked while the alternate screen is up.
 #[derive(Debug)]
 struct SavedScreen {
-    cells: Vec<Vec<Cell>>,
+    /// The primary screen's rows, packed while the alternate one is up: a
+    /// full-screen agent keeps it parked for its whole session and nothing
+    /// reads it until the program leaves (t-54317).
+    cells: Vec<PackedRow>,
+    /// The width the parked rows had.
+    cols: usize,
     /// The soft-wrap ledger travels with the rows it describes.
     wrap: Vec<Option<u16>>,
     folds: Vec<Option<RowFold>>,
@@ -1060,7 +1093,9 @@ pub struct TerminalGrid {
     /// Fold membership parallel to `cells`, kept per row so millions of
     /// scrollback cells do not repeat the same four-byte fact.
     folds: Vec<Option<RowFold>>,
-    scrollback: VecDeque<Vec<Cell>>,
+    /// The rows that left the top of the screen, oldest first, each packed to
+    /// what it shows (`PackedRow`).
+    scrollback: VecDeque<PackedRow>,
     /// [`Self::wrap`] for the rows history holds, in the same order.
     scroll_wrap: VecDeque<Option<u16>>,
     /// Fold membership parallel to compact scrollback rows.
@@ -1206,8 +1241,9 @@ pub struct TerminalGrid {
     /// cannot say. Parallel to `dirty_rows` and moved wherever those move, so
     /// index *i* always describes the row the consumer has at index *i*.
     ///
-    /// The cost of keeping it is one screen's cells per pane — 580 KB at
-    /// 220×60 — against a comparison measured at 0.73 µs a row (43.8 µs for a
+    /// The cost of keeping it is one screen's text and style runs per pane —
+    /// the rows are packed (`SentRow`); as cells they were 580 KB at 220×60 —
+    /// against a comparison measured at 0.73 µs a row on cells (43.8 µs for a
     /// whole screen, and that is the WORST case: the comparison stops at the
     /// first cell that differs, so a row that really changed leaves early).
     /// What one skipped row saves downstream is several times that before the
@@ -1815,18 +1851,12 @@ impl TerminalGrid {
                 let wrap = self.wrap_of_screen_row(index);
                 let fold = self.folds[index];
                 let held = self.sent_rows.get(index).and_then(Option::as_ref);
-                if held.is_some_and(|sent| {
-                    sent.wrap == wrap && sent.fold == fold && sent.cells == self.cells[index]
-                }) {
+                if held.is_some_and(|sent| sent.holds(&self.cells[index], wrap, fold)) {
                     continue;
                 }
                 let cells = self.cells[index].clone();
                 if let Some(slot) = self.sent_rows.get_mut(index) {
-                    *slot = Some(SentRow {
-                        cells: cells.clone(),
-                        wrap,
-                        fold,
-                    });
+                    *slot = Some(SentRow::of(&cells, wrap, fold));
                 }
                 moved.push(GridRow {
                     index,
@@ -2256,11 +2286,11 @@ impl TerminalGrid {
         self.sent_rows.clear();
         self.sent_rows.reserve(self.rows);
         for index in 0..self.rows {
-            self.sent_rows.push(Some(SentRow {
-                cells: self.cells[index].clone(),
-                wrap: self.wrap_of_screen_row(index),
-                fold: self.folds[index],
-            }));
+            self.sent_rows.push(Some(SentRow::of(
+                &self.cells[index],
+                self.wrap_of_screen_row(index),
+                self.folds[index],
+            )));
         }
     }
 
@@ -2294,30 +2324,30 @@ impl TerminalGrid {
 
     /// A scrollback row's logical cells, oldest first — styles and all.
     ///
-    /// Storage stops at the last non-default cell; this accessor restores the
-    /// default tail to the width the row had when it left the screen. A full
-    /// row stays borrowed, while a compact row owns only this read's padding.
-    /// `scrollback_line` below can read compact storage directly because it
-    /// trims the same default tail from its text answer.
+    /// Storage is packed and stops at the last non-default cell; this
+    /// accessor unpacks the row and restores the default tail to the width it
+    /// had when it left the screen. `scrollback_line` below reads the packed
+    /// row directly because it trims the same default tail from its text
+    /// answer.
     #[must_use]
     pub fn scrollback_cells(&self, index: usize) -> Option<Cow<'_, [Cell]>> {
-        let cells = self.scrollback.get(index)?;
-        let cols = self.scroll_cols.get(index).copied().unwrap_or(cells.len());
-        if cells.len() >= cols {
-            return Some(Cow::Borrowed(&cells[..cols]));
-        }
-        let mut padded = Vec::with_capacity(cols);
-        padded.extend_from_slice(cells);
-        padded.resize(cols, Cell::default());
-        Some(Cow::Owned(padded))
+        let row = self.scrollback.get(index)?;
+        let cols = self.scroll_cols.get(index).copied().unwrap_or(row.len());
+        Some(Cow::Owned(row.padded(cols)))
     }
 
-    /// The compact representation, for readers whose own contract discards
-    /// trailing default cells. Session serialization is one: `render_row`
-    /// stops at the last ink, so materialising up to 50,000 padded rows first
-    /// would spend the memory this representation exists to save.
-    pub(crate) fn stored_scrollback_cells(&self, index: usize) -> Option<&[Cell]> {
-        self.scrollback.get(index).map(Vec::as_slice)
+    /// One row's stored cells — up to its last non-default cell, unpadded —
+    /// written over `out`, for readers whose own contract discards trailing
+    /// default cells. Session serialization is one: `render_row` stops at the
+    /// last ink, so padding up to 50,000 rows first would spend the memory
+    /// the packed history exists to save. `false` for a row that is not there.
+    pub(crate) fn stored_scrollback_cells_into(&self, index: usize, out: &mut Vec<Cell>) -> bool {
+        out.clear();
+        let Some(row) = self.scrollback.get(index) else {
+            return false;
+        };
+        out.extend(row.cells());
+        true
     }
 
     /// How many rows the visible screen holds.
@@ -2329,16 +2359,13 @@ impl TerminalGrid {
     /// A scrollback row, oldest first.
     #[must_use]
     pub fn scrollback_line(&self, index: usize) -> String {
-        self.scrollback
-            .get(index)
-            .map_or_else(String::new, |cells| {
-                let text: String = cells
-                    .iter()
-                    .filter(|cell| !cell.is_continuation())
-                    .flat_map(|cell| std::iter::once(cell.ch).chain(cell.zw.scalars()))
-                    .collect();
-                text.trim_end().to_string()
-            })
+        self.scrollback.get(index).map_or_else(String::new, |row| {
+            let mut text = String::new();
+            row.text_into(&mut text);
+            let kept = text.trim_end().len();
+            text.truncate(kept);
+            text
+        })
     }
 
     /// How many lines of history to keep. Clamped to the range a person can
@@ -2495,7 +2522,7 @@ impl TerminalGrid {
             self.scroll_cols
                 .get(line)
                 .copied()
-                .unwrap_or(self.scrollback[line].len())
+                .unwrap_or_else(|| self.scrollback[line].len())
         } else {
             self.cells.get(line - history).map_or(0, Vec::len)
         }
@@ -2508,7 +2535,7 @@ impl TerminalGrid {
             if col >= self.logical_width_at(line) {
                 return None;
             }
-            Some(self.scrollback[line].get(col).copied().unwrap_or_default())
+            Some(self.scrollback[line].cell(col).unwrap_or_default())
         } else {
             self.cells.get(line - history)?.get(col).copied()
         }
@@ -2854,10 +2881,10 @@ impl TerminalGrid {
     }
 
     /// Returns the offered full-width line so the caller can reuse it for the
-    /// fresh screen row. History has its own compact allocation pool: once the
-    /// cap is full, the oldest compact buffer is filled with the new prefix.
-    /// Repeated same-width transcript lines therefore return to zero allocation
-    /// traffic at steady state without retaining screen-wide history buffers.
+    /// fresh screen row. History keeps the line packed (`PackedRow`): its
+    /// cells up to the last non-default one, as scalars, style runs and
+    /// riders — never a screen-wide buffer — and once the cap is full the
+    /// oldest row goes first.
     fn push_scrollback(
         &mut self,
         line: Vec<Cell>,
@@ -2868,29 +2895,20 @@ impl TerminalGrid {
             return Some(line);
         }
         let logical_cols = line.len();
-        let mut stored = if self.scrollback.len() == self.scrollback_cap {
-            self.pop_scrollback().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let used = line
-            .iter()
-            .rposition(|cell| *cell != Cell::default())
-            .map_or(0, |at| at + 1);
-        stored.clear();
-        stored.extend_from_slice(&line[..used]);
-        stored.truncate(used);
-        stored.shrink_to_fit();
-        self.scrollback.push_back(stored);
+        if self.scrollback.len() == self.scrollback_cap {
+            drop(self.pop_scrollback());
+        }
+        self.scrollback.push_back(PackedRow::pack(&line));
         self.scroll_wrap.push_back(wrapped);
         self.scroll_folds.push_back(fold);
         self.scroll_cols.push_back(logical_cols);
         Some(line)
     }
 
-    /// Retire one buffer coordinate along with its row and metadata. Both
-    /// steady-state recycling and a smaller history cap use this boundary.
-    fn pop_scrollback(&mut self) -> Option<Vec<Cell>> {
+    /// Retire one buffer coordinate along with its row and metadata. Both a
+    /// full history taking a new row and a smaller history cap use this
+    /// boundary.
+    fn pop_scrollback(&mut self) -> Option<PackedRow> {
         let line = self.scrollback.pop_front()?;
         self.scroll_wrap.pop_front();
         self.scroll_folds.pop_front();
@@ -3966,11 +3984,13 @@ impl TerminalGrid {
             return;
         }
         if enabled {
+            let parked = std::mem::replace(
+                &mut self.cells,
+                vec![vec![Cell::default(); self.cols]; self.rows],
+            );
             self.saved_screen = Some(SavedScreen {
-                cells: std::mem::replace(
-                    &mut self.cells,
-                    vec![vec![Cell::default(); self.cols]; self.rows],
-                ),
+                cells: parked.iter().map(|row| PackedRow::pack(row)).collect(),
+                cols: self.cols,
                 wrap: std::mem::replace(&mut self.wrap, vec![None; self.rows]),
                 folds: std::mem::replace(&mut self.folds, vec![None; self.rows]),
                 cursor_row: self.cursor_row,
@@ -3981,7 +4001,11 @@ impl TerminalGrid {
             self.cursor_col = 0;
             self.pen = CellStyle::default();
         } else if let Some(saved) = self.saved_screen.take() {
-            self.cells = saved.cells;
+            self.cells = saved
+                .cells
+                .iter()
+                .map(|row| row.padded(saved.cols))
+                .collect();
             self.wrap = saved.wrap;
             self.folds = saved.folds;
             // The window may have been resized while the alternate screen was
@@ -5897,7 +5921,10 @@ mod tests {
         drop(grid.push_scrollback(bce_tail, None, None));
 
         assert_eq!(
-            grid.scrollback.iter().map(Vec::len).collect::<Vec<_>>(),
+            grid.scrollback
+                .iter()
+                .map(PackedRow::len)
+                .collect::<Vec<_>>(),
             [6, 4, 4, 4, 11, 12],
             "storage did not stop at each row's last non-default cell"
         );
@@ -5927,18 +5954,6 @@ mod tests {
             !default_tail_hit.is_empty(),
             "the fixture has no logical default-tail hit"
         );
-
-        // Emulate the representation this change introduces before changing
-        // any reader. On the old implementation this makes the assertions
-        // below red; after the surgery it is already a no-op.
-        for row in &mut grid.scrollback {
-            let used = row
-                .iter()
-                .rposition(|cell| *cell != Cell::default())
-                .map_or(0, |at| at + 1);
-            row.truncate(used);
-            row.shrink_to_fit();
-        }
 
         for (index, expected) in full_cells.iter().enumerate() {
             let actual = grid.scrollback_cells(index).expect("history row");
@@ -5973,9 +5988,8 @@ mod tests {
     }
 
     /// A one-character transcript line must not retain a screen-wide
-    /// allocation. The small allowance admits allocator rounding without
-    /// weakening the property being bought: capacity follows used width, not
-    /// terminal width.
+    /// allocation: what a history row holds follows its used width, not the
+    /// terminal's, and a plain row holds nothing but its scalars.
     #[test]
     fn compact_scrollback_capacity_tracks_the_written_width() {
         let cols = 95;
@@ -5985,18 +5999,14 @@ mod tests {
 
         let one = &grid.scrollback[0];
         assert_eq!(one.len(), 1, "default cells were retained");
-        assert!(
-            one.capacity() <= one.len() + 2,
-            "one used cell retained capacity {}",
-            one.capacity()
+        assert_eq!(
+            one.heap_bytes(),
+            size_of::<char>(),
+            "one used cell held more than its scalar"
         );
         let blank = &grid.scrollback[1];
-        assert!(blank.is_empty(), "a default-only row retained cells");
-        assert!(
-            blank.capacity() <= 2,
-            "a default-only row retained capacity {}",
-            blank.capacity()
-        );
+        assert_eq!(blank.len(), 0, "a default-only row retained cells");
+        assert_eq!(blank.heap_bytes(), 0, "a default-only row held bytes");
     }
 
     /// History can contain several geometries: rows already in scrollback
@@ -6022,7 +6032,10 @@ mod tests {
             "rows were not read at the geometry in which they left the screen"
         );
         assert_eq!(
-            grid.scrollback.iter().map(Vec::len).collect::<Vec<_>>(),
+            grid.scrollback
+                .iter()
+                .map(PackedRow::len)
+                .collect::<Vec<_>>(),
             [3, 1, 2],
             "the resized rows were not stored compactly"
         );

@@ -28604,9 +28604,11 @@ mod tests {
     /// A closed window's screens reopen showing what they showed.
     ///
     /// Orca's scrollback round trip, measured at both ends: the shutdown
-    /// capture serialises every live pane under the 512 KiB cap, binary-
-    /// searching the largest TAIL of rows that fits
-    /// (`captureTerminalShutdownLayout`, index-ftls8Hg_.js:100871); the
+    /// capture serialises every live pane under the 512 KiB cap, keeping the
+    /// largest TAIL of rows that fits — Orca binary-searches it
+    /// (`captureTerminalShutdownLayout`, index-ftls8Hg_.js:100871), ours
+    /// walks back from the newest row, which finds the same tail without
+    /// unpacking the history the cap leaves out (t-54317); the
     /// restore strips a trailing alt-screen segment and follows the buffer
     /// with the measured mode reset (`restoreScrollbackBuffers` +
     /// `POST_REPLAY_MODE_RESET`, I18nProvider:46152/:46043). The rules live
@@ -28625,7 +28627,10 @@ mod tests {
         // output and loses the part the person was looking at.
         assert!(
             writing.contains("SCROLLBACK_BUFFER_BYTE_LIMIT: usize = 512 * 1024")
-                && writing.contains("usize::midpoint(lo, hi)"),
+                && block_after(writing, "pub fn serialize_tail(").contains(
+                    "let mut fits = visible.iter().rev().all(|cells| tail.take(grid, cells));"
+                )
+                && block_after(writing, "pub fn serialize_tail(").contains("index -= 1;"),
             "the capture lost its measured cap or its tail search"
         );
         // The replay strip: a buffer ending inside the alternate screen is

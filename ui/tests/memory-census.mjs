@@ -1,0 +1,402 @@
+/* 창 렌더러의 메모리, 장면마다 (t-54317).
+ *
+ * 사람이 쓰는 창(WKWebView)에는 계기를 걸지 않는다 — vmmap·footprint·heap은 걸린
+ * 프로세스를 멈출 수 있다. 같은 `ui/`를 Playwright의 WebKit(설치 앱 웹뷰의 엔진)과
+ * Chromium으로 띄우고, 스텁 백엔드 위에 장면을 세운 뒤, **이 스크립트가 띄운** 페이지의
+ * 프로세스만 밖에서 읽는다: footprint(물리 사용량과 그 dirty·swapped)와, WebKit에서는
+ * heap의 크기 분포. Chromium에서는 CDP로 GC 두 번 뒤의 JS 힙·DOM 노드를 더 읽는다.
+ * RSS 한 숫자로는 판정하지 않는다. 절대값은 WKWebView의 값이 아니므로 판정은 같은
+ * 계기로 잰 전/후의 비다(`docs` 밖의 근거: 2026-08-31 WebContent 판정과 같은 방법).
+ *
+ * 장면:
+ *   empty          부팅만 한 창
+ *   panes-1/10/30  터미널 판 N개, 판마다 60×220 한 화면(빌드 로그 모양의 프레임)
+ *   scrollback     판 하나에 5,000줄을 흘린 뒤 히스토리 한가운데를 보는 화면
+ *   conversation   400턴 대화(conversation-perf의 픽스처) — 재기만 한다
+ *   gallery        스크린숏 증거 카드 360장을 끝까지 내려 본 갤러리(그림은 사람의 카탈로그에서
+ *                  잰 크기 분포: 1280×720·3460×2464·640×480·925×601, 압축 크기 중앙값 약 271 KiB)
+ *   knowledge      합성 볼트 1,500쪽의 지식 그래프(평면 지도)
+ *
+ * 저사양: 스크립트 전체를 `taskpolicy -b`(효율 코어·낮은 I/O 우선순위)로 돌리고 `--low-spec`로
+ * 표시한다 — 띄운 브라우저도 그 정책을 물려받는다.
+ *
+ *   node ui/tests/memory-census.mjs [--engine webkit|chromium] [--scenarios a,b] [--low-spec] [--json out.json]
+ */
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { crc32, deflateSync } from "node:zlib";
+import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { conversationFixture, openFixtureConversation, standingPids, webkitType } from "./conversation-perf.mjs";
+import { installTerminalWaits } from "./terminal-grid-selection.mjs";
+import { REAL_PANE, terminalFrameFixtureSource } from "./terminal-frames.mjs";
+import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
+import { seedUniverseVault } from "./knowledge-universe-fixture.mjs";
+
+export const SCENARIOS = Object.freeze([
+  "empty", "panes-1", "panes-10", "panes-30", "scrollback", "conversation", "gallery", "knowledge",
+]);
+/* 스크롤백 장면이 흘리는 줄 수 — 창의 기본 스크롤백(`DEFAULT_SCROLLBACK_LINES`). */
+const SCROLLBACK_LINES = 5000;
+/* 한 프레임에 밀려 올라가는 줄 — 빌드 로그가 몰아칠 때의 한 당김. */
+const SCROLL_STEP = 50;
+/* 갤러리의 카탈로그: 증거 탭의 스크린숏 카드와, 그 탭이 아닌 보고서 몇. */
+const GALLERY = Object.freeze({ screenshots: 360, reports: 40 });
+/* 사람의 카탈로그에서 잰 스크린숏 크기(10-14, PNG 머리만 읽음: 940장, 1280×720 264·3460×2464 203·
+ * 640×480 93·925×601 37). 합성 그림의 무늬 행 간격은 압축 크기가 잰 분포(중앙값 271 KiB, p90
+ * 780 KiB)에 가깝게 고른 값이다. */
+const PICTURES = Object.freeze([
+  { width: 1280, height: 720, noisyEvery: 10, weight: 3 },
+  { width: 3460, height: 2464, noisyEvery: 33, weight: 2 },
+  { width: 640, height: 480, noisyEvery: 10, weight: 1 },
+  { width: 925, height: 601, noisyEvery: 11, weight: 1 },
+]);
+const KNOWLEDGE_PAGES = 1500;
+/* 장면을 세운 뒤 재기 전에 기다리는 시간 — 지연 그리기와 디코드가 끝나도록. */
+const SETTLE_MS = 2000;
+/* 장면 하나를 세우는 데 주는 시간. 넘으면 그 장면은 실패로 적고 다음 장면으로 간다 — 한 장면이
+ * 멈춰 나머지 장면의 수까지 잃지 않게. */
+const SCENARIO_PATIENCE_MS = 180000;
+
+/* `promise`, 또는 `ms` 뒤의 실패. */
+function within(ms, promise, what) {
+  let timer;
+  const late = new Promise((unused, fail) => {
+    timer = setTimeout(() => fail(new Error(`${what}: not done in ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+/* 합성 PNG 하나: 창 배경 같은 평평한 행 사이사이에 무늬 행. 어떤 사람의 화면도 아니다. */
+export function syntheticPng({ width, height, noisyEvery }) {
+  const stride = width * 4 + 1;
+  const raw = Buffer.alloc(stride * height);
+  let seed = (width * 31 + height) >>> 0;
+  for (let y = 0; y < height; y += 1) {
+    const at = y * stride;
+    const noisy = y % noisyEvery === 0;
+    for (let x = 0; x < width; x += 1) {
+      const pixel = at + 1 + x * 4;
+      if (noisy) {
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        raw[pixel] = seed & 255;
+        raw[pixel + 1] = (seed >>> 8) & 255;
+        raw[pixel + 2] = (seed >>> 16) & 255;
+      } else {
+        raw[pixel] = 236;
+        raw[pixel + 1] = 238;
+        raw[pixel + 2] = 241;
+      }
+      raw[pixel + 3] = 255;
+    }
+  }
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+    const check = Buffer.alloc(4);
+    check.writeUInt32BE(crc32(body));
+    return Buffer.concat([length, body, check]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 6;
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/* ---- 프로세스 읽기: 이 스크립트가 띄운 것만 ---------------------------------------- */
+
+function processTable() {
+  const said = execFileSync("ps", ["-axo", "pid=,ppid=,rss=,command="], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return said.split("\n").map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/))
+    .filter(Boolean).map((match) => ({ pid: Number(match[1]), ppid: Number(match[2]), rss: Number(match[3]), command: match[4] }));
+}
+
+/* Of the processes that could be the page's, the one holding the most — a browser keeps a spare
+ * content process beside the page's, and the spare holds next to nothing. */
+const largest = (rows) => rows.reduce((most, row) => (most === null || row.rss > most.rss ? row : most), null)?.pid ?? null;
+
+/* 페이지가 사는 프로세스: WebKit은 Playwright 빌드의 WebContent(launchd 아래 XPC), Chromium은
+ * 이 노드가 띄운 브라우저의 렌더러. `before`는 브라우저를 띄우기 전에 서 있던 pid들이다. */
+function pageProcess(engine, before) {
+  const rows = processTable();
+  if (engine === "webkit") {
+    return largest(rows.filter((row) => /ms-playwright\/webkit-\d+/.test(row.command) && /WebContent/.test(row.command)
+      && !before.has(row.pid)));
+  }
+  const browsers = new Set(rows.filter((row) => row.ppid === process.pid).map((row) => row.pid));
+  return largest(rows.filter((row) => browsers.has(row.ppid) && /--type=renderer/.test(row.command)
+    && !before.has(row.pid)));
+}
+
+function footprintOf(pid, folder) {
+  const path = join(folder, `footprint-${pid}.json`);
+  execFileSync("footprint", ["-j", path, "-f", "bytes", "--swapped", "-p", String(pid)], { stdio: "ignore" });
+  const read = JSON.parse(readFileSync(path, "utf8")).processes[0];
+  rmSync(path);
+  const categories = Object.entries(read.categories ?? {});
+  const sum = (pick) => categories.reduce((total, [name, one]) => total + pick(name, one), 0);
+  return {
+    footprint: read.footprint,
+    dirty: sum((name, one) => one.dirty ?? 0),
+    swapped: sum((name, one) => one.swapped ?? 0),
+    malloc: sum((name, one) => (/malloc/i.test(name) ? (one.dirty ?? 0) + (one.swapped ?? 0) : 0)),
+    top: categories.map(([name, one]) => [name, (one.dirty ?? 0) + (one.swapped ?? 0)])
+      .sort((a, b) => b[1] - a[1]).slice(0, 6),
+  };
+}
+
+function heapOf(pid) {
+  const said = execFileSync("heap", ["-q", "--showSizes", String(pid)], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  const totals = said.match(/^All zones: (\d+) nodes \((\d+) bytes\)/m);
+  const sizes = said.match(/^All zones: \d+ nodes malloced - Sizes: (.*)$/m);
+  return {
+    nodes: totals ? Number(totals[1]) : null,
+    bytes: totals ? Number(totals[2]) : null,
+    histogram: sizes ? sizes[1].trim().split(/\s+/).slice(0, 24).join(" ") : null,
+  };
+}
+
+/* ---- 장면 ------------------------------------------------------------------------ */
+
+async function openPanes(page, count) {
+  await installTerminalWaits(page);
+  return page.evaluate(async ({ count, fixtureSource, pane }) => {
+    window.__ANSWER__.term_snapshot = () => null;
+    window.__ANSWER__.term_resize = () => null;
+    const { packedRow, base } = new Function(`return (${fixtureSource})`)()(pane.rows, pane.cols);
+    const terms = [];
+    for (let at = 0; at < count; at += 1) {
+      const term = await openTermTab({ placement: "tab" });
+      const view = termView(term);
+      setActiveTab(tabOfTerm(term).id);
+      await window.__TERMINAL_READY__(term, view);
+      await window.__TERM_FEED__(term, base({
+        full: true, rows: Array.from({ length: pane.rows }, (unused, row) => packedRow(row, at * pane.rows + row)),
+      }));
+      terms.push(term);
+    }
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    return { panes: terms.length, rows: document.querySelectorAll(".term-row").length };
+  }, { count, fixtureSource: terminalFrameFixtureSource, pane: REAL_PANE });
+}
+
+async function scrollHistory(page) {
+  await installTerminalWaits(page);
+  return page.evaluate(async ({ fixtureSource, pane, lines, step }) => {
+    window.__ANSWER__.term_snapshot = () => null;
+    window.__ANSWER__.term_resize = () => null;
+    const { packedRow, base } = new Function(`return (${fixtureSource})`)()(pane.rows, pane.cols);
+    const term = await openTermTab({ placement: "tab" });
+    const view = termView(term);
+    setActiveTab(tabOfTerm(term).id);
+    await window.__TERMINAL_READY__(term, view);
+    await window.__TERM_FEED__(term, base({ full: true, rows: Array.from({ length: pane.rows }, (u, row) => packedRow(row, row)) }));
+    // 빌드 로그가 흐른다: 한 프레임에 `step`줄씩 밀려 올라가고 아래 줄만 온다.
+    for (let written = pane.rows; written < lines + pane.rows; written += step) {
+      await window.__TERM_FEED__(term, base({
+        scrolled_lines: step, scrollback_len: written - pane.rows + step,
+        rows: Array.from({ length: step }, (u, at) => packedRow(pane.rows - step + at, written + at)),
+      }));
+    }
+    // 그리고 히스토리 한가운데를 본다 — 창은 그 화면의 행만 든다.
+    const offset = Math.floor(lines / 2);
+    await window.__TERM_FEED__(term, base({
+      full: true, view_offset: offset, scrollback_len: lines,
+      rows: Array.from({ length: pane.rows }, (u, row) => packedRow(row, lines - offset + row)),
+    }));
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    return { rows: document.querySelectorAll(".term-row").length };
+  }, { fixtureSource: terminalFrameFixtureSource, pane: REAL_PANE, lines: SCROLLBACK_LINES, step: SCROLL_STEP });
+}
+
+async function openGallery(page, pictures) {
+  return page.evaluate(async ({ pictures, catalog }) => {
+    const now = Date.now();
+    const minute = 60 * 1000;
+    const rows = [];
+    const classes = pictures.flatMap((picture, at) => Array(picture.weight).fill(at));
+    for (let at = 0; at < catalog.screenshots + catalog.reports; at += 1) {
+      const shot = at < catalog.screenshots;
+      const id = `row-${String(at).padStart(4, "0")}`;
+      const picture = pictures[classes[at % classes.length]];
+      rows.push({
+        id, kind: shot ? "screenshot" : "report", title: `합성 ${shot ? "스크린숏" : "보고서"} ${at}`,
+        path: shot ? `/tmp/zerocode-window-test/computer-use/sessions/s-${at % 60}/${at}.png` : `/data/artifacts/run/${id}/REPORT.md`,
+        bytes: shot ? picture.bytes : 9000, created_ms: now - at * minute, modified_ms: now - at * minute,
+        origin: shot ? { automation: "computer-use" } : {}, tags: [],
+        preview: shot ? { kind: "image", w: picture.width, h: picture.height } : { kind: "markdown", text: "합성 보고서" },
+        source: shot ? "evidence" : "worker_report",
+      });
+    }
+    window.__CENSUS_PREVIEWS__ = 0;
+    window.__ANSWER__.artifacts_list = () => ({
+      rows, total: rows.length, truncated: false, missing: [], missing_total: 0, missing_by_kind: {},
+      unlinked_by_kind: {}, by_kind: { screenshot: catalog.screenshots, report: catalog.reports },
+      retention_days: 30, thumb: { width: 320, height: 240, queue_max: 2 },
+    });
+    window.__ANSWER__.artifact_counts = () => ({
+      total: rows.length, by_worker: {}, by_task: {}, by_run: {}, by_worktree: {}, by_automation: {}, report_by_worker: {},
+    });
+    window.__ANSWER__.artifact_thumbnail = () => ({ data_url: null, cached: false });
+    // 런타임이 하듯 답마다 새 문자열: IPC의 답은 JSON을 거쳐 늘 새로 만들어진다.
+    window.__ANSWER__.artifact_preview = (args) => {
+      const row = rows.find((one) => one.id === args.id);
+      if (row?.kind !== "screenshot") return { kind: "markdown", text: "합성 보고서", bytes: 12, truncated: false };
+      window.__CENSUS_PREVIEWS__ += 1;
+      const picture = pictures[classes[Number(row.id.slice(4)) % classes.length]];
+      return JSON.parse(JSON.stringify({
+        kind: "image", data_url: `data:image/png;base64,${picture.base64}`, bytes: picture.bytes, truncated: false,
+      }));
+    };
+    dropTab("artifacts");
+    artifactFilter.tab = "evidence";
+    artifactFilter.origin = null;
+    artifactTabPicked = true;
+    artifactSelectedId = null;
+    el("nav-artifacts").click();
+    const frame = () => new Promise((done) => requestAnimationFrame(done));
+    for (let beat = 0; beat < 600 && (artifactAsking || artifactRows.size === 0); beat += 1) await frame();
+    const view = artifactsView();
+    const grid = view.querySelector(".artifacts-grid");
+    // 끝까지 내려 본다 — 가상화된 카드가 차례로 서고, 서는 카드마다 제 그림을 청할 수 있다.
+    for (let top = 0; top <= grid.scrollHeight; top += Math.max(200, grid.clientHeight / 2)) {
+      grid.scrollTop = top;
+      grid.dispatchEvent(new Event("scroll"));
+      await frame();
+      await new Promise((done) => setTimeout(done, 30));
+    }
+    await new Promise((done) => setTimeout(done, 300));
+    const held = [...artifactPreviews.values()].reduce((sum, one) => sum + (one?.data_url?.length ?? 0), 0);
+    return {
+      tab: artifactFilter.tab, cards: view.querySelectorAll(".artifact-card").length,
+      previewAsks: window.__CENSUS_PREVIEWS__, previewsHeld: artifactPreviews.size, previewBytesHeld: held,
+    };
+  }, { pictures, catalog: GALLERY });
+}
+
+async function openKnowledge(page) {
+  await page.evaluate((pages) => {
+    secondBrainVault = "/universe";
+    window.__VAULT__ = window.__universeVaultSpec__(pages);
+    noteKnowledgeExploreLines({ "/universe": JSON.stringify({ mode: "global", dimension: "2d" }) });
+    document.getElementById("nav-knowledge").click();
+  }, KNOWLEDGE_PAGES);
+  await page.waitForFunction((pages) => {
+    const view = document.querySelector(".knowledge-view:not([hidden])");
+    const layout = view === null ? undefined : knowledgeLayouts.get(view);
+    return layout !== undefined && layout.count >= pages && layout.left === 0;
+  }, KNOWLEDGE_PAGES, { timeout: SCENARIO_PATIENCE_MS, polling: 250 });
+  return page.evaluate(() => ({ nodes: document.querySelectorAll(".knowledge-view:not([hidden]) *").length }));
+}
+
+/* ---- 한 장면, 한 브라우저 ------------------------------------------------------------ */
+
+async function measureScenario({ engine, name, origin, pictures, folder }) {
+  const before = standingPids();
+  const type = engine === "webkit" ? webkitType() : chromium;
+  const browser = await type.launch({ headless: true });
+  try {
+    let page;
+    let faults = [];
+    if (name === "knowledge") {
+      const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+      page = await context.newPage();
+      page.on("pageerror", (error) => faults.push(String(error).slice(0, 200)));
+      await seedKnowledgeWindow(page);
+      await seedUniverseVault(page);
+      await page.goto(`${origin}/index.html`);
+      await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+    } else {
+      ({ page, faults } = await openWindowTestPage(browser, origin));
+    }
+    const cdp = engine === "chromium" ? await page.context().newCDPSession(page) : null;
+    const stand = async () => {
+      if (name.startsWith("panes-")) return openPanes(page, Number(name.slice("panes-".length)));
+      if (name === "scrollback") return scrollHistory(page);
+      if (name === "conversation") return (await openFixtureConversation(page, conversationFixture())) ?? {};
+      if (name === "gallery") return openGallery(page, pictures);
+      if (name === "knowledge") return openKnowledge(page);
+      if (name !== "empty") throw new Error(`no scenario named ${name}`);
+      return {};
+    };
+    const detail = await within(SCENARIO_PATIENCE_MS, stand(), name);
+    await page.waitForTimeout(SETTLE_MS);
+    const row = { engine, scenario: name, ...detail };
+    if (cdp) {
+      await cdp.send("HeapProfiler.collectGarbage");
+      await cdp.send("HeapProfiler.collectGarbage");
+      const usage = await cdp.send("Runtime.getHeapUsage");
+      const counters = await cdp.send("Memory.getDOMCounters");
+      Object.assign(row, { jsHeap: usage.usedSize, embedderHeap: usage.embedderHeapUsedSize ?? 0,
+        domNodes: counters.nodes, listeners: counters.jsEventListeners });
+    }
+    const pid = pageProcess(engine, before);
+    row.pid = pid;
+    if (pid !== null) {
+      row.process = footprintOf(pid, folder);
+      if (engine === "webkit") row.heap = heapOf(pid);
+    }
+    row.faults = faults.slice(0, 3);
+    return row;
+  } finally {
+    await browser.close();
+  }
+}
+
+export async function census({ engine = "webkit", scenarios = SCENARIOS, lowSpec = false, out = null } = {}) {
+  const pictures = PICTURES.map((picture) => {
+    const bytes = syntheticPng(picture);
+    return { ...picture, bytes: bytes.length, base64: bytes.toString("base64") };
+  });
+  const folder = mkdtempSync(join(tmpdir(), "zerocode-memory-census-"));
+  const { files, origin } = await createWindowServer();
+  const rows = [];
+  try {
+    for (const name of scenarios) {
+      let row;
+      try {
+        row = await measureScenario({ engine, name, origin, pictures, folder });
+      } catch (error) {
+        row = { engine, scenario: name, error: String(error?.stack ?? error).slice(0, 600) };
+      }
+      rows.push({ lowSpec, ...row });
+      if (out) writeFileSync(out, `${JSON.stringify({ engine, lowSpec, rows }, null, 1)}\n`);
+      const mib = (bytes) => (bytes === undefined || bytes === null ? "-" : (bytes / 1048576).toFixed(1));
+      console.log(`${engine.padEnd(8)} ${lowSpec ? "low " : "    "}${name.padEnd(13)} footprint ${mib(row.process?.footprint)} MiB`
+        + ` dirty ${mib(row.process?.dirty)} malloc ${mib(row.process?.malloc)}`
+        + (row.heap ? ` heap ${mib(row.heap.bytes)} MiB/${row.heap.nodes} nodes` : "")
+        + (row.jsHeap !== undefined ? ` js ${mib(row.jsHeap)} MiB dom ${row.domNodes}` : "")
+        + (row.previewBytesHeld !== undefined ? ` previews ${row.previewsHeld}/${row.previewAsks} asks ${mib(row.previewBytesHeld)} MiB held` : "")
+        + (row.faults?.length ? ` FAULT ${row.faults[0]}` : "")
+        + (row.error ? ` ERROR ${row.error.split("\n")[0]}` : ""));
+    }
+  } finally {
+    files.close();
+    rmdirSync(folder);
+  }
+  return { engine, lowSpec, pictures: pictures.map(({ base64, ...kept }) => kept), rows };
+}
+
+if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const argv = process.argv.slice(2);
+  const option = (name, fallback) => {
+    const at = argv.indexOf(name);
+    return at >= 0 && at + 1 < argv.length ? argv[at + 1] : fallback;
+  };
+  const scenarios = option("--scenarios", SCENARIOS.join(",")).split(",").filter(Boolean);
+  const out = option("--json", null);
+  const result = await census({ engine: option("--engine", "webkit"), scenarios, lowSpec: argv.includes("--low-spec"), out });
+  if (out) writeFileSync(out, `${JSON.stringify(result, null, 1)}\n`);
+  // A scenario that could not be stood is a failed census, its row says why.
+  if (result.rows.some((row) => row.error)) process.exitCode = 1;
+}

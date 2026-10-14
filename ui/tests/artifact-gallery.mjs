@@ -1606,6 +1606,75 @@ export async function testArtifactFirstScreen(page, ok) {
     seen.pubPreview && seen.pubAsked === false && seen.madeFirst && seen.madeLater && seen.madeAsks === 2, JSON.stringify(seen));
 }
 
+/* 글이 얼굴인 증거 카드는 그림을 청하지 않는다 (t-54317). 증거 탭의 스크린숏 카드는 얼굴을 숨기고
+ * 글로 선다(t-43931) — 그런데 카드가 설 때마다 원본 스크린숏 전체(표 상한 4 MiB)를 서랍의 캐시로
+ * 청해 카드 120장 몫까지 들고 있었다. 보이지 않는 그림의 값이다(사람의 카탈로그에는 3460×2464
+ * 그림이 203장 있다). 그림은 서랍이 열 때 고른 하나만 청하고, 서랍은 그대로 그 그림을 보인다. */
+export async function testArtifactWordFacedCards(page, ok) {
+  await installHarnessWaits(page);
+  const seen = await page.evaluate(async () => {
+    const PICTURE = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const now = Date.now();
+    const rows = Array.from({ length: 48 }, (unused, at) => ({
+      id: `shot-${String(at).padStart(2, "0")}`, kind: "screenshot", title: `스크린숏 ${at}`,
+      path: `/tmp/zerocode-window-test/computer-use/sessions/s-1/${at}.png`, bytes: 400000,
+      created_ms: now - at * 1000, modified_ms: now - at * 1000, origin: { automation: "computer-use" },
+      tags: [], preview: { kind: "image", w: 3460, h: 2464 }, source: "evidence",
+    }));
+    const saved = { list: window.__ANSWER__.artifacts_list, preview: window.__ANSWER__.artifact_preview,
+      thumb: window.__ANSWER__.artifact_thumbnail };
+    window.__ANSWER__.artifacts_list = () => ({ rows, total: rows.length, truncated: false, missing: [], missing_total: 0,
+      thumb: { queue_max: 4 } });
+    const previews = [];
+    window.__ANSWER__.artifact_preview = (args) => {
+      previews.push(args.id);
+      return { kind: "image", data_url: PICTURE, bytes: 400000, truncated: false };
+    };
+    window.__ANSWER__.artifact_thumbnail = () => ({ data_url: null, cached: false });
+    dropTab("artifacts");
+    artifactThumbs.clear(); artifactThumbFailed.clear(); artifactPreviews.clear();
+    Object.assign(artifactFilter, { tab: "evidence", origin: null, project: null, agent: null, period: "all",
+      showMissing: false, query: "" });
+    artifactTabPicked = true;
+    artifactListing.filtered = false;
+    artifactSelectedId = null;
+    openArtifacts({ fresh: true });
+    await window.__PAINTED__();
+    await window.__UNTIL__(() => !artifactAsking && artifactRows.size === rows.length, "evidence rows");
+    const view = artifactsView();
+    const grid = view.querySelector(".artifacts-grid");
+    // 끝까지 내려 본다 — 가상 카드가 차례로 서고, 서는 카드마다 제 그림을 청할 수 있었다.
+    for (let top = 0; top <= grid.scrollHeight; top += Math.max(120, grid.clientHeight / 2)) {
+      grid.scrollTop = top;
+      grid.dispatchEvent(new Event("scroll"));
+      await window.__PAINTED__();
+    }
+    await new Promise((done) => setTimeout(done, 40));
+    const shots = [...view.querySelectorAll('.artifact-card[data-kind="screenshot"]')];
+    const out = {
+      tab: artifactFilter.tab, cards: shots.length, plain: shots.every((card) => card.classList.contains("is-plain")),
+      asked: previews.length, held: [...artifactPreviews.values()].filter((one) => one?.data_url).length,
+      sources: shots.filter((card) => card.querySelector(".artifact-card-thumb").getAttribute("src")).length,
+    };
+    // 서랍은 그대로 그림을 연다 — 고른 카드의 그림 하나만.
+    selectArtifact(view, "shot-03");
+    const img = view.querySelector(".artifacts-drawer .artifact-preview-image");
+    await window.__UNTIL__(() => !img.hidden, "the drawer's picture");
+    out.drawer = img.src === PICTURE;
+    out.drawerAsks = previews.join(",");
+    window.__ANSWER__.artifacts_list = saved.list;
+    window.__ANSWER__.artifact_preview = saved.preview;
+    window.__ANSWER__.artifact_thumbnail = saved.thumb;
+    artifactSelectedId = null;
+    return out;
+  });
+  ok("a word-faced evidence card asks for no picture: scrolling 48 screenshot cards reads no file into the drawer's cache",
+    seen.tab === "evidence" && seen.cards > 0 && seen.plain && seen.asked === 0 && seen.held === 0 && seen.sources === 0,
+    JSON.stringify(seen));
+  ok("…and the drawer still opens the chosen screenshot, asking for that one picture alone",
+    seen.drawer && seen.drawerAsks === "shot-03", JSON.stringify(seen));
+}
+
 /* 다시 찾기(2026-09-28 항목 6): 프로젝트·에이전트·기간(오늘 · 이번 주 · 전체)으로
  * 좁히고, 카드는 날로 무리를 짓는다(오늘 · 이번 주 · 이전). 창이 카탈로그를 다
  * 들고 있으면 거르기는 창 안에서 하고 묻지 않는다. 표 상한이 답을 잘랐으면
