@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -26,7 +26,6 @@ pub const START_TIMEOUT: Duration = Duration::from_secs(120);
 /// exchange may run, how long a request may wait for its turn, and how many
 /// may wait at once.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // queue_wait and waiting are read once requests wait for their turn.
 pub(crate) struct Limits {
     pub request: Duration,
     pub queue_wait: Duration,
@@ -63,8 +62,7 @@ pub struct Running {
     pub engine: Arc<Engine>,
     task: Option<tokio::task::JoinHandle<()>>,
     reservation: Option<std::net::TcpListener>,
-    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
-    permit: Arc<tokio::sync::Semaphore>,
+    admission: Arc<Admission>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -296,12 +294,59 @@ fn read(output: &mut BufReader<ChildStdout>) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// The requests one owned server holds. The runtime reads one frame and
+/// answers it before it reads the next (`bridge.py`'s single loop, and
+/// [`Engine::exchange`] holding the pipe across both), so one request runs
+/// at a time and at most `limits.waiting` wait for their turn behind it. A
+/// request past that is refused at once; a closed admission refuses every
+/// request still waiting.
+struct Admission {
+    turn: Arc<tokio::sync::Semaphore>,
+    admitted: AtomicUsize,
+    limits: Limits,
+}
+
+/// One admitted request's place, given back when it is dropped: when the
+/// request is answered or refused, or its caller leaves while it waits.
+struct Ticket(Arc<Admission>);
+
+impl Admission {
+    /// How many requests the runtime answers at once.
+    const RUNNING: usize = 1;
+
+    fn new(limits: Limits) -> Arc<Self> {
+        Arc::new(Self {
+            turn: Arc::new(tokio::sync::Semaphore::new(Self::RUNNING)),
+            admitted: AtomicUsize::new(0),
+            limits,
+        })
+    }
+
+    fn enter(self: &Arc<Self>) -> Option<Ticket> {
+        self.admitted
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                (held < Self::RUNNING + self.limits.waiting).then_some(held + 1)
+            })
+            .ok()
+            .map(|_| Ticket(self.clone()))
+    }
+
+    fn close(&self) {
+        self.turn.close();
+    }
+}
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        self.0.admitted.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 #[derive(Clone)]
 struct HttpState {
     engine: Arc<Engine>,
     provider: Provider,
-    permit: Arc<tokio::sync::Semaphore>,
-    limits: Limits,
+    admission: Arc<Admission>,
     failed: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -330,7 +375,7 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
     if browser_request(&headers, &state.provider) {
         return failure(StatusCode::FORBIDDEN, Error::Protocol);
     }
-    let Ok(permit) = state.permit.clone().try_acquire_owned() else {
+    let Some(ticket) = state.admission.enter() else {
         return failure(StatusCode::SERVICE_UNAVAILABLE, Error::Busy);
     };
     let mut request: Value = match serde_json::from_slice(&body) {
@@ -351,42 +396,73 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
         return failure(StatusCode::PAYLOAD_TOO_LARGE, Error::TooLarge);
     }
     request["model"] = json!(state.provider.identity());
-    let prepared = match serde_json::to_vec(&request)
+    let mut prepared = match serde_json::to_vec(&request)
         .ok()
         .and_then(|bytes| state.provider.prepare(bytes).ok())
     {
         Some(prepared) => prepared,
         None => return failure(StatusCode::BAD_REQUEST, Error::Protocol),
     };
-    let engine = state.engine.clone();
-    let bytes = prepared.body.clone();
-    let mut task = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        engine.exchange(&bytes)
-    });
-    let result = tokio::time::timeout(state.limits.request, &mut task).await;
-    match result {
-        Ok(Ok(Ok(bytes))) => {
-            if state.provider.decode(&prepared, bytes.clone()).is_err() {
-                return failure(StatusCode::BAD_GATEWAY, Error::Protocol);
-            }
-            (
+    drop(request);
+    drop(body);
+    // A caller that leaves while it waits drops this wait, and its request
+    // never reaches the runtime.
+    let turn = match tokio::time::timeout(
+        state.admission.limits.queue_wait,
+        state.admission.turn.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(turn)) => turn,
+        Ok(Err(_)) => return failure(StatusCode::SERVICE_UNAVAILABLE, Error::ServerStopped),
+        Err(_) => return failure(StatusCode::SERVICE_UNAVAILABLE, Error::Busy),
+    };
+    let bytes = std::mem::take(&mut prepared.body);
+    // The exchange and its deadline run apart from the caller: a caller that
+    // left must not take the deadline with it and leave the runtime answering
+    // nobody while the turn stays held.
+    match tokio::spawn(exchange_in_turn(state.clone(), turn, ticket, bytes)).await {
+        Ok(Ok(bytes)) => match state.provider.decode(&prepared, bytes.clone()) {
+            Ok(_) => (
                 [(axum::http::header::CONTENT_TYPE, "application/json")],
                 bytes,
             )
-                .into_response()
-        }
-        other => {
-            state.engine.stop();
-            (state.failed)();
-            let error = if other.is_err() {
-                Error::Timeout
-            } else {
-                Error::RuntimeFailed
-            };
-            failure(StatusCode::SERVICE_UNAVAILABLE, error)
-        }
+                .into_response(),
+            Err(refusal) => (
+                StatusCode::BAD_GATEWAY,
+                axum::Json(json!({"error":Error::Protocol.token(),"refusal":refusal.token()})),
+            )
+                .into_response(),
+        },
+        Ok(Err(error)) => failure(StatusCode::SERVICE_UNAVAILABLE, error),
+        Err(_) => failure(StatusCode::SERVICE_UNAVAILABLE, Error::RuntimeFailed),
     }
+}
+
+/// One request's exchange with the runtime, holding its turn, bounded by the
+/// request deadline. A runtime that misses the deadline or fails is stopped,
+/// and the requests waiting behind it are refused rather than handed to it.
+async fn exchange_in_turn(
+    state: HttpState,
+    turn: tokio::sync::OwnedSemaphorePermit,
+    ticket: Ticket,
+    bytes: Vec<u8>,
+) -> Result<Vec<u8>> {
+    let _ticket = ticket;
+    let engine = state.engine.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+        engine.exchange(&bytes)
+    });
+    let error = match tokio::time::timeout(state.admission.limits.request, task).await {
+        Ok(Ok(Ok(bytes))) => return Ok(bytes),
+        Err(_) => Error::Timeout,
+        Ok(_) => Error::RuntimeFailed,
+    };
+    state.admission.close();
+    state.engine.stop();
+    (state.failed)();
+    Err(error)
 }
 
 #[cfg(all(test, unix))]
@@ -424,7 +500,13 @@ async fn serve_with(
     listener: Option<std::net::TcpListener>,
     limits: Limits,
 ) -> Result<Running> {
-    engine.on_exit(failed.clone());
+    let admission = Admission::new(limits);
+    let closing = admission.clone();
+    let exited = failed.clone();
+    engine.on_exit(Arc::new(move || {
+        closing.close();
+        exited();
+    }));
     match model.engine {
         EngineKind::Laya | EngineKind::TransformersSystemOne => {}
         EngineKind::SystemOneServer => return Err(Error::EngineUnsupported),
@@ -464,12 +546,10 @@ async fn serve_with(
         model: model.id.clone(),
         requires_auth: false,
     };
-    let permit = Arc::new(tokio::sync::Semaphore::new(1));
     let state = HttpState {
         engine: engine.clone(),
         provider: provider.clone(),
-        permit: permit.clone(),
-        limits,
+        admission: admission.clone(),
         failed,
     };
     let router = axum::Router::new()
@@ -487,7 +567,7 @@ async fn serve_with(
         engine,
         task: Some(task),
         reservation: Some(reservation),
-        permit,
+        admission,
     })
 }
 
@@ -496,7 +576,7 @@ impl Running {
     /// and the ones waiting for their turn.
     #[cfg(all(test, unix))]
     pub(crate) fn admitted(&self) -> usize {
-        1 - self.permit.available_permits()
+        self.admission.admitted.load(Ordering::Acquire)
     }
 
     pub(crate) fn take_listener(&mut self) -> Result<std::net::TcpListener> {
@@ -504,6 +584,7 @@ impl Running {
     }
 
     pub(crate) async fn retire(mut self) {
+        self.admission.close();
         self.engine.stop();
         if let Some(task) = self.task.take() {
             task.abort();
@@ -517,6 +598,7 @@ impl Drop for Running {
         if let Some(task) = &self.task {
             task.abort();
         }
+        self.admission.close();
         self.engine.stop();
     }
 }
