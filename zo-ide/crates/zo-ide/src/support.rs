@@ -427,6 +427,15 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
+/// Readies the test harness (`test_env_mutex`: a temporary home, no catalog
+/// inherited from the pane that started the run) before a catalog source is
+/// read, for a test that never took the lock. A shipped build has no harness,
+/// and this does nothing there.
+pub(crate) fn test_env_ready() {
+    #[cfg(test)]
+    test_env_mutex();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{prompt_is_coding_task, HookAbortMonitor};

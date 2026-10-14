@@ -1574,8 +1574,7 @@ pub fn publish_model_catalog() -> Option<crate::model_wire_env::Published> {
     // A test publishes only from the home the harness gave it: whichever test
     // publishes first must not read the job's home or the catalog the pane
     // that started the run handed it (t-44087).
-    #[cfg(test)]
-    crate::support::test_env_mutex();
+    crate::support::test_env_ready();
     let declared = runtime::model_catalog::ModelCatalog::load()
         .ok()
         .and_then(|catalog| catalog.catalog_overlay_json());

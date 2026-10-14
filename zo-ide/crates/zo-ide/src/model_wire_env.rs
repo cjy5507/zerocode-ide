@@ -67,17 +67,6 @@ const EFFORT_CEILINGS: Bridge = Bridge {
     published: "ZO_MODEL_EFFORT_CEILINGS_PUBLISHED",
     operator: "ZO_MODEL_EFFORT_CEILINGS_OPERATOR",
 };
-/// Every variable the two bridges read or write — what a test process clears
-/// so it never answers from the catalog of the zo that started it.
-#[cfg(test)]
-pub(crate) const BRIDGE_VARIABLES: [&str; 6] = [
-    CONTEXT_WINDOWS.variable,
-    CONTEXT_WINDOWS.published,
-    CONTEXT_WINDOWS.operator,
-    EFFORT_CEILINGS.variable,
-    EFFORT_CEILINGS.published,
-    EFFORT_CEILINGS.operator,
-];
 /// Beside the discovery cache: the merged copy a refresh leaves for audit.
 const AUDIT_FILE: &str = "merged.json";
 
@@ -221,6 +210,18 @@ pub(crate) fn reset_ownership_for_tests() {
         reported.clear();
     }
 }
+
+/// Every variable the two bridges read or write — what a test process clears
+/// so it never answers from the catalog of the zo that started it.
+#[cfg(test)]
+pub(crate) const BRIDGE_VARIABLES: [&str; 6] = [
+    CONTEXT_WINDOWS.variable,
+    CONTEXT_WINDOWS.published,
+    CONTEXT_WINDOWS.operator,
+    EFFORT_CEILINGS.variable,
+    EFFORT_CEILINGS.published,
+    EFFORT_CEILINGS.operator,
+];
 
 /// Make the overlay-declared and discovered catalogs live.
 ///
