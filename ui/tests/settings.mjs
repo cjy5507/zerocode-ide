@@ -2460,6 +2460,9 @@ class StatefulBackend {
         return clone(this.integrationQueue);
       }
       case "worktree_prefs": return { branch_prefix: "none", custom_prefix: null };
+      // Which releases the catalog superseded, asked once as every window boots (t-46882): this
+      // fixture's lineup supersedes none, so it answers with the real command's empty map.
+      case "superseded_models": return {};
       case "claude_accounts": return clone(this.claudeAccounts ?? { accounts: [], can_add: true });
       case "resolve_claude_account_identity": {
         const held = this.claudeAccounts.accounts.find((row) => row.id === args.id);
