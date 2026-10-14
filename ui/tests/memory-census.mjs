@@ -125,20 +125,25 @@ function processTable() {
  * content process beside the page's, and the spare holds next to nothing. */
 const largest = (rows) => rows.reduce((most, row) => (most === null || row.rss > most.rss ? row : most), null)?.pid ?? null;
 
-/* 페이지가 사는 프로세스: WebKit은 Playwright 빌드의 WebContent(launchd 아래 XPC), Chromium은
- * 이 노드가 띄운 브라우저의 렌더러. `before`는 브라우저를 띄우기 전에 서 있던 pid들이다. */
-function pageProcess(engine, before) {
+/* 페이지가 살 수 있는 프로세스들: WebKit은 Playwright 빌드의 WebContent(launchd 아래 XPC), Chromium은
+ * 이 노드가 띄운 브라우저의 렌더러. `before`는 브라우저를 띄우기 전에 서 있던 pid들이다. 페이지를
+ * 여럿 띄운 하네스(artifact-page-perf)는 이것을 다 읽는다. */
+export function pageProcesses(engine, before) {
   const rows = processTable();
   if (engine === "webkit") {
-    return largest(rows.filter((row) => /ms-playwright\/webkit-\d+/.test(row.command) && /WebContent/.test(row.command)
-      && !before.has(row.pid)));
+    return rows.filter((row) => /ms-playwright\/webkit-\d+/.test(row.command) && /WebContent/.test(row.command)
+      && !before.has(row.pid));
   }
   const browsers = new Set(rows.filter((row) => row.ppid === process.pid).map((row) => row.pid));
-  return largest(rows.filter((row) => browsers.has(row.ppid) && /--type=renderer/.test(row.command)
-    && !before.has(row.pid)));
+  return rows.filter((row) => browsers.has(row.ppid) && /--type=renderer/.test(row.command) && !before.has(row.pid));
 }
 
-function footprintOf(pid, folder) {
+/* 페이지가 사는 프로세스 하나. */
+function pageProcess(engine, before) {
+  return largest(pageProcesses(engine, before));
+}
+
+export function footprintOf(pid, folder) {
   const path = join(folder, `footprint-${pid}.json`);
   execFileSync("footprint", ["-j", path, "-f", "bytes", "--swapped", "-p", String(pid)], { stdio: "ignore" });
   const read = JSON.parse(readFileSync(path, "utf8")).processes[0];
