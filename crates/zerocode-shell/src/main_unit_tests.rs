@@ -5230,7 +5230,7 @@ fn a_requested_navigation_is_pending_until_its_document_settles() {
     let stood = t0
         .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS))
         .unwrap();
-    assert!(!NavRecord::born(false, stood).pending());
+    assert!(NavRecord::born(false, stood).pending());
 }
 
 #[test]

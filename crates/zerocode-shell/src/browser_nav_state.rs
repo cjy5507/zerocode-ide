@@ -46,8 +46,14 @@ impl NavState {
 pub(super) struct NavRecord {
     state: NavState,
     started_at: Option<Instant>,
-    requested_at: Option<Instant>,
+    awaiting: Option<Awaiting>,
     generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Awaiting {
+    Request,
+    Load(u64),
 }
 
 impl NavRecord {
@@ -58,14 +64,14 @@ impl NavRecord {
             NavRecord {
                 state: NavState::Blank,
                 started_at: None,
-                requested_at: None,
+                awaiting: None,
                 generation: 0,
             }
         } else {
             NavRecord {
                 state: NavState::Loading,
                 started_at: Some(now),
-                requested_at: None,
+                awaiting: Some(Awaiting::Load(1)),
                 generation: 1,
             }
         }
@@ -76,22 +82,17 @@ impl NavRecord {
     pub(super) fn started(&mut self, now: Instant) -> u64 {
         self.state = NavState::Loading;
         self.started_at = Some(now);
-        self.requested_at = None;
         self.generation += 1;
+        self.awaiting = Some(Awaiting::Load(self.generation));
         self.generation
     }
 
     pub(super) fn requested(&mut self) {
-        self.requested_at = Some(Instant::now());
+        self.awaiting = Some(Awaiting::Request);
     }
 
     pub(super) fn pending(&self) -> bool {
-        let now = Instant::now();
-        self.observed(now) == NavState::Loading
-            || self.requested_at.is_some_and(|at| {
-                now.saturating_duration_since(at)
-                    < Duration::from_millis(zerocode_core::agent_browser::BROWSER_DOOR_BUDGET_MS)
-            })
+        self.awaiting.is_some()
     }
 
     /// The main document's Finished — on the blank page, that is `blank`.
@@ -102,11 +103,15 @@ impl NavRecord {
             NavState::Finished
         };
         self.started_at = None;
+        if self.awaiting == Some(Awaiting::Load(self.generation)) {
+            self.awaiting = None;
+        }
     }
 
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     pub(super) fn failed(&mut self) {
         self.state = NavState::Dead;
+        self.awaiting = None;
     }
 
     /// The state as a reader sees it NOW: a load past the clock reads dead
