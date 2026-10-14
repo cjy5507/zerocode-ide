@@ -1586,6 +1586,7 @@ fn acted_in(acts: &[&ComputerInput], ctx: &ToolContext) -> Option<ComputerTarget
 /// alone, in the same frame — the core's batch verb and flag, the window's
 /// checks.
 fn batch_argv(steps: &[ComputerInput], frame: ShotFrame) -> Result<Vec<String>, ToolError> {
+    check_batch_len(steps.len())?;
     let commands = steps
         .iter()
         .enumerate()
@@ -1616,10 +1617,24 @@ fn batch_argv(steps: &[ComputerInput], frame: ShotFrame) -> Result<Vec<String>, 
     ])
 }
 
+fn check_batch_len(count: usize) -> Result<(), ToolError> {
+    if count == 0 || count > COMPUTER_BATCH_MAX_STEPS {
+        return Err(ToolError::InvalidInput(format!(
+            "a batch holds 1 to {COMPUTER_BATCH_MAX_STEPS} steps (this one has {count})"
+        )));
+    }
+    Ok(())
+}
+
 /// One batch: checked whole by the core before any look is paid, one trip
 /// down the shim, one look after — and each step answered under the model's
 /// own action name, in its picture's pixels.
 fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &ComputerRoad) -> Result<String, ToolError> {
+    let mut steps = input
+        .steps
+        .take()
+        .ok_or_else(|| ToolError::InvalidInput("`batch` needs `steps`: the actions to run in order".into()))?;
+    check_batch_len(steps.len())?;
     if input.window.is_some() {
         return Err(ToolError::InvalidInput("`window` is a wait_for title condition, not a batch default; select an observed app/window_id pair".into()));
     }
@@ -1631,10 +1646,6 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
         _ => return Err(ToolError::InvalidInput("batch window defaults need both a nonempty app and a positive window_id from an observation; otherwise scope each step".into())),
     };
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
-    let mut steps = input
-        .steps
-        .take()
-        .ok_or_else(|| ToolError::InvalidInput("`batch` needs `steps`: the actions to run in order".into()))?;
     for (at, step) in steps.iter_mut().enumerate() {
         if let Some(target) = &default_target {
             if step.app.as_deref().is_some_and(|app| app != target.app.as_str())
@@ -1910,6 +1921,11 @@ fn run_computer_walk(input: &ComputerInput, ctx: &ToolContext, road: &ComputerRo
 }
 
 pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<String, ToolError> {
+    if input.get("action").and_then(Value::as_str).map(str::trim) == Some(BATCH_ACTION) {
+        if let Some(steps) = input.get("steps").and_then(Value::as_array) {
+            check_batch_len(steps.len())?;
+        }
+    }
     let input: ComputerInput = from_value(input)?;
     if input.background == Some(true) && input.action.trim() != BATCH_ACTION {
         argv_for(&input)?;
@@ -1998,6 +2014,96 @@ mod tests {
 
     fn input(fields: Value) -> ComputerInput {
         serde_json::from_value(fields).expect("input")
+    }
+
+    #[cfg(unix)]
+    fn native_wait_fixtures() -> Vec<Value> {
+        serde_json::from_str(include_str!("../../../../crates/zerocode-shell/tests/fixtures/scoped-wait-for.json")).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shared_batch_limit_precedes_deserialization_and_scope_default_expansion() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let fields = json!({"action":"batch", "app":"Fixture", "window_id":41,
+            "steps": vec![json!({"action":"wait", "unknown":"invalid"}); COMPUTER_BATCH_MAX_STEPS + 1]});
+        let error = run_computer(&fields, &ctx, &road).unwrap_err();
+        assert!(error.to_string().contains(&format!("1 to {COMPUTER_BATCH_MAX_STEPS} steps")), "{error}");
+        let direct = ComputerInput {
+            action: BATCH_ACTION.into(), app: Some("Fixture".into()), window_id: Some(41),
+            steps: Some(vec![input(json!({"action":"wait", "app":"Other", "window_id":52})); COMPUTER_BATCH_MAX_STEPS + 1]),
+            ..ComputerInput::default()
+        };
+        let error = run_computer_batch(direct, &ctx, &road).unwrap_err();
+        assert!(error.to_string().contains(&format!("1 to {COMPUTER_BATCH_MAX_STEPS} steps")), "{error}");
+        assert!(calls(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn batch_serialization_rejects_the_shared_limit_before_per_step_validation() {
+        let invalid = input(json!({"action":"batch", "steps":[]}));
+        let error = batch_argv(&vec![invalid; COMPUTER_BATCH_MAX_STEPS + 1], ShotFrame::UNIT).unwrap_err();
+        assert!(error.to_string().contains(&format!("1 to {COMPUTER_BATCH_MAX_STEPS} steps")), "{error}");
+        assert!(batch_argv(&[], ShotFrame::UNIT).is_err());
+    }
+
+    #[test]
+    fn batch_serialization_accepts_exactly_the_existing_shared_step_limit() {
+        let steps = vec![input(json!({"action":"wait", "duration":0.001})); COMPUTER_BATCH_MAX_STEPS];
+        let argv = batch_argv(&steps, ShotFrame::UNIT).unwrap();
+        let parsed = zerocode_core::computer_use::parse_command(&argv).unwrap();
+        assert_eq!(zerocode_core::computer_use::batch_steps(&parsed).len(), COMPUTER_BATCH_MAX_STEPS);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_producer_fixture_receipts_reach_the_scoped_wait_adapter() {
+        for case in native_wait_fixtures() {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            ctx.set_computer_frame(ShotFrame::UNIT);
+            std::fs::write(dir.path().join("wait-for"), json!({"ok":true,"result":case["result"]}).to_string()).unwrap();
+            let response = run_computer(&case["input"], &ctx, &road).unwrap();
+            let answer: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(answer["result"], case["result"]);
+            assert_eq!(answer["result"]["app"], case["helper"]["app"]);
+            assert_eq!(answer["result"]["window"], case["helper"]["window"]);
+            let argv: Vec<String> = std::fs::read_to_string(dir.path().join("wait-for-argv")).unwrap().lines().map(str::to_string).collect();
+            assert_eq!(zerocode_core::computer_use::parse_command(&argv).unwrap().params, case["params"]);
+            assert_eq!(calls(dir.path()), ["wait-for"]);
+            assert!(answer["looked_after"].is_null());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_producer_receipts_survive_batch_defaults_and_keep_the_final_input_observation() {
+        for case in native_wait_fixtures() {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            ctx.set_computer_frame(ShotFrame::UNIT);
+            let mut wait = case["input"].clone();
+            for key in ["app", "window_id", "background"] { wait.as_object_mut().unwrap().remove(key); }
+            let steps = json!([wait, {"action":"left_click", "label":"Save", "role":"AXButton"}]);
+            let reports = json!([
+                {"n":1,"ok":true,"result":case["result"]},
+                {"n":2,"ok":true,"result":{"action":{"targetWindowId":41}}},
+            ]);
+            std::fs::write(dir.path().join("batch"), json!({"ok":true,"result":{"ran":2,"steps":reports}}).to_string()).unwrap();
+            let response = run_computer(&json!({"action":"batch","app":case["input"]["app"],"window_id":41,"background":true,"steps":steps}), &ctx, &road).unwrap();
+            let answer: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(answer["ran"], 2);
+            assert_eq!(answer["steps"][0]["result"], case["result"]);
+            let argv: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(dir.path().join("batch-commands")).unwrap()).unwrap();
+            assert_eq!(zerocode_core::computer_use::parse_command(&argv[0]).unwrap().params, case["params"]);
+            let observed = answer["looked_after"]["screen"]["said"].as_str().unwrap();
+            assert!(observed.contains("--app org.example.fixture") && observed.contains("--window-id 41"));
+            assert_eq!(calls(dir.path()), ["batch", "observe"]);
+        }
     }
 
     fn screen_with_look(look: &str) -> Value {
@@ -2989,6 +3095,7 @@ done
 target=''
 [ -n "$window" ] && target=',"window":{"id":'"$window"'},"fixture":"unrelated-window-fixture"'
 [ "$verb" = batch ] && { printf '%s' "$3" > '@DIR@/batch-commands'; cat '@DIR@/batch'; echo; exit 0; }
+[ "$verb" = wait-for ] && [ -f '@DIR@/wait-for' ] && { for word in "$@"; do printf '%s\n' "$word"; done > '@DIR@/wait-for-argv'; cat '@DIR@/wait-for'; echo; exit 0; }
 [ "$verb" = walk ] && [ -f '@DIR@/walk' ] && { printf '%s\n' "$*" > '@DIR@/walk-argv'; cat '@DIR@/walk'; echo; exit 0; }
 if [ "$verb" = handoff ]; then
   for word in "$@"; do printf '%s\n' "$word"; done > '@DIR@/handoff-argv'

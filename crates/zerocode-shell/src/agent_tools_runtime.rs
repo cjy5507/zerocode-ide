@@ -5952,6 +5952,23 @@ pub(super) fn install_confirm_asker(app: AppHandle) {
 pub(super) fn desktop_wait_for(
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+    let started = std::time::Instant::now();
+    desktop_wait_for_with(
+        params,
+        &computer_use::eye::MEMORY,
+        &mut computer_use::call,
+        &mut || started.elapsed(),
+        &mut std::thread::sleep,
+    )
+}
+
+fn desktop_wait_for_with(
+    params: &serde_json::Value,
+    memory: &computer_use::eye::Memory,
+    helper: computer_use::eye::Call<'_>,
+    elapsed: &mut dyn FnMut() -> std::time::Duration,
+    sleep: &mut dyn FnMut(std::time::Duration),
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
     use zerocode_core::computer_use::{
         COMPUTER_WAIT_FOR_POLL_MS, desktop_wait_for_ms, wait_for_retries, wait_for_settled,
         window_title_matches,
@@ -5961,6 +5978,21 @@ pub(super) fn desktop_wait_for(
         .get("window")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
+    let scoped = ["app", "windowId", "windowIndex"]
+        .iter()
+        .any(|key| params.get(key).is_some());
+    if wanted_title.is_some()
+        && (scoped
+            || params
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true))
+    {
+        return Err(computer_use::ComputerUseError::new(
+            zerocode_core::computer_use_protocol::error_code::INVALID_ARGUMENT,
+            "a title wait cannot honor app/window or background scope; use a scoped element condition",
+        ));
+    }
     let (budget_ms, capped) =
         desktop_wait_for_ms(params.get("timeoutMs").and_then(serde_json::Value::as_u64));
     let mut probe = params.clone();
@@ -5969,30 +6001,29 @@ pub(super) fn desktop_wait_for(
             object.remove(key);
         }
     }
-    let started = std::time::Instant::now();
     let budget = std::time::Duration::from_millis(budget_ms);
     let poll = std::time::Duration::from_millis(COMPUTER_WAIT_FOR_POLL_MS);
     let mut looks = 0_u32;
     // An OCR wait reads the screen again only after the eye saw it change
     // where it reads; without the eye it reads every time.
-    let mut helper = computer_use::call;
     let reads_pixels = wanted_title.is_none()
         && probe.get("ocr").and_then(serde_json::Value::as_bool) == Some(true)
-        && probe.get("app").is_none();
+        && !scoped;
     let mut gate = reads_pixels
-        .then(|| computer_use::eye::Gate::new(&computer_use::eye::MEMORY, &probe, &mut helper))
+        .then(|| computer_use::eye::Gate::new(memory, &probe, helper))
         .flatten();
-    let mut last_read = serde_json::Value::Array(Vec::new());
+    let mut last_read = serde_json::Value::Null;
     // What the last desktop reading matched in ZeroCode's own windows and
     // left out: the agent's own words are not the app's answer.
     let mut excluded_regions = false;
     loop {
         looks += 1;
-        let unchanged = gate.as_mut().is_some_and(|gate| !gate.read(&mut helper));
+        let unchanged =
+            gate.as_mut().is_some_and(|gate| !gate.read(helper)) && !last_read.is_null();
         let seen = if unchanged {
             Ok(last_read.clone())
         } else if let Some(title) = wanted_title.as_deref() {
-            computer_use::call("listAllWindows", serde_json::json!({})).map(|answer| {
+            helper("listAllWindows", serde_json::json!({})).map(|answer| {
                 let windows = answer
                     .get("windows")
                     .and_then(serde_json::Value::as_array)
@@ -6009,46 +6040,60 @@ pub(super) fn desktop_wait_for(
                                 .is_some_and(|shown| window_title_matches(shown, title))
                     })
                     .collect::<Vec<_>>();
-                serde_json::Value::Array(windows)
+                serde_json::json!({ "matches": windows })
             })
         } else {
-            computer_use::call("findElements", computer_use::eye::reading(&probe)).map(|answer| {
+            let asked = computer_use::eye::reading_with(memory, &probe, helper);
+            helper("findElements", asked)
+        };
+        let seen = match seen {
+            Ok(answer) => {
+                if scoped {
+                    checked_wait_scope(params, &answer)?;
+                }
                 excluded_regions = answer
                     .get(zerocode_core::computer_use_protocol::eye::EXCLUDED_REGIONS_KEY)
                     .and_then(serde_json::Value::as_array)
                     .is_some_and(|regions| !regions.is_empty());
-                answer
-                    .get("matches")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::Value::Array(Vec::new()))
-            })
-        };
-        let matches = match seen {
-            Ok(matches) => matches,
-            Err(error) if wait_for_retries(&error.code) => serde_json::Value::Array(Vec::new()),
+                Some(answer)
+            }
+            // A missing window is an unread observation, not an empty one.
+            // In particular, an earlier poll's identity cannot verify absence.
+            Err(error) if wait_for_retries(&error.code) => None,
             Err(error) => return Err(error),
         };
-        last_read.clone_from(&matches);
-        let count = matches.as_array().map_or(0, Vec::len);
-        if wait_for_settled(count, absent) {
-            return Ok(serde_json::json!({
+        last_read = seen.clone().unwrap_or(serde_json::Value::Null);
+        let matches = seen.as_ref().and_then(|answer| answer.get("matches"));
+        let count = matches
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        if seen.is_some() && wait_for_settled(count, absent) {
+            let mut result = serde_json::json!({
                 "satisfied": true,
                 "absent": absent,
                 "looks": looks,
                 "reads": gate.as_ref().map_or(looks, |gate| gate.reads),
-                "elapsedMs": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "elapsedMs": u64::try_from(elapsed().as_millis()).unwrap_or(u64::MAX),
                 "budgetMs": budget_ms,
                 "budgetCapped": capped,
-                "matches": matches,
-            }));
+                "matches": matches.cloned().unwrap_or_else(|| serde_json::json!([])),
+            });
+            if let Some(answer) = seen {
+                for key in ["app", "window"] {
+                    if let Some(actual) = answer.get(key) {
+                        result[key] = actual.clone();
+                    }
+                }
+            }
+            return Ok(result);
         }
-        if started.elapsed() + poll >= budget {
+        if elapsed().saturating_add(poll) >= budget {
             return Err(computer_use::ComputerUseError {
                 code: zerocode_core::computer_use_protocol::error_code::TIMEOUT.into(),
                 message: format!(
                     "still {} after {} ms ({looks} looks, {count} matches{}{})",
                     if absent { "present" } else { "absent" },
-                    started.elapsed().as_millis(),
+                    elapsed().as_millis(),
                     gate.as_ref()
                         .map(|gate| format!(", {} reads", gate.reads))
                         .unwrap_or_default(),
@@ -6061,7 +6106,462 @@ pub(super) fn desktop_wait_for(
                 ),
             });
         }
-        std::thread::sleep(poll);
+        sleep(poll);
+    }
+}
+
+fn checked_wait_scope(
+    params: &serde_json::Value,
+    answer: &serde_json::Value,
+) -> Result<(), computer_use::ComputerUseError> {
+    let actual = answer
+        .pointer("/window/id")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|id| *id > 0)
+        .ok_or_else(|| {
+            computer_use::ComputerUseError::new(
+                "window_scope_unverified",
+                "the wait observation did not identify its actual window",
+            )
+        })?;
+    if params
+        .get("windowId")
+        .is_some_and(|expected| expected.as_u64() != Some(actual))
+    {
+        return Err(computer_use::ComputerUseError::new(
+            "window_scope_mismatch",
+            "the wait observation came from a different window",
+        ));
+    }
+    // The trusted helper resolves app aliases and selects this window from
+    // that app's candidates. Its display name need not equal the alias.
+    if params.get("app").is_some()
+        && answer
+            .get("app")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|app| app.trim().is_empty())
+    {
+        return Err(computer_use::ComputerUseError::new(
+            "window_scope_unverified",
+            "the wait observation did not identify its actual app",
+        ));
+    }
+    if answer
+        .get("matches")
+        .and_then(serde_json::Value::as_array)
+        .is_none()
+    {
+        return Err(computer_use::ComputerUseError::new(
+            "window_scope_unverified",
+            "the wait observation did not include an element search result",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod desktop_wait_for_tests {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+    use zerocode_core::computer_use::{self as core, COMPUTER_WAIT_FOR_POLL_MS};
+    use zerocode_core::computer_use_protocol::error_code;
+
+    use super::{computer_use, desktop_wait_for_with};
+
+    fn probe(
+        params: &Value,
+        helper: computer_use::eye::Call<'_>,
+    ) -> Result<Value, computer_use::ComputerUseError> {
+        let elapsed = Cell::new(Duration::ZERO);
+        desktop_wait_for_with(
+            params,
+            &computer_use::eye::MEMORY,
+            helper,
+            &mut || elapsed.get(),
+            &mut |pause| elapsed.set(elapsed.get() + pause),
+        )
+    }
+
+    fn fixture() -> Vec<Value> {
+        serde_json::from_str(include_str!("../tests/fixtures/scoped-wait-for.json")).unwrap()
+    }
+
+    fn scoped(absent: bool) -> Value {
+        json!({"app":"org.example.fixture", "windowId":41, "label":"Busy", "absent":absent,
+            "timeoutMs":COMPUTER_WAIT_FOR_POLL_MS * 3})
+    }
+
+    fn actual(matches: Value) -> Value {
+        json!({"app":"Fixture Display", "window":{"id":41,"title":"Actual document"}, "matches":matches})
+    }
+
+    fn batch_after_wait(
+        params: &Value,
+        helper: computer_use::eye::Call<'_>,
+    ) -> (core::Walked<()>, usize) {
+        let mut wait = vec![
+            "wait-for".to_string(),
+            "--app".into(),
+            params["app"].as_str().unwrap().into(),
+            "--window-id".into(),
+            params["windowId"].to_string(),
+            "--label".into(),
+            params["label"].as_str().unwrap().into(),
+            "--timeout-ms".into(),
+            params["timeoutMs"].to_string(),
+            "--json".into(),
+        ];
+        if params["absent"] == true {
+            wait.push("--absent".into());
+        }
+        if let Some(role) = params["role"].as_str() {
+            wait.extend(["--role".into(), role.into()]);
+        }
+        if params["background"] == true {
+            wait.push("--background".into());
+        }
+        let steps = vec![
+            wait,
+            vec![
+                "type-text".into(),
+                "--app".into(),
+                "org.example.fixture".into(),
+                "--window-id".into(),
+                "41".into(),
+                "--text".into(),
+                "fixture".into(),
+                "--background".into(),
+                "--json".into(),
+            ],
+        ];
+        let mut inputs = 0;
+        let walked = core::walk(
+            &steps,
+            &core::WalkBudget {
+                deadline_ms: core::batch_deadline_ms(&steps),
+                out_of_time: (),
+            },
+            |_, argv| core::held_ms(&core::parse_command(argv).unwrap()),
+            |_, argv| core::Next::Run(argv.clone()),
+            |n, _, argv| {
+                let envelope = if n == 1 {
+                    let command = core::parse_command(argv).unwrap();
+                    match probe(&command.params, helper) {
+                        Ok(result) => json!({"ok":true,"result":result}),
+                        Err(error) => {
+                            json!({"ok":false,"error":{"code":error.code,"message":error.message}})
+                        }
+                    }
+                } else {
+                    inputs += 1;
+                    json!({"ok":true,"result":{}})
+                };
+                let report = core::walk_step_report(n, argv, true, Some(&envelope), "");
+                let halt = (report["ok"] != true).then_some(());
+                (report, halt)
+            },
+            || true,
+            || 0,
+        );
+        (walked, inputs)
+    }
+
+    #[test]
+    fn scoped_element_waits_produce_the_shared_present_and_absent_receipts() {
+        for case in fixture() {
+            let mut calls = Vec::new();
+            let result = probe(&case["params"], &mut |method, params| {
+                calls.push(method.to_string());
+                assert_eq!(method, "findElements");
+                let mut expected = case["params"].clone();
+                expected.as_object_mut().unwrap().remove("timeoutMs");
+                expected.as_object_mut().unwrap().remove("absent");
+                assert_eq!(params, expected);
+                Ok(case["helper"].clone())
+            })
+            .unwrap();
+            assert_eq!(result, case["result"]);
+            assert_eq!(calls, ["findElements"]);
+        }
+    }
+
+    #[test]
+    fn scoped_waits_preserve_actual_app_names_without_reinterpreting_aliases() {
+        for alias in [
+            "org.example.fixture",
+            "pid:410",
+            "Fixture",
+            "/Applications/Fixture.app",
+        ] {
+            let mut params = scoped(false);
+            params["app"] = json!(alias);
+            let result = probe(&params, &mut |method, asked| {
+                assert_eq!(method, "findElements");
+                assert_eq!(asked["app"], alias);
+                Ok(actual(json!([{"label":"Busy"}])))
+            })
+            .unwrap();
+            assert_eq!(result["app"], "Fixture Display");
+            assert_eq!(result["window"]["id"], 41);
+        }
+    }
+
+    #[test]
+    fn scoped_waits_reject_wrong_missing_and_malformed_receipts_for_both_conditions() {
+        for absent in [false, true] {
+            let matches = if absent {
+                json!([])
+            } else {
+                json!([{"label":"Busy"}])
+            };
+            for (answer, code) in [
+                (
+                    json!({"app":"Fixture Display", "matches":matches}),
+                    "window_scope_unverified",
+                ),
+                (
+                    json!({"app":"Fixture Display", "window":{"id":0}, "matches":matches}),
+                    "window_scope_unverified",
+                ),
+                (
+                    json!({"app":"Fixture Display", "window":{"id":52}, "matches":matches}),
+                    "window_scope_mismatch",
+                ),
+                (
+                    json!({"window":{"id":41}, "matches":matches}),
+                    "window_scope_unverified",
+                ),
+                (
+                    json!({"app":" ", "window":{"id":41}, "matches":matches}),
+                    "window_scope_unverified",
+                ),
+                (
+                    json!({"app":"Fixture Display", "window":{"id":41}}),
+                    "window_scope_unverified",
+                ),
+                (
+                    json!({"app":"Fixture Display", "window":{"id":41}, "matches":null}),
+                    "window_scope_unverified",
+                ),
+            ] {
+                let mut calls = 0;
+                let error = probe(&scoped(absent), &mut |_, _| {
+                    calls += 1;
+                    Ok(answer.clone())
+                })
+                .unwrap_err();
+                assert_eq!(error.code, code);
+                assert_eq!(calls, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn retryable_missing_windows_never_verify_scoped_absence() {
+        for code in core::WAIT_FOR_RETRIABLE_CODES {
+            for absent in [false, true] {
+                let mut calls = 0;
+                let error = probe(&scoped(absent), &mut |_, _| {
+                    calls += 1;
+                    Err(computer_use::ComputerUseError::new(*code, "not readable"))
+                })
+                .unwrap_err();
+                assert_eq!(error.code, error_code::TIMEOUT);
+                assert_eq!(calls, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn later_scoped_polls_cannot_reuse_an_earlier_valid_receipt() {
+        for (later, code, looks) in [
+            (Ok(json!({"matches":[]})), "window_scope_unverified", 2),
+            (
+                Ok(json!({"app":"Fixture Display", "window":{"id":52}, "matches":[]})),
+                "window_scope_mismatch",
+                2,
+            ),
+            (
+                Err(computer_use::ComputerUseError::new(
+                    error_code::WINDOW_NOT_FOUND,
+                    "closed",
+                )),
+                error_code::TIMEOUT,
+                3,
+            ),
+            (
+                Err(computer_use::ComputerUseError::new(
+                    error_code::APP_NOT_FOUND,
+                    "quit",
+                )),
+                error_code::TIMEOUT,
+                3,
+            ),
+        ] {
+            let mut calls = 0;
+            let error = probe(&scoped(true), &mut |_, _| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(actual(json!([{"label":"Busy"}])))
+                } else {
+                    later.clone()
+                }
+            })
+            .unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(calls, looks);
+        }
+    }
+
+    #[test]
+    fn scoped_absence_keeps_only_the_final_actual_observation_after_a_missing_window() {
+        for ocr in [false, true] {
+            let mut params = scoped(true);
+            params["ocr"] = json!(ocr);
+            let mut calls = 0;
+            let mut final_read = actual(json!([]));
+            final_read["window"]["title"] = json!("Final actual document");
+            let result = probe(&params, &mut |method, _| {
+                assert_eq!(method, "findElements");
+                calls += 1;
+                match calls {
+                    1 => Ok(actual(json!([{"label":"Busy"}]))),
+                    2 => Err(computer_use::ComputerUseError::new(
+                        error_code::WINDOW_NOT_FOUND,
+                        "temporarily unreadable",
+                    )),
+                    _ => Ok(final_read.clone()),
+                }
+            })
+            .unwrap();
+            assert_eq!(result["window"], final_read["window"]);
+            assert_eq!(result["app"], final_read["app"]);
+            assert_eq!(result["matches"], json!([]));
+            assert_eq!(result["looks"], 3);
+            assert_eq!(result["elapsedMs"], COMPUTER_WAIT_FOR_POLL_MS * 2);
+            assert_eq!(calls, 3);
+        }
+    }
+
+    #[test]
+    fn backend_title_scope_is_rejected_before_any_helper_call() {
+        for scope in [
+            json!({"app":"Fixture"}),
+            json!({"windowId":41}),
+            json!({"windowIndex":0}),
+            json!({"background":true}),
+        ] {
+            for absent in [false, true] {
+                let mut params = json!({"window":"Document", "absent":absent});
+                params
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(scope.as_object().unwrap().clone());
+                let error = probe(&params, &mut |_, _| {
+                    panic!("a scoped title must never list global windows")
+                })
+                .unwrap_err();
+                assert_eq!(error.code, error_code::INVALID_ARGUMENT);
+            }
+        }
+    }
+
+    #[test]
+    fn unscoped_title_waits_keep_title_matching_and_own_window_exclusion() {
+        for absent in [false, true] {
+            let result = probe(
+                &json!({"window":"document", "absent":absent}),
+                &mut |method, params| {
+                    assert_eq!(method, "listAllWindows");
+                    assert_eq!(params, json!({}));
+                    let mut windows = vec![
+                        json!({"id":9,"title":"Document","own":true}),
+                        json!({"id":52,"title":"Other"}),
+                    ];
+                    if !absent {
+                        windows.push(json!({"id":41,"title":"Target Document"}));
+                    }
+                    Ok(json!({"windows":windows}))
+                },
+            )
+            .unwrap();
+            assert_eq!(result["satisfied"], true);
+            assert_eq!(
+                result["matches"].as_array().unwrap().len(),
+                usize::from(!absent)
+            );
+            assert!(result.get("window").is_none() && result.get("app").is_none());
+        }
+    }
+
+    #[test]
+    fn unscoped_ocr_waits_use_only_the_injected_helper_for_eye_and_exclusion_reads() {
+        for absent in [false, true] {
+            let mut calls = Vec::new();
+            let result = probe(&json!({"ocr":true,"text":"Ready","absent":absent}), &mut |method, params| {
+                calls.push(method.to_string());
+                match method {
+                    "findElements" => {
+                        assert_eq!(params["ownRegion"], json!([]));
+                        Ok(json!({"matches": if absent { json!([]) } else { json!([{"text":"Ready"}]) }}))
+                    }
+                    "listAllWindows" => Ok(json!({"windows":[]})),
+                    _ => Err(computer_use::ComputerUseError::new(error_code::UNSUPPORTED_CAPABILITY, "fixture has no eye")),
+                }
+            }).unwrap();
+            assert_eq!(result["satisfied"], true);
+            assert!(calls.iter().any(|method| method == "listAllWindows"));
+            assert!(calls.iter().any(|method| method == "findElements"));
+            assert!(result.get("window").is_none());
+        }
+    }
+
+    #[test]
+    fn an_unverified_scoped_wait_stops_the_shared_batch_before_following_input() {
+        let cases = [
+            Ok(json!({"matches":[]})),
+            Ok(json!({"app":"Fixture Display","window":{"id":52},"matches":[]})),
+            Err(computer_use::ComputerUseError::new(
+                error_code::WINDOW_NOT_FOUND,
+                "closed",
+            )),
+            Err(computer_use::ComputerUseError::new(
+                error_code::APP_NOT_FOUND,
+                "quit",
+            )),
+        ];
+        for answer in cases {
+            for after_valid in [false, true] {
+                let mut calls = 0;
+                let (walked, inputs) = batch_after_wait(&scoped(true), &mut |_, _| {
+                    calls += 1;
+                    if after_valid && calls == 1 {
+                        Ok(actual(json!([{"label":"Busy"}])))
+                    } else {
+                        answer.clone()
+                    }
+                });
+                assert_eq!(inputs, 0);
+                assert_eq!(walked.halted, Some((1, ())));
+                assert_eq!(walked.reports.len(), 1);
+                assert_eq!(walked.reports[0]["ok"], false);
+            }
+        }
+    }
+
+    #[test]
+    fn verified_scoped_producer_receipts_allow_the_following_batch_input() {
+        for case in fixture() {
+            let (walked, inputs) = batch_after_wait(&case["params"], &mut |method, _| {
+                assert_eq!(method, "findElements");
+                Ok(case["helper"].clone())
+            });
+            assert_eq!(inputs, 1);
+            assert!(walked.finished());
+            assert_eq!(walked.reports[0]["result"], case["result"]);
+        }
     }
 }
 

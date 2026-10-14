@@ -1,0 +1,14 @@
+[
+  {
+    "input": {"action":"wait_for","app":"org.example.fixture","window_id":41,"background":true,"label":"Ready","role":"AXStaticText","timeout_ms":500},
+    "params": {"app":"org.example.fixture","windowId":41,"background":true,"label":"Ready","role":"AXStaticText","timeoutMs":500},
+    "helper": {"source":"accessibility","app":"Fixture Display","window":{"id":41,"title":"Ready document"},"matches":[{"index":7,"role":"AXStaticText","label":"Ready"}]},
+    "result": {"satisfied":true,"absent":false,"looks":1,"reads":1,"elapsedMs":0,"budgetMs":500,"budgetCapped":false,"app":"Fixture Display","window":{"id":41,"title":"Ready document"},"matches":[{"index":7,"role":"AXStaticText","label":"Ready"}]}
+  },
+  {
+    "input": {"action":"wait_for","app":"org.example.fixture","window_id":41,"background":true,"label":"Busy","role":"AXStaticText","absent":true,"timeout_ms":500},
+    "params": {"app":"org.example.fixture","windowId":41,"background":true,"label":"Busy","role":"AXStaticText","absent":true,"timeoutMs":500},
+    "helper": {"source":"accessibility","app":"Fixture Display","window":{"id":41,"title":"Finished document"},"matches":[]},
+    "result": {"satisfied":true,"absent":true,"looks":1,"reads":1,"elapsedMs":0,"budgetMs":500,"budgetCapped":false,"app":"Fixture Display","window":{"id":41,"title":"Finished document"},"matches":[]}
+  }
+]
