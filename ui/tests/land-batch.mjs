@@ -289,6 +289,8 @@ export async function testLandBatch({ browser, origin, ok, faults: shared }) {
       JSON.stringify(off.endedOff));
 
     /* ---- 26 상태와 단추 ----------------------------------------------------------- */
+    const theme0 = await page.evaluate(() => theme);
+    await page.evaluate(() => { theme = "light"; applyTheme(); });
     const seen = {};
     for (const state of STATES) {
       seen[state.name] = await page.evaluate(async (name) => {
@@ -459,7 +461,6 @@ export async function testLandBatch({ browser, origin, ok, faults: shared }) {
       JSON.stringify(english));
 
     /* ---- 사진: 상태마다 어두운 창과 좁은 창 ------------------------------------------ */
-    const theme0 = await page.evaluate(() => theme);
     await page.evaluate(() => { theme = "dark"; applyTheme(); });
     for (const state of STATES) {
       await page.evaluate(async (name) => window.__SET_BATCHES__([window.__ENTRY__(name)]), state.name);
