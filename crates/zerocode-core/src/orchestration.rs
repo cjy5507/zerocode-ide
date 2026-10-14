@@ -41,6 +41,7 @@ pub mod coordinator_handover;
 pub mod delegate;
 pub mod evidence;
 pub mod gate_reuse;
+pub mod land_batch;
 pub mod land_check;
 pub mod landing_watch;
 mod progress;
@@ -6443,6 +6444,9 @@ fn changes_the_ledger(verb: &str, words: &Words) -> bool {
         "retention" => words.value("--days").is_some() || words.has("--sweep"),
         // Listing what would be settled changes nothing; applying it does.
         "task-settle" => words.has("--apply"),
+        // Reading the batches changes nothing; every press hands the window work whose
+        // records come back as receipts.
+        land_batch::LAND_BATCH_VERB => land_batch::presses(words),
         _ => true,
     };
     doing(verb).is_some_and(|what| what.changes(spending))
@@ -14399,6 +14403,11 @@ const BOOL_FLAGS: &[&str] = &[
     "--wip-commit",
     "--inherit-checkout",
     "--prepare",
+    "--promote",
+    "--bisect",
+    "--restack",
+    "--abort",
+    "--record-merged",
 ];
 
 /* ---- what the ledger cannot know ------------------------------------- */
@@ -14567,6 +14576,13 @@ pub trait Launcher {
     /// with the reservation's exact rollback.
     fn checkout_present(&self, _path: &str) -> Option<bool> {
         None
+    }
+
+    /// Whether the integration queue (`land-batch`) may run on this machine at all — the one
+    /// platform judgment, [`land_batch::integration_queue_supported`]. A lookup like the rest:
+    /// a test launcher answers for the platform it stands in for.
+    fn integration_queue_supported(&self) -> bool {
+        land_batch::integration_queue_supported()
     }
 }
 
@@ -18752,6 +18768,7 @@ impl std::fmt::Debug for Decided {
             Effect::WorktreeEvidence { .. } => "worktree-evidence",
             Effect::WorkerTranscript { .. } => "worker-transcript",
             Effect::LandCheck(..) => "land-check",
+            Effect::LandBatch(..) => "land-batch",
             Effect::WorkerTerminal { .. } => "worker-terminal",
             Effect::Focus { .. } => "focus",
             Effect::Close { .. } => "close",
@@ -19976,8 +19993,11 @@ const BOUNDED_INPUT: &[(&str, Destination)] = &[
     ("--to-message", Destination::Name),
     ("--ack", Destination::Name),
     ("--gate", Destination::Name),
+    ("--batch", Destination::Name),
     // A list of names.
     ("--deps", Destination::Names),
+    ("--members", Destination::Names),
+    ("--drop", Destination::Names),
     ("--types", Destination::Names),
     ("--cursor", Destination::Name),
     ("--address", Destination::Name),
@@ -22623,6 +22643,23 @@ fn plan_inner(
             let mut planned = said(serde_json::Value::Null);
             planned.effect = Effect::LandCheck(ask);
             planned
+        }
+
+        /* The integration queue (t-45315). A read is answered here; a press is judged here and
+         * carried by the window, which reads the repository's switch before anything is written
+         * and hands every record back as a receipt the ledger judges again
+         * (`Ledger::land_batched`). */
+        land_batch::LAND_BATCH_VERB => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            let supported = launcher.integration_queue_supported();
+            match land_batch::plan(ledger, &run_id, team, pane, &words, supported, now_ms)? {
+                land_batch::Planned::Said(value) => said(value),
+                land_batch::Planned::Carry(ask) => {
+                    let mut planned = said(serde_json::Value::Null);
+                    planned.effect = Effect::LandBatch(Box::new(ask));
+                    planned
+                }
+            }
         }
 
         "send" => {

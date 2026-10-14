@@ -274,6 +274,12 @@ impl Launcher for Catalog {
         words.push(session.id.clone());
         Ok(words.join(" "))
     }
+
+    /// The bench stands in for a machine the integration queue runs on, whatever machine runs
+    /// the tests; the platform's own answer is a test of its own.
+    fn integration_queue_supported(&self) -> bool {
+        true
+    }
 }
 
 fn words(line: &str) -> Vec<String> {
@@ -25168,6 +25174,9 @@ mod completion;
 /// its task wrote (`tests/evidence.rs`).
 mod evidence;
 mod gate_reuse;
+/// t-45315 (T3 stage 6): `land-batch` chooses verified work for the window to stack, and every
+/// record of a batch comes back as a receipt the ledger judges (`tests/land_batch.rs`).
+mod land_batch;
 /// t-34501 stage 3 (t-42447): `land-check` names the task, head and repository for the window, and
 /// the window's evidence comes back as the ledger's own letter (`tests/land_check.rs`).
 mod land_check;

@@ -10950,6 +10950,9 @@ fn carried(
                 Err(why) => refused(why),
             }
         }
+        /* The integration queue (t-45315). Carried from stage 6's window half on; until then
+         * the window refuses rather than leave a press unanswered. */
+        Effect::LandBatch(_) => refused("the integration queue is not carried by this window yet"),
         /* One checkout's evidence, assembled where the sources live.
          *
          * The decision named the tree; this resolves it and reads. Three
