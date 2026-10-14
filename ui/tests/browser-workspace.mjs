@@ -16,7 +16,10 @@ async function standWorkspace(browser, origin, { holdState = false } = {}) {
       mock.opened.push(args);
       return args.label ?? `browser-${++minted}`;
     };
-    window.__ANSWER__.browser_place = (args) => { mock.placed.push(args); return null; };
+    window.__ANSWER__.browser_place = (args) => {
+      mock.placed.push(args);
+      return mock.holdPlacement ? new Promise((resolve) => { mock.releasePlacement = resolve; }) : null;
+    };
     window.__ANSWER__.browser_zoom = () => null;
     window.__ANSWER__.close_browser_pane = ({ label }) => { mock.closed.push(label); return null; };
     window.__ANSWER__.set_browser_open_tabs = ({ tabs: records }) => {
@@ -296,7 +299,7 @@ export async function testBrowserWorkspace(browser, origin, ok) {
         records: browserOpenTabRecords(),
       }));
       ok("restored workspace ownership survives persistence and stays hidden until confirmed",
-        restored.opened[0]?.agentWorkspace === true && restored.shown.length === 0
+        restored.opened[0]?.agentWorkspace === true && restored.opened[0]?.workspaceRestored === true && restored.shown.length === 0
           && restored.records[0]?.agentWorkspace === true, JSON.stringify(restored));
       await page.evaluate(() => {
         window.__WORKSPACE__.holdState = false;
@@ -320,6 +323,193 @@ export async function testBrowserWorkspace(browser, origin, ok) {
         person.open?.agentWorkspace !== true && person.last?.shown === true && person.barHidden === true,
         JSON.stringify(person));
       ok("workspace restoration raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => window.__workspaceEmit({ label, mode: "agent", revision: 30, inFlight: 1, needsObservation: false }), label);
+      await observe(page, label);
+      await page.evaluate((label) => {
+        window.__WORKSPACE__.holdMode = true;
+        window.__workspaceClick(label, "pause");
+        window.__workspaceClick(label, "human");
+        window.__workspaceClick(label, "agent");
+      }, label);
+      await page.waitForTimeout(60);
+      const pausing = await page.evaluate((label) => ({
+        modes: window.__WORKSPACE__.modes,
+        text: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-status")?.textContent,
+      }), label);
+      ok("rapid control clicks submit one pause request without announcing an unconfirmed pause",
+        pausing.modes.length === 1 && pausing.modes[0]?.mode === "paused"
+          && pausing.modes[0]?.expectedRevision === 30 && !/작업 일시정지/.test(pausing.text ?? ""), JSON.stringify(pausing));
+      await page.evaluate((label) => window.__WORKSPACE__.releaseMode?.({ label, mode: "paused", revision: 31, inFlight: 0, needsObservation: false }), label);
+      await page.waitForTimeout(60);
+      const paused = await page.evaluate((label) => ({
+        text: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-status")?.textContent,
+        last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+      }), label);
+      ok("a pause is displayed only after backend confirmation and never exposes native input",
+        /일시정지/.test(paused.text ?? "") && paused.last?.shown === false, JSON.stringify(paused));
+      await page.evaluate((label) => {
+        window.__WORKSPACE__.holdMode = false;
+        window.__workspaceClick(label, "agent");
+      }, label);
+      await page.waitForTimeout(60);
+      const resumed = await page.evaluate((label) => ({
+        mode: window.__WORKSPACE__.modes.at(-1),
+        text: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-status")?.textContent,
+        last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+      }), label);
+      ok("handing back uses the paused revision and explains the fresh observation requirement",
+        resumed.mode?.expectedRevision === 31 && resumed.mode?.mode === "agent" && resumed.last?.shown === false
+          && /새 화면 확인/.test(resumed.text ?? "") && !/작업 중/.test(resumed.text ?? ""), JSON.stringify(resumed));
+      await page.evaluate((label) => {
+        window.__WORKSPACE__.holdMode = true;
+        window.__workspaceClick(label, "human");
+      }, label);
+      await page.waitForTimeout(30);
+      await page.evaluate(() => window.__WORKSPACE__.rejectMode?.(new Error("handoff_timeout")));
+      await page.waitForTimeout(100);
+      const rejected = await page.evaluate((label) => ({
+        text: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-status")?.textContent,
+        last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+        humanDisabled: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-human")?.disabled,
+      }), label);
+      ok("a rejected handoff stays hidden with an inline recovery action", rejected.last?.shown === false
+        && rejected.humanDisabled === true && /확인하지 못|확인할 수/.test(rejected.text ?? ""), JSON.stringify(rejected));
+      await page.evaluate((label) => {
+        window.__WORKSPACE__.state = [{ label, mode: "paused", revision: 34, inFlight: 0, needsObservation: false }];
+        window.__workspaceClick(label, "refresh");
+      }, label);
+      await page.waitForTimeout(60);
+      await page.evaluate((label) => {
+        window.__workspaceClick(label, "human");
+      }, label);
+      await page.waitForTimeout(30);
+      await page.evaluate((label) => window.__WORKSPACE__.releaseMode?.({ label, mode: "human", revision: 35, inFlight: 1, needsObservation: false }), label);
+      await page.waitForTimeout(80);
+      const invalid = await page.evaluate((label) => window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1), label);
+      ok("a human response with input still in flight is refused", invalid?.shown === false, JSON.stringify(invalid));
+      ok("workspace pause and error handling raise no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const original = await page.evaluate(() => {
+        const field = document.createElement("input");
+        field.id = "workspace-focus-test";
+        document.body.appendChild(field);
+        field.focus();
+        return { id: activeTabId, tree: JSON.stringify(stageTree()) };
+      });
+      const label = await openManaged(page);
+      await page.evaluate((label) => window.__workspaceEmit({ label, mode: "agent", revision: 40, inFlight: 0, needsObservation: false }), label);
+      const quiet = await page.evaluate(() => ({
+        id: activeTabId, focused: document.activeElement?.id, tree: JSON.stringify(stageTree()),
+      }));
+      ok("agent open and state events preserve the actual typing receiver", quiet.id === original.id
+        && quiet.focused === "workspace-focus-test" && quiet.tree === original.tree, JSON.stringify(quiet));
+      await page.evaluate(() => document.querySelector("#browser-workspace-launcher")?.click());
+      await page.waitForTimeout(100);
+      const beside = await page.evaluate((label) => ({
+        active: activeTabId,
+        split: stageGroups().length,
+        badge: [...document.querySelectorAll(".tab[data-tab]")]
+          .find((node) => node.dataset.tab === `browser:${label}`)?.querySelector(".browser-workspace-tab-badge")?.textContent,
+      }), label);
+      ok("the explicit viewing action opens the marked task browser beside the original pane",
+        beside.active === `browser:${label}` && beside.split === 2 && !!beside.badge, JSON.stringify(beside));
+      await page.evaluate((label) => window.__workspaceClick(label, "collapse"), label);
+      await page.waitForTimeout(60);
+      const back = await page.evaluate(() => ({
+        id: activeTabId, tree: JSON.stringify(stageTree()), closed: window.__WORKSPACE__.closed,
+        frames: document.querySelectorAll(".browser-workspace-frame[src]").length,
+      }));
+      ok("folding the side view restores the original pane and retains the native browser",
+        back.id === original.id && back.tree === original.tree && back.closed.length === 0 && back.frames === 0, JSON.stringify(back));
+      await observe(page, label);
+      await page.evaluate((label) => {
+        const newer = { label, mode: "agent", revision: 42, inFlight: 0, needsObservation: true };
+        window.__workspaceEmit(newer);
+        window.__workspaceEmit({ label, mode: "human", revision: 42, inFlight: 0, needsObservation: false });
+      }, label);
+      await page.waitForTimeout(60);
+      const conflict = await page.evaluate((label) => ({
+        last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+        text: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-status")?.textContent,
+      }), label);
+      ok("conflicting modes at one revision fail closed instead of choosing human control",
+        conflict.last?.shown === false && /확인/.test(conflict.text ?? ""), JSON.stringify(conflict));
+      await page.evaluate((label) => {
+        window.__WORKSPACE__.state = [{ label, mode: "agent", revision: 43, inFlight: 0, needsObservation: false }];
+        window.__ANSWER__.browser_snapshot = () => null;
+        window.__workspaceClick(label, "refresh");
+      }, label);
+      await page.waitForTimeout(1100);
+      const badFrame = await page.evaluate((label) => ({
+        text: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-status")?.textContent,
+        frames: document.querySelectorAll(".browser-workspace-frame[src]").length,
+      }), label);
+      ok("an unknown capture result clears the image and offers inline recovery",
+        badFrame.frames === 0 && /가져오지 못/.test(badFrame.text ?? ""), JSON.stringify(badFrame));
+      await page.setViewportSize({ width: 760, height: 700 });
+      const layout = await page.evaluate((label) => {
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        const bar = host?.querySelector(".browser-workspace-bar");
+        const box = host?.getBoundingClientRect();
+        return {
+          host: box?.width, bar: bar?.getBoundingClientRect().width,
+          actionsFit: [...(bar?.querySelectorAll("button") ?? [])].filter((button) => !button.hidden)
+            .every((button) => button.getBoundingClientRect().right <= (box?.right ?? 0) + 1),
+          imageFit: getComputedStyle(host.querySelector(".browser-workspace-frame")).objectFit,
+        };
+      }, label);
+      ok("narrow task controls stay inside their pane and preserve the image proportions",
+        layout.host > 0 && layout.bar <= layout.host + 1 && layout.actionsFit && layout.imageFit === "contain", JSON.stringify(layout));
+      const words = await page.evaluate(() => ["en", "ja", "zh", "es"].map((code) => {
+        const keys = ["title", "agent", "watchAction", "collapseAction", "pauseAction", "humanAction", "agentAction", "refreshAction", "stateError"];
+        return { code, complete: keys.every((key) => typeof CATALOG[code]?.[`browser.workspace.${key}`] === "string") };
+      }));
+      ok("all four existing translations cover the workspace state and actions", words.every((one) => one.complete), JSON.stringify(words));
+      ok("workspace viewing and recovery raise no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate(async (label) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 50, inFlight: 0, needsObservation: false });
+        await browserPlacing;
+        window.__WORKSPACE__.placed = [];
+        window.__WORKSPACE__.holdPlacement = true;
+        browserSaid.delete(label);
+        syncBrowserPanes();
+      }, label);
+      await page.waitForTimeout(60);
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "human", revision: 51, inFlight: 0, needsObservation: false });
+        setActiveTab(`browser:${label}`);
+        window.__workspaceClick(label, "watch");
+        window.__workspaceEmit({ label, mode: "agent", revision: 52, inFlight: 0, needsObservation: true });
+        window.__WORKSPACE__.holdPlacement = false;
+        window.__WORKSPACE__.releasePlacement?.(null);
+      }, label);
+      await page.waitForTimeout(100);
+      const queued = await page.evaluate((label) => ({
+        shown: window.__WORKSPACE__.placed.filter((one) => one.label === label && one.shown),
+        last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+      }), label);
+      ok("a queued native show rechecks ownership when it actually executes",
+        queued.shown.length === 0 && queued.last?.shown === false, JSON.stringify(queued));
+      ok("workspace native placement races raise no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
 }
