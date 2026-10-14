@@ -15836,7 +15836,7 @@ function dropHelperPageStop(stop) {
   stop.remove();
 }
 
-/* A page set aside (`parkChatPage`, t-54304) lets its stop go as a page that
+/* A page set aside (`frontChatHost`, t-54304) lets its stop go as a page that
  * is left does: an answer still out is dropped with the button it was for,
  * and the page that comes back stands a new one (`syncHelperPageStop`). */
 function leaveHelperPageStop(host) {
@@ -16004,10 +16004,9 @@ function paintHelperPageOwn(host, tab, run, owner) {
 function paintHelperPage(host, tab) {
   const run = tab.worker;
   const owner = tabOfTerm(run.term);
-  // Another conversation's page leaves this host kept aside, and this one's,
-  // kept when it left, comes back as it stood (t-54304).
-  parkChatPage(host, tab);
-  unparkChatPage(host, tab);
+  // Another conversation's page is set aside, and this one's, kept when it
+  // left, comes back as it stood — on its own host (t-54304, t-55369).
+  host = frontChatHost(host, tab);
   const held = host.__helperPage;
   // The accent the page wears is the agent's (`--chat-accent` reads it).
   writeAttribute(host, "data-agent", run.agent ?? "");
@@ -16150,7 +16149,7 @@ function watchChatDock(host, dock) {
 }
 
 function paintWorkerView(tab) {
-  const host = docHost(tab.pane, "worker");
+  let host = docHost(tab.pane, "worker");
   const run = tab.worker;
   // A HELPER's page is its conversation, standing on its own skeleton. The
   // blocks below belong to a nested COMMAND run — a command line to show, a
@@ -16163,9 +16162,9 @@ function paintWorkerView(tab) {
   }
   // 앞 그림이 이 호스트에 걸어 둔 것을 먼저 놓아 준다 — 노드가 사라지는 줄이
   // 바로 다음 줄이다. 헬퍼의 뼈대도 같은 순간에 놓인다: 이 호스트는 이제
-  // 다른 페이지의 것이다. 대화였다면 다시 볼 때를 위해 떼어 둔다(t-54304).
-  parkChatPage(host, tab);
-  keepChatPlace(host.__helperPage?.turns);
+  // 다른 페이지의 것이다. 대화였다면 다시 볼 때를 위해 제 호스트째 앞 화면
+  // 뒤에 두고, 이 페이지는 판의 새 호스트에 선다(t-54304, t-55369).
+  host = frontChatHost(host, tab);
   dropWorkerScreen(tab.pane);
   host.__helperPage = null;
   host.classList.remove("is-chat-page", "is-helper-page");
