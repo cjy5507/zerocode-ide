@@ -6236,6 +6236,14 @@ await test("현재 상태 새로고침은 초안을 보존하고 늦은 응답�
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await renderSettled(page);
   assert(!backend.calls.slice(hiddenAt).some((call) => call.window_id === "judgment-status" && ["typesafe_settings", "managed_judgment_status", "judgment_latest_request"].includes(call.command)), "a hidden settings page polls current status");
+  await page.evaluate(() => setSettingsOpen(true));
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  await page.fill("#settings-search", "no-such-judgment-setting-fixture");
+  assert(await page.locator("#judgment-current-status").isHidden());
+  const filteredAt = backend.calls.length;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await renderSettled(page);
+  assert(!backend.calls.slice(filteredAt).some((call) => call.window_id === "judgment-status" && ["typesafe_settings", "managed_judgment_status", "judgment_latest_request"].includes(call.command)), "a settings pane hidden by search reads current status");
   assertEqual(backend.typesafeSettings().provider, provider, "status refresh changed saved settings");
   return "one settings/status read · late identity discarded · unsaved draft kept · no hidden refresh";
 }));
