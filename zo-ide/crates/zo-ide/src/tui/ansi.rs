@@ -692,17 +692,17 @@ pub fn write_spans_for_palette(
     // 커서 이동·지우기가 링크 안에 들면 그 칸들까지 링크가 된다.
     let mut open: Option<&Hyperlink> = None;
     for span in &line.spans {
-        let link = span.link.as_ref();
-        let changes = open != link;
+        let target = span.link.as_ref();
+        let changes = open != target;
         if changes && open.is_some() {
             close_hyperlink(out);
         }
         writer.transition(span.style.patch(line.style), out);
         if changes {
-            if let Some(link) = link {
-                open_hyperlink(link, out);
+            if let Some(target) = target {
+                open_hyperlink(target, out);
             }
-            open = link;
+            open = target;
         }
         out.push_str(&span.text);
     }
