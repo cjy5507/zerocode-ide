@@ -28,7 +28,7 @@ use super::{
     refusal_surfaced_message, surfaced_refusal_notice,
     sleep_tool_cut_short, sleep_tool_execution_input,
     agent_notification_text, steering_message, tool_execution_input,
-    take_truncation_continuation, tool_preview_from,
+    take_truncation_continuation, tool_input_print_from, tool_preview_from,
     tool_result_message, tool_summary_line, unblock_tool_execute, ApiClient, AssistantEvent,
     AssistantTurn, AsyncPermissionDecision, AsyncPermissionPrompter, BlockIdGen, BudgetExhausted,
     CapturePrompter, ContentBlock, ConversationMessage, ConversationRuntime, EmptyAssistantAction,
@@ -2634,6 +2634,7 @@ where
                             name: tool_name.clone(),
                             summary: tool_summary_line(tool_name, &effective_input),
                             preview: tool_preview_from(tool_name, &effective_input),
+                            input_print: Some(tool_input_print_from(&effective_input)),
                             status: ToolCallStatus::Running,
                         })
                         .await
@@ -3274,6 +3275,7 @@ where
                 name: p.tool_name.clone(),
                 summary: tool_summary_line(&p.tool_name, &p.effective_input),
                 preview: tool_preview_from(&p.tool_name, &p.effective_input),
+                input_print: Some(tool_input_print_from(&p.effective_input)),
                 status: ToolCallStatus::Cancelled,
             })
             .await

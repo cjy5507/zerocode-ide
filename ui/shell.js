@@ -267,6 +267,10 @@ async function refreshPaneLedger() {
         at: Number(row?.at) || 0,
         // The person took this worker's pane over (t-45938): the pane is theirs, 사람 rather than 워커.
         takenOver: row?.taken_over === true,
+        // The ledger's reasons this attempt's head is late (t-45336), newest first: the sidebar's one word of
+        // what holds the work back reads them, beside the seat's own health — whose missing pane rides too.
+        stalled: Array.isArray(row?.stalled) ? row.stalled : [],
+        pane_missing_since_ms: Number.isFinite(row?.pane_missing_since_ms) ? row.pane_missing_since_ms : null,
       };
       if (typeof row?.term === "number") next.set(row.term, facts);
       else if (row?.settled === true && row.checkout) {
@@ -336,7 +340,8 @@ function paneLedgerSaid(map) {
       `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${f.failed ? 1 : 0}` +
       `:${JSON.stringify(f.review)}:${JSON.stringify(f.progress)}:${JSON.stringify(f.closed)}:${f.review_since_ms ?? ""}` +
       `:${f.asking ? 1 : 0}:${f.wall?.stands_until_ms ?? ""}:${f.handed_in ?? ""}:${f.model ?? ""}` +
-      `:${f.worker}:${f.takenOver ? 1 : 0}:${JSON.stringify(f.quotaWall)}`)
+      `:${f.worker}:${f.takenOver ? 1 : 0}:${JSON.stringify(f.quotaWall)}:${(f.stalled ?? []).join("+")}` +
+      `:${f.pane_missing_since_ms ?? ""}`)
     .join(",");
 }
 
@@ -3005,7 +3010,10 @@ listen("pane:autonomy", (event) => {
   if (typeof term !== "number") return;
   const current = paneSessions.get(term)?.session?.id;
   if (current && session && current !== session) return;
-  if (model) paneModels.set(term, model);
+  if (model) {
+    paneModels.set(term, model);
+    paintStatusModel();
+  }
   rememberPaneAutonomy(term, autonomy, session);
 });
 
@@ -9864,6 +9872,10 @@ function agentRowsSaid(rows) {
         // 바꾼다. 원료를 적는다(사다리를 두 번 오르지 않기 위해).
         `:${panePrompts.get(row.term) ?? ""}:${paneSaid.get(row.term) ?? ""}` +
         `:${paneModels.get(row.term) ?? ""}:${restoredWorkers.get(row.term) ?? ""}` +
+        // And what the row says of that model (t-46882): whether the catalog
+        // superseded it, in the words of the language in use — the verdict
+        // alone would leave the word in the language it was first drawn in.
+        `:${row.sub ? "" : `${agentRowModelWords(row)}|${agentRowModelTip(row)}`}` +
         // A helper's own model — its words and the facts behind them — is
         // what its row says about it; the pane's (above) is not.
         `:${row.sub ? `${agentRowModelWords(row)}|${agentRowModelTip(row)}` : ""}` +
@@ -9901,11 +9913,73 @@ function agentRowPane(row) {
  * (t-15625). Spelled once for the two roads that draw a row: the builder and
  * the re-dress. */
 function agentRowModelWords(row) {
-  return row.sub ? helperModelWords(row.sub, row.agent) : (paneModels.get(row.term) ?? "");
+  return row.sub ? helperModelWords(row.sub, row.agent) : paneModelWords(row.term).text;
 }
 
 function agentRowModelTip(row) {
-  return row.sub ? (helperModelTip(row.sub) || agentRowModelWords(row)) : (paneModels.get(row.term) ?? "");
+  return row.sub ? (helperModelTip(row.sub) || agentRowModelWords(row)) : paneModelWords(row.term).tip;
+}
+
+/* Which releases today's catalog has superseded, by agent, and the release
+ * that stands for each (t-46882) — the backend's word off the one lineup its
+ * restore roads judge by, never a rule of this window's: asked once as the
+ * window boots (`superseded_models`, off the critical path), since a read the
+ * backend finished before this page listened is not said again, and then
+ * said by every read (`summon-lineup:superseded`). Drawing a row asks
+ * nothing. */
+let supersededModels = {};
+
+function adoptSupersededModels(held) {
+  const next = held && typeof held === "object" ? held : {};
+  if (JSON.stringify(next) === JSON.stringify(supersededModels)) return;
+  supersededModels = next;
+  scheduleAgentPaint(["cards"]);
+  paintStatusModel();
+}
+
+listen("summon-lineup:superseded", (event) => adoptSupersededModels(event.payload));
+
+/* The release standing for the model `term`'s pane reports, when the catalog
+ * superseded that one; `null` for a current model, a pane that reported
+ * none, and an agent the catalog said nothing of. */
+function paneModelSupersededBy(term) {
+  const model = paneModels.get(term);
+  const agent = paneAgents.get(term);
+  if (!model || !agent) return null;
+  return supersededModels[agent]?.[model] ?? null;
+}
+
+/* A pane's model as its sidebar row and the status bar word it: the id its
+ * agent reported, and — when the catalog has superseded that release — the
+ * one word that says so, with the release standing for it in the tip. A
+ * ledger pane a restore brought back on such a release is moved to that one
+ * at its next rest (the backend's `superseded` sweep); a person's own is
+ * only told. */
+function paneModelWords(term) {
+  const model = paneModels.get(term) ?? "";
+  const standing = model ? paneModelSupersededBy(term) : null;
+  if (!standing) return { text: model, tip: model };
+  return {
+    text: `${model} · ${t("agent.model.superseded", "대체됨")}`,
+    tip: t("agent.model.supersededTip", "{{model}}은(는) 대체된 릴리스입니다 — 지금은 {{standing}}이(가) 그 자리에 섭니다", {
+      model,
+      standing,
+    }),
+  };
+}
+
+/* The status bar's model segment, for the terminal in front (t-46882): the
+ * superseded word and its tip when that pane's model is a release the
+ * catalog superseded, and nothing otherwise. A lane writes the same segment
+ * from its own session (`focusLane`) and is left to it. */
+function paintStatusModel() {
+  const tab = currentTab();
+  if (tab?.kind !== "term") return;
+  const segment = el("sb-model");
+  const term = activePaneOf(tab);
+  const words = term !== null && paneModelSupersededBy(term) ? paneModelWords(term) : { text: "", tip: "" };
+  writeTextContent(segment, words.text);
+  if ((segment.dataset.tip ?? "") !== words.tip) segment.dataset.tip = words.tip;
 }
 
 /* The account a pane's row wears beside its model (t-46106): the account
@@ -10433,12 +10507,42 @@ function worktreeStageOf(path) {
   return stage;
 }
 
+/* What holds the work in one checkout back, in one word beside its stage (t-45336). The seat's own health first,
+ * by the desk's table for it (`DESK_HEALTH`, `DESK_TASK_BLOCKERS`): the pane gone, a quota wall, a question
+ * waiting, a sleeper. Then the ledger's own reason the head is late on its way to main — the landing watch's word
+ * (`stalled`, newest first) — the newest that still fits where the work stands: a late review only while it waits
+ * for one, a late landing only while it waits to land. The landing chip already says a clash with main and 정리
+ * 가능, so neither is said twice here; nothing is said while nothing holds the work. */
+const WORKTREE_STALL_WORDS = Object.freeze({
+  no_review: { key: "worktree.stall.noReview", word: "검증 늦음", stages: ["handedIn", "reviewing"] },
+  no_merge: { key: "worktree.stall.noMerge", word: "착지 늦음", stages: ["landWait"] },
+  merged_unrecorded: { key: "worktree.stall.mergedUnrecorded", word: "병합 기록 없음", stages: ["handedIn", "reviewing", "landWait"] },
+  ledger_merged_git_not: { key: "worktree.stall.gitNot", word: "main에 없음", stages: ["landed"] },
+});
+
+function worktreeBlockerWord(path) {
+  const seats = worktreeSeatFacts(path);
+  const now = Date.now();
+  for (const facts of seats) {
+    const health = deskWorkerHealth(facts, null, now);
+    if (health && DESK_TASK_BLOCKERS.includes(health.id)) return t(health.key, health.word);
+  }
+  const stage = worktreeStageOf(path);
+  for (const facts of seats) {
+    for (const reason of facts.stalled ?? []) {
+      const said = WORKTREE_STALL_WORDS[reason];
+      if (said?.stages.includes(stage)) return t(said.key, said.word);
+    }
+  }
+  return "";
+}
+
 /* What the work in one checkout says on its row, as one string — the repaint compares it (t-44016). The empty
- * coordinator seat said on the line is part of it (t-45938). */
+ * coordinator seat said on the line is part of it (t-45938), and so is what holds the work back (t-45336). */
 function worktreeWorkSaid(path) {
   const vacant = coordinatorVacancyAt(path);
-  return [worktreeWorkFacts(path)?.taskId ?? "", landingStageWord(worktreeStageOf(path)), worktreeWorkerWords(path),
-    vacant.map((seat) => seat.run).join(",")].join("|");
+  return [worktreeWorkFacts(path)?.taskId ?? "", landingStageWord(worktreeStageOf(path)), worktreeBlockerWord(path),
+    worktreeWorkerWords(path), vacant.map((seat) => seat.run).join(",")].join("|");
 }
 
 /* The terminals standing in one checkout: its tabs' panes, and the agents parked off the stage there. */
@@ -11898,7 +12002,13 @@ listen("hook:agent", (event) => {
   const clearedRestoreBirth = restoredWorkers.delete(term);
   // The model rides raw per event; the stickiness lives here (1-fv). An
   // event without one is an event about something else, not a forgetting.
-  if (event.payload.model) paneModels.set(term, event.payload.model);
+  // Whether it moved is read first: the row and the board wear it, and a
+  // move with no change of state repaints them below (t-46882).
+  const modelMoved = Boolean(event.payload.model) && paneModels.get(term) !== event.payload.model;
+  if (event.payload.model) {
+    paneModels.set(term, event.payload.model);
+    paintStatusModel();
+  }
   if (event.payload.permission_mode) panePermissionModes.set(term, event.payload.permission_mode);
   // The row's word ladder eats both of these (Orca's entry.prompt /
   // entry.lastAssistantMessage) — sticky for the same reason as the model.
@@ -11977,15 +12087,16 @@ listen("hook:agent", (event) => {
   if (owner && owner.id === activeTabId) acknowledgedPanes.set(`term:${term}`, heard);
   if (hookStates.get(term) === state) {
     // The state did not move but the card's lines may have — a second prompt
-    // inside one working stretch, or a turn ending with new words. The open
-    // board and the sidebar's rows both speak those lines now; the tab strip
-    // draws states, not sentences.
+    // inside one working stretch, a turn ending with new words, or a pane at
+    // rest moved to another model (`/model`, t-46882). The open board and the
+    // sidebar's rows both speak those lines now; the tab strip draws states,
+    // not sentences.
     if (confirmsSnapshot) {
       // The retained copy repaired the state before this matching push
       // arrived. Consume that origin once so all state-change consumers hear
       // the real push; later repeated tool events remain on the quiet path.
       scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
-    } else if (clearedRestoreBirth || event.payload.prompt || event.payload.said) {
+    } else if (clearedRestoreBirth || event.payload.prompt || event.payload.said || modelMoved) {
       scheduleAgentPaint(["cards", "board"]);
     }
     // The state stood still, but the model or the mode may have moved.
@@ -12255,18 +12366,25 @@ function sayWithheldPrompt(term, why, pasted, text) {
  * error anywhere else to explain why — the exact silence the backend emits
  * this event to break. */
 listen("term:prompt", (event) => {
-  const { term, delivered, pasted, why, text } = event.payload;
+  const { term, delivered, pasted, why, text, theirs } = event.payload;
   // A prompt that landed had the line to itself, so whatever was withheld
   // there before is over: the next refusal is news.
   if (delivered) {
     withheldNotices.delete(term);
     return;
   }
+  // Whose words they were (t-52566). The window's own — the mail pointer's
+  // advice, a restored worker's continuation, a briefing — are the road that
+  // sent them to answer for: none of them reaches the person's clipboard,
+  // and neither their park nor their timeout is the person's to hear about.
+  // The mail pointer's line that ran out of time at a restored zo worker
+  // came here as an error, with the advice copied over their clipboard.
+  const own = theirs !== false;
   // Parked, not lost (t-47952): the agent there is still in its turn, and
   // the words go in when the turn ends. A report, not a failure — they are
   // still on their way, so nothing reaches the clipboard.
   if (why === TERM_PROMPT_PARKED) {
-    toast(t("term.promptParked", "터미널 {{term}}의 에이전트가 일하는 중이라 끝나면 보냅니다.", { term }));
+    if (own) toast(t("term.promptParked", "터미널 {{term}}의 에이전트가 일하는 중이라 끝나면 보냅니다.", { term }));
     return;
   }
   // A write the window WITHHELD is a different sentence from one that timed
@@ -12274,9 +12392,10 @@ listen("term:prompt", (event) => {
   // draft, a parked question, a hand that arrived while the words settled —
   // or the line refused it, and the event names which.
   if (typeof why === "string" && why.length > 0 && why !== TERM_PROMPT_NOT_READY) {
-    sayWithheldPrompt(term, why, pasted, text);
+    sayWithheldPrompt(term, why, pasted, own ? text : null);
     return;
   }
+  if (!own) return;
   // Words that did not land go to the clipboard, and the notice says so.
   const kept = typeof text === "string" && text.length > 0;
   if (kept) void clipboardText.write(text);
@@ -12545,7 +12664,7 @@ async function openHelperPage(row, sub) {
  * exit, and the new tab stands where the pane's tab stood (`at`) carrying the
  * turns already said (`history`), so the swap reads as the same conversation
  * changing renderer, not as a new page. */
-async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -1, history = [], label = null, refused = showError } = {}) {
+async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -1, history = [], label = null, carry = null, refused = showError } = {}) {
   let started;
   try {
     started = await invoke("wire_start", { agent, cwd, resume, from_pane: fromTerm });
@@ -12584,10 +12703,15 @@ async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -
     },
   };
   if (history.length) holdHelperTurns(worker.helper, history);
+  // What the conversation brings from the view it continues — the words that
+  // waited, the half-written draft, the row being read (t-54304).
+  carry?.(worker);
   openTab({ id: tabId, kind: "worker", worker });
   if (at >= 0) placeTabAt(tabId, at);
   helperClock.sync();
   paintViewToggle();
+  // The words that waited for the wire go down it now, a message a turn.
+  if (worker.queue?.length) settleComposerQueue(worker);
   return tabId;
 }
 
@@ -12646,29 +12770,59 @@ async function handPaneToWire(term) {
   if (held.handing) return true;
   if (isMidTurn(hookStates.get(term))) {
     held.pendingWire = true;
+    // The view stands already (t-54304): it says so now, not on its next paint.
+    paintPaneChat(term);
     return false;
   }
   held.pendingWire = false;
   held.handing = true;
+  // The transcript view says the wire is taking over, and holds what is sent
+  // meanwhile (`composerHolding`, t-54304).
+  paintPaneChat(term);
+  let tabId = null;
   try {
     const owner = tabOfTerm(term);
     const history = await readPaneTranscript(term);
-    const tabId = await openWirePage(row.id, owner?.worktree ?? activeWorktreePath, {
+    tabId = await openWirePage(row.id, owner?.worktree ?? activeWorktreePath, {
       resume: session,
       fromTerm: term,
       at: owner ? tabs.indexOf(owner) : -1,
       history,
       label: owner ? tabLabel(owner) : null,
+      carry: (run) => carryPaneChat(held, run),
       // The refusal stays on the page (`paintPaneChat`), not only in a toast
       // — the backend logs it too (`refusal_line`), so the log and the page
       // give the same reason.
       refused: (reason) => { held.wireRefusal = String(reason?.message ?? reason); },
     });
-    if (tabId === null) paintPaneChat(term);
+    // The conversation lives on the wire's tab now: the pane's own view steps
+    // down, as it never stood when the hand-over came first.
+    if (tabId !== null) held.on = false;
     return tabId !== null;
   } finally {
     held.handing = false;
+    // A wire that never stood leaves the pane its conversation: the view says
+    // why, and what waited goes the pane's own way, once (t-54304).
+    if (tabId === null) {
+      paintPaneChat(term);
+      settleComposerQueue(held.run);
+    }
   }
+}
+
+/* What a pane's transcript view hands the wire's page that continues its
+ * conversation (t-54304): the words that waited for the hand-over, in their
+ * order, and the half-written draft — taken off the pane's run, so nothing
+ * sent is lost and nothing goes twice — and the row being read, found among
+ * the wire's own turns. */
+function carryPaneChat(held, run) {
+  const from = held.run;
+  if (from.queue?.length) run.queue = from.queue.splice(0);
+  if (from.draft) {
+    run.draft = from.draft;
+    from.draft = "";
+  }
+  run.chatPlace = chatPlaceAcross(held.host?.__helperPage?.turns ?? null, run);
 }
 
 /* The other way: the wire tab's 「화면」. The CLI's own screen resumes the
@@ -12948,19 +13102,22 @@ async function setPaneChat(term, on, { wire = true } = {}) {
     return;
   }
   if (!on) held.wireRefusal = null;
-  // A pane whose agent can be driven on a wire is handed over to it: the
-  // conversation view IS the wire then, streaming. Otherwise — or until the
-  // turn ends, or when the caller only wants to read (`wire: false`: the
-  // pane's CLI is left running as it is) — the transcript view stands.
-  if (on && wire && await handPaneToWire(term)) return;
   held.on = on;
   held.arriving = on ? "chat" : "term";
   updateStage();
   paintViewToggle();
   helperClock.sync();
-  // The first turns now, not on the poll's next beat: the page a person just
-  // asked for should not stand empty for a second.
-  if (on) void pollHelperPages();
+  if (!on) return;
+  // The transcript view stands now, its first turns read at once rather than
+  // on the poll's next beat. A pane whose agent can be driven on a wire is
+  // handed to it behind the view — the conversation IS the wire then,
+  // streaming — unless the caller only wants to read (`wire: false`: the
+  // pane's CLI is left running as it is). Until 10-14 the view waited for the
+  // hand-over: the whole transcript read and the wire's CLI past its
+  // handshake before anything changed on screen (t-54304; Codex, Claude's Code
+  // tab and Dots all draw what they hold first and connect behind it).
+  void pollHelperPages();
+  if (wire) void handPaneToWire(term);
 }
 
 function forgetPaneChat(term) {
@@ -13128,6 +13285,23 @@ function paintPaneChat(term) {
     typeof held.wireRefusal === "string" && held.wireRefusal !== "",
     t("worker.wireRefused", "실시간 세션(선)으로 넘기지 못했습니다: {{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에). 「대화」를 다시 누르면 다시 시도합니다.", { reason: held.wireRefusal ?? "" }),
   );
+  // The wire takes the conversation over behind this view; what is sent
+  // meanwhile waits for it (t-54304).
+  noticeOnPaneChat(
+    held,
+    "worker.handingOver",
+    held.handing === true,
+    t("worker.handingOver", "실시간 세션(선)으로 잇는 중입니다 — 그동안 보낸 글은 이어진 뒤에 갑니다."),
+  );
+  // The first read is out. Said only once it is late: the stylesheet holds the
+  // line hidden for `--chat-late-ms`, so a read that comes sooner is never seen
+  // (t-54304).
+  sayLate(noticeOnPaneChat(
+    held,
+    "worker.readingTranscript",
+    run.helper.found === null,
+    t("worker.readingTranscript", "대화를 읽는 중…"),
+  ));
   noticeOnPaneChat(
     held,
     "worker.historyFolded",
@@ -13144,13 +13318,13 @@ function noticeOnPaneChat(held, key, wanted, words) {
   const shown = held.host.querySelector(`.pane-chat-notice[data-says="${key}"]`);
   if (!wanted) {
     shown?.remove();
-    return;
+    return null;
   }
   if (shown) {
     // The same line with new words (a refusal's reason): the words change,
     // the line stays.
     writeTextContent(shown, words);
-    return;
+    return shown;
   }
   const said = document.createElement("p");
   said.className = "pane-chat-notice";
@@ -13160,6 +13334,16 @@ function noticeOnPaneChat(held, key, wanted, words) {
   // (t-22100), where a line of its own would become a grid cell and fall into
   // the rail's narrow column.
   held.host.querySelector(":scope > .helper-body")?.before(said);
+  return said;
+}
+
+/* A notice said only once it is late: it stands hidden (shell.css) until
+ * `--chat-late-ms` — the token the stylesheet and its gate read — has passed
+ * since it first stood (t-54304). Once a line. */
+function sayLate(notice) {
+  if (!notice || notice.__late !== undefined) return;
+  const wait = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--chat-late-ms"));
+  notice.__late = setTimeout(() => notice.classList.add("is-late"), Number.isFinite(wait) ? wait : 0);
 }
 
 /* The question the pane's program is asking, as the extension's card in the
@@ -13277,6 +13461,9 @@ async function pollHelperPages() {
     }
     return;
   }
+  // The first answer for a page that was waiting on it (`found: null`):
+  // painted even with no turn in it — its page says it is reading until then.
+  const firstAnswer = held.found === null;
   held.found = true;
   // Only a helper's own file has a sidecar to say what it is.
   const aboutMoved = held.id !== PANE_LOG_ID && held.id !== WIRE_LOG_ID && holdHelperAbout(held, more.about);
@@ -13295,6 +13482,7 @@ async function pollHelperPages() {
   if (held.id === PANE_LOG_ID && more.model && tab.worker.term !== undefined && !paneModels.get(tab.worker.term)) {
     paneModels.set(tab.worker.term, more.model);
     if (activeHelperPage() === tab) paintHelperSurface(tab);
+    paintStatusModel();
   }
   const replaced = after !== null && more.next < after;
   if (replaced) {
@@ -13322,7 +13510,7 @@ async function pollHelperPages() {
   // A pane's page shows its hooks as well as its file (`paneChatKey`): a read
   // that brought no new line repaints once when a hook moved since the paint.
   const hooksMoved = held.id === PANE_LOG_ID && held.hookKey !== paneChatKey(tab.worker.term);
-  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved && !aboutMoved) return;
+  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved && !aboutMoved && !firstAnswer) return;
   if (wireMoved.state) syncWorkerComposers(tab.worker);
   if (wireMoved.state) settleComposerQueue(tab.worker);
   // 컨텍스트가 움직였다 — 미터만 갈아입는다(턴은 그대로일 수 있다).
@@ -14768,7 +14956,10 @@ function workerComposerNode(run, owner = null) {
       // 조립된 그대로가 대기열에 든다(`settleComposerQueue`). 여기서
       // `sendUncertain`을 다시 보지 않는 것은 이 핸들러의 첫 줄이 이미
       // 그 상태를 돌려보냈기 때문이다.
-      if (composerWorking(run)) queueComposerMessage(run, message);
+      // So do words sent while the pane hands its conversation to its wire:
+      // the wire's page sends them (`carryPaneChat`), or the pane, refused
+      // (t-54304).
+      if (composerWorking(run) || composerHolding(run)) queueComposerMessage(run, message);
       // 아니면 그 자리에서 실행의 길로 — 선이면 한 요청, 판이면
       // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
       // 상자에 있다는 사실을 남긴다.
@@ -15618,11 +15809,7 @@ function syncHelperPageStop(actions, run) {
   const busy = held !== null && held.__stop.phase !== "idle";
   const wanted = busy || (run.status === "running" && Boolean(agentVoice(run.agent).helper_stop));
   if (!wanted) {
-    if (held) {
-      clearTimeout(held.__stop.timer);
-      held.remove();
-      actions.querySelector(".helper-foot-told")?.remove();
-    }
+    if (held) dropHelperPageStop(held);
     return;
   }
   if (held) {
@@ -15640,6 +15827,20 @@ function syncHelperPageStop(actions, run) {
   told.setAttribute("role", "status");
   actions.append(stop, told);
   paintHelperPageStop(stop);
+}
+
+/* The stop let go: its beat's timer, its read-out and the button. */
+function dropHelperPageStop(stop) {
+  clearTimeout(stop.__stop.timer);
+  stop.parentElement?.querySelector(".helper-foot-told")?.remove();
+  stop.remove();
+}
+
+/* A page set aside (`parkChatPage`, t-54304) lets its stop go as a page that
+ * is left does: an answer still out is dropped with the button it was for,
+ * and the page that comes back stands a new one (`syncHelperPageStop`). */
+function leaveHelperPageStop(host) {
+  for (const stop of host.querySelectorAll(".helper-foot-stop")) dropHelperPageStop(stop);
 }
 
 function paintHelperPageStop(stop) {
@@ -15803,6 +16004,10 @@ function paintHelperPageOwn(host, tab, run, owner) {
 function paintHelperPage(host, tab) {
   const run = tab.worker;
   const owner = tabOfTerm(run.term);
+  // Another conversation's page leaves this host kept aside, and this one's,
+  // kept when it left, comes back as it stood (t-54304).
+  parkChatPage(host, tab);
+  unparkChatPage(host, tab);
   const held = host.__helperPage;
   // The accent the page wears is the agent's (`--chat-accent` reads it).
   writeAttribute(host, "data-agent", run.agent ?? "");
@@ -15843,9 +16048,11 @@ function paintHelperPage(host, tab) {
   // extension's dock (`inputContainer`), the question card inside it, and
   // the conversation's state over the composer (t-22100).
   let stack = null;
+  let dock = null;
   if (owner || run.wire) {
     stack = chatStackNode(run);
-    host.appendChild(chatDockNode(host, workerComposerNode(run, owner), stack));
+    dock = chatDockNode(host, workerComposerNode(run, owner), stack);
+    host.appendChild(dock);
     paintChatStack(stack, run);
   } else {
     host.insertBefore(workerWhereNode(run, null), body);
@@ -15855,7 +16062,7 @@ function paintHelperPage(host, tab) {
   // 사람이 위에 두고 간 페이지는 그 행에서 연다(t-6824).
   standChatPlace(turns);
   askTurnRail(turns);
-  host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status, run, stack };
+  host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status, run, stack, dock };
   // A plain Esc on the page interrupts its turn (t-6323 A3).
   interruptOnEscape(host);
 }
@@ -15879,21 +16086,29 @@ function chatBodyNode(turns) {
  * heap behind, every time. A frame the page asked for (the rail's) would hold
  * it until the frame came, so it is let go here too. */
 function releaseWorkerPage(tab) {
+  // A page kept aside for this tab goes with it, from whichever leaf kept it
+  // (t-54304).
+  for (const group of groups.values()) dropParkedPage(group.workerView, tab.id);
   const host = groups.get(tab.pane)?.workerView;
   const held = host?.__helperPage;
   if (!held || held.id !== tab.id) return;
-  // The rail's frame and its scroll's pace, if either was asked for (t-22100).
-  if (held.turns.__rail?.__frame) cancelAnimationFrame(held.turns.__rail.__frame);
-  clearTimeout(held.turns.__rail?.__scrolled);
-  held.turns.__shelf?.disconnect();
-  held.turns.__imageWatch?.disconnect();
-  held.turns.__footWatch?.disconnect();
+  forgetChatList(held.turns);
   host.__dockWatch?.disconnect();
   host.__dockWatch = null;
   host.__helperPage = null;
   host.classList.remove("is-chat-page", "is-helper-page");
   delete host.dataset.keyboardOwner;
   host.replaceChildren();
+}
+
+/* What a conversation's list holds onto beyond itself — its rail's frame and
+ * pace (t-22100), its watchers — let go when its page leaves for good. */
+function forgetChatList(list) {
+  if (list.__rail?.__frame) cancelAnimationFrame(list.__rail.__frame);
+  clearTimeout(list.__rail?.__scrolled);
+  list.__shelf?.disconnect();
+  list.__imageWatch?.disconnect();
+  list.__footWatch?.disconnect();
 }
 
 /* The extension's dock at the foot of the conversation (`inputContainer`):
@@ -15907,26 +16122,31 @@ function chatDockNode(host, composer, stack = null) {
   dock.className = "chat-dock";
   if (stack) dock.appendChild(stack);
   dock.appendChild(composer);
-  if (typeof ResizeObserver === "function") {
-    const watch = new ResizeObserver(() => {
-      // The list's foot moves with the dock (the dock's height is the list's
-      // padding): a list at its foot stays there, as the extension's follows
-      // its input's height (t-6323 A5). The height is written on the two
-      // that read it and no further — it is not inherited (shell.css): written
-      // on the page, every row restyled at the key that wrapped a draft
-      // (t-22095).
-      const list = host.__helperPage?.turns ?? null;
-      const follow = chatFollows(list);
-      const height = `${dock.offsetHeight}px`;
-      for (const reader of host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door)")) {
-        reader.style.setProperty("--chat-dock-h", height);
-      }
-      if (follow) carryToFoot(list);
-    });
-    watch.observe(dock);
-    host.__dockWatch = watch;
-  }
+  host.__dockWatch = watchChatDock(host, dock);
   return dock;
+}
+
+/* The dock's height, watched: it rides the list as room under its words. Asked
+ * when the dock is built and again when a kept page comes back (t-54304). */
+function watchChatDock(host, dock) {
+  if (typeof ResizeObserver !== "function") return null;
+  const watch = new ResizeObserver(() => {
+    // The list's foot moves with the dock (the dock's height is the list's
+    // padding): a list at its foot stays there, as the extension's follows
+    // its input's height (t-6323 A5). The height is written on the two
+    // that read it and no further — it is not inherited (shell.css): written
+    // on the page, every row restyled at the key that wrapped a draft
+    // (t-22095).
+    const list = host.__helperPage?.turns ?? null;
+    const follow = chatFollows(list);
+    const height = `${dock.offsetHeight}px`;
+    for (const reader of host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door)")) {
+      reader.style.setProperty("--chat-dock-h", height);
+    }
+    if (follow) carryToFoot(list);
+  });
+  watch.observe(dock);
+  return watch;
 }
 
 function paintWorkerView(tab) {
@@ -15943,7 +16163,8 @@ function paintWorkerView(tab) {
   }
   // 앞 그림이 이 호스트에 걸어 둔 것을 먼저 놓아 준다 — 노드가 사라지는 줄이
   // 바로 다음 줄이다. 헬퍼의 뼈대도 같은 순간에 놓인다: 이 호스트는 이제
-  // 다른 페이지의 것이다.
+  // 다른 페이지의 것이다. 대화였다면 다시 볼 때를 위해 떼어 둔다(t-54304).
+  parkChatPage(host, tab);
   keepChatPlace(host.__helperPage?.turns);
   dropWorkerScreen(tab.pane);
   host.__helperPage = null;
@@ -16575,7 +16796,7 @@ function reseatWorkerByAnswer(term, parent, worktree, agent, room) {
 }
 
 listen("term:worker", (event) => {
-  const { parent, term, worktree, agent, resumed, helper, seat } = event.payload ?? {};
+  const { parent, term, worktree, agent, resumed, helper, seat, model } = event.payload ?? {};
   if (
     typeof parent !== "number" ||
     typeof term !== "number" ||
@@ -16591,6 +16812,9 @@ listen("term:worker", (event) => {
   if (typeof helper === "string" && helper.length > 0) paneHelpers.set(term, helper);
   restoringWorkers.delete(worktree);
   if (agent) paneAgents.set(term, agent);
+  // The model a restoration's launch named (t-46882): the pane runs it before
+  // its agent says so, and its transcript still names the one it ran before.
+  if (typeof model === "string" && model.length > 0) paneModels.set(term, model);
   if (resumed === "session" || resumed === "fresh") restoredWorkers.set(term, resumed);
   // Seat first. The card may not exist yet, but the tab is the authoritative
   // term→worktree edge that `paintWorktreeAgents` reads when the refresh
@@ -16638,17 +16862,26 @@ listen("worktree:landing", () => {
  * that carries the deletions. Those go to the window log with their reason,
  * beside the refusals the existing automatic cleanup already writes there. */
 listen("worktree:reclaimed", (event) => {
-  const { name, branch, base } = event.payload ?? {};
+  const { name, branch, base, beside } = event.payload ?? {};
   // The list refresh is not repeated here: the backend emits
   // `worktree:removed` for the same reclaim, and that listener already owns
   // it. This one carries the sentence and nothing else.
   if (typeof name !== "string" || name === "") return;
+  // A checkout a worker cut beside its own goes because its task was handed in
+  // (t-45336): its sentence names the task, and the head that holds its commits.
+  const handedIn = typeof beside === "string" && beside !== "";
   toast(
-    t(
-      "worktree.reclaimed",
-      "워커가 끝나 워크스페이스 {{name}}을(를) 회수했습니다 — {{branch}}의 커밋은 모두 {{base}}에 있고 저장되지 않은 변경은 없었습니다. 브랜치는 그대로 남아 있습니다.",
-      { name, branch: branch ?? "", base: base ?? "" },
-    ),
+    handedIn
+      ? t(
+        "worktree.reclaimedBeside",
+        "{{task}}이(가) 넘겨져 워커 체크아웃 곁의 {{name}}을(를) 회수했습니다 — {{branch}}의 커밋은 모두 넘긴 머리({{base}})에 있고 저장되지 않은 변경은 없었습니다.",
+        { task: beside, name, branch: branch ?? "", base: base ?? "" },
+      )
+      : t(
+        "worktree.reclaimed",
+        "워커가 끝나 워크스페이스 {{name}}을(를) 회수했습니다 — {{branch}}의 커밋은 모두 {{base}}에 있고 저장되지 않은 변경은 없었습니다. 브랜치는 그대로 남아 있습니다.",
+        { name, branch: branch ?? "", base: base ?? "" },
+      ),
     "done",
   );
 });
@@ -18802,6 +19035,9 @@ async function boot() {
   // The plan segment and the agent registry, off the critical path: the
   // last snapshot paints at once and the scan renews it behind the bar.
   refreshAgents();
+  // And which releases the catalog superseded (t-46882), as the backend's
+  // last lineup read says: once — every later read says it on its own.
+  void invoke("superseded_models").then(adoptSupersededModels).catch(() => {});
   refreshBrowserProfiles();
   refreshClaudeUsage(false);
   refreshCodexUsage(false);

@@ -163,9 +163,10 @@ pub fn build_design_guidance_reminder(has_frontend_design_skill: bool) -> String
     )
 }
 
-/// Past-reference cues that arm the recall hint. Literal substrings only (no LLM
-/// detection): the English set is matched against the lowercased input, the
-/// Korean set against the original (Hangul is unchanged by `to_lowercase`). Kept
+/// Past-reference cues that arm the recall hint. Literal phrases only (no LLM
+/// detection): the English set is matched as whole words against the lowercased
+/// input, the Korean set anywhere in the original (Hangul is unchanged by
+/// `to_lowercase`, and particles attach to the cue: 그때는, 아까부터). Kept
 /// deliberately narrow — phrases that point at a PRIOR exchange rather than the
 /// current turn — so an ordinary request never trips the hint. Precedent:
 /// `auto_fanout::build_route_hint`'s keyword tables.
@@ -194,17 +195,29 @@ const PAST_REFERENCE_CUES_KO: &[&str] = &[
 ];
 
 /// Whether `user_input` refers back to a prior conversation, by a literal-cue
-/// scan (no LLM). English cues match the lowercased text; Korean cues match the
-/// original, since `to_lowercase` leaves Hangul unchanged. Any hit arms the
-/// recall hint. Mirrors `auto_fanout::contains_any`.
+/// scan (no LLM). English cues match the lowercased text as whole words: a cue
+/// inside a longer word refers to nothing ("feedback when" holds "back when",
+/// and zo's own system prompt says it). Korean cues match the original, since
+/// `to_lowercase` leaves Hangul unchanged. Any hit arms the recall hint.
 fn input_refers_to_past_conversation(user_input: &str) -> bool {
     let lower = user_input.to_lowercase();
     PAST_REFERENCE_CUES_EN
         .iter()
-        .any(|cue| lower.contains(cue))
+        .any(|cue| contains_whole_words(&lower, cue))
         || PAST_REFERENCE_CUES_KO
             .iter()
             .any(|cue| user_input.contains(cue))
+}
+
+/// Whether `phrase` occurs in `text` as words of its own — one plural `s` may
+/// follow it ("previous sessions") — with no letter or digit joined to either end.
+fn contains_whole_words(text: &str, phrase: &str) -> bool {
+    text.match_indices(phrase).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let rest = &text[at + phrase.len()..];
+        let after = rest.strip_prefix('s').unwrap_or(rest).chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 
@@ -636,6 +649,40 @@ where
             GOAL_CLARIFY_REMINDER_PREFIX,
             Some(&reminder),
         );
+    }
+}
+
+#[cfg(test)]
+mod past_reference_tests {
+    use super::input_refers_to_past_conversation;
+
+    #[test]
+    fn a_cue_inside_a_longer_word_is_not_a_past_reference() {
+        // The first line is zo's own `# System` section: a ledger task that
+        // carried the launching session's prompt armed the recall hint for the
+        // worker's whole turn through "feedback when".
+        for input in [
+            "Users may configure hooks that behave like user feedback when they block or redirect a tool call.",
+            "use the fallback when the key is missing",
+            "fire the callback when the stream ends",
+        ] {
+            assert!(!input_refers_to_past_conversation(input), "{input:?}");
+        }
+        for input in [
+            "Back when we set this up, which port did we pick?",
+            "as you said earlier, keep it short",
+            "(earlier) the parser failed",
+            "저번에 얘기했던 그 버그 다시 보자",
+        ] {
+            assert!(input_refers_to_past_conversation(input), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn a_plural_cue_still_reads_as_a_past_reference() {
+        for input in ["what did we settle in previous sessions", "the last sessions went fine", "the last times it broke"] {
+            assert!(input_refers_to_past_conversation(input), "{input:?}");
+        }
     }
 }
 

@@ -41,7 +41,7 @@ pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// The budget of one git call. The same as the evidence road's, so no git the window asks is
 /// allowed to outlive the others.
-const GIT_BUDGET: Duration = Duration::from_secs(8);
+pub(crate) const GIT_BUDGET: Duration = Duration::from_secs(8);
 
 /// How long a check the window is running may hold its folder: the git calls, the check's limit
 /// and slack for the rest. A row past this is somebody's crash, not somebody's check.
@@ -54,7 +54,7 @@ const PREPARED_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 const LOG_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// How many clashing file names a letter names; the total is always the true count.
-const CONFLICT_NAMES: usize = 20;
+pub(crate) const CONFLICT_NAMES: usize = 20;
 
 /// The extension of the script a check's command is written to beside its log, where the shell
 /// takes a file (cmd); it goes when the check ends.

@@ -242,6 +242,16 @@ pub const HTTP_VERSION: LedgerKey = LedgerKey {
     also: &[],
 };
 
+/// The judgment client a request was put to, as its route's fingerprint
+/// (`judgment_provider::Provider::route_fingerprint`): read with the provider
+/// before anything left, so the row names the client that sent it whichever
+/// provider's folder it was filed in (t-53792). Absent on a row whose writer
+/// does not record it — every row written before, and zo's own.
+pub const CLIENT_ROUTE: LedgerKey = LedgerKey {
+    canonical: "clientRoute",
+    also: &[],
+};
+
 /// The model a step of a zo turn ran on, on the step governor's own rows —
 /// never the version that answered anything, which is [`MODEL`]'s alone.
 ///
@@ -339,6 +349,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     RUBRIC_VERSION,
     RUBRIC_VERSIONS,
     HTTP_VERSION,
+    CLIENT_ROUTE,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.

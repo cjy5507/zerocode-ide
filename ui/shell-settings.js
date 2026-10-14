@@ -25,9 +25,9 @@ const PANE_OF = {
   // The Jev dashboard's "in settings" and its consent chip land on the one
   // switch (§6.1), its key chip on the key field and its budget chip on the
   // key card's status (t-6243 D5).
-  "jev-enabled": "api-routers",
-  "typesafe-key-input": "api-routers",
-  "typesafe-status": "api-routers",
+  "jev-enabled": "judgment-models",
+  "typesafe-key-input": "judgment-models",
+  "typesafe-status": "judgment-models",
   // The field of the key a page's typing asks with now (t-9537) — drawn per
   // key, and this id is the one a walk reads (`paintTypeValueSlot`).
   "type-value-key-input": "computer-use",
@@ -1003,7 +1003,6 @@ function showSettingsPane(pane) {
   }
   if (pane === "api-routers" && arriving) {
     void refreshApiRouters();
-    if (judgmentProviderController.current()?.kind === "local" && judgmentProviderController.localMode === "managed") void managedJudgmentController.refresh();
   }
   if (pane === "onboarding" && arriving) {
     paintSettingsOnboarding();
@@ -1053,6 +1052,7 @@ function showSettingsPane(pane) {
     if (item.dataset.pane === pane) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
   }
+  if (pane === "judgment-models" && arriving && showing) void refreshTypeSafe();
 }
 
 settingsRailItems.forEach((item) => {
@@ -6680,6 +6680,8 @@ let typesafeInitialized = false;
  * somebody asks TypeSafe. `null` means nobody has asked since it was saved,
  * and the standing is read off the key itself. */
 let typesafeChecked = null;
+let typesafeRefreshing = null;
+let typesafeRefreshFailed = false;
 
 /* The switch's own paint and door live in shell-jev.js
  * (`paintJevSwitches`, `setJevEnabled`): one state and one command for this
@@ -6907,19 +6909,67 @@ function paintClassifierGate(state) {
 
 async function refreshTypeSafe() {
   initTypeSafeEvents();
-  try {
-    paintTypeSafe(await invoke("typesafe_settings"));
-  } catch (error) {
-    typesafeState = null;
-    typesafeChecked = null;
-    judgmentProviderController.paint({});
-    paintSettingsStanding(el("typesafe-key-state"), "failed");
-    paintTypeSafeStatus(typesafeRefusal(error), typesafeRefusalEvidence(error));
+  const settled = (pending) => new Promise((resolve) => {
+    const deadline = setTimeout(() => resolve({ error: "status_timeout" }), 10_000);
+    pending.then((value) => {
+      clearTimeout(deadline);
+      resolve({ value });
+    }, (error) => {
+      clearTimeout(deadline);
+      resolve({ error });
+    });
+  });
+  let request = typesafeRefreshing;
+  if (!request) {
+    request = {
+      previous: judgmentProviderController.state,
+      settings: settled(invoke("typesafe_settings")),
+      managed: null,
+      latest: null,
+      promise: null,
+    };
+    typesafeRefreshing = request;
+    request.promise = Promise.resolve().then(async () => {
+      const settings = await request.settings;
+      const managed = request.managed ? await request.managed : null;
+      const latest = request.latest ? await request.latest : null;
+      if (judgmentProviderController.state !== request.previous) return;
+      typesafeRefreshFailed = false;
+      if (managed) {
+        const snapshot = managed.value;
+        const held = managedJudgmentController.snapshot;
+        const superseded = held?.instanceId === snapshot?.instanceId && held?.revision > snapshot?.revision;
+        managedJudgmentController.statusError = Boolean(managed.error || (!superseded && !managedJudgmentController.accept(snapshot, true)));
+      }
+      if (settings.error || !settings.value || typeof settings.value !== "object" || Array.isArray(settings.value)) {
+        typesafeRefreshFailed = true;
+        typesafeState = null;
+        typesafeChecked = null;
+        judgmentProviderController.paint({});
+        paintSettingsStanding(el("typesafe-key-state"), "failed");
+        paintTypeSafeStatus(typesafeRefusal(settings.error), typesafeRefusalEvidence(settings.error));
+      } else {
+        paintTypeSafe(settings.value);
+      }
+      if (latest) judgmentProviderController.usageSnapshot = latest.value ?? null;
+      judgmentProviderController.renderStatus();
+      if (jevViewsShowing() || (!settingsView.hidden && settingsPane === "judgment-models" && typesafeState?.jev?.on)) void loadJevNumbers();
+    }).finally(() => {
+      if (typesafeRefreshing !== request) return;
+      typesafeRefreshing = null;
+      if (request.managed) managedJudgmentController.loading = false;
+      judgmentProviderController.controls();
+      if (managedJudgmentController.visible()) managedJudgmentController.render();
+    });
   }
-  // A dashboard on stage refreshes its numbers with its recent rows; the
-  // card's standing lines, while Jev is on, read the same numbers without
-  // them (t-11989).
-  if (jevViewsShowing() || typesafeState?.jev?.on) void loadJevNumbers();
+  if (managedJudgmentController.visible() && !request.managed) {
+    managedJudgmentController.init();
+    managedJudgmentController.loading = true;
+    request.managed = settled(invoke("managed_judgment_status"));
+    request.latest = settled(invoke("judgment_latest_request"));
+  }
+  judgmentProviderController.renderStatus();
+  return request.promise;
 }
 
 /* Where the card stands: what the last check answered if anything has been
@@ -6999,7 +7049,8 @@ async function saveTypeSafeKey() {
 }
 
 async function checkTypeSafeKey() {
-  if (typesafeBusy || judgmentProviderController.dirty()) return;
+  if (typesafeBusy) return;
+  if (judgmentProviderController.dirty()) return judgmentProviderController.checkDraft();
   const identity = typesafeState?.providerIdentity;
   typesafeBusy = true;
   if (typesafeState) paintTypeSafe(typesafeState);
@@ -9457,6 +9508,9 @@ function setSettingsOpen(on, focus = null) {
     // a branch changes what this section says without the window doing
     // anything.
     refreshProjectScripts();
+    // The integration queue's switch is the same project's (t-45315): one
+    // more read on the same open.
+    void refreshIntegrationQueue();
     // The branch prefix rides along with it: one section, one open, one pair
     // of reads.
     void refreshWorktreePrefs();
@@ -9482,8 +9536,12 @@ function setSettingsOpen(on, focus = null) {
   }
   settingsSection = on ? focus : null;
   settingsView.hidden = !on;
+  if (on && !wasOpen && settingsPane === "judgment-models") void refreshTypeSafe();
   if (on && focus) {
     const at = el(focus);
+    for (let details = at?.closest("details:not([open])"); details; details = details.parentElement?.closest("details:not([open])")) {
+      details.open = true;
+    }
     at?.scrollIntoView({ block: "center" });
     // A no-op on the sections that are not focusable, which is the honest
     // outcome: bring it into view and leave the caret where it was.

@@ -1845,7 +1845,8 @@ function worktreeListShape(held) {
         `W${worktree.path}|${worktree.branch ?? ""}|${worktree.base ?? ""}|${worktree.is_main ? 1 : 0}` +
           `|${landingShape(worktree.landing)}` +
           `|${worktree.is_folder ? 1 : 0}|${(held.get(worktree.path) ?? []).length}` +
-          `|${expandedWorktrees.has(worktree.path) ? 1 : 0}|${worktreeTaskTitle(worktree.path)}`,
+          `|${expandedWorktrees.has(worktree.path) ? 1 : 0}|${worktreeTaskTitle(worktree.path)}` +
+          `|${taskFoldsUnder.get(worktree.path)?.rows.length ?? 0}`,
       );
     }
   }
@@ -2399,6 +2400,14 @@ function workspaceActivityRank(path) {
 /* Which checkouts an automation cut, by path. The run ledger IS the
  * provenance — there is no second store to keep in step with it. */
 const automationBornPaths = new Set();
+
+/* A task's checkouts folded under one row (t-45336, `foldTaskCheckouts`): the
+ * paths folded away, the row each fold stands under with what it holds, and the
+ * folds the person opened. Declared with the chain's other state, ahead of
+ * every road that reads the list. */
+let taskFoldedPaths = new Set();
+let taskFoldsUnder = new Map();
+const openedTaskFolds = new Set();
 
 /* Where each worktree's session rows are hung, by path. Rebuilt with the
  * list, so it never outlives the nodes it points at. */
@@ -3812,15 +3821,25 @@ function landingShape(landing) {
   if (!landing) return "";
   return `${landing.state}.${landing.ahead}.${landing.dirty ? 1 : 0}.${landing.ignored ? 1 : 0}` +
     `.${landing.detached ? 1 : 0}.${landing.compare_ref ?? ""}.${landing.landed_in?.sha ?? ""}` +
-    // How far behind and what a merge would clash on move the chip and its tooltip, so they move the row.
+    // How far behind, what a merge would clash on and what the unsaved files share with the compare ref
+    // move the chip and its tooltip, so they move the row.
     `.${landing.behind ?? ""}.${landing.far_behind ? 1 : 0}.${landing.conflict ? landing.conflict.total : ""}` +
-    `.${(landing.conflict?.files ?? []).join(",")}`;
+    `.${(landing.conflict?.files ?? []).join(",")}` +
+    `.${landing.overlap ? landing.overlap.total : ""}.${(landing.overlap?.files ?? []).join(",")}`;
 }
 
 /* The compare ref without its remote: `origin/main` is 「main」 on a chip that has a few
  * letters to spare. The tooltip keeps the whole name. */
 function landingRefName(ref) {
   return ref.replace(/^[^/]+\//, "");
+}
+
+/* How far behind the compare ref a checkout runs, in one line: an unlanded row's drift and any other
+ * row's unsaved work say it in the same words. */
+function landingBehindLine(behind, ref) {
+  return behind > 0
+    ? t("worktree.landTipBehind", "{{ref}}보다 {{count}}커밋 뒤처져 있습니다", { ref, count: behind })
+    : t("worktree.landTipBehindNone", "{{ref}}의 최신 커밋을 모두 담고 있습니다 (뒤처지지 않음)", { ref });
 }
 
 /* What the tooltip of an unlanded row says about drift (t-34501): how many commits the branch
@@ -3830,11 +3849,7 @@ function landingRefName(ref) {
 function worktreeDriftLines(landing, ref) {
   const lines = [];
   const behind = Number.isFinite(landing.behind) ? landing.behind : null;
-  if (behind !== null) {
-    lines.push(behind > 0
-      ? t("worktree.landTipBehind", "{{ref}}보다 {{count}}커밋 뒤처져 있습니다", { ref, count: behind })
-      : t("worktree.landTipBehindNone", "{{ref}}의 최신 커밋을 모두 담고 있습니다 (뒤처지지 않음)", { ref }));
-  }
+  if (behind !== null) lines.push(landingBehindLine(behind, ref));
   const clash = landing.conflict ?? null;
   if (clash === null) {
     lines.push(t("worktree.landTipConflictUnknown", "{{ref}}에 합치면 충돌하는지는 읽지 못했습니다", { ref }));
@@ -3850,6 +3865,30 @@ function worktreeDriftLines(landing, ref) {
   }
   if ((behind !== null && behind > 0) || (clash !== null && clash.total > 0)) {
     lines.push(t("worktree.landTipNext", "다음 할 일: git fetch 뒤 {{ref}}에 있는 것을 이 브랜치에 합치고, 이미 돈 게이트를 다시 돌리세요", { ref }));
+  }
+  return lines;
+}
+
+/* What the tooltip of a row with unsaved changes says against the compare ref (t-45314): how far behind
+ * it runs — an unlanded row says so among its drift already — and which of the unsaved files the compare
+ * ref changed too since the two split. That is a fact by file, not a merge tried, so it is never called a
+ * conflict; one nobody read (`overlap` absent) is said as not read — never as none. A row with no compare
+ * ref has nothing to say it against. */
+function worktreeUnsavedLines(landing, ref) {
+  if (!ref || landing.state === "no_ref") return [];
+  const lines = [];
+  if (landing.state !== "unlanded" && Number.isFinite(landing.behind)) lines.push(landingBehindLine(landing.behind, ref));
+  const overlap = landing.overlap ?? null;
+  if (overlap === null) {
+    lines.push(t("worktree.landTipOverlapUnknown", "저장 안 한 변경이 {{ref}}에서 바뀐 파일과 겹치는지는 읽지 못했습니다", { ref }));
+  } else if (overlap.total === 0) {
+    lines.push(t("worktree.landTipOverlapNone", "저장 안 한 변경 가운데 갈라진 뒤 {{ref}}에서도 바뀐 파일은 없습니다", { ref }));
+  } else {
+    const left = overlap.total - overlap.files.length;
+    lines.push(t("worktree.landTipOverlap", "저장 안 한 변경 가운데 {{count}}개 파일은 갈라진 뒤 {{ref}}에서도 바뀌었습니다: {{files}}", {
+      ref, count: overlap.total, files: overlap.files.join(", "),
+    }) + (left > 0 ? t("worktree.landTipOverlapMore", " 외 {{count}}개", { count: left }) : ""));
+    lines.push(t("worktree.landTipOverlapScope", "파일 단위 겹침입니다 — 같은 줄을 고쳤는지는 보지 않습니다"));
   }
   return lines;
 }
@@ -3950,6 +3989,12 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   }
   head ??= word;
   if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
+  // What the compare ref changed too among the unsaved files (t-45314), right after them: it is said of the
+  // unsaved work and by file, so it wears neither the conflict's word nor its colour.
+  const overlapping = landing.dirty && !check ? landing.overlap?.total ?? 0 : 0;
+  if (overlapping > 0) {
+    word += ` · ${t("worktree.landOverlap", "{{ref}}과 겹침 {{count}}", { ref: landingRefName(ref), count: overlapping })}`;
+  }
   // Said of work that is in the compare ref and of nothing else: the backend
   // asks only landed rows, and a row that is in doubt says nothing more.
   const holdsIgnored = gitIn && !check && landing.ignored === true;
@@ -3994,7 +4039,10 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
       })
       : t("worktree.landTipRefUnknown", "비교: {{ref}} · 마지막 갱신 시각을 알 수 없음", { ref }));
   }
-  if (landing.dirty) lines.push(t("worktree.landTipDirty", "추적 중인 파일에 커밋하지 않은 변경이 있습니다"));
+  if (landing.dirty) {
+    lines.push(t("worktree.landTipDirty", "추적 중인 파일에 커밋하지 않은 변경이 있습니다"));
+    lines.push(...worktreeUnsavedLines(landing, ref));
+  }
   if (holdsIgnored) {
     lines.push(t("worktree.landTipIgnored", "git이 무시하는 파일이 남아 있습니다 — 폴더를 지우면 함께 사라집니다. 크기와 폴더는 근거 보기에서 볼 수 있습니다"));
   }
@@ -4543,7 +4591,9 @@ function dressWorktreeWork(row, path) {
   };
   set(row.querySelector(".wt-task-id"), worktreeWorkFacts(path)?.taskId ?? "");
   set(row.querySelector(".wt-stage"), landingStageWord(worktreeStageOf(path)));
+  set(row.querySelector(".wt-blocker"), worktreeBlockerWord(path));
   set(row.querySelector(".wt-worker"), worktreeWorkerWords(path));
+  dressWorktreeFold(row.querySelector(".wt-fold"), path);
   // A run whose coordinator seat nobody holds, said once, on this line when it is that run's (t-45938).
   const vacant = coordinatorVacancyAt(path);
   const empty = row.querySelector(".wt-coordinator-vacant");
@@ -4804,6 +4854,23 @@ function makeWorktreeNode(worktree, held) {
   const stage = document.createElement("span");
   stage.className = "wt-stage";
   stage.hidden = true;
+  // What holds the work back, in one word beside its stage (t-45336).
+  const blocker = document.createElement("span");
+  blocker.className = "wt-blocker";
+  blocker.hidden = true;
+  // The checkouts of this row's task folded under it (t-45336): how many, and the way to open them.
+  const fold = document.createElement("button");
+  fold.className = "wt-fold";
+  fold.type = "button";
+  fold.hidden = true;
+  fold.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const key = fold.dataset.foldKey;
+    if (!key) return;
+    if (openedTaskFolds.has(key)) openedTaskFolds.delete(key);
+    else openedTaskFolds.add(key);
+    void refreshWorktrees();
+  });
   const worker = document.createElement("span");
   worker.className = "wt-worker";
   worker.hidden = true;
@@ -4812,8 +4879,9 @@ function makeWorktreeNode(worktree, held) {
   vacant.className = "wt-coordinator-vacant";
   vacant.hidden = true;
   branch.prepend(taskId);
-  branch.append(stage, worker, vacant);
+  branch.append(stage, blocker, worker, vacant);
   branch.appendChild(unseated);
+  branch.appendChild(fold);
   // A workspace can be carried straight from the rail into a board lane. If
   // the board was closed, the drag opens a preview sheet; a successful drop
   // makes it real, while a cancelled drag gives the stage back exactly as it
@@ -5078,7 +5146,85 @@ function shownWorktrees(project) {
     && !(hideAgentScratchWorkspaces && worktree.ownership === "agent-scratch")
     && !(sleepingPaths.has(worktree.path) && !worktree.active
       && !(keepDefaultBranchAwake && worktree.is_main))
-    && !(worktree.external_hidden && worktreeAgentRows(worktree.path).length === 0));
+    && !(worktree.external_hidden && worktreeAgentRows(worktree.path).length === 0)
+    && !(taskFoldedPaths.has(worktree.path) && !worktree.active && worktreeAgentRows(worktree.path).length === 0));
+}
+
+/* A task's checkouts, folded under one row (t-45336).
+ *
+ * A worker cuts checkouts beside its own for one task — a red to prove a test
+ * fails, a detached verify, a folder of evidence — and the person saw one task
+ * stand in the sidebar four times, each row saying 「미반영 N · 에이전트 창 없음」,
+ * and finished work pile up. The catalog names the task each checkout belongs
+ * to (`task_id`: the window's one reading of its checkout names, the same the
+ * reclaim beside a hand-in takes a checkout by). Per project, one row stands
+ * for a task and the others fold under it — the fifth axis of the one chain
+ * above — with a chip on that row saying how many, until the person opens
+ * them. A row never folds while the window stands in it or an agent runs in it:
+ * hiding the place hides the work. */
+function foldTaskCheckouts(catalog) {
+  const folded = new Set();
+  const under = new Map();
+  for (const project of catalog) {
+    const byTask = new Map();
+    for (const worktree of project.worktrees ?? []) {
+      if (!worktree.task_id) continue;
+      byTask.set(worktree.task_id, [...(byTask.get(worktree.task_id) ?? []), worktree]);
+    }
+    for (const [task, group] of byTask) {
+      if (group.length < 2) continue;
+      const lead = taskLeadRow(task, group);
+      const tucked = group.filter((worktree) => worktree !== lead && !worktree.active
+        && worktreeAgentRows(worktree.path).length === 0);
+      if (tucked.length === 0) continue;
+      const key = `${project.path}|${task}`;
+      under.set(lead.path, { key, rows: tucked });
+      if (openedTaskFolds.has(key)) continue;
+      for (const worktree of tucked) folded.add(worktree.path);
+    }
+  }
+  taskFoldedPaths = folded;
+  taskFoldsUnder = under;
+}
+
+/* The row that stands for a task: the checkout the ledger seated its work in —
+ * where the head was handed in from — else the one the window stands in, one
+ * with an agent running, then one on a branch (a worker's own checkout is; the
+ * ones it cuts beside are mostly detached), the one used last first. */
+function taskLeadRow(task, group) {
+  const recent = (one, other) => (other.last_activity_ms ?? 0) - (one.last_activity_ms ?? 0);
+  return group.find((worktree) => worktreeWorkFacts(worktree.path)?.taskId === task)
+    ?? group.find((worktree) => worktree.active)
+    ?? group.find((worktree) => worktreeAgentRows(worktree.path).length > 0)
+    ?? [...group].sort((one, other) => Number(Boolean(other.branch)) - Number(Boolean(one.branch))
+      || recent(one, other))[0];
+}
+
+/* The chip on a task's row that stands for its other checkouts (t-45336): how
+ * many are folded under it, their folders in the tooltip, and a press that
+ * opens them or folds them again. */
+function dressWorktreeFold(chip, path) {
+  if (!chip) return;
+  const held = taskFoldsUnder.get(path);
+  const opened = held ? openedTaskFolds.has(held.key) : false;
+  const count = held?.rows.length ?? 0;
+  let words = "";
+  let tip = "";
+  if (held && opened) {
+    words = t("worktree.taskFoldOpen", "접기");
+    tip = t("worktree.taskFoldOpenTip", "이 과업의 다른 체크아웃 {{count}}개를 다시 이 행 밑에 접습니다", { count });
+  } else if (held) {
+    words = t("worktree.taskFold", "+{{count}} 접힘", { count });
+    tip = t("worktree.taskFoldTip", "이 과업의 다른 체크아웃 {{count}}개({{names}})를 이 행 밑에 접었습니다 — 누르면 펼칩니다. 넘긴 머리에 담긴 것은 창이 거둡니다.", {
+      count,
+      names: held.rows.map((one) => basename(one.path)).join(", "),
+    });
+  }
+  if (chip.textContent !== words) chip.textContent = words;
+  if (chip.hidden !== (words === "")) chip.hidden = words === "";
+  if ((chip.dataset.tip ?? "") !== tip) chip.dataset.tip = tip;
+  if ((chip.dataset.foldKey ?? "") !== (held?.key ?? "")) chip.dataset.foldKey = held?.key ?? "";
+  chip.setAttribute("aria-expanded", opened ? "true" : "false");
 }
 
 /* What a workspace row is CALLED — the branch, or the folder's own name.
@@ -5231,6 +5377,8 @@ async function refreshWorktrees() {
     );
     allWorktrees.push(...project.worktrees);
   }
+  // One row a task before anything below reads the list (t-45336).
+  foldTaskCheckouts(projects);
   const staged = allWorktrees.find((worktree) => worktree.active);
   activeWorktreePath = staged?.path ?? null;
   // The native browser panes hear about the swap NOW — the stage repaint
@@ -9927,6 +10075,54 @@ el("project-run-policy").addEventListener("change", (event) => {
   void saveProjectScriptSetting("setup_run_policy", event.target.value);
 });
 
+/* ---- 묶음 통합 큐의 스위치 (t-45315) ----
+ *
+ * 프로젝트 설정의 한 줄. 저장소마다 따로 저장되고(`integration_queue_enabled`) 기본은 꺼짐이다.
+ * 이 기계가 큐를 돌리지 못하면(지금은 macOS만) 줄은 잠긴 채 까닭을 보인다 — 켜기는 백엔드도
+ * 거절한다. 답을 못 받았으면 줄은 잠기기만 하고 까닭을 지어내지 않는다. 켜고 끈 것은 데스크가
+ * 서 있으면 곧바로 다시 읽어 묶음 카드가 따른다. */
+let integrationQueue = null;
+let integrationQueueGeneration = 0;
+
+async function refreshIntegrationQueue() {
+  const generation = ++integrationQueueGeneration;
+  let answer = null;
+  try {
+    answer = await invoke("integration_queue_setting");
+  } catch {
+    answer = null;
+  }
+  if (generation !== integrationQueueGeneration) return;
+  integrationQueue = answer && typeof answer === "object" ? answer : null;
+  paintIntegrationQueue();
+}
+
+function paintIntegrationQueue() {
+  const box = el("project-integration-queue");
+  const supported = integrationQueue?.supported === true;
+  box.checked = integrationQueue?.enabled === true;
+  box.disabled = !supported;
+  el("project-integration-queue-why").hidden = integrationQueue === null || supported;
+}
+
+async function saveIntegrationQueue(enabled) {
+  const generation = ++integrationQueueGeneration;
+  try {
+    const answer = await invoke("set_integration_queue_enabled", { enabled });
+    if (generation !== integrationQueueGeneration) return;
+    integrationQueue = answer && typeof answer === "object" ? answer : null;
+    paintIntegrationQueue();
+    if (deskViews().length > 0) refreshDeskLedger();
+  } catch (error) {
+    if (generation === integrationQueueGeneration) await refreshIntegrationQueue();
+    showError(error);
+  }
+}
+
+el("project-integration-queue").addEventListener("change", (event) => {
+  void saveIntegrationQueue(event.target.checked);
+});
+
 /* One question, three answers: yes, no, and backing out.
  *
  * A promise rather than a callback, because every caller's next move depends on
@@ -10737,6 +10933,15 @@ function buildCleanupRow(row) {
   git.textContent = wscleanGitWord(row);
   head.append(git);
 
+  // Work that has landed is offered for what it is (t-45336): every commit in it
+  // is in the compare ref, by the sidebar's own landing answer.
+  if ((row.reasons ?? []).includes("landed")) {
+    const landed = document.createElement("span");
+    landed.className = "wsclean-chip is-clean";
+    landed.textContent = t("cleanup.reasonLanded", "착지됨");
+    head.append(landed);
+  }
+
   const acts = document.createElement("div");
   acts.className = "wsclean-acts";
 
@@ -10995,7 +11200,13 @@ async function removeCleanupRows(rows) {
     try {
       // 기존 제거 경로를 그대로 쓴다. `force`는 방금 다시 잰 값이지 확인
       // 화면이 들고 있던 값이 아니다.
-      await invoke("remove_worktree", { path: row.path, discardChanges: now.force });
+      // Landed work takes its task's landed branches with it (t-45336): only
+      // ones the compare ref holds, by `git branch -d`, never with force.
+      await invoke("remove_worktree", {
+        path: row.path,
+        discardChanges: now.force,
+        landedBranches: (now.reasons ?? []).includes("landed"),
+      });
       removed.push(row.name);
       wsclean.picked.delete(row.id);
     } catch (error) {

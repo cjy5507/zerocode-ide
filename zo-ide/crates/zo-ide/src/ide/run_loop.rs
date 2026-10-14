@@ -999,6 +999,7 @@ fn observe_for_reporter(
             name,
             summary,
             preview,
+            input_print,
             status,
             ..
         } => {
@@ -1019,6 +1020,7 @@ fn observe_for_reporter(
                             file,
                         },
                         activity.hook_input(summary),
+                        input_print.as_deref(),
                         &activity.started_card(),
                         session_id,
                     );

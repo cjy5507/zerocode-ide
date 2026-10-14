@@ -95,7 +95,7 @@ fn a_sleepers_resume_words_are_the_launch_it_was_summoned_with() {
     peer.append_launch_tuning(&mut expected);
     continue_past_classifier_declines("claude", true, &mut expected);
     assert_eq!(
-        bench.ledger.sleeper_resume_tuning(&worker),
+        bench.ledger.sleeper_resume_tuning(&worker, &no_successor),
         Ok(expected),
         "the window's resume would launch a CLI nobody summoned"
     );
@@ -107,11 +107,141 @@ fn a_sleepers_resume_words_are_the_launch_it_was_summoned_with() {
         Some("session-t7812-plain"),
     );
     assert_eq!(
-        plain.ledger.sleeper_resume_tuning(&codex),
+        plain.ledger.sleeper_resume_tuning(&codex, &no_successor),
         Ok(Vec::new()),
         "a launch summoned without tuning came back with some"
     );
-    assert!(plain.ledger.sleeper_resume_tuning("w-nobody").is_err());
+    assert!(
+        plain
+            .ledger
+            .sleeper_resume_tuning("w-nobody", &no_successor)
+            .is_err()
+    );
+}
+
+/// A lineup that names no successor for anything: every model is current.
+fn no_successor(_agent: &str, _model: &str) -> Option<String> {
+    None
+}
+
+/// t-46882 (10-11 16:5x, the person: 「페이블 5.1이 있는데 5를 왜」): a kept
+/// worker whose row names a release the classifier has since superseded comes
+/// back on the release that stands for it today — on both roads back, the
+/// ledger's reseat and the window's resume, with its effort and its pinned
+/// decline column as they were. A worker the person took over keeps what its
+/// row names: that pane is theirs, and so is its model.
+#[test]
+fn a_kept_worker_comes_back_on_the_release_that_stands_for_its_rows_model() {
+    fn today(agent: &str, model: &str) -> Option<String> {
+        (agent == "claude" && model == "claude-fable-5").then(|| "claude-fable-5-1".to_string())
+    }
+    struct Today;
+    impl Launcher for Today {
+        fn command_for(
+            &self,
+            agent: &str,
+            _prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            Ok(format!("fresh {agent} {}", tuning.join(" ")))
+        }
+
+        fn command_for_resume(
+            &self,
+            agent: &str,
+            session: &ProviderSession,
+            _nudge: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            Ok(format!(
+                "resume {agent} {} {}",
+                tuning.join(" "),
+                session.id
+            ))
+        }
+
+        fn current_release(&self, agent: &str, model: &str) -> Option<String> {
+            today(agent, model)
+        }
+    }
+
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("superseded", 1_000);
+    let task = ledger
+        .create_task(
+            &run,
+            "continue".to_string(),
+            String::new(),
+            Vec::new(),
+            None,
+            1_001,
+        )
+        .expect("a task");
+    let worker = ledger
+        .start_worker(&run, "claude", ("team-old", "%2"), Some(&task), 1_002)
+        .expect("a worker")
+        .worker;
+    let at = ledger.locate(&worker).expect("the worker");
+    ledger.runs[at.0].workers[at.1].model = Some("claude-fable-5".to_string());
+    ledger.runs[at.0].workers[at.1].effort = Some("xhigh".to_string());
+    ledger.runs[at.0].workers[at.1].session = Some(ProviderSession {
+        key: SessionKey::SessionId,
+        id: "46882a0c-0000-4000-8000-000000000c01".to_string(),
+        transcript_path: None,
+    });
+    assert!(ledger.worker_seated(("team-old", "%2"), "/wt/superseded"));
+    assert_eq!(ledger.window_restarted(2_000).sleeping, 1);
+    assert!(ledger.coordinator_returned(&run, "team-new/%1", None, 2_001));
+    let mut team = Team::new("team-new", "token", 70);
+    let reseat = |ledger: &Ledger, team: &mut Team| {
+        let planned = ledger
+            .prepare_worker_reseat(&run, &worker, team, "%1", &Today, "")
+            .expect("a resume split");
+        let Effect::Split { command, .. } = planned.effect else {
+            panic!("the reseat did not use the split fence");
+        };
+        command
+    };
+
+    let cut = reseat(&ledger, &mut team);
+    assert_eq!(
+        command_flag(&cut, "--model"),
+        Some("claude-fable-5-1"),
+        "the ledger's reseat brought the worker back on the superseded release: {cut}"
+    );
+    assert_eq!(command_flag(&cut, "--effort"), Some("xhigh"), "{cut}");
+    let words = ledger
+        .sleeper_resume_tuning(&worker, &today)
+        .expect("the window's words")
+        .join(" ");
+    assert_eq!(
+        command_flag(&words, "--model"),
+        Some("claude-fable-5-1"),
+        "the window's resume brought the worker back on the superseded release: {words}"
+    );
+    // Still the pinned column: the release moved, the summons' binding did not.
+    assert!(
+        words.contains(r#"{"switchModelsOnFlag":false}"#),
+        "the correction unpinned the worker: {words}"
+    );
+
+    // A pane the person took is theirs, and so is the model its row names.
+    ledger.runs[at.0].workers[at.1].taken_over = true;
+    let cut = reseat(&ledger, &mut team);
+    assert_eq!(
+        command_flag(&cut, "--model"),
+        Some("claude-fable-5"),
+        "a taken-over worker's model was moved: {cut}"
+    );
+    let words = ledger
+        .sleeper_resume_tuning(&worker, &today)
+        .expect("the window's words")
+        .join(" ");
+    assert_eq!(
+        command_flag(&words, "--model"),
+        Some("claude-fable-5"),
+        "{words}"
+    );
 }
 
 /// The witness road's undo (t-7812 R1): a sleeper a door seated before its

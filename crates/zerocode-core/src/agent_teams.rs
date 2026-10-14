@@ -377,6 +377,10 @@ pub enum Effect {
     /// project's landing check there (t-34501 stage 3). The ledger chose the task, head
     /// and repository; git and the check process are the window's, and so is the reply.
     LandCheck(crate::orchestration::land_check::LandCheckAsk),
+    /// One press of the integration queue (t-45315): stack, gate, promote, search, restack or
+    /// cancel a batch. The ledger judged who pressed what; git, the repository's switch and the
+    /// receipts are the window's. Boxed because it carries the batch as the ledger read it.
+    LandBatch(Box<crate::orchestration::land_batch::LandBatchAsk>),
     /// Move the keyboard. The ONE road by which a teammate pane takes focus.
     Focus { term: u32 },
     /// End one pane.

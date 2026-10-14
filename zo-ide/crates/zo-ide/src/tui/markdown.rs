@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use super::ansi::{Color, Line, Span, Style};
+use super::ansi::{Color, Hyperlink, Line, Span, Style};
 use super::highlight::{
     MAX_HIGHLIGHT_LINE_BYTES, StreamingCodeHighlighter, highlight_code_to_lines,
 };
@@ -366,6 +366,8 @@ struct Writer<'a> {
     current_continuation: Option<Span>,
     /// 지금 줄에 이미 접두어가 붙었는지 — 두 번 붙이지 않기 위한 표식.
     inline: Vec<Style>,
+    /// 열린 링크마다 그 주소 — 창이 열 수 없는 목적지면 `None` 이고 이름표만 그린다.
+    links: Vec<Option<Hyperlink>>,
     indent: Vec<Indent>,
     list_indices: Vec<Option<u64>>,
     needs_newline: bool,
@@ -499,7 +501,10 @@ impl Writer<'_> {
             Tag::Emphasis => self.inline.push(Style::new().italic()),
             Tag::Strong => self.inline.push(Style::new().bold()),
             Tag::Strikethrough => self.inline.push(Style::new().strike()),
-            Tag::Link { .. } => self.inline.push(LINK_STYLE),
+            Tag::Link { dest_url, .. } => {
+                self.inline.push(LINK_STYLE);
+                self.links.push(Hyperlink::checked(dest_url));
+            }
             _ => {}
         }
     }
@@ -541,11 +546,12 @@ impl Writer<'_> {
                 self.indent.pop();
                 self.pending_marker = false;
             }
-            TagEnd::Emphasis
-            | TagEnd::Strong
-            | TagEnd::Strikethrough
-            | TagEnd::Link => {
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                 self.inline.pop();
+            }
+            TagEnd::Link => {
+                self.inline.pop();
+                self.links.pop();
             }
             _ => {}
         }
@@ -651,8 +657,9 @@ impl Writer<'_> {
     fn text(&mut self, text: &str) {
         if self.table.is_some() {
             let style = self.style();
+            let link = self.link();
             if let Some(cell) = self.table.as_mut().and_then(tables::State::cell_mut) {
-                cell.push_span(Span::new(text.to_string(), style));
+                cell.push_span(Span::new(text.to_string(), style).linked(link));
             }
             return;
         }
@@ -697,6 +704,11 @@ impl Writer<'_> {
         self.inline
             .iter()
             .fold(Style::new(), |acc, style| acc.patch(*style))
+    }
+
+    /// 지금 열린 링크의 주소.
+    fn link(&self) -> Option<Hyperlink> {
+        self.links.last().cloned().flatten()
     }
 
     /// 지금 스택으로 만든 줄 접두어. 리스트는 가장 안쪽 것만 쓴다.
@@ -775,6 +787,7 @@ impl Writer<'_> {
     }
 
     fn push_span(&mut self, span: Span) {
+        let span = span.linked(self.link());
         if let Some(cell) = self.table.as_mut().and_then(tables::State::cell_mut) {
             cell.push_span(span);
             return;
@@ -1134,6 +1147,27 @@ mod tests {
         assert!(italic.style.italic);
         let code = line.spans.iter().find(|span| span.text == "code").expect("code");
         assert_eq!(code.style.fg, Some(crate::tui::ansi::Color::CYAN));
+    }
+
+    /// 링크의 이름표는 글자와 스타일(청록 밑줄)이 그대로이고, 주소는 이름표를 감싼
+    /// OSC 8 로 터미널에 간다. 비ASCII 바이트는 퍼센트 인코딩되고, 상대 경로처럼 열 수
+    /// 없는 목적지는 주소 없이 이름표만 남는다.
+    #[test]
+    fn a_link_label_keeps_its_style_and_carries_its_checked_address() {
+        let line = &render("[문서](https://example.com/문서/a) and [notes](docs/notes.md)")[0];
+        assert_eq!(line.plain(), "문서 and notes");
+        for label in ["문서", "notes"] {
+            let span = line.spans.iter().find(|span| span.text == label).expect("label");
+            assert!(span.style.underline, "{label}");
+            assert_eq!(span.style.fg, Some(crate::tui::ansi::Color::CYAN), "{label}");
+        }
+        let mut rendered = String::new();
+        crate::tui::ansi::write_spans(line, &mut rendered);
+        assert!(
+            rendered.contains("\u{1b}]8;;https://example.com/%EB%AC%B8%EC%84%9C/a\u{1b}\\문서\u{1b}]8;;\u{1b}\\"),
+            "{rendered:?}"
+        );
+        assert_eq!(rendered.matches("\u{1b}]8;;").count(), 2, "one link opened and closed: {rendered:?}");
     }
 
     #[test]

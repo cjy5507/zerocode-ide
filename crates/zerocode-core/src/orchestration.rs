@@ -41,6 +41,7 @@ pub mod coordinator_handover;
 pub mod delegate;
 pub mod evidence;
 pub mod gate_reuse;
+pub mod land_batch;
 pub mod land_check;
 pub mod landing_watch;
 mod progress;
@@ -1091,7 +1092,10 @@ pub const NO_ATTEMPT: &str = "none";
 
 /// A commit, as a person or an agent writes one: seven hex digits or more.
 /// Anything else is not a commit — a report id, a branch name, a sentence.
-pub(crate) fn commit_named(text: &str) -> Option<String> {
+/// Public because the window measures a task's other checkouts against the
+/// commit an attempt handed in (t-45336) and must read [`Dispatch::source`] the
+/// way the ledger wrote it.
+pub fn commit_named(text: &str) -> Option<String> {
     let text = text.trim();
     (text.len() >= 7 && text.chars().all(|c| c.is_ascii_hexdigit())).then(|| text.to_string())
 }
@@ -3276,40 +3280,49 @@ struct HandoverEligible<'a> {
 
 /// An open attempt, its worker live and not the person's, a checkout to
 /// inherit, not walked already, and its task under the table's ceiling — or
-/// the reason it is not.
-fn handover_eligible<'a>(run: &'a Run, dispatch_id: &str) -> Result<HandoverEligible<'a>, String> {
+/// the reason it is not, by its code.
+fn handover_eligible<'a>(
+    run: &'a Run,
+    dispatch_id: &str,
+) -> Result<HandoverEligible<'a>, WallRefusal> {
     let dispatch = run
         .dispatch(dispatch_id)
-        .ok_or_else(|| format!("unknown dispatch: {dispatch_id}"))?;
+        .ok_or_else(|| WallRefusal::UnknownDispatch {
+            dispatch: dispatch_id.to_string(),
+        })?;
     if !dispatch.is_open() {
-        return Err(format!(
-            "dispatch {dispatch_id} has ended — a handover follows an OPEN attempt"
-        ));
+        return Err(WallRefusal::AttemptEnded {
+            dispatch: dispatch_id.to_string(),
+        });
     }
     let worker = run
         .worker(&dispatch.worker)
-        .ok_or_else(|| format!("unknown worker: {}", dispatch.worker))?;
+        .ok_or_else(|| WallRefusal::UnknownWorker {
+            worker: dispatch.worker.clone(),
+        })?;
     if !worker.state.is_live() {
-        return Err(format!("worker {} is {}", worker.id, worker.state.as_str()));
+        return Err(WallRefusal::WorkerNotLive {
+            worker: worker.id.clone(),
+            state: worker.state,
+        });
     }
     if worker.taken_over {
-        return Err(format!(
-            "worker {}'s pane was taken over by the person — the terminal is theirs",
-            worker.id
-        ));
+        return Err(WallRefusal::PaneTakenOver {
+            worker: worker.id.clone(),
+        });
     }
-    let checkout = worker.checkout.clone().ok_or_else(|| {
-        format!(
-            "worker {} reported no checkout — there is nothing to inherit",
-            worker.id
-        )
-    })?;
+    let checkout = worker
+        .checkout
+        .clone()
+        .ok_or_else(|| WallRefusal::NoCheckout {
+            worker: worker.id.clone(),
+        })?;
     if run.messages.iter().any(|held| {
         handover_consumes_attempt(held) && held.dispatch.as_deref() == Some(dispatch_id)
     }) {
-        return Err(format!(
-            "dispatch {dispatch_id} was already walked — one handover per attempt"
-        ));
+        return Err(WallRefusal::AlreadyWalked {
+            dispatch: dispatch_id.to_string(),
+        });
     }
     let walked = run
         .messages
@@ -3319,10 +3332,10 @@ fn handover_eligible<'a>(run: &'a Run, dispatch_id: &str) -> Result<HandoverElig
         })
         .count();
     if walked >= QUOTA_POLICY.handover_max {
-        return Err(format!(
-            "task {} has been handed over {walked} time(s), which is the table's ceiling",
-            dispatch.task
-        ));
+        return Err(WallRefusal::HandoverCeiling {
+            task: dispatch.task.clone(),
+            count: walked,
+        });
     }
     Ok(HandoverEligible {
         worker,
@@ -6443,6 +6456,9 @@ fn changes_the_ledger(verb: &str, words: &Words) -> bool {
         "retention" => words.value("--days").is_some() || words.has("--sweep"),
         // Listing what would be settled changes nothing; applying it does.
         "task-settle" => words.has("--apply"),
+        // Reading the batches changes nothing; every press hands the window work whose
+        // records come back as receipts.
+        land_batch::LAND_BATCH_VERB => land_batch::presses(words),
         _ => true,
     };
     doing(verb).is_some_and(|what| what.changes(spending))
@@ -12031,7 +12047,7 @@ impl Ledger {
             let current =
                 resume_plan(run, &plan.worker, &plan.marker, now_ms).map_err(|not| match not {
                     NotResumed::InFlight => RESUME_IN_FLIGHT.to_string(),
-                    NotResumed::Refused(why) => why,
+                    NotResumed::Refused(why) => why.to_string(),
                 })?;
             if current != *plan {
                 return Err("the worker, its seat or its attempt changed — plan again".into());
@@ -12512,15 +12528,36 @@ impl Ledger {
     /// The launch words the sleeper `worker_id` comes back with (t-7812):
     /// `kept_worker_tuning`'s, asked by the window's resume road so the pane
     /// it opens for a sleeper's conversation is the launch the ledger's own
-    /// reseat would have cut. A read; nothing moves.
-    pub fn sleeper_resume_tuning(&self, worker_id: &str) -> Result<Vec<String>, String> {
+    /// reseat would have cut — `current` answering, as the launcher's
+    /// [`Launcher::current_release`] does there, which release stands for a
+    /// superseded one today (t-46882). A read; nothing moves.
+    pub fn sleeper_resume_tuning(
+        &self,
+        worker_id: &str,
+        current: &dyn Fn(&str, &str) -> Option<String>,
+    ) -> Result<Vec<String>, String> {
         self.runs
             .iter()
             .find_map(|run| {
                 run.worker(worker_id)
-                    .map(|worker| kept_worker_tuning(&run.id, worker))
+                    .map(|worker| kept_worker_tuning(&run.id, worker, current))
             })
             .unwrap_or_else(|| Err(format!("unknown worker: {worker_id}")))
+    }
+
+    /// The model the sleeper `worker_id` comes back on — the release
+    /// [`Self::sleeper_resume_tuning`] names, alone, for the window to show
+    /// on its pane before the agent says (t-46882). A read; `None` for a row
+    /// that names none.
+    pub fn sleeper_resume_model(
+        &self,
+        worker_id: &str,
+        current: &dyn Fn(&str, &str) -> Option<String>,
+    ) -> Option<String> {
+        self.runs
+            .iter()
+            .find_map(|run| run.worker(worker_id))
+            .and_then(|worker| kept_worker_model(worker, current))
     }
 
     /// The window resumed a conversation into a checkout, and a sleeper is
@@ -12786,7 +12823,8 @@ impl Ledger {
             .checkout
             .clone()
             .ok_or_else(|| format!("{kept} worker {worker_id} has no checkout"))?;
-        let tuning = kept_worker_tuning(run_id, worker)?;
+        let current = |agent: &str, model: &str| launcher.current_release(agent, model);
+        let tuning = kept_worker_tuning(run_id, worker, &current)?;
         /* Resume the conversation without starting the interrupted work yet.
          *
          * The host has to spawn the process before `worker_reseated` can prove
@@ -12837,6 +12875,7 @@ impl Ledger {
             prompt,
             prompt_timeout_ms: READY_TIMEOUT_DEFAULT_MS,
             resumed,
+            model: kept_worker_model(worker, &current),
         };
         Ok(Decided {
             answered_from: None,
@@ -14399,6 +14438,11 @@ const BOOL_FLAGS: &[&str] = &[
     "--wip-commit",
     "--inherit-checkout",
     "--prepare",
+    "--promote",
+    "--bisect",
+    "--restack",
+    "--abort",
+    "--record-merged",
 ];
 
 /* ---- what the ledger cannot know ------------------------------------- */
@@ -14492,6 +14536,16 @@ pub trait Launcher {
         None
     }
 
+    /// The release that stands today for `model`, a release of `agent`'s
+    /// lineup the classifier superseded
+    /// ([`crate::summon_difficulty::lineup::Lineup::current_release`]) —
+    /// what a kept worker comes back on instead (t-46882). Peeked, never
+    /// fetched: this runs inside the actor. `None` when the host holds no
+    /// lineup for the agent or the model is current.
+    fn current_release(&self, _agent: &str, _model: &str) -> Option<String> {
+        None
+    }
+
     /// What this machine actually has, one row per agent the catalog knows.
     ///
     /// The ledger cannot look for itself — it reads no `PATH` and stats no
@@ -14567,6 +14621,13 @@ pub trait Launcher {
     /// with the reservation's exact rollback.
     fn checkout_present(&self, _path: &str) -> Option<bool> {
         None
+    }
+
+    /// Whether the integration queue (`land-batch`) may run on this machine at all — the one
+    /// platform judgment, [`land_batch::integration_queue_supported`]. A lookup like the rest:
+    /// a test launcher answers for the platform it stands in for.
+    fn integration_queue_supported(&self) -> bool {
+        land_batch::integration_queue_supported()
     }
 }
 
@@ -15445,10 +15506,232 @@ pub struct QuotaWallChip {
     /// Who a standing order hands this task to, when one names an alternative.
     pub declared_alt: Option<Pinned>,
     /// Why 「지금 다시 시도」 would not be taken now — the continuation's own
-    /// rules ([`resume_plan`]) in the ledger's words. `None`: it would.
-    pub retry_refusal: Option<String>,
+    /// rules ([`resume_plan`]), by their code. `None`: it would.
+    pub retry_refusal: Option<WallRefusal>,
     /// Why 「다른 에이전트로 넘기기」 would not be taken now. `None`: it would.
-    pub hand_over_refusal: Option<String>,
+    pub hand_over_refusal: Option<WallRefusal>,
+}
+
+/// Why a press at a quota wall would not be taken, read off the ledger's rows
+/// (t-47935): a code the window turns into the person's language, and the
+/// facts its sentence names — never the sentence, so nothing on the way to a
+/// screen reads English to decide anything. `Display` is the ledger's English
+/// sentence, for every reader that is not a person's screen: the beat, the
+/// CLI, a log.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum WallRefusal {
+    /// Not live, or in a state that holds no pane: asleep for an account
+    /// move, or let go.
+    WorkerNotLive {
+        worker: String,
+        state: WorkerState,
+    },
+    /// The person took the worker's pane: the terminal is theirs.
+    PaneTakenOver {
+        worker: String,
+    },
+    NoOpenAttempt {
+        worker: String,
+    },
+    /// No `quota_walled` row for the open attempt.
+    NoWall {
+        worker: String,
+    },
+    /// The wall no longer explains the silence.
+    WallLifted {
+        worker: String,
+    },
+    /// An account switch seated the worker again after the wall: the wall
+    /// was the account's it left.
+    AccountMoved {
+        worker: String,
+    },
+    /// This window holds no pane of the worker.
+    PaneNotHere {
+        worker: String,
+    },
+    /// The beat's continuation with no `--on-transient-error resume` order.
+    NoTransientOrder,
+    UnknownRun {
+        run: String,
+    },
+    UnknownWorker {
+        worker: String,
+    },
+    UnknownDispatch {
+        dispatch: String,
+    },
+    UnknownTask {
+        task: String,
+    },
+    /// Another worker holds the worker's seat.
+    SeatLost {
+        worker: String,
+    },
+    /// The worker waits on an answer to its own question.
+    AwaitingAnswer {
+        worker: String,
+    },
+    /// The beat's continuation at a standing wall: the handover answers it.
+    AtWall {
+        dispatch: String,
+    },
+    /// A press for a wall the attempt does not stand at now.
+    WallNotNow {
+        dispatch: String,
+    },
+    /// A continuation is being typed for the attempt ([`RESUME_IN_FLIGHT`]).
+    ResumeInFlight,
+    /// [`RESUME_POLICY`]`.attempts_max` continuations already.
+    ResumeCeiling {
+        dispatch: String,
+        count: usize,
+    },
+    /// The words for this key may already be on the line.
+    AlreadyTyped {
+        dispatch: String,
+    },
+    /// Inside [`RESUME_POLICY`]`.retry_after_ms` of the last continuation.
+    TooSoon {
+        dispatch: String,
+        typed_ms_ago: i64,
+    },
+    /// This window does not hold the seat the handover's verbs are
+    /// presented from.
+    CoordinatorSeatElsewhere {
+        run: String,
+    },
+    /// The run's coordinator seat is empty.
+    NoLiveCoordinator {
+        run: String,
+    },
+    /// A continuation is being typed: a handover waits until it settles.
+    HandoverWaitsForTyping {
+        dispatch: String,
+    },
+    /// A handover follows an open attempt.
+    AttemptEnded {
+        dispatch: String,
+    },
+    /// Nothing to inherit.
+    NoCheckout {
+        worker: String,
+    },
+    /// One handover per attempt.
+    AlreadyWalked {
+        dispatch: String,
+    },
+    /// [`QUOTA_POLICY`]`.handover_max` handovers of the task already.
+    HandoverCeiling {
+        task: String,
+        count: usize,
+    },
+    /// The wall's own row is gone from the ledger.
+    WallRowGone {
+        wall: String,
+    },
+}
+
+impl std::fmt::Display for WallRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkerNotLive { worker, state } => {
+                write!(f, "worker {worker} is {}", state.as_str())
+            }
+            Self::PaneTakenOver { worker } => write!(
+                f,
+                "worker {worker}'s pane was taken over by the person — the terminal is theirs"
+            ),
+            Self::NoOpenAttempt { worker } => write!(f, "worker {worker} carries no open attempt"),
+            Self::NoWall { worker } => write!(
+                f,
+                "worker {worker} stands at no quota wall the ledger has witnessed"
+            ),
+            Self::WallLifted { worker } => write!(
+                f,
+                "worker {worker}'s quota wall no longer stands — it lifted"
+            ),
+            Self::AccountMoved { worker } => write!(
+                f,
+                "worker {worker} was seated again on another account after this wall"
+            ),
+            Self::PaneNotHere { worker } => {
+                write!(f, "this window holds no pane of worker {worker}")
+            }
+            Self::NoTransientOrder => {
+                f.write_str("no standing order says --on-transient-error resume")
+            }
+            Self::UnknownRun { run } => write!(f, "unknown run: {run}"),
+            Self::UnknownWorker { worker } => write!(f, "unknown worker: {worker}"),
+            Self::UnknownDispatch { dispatch } => write!(f, "unknown dispatch: {dispatch}"),
+            Self::UnknownTask { task } => write!(f, "unknown task: {task}"),
+            Self::SeatLost { worker } => write!(f, "worker {worker} no longer holds its seat"),
+            Self::AwaitingAnswer { worker } => {
+                write!(f, "worker {worker} is waiting on an answer it asked for")
+            }
+            Self::AtWall { dispatch } => write!(
+                f,
+                "dispatch {dispatch} is at its quota wall — the handover road answers it"
+            ),
+            Self::WallNotNow { dispatch } => write!(
+                f,
+                "the press names a wall dispatch {dispatch} does not stand at now"
+            ),
+            Self::ResumeInFlight => f.write_str(RESUME_IN_FLIGHT),
+            Self::ResumeCeiling { dispatch, count } => write!(
+                f,
+                "dispatch {dispatch} has been resumed {count} time(s), which is the table's ceiling"
+            ),
+            Self::AlreadyTyped { dispatch } => write!(
+                f,
+                "this error was already typed at for dispatch {dispatch} — its words may be on \
+                 the line"
+            ),
+            Self::TooSoon {
+                dispatch,
+                typed_ms_ago,
+            } => write!(
+                f,
+                "the last continuation for dispatch {dispatch} was typed {typed_ms_ago} ms ago"
+            ),
+            Self::CoordinatorSeatElsewhere { run } => {
+                write!(f, "this window does not hold run {run}'s coordinator seat")
+            }
+            Self::NoLiveCoordinator { run } => write!(f, "run {run} has no live coordinator seat"),
+            Self::HandoverWaitsForTyping { dispatch } => write!(
+                f,
+                "a continuation is being typed at dispatch {dispatch} — a handover waits until \
+                 it settles"
+            ),
+            Self::AttemptEnded { dispatch } => write!(
+                f,
+                "dispatch {dispatch} has ended — a handover follows an OPEN attempt"
+            ),
+            Self::NoCheckout { worker } => write!(
+                f,
+                "worker {worker} reported no checkout — there is nothing to inherit"
+            ),
+            Self::AlreadyWalked { dispatch } => write!(
+                f,
+                "dispatch {dispatch} was already walked — one handover per attempt"
+            ),
+            Self::HandoverCeiling { task, count } => write!(
+                f,
+                "task {task} has been handed over {count} time(s), which is the table's ceiling"
+            ),
+            Self::WallRowGone { wall } => {
+                write!(f, "the row of wall {wall} is gone from the ledger")
+            }
+        }
+    }
+}
+
+/// The ledger's English sentence, for a road that answers in words.
+impl From<WallRefusal> for String {
+    fn from(why: WallRefusal) -> Self {
+        why.to_string()
+    }
 }
 
 /// Whether the ledger wrote a PANE move of `worker_id` (an account switch that
@@ -15466,8 +15749,8 @@ fn account_moved_since(run: &Run, worker_id: &str, since_ms: i64) -> bool {
 }
 
 /// The chip `worker` wears for the newest wall of its open attempt, or why it
-/// wears none — the reason, in the ledger's words, that a press made from a
-/// screen drawn earlier is refused with.
+/// wears none — the reason, by its code, that a press made from a screen
+/// drawn earlier is refused with.
 ///
 /// None for a worker asleep for an account move ([`WorkerState::Sleeping`] is
 /// not a pane) or no longer live, for a pane the person took, for an attempt
@@ -15480,15 +15763,17 @@ pub fn wall_chip_for(
     worker: &Worker,
     seat: WallChipSeat,
     now_ms: i64,
-) -> Result<QuotaWallChip, String> {
+) -> Result<QuotaWallChip, WallRefusal> {
     if !worker.state.is_live() || !worker.state.may_occupy_pane() {
-        return Err(format!("worker {} is {}", worker.id, worker.state.as_str()));
+        return Err(WallRefusal::WorkerNotLive {
+            worker: worker.id.clone(),
+            state: worker.state,
+        });
     }
     if worker.taken_over {
-        return Err(format!(
-            "worker {}'s pane was taken over by the person — the terminal is theirs",
-            worker.id
-        ));
+        return Err(WallRefusal::PaneTakenOver {
+            worker: worker.id.clone(),
+        });
     }
     let Some(dispatch) = worker
         .dispatch
@@ -15496,28 +15781,29 @@ pub fn wall_chip_for(
         .and_then(|id| run.dispatch(id))
         .filter(|held| held.is_open())
     else {
-        return Err(format!("worker {} carries no open attempt", worker.id));
+        return Err(WallRefusal::NoOpenAttempt {
+            worker: worker.id.clone(),
+        });
     };
     let Some(wall) = newest_wall(run, &dispatch.id) else {
-        return Err(format!(
-            "worker {} stands at no quota wall the ledger has witnessed",
-            worker.id
-        ));
+        return Err(WallRefusal::NoWall {
+            worker: worker.id.clone(),
+        });
     };
     if !wall.stands(now_ms) {
-        return Err(format!(
-            "worker {}'s quota wall no longer stands — it lifted",
-            worker.id
-        ));
+        return Err(WallRefusal::WallLifted {
+            worker: worker.id.clone(),
+        });
     }
     if account_moved_since(run, &worker.id, wall.observed_at_ms) {
-        return Err(format!(
-            "worker {} was seated again on another account after this wall",
-            worker.id
-        ));
+        return Err(WallRefusal::AccountMoved {
+            worker: worker.id.clone(),
+        });
     }
     if !seat.worker_here {
-        return Err(format!("this window holds no pane of worker {}", worker.id));
+        return Err(WallRefusal::PaneNotHere {
+            worker: worker.id.clone(),
+        });
     }
     let retry_refusal = match resume_plan(
         run,
@@ -15526,19 +15812,17 @@ pub fn wall_chip_for(
         now_ms,
     ) {
         Ok(_) => None,
-        Err(NotResumed::InFlight) => Some(RESUME_IN_FLIGHT.to_string()),
+        Err(NotResumed::InFlight) => Some(WallRefusal::ResumeInFlight),
         Err(NotResumed::Refused(why)) => Some(why),
     };
     let hand_over_refusal = if !seat.coordinator_here {
-        Some(format!(
-            "this window does not hold run {}'s coordinator seat",
-            run.id
-        ))
+        Some(WallRefusal::CoordinatorSeatElsewhere {
+            run: run.id.clone(),
+        })
     } else if resume_rows(run, &dispatch.id).any(|body| body["status"] == RESUME_TYPING) {
-        Some(format!(
-            "a continuation is being typed at dispatch {} — a handover waits until it settles",
-            dispatch.id
-        ))
+        Some(WallRefusal::HandoverWaitsForTyping {
+            dispatch: dispatch.id.clone(),
+        })
     } else {
         handover_eligible(run, &dispatch.id).err()
     };
@@ -15768,8 +16052,8 @@ pub enum NotResumed {
     /// One is being typed for this attempt already: the silence is its, and
     /// neither a second continuation nor a quiet notice is owed.
     InFlight,
-    /// Anything else, said — the silence stays the news it always was.
-    Refused(String),
+    /// Anything else, by its code — the silence stays the news it always was.
+    Refused(WallRefusal),
 }
 
 /// What became of one typed continuation, as the window saw it.
@@ -15826,7 +16110,7 @@ pub fn resume_plan(
     marker: &TransientErrorMarker,
     now_ms: i64,
 ) -> Result<ResumePlan, NotResumed> {
-    let refused = |why: String| Err(NotResumed::Refused(why));
+    let refused = |why: WallRefusal| Err(NotResumed::Refused(why));
     // A person's press stands in for the declared order AND is asked at a wall
     // (t-39771): the two refusals it waives, and nothing else of the plan.
     let by_person = marker.source == PERSON_MARKER_SOURCE;
@@ -15838,25 +16122,31 @@ pub fn resume_plan(
             .and_then(|policy| policy.on_transient_error)
             != Some(OnTransientError::Resume)
     {
-        return refused("no standing order says --on-transient-error resume".into());
+        return refused(WallRefusal::NoTransientOrder);
     }
     let Some(worker) = run.worker(worker_id) else {
-        return refused(format!("unknown worker: {worker_id}"));
+        return refused(WallRefusal::UnknownWorker {
+            worker: worker_id.to_string(),
+        });
     };
     if !worker.state.is_live() || !worker.state.may_occupy_pane() {
-        return refused(format!("worker {} is {}", worker.id, worker.state.as_str()));
+        return refused(WallRefusal::WorkerNotLive {
+            worker: worker.id.clone(),
+            state: worker.state,
+        });
     }
     if worker.taken_over {
-        return refused(format!(
-            "worker {}'s pane was taken over by the person — the composer is theirs",
-            worker.id
-        ));
+        return refused(WallRefusal::PaneTakenOver {
+            worker: worker.id.clone(),
+        });
     }
     if run
         .worker_in_pane(&worker.team, &worker.pane)
         .is_none_or(|current| current.id != worker.id)
     {
-        return refused(format!("worker {} no longer holds its seat", worker.id));
+        return refused(WallRefusal::SeatLost {
+            worker: worker.id.clone(),
+        });
     }
     let Some(dispatch) = worker
         .dispatch
@@ -15864,19 +16154,19 @@ pub fn resume_plan(
         .and_then(|id| run.dispatch(id))
         .filter(|dispatch| dispatch.is_open())
     else {
-        return refused(format!("worker {} carries no open attempt", worker.id));
+        return refused(WallRefusal::NoOpenAttempt {
+            worker: worker.id.clone(),
+        });
     };
     if awaiting_reply(run, &worker.id) {
-        return refused(format!(
-            "worker {} is waiting on an answer it asked for",
-            worker.id
-        ));
+        return refused(WallRefusal::AwaitingAnswer {
+            worker: worker.id.clone(),
+        });
     }
     if !by_person && newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms)) {
-        return refused(format!(
-            "dispatch {} is at its quota wall — the handover road answers it",
-            dispatch.id
-        ));
+        return refused(WallRefusal::AtWall {
+            dispatch: dispatch.id.clone(),
+        });
     }
     // A press is about ONE wall: the one the attempt stands at now. A press
     // made on an older wall, or on one that lifted, is not this one's.
@@ -15885,39 +16175,35 @@ pub fn resume_plan(
             .filter(|wall| wall.stands(now_ms))
             .is_none_or(|wall| person_wall_key(&dispatch.id, &wall.wall) != marker.key)
     {
-        return refused(format!(
-            "the press names a wall dispatch {} does not stand at now",
-            dispatch.id
-        ));
+        return refused(WallRefusal::WallNotNow {
+            dispatch: dispatch.id.clone(),
+        });
     }
     let rows: Vec<serde_json::Value> = resume_rows(run, &dispatch.id).collect();
     if rows.iter().any(|body| body["status"] == RESUME_TYPING) {
         return Err(NotResumed::InFlight);
     }
     if rows.len() >= RESUME_POLICY.attempts_max {
-        return refused(format!(
-            "dispatch {} has been resumed {} time(s), which is the table's ceiling",
-            dispatch.id,
-            rows.len()
-        ));
+        return refused(WallRefusal::ResumeCeiling {
+            dispatch: dispatch.id.clone(),
+            count: rows.len(),
+        });
     }
     if rows
         .iter()
         .any(|body| body["marker"]["key"] == marker.key.as_str() && resume_may_have_typed(body))
     {
-        return refused(format!(
-            "this error was already typed at for dispatch {} — its words may be on the line",
-            dispatch.id
-        ));
+        return refused(WallRefusal::AlreadyTyped {
+            dispatch: dispatch.id.clone(),
+        });
     }
     if let Some(last) = rows.last().and_then(|body| body["typedMs"].as_i64())
         && now_ms < last.saturating_add(RESUME_POLICY.retry_after_ms)
     {
-        return refused(format!(
-            "the last continuation for dispatch {} was typed {} ms ago",
-            dispatch.id,
-            now_ms.saturating_sub(last)
-        ));
+        return refused(WallRefusal::TooSoon {
+            dispatch: dispatch.id.clone(),
+            typed_ms_ago: now_ms.saturating_sub(last),
+        });
     }
     Ok(ResumePlan {
         run: run.id.clone(),
@@ -17416,10 +17702,17 @@ fn continue_past_classifier_declines(agent: &str, pinned: bool, words: &mut Vec<
 /// The row's values win: an effort changed inside the pane reaches no hook,
 /// so the row's effort stands, and a value the row never held is not filled
 /// in — an agent summoned without tuning comes back without it.
-fn kept_worker_tuning(run_id: &str, worker: &Worker) -> Result<Vec<String>, String> {
+///
+/// `current` answers which release stands today for a superseded one
+/// ([`Launcher::current_release`], t-46882).
+fn kept_worker_tuning(
+    run_id: &str,
+    worker: &Worker,
+    current: &dyn Fn(&str, &str) -> Option<String>,
+) -> Result<Vec<String>, String> {
     let mut tuning = launch_tuning(
         &worker.agent,
-        worker.model.as_deref(),
+        kept_worker_model(worker, current).as_deref(),
         worker.effort.as_deref(),
     )?;
     if let Some(peer) = provider_peer(&worker.agent, run_id, &worker.id) {
@@ -17433,6 +17726,25 @@ fn kept_worker_tuning(run_id: &str, worker: &Worker) -> Result<Vec<String>, Stri
         &mut tuning,
     );
     Ok(tuning)
+}
+
+/// The model a kept worker comes back on (t-46882): the one its row names —
+/// or, for a worker no person took, the release that stands for it today
+/// when the classifier has since superseded the row's (`claude-fable-5` →
+/// `claude-fable-5-1`, the person's 10-11 「페이블 5.1이 있는데 5를 왜」). A
+/// pane the person took is theirs, and so is the model its row names; a row
+/// that names none comes back naming none.
+fn kept_worker_model(
+    worker: &Worker,
+    current: &dyn Fn(&str, &str) -> Option<String>,
+) -> Option<String> {
+    let named = worker.model.as_deref()?;
+    Some(
+        (!worker.taken_over)
+            .then(|| current(&worker.agent, named))
+            .flatten()
+            .unwrap_or_else(|| named.to_string()),
+    )
 }
 
 /// Assemble a reserved worker's command or put the reservation back exactly.
@@ -17747,6 +18059,18 @@ fn launch_tuning(
         }
     }
     Ok(words)
+}
+
+/// The launch words that name `model` for `agent`'s CLI — the measured
+/// launch table's own spelling (`TUNABLE`), for a road that names a model
+/// the ledger did not summon with: the release that stands for the one a
+/// resumed conversation last ran (t-46882).
+///
+/// # Errors
+/// An agent the table measured no model flag for, or an empty id — the
+/// refusals a summons' own `--model` meets.
+pub fn model_words(agent: &str, model: &str) -> Result<Vec<String>, String> {
+    launch_tuning(agent, Some(model), None)
 }
 
 /// Say which launch choices this summons left to the agent CLI.
@@ -18231,6 +18555,20 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::Mutation,
     ),
     (
+        land_batch::LAND_BATCH_VERB,
+        "[--batch <id>] · read this run's integration batches | --members <t-1,t-2,…> \
+         --message-dir <dir> · stack ready, verified tasks on the base branch, one merge each, \
+         on an app-only ref (refs/zerocode/stack/) — no checkout, index or branch is touched | \
+         --batch <id> --prepare | --record <check> --rc <n> --log <path> [--took-ms <ms>] | \
+         --promote | --bisect | --restack [--drop <t-1,…>] | --abort | --record-merged · \
+         --prepare readies the tip (or the culprit search's next step) for the gate; the gate is \
+         a set of build-line jobs, so --record takes the whole set's result — --rc 0 only when \
+         every job passed — and --log names the per-job RC summary; --promote fast-forwards the \
+         base branch to a green tip; --record-merged writes the merged records after the \
+         person's promote. macOS only, and off until the repository turns it on",
+        Doing::Policy,
+    ),
+    (
         gate_reuse::PIN,
         "--gate <gate-root|gate-zo> --body <policy-json> · pin exact policy and producer identities for the current authenticated coordinator",
         Doing::Mutation,
@@ -18533,6 +18871,9 @@ pub struct PreparedWorkerReseat {
     pub prompt: String,
     pub prompt_timeout_ms: u32,
     pub resumed: WorkerResume,
+    /// The model the pane is launched on, when its launch names one — what
+    /// the window shows for it before its agent first says (t-46882).
+    pub model: Option<String>,
 }
 
 impl std::fmt::Debug for PreparedWorkerReseat {
@@ -18548,6 +18889,7 @@ impl std::fmt::Debug for PreparedWorkerReseat {
             .field("prompt", &format_args!("<{} bytes>", self.prompt.len()))
             .field("prompt_timeout_ms", &self.prompt_timeout_ms)
             .field("resumed", &self.resumed)
+            .field("model", &self.model)
             .finish()
     }
 }
@@ -18752,6 +19094,7 @@ impl std::fmt::Debug for Decided {
             Effect::WorktreeEvidence { .. } => "worktree-evidence",
             Effect::WorkerTranscript { .. } => "worker-transcript",
             Effect::LandCheck(..) => "land-check",
+            Effect::LandBatch(..) => "land-batch",
             Effect::WorkerTerminal { .. } => "worker-terminal",
             Effect::Focus { .. } => "focus",
             Effect::Close { .. } => "close",
@@ -18832,6 +19175,15 @@ const WORKER_GATE_CONTEXT: &str = "For code changes in a Rust workspace, the wor
 /// the same for every agent that takes a task, so every agent is told the same.
 /// The sentence says the rule's gist itself, so a CLI that has not installed the
 /// skill yet is still told what to do.
+/// What a worker is told, once and at launch, about the checkouts it cuts
+/// (t-45336): one per task, and a checkout cut beside it for a red, a verify
+/// or evidence goes before the hand-in. The person saw one task stand in the
+/// sidebar four times — a worker's before, evidence, green and verify
+/// checkouts — and finished work pile up. The window takes back what the
+/// handed-in head holds, and the ledger tells the coordinator when a hand-in
+/// leaves one standing; this is the rule both of those enforce.
+const WORKER_ONE_CHECKOUT_CONTEXT: &str = "Keep one checkout per task: a checkout you cut beside your own — for a red, a verify or evidence — goes before you hand in (`git worktree remove`, never with force), and evidence you name lives outside every checkout. The ledger tells the coordinator when a hand-in leaves one standing, and the window takes back what your handed-in head holds.";
+
 const WORKER_PLAIN_REPORT_CONTEXT: &str = "What you write for a person to read — the summary, a report, a notice — follows the `plain-report` skill. Put the result first, write one fact in a sentence, give every number a unit, and use no codebase metaphors.";
 
 /// The sentence that sends a worker to `zerocode-find` before it reads code
@@ -18903,8 +19255,9 @@ values masked, {cap_mb} MB at most). An intended failure is evidence too — nam
 name — and a report that is not a plain report says what it is: `\"{report_kind}\":\"review\"` \
 (one of {kinds}). Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
-a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{conditions}{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+a new request. `zerocode-orc help` lists the rest. {find} {plain} {one_checkout} {purpose}\n\n{conditions}{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
         conditions = conditions,
+        one_checkout = WORKER_ONE_CHECKOUT_CONTEXT,
         evidence = crate::hand_in::EVIDENCE_KEY,
         expect = crate::hand_in::EXPECT_KEY,
         report_kind = crate::hand_in::REPORT_KIND_KEY,
@@ -18960,8 +19313,9 @@ nobody on either side can answer one. Keep the summary short and carry a \
 longer answer as a path — `--payload '{{\"reportPath\":\"/abs/path\",\"lifetime\":\"ephemeral\"}}'` — \
 naming it once in the summary too, and say whether that file outlives your \
 worktree, because the home window is not on this machine. Every command that CHANGES anything needs --retry-request. \
-`zerocode-orc help` lists the rest. {plain} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+`zerocode-orc help` lists the rest. {plain} {one_checkout} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
         plain = WORKER_PLAIN_REPORT_CONTEXT,
+        one_checkout = WORKER_ONE_CHECKOUT_CONTEXT,
         purpose = WORKER_PURPOSE_CONTEXT,
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
@@ -19976,8 +20330,11 @@ const BOUNDED_INPUT: &[(&str, Destination)] = &[
     ("--to-message", Destination::Name),
     ("--ack", Destination::Name),
     ("--gate", Destination::Name),
+    ("--batch", Destination::Name),
     // A list of names.
     ("--deps", Destination::Names),
+    ("--members", Destination::Names),
+    ("--drop", Destination::Names),
     ("--types", Destination::Names),
     ("--cursor", Destination::Name),
     ("--address", Destination::Name),
@@ -20003,6 +20360,8 @@ const BOUNDED_INPUT: &[(&str, Destination)] = &[
     ("--rc", Destination::Name),
     ("--took-ms", Destination::Name),
     ("--log", Destination::Prose),
+    // The integration queue's folder of landing messages (t-45315), a path like the log's.
+    ("--message-dir", Destination::Prose),
 ];
 
 /// Refuse an oversized field before anything happens, not while saving.
@@ -22623,6 +22982,23 @@ fn plan_inner(
             let mut planned = said(serde_json::Value::Null);
             planned.effect = Effect::LandCheck(ask);
             planned
+        }
+
+        /* The integration queue (t-45315). A read is answered here; a press is judged here and
+         * carried by the window, which reads the repository's switch before anything is written
+         * and hands every record back as a receipt the ledger judges again
+         * (`Ledger::land_batched`). */
+        land_batch::LAND_BATCH_VERB => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            let supported = launcher.integration_queue_supported();
+            match land_batch::plan(ledger, &run_id, team, pane, &words, supported, now_ms)? {
+                land_batch::Planned::Said(value) => said(value),
+                land_batch::Planned::Carry(ask) => {
+                    let mut planned = said(serde_json::Value::Null);
+                    planned.effect = Effect::LandBatch(ask);
+                    planned
+                }
+            }
         }
 
         "send" => {

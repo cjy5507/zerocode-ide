@@ -41,7 +41,12 @@ pub(crate) fn sweep(app: &AppHandle, now_ms: i64) {
         .filter_map(|path| {
             let at = PathBuf::from(&path);
             let busy = crate::occupancy_of(&occupied, &at) > 0;
-            crate::worktree_landing::witness_for(&at, busy)
+            // With what the worker left beside it when it handed in (t-45336): the
+            // ledger tells the coordinator once that the rule was broken.
+            crate::worktree_landing::witness_for(&at, busy).map(|mut witness| {
+                witness.beside = crate::worktree_reclaim::found_beside(&path);
+                witness
+            })
         })
         .collect();
     orchestration::watch_landings(witnesses, now_ms);

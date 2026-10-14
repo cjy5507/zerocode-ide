@@ -41,6 +41,7 @@ mod summon_assign;
 mod summon_choice;
 mod summon_difficulty;
 mod summon_model;
+pub(crate) mod superseded;
 pub(crate) mod wall_press;
 mod writing_book;
 
@@ -762,6 +763,55 @@ pub(crate) fn deliver_continuation(
     delivered
 }
 
+/// The panes a reseated worker's continuation is owed to and has not yet
+/// been answered at (t-52566) — from before the worker's seat is durable,
+/// the first moment the mail pointer can see the pane as the worker's,
+/// until the continuation's own delivery answers.
+///
+/// A zo's `SessionStart` lands as the rest it is ([`pane_turns`]) while its
+/// pane waits for its composer, a breath before the continuation begins the
+/// turn it carries. The wake road keeps its words in its own table
+/// ([`Host::wake_words_pending`]); the reseat kept none, and the pointer
+/// read that rest: its line queued behind the continuation, took the line
+/// inside the turn the continuation began, ran out its eight seconds against
+/// the spinner and came back to the person as words they had lost
+/// (2026-10-14, terms 11 and 14).
+fn continuations_owed() -> &'static Mutex<std::collections::HashSet<u32>> {
+    static OWED: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+    OWED.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// One reseat's hold on its pane for the continuation it owes (t-52566):
+/// taken before the seat is durable, let go when the reseat's walk is done
+/// with the pane, whichever way it ends. A worker owed no words holds
+/// nothing: its pane is written down at rest, and its mail is pointed at
+/// like any pane's.
+struct ContinuationOwed(Option<u32>);
+
+impl ContinuationOwed {
+    fn hold(term: u32, words: &str) -> Self {
+        if words.trim().is_empty() {
+            return Self(None);
+        }
+        continuations_owed()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(term);
+        Self(Some(term))
+    }
+}
+
+impl Drop for ContinuationOwed {
+    fn drop(&mut self) {
+        if let Some(term) = self.0 {
+            continuations_owed()
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .remove(&term);
+        }
+    }
+}
+
 fn continuation_status(
     outcome: Option<zerocode_pty::DeliveryOutcome>,
     idle: bool,
@@ -881,7 +931,7 @@ pub(crate) fn coordinator_awaiting(
             let seat = run
                 .coordinator
                 .as_ref()
-                .filter(|seat| seat.actor.as_deref() == Some(actor.as_str()))?;
+                .filter(|seat| seated_as(Some(*seat), &actor))?;
             let address = run.address();
             let cut = restart_census::peek_cut(root, &address);
             cut.kept().then(|| {
@@ -935,6 +985,24 @@ pub(crate) fn seed_reseated_session(host: &dyn Host, worker: &str, term: u32) {
     }
 }
 
+/// Whether the person has taken `worker`'s pane, as its row holds it now — a
+/// row this window cannot read is answered as taken, so nothing of the
+/// person's is moved on a guess (t-46882).
+pub(crate) fn worker_taken_over_now(worker: &str) -> bool {
+    let Some(held) = runtime() else { return true };
+    let Ok(image) = held.actor.view() else {
+        return true;
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return true;
+    };
+    ledger
+        .runs()
+        .iter()
+        .find_map(|run| run.worker(worker))
+        .is_none_or(|row| row.taken_over)
+}
+
 /// The launch words the sleeper `worker` comes back with when the window's
 /// own resume road reopens its conversation (t-7812 B): the model, effort and
 /// peer name its row holds, the same words the ledger's reseat would have cut
@@ -947,7 +1015,91 @@ pub(crate) fn sleeper_launch_tuning(worker: &str) -> Result<Vec<String>, String>
         .map_err(|_| "the orchestration ledger could not be read".to_string())?;
     let ledger = cached_ledger(&held, &image)
         .map_err(|_| "the orchestration ledger could not be read".to_string())?;
-    ledger.sleeper_resume_tuning(worker)
+    ledger.sleeper_resume_tuning(worker, &current_release)
+}
+
+/// The model those words name for the sleeper `worker`, when they name one —
+/// what the window shows on the pane its resume road opens (t-46882).
+pub(crate) fn sleeper_launch_model(worker: &str) -> Option<String> {
+    let held = runtime()?;
+    let image = held.actor.view().ok()?;
+    let ledger = cached_ledger(&held, &image).ok()?;
+    ledger.sleeper_resume_model(worker, &current_release)
+}
+
+/// The release that stands today for `model` in `agent`'s lineup, when the
+/// classifier superseded it (t-46882) — the one question every road that
+/// brings a ledger pane back asks of the catalog: the ledger's reseat (the
+/// actor's launcher), a door's wake and the beat's turn-end pass. Peeked
+/// off the lineup this window last read ([`crate::summon_lineup::snapshot`]),
+/// never fetched; `None` before the first read, for a current model, and for
+/// one the lineup does not list.
+pub(crate) fn current_release(agent: &str, model: &str) -> Option<String> {
+    crate::summon_lineup::current_release(&lineup_now(), agent, model)
+}
+
+/// Whether the window has read a lineup for `agent` at all — the difference
+/// between "this release stands" and "nothing has said yet" that
+/// [`current_release`] answers alike (t-46882).
+pub(crate) fn lineup_held(agent: &str) -> bool {
+    lineup_now().lineups.contains_key(agent)
+}
+
+/// The lineup the restore roads read: the window's own, or a private test
+/// window's.
+fn lineup_now() -> crate::summon_lineup::Snapshot {
+    #[cfg(test)]
+    if let Some(held) = private_lineup()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clone()
+    {
+        return held;
+    }
+    crate::summon_lineup::snapshot()
+}
+
+/// The lineup a private test window holds in place of the window's own
+/// read — set and cleared only under that window's exclusive turn, so no
+/// other scenario's roads read it.
+#[cfg(test)]
+fn private_lineup() -> &'static Mutex<Option<crate::summon_lineup::Snapshot>> {
+    static HELD: OnceLock<Mutex<Option<crate::summon_lineup::Snapshot>>> = OnceLock::new();
+    HELD.get_or_init(Mutex::default)
+}
+
+/// Hold `lineup` for the private window in front, or forget the one held.
+#[cfg(test)]
+pub(crate) fn hold_lineup_for_tests(lineup: Option<crate::summon_lineup::Snapshot>) {
+    *private_lineup()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner()) = lineup;
+}
+
+/// Whether this conversation is a run's coordinator — a run's seat names it
+/// (its actor is the conversation's own identity, kept on the seat a restart
+/// vacated) — whatever the goodbye wrote of its turn (t-46882). The ledger
+/// half of [`coordinator_awaiting`], without the goodbye's.
+pub(crate) fn coordinates_a_run(agent: &str, session: &zerocode_core::ProviderSession) -> bool {
+    let actor = zerocode_core::orchestration::receipt_actor(agent, session.key, &session.id);
+    let Some(held) = runtime() else {
+        return false;
+    };
+    let Ok(image) = held.actor.view() else {
+        return false;
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return false;
+    };
+    ledger
+        .runs()
+        .iter()
+        .any(|run| seated_as(run.coordinator.as_ref(), &actor))
+}
+
+/// Whether `seat` is the chair `actor` — one conversation — holds.
+fn seated_as(seat: Option<&zerocode_core::orchestration::CoordinatorSeat>, actor: &str) -> bool {
+    seat.is_some_and(|seat| seat.actor.as_deref() == Some(actor))
 }
 
 /* ---- the account switch's half of the ledger (t-7538) ------------------ */
@@ -1792,6 +1944,100 @@ pub(crate) fn record_land_check(
     }
 }
 
+/// One record of an integration batch, judged by the ledger against the batch's records and
+/// written as its letter (t-45315). Rings the bell when a letter is new; a record the batch does
+/// not take comes back in the ledger's own words.
+pub(crate) fn record_land_batch(
+    receipt: zerocode_core::orchestration::land_batch::LandBatchReceipt,
+    now_ms: i64,
+) -> Result<(), String> {
+    let held = runtime().ok_or(NO_RUNTIME)?;
+    let (moved, _) = held
+        .actor
+        .land_batched(receipt, now_ms)
+        .map_err(|why| why.to_string())?;
+    rang(moved);
+    Ok(())
+}
+
+/// Every batch of one run as the ledger holds it now: what a press settles and is judged against.
+fn land_batches_of(run: &str) -> Vec<zerocode_core::orchestration::land_batch::BatchState> {
+    let Some(held) = runtime() else {
+        return Vec::new();
+    };
+    let Ok(image) = held.actor.view() else {
+        return Vec::new();
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return Vec::new();
+    };
+    ledger
+        .run(run)
+        .map(zerocode_core::orchestration::land_batch::batches)
+        .unwrap_or_default()
+}
+
+/// A person's press on a batch's card (t-45315): the ledger judges it by the rules the
+/// coordinator's verb meets, and the same road carries it. `by` comes from the board's command,
+/// the one place a press is the person's.
+pub(crate) fn press_land_batch(
+    run: &str,
+    batch: &str,
+    asked: zerocode_core::orchestration::land_batch::Press,
+    by: zerocode_core::orchestration::land_batch::PressedBy,
+    now_ms: i64,
+) -> Result<serde_json::Value, String> {
+    let held = runtime().ok_or(NO_RUNTIME)?;
+    let image = held.actor.view().map_err(|why| why.to_string())?;
+    let ledger = cached_ledger(&held, &image).map_err(|why| why.to_string())?;
+    let ask = zerocode_core::orchestration::land_batch::press(&ledger, run, batch, asked, by)?;
+    let batches = ledger
+        .run(run)
+        .map(zerocode_core::orchestration::land_batch::batches)
+        .unwrap_or_default();
+    let root = land_check_root().ok_or("the orchestration data root is not open")?;
+    let said = crate::land_batch::carry(&root, &ask, &batches, now_ms)?;
+    serde_json::from_str(&said)
+        .map_err(|_| format!("the integration queue answered what is not JSON: {said}"))
+}
+
+/// The integration queue's next run at the window's start (t-45315): every run's batches settled
+/// and swept as the next `land-batch` call would, on a thread of its own — git is a process.
+pub(crate) fn settle_land_batches_at_start(now_ms: i64) {
+    let Some(root) = land_check_root() else {
+        return;
+    };
+    let Some(held) = runtime() else {
+        return;
+    };
+    let Ok(image) = held.actor.view() else {
+        return;
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return;
+    };
+    let runs: Vec<(
+        String,
+        Vec<zerocode_core::orchestration::land_batch::BatchState>,
+    )> = ledger
+        .runs()
+        .iter()
+        .map(|run| {
+            (
+                run.id.clone(),
+                zerocode_core::orchestration::land_batch::batches(run),
+            )
+        })
+        .filter(|(_, batches)| !batches.is_empty())
+        .collect();
+    if runs.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("land-batch-settle".to_string())
+        .spawn(move || crate::land_batch::settle_at_start(&root, &runs, now_ms));
+}
+
 /// Hand the ledger what the window saw of git, so it can write what is late. A pass that finds
 /// nothing writes nothing; one that wrote rings the bell for whoever sleeps on the mail.
 pub(crate) fn watch_landings(
@@ -1877,6 +2123,105 @@ fn settled_workers(ledger: &Ledger) -> Vec<(&zerocode_core::orchestration::Run, 
 pub(crate) fn checkout_is_settled(checkout: &str) -> bool {
     let wanted = checkout.trim_end_matches('/');
     settled_checkouts().iter().any(|one| one.path == wanted)
+}
+
+/// A commit a worker handed in, and the checkout it sat in (t-45336): what the
+/// reclaim measures the task's OTHER checkouts against — the red, the verify,
+/// the evidence checkout a worker cut beside its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HandedIn {
+    pub(crate) task: String,
+    pub(crate) worker: String,
+    pub(crate) agent: String,
+    /// The worker's own checkout, as the ledger holds it, trailing separator
+    /// shed.
+    pub(crate) checkout: String,
+    /// The commit the report named under `head`, as the ledger wrote it.
+    pub(crate) head: String,
+}
+
+/// Every task whose newest attempt ended in `worker_done ok:true` naming a
+/// commit, with the checkout its worker sat in (t-45336).
+///
+/// The newest attempt only: a task sent back and handed in again is measured
+/// against the head it stands at now. A dispatch whose worker lives in another
+/// window is left out — its checkout is on another machine — and so is an
+/// attempt whose report named no commit: there is nothing to measure against.
+/// Sorted, so a sweep that judges a few per pass walks them in the same order
+/// every time. Empty for a window with no durable runtime, the answer
+/// [`settled_checkouts`] gives too.
+pub(crate) fn handed_in_heads() -> Vec<HandedIn> {
+    let Some(held) = runtime() else {
+        return Vec::new();
+    };
+    let Ok(image) = held.actor.view() else {
+        return Vec::new();
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return Vec::new();
+    };
+    drop(image);
+    let mut answered: Vec<HandedIn> = ledger
+        .runs()
+        .iter()
+        .flat_map(|run| {
+            run.tasks.iter().filter_map(move |task| {
+                let attempt = run.newest_attempt(&task.id)?;
+                if attempt.succeeded != Some(true) || attempt.remote.is_some() {
+                    return None;
+                }
+                let head = zerocode_core::orchestration::commit_named(attempt.source.as_deref()?)?;
+                let worker = run.worker(&attempt.worker)?;
+                let checkout = worker.checkout.as_deref()?.trim_end_matches('/');
+                (!checkout.is_empty()).then(|| HandedIn {
+                    task: task.id.clone(),
+                    worker: worker.id.clone(),
+                    agent: worker.agent.clone(),
+                    checkout: checkout.to_string(),
+                    head,
+                })
+            })
+        })
+        .collect();
+    answered.sort_by(|left, right| {
+        left.checkout
+            .cmp(&right.checkout)
+            .then_with(|| left.task.cmp(&right.task))
+    });
+    answered
+}
+
+/// Whether a worker the ledger still counts summoned sits in `checkout` — the
+/// question a checkout beside a hand-in is asked before it goes and again
+/// right before (t-45336): a coordinator can seat a retry in it at any moment.
+/// Compared the way the hand-in keeping compares a ledger path with git's
+/// (last component first, then the filesystem), because the ledger holds the
+/// path a pane reported and git hands back the resolved one.
+pub(crate) fn checkout_is_summoned(checkout: &str) -> bool {
+    let Some(held) = runtime() else {
+        // No ledger to ask: somebody may be seated, so the answer that keeps
+        // the directory.
+        return true;
+    };
+    let Ok(image) = held.actor.view() else {
+        return true;
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return true;
+    };
+    drop(image);
+    let wanted = Path::new(checkout.trim_end_matches('/'));
+    ledger
+        .runs()
+        .iter()
+        .flat_map(|run| run.workers.iter())
+        .filter(|worker| worker.state.still_summoned())
+        .filter_map(|worker| worker.checkout.as_deref())
+        .any(|at| {
+            let at = Path::new(at.trim_end_matches('/'));
+            at.file_name() == wanted.file_name()
+                && (at == wanted || zerocode_orchestrator::same_worktree_path(at, wanted))
+        })
 }
 
 fn runtime_report_value(revision: u64, ledger: &Ledger) -> serde_json::Value {
@@ -2142,6 +2487,13 @@ pub(crate) struct LedgerAgent {
     /// (`Run::progress_from`, t-47538) — the stage every surface draws.
     /// `None` for a worker with neither a task nor an attempt.
     pub(crate) progress: Option<zerocode_core::orchestration::WorkProgress>,
+    /// The ledger's own reasons this attempt's head is late on its way to
+    /// main (`landing_stalled`, t-22105), newest first and each once — what
+    /// the sidebar says in one word beside the stage (t-45336). The window
+    /// keeps the one that still fits where the work stands; the ledger never
+    /// takes a told reason back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) stalled: Vec<String>,
     /// Why the task is closed — folded into a task, handed to a run, or
     /// outdated — when it is. A closed task is neither reported nor failed:
     /// the board says 닫힘 and its reason, and the card leaves the open lanes.
@@ -2546,6 +2898,9 @@ pub(crate) fn refresh_board_ledger() {
     // store's book in memory, outside the ledger's view (t-32798).
     let mut next = next;
     hand_in_keep::dress(&mut next);
+    // Whether each batch's repository has the integration queue on is the project's setting,
+    // laid over the desk the same way, outside the ledger's view (t-45315).
+    crate::land_batch::dress_desk(Arc::make_mut(&mut next.desk));
     // Build, allocate and drop old rows outside the publication lock. The
     // main-thread reader holds it only long enough to clone an Arc.
     let next = Arc::new(next);
@@ -2695,6 +3050,32 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 (true, Some(_)) if !review.merged && !review.nothing_to_land => review.verified_ms,
                 _ => None,
             };
+            // The reasons the ledger told the coordinator this attempt's head
+            // is late (t-45336): read off this run's letters like the time
+            // above, newest first, each reason once.
+            let stalled: Vec<String> = match dispatch {
+                Some(attempt) if attempt.source.is_some() => {
+                    let head = attempt.source.as_deref();
+                    let mut told: Vec<String> = Vec::new();
+                    for one in run.messages().iter().rev().filter(|one| {
+                        one.kind == zerocode_core::orchestration::MessageKind::LandingStalled
+                            && one.dispatch.as_deref() == Some(attempt.id.as_str())
+                    }) {
+                        let said: serde_json::Value =
+                            serde_json::from_str(one.body.as_str()).unwrap_or_default();
+                        if said["head"].as_str() != head {
+                            continue;
+                        }
+                        if let Some(reason) = said["reason"].as_str()
+                            && !told.iter().any(|held| held == reason)
+                        {
+                            told.push(reason.to_string());
+                        }
+                    }
+                    told
+                }
+                _ => Vec::new(),
+            };
             let wall =
                 dispatch.and_then(|one| zerocode_core::orchestration::newest_wall(run, &one.id));
             // Asked only of a row with a wall: the chip is that wall's.
@@ -2746,6 +3127,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 review,
                 review_since_ms,
                 progress,
+                stalled,
                 closed: carried.and_then(|held| held.closed.clone()),
                 term,
                 // Finished work is dated by when its attempt ended — the
@@ -3232,6 +3614,29 @@ const NO_AGENT_IN_FRONT: &str = "— its shell is in front; the agent that ended
 /// [`pane_turn_began`] writes both down as running.
 const A_TURN_IS_RUNNING: &str = "— a turn is under way in it";
 
+/// Why the window may not type at a pane's composer on its own: one per door
+/// [`composer_at_rest`] keeps — a code a person's screen says in its own
+/// language (t-47935), and the sentence the window's log and a coordinator
+/// read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerBusy {
+    NeverHeard,
+    HeldByPerson,
+    ShellInFront,
+    TurnRunning,
+}
+
+impl ComposerBusy {
+    const fn sentence(self) -> &'static str {
+        match self {
+            Self::NeverHeard => NOTHING_WAS_EVER_HEARD,
+            Self::HeldByPerson => THE_PERSON_HOLDS_IT,
+            Self::ShellInFront => NO_AGENT_IN_FRONT,
+            Self::TurnRunning => A_TURN_IS_RUNNING,
+        }
+    }
+}
+
 /// Whether the window may type at this pane's composer on its own, off the
 /// turn facts it measured: `Ok` for a pane whose last turn ended at rest with
 /// its agent still in front, and otherwise the reason it may not.
@@ -3247,18 +3652,18 @@ fn composer_at_rest(
     host: &dyn Host,
     term: u32,
     heard: Option<PaneTurn>,
-) -> Result<(), &'static str> {
+) -> Result<(), ComposerBusy> {
     match heard {
         Some(PaneTurn::Ended { interrupted: false }) => {
             if host.shell_in_front(term) {
-                Err(NO_AGENT_IN_FRONT)
+                Err(ComposerBusy::ShellInFront)
             } else {
                 Ok(())
             }
         }
-        Some(PaneTurn::Ended { interrupted: true }) => Err(THE_PERSON_HOLDS_IT),
-        Some(PaneTurn::Running { .. }) => Err(A_TURN_IS_RUNNING),
-        None => Err(NOTHING_WAS_EVER_HEARD),
+        Some(PaneTurn::Ended { interrupted: true }) => Err(ComposerBusy::HeldByPerson),
+        Some(PaneTurn::Running { .. }) => Err(ComposerBusy::TurnRunning),
+        None => Err(ComposerBusy::NeverHeard),
     }
 }
 
@@ -3478,6 +3883,11 @@ impl Launcher for LiveCatalog {
         origin: [&str; 3],
     ) -> Option<zerocode_core::summon_model::Facts> {
         summon_difficulty::model_facts(agent, origin)
+    }
+
+    /// The lineup this window holds, peeked inside the actor (t-46882).
+    fn current_release(&self, agent: &str, model: &str) -> Option<String> {
+        current_release(agent, model)
     }
 
     fn choose_assign(
@@ -6103,6 +6513,7 @@ pub(crate) fn terminal_gone_with_archive(term: u32, screen: Option<String>, now_
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .retain(|_, held| held.term != Some(term));
+    superseded::forget(term);
     let dissolving: Vec<String> = {
         let tables = crate::agent_teams::teams();
         tables
@@ -7507,6 +7918,10 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // end — here, before the pointer below can start its next turn
     // (t-46106).
     host.follow_account_switch(now_ms);
+    // A pane a restore brought back on a superseded release is moved at its
+    // first rest, here, before the pointer below can start its next turn
+    // (t-46882).
+    superseded::sweep(host);
     point_at_waiting_mail(host, now_ms);
     // The readiness sweep, on the beat that already exists: the sounds heard
     // since the last one retire their windows, and whoever stayed silent past
@@ -7641,6 +8056,17 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
         .keys()
         .cloned()
         .collect();
+    // The panes words are still on their way to (t-52566), copied out after
+    // the ledger like the turn facts: a reseated worker's continuation,
+    // owed from before its seat is durable, and whatever the window is
+    // typing at a pane or holds queued for it. A line typed at such a pane
+    // waits behind those words and takes the line inside whatever they
+    // begin.
+    let owed: std::collections::HashSet<u32> = continuations_owed()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clone();
+    let on_their_way = host.prompts_on_their_way();
     /// Advice one pass decided to type: the pane, and the line.
     struct Pointing {
         run: String,
@@ -7904,8 +8330,12 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                 /* A wake's words own this composer until the pane takes them
                  * (t-11537): the continuation says what is waiting, and a
                  * pointer beside it is the same news twice. Nothing is marked
-                 * — the next beat after the receipt reads the pane afresh. */
-                if host.wake_words_pending(term) {
+                 * — the next beat after the receipt reads the pane afresh.
+                 * A ledger reseat's continuation owns it the same way, from
+                 * before its seat is durable until its delivery answers
+                 * (t-52566): a zo's `SessionStart` reads as rest a breath
+                 * before that continuation begins its turn. */
+                if host.wake_words_pending(term) || owed.contains(&term) {
                     continue;
                 }
                 /* The first two conditions, and the line between them: a door
@@ -8029,7 +8459,9 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                 // terminal: a hand-started agent quit after its last turn
                 // leaves the shell in front, and nothing reports that. A
                 // running turn was answered above.
-                let unattended = composer_at_rest(host, term, heard).err();
+                let unattended = composer_at_rest(host, term, heard)
+                    .err()
+                    .map(ComposerBusy::sentence);
                 // The third: a sleeper is already the better pointer — for an
                 // unattended pane most of all. An agent asleep in a
                 // `check --wait` is told the instant mail lands, with the mail
@@ -8219,6 +8651,15 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                         | Standing::Asking,
                     )
                     | None => {
+                        /* Words already on their way to this pane own its
+                         * line until they land (t-52566): a line typed now
+                         * would queue behind them and take the line inside
+                         * whatever they begin — a turn, which a pointer is
+                         * never typed into. Nothing is marked; the beat after
+                         * they land reads the pane afresh. */
+                        if on_their_way.contains(&term) {
+                            continue;
+                        }
                         /* The wall's door (t-6560), asked where this pass
                          * would type a FRESH line — new mail, a pane just
                          * become pointable, a wall whose window ran out — and
@@ -10679,6 +11120,11 @@ fn carried(
                     }
                     rang(true);
                     if let Some(prepared) = reseating.as_ref() {
+                        // The continuation owns this pane from before the
+                        // seat it is owed to is durable — the moment the mail
+                        // pointer can first see the pane as the worker's —
+                        // until its delivery answers (t-52566).
+                        let _owed = ContinuationOwed::hold(term, &prepared.prompt);
                         if let Err(why) =
                             actor.worker_reseated(&prepared.worker, team_id, &new_pane, now_ms)
                         {
@@ -10708,6 +11154,19 @@ fn carried(
                             rang(moved);
                         }
                         seed_reseated_session(host, &prepared.worker, term);
+                        // A worker the person took over comes back theirs,
+                        // model and all (t-46882): only the ledger's own is
+                        // read at its first rest.
+                        if !worker_taken_over_now(&prepared.worker) {
+                            superseded::came_back(
+                                term,
+                                &prepared.agent,
+                                sleeper_record(&prepared.worker)
+                                    .and_then(|session| session.transcript_path)
+                                    .as_deref(),
+                                now_ms,
+                            );
+                        }
                         /* The replacement was started at an idle composer.
                          * Only now, after the row and run binding are durable,
                          * may it see the interrupted work. A tiny task can run
@@ -10732,6 +11191,7 @@ fn carried(
                             &prepared.checkout,
                             &prepared.agent,
                             prepared.resumed,
+                            prepared.model.as_deref(),
                         );
                         return continuation_answer(decided.reply, continuation, idle);
                     }
@@ -10938,6 +11398,27 @@ fn carried(
                 return refused("the orchestration data root is not open");
             };
             match crate::land_check::carry(&root, &ask, now_ms) {
+                Ok(said) => {
+                    let text = format!("{said}\n");
+                    if let Some(key) = decided.receipt.clone()
+                        && let Err(why) = actor.remember_served(key, text.clone(), now_ms)
+                    {
+                        return refused_by_runtime(why);
+                    }
+                    answer(zerocode_core::agent_teams::Reply::ok(text))
+                }
+                Err(why) => refused(why),
+            }
+        }
+        /* The integration queue (t-45315). The ledger judged the press; the window does its git
+         * and hands every record back through the actor, which judges it again against the
+         * batch's records. The answer is filed as the receipt, as land-check's is. */
+        Effect::LandBatch(ask) => {
+            let Some(root) = land_check_root() else {
+                return refused("the orchestration data root is not open");
+            };
+            let held = land_batches_of(&ask.run);
+            match crate::land_batch::carry(&root, &ask, &held, now_ms) {
                 Ok(said) => {
                     let text = format!("{said}\n");
                     if let Some(key) = decided.receipt.clone()

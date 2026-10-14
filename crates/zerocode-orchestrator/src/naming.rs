@@ -125,6 +125,29 @@ pub fn worker_task_id(name: &str) -> Option<&str> {
     (task_id.len() == parent.len()).then_some(task_id)
 }
 
+/// The ledger task a checkout belongs to by the names the window gives its
+/// checkouts (t-45336): the id its folder carries ([`worker_task_id`]) and,
+/// when it is on a branch, only if that branch sits under `prefix` and carries
+/// the same id. A detached checkout answers by its folder alone.
+///
+/// The one reading behind two answers that must agree: the checkouts a hand-in
+/// takes back beside a worker's own, and the sidebar row a task's checkouts
+/// fold under. A coordinator's `coord-…` folder, a branch outside the prefix
+/// and a branch naming another task belong to no task.
+#[must_use]
+pub fn checkout_task_id<'a>(
+    folder: &'a str,
+    branch: Option<&str>,
+    prefix: &str,
+) -> Option<&'a str> {
+    let task = worker_task_id(folder)?;
+    let Some(branch) = branch else {
+        return Some(task);
+    };
+    let below = branch.strip_prefix(prefix)?.strip_prefix('/')?;
+    (worker_task_id(below) == Some(task)).then_some(task)
+}
+
 fn task_id_prefix(component: &str) -> Option<&str> {
     let suffix = component.strip_prefix("t-")?;
     let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
@@ -371,6 +394,30 @@ mod tests {
         }
         for unrelated in ["wt/drain-gate", "t-title", "t-", "x-t-9-title", "t-9title"] {
             assert_eq!(worker_task_id(unrelated), None, "name was {unrelated:?}");
+        }
+    }
+
+    #[test]
+    fn a_checkout_belongs_to_the_task_its_folder_and_its_branch_both_name() {
+        for (folder, branch, task) in [
+            ("t-26584-before", None, Some("t-26584")),
+            (
+                "t-26584-jev-green",
+                Some("wt/t-26584-jev-green"),
+                Some("t-26584"),
+            ),
+            ("t-26584", Some("wt/t-26584/fix-the-gate"), Some("t-26584")),
+            ("t-265840-red", None, Some("t-265840")),
+            ("coord-t26584", None, None),
+            ("t-26584-gate", Some("coord/t-26584-gate"), None),
+            ("t-26584-mixed", Some("wt/t-26585-mixed"), None),
+            ("t-26584-plain", Some("t-26584-plain"), None),
+        ] {
+            assert_eq!(
+                checkout_task_id(folder, branch, "wt"),
+                task,
+                "{folder} on {branch:?}"
+            );
         }
     }
 

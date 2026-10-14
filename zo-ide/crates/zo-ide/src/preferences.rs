@@ -242,7 +242,7 @@ mod tests {
     };
     use crate::effort::Effort;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -268,6 +268,7 @@ mod tests {
 
     #[test]
     fn preferences_round_trip_and_preserve_unrelated_settings() {
+        let _lock = crate::test_env_lock();
         let settings = path("round-trip");
         fs::write(&settings, r#"{"mcpServers":{},"custom":true}"#)
             .expect("seed settings");
@@ -289,6 +290,7 @@ mod tests {
     /// disk is pinned to the alias once, with a migration record.
     #[test]
     fn family_heads_are_pinned_to_their_alias() {
+        let _lock = crate::test_env_lock();
         let opus = api::resolve_catalog_alias(api::ANTHROPIC_OPUS_MODEL_ALIAS);
         assert_eq!(super::pinned_model_id(&opus), "opus");
         assert_eq!(super::pinned_model_id("claude-opus-4-8"), "claude-opus-4-8", "not a family head");
@@ -337,5 +339,173 @@ mod tests {
         assert_eq!(persistable_model_id(current), current);
         let anthropic = api::resolve_catalog_alias(api::ANTHROPIC_OPUS_MODEL_ALIAS);
         assert_eq!(persistable_model_id(&anthropic), anthropic);
+    }
+
+    /// Marks a run of this test binary as a child of
+    /// [`one_catalog_view_from_process_start_in_either_order`], naming the
+    /// order it asks in.
+    const CATALOG_VIEW_ORDER_ENV: &str = "ZO_TEST_CATALOG_VIEW_ORDER";
+    /// The child asks the catalog first, then reads the catalog file.
+    const START_FIRST: &str = "start-first";
+    /// The child reads the catalog file first, then asks.
+    const CATALOG_FIRST: &str = "catalog-first";
+    /// The marker before a child's answer on its stdout.
+    const CATALOG_VIEW_LINE: &str = "catalog-view ";
+
+    /// What the catalog answers: where the opus alias resolves, the alias that
+    /// id is pinned to, every family alias with its head, and each provider's
+    /// latest model.
+    fn catalog_view() -> serde_json::Value {
+        let opus = api::resolve_catalog_alias(api::ANTHROPIC_OPUS_MODEL_ALIAS);
+        let heads: std::collections::BTreeMap<&str, &str> = api::provider_catalog()
+            .iter()
+            .filter(|entry| api::family_alias_for(entry.canonical_model_id) == Some(entry.alias))
+            .map(|entry| (entry.alias, entry.canonical_model_id))
+            .collect();
+        let latest: Vec<Option<&str>> = [
+            api::ProviderKind::Anthropic,
+            api::ProviderKind::OpenAi,
+            api::ProviderKind::Google,
+            api::ProviderKind::Xai,
+        ]
+        .into_iter()
+        .map(api::latest_model_for_provider)
+        .collect();
+        serde_json::json!({
+            "opus": opus,
+            "pinned": super::pinned_model_id(&opus),
+            "heads": heads,
+            "latest": latest,
+        })
+    }
+
+    /// Write `home`'s catalog file the way an overlay moves a family: the opus
+    /// alias on another shipped release whose id carries the family's name.
+    /// Read from the shipped catalog's own bytes, so nothing here asks the live
+    /// catalog before the file exists. Returns that release.
+    fn declare_another_opus_release(home: &Path) -> String {
+        let shipped: serde_json::Value =
+            serde_json::from_str(api::builtin_model_catalog_json()).expect("shipped catalog");
+        let row = shipped["aliases"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["alias"] == api::ANTHROPIC_OPUS_MODEL_ALIAS))
+            .expect("the shipped opus row");
+        let head = row["canonical"].as_str().expect("the shipped opus head");
+        let release = shipped["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|model| model["provider"] == row["provider"])
+            .flat_map(|model| model["ids"].as_array().into_iter().flatten())
+            .filter_map(serde_json::Value::as_str)
+            .find(|id| *id != head && id.contains(api::ANTHROPIC_OPUS_MODEL_ALIAS))
+            .expect("another shipped opus release")
+            .to_string();
+        let overlay = serde_json::json!({
+            "aliases": [{
+                "alias": api::ANTHROPIC_OPUS_MODEL_ALIAS,
+                "canonical": release,
+                "provider": row["provider"],
+            }],
+        });
+        fs::create_dir_all(home).expect("config home");
+        fs::write(home.join(runtime::model_catalog::CATALOG_FILE), overlay.to_string())
+            .expect("write the catalog file");
+        release
+    }
+
+    /// A child's side: in its own test home, declare the moved release, then
+    /// print what the catalog answers — at process start when the order asks
+    /// first, and after the catalog file is read.
+    fn answer_as_a_catalog_view_child(order: &str) {
+        let _lock = crate::test_env_lock();
+        let home = runtime::default_config_home();
+        let release = declare_another_opus_release(&home);
+        let mut views = Vec::new();
+        if order == START_FIRST {
+            views.push(("start", catalog_view()));
+        }
+        crate::runtime_support::publish_model_catalog();
+        views.push(("catalog", catalog_view()));
+        for (phase, view) in views {
+            println!(
+                "{CATALOG_VIEW_LINE}{}",
+                serde_json::json!({ "phase": phase, "declared": release, "view": view })
+            );
+        }
+        let _ = fs::remove_file(home.join(runtime::model_catalog::CATALOG_FILE));
+    }
+
+    /// The views a fresh run of this test binary, on this test alone, reports
+    /// when it asks in `order`. Its home is temporary and it inherits no
+    /// catalog from this process's environment.
+    fn catalog_views_of_a_child(order: &str) -> Vec<serde_json::Value> {
+        let home = crate::support::temp_dir("catalog-view-child");
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_crate, path)| path);
+        let filter = format!("{module}::one_catalog_view_from_process_start_in_either_order");
+        let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .arg(&filter)
+            .args(["--exact", "--nocapture", "--test-threads=1"])
+            .env(CATALOG_VIEW_ORDER_ENV, order)
+            .env("HOME", &home)
+            .env("ZO_CONFIG_HOME", &home)
+            .env("ZO_HOME", &home)
+            .env("ZO_DISABLE_KEYCHAIN", "1")
+            .env("ZO_DISABLE_MODEL_DISCOVERY", "1")
+            .env_remove(api::MODEL_CONTEXT_WINDOWS_ENV)
+            .env_remove(api::MODEL_EFFORT_CEILINGS_ENV)
+            .env_remove(api::CUSTOM_PROVIDERS_ENV)
+            .output()
+            .expect("run a child");
+        let _ = fs::remove_dir_all(&home);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "the {order} child failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // libtest names the test (`test … ... `) on the line the child's
+        // first answer lands on, so the marker is looked for, not anchored.
+        stdout
+            .lines()
+            .filter_map(|line| line.split_once(CATALOG_VIEW_LINE).map(|(_, view)| view))
+            .map(|line| serde_json::from_str(line).expect("a view line"))
+            .collect()
+    }
+
+    /// One catalog per process (t-44087): what the catalog answers at process
+    /// start — where the opus alias resolves, the alias it is pinned to, the
+    /// family heads — is what it answers once the catalog file is read, and
+    /// reading the file first changes nothing. Each order runs in a fresh run
+    /// of this binary in a temporary home: the catalog is process-global, so
+    /// only a new process can be asked at its start.
+    #[test]
+    fn one_catalog_view_from_process_start_in_either_order() {
+        if let Ok(order) = std::env::var(CATALOG_VIEW_ORDER_ENV) {
+            answer_as_a_catalog_view_child(&order);
+            return;
+        }
+        let start_first = catalog_views_of_a_child(START_FIRST);
+        let catalog_first = catalog_views_of_a_child(CATALOG_FIRST);
+        let [at_start, after_reading] = start_first.as_slice() else {
+            panic!("two views from the {START_FIRST} child: {start_first:?}");
+        };
+        let [read_first] = catalog_first.as_slice() else {
+            panic!("one view from the {CATALOG_FIRST} child: {catalog_first:?}");
+        };
+        assert_eq!(
+            after_reading["view"]["opus"], after_reading["declared"],
+            "the catalog file was read: {after_reading}"
+        );
+        assert_eq!(
+            at_start["view"], after_reading["view"],
+            "process start answered from another catalog than the one the file declares"
+        );
+        assert_eq!(
+            read_first["view"], after_reading["view"],
+            "reading the catalog file first changes nothing"
+        );
     }
 }

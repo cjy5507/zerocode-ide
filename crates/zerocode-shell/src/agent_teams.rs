@@ -1217,14 +1217,16 @@ pub trait Host {
     /// other hosts owe nothing.
     fn follow_account_switch(&self, _now_ms: i64) {}
 
-    /// Publish a restored worker only after its durable seat has moved. Fake
-    /// hosts need no renderer surface and therefore default to doing nothing.
+    /// Publish a restored worker only after its durable seat has moved, with
+    /// the model its launch named when it named one (t-46882). Fake hosts
+    /// need no renderer surface and therefore default to doing nothing.
     fn announce_reseated_worker(
         &self,
         _term: u32,
         _worktree: &str,
         _agent: &str,
         _resumed: zerocode_core::orchestration::WorkerResume,
+        _model: Option<&str>,
     ) {
     }
 
@@ -1338,6 +1340,16 @@ pub trait Host {
     /// (t-11537). Hosts that wake nothing — tmux, tests — answer `false`.
     fn wake_words_pending(&self, _term: u32) -> bool {
         false
+    }
+    /// The panes words are on their way to (t-52566): a delivery the window
+    /// is typing at a pane, or one queued behind it. A pointer typed at such
+    /// a pane waits behind those words and takes the line inside whatever
+    /// they begin — the mail pointer's line, queued behind a restored zo
+    /// worker's continuation, met the turn the continuation began and ran
+    /// out its eight seconds there. Hosts that queue nothing — tmux, tests —
+    /// answer none.
+    fn prompts_on_their_way(&self) -> std::collections::HashSet<u32> {
+        std::collections::HashSet::new()
     }
     /// What the pane's own screen says about its provider being at rest,
     /// measured off the terminal and never off a hook (t-21565): how long the
@@ -1616,7 +1628,8 @@ pub fn run(
         | Effect::WorkerTerminal { .. }
         | Effect::WorktreeEvidence { .. }
         | Effect::WorkerTranscript { .. }
-        | Effect::LandCheck(..) => answer(zerocode_core::agent_teams::Reply::refused(
+        | Effect::LandCheck(..)
+        | Effect::LandBatch(..) => answer(zerocode_core::agent_teams::Reply::refused(
             "the tmux road reads its own panes only",
         )),
         Effect::Focus { term } => {

@@ -29,6 +29,10 @@ const REFRESH_AFTER_MS: i64 = 60 * 60 * 1000;
 const SEEN_FILE: &str = "summon-lineup-seen.json";
 /// What the window's one-line notice listens for.
 pub(crate) const CHANGED_EVENT: &str = "summon-lineup:changed";
+/// What every read says of the releases it holds as superseded
+/// ([`superseded`]), for the words the window puts beside a pane's model
+/// (t-46882).
+pub(crate) const SUPERSEDED_EVENT: &str = "summon-lineup:superseded";
 
 /// Every lineup and the book, as a reader takes them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -107,6 +111,7 @@ fn read_in_background(now_ms: i64) {
             if !changes.is_empty() {
                 let _ = save_seen(&path, &seen);
             }
+            let said = superseded(&lineups);
             {
                 let mut held = held()
                     .lock()
@@ -115,10 +120,11 @@ fn read_in_background(now_ms: i64) {
                 held.read_at_ms = Some(now_ms);
                 held.reading = false;
             }
-            if !changes.is_empty()
-                && let Some(app) = WINDOW.get()
-            {
-                let _ = app.emit(CHANGED_EVENT, &changes);
+            if let Some(app) = WINDOW.get() {
+                if !changes.is_empty() {
+                    let _ = app.emit(CHANGED_EVENT, &changes);
+                }
+                let _ = app.emit(SUPERSEDED_EVENT, &said);
             }
         });
     if spawned.is_err() {
@@ -127,6 +133,43 @@ fn read_in_background(now_ms: i64) {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .reading = false;
     }
+}
+
+/// Every release `lineups` hold as superseded, by agent, and the one that
+/// stands for each today (t-46882) — what the window's sidebar row and
+/// status bar say beside a pane's model. An agent none of whose releases has
+/// a standing successor is left out.
+pub(crate) fn superseded(
+    lineups: &BTreeMap<String, Lineup>,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    lineups
+        .iter()
+        .map(|(agent, lineup)| {
+            let moved: BTreeMap<String, String> = lineup
+                .models
+                .iter()
+                .filter_map(|model| {
+                    Some((
+                        model.id.clone(),
+                        lineup.current_release(&model.id)?.to_string(),
+                    ))
+                })
+                .collect();
+            (agent.clone(), moved)
+        })
+        .filter(|(_, moved)| !moved.is_empty())
+        .collect()
+}
+
+/// The release that stands today for `model` in `agent`'s lineup, when the
+/// classifier superseded it (t-46882): `snapshot`'s answer, `None` where it
+/// holds no lineup for the agent.
+pub(crate) fn current_release(snapshot: &Snapshot, agent: &str, model: &str) -> Option<String> {
+    snapshot
+        .lineups
+        .get(agent)?
+        .current_release(model)
+        .map(str::to_string)
 }
 
 /// The lineup of every agent that takes a model at a difficulty and drives
@@ -216,6 +259,51 @@ mod tests {
             );
         }
         assert!(lineups_of(|_| None).is_empty(), "no catalog, no lineup");
+    }
+
+    /// t-46882: what the window is told beside a pane's model — each
+    /// superseded release with the one standing for it, by agent; an agent
+    /// with nothing superseded says nothing, and neither does a lineup whose
+    /// classifier named no successor.
+    #[test]
+    fn the_window_hears_which_releases_stand_for_the_superseded_ones() {
+        let read = |rows: serde_json::Value| Lineup::from_catalog(&json!({ "models": rows }), "p");
+        let lineups = BTreeMap::from([
+            (
+                "claude".to_string(),
+                read(json!([
+                    {"provider": "p", "id": "model-a-5", "band": "superseded", "supersededBy": "model-a-5-1"},
+                    {"provider": "p", "id": "model-a-5-1", "band": "top", "rungs": []},
+                ]))
+                .unwrap(),
+            ),
+            (
+                "codex".to_string(),
+                read(json!([
+                    {"provider": "p", "id": "model-b", "band": "second", "rungs": ["hard"]},
+                    {"provider": "p", "id": "model-twin", "band": "superseded"},
+                ]))
+                .unwrap(),
+            ),
+        ]);
+        assert_eq!(
+            serde_json::to_value(superseded(&lineups)).unwrap(),
+            json!({"claude": {"model-a-5": "model-a-5-1"}})
+        );
+        let snapshot = Snapshot {
+            lineups,
+            seen: Seen::default(),
+        };
+        assert_eq!(
+            current_release(&snapshot, "claude", "model-a-5").as_deref(),
+            Some("model-a-5-1")
+        );
+        assert_eq!(current_release(&snapshot, "codex", "model-twin"), None);
+        assert_eq!(
+            current_release(&snapshot, "zo", "model-a-5"),
+            None,
+            "no lineup"
+        );
     }
 
     #[test]

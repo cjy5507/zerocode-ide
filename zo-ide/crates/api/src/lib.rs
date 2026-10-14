@@ -125,7 +125,7 @@ pub use providers::{
     non_claude_adapters_enabled, openai_fast_tier_enabled, openai_fast_variant_pair,
     orchestration_reserved_models, provider_catalog, provider_enabled,
     provider_usable_for_smart_inventory, refresh_custom_providers_from_env,
-    refresh_custom_providers_from_json, refresh_model_registry_from_json, adopt_launch_keys, find_router_keys_in_keychain,
+    refresh_custom_providers_from_json, refresh_model_registry_from_json, install_model_catalog_loader, adopt_launch_keys, find_router_keys_in_keychain,
     find_service_keys_in_keychain,
     preserved_thinking_generation, rejects_forced_tool_choice, resolve_catalog_alias,
     resolve_effort_band,

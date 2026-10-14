@@ -289,6 +289,64 @@ fn a_repeated_command_is_answered_once() {
     );
 }
 
+/// A guard's row names the client its question was put to, and the memo's
+/// answer to the same command, which sent nothing, names none and is no use
+/// of it: the reading of that client's real use is the request that left
+/// (t-53792).
+#[test]
+fn a_guards_row_names_its_client_and_its_memo_answer_is_no_use_of_it() {
+    use crate::systemone::latest::{self, State};
+    use zerocode_core::jev::summary::CLIENT_ROUTE;
+
+    let endpoint = flagging();
+    let project = tempfile::tempdir().expect("a project");
+    let (home, wire) = home_asking(&endpoint, project.path(), JevMode::Shadow);
+    let guards = fresh_guards();
+    let codex = pane(AgentKind::Codex, project.path());
+    for (call, at) in [("call-1", 1), ("call-2", 2)] {
+        join(note(
+            guards,
+            &wire,
+            &codex,
+            Asking::ALL,
+            vec![about(call, "cargo test -p tools", project.path())],
+            at,
+        ));
+    }
+    let held = rows(&home, &COMMAND_GUARD, 2);
+    let asked = requests(&held);
+    assert_eq!(asked.len(), 2, "{held:?}");
+    assert!(crate::systemone::tests::route_of(&wire).is_some());
+    assert_eq!(
+        asked[0][CLIENT_ROUTE.canonical],
+        json!(crate::systemone::tests::route_of(&wire))
+    );
+    assert_eq!(asked[1]["cached"], json!(true));
+    assert!(
+        asked[1].get(CLIENT_ROUTE.canonical).is_none(),
+        "the memo's answer was put to no client: {}",
+        asked[1]
+    );
+    let reading = latest::read(&wire, 0);
+    assert_eq!(reading.state, State::Observed, "{reading:?}");
+    let last = reading.last_request.expect("the request that left");
+    assert_eq!(
+        (
+            last.feature,
+            last.at_ms,
+            last.outcome.as_str(),
+            last.applied
+        ),
+        (
+            COMMAND_GUARD.id,
+            asked[0]["at"].as_i64(),
+            ANSWERED_OUTCOME,
+            Some(false)
+        )
+    );
+    assert!(!reading.unattributed_newer);
+}
+
 /// A seat left off asks nothing and writes nothing — and a command today's
 /// rules prove read-only is not asked at all.
 #[test]

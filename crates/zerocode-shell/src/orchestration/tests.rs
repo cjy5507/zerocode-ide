@@ -408,6 +408,7 @@ impl PrivateWindow {
             .take();
         super::install_runtime(actor, overrides, usage);
         forget_the_goodbyes_note();
+        super::hold_lineup_for_tests(None);
         (
             Self {
                 _root: root,
@@ -447,6 +448,8 @@ impl PrivateWindow {
 impl Drop for PrivateWindow {
     fn drop(&mut self) {
         forget_the_goodbyes_note();
+        // A lineup this window held is no other window's (t-46882).
+        super::hold_lineup_for_tests(None);
         *super::runtime_cell()
             .lock()
             .unwrap_or_else(|held| held.into_inner()) = self.previous.take();
@@ -11820,6 +11823,118 @@ fn the_beat_points_an_idle_coordinator_at_its_mail_and_enters_once() {
     crate::agent_teams::forget_term(WORKER);
 }
 
+/// t-52566: a pane words are still on their way to is not pointed at. The
+/// mail pointer's line, queued behind a restored zo worker's continuation,
+/// took the line inside the turn the continuation began and ran out its
+/// eight seconds there; behind any delivery it would meet whatever that
+/// delivery begins. Once the words have landed, the ordinary road speaks.
+#[test]
+fn the_pointer_waits_for_words_already_on_their_way_to_the_pane() {
+    const LEADER: u32 = 52_566;
+    const WORKER: u32 = 52_567;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let team = format!("team-pointer-behind-{LEADER}");
+    let (_run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+
+    /// Sends always land; the panes the window is still typing at are
+    /// whatever the test says.
+    struct Typing {
+        sent: Mutex<Vec<(u32, String)>>,
+        typing_at: Mutex<std::collections::HashSet<u32>>,
+    }
+    impl Host for Typing {
+        fn split(
+            &self,
+            _team: &str,
+            _leader_term: u32,
+            _from_term: u32,
+            _pane: &str,
+            _direction: zerocode_core::agent_teams::Direction,
+            _command: &str,
+            _token: &str,
+        ) -> Option<u32> {
+            None
+        }
+        fn send(&self, term: u32, text: &str) -> bool {
+            self.sent
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .push((term, text.to_string()));
+            true
+        }
+        fn capture(&self, _term: u32) -> Option<String> {
+            None
+        }
+        fn focus(&self, _term: u32) -> bool {
+            false
+        }
+        fn close(&self, _term: u32) {}
+        fn actor_for(&self, term: u32) -> Option<String> {
+            Some(test_actor(term))
+        }
+        fn prompts_on_their_way(&self) -> std::collections::HashSet<u32> {
+            self.typing_at
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .clone()
+        }
+    }
+    let host = Typing {
+        sent: Mutex::new(Vec::new()),
+        typing_at: Mutex::new(std::collections::HashSet::from([LEADER])),
+    };
+    let typed = |host: &Typing| -> Vec<(u32, String)> {
+        host.sent
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
+    };
+
+    // The worker reports, and the coordinator's turn has ended: mail waits
+    // at a pane at rest — but the window is still typing something there.
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let done = run(
+        &host,
+        Vec::new(),
+        &team,
+        &pane,
+        &held,
+        &words(&format!(
+            "send --type worker_done --body {{\"ok\":true}} --retry-request done-{worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(done.exit_code, 0, "{}", done.stderr);
+    super::pane_turn_ended(LEADER, 50, false, clock());
+    super::tick(&host, &[], clock());
+    super::tick(&host, &[], clock());
+    assert_eq!(
+        typed(&host),
+        Vec::new(),
+        "advice was queued behind words still on their way to the pane"
+    );
+
+    // Those words have landed: the next beat points, once.
+    host.typing_at
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clear();
+    super::tick(&host, &[], clock());
+    assert_eq!(
+        typed(&host),
+        vec![
+            (LEADER, zerocode_core::orchestration::pointer_text(1)),
+            (LEADER, "\r".to_string())
+        ]
+    );
+
+    super::pane_turn_began(LEADER, clock());
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+}
+
 /// A pointer that reached Enter is written down under the window's data
 /// root, so the window that comes back after a restart — its in-memory
 /// marks gone, the mail still unacknowledged — does not type the same
@@ -23077,6 +23192,10 @@ mod restore_door;
 /// t-9091: a closing window's beat leaves its sleepers to the next window
 /// (`tests/restore_goodbye.rs`).
 mod restore_goodbye;
+/// t-46882: a restart brings no ledger pane back on a release the catalog
+/// superseded, and a pane that came back before the lineup was read is moved
+/// at its first rest (`tests/restore_release.rs`).
+mod restore_release;
 /// t-19779: a released worker stays retired — the window is told so when its
 /// checkout is opened, and no restore road brings it back
 /// (`tests/restore_retired.rs`).
@@ -27716,7 +27835,15 @@ fn a_persons_retry_press_types_once_per_wall_and_holds_a_handover_back() {
     assert_eq!(chip.hand_over_refusal, None, "{chip:?}");
 
     let refused = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at).unwrap_err();
-    assert!(refused.contains("composer is not at rest"), "{refused}");
+    assert!(
+        refused.to_string().contains("composer is not at rest"),
+        "{refused}"
+    );
+    assert_eq!(
+        serde_json::to_value(&refused).expect("json"),
+        serde_json::json!({ "code": "composer_never_heard", "worker": stood.worker }),
+        "the window is sent a sentence, not a code"
+    );
     assert!(resumed_rows(&stood.dispatch).is_empty());
 
     super::pane_turn_ended(term, at - 1, false, at);
@@ -27734,7 +27861,11 @@ fn a_persons_retry_press_types_once_per_wall_and_holds_a_handover_back() {
     assert_eq!(typed[0]["line"], WALL_RETRY_LINE);
 
     let again = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at + 1).unwrap_err();
-    assert_eq!(again, RESUME_IN_FLIGHT);
+    assert_eq!(again.to_string(), RESUME_IN_FLIGHT);
+    assert_eq!(
+        serde_json::to_value(&again).expect("json"),
+        serde_json::json!({ "code": "resume_in_flight" })
+    );
     let held_back = super::wall_press::hand_over(
         &stood.host,
         &[],
@@ -27744,7 +27875,11 @@ fn a_persons_retry_press_types_once_per_wall_and_holds_a_handover_back() {
         at + 2,
     )
     .unwrap_err();
-    assert!(held_back.contains("being typed"), "{held_back}");
+    assert!(held_back.to_string().contains("being typed"), "{held_back}");
+    assert_eq!(
+        serde_json::to_value(&held_back).expect("json"),
+        serde_json::json!({ "code": "handover_waits_for_typing", "dispatch": stood.dispatch })
+    );
     assert_eq!(stood.worker_state(&stood.worker), "Active");
     assert_eq!(resumed_rows(&stood.dispatch).len(), 1);
 
@@ -27754,11 +27889,19 @@ fn a_persons_retry_press_types_once_per_wall_and_holds_a_handover_back() {
     assert_eq!(settled.len(), 1, "{settled:?}");
     assert_eq!(settled[0]["status"], "submitted");
     let once = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at + 4).unwrap_err();
-    assert!(once.contains("already typed"), "{once}");
+    assert!(once.to_string().contains("already typed"), "{once}");
+    assert_eq!(
+        serde_json::to_value(&once).expect("json"),
+        serde_json::json!({ "code": "already_typed", "dispatch": stood.dispatch })
+    );
     let lifted =
         super::wall_press::retry(&stood.host, &run_id, &stood.worker, wall.stands_until_ms)
             .unwrap_err();
-    assert!(lifted.contains("lifted"), "{lifted}");
+    assert!(lifted.to_string().contains("lifted"), "{lifted}");
+    assert_eq!(
+        serde_json::to_value(&lifted).expect("json"),
+        serde_json::json!({ "code": "wall_lifted", "worker": stood.worker })
+    );
     assert_eq!(resumed_rows(&stood.dispatch).len(), 1, "a refusal typed");
 }
 
@@ -27780,7 +27923,14 @@ fn a_persons_handover_press_walks_the_beats_verbs_and_seats_one_replacement() {
     let at = stood.began + 20_000;
     let unnamed = super::wall_press::hand_over(&stood.host, &[], &run_id, &stood.worker, None, at)
         .unwrap_err();
-    assert!(unnamed.contains("no alternative is named"), "{unnamed}");
+    assert!(
+        unnamed.to_string().contains("no alternative is named"),
+        "{unnamed}"
+    );
+    assert_eq!(
+        serde_json::to_value(&unnamed).expect("json"),
+        serde_json::json!({ "code": "no_alternative" })
+    );
     *stood
         .host
         .busy
@@ -27789,7 +27939,11 @@ fn a_persons_handover_press_walks_the_beats_verbs_and_seats_one_replacement() {
     let working =
         super::wall_press::hand_over(&stood.host, &[], &run_id, &stood.worker, Some("claude"), at)
             .unwrap_err();
-    assert!(working.contains("at work again"), "{working}");
+    assert!(working.to_string().contains("at work again"), "{working}");
+    assert_eq!(
+        serde_json::to_value(&working).expect("json"),
+        serde_json::json!({ "code": "at_work_again", "worker": stood.worker })
+    );
     *stood
         .host
         .busy
@@ -27846,7 +28000,11 @@ fn a_persons_handover_press_walks_the_beats_verbs_and_seats_one_replacement() {
         at + 3,
     )
     .unwrap_err();
-    assert!(again.contains("released"), "{again}");
+    assert!(again.to_string().contains("released"), "{again}");
+    assert_eq!(
+        serde_json::to_value(&again).expect("json"),
+        serde_json::json!({ "code": "worker_not_live", "worker": stood.worker, "state": "released" })
+    );
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let stop = run(
         &stood.host,
@@ -27878,4 +28036,116 @@ fn a_persons_handover_press_walks_the_beats_verbs_and_seats_one_replacement() {
     );
     assert_eq!(linked().len(), 1, "two replacements for one attempt");
     assert_eq!(stood.worker_state(&replacement), "Active");
+}
+
+/// The attempts that name `dispatch` as the one they replace.
+fn replacements_of(dispatch: &str) -> usize {
+    the_rows()
+        .dispatches
+        .iter()
+        .filter(|one| one.retry_of.as_deref() == Some(dispatch))
+        .count()
+}
+
+/// t-47935: a press made while an account switch moves panes stands in the
+/// switch's line without waiting in it (`unless_switching`), and the window
+/// is told so as a code — never a sentence — so it can say it in the
+/// person's language. Nothing moved: no continuation reserved or typed, the
+/// worker at its post, no replacement. Once the line is free the same press
+/// is taken: the line was the only reason.
+#[test]
+fn a_press_made_while_an_account_switch_moves_panes_is_refused_by_code_and_moves_nothing() {
+    const LEADER_TERM: u32 = 86_100;
+    let stood = Walled::stand(LEADER_TERM, crate::test_host::existing_directory(), "");
+    stood.wall_it();
+    let run_id = run_of(&stood.worker);
+    let at = stood.began + 20_000;
+    super::pane_turn_ended(LEADER_TERM + 1, at - 1, false, at);
+
+    let switching = crate::account_switch::hold_switch_line();
+    let retried = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at)
+        .expect_err("a retry inside a move");
+    let handed = super::wall_press::hand_over(
+        &stood.host,
+        &[],
+        &run_id,
+        &stood.worker,
+        Some("claude"),
+        at + 1,
+    )
+    .expect_err("a handover inside a move");
+    drop(switching);
+    let in_flight = serde_json::json!({ "code": "switch_in_flight" });
+    assert_eq!(serde_json::to_value(&retried).expect("json"), in_flight);
+    assert_eq!(serde_json::to_value(&handed).expect("json"), in_flight);
+    assert!(
+        resumed_rows(&stood.dispatch).is_empty(),
+        "a press inside a move reserved a continuation"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    assert_eq!(replacements_of(&stood.dispatch), 0);
+
+    let said = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at + 2)
+        .expect("the line is free again");
+    assert_eq!(said["line"], zerocode_core::orchestration::WALL_RETRY_LINE);
+    assert_eq!(resumed_rows(&stood.dispatch).len(), 1);
+}
+
+/// t-47935: a handover whose replacement cannot start — the agent the person
+/// chose reached its own wall after the chip was drawn — has already ended
+/// the attempt, and says so as a code: the attempt it ended and the ledger's
+/// own line about the start. The worker is let go, its task is ready for the
+/// next summons, and nothing is linked to the ended attempt.
+#[test]
+fn a_handover_whose_replacement_cannot_start_says_so_by_code_and_leaves_the_task_ready() {
+    const LEADER_TERM: u32 = 86_120;
+    let stood = Walled::stand(LEADER_TERM, crate::test_host::existing_directory(), "");
+    stood.wall_it();
+    let run_id = run_of(&stood.worker);
+    let at = stood.began + 20_000;
+    stood.window.set_usage(vec![
+        (
+            "codex",
+            usage_snapshot(
+                "codex",
+                Some((98, Some(stood.began + 42 * 60_000))),
+                Some((40, None)),
+                stood.began - 3 * 60_000,
+            ),
+        ),
+        (
+            "claude",
+            usage_snapshot(
+                "claude",
+                Some((99, Some(stood.began + 9 * 60_000))),
+                Some((30, None)),
+                stood.began - 60_000,
+            ),
+        ),
+    ]);
+
+    let refused =
+        super::wall_press::hand_over(&stood.host, &[], &run_id, &stood.worker, Some("claude"), at)
+            .expect_err("claude stands at its own wall");
+    let said = serde_json::to_value(&refused).expect("json");
+    assert_eq!(said["code"], "replacement_not_started", "{said}");
+    assert_eq!(said["dispatch"], stood.dispatch.as_str(), "{said}");
+    let detail = said["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("claude") && detail.contains("99%"),
+        "the start's own refusal is not carried: {said}"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    assert_eq!(
+        replacements_of(&stood.dispatch),
+        0,
+        "a replacement was linked"
+    );
+    let rows = the_rows();
+    let task = rows
+        .tasks
+        .iter()
+        .find(|one| one.id == stood.task)
+        .expect("the task");
+    assert_eq!(task.status, zerocode_core::orchestration::TaskStatus::Ready);
 }

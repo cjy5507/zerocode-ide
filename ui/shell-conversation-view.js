@@ -405,21 +405,148 @@ function standChatPlace(list) {
   paintFootDoor(list);
 }
 
-/* The reader's place, kept on the run as its page leaves the host: nothing
- * while the list follows its foot, else the first row under the list's top
- * (a person's words stuck there are not where they read) and how far under
- * it that row stands. A list with no box keeps the place it had. */
-function keepChatPlace(list) {
-  const run = list?.__run;
-  if (!run || list.clientHeight === 0) return;
-  run.chatPlace = null;
-  if (!chatAway(list)) return;
+/* The row a reader who left the foot is reading — the first under the list's
+ * top that is not a person's words stuck there — and how far under the top it
+ * stands; null while the list follows its foot. */
+function chatReading(list) {
+  if (!chatAway(list)) return null;
   const top = list.getBoundingClientRect().top;
   for (const row of list.querySelectorAll(":scope > [data-turn]:not(.is-user)")) {
     const box = row.getBoundingClientRect();
-    if (box.bottom <= top) continue;
-    run.chatPlace = { turn: row.dataset.turn, offset: box.top - top };
-    return;
+    if (box.bottom > top) return { row, offset: box.top - top };
+  }
+  return null;
+}
+
+/* The reader's place, kept on the run as its page leaves the host: nothing
+ * while the list follows its foot, else the row read (`chatReading`). A list
+ * with no box keeps the place it had. */
+function keepChatPlace(list) {
+  const run = list?.__run;
+  if (!run || list.clientHeight === 0) return;
+  const reading = chatReading(list);
+  run.chatPlace = reading ? { turn: reading.row.dataset.turn, offset: reading.offset } : null;
+}
+
+/* The reader's place in `list` as a place among `run`'s own turns — for a page
+ * that continues the same conversation from other turns (a pane's transcript
+ * view handed to its wire, t-54304): the row read, found among `run`'s turns
+ * by what it is (its call's id, or its voice, words and time), and how far
+ * under the top it stood. Null when the list follows its foot or the turn is
+ * not there. */
+function chatPlaceAcross(list, run) {
+  if (!list || list.clientHeight === 0) return null;
+  const reading = chatReading(list);
+  const read = reading?.row.__turn;
+  if (!read) return null;
+  const same = run.helper.turns.find((turn) => turn.role === read.role && (turn.tool?.call_id || read.tool?.call_id
+    ? turn.tool?.call_id === read.tool?.call_id
+    : turn.text === read.text && turn.at === read.at));
+  return same ? { turn: String(same.seq), offset: reading.offset } : null;
+}
+
+/* ---- a conversation looked away from is kept aside (t-54304) ---------------
+ *
+ * A leaf draws one conversation at a time on one host. A press on another
+ * conversation's tab let the page go and built the next — and, coming back,
+ * built this one again: every row of up to `HELPER_TURN_CAP` turns, 79 ms for
+ * 400 in the harness and 360 ms at a 4x CPU (t-22100's open). The desktop apps
+ * the person held it against never build a conversation they still hold:
+ * Dots keeps a hidden view alive for 600 s (`ttlSeconds:600`, React
+ * Activity); Claude's Code tab and Codex keep what a thread looked like when
+ * it was left — its rows' heights, the row read and how far into it, whether
+ * it followed its foot — and stand it there again (reports/t-54304/
+ * findings-*.md). This page has no windowing to restore, so the cheapest way
+ * to the same is to keep the page itself: the host's nodes, taken out of the
+ * document and put back as they were.
+ *
+ * Out of the document nothing of a kept page is found, read aloud, laid out
+ * or painted; its watchers' answers find its list disconnected and wait for
+ * it (`judgeShelf`, `imageWatch`, the rail's frame). What lives only while a
+ * page is looked at goes as it would with the page: a helper's stop and the
+ * answer still out for it (`leaveHelperPageStop`); and the code blocks the
+ * colouring let go while the page was out go back in line when it comes back
+ * (`colourCodeAgainIn`). A leaf keeps `pages` of them — the ones looked at
+ * last — for `ttlMs` each, and a closed tab's goes at once
+ * (`releaseWorkerPage`). A 400-turn page is some 2,150 elements. */
+const CHAT_PARK = Object.freeze({ pages: 2, ttlMs: 600_000 });
+
+/* Take the conversation page standing on `host` out of the document and keep
+ * it, when the tab coming is another one. Its reader's place is written on its
+ * run as before (`keepChatPlace`), for the day the kept page is let go and the
+ * conversation built again. */
+function parkChatPage(host, coming) {
+  const page = host.__helperPage;
+  if (!page || page.id === coming.id) return;
+  const tab = tabs.find((one) => one.id === page.id);
+  if (!tab) return;
+  const list = page.turns;
+  keepChatPlace(list);
+  const kept = {
+    page,
+    pane: tab.pane,
+    nodes: [...host.childNodes],
+    classes: ["is-chat-page", "is-helper-page"].filter((name) => host.classList.contains(name)),
+    keyboard: host.dataset.keyboardOwner === "true",
+    at: Date.now(),
+    timer: 0,
+  };
+  host.__dockWatch?.disconnect();
+  host.__dockWatch = null;
+  leaveHelperPageStop(host);
+  host.replaceChildren();
+  host.__helperPage = null;
+  host.classList.remove("is-chat-page", "is-helper-page");
+  delete host.dataset.keyboardOwner;
+  const parked = (host.__parked ??= new Map());
+  dropParkedPage(host, page.id);
+  parked.set(page.id, kept);
+  kept.timer = setTimeout(() => sweepParkedPages(host), CHAT_PARK.ttlMs);
+  sweepParkedPages(host);
+  // The page coming leaves the kept ones as it comes back (`unparkChatPage`),
+  // so it never counts against them — nor is it the oldest let go.
+  const aside = () => [...parked.keys()].filter((id) => id !== coming.id);
+  while (aside().length > CHAT_PARK.pages) dropParkedPage(host, aside()[0]);
+}
+
+/* Put the page `tab` left on this host back as it was — its nodes, its
+ * classes, the dock's watch, and the list where its reader left it: the offset
+ * went out with the document, so the list stands again on the row read and its
+ * height under the top (`standChatPlace` reads the place `parkChatPage` wrote),
+ * or at its foot — now if it has a box, else when it gets one (`keepToFoot`'s
+ * watch). The page then takes the road of any page standing as drawn: the new
+ * turns, the head, the status. */
+function unparkChatPage(host, tab) {
+  const kept = host.__parked?.get(tab.id);
+  if (!kept || host.__helperPage) return;
+  host.__parked.delete(tab.id);
+  clearTimeout(kept.timer);
+  host.replaceChildren(...kept.nodes);
+  for (const name of kept.classes) host.classList.add(name);
+  if (kept.keyboard) host.dataset.keyboardOwner = "true";
+  host.__helperPage = kept.page;
+  const list = kept.page.turns;
+  if (list.__follow) list.__follow.placed = false;
+  standChatPlace(list);
+  if (kept.page.dock) host.__dockWatch = watchChatDock(host, kept.page.dock);
+  colourCodeAgainIn(host);
+}
+
+/* Let a kept page go: its watchers and its timer. */
+function dropParkedPage(host, id) {
+  const kept = host?.__parked?.get(id);
+  if (!kept) return;
+  host.__parked.delete(id);
+  clearTimeout(kept.timer);
+  forgetChatList(kept.page.turns);
+}
+
+/* The kept pages whose time ran out, whose tab is gone, or whose tab now
+ * stands in another leaf. */
+function sweepParkedPages(host, now = Date.now()) {
+  for (const [id, kept] of host?.__parked ?? []) {
+    const tab = tabs.find((one) => one.id === id);
+    if (!tab || tab.pane !== kept.pane || now - kept.at >= CHAT_PARK.ttlMs) dropParkedPage(host, id);
   }
 }
 
@@ -1252,6 +1379,22 @@ function colourCodeIn(host) {
   }
   codeSliceEnded(clock);
   askCodeSlice();
+}
+
+/* The fences of a page come back from aside (`unparkChatPage`, t-54304): the
+ * colouring let go of those whose turn came while the page was out of the
+ * document (`stepCodeJob`) — still waiting, out of line, perhaps half drawn.
+ * They stand plain again, their words whole, and go back in line. */
+function colourCodeAgainIn(host) {
+  const inLine = new Set([codeColour.job, ...codeColour.queue, ...codeColour.held].filter(Boolean).map((job) => job.pre));
+  let again = false;
+  for (const pre of host.querySelectorAll("pre.md-block")) {
+    if (pre.__codeColour !== CODE_WAITING || inLine.has(pre)) continue;
+    if (codeWordsOf(pre) === null) pre.textContent = pre.textContent;
+    pre.__codeColour = undefined;
+    again = true;
+  }
+  if (again) colourCodeIn(host);
 }
 
 /* Ask for a slice, once, while anything waits. */

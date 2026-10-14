@@ -1,6 +1,7 @@
 //! Board commands.
 
 use crate::conversation_wake::{self, ConversationWake};
+use crate::orchestration::wall_press::PressRefusal;
 use crate::*;
 use zerocode_core::capabilities::SpawnRoad;
 
@@ -364,14 +365,15 @@ pub(crate) async fn desk_ack(
 /// (`wall_press::retry`). The main window only, and only after the renderer's
 /// own confirm: no beat, hook or worker endpoint reaches this command, and a
 /// press the ledger no longer takes (the wall lifted, an account switch moved
-/// the worker) is refused here whatever the chip still shows.
+/// the worker) is refused here whatever the chip still shows — by its code,
+/// which the board says in the person's language.
 #[tauri::command]
 pub(crate) async fn quota_wall_retry(
     app: AppHandle,
     webview: tauri::Webview,
     run: String,
     worker: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, PressRefusal> {
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
         let host = crate::agent_tools_runtime::TeamWindow { app };
@@ -394,7 +396,7 @@ pub(crate) async fn quota_wall_handover(
     run: String,
     worker: String,
     to: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, PressRefusal> {
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
         let overrides: Vec<_> = {
@@ -411,6 +413,95 @@ pub(crate) async fn quota_wall_handover(
             &run,
             &worker,
             to.as_deref(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 「main으로 올리기」 on an integration batch's card (t-45315): fast-forward the base branch to
+/// the batch's green tip. Like the three presses below: the main window only, after the
+/// renderer's own confirm; the press is the person's, judged by the rules the coordinator's
+/// verb meets and carried on the same road (`press_land_batch`).
+#[tauri::command]
+pub(crate) async fn land_batch_promote(
+    webview: tauri::Webview,
+    run: String,
+    batch: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::press_land_batch(
+            &run,
+            &batch,
+            zerocode_core::orchestration::land_batch::Press::Promote,
+            zerocode_core::orchestration::land_batch::person_press(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 「범인 찾기」 on a red batch's card (t-45315): start the culprit search over its steps.
+#[tauri::command]
+pub(crate) async fn land_batch_bisect(
+    webview: tauri::Webview,
+    run: String,
+    batch: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::press_land_batch(
+            &run,
+            &batch,
+            zerocode_core::orchestration::land_batch::Press::Bisect,
+            zerocode_core::orchestration::land_batch::person_press(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 「범인 빼고 다시 쌓기」 and 「새 main 위에 다시 쌓기」 (t-45315): stack the next generation on
+/// the base branch as it stands, without the members in `drop` — the culprit, or none.
+#[tauri::command]
+pub(crate) async fn land_batch_restack(
+    webview: tauri::Webview,
+    run: String,
+    batch: String,
+    drop: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::press_land_batch(
+            &run,
+            &batch,
+            zerocode_core::orchestration::land_batch::Press::Restack { drop },
+            zerocode_core::orchestration::land_batch::person_press(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 「취소」 on a batch's card (t-45315): end the batch and tombstone its generation's publish.
+#[tauri::command]
+pub(crate) async fn land_batch_cancel(
+    webview: tauri::Webview,
+    run: String,
+    batch: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::press_land_batch(
+            &run,
+            &batch,
+            zerocode_core::orchestration::land_batch::Press::Cancel,
+            zerocode_core::orchestration::land_batch::person_press(),
             crate::now_epoch_ms(),
         )
     })
@@ -1476,13 +1567,32 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         tab.as_deref()
             .and_then(|key| restart_nudge_runtime::tab_nudge(&data_root, key, Some(root.as_path())))
     });
+    // Whose pane this is (t-46882): the ledger's — a sleeper no person took,
+    // or the conversation a run's seat names — or the person's own.
+    let owned_by_the_ledger = match reseating.as_deref() {
+        Some(worker) => !crate::orchestration::worker_taken_over_now(worker),
+        None => !fresh && crate::orchestration::coordinates_a_run(agent, &session),
+    };
+    // A run's coordinator comes back on the release that stands today for
+    // the one its conversation last ran (t-46882): a resume that names no
+    // `--model` runs the selection its session saved, and on 2026-10-11 that
+    // was `claude-fable-5` beside the catalog's `claude-fable-5-1`. A person's
+    // own tab runs what it runs.
+    let moved = (owned_by_the_ledger && reseating.is_none())
+        .then(|| moved_release(agent, &session))
+        .flatten();
     // And a sleeper's conversation comes back as the launch the ledger would
     // have cut (t-7812 B): its model, its effort, its peer name. The pane the
     // 2026-09-25 restart reopened without them was a default-model CLI that
-    // nobody had summoned.
-    let tuning = match reseating.as_deref() {
-        Some(worker) => crate::orchestration::sleeper_launch_tuning(worker)?,
-        None => Vec::new(),
+    // nobody had summoned. Its row's release is moved by the same lookup,
+    // in the ledger's own words (`kept_worker_tuning`, t-46882).
+    let (tuning, named) = match (reseating.as_deref(), &moved) {
+        (Some(worker), _) => (
+            crate::orchestration::sleeper_launch_tuning(worker)?,
+            crate::orchestration::sleeper_launch_model(worker),
+        ),
+        (None, Some(moved)) => (moved.words.clone(), Some(moved.to.clone())),
+        (None, None) => (Vec::new(), None),
     };
     let command = if fresh {
         fresh_command(agent, launch_override.as_ref())?
@@ -1551,6 +1661,9 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         &session.id,
         &root,
     ));
+    if let Some(moved) = &moved {
+        window.note(&moved.line(term, kind.slug()));
+    }
     if fresh {
         // Not that conversation: the fresh agent's own SessionStart names
         // the one this pane now holds.
@@ -1577,7 +1690,19 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         None => session,
     };
     let resumed_session_id = session.id.clone();
+    let written_at = session.transcript_path.clone();
     window.record(term, session);
+    // A ledger pane — a sleeper no person took, or a run's coordinator — is
+    // read at its first rest for the release it came back on (t-46882); a
+    // person's own tab runs whatever they run.
+    if owned_by_the_ledger {
+        crate::orchestration::superseded::came_back(
+            term,
+            kind.slug(),
+            written_at.as_deref(),
+            now_epoch_ms(),
+        );
+    }
     // Whose word in the goodbye's note this wake speaks for: the sleeper's,
     // the coordinator's run's, or the person's tab's.
     let reseated = reseating.is_some();
@@ -1625,7 +1750,42 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         window.seat_run(term);
     }
     window.stir();
-    Ok(ConversationWake::opened(term))
+    Ok(ConversationWake::opened(term).naming(named))
+}
+
+/// A resumed conversation moved off the release it last ran (t-46882): the
+/// one its own record names, the one that stands for it today, and the
+/// launch words that name that one.
+struct MovedRelease {
+    from: String,
+    to: String,
+    words: Vec<String>,
+}
+
+impl MovedRelease {
+    /// The window's log line for it.
+    fn line(&self, term: TermId, agent: &str) -> String {
+        format!(
+            "term {term} resumed {agent} on {}: its conversation last ran {}, which the catalog \
+             superseded",
+            self.to, self.from
+        )
+    }
+}
+
+/// The release a resumed conversation's own transcript says it last ran,
+/// when the catalog has superseded it and names the one standing for it
+/// today (`orchestration::current_release`) — read the way the account
+/// switch reads a pane's model (`account_switch::pane_tuning`). `None` for a
+/// conversation whose transcript the window cannot read, one on a current
+/// release, and an agent whose CLI takes no measured `--model`.
+fn moved_release(agent: &str, session: &zerocode_core::ProviderSession) -> Option<MovedRelease> {
+    let path = session.transcript_path.as_deref()?;
+    let lines = zerocode_core::transcript::tail_lines(Path::new(path))?;
+    let from = zerocode_core::transcript::model_in(&lines.join("\n"))?;
+    let to = crate::orchestration::current_release(agent, &from)?;
+    let words = zerocode_core::orchestration::model_words(agent, &to).ok()?;
+    Some(MovedRelease { from, to, words })
 }
 
 /// The product's wake window: this window's app and state, and the screen a

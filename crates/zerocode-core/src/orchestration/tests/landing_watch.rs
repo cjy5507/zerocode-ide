@@ -73,6 +73,7 @@ fn witness(checkout: &str, head: &str, git: GitSays, occupied: bool) -> LandingW
         compare_oid: "c0ffee0000000000000000000000000000000001".to_string(),
         git,
         occupied,
+        beside: Vec::new(),
     }
 }
 
@@ -408,6 +409,65 @@ fn a_task_older_than_the_horizon_is_not_told_so_old_records_do_not_become_a_floo
             .landing_watch(&silent(), handed.done_at + VERIFY_OVERDUE_MS),
         1,
         "inside the horizon it is told"
+    );
+}
+
+/// A worker that handed in with other checkouts of its task still standing beside its own is told
+/// to the coordinator once, at the hand-in, with their paths (t-45336) — the rule is one checkout per
+/// task — and a hand-in with nothing beside it hears nothing of the kind.
+#[test]
+fn checkouts_left_beside_a_hand_in_are_told_once_with_their_paths() {
+    let mut bench = Bench::new();
+    let handed = handed_in(&mut bench, CHECKOUT, HEAD);
+    let mut seen = witness(CHECKOUT, HEAD, GitSays::Silent, false);
+    seen.beside = vec![
+        "/r/checkout-red".to_string(),
+        "/r/checkout-verify".to_string(),
+    ];
+    let left = |bench: &Bench| {
+        news(bench, MessageKind::LandingStalled)
+            .iter()
+            .map(body)
+            .filter(|said| said["reason"] == "checkouts_left")
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        bench
+            .ledger
+            .landing_watch(std::slice::from_ref(&seen), handed.done_at + 1),
+        1
+    );
+    let told = left(&bench);
+    assert_eq!(told.len(), 1, "the left checkouts are told at the hand-in");
+    assert_eq!(
+        told[0]["beside"],
+        serde_json::json!(["/r/checkout-red", "/r/checkout-verify"])
+    );
+    assert_eq!(told[0]["taskId"], handed.task.as_str());
+    assert!(
+        told[0]["next"]
+            .as_str()
+            .is_some_and(|line| line.contains("one checkout per task")),
+        "the notice names the rule: {}",
+        told[0]["next"]
+    );
+    // Once: not a minute later, and not six hours later either, while the other reasons keep their
+    // own pace.
+    bench
+        .ledger
+        .landing_watch(std::slice::from_ref(&seen), handed.done_at + 60_000);
+    bench.ledger.landing_watch(
+        std::slice::from_ref(&seen),
+        handed.done_at + RENOTIFY_MS + VERIFY_OVERDUE_MS + 1,
+    );
+    assert_eq!(left(&bench).len(), 1, "a left checkout is told once");
+
+    let mut other = Bench::new();
+    let handed = handed_in(&mut other, CHECKOUT, HEAD);
+    assert_eq!(
+        other.ledger.landing_watch(&silent(), handed.done_at + 1),
+        0,
+        "nothing beside the checkout, nothing told"
     );
 }
 

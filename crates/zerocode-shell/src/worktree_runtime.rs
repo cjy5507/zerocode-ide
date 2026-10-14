@@ -79,6 +79,12 @@ pub(super) struct WorktreeEntry {
     /// list. Named as a fact about the row so the sidebar's filter is one
     /// expression over the catalog rather than a second copy of the rules.
     pub(super) external_hidden: bool,
+    /// The ledger task this checkout is named for, by the window's one reading
+    /// of its checkout names (`naming::checkout_task_id`, t-45336): the sidebar
+    /// stands one row for a task and folds the task's other checkouts under it.
+    /// Stamped by the same walk as `ownership`, which holds the branch prefix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) task_id: Option<String>,
     /// 이 체크아웃이 마지막으로 살아 있었던 시각, epoch 밀리초.
     ///
     /// `0`은 "읽을 자국이 하나도 없었다"이지 "1970년"이 아니다 — 정렬은 그것을
@@ -123,6 +129,7 @@ impl WorktreeEntry {
             // about the sidebar's filter — cannot hide anything by omission.
             ownership: zerocode_core::Ownership::ZerocodeManaged.slug(),
             external_hidden: false,
+            task_id: None,
             // Stamped by the catalogue walk, which is the only caller that
             // knows the host to ask. Born as "no mark read", never as a date.
             last_activity_ms: 0,
@@ -146,6 +153,7 @@ impl WorktreeEntry {
             local_base_ref_refresh: None,
             ownership: zerocode_core::Ownership::ZerocodeManaged.slug(),
             external_hidden: false,
+            task_id: None,
             last_activity_ms: 0,
             linked_item: None,
             head: None,

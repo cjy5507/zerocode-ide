@@ -51,6 +51,28 @@ fn worker_briefings_ask_for_a_plain_report_by_the_skills_name() {
     }
 }
 
+/// A worker is told once, at launch, to keep one checkout per task and to take
+/// a checkout it cut beside its own away before it hands in (t-45336) — in the
+/// shared briefing and the federated one, before the task.
+#[test]
+fn worker_briefings_keep_one_checkout_per_task() {
+    for briefing in [
+        worker_briefing("t-1", "lint", ""),
+        federated_briefing("d-1"),
+    ] {
+        let (before, _) = briefing
+            .split_once(BRIEFING_HANDS_OVER)
+            .expect("the briefing hands over");
+        assert_eq!(
+            before.matches("one checkout per task").count(),
+            1,
+            "{before}"
+        );
+        assert!(before.contains("goes before you hand in"), "{before}");
+        assert!(before.contains("never with force"), "{before}");
+    }
+}
+
 /// What the board lints is what the worker itself wrote for a person: the
 /// `summary` of its own `worker_done` body. A coordinator's correction, a body
 /// without prose and a result nobody is known to have written are not read.
@@ -273,6 +295,12 @@ impl Launcher for Catalog {
         words.push("--resume".to_string());
         words.push(session.id.clone());
         Ok(words.join(" "))
+    }
+
+    /// The bench stands in for a machine the integration queue runs on, whatever machine runs
+    /// the tests; the platform's own answer is a test of its own.
+    fn integration_queue_supported(&self) -> bool {
+        true
     }
 }
 
@@ -13195,7 +13223,7 @@ fn a_quota_wall_stands_until_its_reset_and_the_next_wall_is_news_again() {
         key: "dns".to_string(),
     };
     match resume_plan(&bench.ledger.runs()[0], &worker, &stop, stops_standing - 1) {
-        Err(NotResumed::Refused(why)) => assert!(why.contains("quota wall"), "{why}"),
+        Err(NotResumed::Refused(why)) => assert!(why.to_string().contains("quota wall"), "{why}"),
         other => panic!("a stop while the wall stands was not the wall's: {other:?}"),
     }
     resume_plan(&bench.ledger.runs()[0], &worker, &stop, stops_standing)
@@ -13623,7 +13651,7 @@ fn a_resume_plan_refuses_by_name_and_its_receipts_count_the_attempt() {
         .to_string();
     let (worker, _) = bench.seat(&format!("worker-start --agent claude --task {task}"));
     let refused = |plan: Result<ResumePlan, NotResumed>, says: &str| match plan {
-        Err(NotResumed::Refused(why)) => assert!(why.contains(says), "{why}"),
+        Err(NotResumed::Refused(why)) => assert!(why.to_string().contains(says), "{why}"),
         other => panic!("not refused for `{says}`: {other:?}"),
     };
     refused(
@@ -25168,6 +25196,9 @@ mod completion;
 /// its task wrote (`tests/evidence.rs`).
 mod evidence;
 mod gate_reuse;
+/// t-45315 (T3 stage 6): `land-batch` chooses verified work for the window to stack, and every
+/// record of a batch comes back as a receipt the ledger judges (`tests/land_batch.rs`).
+mod land_batch;
 /// t-34501 stage 3 (t-42447): `land-check` names the task, head and repository for the window, and
 /// the window's evidence comes back as the ledger's own letter (`tests/land_check.rs`).
 mod land_check;
@@ -27618,12 +27649,13 @@ const HELD_HERE: WallChipSeat = WallChipSeat {
 /// A press's plan refused, saying `says`.
 fn press_refused(plan: Result<ResumePlan, NotResumed>, says: &str) {
     match plan {
-        Err(NotResumed::Refused(why)) => assert!(why.contains(says), "{why}"),
+        Err(NotResumed::Refused(why)) => assert!(why.to_string().contains(says), "{why}"),
         other => panic!("not refused for `{says}`: {other:?}"),
     }
 }
 
-/// The chip `worker` of the bench's first run wears at `at`.
+/// The chip `worker` of the bench's first run wears at `at`, its refusal in
+/// the ledger's English sentence.
 fn chip_of(
     bench: &Bench,
     worker: &str,
@@ -27632,6 +27664,17 @@ fn chip_of(
 ) -> Result<QuotaWallChip, String> {
     let run = &bench.ledger.runs()[0];
     wall_chip_for(run, run.worker(worker).expect("the worker"), seat, at)
+        .map_err(|why| why.to_string())
+}
+
+/// What the window is sent for `worker`'s chip at `at`: the row's
+/// `quota_wall`, or the refusal a press is answered with.
+fn chip_json(bench: &Bench, worker: &str, seat: WallChipSeat, at: i64) -> serde_json::Value {
+    let run = &bench.ledger.runs()[0];
+    match wall_chip_for(run, run.worker(worker).expect("the worker"), seat, at) {
+        Ok(chip) => serde_json::to_value(&chip).expect("json"),
+        Err(why) => serde_json::json!({ "refused": why }),
+    }
 }
 
 /// The coordinator's fourth and second conditions on 「지금 다시 시도」
@@ -27819,7 +27862,8 @@ fn a_walled_workers_chip_stands_only_while_a_press_would_be_taken() {
     assert_eq!(chip.retry_refusal, None);
     assert!(
         chip.hand_over_refusal
-            .as_deref()
+            .as_ref()
+            .map(ToString::to_string)
             .is_some_and(|why| why.contains("coordinator seat")),
         "{chip:?}"
     );
@@ -27855,10 +27899,17 @@ fn a_walled_workers_chip_stands_only_while_a_press_would_be_taken() {
     let plan = resume_plan(&bench.ledger.runs()[0], &worker, &marker, NOW + 1).expect("a press");
     bench.ledger.resume_begin(&plan, NOW + 1).expect("reserved");
     let chip = chip_of(&bench, &worker, HELD_HERE, NOW + 2).expect("a chip");
-    assert_eq!(chip.retry_refusal.as_deref(), Some(RESUME_IN_FLIGHT));
+    assert_eq!(
+        chip.retry_refusal
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some(RESUME_IN_FLIGHT)
+    );
     assert!(
         chip.hand_over_refusal
-            .as_deref()
+            .as_ref()
+            .map(ToString::to_string)
             .is_some_and(|why| why.contains("being typed")),
         "{chip:?}"
     );
@@ -27870,7 +27921,8 @@ fn a_walled_workers_chip_stands_only_while_a_press_would_be_taken() {
     let chip = chip_of(&asking, &worker, HELD_HERE, NOW + 1).expect("a chip");
     assert!(
         chip.retry_refusal
-            .as_deref()
+            .as_ref()
+            .map(ToString::to_string)
             .is_some_and(|why| why.contains("waiting on an answer")),
         "{chip:?}"
     );
@@ -27943,4 +27995,84 @@ fn a_walled_workers_chip_stands_only_while_a_press_would_be_taken() {
         .expect("a receipt");
     let refused = chip_of(&moving, &worker, HELD_HERE, NOW + 6).unwrap_err();
     assert!(refused.contains("another account"), "{refused}");
+}
+
+/// t-47935: what a chip says a button would meet, and why a press made from
+/// an older screen is refused, reach the window as a code with the facts its
+/// sentence names — never as the sentence — so the window says it in the
+/// person's language and never reads English to decide anything. Read as the
+/// window reads it: the JSON the row and the press carry.
+#[test]
+fn a_chips_refusals_reach_the_window_as_codes_with_their_facts() {
+    use serde_json::json;
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    let (worker, _pane, _task, dispatch) = a_walled_claude_worker(&mut bench, NOW);
+    let run_id = bench.ledger.runs()[0].id.clone();
+    let wall = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the wall");
+    let elsewhere = WallChipSeat {
+        worker_here: true,
+        coordinator_here: false,
+    };
+    let chip = chip_json(&bench, &worker, elsewhere, NOW + 1);
+    assert_eq!(chip["retry_refusal"], serde_json::Value::Null, "{chip}");
+    assert_eq!(
+        chip["hand_over_refusal"],
+        json!({ "code": "coordinator_seat_elsewhere", "run": run_id }),
+        "{chip}"
+    );
+    let not_here = WallChipSeat {
+        worker_here: false,
+        coordinator_here: true,
+    };
+    assert_eq!(
+        chip_json(&bench, &worker, not_here, NOW + 1),
+        json!({ "refused": { "code": "pane_not_here", "worker": worker } })
+    );
+    assert_eq!(
+        chip_json(&bench, &worker, HELD_HERE, wall.stands_until_ms),
+        json!({ "refused": { "code": "wall_lifted", "worker": worker } })
+    );
+
+    let marker = person_wall_marker(&bench.ledger.runs()[0], &worker).expect("a press");
+    let plan = resume_plan(&bench.ledger.runs()[0], &worker, &marker, NOW + 1).expect("a press");
+    bench.ledger.resume_begin(&plan, NOW + 1).expect("reserved");
+    let chip = chip_json(&bench, &worker, HELD_HERE, NOW + 2);
+    assert_eq!(
+        chip["retry_refusal"],
+        json!({ "code": "resume_in_flight" }),
+        "{chip}"
+    );
+    assert_eq!(
+        chip["hand_over_refusal"],
+        json!({ "code": "handover_waits_for_typing", "dispatch": dispatch }),
+        "{chip}"
+    );
+
+    let mut asking = Bench::new();
+    let (worker, pane_of, _, _) = a_walled_claude_worker(&mut asking, NOW);
+    asking.json_at(&pane_of, "send --type question --body which-branch?");
+    assert_eq!(
+        chip_json(&asking, &worker, HELD_HERE, NOW + 1)["retry_refusal"],
+        json!({ "code": "awaiting_answer", "worker": worker })
+    );
+
+    let mut taken = Bench::new();
+    let (worker, pane_of, _, _) = a_walled_claude_worker(&mut taken, NOW);
+    assert!(taken.ledger.worker_taken_over(("team-1", &pane_of)));
+    assert_eq!(
+        chip_json(&taken, &worker, HELD_HERE, NOW + 1),
+        json!({ "refused": { "code": "pane_taken_over", "worker": worker } })
+    );
+
+    let mut moving = Bench::new();
+    let (worker, _, _, _) = a_walled_claude_worker(&mut moving, NOW);
+    moving
+        .ledger
+        .worker_rested_for_account_switch(&approval(&moving, &worker, SWITCHING_SESSION), NOW + 1)
+        .expect("rested");
+    assert_eq!(
+        chip_json(&moving, &worker, HELD_HERE, NOW + 2),
+        json!({ "refused": { "code": "worker_not_live", "worker": worker, "state": "sleeping" } })
+    );
 }

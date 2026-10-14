@@ -409,7 +409,53 @@ function realSummary() {
  * machine's numbers in the light and the dark treatment, everything on one
  * screen, no text cut, clipped or overlapping; and the settings card the
  * same numbers stand on. */
+async function testJevLongModelIds(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  const models = [
+    { name: "unbroken", id: `model-${"x".repeat(90)}` },
+    { name: "qualified", id: `provider/${"y".repeat(87)}` },
+  ];
+  try {
+    await page.evaluate(jevDashboardFixture);
+    await page.evaluate(() => el("nav-jev").click());
+    await page.waitForFunction(() => document.querySelector("#jev-view .jev-caption")?.textContent.includes("jev-1.13.0"));
+    for (const theme of ["dark", "light"]) {
+      await setQualityTheme(page, theme);
+      for (const model of models) {
+        await page.evaluate((id) => {
+          jevNumbers = jevNumbers.map((held) => ({ ...held, model: id }));
+          paintJevViews();
+          document.querySelector("#jev-view").style.maxWidth = "319px";
+        }, model.id);
+        await standNarrow(page);
+        const seen = await page.evaluate((id) => {
+          const view = document.querySelector("#jev-view");
+          const caption = view.querySelector(".jev-caption");
+          const wide = [view, ...view.querySelectorAll(".jev-table-wrap, .jev-table, .jev-caption")]
+            .filter((node) => node.scrollWidth > node.clientWidth + 1).map((node) => node.className);
+          return {
+            text: caption.textContent, fullModel: caption.textContent.endsWith(id),
+            faults: window.__JEV_TEXT_FAULTS__(view), wide,
+            width: view.getBoundingClientRect().width,
+            theme: document.documentElement.dataset.theme ?? "dark",
+          };
+        }, model.id);
+        const path = join(EVIDENCE_DIR, `jev-dashboard-model-${theme}-${model.name}.png`);
+        await page.screenshot({ path });
+        ok(`the ${theme} dashboard preserves a 96-character ${model.name} model ID within 319 pixels`,
+          seen.fullModel && seen.width > 0 && seen.width <= 320 && seen.faults.length === 0 && seen.wide.length === 0 && seen.theme === theme,
+          JSON.stringify({ ...seen, faults: seen.faults.slice(0, 6), path }));
+      }
+    }
+    ok("long model ID fixtures have no JavaScript errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 export async function testJevDashboardEvidence(browser, origin, ok) {
+  await mkdir(EVIDENCE_DIR, { recursive: true });
+  await testJevLongModelIds(browser, origin, ok);
   const real = realSummary();
   // The table carries every seat of the card; the numbers, trends and card
   // lines are drawn for the seats the answering zo could count. An installed
@@ -532,31 +578,56 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
 
     await page.setViewportSize(oneScreen);
 
-    // The settings card: one switch, the provider selector, the key, and a line to the dashboard
-    // (§6.1) — no choice of mode in sight.
     for (const theme of ["dark", "light"]) {
       await setQualityTheme(page, theme);
       await page.evaluate(() => setSettingsOpen(true, "jev-enabled"));
       await page.waitForFunction(() => document.getElementById("jev-enabled")?.checked !== undefined);
       await settlePaint(page);
-      const card = await page.evaluate(() => {
+      const basic = await page.evaluate(() => {
         const card = document.querySelector("#typesafe-card");
         card.scrollIntoView({ block: "start" });
+        const visible = (id) => {
+          const node = document.getElementById(id);
+          return Boolean(node && !node.closest("details:not([open])") && node.getClientRects().length > 0);
+        };
+        return {
+          faults: window.__JEV_TEXT_FAULTS__(card),
+          sourceControls: ["judgment-source-hub", "judgment-source-local", "judgment-source-jev", "judgment-source-repository"].filter(visible),
+          hiddenConnectionFields: ["judgment-provider-kind", "judgment-endpoint", "typesafe-key-input"].filter((id) => !visible(id)),
+          primaryActions: card.querySelectorAll(".judgment-model-source .btn--primary").length,
+          switches: card.querySelectorAll("[data-jev-switch]").length,
+          provider: document.getElementById("judgment-provider-kind").value,
+        };
+      });
+      const path = join(EVIDENCE_DIR, `jev-settings-card-${theme}.png`);
+      await page.locator("#typesafe-card").screenshot({ path });
+      ok(`the ${theme} basic model card offers download, local folder and Jev without requiring server settings or cutting text`,
+        basic.faults.length === 0 && basic.sourceControls.length === 4
+          && basic.hiddenConnectionFields.length === 3 && basic.primaryActions === 1 && basic.switches === 1,
+        JSON.stringify({ ...basic, faults: basic.faults.slice(0, 6), path, counted }));
+      await page.locator("#judgment-connection-settings > summary").click();
+      await settlePaint(page);
+      const connection = await page.evaluate(() => {
+        const card = document.querySelector("#typesafe-card");
         return {
           faults: window.__JEV_TEXT_FAULTS__(card),
           visibleSelectIds: [...card.querySelectorAll("select")]
             .filter((select) => !select.closest("details:not([open])") && select.getClientRects().length > 0)
             .map((select) => select.id),
           switches: card.querySelectorAll("[data-jev-switch]").length,
+          keyVisible: document.getElementById("typesafe-key-input").getClientRects().length > 0,
+          provider: document.getElementById("judgment-provider-kind").value,
         };
       });
-      const path = join(EVIDENCE_DIR, `jev-settings-card-${theme}.png`);
-      await page.locator("#typesafe-card").screenshot({ path });
+      const connectionPath = join(EVIDENCE_DIR, `jev-settings-connection-${theme}.png`);
+      await page.locator("#typesafe-card").screenshot({ path: connectionPath });
+      ok(`the ${theme} connection card reveals its provider and key without changing the provider or cutting text`,
+        connection.faults.length === 0 && connection.visibleSelectIds.length === 1
+          && connection.visibleSelectIds[0] === "judgment-provider-kind" && connection.switches === 1
+          && connection.keyVisible && connection.provider === basic.provider,
+        JSON.stringify({ ...connection, faults: connection.faults.slice(0, 6), path: connectionPath, counted }));
+      await page.locator("#judgment-connection-settings > summary").click();
       await page.evaluate(() => setSettingsOpen(false));
-      ok(`the ${theme} settings card has one switch, the provider selector and the key, with no text cut, clipped or overlapping`,
-        card.faults.length === 0 && card.visibleSelectIds.length === 1
-          && card.visibleSelectIds[0] === "judgment-provider-kind" && card.switches === 1,
-        JSON.stringify({ ...card, faults: card.faults.slice(0, 6), path, counted }));
     }
     ok("the evidence pages raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {
@@ -989,7 +1060,8 @@ export async function testJevDashboard(browser, origin, ok) {
       const view = document.querySelector("#jev-view");
       view.querySelector('[data-jev-dash-row="routing"] .jev-token[data-token="no_key"]').click();
       await window.__PAINTED__();
-      const key = { open: !settingsView.hidden, focus: document.activeElement?.id ?? null };
+      const key = { open: !settingsView.hidden, focus: document.activeElement?.id ?? null,
+        connectionOpen: document.getElementById("judgment-connection-settings").open };
       setSettingsOpen(false);
       await window.__PAINTED__();
       view.querySelector('[data-jev-dash-row="notify"] .jev-token[data-token="not_consented"]').click();
@@ -1001,7 +1073,7 @@ export async function testJevDashboard(browser, origin, ok) {
       return { key, consent, back: activeTabId };
     });
     ok("a key chip opens settings on the key field, and a consent chip lands on the switch that consents every folder",
-      fixed.key.open && fixed.key.focus === "typesafe-key-input" && fixed.consent.open
+      fixed.key.open && fixed.key.focus === "typesafe-key-input" && fixed.key.connectionOpen && fixed.consent.open
         && fixed.consent.focus === "jev-enabled" && fixed.consent.said.includes("「모든 폴더에서 사용」")
         && fixed.back === "jev",
       JSON.stringify(fixed));

@@ -32,3 +32,14 @@ pub(crate) fn agent_models(agent: String) -> Result<Vec<crate::slash_catalog::Mo
     let home = home()?;
     Ok(crate::slash_catalog::agent_models(&agent, &home))
 }
+
+/// The releases today's lineup holds as superseded, by agent, and the one
+/// that stands for each (t-46882) — peeked off the lineup the restore roads
+/// judge by ([`crate::summon_lineup::snapshot`]), never fetched. The window
+/// asks once as it starts; every later read says it again
+/// (`summon-lineup:superseded`).
+#[tauri::command(async)]
+pub(crate) fn superseded_models()
+-> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
+    crate::summon_lineup::superseded(&crate::summon_lineup::snapshot().lineups)
+}

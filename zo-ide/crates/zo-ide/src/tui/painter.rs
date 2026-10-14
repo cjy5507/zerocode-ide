@@ -2745,6 +2745,7 @@ fn is_plain(line: &Line) -> bool {
         && line.lead.is_none()
         && line.trail.is_none()
         && line.spans.iter().all(|span| span.style == super::ansi::Style::default())
+        && line.spans.iter().all(|span| span.link.is_none())
 }
 
 /// What a streamed answer costs on the wire (t-48216): a history row is its

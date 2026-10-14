@@ -78,6 +78,16 @@ struct HistoryFile {
     session_id: String,
 }
 
+/// 기록에서 사람이 걸어갈 수 있는 한 행.
+#[derive(Debug)]
+enum HistoryRow {
+    /// 전역 기록 파일의 한 행 — 자리만 들고, 본문은 그 행으로 걸어갈 때 읽는다.
+    /// 파일은 zo 를 쓸수록 자라고 패인마다 읽힌다.
+    Stored { offset: u64, len: usize },
+    /// 이 세션이 쥐는 본문 — 재개한 대화의 사람 턴과 여기서 제출한 것.
+    Held(String),
+}
+
 /// How long the composer will wait for a pasted path to prove it is an image.
 ///
 /// Generous for a local decode (measured in microseconds even for a 2 GiB
@@ -116,7 +126,7 @@ pub struct Composer {
     text: String,
     /// 커서의 바이트 오프셋. 언제나 문자 경계에 있다.
     cursor: usize,
-    history: Vec<String>,
+    history: Vec<HistoryRow>,
     /// `None` for secondary/test composers; the interactive app binds this to
     /// the one global `~/.zo/history.jsonl` store.
     history_file: Option<HistoryFile>,
@@ -153,16 +163,15 @@ impl Composer {
         seed: Vec<String>,
     ) -> Self {
         let session_id = session_id.into();
-        let mut history = load_history(&path)
-            .into_iter()
-            .map(|entry| entry.text)
-            .collect::<Vec<_>>();
-        extend_history(&mut history, seed);
-        Self {
-            history,
+        let mut composer = Self {
+            history: index_history(&path),
             history_file: Some(HistoryFile { path, session_id }),
             ..Self::default()
+        };
+        for entry in seed {
+            composer.push_history(entry.trim());
         }
+        composer
     }
 
     /// Rebind `/resume` to its session id and authoritative transcript seed.
@@ -465,9 +474,7 @@ impl Composer {
         self.browsing = None;
         let trimmed = text.trim();
         if !trimmed.is_empty() {
-            if self.history.last().map(String::as_str) != Some(trimmed) {
-                self.history.push(trimmed.to_string());
-            }
+            self.push_history(trimmed);
             if let Some(history) = &self.history_file {
                 if let Err(error) = append_history(history, trimmed) {
                     eprintln!(
@@ -497,7 +504,7 @@ impl Composer {
             Some(index) => index - 1,
         };
         self.browsing = Some(index);
-        self.text = self.history[index].clone();
+        self.text = self.history_text(index);
         self.cursor = self.text.len();
         self.images.clear();
     }
@@ -515,9 +522,49 @@ impl Composer {
             return;
         }
         self.browsing = Some(index + 1);
-        self.text = self.history[index + 1].clone();
+        self.text = self.history_text(index + 1);
         self.cursor = self.text.len();
         self.images.clear();
+    }
+
+    /// 기록 끝에 한 행을 더한다 — 빈 줄과 바로 앞 행과 같은 줄은 더하지 않는다.
+    fn push_history(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let last = self.history.len().checked_sub(1).map(|index| self.history_text(index));
+        if last.as_deref() != Some(text) {
+            self.history.push(HistoryRow::Held(text.to_string()));
+        }
+    }
+
+    /// `index` 행의 본문. 파일에 있는 행은 지금 읽는다 — 기록 파일은 뒤에 붙기만
+    /// 하므로 행의 자리는 움직이지 않는다. 누가 파일을 통째로 갈아 놓아 그 자리가 더는
+    /// 행으로 읽히지 않으면 빈 행으로 걷는다.
+    fn history_text(&self, index: usize) -> String {
+        match &self.history[index] {
+            HistoryRow::Held(text) => text.clone(),
+            HistoryRow::Stored { offset, len } => self
+                .history_file
+                .as_ref()
+                .and_then(|file| {
+                    core_types::paths::read_private_file_range(&file.path, *offset, *len).ok()
+                })
+                .and_then(|bytes| parse_history_row(&bytes))
+                .map(|entry| entry.text)
+                .unwrap_or_default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn resident_history_bytes(&self) -> usize {
+        self.history
+            .iter()
+            .map(|row| match row {
+                HistoryRow::Held(text) => text.len(),
+                HistoryRow::Stored { .. } => 0,
+            })
+            .sum()
     }
 
     fn previous_boundary(&self, from: usize) -> Option<usize> {
@@ -809,24 +856,28 @@ pub const fn is_line_break(ch: char) -> bool {
     )
 }
 
-fn extend_history(history: &mut Vec<String>, entries: impl IntoIterator<Item = String>) {
-    for entry in entries {
-        let entry = entry.trim();
-        if !entry.is_empty() && history.last().map(String::as_str) != Some(entry) {
-            history.push(entry.to_string());
-        }
-    }
-}
-
-fn load_history(path: &Path) -> Vec<HistoryEntry> {
+fn index_history(path: &Path) -> Vec<HistoryRow> {
     let Ok(contents) = core_types::paths::read_private_file(path) else {
         return Vec::new();
     };
-    String::from_utf8_lossy(&contents)
-        .lines()
-        .filter_map(|line| serde_json::from_str::<HistoryEntry>(line).ok())
-        .filter(|entry| !entry.text.trim().is_empty())
-        .collect()
+    let mut rows = Vec::new();
+    let mut offset = 0;
+    for line in contents.split_inclusive(|byte| *byte == b'\n') {
+        let start = offset;
+        offset += line.len();
+        let row = line.strip_suffix(b"\n").unwrap_or(line);
+        if parse_history_row(row).is_some_and(|entry| !entry.text.trim().is_empty()) {
+            rows.push(HistoryRow::Stored {
+                offset: start as u64,
+                len: row.len(),
+            });
+        }
+    }
+    rows
+}
+
+fn parse_history_row(row: &[u8]) -> Option<HistoryEntry> {
+    serde_json::from_str::<HistoryEntry>(&String::from_utf8_lossy(row)).ok()
 }
 
 fn append_history(history: &HistoryFile, text: &str) -> std::io::Result<()> {
@@ -1016,7 +1067,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Instant;
 
-    use super::{Composer, EffortTier, PASTE_TAB_SPACES};
+    use super::{
+        append_history, Composer, EffortTier, HistoryFile, HISTORY_FILE_NAME, PASTE_TAB_SPACES,
+    };
     use crate::tui::ansi::{write_spans_for_palette, Color, Line};
     use crate::tui::palette::{ColorLevel, TerminalPalette};
 
@@ -1264,6 +1317,58 @@ mod tests {
         assert_eq!(restored.text(), "new question");
         restored.history_prev();
         assert_eq!(restored.text(), "new question");
+    }
+
+    /// 전역 기록은 사람이 zo 를 쓸수록 자라는데, 패인마다 그것을 통째로 들고 있을 수는
+    /// 없다. 행의 본문은 사람이 그 행으로 걸어갈 때 읽고, 걷는 길은 전과 같아야 한다.
+    #[test]
+    fn stored_history_rows_stay_on_disk_until_browsed() {
+        const STORED_ROWS: usize = 120;
+        const ROW_TEXT_BYTES: usize = 400;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join(HISTORY_FILE_NAME);
+        let writer = HistoryFile {
+            path: path.clone(),
+            session_id: "session-a".to_string(),
+        };
+        let rows = (0..STORED_ROWS)
+            .map(|row| format!("stored question {row} {}", "x".repeat(ROW_TEXT_BYTES)))
+            .collect::<Vec<_>>();
+        for row in &rows {
+            append_history(&writer, row).expect("append history row");
+        }
+        append_history(&writer, "   ").expect("append blank row");
+
+        let seed = "resumed question".to_string();
+        let mut composer = Composer::with_history_file(path, "session-b", vec![seed.clone()]);
+        assert_eq!(
+            composer.resident_history_bytes(),
+            seed.len(),
+            "only this session's own prompts are held; stored rows are read when browsed"
+        );
+
+        composer.insert_str("draft");
+        composer.history_prev();
+        assert_eq!(composer.text(), seed);
+        for row in rows.iter().rev() {
+            composer.history_prev();
+            assert_eq!(composer.text(), row);
+        }
+        composer.history_prev();
+        assert_eq!(composer.text(), rows[0], "the oldest row is where browsing stops");
+        for row in rows.iter().skip(1) {
+            composer.history_next();
+            assert_eq!(composer.text(), row);
+        }
+        composer.history_next();
+        assert_eq!(composer.text(), seed);
+        composer.history_next();
+        assert_eq!(composer.text(), "draft");
+
+        composer.insert_str(" sent");
+        assert_eq!(composer.submit().text, "draft sent");
+        composer.history_prev();
+        assert_eq!(composer.text(), "draft sent");
     }
 
     #[test]

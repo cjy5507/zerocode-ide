@@ -26,10 +26,17 @@ use crate::{AppState, ShellStateExt as _, TermId};
 
 /// A resume door's answer: the pane it opened, or — `standing`, with nothing
 /// spawned — the pane already holding the conversation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ConversationWake {
     pub(crate) term: TermId,
     pub(crate) standing: bool,
+    /// The model the opened pane's launch names, when it names one — what
+    /// the window shows for the pane until its agent says (t-46882): a
+    /// conversation that last ran a superseded release would otherwise wear
+    /// that release's name, read off its transcript, while the CLI runs the
+    /// one the launch named.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
 }
 
 impl ConversationWake {
@@ -37,6 +44,7 @@ impl ConversationWake {
         Self {
             term,
             standing: false,
+            model: None,
         }
     }
 
@@ -44,7 +52,13 @@ impl ConversationWake {
         Self {
             term,
             standing: true,
+            model: None,
         }
+    }
+
+    /// The same answer, saying the model the pane's launch named.
+    pub(crate) fn naming(self, model: Option<String>) -> Self {
+        Self { model, ..self }
     }
 }
 

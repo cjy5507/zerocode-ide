@@ -35,6 +35,10 @@ pub struct LandingWitness {
     pub git: GitSays,
     /// 지금 그 폴더 안에 판(세션)이 있다.
     pub occupied: bool,
+    /// 이 폴더에서 머리를 넘긴 과업의 다른 체크아웃 — 워커가 곁에 만들어 두고 넘길 때 거두지
+    /// 않은 red·verify·증거용 체크아웃 — 으로, 창이 넘김을 처음 볼 때 본 경로들(t-45336).
+    /// 비었으면 남긴 것이 없거나 창이 아직 보지 않았다.
+    pub beside: Vec<String>,
 }
 
 /// git이 말한 것.
@@ -59,7 +63,8 @@ pub struct ConflictCell {
     pub files: Vec<String>,
 }
 
-/// 코디네이터에게 늦은 착지를 알리는 까닭 다섯 (t-22105 a~e).
+/// 코디네이터에게 늦은 착지를 알리는 까닭 다섯 (t-22105 a~e), 그리고 넘길 때 남긴 체크아웃
+/// (t-45336).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StallReason {
     NoReview,
@@ -67,6 +72,9 @@ pub enum StallReason {
     MergedUnrecorded,
     Cleanable,
     LedgerMergedGitNot,
+    /// 워커가 머리를 넘기면서 같은 과업의 다른 체크아웃을 곁에 남겼다 — 워커 공통 규칙
+    /// 「과업당 워크트리 하나, 증거용 분리 체크아웃은 넘김 전에 스스로 거둔다」를 어긴 것.
+    CheckoutsLeft,
 }
 
 impl StallReason {
@@ -77,6 +85,7 @@ impl StallReason {
             Self::MergedUnrecorded => "merged_unrecorded",
             Self::Cleanable => "cleanable",
             Self::LedgerMergedGitNot => "ledger_merged_git_not",
+            Self::CheckoutsLeft => "checkouts_left",
         }
     }
 }
@@ -123,8 +132,15 @@ fn witness_of<'a>(
     witnesses.iter().find(|held| held.checkout == checkout)
 }
 
-/// 이 과업·까닭·머리를 코디네이터에게 마지막으로 알린 때가 [`RENOTIFY_MS`] 안인가.
-fn told_lately(run: &Run, task: &str, reason: StallReason, head: &str, now_ms: i64) -> bool {
+/// 이 과업·까닭·머리를 코디네이터에게 마지막으로 알린 때가 `again_after` 안인가.
+fn told_lately(
+    run: &Run,
+    task: &str,
+    reason: StallReason,
+    head: &str,
+    now_ms: i64,
+    again_after: i64,
+) -> bool {
     run.messages()
         .iter()
         .filter(|held| held.kind == MessageKind::LandingStalled)
@@ -136,7 +152,7 @@ fn told_lately(run: &Run, task: &str, reason: StallReason, head: &str, now_ms: i
         })
         .map(|held| held.created_ms)
         .max()
-        .is_some_and(|last| now_ms.saturating_sub(last) < RENOTIFY_MS)
+        .is_some_and(|last| now_ms.saturating_sub(last) < again_after)
 }
 
 fn next_step(reason: StallReason, compare_ref: &str) -> String {
@@ -159,6 +175,11 @@ fn next_step(reason: StallReason, compare_ref: &str) -> String {
             "the ledger says merged, but git does not have this head in {compare_ref}: check \
              what landed before anything is deleted"
         ),
+        StallReason::CheckoutsLeft => "the worker handed in with other checkouts of this task \
+             still standing beside its own (the rule is one checkout per task, and a checkout cut \
+             for evidence goes before the hand-in): the window takes back the ones the handed-in \
+             head holds that nobody uses, and the rest stay folded under the task's row"
+            .to_string(),
     }
 }
 
@@ -236,6 +257,13 @@ fn late_landings(
                 reasons.push((StallReason::Cleanable, left));
             }
         }
+        // What the worker left beside its checkout when it handed in, as the window saw it — told
+        // once, at the hand-in, whatever the window then took back (t-45336).
+        let left: &[String] =
+            witness_of(witnesses, checkout).map_or(&[][..], |held| held.beside.as_slice());
+        if !left.is_empty() {
+            reasons.push((StallReason::CheckoutsLeft, done_ms));
+        }
         if review.verified
             && !review.merged
             && let Some(verified_at) = review.verified_ms
@@ -248,10 +276,17 @@ fn late_landings(
         }
 
         for (reason, since_ms) in reasons {
-            if told_lately(run, &task.id, reason, source, now_ms) {
+            // A checkout left beside a hand-in is a fact about that hand-in, told once; what is late
+            // is told again while it stays late.
+            let again_after = if reason == StallReason::CheckoutsLeft {
+                i64::MAX
+            } else {
+                RENOTIFY_MS
+            };
+            if told_lately(run, &task.id, reason, source, now_ms, again_after) {
                 continue;
             }
-            let told = serde_json::json!({
+            let mut told = serde_json::json!({
                 "reason": reason.word(),
                 "taskId": task.id,
                 "title": task.display_name(),
@@ -264,6 +299,9 @@ fn late_landings(
                 "observedAtMs": now_ms,
                 "next": next_step(reason, compare_ref),
             });
+            if reason == StallReason::CheckoutsLeft {
+                told["beside"] = serde_json::json!(left);
+            }
             drafts.push((
                 run.id.clone(),
                 Draft {

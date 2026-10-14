@@ -9,7 +9,7 @@ pub(crate) mod appearance;
 pub(crate) mod artifacts;
 pub(crate) mod board;
 pub(crate) mod console;
-pub(crate) use console::{agent_models, slash_commands};
+pub(crate) use console::{agent_models, slash_commands, superseded_models};
 pub(crate) mod wire;
 pub(crate) use wire::{
     HAND_OVER_EXIT_POLL, HAND_OVER_EXIT_WAIT, program_left, wait_process_group_gone, wire_answer,
@@ -25,8 +25,10 @@ pub(crate) mod integration_prefs;
 pub(crate) mod managed_judgment;
 pub(crate) use managed_judgment::{
     managed_judgment_apply, managed_judgment_cancel, managed_judgment_check,
-    managed_judgment_install, managed_judgment_prepare_runtime, managed_judgment_remove,
-    managed_judgment_start, managed_judgment_status, managed_judgment_stop,
+    managed_judgment_inspect_source, managed_judgment_install, managed_judgment_install_source,
+    managed_judgment_prepare_model_runtime, managed_judgment_prepare_runtime,
+    managed_judgment_register_catalog, managed_judgment_remove, managed_judgment_start,
+    managed_judgment_status, managed_judgment_stop, managed_judgment_switch_model,
 };
 pub(crate) mod onboarding;
 pub(crate) mod project;
@@ -135,6 +137,9 @@ pub(crate) use board::{
     set_dock_badge, set_hooks_enabled, set_previewed_terms, set_watched_terms, term_pull,
     term_snapshot, worker_screen,
 };
+pub(crate) use board::{
+    land_batch_bisect, land_batch_cancel, land_batch_promote, land_batch_restack,
+};
 
 pub(crate) use review::{
     automation_born_worktrees, clear_delivered_diff_notes, clear_diff_notes, delete_automation,
@@ -155,7 +160,9 @@ pub(crate) use typesafe::{
     save_typesafe_key, set_jev_enabled, set_jev_model, set_jev_review_enabled,
     set_route_classifier, set_summon_profiles, typesafe_settings,
 };
-pub(crate) use typesafe::{judgment_models, set_judgment_provider};
+pub(crate) use typesafe::{
+    judgment_latest_request, judgment_models, preflight_judgment_provider, set_judgment_provider,
+};
 
 pub(crate) mod type_value;
 pub(crate) use type_value::{remove_type_value_key, save_type_value_key, type_value_keys};
@@ -172,6 +179,7 @@ pub(crate) use repo_policy::{
     set_project_script_policy, set_project_script_setting, set_repo_mark,
     suppress_external_worktree_inbox,
 };
+pub(crate) use repo_policy::{integration_queue_setting, set_integration_queue_enabled};
 
 pub(crate) use integration_prefs::{
     github_disconnect, github_login_intent, github_select_account, github_status,

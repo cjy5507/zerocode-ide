@@ -132,6 +132,7 @@ mod jev_scope;
 mod jira_attachments;
 mod jira_store;
 mod keyboard_input_source;
+mod land_batch;
 mod land_check;
 mod landing_watch_sweep;
 mod last_status;
@@ -246,6 +247,7 @@ use browser_diagnose::*;
 use browser_guest_runtime::*;
 use browser_nav_state::*;
 use browser_runtime::*;
+use cmd::judgment_latest_request;
 use cmd::{
     abort_conflict_operation, ack_board_agent, add_claude_account, add_codex_account, agent_icon,
     agent_launch_plans, agent_models, agent_teams_mode, agent_terms, answer_approval, answer_ask,
@@ -296,8 +298,10 @@ use cmd::{
     list_dir, list_quick_commands, list_run_evidence, list_skills, list_system_fonts,
     list_worktrees, listening_ports, log_window_error, logout_codex_login, machine_load,
     managed_judgment_apply, managed_judgment_cancel, managed_judgment_check,
-    managed_judgment_install, managed_judgment_prepare_runtime, managed_judgment_remove,
-    managed_judgment_start, managed_judgment_status, managed_judgment_stop,
+    managed_judgment_inspect_source, managed_judgment_install, managed_judgment_install_source,
+    managed_judgment_prepare_model_runtime, managed_judgment_prepare_runtime,
+    managed_judgment_register_catalog, managed_judgment_remove, managed_judgment_start,
+    managed_judgment_status, managed_judgment_stop, managed_judgment_switch_model,
     mark_default_tabs_applied, mark_first_run_seen, mark_onboarding, merge_and_remove_worktree,
     mirror_ready, mouse_input, note_webview_error, note_worker_room_change, note_worker_room_seen,
     notification_probe, open_board_popout, open_browser_pane, open_commit_remote,
@@ -311,39 +315,40 @@ use cmd::{
     patch_left_sidebar_appearance, patch_open_in_applications, patch_terminal_prefs,
     patch_update_prefs, patch_workspace_board_items, patch_workspace_board_status,
     patch_workspace_creation_prefs, path_kinds, paths_exist, pr_check_details, pr_checks,
-    preview_ghostty_import, preview_warp_terminal_themes, probe_remote_workspace, probe_ssh_host,
-    process_memory, project_catalog, project_kind, project_scripts, pull_request_seed,
-    quota_wall_handover, quota_wall_retry, read_image_file, read_primary_selection, read_text_file,
-    recall_folder_panel, record_archive_trust, record_repo_trust, relaunch_window, release_status,
-    release_untitled_markdown, relogin_claude_account, relogin_codex_account, relogin_codex_login,
-    remote_servers, remote_workspaces, remove_api_router, remove_claude_account,
-    remove_codex_account, remove_project, remove_remote_server, remove_remote_workspace,
-    remove_ssh_host, remove_type_value_key, remove_typesafe_key, remove_worktree, render_mermaid,
-    reopen_onboarding, reorder_projects, repo_trust_standing, request_developer_permission,
-    reset_agent_launch, reset_computer_use_permissions, resize_lane,
-    resolve_claude_account_identity, resolve_mr_base, resolve_pr_base, resource_snapshot,
-    respond_permission, resume_line, resume_session, resume_vault_session, reveal_board_agent,
-    reveal_run_evidence, reveal_skill, reveal_vault_session, run_automation, save_agent_launch,
-    save_agent_launch_env, save_api_router, save_automation, save_clipboard_image, save_diff_note,
-    save_launch_recipe, save_onboarding_step, save_pane_layouts, save_quick_command,
-    save_remote_server, save_remote_workspace, save_ssh_host, save_stage_layouts,
-    save_type_value_key, save_typesafe_key, save_worktree_prefs, scm_fetch, scm_numstat,
-    scm_observer_dismiss, scm_observer_health, scm_observer_retry, scm_observer_shown, scm_pull,
-    scm_push, scm_status, scm_tree_rows, search_files, search_text, second_brain_export_html,
-    second_brain_graph, second_brain_link, second_brain_open, second_brain_page,
-    second_brain_paths, second_brain_relate, second_brain_seat_recalls, second_brain_setup,
-    second_brain_status, select_claude_account, select_codex_account, send_prompt, session_info,
-    set_active_worktree, set_agent_activity_display, set_agent_permission_mode,
-    set_agent_teams_mode, set_app_font_family, set_browser_default_profile,
-    set_browser_default_zoom, set_browser_home_page, set_browser_open_tabs,
-    set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
-    set_browser_workspace_mode, set_claude_autoswitch_mode, set_clipboard_image,
-    set_compact_worktree_cards, set_computer_awake_mode, set_computer_confirm,
-    set_computer_generator_road, set_computer_input_policy, set_computer_live_reflex,
-    set_confirm_close_pinned, set_conversation_focus_view, set_crash_watchdog,
-    set_ctrl_tab_order_mode, set_default_agent, set_default_task_source, set_diff_side_by_side,
-    set_dock_badge, set_external_worktree_visibility, set_finish_notification_mode,
-    set_guide_dismissed, set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
+    preflight_judgment_provider, preview_ghostty_import, preview_warp_terminal_themes,
+    probe_remote_workspace, probe_ssh_host, process_memory, project_catalog, project_kind,
+    project_scripts, pull_request_seed, quota_wall_handover, quota_wall_retry, read_image_file,
+    read_primary_selection, read_text_file, recall_folder_panel, record_archive_trust,
+    record_repo_trust, relaunch_window, release_status, release_untitled_markdown,
+    relogin_claude_account, relogin_codex_account, relogin_codex_login, remote_servers,
+    remote_workspaces, remove_api_router, remove_claude_account, remove_codex_account,
+    remove_project, remove_remote_server, remove_remote_workspace, remove_ssh_host,
+    remove_type_value_key, remove_typesafe_key, remove_worktree, render_mermaid, reopen_onboarding,
+    reorder_projects, repo_trust_standing, request_developer_permission, reset_agent_launch,
+    reset_computer_use_permissions, resize_lane, resolve_claude_account_identity, resolve_mr_base,
+    resolve_pr_base, resource_snapshot, respond_permission, resume_line, resume_session,
+    resume_vault_session, reveal_board_agent, reveal_run_evidence, reveal_skill,
+    reveal_vault_session, run_automation, save_agent_launch, save_agent_launch_env,
+    save_api_router, save_automation, save_clipboard_image, save_diff_note, save_launch_recipe,
+    save_onboarding_step, save_pane_layouts, save_quick_command, save_remote_server,
+    save_remote_workspace, save_ssh_host, save_stage_layouts, save_type_value_key,
+    save_typesafe_key, save_worktree_prefs, scm_fetch, scm_numstat, scm_observer_dismiss,
+    scm_observer_health, scm_observer_retry, scm_observer_shown, scm_pull, scm_push, scm_status,
+    scm_tree_rows, search_files, search_text, second_brain_export_html, second_brain_graph,
+    second_brain_link, second_brain_open, second_brain_page, second_brain_paths,
+    second_brain_relate, second_brain_seat_recalls, second_brain_setup, second_brain_status,
+    select_claude_account, select_codex_account, send_prompt, session_info, set_active_worktree,
+    set_agent_activity_display, set_agent_permission_mode, set_agent_teams_mode,
+    set_app_font_family, set_browser_default_profile, set_browser_default_zoom,
+    set_browser_home_page, set_browser_open_tabs, set_browser_restore_tabs,
+    set_browser_search_engine, set_browser_visits, set_browser_workspace_mode,
+    set_claude_autoswitch_mode, set_clipboard_image, set_compact_worktree_cards,
+    set_computer_awake_mode, set_computer_confirm, set_computer_generator_road,
+    set_computer_input_policy, set_computer_live_reflex, set_confirm_close_pinned,
+    set_conversation_focus_view, set_crash_watchdog, set_ctrl_tab_order_mode, set_default_agent,
+    set_default_task_source, set_diff_side_by_side, set_dock_badge,
+    set_external_worktree_visibility, set_finish_notification_mode, set_guide_dismissed,
+    set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
     set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
     set_hide_sleeping_workspaces, set_hooks_enabled, set_jev_enabled, set_jev_model,
@@ -371,21 +376,21 @@ use cmd::{
     ssh_link_disconnect, ssh_link_states, ssh_open_remote_term, ssh_probe_target,
     ssh_remove_target, ssh_save_target, ssh_submit_credential, ssh_targets, stage_layouts,
     stage_path, stage_paths, standing_pane_worktrees, stats_summary, stop_pane_helper,
-    stop_workspace_port, subagent_log, submodule_status, supply_chain_graph, supply_chain_report,
-    suppress_external_worktree_inbox, term_focus, term_fold, term_has_running_process, term_key,
-    term_lines, term_mouse, term_paste, term_pull, term_resize, term_scroll, term_search,
-    term_snapshot, term_text, term_view_to_line, terminal_command, terminal_command_argv,
-    terminal_prefs, terminal_sessions, terminal_windows_status, test_local_network_permission,
-    test_remote_server, test_remote_workspace, test_router_connection, test_ssh_host, text_input,
-    tip_verdict, tour_decision, tree_selection, type_value_keys, typesafe_settings, unstage_path,
-    unstage_paths, update_check, update_download, update_history, update_install, upstream_status,
-    use_system_claude_login, validate_branch_name, vault_sessions, verify_claude_accounts,
-    verify_codex_accounts, waiting_on_me, watch_files, wire_answer, wire_image, wire_interrupt,
-    wire_log, wire_models, wire_send, wire_set_mode, wire_set_model, wire_start, wire_stop,
-    work_item_seed, worker_screen, workspace_cleanup_scan, workspace_space_cancel,
-    workspace_space_git, workspace_space_scan, worktree_committed_diff, worktree_evidence,
-    worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs, worktree_stamp,
-    write_primary_selection, write_text_file,
+    stop_workspace_port, subagent_log, submodule_status, superseded_models, supply_chain_graph,
+    supply_chain_report, suppress_external_worktree_inbox, term_focus, term_fold,
+    term_has_running_process, term_key, term_lines, term_mouse, term_paste, term_pull, term_resize,
+    term_scroll, term_search, term_snapshot, term_text, term_view_to_line, terminal_command,
+    terminal_command_argv, terminal_prefs, terminal_sessions, terminal_windows_status,
+    test_local_network_permission, test_remote_server, test_remote_workspace,
+    test_router_connection, test_ssh_host, text_input, tip_verdict, tour_decision, tree_selection,
+    type_value_keys, typesafe_settings, unstage_path, unstage_paths, update_check, update_download,
+    update_history, update_install, upstream_status, use_system_claude_login, validate_branch_name,
+    vault_sessions, verify_claude_accounts, verify_codex_accounts, waiting_on_me, watch_files,
+    wire_answer, wire_image, wire_interrupt, wire_log, wire_models, wire_send, wire_set_mode,
+    wire_set_model, wire_start, wire_stop, work_item_seed, worker_screen, workspace_cleanup_scan,
+    workspace_space_cancel, workspace_space_git, workspace_space_scan, worktree_committed_diff,
+    worktree_evidence, worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs,
+    worktree_stamp, write_primary_selection, write_text_file,
 };
 use cmd::{
     artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
@@ -400,6 +405,10 @@ use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
     claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs, coordinator_seats,
     set_coordinator_handover,
+};
+use cmd::{
+    integration_queue_setting, land_batch_bisect, land_batch_cancel, land_batch_promote,
+    land_batch_restack, set_integration_queue_enabled,
 };
 use emulator::{
     acknowledge_emulator_payload, android_accessibility_tree, android_accessibility_tree_direct,
@@ -2321,6 +2330,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
     let remote_servers = remote_servers::RemoteServerService::new();
     let settings = Arc::new(settings::SettingsRepository::new(settings_root.clone()));
     land_check::hold_settings(Arc::clone(&settings));
+    land_batch::hold_settings(Arc::clone(&settings));
     if let Err(error) = migrate_legacy_project_settings(&settings) {
         eprintln!("zerocode-shell: could not migrate project settings: {error}");
     }
@@ -2602,12 +2612,19 @@ fn main() -> ExitCode {
             managed_judgment_cancel,
             managed_judgment_check,
             managed_judgment_install,
+            managed_judgment_install_source,
+            managed_judgment_inspect_source,
             managed_judgment_prepare_runtime,
+            managed_judgment_prepare_model_runtime,
+            managed_judgment_register_catalog,
             managed_judgment_remove,
             managed_judgment_start,
             managed_judgment_status,
             managed_judgment_stop,
+            managed_judgment_switch_model,
             judgment_models,
+            judgment_latest_request,
+            preflight_judgment_provider,
             set_summon_profiles,
             check_typesafe_key,
             jev_summary,
@@ -2968,6 +2985,8 @@ fn main() -> ExitCode {
             mark_default_tabs_applied,
             set_project_script_policy,
             set_project_script_setting,
+            integration_queue_setting,
+            set_integration_queue_enabled,
             repo_trust_standing,
             record_repo_trust,
             archive_trust_standing,
@@ -3053,6 +3072,10 @@ fn main() -> ExitCode {
             desk_ack,
             quota_wall_retry,
             quota_wall_handover,
+            land_batch_promote,
+            land_batch_bisect,
+            land_batch_restack,
+            land_batch_cancel,
             desk_checkouts,
             machine_load,
             coordinator_handover_status,
@@ -3067,6 +3090,7 @@ fn main() -> ExitCode {
             orchestration_accuracy,
             agent_models,
             slash_commands,
+            superseded_models,
             wire_answer,
             wire_interrupt,
             wire_image,
@@ -3471,6 +3495,9 @@ fn main() -> ExitCode {
                     ),
                 );
             }
+            // The integration queue's next run (t-45315): batches a crash left half way are
+            // settled from what git holds, on a thread of their own.
+            orchestration::settle_land_batches_at_start(now_epoch_ms());
             boot_timeline::mark(boot_timeline::Phase::LedgerReady);
             crumbs::record("boot", format_args!("hooks"));
             if let Some((events, teams, browser, computer, federation)) =

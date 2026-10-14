@@ -386,6 +386,23 @@ pub(super) fn decide_external_visibility(
         // (`isSelectedCheckout` is the first branch of `shouldShowWorktree`).
         let itself = entry.active || entry.is_main || entry.path == repo_root;
         entry.ownership = zerocode_core::classify(facts, ours).slug();
+        // The task this checkout is named for — the same reading the reclaim
+        // beside a hand-in takes a checkout by (t-45336). The repository's own
+        // checkout and a folder are nobody's task row; the one the window
+        // stands in still is its task's.
+        let folder = Path::new(&entry.path)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str);
+        entry.task_id = folder
+            .filter(|_| !entry.is_main && !entry.is_folder && entry.path != repo_root)
+            .and_then(|folder| {
+                zerocode_orchestrator::naming::checkout_task_id(
+                    folder,
+                    entry.branch.as_deref(),
+                    ours.branch_prefix,
+                )
+            })
+            .map(str::to_string);
         let visible = zerocode_core::should_show(facts, ours, stored, added_at, itself);
         entry.external_hidden = !visible;
         // Counted only where a listing really happened, and only for the rows a
@@ -1422,16 +1439,20 @@ pub(super) fn activate_zo_worker_delivery(app: &AppHandle, owner: ZoChannelOwner
             return;
         };
         state.worker_prompt_submits().remove(&term);
-        let refusal = zerocode_pty::ready::Refusal::LaunchRefused;
+        let refused = DeliveryOutcome::Refused(zerocode_pty::ready::Refusal::LaunchRefused);
         if let Some(waiting) = state.delivery_waiters().remove(&term) {
-            let _ = waiting.send(DeliveryOutcome::Refused(refusal));
+            let _ = waiting.send(refused);
         }
+        // The briefing is the coordinator's words, not the person's: what
+        // goes back with the refusal is what the pump's own settle hands
+        // back (t-52566) — none of it.
         let _ = app.emit(
             "term:prompt",
             prompt_transaction::settled_event(
                 term,
-                DeliveryOutcome::Refused(refusal),
-                Some(delivery.text().to_string()),
+                refused,
+                prompt_transaction::words_to_hand_back(&delivery, refused),
+                delivery.hands_back(),
             ),
         );
         return;
@@ -3260,6 +3281,9 @@ pub(super) struct QueuedPrompt {
     /// Whether it waits out its pane's turn once it has the line (t-47952),
     /// the door's choice carried to the queued copy like its guard.
     pub(super) parks: bool,
+    /// Whether its words are the person's own, to go back to them when the
+    /// pane never takes them (t-52566), carried to the queued copy the same.
+    pub(super) hands_back: bool,
     pub(super) completion: std::sync::mpsc::SyncSender<DeliveryOutcome>,
 }
 

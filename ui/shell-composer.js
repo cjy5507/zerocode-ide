@@ -217,6 +217,13 @@ function composerWorking(run) {
     && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)));
 }
 
+/* Whether words sent now wait for a hand-over: the pane's conversation is
+ * being handed to its wire (t-54304). The wire's page sends them when it
+ * stands (`carryPaneChat`); a refused hand-over leaves them to the pane. */
+function composerHolding(run) {
+  return run.helper?.id === PANE_LOG_ID && paneChats.get(run.term)?.handing === true;
+}
+
 /* 글 하나가 실행에 닿는 길 — 선이면 한 요청, 판이면 붙여넣기·숨·Enter.
  * 제출과 대기열이 **같은 이 문**을 지나므로, 대기열에서 나간 글은 사람이
  * 직접 친 글과 한 글자도 다르지 않게 도착한다. */
@@ -293,6 +300,8 @@ function paintComposerQueue(form, run) {
  * 때 빗장(`run.queueArmed`)을 내리고, 상태가 실제로 working으로 오른 것을
  * 본 뒤에만 다시 올린다 — 시계가 아니라 상태가 기준이다. */
 function settleComposerQueue(run) {
+  // Held for a hand-over under way: they go with the conversation (t-54304).
+  if (composerHolding(run)) return;
   if (composerWorking(run)) {
     run.queueArmed = true;
     return;

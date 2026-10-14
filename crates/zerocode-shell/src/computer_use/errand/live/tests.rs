@@ -150,10 +150,21 @@ fn the_request_carries_the_questions_own_state_and_the_vendors_model() {
     assert_eq!(sent["questions"], asked.questions);
 }
 
+/// A judge read the way the window reads one — the key from the settings
+/// pane's keychain — over a settings file in `unset` that nobody wrote, as on
+/// a machine where no provider was ever chosen: the provider the person chose
+/// on this machine (a local one needs no key) never decides a case here, and
+/// nothing a case does lands in the person's zo home.
+fn pane_judge(keys: &HeldKeys, unset: &tempfile::TempDir) -> LiveJudge {
+    let wire = Wire::reading(keys, Some(unset.path().join("settings.json")));
+    LiveJudge::over(wire, None, &zerocode_core::jev::BROWSER)
+}
+
 #[test]
 fn without_a_key_nothing_is_sent() {
     let keys = HeldKeys::default();
-    let mut judge = LiveJudge::new(&keys, None, &zerocode_core::jev::BROWSER);
+    let unset = tempfile::tempdir().expect("a zo home nobody set");
+    let mut judge = pane_judge(&keys, &unset);
     assert!(!judge.armed());
 
     // A server that would answer, and is never reached.
@@ -172,7 +183,8 @@ fn a_key_the_pane_kept_is_the_key_the_wire_presents() {
     let keys = HeldKeys::default();
     crate::typesafe_settings::save_key("secret-key", &keys).expect("the fake keychain takes it");
 
-    let judge = LiveJudge::new(&keys, None, &zerocode_core::jev::BROWSER);
+    let unset = tempfile::tempdir().expect("a zo home nobody set");
+    let judge = pane_judge(&keys, &unset);
     assert!(judge.armed(), "the pane's key is the wire's key");
 }
 
@@ -392,6 +404,7 @@ fn a_credential_on_the_screen_never_reaches_the_wire() {
             output_tokens: Some(0),
             model: Some(ANSWERING_VERSION.to_string()),
             version: Some(version_word(reqwest::Version::HTTP_11)),
+            route: crate::systemone::tests::route_of(judge.wire()),
         })
     );
 }
@@ -587,6 +600,7 @@ fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() 
             output_tokens: Some(0),
             model: Some(ANSWERING_VERSION.to_string()),
             version: Some(version_word(reqwest::Version::HTTP_11)),
+            route: crate::systemone::tests::route_of(judge.wire()),
         })
     );
     let heard = endpoint.asked();
@@ -808,6 +822,7 @@ fn a_risen_auto_answers_the_same_bytes_from_the_memo_and_sends_nothing() {
             // version: the memo's answer crossed no wire.
             model: Some(ANSWERING_VERSION.to_string()),
             version: None,
+            route: None,
         })
     );
     assert_eq!(endpoint.asked().len(), 2, "the third question never left");

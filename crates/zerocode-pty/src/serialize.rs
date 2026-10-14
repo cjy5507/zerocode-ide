@@ -45,40 +45,75 @@ const ALT_SCREEN_OFF: &str = "\x1b[?1049l";
 /// the cap.
 ///
 /// Scrollback oldest-first, then the visible screen with its trailing blank
-/// rows trimmed. When the whole thing exceeds `max_bytes`, Orca's binary
-/// search finds the largest tail that fits — and a tail that cannot fit even
-/// one row is stored as nothing, which restores as nothing.
+/// rows trimmed. When the whole thing exceeds `max_bytes`, the largest tail
+/// that fits is kept — Orca finds it with a binary search — and a tail that
+/// cannot fit even one row is stored as nothing, which restores as nothing.
+///
+/// The tail is found from the newest row back, each row rendered once: a
+/// row's bytes do not depend on its neighbours (`render_row` opens and closes
+/// its own rendition), so the largest tail that fits is the longest run of
+/// rows from the end whose bytes, a line break between each, stay within the
+/// cap. That is the binary search's answer without rendering the whole
+/// buffer to find it, and a packed history row the cap leaves out is never
+/// unpacked (t-54317).
 #[must_use]
 pub fn serialize_tail(grid: &TerminalGrid, max_bytes: usize) -> String {
-    let mut rows: Vec<&[Cell]> = (0..grid.scrollback_len())
-        .filter_map(|index| grid.stored_scrollback_cells(index))
-        .collect();
     let mut visible: Vec<&[Cell]> = (0..grid.screen_rows())
         .map(|row| grid.row_cells(row))
         .collect();
     while visible.last().is_some_and(|cells| row_end(cells) == 0) {
         visible.pop();
     }
-    rows.extend(visible);
-
-    let whole = render_rows(grid, &rows);
-    if whole.len() <= max_bytes {
-        return whole;
-    }
-    let mut lo = 1usize;
-    let mut hi = rows.len();
-    let mut best = String::new();
-    while lo <= hi {
-        let mid = usize::midpoint(lo, hi);
-        let attempt = render_rows(grid, &rows[rows.len() - mid..]);
-        if attempt.len() <= max_bytes {
-            best = attempt;
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
+    let mut tail = Tail::new(max_bytes);
+    let mut fits = visible.iter().rev().all(|cells| tail.take(grid, cells));
+    let mut cells = Vec::new();
+    let mut index = grid.scrollback_len();
+    while fits && index > 0 {
+        index -= 1;
+        if grid.stored_scrollback_cells_into(index, &mut cells) {
+            fits = tail.take(grid, &cells);
         }
     }
-    best
+    tail.into_string()
+}
+
+/// The rows a stored buffer keeps, newest first, and what they weigh with the
+/// line breaks between them.
+struct Tail {
+    max_bytes: usize,
+    bytes: usize,
+    rows: Vec<String>,
+}
+
+impl Tail {
+    const fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            bytes: 0,
+            rows: Vec::new(),
+        }
+    }
+
+    /// Keep `cells` as the next-older row if it still fits; `false` once it
+    /// does not, and every older row then stays out too.
+    fn take(&mut self, grid: &TerminalGrid, cells: &[Cell]) -> bool {
+        let mut row = String::new();
+        render_row(&mut row, grid, cells);
+        let parted = if self.rows.is_empty() { 0 } else { 2 };
+        let bytes = self.bytes + parted + row.len();
+        if bytes > self.max_bytes {
+            return false;
+        }
+        self.bytes = bytes;
+        self.rows.push(row);
+        true
+    }
+
+    /// The kept rows, oldest first, a line break between each.
+    fn into_string(mut self) -> String {
+        self.rows.reverse();
+        self.rows.join("\r\n")
+    }
 }
 
 /// A stored buffer as the bytes to feed a fresh terminal — the alt-screen
@@ -97,17 +132,6 @@ pub fn replay_payload(stored: &str) -> Vec<u8> {
     bytes.extend_from_slice(b"\r\n");
     bytes.extend_from_slice(POST_REPLAY_MODE_RESET.as_bytes());
     bytes
-}
-
-fn render_rows(grid: &TerminalGrid, rows: &[&[Cell]]) -> String {
-    let mut out = String::new();
-    for (at, cells) in rows.iter().enumerate() {
-        if at > 0 {
-            out.push_str("\r\n");
-        }
-        render_row(&mut out, grid, cells);
-    }
-    out
 }
 
 /// What closes an explicit hyperlink — `OSC 8` with no address.
@@ -368,6 +392,33 @@ mod tests {
         );
         assert!(!capped.contains("line 0"), "the oldest row must go first");
         assert_eq!(serialize_tail(terminal.grid(), 0), "");
+    }
+
+    /// The kept tail is the LARGEST that fits — the binary search's answer:
+    /// under every cap it is exactly the newest rows whose bytes and line
+    /// breaks the cap holds, and one row more would not fit.
+    #[test]
+    fn the_cap_keeps_as_many_newest_rows_as_fit() {
+        let mut terminal = Terminal::new(4, 12);
+        for line in 0..120 {
+            terminal.feed(format!("\x1b[3{}mline {line}\x1b[0m\r\n", line % 8).as_bytes());
+        }
+        let whole = serialize_tail(terminal.grid(), SCROLLBACK_BUFFER_BYTE_LIMIT);
+        let rows: Vec<&str> = whole.split("\r\n").collect();
+        for cap in [0, 1, 17, 64, 200, 999, whole.len() - 1, whole.len()] {
+            let kept = serialize_tail(terminal.grid(), cap);
+            let count = if kept.is_empty() {
+                0
+            } else {
+                kept.split("\r\n").count()
+            };
+            assert_eq!(kept, rows[rows.len() - count..].join("\r\n"), "cap {cap}");
+            assert!(kept.len() <= cap, "cap {cap} kept {} bytes", kept.len());
+            if count < rows.len() {
+                let more = rows[rows.len() - count - 1..].join("\r\n");
+                assert!(more.len() > cap, "cap {cap} left out a row that fits");
+            }
+        }
     }
 
     /// The replay strip: a buffer that ends inside the alternate screen is

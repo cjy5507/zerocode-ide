@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use super::*;
 
+mod latest_request;
 mod providers;
 
 /// The version a fake endpoint's answers name as the one that answered: what
@@ -33,6 +34,15 @@ pub(crate) struct Endpoint {
 /// How long a dropped endpoint waits on the one connection that wakes its
 /// accept loop — a loopback connect, so far past what it takes.
 const LEAVING: Duration = Duration::from_millis(200);
+
+/// The route `wire` would put a question to now
+/// ([`Provider::route_fingerprint`]) — what a case holds a row's
+/// `clientRoute` against (t-53792).
+pub(crate) fn route_of(wire: &Wire) -> Option<String> {
+    wire.provider()
+        .ok()
+        .map(|provider| provider.route_fingerprint())
+}
 
 impl Drop for Endpoint {
     /// The seat is given back when its test is done. Every endpoint used to
@@ -358,6 +368,147 @@ fn an_answer_names_its_version_on_the_row_and_an_unanswered_ask_names_none() {
         late.spent.version, None,
         "nothing came back inside the wall"
     );
+}
+
+/// A request that left names the client it was put to, whatever came back —
+/// an answer, a status, a wall — on the row its seat writes; an ask the door
+/// stopped sent nothing and names none (t-53792).
+#[test]
+fn a_sent_request_names_its_client_whatever_came_back_and_an_unsent_one_names_none() {
+    use zerocode_core::jev::STALL;
+    use zerocode_core::jev::summary::CLIENT_ROUTE;
+
+    let home = tempfile::tempdir().expect("a zo home");
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {"jev": {"workspaces": [door::resolved_path(workspace.path())]}}})
+            .to_string(),
+    )
+    .expect("settings");
+    let answer = json!({"model": ANSWERING_VERSION, "answers": {},
+                        "usage": {"input_tokens": 1, "output_tokens": 0}})
+    .to_string();
+    let body = request_body(&json!({"screen": "a quiet pane"}), &json!({}));
+    for (status, hold_ms, wall_ms, came_back) in [
+        ("HTTP/1.1 200 OK", 0, 5_000, Ok(())),
+        (
+            "HTTP/1.1 503 Service Unavailable",
+            0,
+            5_000,
+            Err("http_503"),
+        ),
+        ("HTTP/1.1 200 OK", 500, 100, Err(TIMEOUT)),
+    ] {
+        let endpoint = Endpoint::serving(status, answer.clone(), hold_ms);
+        let wire = Wire::at(&endpoint.base(), "test-key", Some(settings.clone()));
+        let asked = wire.ask(
+            &STALL,
+            Some(workspace.path()),
+            body.clone(),
+            Duration::from_millis(wall_ms),
+        );
+        assert_eq!(
+            asked.answer.as_ref().map(|_| ()).map_err(String::as_str),
+            came_back
+        );
+        assert_eq!(asked.spent.requests, 1, "{status}");
+        assert!(route_of(&wire).is_some());
+        assert_eq!(asked.spent.route, route_of(&wire), "{status} {came_back:?}");
+        let mut row = json!({"outcome": "answered"});
+        asked.spent.stamp(&mut row);
+        assert_eq!(row[CLIENT_ROUTE.canonical], json!(route_of(&wire)), "{row}");
+    }
+
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer, 0);
+    let refused = Wire::at(&endpoint.base(), "test-key", Some(settings)).ask(
+        &STALL,
+        Some(home.path()),
+        body,
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        refused.answer,
+        Err(Refused::NotConsented.token().to_string())
+    );
+    assert_eq!(refused.spent, Spent::default(), "no client was asked");
+    let mut row = json!({});
+    refused.spent.stamp(&mut row);
+    assert!(row.get(CLIENT_ROUTE.canonical).is_none(), "{row}");
+    assert!(endpoint.asked().is_empty());
+}
+
+#[test]
+fn expiration_before_sending_is_not_recorded_as_real_model_use() {
+    use zerocode_core::jev::STALL;
+
+    let home = tempfile::tempdir().expect("a home");
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {"jev": {"workspaces": [door::resolved_path(workspace.path())]}}})
+            .to_string(),
+    )
+    .expect("settings");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", "{}".to_string(), 0);
+    let wire = Wire::at(&endpoint.base(), "test-key", Some(settings));
+    let asked = wire.ask(
+        &STALL,
+        Some(workspace.path()),
+        request_body(&json!({"screen": "fixture"}), &json!({})),
+        Duration::ZERO,
+    );
+    assert_eq!(asked.answer, Err(TIMEOUT.to_string()));
+    assert_eq!(asked.spent.requests, 0, "no POST was attempted");
+    assert_eq!(asked.spent.route, None, "no route carried a request");
+    assert!(endpoint.asked().is_empty());
+    let mut row = json!({"at": 1, "outcome": TIMEOUT});
+    asked.spent.stamp(&mut row);
+    append_rows(&ledger_of(&wire, &STALL).expect("a ledger"), &[row]);
+    assert_eq!(latest::read(&wire, 2).state, latest::State::NoneObserved);
+}
+
+/// A row riding a request names the client that request went to, and a
+/// judgment asked in shards names one client only when every shard that sent
+/// a request sent it there (t-53792): a shard on another client, or one that
+/// names none, leaves the judgment naming no client, and its sums stay what
+/// they were; a shard that sent nothing asked no client and has no say.
+#[test]
+fn a_rider_names_its_requests_client_and_shards_on_two_clients_name_none() {
+    let on = |route: Option<&str>, requests: u32| Spent {
+        requests,
+        input_tokens: Some(10),
+        output_tokens: Some(0),
+        route: route.map(str::to_string),
+        ..Spent::default()
+    };
+    let sent = on(Some("route-a"), 1);
+    let riding = sent.rider();
+    assert_eq!(
+        (riding.requests, riding.route.as_deref()),
+        (0, Some("route-a"))
+    );
+    let same = Spent::together([&sent, &on(Some("route-a"), 1)]);
+    assert_eq!((same.requests, same.route.as_deref()), (2, Some("route-a")));
+    let beside_an_unsent_shard = Spent::together([&sent, &Spent::default()]);
+    assert_eq!(
+        (
+            beside_an_unsent_shard.requests,
+            beside_an_unsent_shard.route.as_deref()
+        ),
+        (1, Some("route-a"))
+    );
+    for other in [on(Some("route-b"), 1), on(None, 1)] {
+        let mixed = Spent::together([&sent, &other]);
+        assert_eq!((mixed.requests, mixed.input_tokens), (2, Some(20)));
+        assert_eq!(mixed.route, None, "{other:?}");
+        let mixed = Spent::together([&other, &sent]);
+        assert_eq!(mixed.route, None, "{other:?} first");
+    }
+    assert_eq!(Spent::together(std::iter::empty()).route, None);
+    assert_eq!(Spent::together([&Spent::default()]).route, None);
 }
 
 #[test]
@@ -728,6 +879,7 @@ fn a_row_riding_another_rows_request_is_charged_nothing_and_a_batch_is_counted_o
         output_tokens: Some(0),
         model: Some(ANSWERING_VERSION.to_string()),
         version: Some("HTTP/2.0".to_string()),
+        route: None,
     };
     let riding = paid.rider();
     assert_eq!(riding.requests, 0);
