@@ -2870,6 +2870,13 @@ class StatefulBackend {
       // `smart.jev.enabled`, written as the core's press writes it.
       case "typesafe_settings": return clone(await (this.judgmentSettingsWait ?? this.typesafeSettings()));
       case "managed_judgment_status": return clone(await (this.judgmentStatusWait ?? this.managedJudgmentSettings()));
+      case "judgment_latest_request": {
+        if (this.judgmentUsageError) throw this.judgmentUsageError;
+        return clone(await (this.judgmentUsageWait ?? this.judgmentUsage ?? {
+          providerIdentity: this.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "none",
+          state: "unknown", reason: "unattributed", unattributedNewer: false, lastRequest: null,
+        }));
+      }
       case "managed_judgment_inspect_source": {
         if (this.managedSourceError) throw this.managedSourceError;
         const snapshot = this.managedJudgmentSettings();
@@ -3488,6 +3495,9 @@ async function withJudgmentStatus(run) {
   } finally {
     delete backend.judgmentSettingsWait;
     delete backend.judgmentStatusWait;
+    delete backend.judgmentUsageWait;
+    delete backend.judgmentUsage;
+    delete backend.judgmentUsageError;
     delete backend.managedSourceWait;
     delete backend.managedSourceResult;
     delete backend.managedSourceError;
@@ -6188,35 +6198,122 @@ await test("현재 상태 새로고침은 초안을 보존하고 늦은 응답�
   const before = backend.calls.length;
   let finishSettings;
   let finishStatus;
+  let finishUsage;
   const oldSettings = backend.typesafeSettings();
   const oldStatus = backend.managedJudgmentSettings();
   backend.judgmentSettingsWait = new Promise((resolve) => { finishSettings = resolve; });
   backend.judgmentStatusWait = new Promise((resolve) => { finishStatus = resolve; });
+  backend.judgmentUsageWait = new Promise((resolve) => { finishUsage = resolve; });
   await page.click("#judgment-status-refresh");
   await backend.waitForCall("judgment-status", "typesafe_settings", before);
   await backend.waitForCall("judgment-status", "managed_judgment_status", before);
+  await backend.waitForCall("judgment-status", "judgment_latest_request", before);
   await page.evaluate(() => { void refreshTypeSafe(); void managedJudgmentController.refresh(); });
   assertEqual(backend.calls.slice(before).filter((call) => call.window_id === "judgment-status" && call.command === "typesafe_settings").length, 1, "refresh duplicated the canonical settings request");
+  assertEqual(backend.calls.slice(before).filter((call) => call.window_id === "judgment-status" && call.command === "judgment_latest_request").length, 1, "refresh duplicated the actual-use read");
   const next = clone(oldSettings);
   next.provider.model = "new-current-decision";
   next.providerIdentity = "new-current-identity";
   await page.evaluate((state) => paintTypeSafe(state), next);
   finishSettings(oldSettings);
   finishStatus(oldStatus);
+  finishUsage({
+    providerIdentity: oldSettings.providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+    state: "observed", reason: null, unattributedNewer: false,
+    lastRequest: { feature: "stall", atMs: Date.now() - 60_000, outcome: "answered", elapsedMs: 12, applied: true },
+  });
   delete backend.judgmentSettingsWait;
   delete backend.judgmentStatusWait;
+  delete backend.judgmentUsageWait;
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assert((await page.locator("#judgment-active-model").textContent()).includes("new-current-decision"), "a late read restored the old identity");
   assertEqual(await page.inputValue("#typesafe-model-input"), "unapplied-cloud-model", "refresh discarded an unsaved draft");
   assertEqual(await page.locator("#judgment-provider-draft").getAttribute("data-state"), "unapplied");
   assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown");
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a late usage read was assigned to a new model");
   await page.evaluate(() => setSettingsOpen(false));
   const hiddenAt = backend.calls.length;
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await renderSettled(page);
-  assert(!backend.calls.slice(hiddenAt).some((call) => call.window_id === "judgment-status" && ["typesafe_settings", "managed_judgment_status"].includes(call.command)), "a hidden settings page polls current status");
+  assert(!backend.calls.slice(hiddenAt).some((call) => call.window_id === "judgment-status" && ["typesafe_settings", "managed_judgment_status", "judgment_latest_request"].includes(call.command)), "a hidden settings page polls current status");
   assertEqual(backend.typesafeSettings().provider, provider, "status refresh changed saved settings");
   return "one settings/status read · late identity discarded · unsaved draft kept · no hidden refresh";
+}));
+
+await test("실제 요청의 성공·실패·적용 결과는 응답 점검과 서버 실행을 바꾸지 않는다", async () => withJudgmentStatus(async (page) => {
+  const atMs = Date.parse("2026-10-01T10:20:30Z");
+  backend.judgmentUsage = {
+    providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+    state: "observed", reason: null, unattributedNewer: false,
+    lastRequest: { feature: "stall", atMs, outcome: "answered", elapsedMs: 37, applied: true },
+  };
+  const words = (key, fallback) => page.evaluate(([name, source]) => t(name, source), [key, fallback]);
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed", "a real request remained permanently unknown");
+  const feature = await page.evaluate(() => { const name = jevFeature("stall").name; return t(name.key, name.source); });
+  const when = await page.evaluate((at) => new Intl.DateTimeFormat(document.documentElement.lang || "ko", { dateStyle: "short", timeStyle: "medium" }).format(new Date(at)), atMs);
+  const used = await page.locator("#judgment-current-usage").textContent();
+  assert(used.includes(feature) && used.includes(when), "the real feature and source timestamp were not displayed", used);
+  assert(used.includes(await words("settings.judgment.usageApplied", "결과 적용됨")), "an explicitly applied result was not distinguished");
+  backend.judgmentUsage.lastRequest = { feature: "stall", atMs, outcome: "http_503", elapsedMs: 0, applied: false };
+  backend.judgmentUsage.unattributedNewer = true;
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  const failed = await page.locator("#judgment-current-usage").textContent();
+  assert(failed.includes(await words("settings.judgment.usageFailed", "요청 실패")), "HTTP failure was hidden");
+  assert(failed.includes(await words("settings.judgment.usageNotApplied", "결과 미적용")), "a failed request was presented as an applied result");
+  assert(failed.includes(await words("settings.judgment.usageNewerUnknown", "더 새 기록에는 요청 당시 모델 정보가 없어 결과를 확인할 수 없습니다.")), "a newer unattributed request was hidden");
+  assert(failed.includes("0 ms"), "the source's measured zero latency was replaced with an invented value");
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "ready", "a request failure was presented as a stopped server");
+  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected", "a real request overwrote a separate connection check");
+  return "real source time and feature · explicit application · HTTP failure is not server shutdown · newer history gap disclosed";
+}));
+
+await test("실제 사용은 최근 미관측·출처 부족·다른 제공자·지원 없는 명령을 구분한다", async () => withJudgmentStatus(async (page) => {
+  backend.judgmentUsage = {
+    providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+    state: "none_observed", reason: null, unattributedNewer: false, lastRequest: null,
+  };
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "none_observed");
+  assert(!/\d/.test(await page.locator("#judgment-current-usage").textContent()), "bounded non-observation invented a total or last-used time");
+  backend.judgmentUsage.state = "unknown";
+  backend.judgmentUsage.reason = "unattributed";
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown");
+  backend.judgmentUsage = {
+    ...backend.judgmentUsage, providerIdentity: "another-provider", state: "observed", reason: null,
+    lastRequest: { feature: "stall", atMs: Date.now() - 60_000, outcome: "answered", elapsedMs: 31, applied: true },
+  };
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "old provider history became current use");
+  backend.judgmentUsageError = "command_not_supported";
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "unsupported usage reporting fabricated activity");
+  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "ready");
+  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected");
+  return "recent evidence only · unknown legacy provenance · different provider discarded · old backend tolerated";
+}));
+
+await test("실제 요청에 없는 시각과 적용 여부는 만들어 내지 않는다", async () => withJudgmentStatus(async (page) => {
+  backend.judgmentUsage = {
+    providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+    state: "observed", reason: null, unattributedNewer: false,
+    lastRequest: { feature: "stall", atMs: null, outcome: "answered", elapsedMs: null, applied: null },
+  };
+  await page.click("#judgment-status-refresh");
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed");
+  const used = await page.locator("#judgment-current-usage").textContent();
+  const missing = await page.evaluate(() => [t("settings.judgment.usageTimeUnknown", "시각 정보 없음"), t("settings.judgment.usageAppliedUnknown", "결과 적용 여부 모름")]);
+  assert(missing.every((words) => used.includes(words)), "missing source facts were inferred", used);
+  assert(!/\d/.test(used), "a missing timestamp or latency became an invented number", used);
+  return "known real request · unknown source timestamp/latency/application kept unknown";
 }));
 
 await test("가져오기 실패는 해당 초안 옆에 한 번만 표시한다", async () => withJudgmentStatus(async (page, provider) => {
