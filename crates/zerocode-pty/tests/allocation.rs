@@ -79,7 +79,8 @@ fn hot_path_allocation_contracts() {
     // Lowering the configured cap must release the oldest row buffers, not
     // only shorten a logical length while retaining their allocations. Since
     // t-1956, a history row stores only through its last non-default cell, so
-    // the releasable bill follows the written width rather than `COLS`.
+    // the releasable bill follows the written width rather than `COLS`; since
+    // t-54317 it is packed, and a plain row holds one scalar a written column.
     const COLS: usize = 80;
     const FILLED_LINES: usize = MIN_SCROLLBACK_LINES * 2;
     const ROW_TEXT: &str = "one retained scrollback row";
@@ -105,7 +106,7 @@ fn hot_path_allocation_contracts() {
     let shrunk = live_bytes();
     let released = filled.saturating_sub(shrunk);
     let written_width = ROW_TEXT.chars().count();
-    let row_storage = (FILLED_LINES - MIN_SCROLLBACK_LINES) * written_width * size_of::<Cell>();
+    let row_storage = (FILLED_LINES - MIN_SCROLLBACK_LINES) * written_width * size_of::<char>();
     assert!(
         released >= row_storage,
         "cap shrink released {released} bytes, expected at least {row_storage}; \
