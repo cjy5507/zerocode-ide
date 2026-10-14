@@ -12255,18 +12255,25 @@ function sayWithheldPrompt(term, why, pasted, text) {
  * error anywhere else to explain why — the exact silence the backend emits
  * this event to break. */
 listen("term:prompt", (event) => {
-  const { term, delivered, pasted, why, text } = event.payload;
+  const { term, delivered, pasted, why, text, theirs } = event.payload;
   // A prompt that landed had the line to itself, so whatever was withheld
   // there before is over: the next refusal is news.
   if (delivered) {
     withheldNotices.delete(term);
     return;
   }
+  // Whose words they were (t-52566). The window's own — the mail pointer's
+  // advice, a restored worker's continuation, a briefing — are the road that
+  // sent them to answer for: none of them reaches the person's clipboard,
+  // and neither their park nor their timeout is the person's to hear about.
+  // The mail pointer's line that ran out of time at a restored zo worker
+  // came here as an error, with the advice copied over their clipboard.
+  const own = theirs !== false;
   // Parked, not lost (t-47952): the agent there is still in its turn, and
   // the words go in when the turn ends. A report, not a failure — they are
   // still on their way, so nothing reaches the clipboard.
   if (why === TERM_PROMPT_PARKED) {
-    toast(t("term.promptParked", "터미널 {{term}}의 에이전트가 일하는 중이라 끝나면 보냅니다.", { term }));
+    if (own) toast(t("term.promptParked", "터미널 {{term}}의 에이전트가 일하는 중이라 끝나면 보냅니다.", { term }));
     return;
   }
   // A write the window WITHHELD is a different sentence from one that timed
@@ -12274,9 +12281,10 @@ listen("term:prompt", (event) => {
   // draft, a parked question, a hand that arrived while the words settled —
   // or the line refused it, and the event names which.
   if (typeof why === "string" && why.length > 0 && why !== TERM_PROMPT_NOT_READY) {
-    sayWithheldPrompt(term, why, pasted, text);
+    sayWithheldPrompt(term, why, pasted, own ? text : null);
     return;
   }
+  if (!own) return;
   // Words that did not land go to the clipboard, and the notice says so.
   const kept = typeof text === "string" && text.length > 0;
   if (kept) void clipboardText.write(text);

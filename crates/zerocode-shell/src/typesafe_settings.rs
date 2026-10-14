@@ -15,13 +15,15 @@
 //! own question through the same key road, request and answer check.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zerocode_core::jev::door::{self, JevSettings, NotAnObject};
 use zerocode_core::jev::{
     CLASSIFIER_SETTING, ClassifierMode, DEFAULT_MODEL, JEV_USES, JevMode, JevUse, MODEL_SETTING,
-    ROUTING, SMART_SETTINGS_KEY, count, model_in, pin_in, pinned_model,
+    ROUTING, SMART_SETTINGS_KEY, choice, count, model_in, noul, pin_in, pinned_model, promote,
+    score,
 };
 use zerocode_harness::{SERVICE_KEYCHAIN_SERVICE_PREFIX, TYPESAFE_API_KEY_ENV};
 
@@ -505,20 +507,30 @@ pub(crate) fn with_provider_locked<R>(
     crate::api_routers::with_zo_settings_root(path, |_| read())
 }
 
+/// `provider` as an apply would write it, or the token it is refused with —
+/// one reading for the apply and the preflight, so a candidate the preflight
+/// asked is one the apply accepts.
+fn applicable(
+    provider: judgment_provider::Provider,
+) -> Result<judgment_provider::Provider, String> {
+    let provider = provider.validated().map_err(|reason| reason.to_string())?;
+    if provider.kind == judgment_provider::ProviderKind::Jev
+        && zerocode_core::jev::pinned_model(&provider.model).is_none()
+    {
+        return Err(judgment_provider::Refusal::Model.token().to_string());
+    }
+    Ok(provider)
+}
+
 fn set_provider_checked(
     path: &Path,
     provider: judgment_provider::Provider,
     expected: Option<&str>,
     binding: Option<&local_judgment::Binding>,
 ) -> Result<(), String> {
-    let provider = provider.validated().map_err(|reason| reason.to_string())?;
+    let provider = applicable(provider)?;
     if binding.is_some_and(|binding| !binding.matches(&provider)) {
         return Err("managed_model_binding".to_string());
-    }
-    if provider.kind == judgment_provider::ProviderKind::Jev
-        && zerocode_core::jev::pinned_model(&provider.model).is_none()
-    {
-        return Err("provider_model".to_string());
     }
     update_smart(path, |smart| {
         if let Some(expected) = expected {
@@ -724,6 +736,153 @@ pub fn read_check(stdout: &[u8]) -> Option<TypeSafeCheck> {
     String::from_utf8_lossy(stdout)
         .lines()
         .find_map(|line| serde_json::from_str::<TypeSafeCheck>(line.trim()).ok())
+}
+
+/// How long a preflight waits for a Jev or remote candidate: zo's own key
+/// check's deadline (`DECISION_SHADOW_DEADLINE`).
+pub const PREFLIGHT_DEADLINE: Duration = Duration::from_secs(8);
+/// How long it waits for a loopback candidate, which may load its model on
+/// the first request: the managed runtime's own native check's.
+pub const LOCAL_PREFLIGHT_DEADLINE: Duration = Duration::from_secs(35);
+
+/// The preflight's three questions, one of each kind a provider must answer,
+/// about one number nobody's work holds.
+const PREFLIGHT_CHOICE: &str = "parity";
+const PREFLIGHT_SCORE: &str = "size";
+const PREFLIGHT_NOUL: &str = "positive";
+const PREFLIGHT_PARITY: [(&str, &str); 2] = [
+    ("even", "The number divides by two with nothing left over."),
+    ("odd", "The number leaves one over when divided by two."),
+];
+const PREFLIGHT_LEVELS: [&str; 2] = [
+    "The number is smaller than ten.",
+    "The number is ten or larger.",
+];
+
+/// The preflight's request: [`PREFLIGHT_CHOICE`], [`PREFLIGHT_SCORE`] and
+/// [`PREFLIGHT_NOUL`] about a fixed number, built by the same builders every
+/// question the product asks is.
+#[must_use]
+pub fn preflight_body() -> Value {
+    crate::systemone::request_body(
+        &serde_json::json!({"number": 4}),
+        &serde_json::json!({
+            (PREFLIGHT_CHOICE): choice::question("Is `number` even or odd?", &PREFLIGHT_PARITY),
+            (PREFLIGHT_SCORE): {
+                "type": "score",
+                "instructions": "How large is `number`?",
+                "criteria": PREFLIGHT_LEVELS,
+            },
+            (PREFLIGHT_NOUL): noul::question(
+                "`number` is greater than zero.",
+                "The number is greater than zero.",
+                "The number is zero or less than zero.",
+            ),
+        }),
+    )
+}
+
+/// The version an answer to [`preflight_body`] names, once every one of its
+/// three answers has passed the reader each seat reads that kind with — or
+/// the `schema` token of the first that did not.
+///
+/// # Errors
+/// A body that is not an answer, or an answer that breaks a reader's rule.
+pub fn read_preflight(body: &str) -> Result<Option<String>, String> {
+    let response: Value = serde_json::from_str(body).map_err(|_| promote::SCHEMA.to_string())?;
+    let answers = response
+        .get("answers")
+        .ok_or_else(|| promote::SCHEMA.to_string())?;
+    let offered = PREFLIGHT_PARITY
+        .iter()
+        .map(|(word, _)| (*word).to_string())
+        .collect();
+    choice::read(answers, PREFLIGHT_CHOICE, &offered)
+        .map_err(|refusal| refusal.token().to_string())?;
+    noul::read(answers, PREFLIGHT_NOUL).map_err(|refusal| refusal.token().to_string())?;
+    score::read_value(
+        answers.get(PREFLIGHT_SCORE).unwrap_or(&Value::Null),
+        PREFLIGHT_LEVELS.len(),
+    )
+    .map_err(|rule| format!("{}_{}", promote::SCHEMA, rule.word()))?;
+    Ok(crate::systemone::answered_by(body))
+}
+
+/// What a candidate provider said to [`preflight_body`] before anything
+/// selected it: whether it answered all three questions in the native
+/// System One schema — a connection, not a measure of whether its judgments
+/// are right — the version that answered or the token of why none did, and
+/// the two identities the result is bound to. An apply that names
+/// `active_provider_identity` as the one it expects to replace cannot land
+/// after the settings moved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderPreflight {
+    pub candidate_identity: String,
+    pub active_provider_identity: String,
+    pub answered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+/// Put [`preflight_body`] to `candidate` through `wire` while the settings
+/// at `path` select the provider named `expected`, and write nothing: no
+/// setting, no key and no managed model. The key is the one the
+/// candidate's own endpoint keeps, read only when it asks for one.
+///
+/// # Errors
+/// A candidate an apply would refuse (nothing is sent), `settings_changed`
+/// when the selected provider is not `expected` before the request or after
+/// its answer, or an unreadable settings file or keychain.
+pub fn preflight_provider(
+    path: &Path,
+    candidate: judgment_provider::Provider,
+    expected: &str,
+    keys: &dyn RouterKeys,
+    wire: &crate::systemone::Wire,
+) -> Result<ProviderPreflight, String> {
+    let candidate = applicable(candidate)?;
+    let still_selected = || {
+        require_provider(
+            &selected_provider(path).map_err(|refusal| refusal.message)?,
+            Some(expected),
+        )
+    };
+    still_selected()?;
+    let key = if candidate.requires_auth {
+        keys.read(&provider_keychain_service(&candidate))
+            .map_err(|refusal| refusal.message)?
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+    } else {
+        None
+    };
+    let deadline = if candidate.kind == judgment_provider::ProviderKind::Local {
+        LOCAL_PREFLIGHT_DEADLINE
+    } else {
+        PREFLIGHT_DEADLINE
+    };
+    let began = Instant::now();
+    let outcome = wire
+        .ask_candidate(&candidate, key.as_deref(), &preflight_body(), deadline)
+        .and_then(|body| read_preflight(&body));
+    let elapsed_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+    still_selected()?;
+    let (model, failure) = match outcome {
+        Ok(model) => (model, None),
+        Err(failure) => (None, Some(failure)),
+    };
+    Ok(ProviderPreflight {
+        candidate_identity: candidate.identity(),
+        active_provider_identity: expected.to_string(),
+        answered: failure.is_none(),
+        model,
+        failure,
+        elapsed_ms,
+    })
 }
 
 /// How many Jev requests this machine has sent today, and the most one day
@@ -1295,15 +1454,34 @@ mod tests {
             }
         }
 
-        // The card offers one switch and no choice of mode: its only select
-        // is the classifier, folded under 고급 and closed until asked for.
         let page = include_str!("../../../ui/index.html");
         let card = &page[page.find("id=\"typesafe-card\"").expect("the key card")..];
         let card = &card[..card
             .find("<template id=\"jev-features\">")
             .expect("the features follow the card")];
         assert_eq!(card.matches("data-jev-switch ").count(), 1, "one switch");
-        assert_eq!(card.matches("<select").count(), 2, "{card}");
+        let select_ids: Vec<&str> = card
+            .split("<select")
+            .skip(1)
+            .map(|select| {
+                let attributes = select.split_once('>').expect("select opening tag").0;
+                attributes
+                    .split_once("id=\"")
+                    .and_then(|(_, value)| value.split_once('"'))
+                    .expect("every model setting select has an id")
+                    .0
+            })
+            .collect();
+        assert_eq!(
+            select_ids,
+            [
+                "managed-judgment-filter",
+                "judgment-provider-kind",
+                "judgment-listed-model",
+                "route-classifier-select",
+            ],
+            "model selection and library filters do not add per-feature mode controls"
+        );
         assert!(card.contains("id=\"judgment-provider-kind\""));
         let advanced = &card[card
             .find("<details class=\"settings-fold settings-jev-advanced\"")
@@ -1347,6 +1525,7 @@ mod tests {
             "set_route_classifier",
             "set_judgment_provider",
             "judgment_models",
+            "preflight_judgment_provider",
             "check_typesafe_key",
             "jev_summary",
             "jev_day",

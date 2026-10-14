@@ -840,7 +840,10 @@ pub(super) fn start_automation(
         )
         .clearing(false)
         .guarded(zerocode_pty::ready::Guard::for_its_own_line(Some(launch)))
-        .words(composer_words_for(driving)),
+        .words(composer_words_for(driving))
+        // The automation's prompt is the person's, written when they made
+        // it: it goes back to them as their own send does (t-52566).
+        .handing_back(true),
     );
     state.cadence().wake();
     // And the run itself, written down. `last_run_at` above says only WHEN the

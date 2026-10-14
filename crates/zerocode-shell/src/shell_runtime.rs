@@ -1422,16 +1422,20 @@ pub(super) fn activate_zo_worker_delivery(app: &AppHandle, owner: ZoChannelOwner
             return;
         };
         state.worker_prompt_submits().remove(&term);
-        let refusal = zerocode_pty::ready::Refusal::LaunchRefused;
+        let refused = DeliveryOutcome::Refused(zerocode_pty::ready::Refusal::LaunchRefused);
         if let Some(waiting) = state.delivery_waiters().remove(&term) {
-            let _ = waiting.send(DeliveryOutcome::Refused(refusal));
+            let _ = waiting.send(refused);
         }
+        // The briefing is the coordinator's words, not the person's: what
+        // goes back with the refusal is what the pump's own settle hands
+        // back (t-52566) — none of it.
         let _ = app.emit(
             "term:prompt",
             prompt_transaction::settled_event(
                 term,
-                DeliveryOutcome::Refused(refusal),
-                Some(delivery.text().to_string()),
+                refused,
+                prompt_transaction::words_to_hand_back(&delivery, refused),
+                delivery.hands_back(),
             ),
         );
         return;
@@ -3260,6 +3264,9 @@ pub(super) struct QueuedPrompt {
     /// Whether it waits out its pane's turn once it has the line (t-47952),
     /// the door's choice carried to the queued copy like its guard.
     pub(super) parks: bool,
+    /// Whether its words are the person's own, to go back to them when the
+    /// pane never takes them (t-52566), carried to the queued copy the same.
+    pub(super) hands_back: bool,
     pub(super) completion: std::sync::mpsc::SyncSender<DeliveryOutcome>,
 }
 

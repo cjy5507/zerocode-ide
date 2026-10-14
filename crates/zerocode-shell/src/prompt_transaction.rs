@@ -167,11 +167,18 @@ pub(super) fn turn(
 /// the person can already read them; carrying them again would be a second
 /// copy of a line that is on screen. So has an Enter alone (t-17037): it
 /// carries no words, and the ones it was for are on the line already.
+///
+/// And only the person's own words go back to them (t-52566,
+/// [`PromptDelivery::hands_back`]). The window's own — the mail pointer's
+/// advice, a restart's continuation, a briefing — were never theirs to
+/// paste: the pointer's line that ran out of time inside a restored zo
+/// worker's turn reached the person's clipboard as words they had lost. The
+/// road that sent them answers for them, and the black box keeps the line.
 pub(super) fn words_to_hand_back(
     delivery: &PromptDelivery,
     outcome: DeliveryOutcome,
 ) -> Option<String> {
-    if delivery.enter_again().is_some() {
+    if !delivery.hands_back() || delivery.enter_again().is_some() {
         return None;
     }
     match outcome {
@@ -196,7 +203,7 @@ pub(super) fn withheld(outcome: DeliveryOutcome) -> Option<Refusal> {
 pub(super) const PARKED_WHY: &str = "busy";
 
 /// The word `term:prompt` carries for words whose program never said it was
-/// ready (t-47952): they come back for the person to paste.
+/// ready (t-47952): the person's own come back for them to paste (t-52566).
 pub(super) const NOT_READY_WHY: &str = "not_ready";
 
 /// What the window hears about a settled delivery (`term:prompt`) — the
@@ -205,10 +212,13 @@ pub(super) const NOT_READY_WHY: &str = "not_ready";
 /// token: the window words it in the person's language from its own table
 /// (t-10159), and the English sentence stays the receipt's and the black
 /// box's. A timeout is named too, by a word of its own ([`NOT_READY_WHY`]).
+/// `theirs` says whether the words were the person's own (t-52566): the
+/// window says the timeout of its own words to nobody.
 pub(super) fn settled_event(
     term: TermId,
     outcome: DeliveryOutcome,
     text: Option<String>,
+    theirs: bool,
 ) -> PromptSettled {
     let why = match outcome {
         DeliveryOutcome::TimedOut => Some(NOT_READY_WHY),
@@ -220,6 +230,7 @@ pub(super) fn settled_event(
         pasted: outcome.pasted(),
         why,
         text,
+        theirs,
     }
 }
 
@@ -241,14 +252,17 @@ pub(super) fn withheld_line(term: TermId, outcome: DeliveryOutcome) -> Option<St
 /// What the window hears about words parked behind a working agent
 /// (t-47952) — the same event as a settled delivery's, so the window has
 /// one listener, with nothing delivered, nothing pasted and nothing handed
-/// back: the words are still on their way.
-pub(super) fn parked_event(term: TermId) -> PromptSettled {
+/// back: the words are still on their way. Whose words they are rides with
+/// it (t-52566): the person hears of their own send's park, and of nothing
+/// the window parked for itself.
+pub(super) fn parked_event(term: TermId, theirs: bool) -> PromptSettled {
     PromptSettled {
         term,
         delivered: false,
         pasted: false,
         why: Some(PARKED_WHY),
         text: None,
+        theirs,
     }
 }
 
@@ -387,7 +401,8 @@ pub(super) fn settle(
                     .guarded(next.guard)
                     .pressing(next.enter_again)
                     .words(next.words)
-                    .parking(next.parks),
+                    .parking(next.parks)
+                    .handing_back(next.hands_back),
             );
         }
         if row.is_empty() {
@@ -599,6 +614,7 @@ mod tests {
             enter_again: Some(zerocode_pty::EnterAgain { hand: placed }),
             words: zerocode_pty::Words::Pasted,
             parks: false,
+            hands_back: false,
             completion,
         });
         settle(
@@ -651,6 +667,7 @@ mod tests {
                 enter_again: None,
                 words: zerocode_pty::Words::Pasted,
                 parks: false,
+                hands_back: false,
                 completion,
             },
             receipt,
@@ -1065,7 +1082,7 @@ mod tests {
     }
 
     /// A pane relaunched between registration and the write is a different
-    /// program: the words come back rather than being typed at it.
+    /// program: the person's words come back rather than being typed at it.
     #[test]
     fn a_relaunch_between_registration_and_the_write_hands_the_words_back() {
         const TERM: TermId = 8_306;
@@ -1076,7 +1093,8 @@ mod tests {
             ReadySignal::CursorShown,
             start,
         )
-        .guarded(Guard::for_its_own_line(Some(1)));
+        .guarded(Guard::for_its_own_line(Some(1)))
+        .handing_back(true);
         let relaunched = Line {
             launch: Some(2),
             ..Line::default()
@@ -1132,7 +1150,8 @@ mod tests {
         let refused = serde_json::to_value(settled_event(
             TERM,
             DeliveryOutcome::Refused(Refusal::HoldsADraft),
-            Some(pointer.to_string()),
+            None,
+            false,
         ))
         .expect("the event serializes");
         assert_eq!(
@@ -1142,31 +1161,48 @@ mod tests {
                 "delivered": false,
                 "pasted": false,
                 "why": "holds_a_draft",
-                "text": pointer,
+                "text": null,
+                "theirs": false,
             })
         );
+        let held = serde_json::to_value(settled_event(
+            TERM,
+            DeliveryOutcome::Refused(Refusal::HoldsADraft),
+            Some(pointer.to_string()),
+            true,
+        ))
+        .expect("the event serializes");
+        assert_eq!(held["text"], pointer);
+        assert_eq!(held["theirs"], true);
         let left = serde_json::to_value(settled_event(
             TERM,
             DeliveryOutcome::Unsubmitted(Refusal::HandReached),
             None,
+            true,
         ))
         .expect("the event serializes");
         assert_eq!(left["pasted"], true);
         assert_eq!(left["why"], "hand_reached");
         for refusal in Refusal::ALL {
-            let said =
-                serde_json::to_value(settled_event(TERM, DeliveryOutcome::Refused(refusal), None))
-                    .expect("the event serializes");
+            let said = serde_json::to_value(settled_event(
+                TERM,
+                DeliveryOutcome::Refused(refusal),
+                None,
+                false,
+            ))
+            .expect("the event serializes");
             assert_eq!(said["why"], refusal.token(), "{refusal:?}");
             assert_ne!(said["why"], refusal.says(), "{refusal:?}");
         }
-        let landed = serde_json::to_value(settled_event(TERM, DeliveryOutcome::Delivered, None))
-            .expect("serializes");
+        let landed =
+            serde_json::to_value(settled_event(TERM, DeliveryOutcome::Delivered, None, true))
+                .expect("serializes");
         assert_eq!(landed["why"], serde_json::Value::Null);
         let lost = serde_json::to_value(settled_event(
             TERM,
             DeliveryOutcome::TimedOut,
             Some("look at this page".to_string()),
+            true,
         ))
         .expect("serializes");
         assert_eq!(
@@ -1177,9 +1213,10 @@ mod tests {
                 "pasted": false,
                 "why": "not_ready",
                 "text": "look at this page",
+                "theirs": true,
             })
         );
-        let parked = serde_json::to_value(parked_event(TERM)).expect("serializes");
+        let parked = serde_json::to_value(parked_event(TERM, true)).expect("serializes");
         assert_eq!(
             parked,
             serde_json::json!({
@@ -1188,6 +1225,7 @@ mod tests {
                 "pasted": false,
                 "why": "busy",
                 "text": null,
+                "theirs": true,
             })
         );
         for refusal in Refusal::ALL {
@@ -1430,6 +1468,7 @@ mod tests {
                 enter_again: None,
                 words: zerocode_pty::Words::Pasted,
                 parks: resting.parks(),
+                hands_back: resting.hands_back(),
                 completion,
             });
         settle(
@@ -1443,6 +1482,10 @@ mod tests {
         assert!(
             bench.deliveries[&TERM].parks(),
             "the queued send lost the door's choice to wait out a turn"
+        );
+        assert!(
+            bench.deliveries[&TERM].hands_back(),
+            "the queued send stopped being the person's words (t-52566)"
         );
         assert_eq!(
             bench.round(TERM, spinning(), working(), start),
@@ -1532,6 +1575,198 @@ mod tests {
         assert!(still_mid_turn(working(), None, wrote + floor).busy);
         assert!(!still_mid_turn(working(), Some(wrote), wrote + floor).busy);
         assert!(!still_mid_turn(Line::default(), Some(wrote), wrote).busy);
+    }
+
+    /* ---- the window's own words are not the person's to paste (t-52566) - */
+
+    /// Turn the delivery at `term` until it settles — no longer than its
+    /// deadline and a beat — feeding the same grid and line every round.
+    fn until_settled(
+        bench: &mut Bench,
+        term: TermId,
+        seen: Observed,
+        line: Line,
+        from: Instant,
+    ) -> (DeliveryOutcome, Instant) {
+        let mut now = from;
+        loop {
+            if let Turned::Settled(outcome) = bench.round(term, seen, line, now) {
+                return (outcome, now);
+            }
+            now += QUIET / 2;
+            assert!(
+                now <= from + TIMEOUT + QUIET,
+                "the delivery outlived its deadline"
+            );
+        }
+    }
+
+    /// 2026-10-14 10:46, the person's 「또 이버그」: three deliveries at a zo
+    /// worker the ledger reseated after a restart (term 11). The restore's
+    /// wait for the resumed composer carried no words and landed at rest;
+    /// the continuation landed, and the worker's turn began; the mail
+    /// pointer, queued behind the continuation, took the line inside that
+    /// turn and ran out its eight seconds against the spinner — and the pump
+    /// handed the pointer's line back as words the person had lost: an
+    /// error, and the window's own advice over whatever was on their
+    /// clipboard. A worker's launch briefing that ran out of time went the
+    /// same way. The window's own words are never handed back, whatever
+    /// became of them, and the black box keeps the line that says what did;
+    /// the person's own send still is (`an_idle_pane_that_never_rests_…`).
+    #[test]
+    fn the_windows_own_words_are_never_handed_back_to_the_person() {
+        const TERM: TermId = 8_566;
+        crate::human_input::forget_term(TERM);
+        let start = Instant::now();
+        let mut bench = Bench::default();
+        // The restore's wait for the resumed composer: no words, no Enter.
+        bench.deliveries.insert(
+            TERM,
+            PromptDelivery::with_deadlines(
+                String::new(),
+                false,
+                ReadySignal::CursorShown,
+                start,
+                QUIET,
+                TIMEOUT,
+            )
+            .clearing(false)
+            .guarded(Guard::for_its_own_line(None)),
+        );
+        assert_eq!(
+            bench.round(TERM, composer(0), Line::default(), start),
+            Turned::Waiting
+        );
+        let mut now = start + SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(1), Line::default(), now),
+            Turned::Settled(DeliveryOutcome::Delivered)
+        );
+        // The continuation lands, and the worker's turn begins.
+        bench
+            .deliveries
+            .insert(TERM, guarded(crate::RESTART_NUDGE, true, now));
+        assert_eq!(
+            bench.round(TERM, composer(1), Line::default(), now),
+            Turned::Waiting
+        );
+        now += SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(2), Line::default(), now),
+            Turned::Pasted
+        );
+        now += SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(2), Line::default(), now),
+            Turned::Entered
+        );
+        now += SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(2), Line::default(), now),
+            Turned::Settled(DeliveryOutcome::Delivered)
+        );
+        let typed = bench.wrote.len();
+        // The pointer's line takes the line as the continuation lands, inside
+        // the turn the continuation began.
+        bench.deliveries.insert(
+            TERM,
+            crate::cmd::terminal::prompt_delivery_for(
+                zerocode_core::orchestration::pointer_text(1),
+                true,
+                Some("zo"),
+                crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+                None,
+                now,
+            ),
+        );
+        let (pointed, ended) = until_settled(&mut bench, TERM, spinning(), working(), now);
+        assert_eq!(bench.wrote.len(), typed, "the pointer typed into the turn");
+        // A worker's launch briefing at a composer that shook hands and never
+        // stood.
+        now = ended;
+        bench.deliveries.insert(
+            TERM,
+            PromptDelivery::with_deadlines(
+                "carry the task".to_string(),
+                true,
+                ReadySignal::CursorShown,
+                now,
+                QUIET,
+                TIMEOUT,
+            )
+            .clearing(false)
+            .guarded(Guard::for_its_own_line(None)),
+        );
+        let silent = Observed {
+            bracketed_paste: true,
+            ..Observed::default()
+        };
+        let (briefed, _) = until_settled(&mut bench, TERM, silent, Line::default(), now);
+        assert_eq!(
+            bench.handed_back,
+            Vec::<String>::new(),
+            "the window's own words were handed to the person as words they had lost \
+             (the pointer {pointed:?}, the briefing {briefed:?})"
+        );
+        assert_eq!(
+            bench
+                .lines
+                .iter()
+                .filter(|line| line.contains("prompt timed out after")
+                    && line.ends_with("state=working"))
+                .count(),
+            usize::from(pointed == DeliveryOutcome::TimedOut),
+            "the black box lost the line that says what became of the pointer: {:?}",
+            bench.lines
+        );
+        crate::human_input::forget_term(TERM);
+    }
+
+    /// t-52566: whose words a delivery carries is its door's answer. Only
+    /// the person's own send hands its words back; every other readiness
+    /// types the window's own, and nothing of them goes back whatever became
+    /// of them — and a delivery a door builds for itself, a worker's launch
+    /// briefing, is the window's unless the door says otherwise.
+    #[test]
+    fn only_the_persons_own_send_hands_its_words_back() {
+        use crate::cmd::terminal::PromptReadiness;
+        let start = Instant::now();
+        for (readiness, theirs) in [
+            (PromptReadiness::Resting, true),
+            (PromptReadiness::RestingBesideADraft, false),
+            (PromptReadiness::Mounting, false),
+            (PromptReadiness::MountingBesideADraft, false),
+            (PromptReadiness::EnterAgain(None), false),
+        ] {
+            assert_eq!(readiness.hands_back(), theirs, "{readiness:?}");
+            let delivery = crate::cmd::terminal::prompt_delivery_for(
+                "words".to_string(),
+                true,
+                Some("zo"),
+                readiness,
+                None,
+                start,
+            );
+            assert_eq!(delivery.hands_back(), theirs, "{readiness:?}");
+            for outcome in [
+                DeliveryOutcome::TimedOut,
+                DeliveryOutcome::Refused(Refusal::HoldsADraft),
+            ] {
+                assert_eq!(
+                    words_to_hand_back(&delivery, outcome).is_some(),
+                    theirs,
+                    "{readiness:?} {outcome:?}"
+                );
+            }
+        }
+        let briefing = PromptDelivery::new(
+            "carry the task".to_string(),
+            true,
+            ReadySignal::CursorShown,
+            start,
+        );
+        assert!(!briefing.hands_back());
+        assert!(briefing.handing_back(true).hands_back());
     }
 
     /* ---- a restart's words reach a real program once (t-14037) --------- */
@@ -1657,6 +1892,7 @@ done
                     enter_again: None,
                     words: composer_words_for(Some("claude")),
                     parks: false,
+                    hands_back: false,
                     completion,
                 });
         }

@@ -25,6 +25,8 @@ export const requiredRoutes = [
   "/shell-scm.js",
   "/shell-settings.js",
   "/shell-judgment.js",
+  "/shell-managed-judgment.js",
+  "/shell-model-source.js",
   "/shell-flow.js",
   "/shell-status.js",
   "/shell-term.js",

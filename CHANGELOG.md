@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.65] — 2026-10-14
+- The judgment model library: settings open on a guided setup that brings a model in from a Hugging Face address or a local folder and connects it, a candidate model is checked before it is applied so a switch only commits to the model that answered, errors say what to do next, and a failed restoration of the previous model is reported as such rather than as a cancellation (t-51504, t-51505, t-51535). D3 lite is shown as not supported.
+- A cancelled model switch no longer reports a runtime failure when the engine it stopped closes at the same moment (t-51504).
+- The window no longer copies its own messages to your clipboard or raises an error when an agent is busy: only text you typed comes back when a pane never takes it, and a worker brought back after a restart gets its continuation before any mail notice (t-52566).
+
 ## [1.1.64] — 2026-10-14
 - Computer Use acts and reads only in the window it was given: clicks, keys, typing and scrolls keep the requested app and window, a coordinate or selector that belongs to another window is refused before anything is sent, content from a different window is never returned, and an action whose window disappears reports the observation as unavailable instead of reading whatever window is in front (t-52051).
 - Computer Use no longer invites a repeated input: once a click or keystroke has been sent, a scope it could not verify comes back as a receipt marked not to repeat rather than an error (t-52051).

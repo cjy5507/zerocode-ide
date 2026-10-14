@@ -974,6 +974,19 @@ impl PromptReadiness {
         matches!(self, Self::Resting)
     }
 
+    /// Whether the words are the person's own, to go back to them when the
+    /// pane never takes them (t-52566) — see
+    /// [`zerocode_pty::PromptDelivery::handing_back`].
+    ///
+    /// The person's own send, and an automation's to a running agent, which
+    /// is that same send. Every other door types the window's own words —
+    /// the mail pointer's advice, a restart's continuation and its Enter
+    /// alone, a dispatch preamble, an ssh send, an explain request — and the
+    /// road that sent them answers for them: none is the person's to paste.
+    pub(crate) const fn hands_back(self) -> bool {
+        matches!(self, Self::Resting)
+    }
+
     /// Whether composer edit keys ride ahead of the paste.
     fn clearing(self, agent: Option<&str>) -> bool {
         match self {
@@ -1053,7 +1066,8 @@ pub(crate) fn prompt_delivery_for(
         )
         .clearing(clearing)
         .guarded(guard)
-        .words(words),
+        .words(words)
+        .handing_back(readiness.hands_back()),
         PromptReadiness::Resting
         | PromptReadiness::RestingBesideADraft
         | PromptReadiness::MountingBesideADraft
@@ -1062,7 +1076,8 @@ pub(crate) fn prompt_delivery_for(
             .guarded(guard)
             .pressing(readiness.enter_again())
             .words(words)
-            .parking(readiness.parks()),
+            .parking(readiness.parks())
+            .handing_back(readiness.hands_back()),
     }
 }
 
@@ -1122,6 +1137,7 @@ pub(crate) fn type_prompt_at_term(
                 enter_again: readiness.enter_again(),
                 words: composer_words_for(agent),
                 parks: readiness.parks(),
+                hands_back: readiness.hands_back(),
                 completion: notify,
             });
         return Ok(waiting);
@@ -1523,7 +1539,11 @@ pub(crate) fn launch_agent_tab(
             )
             .clearing(false)
             .guarded(zerocode_pty::ready::Guard::for_its_own_line(launch))
-            .words(composer_words_for(Some(spec.id))),
+            .words(composer_words_for(Some(spec.id)))
+            // The person's own launch — words they typed into the launcher,
+            // or the action they chose put there — goes back to them like
+            // their own send when the agent never takes it (t-52566).
+            .handing_back(true),
         );
     }
     state.cadence().wake();
