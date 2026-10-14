@@ -973,9 +973,10 @@ fn a_continuation_no_road_placed_goes_on_to_the_next_window() {
     host.cut.lock().unwrap().clear();
     host.typed.lock().unwrap().clear();
     let third_door = Door::new(checkout.path());
+    // The wake names the model the worker's row holds (t-46882).
     assert_eq!(
         third_door.wake(IDLE_DOOR, "codex", idle_session),
-        Ok(ConversationWake::opened(IDLE_DOOR))
+        Ok(ConversationWake::opened(IDLE_DOOR).naming(row(&idle).model))
     );
     assert_eq!(
         coordinator_back(&host, "owed-again", OLD_LEADER, THIRD_LEADER),

@@ -435,9 +435,10 @@ fn a_door_and_the_ledgers_reseat_bring_one_conversation_back_once_in_either_orde
                 *counted.lock().unwrap() =
                     Some(coordinator_back(&*reseating, name, OLD_LEADER, NEW_LEADER));
             }));
+            // The wake names the model the worker's row holds (t-46882).
             assert_eq!(
                 door.wake(DOOR, "codex", session),
-                Ok(ConversationWake::opened(DOOR))
+                Ok(ConversationWake::opened(DOOR).naming(row(&worker).model))
             );
             assert_eq!(
                 *reseated.lock().unwrap(),
