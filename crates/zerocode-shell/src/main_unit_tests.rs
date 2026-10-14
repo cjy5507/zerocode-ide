@@ -5207,6 +5207,31 @@ fn a_load_is_dead_by_the_clock_not_by_wry() {
     assert_eq!(NAV_DEAD_AFTER_SECS, 20, "the table's number");
 }
 
+#[test]
+fn a_requested_navigation_is_pending_until_its_document_settles() {
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let grace = Duration::from_millis(zerocode_core::agent_browser::BROWSER_DOOR_BUDGET_MS);
+    let mut record = NavRecord::born(true, t0);
+    assert!(!record.pending(t0));
+    record.requested(t0);
+    assert!(record.pending(t0 + grace - Duration::from_millis(1)));
+    assert_eq!(record.observed(t0), NavState::Blank);
+    record.started(t0 + Duration::from_millis(5));
+    assert!(record.pending(t0 + grace * 2));
+    record.finished(false);
+    assert!(!record.pending(t0 + Duration::from_millis(6)));
+    record.requested(t0);
+    record.finished(true);
+    assert!(record.pending(t0 + Duration::from_millis(7)));
+    assert!(!record.pending(t0 + grace));
+    let mut loading = NavRecord::born(false, t0);
+    assert!(loading.pending(t0));
+    assert!(!loading.pending(t0 + Duration::from_secs(NAV_DEAD_AFTER_SECS)));
+    loading.finished(false);
+    assert!(!loading.pending(t0));
+}
+
 /// `tabs` answers one line per pane in birth order, every column a record.
 #[test]
 fn tabs_answer_one_row_per_pane_in_birth_order() {

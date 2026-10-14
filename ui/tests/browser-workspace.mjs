@@ -1162,6 +1162,47 @@ export async function testBrowserWorkspace(browser, origin, ok) {
   {
     const { page, faults } = await standWorkspace(browser, origin);
     try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        const select = host?.querySelector(".browser-workspace-owner-select");
+        if (select) { select.value = window.__WORKSPACE__.actorTerm; select.dispatchEvent(new Event("change", { bubbles: true })); }
+        window.__workspaceClick(label, "agent");
+      }, label);
+      await page.waitForTimeout(60);
+      await page.evaluate((label) => window.__workspaceClick(label, "pause"), label);
+      await page.waitForTimeout(60);
+      await page.evaluate((label) => window.__workspaceClick(label, "human"), label);
+      await page.waitForTimeout(60);
+      const granted = await page.evaluate((label) => ({
+        workspace: tabs.find((one) => one.label === label).workspace,
+        last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+      }), label);
+      await page.evaluate(({ label, revision }) => window.__workspaceEmit({
+        label, mode: "human", revision, inFlight: 1, needsObservation: false,
+      }), { label, revision: granted.workspace?.revision });
+      await page.waitForTimeout(80);
+      const own = await page.evaluate((label) => ({
+        last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+        error: tabs.find((one) => one.label === label).workspaceError,
+        addressReadOnly: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-address")?.readOnly,
+      }), label);
+      ok("the person's own request in flight keeps the human view placed and usable",
+        granted.workspace?.mode === "human" && granted.last?.shown === true && own.last?.shown === true
+          && own.error === null && own.addressReadOnly === false, JSON.stringify({ granted, own }));
+      await page.evaluate(({ label, revision }) => window.__workspaceEmit({
+        label, mode: "paused", revision: revision + 1, inFlight: 1, needsObservation: true,
+      }), { label, revision: granted.workspace?.revision });
+      await page.waitForTimeout(80);
+      const paused = await page.evaluate((label) => window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1), label);
+      ok("a paused state that claims input in flight still hides the native pane", paused?.shown === false, JSON.stringify(paused));
+      ok("workspace own-request handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
       await page.evaluate(() => {
         const mock = window.__WORKSPACE__;
         mock.holdOpen = true;

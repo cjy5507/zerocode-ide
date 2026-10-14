@@ -2280,3 +2280,345 @@ mod boundary_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod handoff_followup_regressions {
+    use super::*;
+
+    const HISTORY: [&str; 3] = ["console", "network", "diagnose"];
+
+    fn owned() -> Workspaces {
+        let workspaces = Workspaces::default();
+        workspaces
+            .register("browser-1", Some("term-1"), false)
+            .unwrap();
+        workspaces
+    }
+
+    fn observe(workspaces: &Workspaces) {
+        workspaces
+            .begin("browser-1", Some("term-1"), "read")
+            .unwrap()
+            .unwrap()
+            .finish(true);
+    }
+
+    fn change(workspaces: &Workspaces, mode: Mode) -> Snapshot {
+        let revision = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        let mut transition = workspaces.transition("browser-1", mode, revision).unwrap();
+        if mode != Mode::Paused {
+            transition.confirm_fence().unwrap();
+        }
+        transition.finish().unwrap()
+    }
+
+    fn stepped(workspaces: &Workspaces, verb: &str) -> StepControl {
+        let operation = workspaces
+            .begin("browser-1", Some("term-1"), verb)
+            .unwrap()
+            .unwrap();
+        let control = operation.step_control().unwrap();
+        operation.finish(true);
+        control
+    }
+
+    #[test]
+    fn a_step_frame_queued_before_a_person_takes_the_tab_is_skipped_without_a_capture() {
+        let workspaces = owned();
+        observe(&workspaces);
+        let control = stepped(&workspaces, "click");
+        change(&workspaces, Mode::Human);
+        assert!(
+            workspaces
+                .admit_evidence("browser-1", Some(&control))
+                .unwrap()
+                .is_none()
+        );
+        drop(workspaces.begin_snapshot_for("browser-1", false).unwrap());
+        change(&workspaces, Mode::Agent);
+        assert!(
+            workspaces
+                .admit_evidence("browser-1", Some(&control))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_step_frame_admitted_just_before_a_transfer_is_never_kept_and_never_delays_it() {
+        let workspaces = owned();
+        observe(&workspaces);
+        let control = stepped(&workspaces, "click");
+        let (frame, check) = workspaces
+            .admit_evidence("browser-1", Some(&control))
+            .unwrap()
+            .unwrap();
+        assert!(check.holds());
+        let revision = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        let mut transition = workspaces
+            .transition("browser-1", Mode::Human, revision)
+            .unwrap();
+        assert!(!check.holds());
+        tokio::time::timeout(Duration::from_millis(100), transition.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        transition.confirm_fence().unwrap();
+        assert_eq!(transition.finish().unwrap().mode, Mode::Human);
+        assert!(!check.holds());
+        drop(frame);
+        assert!(
+            workspaces
+                .admit_evidence("browser-1", Some(&control))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn admitting_and_keeping_a_step_frame_issues_no_observation() {
+        let workspaces = owned();
+        let control = stepped(&workspaces, "wait");
+        let before = workspaces.snapshot("browser-1").unwrap().unwrap();
+        let (frame, check) = workspaces
+            .admit_evidence("browser-1", Some(&control))
+            .unwrap()
+            .unwrap();
+        assert!(workspaces.begin_snapshot_for("browser-1", true).is_err());
+        assert!(check.holds());
+        drop(frame);
+        let after = workspaces.snapshot("browser-1").unwrap().unwrap();
+        assert!(before.needs_observation && after.needs_observation);
+        assert_eq!(before.revision, after.revision);
+        assert!(matches!(
+            workspaces.begin_at("browser-1", Some("term-1"), "click", Some(after.revision)),
+            Err(error) if error.starts_with("workspace_observation_required:")
+        ));
+        let watch = workspaces.begin_snapshot_for("browser-1", true).unwrap();
+        assert!(
+            workspaces
+                .admit_evidence("browser-1", Some(&control))
+                .is_err()
+        );
+        drop(watch);
+    }
+
+    #[test]
+    fn a_step_frame_needs_its_own_tab_owner_and_managed_state() {
+        let workspaces = owned();
+        workspaces
+            .register("browser-2", Some("term-1"), false)
+            .unwrap();
+        observe(&workspaces);
+        let control = stepped(&workspaces, "click");
+        assert!(
+            workspaces
+                .admit_evidence("browser-2", Some(&control))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            workspaces
+                .admit_evidence("browser-1", None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            workspaces
+                .admit_evidence("browser-person", Some(&control))
+                .unwrap()
+                .is_none()
+        );
+        drop(
+            workspaces
+                .admit_evidence("browser-person", None)
+                .unwrap()
+                .unwrap(),
+        );
+        workspaces
+            .get("browser-1")
+            .unwrap()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .owner = Some("term-2".into());
+        assert!(
+            workspaces
+                .admit_evidence("browser-1", Some(&control))
+                .unwrap()
+                .is_none()
+        );
+        workspaces.remove("browser-1").unwrap();
+        assert!(
+            workspaces
+                .admit_evidence("browser-1", Some(&control))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_refusal_before_dispatch_keeps_control_of_the_tab_and_the_owners_other_tabs() {
+        let workspaces = owned();
+        workspaces
+            .register("browser-2", Some("term-1"), false)
+            .unwrap();
+        observe(&workspaces);
+        let before = workspaces.snapshot("browser-1").unwrap().unwrap();
+        workspaces
+            .begin("browser-1", Some("term-1"), "click")
+            .unwrap()
+            .unwrap()
+            .settle(Dispatch::NotSent);
+        for verb in ["goto", "type", "fill"] {
+            workspaces
+                .begin_actor_target(Some("term-1"), verb, Some("browser-person"))
+                .unwrap()
+                .unwrap()
+                .settle(Dispatch::NotSent);
+        }
+        workspaces
+            .begin_actor_target(Some("term-1"), "open", None)
+            .unwrap()
+            .unwrap()
+            .settle(Dispatch::NotSent);
+        let after = workspaces.snapshot("browser-1").unwrap().unwrap();
+        assert_eq!(
+            (after.mode, after.revision, after.needs_observation),
+            (Mode::Agent, before.revision, false)
+        );
+        assert_eq!(
+            workspaces.snapshot("browser-2").unwrap().unwrap().mode,
+            Mode::Agent
+        );
+        workspaces
+            .begin("browser-1", Some("term-1"), "click")
+            .unwrap()
+            .unwrap()
+            .settle(Dispatch::Completed);
+        let transition = workspaces
+            .transition("browser-1", Mode::Human, before.revision)
+            .unwrap();
+        assert_eq!(transition.fence_labels().unwrap(), ["browser-1"]);
+    }
+
+    #[test]
+    fn an_uncertain_dispatch_pauses_the_tab_and_every_target_of_its_owner() {
+        let workspaces = owned();
+        observe(&workspaces);
+        workspaces
+            .begin("browser-1", Some("term-1"), "fill")
+            .unwrap()
+            .unwrap()
+            .settle(Dispatch::Uncertain);
+        let paused = workspaces.snapshot("browser-1").unwrap().unwrap();
+        assert!(paused.mode == Mode::Paused && paused.needs_observation);
+        let workspaces = owned();
+        workspaces
+            .register("browser-2", Some("term-1"), false)
+            .unwrap();
+        workspaces
+            .begin_actor_target(Some("term-1"), "eval", Some("browser-person"))
+            .unwrap()
+            .unwrap()
+            .settle(Dispatch::Uncertain);
+        for label in ["browser-1", "browser-2"] {
+            assert_eq!(
+                workspaces.snapshot(label).unwrap().unwrap().mode,
+                Mode::Paused,
+                "{label}"
+            );
+        }
+        let revision = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        let transition = workspaces
+            .transition("browser-1", Mode::Human, revision)
+            .unwrap();
+        assert_eq!(
+            transition.fence_labels().unwrap(),
+            ["browser-1", "browser-person"]
+        );
+    }
+
+    #[test]
+    fn a_persons_own_request_keeps_the_human_view_placed_and_a_second_one_is_busy() {
+        let workspaces = owned();
+        let human = change(&workspaces, Mode::Human);
+        let operation = workspaces
+            .begin_person("browser-1", Some(human.revision))
+            .unwrap()
+            .unwrap();
+        workspaces
+            .with_placement("browser-1", Some(human.revision), |allowed| {
+                assert!(allowed);
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            workspaces.begin_person("browser-1", Some(human.revision)),
+            Err(error) if error.starts_with("workspace_busy:")
+        ));
+        assert!(
+            workspaces
+                .begin("browser-1", Some("term-1"), "read")
+                .is_err()
+        );
+        operation.finish(true);
+        workspaces
+            .with_placement("browser-1", Some(human.revision), |allowed| {
+                assert!(allowed);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn page_history_is_refused_to_agents_once_a_person_has_controlled_the_tab() {
+        let workspaces = owned();
+        for verb in HISTORY {
+            workspaces
+                .begin("browser-1", Some("term-1"), verb)
+                .unwrap()
+                .unwrap()
+                .finish(true);
+        }
+        change(&workspaces, Mode::Human);
+        change(&workspaces, Mode::Agent);
+        observe(&workspaces);
+        for verb in HISTORY {
+            assert!(
+                matches!(
+                    workspaces.begin("browser-1", Some("term-1"), verb),
+                    Err(error) if error.starts_with("workspace_history_unsupported:")
+                ),
+                "{verb}"
+            );
+        }
+        change(&workspaces, Mode::Paused);
+        change(&workspaces, Mode::Agent);
+        observe(&workspaces);
+        for verb in HISTORY {
+            assert!(
+                workspaces.begin("browser-1", Some("term-1"), verb).is_err(),
+                "{verb}"
+            );
+        }
+        workspaces
+            .register("browser-2", Some("term-1"), false)
+            .unwrap();
+        for verb in HISTORY {
+            workspaces
+                .begin("browser-2", Some("term-1"), verb)
+                .unwrap()
+                .unwrap()
+                .finish(true);
+        }
+        for row in zerocode_core::agent_browser::BROWSER_VERBS {
+            assert_eq!(
+                zerocode_core::agent_browser::reads_history(row.word),
+                HISTORY.contains(&row.word),
+                "{}",
+                row.word
+            );
+        }
+    }
+}

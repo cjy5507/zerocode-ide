@@ -188,9 +188,15 @@ fn capture_limits_survive_caller_cancellation_until_the_native_callback_complete
         "native capture must keep the shared lease through its callback"
     );
     let capture = block_after(SNAPSHOT, "async fn browser_snapshot_png_for(");
-    assert!(capture.contains(".begin_snapshot_for(label, spectator)"));
-    assert!(capture.contains("let _frame = frame"));
-    assert!(capture.contains("snapshot_webview_png_held(pane, None, Some(Box::new(frame)))"));
+    assert!(
+        capture
+            .find(".begin_snapshot_for(label, spectator)")
+            .unwrap()
+            < capture.find("snapshot_leased(pane, frame)").unwrap()
+    );
+    let leased = block_after(SNAPSHOT, "async fn snapshot_leased(");
+    assert!(leased.contains("let _frame = frame"));
+    assert!(leased.contains("snapshot_webview_png_held(pane, None, Some(Box::new(frame)))"));
     let webkit = include_str!("../../src/artifact_webkit.rs");
     let callback = block_after(webkit, "fn take_snapshot_png_held(");
     assert!(callback.contains("let _held = held.borrow_mut().take()"));
@@ -292,4 +298,237 @@ fn nested_walk_recipe_and_code_entry_keep_their_own_observation_revision() {
     let typer = block_after(RUNTIME, "impl computer_use::enter::Typer for LiveTyper");
     assert!(typer.contains("workspace_revision: Option<u64>"));
     assert!(!typer.contains(".snapshot(") && !typer.contains("browser_revision("));
+}
+
+fn arm<'a>(dispatch: &'a str, opens: &str, next: &str) -> &'a str {
+    let start = dispatch.find(opens).unwrap_or_else(|| panic!("{opens}"));
+    let end = dispatch[start..]
+        .find(next)
+        .map_or(dispatch.len(), |at| start + at);
+    &dispatch[start..end]
+}
+
+#[test]
+fn step_frames_are_bound_to_the_steps_control_and_rechecked_before_they_are_kept() {
+    let evidence = include_str!("../../src/evidence_runtime.rs");
+    let leave = block_after(evidence, "fn leave_browser_evidence(");
+    assert!(leave.contains("control: Option<crate::browser_workspace::StepControl>"));
+    assert!(leave.contains("Frame::After(Capture::Browser {"));
+    let take = block_after(evidence, "impl Surface for Capture {");
+    let browser = &take[take
+        .find("Self::Browser { app, label, control } =>")
+        .unwrap()..];
+    assert!(browser.contains("browser_evidence_png(&app, &state, &label, control.as_ref())"));
+    assert!(browser.contains("Ok(None) => Err(FrameSkipped::ControlChanged)"));
+    assert!(!take.contains("browser_snapshot_png("));
+    let capture = block_after(SNAPSHOT, "async fn browser_evidence_png(");
+    let admitted = capture.find(".admit_evidence(label, control)").unwrap();
+    let taken = capture.find("snapshot_leased(pane, frame)").unwrap();
+    let kept = capture.find("check.holds()").unwrap();
+    assert!(admitted < taken && taken < kept);
+    for minted in [
+        "finish_observation",
+        "begin_at(",
+        "needs_observation",
+        "stamp_browser_observation",
+    ] {
+        assert!(!capture.contains(minted), "{minted}");
+    }
+    let source = include_str!("../../src/browser_workspace.rs");
+    let admission = block_after(source, "fn admit_evidence(");
+    assert!(
+        admission.find("agent_holds(&state, control)").unwrap()
+            < admission.find(".begin_snapshot_for(label, false)").unwrap()
+    );
+    assert!(!admission.contains("needs_observation") && !admission.contains("in_flight"));
+    let held = block_after(source, "fn agent_holds(");
+    for guard in [
+        "state.closed",
+        "Mode::Agent",
+        "control.revision",
+        "control.owner",
+    ] {
+        assert!(held.contains(guard), "{guard}");
+    }
+    let step = block_after(RUNTIME, "async fn browser_step_at(");
+    assert!(step.contains("let (answer, control) = answer_browser_command("));
+    assert!(step.contains("control,"));
+    let answer = block_after(RUNTIME, "async fn answer_browser_command(");
+    assert!(answer.contains(".and_then(crate::browser_workspace::Operation::step_control)"));
+}
+
+#[test]
+fn only_a_refusal_before_dispatch_is_known_to_have_no_effect() {
+    let answer = block_after(RUNTIME, "async fn answer_browser_command(");
+    assert!(answer.contains("let mut dispatched = crate::browser_workspace::Dispatch::Uncertain;"));
+    assert!(
+        answer.contains(
+            "dispatch_browser_command(app, argv, pane, expected_revision, &mut dispatched)"
+        )
+    );
+    assert_eq!(answer.matches(".settle(dispatched)").count(), 2);
+    for inferred in [
+        "PAGE_TIMED_OUT",
+        "PAGE_GONE",
+        "PAGE_ANSWER_UNREADABLE",
+        "PAGE_SEND_FAILED",
+        "stderr.contains",
+        "stderr.starts_with",
+    ] {
+        assert!(!answer.contains(inferred), "{inferred}");
+    }
+    let unsent = block_after(RUNTIME, "fn refused_unsent(");
+    assert!(unsent.contains("*dispatched = crate::browser_workspace::Dispatch::NotSent;"));
+    assert!(unsent.contains("browser_refused(stderr)"));
+    let dispatch = block_after(RUNTIME, "async fn dispatch_browser_command(");
+    for (opens, next, sent) in [
+        ("(\"open\", 2) =>", "(\"close\", 2) =>", "app.emit_to("),
+        ("(\"close\", 2) =>", "(\"viewport\", 3) =>", "app.emit_to("),
+        ("(\"viewport\", 3) =>", "(\"scroll\", 3) =>", "app.emit_to("),
+        (
+            "(\"scroll\", 3) =>",
+            "(\"diagnose\", _) =>",
+            "automate_scroll(",
+        ),
+        (
+            "(\"goto\", 3) =>",
+            "(\"eval\", 3) | (\"eval\", 4) =>",
+            "pane.navigate(url)",
+        ),
+        (
+            "(\"eval\", 3) | (\"eval\", 4) =>",
+            "(\"read\", 2) | (\"read\", 3) =>",
+            "automate_eval(",
+        ),
+        (
+            "(\"fill\", _) =>",
+            "(\"screenshot\", _) =>",
+            "automate_fill(",
+        ),
+    ] {
+        let arm = arm(dispatch, opens, next);
+        let sent = arm.find(sent).unwrap_or_else(|| panic!("{opens}"));
+        assert!(
+            arm[..sent].contains("refused_unsent(dispatched,"),
+            "{opens}"
+        );
+        assert!(!arm[sent..].contains("refused_unsent("), "{opens}");
+    }
+    let click = arm(
+        dispatch,
+        "(\"click\", 3) | (\"click\", 4) | (\"click\", 5) =>",
+        "(\"type\", 4) =>",
+    );
+    assert_eq!(click.matches("refused_unsent(").count(), 1);
+    assert!(
+        click.find("refused_unsent(dispatched,").unwrap() < click.find("match pressed {").unwrap()
+    );
+    let later = click.find("match later.await {").unwrap();
+    let later = &click[later..later + click[later..].find("};").unwrap()];
+    assert!(!later.contains("refused_unsent("));
+    for (opens, next) in [
+        ("(\"find\", 3) =>", "(\"goto\", 3) =>"),
+        ("(\"type\", 4) =>", "(\"wait\", 3) | (\"wait\", 4) =>"),
+    ] {
+        assert!(
+            !arm(dispatch, opens, next).contains("refused_unsent("),
+            "{opens}"
+        );
+    }
+    let fill = arm(dispatch, "(\"fill\", _) =>", "(\"screenshot\", _) =>");
+    assert!(fill.contains("page_refused(&label, words)"));
+    assert!(fill.contains("return browser_refused(format!(\"zerocode-browser: {words}\"));"));
+    assert!(dispatch.contains("_ => refused_unsent(dispatched, format!(\"{}\\n\", zerocode_core::agent_browser::usage())),"));
+}
+
+#[test]
+fn windows_placement_moves_sizes_and_shows_the_wry_container_without_activation() {
+    let wry = block_after(BROWSER, "fn place_native_browser(");
+    let decided = wry.find(".with_placement(").unwrap();
+    let parent = wry.find("controller.ParentWindow(&mut container)").unwrap();
+    let hidden = wry
+        .find("set_native_container_shown(container, false)")
+        .unwrap();
+    assert!(parent < hidden && hidden < decided);
+    let placed = &wry[decided..];
+    let moved = placed.find("SetWindowPos(").unwrap();
+    let sized = placed.find("right: width,").unwrap();
+    let shown = placed
+        .find("set_native_container_shown(container, true)")
+        .unwrap();
+    let visible = placed.find(".SetIsVisible(true)").unwrap();
+    assert!(moved < sized && sized < shown && shown < visible);
+    assert!(placed.contains("left: 0,") && placed.contains("top: 0,"));
+    assert!(placed.contains("SWP_NOACTIVATE") && placed.contains("SWP_NOZORDER"));
+    for activation in [
+        "ShowWindow(",
+        "SW_SHOW",
+        "SetForegroundWindow",
+        "SetActiveWindow",
+        "BringWindowToTop",
+    ] {
+        assert!(!wry.contains(activation), "{activation}");
+    }
+    assert!(wry.contains("native_container_holds_focus(container)"));
+    let visibility = block_after(BROWSER, "fn set_native_container_shown(");
+    for flag in [
+        "SWP_SHOWWINDOW",
+        "SWP_HIDEWINDOW",
+        "SWP_NOACTIVATE",
+        "SWP_NOMOVE",
+        "SWP_NOSIZE",
+        "SWP_NOZORDER",
+    ] {
+        assert!(visibility.contains(flag), "{flag}");
+    }
+    let focus = block_after(BROWSER, "fn native_container_holds_focus(");
+    assert!(focus.contains("GetFocus()") && focus.contains("IsChild(container, focus)"));
+    let hide = block_after(BROWSER, "fn hide_browser_pane(");
+    let windows = &hide[hide.find("#[cfg(target_os = \"windows\")]").unwrap()..];
+    let windows = &windows[..windows.find("#[cfg(not(any(").unwrap()];
+    assert!(windows.contains("controller.ParentWindow(&mut container)"));
+    assert!(windows.contains("native_container_holds_focus(container)"));
+    assert!(windows.contains(".SetIsVisible(false)"));
+    assert!(windows.contains("set_native_container_shown(container, false)"));
+    assert!(!windows.contains("pane.hide()"));
+}
+
+#[test]
+fn handoff_waits_for_a_known_navigation_before_the_page_fence() {
+    let command = block_after(CONTROL, "async fn set_browser_workspace_mode(");
+    let labels = command.find("transition.fence_labels()").unwrap();
+    let settled = command
+        .find("settle_known_navigation(&state, &labels)")
+        .unwrap();
+    let fenced = command.find("workspace_page_fence(&pane)").unwrap();
+    let confirmed = command.find("transition.confirm_fence()").unwrap();
+    assert!(labels < settled && settled < fenced && fenced < confirmed);
+    let settle = block_after(BROWSER, "async fn settle_known_navigation(");
+    assert!(settle.contains(".nav.pending(now)"));
+    assert!(settle.contains("workspace_paused:"));
+    let note = block_after(BROWSER, "fn note_navigation_request(");
+    assert!(note.contains(".nav.requested("));
+    let navigate = block_after(BROWSER, "fn browser_navigate(");
+    assert!(
+        navigate
+            .find("note_navigation_request(&state, &label)")
+            .unwrap()
+            < navigate.find("pane.navigate(parsed)").unwrap()
+    );
+    let dispatch = block_after(RUNTIME, "async fn dispatch_browser_command(");
+    let goto = arm(
+        dispatch,
+        "(\"goto\", 3) =>",
+        "(\"eval\", 3) | (\"eval\", 4) =>",
+    );
+    assert!(
+        goto.find("cmd::browser::note_navigation_request(&state, &argv[1])")
+            .unwrap()
+            < goto.find("pane.navigate(url)").unwrap()
+    );
+    let source = include_str!("../../src/browser_workspace.rs");
+    let admission = block_after(source, "fn begin_at(");
+    assert!(admission.contains("reads_history(verb)"));
+    let placement = block_after(source, "fn with_placement<T>(");
+    assert!(!placement.contains("in_flight"));
 }

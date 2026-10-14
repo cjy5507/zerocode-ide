@@ -614,8 +614,20 @@ mod tests {
             self.0.to_string()
         }
 
-        async fn take(self) -> Option<Picture> {
-            Some(Picture::unplaced(PNG.to_vec()))
+        async fn take(self) -> Result<Picture, FrameSkipped> {
+            Ok(Picture::unplaced(PNG.to_vec()))
+        }
+    }
+
+    struct Moved;
+
+    impl Surface for Moved {
+        fn key(&self) -> String {
+            "browser:browser-1".to_string()
+        }
+
+        async fn take(self) -> Result<Picture, FrameSkipped> {
+            Err(FrameSkipped::ControlChanged)
         }
     }
 
@@ -740,6 +752,35 @@ mod tests {
             .key(),
             "a window's region and the whole display are one screen"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_step_frame_whose_control_moved_is_a_line_without_a_picture() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (writer, messages) = unbounded_channel();
+        let click = ["click", "browser-1", "#send"].map(String::from);
+        writer
+            .send(Message::Step(Job::new(
+                dir.path(),
+                "browser",
+                &click,
+                &answered(true),
+                Frame::After(Moved),
+                None,
+            )))
+            .unwrap();
+        drop(writer);
+        write_in_order(messages, Duration::ZERO).await;
+        let steps = run_evidence::steps_in(dir.path());
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].shot.is_none());
+        assert_eq!(steps[0].frame_skipped, Some(FrameSkipped::ControlChanged));
+        let pictures = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+            .count();
+        assert_eq!(pictures, 0);
     }
 
     /// Past the backlog table the writer writes lines without frames.
