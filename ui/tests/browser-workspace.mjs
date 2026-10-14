@@ -12,6 +12,14 @@ async function standWorkspace(browser, origin, { holdState = false } = {}) {
     };
     let minted = 810;
     const mock = window.__WORKSPACE__;
+    const actorTab = tabs.find((tab) => tab.kind === "term");
+    const actorTerm = activePaneOf(actorTab) ?? actorTab.term;
+    paneSessions.delete(actorTerm);
+    paneAgents.set(actorTerm, "codex");
+    mock.actorTerm = String(actorTerm);
+    const snapshot = (state) => state && typeof state === "object"
+      ? { ownerTerm: mock.actorTerm, snapshotSupported: true, ...state } : state;
+    const snapshots = (states) => Array.isArray(states) ? states.map(snapshot) : states;
     window.__ANSWER__.open_browser_pane = (args) => {
       mock.opened.push(args);
       return args.label ?? `browser-${++minted}`;
@@ -27,16 +35,18 @@ async function standWorkspace(browser, origin, { holdState = false } = {}) {
       return { browser: { ...browserPrefs, open_tabs: records } };
     };
     window.__ANSWER__.get_browser_workspaces = () => mock.holdState
-      ? new Promise((resolve) => { mock.releaseState = resolve; }) : mock.state;
+      ? new Promise((resolve) => { mock.releaseState = (states) => resolve(snapshots(states)); }) : snapshots(mock.state);
     window.__ANSWER__.set_browser_workspace_mode = (args) => {
       mock.modes.push(args);
       if (mock.holdMode) return new Promise((resolve, reject) => {
-        mock.releaseMode = resolve;
+        mock.releaseMode = (state) => resolve(snapshot(state));
         mock.rejectMode = reject;
       });
       const next = {
         label: args.label, mode: args.mode, revision: args.expectedRevision + 1,
         inFlight: 0, needsObservation: args.mode === "agent",
+        ownerTerm: args.ownerTerm ?? mock.state[0]?.ownerTerm ?? mock.actorTerm,
+        snapshotSupported: mock.state[0]?.snapshotSupported ?? true,
       };
       mock.state = [next];
       return next;
@@ -46,8 +56,9 @@ async function standWorkspace(browser, origin, { holdState = false } = {}) {
       return mock.holdSnapshot ? new Promise((resolve) => { mock.releaseSnapshot = resolve; }) : frame;
     };
     window.__workspaceEmit = (state) => {
-      mock.state = [state];
-      for (const hear of window.__LISTENERS__["browser:workspace"] ?? []) hear({ payload: state });
+      const said = snapshot(state);
+      mock.state = [said];
+      for (const hear of window.__LISTENERS__["browser:workspace"] ?? []) hear({ payload: said });
     };
     window.__workspaceClick = (label, action) => {
       const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
@@ -453,7 +464,7 @@ export async function testBrowserWorkspace(browser, origin, ok) {
       }, label);
       await page.waitForTimeout(1100);
       const badFrame = await page.evaluate((label) => ({
-        text: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-status")?.textContent,
+        text: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-preview-note")?.textContent,
         frames: document.querySelectorAll(".browser-workspace-frame[src]").length,
       }), label);
       ok("an unknown capture result clears the image and offers inline recovery",
@@ -474,7 +485,7 @@ export async function testBrowserWorkspace(browser, origin, ok) {
       ok("narrow task controls stay inside their pane and preserve the image proportions",
         layout.host > 0 && layout.bar <= layout.host + 1 && layout.actionsFit && layout.imageFit === "contain", JSON.stringify(layout));
       const words = await page.evaluate(() => ["en", "ja", "zh", "es"].map((code) => {
-        const keys = ["title", "agent", "watchAction", "collapseAction", "pauseAction", "humanAction", "agentAction", "refreshAction", "stateError"];
+        const keys = ["title", "agent", "watchAction", "collapseAction", "pauseAction", "humanAction", "agentAction", "refreshAction", "stateError", "ownerChoose", "ownerCurrent", "ownerError", "unsupported", "retry"];
         return { code, complete: keys.every((key) => typeof CATALOG[code]?.[`browser.workspace.${key}`] === "string") };
       }));
       ok("all four existing translations cover the workspace state and actions", words.every((one) => one.complete), JSON.stringify(words));
@@ -625,7 +636,7 @@ export async function testBrowserWorkspace(browser, origin, ok) {
       await page.waitForTimeout(40);
       const human = await page.evaluate(() => window.__WORKSPACE__.navigated);
       ok("a current human popup keeps the existing browser navigation path", human.length === 1
-        && human[0]?.url === "https://example.com/popup-human", JSON.stringify(human));
+        && human[0]?.url === "https://example.com/popup-human" && human[0]?.expectedRevision === 81, JSON.stringify(human));
       await page.evaluate((label) => {
         window.__workspaceEmit({ label, mode: "paused", revision: 82, inFlight: 0, needsObservation: false });
         window.__workspacePopup({ label, url: "https://example.com/popup-paused", revision: 81 });
@@ -651,8 +662,269 @@ export async function testBrowserWorkspace(browser, origin, ok) {
       await page.waitForTimeout(40);
       const ordinary = await page.evaluate((label) => window.__WORKSPACE__.navigated.filter((one) => one.label === label), person);
       ok("ordinary user popups retain their existing navigation behavior", ordinary.length === 1
-        && ordinary[0]?.url === "https://example.com/person-popup-next", JSON.stringify(ordinary));
+        && ordinary[0]?.url === "https://example.com/person-popup-next" && ordinary[0]?.expectedRevision === undefined, JSON.stringify(ordinary));
       ok("workspace popup handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await page.evaluate(async () => {
+        browserPrefs = { ...browserPrefs, restore_tabs: true, open_tabs: [{ url: "https://example.com/owner-restore", agentWorkspace: true }] };
+        await restoreBrowserTabs();
+        return tabs.find((tab) => tab.kind === "browser").label;
+      });
+      await page.evaluate((label) => window.__workspaceEmit({
+        label, mode: "paused", revision: 90, inFlight: 0, needsObservation: true, ownerTerm: null,
+      }), label);
+      const none = await page.evaluate((label) => {
+        const tab = tabs.find((one) => one.label === label);
+        const host = groupOf(tab.pane)?.browserView;
+        window.__workspaceClick(label, "agent");
+        return {
+          owner: tab.workspace?.ownerTerm,
+          choice: host?.querySelector(".browser-workspace-owner-select")?.value,
+          disabled: host?.querySelector(".browser-workspace-agent")?.disabled,
+          modes: window.__WORKSPACE__.modes.length,
+        };
+      }, label);
+      ok("a restored unassigned task never selects the first agent or resumes implicitly",
+        none.owner === null && none.choice === "" && none.disabled === true && none.modes === 0, JSON.stringify(none));
+      await page.evaluate((label) => {
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        const select = host?.querySelector(".browser-workspace-owner-select");
+        if (select) { select.value = window.__WORKSPACE__.actorTerm; select.dispatchEvent(new Event("change", { bubbles: true })); }
+        window.__workspaceClick(label, "agent");
+      }, label);
+      await page.waitForTimeout(80);
+      const assigned = await page.evaluate((label) => ({
+        actor: window.__WORKSPACE__.actorTerm,
+        call: window.__WORKSPACE__.modes.at(-1),
+        text: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-owner-name")?.textContent,
+      }), label);
+      ok("explicit assignment sends the selected decimal terminal ID and displays the confirmed agent",
+        assigned.call?.ownerTerm === assigned.actor && assigned.call?.expectedRevision === 90
+          && /Codex/.test(assigned.text ?? ""), JSON.stringify(assigned));
+      ok("workspace restored-owner selection raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "paused", revision: 100, inFlight: 0, needsObservation: true, ownerTerm: null });
+        setActiveTab(`browser:${label}`);
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        const select = host?.querySelector(".browser-workspace-owner-select");
+        if (select) { select.value = window.__WORKSPACE__.actorTerm; select.dispatchEvent(new Event("change", { bubbles: true })); }
+        const actor = tabs.find((one) => one.kind === "term" && String(one.term) === window.__WORKSPACE__.actorTerm);
+        if (actor) dropTab(actor.id);
+        const tab = tabs.find((one) => one.label === label);
+        paintBrowserView(tab);
+        window.__workspaceClick(label, "agent");
+      }, label);
+      await page.waitForTimeout(60);
+      const gone = await page.evaluate((label) => ({
+        modes: window.__WORKSPACE__.modes.length,
+        disabled: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-agent")?.disabled,
+      }), label);
+      ok("a selected agent that closes cannot receive control", gone.modes === 0 && gone.disabled === true, JSON.stringify(gone));
+      ok("workspace stale-owner handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => window.__workspaceEmit({
+        label, mode: "agent", revision: 110, inFlight: 0, needsObservation: false, snapshotSupported: false,
+      }), label);
+      await observe(page, label);
+      await page.waitForTimeout(1100);
+      const unsupported = await page.evaluate((label) => {
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        return {
+          captures: window.__WORKSPACE__.snapshots.length,
+          humanDisabled: host?.querySelector(".browser-workspace-human")?.disabled,
+          pauseDisabled: host?.querySelector(".browser-workspace-pause")?.disabled,
+          note: host?.querySelector(".browser-workspace-preview-note")?.textContent,
+        };
+      }, label);
+      ok("unsupported snapshots schedule no capture and retain safe control actions",
+        unsupported.captures === 0 && unsupported.humanDisabled === false && unsupported.pauseDisabled === false
+          && /지원하지 않/.test(unsupported.note ?? ""), JSON.stringify(unsupported));
+      await page.evaluate((label) => window.__workspaceClick(label, "human"), label);
+      await page.waitForTimeout(80);
+      const direct = await page.evaluate((label) => ({
+        last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+        captures: window.__WORKSPACE__.snapshots.length,
+      }), label);
+      ok("unsupported watching still permits confirmed native human control", direct.last?.shown === true && direct.captures === 0, JSON.stringify(direct));
+      ok("workspace unsupported-snapshot handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 120, inFlight: 0, needsObservation: false });
+        window.__ANSWER__.browser_snapshot = () => { window.__WORKSPACE__.snapshots.push({ label }); throw new Error("capture_unavailable"); };
+      }, label);
+      await observe(page, label);
+      const failed = await page.evaluate((label) => {
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        return {
+          status: host?.querySelector(".browser-workspace-status")?.textContent,
+          note: host?.querySelector(".browser-workspace-preview-note")?.textContent,
+          humanDisabled: host?.querySelector(".browser-workspace-human")?.disabled,
+          pauseDisabled: host?.querySelector(".browser-workspace-pause")?.disabled,
+          count: window.__WORKSPACE__.snapshots.length,
+        };
+      }, label);
+      ok("capture failure leaves the confirmed control state and safety buttons available",
+        /에이전트 제어/.test(failed.status ?? "") && /가져오지 못/.test(failed.note ?? "")
+          && failed.humanDisabled === false && failed.pauseDisabled === false, JSON.stringify(failed));
+      await page.waitForTimeout(1100);
+      const bounded = await page.evaluate(() => window.__WORKSPACE__.snapshots.length);
+      ok("a failed capture stops automatic retries until an explicit retry", bounded === failed.count && bounded === 1, String(bounded));
+      await page.evaluate((label) => window.__workspaceClick(label, "pause"), label);
+      await page.waitForTimeout(50);
+      await page.evaluate((label) => window.__workspaceClick(label, "human"), label);
+      await page.waitForTimeout(80);
+      const safe = await page.evaluate((label) => ({
+        modes: window.__WORKSPACE__.modes.map((one) => one.mode),
+        last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+      }), label);
+      ok("pause and human handoff remain usable after a capture error", safe.modes.join(",") === "paused,human" && safe.last?.shown === true, JSON.stringify(safe));
+      ok("workspace capture-error recovery raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await page.evaluate(() => openBrowserTab("https://example.com/new-owner", { agentWorkspace: true }));
+      await page.evaluate((label) => window.__workspaceEmit({ label, mode: "paused", revision: 130, inFlight: 0, needsObservation: true, ownerTerm: null }), label);
+      const suggested = await page.evaluate((label) => {
+        const tab = tabs.find((one) => one.label === label);
+        const host = groupOf(tab.pane)?.browserView;
+        return {
+          actor: window.__WORKSPACE__.actorTerm,
+          choice: host?.querySelector(".browser-workspace-owner-select")?.value,
+          owner: tab.workspace?.ownerTerm,
+          modes: window.__WORKSPACE__.modes.length,
+        };
+      }, label);
+      ok("a new task can suggest the active agent without assigning or starting it", suggested.choice === suggested.actor
+        && suggested.owner === null && suggested.modes === 0, JSON.stringify(suggested));
+      await page.evaluate((label) => window.__workspaceEmit({ label, mode: "human", revision: 131, inFlight: 0, needsObservation: false }), label);
+      await observe(page, label);
+      const next = await page.evaluate(async (label) => {
+        const tab = tabs.find((one) => one.label === label);
+        await reopenBrowserPane(tab);
+        window.__workspaceEmit({ label: tab.label, mode: "paused", revision: 1, inFlight: 0, needsObservation: true, ownerTerm: null });
+        return { label: tab.label, choice: tab.workspaceOwnerChoice, mode: tab.workspace?.mode };
+      }, label);
+      ok("recreating a task requires owner confirmation again", next.label !== label && next.choice === "" && next.mode === "paused", JSON.stringify(next));
+      ok("workspace new-owner suggestions raise no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        setActiveTab(`browser:${label}`);
+        for (const hear of window.__LISTENERS__["browser:workspace"] ?? []) hear({ payload: {
+          label, mode: "human", revision: 140, inFlight: 0, needsObservation: false,
+        } });
+        window.__workspaceClick(label, "watch");
+      }, label);
+      const missing = await page.evaluate((label) => ({
+        shown: window.__WORKSPACE__.placed.filter((one) => one.label === label && one.shown).length,
+        disabled: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-workspace-human")?.disabled,
+      }), label);
+      ok("missing owner and capture capabilities cannot expose a managed human page", missing.shown === 0 && missing.disabled === true, JSON.stringify(missing));
+      await page.evaluate((label) => window.__workspaceEmit({ label, mode: "human", revision: 141, inFlight: 0, needsObservation: false, ownerTerm: "codex" }), label);
+      await page.waitForTimeout(30);
+      const invalidOwner = await page.evaluate((label) => window.__WORKSPACE__.placed.filter((one) => one.label === label && one.shown).length, label);
+      ok("an agent name cannot be mistaken for a terminal owner ID", invalidOwner === 0, String(invalidOwner));
+      await page.evaluate((label) => window.__workspaceEmit({ label, mode: "agent", revision: 142, inFlight: 0, needsObservation: false, snapshotSupported: "true" }), label);
+      await page.waitForTimeout(100);
+      const invalidCapability = await page.evaluate(() => window.__WORKSPACE__.snapshots.length);
+      ok("an unknown capture capability starts no capture", invalidCapability === 0, String(invalidCapability));
+      ok("workspace malformed-capability handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const initialZooms = await page.evaluate(() => window.__COUNTS__.browser_zoom ?? 0);
+      const label = await openManaged(page);
+      const openedZooms = await page.evaluate(() => window.__COUNTS__.browser_zoom ?? 0);
+      ok("managed creation leaves initial zoom to the backend", openedZooms === initialZooms, JSON.stringify({ initialZooms, openedZooms }));
+      await page.evaluate((label) => {
+        window.__WORKSPACE__.mutators = [];
+        for (const command of ["browser_history", "browser_reload", "browser_stop", "browser_devtools", "browser_find", "browser_find_clear", "browser_zoom", "browser_grab_arm", "browser_grab_disarm"]) {
+          window.__ANSWER__[command] = (args) => {
+            window.__WORKSPACE__.mutators.push({ command, ...args });
+            return command === "browser_find" ? { count: 1, index: 1 } : null;
+          };
+        }
+        window.__workspaceEmit({ label, mode: "human", revision: 150, inFlight: 0, needsObservation: false });
+      }, label);
+      await observe(page, label);
+      await page.evaluate(async (label) => {
+        const tab = tabs.find((one) => one.label === label);
+        const host = groupOf(tab.pane)?.browserView;
+        host?.querySelector(".browser-back")?.click();
+        host?.querySelector(".browser-forward")?.click();
+        tab.loading = false;
+        paintBrowserView(tab);
+        host?.querySelector(".browser-reload")?.click();
+        tab.loading = true;
+        paintBrowserView(tab);
+        host?.querySelector(".browser-reload")?.click();
+        host?.querySelector(".browser-devtools")?.click();
+        await runBrowserFind(tab, "example", true);
+        dropBrowserFindMarks(tab);
+        browserZoomStep(tab, 1);
+        toggleBrowserGrab(host);
+        stopBrowserGrab(true);
+        window.__WORKSPACE__.oldMenu = browserMenuItems(tab, {});
+      }, label);
+      const calls = await page.evaluate(() => window.__WORKSPACE__.mutators);
+      const expected = ["browser_history", "browser_reload", "browser_stop", "browser_devtools", "browser_find", "browser_find_clear", "browser_zoom", "browser_grab_arm", "browser_grab_disarm"];
+      ok("every managed toolbar mutator carries the observed human revision", expected.every((name) => calls.some((one) => one.command === name))
+        && calls.every((one) => one.expectedRevision === 150), JSON.stringify(calls));
+      const before = calls.length;
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 151, inFlight: 0, needsObservation: true });
+        window.__workspaceEmit({ label, mode: "human", revision: 152, inFlight: 0, needsObservation: false });
+        for (const row of window.__WORKSPACE__.oldMenu ?? []) row.run?.();
+      }, label);
+      const after = await page.evaluate(() => window.__WORKSPACE__.mutators.length);
+      ok("a menu from an earlier human revision cannot execute after a round trip", after === before, JSON.stringify({ before, after }));
+      const person = await page.evaluate(async () => {
+        const label = await openBrowserTab("https://example.com/person-mutators");
+        const tab = tabs.find((one) => one.label === label);
+        const host = groupOf(tab.pane)?.browserView;
+        host?.querySelector(".browser-back")?.click();
+        browserZoomStep(tab, 1);
+        return label;
+      });
+      const ordinary = await page.evaluate((label) => window.__WORKSPACE__.mutators.filter((one) => one.label === label), person);
+      ok("ordinary user mutators preserve their existing argument contract", ordinary.length >= 3
+        && ordinary.every((one) => one.expectedRevision === undefined), JSON.stringify(ordinary));
+      ok("workspace mutator revision handling raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
 }
