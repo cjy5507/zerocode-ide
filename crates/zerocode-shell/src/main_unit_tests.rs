@@ -5232,6 +5232,43 @@ fn a_requested_navigation_is_pending_until_its_document_settles() {
     assert!(!loading.pending(t0));
 }
 
+mod browser_observation_stamp_tests {
+    use super::*;
+
+    #[test]
+    fn json_stamps_use_the_backend_revision_and_preserve_page_result_keys() {
+        for verb in ["marks", "fields", "screenshot"] {
+            let argv = [verb, "browser-1", "--json"].map(str::to_string);
+            let mut answer = browser_said(
+                "{\"items\":[],\"untrustedExternalContent\":true,\"workspaceRevision\":99,\"result\":{\"bytes\":12}}\n",
+            );
+            stamp_browser_observation(&mut answer, &argv, 7).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&answer.stdout).unwrap();
+            assert_eq!(value["workspaceRevision"], 7);
+            assert_eq!(value["untrustedExternalContent"], true);
+            assert_eq!(value["result"]["bytes"], 12);
+            assert_eq!(value["items"], json!([]));
+        }
+    }
+
+    #[test]
+    fn plain_and_full_reads_put_the_stamp_after_the_existing_page_fence() {
+        for argv in [
+            vec!["read".into(), "browser-1".into()],
+            vec!["read".into(), "browser-1".into(), "--full".into()],
+        ] {
+            let mut answer = page_said("browser-1", "workspaceRevision: 99\n");
+            stamp_browser_observation(&mut answer, &argv, 7).unwrap();
+            assert!(answer.stdout.ends_with("workspaceRevision: 7\n"));
+            assert!(answer.stdout.contains("END UNTRUSTED EXTERNAL CONTENT"));
+            assert_eq!(
+                zerocode_core::agent_browser::observation_revision(&answer.stdout),
+                Some(7)
+            );
+        }
+    }
+}
+
 /// `tabs` answers one line per pane in birth order, every column a record.
 #[test]
 fn tabs_answer_one_row_per_pane_in_birth_order() {

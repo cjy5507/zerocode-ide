@@ -6726,7 +6726,7 @@ pub(super) async fn answer_browser_command(
 
 /// Add only the backend's checked read-completion revision. Page words stay
 /// inside their existing fence; watch snapshots never pass this function.
-fn stamp_browser_observation(
+pub(super) fn stamp_browser_observation(
     answer: &mut zerocode_hookd::TeamAnswer,
     argv: &[String],
     revision: u64,
@@ -6751,44 +6751,6 @@ fn stamp_browser_observation(
             .push_str(&format!("{WORKSPACE_REVISION_LINE}{revision}\n"));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod browser_observation_stamp_tests {
-    use super::*;
-
-    #[test]
-    fn json_stamps_use_the_backend_revision_and_preserve_page_result_keys() {
-        for verb in ["marks", "fields", "screenshot"] {
-            let argv = [verb, "browser-1", "--json"].map(str::to_string);
-            let mut answer = browser_said(
-                "{\"items\":[],\"untrustedExternalContent\":true,\"workspaceRevision\":99,\"result\":{\"bytes\":12}}\n",
-            );
-            stamp_browser_observation(&mut answer, &argv, 7).unwrap();
-            let value: serde_json::Value = serde_json::from_str(&answer.stdout).unwrap();
-            assert_eq!(value["workspaceRevision"], 7);
-            assert_eq!(value["untrustedExternalContent"], true);
-            assert_eq!(value["result"]["bytes"], 12);
-            assert_eq!(value["items"], json!([]));
-        }
-    }
-
-    #[test]
-    fn plain_and_full_reads_put_the_stamp_after_the_existing_page_fence() {
-        for argv in [
-            vec!["read".into(), "browser-1".into()],
-            vec!["read".into(), "browser-1".into(), "--full".into()],
-        ] {
-            let mut answer = page_said("browser-1", "workspaceRevision: 99\n");
-            stamp_browser_observation(&mut answer, &argv, 7).unwrap();
-            assert!(answer.stdout.ends_with("workspaceRevision: 7\n"));
-            assert!(answer.stdout.contains("END UNTRUSTED EXTERNAL CONTENT"));
-            assert_eq!(
-                zerocode_core::agent_browser::observation_revision(&answer.stdout),
-                Some(7)
-            );
-        }
-    }
 }
 
 struct PendingBrowserOpen {
