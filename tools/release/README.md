@@ -111,22 +111,43 @@ Measured before the rule (three green runs): gate-root 1105–1615 s, gate-zo
 GateOwed` pins the rule with stubs (`CHANGED_PATHS`, `STAMP_REAL_CHANGES`);
 `GateOwedOnGit` runs `gate_owed` and `stamp_only` on a real repository.
 
+## The warm targets
+
+Each gate and build keeps its own cargo target under
+`~/.local/share/zerocode/release/target/` (`TARGET_LANES`), so registry crates
+are built once and stay warm. Before the gates, `trim_targets` drops two kinds
+of dead weight from each: the incremental caches (`CARGO_INCREMENTAL=0` never
+reads them), and every build unit of a crate this repository defines
+(`workspace_units.py`, which takes the names from the scratch's `Cargo.toml`
+files, minus any name `Cargo.lock` gives a registry or git source). The scratch
+is a fresh clone, so each run rebuilds those units anyway, and the ones an
+earlier version left are never read again: on 2026-10-13 they were 10.4 of
+zo-gate's 12.4 GiB and 11.4 of root-gate's 19 GiB. Only a target still over
+`TARGET_CAP_GB` after that is cleaned whole, which costs its next gate every
+registry crate (245 for v1.1.62's zo gate, about 6 minutes).
+`tests/test_workspace_units.py` proves the drop on a real cargo build.
+
 ## The two phases after the swaps
 
 - `bundle-updater` — with a key and U-B's `plugins.updater` present, and only
-  under `RELEASE_PUBLISH=1` (an install run skips the second build aloud: the
-  publish run builds the archive on its own sha), builds
-  `app,dmg` with `createUpdaterArtifacts` on and gathers
+  under `RELEASE_PUBLISH=1` (an install run skips the phase aloud), gathers
   `ZeroCode_<version>_<arch>.app.tar.gz`, its `.sig`, the `.dmg`, the CHANGELOG
   section (`notes.md`) and `latest.json` under
-  `~/.local/share/zerocode/release/out/<sha8>/`. Without a key, or before U-B's
+  `~/.local/share/zerocode/release/out/<sha8>/`. Without a distribution identity
+  it ships build-app's app, the one the install phase put in place: one build
+  serves both, and the phase is red when the sealed app's cdhash is not the
+  installed app's. With an identity it builds `app,dmg` again with
+  `createUpdaterArtifacts` on, because Tauri signs and notarizes only inside
+  its own build. Without a key, or before U-B's
   section lands, the phase is skipped aloud (`status.json` `phases[].skipped`,
   `status.sh` `skipped=…`) and the lane stays green.
   The app the DMG and the archive carry is sealed before it is gathered: with
-  no distribution identity in the env (`APPLE_SIGNING_IDENTITY`) the lane signs
-  it inside-out with `tools/signing/sign-app-bundle.sh` — the install phase's
-  signer — packs the archive and the DMG again from the sealed bundle and signs
-  the archive with the updater key; with one, Tauri's own seal (and its
+  no distribution identity in the env (`APPLE_SIGNING_IDENTITY`) it is
+  build-app's app, signed inside-out at build time with
+  `tools/signing/sign-app-bundle.sh` and installed as is; the lane packs the
+  archive and the DMG from it and signs the archive with the updater key, and
+  never signs the app again (a re-sign moves the outer cdhash, so the shipped
+  app would not be the installed one); with an identity, Tauri's own seal (and its
   notarization when `APPLE_ID`·`APPLE_PASSWORD`·`APPLE_TEAM_ID` stand beside it)
   is kept. Either way `codesign --verify --deep --strict` must pass or the phase
   is red: Tauri without an identity ships the linker's adhoc signature over

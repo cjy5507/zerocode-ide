@@ -494,18 +494,23 @@ class Syntax(LaneCase):
 
     def test_the_dmg_carries_a_sealed_app_or_the_lane_is_red(self):
         """The app the DMG and the updater archive carry is sealed the way the
-        installed app is: without a distribution identity in the env the lane
-        signs it inside-out with the install signer, packs the archive and the
-        DMG again from the sealed bundle and signs the archive with the updater
-        key; with one, Tauri's own seal is kept. Either way the bundle verifies
-        --deep --strict before it is gathered (v1.3.78 shipped the linker's adhoc
-        signature over unsealed resources and a colleague's Mac called it
-        damaged, 2026-09-15)."""
+        installed app is: without a distribution identity it is build-app's own
+        app, signed inside-out by the install signer and installed as is, so the
+        seal packs the archive and the DMG from it and signs the archive with the
+        updater key, and never signs the app again (a re-sign moved the outer
+        cdhash, 4929830f to 9cfee161 on 10-13, and would ship an app this machine
+        never installed); with an identity, Tauri's own seal is kept. Either way
+        the bundle verifies --deep --strict before it is gathered (v1.3.78
+        shipped the linker's adhoc signature over unsealed resources and a
+        colleague's Mac called it damaged, 2026-09-15)."""
         lane = LANE.read_text()
+        built_app = lane.split("run_build() {")[1].split("\n}\n")[0]
+        self.assertIn('sign-app-bundle.sh" "$target/release/bundle/macos/$APP_NAME"', built_app,
+                      "build-app signs the app inside-out")
         seal = lane.split("seal_updater_bundle() {")[1].split("\n}\n")[0]
+        self.assertNotIn("sign-app-bundle.sh", seal, "the seal never signs the installed app again")
         for words in [
             'if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then',
-            'sign-app-bundle.sh" "$app"',
             'COPYFILE_DISABLE=1 tar -czf "$APP_NAME.tar.gz" "$APP_NAME"',
             'npx --no-install tauri signer sign -f "$UPDATER_KEY" "$archive"',
             'hdiutil create -quiet -volname "${APP_NAME%.app}" -srcfolder "$staging" -ov -format UDZO "$dmg"',
@@ -884,6 +889,42 @@ class Cap(LaneCase):
         self.assertEqual(len(self.solos_run()), 3, "the red gate was judged solo on the warm target")
         out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
         self.assertIn("CARGO_INCREMENTAL='0'", out.stdout.splitlines())
+
+    def test_the_repositorys_own_units_are_dropped_and_the_registry_ones_stay_warm(self):
+        """Every unit of a crate this repository defines is rebuilt in every run
+        (the scratch is a fresh clone), and the ones an earlier version left are
+        never read again (the version stamp moves their hash), so they go before
+        the gates: on 10-13 they were 10.4 of zo-gate's 12.4 G and 11.4 of
+        root-gate's 19 G, 1 G under the cap whose clean made v1.1.62's zo gate
+        rebuild 245 registry crates. A registry crate's units stay warm."""
+        self.warm_all()
+        own, reg = "0123456789abcdef", "fedcba9876543210"
+        files = (f".fingerprint/zerocode-core-{own}/lib-zerocode_core.json", f"deps/libzerocode_core-{own}.rlib",
+                 f"deps/e2e_hermetic-{own}", f"deps/e2e_hermetic-{own}.d", f"build/zerocode-core-{own}/out/stamp",
+                 f".fingerprint/serde-{reg}/lib-serde.json", f"deps/libserde-{reg}.rlib", f"build/serde-{reg}/out/stamp")
+        profiles = ("debug", "x86_64-pc-windows-msvc/debug")
+        for lane in TARGET_LANES:
+            for profile in profiles:
+                for rel in files:
+                    p = self.lane.target(lane) / profile / rel
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text("a build product")
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(DISK_FREE_GB=100, WORKSPACE_PACKAGES="zerocode-core zo-ide")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        for lane in TARGET_LANES:
+            t = self.lane.target(lane)
+            left = sorted(str(q.relative_to(t)) for q in t.rglob("*") if own in q.name)
+            self.assertEqual(left, [], f"{lane} keeps a unit of the repository's own crate")
+            for profile in profiles:
+                for rel in files[5:]:
+                    self.assertTrue((t / profile / rel).exists(), f"{lane} lost the registry unit {profile}/{rel}")
+            self.assertTrue((t / "warm").exists(), f"{lane} must stay warm otherwise")
+        events = [line.split(" ", 1)[1] for line in self.lane.stub_lines()]
+        drops = [i for i, e in enumerate(events) if e.startswith("drop-workspace-units ")]
+        self.assertEqual(len(drops), len(TARGET_LANES), events)
+        self.assertLess(max(drops), next(i for i, e in enumerate(events) if e.startswith("gate root target=")))
+        self.assertIn("workspace unit", r.stdout)
 
     def solos_run(self):
         return [l for l in self.lane.stub_lines() if " solo " in l]
@@ -1549,10 +1590,62 @@ class BundleUpdater(LaneCase):
         self.assertEqual(darwin["signature"], archive.with_name(archive.name + ".sig").read_text().strip())
         self.assertEqual(darwin["url"],
                          f"https://github.com/{GITHUB_REPO}/releases/download/v{VERSION}/ZeroCode_{VERSION}_aarch64.app.tar.gz")
-        built = [l for l in self.lane.stub_lines() if "bundle-updater" in l]
-        self.assertEqual(len(built), 1, built)
-        self.assertIn(f"target={self.lane.target('root-release')}", built[0])
-        self.assertIn("key=" + str(self.lane.key), built[0], "the build is told the private key, never its bytes")
+        sealed = [l for l in self.lane.stub_lines() if " bundle-updater seal " in l]
+        self.assertEqual(len(sealed), 1, sealed)
+        self.assertIn(f"target={self.lane.target('root-release')}", sealed[0])
+        self.assertIn("key=" + str(self.lane.key), sealed[0], "the archive is signed by the key's path, never its bytes")
+
+    def test_a_publish_run_builds_the_app_once_and_seals_that_build(self):
+        """A publish run's build-app is the publish build itself, so
+        bundle-updater seals and packs that app instead of running
+        tauri:release a second time (1105 s on 10-13, a cold zo stage inside)."""
+        pub = self.lane.write_key(keyid=bytes.fromhex("0102030405060708"))
+        self.lane.extra_env["RELEASE_PUBLISH"] = "1"
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=pub)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = self.lane.stub_lines()
+        installs = [l for l in lines if " build-app target=" in l]
+        self.assertEqual(len(installs), 1, lines)
+        self.assertNotIn("key=", installs[0], "the install build never holds the updater key")
+        self.assertFalse([l for l in lines if " bundle-updater target=" in l], "no second tauri:release")
+        sealed = [l for l in lines if " bundle-updater seal " in l]
+        self.assertEqual(len(sealed), 1, lines)
+        self.assertIn(f"target={self.lane.target('root-release')}", sealed[0])
+
+    def test_the_sealed_app_must_be_the_installed_app_or_the_lane_is_red(self):
+        """One build serves both, so what the updater ships is what this
+        machine installed: a sealed app whose code signature differs from the
+        installed one is red, and nothing is gathered for publish."""
+        pub = self.lane.write_key(keyid=bytes.fromhex("0102030405060708"))
+        self.lane.extra_env["RELEASE_PUBLISH"] = "1"
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=pub, CDHASH_INSTALLED="aa11", CDHASH_SEALED="bb22")
+        self.assertNotEqual(r.returncode, 0)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "red")
+        self.assertIn("aa11", st["reason"])
+        self.assertIn("bb22", st["reason"])
+        self.assertFalse((self.lane.out(SHA_A) / "latest.json").exists())
+
+    def test_with_a_distribution_identity_the_publish_builds_its_own_signed_app(self):
+        """Tauri signs (and notarizes) only in the publish build when a
+        distribution identity is in the env, and the install build re-signs
+        with the local identity, so with one the two builds stay."""
+        pub = self.lane.write_key(keyid=bytes.fromhex("0102030405060708"))
+        self.lane.extra_env["RELEASE_PUBLISH"] = "1"
+        self.lane.extra_env["APPLE_SIGNING_IDENTITY"] = "Developer ID Application: Fixture"
+        self.lane.enqueue(SHA_A)
+        # Two builds, two identities: the installed app is not the shipped one by design.
+        r = self.lane.run(PLUGIN_PUBKEY=pub, CDHASH_INSTALLED="aa11", CDHASH_SEALED="bb22")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = self.lane.stub_lines()
+        installs = [l for l in lines if " build-app target=" in l]
+        self.assertEqual(len(installs), 1, lines)
+        self.assertNotIn("key=", installs[0], "the install build never holds the updater key")
+        second = [l for l in lines if " bundle-updater target=" in l]
+        self.assertEqual(len(second), 1, lines)
+        self.assertIn("key=" + str(self.lane.key), second[0])
 
     def test_a_pubkey_that_is_not_the_configured_one_is_red(self):
         self.lane.write_key(keyid=bytes.fromhex("0102030405060708"))

@@ -103,6 +103,7 @@ RELEASE_STUB_LOG=${RELEASE_STUB_LOG:-}
 UPDATER_KEY=${UPDATER_KEY:-$RELEASE_HOME/keys/updater.key}   # `tauri signer generate -w`; its .pub beside it; never in the tree (README.md)
 UPDATER_KEY_PASSWORD_FILE=${UPDATER_KEY_PASSWORD_FILE:-$UPDATER_KEY.password}   # optional; absent means the key has no password
 FEED_PY=$SELF_DIR/updater_feed.py
+UNITS_PY=$SELF_DIR/workspace_units.py   # drops the repository's own build units from a target (trim_targets)
 LEGACY_INSTALL_SH=$SELF_DIR/legacy/install.sh   # the old CLI's installer, verbatim (§2.7)
 APP_INSTALL_SH=$SELF_DIR/install.sh             # the app's installer: reads the feed beside it, so it goes up with every release
 # -------------------------------------------------------------------------------
@@ -324,11 +325,27 @@ drop_incremental() {
   stub_log "drop-incremental $1"
   log "target $1: removed $(( kb / 1024 ))M of incremental cache nothing reads (CARGO_INCREMENTAL=$CARGO_INCREMENTAL)"
 }
+# drop_workspace_units LANE — every unit of a crate this repository defines. The
+# scratch is a fresh clone, so each run rebuilds those units anyway, and the ones an
+# earlier version left (the version stamp moves their hash) are never read again: on
+# 10-13 they were 10.4 of zo-gate's 12.4 G and 11.4 of root-gate's 19 G, and the cap's
+# clean behind them cost v1.1.62's zo gate 245 registry crates. Registry units stay warm.
+drop_workspace_units() {
+  local out units bytes
+  if is_dry; then out=$(python3 "$UNITS_PY" drop --target "$(target_dir "$1")" --names "$(stub WORKSPACE_PACKAGES)")
+  else out=$(python3 "$UNITS_PY" drop --target "$(target_dir "$1")" --scratch "$SCRATCH")
+  fi || { log "target $1: workspace units left in place, $UNITS_PY failed"; return 0; }
+  read -r units bytes <<< "$out"
+  [ "${units:-0}" -gt 0 ] 2>/dev/null || return 0
+  stub_log "drop-workspace-units $1"
+  log "target $1: removed $units workspace unit(s), $(( ${bytes:-0} / 1048576 ))M — the fresh scratch rebuilds them anyway"
+}
 trim_targets() {
   local lane kb cap_kb=$(( TARGET_CAP_GB * 1024 * 1024 ))
   for lane in $TARGET_LANES; do
     mkdir -p "$(target_dir "$lane")"
     drop_incremental "$lane"
+    drop_workspace_units "$lane"
     kb=$(target_kb "$lane"); kb=${kb:-0}
     if [ "$kb" -gt "$cap_kb" ]; then
       log "target $lane is $(( kb / 1024 / 1024 ))G > ${TARGET_CAP_GB}G cap — cleaning that one"
@@ -634,18 +651,18 @@ build_updater_bundle() { # TARGET PASSWORD LOG
 # APPLE_PASSWORD·APPLE_TEAM_ID stand beside it); without one it ships the
 # linker's adhoc signature over unsealed resources, and another Mac's
 # Gatekeeper calls that "damaged" the moment quarantine is on it (v1.3.78,
-# 2026-09-15: a colleague's MacBook Air). So without that identity the lane
-# signs the bundle inside-out with the same signer the install phase uses,
-# then packs the archive and the DMG again from the sealed app — Tauri had
-# packed both before any signature stood — and signs the archive with the
-# updater key. With the identity, Tauri's own seal is kept and only verified.
+# 2026-09-15: a colleague's MacBook Air). So without that identity the app is
+# build-app's own, signed inside-out by the install signer and installed as is:
+# the lane packs the archive and the DMG from it and signs the archive with the
+# updater key. It never signs that app again, because a re-sign moves the outer
+# cdhash (4929830f to 9cfee161 on 10-13) and the updater would ship an app this
+# machine never installed. With the identity, Tauri's own seal is kept and only verified.
 # Either way the bundle must verify --deep --strict before it is gathered.
 seal_updater_bundle() { # TARGET PASSWORD LOG -> rc; WHY on failure
   local target=$1 password=$2 log=$3 app archive dmg staging rc
   app="$target/release/bundle/macos/$APP_NAME"
   [ -d "$app" ] || { WHY="no $APP_NAME under $target/release/bundle/macos"; return 1; }
   if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-    bash "$SCRATCH/tools/signing/sign-app-bundle.sh" "$app" >> "$log" 2>&1 || { WHY="sign-app-bundle.sh on the DMG's app ($log)"; return 1; }
     archive="$target/release/bundle/macos/$APP_NAME.tar.gz"
     rm -f "$archive" "$archive.sig"
     # COPYFILE_DISABLE: no AppleDouble `._` entries — the updater unpacks the
@@ -661,7 +678,7 @@ seal_updater_bundle() { # TARGET PASSWORD LOG -> rc; WHY on failure
       && hdiutil create -quiet -volname "${APP_NAME%.app}" -srcfolder "$staging" -ov -format UDZO "$dmg" >> "$log" 2>&1
     rc=$?; rm -rf "$staging"
     [ "$rc" = 0 ] || { WHY="hdiutil create $dmg rc=$rc ($log)"; return 1; }
-    log "bundle-updater: sealed $APP_NAME with the local identity; archive and DMG packed again from it"
+    log "bundle-updater: archive and DMG packed from build-app's sealed $APP_NAME, the installed one"
   fi
   codesign --verify --deep --strict "$app" >> "$log" 2>&1 || { WHY="the DMG's app does not verify (codesign --deep --strict, $log)"; return 1; }
 }
@@ -669,8 +686,13 @@ seal_updater_bundle() { # TARGET PASSWORD LOG -> rc; WHY on failure
 # build inside is heavy. Skips — no key, no plugins.updater yet — are green
 # and said; a pubkey that is not the configured one is red, because the
 # updater would refuse what that key signs.
+# One build serves the install and the publish, so what the updater ships is what
+# this machine installed; the dry twin answers from RELEASE_STUB_CDHASH_<KIND>.
+app_cdhash() { # INSTALLED|SEALED APP -> its CDHash, or nothing
+  if is_dry; then stub "CDHASH_$1" stub-cdhash; else codesign -dvvv "$2" 2>&1 | sed -n 's/^CDHash=//p' | head -1; fi
+}
 do_bundle_updater() {
-  local target pub conf_pub conf_fp out log="$OUT/bundle-updater-$SHA8.log" archive dmg rc password=
+  local target pub conf_pub conf_fp out log="$OUT/bundle-updater-$SHA8.log" archive dmg rc password= installed sealed
   target=$(target_dir root-release); out=$(out_dir)
   [ -n "$VERSION" ] || { WHY="no [workspace.package] version in the scratch"; return 1; }
   [ -f "$UPDATER_KEY" ] || { SKIP="no updater key at $UPDATER_KEY (tools/release/README.md)"; return 0; }
@@ -681,13 +703,15 @@ do_bundle_updater() {
   [ -n "$conf_pub" ] || { SKIP="no plugins.updater.pubkey in the scratch tauri.conf.json (U-B)"; return 0; }
   conf_fp=$(python3 "$FEED_PY" fingerprint --text "$conf_pub" 2>/dev/null)
   [ "$conf_fp" = "$UPDATER_PUBKEY" ] || { WHY="pubkey mismatch: key $UPDATER_PUBKEY, tauri.conf.json ${conf_fp:-unreadable} — the updater would refuse the signature"; return 1; }
-  # The archive is only ever shipped by a publish run, which builds it again on its
-  # own sha; an install run skips the second app,dmg build aloud (529 s on 09-08).
-  [ "$RELEASE_PUBLISH" = 1 ] || { SKIP="RELEASE_PUBLISH=0 (the publish run builds the archive)"; return 0; }
+  # The archive is only ever shipped by a publish run; an install run skips the phase aloud.
+  [ "$RELEASE_PUBLISH" = 1 ] || { SKIP="RELEASE_PUBLISH=0 (the publish run packs the archive)"; return 0; }
   mkdir -p "$out" || return 1
   if is_dry; then
-    stub_log "bundle-updater target=$target key=$UPDATER_KEY"; rc=$(stub BUNDLE_UPDATER_RC 0)
-    [ "$rc" = 0 ] || { WHY="build rc=$rc"; return 1; }
+    if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+      stub_log "bundle-updater target=$target key=$UPDATER_KEY"; rc=$(stub BUNDLE_UPDATER_RC 0)
+      [ "$rc" = 0 ] || { WHY="build rc=$rc"; return 1; }
+    fi
+    stub_log "bundle-updater seal target=$target key=$UPDATER_KEY"
     mkdir -p "$target/release/bundle/macos" "$target/release/bundle/dmg"
     printf 'stub archive %s\n' "$SHA" > "$target/release/bundle/macos/$APP_NAME.tar.gz"
     printf 'STUBSIG%s\n' "$SHA8" > "$target/release/bundle/macos/$APP_NAME.tar.gz.sig"
@@ -695,11 +719,21 @@ do_bundle_updater() {
     printf '### stub\n- stub notes for %s\n' "$VERSION" > "$out/notes.md"
   else
     [ -f "$UPDATER_KEY_PASSWORD_FILE" ] && password=$(cat "$UPDATER_KEY_PASSWORD_FILE")
-    heavy build_updater_bundle "$target" "$password" "$log"; rc=$?
-    [ "$rc" = 0 ] || { WHY="tauri build rc=$rc ($log)"; return 1; }
+    # Without a distribution identity build-app's app is the one shipped, so a second
+    # tauri:release would only be thrown away (1105 s on 10-13, its zo stage cold).
+    # Tauri signs and notarizes only inside its own build: with an identity it stays.
+    if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+      heavy build_updater_bundle "$target" "$password" "$log"; rc=$?
+      [ "$rc" = 0 ] || { WHY="tauri build rc=$rc ($log)"; return 1; }
+    fi
     seal_updater_bundle "$target" "$password" "$log" || return 1
     python3 "$FEED_PY" section --changelog "$SCRATCH/CHANGELOG.md" --version "$VERSION" > "$out/notes.md" \
       || { WHY="CHANGELOG.md has no [$VERSION] section — run tools/release/bump.sh before queueing"; return 1; }
+  fi
+  if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+    installed=$(app_cdhash INSTALLED "$RELEASE_APP_DIR/$APP_NAME"); sealed=$(app_cdhash SEALED "$target/release/bundle/macos/$APP_NAME")
+    { [ -n "$sealed" ] && [ "$sealed" = "$installed" ]; } \
+      || { WHY="the sealed app is not the installed one: cdhash ${sealed:-unreadable}, installed ${installed:-unreadable}"; return 1; }
   fi
   archive="$target/release/bundle/macos/$APP_NAME.tar.gz"
   { [ -f "$archive" ] && [ -f "$archive.sig" ]; } || { WHY="no signed updater archive under $target/release/bundle/macos"; return 1; }
