@@ -409,7 +409,53 @@ function realSummary() {
  * machine's numbers in the light and the dark treatment, everything on one
  * screen, no text cut, clipped or overlapping; and the settings card the
  * same numbers stand on. */
+async function testJevLongModelIds(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  const models = [
+    { name: "unbroken", id: `model-${"x".repeat(90)}` },
+    { name: "qualified", id: `provider/${"y".repeat(87)}` },
+  ];
+  try {
+    await page.evaluate(jevDashboardFixture);
+    await page.evaluate(() => el("nav-jev").click());
+    await page.waitForFunction(() => document.querySelector("#jev-view .jev-caption")?.textContent.includes("jev-1.13.0"));
+    for (const theme of ["dark", "light"]) {
+      await setQualityTheme(page, theme);
+      for (const model of models) {
+        await page.evaluate((id) => {
+          jevNumbers = jevNumbers.map((held) => ({ ...held, model: id }));
+          paintJevViews();
+          document.querySelector("#jev-view").style.maxWidth = "319px";
+        }, model.id);
+        await standNarrow(page);
+        const seen = await page.evaluate((id) => {
+          const view = document.querySelector("#jev-view");
+          const caption = view.querySelector(".jev-caption");
+          const wide = [view, ...view.querySelectorAll(".jev-table-wrap, .jev-table, .jev-caption")]
+            .filter((node) => node.scrollWidth > node.clientWidth + 1).map((node) => node.className);
+          return {
+            text: caption.textContent, fullModel: caption.textContent.endsWith(id),
+            faults: window.__JEV_TEXT_FAULTS__(view), wide,
+            width: view.getBoundingClientRect().width,
+            theme: document.documentElement.dataset.theme ?? "dark",
+          };
+        }, model.id);
+        const path = join(EVIDENCE_DIR, `jev-dashboard-model-${theme}-${model.name}.png`);
+        await page.screenshot({ path });
+        ok(`the ${theme} dashboard preserves a 96-character ${model.name} model ID within 319 pixels`,
+          seen.fullModel && seen.width > 0 && seen.width <= 320 && seen.faults.length === 0 && seen.wide.length === 0 && seen.theme === theme,
+          JSON.stringify({ ...seen, faults: seen.faults.slice(0, 6), path }));
+      }
+    }
+    ok("long model ID fixtures have no JavaScript errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 export async function testJevDashboardEvidence(browser, origin, ok) {
+  await mkdir(EVIDENCE_DIR, { recursive: true });
+  await testJevLongModelIds(browser, origin, ok);
   const real = realSummary();
   // The table carries every seat of the card; the numbers, trends and card
   // lines are drawn for the seats the answering zo could count. An installed

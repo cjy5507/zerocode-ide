@@ -27828,7 +27828,15 @@ fn a_persons_retry_press_types_once_per_wall_and_holds_a_handover_back() {
     assert_eq!(chip.hand_over_refusal, None, "{chip:?}");
 
     let refused = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at).unwrap_err();
-    assert!(refused.contains("composer is not at rest"), "{refused}");
+    assert!(
+        refused.to_string().contains("composer is not at rest"),
+        "{refused}"
+    );
+    assert_eq!(
+        serde_json::to_value(&refused).expect("json"),
+        serde_json::json!({ "code": "composer_never_heard", "worker": stood.worker }),
+        "the window is sent a sentence, not a code"
+    );
     assert!(resumed_rows(&stood.dispatch).is_empty());
 
     super::pane_turn_ended(term, at - 1, false, at);
@@ -27846,7 +27854,11 @@ fn a_persons_retry_press_types_once_per_wall_and_holds_a_handover_back() {
     assert_eq!(typed[0]["line"], WALL_RETRY_LINE);
 
     let again = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at + 1).unwrap_err();
-    assert_eq!(again, RESUME_IN_FLIGHT);
+    assert_eq!(again.to_string(), RESUME_IN_FLIGHT);
+    assert_eq!(
+        serde_json::to_value(&again).expect("json"),
+        serde_json::json!({ "code": "resume_in_flight" })
+    );
     let held_back = super::wall_press::hand_over(
         &stood.host,
         &[],
@@ -27856,7 +27868,11 @@ fn a_persons_retry_press_types_once_per_wall_and_holds_a_handover_back() {
         at + 2,
     )
     .unwrap_err();
-    assert!(held_back.contains("being typed"), "{held_back}");
+    assert!(held_back.to_string().contains("being typed"), "{held_back}");
+    assert_eq!(
+        serde_json::to_value(&held_back).expect("json"),
+        serde_json::json!({ "code": "handover_waits_for_typing", "dispatch": stood.dispatch })
+    );
     assert_eq!(stood.worker_state(&stood.worker), "Active");
     assert_eq!(resumed_rows(&stood.dispatch).len(), 1);
 
@@ -27866,11 +27882,19 @@ fn a_persons_retry_press_types_once_per_wall_and_holds_a_handover_back() {
     assert_eq!(settled.len(), 1, "{settled:?}");
     assert_eq!(settled[0]["status"], "submitted");
     let once = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at + 4).unwrap_err();
-    assert!(once.contains("already typed"), "{once}");
+    assert!(once.to_string().contains("already typed"), "{once}");
+    assert_eq!(
+        serde_json::to_value(&once).expect("json"),
+        serde_json::json!({ "code": "already_typed", "dispatch": stood.dispatch })
+    );
     let lifted =
         super::wall_press::retry(&stood.host, &run_id, &stood.worker, wall.stands_until_ms)
             .unwrap_err();
-    assert!(lifted.contains("lifted"), "{lifted}");
+    assert!(lifted.to_string().contains("lifted"), "{lifted}");
+    assert_eq!(
+        serde_json::to_value(&lifted).expect("json"),
+        serde_json::json!({ "code": "wall_lifted", "worker": stood.worker })
+    );
     assert_eq!(resumed_rows(&stood.dispatch).len(), 1, "a refusal typed");
 }
 
@@ -27892,7 +27916,14 @@ fn a_persons_handover_press_walks_the_beats_verbs_and_seats_one_replacement() {
     let at = stood.began + 20_000;
     let unnamed = super::wall_press::hand_over(&stood.host, &[], &run_id, &stood.worker, None, at)
         .unwrap_err();
-    assert!(unnamed.contains("no alternative is named"), "{unnamed}");
+    assert!(
+        unnamed.to_string().contains("no alternative is named"),
+        "{unnamed}"
+    );
+    assert_eq!(
+        serde_json::to_value(&unnamed).expect("json"),
+        serde_json::json!({ "code": "no_alternative" })
+    );
     *stood
         .host
         .busy
@@ -27901,7 +27932,11 @@ fn a_persons_handover_press_walks_the_beats_verbs_and_seats_one_replacement() {
     let working =
         super::wall_press::hand_over(&stood.host, &[], &run_id, &stood.worker, Some("claude"), at)
             .unwrap_err();
-    assert!(working.contains("at work again"), "{working}");
+    assert!(working.to_string().contains("at work again"), "{working}");
+    assert_eq!(
+        serde_json::to_value(&working).expect("json"),
+        serde_json::json!({ "code": "at_work_again", "worker": stood.worker })
+    );
     *stood
         .host
         .busy
@@ -27958,7 +27993,11 @@ fn a_persons_handover_press_walks_the_beats_verbs_and_seats_one_replacement() {
         at + 3,
     )
     .unwrap_err();
-    assert!(again.contains("released"), "{again}");
+    assert!(again.to_string().contains("released"), "{again}");
+    assert_eq!(
+        serde_json::to_value(&again).expect("json"),
+        serde_json::json!({ "code": "worker_not_live", "worker": stood.worker, "state": "released" })
+    );
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let stop = run(
         &stood.host,
@@ -27990,4 +28029,116 @@ fn a_persons_handover_press_walks_the_beats_verbs_and_seats_one_replacement() {
     );
     assert_eq!(linked().len(), 1, "two replacements for one attempt");
     assert_eq!(stood.worker_state(&replacement), "Active");
+}
+
+/// The attempts that name `dispatch` as the one they replace.
+fn replacements_of(dispatch: &str) -> usize {
+    the_rows()
+        .dispatches
+        .iter()
+        .filter(|one| one.retry_of.as_deref() == Some(dispatch))
+        .count()
+}
+
+/// t-47935: a press made while an account switch moves panes stands in the
+/// switch's line without waiting in it (`unless_switching`), and the window
+/// is told so as a code — never a sentence — so it can say it in the
+/// person's language. Nothing moved: no continuation reserved or typed, the
+/// worker at its post, no replacement. Once the line is free the same press
+/// is taken: the line was the only reason.
+#[test]
+fn a_press_made_while_an_account_switch_moves_panes_is_refused_by_code_and_moves_nothing() {
+    const LEADER_TERM: u32 = 86_100;
+    let stood = Walled::stand(LEADER_TERM, crate::test_host::existing_directory(), "");
+    stood.wall_it();
+    let run_id = run_of(&stood.worker);
+    let at = stood.began + 20_000;
+    super::pane_turn_ended(LEADER_TERM + 1, at - 1, false, at);
+
+    let switching = crate::account_switch::hold_switch_line();
+    let retried = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at)
+        .expect_err("a retry inside a move");
+    let handed = super::wall_press::hand_over(
+        &stood.host,
+        &[],
+        &run_id,
+        &stood.worker,
+        Some("claude"),
+        at + 1,
+    )
+    .expect_err("a handover inside a move");
+    drop(switching);
+    let in_flight = serde_json::json!({ "code": "switch_in_flight" });
+    assert_eq!(serde_json::to_value(&retried).expect("json"), in_flight);
+    assert_eq!(serde_json::to_value(&handed).expect("json"), in_flight);
+    assert!(
+        resumed_rows(&stood.dispatch).is_empty(),
+        "a press inside a move reserved a continuation"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    assert_eq!(replacements_of(&stood.dispatch), 0);
+
+    let said = super::wall_press::retry(&stood.host, &run_id, &stood.worker, at + 2)
+        .expect("the line is free again");
+    assert_eq!(said["line"], zerocode_core::orchestration::WALL_RETRY_LINE);
+    assert_eq!(resumed_rows(&stood.dispatch).len(), 1);
+}
+
+/// t-47935: a handover whose replacement cannot start — the agent the person
+/// chose reached its own wall after the chip was drawn — has already ended
+/// the attempt, and says so as a code: the attempt it ended and the ledger's
+/// own line about the start. The worker is let go, its task is ready for the
+/// next summons, and nothing is linked to the ended attempt.
+#[test]
+fn a_handover_whose_replacement_cannot_start_says_so_by_code_and_leaves_the_task_ready() {
+    const LEADER_TERM: u32 = 86_120;
+    let stood = Walled::stand(LEADER_TERM, crate::test_host::existing_directory(), "");
+    stood.wall_it();
+    let run_id = run_of(&stood.worker);
+    let at = stood.began + 20_000;
+    stood.window.set_usage(vec![
+        (
+            "codex",
+            usage_snapshot(
+                "codex",
+                Some((98, Some(stood.began + 42 * 60_000))),
+                Some((40, None)),
+                stood.began - 3 * 60_000,
+            ),
+        ),
+        (
+            "claude",
+            usage_snapshot(
+                "claude",
+                Some((99, Some(stood.began + 9 * 60_000))),
+                Some((30, None)),
+                stood.began - 60_000,
+            ),
+        ),
+    ]);
+
+    let refused =
+        super::wall_press::hand_over(&stood.host, &[], &run_id, &stood.worker, Some("claude"), at)
+            .expect_err("claude stands at its own wall");
+    let said = serde_json::to_value(&refused).expect("json");
+    assert_eq!(said["code"], "replacement_not_started", "{said}");
+    assert_eq!(said["dispatch"], stood.dispatch.as_str(), "{said}");
+    let detail = said["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("claude") && detail.contains("99%"),
+        "the start's own refusal is not carried: {said}"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    assert_eq!(
+        replacements_of(&stood.dispatch),
+        0,
+        "a replacement was linked"
+    );
+    let rows = the_rows();
+    let task = rows
+        .tasks
+        .iter()
+        .find(|one| one.id == stood.task)
+        .expect("the task");
+    assert_eq!(task.status, zerocode_core::orchestration::TaskStatus::Ready);
 }

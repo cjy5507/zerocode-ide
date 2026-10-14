@@ -3812,15 +3812,25 @@ function landingShape(landing) {
   if (!landing) return "";
   return `${landing.state}.${landing.ahead}.${landing.dirty ? 1 : 0}.${landing.ignored ? 1 : 0}` +
     `.${landing.detached ? 1 : 0}.${landing.compare_ref ?? ""}.${landing.landed_in?.sha ?? ""}` +
-    // How far behind and what a merge would clash on move the chip and its tooltip, so they move the row.
+    // How far behind, what a merge would clash on and what the unsaved files share with the compare ref
+    // move the chip and its tooltip, so they move the row.
     `.${landing.behind ?? ""}.${landing.far_behind ? 1 : 0}.${landing.conflict ? landing.conflict.total : ""}` +
-    `.${(landing.conflict?.files ?? []).join(",")}`;
+    `.${(landing.conflict?.files ?? []).join(",")}` +
+    `.${landing.overlap ? landing.overlap.total : ""}.${(landing.overlap?.files ?? []).join(",")}`;
 }
 
 /* The compare ref without its remote: `origin/main` is 「main」 on a chip that has a few
  * letters to spare. The tooltip keeps the whole name. */
 function landingRefName(ref) {
   return ref.replace(/^[^/]+\//, "");
+}
+
+/* How far behind the compare ref a checkout runs, in one line: an unlanded row's drift and any other
+ * row's unsaved work say it in the same words. */
+function landingBehindLine(behind, ref) {
+  return behind > 0
+    ? t("worktree.landTipBehind", "{{ref}}보다 {{count}}커밋 뒤처져 있습니다", { ref, count: behind })
+    : t("worktree.landTipBehindNone", "{{ref}}의 최신 커밋을 모두 담고 있습니다 (뒤처지지 않음)", { ref });
 }
 
 /* What the tooltip of an unlanded row says about drift (t-34501): how many commits the branch
@@ -3830,11 +3840,7 @@ function landingRefName(ref) {
 function worktreeDriftLines(landing, ref) {
   const lines = [];
   const behind = Number.isFinite(landing.behind) ? landing.behind : null;
-  if (behind !== null) {
-    lines.push(behind > 0
-      ? t("worktree.landTipBehind", "{{ref}}보다 {{count}}커밋 뒤처져 있습니다", { ref, count: behind })
-      : t("worktree.landTipBehindNone", "{{ref}}의 최신 커밋을 모두 담고 있습니다 (뒤처지지 않음)", { ref }));
-  }
+  if (behind !== null) lines.push(landingBehindLine(behind, ref));
   const clash = landing.conflict ?? null;
   if (clash === null) {
     lines.push(t("worktree.landTipConflictUnknown", "{{ref}}에 합치면 충돌하는지는 읽지 못했습니다", { ref }));
@@ -3850,6 +3856,30 @@ function worktreeDriftLines(landing, ref) {
   }
   if ((behind !== null && behind > 0) || (clash !== null && clash.total > 0)) {
     lines.push(t("worktree.landTipNext", "다음 할 일: git fetch 뒤 {{ref}}에 있는 것을 이 브랜치에 합치고, 이미 돈 게이트를 다시 돌리세요", { ref }));
+  }
+  return lines;
+}
+
+/* What the tooltip of a row with unsaved changes says against the compare ref (t-45314): how far behind
+ * it runs — an unlanded row says so among its drift already — and which of the unsaved files the compare
+ * ref changed too since the two split. That is a fact by file, not a merge tried, so it is never called a
+ * conflict; one nobody read (`overlap` absent) is said as not read — never as none. A row with no compare
+ * ref has nothing to say it against. */
+function worktreeUnsavedLines(landing, ref) {
+  if (!ref || landing.state === "no_ref") return [];
+  const lines = [];
+  if (landing.state !== "unlanded" && Number.isFinite(landing.behind)) lines.push(landingBehindLine(landing.behind, ref));
+  const overlap = landing.overlap ?? null;
+  if (overlap === null) {
+    lines.push(t("worktree.landTipOverlapUnknown", "저장 안 한 변경이 {{ref}}에서 바뀐 파일과 겹치는지는 읽지 못했습니다", { ref }));
+  } else if (overlap.total === 0) {
+    lines.push(t("worktree.landTipOverlapNone", "저장 안 한 변경 가운데 갈라진 뒤 {{ref}}에서도 바뀐 파일은 없습니다", { ref }));
+  } else {
+    const left = overlap.total - overlap.files.length;
+    lines.push(t("worktree.landTipOverlap", "저장 안 한 변경 가운데 {{count}}개 파일은 갈라진 뒤 {{ref}}에서도 바뀌었습니다: {{files}}", {
+      ref, count: overlap.total, files: overlap.files.join(", "),
+    }) + (left > 0 ? t("worktree.landTipOverlapMore", " 외 {{count}}개", { count: left }) : ""));
+    lines.push(t("worktree.landTipOverlapScope", "파일 단위 겹침입니다 — 같은 줄을 고쳤는지는 보지 않습니다"));
   }
   return lines;
 }
@@ -3950,6 +3980,12 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   }
   head ??= word;
   if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
+  // What the compare ref changed too among the unsaved files (t-45314), right after them: it is said of the
+  // unsaved work and by file, so it wears neither the conflict's word nor its colour.
+  const overlapping = landing.dirty && !check ? landing.overlap?.total ?? 0 : 0;
+  if (overlapping > 0) {
+    word += ` · ${t("worktree.landOverlap", "{{ref}}과 겹침 {{count}}", { ref: landingRefName(ref), count: overlapping })}`;
+  }
   // Said of work that is in the compare ref and of nothing else: the backend
   // asks only landed rows, and a row that is in doubt says nothing more.
   const holdsIgnored = gitIn && !check && landing.ignored === true;
@@ -3994,7 +4030,10 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
       })
       : t("worktree.landTipRefUnknown", "비교: {{ref}} · 마지막 갱신 시각을 알 수 없음", { ref }));
   }
-  if (landing.dirty) lines.push(t("worktree.landTipDirty", "추적 중인 파일에 커밋하지 않은 변경이 있습니다"));
+  if (landing.dirty) {
+    lines.push(t("worktree.landTipDirty", "추적 중인 파일에 커밋하지 않은 변경이 있습니다"));
+    lines.push(...worktreeUnsavedLines(landing, ref));
+  }
   if (holdsIgnored) {
     lines.push(t("worktree.landTipIgnored", "git이 무시하는 파일이 남아 있습니다 — 폴더를 지우면 함께 사라집니다. 크기와 폴더는 근거 보기에서 볼 수 있습니다"));
   }

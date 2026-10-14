@@ -45,6 +45,13 @@ pub const ENV_HOOK_ENDPOINT: &str = "ZEROCODE_HOOK_ENDPOINT";
 /// 변화만 빼서 비교할 때 쓴다. 평소에는 없으므로 동작 비용도 변화도 없다.
 pub const PROFILE_DISABLE_ENV: &str = "ZO_PROFILE_DISABLE_HOOK_REPORTER";
 pub const TOKEN_HEADER: &str = "x-zerocode-hook-token";
+/// The key a tool start carries a print of its call's whole input under: a
+/// hash, never the input, so the window's step gate can tell apart two calls
+/// that the compact `tool_input` draws alike — a command by its first word, a
+/// file without the offset it is read at. The window reads the same key
+/// (`zerocode_core::continue_gate::INPUT_PRINT_KEY`); a source contract holds
+/// the two equal.
+pub const INPUT_PRINT_KEY: &str = "tool_input_print";
 const AGENT_SLUG: &str = "zo";
 const POST_TIMEOUT: Duration = Duration::from_millis(1500);
 
@@ -614,23 +621,29 @@ impl HookReporter {
     /// the rest — and `activity` is the same compact fact
     /// `session_status.activity` carries at the moment the call began.
     /// `tool_use_id` is the runtime's id for the call, the same on its end.
+    /// `input_print` is the runtime's print of the call's whole input — a hash,
+    /// never the input — sent under [`INPUT_PRINT_KEY`] so that the window's
+    /// step gate can tell apart calls this compact `tool_input` draws alike; a
+    /// block that carried none sends none.
     pub fn pre_tool_use(
         &self,
         call: ToolCallFacts<'_>,
         tool_input: &str,
+        input_print: Option<&str>,
         activity: &crate::ide::channel::state::ActivityCard,
         session_id: &str,
     ) {
-        self.post(
-            "PreToolUse",
-            serde_json::json!({
-                "tool_name": call.name,
-                "tool_use_id": call.call_id,
-                "tool_input": call.input(Some(tool_input)),
-                "activity": activity,
-                "session_id": session_id,
-            }),
-        );
+        let mut payload = serde_json::json!({
+            "tool_name": call.name,
+            "tool_use_id": call.call_id,
+            "tool_input": call.input(Some(tool_input)),
+            "activity": activity,
+            "session_id": session_id,
+        });
+        if let Some(print) = input_print {
+            payload[INPUT_PRINT_KEY] = serde_json::Value::from(print);
+        }
+        self.post("PreToolUse", payload);
     }
 
     /// One tool END, in Claude's spelling: the id its start said, and — for a
@@ -1062,6 +1075,7 @@ mod tests {
                 file: Some("/repo/zo-ide/crates/zo-ide/src/tui/view.rs"),
             },
             "tui/view.rs",
+            None,
             &activity,
             "s-activity",
         );
@@ -1092,6 +1106,7 @@ mod tests {
             })
         );
         assert_eq!(envelope.payload["session_id"], "s-activity");
+        assert!(envelope.payload.get(INPUT_PRINT_KEY).is_none(), "a start with no print says none");
     }
 
     /// A tool call's start and its end say the same id, in Claude's spelling,
@@ -1118,9 +1133,9 @@ mod tests {
             name: "Bash",
             file: None,
         };
-        reporter.pre_tool_use(edit, "tui/view.rs", &card("edit", "tui/view.rs"), "s-1");
+        reporter.pre_tool_use(edit, "tui/view.rs", None, &card("edit", "tui/view.rs"), "s-1");
         reporter.post_tool_use(edit, false, "s-1");
-        reporter.pre_tool_use(bash, "cargo", &card("bash", "cargo"), "s-1");
+        reporter.pre_tool_use(bash, "cargo", None, &card("bash", "cargo"), "s-1");
         reporter.post_tool_use(bash, true, "s-1");
 
         let posted = captured.lock().expect("capture");

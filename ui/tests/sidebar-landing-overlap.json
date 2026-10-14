@@ -1,0 +1,36 @@
+{
+  "about": "AT-②-1 (t-45314): what the backend tells the window of checkouts B, C and D of the `uncommitted` tests in crates/zerocode-shell/src/worktree_landing.rs, without the two clock stamps (dirty_checked_ms, ref_updated_ms). Those tests compare their serialization with these rows, and ui/tests/sidebar-landing-state.mjs lays the same rows out.",
+  "rows": {
+    "B": {
+      "state": "no_commits",
+      "detached": false,
+      "ahead": 0,
+      "dirty": true,
+      "ignored": false,
+      "compare_ref": "origin/main",
+      "behind": 1,
+      "overlap": { "total": 1, "files": ["src/login.rs"] },
+      "far_behind": false
+    },
+    "C": {
+      "state": "no_commits",
+      "detached": false,
+      "ahead": 0,
+      "dirty": true,
+      "ignored": false,
+      "compare_ref": "origin/main",
+      "behind": 1,
+      "overlap": { "total": 0, "files": [] },
+      "far_behind": false
+    },
+    "D": {
+      "state": "no_commits",
+      "detached": false,
+      "ahead": 0,
+      "dirty": false,
+      "ignored": false,
+      "compare_ref": "origin/main",
+      "far_behind": false
+    }
+  }
+}

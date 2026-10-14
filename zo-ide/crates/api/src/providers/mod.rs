@@ -7303,6 +7303,13 @@ mod tests {
     fn system_ones_client_is_configured_by_the_typesafe_key_the_window_keeps() {
         let _lock = crate::test_env_lock();
         let _key = EnvVarGuard::set(crate::SYSTEMONE_API_KEY_ENV, None);
+        // zo's settings name the provider, and the person's machine may have
+        // chosen one that needs no key: read a config home nobody set.
+        let unset = tempfile::tempdir().expect("a zo home nobody set");
+        let _home = EnvVarGuard::set(
+            core_types::paths::ZO_CONFIG_HOME_ENV,
+            Some(unset.path().to_str().expect("a UTF-8 temporary path")),
+        );
         super::forget_adopted_launch_keys_for_test();
         assert_eq!(
             crate::SystemOneConfig::from_env().err(),
