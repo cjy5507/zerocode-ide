@@ -9530,6 +9530,7 @@ function setSettingsOpen(on, focus = null) {
   }
   settingsSection = on ? focus : null;
   settingsView.hidden = !on;
+  if (on && !wasOpen && settingsPane === "judgment-models") void refreshTypeSafe();
   if (on && focus) {
     const at = el(focus);
     for (let details = at?.closest("details:not([open])"); details; details = details.parentElement?.closest("details:not([open])")) {
