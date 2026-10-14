@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{self, Artifact, Model};
+use crate::catalog::{self, Artifact, Catalog, EngineKind, Model};
 use crate::manager::test_support;
 use crate::storage::Store;
 use crate::{Error, Manager};
@@ -29,6 +29,14 @@ fn model() -> Model {
     model.id = "fixture-model".to_owned();
     model.files = vec![artifact("model.safetensors", b"weights")];
     model
+}
+
+pub(crate) fn fixture_model() -> Model {
+    model()
+}
+
+pub(crate) async fn settled_snapshot(manager: &Manager) -> crate::Snapshot {
+    settled(manager).await
 }
 
 async fn settled(manager: &Manager) -> crate::Snapshot {
@@ -57,6 +65,462 @@ fn public_manifests_are_pinned_and_have_an_exact_download_total() {
     if let Some(profile) = profile {
         assert!(profile.python.sha256.len() == 64 && profile.download_bytes() > 100_000_000);
     }
+}
+
+fn registration_document(mut models: Vec<Model>) -> String {
+    for model in &mut models {
+        model.label = "Fixture native model".to_owned();
+        model.source = "https://example.com/native-model".to_owned();
+    }
+    serde_json::to_string(&Catalog { version: 1, models }).unwrap()
+}
+
+#[test]
+fn catalog_exposes_native_models_from_distinct_engine_families() {
+    let catalog = catalog::catalog().unwrap();
+    let engines: Vec<_> = catalog.models.iter().map(|model| model.engine).collect();
+    assert!(engines.contains(&EngineKind::Laya));
+    assert!(engines.contains(&EngineKind::TransformersSystemOne));
+    assert_eq!(catalog.models[1].weights_bytes(), 1_707_072_248);
+}
+
+#[test]
+fn additive_metadata_preserves_the_existing_model_fingerprint() {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct LegacyArtifact {
+        path: String,
+        bytes: u64,
+        sha256: String,
+        url: String,
+        #[serde(default)]
+        package: Option<String>,
+        #[serde(default)]
+        version: Option<String>,
+        #[serde(default)]
+        license: Option<String>,
+    }
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct LegacyModel {
+        id: String,
+        label: String,
+        engine: String,
+        protocol: String,
+        revision: String,
+        license: String,
+        source: String,
+        quality: String,
+        files: Vec<LegacyArtifact>,
+    }
+
+    let original: serde_json::Value =
+        serde_json::from_str(include_str!("../manifests/models.json")).unwrap();
+    let legacy = serde_json::from_value::<LegacyModel>(original["models"][0].clone()).unwrap();
+    let current = serde_json::from_value::<Model>(original["models"][0].clone()).unwrap();
+    let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&current).unwrap(),
+        legacy_bytes,
+        "optional discovery fields must not change installed model receipts"
+    );
+    assert_eq!(
+        current.fingerprint().unwrap(),
+        format!("{:x}", Sha256::digest(&legacy_bytes)),
+    );
+    let mut changed = current.clone();
+    changed.weights_bytes = Some(current.download_bytes());
+    assert_ne!(
+        changed.fingerprint().unwrap(),
+        current.fingerprint().unwrap()
+    );
+}
+
+#[test]
+fn registration_accepts_multiple_native_models_without_runtime_code() {
+    let mut server = model();
+    server.id = "fixture-system-one".to_owned();
+    server.engine = EngineKind::SystemOneServer;
+    server.server_model_id = Some("acme/native-decision".to_owned());
+    server.files.clear();
+    let parsed = Catalog::parse(&registration_document(vec![model(), server])).unwrap();
+    assert_eq!(parsed.models.len(), 2);
+    assert_ne!(parsed.models[0].engine, parsed.models[1].engine);
+}
+
+#[test]
+fn registration_rejects_duplicate_ids_and_nonhex_revisions() {
+    assert_eq!(
+        Catalog::parse(&registration_document(vec![model(), model()])).unwrap_err(),
+        Error::CatalogConflict
+    );
+    let mut invalid = model();
+    invalid.revision = "z".repeat(40);
+    assert_eq!(
+        Catalog::parse(&registration_document(vec![invalid])).unwrap_err(),
+        Error::Manifest
+    );
+}
+
+#[test]
+fn registration_rejects_executable_and_receipt_artifacts() {
+    for path in [
+        "model.py",
+        "weights.pt",
+        "runtime.whl",
+        "receipt.json",
+        "config.json/weights.safetensors",
+    ] {
+        let mut candidate = model();
+        candidate.files.push(artifact(path, b"untrusted"));
+        if path.contains('/') {
+            candidate.files.push(artifact("config.json", b"{}"));
+        }
+        assert_eq!(
+            Catalog::parse(&registration_document(vec![candidate])).unwrap_err(),
+            Error::Manifest,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn registration_rejects_unknown_runtime_and_loader_fields() {
+    let mut document: serde_json::Value =
+        serde_json::from_str(&registration_document(vec![model()])).unwrap();
+    document["runtime"] = serde_json::json!({"command":"untrusted"});
+    assert_eq!(
+        Catalog::parse(&document.to_string()).unwrap_err(),
+        Error::Manifest
+    );
+    document.as_object_mut().unwrap().remove("runtime");
+    document["models"][0]["loader"] = serde_json::json!("untrusted.module");
+    assert_eq!(
+        Catalog::parse(&document.to_string()).unwrap_err(),
+        Error::Manifest
+    );
+}
+
+#[test]
+fn model_weight_metadata_must_match_the_pinned_artifact_sizes() {
+    let mut model = model();
+    model.weights_bytes = Some(1);
+    assert_eq!(
+        Catalog::parse(&registration_document(vec![model])).unwrap_err(),
+        Error::Manifest
+    );
+}
+
+#[test]
+fn registration_enforces_catalog_size_and_model_count_limits() {
+    assert_eq!(
+        Catalog::parse(&" ".repeat(catalog::MAX_CATALOG_BYTES + 1)).unwrap_err(),
+        Error::TooLarge
+    );
+    let models = (0..=catalog::MAX_MODELS)
+        .map(|index| {
+            let mut model = model();
+            model.id = format!("fixture-{index}");
+            model
+        })
+        .collect();
+    assert_eq!(
+        Catalog::parse(&registration_document(models)).unwrap_err(),
+        Error::Manifest
+    );
+}
+
+#[test]
+fn registered_sources_survive_restart_without_changing_provider_settings() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    fs::write(&settings, b"{}").unwrap();
+    let manager = Manager::new(home.path(), &settings, |_| {}).unwrap();
+    let before = manager.snapshot();
+    let registered = manager
+        .register_catalog(
+            &before.instance_id,
+            &before.catalog_fingerprint,
+            &registration_document(vec![model()]),
+        )
+        .unwrap();
+    assert!(
+        registered
+            .models
+            .iter()
+            .any(|model| model.id == "fixture-model" && model.origin == "registered")
+    );
+    assert_eq!(fs::read(&settings).unwrap(), b"{}");
+    drop(manager);
+    let restored = Manager::new(home.path(), &settings, |_| {})
+        .unwrap()
+        .snapshot();
+    assert_eq!(restored.catalog_fingerprint, registered.catalog_fingerprint);
+}
+
+#[test]
+fn registration_refuses_stale_instances_and_changed_catalogs() {
+    let home = tempfile::tempdir().unwrap();
+    let manager = Manager::new(home.path(), &home.path().join("settings.json"), |_| {}).unwrap();
+    let before = manager.snapshot();
+    let document = registration_document(vec![model()]);
+    assert!(matches!(
+        manager.register_catalog("old-instance", &before.catalog_fingerprint, &document),
+        Err(Error::InstanceChanged)
+    ));
+    manager
+        .register_catalog(&before.instance_id, &before.catalog_fingerprint, &document)
+        .unwrap();
+    assert!(matches!(
+        manager.register_catalog(&before.instance_id, &before.catalog_fingerprint, &document),
+        Err(Error::RevisionChanged)
+    ));
+}
+
+#[test]
+fn catalog_identity_does_not_depend_on_registration_directory_order() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let manager = Manager::new(home.path(), &settings, |_| {}).unwrap();
+    for id in ["fixture-z", "fixture-a"] {
+        let mut model = model();
+        model.id = id.to_owned();
+        let before = manager.snapshot();
+        manager
+            .register_catalog(
+                &before.instance_id,
+                &before.catalog_fingerprint,
+                &registration_document(vec![model]),
+            )
+            .unwrap();
+    }
+    let expected = manager.snapshot().catalog_fingerprint;
+    drop(manager);
+    let restored = Manager::new(home.path(), &settings, |_| {}).unwrap();
+    assert_eq!(restored.snapshot().catalog_fingerprint, expected);
+}
+
+#[test]
+fn registration_failure_does_not_publish_partial_catalog_changes() {
+    let home = tempfile::tempdir().unwrap();
+    let manager = Manager::new(home.path(), &home.path().join("settings.json"), |_| {}).unwrap();
+    let before = manager.snapshot();
+    let document = registration_document(vec![model()]);
+    let addition = Catalog::parse(&document).unwrap();
+    let collision = home
+        .path()
+        .join("managed-judgment/sources")
+        .join(addition.fingerprint().unwrap());
+    fs::create_dir(&collision).unwrap();
+    assert!(matches!(
+        manager.register_catalog(&before.instance_id, &before.catalog_fingerprint, &document),
+        Err(Error::Storage)
+    ));
+    assert_eq!(
+        manager.snapshot().catalog_fingerprint,
+        before.catalog_fingerprint
+    );
+    assert_eq!(
+        fs::read_dir(home.path().join("managed-judgment/partial"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn source_receipts_detect_changed_registration_bytes() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let catalog = Catalog::parse(&registration_document(vec![model()])).unwrap();
+    store.register_catalog(&catalog).unwrap();
+    let path = home
+        .path()
+        .join("managed-judgment/sources")
+        .join(catalog.fingerprint().unwrap())
+        .join("catalog.json");
+    let mut tampered = catalog;
+    tampered.models[0].files[0].sha256 = "a".repeat(64);
+    fs::write(path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert_eq!(store.registered_catalogs().unwrap_err(), Error::Integrity);
+}
+
+#[test]
+fn registration_waits_for_an_active_operation_to_finish() {
+    let home = tempfile::tempdir().unwrap();
+    let manager = Manager::new(home.path(), &home.path().join("settings.json"), |_| {}).unwrap();
+    let before = manager.snapshot();
+    test_support::begin_registration_blocker(&manager);
+    assert!(matches!(
+        manager.register_catalog(
+            &before.instance_id,
+            &before.catalog_fingerprint,
+            &registration_document(vec![model()])
+        ),
+        Err(Error::Busy)
+    ));
+    manager.shutdown();
+}
+
+#[test]
+fn candidate_engines_remain_disabled_before_platform_validation() {
+    let home = tempfile::tempdir().unwrap();
+    let manager = Manager::new(home.path(), &home.path().join("settings.json"), |_| {}).unwrap();
+    let snapshot = manager.snapshot();
+    let model = snapshot
+        .models
+        .iter()
+        .find(|model| model.engine == EngineKind::TransformersSystemOne)
+        .unwrap();
+    assert!(!model.local.supported);
+    assert!(model.existing_server.supported);
+    assert_eq!(model.server_model_id.as_deref(), Some("vllm-sr/d3-lite"));
+    assert!(matches!(
+        manager.install(&model.id, &model.revision, None),
+        Err(Error::EngineUnverified | Error::Unsupported)
+    ));
+    assert!(matches!(
+        manager.start(&model.id, &model.revision),
+        Err(Error::EngineUnverified | Error::Unsupported)
+    ));
+    assert!(manager.snapshot().operation.is_none());
+}
+
+#[test]
+fn model_data_rejects_dynamic_loader_configuration_before_install() {
+    let home = tempfile::tempdir().unwrap();
+    let bytes = br#"{"auto_map":{"AutoModel":"untrusted.Loader"}}"#;
+    let mut model = model();
+    model.files = vec![artifact("config.json", bytes)];
+    fs::write(home.path().join("config.json"), bytes).unwrap();
+    assert_eq!(
+        crate::adapter::verify_model(home.path(), &model, &AtomicBool::new(false)),
+        Err(Error::ExecutableArtifact)
+    );
+}
+
+#[test]
+fn safetensors_indexes_cannot_read_shards_outside_the_registered_data() {
+    let home = tempfile::tempdir().unwrap();
+    let bytes = br#"{"weight_map":{"weight":"../outside.safetensors"}}"#;
+    let mut model = model();
+    model.files = vec![artifact("model.safetensors.index.json", bytes)];
+    fs::write(home.path().join("model.safetensors.index.json"), bytes).unwrap();
+    assert_eq!(
+        crate::adapter::verify_model(home.path(), &model, &AtomicBool::new(false)),
+        Err(Error::UnsafePath)
+    );
+}
+
+#[test]
+fn engine_selection_uses_the_manifest_engine_instead_of_the_model_name() {
+    let mut model = model();
+    model.id = "unfamiliar-native-model".to_owned();
+    let profile = catalog::runtime().unwrap();
+    if let Some(profile) = profile {
+        assert!(crate::adapter::local_profile(&model, Some(&profile), false).is_ok());
+        model.engine = EngineKind::TransformersSystemOne;
+        model.native_format = Some("d3-code-readout-v1".to_owned());
+        assert!(matches!(
+            crate::adapter::local_profile(&model, Some(&profile), false),
+            Err(Error::Unsupported)
+        ));
+    }
+}
+
+#[test]
+fn new_runtime_profiles_preserve_the_existing_runtime_receipt_shape() {
+    let profiles = catalog::runtime_profiles().unwrap();
+    if let Some(original) = catalog::runtime().unwrap() {
+        assert_eq!(
+            profiles[0].fingerprint().unwrap(),
+            original.fingerprint().unwrap()
+        );
+        let candidate = profiles
+            .iter()
+            .find(|profile| profile.engine == EngineKind::TransformersSystemOne)
+            .unwrap();
+        assert!(!candidate.validated);
+        let mut validated = candidate.clone();
+        validated.validated = true;
+        assert_eq!(
+            candidate.fingerprint().unwrap(),
+            validated.fingerprint().unwrap()
+        );
+        assert!(
+            candidate
+                .runtime_files
+                .iter()
+                .any(|file| file.path == "d3_runtime.py")
+        );
+        assert!(
+            !candidate
+                .wheels
+                .iter()
+                .any(|file| file.package.as_deref() == Some("laya"))
+        );
+    }
+}
+
+#[test]
+fn reviewed_runtime_module_tampering_is_rejected_before_spawning() {
+    let home = tempfile::tempdir().unwrap();
+    let profiles = catalog::runtime_profiles().unwrap();
+    if let Some(mut profile) = profiles
+        .into_iter()
+        .find(|profile| profile.engine == EngineKind::TransformersSystemOne)
+    {
+        profile.site_packages = "packages".to_owned();
+        profile.runtime_files = vec![artifact("d3_runtime.py", b"reviewed")];
+        fs::create_dir(home.path().join("packages")).unwrap();
+        fs::write(home.path().join("packages/d3_runtime.py"), b"tampered").unwrap();
+        assert!(matches!(
+            crate::engine::Engine::spawn(home.path(), &profile, None),
+            Err(Error::Integrity)
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn production_bridge_rejects_untrusted_execution_paths_without_loading_a_model() {
+    let output = std::process::Command::new("python3")
+        .args([
+            "-I",
+            "-u",
+            "-c",
+            include_str!("../tests/bridge_boundary.py"),
+        ])
+        .arg(serde_json::to_string(include_str!("bridge.py")).unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "runtime-validation")]
+#[test]
+fn candidate_validation_requires_a_new_directory_and_owned_settings_path() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("candidate");
+    let foreign_settings = home.path().join("settings.json");
+    fs::write(&foreign_settings, b"unchanged").unwrap();
+    assert!(matches!(
+        Manager::for_validation(&root, &foreign_settings, |_| {}),
+        Err(Error::UnsafePath)
+    ));
+    let settings = root.join("settings.json");
+    let manager = Manager::for_validation(&root, &settings, |_| {}).unwrap();
+    drop(manager);
+    assert!(matches!(
+        Manager::for_validation(&root, &settings, |_| {}),
+        Err(Error::Storage)
+    ));
+    assert_eq!(fs::read(&foreign_settings).unwrap(), b"unchanged");
 }
 
 #[test]
@@ -533,6 +997,21 @@ fn revision_mismatch_and_missing_runtime_leave_the_provider_unchanged() {
 
 #[cfg(unix)]
 fn fake_engine() -> std::sync::Arc<crate::engine::Engine> {
+    native_fixture_engine(false)
+}
+
+#[cfg(unix)]
+pub(crate) fn ready_fixture_engine() -> std::sync::Arc<crate::engine::Engine> {
+    native_fixture_engine(true)
+}
+
+#[cfg(unix)]
+pub(crate) fn running_fixture_engine() -> std::sync::Arc<crate::engine::Engine> {
+    fake_engine()
+}
+
+#[cfg(unix)]
+fn native_fixture_engine(ready: bool) -> std::sync::Arc<crate::engine::Engine> {
     let source = r#"import json,sys
 for line in sys.stdin:
  r=json.loads(line);a={}
@@ -544,8 +1023,13 @@ for line in sys.stdin:
    n=len(q['criteria']);p={str(i):(1.0 if i==0 else 0.0) for i in range(n)};a[k]={'type':'score','score':0.0,'confidence':1.0,'probabilities':p,'legend':{str(i):v for i,v in enumerate(q['criteria'])}}
  print(json.dumps({'model':r['model'],'answers':a,'usage':{'input_tokens':1,'output_tokens':0}}),flush=True)
 "#;
+    let source = if ready {
+        "print('{\"ready\":true}',flush=True)\n".to_owned() + source
+    } else {
+        source.to_owned()
+    };
     crate::engine::Engine::from_command(
-        std::process::Command::new("python3").args(["-I", "-u", "-c", source]),
+        std::process::Command::new("python3").args(["-I", "-u", "-c", &source]),
     )
 }
 
@@ -571,6 +1055,28 @@ async fn an_owned_server_checks_native_answers_and_rejects_browser_origin() {
     assert!(checked.applied_model_id.is_none());
     manager.stop(&id).unwrap();
     assert!(!engine.alive());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_text_only_server_explicitly_rejects_media_before_native_inference() {
+    let home = tempfile::tempdir().unwrap();
+    let manager = test_support::manager(home.path(), &home.path().join("settings.json"), model());
+    let (server_id, provider) = test_support::running(&manager, fake_engine(), false).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for input in ["images", "videos"] {
+        let request = json!({"model":provider.model,"state":"fixture","questions":{"answer":{"type":"noul"}},(input):[]});
+        let response = client
+            .post(provider.request_url())
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"], "input_not_supported");
+    }
+    manager.stop(&server_id).unwrap();
 }
 
 #[cfg(unix)]

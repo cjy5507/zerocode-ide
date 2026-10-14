@@ -836,6 +836,10 @@ pub struct PromptDelivery {
     /// It is waiting out a turn right now: the next round that finds the
     /// turn over starts its wait for rest afresh.
     waiting_out: bool,
+    /// Whether its words are the person's own, to go back to them when the
+    /// child could not be made to take them (t-52566) — the door that made
+    /// it says, see [`Self::handing_back`].
+    hands_back: bool,
 }
 
 /// The receipt's two clocks (t-14037).
@@ -891,6 +895,7 @@ impl PromptDelivery {
             since: now,
             parked_at: None,
             waiting_out: false,
+            hands_back: false,
         }
     }
 
@@ -938,6 +943,7 @@ impl PromptDelivery {
             since: now,
             parked_at: None,
             waiting_out: false,
+            hands_back: false,
         }
     }
 
@@ -1032,6 +1038,31 @@ impl PromptDelivery {
         self.parks
     }
 
+    /// Choose whether this delivery's words go back to the person when the
+    /// child could not be made to take them (t-52566).
+    ///
+    /// Only words the person handed over are theirs to paste: their own
+    /// send, a prompt they launched an agent with, an automation of theirs.
+    /// The window's own words — the mail pointer's advice, a restored
+    /// worker's continuation, a briefing — are the road that sent them to
+    /// answer for, and the default hands nothing back: the pointer's line,
+    /// queued behind a restored zo worker's continuation, ran out its eight
+    /// seconds inside the turn the continuation began and went to the
+    /// person's clipboard as words they had lost (2026-10-14).
+    #[must_use]
+    pub const fn handing_back(mut self, hands_back: bool) -> Self {
+        self.hands_back = hands_back;
+        self
+    }
+
+    /// Whether this delivery's words are the person's own — for the copy
+    /// parked in a queue behind another to carry, and for the caller that
+    /// hands them back.
+    #[must_use]
+    pub const fn hands_back(&self) -> bool {
+        self.hands_back
+    }
+
     /// The round this delivery first waited out a turn, if it has.
     #[must_use]
     pub const fn parked_at(&self) -> Option<Instant> {
@@ -1046,7 +1077,8 @@ impl PromptDelivery {
     }
 
     /// The words this delivery carries — for the caller that has to hand
-    /// them to a person once the child could not be made to take them.
+    /// them to a person once the child could not be made to take them, when
+    /// they are that person's ([`Self::hands_back`]).
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text

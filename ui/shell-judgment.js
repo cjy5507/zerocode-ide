@@ -58,7 +58,7 @@ const judgmentProviderController = {
       return ["model", t("settings.judgment.nextModel", "모델 목록을 읽고 사용할 모델을 고르세요. 모델 ID를 알고 있다면 직접 입력해도 됩니다.")];
     }
     if (this.dirty()) {
-      return ["apply", t("settings.judgment.nextApply", "선택이 준비됐습니다. 판단 모델 적용을 누른 뒤 연결 확인으로 응답을 확인하세요.")];
+      return ["apply", t("settings.judgment.nextApply", "확인하고 사용을 누르면 먼저 이 모델에 시험 요청을 보냅니다. 응답을 확인한 경우에만 현재 모델을 바꿉니다.")];
     }
     return ["check", t("settings.judgment.nextCheck", "현재 설정이 적용돼 있습니다. 연결 확인은 모델의 응답만 확인하며 작업 정확도를 보장하지 않습니다.")];
   },
@@ -78,6 +78,11 @@ const judgmentProviderController = {
       el(name)?.addEventListener("change", () => this.read());
     }
     el("judgment-refresh-models")?.addEventListener("click", () => void this.refreshModels());
+    el("judgment-listed-model")?.addEventListener("change", (event) => {
+      if (!event.target.value) return;
+      el("typesafe-model-input").value = event.target.value;
+      this.read();
+    });
     el("judgment-save-provider")?.addEventListener("click", () => void this.apply());
     el("judgment-revert-provider")?.addEventListener("click", () => {
       if (!this.state?.provider) return;
@@ -98,6 +103,8 @@ const judgmentProviderController = {
     this.modelIds = [];
     this.listedServer = null;
     el("judgment-model-options")?.replaceChildren();
+    el("judgment-listed-model")?.replaceChildren();
+    if (el("judgment-listed-model-field")) el("judgment-listed-model-field").hidden = true;
     if (el("judgment-model-status")) el("judgment-model-status").textContent = "";
     if (el("typesafe-key-input")) el("typesafe-key-input").value = "";
   },
@@ -111,6 +118,21 @@ const judgmentProviderController = {
     if (!provider) return;
     this.reset(provider);
     this.render();
+  },
+
+  connectModel(model) {
+    const modelId = managedJudgmentController.serverModel(model);
+    if (!modelId || typesafeBusy || managedJudgmentController.busy || managedJudgmentController.operating()) return;
+    const kind = this.draft?.kind === "remote" ? "remote" : "local";
+    const previous = this.draft?.kind === kind ? this.draft : this.drafts.get(kind);
+    const provider = previous ? this.copy(previous)
+      : { kind, protocol: "system_one", baseUrl: "", model: "", requiresAuth: kind === "remote" };
+    provider.model = modelId;
+    el("judgment-connection-settings").open = true;
+    this.localMode = "manual";
+    this.reset(provider);
+    this.render();
+    el(provider.baseUrl ? "typesafe-model-input" : "judgment-endpoint")?.focus();
   },
 
   read() {
@@ -147,7 +169,7 @@ const judgmentProviderController = {
     const local = this.draft.kind === "local";
     const managed = local && this.localMode === "managed";
     el("judgment-local-mode").hidden = !local;
-    el("managed-judgment-panel").hidden = !managed;
+    el("managed-judgment-panel").hidden = false;
     el("judgment-manual-fields").hidden = managed;
     for (const mode of ["managed", "manual"]) {
       el(`judgment-local-${mode}`).setAttribute("aria-pressed", String(this.localMode === mode));
@@ -164,10 +186,8 @@ const judgmentProviderController = {
       : t("settings.judgment.remoteScope", "동의한 프로젝트의 내용이 선택한 판단 서비스로 전송됩니다. 모델을 바꿔도 승인·정지·결과 검증은 유지합니다.");
     el("judgment-provider-scope").textContent = scope;
     this.controls();
-    if (managed) {
-      managedJudgmentController.render();
-      if (!managedJudgmentController.snapshot && !managedJudgmentController.loading && managedJudgmentController.visible()) void managedJudgmentController.refresh();
-    }
+    managedJudgmentController.render();
+    if (!managedJudgmentController.snapshot && !managedJudgmentController.loading && managedJudgmentController.visible()) void managedJudgmentController.refresh();
   },
 
   controls() {
@@ -220,7 +240,12 @@ const judgmentProviderController = {
     const check = el("typesafe-check-btn");
     if (check) {
       check.hidden = managed;
-      check.disabled = busy || dirty || (this.state?.provider?.requiresAuth && !this.state.keySaved);
+      check.disabled = busy || !this.draft?.baseUrl || (!this.draft?.model && this.draft?.kind !== "jev") || (!dirty && this.state?.provider?.requiresAuth && !this.state.keySaved);
+    }
+    const listed = el("judgment-listed-model");
+    if (listed) {
+      listed.disabled = busy || this.loading;
+      listed.value = this.modelIds.includes(this.draft?.model) ? this.draft.model : "";
     }
     for (const mode of ["managed", "manual"]) el(`judgment-local-${mode}`).disabled = busy;
     paintTypeSafeSave();
@@ -230,13 +255,56 @@ const judgmentProviderController = {
     if (typesafeBusy || !this.draft || !this.dirty()) return;
     const provider = this.copy(this.draft);
     if (provider.kind === "jev" && !provider.model) provider.model = this.state.model.alias;
+    const expectedProviderIdentity = this.state.providerIdentity;
+    const draftIdentity = JSON.stringify(this.current());
+    let applied = false;
     await runTypeSafe(async () => {
-      const state = await invoke("set_judgment_provider", { provider });
+      const check = await this.probe(provider, expectedProviderIdentity, draftIdentity);
+      if (!check.answered) throw { kind: "failed", message: typesafeCheckFailure(check.failure) };
+      const state = await invoke("set_judgment_provider", { provider, expectedProviderIdentity });
       typesafeChecked = null;
       this.reset(state.provider);
       this.state = state;
+      applied = true;
       return state;
-    }, () => t("settings.judgment.applied", "판단 모델을 적용했습니다. 연결 확인은 정확도 검증과 별개입니다."));
+    }, () => t("settings.judgment.checkedAndApplied", "응답을 확인한 모델을 적용했습니다. 연결 확인은 작업 정확도 검증과 별개입니다."));
+    if (applied && this.state?.providerIdentity === typesafeState?.providerIdentity) {
+      typesafeChecked = "connected";
+      paintTypeSafe(typesafeState);
+    }
+  },
+
+  async probe(provider, expectedProviderIdentity, draftIdentity) {
+    const check = await invoke("preflight_judgment_provider", { provider, expectedProviderIdentity });
+    if (this.state?.providerIdentity !== expectedProviderIdentity || JSON.stringify(this.current()) !== draftIdentity || check.activeProviderIdentity !== expectedProviderIdentity) throw "settings_changed";
+    if (typeof check.candidateIdentity !== "string" || !check.candidateIdentity || typeof check.answered !== "boolean") throw "schema";
+    return check;
+  },
+
+  async checkDraft() {
+    if (typesafeBusy || !this.draft) return;
+    const provider = this.copy(this.draft);
+    if (provider.kind === "jev" && !provider.model) provider.model = this.state.model.alias;
+    const expectedProviderIdentity = this.state.providerIdentity;
+    const draftIdentity = JSON.stringify(this.current());
+    typesafeBusy = true;
+    this.controls();
+    managedJudgmentController.render();
+    paintTypeSafeStatus(t("settings.judgment.checkingDraft", "현재 모델을 유지하면서 새 연결을 확인하는 중…"));
+    try {
+      const check = await this.probe(provider, expectedProviderIdentity, draftIdentity);
+      const model = check.model?.startsWith(`${check.candidateIdentity}:`)
+        ? check.model.slice(check.candidateIdentity.length + 1) : check.model ?? provider.model;
+      paintTypeSafeStatus(check.answered
+        ? t("settings.judgment.draftAnswered", "{{model}} 응답 확인 · 아직 적용하지 않았습니다. 확인하고 사용을 누르면 전환합니다.", { model })
+        : typesafeCheckFailure(check.failure), { standing: check.answered ? "connected" : "failed" });
+    } catch (error) {
+      paintTypeSafeStatus(this.failure(String(error)) ?? typesafeRefusal(error), { standing: "failed" });
+    } finally {
+      typesafeBusy = false;
+      this.controls();
+      managedJudgmentController.render();
+    }
   },
 
   async refreshModels() {
@@ -258,6 +326,17 @@ const judgmentProviderController = {
         return option;
       });
       el("judgment-model-options").replaceChildren(...options);
+      const listed = el("judgment-listed-model");
+      const unselectedOption = document.createElement("option");
+      unselectedOption.value = "";
+      unselectedOption.textContent = t("settings.judgment.chooseListed", "서버에서 읽은 모델 선택");
+      listed.replaceChildren(unselectedOption, ...this.modelIds.map((id) => {
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = id;
+        return option;
+      }));
+      el("judgment-listed-model-field").hidden = this.modelIds.length === 0;
       el("judgment-model-status").textContent = t("settings.judgment.modelsRead", "모델 {{count}}개를 읽었습니다. 선택한 ID는 그대로 유지합니다.", { count: this.modelIds.length });
     } catch (error) {
       if (sequence !== this.sequence) return;

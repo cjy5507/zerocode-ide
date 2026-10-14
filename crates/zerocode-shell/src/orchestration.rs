@@ -762,6 +762,55 @@ pub(crate) fn deliver_continuation(
     delivered
 }
 
+/// The panes a reseated worker's continuation is owed to and has not yet
+/// been answered at (t-52566) — from before the worker's seat is durable,
+/// the first moment the mail pointer can see the pane as the worker's,
+/// until the continuation's own delivery answers.
+///
+/// A zo's `SessionStart` lands as the rest it is ([`pane_turns`]) while its
+/// pane waits for its composer, a breath before the continuation begins the
+/// turn it carries. The wake road keeps its words in its own table
+/// ([`Host::wake_words_pending`]); the reseat kept none, and the pointer
+/// read that rest: its line queued behind the continuation, took the line
+/// inside the turn the continuation began, ran out its eight seconds against
+/// the spinner and came back to the person as words they had lost
+/// (2026-10-14, terms 11 and 14).
+fn continuations_owed() -> &'static Mutex<std::collections::HashSet<u32>> {
+    static OWED: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+    OWED.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// One reseat's hold on its pane for the continuation it owes (t-52566):
+/// taken before the seat is durable, let go when the reseat's walk is done
+/// with the pane, whichever way it ends. A worker owed no words holds
+/// nothing: its pane is written down at rest, and its mail is pointed at
+/// like any pane's.
+struct ContinuationOwed(Option<u32>);
+
+impl ContinuationOwed {
+    fn hold(term: u32, words: &str) -> Self {
+        if words.trim().is_empty() {
+            return Self(None);
+        }
+        continuations_owed()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(term);
+        Self(Some(term))
+    }
+}
+
+impl Drop for ContinuationOwed {
+    fn drop(&mut self) {
+        if let Some(term) = self.0 {
+            continuations_owed()
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .remove(&term);
+        }
+    }
+}
+
 fn continuation_status(
     outcome: Option<zerocode_pty::DeliveryOutcome>,
     idle: bool,
@@ -7641,6 +7690,17 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
         .keys()
         .cloned()
         .collect();
+    // The panes words are still on their way to (t-52566), copied out after
+    // the ledger like the turn facts: a reseated worker's continuation,
+    // owed from before its seat is durable, and whatever the window is
+    // typing at a pane or holds queued for it. A line typed at such a pane
+    // waits behind those words and takes the line inside whatever they
+    // begin.
+    let owed: std::collections::HashSet<u32> = continuations_owed()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clone();
+    let on_their_way = host.prompts_on_their_way();
     /// Advice one pass decided to type: the pane, and the line.
     struct Pointing {
         run: String,
@@ -7904,8 +7964,12 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                 /* A wake's words own this composer until the pane takes them
                  * (t-11537): the continuation says what is waiting, and a
                  * pointer beside it is the same news twice. Nothing is marked
-                 * — the next beat after the receipt reads the pane afresh. */
-                if host.wake_words_pending(term) {
+                 * — the next beat after the receipt reads the pane afresh.
+                 * A ledger reseat's continuation owns it the same way, from
+                 * before its seat is durable until its delivery answers
+                 * (t-52566): a zo's `SessionStart` reads as rest a breath
+                 * before that continuation begins its turn. */
+                if host.wake_words_pending(term) || owed.contains(&term) {
                     continue;
                 }
                 /* The first two conditions, and the line between them: a door
@@ -8219,6 +8283,15 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                         | Standing::Asking,
                     )
                     | None => {
+                        /* Words already on their way to this pane own its
+                         * line until they land (t-52566): a line typed now
+                         * would queue behind them and take the line inside
+                         * whatever they begin — a turn, which a pointer is
+                         * never typed into. Nothing is marked; the beat after
+                         * they land reads the pane afresh. */
+                        if on_their_way.contains(&term) {
+                            continue;
+                        }
                         /* The wall's door (t-6560), asked where this pass
                          * would type a FRESH line — new mail, a pane just
                          * become pointable, a wall whose window ran out — and
@@ -10679,6 +10752,11 @@ fn carried(
                     }
                     rang(true);
                     if let Some(prepared) = reseating.as_ref() {
+                        // The continuation owns this pane from before the
+                        // seat it is owed to is durable — the moment the mail
+                        // pointer can first see the pane as the worker's —
+                        // until its delivery answers (t-52566).
+                        let _owed = ContinuationOwed::hold(term, &prepared.prompt);
                         if let Err(why) =
                             actor.worker_reseated(&prepared.worker, team_id, &new_pane, now_ms)
                         {

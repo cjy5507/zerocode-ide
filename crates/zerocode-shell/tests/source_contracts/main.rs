@@ -33355,6 +33355,75 @@ mod tests {
         );
     }
 
+    /// A zo worker's briefing withheld at a refused launch is the
+    /// coordinator's words, not the person's (t-52566): the refusal used to
+    /// carry the whole briefing to the window, which put it on the person's
+    /// clipboard. It hands back what the pump's own settle would — the words
+    /// a delivery says are the person's, and nothing else.
+    #[test]
+    fn a_refused_zo_briefing_is_not_handed_to_the_person() {
+        let backend = shipped_backend();
+        let releasing = block_after(backend, "fn activate_zo_worker_delivery(");
+        assert!(
+            !releasing.contains("Some(delivery.text().to_string())")
+                && releasing.contains("prompt_transaction::words_to_hand_back("),
+            "a refused zo briefing still hands the coordinator's words to the \
+             person's clipboard:\n{releasing}"
+        );
+    }
+
+    /// Whose words a delivery carries is decided by the door that makes it,
+    /// and travels with it (t-52566). The person's own launch and an
+    /// automation of theirs say their words are theirs; a worker's briefing
+    /// says nothing, which is the window's. The queued copy carries the
+    /// door's answer like its guard, and the pump hands it to the window
+    /// with every settle and park, so the window can tell the person's lost
+    /// words from its own.
+    #[test]
+    fn whose_words_a_delivery_carries_travels_from_its_door_to_the_window() {
+        let backend = shipped_backend();
+        for (door, opens) in [
+            ("the person's launch", "fn launch_agent_tab("),
+            ("an automation's launch", "fn start_automation("),
+        ] {
+            assert!(
+                block_after(backend, opens).contains(".handing_back(true)"),
+                "{door} no longer hands the person's words back"
+            );
+        }
+        assert!(
+            !block_after(backend, "fn split(").contains(".handing_back("),
+            "a worker's briefing claims to be the person's words"
+        );
+        let typing = block_after(backend, "fn type_prompt_at_term(");
+        let building = block_after(backend, "fn prompt_delivery_for(");
+        assert!(
+            typing.contains("hands_back: readiness.hands_back(),")
+                && building
+                    .matches(".handing_back(readiness.hands_back())")
+                    .count()
+                    == 2,
+            "a send or its queued copy lost whose words it carries:\n{typing}\n{building}"
+        );
+        let transaction = include_str!("../../src/prompt_transaction.rs");
+        let (transaction, _) = transaction
+            .split_once("#[cfg(test)]")
+            .unwrap_or((transaction, ""));
+        assert!(
+            block_after(transaction, "pub(super) fn settle(")
+                .contains(".handing_back(next.hands_back)"),
+            "an activated queued prompt forgot whose words it carries"
+        );
+        let pumping = block_after(backend, "fn pump_loop(app: &AppHandle) {");
+        assert!(
+            pumping.matches("delivery.hands_back()").count() == 2
+                && pumping.contains("prompt_transaction::parked_event(term, theirs)")
+                && pumping
+                    .contains("prompt_transaction::settled_event(term, outcome, text, theirs)"),
+            "the pump no longer tells the window whose words settled or parked:\n{pumping}"
+        );
+    }
+
     /// The left column is a plane of its own, in both treatments.
     ///
     /// Orca established that the left column is a plane of its own. ZeroCode's

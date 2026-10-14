@@ -23,8 +23,10 @@ pub(crate) mod integration_prefs;
 pub(crate) mod managed_judgment;
 pub(crate) use managed_judgment::{
     managed_judgment_apply, managed_judgment_cancel, managed_judgment_check,
-    managed_judgment_install, managed_judgment_prepare_runtime, managed_judgment_remove,
-    managed_judgment_start, managed_judgment_status, managed_judgment_stop,
+    managed_judgment_inspect_source, managed_judgment_install, managed_judgment_install_source,
+    managed_judgment_prepare_model_runtime, managed_judgment_prepare_runtime,
+    managed_judgment_register_catalog, managed_judgment_remove, managed_judgment_start,
+    managed_judgment_status, managed_judgment_stop, managed_judgment_switch_model,
 };
 pub(crate) mod onboarding;
 pub(crate) mod project;
@@ -153,7 +155,7 @@ pub(crate) use typesafe::{
     save_typesafe_key, set_jev_enabled, set_jev_model, set_jev_review_enabled,
     set_route_classifier, set_summon_profiles, typesafe_settings,
 };
-pub(crate) use typesafe::{judgment_models, set_judgment_provider};
+pub(crate) use typesafe::{judgment_models, preflight_judgment_provider, set_judgment_provider};
 
 pub(crate) mod type_value;
 pub(crate) use type_value::{remove_type_value_key, save_type_value_key, type_value_keys};
