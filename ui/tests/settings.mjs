@@ -6134,6 +6134,12 @@ await test("현재 판단 상태는 실행·요청 허용·응답 점검·실제
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a native check was presented as task use");
   assert(!/\d/.test(await page.locator("#judgment-current-usage").textContent()), "usage without evidence invented a count or timestamp");
   assertEqual(await page.locator('.settings-pane[data-pane="judgment-models"] > header #typesafe-key-state').count(), 0, "the key/check badge still looks like the whole page's state");
+  const reopenedAt = backend.calls.length;
+  await page.evaluate(() => { setSettingsOpen(false); setSettingsOpen(true); });
+  await backend.waitForCall("judgment-status", "managed_judgment_status", reopenedAt);
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+  assertEqual(backend.calls.slice(reopenedAt).filter((call) => call.window_id === "judgment-status" && call.command === "typesafe_settings").length, 1, "reopening duplicated the settings read");
+  assertEqual(backend.calls.slice(reopenedAt).filter((call) => call.window_id === "judgment-status" && call.command === "managed_judgment_status").length, 1, "reopening did not share one current server read");
   const order = await page.evaluate(() => Boolean(document.getElementById("judgment-current-status").compareDocumentPosition(document.getElementById("judgment-model-changes")) & Node.DOCUMENT_POSITION_FOLLOWING));
   assert(order, "model changes precede current status");
   const before = backend.calls.length;
@@ -6248,6 +6254,7 @@ await test("판단 상태는 다섯 언어·두 테마·좁은 폭에서 읽을 
   const before = backend.calls.length;
   await page.keyboard.press("Enter");
   await backend.waitForCall("judgment-status", "typesafe_settings", before);
+  await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   return "five languages · light/dark · narrow layout · keyboard refresh";
 }));
 
