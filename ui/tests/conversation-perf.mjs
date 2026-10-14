@@ -898,7 +898,7 @@ export const SWITCH = Object.freeze({ turns: [400, 200], hops: 6, readUp: 0.5, s
  * wire tabs of one leaf (each its own wire id, a log that brings nothing new,
  * so no poll repaints between hops), and one hop — a press on a tab, read
  * as the person meets it. */
-async function standSwitcher(page) {
+export async function standSwitcher(page) {
   await page.evaluate(({ dressFrames, png }) => {
     if (window.__SWITCH__) return;
     let wire = 60;
