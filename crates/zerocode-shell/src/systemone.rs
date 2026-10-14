@@ -1048,7 +1048,7 @@ impl Wire {
             }
         };
         let request_bytes = prepared.body.len();
-        let (answer, version) = tauri::async_runtime::block_on(self.ask_once(
+        let (answer, version, attempted) = tauri::async_runtime::block_on(self.send_once(
             &provider,
             key.as_deref(),
             prepared,
@@ -1070,7 +1070,7 @@ impl Wire {
             .and_then(|body| serde_json::from_str::<Value>(body).ok())
             .and_then(|body| body.get("usage").cloned());
         let spent = Spent {
-            requests: 1,
+            requests: u32::from(attempted),
             redacted_lines,
             input_tokens: usage
                 .as_ref()
@@ -1082,7 +1082,7 @@ impl Wire {
                 .and_then(Value::as_u64),
             model: answer.as_deref().ok().and_then(answered_by),
             version,
-            route: Some(route),
+            route: attempted.then_some(route),
         };
         // Keep the actual wire usage even when a late reply loses permission.
         let answer = if answer.is_ok() && !self.response_is_current(row, workspace, &allowed, mode)
@@ -1146,20 +1146,31 @@ impl Wire {
         &self,
         provider: &Provider,
         key: Option<&str>,
-        mut prepared: Prepared,
+        prepared: Prepared,
         deadline: Instant,
     ) -> (Result<String, String>, Option<String>) {
+        let (answer, version, _) = self.send_once(provider, key, prepared, deadline).await;
+        (answer, version)
+    }
+
+    async fn send_once(
+        &self,
+        provider: &Provider,
+        key: Option<&str>,
+        mut prepared: Prepared,
+        deadline: Instant,
+    ) -> (Result<String, String>, Option<String>, bool) {
         if Instant::now() >= deadline {
-            return (Err(TIMEOUT.to_string()), None);
+            return (Err(TIMEOUT.to_string()), None, false);
         }
         let Some(lent) = self.socket_for(provider).lend() else {
-            return (Err(TRANSPORT.to_string()), None);
+            return (Err(TRANSPORT.to_string()), None, false);
         };
         let url = provider.request_url();
         // Key/consent checks, runtime startup and client construction spend
         // this call's budget too; the socket never starts a fresh deadline.
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return (Err(TIMEOUT.to_string()), None);
+            return (Err(TIMEOUT.to_string()), None, false);
         };
         let request = lent
             .client
@@ -1175,12 +1186,12 @@ impl Wire {
         let sent = request.send().await;
         let mut answer = match sent {
             Ok(answer) => answer,
-            Err(err) => return (Err(self.unanswered(&lent, &err, provider)), None),
+            Err(err) => return (Err(self.unanswered(&lent, &err, provider)), None, true),
         };
         let version = Some(version_word(answer.version()));
         let status = answer.status();
         if !status.is_success() {
-            return (Err(token_for(status.as_u16())), version);
+            return (Err(token_for(status.as_u16())), version, true);
         }
         let mut bytes = Vec::new();
         loop {
@@ -1188,13 +1199,14 @@ impl Wire {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
                 Err(error) => {
-                    return (Err(self.unanswered(&lent, &error, provider)), version);
+                    return (Err(self.unanswered(&lent, &error, provider)), version, true);
                 }
             };
             if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
                 return (
                     Err(judgment_provider::Refusal::TooLarge.token().to_string()),
                     version,
+                    true,
                 );
             }
             bytes.extend_from_slice(&chunk);
@@ -1204,6 +1216,7 @@ impl Wire {
                 .decode(&prepared, bytes)
                 .map_err(|reason| reason.token().to_string()),
             version,
+            true,
         )
     }
 

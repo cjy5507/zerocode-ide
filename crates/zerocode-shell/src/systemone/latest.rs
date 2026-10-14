@@ -188,10 +188,16 @@ fn tail_rows(ledger: &Path) -> Option<Vec<Value>> {
         Ok(_) => {}
     }
     let lines = zerocode_core::transcript::tail_lines(ledger)?;
-    Some(
-        lines
-            .iter()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect(),
-    )
+    if lines.is_empty() {
+        return None;
+    }
+    lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .filter(Value::is_object)
+        })
+        .collect()
 }

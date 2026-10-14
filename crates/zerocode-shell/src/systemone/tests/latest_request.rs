@@ -228,6 +228,41 @@ fn a_record_that_does_not_read_says_unknown() {
     );
 }
 
+#[test]
+fn malformed_records_cannot_prove_absence_or_an_older_requests_recency() {
+    let (_home, wire) = selecting(&local("http://127.0.0.1:9"));
+    let route = route_of(&wire).expect("a route");
+    let ledger = ledger_of(&wire, &STALL).expect("a ledger");
+    std::fs::create_dir_all(ledger.parent().expect("a folder")).expect("create folder");
+    for broken in ["{\"outcome\":", "null", "[]", "\"not a record\""] {
+        for prefix in [
+            String::new(),
+            format!("{}\n", sent(1, Some(&route), "answered")),
+        ] {
+            std::fs::write(&ledger, format!("{prefix}{broken}\n")).expect("write broken record");
+            let reading = latest::read(&wire, 2);
+            assert_eq!(
+                (reading.state, reading.reason, reading.last_request),
+                (State::Unknown, Some(Reason::RecordsUnreadable), None),
+                "a malformed retained record must leave the newest request unknown"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_tail_without_a_complete_record_is_unknown_not_no_requests() {
+    let (_home, wire) = selecting(&local("http://127.0.0.1:9"));
+    let ledger = ledger_of(&wire, &STALL).expect("a ledger");
+    std::fs::create_dir_all(ledger.parent().expect("a folder")).expect("create folder");
+    std::fs::write(&ledger, "x".repeat(300 * 1024)).expect("write oversized record");
+    let reading = latest::read(&wire, 2);
+    assert_eq!(
+        (reading.state, reading.reason, reading.last_request),
+        (State::Unknown, Some(Reason::RecordsUnreadable), None)
+    );
+}
+
 /// Settings that do not read name no model and no records: nothing is read.
 #[test]
 fn settings_that_do_not_read_name_no_identity_and_read_no_record() {

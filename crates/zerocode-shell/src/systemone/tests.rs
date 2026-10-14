@@ -439,6 +439,37 @@ fn a_sent_request_names_its_client_whatever_came_back_and_an_unsent_one_names_no
     assert!(endpoint.asked().is_empty());
 }
 
+#[test]
+fn expiration_before_sending_is_not_recorded_as_real_model_use() {
+    use zerocode_core::jev::STALL;
+
+    let home = tempfile::tempdir().expect("a home");
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {"jev": {"workspaces": [door::resolved_path(workspace.path())]}}})
+            .to_string(),
+    )
+    .expect("settings");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", "{}".to_string(), 0);
+    let wire = Wire::at(&endpoint.base(), "test-key", Some(settings));
+    let asked = wire.ask(
+        &STALL,
+        Some(workspace.path()),
+        request_body(&json!({"screen": "fixture"}), &json!({})),
+        Duration::ZERO,
+    );
+    assert_eq!(asked.answer, Err(TIMEOUT.to_string()));
+    assert_eq!(asked.spent.requests, 0, "no POST was attempted");
+    assert_eq!(asked.spent.route, None, "no route carried a request");
+    assert!(endpoint.asked().is_empty());
+    let mut row = json!({"at": 1, "outcome": TIMEOUT});
+    asked.spent.stamp(&mut row);
+    append_rows(&ledger_of(&wire, &STALL).expect("a ledger"), &[row]);
+    assert_eq!(latest::read(&wire, 2).state, latest::State::NoneObserved);
+}
+
 /// A row riding a request names the client that request went to, and a
 /// judgment asked in shards names one client only when every shard that sent
 /// a request sent it there (t-53792): a shard on another client, or one that
