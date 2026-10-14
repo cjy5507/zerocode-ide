@@ -2167,6 +2167,284 @@ mod tests {
         assert!(observed.contains("--app Fixture") && observed.contains("--window-id 52"));
     }
 
+    #[test]
+    fn a_timed_wait_keeps_context_out_of_its_native_command() {
+        for background in [false, true] {
+            let fields = input(json!({"action": "wait", "duration": 0.01, "app": "Fixture", "window_id": 41, "background": background}));
+            let argv = argv_for(&fields).expect("a timer does not inject input or read a window");
+            assert_eq!(argv, ["wait", "--ms", "10", "--json"]);
+            let command = zerocode_core::computer_use::parse_command(&argv).unwrap();
+            assert_eq!(command.method, ComputerMethod::Wait);
+            assert_eq!(command.params.get("ms"), Some(&json!(10)));
+            assert!(command.params.get("app").is_none() && command.params.get("windowId").is_none() && command.params.get("background").is_none());
+        }
+    }
+
+    #[test]
+    fn a_timed_wait_cannot_silently_turn_a_condition_into_a_delay() {
+        for condition in [json!({"text": "Ready"}), json!({"label": "Ready"}), json!({"role": "AXButton"}), json!({"ocr": true}), json!({"absent": true})] {
+            let mut fields = json!({"action": "wait", "duration": 0.01, "app": "Fixture", "window_id": 41});
+            fields.as_object_mut().unwrap().extend(condition.as_object().unwrap().clone());
+            let error = argv_for(&input(fields)).expect_err("a condition needs a conditional wait");
+            assert!(error.to_string().contains("wait_for"), "{error}");
+        }
+    }
+
+    #[test]
+    fn title_waits_cannot_claim_a_window_scope_the_executor_does_not_check() {
+        for scope in [json!({"app": "Fixture"}), json!({"app": "Fixture", "window_id": 41}), json!({"background": true})] {
+            let mut fields = json!({"action": "wait_for", "window": "Target document", "timeout_ms": 50});
+            fields.as_object_mut().unwrap().extend(scope.as_object().unwrap().clone());
+            assert!(argv_for(&input(fields)).is_err(), "title waits scan the window list");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_scoped_timed_wait_requires_no_window_receipt_or_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let response = run_computer(&json!({"action": "wait", "duration": 0.01, "app": "Fixture", "window_id": 41, "background": true}), &ctx, &road).unwrap();
+        let answer: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(answer["ok"], true);
+        assert_eq!(calls(dir.path()), ["wait"]);
+        assert!(answer["first_look"].is_null() && answer["looked_after"].is_null());
+        assert_eq!(staged(&ctx), 0);
+        assert_eq!(answer["result"]["said"], "wait --ms 10 --json");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batch_window_defaults_reach_inputs_and_conditional_waits_but_not_timer_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let reports = json!([
+            {"n": 1, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+            {"n": 2, "ok": true, "result": {}},
+            {"n": 3, "ok": true, "result": {"snapshot": {"window": {"id": 41}}}},
+            {"n": 4, "ok": true, "result": {"window": {"id": 41}}},
+        ]);
+        std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 4, "steps": reports}}).to_string()).unwrap();
+        let response = run_computer(&json!({"action": "batch", "app": "Fixture", "window_id": 41, "background": true, "steps": [
+            {"action": "left_click", "label": "Save", "role": "AXButton"},
+            {"action": "wait", "duration": 0.01},
+            {"action": "type", "app": "Fixture", "text": "fixture"},
+            {"action": "wait_for", "window_id": 41, "label": "Ready", "role": "AXStaticText", "timeout_ms": 50},
+        ]}), &ctx, &road).unwrap();
+        let answer: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(answer["ran"], 4);
+        assert_eq!(calls(dir.path()), ["observe", "batch", "observe"]);
+        let commands: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(dir.path().join("batch-commands")).unwrap()).unwrap();
+        for at in [0, 2, 3] {
+            let command = zerocode_core::computer_use::parse_command(&commands[at]).unwrap();
+            assert_eq!(command.params.get("app"), Some(&json!("Fixture")));
+            assert_eq!(command.params.get("windowId"), Some(&json!(41)));
+            assert_eq!(command.params.get("background"), Some(&json!(true)));
+        }
+        assert_eq!(commands[1], ["wait", "--ms", "10", "--json"]);
+        assert_eq!(zerocode_core::computer_use::parse_command(&commands[0]).unwrap().params.get("role"), Some(&json!("AXButton")));
+        assert_eq!(zerocode_core::computer_use::parse_command(&commands[3]).unwrap().params.get("role"), Some(&json!("AXStaticText")));
+        let observed = answer["looked_after"]["screen"]["said"].as_str().unwrap();
+        assert!(observed.contains("--app Fixture") && observed.contains("--window-id 41"));
+        assert!(!response.contains("window_scope_unverified"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_batches_accept_timers_between_explicitly_scoped_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let reports = json!([
+            {"n": 1, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+            {"n": 2, "ok": true, "result": {}},
+        ]);
+        std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 2, "steps": reports}}).to_string()).unwrap();
+        let response = run_computer(&json!({"action": "batch", "background": true, "steps": [
+            {"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Save"},
+            {"action": "wait", "duration": 0.01},
+        ]}), &ctx, &road).unwrap();
+        let answer: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(answer["ran"], 2);
+        assert_eq!(calls(dir.path()), ["batch", "observe"]);
+        let observed = answer["looked_after"]["screen"]["said"].as_str().unwrap();
+        assert!(observed.contains("--window-id 41"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timer_context_cannot_redirect_the_observation_after_an_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let reports = json!([
+            {"n": 1, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+            {"n": 2, "ok": true, "result": {}},
+        ]);
+        std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 2, "steps": reports}}).to_string()).unwrap();
+        let response = run_computer(&json!({"action": "batch", "steps": [
+            {"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Save"},
+            {"action": "wait", "app": "Fixture", "window_id": 52, "background": true, "duration": 0.01},
+        ]}), &ctx, &road).unwrap();
+        let answer: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(answer["ran"], 2);
+        let observed = answer["looked_after"]["screen"]["said"].as_str().unwrap();
+        assert!(observed.contains("--window-id 41") && !observed.contains("--window-id 52"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_mode_does_not_add_input_flags_to_non_input_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let reports = json!([
+            {"n": 1, "ok": true, "result": {}},
+            {"n": 2, "ok": true, "result": {}},
+            {"n": 3, "ok": true, "result": {}},
+        ]);
+        std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 3, "steps": reports}}).to_string()).unwrap();
+        let response = run_computer(&json!({"action": "batch", "background": true, "steps": [
+            {"action": "wait", "duration": 0.01, "background": true},
+            {"action": "sound_wait", "text": "notification", "timeout_ms": 50, "background": true},
+            {"action": "watch", "until": "quiet", "timeout_ms": 50, "background": true},
+        ]}), &ctx, &road).unwrap();
+        let answer: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(answer["ran"], 3);
+        assert_eq!(calls(dir.path()), ["batch"]);
+        assert!(answer["looked_after"].is_null());
+        let commands: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(dir.path().join("batch-commands")).unwrap()).unwrap();
+        for command in commands {
+            assert!(!command.iter().any(|word| matches!(word.as_str(), "--app" | "--window-id" | "--background")));
+            assert!(!zerocode_core::computer_use::parse_command(&command).unwrap().method.acts());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batch_scope_defaults_reject_conflicts_and_ambiguity_before_any_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        for extra in [
+            json!({"app": "OtherFixture"}), json!({"window_id": 52}), json!({"window_id": 0}), json!({"app": ""}),
+            json!({"background": false}), json!({"window": "Target document"}),
+        ] {
+            let mut step = json!({"action": "type", "text": "fixture"});
+            step.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let fields = json!({"action": "batch", "app": "Fixture", "window_id": 41, "background": true, "steps": [
+                {"action": "left_click", "label": "Save"}, step,
+            ]});
+            assert!(run_computer(&fields, &ctx, &road).is_err(), "conflicting default: {fields}");
+        }
+        for scope in [json!({"app": "Fixture"}), json!({"window_id": 41}), json!({"app": "Fixture", "window_id": 0}), json!({"app": " ", "window_id": 41}), json!({"window": "Target document"})] {
+            let mut fields = json!({"action": "batch", "steps": [{"action": "wait", "duration": 0.01}]});
+            fields.as_object_mut().unwrap().extend(scope.as_object().unwrap().clone());
+            assert!(run_computer(&fields, &ctx, &road).is_err(), "ambiguous default: {fields}");
+        }
+        let fields = json!({"action": "batch", "background": true, "steps": [{"action": "wait", "duration": 0.01, "background": false}]});
+        let error = run_computer(&fields, &ctx, &road).expect_err("an explicit foreground downgrade remains an error");
+        assert!(error.to_string().contains("foreground"));
+        assert!(calls(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_window_default_cannot_be_dropped_by_an_unsupported_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        for step in [
+            json!({"action": "watch", "until": "quiet", "timeout_ms": 50}),
+            json!({"action": "sound_wait", "text": "notification", "timeout_ms": 50}),
+            json!({"action": "activate", "app": "Fixture"}),
+            json!({"action": "hold_key", "text": "Tab", "duration": 0.01}),
+            json!({"action": "clipboard_write", "text": "fixture"}),
+        ] {
+            let fields = json!({"action": "batch", "app": "Fixture", "window_id": 41, "steps": [{"action": "left_click", "label": "Save"}, step]});
+            assert!(run_computer(&fields, &ctx, &road).is_err(), "scope cannot be ignored: {fields}");
+        }
+        assert!(calls(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batch_defaults_keep_coordinate_index_mark_and_late_validation_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        for step in [
+            json!({"action": "left_click", "coordinate": [20, 40]}),
+            json!({"action": "left_click_drag", "start_coordinate": [20, 40], "coordinate": [30, 50]}),
+            json!({"action": "left_click", "element_index": 3}),
+            json!({"action": "left_click", "mark": 3}),
+            json!({"action": "wait", "duration": -1}),
+            json!({"action": "left_click"}),
+            json!({"action": "batch", "steps": [{"action": "wait", "duration": 0.01}]}),
+        ] {
+            let fields = json!({"action": "batch", "app": "Fixture", "window_id": 41, "steps": [{"action": "left_click", "label": "Save"}, step]});
+            assert!(run_computer(&fields, &ctx, &road).is_err(), "unsafe step: {fields}");
+        }
+        assert!(calls(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_conditional_wait_still_needs_its_selected_windows_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let reports = json!([
+            {"n": 1, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+            {"n": 2, "ok": true, "result": {}},
+        ]);
+        std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 2, "steps": reports}}).to_string()).unwrap();
+        let response = run_computer(&json!({"action": "batch", "app": "Fixture", "window_id": 41, "background": true, "steps": [
+            {"action": "left_click", "label": "Save"},
+            {"action": "wait_for", "label": "Ready", "timeout_ms": 50},
+        ]}), &ctx, &road).unwrap();
+        let receipt: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(receipt["input_dispatched"], true);
+        assert_eq!(receipt["do_not_repeat"], true);
+        assert_eq!(receipt["completion_verified"], false);
+        assert_eq!(receipt["ran"], 2);
+        assert!(receipt["result"].is_null());
+        assert!(response.contains("window_scope_unverified"));
+        assert_eq!(calls(dir.path()), ["observe", "batch"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batch_defaults_keep_partial_execution_and_keyboard_receiver_refusals() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        std::fs::write(dir.path().join("batch"), json!({
+            "ok": false, "error": {"code": "focus_changed", "message": "the background keyboard receiver cannot be verified in the target window"},
+            "result": {"ran": 2, "of": 3, "refusedAt": 3, "steps": [
+                {"n": 1, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+                {"n": 2, "ok": true, "result": {}},
+                {"n": 3, "ok": false, "error": {"code": "focus_changed", "message": "receiver unverified"}},
+            ]},
+        }).to_string()).unwrap();
+        let response = run_computer(&json!({"action": "batch", "app": "Fixture", "window_id": 41, "background": true, "steps": [
+            {"action": "left_click", "label": "Editor", "role": "AXTextArea"},
+            {"action": "wait", "duration": 0.01},
+            {"action": "type", "text": "fixture"},
+        ]}), &ctx, &road).unwrap();
+        let answer: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(answer["ok"], false);
+        assert_eq!(answer["ran"], 2);
+        assert_eq!(answer["refused"]["step"], 3);
+        assert_eq!(answer["refused"]["action"], "type");
+        assert_eq!(answer["refused"]["code"], "focus_changed");
+        assert_eq!(answer["steps"][2]["ok"], false);
+        assert!(answer["looked_after"]["screen"]["said"].as_str().unwrap().contains("--window-id 41"));
+        assert_eq!(calls(dir.path()), ["batch", "observe"]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_batch_never_discloses_a_different_windows_step_result_or_invites_repeating_input() {
