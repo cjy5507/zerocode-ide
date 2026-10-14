@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -1768,8 +1770,12 @@ pub fn provider_catalog() -> &'static [ProviderCatalogEntry] {
 /// Ids the catalog does not carry fall through to the gated resolver.
 #[must_use]
 pub fn resolve_catalog_alias(model: &str) -> String {
+    resolve_catalog_alias_in(model_registry(), model)
+}
+
+fn resolve_catalog_alias_in(registry: &[ProviderCatalogEntry], model: &str) -> String {
     let trimmed = model.trim();
-    model_registry()
+    registry
         .iter()
         .find(|entry| entry.alias.eq_ignore_ascii_case(trimmed))
         .map_or_else(
@@ -1792,12 +1798,15 @@ pub fn resolve_catalog_alias(model: &str) -> String {
 /// (`claude-opus-4-8`).
 #[must_use]
 pub fn family_alias_for(model: &str) -> Option<&'static str> {
-    let canonical = resolve_catalog_alias(model);
+    // One catalog for both questions: a publish between them would resolve
+    // `model` in one and look for its alias in the other.
+    let registry = model_registry();
+    let canonical = resolve_catalog_alias_in(registry, model);
     let canonical = canonical.trim();
     if canonical.is_empty() {
         return None;
     }
-    model_registry()
+    registry
         .iter()
         .filter(|entry| entry.canonical_model_id.eq_ignore_ascii_case(canonical))
         .map(|entry| entry.alias)
@@ -1909,6 +1918,73 @@ static MODEL_REGISTRY_STORE: RwLock<Option<&'static [ProviderCatalogEntry]>> = R
 /// runtime is rebuilt several times per session) neither rebuild nor re-leak.
 static MODEL_REGISTRY_APPLIED: RwLock<Option<String>> = RwLock::new(None);
 
+/// The host's loader of the catalog this process declares
+/// ([`install_model_catalog_loader`]).
+static MODEL_CATALOG_LOADER: OnceLock<fn()> = OnceLock::new();
+
+/// Whether the first catalog question has run the loader.
+static MODEL_CATALOG_LOADED: AtomicBool = AtomicBool::new(false);
+
+/// Held while the loader runs, so a question asked on another thread meanwhile
+/// waits for the catalog instead of answering from the seed.
+static MODEL_CATALOG_LOADING: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// Set on the thread that runs the loader: the questions the loader itself
+    /// asks are answered from the shipped seed it layers the catalog over.
+    static LOADING_ON_THIS_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Install the host's loader of the catalog this process declares — its
+/// settings, what discovery found, what a parent process handed it — which
+/// publishes it through [`refresh_model_registry_from_json`]. The first catalog
+/// question runs it, once, before anything is answered.
+///
+/// Without it the first questions were answered from the shipped seed alone
+/// and the later ones from the catalog the host published: two catalogs in one
+/// process, and which one a caller saw depended on who asked first (t-44087).
+/// The seed is what the catalog is built on, never an answer of its own.
+/// Install it before anything can ask; a second install is ignored.
+pub fn install_model_catalog_loader(loader: fn()) {
+    let _ = MODEL_CATALOG_LOADER.set(loader);
+}
+
+/// Marks this thread as running the loader, and the loader as run once this
+/// is dropped — a loader that panicked is not run again.
+struct LoadingOnThisThread;
+
+impl LoadingOnThisThread {
+    fn enter() -> Self {
+        LOADING_ON_THIS_THREAD.with(|loading| loading.set(true));
+        Self
+    }
+}
+
+impl Drop for LoadingOnThisThread {
+    fn drop(&mut self) {
+        LOADING_ON_THIS_THREAD.with(|loading| loading.set(false));
+        MODEL_CATALOG_LOADED.store(true, Ordering::Release);
+    }
+}
+
+/// Run the installed loader, unless it has run.
+fn load_model_catalog() {
+    let Some(loader) = MODEL_CATALOG_LOADER.get() else {
+        return;
+    };
+    if MODEL_CATALOG_LOADED.load(Ordering::Acquire) {
+        return;
+    }
+    let _turn = MODEL_CATALOG_LOADING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if MODEL_CATALOG_LOADED.load(Ordering::Acquire) {
+        return;
+    }
+    let _loading = LoadingOnThisThread::enter();
+    loader();
+}
+
 fn read_registry_store() -> Option<&'static [ProviderCatalogEntry]> {
     *MODEL_REGISTRY_STORE
         .read()
@@ -2004,6 +2080,10 @@ fn model_registry() -> &'static [ProviderCatalogEntry] {
     if let Some(registry) = read_registry_store() {
         return registry;
     }
+    if LOADING_ON_THIS_THREAD.with(Cell::get) {
+        return builtin_provider_catalog();
+    }
+    load_model_catalog();
     let mut guard = MODEL_REGISTRY_STORE
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

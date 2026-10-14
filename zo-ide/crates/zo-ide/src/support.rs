@@ -402,6 +402,18 @@ pub(crate) fn test_env_mutex() -> &'static std::sync::Mutex<()> {
         // any config folder a test sets (t-11045). Tests that want one set it
         // themselves.
         std::env::remove_var(api::managed_account::CLAUDE_SECURE_STORAGE_DIR_ENV);
+        // A pane hands whatever it starts the catalog its zo published (the
+        // bridge variables): a test run from one would answer from the
+        // person's catalog. Tests that want a catalog publish their own.
+        for variable in crate::model_wire_env::BRIDGE_VARIABLES {
+            std::env::remove_var(variable);
+        }
+        // Nor does a test ask the providers for their model lists: a
+        // connection refreshes discovery, and the refresh asks each source
+        // over the network with whatever credential the process finds.
+        std::env::set_var("ZO_DISABLE_MODEL_DISCOVERY", "1");
+        // The first catalog question loads the catalog, as `main` arranges.
+        api::install_model_catalog_loader(crate::runtime_support::load_model_catalog);
         std::sync::Mutex::new(())
     })
 }
@@ -417,6 +429,15 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     // 세컨드 브레인 시험은 이 락 아래에서 스스로 다시 심는다.
     std::env::remove_var(runtime::second_brain::VAULT_ENV);
     guard
+}
+
+/// Readies the test harness (`test_env_mutex`: a temporary home, no catalog
+/// inherited from the pane that started the run, discovery off) before a
+/// catalog source is read or asked, for a test that never took the lock. A
+/// shipped build has no harness, and this does nothing there.
+pub(crate) fn test_env_ready() {
+    #[cfg(test)]
+    test_env_mutex();
 }
 
 #[cfg(test)]
