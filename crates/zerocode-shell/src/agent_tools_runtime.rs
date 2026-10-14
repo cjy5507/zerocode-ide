@@ -7396,8 +7396,14 @@ pub(super) fn executor_refused(
     dispatched: &mut crate::browser_workspace::Dispatch,
     refusal: cmd::browser::BrowserRefusal,
 ) -> zerocode_hookd::TeamAnswer {
-    *dispatched = crate::browser_workspace::Dispatch::Uncertain;
-    browser_refused(format!("zerocode-browser: {}\n", String::from(refusal)))
+    match refusal {
+        cmd::browser::BrowserRefusal::Unsent(why) => {
+            refused_unsent(dispatched, format!("zerocode-browser: {why}\n"))
+        }
+        cmd::browser::BrowserRefusal::Sent(why) => {
+            browser_refused(format!("zerocode-browser: {why}\n"))
+        }
+    }
 }
 
 pub(super) fn browser_screenshot_refused(json: bool, message: &str) -> zerocode_hookd::TeamAnswer {
