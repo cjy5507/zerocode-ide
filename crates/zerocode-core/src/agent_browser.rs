@@ -117,6 +117,11 @@ pub fn observes(verb: &str) -> bool {
     matches!(verb, "read" | "marks" | "fields" | "screenshot")
 }
 
+#[must_use]
+pub fn reads_history(verb: &str) -> bool {
+    matches!(verb, "console" | "network" | "diagnose")
+}
+
 /// Bind a selected action to an already completed observation. Missing
 /// input stays missing; this helper never reads the current workspace state.
 pub fn with_workspace_revision(argv: &mut Vec<String>, revision: Option<u64>) {

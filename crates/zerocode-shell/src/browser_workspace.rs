@@ -226,6 +226,7 @@ struct State {
     owner: Option<String>,
     popup_pending: bool,
     closed: bool,
+    person_controlled: bool,
 }
 
 struct Workspace {
@@ -358,6 +359,7 @@ impl Workspaces {
                 owner: owner.map(str::to_string),
                 popup_pending: false,
                 closed: false,
+                person_controlled: false,
             }),
             drained: Notify::new(),
         });
@@ -536,6 +538,9 @@ impl Workspaces {
         }
         if verb == "eval" {
             return Err("workspace_eval_refused: 전용 작업 브라우저는 임의 eval을 받지 않습니다 — read, fields, fill을 사용하세요".to_string());
+        }
+        if state.person_controlled && zerocode_core::agent_browser::reads_history(verb) {
+            return Err("workspace_history_unsupported: 사람이 조작한 작업 탭의 콘솔·요청 기록은 에이전트에게 주지 않습니다 — 새 작업 탭을 여세요".to_string());
         }
         if row.changes_page && expected_revision.is_none() {
             return Err("workspace_revision_required: 작업 브라우저 변경에는 원관측의 workspaceRevision이 필요합니다".to_string());
@@ -1229,6 +1234,7 @@ impl Transition {
             }
             next_revision(&mut state)?;
             state.mode = self.target;
+            state.person_controlled |= self.target == Mode::Human;
             if let Some(owner) = self.owner.take() {
                 state.owner = Some(owner);
             }
