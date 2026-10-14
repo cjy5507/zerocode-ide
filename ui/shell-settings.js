@@ -6941,7 +6941,7 @@ async function refreshTypeSafe() {
         const superseded = held?.instanceId === snapshot?.instanceId && held?.revision > snapshot?.revision;
         managedJudgmentController.statusError = Boolean(managed.error || (!superseded && !managedJudgmentController.accept(snapshot, true)));
       }
-      if (settings.error || !settings.value?.provider || !settings.value?.providerIdentity) {
+      if (settings.error || !settings.value || typeof settings.value !== "object" || Array.isArray(settings.value)) {
         typesafeRefreshFailed = true;
         typesafeState = null;
         typesafeChecked = null;
