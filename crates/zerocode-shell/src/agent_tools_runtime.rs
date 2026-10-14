@@ -6595,7 +6595,8 @@ fn read_words(report: cmd::browser::BrowserReadReport) -> String {
 /// pane's last judged read.
 fn typed_answer(
     label: &str,
-    typed: Result<cmd::browser::BrowserInputReport, String>,
+    typed: Result<cmd::browser::BrowserInputReport, cmd::browser::BrowserRefusal>,
+    dispatched: &mut crate::browser_workspace::Dispatch,
 ) -> zerocode_hookd::TeamAnswer {
     if let Ok(report) = &typed {
         crate::browser_read::label_press(label, "type", report);
@@ -6605,7 +6606,20 @@ fn typed_answer(
             "{}\n",
             cmd::browser::input_said(cmd::browser::TYPED_SAID, &report)
         )),
-        Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+        Err(refusal) => executor_refused(dispatched, refusal),
+    }
+}
+
+pub(super) fn found_answer(
+    found: Result<Option<serde_json::Value>, cmd::browser::BrowserRefusal>,
+    dispatched: &mut crate::browser_workspace::Dispatch,
+) -> zerocode_hookd::TeamAnswer {
+    match found {
+        Ok(found) => browser_said(format!(
+            "{}\n",
+            found.unwrap_or_else(|| json!({ "count": 0, "index": 0 }))
+        )),
+        Err(refusal) => executor_refused(dispatched, refusal),
     }
 }
 
@@ -6978,7 +6992,7 @@ async fn dispatch_browser_command(
             };
             match cmd::browser::automate_scroll(app, &state, &argv[1], &target).await {
                 Ok((x, y)) => browser_said(format!("스크롤 x={x} y={y}\n")),
-                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+                Err(refusal) => executor_refused(dispatched, refusal),
             }
         }
         ("diagnose", _) => {
@@ -7000,15 +7014,10 @@ async fn dispatch_browser_command(
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }
         }
-        ("find", 3) => {
-            match cmd::browser::automate_find(app, &state, &argv[1], &argv[2], true, false).await {
-                Ok(found) => browser_said(format!(
-                    "{}\n",
-                    found.unwrap_or_else(|| json!({ "count": 0, "index": 0 }))
-                )),
-                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
-            }
-        }
+        ("find", 3) => found_answer(
+            cmd::browser::automate_find(app, &state, &argv[1], &argv[2], true, false).await,
+            dispatched,
+        ),
         ("goto", 3) => {
             let url = match browsable(&argv[2]) {
                 Ok(parsed) => parsed,
@@ -7052,7 +7061,7 @@ async fn dispatch_browser_command(
                         serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string())
                     ),
                 ),
-                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+                Err(refusal) => executor_refused(dispatched, refusal),
             }
         }
         // `read <label> [css]` reads the page or a selector; `read <label>
@@ -7121,7 +7130,7 @@ async fn dispatch_browser_command(
                             let answer = cmd::browser::settle_later_json(&report, look.as_ref());
                             browser_said(format!("{answer}\n"))
                         }
-                        Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+                        Err(refusal) => executor_refused(dispatched, refusal),
                     };
                 }
                 Err(why) => {
@@ -7146,7 +7155,7 @@ async fn dispatch_browser_command(
                         None => browser_said(format!("{sentence}\n")),
                     }
                 }
-                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+                Err(refusal) => executor_refused(dispatched, refusal),
             }
         }
         // `type <label> <css> <text>` types with its keys; `type <label> <css>
@@ -7158,6 +7167,7 @@ async fn dispatch_browser_command(
             typed_answer(
                 label,
                 cmd::browser::automate_type(app, &state, label, css, text, road).await,
+                dispatched,
             )
         }
         ("type", 5) if argv[3] == zerocode_core::agent_browser::TYPE_VALUE_FLAG => {
@@ -7166,6 +7176,7 @@ async fn dispatch_browser_command(
             typed_answer(
                 label,
                 cmd::browser::automate_type(app, &state, label, css, text, road).await,
+                dispatched,
             )
         }
         ("wait", 3) | ("wait", 4) => {
@@ -7328,7 +7339,7 @@ async fn dispatch_browser_command(
                         page_refused(&label, words)
                     }
                 }
-                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+                Err(refusal) => executor_refused(dispatched, refusal),
             }
         }
         ("screenshot", _) => {
@@ -7379,6 +7390,14 @@ fn refused_unsent(
 ) -> zerocode_hookd::TeamAnswer {
     *dispatched = crate::browser_workspace::Dispatch::NotSent;
     browser_refused(stderr)
+}
+
+pub(super) fn executor_refused(
+    dispatched: &mut crate::browser_workspace::Dispatch,
+    refusal: cmd::browser::BrowserRefusal,
+) -> zerocode_hookd::TeamAnswer {
+    *dispatched = crate::browser_workspace::Dispatch::Uncertain;
+    browser_refused(format!("zerocode-browser: {}\n", String::from(refusal)))
 }
 
 pub(super) fn browser_screenshot_refused(json: bool, message: &str) -> zerocode_hookd::TeamAnswer {

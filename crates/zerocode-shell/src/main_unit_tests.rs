@@ -24129,13 +24129,24 @@ mod browser_look_settle_pin {
             "the look finishes a held settle by the one settle road before it reads:\n{look}"
         );
         let press = block("async fn press_mark(");
-        let refused = press
+        let checked = press
+            .find("pressable_mark(label, mark_n)")
+            .expect("the press checks its mark first");
+        let minted = press
+            .find("browser_pane_of(app, state, label)")
+            .expect("the press finds its pane");
+        assert!(
+            checked < minted,
+            "the mark is checked before the pane is asked for:\n{press}"
+        );
+        let pressable = block("pub(crate) fn pressable_mark(");
+        let refused = pressable
             .find("settle_held(label)")
             .expect("a held settle refuses");
-        let pinned = press.find("recall_table(").expect("the pin is read");
+        let pinned = pressable.find("recall_table(").expect("the pin is read");
         assert!(
             refused < pinned,
-            "a held settle refuses the press before the pin is read:\n{press}"
+            "a held settle refuses the press before the pin is read:\n{pressable}"
         );
     }
 }

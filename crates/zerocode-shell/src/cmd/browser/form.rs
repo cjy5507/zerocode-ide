@@ -2481,28 +2481,34 @@ pub(crate) async fn automate_fill(
     state: &AppState,
     label: &str,
     entries: Vec<FillEntry>,
-) -> Result<FillReport, String> {
-    let pane = browser_pane_of(app, state, label)?;
-    let known = known_form(label);
-    let buttons = known_buttons(label);
-    let report = fill_passes(
-        entries,
-        known.clone(),
-        Duration::from_millis(BROWSER_FILL_PENDING_MS),
-        BROWSER_WAIT_POLL,
-        |asked, expect| {
-            let pane = pane.clone();
-            async move { fill_pass_on(&pane, asked, expect).await }
+) -> Result<FillReport, BrowserRefusal> {
+    send_after_checks(
+        Ok(()),
+        || browser_pane_of(app, state, label),
+        |(), pane| async move {
+            let known = known_form(label);
+            let buttons = known_buttons(label);
+            let report = fill_passes(
+                entries,
+                known.clone(),
+                Duration::from_millis(BROWSER_FILL_PENDING_MS),
+                BROWSER_WAIT_POLL,
+                |asked, expect| {
+                    let pane = pane.clone();
+                    async move { fill_pass_on(&pane, asked, expect).await }
+                },
+            )
+            .await?;
+            if report.stale {
+                return Ok(report);
+            }
+            let report = report.against(known.as_deref(), &buttons);
+            remember_form(label, &report.fingerprint);
+            remember_buttons(label, &report.actions);
+            Ok::<_, String>(report)
         },
     )
-    .await?;
-    if report.stale {
-        return Ok(report);
-    }
-    let report = report.against(known.as_deref(), &buttons);
-    remember_form(label, &report.fingerprint);
-    remember_buttons(label, &report.actions);
-    Ok(report)
+    .await
 }
 
 /// One pass of a fill on a pane's page: the write; the settle after a press

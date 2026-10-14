@@ -10152,7 +10152,9 @@ mod tests {
             );
             let execution = block_after(browser, &format!("async fn {executor}("));
             assert!(
-                execution.contains("browser_pane_of(app, state, label)?"),
+                execution.contains("browser_pane_of(app, state, label)?")
+                    || (execution.contains("send_after_checks(")
+                        && execution.contains("|| browser_pane_of(app, state, label),")),
                 "{executor} can act without a live minted pane:\n{execution}"
             );
         }

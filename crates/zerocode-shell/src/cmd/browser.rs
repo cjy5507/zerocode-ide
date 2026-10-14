@@ -325,6 +325,34 @@ async fn page_json(
     decode_page_json(&raw)
 }
 
+#[derive(Debug)]
+pub(crate) enum BrowserRefusal {
+    Unsent(String),
+    Sent(String),
+}
+
+impl From<BrowserRefusal> for String {
+    fn from(refusal: BrowserRefusal) -> Self {
+        match refusal {
+            BrowserRefusal::Unsent(why) | BrowserRefusal::Sent(why) => why,
+        }
+    }
+}
+
+pub(crate) async fn send_after_checks<C, P, T, F, Fut>(
+    checked: Result<C, String>,
+    pane: impl FnOnce() -> Result<P, String>,
+    send: F,
+) -> Result<T, BrowserRefusal>
+where
+    F: FnOnce(C, P) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let checked = checked.map_err(BrowserRefusal::Unsent)?;
+    let pane = pane().map_err(BrowserRefusal::Unsent)?;
+    send(checked, pane).await.map_err(BrowserRefusal::Sent)
+}
+
 pub(crate) fn note_navigation_request(state: &AppState, label: &str) {
     if let Some(record) = state.browser_records().get_mut(label) {
         record.nav.requested();
@@ -664,7 +692,7 @@ pub(crate) fn typed_report(
     input_report(value, road.methods())
 }
 
-fn checked_selector(selector: &str) -> Result<(), String> {
+pub(crate) fn checked_selector(selector: &str) -> Result<(), String> {
     if selector.trim().is_empty() || selector.chars().count() > BROWSER_SELECTOR_CAP {
         Err("셀렉터는 1~4000자여야 합니다".to_string())
     } else {
@@ -2371,8 +2399,12 @@ pub(crate) async fn browser_find(
     from_the_main_webview(&webview)?;
     let operation =
         super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
-    let result =
-        async { automate_find(&app, &state, &label, &query, forward, match_case).await }.await;
+    let result = async {
+        automate_find(&app, &state, &label, &query, forward, match_case)
+            .await
+            .map_err(String::from)
+    }
+    .await;
     super::browser_workspace::finish_person_control(operation, result)
 }
 
@@ -2385,17 +2417,23 @@ pub(crate) async fn automate_find(
     query: &str,
     forward: bool,
     match_case: bool,
-) -> Result<Option<serde_json::Value>, String> {
-    let pane = browser_pane_of(app, state, label)?;
-    let needle = serde_json::to_string(query).unwrap_or_else(|_| "\"\"".to_string());
-    let fwd = if forward { "true" } else { "false" };
-    let cased = if match_case { "true" } else { "false" };
-    let script = format!(
-        "(function(){{{install}; if(!{needle})return JSON.stringify({{count:0,index:0}});          return JSON.stringify(window.__zerocodeFind.run({needle},{fwd},{cased}));}})()",
-        install = BROWSER_FIND_INSTALL,
-    );
-    let parsed = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-    Ok(find_tally(&parsed))
+) -> Result<Option<serde_json::Value>, BrowserRefusal> {
+    send_after_checks(
+        Ok(()),
+        || browser_pane_of(app, state, label),
+        |(), pane| async move {
+            let needle = serde_json::to_string(query).unwrap_or_else(|_| "\"\"".to_string());
+            let fwd = if forward { "true" } else { "false" };
+            let cased = if match_case { "true" } else { "false" };
+            let script = format!(
+                "(function(){{{install}; if(!{needle})return JSON.stringify({{count:0,index:0}});          return JSON.stringify(window.__zerocodeFind.run({needle},{fwd},{cased}));}})()",
+                install = BROWSER_FIND_INSTALL,
+            );
+            let parsed = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+            Ok::<_, String>(find_tally(&parsed))
+        },
+    )
+    .await
 }
 
 /// The find answer as the host builds it: two whole numbers and nothing
@@ -2471,7 +2509,9 @@ pub(crate) async fn browser_scroll(
         super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
     let result = async {
         let target = zerocode_core::agent_browser::parse_scroll(&target)?;
-        automate_scroll(&app, &state, &label, &target).await
+        automate_scroll(&app, &state, &label, &target)
+            .await
+            .map_err(String::from)
     }
     .await;
     super::browser_workspace::finish_person_control(operation, result)
@@ -2482,9 +2522,31 @@ pub(crate) async fn automate_scroll(
     state: &AppState,
     label: &str,
     target: &zerocode_core::agent_browser::ScrollTarget,
-) -> Result<(i64, i64), String> {
+) -> Result<(i64, i64), BrowserRefusal> {
+    send_after_checks(
+        scroll_request(target),
+        || browser_pane_of(app, state, label),
+        |request, pane| async move {
+            let script = automation_script(&request, BROWSER_SCROLL_BODY);
+            let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+            let value = page_value(reply)?;
+            let axis = |name: &str| {
+                value
+                    .get(name)
+                    .and_then(serde_json::Value::as_i64)
+                    .ok_or_else(|| "스크롤 좌표를 읽을 수 없습니다".to_string())
+            };
+            Ok::<_, String>((axis("x")?, axis("y")?))
+        },
+    )
+    .await
+}
+
+pub(crate) fn scroll_request(
+    target: &zerocode_core::agent_browser::ScrollTarget,
+) -> Result<serde_json::Value, String> {
     use zerocode_core::agent_browser::ScrollTarget;
-    let request = match target {
+    Ok(match target {
         ScrollTarget::Top => serde_json::json!({ "kind": "top" }),
         ScrollTarget::Bottom => serde_json::json!({ "kind": "bottom" }),
         ScrollTarget::PageUp | ScrollTarget::PageDown => serde_json::json!({
@@ -2497,18 +2559,7 @@ pub(crate) async fn automate_scroll(
             checked_selector(selector)?;
             serde_json::json!({ "kind": "selector", "selector": selector })
         }
-    };
-    let pane = browser_pane_of(app, state, label)?;
-    let script = automation_script(&request, BROWSER_SCROLL_BODY);
-    let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-    let value = page_value(reply)?;
-    let axis = |name: &str| {
-        value
-            .get(name)
-            .and_then(serde_json::Value::as_i64)
-            .ok_or_else(|| "스크롤 좌표를 읽을 수 없습니다".to_string())
-    };
-    Ok((axis("x")?, axis("y")?))
+    })
 }
 
 const BROWSER_SCROLL_BODY: &str = r#"
@@ -2746,7 +2797,12 @@ pub(crate) async fn browser_eval(
     from_the_main_webview(&webview)?;
     let operation =
         super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
-    let result = async { automate_eval(&app, &state, &label, &expression).await }.await;
+    let result = async {
+        automate_eval(&app, &state, &label, &expression)
+            .await
+            .map_err(String::from)
+    }
+    .await;
     super::browser_workspace::finish_person_control(operation, result)
 }
 
@@ -2755,14 +2811,19 @@ pub(crate) async fn automate_eval(
     state: &AppState,
     label: &str,
     expression: &str,
-) -> Result<serde_json::Value, String> {
-    checked_expression(expression)?;
-    let pane = browser_pane_of(app, state, label)?;
-    let script = eval_script(expression, &inlined_eval_body(expression));
-    let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE)
-        .await
-        .map_err(inlined_eval_failure)?;
-    Ok(sanitize_eval_value(page_value(reply)?, 0))
+) -> Result<serde_json::Value, BrowserRefusal> {
+    send_after_checks(
+        checked_expression(expression),
+        || browser_pane_of(app, state, label),
+        |(), pane| async move {
+            let script = eval_script(expression, &inlined_eval_body(expression));
+            let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE)
+                .await
+                .map_err(inlined_eval_failure)?;
+            Ok::<_, String>(sanitize_eval_value(page_value(reply)?, 0))
+        },
+    )
+    .await
 }
 
 /// The expression INLINED into the privileged script (§2.4).
@@ -3263,7 +3324,12 @@ pub(crate) async fn browser_click(
     from_the_main_webview(&webview)?;
     let operation =
         super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
-    let result = async { automate_click(&app, &state, &label, &selector).await }.await;
+    let result = async {
+        automate_click(&app, &state, &label, &selector)
+            .await
+            .map_err(String::from)
+    }
+    .await;
     super::browser_workspace::finish_person_control(operation, result)
 }
 
@@ -3272,15 +3338,20 @@ pub(crate) async fn automate_click(
     state: &AppState,
     label: &str,
     selector: &str,
-) -> Result<BrowserInputReport, String> {
-    checked_selector(selector)?;
-    let pane = browser_pane_of(app, state, label)?;
-    // A pane whose agent has read a form is pressed in it: the page is waited for and read, and said
-    // against that form. A pane that has read none is pressed as it was, with no read of its own.
-    match form::known_form(label) {
-        Some(known) => form::press_in_form(&pane, label, selector, known).await,
-        None => press(&pane, selector, None).await,
-    }
+) -> Result<BrowserInputReport, BrowserRefusal> {
+    send_after_checks(
+        checked_selector(selector),
+        || browser_pane_of(app, state, label),
+        |(), pane| async move {
+            // A pane whose agent has read a form is pressed in it: the page is waited for and read, and said
+            // against that form. A pane that has read none is pressed as it was, with no read of its own.
+            match form::known_form(label) {
+                Some(known) => form::press_in_form(&pane, label, selector, known).await,
+                None => press(&pane, selector, None).await,
+            }
+        },
+    )
+    .await
 }
 
 /// The one press: the click's page script by a selector, answered as the
@@ -4129,7 +4200,7 @@ pub(crate) async fn automate_click_mark(
     state: &AppState,
     label: &str,
     mark_n: usize,
-) -> Result<BrowserInputReport, String> {
+) -> Result<BrowserInputReport, BrowserRefusal> {
     let PressedMark {
         pane,
         pin,
@@ -4155,7 +4226,7 @@ pub(crate) async fn automate_click_mark_later(
     state: &AppState,
     label: &str,
     mark_n: usize,
-) -> Result<(BrowserInputReport, Option<BrowserLook>), String> {
+) -> Result<(BrowserInputReport, Option<BrowserLook>), BrowserRefusal> {
     let PressedMark {
         pane,
         pin,
@@ -4236,7 +4307,45 @@ async fn press_mark(
     state: &AppState,
     label: &str,
     mark_n: usize,
-) -> Result<PressedMark, String> {
+) -> Result<PressedMark, BrowserRefusal> {
+    send_after_checks(
+        pressable_mark(label, mark_n),
+        || browser_pane_of(app, state, label),
+        |(marks, pin, mark), pane| async move {
+            let script = automation_script(
+                &serde_json::json!({ "selector": mark.selector }),
+                &format!(
+                    "{BROWSER_OBSERVE_HELPERS}\n{BROWSER_MARK_HELPERS}\n{BROWSER_REMEASURE_BODY}"
+                ),
+            );
+            let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+            let value = page_value(reply)?;
+            let now: BrowserRemeasure = serde_json::from_value(value.clone())
+                .map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
+            let context: BrowserRemeasureContext = serde_json::from_value(value)
+                .map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
+            look_still_holds(&mark, &pin, &now, &context).map_err(|error| error.message)?;
+            let expect = serde_json::json!({
+                "epoch": pin.document_epoch,
+                "value": pin.value_digest,
+                "watch": settle_watch(),
+            });
+            let report = press(&pane, &mark.selector, Some(expect)).await?;
+            Ok::<_, String>(PressedMark {
+                pane,
+                pin,
+                marks,
+                report,
+            })
+        },
+    )
+    .await
+}
+
+pub(crate) fn pressable_mark(
+    label: &str,
+    mark_n: usize,
+) -> Result<(Vec<BrowserMark>, BrowserLookPin, BrowserMark), String> {
     if settle_held(label) {
         return Err(held_refusal(label));
     }
@@ -4246,30 +4355,7 @@ async fn press_mark(
         .and_then(|at| marks.get(at))
         .cloned()
         .ok_or_else(|| format!("mark {mark_n}은 이 판에 없습니다 (1–{})", marks.len()))?;
-    let pane = browser_pane_of(app, state, label)?;
-    let script = automation_script(
-        &serde_json::json!({ "selector": mark.selector }),
-        &format!("{BROWSER_OBSERVE_HELPERS}\n{BROWSER_MARK_HELPERS}\n{BROWSER_REMEASURE_BODY}"),
-    );
-    let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-    let value = page_value(reply)?;
-    let now: BrowserRemeasure = serde_json::from_value(value.clone())
-        .map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
-    let context: BrowserRemeasureContext =
-        serde_json::from_value(value).map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
-    look_still_holds(&mark, &pin, &now, &context).map_err(|error| error.message)?;
-    let expect = serde_json::json!({
-        "epoch": pin.document_epoch,
-        "value": pin.value_digest,
-        "watch": settle_watch(),
-    });
-    let report = press(&pane, &mark.selector, Some(expect)).await?;
-    Ok(PressedMark {
-        pane,
-        pin,
-        marks,
-        report,
-    })
+    Ok((marks, pin, mark))
 }
 
 /// A press by number whose settle was left for later (t-9712): the document
@@ -4477,8 +4563,12 @@ pub(crate) async fn browser_type(
     from_the_main_webview(&webview)?;
     let operation =
         super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
-    let result =
-        async { automate_type(&app, &state, &label, &selector, &text, TypeRoad::Keys).await }.await;
+    let result = async {
+        automate_type(&app, &state, &label, &selector, &text, TypeRoad::Keys)
+            .await
+            .map_err(String::from)
+    }
+    .await;
     super::browser_workspace::finish_person_control(operation, result)
 }
 
@@ -4489,35 +4579,45 @@ pub(crate) async fn automate_type(
     selector: &str,
     text: &str,
     road: TypeRoad,
-) -> Result<BrowserInputReport, String> {
+) -> Result<BrowserInputReport, BrowserRefusal> {
+    send_after_checks(
+        type_checked(selector, text),
+        || browser_pane_of(app, state, label),
+        |(), pane| async move {
+            let mut request = serde_json::json!({
+                "selector": selector,
+                "text": text,
+                "road": road.word(),
+                "blockRoots": block_roots(),
+                "frameSeparator": zerocode_core::browser_form::BROWSER_FORM_FRAME_SEPARATOR,
+            });
+            // The form helpers stand under the body: whether a field is secret is what the read says of it (a part of one secret value, a one-time code), not its own facts alone. A field inside a
+            // frame is typed into the form its agent read: when the pane's agent has read one, the page proves it is still that form before anything is written.
+            request["expect"] = match (
+                selector.contains(zerocode_core::browser_form::BROWSER_FORM_FRAME_SEPARATOR),
+                form::known_form(label),
+            ) {
+                (true, Some(known)) => serde_json::Value::String(known),
+                _ => serde_json::Value::Null,
+            };
+            let mut held = form::form_request();
+            if let (Some(held), Some(asked)) = (held.as_object_mut(), request.as_object()) {
+                held.extend(asked.clone());
+            }
+            let script = form::form_script(&held, TYPE_BODY);
+            let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+            typed_report(page_value(reply)?, road)
+        },
+    )
+    .await
+}
+
+pub(crate) fn type_checked(selector: &str, text: &str) -> Result<(), String> {
     checked_selector(selector)?;
     if text.chars().count() > BROWSER_TYPE_CAP {
         return Err("한 번에 입력할 글은 100000자를 넘을 수 없습니다".to_string());
     }
-    let pane = browser_pane_of(app, state, label)?;
-    let mut request = serde_json::json!({
-        "selector": selector,
-        "text": text,
-        "road": road.word(),
-        "blockRoots": block_roots(),
-        "frameSeparator": zerocode_core::browser_form::BROWSER_FORM_FRAME_SEPARATOR,
-    });
-    // The form helpers stand under the body: whether a field is secret is what the read says of it (a part of one secret value, a one-time code), not its own facts alone. A field inside a
-    // frame is typed into the form its agent read: when the pane's agent has read one, the page proves it is still that form before anything is written.
-    request["expect"] = match (
-        selector.contains(zerocode_core::browser_form::BROWSER_FORM_FRAME_SEPARATOR),
-        form::known_form(label),
-    ) {
-        (true, Some(known)) => serde_json::Value::String(known),
-        _ => serde_json::Value::Null,
-    };
-    let mut held = form::form_request();
-    if let (Some(held), Some(asked)) = (held.as_object_mut(), request.as_object()) {
-        held.extend(asked.clone());
-    }
-    let script = form::form_script(&held, TYPE_BODY);
-    let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-    typed_report(page_value(reply)?, road)
+    Ok(())
 }
 
 /// The typing's page script, one body for both roads. A password field is
