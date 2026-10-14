@@ -218,7 +218,6 @@ impl EvidenceCheck {
         })
     }
 
-    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn start<T>(&self, send: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
         let Some((workspace, control)) = &self.0 else {
             return send();
@@ -235,10 +234,8 @@ impl EvidenceCheck {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
 struct Sending<'a>(&'a Workspace);
 
-#[cfg(any(target_os = "macos", test))]
 impl Drop for Sending<'_> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.0.lock() {
@@ -802,6 +799,29 @@ impl Workspaces {
         }
         drop(state);
         Ok(Frame(frame))
+    }
+
+    pub(crate) fn navigation_check(
+        &self,
+        label: &str,
+        actor: Option<&str>,
+    ) -> Result<EvidenceCheck, String> {
+        let Some(workspace) = self.get(label)? else {
+            return Ok(EvidenceCheck(None));
+        };
+        let control = {
+            let state = workspace.lock()?;
+            let control = StepControl {
+                label: label.to_string(),
+                owner: actor.ok_or_else(changed)?.to_string(),
+                revision: state.revision,
+            };
+            if !agent_holds(&state, &control) {
+                return Err(changed());
+            }
+            control
+        };
+        Ok(EvidenceCheck(Some((workspace, control))))
     }
 
     pub(crate) fn admit_evidence(

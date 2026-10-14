@@ -201,6 +201,9 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     # The page renderer (t-18558): the view's own preferences decide whether a
     # PDF keeps the page's backgrounds.
     "WKPreferences",
+    # A handoff's known navigation (t-53155): `loadRequest:` answers with a
+    # WKNavigation, and the same main-thread turn reads `isLoading`.
+    "WKNavigation",
 ] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
@@ -257,6 +260,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSGeometry",
     "NSURL",
     "NSObject",
+    # A handoff's known navigation (t-53155) is sent as the request WebKit
+    # takes, not through wry, so its answer is read in the same turn.
+    "NSURLRequest",
 ] }
 # The emulator pane's fast road: the window server will hand over the picture
 # the Simulator is already drawing for a tenth of what CoreSimulator charges
@@ -297,6 +303,10 @@ arboard = { version = "=3.6.1", default-features = false, features = ["wayland-d
 # keeping the machine awake while agents run (`awake.rs`).
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Power"] }
 windows-native-keyring-store = "=1.1.0"
+# A handoff's known navigation (t-53155): `Page.navigate` over WebView2's own
+# DevTools call and its NavigationStarting/NavigationCompleted, paired by
+# NavigationId. The exact version wry already compiles into this binary.
+webview2-com = "=0.38.2"
 # The Windows Computer Use provider (`computer_use/windows`): UI Automation
 # through COM, window enumeration and capture, synthetic input, the
 # clipboard, process identity. The same `windows` 0.61 that tauri, tao, wry

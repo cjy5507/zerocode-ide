@@ -78,6 +78,7 @@ mod browser_cookie_import;
 mod browser_cookies;
 mod browser_diagnose;
 mod browser_guest_runtime;
+mod browser_native_nav;
 mod browser_nav_state;
 mod browser_read;
 mod browser_runtime;

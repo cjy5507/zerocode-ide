@@ -7023,16 +7023,29 @@ async fn dispatch_browser_command(
                     return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
                 }
             };
+            let check = match state
+                .shell_runtime()
+                .browser_workspaces
+                .navigation_check(&argv[1], pane)
+            {
+                Ok(check) => check,
+                Err(why) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
+                }
+            };
             let pane = match browser_pane_of(app, &state, &argv[1]) {
                 Ok(pane) => pane,
                 Err(why) => {
                     return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
                 }
             };
-            cmd::browser::note_navigation_request(&state, &argv[1]);
-            match pane.navigate(url) {
+            let sent = match cmd::browser::navigate_known(app, &pane, &argv[1], url, check) {
+                Ok(sent) => sent.taken().await,
+                Err(refusal) => Err(refusal),
+            };
+            match sent {
                 Ok(()) => browser_said("가는 중\n"),
-                Err(_) => browser_refused("zerocode-browser: 이동 요청을 보낼 수 없습니다\n"),
+                Err(refusal) => executor_refused(dispatched, refusal),
             }
         }
         // `eval <label> <expr>`, or `eval <label> --value <expr>` — the shape

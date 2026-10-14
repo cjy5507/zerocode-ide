@@ -353,30 +353,327 @@ where
     send(checked, pane).await.map_err(BrowserRefusal::Sent)
 }
 
-pub(crate) fn note_navigation_request(state: &AppState, label: &str) {
+pub(crate) const NAVIGATION_SUPERSEDED: &str =
+    "더 새로운 이동 요청이 있어 이 이동 요청은 보내지 않았습니다";
+
+pub(crate) fn note_navigation_request(state: &AppState, label: &str) -> Option<u64> {
+    state
+        .browser_records()
+        .get_mut(label)
+        .map(|record| record.nav.admit())
+}
+
+pub(crate) fn navigation_sent(state: &AppState, label: &str, number: u64) -> bool {
+    state
+        .browser_records()
+        .get_mut(label)
+        .is_some_and(|record| record.nav.sent(number))
+}
+
+pub(crate) fn navigation_withdrawn(state: &AppState, label: &str, number: u64) {
     if let Some(record) = state.browser_records().get_mut(label) {
-        record.nav.admit();
+        record.nav.withdrawn(number);
     }
 }
 
+pub(crate) fn navigation_answered(state: &AppState, label: &str, number: u64, answer: NavAnswer) {
+    if let Some(record) = state.browser_records().get_mut(label) {
+        record.nav.answered(number, answer);
+    }
+}
+
+pub(crate) fn navigation_settled(state: &AppState, label: &str, loading: bool) -> NavProof {
+    state
+        .browser_records()
+        .get_mut(label)
+        .map_or(NavProof::Ready, |record| record.nav.settle_if_idle(loading))
+}
+
+pub(crate) struct NavigationSend(tokio::sync::oneshot::Receiver<Result<(), BrowserRefusal>>);
+
+impl NavigationSend {
+    pub(crate) fn answered_now(mut self) -> Option<Result<(), BrowserRefusal>> {
+        self.0.try_recv().ok()
+    }
+
+    pub(crate) async fn taken(self) -> Result<(), BrowserRefusal> {
+        tokio::time::timeout(BROWSER_CALLBACK_DEADLINE, self.0)
+            .await
+            .map_err(|_| BrowserRefusal::Sent(PAGE_TIMED_OUT.to_string()))?
+            .map_err(|_| BrowserRefusal::Sent(PAGE_GONE.to_string()))?
+    }
+}
+
+pub(crate) fn navigate_known(
+    app: &AppHandle,
+    pane: &BrowserPane,
+    label: &str,
+    url: tauri::Url,
+    check: crate::browser_workspace::EvidenceCheck,
+) -> Result<NavigationSend, BrowserRefusal> {
+    let number = note_navigation_request(&app.state::<AppState>(), label)
+        .ok_or_else(|| BrowserRefusal::Unsent("브라우저 판이 이미 닫혔습니다".to_string()))?;
+    let (answer, taken) = tokio::sync::oneshot::channel();
+    send_known_navigation(app, pane, label, url, number, check, answer)?;
+    Ok(NavigationSend(taken))
+}
+
+type NavigationAnswer = tokio::sync::oneshot::Sender<Result<(), BrowserRefusal>>;
+
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+fn send_known_navigation(
+    _app: &AppHandle,
+    pane: &BrowserPane,
+    _label: &str,
+    url: tauri::Url,
+    number: u64,
+    check: crate::browser_workspace::EvidenceCheck,
+    answer: NavigationAnswer,
+) -> Result<(), BrowserRefusal> {
+    let _ = answer.send(pane.navigate_known(url, number, check));
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", not(feature = "chromium-browser")))]
+fn send_known_navigation(
+    app: &AppHandle,
+    pane: &BrowserPane,
+    label: &str,
+    url: tauri::Url,
+    number: u64,
+    check: crate::browser_workspace::EvidenceCheck,
+    answer: NavigationAnswer,
+) -> Result<(), BrowserRefusal> {
+    let native_app = app.clone();
+    let native_label = label.to_string();
+    pane.with_webview(move |platform| {
+        let state = native_app.state::<AppState>();
+        let view = platform.inner().cast::<objc2_web_kit::WKWebView>();
+        let request = crate::browser_native_nav::webkit::request(url.as_str());
+        let sent = match request {
+            Some(request) if !view.is_null() => check.start(|| {
+                if !navigation_sent(&state, &native_label, number) {
+                    return Err(NAVIGATION_SUPERSEDED.to_string());
+                }
+                let taken = unsafe { crate::browser_native_nav::webkit::send(&*view, &request) };
+                navigation_answered(&state, &native_label, number, taken);
+                Ok(())
+            }),
+            _ => Err("workspace_native_unavailable: 브라우저 화면이 없습니다".to_string()),
+        };
+        if sent.is_err() {
+            navigation_withdrawn(&state, &native_label, number);
+        }
+        let _ = answer.send(sent.map_err(BrowserRefusal::Unsent));
+    })
+    .map_err(|_| {
+        navigation_withdrawn(&app.state::<AppState>(), label, number);
+        BrowserRefusal::Unsent("브라우저 판에 이동 요청을 보낼 수 없습니다".to_string())
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn send_known_navigation(
+    app: &AppHandle,
+    pane: &BrowserPane,
+    label: &str,
+    url: tauri::Url,
+    number: u64,
+    check: crate::browser_workspace::EvidenceCheck,
+    answer: NavigationAnswer,
+) -> Result<(), BrowserRefusal> {
+    let native_app = app.clone();
+    let native_label = label.to_string();
+    pane.with_webview(move |platform| {
+        let state = native_app.state::<AppState>();
+        let core = unsafe { platform.controller().CoreWebView2() }
+            .map_err(|_| "workspace_native_unavailable: 브라우저 화면이 없습니다".to_string());
+        let sent = core.and_then(|core| {
+            check.start(|| {
+                if !navigation_sent(&state, &native_label, number) {
+                    return Err(NAVIGATION_SUPERSEDED.to_string());
+                }
+                let answer_app = native_app.clone();
+                let answer_label = native_label.clone();
+                crate::browser_native_nav::webview2::send(&core, url.as_str(), move |taken| {
+                    navigation_answered(
+                        &answer_app.state::<AppState>(),
+                        &answer_label,
+                        number,
+                        taken,
+                    );
+                })
+                .map_err(|_| {
+                    navigation_answered(
+                        &state,
+                        &native_label,
+                        number,
+                        NavAnswer::from_engine(true, false),
+                    );
+                    "브라우저 판에 이동 요청을 보낼 수 없습니다".to_string()
+                })
+            })
+        });
+        if sent.is_err() {
+            navigation_withdrawn(&state, &native_label, number);
+        }
+        let _ = answer.send(sent.map_err(BrowserRefusal::Unsent));
+    })
+    .map_err(|_| {
+        navigation_withdrawn(&app.state::<AppState>(), label, number);
+        BrowserRefusal::Unsent("브라우저 판에 이동 요청을 보낼 수 없습니다".to_string())
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn send_known_navigation(
+    app: &AppHandle,
+    pane: &BrowserPane,
+    label: &str,
+    url: tauri::Url,
+    number: u64,
+    check: crate::browser_workspace::EvidenceCheck,
+    answer: NavigationAnswer,
+) -> Result<(), BrowserRefusal> {
+    let state = app.state::<AppState>();
+    let sent = check.start(|| {
+        if !navigation_sent(&state, label, number) {
+            return Err(NAVIGATION_SUPERSEDED.to_string());
+        }
+        pane.navigate(url)
+            .map_err(|_| "브라우저 판에 이동 요청을 보낼 수 없습니다".to_string())
+    });
+    if sent.is_err() {
+        navigation_withdrawn(&state, label, number);
+    }
+    let _ = answer.send(sent.map_err(BrowserRefusal::Unsent));
+    Ok(())
+}
+
+async fn probe_known_navigation(
+    app: &AppHandle,
+    state: &AppState,
+    label: &str,
+) -> Result<NavProof, String> {
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    {
+        browser_pane_of(app, state, label)?.settle_navigation()
+    }
+    #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+    {
+        let pane = browser_pane_of(app, state, label)?;
+        let (answer, read) = tokio::sync::oneshot::channel();
+        let native_app = app.clone();
+        let native_label = label.to_string();
+        pane.with_webview(move |platform| {
+            let loading = native_loading(&platform, &native_label);
+            let _ = answer.send(loading.map(|loading| {
+                navigation_settled(&native_app.state::<AppState>(), &native_label, loading)
+            }));
+        })
+        .map_err(|_| PAGE_SEND_FAILED.to_string())?;
+        tokio::time::timeout(BROWSER_CALLBACK_DEADLINE, read)
+            .await
+            .map_err(|_| PAGE_TIMED_OUT.to_string())?
+            .map_err(|_| PAGE_GONE.to_string())?
+    }
+}
+
+#[cfg(all(target_os = "macos", not(feature = "chromium-browser")))]
+fn native_loading(
+    platform: &tauri::webview::PlatformWebview,
+    _label: &str,
+) -> Result<bool, String> {
+    let view = platform.inner().cast::<objc2_web_kit::WKWebView>();
+    if view.is_null() {
+        return Err("workspace_native_unavailable: 브라우저 화면이 없습니다".to_string());
+    }
+    Ok(unsafe { crate::browser_native_nav::webkit::loading(&*view) })
+}
+
+#[cfg(target_os = "windows")]
+fn native_loading(
+    _platform: &tauri::webview::PlatformWebview,
+    label: &str,
+) -> Result<bool, String> {
+    crate::browser_native_nav::webview2::loading(label).ok_or_else(|| {
+        "workspace_paused: 이 탭에서 시작부터 지켜본 이동이 아직 끝나지 않아 로딩 상태를 모릅니다 — 이동이 한 번 끝난 뒤 다시 제어권을 선택하세요".to_string()
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn native_loading(
+    _platform: &tauri::webview::PlatformWebview,
+    _label: &str,
+) -> Result<bool, String> {
+    Err(
+        "workspace_platform_unsupported: 이 플랫폼은 작업 브라우저의 로딩 상태를 읽을 수 없습니다"
+            .to_string(),
+    )
+}
+
 pub(crate) async fn settle_known_navigation(
+    app: &AppHandle,
     state: &AppState,
     labels: &[String],
 ) -> Result<(), String> {
-    let settled = wait_until(BROWSER_CALLBACK_DEADLINE, BROWSER_WAIT_POLL, || {
-        let records = state.browser_records();
-        labels.iter().all(|label| {
-            records
-                .get(label)
-                .is_none_or(|record| !record.nav.pending())
-        })
-    })
-    .await;
-    if settled {
-        Ok(())
-    } else {
-        Err("workspace_paused: 페이지 이동이 끝나지 않았습니다 — 일시정지 상태에서 다시 제어권을 선택하세요".to_string())
+    let deadline = tokio::time::Instant::now() + BROWSER_CALLBACK_DEADLINE;
+    loop {
+        let mut waiting = false;
+        for label in labels {
+            if !state.browser_panes().contains(label) {
+                continue;
+            }
+            if probe_known_navigation(app, state, label).await? == NavProof::Waiting {
+                waiting = true;
+            }
+        }
+        if !waiting {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("workspace_paused: 페이지 이동이 끝나지 않았습니다 — 일시정지 상태에서 다시 제어권을 선택하세요".to_string());
+        }
+        tokio::time::sleep(BROWSER_WAIT_POLL).await;
     }
+}
+
+/// The spinner's clock for one Started: after [`NAV_DEAD_AFTER_SECS`] the
+/// load that generation began is marked and told `dead` once, unless it
+/// finished, failed or a later Started moved the pane on. Display and
+/// diagnosis only: a handoff never reads it.
+pub(crate) fn arm_dead_display(app: &AppHandle, label: &str, generation: u64) {
+    let clock_app = app.clone();
+    let clock_label = label.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(NAV_DEAD_AFTER_SECS)).await;
+        let state = clock_app.state::<AppState>();
+        let marked = state
+            .browser_records()
+            .get_mut(&clock_label)
+            .is_some_and(|record| {
+                record
+                    .nav
+                    .dead_if_still(generation, std::time::Instant::now())
+            });
+        if !marked {
+            return;
+        }
+        let url = state
+            .browser_urls()
+            .get(&clock_label)
+            .cloned()
+            .unwrap_or_default();
+        let _ = clock_app.emit_to(
+            "main",
+            "browser:nav",
+            BrowserNav {
+                label: clock_label,
+                url,
+                state: "dead",
+            },
+        );
+    });
 }
 
 pub(crate) async fn workspace_page_fence(pane: &BrowserPane) -> Result<(), String> {
@@ -1271,8 +1568,9 @@ fn open_webkit_browser_pane(
     // Tauri's host scripts must be removed before a macOS guest sees a
     // remote document, including a pane with no staged cookies. An explicitly
     // blank destination is navigated again too, to discard the birth globals.
-    let born_blank =
-        cfg!(target_os = "macos") || (!staged.is_empty() && parsed.as_str() != BROWSER_BLANK_URL);
+    let born_blank = cfg!(target_os = "macos")
+        || managed
+        || (!staged.is_empty() && parsed.as_str() != BROWSER_BLANK_URL);
     let birth = if born_blank {
         blank_page()
     } else {
@@ -1329,36 +1627,7 @@ fn open_webkit_browser_pane(
                         .get_mut(&load_label)
                         .map(|record| record.nav.started(now));
                     if let Some(generation) = generation {
-                        let clock_app = load_app.clone();
-                        let clock_label = load_label.clone();
-                        tauri::async_runtime::spawn(async move {
-                            tokio::time::sleep(Duration::from_secs(NAV_DEAD_AFTER_SECS)).await;
-                            let state = clock_app.state::<AppState>();
-                            let marked = state.browser_records().get_mut(&clock_label).is_some_and(
-                                |record| {
-                                    record
-                                        .nav
-                                        .dead_if_still(generation, std::time::Instant::now())
-                                },
-                            );
-                            if !marked {
-                                return;
-                            }
-                            let url = state
-                                .browser_urls()
-                                .get(&clock_label)
-                                .cloned()
-                                .unwrap_or_default();
-                            let _ = clock_app.emit_to(
-                                "main",
-                                "browser:nav",
-                                BrowserNav {
-                                    label: clock_label,
-                                    url,
-                                    state: "dead",
-                                },
-                            );
-                        });
+                        arm_dead_display(&load_app, &load_label, generation);
                     }
                     "started"
                 }
@@ -1631,15 +1900,47 @@ fn open_webkit_browser_pane(
     state
         .browser_urls()
         .insert(label.clone(), parsed.to_string());
+    #[cfg(target_os = "windows")]
+    watch_native_loads(app, &pane, &label);
     // Registered first: a pane that failed to leave is still a pane the
     // address bar can steer — an orphan child nobody can close is worse.
-    if born_blank && let Err(error) = pane.navigate(parsed) {
+    if born_blank && let Err(error) = navigate_known(app, &pane, &label, parsed, Default::default())
+    {
+        let error = String::from(error);
         note_window_event(
             state.local_data_root(),
             &format!("guest preparation: {label} could not leave about:blank: {error}"),
         );
     }
     Ok(label)
+}
+
+#[cfg(target_os = "windows")]
+fn watch_native_loads(app: &AppHandle, pane: &BrowserPane, label: &str) {
+    let native_app = app.clone();
+    let native_label = label.to_string();
+    let queued = pane.with_webview(move |platform| {
+        let state = native_app.state::<AppState>();
+        let watched = unsafe { platform.controller().CoreWebView2() }
+            .and_then(|core| crate::browser_native_nav::webview2::watch(&core, &native_label));
+        match watched {
+            Ok(()) => {
+                if let Some(record) = state.browser_records().get_mut(&native_label) {
+                    record.nav.birth_taken();
+                }
+            }
+            Err(error) => note_window_event(
+                state.local_data_root(),
+                &format!("browser loads: {native_label} cannot be watched: {error}"),
+            ),
+        }
+    });
+    if let Err(error) = queued {
+        note_window_event(
+            app.state::<AppState>().local_data_root(),
+            &format!("browser loads: {label} cannot be watched: {error}"),
+        );
+    }
 }
 
 #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
@@ -1732,15 +2033,20 @@ fn open_chromium_browser_pane(
         .browser_urls()
         .insert(label.clone(), parsed.to_string());
 
-    let launch = if let Some(profile_id) = profile {
-        pane.navigate_after_cookies(
-            profile_id,
-            state.config_root().to_path_buf(),
-            staged,
-            parsed,
-        )
-    } else {
-        pane.navigate(parsed)
+    let launch = match note_navigation_request(state, &label) {
+        None => Err("브라우저 판이 이미 닫혔습니다".to_string()),
+        Some(number) => match profile {
+            Some(profile_id) => pane.navigate_after_cookies(
+                profile_id,
+                state.config_root().to_path_buf(),
+                staged,
+                parsed,
+                number,
+            ),
+            None => pane
+                .navigate_known(parsed, number, Default::default())
+                .map_err(String::from),
+        },
     };
     if let Err(error) = launch {
         state.browser_panes().remove(&label);
@@ -1908,7 +2214,12 @@ pub(crate) fn workspace_popup(app: &AppHandle, label: &str, url: &str) {
                     let result = state.shell_runtime().browser_workspaces.with_agent_popup(
                         &label,
                         snapshot.revision,
-                        || pane.navigate(url).map_err(|error| error.to_string()),
+                        || {
+                            navigate_known(&queued, &pane, &label, url, Default::default())
+                                .map_err(String::from)?
+                                .answered_now()
+                                .map_or(Ok(()), |answer| answer.map_err(String::from))
+                        },
                     );
                     if matches!(result, Ok(true) | Err(_)) {
                         forget_workspace_observation(&label);
@@ -1927,8 +2238,8 @@ pub(crate) fn workspace_popup(app: &AppHandle, label: &str, url: &str) {
     }
 }
 
-#[tauri::command(async)]
-pub(crate) fn browser_navigate(
+#[tauri::command]
+pub(crate) async fn browser_navigate(
     app: AppHandle,
     webview: tauri::Webview,
     state: State<'_, AppState>,
@@ -1939,16 +2250,18 @@ pub(crate) fn browser_navigate(
     from_the_main_webview(&webview)?;
     let operation =
         super::browser_workspace::begin_person_control(&app, &state, &label, expected_revision)?;
-    let result = (|| {
+    let result = async {
         let parsed = browsable(&url)?;
         let pane = browser_pane_of(&app, &state, &label)?;
         state
             .browser_urls()
             .insert(label.clone(), parsed.to_string());
-        note_navigation_request(&state, &label);
-        pane.navigate(parsed)
-            .map_err(|_| "브라우저 판에 이동 요청을 보낼 수 없습니다".to_string())
-    })();
+        navigate_known(&app, &pane, &label, parsed, Default::default())?
+            .taken()
+            .await
+            .map_err(String::from)
+    }
+    .await;
     super::browser_workspace::finish_person_control(operation, result)
 }
 
@@ -4988,6 +5301,8 @@ fn close_native_browser(
     state.browser_panes().remove(label);
     state.browser_urls().remove(label);
     state.browser_records().remove(label);
+    #[cfg(target_os = "windows")]
+    crate::browser_native_nav::webview2::forget(label);
     forget_workspace_observation(label);
     state.shell_runtime().browser_workspaces.remove(label)?;
     state

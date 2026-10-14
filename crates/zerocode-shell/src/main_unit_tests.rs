@@ -5452,15 +5452,18 @@ mod known_navigation_proof_tests {
     }
 
     #[test]
-    fn an_engine_that_shows_no_load_is_unproven_until_a_newer_request_settles() {
+    fn an_engine_that_shows_no_load_right_after_taking_a_request_settles_on_its_next_idle_reading() {
         let now = Instant::now();
         let mut record = NavRecord::born(true, now);
         let number = record.admit();
         assert!(record.sent(number));
-        record.answered(number, NavAnswer::Silent);
-        assert_eq!(record.proof(), NavProof::Unproven);
-        assert_eq!(record.settle_if_idle(false), NavProof::Unproven);
-        sent_and_loading(&mut record);
+        record.answered(number, NavAnswer::from_engine(false, false));
+        assert_eq!(record.proof(), NavProof::Waiting);
+        assert_eq!(
+            record.settle_if_idle(true),
+            NavProof::Waiting,
+            "a load the engine shows after its answer is waited for"
+        );
         assert_eq!(record.settle_if_idle(false), NavProof::Ready);
     }
 

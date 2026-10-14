@@ -20,24 +20,88 @@ pub(super) const NAV_DEAD_AFTER_SECS: u64 = 20;
 /// closed and opened again never meets an answer meant for its old record.
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
-/// What the engine said about a known request once it took it.
+/// What the engine said about a known request once it took it. Either
+/// way only a later idle reading settles the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NavAnswer {
     /// The request is a load the engine now carries.
     Loading,
     /// The engine ended the request with no new document: refused, failed
-    /// before commit, or moved within the same document.
+    /// before commit, moved within the same document, or showed no load
+    /// right after taking it.
     Resolved,
-    /// The engine took the request and showed no load.
-    Silent,
 }
 
-/// Whether a known request still stands between a handoff and the page.
+impl NavAnswer {
+    /// `ended`: the engine refused the request, failed it before commit, or
+    /// moved within the same document. `loading`: it shows a load.
+    pub(super) fn from_engine(ended: bool, loading: bool) -> Self {
+        if ended || !loading {
+            NavAnswer::Resolved
+        } else {
+            NavAnswer::Loading
+        }
+    }
+}
+
+/// Chromium's answer to the `Page.navigate` it was sent: an error, an
+/// `errorText`, or no new `loaderId` (a same-document move) ends the
+/// request with no new document.
+#[cfg(any(
+    all(target_os = "macos", feature = "chromium-browser"),
+    target_os = "windows",
+    test
+))]
+pub(super) fn page_navigate_answer(succeeded: bool, result: &serde_json::Value) -> NavAnswer {
+    let failed = result
+        .get("errorText")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|text| !text.is_empty());
+    let new_document = result
+        .get("loaderId")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|loader| !loader.is_empty());
+    NavAnswer::from_engine(!succeeded || failed || !new_document, true)
+}
+
+/// One pane's main-frame navigations as WebView2 numbers them. A completion
+/// ends only the navigation with its own number. The loads are unknown until
+/// a navigation seen starting completes having replaced the document, with
+/// nothing else in flight: a load under way before the watch began was never
+/// seen starting, and nothing short of a replaced document ends it.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Default)]
+pub(super) struct NavigationIds {
+    known: bool,
+    started: std::collections::BTreeSet<u64>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl NavigationIds {
+    pub(super) fn starting(&mut self, navigation: u64) {
+        self.started.insert(navigation);
+    }
+
+    /// `replaced`: the navigation committed a document or an error page,
+    /// rather than being cancelled.
+    pub(super) fn completed(&mut self, navigation: u64, replaced: bool) {
+        if self.started.remove(&navigation) && replaced {
+            self.known |= self.started.is_empty();
+        }
+    }
+
+    /// `None` while the loads are unknown.
+    pub(super) fn loading(&self) -> Option<bool> {
+        self.known.then(|| !self.started.is_empty())
+    }
+}
+
+/// Whether a known request, or a load the engine carries, still stands
+/// between a handoff and the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NavProof {
     Ready,
     Waiting,
-    Unproven,
 }
 
 /// The four words `tabs` speaks for a pane.
@@ -173,36 +237,49 @@ impl NavRecord {
         }
     }
 
+    /// The pane's creation sent its first document, and the engine that
+    /// created the pane has taken it.
+    #[cfg(target_os = "windows")]
+    pub(super) fn birth_taken(&mut self) {
+        if let Some(request) = &mut self.request
+            && request.stage == Stage::Sent
+        {
+            request.stage = Stage::Answered(NavAnswer::Loading);
+        }
+    }
+
     /// The engine's loading state, read on its thread in the same turn as
     /// this record. Only an answered request, with nothing loading after
     /// that answer, is settled; a load the page began itself keeps the
     /// handoff waiting while the engine still carries it.
     pub(super) fn settle_if_idle(&mut self, loading: bool) -> NavProof {
         if !loading
-            && let Some(Request {
-                stage: Stage::Answered(NavAnswer::Loading | NavAnswer::Resolved),
-                ..
-            }) = self.request
+            && matches!(
+                self.request,
+                Some(Request {
+                    stage: Stage::Answered(_),
+                    ..
+                })
+            )
         {
             self.request = None;
         }
-        match self.proof() {
-            NavProof::Ready if loading => NavProof::Waiting,
-            proof => proof,
+        if loading {
+            NavProof::Waiting
+        } else {
+            self.proof()
         }
     }
 
     pub(super) fn proof(&self) -> NavProof {
-        match self.request {
-            None => NavProof::Ready,
-            Some(Request {
-                stage: Stage::Answered(NavAnswer::Silent),
-                ..
-            }) => NavProof::Unproven,
-            Some(_) => NavProof::Waiting,
+        if self.request.is_some() {
+            NavProof::Waiting
+        } else {
+            NavProof::Ready
         }
     }
 
+    #[cfg(test)]
     pub(super) fn pending(&self) -> bool {
         self.proof() != NavProof::Ready
     }
@@ -238,18 +315,8 @@ impl NavRecord {
 
     /// The timer's call: mark dead if the load this generation armed is the
     /// one still standing and the clock has run out. `true` when the mark
-    /// was made — the caller emits once, never for a load that moved on.
-    // The wry pane arms this twenty-second timer. The CEF pane does NOT — it
-    // emits `dead` only from `on_load_error`, so a load that neither fails nor
-    // finishes (a hung dev server) never tells the window's spinner to stop;
-    // `observed()` still reads it dead by the clock for `tabs`/`diagnose`.
-    // That is the gap wry closed on 2026-09-07 and CEF has yet to (t-3624),
-    // not a design. In the Chromium bin build the only caller is the unit
-    // tests — compiled-but-unused there (t-3621).
-    #[cfg_attr(
-        all(target_os = "macos", feature = "chromium-browser"),
-        allow(dead_code)
-    )]
+    /// was made — the caller emits once, never for a load that moved on,
+    /// finished, failed, or was already marked. Both engines arm it.
     pub(super) fn dead_if_still(&mut self, generation: u64, now: Instant) -> bool {
         if self.generation != generation
             || self.state != NavState::Loading
