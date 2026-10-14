@@ -1534,6 +1534,151 @@ mod tests {
         assert!(!still_mid_turn(Line::default(), Some(wrote), wrote).busy);
     }
 
+    /* ---- the window's own words are not the person's to paste (t-52566) - */
+
+    /// Turn the delivery at `term` until it settles — no longer than its
+    /// deadline and a beat — feeding the same grid and line every round.
+    fn until_settled(
+        bench: &mut Bench,
+        term: TermId,
+        seen: Observed,
+        line: Line,
+        from: Instant,
+    ) -> (DeliveryOutcome, Instant) {
+        let mut now = from;
+        loop {
+            if let Turned::Settled(outcome) = bench.round(term, seen, line, now) {
+                return (outcome, now);
+            }
+            now += QUIET / 2;
+            assert!(
+                now <= from + TIMEOUT + QUIET,
+                "the delivery outlived its deadline"
+            );
+        }
+    }
+
+    /// 2026-10-14 10:46, the person's 「또 이버그」: three deliveries at a zo
+    /// worker the ledger reseated after a restart (term 11). The restore's
+    /// wait for the resumed composer carried no words and landed at rest;
+    /// the continuation landed, and the worker's turn began; the mail
+    /// pointer, queued behind the continuation, took the line inside that
+    /// turn and ran out its eight seconds against the spinner — and the pump
+    /// handed the pointer's line back as words the person had lost: an
+    /// error, and the window's own advice over whatever was on their
+    /// clipboard. A worker's launch briefing that ran out of time went the
+    /// same way. The window's own words are never handed back, whatever
+    /// became of them, and the black box keeps the line that says what did;
+    /// the person's own send still is (`an_idle_pane_that_never_rests_…`).
+    #[test]
+    fn the_windows_own_words_are_never_handed_back_to_the_person() {
+        const TERM: TermId = 8_566;
+        crate::human_input::forget_term(TERM);
+        let start = Instant::now();
+        let mut bench = Bench::default();
+        // The restore's wait for the resumed composer: no words, no Enter.
+        bench.deliveries.insert(
+            TERM,
+            PromptDelivery::with_deadlines(
+                String::new(),
+                false,
+                ReadySignal::CursorShown,
+                start,
+                QUIET,
+                TIMEOUT,
+            )
+            .clearing(false)
+            .guarded(Guard::for_its_own_line(None)),
+        );
+        assert_eq!(
+            bench.round(TERM, composer(0), Line::default(), start),
+            Turned::Waiting
+        );
+        let mut now = start + SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(1), Line::default(), now),
+            Turned::Settled(DeliveryOutcome::Delivered)
+        );
+        // The continuation lands, and the worker's turn begins.
+        bench
+            .deliveries
+            .insert(TERM, guarded(crate::RESTART_NUDGE, true, now));
+        assert_eq!(
+            bench.round(TERM, composer(1), Line::default(), now),
+            Turned::Waiting
+        );
+        now += SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(2), Line::default(), now),
+            Turned::Pasted
+        );
+        now += SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(2), Line::default(), now),
+            Turned::Entered
+        );
+        now += SUBMIT_GAP;
+        assert_eq!(
+            bench.round(TERM, composer(2), Line::default(), now),
+            Turned::Settled(DeliveryOutcome::Delivered)
+        );
+        let typed = bench.wrote.len();
+        // The pointer's line takes the line as the continuation lands, inside
+        // the turn the continuation began.
+        bench.deliveries.insert(
+            TERM,
+            crate::cmd::terminal::prompt_delivery_for(
+                zerocode_core::orchestration::pointer_text(1),
+                true,
+                Some("zo"),
+                crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+                None,
+                now,
+            ),
+        );
+        let (pointed, ended) = until_settled(&mut bench, TERM, spinning(), working(), now);
+        assert_eq!(bench.wrote.len(), typed, "the pointer typed into the turn");
+        // A worker's launch briefing at a composer that shook hands and never
+        // stood.
+        now = ended;
+        bench.deliveries.insert(
+            TERM,
+            PromptDelivery::with_deadlines(
+                "carry the task".to_string(),
+                true,
+                ReadySignal::CursorShown,
+                now,
+                QUIET,
+                TIMEOUT,
+            )
+            .clearing(false)
+            .guarded(Guard::for_its_own_line(None)),
+        );
+        let silent = Observed {
+            bracketed_paste: true,
+            ..Observed::default()
+        };
+        let (briefed, _) = until_settled(&mut bench, TERM, silent, Line::default(), now);
+        assert_eq!(
+            bench.handed_back,
+            Vec::<String>::new(),
+            "the window's own words were handed to the person as words they had lost \
+             (the pointer {pointed:?}, the briefing {briefed:?})"
+        );
+        assert_eq!(
+            bench
+                .lines
+                .iter()
+                .filter(|line| line.contains("prompt timed out after")
+                    && line.ends_with("state=working"))
+                .count(),
+            usize::from(pointed == DeliveryOutcome::TimedOut),
+            "the black box lost the line that says what became of the pointer: {:?}",
+            bench.lines
+        );
+        crate::human_input::forget_term(TERM);
+    }
+
     /* ---- a restart's words reach a real program once (t-14037) --------- */
 
     /// How a fake agent CLI treats what it is given — the shapes a restart

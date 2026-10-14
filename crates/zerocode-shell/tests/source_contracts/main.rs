@@ -33355,6 +33355,23 @@ mod tests {
         );
     }
 
+    /// A zo worker's briefing withheld at a refused launch is the
+    /// coordinator's words, not the person's (t-52566): the refusal used to
+    /// carry the whole briefing to the window, which put it on the person's
+    /// clipboard. It hands back what the pump's own settle would — the words
+    /// a delivery says are the person's, and nothing else.
+    #[test]
+    fn a_refused_zo_briefing_is_not_handed_to_the_person() {
+        let backend = shipped_backend();
+        let releasing = block_after(backend, "fn activate_zo_worker_delivery(");
+        assert!(
+            !releasing.contains("Some(delivery.text().to_string())")
+                && releasing.contains("prompt_transaction::words_to_hand_back("),
+            "a refused zo briefing still hands the coordinator's words to the \
+             person's clipboard:\n{releasing}"
+        );
+    }
+
     /// The left column is a plane of its own, in both treatments.
     ///
     /// Orca established that the left column is a plane of its own. ZeroCode's
