@@ -109,11 +109,25 @@ Pausing an owned tab also blocks that agent's new writes to other tabs and
 new working tabs. Browser steps inside a walk use the same checks.
 Managed working tabs refuse arbitrary `eval`. Use `read`, `marks`,
 `fields`, `fill`, and the other known browser commands.
-Ordinary website scripts and network requests can continue while paused.
-A failed or canceled mutation leaves control paused until the affected page
-answers a bounded confirmation request. Never bypass a refusal with another
-surface. Once control returns, read the page again before acting, including
-navigation; previous form and numbered-element observations have been discarded.
+Ordinary website scripts and network requests can continue while paused,
+and a script, timer or request the site already started can still finish
+after a handoff. A handoff first waits briefly for a main-document
+navigation this window already sent (`goto`, or the person's address bar);
+if it does not finish, control stays paused. A mutation the command refused
+before anything was sent (its arguments, URL or pane) leaves control as it
+was. A mutation that was sent and then failed, timed out or was canceled,
+including the page's own error answer, an unreadable `eval` result and a
+`fill` that wrote only some fields, pauses that tab and the owner's other
+writes. Control returns only when the person hands it back, after the
+affected page answers a bounded confirmation request. Never bypass a refusal
+with another surface. Once control returns, read the page again before
+acting, including navigation; previous form and numbered-element
+observations have been discarded. After a person has controlled a working
+tab, `console`, `network` and `diagnose` refuse that tab for the rest of its
+life (`workspace_history_unsupported`); open a new working tab when you need
+them. A working tab's step frame is kept only while the same agent still
+controls it at the same revision; otherwise the step's evidence line says
+`control_changed`. A frame is never an observation.
 Every model uses the same original-observation rule. A successful managed-tab
 `read`, `marks`, `fields`, or agent `screenshot` returns `workspaceRevision`.
 The backend issues it only if owner, mode, and revision still match at read
