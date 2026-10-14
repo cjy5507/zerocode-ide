@@ -675,6 +675,13 @@ mod past_reference_tests {
             assert!(input_refers_to_past_conversation(input), "{input:?}");
         }
     }
+
+    #[test]
+    fn a_plural_cue_still_reads_as_a_past_reference() {
+        for input in ["what did we settle in previous sessions", "the last sessions went fine", "the last times it broke"] {
+            assert!(input_refers_to_past_conversation(input), "{input:?}");
+        }
+    }
 }
 
 #[cfg(test)]
