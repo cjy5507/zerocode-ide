@@ -1169,6 +1169,7 @@ fn a_batch_task_raises_no_landing_alert() {
                 compare_oid: base(),
                 git,
                 occupied: false,
+                beside: Vec::new(),
             };
             bench.ledger.landing_watch(&[witness], start + after);
         }
