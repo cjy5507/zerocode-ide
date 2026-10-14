@@ -430,7 +430,7 @@ function browserWorkspaceCanControl(tab) {
 }
 
 function browserWorkspaceOnScreen(tab) {
-  const host = groupOf(tab.pane)?.browserView;
+  const host = groups.get(tab.pane)?.browserView;
   return browserWorkspaceLive(tab) && !document.hidden && !browserCovered()
     && tab.worktree === activeWorktreePath && host && !host.hidden
     && host._browserTab === tab && activeTabIn(tab.pane)?.id === tab.id;
@@ -460,7 +460,7 @@ function browserWorkspaceStopTools(tab) {
 }
 
 function paintBrowserWorkspaceTab(tab) {
-  const host = groupOf(tab.pane)?.browserView;
+  const host = groups.get(tab.pane)?.browserView;
   if (host?._browserTab === tab && !host.hidden) paintBrowserView(tab);
   syncBrowserPanes();
   browserMenuPoll.sync();
@@ -569,7 +569,6 @@ function watchBrowserWorkspace(tab, { beside = false } = {}) {
     if (nextPane !== null && nextPane !== tab.pane) {
       dropRecentTab(tab.pane, tab.id);
       tab.pane = nextPane;
-      optimizeRichStageGroup(nextPane);
     }
   }
   tab.workspaceViewEpoch = (tab.workspaceViewEpoch ?? 0) + 1;
@@ -586,12 +585,17 @@ function collapseBrowserWorkspace(tab) {
   browserWorkspaceStopTools(tab);
   const back = tab.workspaceReturn;
   tab.workspaceReturn = null;
-  if (back && back.viewPane !== null && back.viewPane !== back.pane) {
-    dropRecentTab(tab.pane, tab.id);
-    tab.pane = back.pane;
-    collapseStageGroup(back.viewPane);
+  const live = stageGroups();
+  const original = back?.id && tabs.find((one) => one.id === back.id
+    && one.worktree === activeWorktreePath && live.includes(one.pane));
+  const home = original ? original.pane : live.includes(back?.pane) ? back.pane
+    : live.includes(tab.pane) ? tab.pane : live[0] ?? 0;
+  if (back && home !== tab.pane) {
+    const leaving = tab.pane;
+    dropRecentTab(leaving, tab.id);
+    tab.pane = home;
+    if (live.includes(leaving)) collapseStageGroup(leaving);
   }
-  const original = back?.id && tabs.find((one) => one.id === back.id && one.worktree === activeWorktreePath);
   if (original) setActiveTab(original.id);
   else {
     renderTabs();
@@ -720,7 +724,7 @@ function browserWorkspaceWatcher() {
 
 function syncBrowserWorkspaceCapture() {
   const wanted = browserWorkspaceWatcher();
-  const host = wanted ? groupOf(wanted.pane)?.browserView : null;
+  const host = wanted ? groups.get(wanted.pane)?.browserView : null;
   if (browserWorkspaceCaptureTarget !== wanted || browserWorkspaceCaptureHost !== host) {
     clearTimeout(browserWorkspaceCaptureTimer);
     browserWorkspaceCaptureTimer = 0;
@@ -750,7 +754,7 @@ async function captureBrowserWorkspace(tab, epoch) {
     if (epoch !== browserWorkspaceCaptureEpoch || !browserWorkspaceLive(tab, label) || browserWorkspaceWatcher() !== tab) return;
     if (typeof frame !== "string" || frame.length > BROWSER_WORKSPACE_FRAME_MAX_BYTES
       || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=\r\n]+$/.test(frame)) throw new Error("invalid_frame");
-    const host = groupOf(tab.pane)?.browserView;
+    const host = groups.get(tab.pane)?.browserView;
     const image = host?.querySelector(".browser-workspace-frame");
     if (host?._browserTab !== tab || !image) return;
     clearBrowserWorkspaceFrames();
@@ -4801,7 +4805,7 @@ async function restoreBrowserTabs() {
  * 생성 시에만 입으므로(wry), 갈아입기는 곧 재생성이다(1-g26). 탭 객체는
  * 그대로 두고 이름표만 바꿔, 스트립·본-순서·주석이 제자리를 지킨다. */
 async function reopenBrowserPane(tab, { profile = tab.profile ?? null } = {}) {
-  if (!browserWorkspaceCanControl(tab)) return false;
+  if (!browserWorkspaceLive(tab) || !browserWorkspaceCanControl(tab)) return false;
   const was = tab.label;
   const revision = tab.workspaceRevision;
   const body = groupOf(tab.pane)?.browserView?.querySelector(".browser-body");
@@ -5172,7 +5176,7 @@ function syncBrowserPanes() {
       ? { label, x: rect.x, y: rect.y, width: rect.width, height: rect.height, shown: true }
       : { label, x: 0, y: 0, width: 1, height: 1, shown: false };
     browserPlacing = browserPlacing.then(async () => {
-      const currentHost = groupOf(tab.pane)?.browserView;
+      const currentHost = groups.get(tab.pane)?.browserView;
       const canShow = browserWorkspaceLive(tab, label) && !document.hidden && !browserCovered()
         && browserWorkspaceCanControl(tab) && currentHost && !currentHost.hidden
         && !tab.marking && !tab.navFailure && tab.worktree === activeWorktreePath
@@ -5654,9 +5658,11 @@ window.addEventListener(
 listen("browser:popup", (event) => {
   if (isPopout) return;
   const said = event.payload;
+  if (typeof said?.label !== "string" || typeof said.url !== "string") return;
   const tab = tabs.find((one) => one.kind === "browser" && one.label === said.label);
-  if (tab) submitBrowserAddress(tab, said.url);
-  else void openBrowserTab(said.url);
+  if (!tab || !browserWorkspaceCanControl(tab)) return;
+  if (tab.agentWorkspace && (!Number.isSafeInteger(said.revision) || said.revision !== tab.workspace?.revision)) return;
+  submitBrowserAddress(tab, said.url);
 });
 
 /* A label an agent's event names, or null: only a pane's own name shape

@@ -513,4 +513,146 @@ export async function testBrowserWorkspace(browser, origin, ok) {
       ok("workspace native placement races raise no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const original = await page.evaluate(async () => {
+        const source = currentTab();
+        const right = splitStageBesideFocused("horizontal");
+        await openTermTab({ placement: "tab" });
+        const side = currentTab();
+        side.pane = right;
+        setActiveTab(side.id);
+        const below = splitStageBesideFocused("vertical");
+        await openTermTab({ placement: "tab" });
+        const lower = currentTab();
+        lower.pane = below;
+        setActiveTab(lower.id);
+        setActiveTab(source.id);
+        return { source: source.id, right, side: side.id, below, lower: lower.id, tree: JSON.stringify(stageTree()) };
+      });
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 60, inFlight: 0, needsObservation: false });
+        document.querySelector("#browser-workspace-launcher")?.click();
+      }, label);
+      await page.waitForTimeout(60);
+      const side = await page.evaluate((label) => ({
+        active: activeTabId, pane: tabs.find((one) => one.label === label)?.pane, tree: JSON.stringify(stageTree()),
+      }), label);
+      ok("watching reuses an existing right group without changing its split proportions",
+        side.active === `browser:${label}` && side.pane === original.right && side.tree === original.tree, JSON.stringify({ original, side }));
+      await page.evaluate((label) => window.__workspaceClick(label, "collapse"), label);
+      await page.waitForTimeout(60);
+      const restored = await page.evaluate((original) => ({
+        active: activeTabId, tree: JSON.stringify(stageTree()),
+        side: tabs.find((one) => one.id === original.side)?.pane,
+        lower: tabs.find((one) => one.id === original.lower)?.pane,
+        rightFront: activeTabIn(original.right)?.id,
+      }), original);
+      ok("folding preserves the right group's existing tab and layout",
+        restored.active === original.source && restored.tree === original.tree
+          && restored.side === original.right && restored.lower === original.below && restored.rightFront === original.side,
+        JSON.stringify(restored));
+      ok("workspace right-group reuse raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const original = await page.evaluate(async () => {
+        const pane = splitStageBesideFocused("horizontal");
+        await openTermTab({ placement: "tab" });
+        const tab = currentTab();
+        tab.pane = pane;
+        setActiveTab(tab.id);
+        return { id: tab.id, pane };
+      });
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 70, inFlight: 0, needsObservation: false });
+        document.querySelector("#browser-workspace-launcher")?.click();
+      }, label);
+      await page.waitForTimeout(60);
+      await page.evaluate(({ original, label }) => {
+        dropTab(original.id);
+        window.__workspaceClick(label, "collapse");
+      }, { original, label });
+      await page.waitForTimeout(60);
+      const fallback = await page.evaluate((label) => {
+        const tab = tabs.find((one) => one.label === label);
+        return {
+          live: !!tab && stageGroups().includes(tab.pane),
+          closed: window.__WORKSPACE__.closed,
+          frames: document.querySelectorAll(".browser-workspace-frame[src]").length,
+        };
+      }, label);
+      ok("folding after the original group closes keeps the task tab in a live group",
+        fallback.live && fallback.closed.length === 0 && fallback.frames === 0, JSON.stringify(fallback));
+      ok("workspace missing-return-group handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        window.__WORKSPACE__.navigated = [];
+        window.__ANSWER__.browser_navigate = (args) => { window.__WORKSPACE__.navigated.push(args); return null; };
+        window.__workspacePopup = (said) => {
+          for (const hear of window.__LISTENERS__["browser:popup"] ?? []) hear({ payload: said });
+        };
+        window.__workspaceEmit({ label, mode: "agent", revision: 80, inFlight: 0, needsObservation: false });
+        window.__workspacePopup({ label, url: "https://example.com/popup-agent", revision: 80 });
+      }, label);
+      await page.waitForTimeout(60);
+      const agent = await page.evaluate(() => ({ active: activeTabId, navigated: window.__WORKSPACE__.navigated, opened: window.__WORKSPACE__.opened.length }));
+      ok("the UI delegates agent popups to the backend without navigating or opening another tab",
+        agent.navigated.length === 0 && agent.opened === 1 && agent.active !== `browser:${label}`, JSON.stringify(agent));
+      await page.evaluate((label) => window.__workspaceEmit({ label, mode: "human", revision: 81, inFlight: 0, needsObservation: false }), label);
+      await observe(page, label);
+      await page.evaluate((label) => {
+        window.__workspacePopup({ label, url: "https://example.com/popup-old", revision: 80 });
+        window.__workspacePopup({ label, url: "https://example.com/popup-unknown" });
+      }, label);
+      await page.waitForTimeout(40);
+      const stale = await page.evaluate(() => window.__WORKSPACE__.navigated);
+      ok("managed human popups require their current source revision", stale.length === 0, JSON.stringify(stale));
+      await page.evaluate((label) => window.__workspacePopup({ label, url: "https://example.com/popup-human", revision: 81 }), label);
+      await page.waitForTimeout(40);
+      const human = await page.evaluate(() => window.__WORKSPACE__.navigated);
+      ok("a current human popup keeps the existing browser navigation path", human.length === 1
+        && human[0]?.url === "https://example.com/popup-human", JSON.stringify(human));
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "paused", revision: 82, inFlight: 0, needsObservation: false });
+        window.__workspacePopup({ label, url: "https://example.com/popup-paused", revision: 81 });
+      }, label);
+      await page.waitForTimeout(40);
+      const paused = await page.evaluate(() => window.__WORKSPACE__.navigated.length);
+      ok("a popup from before pause cannot navigate the paused task browser", paused === 1, String(paused));
+      await page.evaluate((label) => closeTab(`browser:${label}`), label);
+      const before = await page.evaluate(() => ({ active: activeTabId, opened: window.__WORKSPACE__.opened.length }));
+      await page.evaluate((label) => {
+        window.__workspacePopup({ label, url: "https://example.com/popup-closed", revision: 81 });
+        window.__workspacePopup({ label: "browser-999", url: "https://example.com/popup-missing" });
+      }, label);
+      await page.waitForTimeout(80);
+      const closed = await page.evaluate(() => ({ active: activeTabId, opened: window.__WORKSPACE__.opened.length }));
+      ok("a popup whose origin closed never opens or focuses an ordinary tab", closed.active === before.active
+        && closed.opened === before.opened, JSON.stringify({ before, closed }));
+      const person = await page.evaluate(async () => {
+        const label = await openBrowserTab("https://example.com/person-popup");
+        window.__workspacePopup({ label, url: "https://example.com/person-popup-next" });
+        return label;
+      });
+      await page.waitForTimeout(40);
+      const ordinary = await page.evaluate((label) => window.__WORKSPACE__.navigated.filter((one) => one.label === label), person);
+      ok("ordinary user popups retain their existing navigation behavior", ordinary.length === 1
+        && ordinary[0]?.url === "https://example.com/person-popup-next", JSON.stringify(ordinary));
+      ok("workspace popup handling raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
 }
