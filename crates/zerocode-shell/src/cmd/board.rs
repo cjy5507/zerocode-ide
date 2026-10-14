@@ -1484,6 +1484,12 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         Some(worker) => crate::orchestration::sleeper_launch_tuning(worker)?,
         None => Vec::new(),
     };
+    // Whose pane this is (t-46882): the ledger's — a sleeper no person took,
+    // or the conversation a run's seat names — or the person's own.
+    let owned_by_the_ledger = match reseating.as_deref() {
+        Some(worker) => !crate::orchestration::worker_taken_over_now(worker),
+        None => !fresh && crate::orchestration::coordinates_a_run(agent, &session),
+    };
     let command = if fresh {
         fresh_command(agent, launch_override.as_ref())?
     } else {
@@ -1578,6 +1584,12 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     };
     let resumed_session_id = session.id.clone();
     window.record(term, session);
+    // A ledger pane — a sleeper no person took, or a run's coordinator — is
+    // read at its first rest for the release it came back on (t-46882); a
+    // person's own tab runs whatever they run.
+    if owned_by_the_ledger {
+        crate::orchestration::superseded::came_back(term, kind.slug(), now_epoch_ms());
+    }
     // Whose word in the goodbye's note this wake speaks for: the sleeper's,
     // the coordinator's run's, or the person's tab's.
     let reseated = reseating.is_some();

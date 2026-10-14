@@ -146,8 +146,7 @@ impl Door {
         agent: &str,
         session: &str,
     ) -> Result<ConversationWake, String> {
-        wake_conversation(
-            self,
+        self.wake_with(
             term,
             agent,
             zerocode_core::ProviderSession {
@@ -155,9 +154,18 @@ impl Door {
                 id: session.to_string(),
                 transcript_path: None,
             },
-            24,
-            80,
         )
+    }
+
+    /// The same wake, of the conversation as the door's record names it —
+    /// where its transcript is written included (t-46882).
+    pub(super) fn wake_with(
+        &self,
+        term: u32,
+        agent: &str,
+        session: zerocode_core::ProviderSession,
+    ) -> Result<ConversationWake, String> {
+        wake_conversation(self, term, agent, session, 24, 80)
     }
 
     /// Walk every armed wake through both of its receipt windows, on the

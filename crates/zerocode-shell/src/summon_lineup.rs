@@ -129,6 +129,17 @@ fn read_in_background(now_ms: i64) {
     }
 }
 
+/// The release that stands today for `model` in `agent`'s lineup, when the
+/// classifier superseded it (t-46882): `snapshot`'s answer, `None` where it
+/// holds no lineup for the agent.
+pub(crate) fn current_release(snapshot: &Snapshot, agent: &str, model: &str) -> Option<String> {
+    snapshot
+        .lineups
+        .get(agent)?
+        .current_release(model)
+        .map(str::to_string)
+}
+
 /// The lineup of every agent that takes a model at a difficulty and drives
 /// one provider — `read` is the catalog road, a test's synthetic one.
 fn lineups_of(read: impl Fn(&str) -> Option<Lineup>) -> BTreeMap<String, Lineup> {

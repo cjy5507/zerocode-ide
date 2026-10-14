@@ -100,6 +100,13 @@ pub struct ModelTierAssignment {
     /// How sure the judgment was, in thousandths; `None` when no judgment
     /// placed it.
     pub confidence_permille: Option<u16>,
+    /// For a [`ModelBand::Superseded`] release, the newer release of its own
+    /// line that stands in its place (`claude-fable-5` → `claude-fable-5-1`)
+    /// — what a session still running the older one is moved to (t-46882).
+    /// `None` for every other band, and for a twin of the same release
+    /// (`acme[blue]` beside `acme[green]`): a twin is no older, the same rule
+    /// as `policy::automatic_choice_allowed`.
+    pub successor: Option<String>,
 }
 
 /// A declared class as a rank in [`FactRule`], strongest first. The
@@ -281,6 +288,7 @@ pub(super) fn classify_model_tiers_with(
                 rungs,
                 source: place.source,
                 confidence_permille: place.confidence_permille,
+                successor: None,
             });
         }
         for model in superseded {
@@ -292,6 +300,7 @@ pub(super) fn classify_model_tiers_with(
                 rungs: BTreeSet::new(),
                 source: TierSource::FactRule,
                 confidence_permille: None,
+                successor: None,
             });
         }
     }

@@ -408,6 +408,7 @@ impl PrivateWindow {
             .take();
         super::install_runtime(actor, overrides, usage);
         forget_the_goodbyes_note();
+        super::hold_lineup_for_tests(None);
         (
             Self {
                 _root: root,
@@ -447,6 +448,8 @@ impl PrivateWindow {
 impl Drop for PrivateWindow {
     fn drop(&mut self) {
         forget_the_goodbyes_note();
+        // A lineup this window held is no other window's (t-46882).
+        super::hold_lineup_for_tests(None);
         *super::runtime_cell()
             .lock()
             .unwrap_or_else(|held| held.into_inner()) = self.previous.take();
@@ -23189,6 +23192,10 @@ mod restore_door;
 /// t-9091: a closing window's beat leaves its sleepers to the next window
 /// (`tests/restore_goodbye.rs`).
 mod restore_goodbye;
+/// t-46882: a restart brings no ledger pane back on a release the catalog
+/// superseded, and a pane that came back before the lineup was read is moved
+/// at its first rest (`tests/restore_release.rs`).
+mod restore_release;
 /// t-19779: a released worker stays retired — the window is told so when its
 /// checkout is opened, and no restore road brings it back
 /// (`tests/restore_retired.rs`).

@@ -12512,13 +12512,19 @@ impl Ledger {
     /// The launch words the sleeper `worker_id` comes back with (t-7812):
     /// `kept_worker_tuning`'s, asked by the window's resume road so the pane
     /// it opens for a sleeper's conversation is the launch the ledger's own
-    /// reseat would have cut. A read; nothing moves.
-    pub fn sleeper_resume_tuning(&self, worker_id: &str) -> Result<Vec<String>, String> {
+    /// reseat would have cut — `current` answering, as the launcher's
+    /// [`Launcher::current_release`] does there, which release stands for a
+    /// superseded one today (t-46882). A read; nothing moves.
+    pub fn sleeper_resume_tuning(
+        &self,
+        worker_id: &str,
+        current: &dyn Fn(&str, &str) -> Option<String>,
+    ) -> Result<Vec<String>, String> {
         self.runs
             .iter()
             .find_map(|run| {
                 run.worker(worker_id)
-                    .map(|worker| kept_worker_tuning(&run.id, worker))
+                    .map(|worker| kept_worker_tuning(&run.id, worker, current))
             })
             .unwrap_or_else(|| Err(format!("unknown worker: {worker_id}")))
     }
@@ -12786,7 +12792,9 @@ impl Ledger {
             .checkout
             .clone()
             .ok_or_else(|| format!("{kept} worker {worker_id} has no checkout"))?;
-        let tuning = kept_worker_tuning(run_id, worker)?;
+        let tuning = kept_worker_tuning(run_id, worker, &|agent, model| {
+            launcher.current_release(agent, model)
+        })?;
         /* Resume the conversation without starting the interrupted work yet.
          *
          * The host has to spawn the process before `worker_reseated` can prove
@@ -14489,6 +14497,16 @@ pub trait Launcher {
     /// — lineup, book and records — or `None` when the host holds no lineup
     /// or the launch was sealed (t-14437).
     fn model_facts(&self, _agent: &str, _origin: [&str; 3]) -> Option<crate::summon_model::Facts> {
+        None
+    }
+
+    /// The release that stands today for `model`, a release of `agent`'s
+    /// lineup the classifier superseded
+    /// ([`crate::summon_difficulty::lineup::Lineup::current_release`]) —
+    /// what a kept worker comes back on instead (t-46882). Peeked, never
+    /// fetched: this runs inside the actor. `None` when the host holds no
+    /// lineup for the agent or the model is current.
+    fn current_release(&self, _agent: &str, _model: &str) -> Option<String> {
         None
     }
 
@@ -17416,7 +17434,14 @@ fn continue_past_classifier_declines(agent: &str, pinned: bool, words: &mut Vec<
 /// The row's values win: an effort changed inside the pane reaches no hook,
 /// so the row's effort stands, and a value the row never held is not filled
 /// in — an agent summoned without tuning comes back without it.
-fn kept_worker_tuning(run_id: &str, worker: &Worker) -> Result<Vec<String>, String> {
+///
+/// `current` answers which release stands today for a superseded one
+/// ([`Launcher::current_release`], t-46882).
+fn kept_worker_tuning(
+    run_id: &str,
+    worker: &Worker,
+    _current: &dyn Fn(&str, &str) -> Option<String>,
+) -> Result<Vec<String>, String> {
     let mut tuning = launch_tuning(
         &worker.agent,
         worker.model.as_deref(),
