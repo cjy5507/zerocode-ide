@@ -6,7 +6,7 @@
  * 저장소 밖). 여기 세 묶음:
  *   A. 한 판에서 대화를 바꿨다가 돌아오면 그 화면이 그대로 돌아온다 — 행 노드도,
  *      읽던 행도. 떼어 두는 화면은 판마다 상한(개수·시간)이 있고, 탭을 닫으면
- *      같이 간다.
+ *      같이 간다. 떼어 둔 동안 칠하지 못한 코드 블록은 돌아오면 칠해진다.
  *   B. 판의 「대화」는 누른 다음 프레임들 안에 전사를 보인다 — 선(wire) 인계는
  *      뒤에서. 인계 중에 보낸 글은 한 번만, 순서대로 간다: 선이 서면 선으로,
  *      서지 못하면 판으로. 선으로 바뀌는 순간 읽던 행은 그대로다.
@@ -18,6 +18,7 @@ import { openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 
 export async function testConversationSwitch(browser, origin, ok) {
   await testParkedPages(browser, origin, ok);
+  await testColoursAfterAside(browser, origin, ok);
   await testPaneHandover(browser, origin, ok, { refuse: false });
   await testPaneHandover(browser, origin, ok, { refuse: true });
   await testLateFirstRead(browser, origin, ok);
@@ -112,6 +113,52 @@ async function testParkedPages(browser, origin, ok) {
       JSON.stringify({ beforeClose: seen.beforeClose, closed: seen.closed, expired: seen.expired }),
     );
     ok("parked pages: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* A conversation looked away from before its code blocks took their colours:
+ * the colouring meets those blocks while the page is out of the document and
+ * lets them go, so a page that comes back as it stood must put them in line
+ * again — a page built again would have. The page's idle slices are held (a
+ * stand-in `requestIdleCallback`) so the order is the one a quick press meets:
+ * opened, left before an idle moment, coloured while aside, come back to. The
+ * blocks' code is its own (`aside_`), so no colours are remembered for it. */
+async function testColoursAfterAside(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standSwitcher(page);
+    const fenced = JSON.parse(JSON.stringify(conversationFixture({ blocks: 2 })).replaceAll("paint_", "aside_"));
+    const seen = await page.evaluate(async ({ fenced, other }) => {
+      const list = () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility()) ?? null;
+      const fences = () => [...(list()?.querySelectorAll("pre.md-block") ?? [])];
+      const read = () => ({ fences: fences().length, coloured: fences().filter((pre) => pre.querySelector("[class^='chat-code-']") !== null).length });
+      const idle = [];
+      const held = window.requestIdleCallback;
+      window.requestIdleCallback = (slice) => idle.push(slice);
+      const runIdle = () => {
+        for (let beat = 0; beat < 400 && idle.length > 0; beat += 1) idle.shift()({ didTimeout: false, timeRemaining: () => 50 });
+      };
+      try {
+        const aside = await window.__SWITCH__.open(fenced);
+        const opened = read();
+        await window.__SWITCH__.open(other);
+        runIdle();
+        await window.__SWITCH__.hop(aside);
+        runIdle();
+        return { opened, back: read() };
+      } finally {
+        window.requestIdleCallback = held;
+      }
+    }, { fenced, other: conversationFixture({ blocks: 1 }) });
+    ok(
+      "a_code_block_left_uncoloured_while_its_page_was_aside_takes_its_colours_when_it_comes_back: a conversation left before an idle moment coloured its code blocks, and coloured by the slices that ran while it was aside, comes back with every block it stands with coloured",
+      seen.opened.fences > 0 && seen.opened.coloured < seen.opened.fences &&
+        seen.back.fences === seen.opened.fences && seen.back.coloured === seen.back.fences,
+      JSON.stringify(seen),
+    );
+    ok("colours after aside: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
   } finally {
     await page.close();
   }
