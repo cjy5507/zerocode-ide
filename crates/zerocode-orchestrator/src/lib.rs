@@ -1960,6 +1960,22 @@ pub fn lists_ignored_paths(status_v2_z: &str) -> bool {
     !parse_status(status_v2_z).ignored.is_empty()
 }
 
+/// The tracked paths `git status --porcelain=v2 -z --untracked-files=no`
+/// names as changed — and a rename's or copy's origin too — for the sidebar's
+/// overlap of unsaved work with the compare ref (t-45314). The same parser as
+/// the cleanup review and the evidence read, so a rename's second field is
+/// read as the path it is and never as a record of its own. Untracked and
+/// ignored records are no change to a tracked file and are left out.
+#[must_use]
+pub fn changed_tracked_paths(status_v2_z: &str) -> Vec<String> {
+    parse_status(status_v2_z)
+        .uncommitted
+        .into_iter()
+        .filter(|entry| entry.code != "??")
+        .flat_map(|entry| std::iter::once(entry.path).chain(entry.origin))
+        .collect()
+}
+
 /// What one expanded submodule holds.
 #[derive(Debug, Default, Clone)]
 pub struct SubmoduleChanges {
@@ -2693,6 +2709,25 @@ prunable gitdir file points to non-existent location
         // 머리 두 글자가 규격이 아닌 줄은 통째로 건너뛴다 — 헤더(`# branch.oid`)가
         // 딸려 오는 날 그것이 경로로 읽히지 않는다.
         assert!(parse_status("# branch.oid abc\0").uncommitted.is_empty());
+    }
+
+    /// What the sidebar's overlap compares with the compare ref's files: every
+    /// changed tracked path, a rename by both its names, an unmerged path, and
+    /// nothing untracked or ignored (t-45314).
+    #[test]
+    fn changed_tracked_paths_name_both_sides_of_a_rename_and_nothing_untracked() {
+        let said = changed_tracked_paths(concat!(
+            "1 .M N... 100644 100644 100644 aaa bbb src/login.rs\0",
+            "2 R. N... 100644 100644 100644 ccc ccc R100 docs/notes.md\0docs/note.md\0",
+            "u UU N... 100644 100644 100644 100644 ddd eee fff ui/b.js\0",
+            "? scratch.txt\0",
+            "! target/\0",
+        ));
+        assert_eq!(
+            said,
+            vec!["src/login.rs", "docs/notes.md", "docs/note.md", "ui/b.js"]
+        );
+        assert!(changed_tracked_paths("").is_empty());
     }
 
     /// 펼친 서브모듈이 읽어 오는 것들 — 이름-상태, 셈, 그리고 gitlink 커밋.
