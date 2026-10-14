@@ -9867,8 +9867,10 @@ function agentRowsSaid(rows) {
         // 바꾼다. 원료를 적는다(사다리를 두 번 오르지 않기 위해).
         `:${panePrompts.get(row.term) ?? ""}:${paneSaid.get(row.term) ?? ""}` +
         `:${paneModels.get(row.term) ?? ""}:${restoredWorkers.get(row.term) ?? ""}` +
-        // And whether the catalog superseded that model (t-46882).
-        `:${row.sub ? "" : (paneModelSupersededBy(row.term) ?? "")}` +
+        // And what the row says of that model (t-46882): whether the catalog
+        // superseded it, in the words of the language in use — the verdict
+        // alone would leave the word in the language it was first drawn in.
+        `:${row.sub ? "" : `${agentRowModelWords(row)}|${agentRowModelTip(row)}`}` +
         // A helper's own model — its words and the facts behind them — is
         // what its row says about it; the pane's (above) is not.
         `:${row.sub ? `${agentRowModelWords(row)}|${agentRowModelTip(row)}` : ""}` +
@@ -11965,6 +11967,9 @@ listen("hook:agent", (event) => {
   const clearedRestoreBirth = restoredWorkers.delete(term);
   // The model rides raw per event; the stickiness lives here (1-fv). An
   // event without one is an event about something else, not a forgetting.
+  // Whether it moved is read first: the row and the board wear it, and a
+  // move with no change of state repaints them below (t-46882).
+  const modelMoved = Boolean(event.payload.model) && paneModels.get(term) !== event.payload.model;
   if (event.payload.model) {
     paneModels.set(term, event.payload.model);
     paintStatusModel();
@@ -12047,15 +12052,16 @@ listen("hook:agent", (event) => {
   if (owner && owner.id === activeTabId) acknowledgedPanes.set(`term:${term}`, heard);
   if (hookStates.get(term) === state) {
     // The state did not move but the card's lines may have — a second prompt
-    // inside one working stretch, or a turn ending with new words. The open
-    // board and the sidebar's rows both speak those lines now; the tab strip
-    // draws states, not sentences.
+    // inside one working stretch, a turn ending with new words, or a pane at
+    // rest moved to another model (`/model`, t-46882). The open board and the
+    // sidebar's rows both speak those lines now; the tab strip draws states,
+    // not sentences.
     if (confirmsSnapshot) {
       // The retained copy repaired the state before this matching push
       // arrived. Consume that origin once so all state-change consumers hear
       // the real push; later repeated tool events remain on the quiet path.
       scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
-    } else if (clearedRestoreBirth || event.payload.prompt || event.payload.said) {
+    } else if (clearedRestoreBirth || event.payload.prompt || event.payload.said || modelMoved) {
       scheduleAgentPaint(["cards", "board"]);
     }
     // The state stood still, but the model or the mode may have moved.
