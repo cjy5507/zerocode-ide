@@ -78,6 +78,7 @@ pub(crate) async fn set_browser_workspace_mode(
     })??;
     if mode != Mode::Paused {
         let labels = transition.fence_labels()?;
+        super::browser::settle_known_navigation(&state, &labels).await?;
         tokio::time::timeout(super::browser::BROWSER_CALLBACK_DEADLINE, async {
             for fenced in labels {
                 if state.browser_panes().contains(&fenced) {

@@ -46,6 +46,7 @@ impl NavState {
 pub(super) struct NavRecord {
     state: NavState,
     started_at: Option<Instant>,
+    requested_at: Option<Instant>,
     generation: u64,
 }
 
@@ -57,12 +58,14 @@ impl NavRecord {
             NavRecord {
                 state: NavState::Blank,
                 started_at: None,
+                requested_at: None,
                 generation: 0,
             }
         } else {
             NavRecord {
                 state: NavState::Loading,
                 started_at: Some(now),
+                requested_at: None,
                 generation: 1,
             }
         }
@@ -73,8 +76,21 @@ impl NavRecord {
     pub(super) fn started(&mut self, now: Instant) -> u64 {
         self.state = NavState::Loading;
         self.started_at = Some(now);
+        self.requested_at = None;
         self.generation += 1;
         self.generation
+    }
+
+    pub(super) fn requested(&mut self, now: Instant) {
+        self.requested_at = Some(now);
+    }
+
+    pub(super) fn pending(&self, now: Instant) -> bool {
+        self.observed(now) == NavState::Loading
+            || self.requested_at.is_some_and(|at| {
+                now.saturating_duration_since(at)
+                    < Duration::from_millis(zerocode_core::agent_browser::BROWSER_DOOR_BUDGET_MS)
+            })
     }
 
     /// The main document's Finished — on the blank page, that is `blank`.

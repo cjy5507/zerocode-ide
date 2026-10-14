@@ -325,6 +325,33 @@ async fn page_json(
     decode_page_json(&raw)
 }
 
+pub(crate) fn note_navigation_request(state: &AppState, label: &str) {
+    if let Some(record) = state.browser_records().get_mut(label) {
+        record.nav.requested(std::time::Instant::now());
+    }
+}
+
+pub(crate) async fn settle_known_navigation(
+    state: &AppState,
+    labels: &[String],
+) -> Result<(), String> {
+    let settled = wait_until(BROWSER_CALLBACK_DEADLINE, BROWSER_WAIT_POLL, || {
+        let now = std::time::Instant::now();
+        let records = state.browser_records();
+        labels.iter().all(|label| {
+            records
+                .get(label)
+                .is_none_or(|record| !record.nav.pending(now))
+        })
+    })
+    .await;
+    if settled {
+        Ok(())
+    } else {
+        Err("workspace_paused: 페이지 이동이 끝나지 않았습니다 — 일시정지 상태에서 다시 제어권을 선택하세요".to_string())
+    }
+}
+
 pub(crate) async fn workspace_page_fence(pane: &BrowserPane) -> Result<(), String> {
     if page_json(pane, "1", BROWSER_CALLBACK_DEADLINE).await? == serde_json::json!(1) {
         Ok(())
@@ -1891,6 +1918,7 @@ pub(crate) fn browser_navigate(
         state
             .browser_urls()
             .insert(label.clone(), parsed.to_string());
+        note_navigation_request(&state, &label);
         pane.navigate(parsed)
             .map_err(|_| "브라우저 판에 이동 요청을 보낼 수 없습니다".to_string())
     })();

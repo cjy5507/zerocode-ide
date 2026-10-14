@@ -7060,6 +7060,7 @@ async fn dispatch_browser_command(
                     return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
                 }
             };
+            cmd::browser::note_navigation_request(&state, &argv[1]);
             match pane.navigate(url) {
                 Ok(()) => browser_said("가는 중\n"),
                 Err(_) => browser_refused("zerocode-browser: 이동 요청을 보낼 수 없습니다\n"),
