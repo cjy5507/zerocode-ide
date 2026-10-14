@@ -203,6 +203,16 @@ impl Cancel {
             self.signal.notified().await;
         }
     }
+
+    async fn until_cancelled(
+        &self,
+        operation: impl std::future::Future<Output = Result<()>>,
+    ) -> Result<()> {
+        tokio::select! {
+            _ = self.cancelled() => Err(Error::Cancelled),
+            result = operation => result,
+        }
+    }
 }
 
 struct Inner {
@@ -1902,14 +1912,15 @@ async fn wait_ready(engine: &Arc<Engine>, cancel: &Cancel) -> Result<()> {
 async fn wait_ready_for(engine: &Arc<Engine>, cancel: &Cancel, timeout: Duration) -> Result<()> {
     let process = engine.clone();
     let ready = tokio::task::spawn_blocking(move || process.ready());
-    let result = tokio::select! {
-        _ = cancel.cancelled() => Err(Error::Cancelled),
-        ready = tokio::time::timeout(timeout, ready) => match ready {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(Error::RuntimeFailed),
-            Err(_) => Err(Error::Timeout),
-        },
-    };
+    let result = cancel
+        .until_cancelled(async {
+            match tokio::time::timeout(timeout, ready).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(Error::RuntimeFailed),
+                Err(_) => Err(Error::Timeout),
+            }
+        })
+        .await;
     if result.is_err() {
         engine.stop();
     }
@@ -2006,15 +2017,19 @@ async fn native_pipe_check(
     let body = prepared.body.clone();
     let process = engine.clone();
     let exchange = tokio::task::spawn_blocking(move || process.exchange(&body));
-    let result = tokio::select! {
-        _ = cancel.cancelled() => Err(Error::Cancelled),
-        result = tokio::time::timeout(engine::REQUEST_TIMEOUT, exchange) => match result {
-            Ok(Ok(Ok(bytes))) => provider.decode(&prepared, bytes).map(|_| ()).map_err(|_| Error::Protocol),
-            Ok(Ok(Err(error))) => Err(error),
-            Ok(Err(_)) => Err(Error::RuntimeFailed),
-            Err(_) => Err(Error::Timeout),
-        },
-    };
+    let result = cancel
+        .until_cancelled(async {
+            match tokio::time::timeout(engine::REQUEST_TIMEOUT, exchange).await {
+                Ok(Ok(Ok(bytes))) => provider
+                    .decode(&prepared, bytes)
+                    .map(|_| ())
+                    .map_err(|_| Error::Protocol),
+                Ok(Ok(Err(error))) => Err(error),
+                Ok(Err(_)) => Err(Error::RuntimeFailed),
+                Err(_) => Err(Error::Timeout),
+            }
+        })
+        .await;
     if result.is_err() {
         engine.stop();
     }
@@ -2199,5 +2214,66 @@ pub(crate) mod test_support {
             fs::rename(backup, settings).unwrap();
             result.map_err(|_| Error::Storage)
         })
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::{AtomicBool, Cancel, Error, Ordering};
+
+    #[tokio::test]
+    async fn a_recorded_stop_does_not_poll_the_operation() {
+        let cancellation = Cancel::new();
+        let polled = AtomicBool::new(false);
+        cancellation.stop();
+        let result = cancellation
+            .until_cancelled(async {
+                polled.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .await;
+        assert_eq!(result, Err(Error::Cancelled));
+        assert!(!polled.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_a_failed_poll_wins_over_the_pipe_error() {
+        let cancellation = Cancel::new();
+        let result = cancellation
+            .until_cancelled(async {
+                cancellation.stop();
+                Err(Error::RuntimeFailed)
+            })
+            .await;
+        assert_eq!(result, Err(Error::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_a_successful_poll_prevents_completion() {
+        let cancellation = Cancel::new();
+        let result = cancellation
+            .until_cancelled(async {
+                cancellation.stop();
+                Ok(())
+            })
+            .await;
+        assert_eq!(result, Err(Error::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn ordinary_failures_keep_their_original_reason() {
+        let cancellation = Cancel::new();
+        assert_eq!(
+            cancellation
+                .until_cancelled(async { Err(Error::RuntimeFailed) })
+                .await,
+            Err(Error::RuntimeFailed)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uninterrupted_operation_completes() {
+        let cancellation = Cancel::new();
+        assert_eq!(cancellation.until_cancelled(async { Ok(()) }).await, Ok(()));
     }
 }
