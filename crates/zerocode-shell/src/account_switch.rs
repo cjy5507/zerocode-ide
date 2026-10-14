@@ -83,6 +83,15 @@ pub(crate) fn unless_switching<T>(act: impl FnOnce() -> T) -> Option<T> {
     Some(act())
 }
 
+/// The line held the way a switch holds it for the seconds a move takes —
+/// for a test that presses at a quota wall in the middle of one.
+#[cfg(test)]
+pub(crate) fn hold_switch_line() -> std::sync::MutexGuard<'static, ()> {
+    SWITCH_LINE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// When the window's default last moved, and to whom — the cooldown's
 /// clock. Window memory: a restart ends the cooldown, which is the same
 /// answer the gauges give (they are read again at boot).
