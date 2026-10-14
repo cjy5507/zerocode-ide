@@ -30,7 +30,8 @@
  *   node ui/tests/conversation-perf.mjs --rounds 3 --json out.json
  *
  * 사람이 느끼는 네 장면(열기·입력·스트리밍·누수, t-22095)은 같은 픽스처 위의
- * `--scenarios`다 — 아래 「사람이 느끼는 네 장면」.
+ * `--scenarios`다 — 아래 「사람이 느끼는 네 장면」. 한 판에서 두 대화를 오가는
+ * 것(t-54304)은 `--switch`다 — 아래 「(e) 대화 바꾸기」.
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -868,6 +869,254 @@ export async function measureLeaks(page, { engine, rounds = SCENARIOS.leak.round
   };
 }
 
+/* ---- (e) 대화 바꾸기 (t-54304) ----------------------------------------------
+ *
+ * 사람(10-14): 「대화 창 전환시 cc나 codex 데스크탑처럼 출력되게」. 한 판에
+ * 대화 둘 — 이 파일의 픽스처로 400턴 A와 200턴 B — 이 같은 판의 두 탭으로
+ * 서 있고, 사람이 탭을 눌러 둘을 번갈아 본다. 한 번 바꿀 때마다 잰다:
+ *   - 누름의 리스너가 메인 스레드를 쥔 시간(`clickMs`)과, 누름 → 그 뒤 첫
+ *     프레임이 화면에 선 때(`firstPaintMs`, 열기의 첫 그림과 같은 자);
+ *   - 그 대화가 지난번에 보였을 때의 행 노드가 그대로 돌아왔는지(`rowsKept`),
+ *     새로 지었는지(`rowsBuilt`), 그리고 목록의 요소 수;
+ *   - 첫 프레임에 시야 안에 선 행(`rowsInView`)과 그중 몸 없이 선 행
+ *     (`bareInView` — 선반의 행, 사람에게는 빈 줄), 시야의 행이 모두 몸을
+ *     입은 첫 프레임까지(`dressedMs`);
+ *   - 그동안의 긴 작업(수·합·최대) — 네 장면의 기록기 그대로.
+ * 두 가지 읽기로: 끝을 따라가며 보던 대화(`foot`), 그리고 위로 올려 읽던
+ * 대화로 돌아오기(`reading`) — 그때는 읽던 행이 같은 높이에 다시 서는지
+ * (`placeDriftPx`, 행이 바뀌면 null)도.
+ *
+ *   node ui/tests/conversation-perf.mjs --switch [--engine webkit] [--rounds 5] [--json out.json]
+ *   WINDOW_CPU_THROTTLE=4 node ui/tests/conversation-perf.mjs --switch     저사양(cpu4x, Chromium)
+ *   taskpolicy -b node ui/tests/conversation-perf.mjs --switch             저사양(효율 코어)
+ */
+/* `readUp`: how far up the reader wheels before looking away — half the
+ * list's height, past the rows a page builds whole at its foot. */
+export const SWITCH = Object.freeze({ turns: [400, 200], hops: 6, readUp: 0.5, settleMs: 300, dressFrames: 60 });
+
+/* The page's hands for the switch, once a page: two conversations opened as
+ * wire tabs of one leaf (each its own wire id, a log that brings nothing new,
+ * so no poll repaints between hops), and one hop — a press on a tab, read
+ * as the person meets it. */
+export async function standSwitcher(page) {
+  await page.evaluate(({ dressFrames, png }) => {
+    if (window.__SWITCH__) return;
+    let wire = 60;
+    // The rows each tab's list showed when it was last looked at.
+    const seen = new Map();
+    const list = () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility()) ?? null;
+    const rows = (held) => [...held.querySelectorAll(":scope > [data-turn]")];
+    // The rows standing in the list's view, and those of them standing bare.
+    const inView = (held) => {
+      const box = held.getBoundingClientRect();
+      const shown = rows(held).filter((row) => {
+        const at = row.getBoundingClientRect();
+        return at.height > 0 && at.bottom > box.top && at.top < box.bottom;
+      });
+      return { rows: shown.length, bare: shown.filter((row) => row.classList.contains("is-shelved")).length };
+    };
+    // The next frame, once it is on screen — and what the list showed in it:
+    // read in a task the frame's own callback posted, which runs before the
+    // watchers that frame woke (the shelf's) can dress a row.
+    const painted = () => new Promise((done) => requestAnimationFrame(() => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => done({ at: performance.now(), view: inView(list()) });
+      channel.port2.postMessage(null);
+    }));
+    window.__SWITCH__ = {
+      async open(history) {
+        wire += 1;
+        const id = wire;
+        window.__ANSWER__.wire_start = (args) => ({ id, agent: args.agent, protocol: "claude-stream", version: "2.1.278", model: null, session: null });
+        window.__ANSWER__.wire_log = () => ({
+          found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], live: [],
+          agent: "claude", protocol: "claude-stream", models: [], modes: [], commands: [], version: "2.1.278",
+        });
+        // A picture's bytes, when a row in view asks for them (A8's lazy load).
+        window.__ANSWER__.wire_image = () => png;
+        const tab = await openWirePage("claude", "/tmp/zerocode-window-test", { history });
+        await pollHelperPages();
+        await window.__PAINTED__();
+        seen.set(tab, new WeakSet(rows(list())));
+        return tab;
+      },
+      box() {
+        const held = list();
+        const rect = held.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 3, height: held.scrollHeight };
+      },
+      // Until the list stops moving (a glide included).
+      async still() {
+        const held = list();
+        let last = -1;
+        let same = 0;
+        for (let beat = 0; beat < 240 && same < 5; beat += 1) {
+          await new Promise((done) => requestAnimationFrame(done));
+          same = held.scrollTop === last ? same + 1 : 0;
+          last = held.scrollTop;
+        }
+        return Math.round(held.scrollHeight - held.scrollTop - held.clientHeight);
+      },
+      // The row the reader reads: the first under the list's top edge that is
+      // not a person's words stuck there (`keepChatPlace`'s own rule).
+      reading() {
+        const held = list();
+        const top = held.getBoundingClientRect().top;
+        const row = rows(held).filter((one) => !one.classList.contains("is-user")).find((one) => one.getBoundingClientRect().bottom > top);
+        return row ? { turn: row.dataset.turn, offset: row.getBoundingClientRect().top - top } : null;
+      },
+      async hop(tab) {
+        const node = document.querySelector(`[role="tab"][data-tab="${CSS.escape(tab)}"]`);
+        const from = performance.now();
+        node.click();
+        const clicked = performance.now();
+        const first = await painted();
+        let dressed = first.view.bare === 0 ? first.at : null;
+        for (let beat = 0; dressed === null && beat < dressFrames; beat += 1) {
+          const next = await painted();
+          if (next.view.bare === 0) dressed = next.at;
+        }
+        const held = list();
+        const now = rows(held);
+        const before = seen.get(tab);
+        const kept = before ? now.filter((row) => before.has(row)).length : 0;
+        seen.set(tab, new WeakSet(now));
+        return {
+          clickMs: clicked - from,
+          firstPaintMs: first.at - from,
+          rowsInView: first.view.rows,
+          bareInView: first.view.bare,
+          dressedMs: dressed === null ? null : dressed - from,
+          rows: now.length,
+          rowsKept: kept,
+          rowsBuilt: now.length - kept,
+          listElements: held.getElementsByTagName("*").length,
+        };
+      },
+    };
+  }, { dressFrames: SWITCH.dressFrames, png: FIXTURE_PNG });
+}
+
+/* One hop, recorded: the press, the frames until its view is dressed, and
+ * the main thread's long tasks until it settles. */
+async function recordedHop(page, tab) {
+  await quiet(page);
+  await page.evaluate(() => window.__FEEL__.begin());
+  const took = await page.evaluate((tab) => window.__SWITCH__.hop(tab), tab);
+  await sleep(SWITCH.settleMs);
+  const taken = await page.evaluate(() => window.__FEEL__.end());
+  const long = taken.longtasks.map((task) => task.ms);
+  return {
+    ...took,
+    longtasks: long.length,
+    longtaskTotalMs: long.reduce((total, value) => total + value, 0),
+    longtaskMaxMs: long.length ? Math.max(...long) : 0,
+  };
+}
+
+/* (e) on one page: A and B opened, then `SWITCH.hops` hops between them at
+ * their foot, then the reader's return — A wheeled up, B looked at, A again —
+ * `SWITCH.hops / 2` times. */
+export async function measureSwitch(page) {
+  await standRecorder(page);
+  await standSwitcher(page);
+  const [a, b] = SWITCH.turns.map((turns) => conversationFixture({ blocks: turns / 20 }));
+  const tabs = await page.evaluate(async ({ a, b }) => [await window.__SWITCH__.open(a), await window.__SWITCH__.open(b)], { a, b });
+  const foot = [];
+  for (let hop = 0; hop < SWITCH.hops; hop += 1) {
+    const to = hop % 2 === 0 ? 0 : 1;
+    foot.push({ to: to === 0 ? "a" : "b", ...(await recordedHop(page, tabs[to])) });
+  }
+  const reading = [];
+  for (let round = 0; round < SWITCH.hops / 2; round += 1) {
+    await page.evaluate((tab) => window.__SWITCH__.hop(tab), tabs[0]);
+    const box = await page.evaluate(() => window.__SWITCH__.box());
+    await page.mouse.move(box.x, box.y);
+    await page.mouse.wheel(0, -Math.round(box.height * SWITCH.readUp));
+    await page.evaluate(() => window.__SWITCH__.still());
+    const place = await page.evaluate(() => window.__SWITCH__.reading());
+    await page.evaluate((tab) => window.__SWITCH__.hop(tab), tabs[1]);
+    const back = await recordedHop(page, tabs[0]);
+    await page.evaluate(() => window.__SWITCH__.still());
+    const again = await page.evaluate(() => window.__SWITCH__.reading());
+    const drift = place && again && place.turn === again.turn ? Math.abs(again.offset - place.offset) : null;
+    reading.push({ to: "a", ...back, placeDriftPx: drift });
+  }
+  return { foot, reading };
+}
+
+/* The switch's numbers over rounds: each mode and target by its median. */
+export function summarizeSwitch(rounds) {
+  const summary = {};
+  for (const mode of ["foot", "reading"]) {
+    for (const to of ["a", "b"]) {
+      const hops = rounds.flatMap((round) => round[mode].filter((hop) => hop.to === to));
+      if (hops.length === 0) continue;
+      const mid = (key) => {
+        const values = hops.map((hop) => hop[key]).filter((value) => typeof value === "number");
+        return values.length ? median(values) : null;
+      };
+      summary[`${mode}-${to}`] = {
+        reader: mode === "reading",
+        hops: hops.length,
+        firstPaintMs: mid("firstPaintMs"),
+        firstPaintMaxMs: Math.max(...hops.map((hop) => hop.firstPaintMs)),
+        clickMs: mid("clickMs"),
+        rows: mid("rows"),
+        rowsBuilt: mid("rowsBuilt"),
+        rowsKept: mid("rowsKept"),
+        listElements: mid("listElements"),
+        rowsInView: mid("rowsInView"),
+        bareInView: mid("bareInView"),
+        bareHops: hops.filter((hop) => hop.bareInView > 0).length,
+        dressedMs: mid("dressedMs"),
+        longtaskMaxMs: mid("longtaskMaxMs"),
+        placeDriftPx: mid("placeDriftPx"),
+        placeKeptHops: hops.filter((hop) => typeof hop.placeDriftPx === "number").length,
+      };
+    }
+  }
+  return summary;
+}
+
+/* Rounds of (e), each on a fresh page of one browser. */
+export async function measureSwitchRounds({ engine = "chromium", rounds = 5 } = {}) {
+  const machine = { cores: cpus().length, loadBefore: loadavg()[0], loadAfter: null };
+  const { files, origin } = await createWindowServer();
+  const browser = await (engine === "webkit" ? webkitType() : chromium).launch({ headless: true });
+  const taken = [];
+  try {
+    for (let round = 0; round < rounds; round += 1) {
+      const { page, faults } = await openWindowTestPage(browser, origin);
+      try {
+        taken.push({ ...(await measureSwitch(page)), faults: faults.slice(0, 3) });
+      } finally {
+        await page.close();
+      }
+    }
+  } finally {
+    await browser.close();
+    files.close();
+  }
+  machine.loadAfter = loadavg()[0];
+  return { engine, throttle: Number(process.env.WINDOW_CPU_THROTTLE ?? 0) || 1, rounds, machine, summary: summarizeSwitch(taken), taken };
+}
+
+function printSwitch(result) {
+  const ms = (value) => (value === null || value === undefined ? "—" : `${value.toFixed(1)} ms`);
+  // The reader's return only: on how many hops the reader's row came back, and how far it moved.
+  const mode = (one) => (one.reader
+    ? ` · reader's row back ${one.placeKeptHops}/${one.hops}${one.placeDriftPx === null ? "" : `, moved ${one.placeDriftPx.toFixed(1)} px`}`
+    : "");
+  console.log(`engine ${result.engine} · cpu ×${result.throttle} · ${result.rounds} rounds · load ${result.machine.loadBefore.toFixed(1)} → ${result.machine.loadAfter.toFixed(1)} on ${result.machine.cores} cores`);
+  for (const [name, one] of Object.entries(result.summary)) {
+    console.log(`  (e) ${name} (${one.hops} hops): first paint ${ms(one.firstPaintMs)} (max ${ms(one.firstPaintMaxMs)}) · press held the thread ${ms(one.clickMs)} · rows ${one.rows} built ${one.rowsBuilt} kept ${one.rowsKept} · list elements ${one.listElements}`);
+    console.log(`      first frame: ${one.rowsInView} rows in view, ${one.bareInView} bare (hops with bare rows ${one.bareHops}) · dressed ${ms(one.dressedMs)} · longest task ${ms(one.longtaskMaxMs)}${mode(one)}`);
+  }
+  const faults = result.taken.flatMap((round) => round.faults);
+  if (faults.length) console.log(`  page errors: ${faults.slice(0, 3).join(" | ")}`);
+}
+
 /* One round: a 200-turn and a 400-turn open on fresh pages; on the 400-turn
  * page, typing, then each stream rate. */
 async function scenarioRound(browser, origin) {
@@ -1087,6 +1336,12 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     for (const row of compareScenarios(a, b)) {
       console.log(`${row.apart > 0.05 ? "APART" : "AGREE"} ${row.path}: ${row.a.toFixed(2)} · ${row.b.toFixed(2)} (${(row.apart * 100).toFixed(1)}%)`);
     }
+    process.exit(0);
+  }
+  if (argv.includes("--switch")) {
+    const result = await measureSwitchRounds({ engine, rounds });
+    printSwitch(result);
+    if (out) writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`);
     process.exit(0);
   }
   if (argv.includes("--scenarios")) {

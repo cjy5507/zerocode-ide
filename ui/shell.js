@@ -12588,7 +12588,7 @@ async function openHelperPage(row, sub) {
  * exit, and the new tab stands where the pane's tab stood (`at`) carrying the
  * turns already said (`history`), so the swap reads as the same conversation
  * changing renderer, not as a new page. */
-async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -1, history = [], label = null, refused = showError } = {}) {
+async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -1, history = [], label = null, carry = null, refused = showError } = {}) {
   let started;
   try {
     started = await invoke("wire_start", { agent, cwd, resume, from_pane: fromTerm });
@@ -12627,10 +12627,15 @@ async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -
     },
   };
   if (history.length) holdHelperTurns(worker.helper, history);
+  // What the conversation brings from the view it continues — the words that
+  // waited, the half-written draft, the row being read (t-54304).
+  carry?.(worker);
   openTab({ id: tabId, kind: "worker", worker });
   if (at >= 0) placeTabAt(tabId, at);
   helperClock.sync();
   paintViewToggle();
+  // The words that waited for the wire go down it now, a message a turn.
+  if (worker.queue?.length) settleComposerQueue(worker);
   return tabId;
 }
 
@@ -12689,29 +12694,59 @@ async function handPaneToWire(term) {
   if (held.handing) return true;
   if (isMidTurn(hookStates.get(term))) {
     held.pendingWire = true;
+    // The view stands already (t-54304): it says so now, not on its next paint.
+    paintPaneChat(term);
     return false;
   }
   held.pendingWire = false;
   held.handing = true;
+  // The transcript view says the wire is taking over, and holds what is sent
+  // meanwhile (`composerHolding`, t-54304).
+  paintPaneChat(term);
+  let tabId = null;
   try {
     const owner = tabOfTerm(term);
     const history = await readPaneTranscript(term);
-    const tabId = await openWirePage(row.id, owner?.worktree ?? activeWorktreePath, {
+    tabId = await openWirePage(row.id, owner?.worktree ?? activeWorktreePath, {
       resume: session,
       fromTerm: term,
       at: owner ? tabs.indexOf(owner) : -1,
       history,
       label: owner ? tabLabel(owner) : null,
+      carry: (run) => carryPaneChat(held, run),
       // The refusal stays on the page (`paintPaneChat`), not only in a toast
       // — the backend logs it too (`refusal_line`), so the log and the page
       // give the same reason.
       refused: (reason) => { held.wireRefusal = String(reason?.message ?? reason); },
     });
-    if (tabId === null) paintPaneChat(term);
+    // The conversation lives on the wire's tab now: the pane's own view steps
+    // down, as it never stood when the hand-over came first.
+    if (tabId !== null) held.on = false;
     return tabId !== null;
   } finally {
     held.handing = false;
+    // A wire that never stood leaves the pane its conversation: the view says
+    // why, and what waited goes the pane's own way, once (t-54304).
+    if (tabId === null) {
+      paintPaneChat(term);
+      settleComposerQueue(held.run);
+    }
   }
+}
+
+/* What a pane's transcript view hands the wire's page that continues its
+ * conversation (t-54304): the words that waited for the hand-over, in their
+ * order, and the half-written draft — taken off the pane's run, so nothing
+ * sent is lost and nothing goes twice — and the row being read, found among
+ * the wire's own turns. */
+function carryPaneChat(held, run) {
+  const from = held.run;
+  if (from.queue?.length) run.queue = from.queue.splice(0);
+  if (from.draft) {
+    run.draft = from.draft;
+    from.draft = "";
+  }
+  run.chatPlace = chatPlaceAcross(held.host?.__helperPage?.turns ?? null, run);
 }
 
 /* The other way: the wire tab's 「화면」. The CLI's own screen resumes the
@@ -12991,19 +13026,22 @@ async function setPaneChat(term, on, { wire = true } = {}) {
     return;
   }
   if (!on) held.wireRefusal = null;
-  // A pane whose agent can be driven on a wire is handed over to it: the
-  // conversation view IS the wire then, streaming. Otherwise — or until the
-  // turn ends, or when the caller only wants to read (`wire: false`: the
-  // pane's CLI is left running as it is) — the transcript view stands.
-  if (on && wire && await handPaneToWire(term)) return;
   held.on = on;
   held.arriving = on ? "chat" : "term";
   updateStage();
   paintViewToggle();
   helperClock.sync();
-  // The first turns now, not on the poll's next beat: the page a person just
-  // asked for should not stand empty for a second.
-  if (on) void pollHelperPages();
+  if (!on) return;
+  // The transcript view stands now, its first turns read at once rather than
+  // on the poll's next beat. A pane whose agent can be driven on a wire is
+  // handed to it behind the view — the conversation IS the wire then,
+  // streaming — unless the caller only wants to read (`wire: false`: the
+  // pane's CLI is left running as it is). Until 10-14 the view waited for the
+  // hand-over: the whole transcript read and the wire's CLI past its
+  // handshake before anything changed on screen (t-54304; Codex, Claude's Code
+  // tab and Dots all draw what they hold first and connect behind it).
+  void pollHelperPages();
+  if (wire) void handPaneToWire(term);
 }
 
 function forgetPaneChat(term) {
@@ -13171,6 +13209,23 @@ function paintPaneChat(term) {
     typeof held.wireRefusal === "string" && held.wireRefusal !== "",
     t("worker.wireRefused", "실시간 세션(선)으로 넘기지 못했습니다: {{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에). 「대화」를 다시 누르면 다시 시도합니다.", { reason: held.wireRefusal ?? "" }),
   );
+  // The wire takes the conversation over behind this view; what is sent
+  // meanwhile waits for it (t-54304).
+  noticeOnPaneChat(
+    held,
+    "worker.handingOver",
+    held.handing === true,
+    t("worker.handingOver", "실시간 세션(선)으로 잇는 중입니다 — 그동안 보낸 글은 이어진 뒤에 갑니다."),
+  );
+  // The first read is out. Said only once it is late: the stylesheet holds the
+  // line hidden for `--chat-late-ms`, so a read that comes sooner is never seen
+  // (t-54304).
+  sayLate(noticeOnPaneChat(
+    held,
+    "worker.readingTranscript",
+    run.helper.found === null,
+    t("worker.readingTranscript", "대화를 읽는 중…"),
+  ));
   noticeOnPaneChat(
     held,
     "worker.historyFolded",
@@ -13187,13 +13242,13 @@ function noticeOnPaneChat(held, key, wanted, words) {
   const shown = held.host.querySelector(`.pane-chat-notice[data-says="${key}"]`);
   if (!wanted) {
     shown?.remove();
-    return;
+    return null;
   }
   if (shown) {
     // The same line with new words (a refusal's reason): the words change,
     // the line stays.
     writeTextContent(shown, words);
-    return;
+    return shown;
   }
   const said = document.createElement("p");
   said.className = "pane-chat-notice";
@@ -13203,6 +13258,16 @@ function noticeOnPaneChat(held, key, wanted, words) {
   // (t-22100), where a line of its own would become a grid cell and fall into
   // the rail's narrow column.
   held.host.querySelector(":scope > .helper-body")?.before(said);
+  return said;
+}
+
+/* A notice said only once it is late: it stands hidden (shell.css) until
+ * `--chat-late-ms` — the token the stylesheet and its gate read — has passed
+ * since it first stood (t-54304). Once a line. */
+function sayLate(notice) {
+  if (!notice || notice.__late !== undefined) return;
+  const wait = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--chat-late-ms"));
+  notice.__late = setTimeout(() => notice.classList.add("is-late"), Number.isFinite(wait) ? wait : 0);
 }
 
 /* The question the pane's program is asking, as the extension's card in the
@@ -13320,6 +13385,9 @@ async function pollHelperPages() {
     }
     return;
   }
+  // The first answer for a page that was waiting on it (`found: null`):
+  // painted even with no turn in it — its page says it is reading until then.
+  const firstAnswer = held.found === null;
   held.found = true;
   // Only a helper's own file has a sidecar to say what it is.
   const aboutMoved = held.id !== PANE_LOG_ID && held.id !== WIRE_LOG_ID && holdHelperAbout(held, more.about);
@@ -13365,7 +13433,7 @@ async function pollHelperPages() {
   // A pane's page shows its hooks as well as its file (`paneChatKey`): a read
   // that brought no new line repaints once when a hook moved since the paint.
   const hooksMoved = held.id === PANE_LOG_ID && held.hookKey !== paneChatKey(tab.worker.term);
-  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved && !aboutMoved) return;
+  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved && !aboutMoved && !firstAnswer) return;
   if (wireMoved.state) syncWorkerComposers(tab.worker);
   if (wireMoved.state) settleComposerQueue(tab.worker);
   // 컨텍스트가 움직였다 — 미터만 갈아입는다(턴은 그대로일 수 있다).
@@ -14811,7 +14879,10 @@ function workerComposerNode(run, owner = null) {
       // 조립된 그대로가 대기열에 든다(`settleComposerQueue`). 여기서
       // `sendUncertain`을 다시 보지 않는 것은 이 핸들러의 첫 줄이 이미
       // 그 상태를 돌려보냈기 때문이다.
-      if (composerWorking(run)) queueComposerMessage(run, message);
+      // So do words sent while the pane hands its conversation to its wire:
+      // the wire's page sends them (`carryPaneChat`), or the pane, refused
+      // (t-54304).
+      if (composerWorking(run) || composerHolding(run)) queueComposerMessage(run, message);
       // 아니면 그 자리에서 실행의 길로 — 선이면 한 요청, 판이면
       // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
       // 상자에 있다는 사실을 남긴다.
@@ -15661,11 +15732,7 @@ function syncHelperPageStop(actions, run) {
   const busy = held !== null && held.__stop.phase !== "idle";
   const wanted = busy || (run.status === "running" && Boolean(agentVoice(run.agent).helper_stop));
   if (!wanted) {
-    if (held) {
-      clearTimeout(held.__stop.timer);
-      held.remove();
-      actions.querySelector(".helper-foot-told")?.remove();
-    }
+    if (held) dropHelperPageStop(held);
     return;
   }
   if (held) {
@@ -15683,6 +15750,20 @@ function syncHelperPageStop(actions, run) {
   told.setAttribute("role", "status");
   actions.append(stop, told);
   paintHelperPageStop(stop);
+}
+
+/* The stop let go: its beat's timer, its read-out and the button. */
+function dropHelperPageStop(stop) {
+  clearTimeout(stop.__stop.timer);
+  stop.parentElement?.querySelector(".helper-foot-told")?.remove();
+  stop.remove();
+}
+
+/* A page set aside (`parkChatPage`, t-54304) lets its stop go as a page that
+ * is left does: an answer still out is dropped with the button it was for,
+ * and the page that comes back stands a new one (`syncHelperPageStop`). */
+function leaveHelperPageStop(host) {
+  for (const stop of host.querySelectorAll(".helper-foot-stop")) dropHelperPageStop(stop);
 }
 
 function paintHelperPageStop(stop) {
@@ -15846,6 +15927,10 @@ function paintHelperPageOwn(host, tab, run, owner) {
 function paintHelperPage(host, tab) {
   const run = tab.worker;
   const owner = tabOfTerm(run.term);
+  // Another conversation's page leaves this host kept aside, and this one's,
+  // kept when it left, comes back as it stood (t-54304).
+  parkChatPage(host, tab);
+  unparkChatPage(host, tab);
   const held = host.__helperPage;
   // The accent the page wears is the agent's (`--chat-accent` reads it).
   writeAttribute(host, "data-agent", run.agent ?? "");
@@ -15886,9 +15971,11 @@ function paintHelperPage(host, tab) {
   // extension's dock (`inputContainer`), the question card inside it, and
   // the conversation's state over the composer (t-22100).
   let stack = null;
+  let dock = null;
   if (owner || run.wire) {
     stack = chatStackNode(run);
-    host.appendChild(chatDockNode(host, workerComposerNode(run, owner), stack));
+    dock = chatDockNode(host, workerComposerNode(run, owner), stack);
+    host.appendChild(dock);
     paintChatStack(stack, run);
   } else {
     host.insertBefore(workerWhereNode(run, null), body);
@@ -15898,7 +15985,7 @@ function paintHelperPage(host, tab) {
   // 사람이 위에 두고 간 페이지는 그 행에서 연다(t-6824).
   standChatPlace(turns);
   askTurnRail(turns);
-  host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status, run, stack };
+  host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status, run, stack, dock };
   // A plain Esc on the page interrupts its turn (t-6323 A3).
   interruptOnEscape(host);
 }
@@ -15922,21 +16009,29 @@ function chatBodyNode(turns) {
  * heap behind, every time. A frame the page asked for (the rail's) would hold
  * it until the frame came, so it is let go here too. */
 function releaseWorkerPage(tab) {
+  // A page kept aside for this tab goes with it, from whichever leaf kept it
+  // (t-54304).
+  for (const group of groups.values()) dropParkedPage(group.workerView, tab.id);
   const host = groups.get(tab.pane)?.workerView;
   const held = host?.__helperPage;
   if (!held || held.id !== tab.id) return;
-  // The rail's frame and its scroll's pace, if either was asked for (t-22100).
-  if (held.turns.__rail?.__frame) cancelAnimationFrame(held.turns.__rail.__frame);
-  clearTimeout(held.turns.__rail?.__scrolled);
-  held.turns.__shelf?.disconnect();
-  held.turns.__imageWatch?.disconnect();
-  held.turns.__footWatch?.disconnect();
+  forgetChatList(held.turns);
   host.__dockWatch?.disconnect();
   host.__dockWatch = null;
   host.__helperPage = null;
   host.classList.remove("is-chat-page", "is-helper-page");
   delete host.dataset.keyboardOwner;
   host.replaceChildren();
+}
+
+/* What a conversation's list holds onto beyond itself — its rail's frame and
+ * pace (t-22100), its watchers — let go when its page leaves for good. */
+function forgetChatList(list) {
+  if (list.__rail?.__frame) cancelAnimationFrame(list.__rail.__frame);
+  clearTimeout(list.__rail?.__scrolled);
+  list.__shelf?.disconnect();
+  list.__imageWatch?.disconnect();
+  list.__footWatch?.disconnect();
 }
 
 /* The extension's dock at the foot of the conversation (`inputContainer`):
@@ -15950,26 +16045,31 @@ function chatDockNode(host, composer, stack = null) {
   dock.className = "chat-dock";
   if (stack) dock.appendChild(stack);
   dock.appendChild(composer);
-  if (typeof ResizeObserver === "function") {
-    const watch = new ResizeObserver(() => {
-      // The list's foot moves with the dock (the dock's height is the list's
-      // padding): a list at its foot stays there, as the extension's follows
-      // its input's height (t-6323 A5). The height is written on the two
-      // that read it and no further — it is not inherited (shell.css): written
-      // on the page, every row restyled at the key that wrapped a draft
-      // (t-22095).
-      const list = host.__helperPage?.turns ?? null;
-      const follow = chatFollows(list);
-      const height = `${dock.offsetHeight}px`;
-      for (const reader of host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door)")) {
-        reader.style.setProperty("--chat-dock-h", height);
-      }
-      if (follow) carryToFoot(list);
-    });
-    watch.observe(dock);
-    host.__dockWatch = watch;
-  }
+  host.__dockWatch = watchChatDock(host, dock);
   return dock;
+}
+
+/* The dock's height, watched: it rides the list as room under its words. Asked
+ * when the dock is built and again when a kept page comes back (t-54304). */
+function watchChatDock(host, dock) {
+  if (typeof ResizeObserver !== "function") return null;
+  const watch = new ResizeObserver(() => {
+    // The list's foot moves with the dock (the dock's height is the list's
+    // padding): a list at its foot stays there, as the extension's follows
+    // its input's height (t-6323 A5). The height is written on the two
+    // that read it and no further — it is not inherited (shell.css): written
+    // on the page, every row restyled at the key that wrapped a draft
+    // (t-22095).
+    const list = host.__helperPage?.turns ?? null;
+    const follow = chatFollows(list);
+    const height = `${dock.offsetHeight}px`;
+    for (const reader of host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door)")) {
+      reader.style.setProperty("--chat-dock-h", height);
+    }
+    if (follow) carryToFoot(list);
+  });
+  watch.observe(dock);
+  return watch;
 }
 
 function paintWorkerView(tab) {
@@ -15986,7 +16086,8 @@ function paintWorkerView(tab) {
   }
   // 앞 그림이 이 호스트에 걸어 둔 것을 먼저 놓아 준다 — 노드가 사라지는 줄이
   // 바로 다음 줄이다. 헬퍼의 뼈대도 같은 순간에 놓인다: 이 호스트는 이제
-  // 다른 페이지의 것이다.
+  // 다른 페이지의 것이다. 대화였다면 다시 볼 때를 위해 떼어 둔다(t-54304).
+  parkChatPage(host, tab);
   keepChatPlace(host.__helperPage?.turns);
   dropWorkerScreen(tab.pane);
   host.__helperPage = null;

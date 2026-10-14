@@ -955,6 +955,12 @@
 
   --motion-dialog: 200ms;
 
+  /* How long a conversation's first read may take before the page says it is
+   * reading (t-54304). Claude's empty conversation fades in 0.2 s late
+   * (`shared-12-6xBCRyAw.js@151413`) and Dots' loading spinner waits too
+   * (`composer-controls@186511`): a read that comes sooner shows nothing. */
+  --chat-late-ms: 200ms;
+
   /* The curve an ENTRANCE rides, which is not the curve a state change rides.
    *
    * `.animate-in` resolves `var(--tw-ease, ease)` (:4015) — plain `ease`,
