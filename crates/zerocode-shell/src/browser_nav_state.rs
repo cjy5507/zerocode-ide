@@ -81,11 +81,12 @@ impl NavRecord {
         self.generation
     }
 
-    pub(super) fn requested(&mut self, now: Instant) {
-        self.requested_at = Some(now);
+    pub(super) fn requested(&mut self) {
+        self.requested_at = Some(Instant::now());
     }
 
-    pub(super) fn pending(&self, now: Instant) -> bool {
+    pub(super) fn pending(&self) -> bool {
+        let now = Instant::now();
         self.observed(now) == NavState::Loading
             || self.requested_at.is_some_and(|at| {
                 now.saturating_duration_since(at)

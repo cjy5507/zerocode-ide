@@ -327,7 +327,7 @@ async fn page_json(
 
 pub(crate) fn note_navigation_request(state: &AppState, label: &str) {
     if let Some(record) = state.browser_records().get_mut(label) {
-        record.nav.requested(std::time::Instant::now());
+        record.nav.requested();
     }
 }
 
@@ -336,12 +336,11 @@ pub(crate) async fn settle_known_navigation(
     labels: &[String],
 ) -> Result<(), String> {
     let settled = wait_until(BROWSER_CALLBACK_DEADLINE, BROWSER_WAIT_POLL, || {
-        let now = std::time::Instant::now();
         let records = state.browser_records();
         labels.iter().all(|label| {
             records
                 .get(label)
-                .is_none_or(|record| !record.nav.pending(now))
+                .is_none_or(|record| !record.nav.pending())
         })
     })
     .await;

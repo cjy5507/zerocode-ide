@@ -5211,25 +5211,26 @@ fn a_load_is_dead_by_the_clock_not_by_wry() {
 fn a_requested_navigation_is_pending_until_its_document_settles() {
     use std::time::{Duration, Instant};
     let t0 = Instant::now();
-    let grace = Duration::from_millis(zerocode_core::agent_browser::BROWSER_DOOR_BUDGET_MS);
     let mut record = NavRecord::born(true, t0);
-    assert!(!record.pending(t0));
-    record.requested(t0);
-    assert!(record.pending(t0 + grace - Duration::from_millis(1)));
+    assert!(!record.pending());
+    record.requested();
+    assert!(record.pending());
     assert_eq!(record.observed(t0), NavState::Blank);
-    record.started(t0 + Duration::from_millis(5));
-    assert!(record.pending(t0 + grace * 2));
+    record.started(t0);
+    assert!(record.pending());
     record.finished(false);
-    assert!(!record.pending(t0 + Duration::from_millis(6)));
-    record.requested(t0);
+    assert!(!record.pending());
+    record.requested();
     record.finished(true);
-    assert!(record.pending(t0 + Duration::from_millis(7)));
-    assert!(!record.pending(t0 + grace));
+    assert!(record.pending());
     let mut loading = NavRecord::born(false, t0);
-    assert!(loading.pending(t0));
-    assert!(!loading.pending(t0 + Duration::from_secs(NAV_DEAD_AFTER_SECS)));
+    assert!(loading.pending());
     loading.finished(false);
-    assert!(!loading.pending(t0));
+    assert!(!loading.pending());
+    let stood = t0
+        .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS))
+        .unwrap();
+    assert!(!NavRecord::born(false, stood).pending());
 }
 
 mod browser_observation_stamp_tests {

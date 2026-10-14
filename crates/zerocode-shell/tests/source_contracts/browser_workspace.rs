@@ -509,7 +509,7 @@ fn handoff_waits_for_a_known_navigation_before_the_page_fence() {
     let confirmed = command.find("transition.confirm_fence()").unwrap();
     assert!(labels < settled && settled < fenced && fenced < confirmed);
     let settle = block_after(BROWSER, "async fn settle_known_navigation(");
-    assert!(settle.contains(".nav.pending(now)"));
+    assert!(settle.contains(".nav.pending()"));
     assert!(settle.contains("workspace_paused:"));
     let note = block_after(BROWSER, "fn note_navigation_request(");
     assert!(note.contains(".nav.requested("));
