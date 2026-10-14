@@ -462,9 +462,13 @@ function chatPlaceAcross(list, run) {
  *
  * Out of the document nothing of a kept page is found, read aloud, laid out
  * or painted; its watchers' answers find its list disconnected and wait for
- * it (`judgeShelf`, `imageWatch`, the rail's frame). A leaf keeps `pages` of
- * them — the ones looked at last — for `ttlMs` each, and a closed tab's goes
- * at once (`releaseWorkerPage`). A 400-turn page is some 2,150 elements. */
+ * it (`judgeShelf`, `imageWatch`, the rail's frame). What lives only while a
+ * page is looked at goes as it would with the page: a helper's stop and the
+ * answer still out for it (`leaveHelperPageStop`); and the code blocks the
+ * colouring let go while the page was out go back in line when it comes back
+ * (`colourCodeAgainIn`). A leaf keeps `pages` of them — the ones looked at
+ * last — for `ttlMs` each, and a closed tab's goes at once
+ * (`releaseWorkerPage`). A 400-turn page is some 2,150 elements. */
 const CHAT_PARK = Object.freeze({ pages: 2, ttlMs: 600_000 });
 
 /* Take the conversation page standing on `host` out of the document and keep
@@ -489,6 +493,7 @@ function parkChatPage(host, coming) {
   };
   host.__dockWatch?.disconnect();
   host.__dockWatch = null;
+  leaveHelperPageStop(host);
   host.replaceChildren();
   host.__helperPage = null;
   host.classList.remove("is-chat-page", "is-helper-page");
@@ -498,7 +503,10 @@ function parkChatPage(host, coming) {
   parked.set(page.id, kept);
   kept.timer = setTimeout(() => sweepParkedPages(host), CHAT_PARK.ttlMs);
   sweepParkedPages(host);
-  while (parked.size > CHAT_PARK.pages) dropParkedPage(host, parked.keys().next().value);
+  // The page coming leaves the kept ones as it comes back (`unparkChatPage`),
+  // so it never counts against them — nor is it the oldest let go.
+  const aside = () => [...parked.keys()].filter((id) => id !== coming.id);
+  while (aside().length > CHAT_PARK.pages) dropParkedPage(host, aside()[0]);
 }
 
 /* Put the page `tab` left on this host back as it was — its nodes, its
@@ -521,6 +529,7 @@ function unparkChatPage(host, tab) {
   if (list.__follow) list.__follow.placed = false;
   standChatPlace(list);
   if (kept.page.dock) host.__dockWatch = watchChatDock(host, kept.page.dock);
+  colourCodeAgainIn(host);
 }
 
 /* Let a kept page go: its watchers and its timer. */
@@ -1370,6 +1379,22 @@ function colourCodeIn(host) {
   }
   codeSliceEnded(clock);
   askCodeSlice();
+}
+
+/* The fences of a page come back from aside (`unparkChatPage`, t-54304): the
+ * colouring let go of those whose turn came while the page was out of the
+ * document (`stepCodeJob`) — still waiting, out of line, perhaps half drawn.
+ * They stand plain again, their words whole, and go back in line. */
+function colourCodeAgainIn(host) {
+  const inLine = new Set([codeColour.job, ...codeColour.queue, ...codeColour.held].filter(Boolean).map((job) => job.pre));
+  let again = false;
+  for (const pre of host.querySelectorAll("pre.md-block")) {
+    if (pre.__codeColour !== CODE_WAITING || inLine.has(pre)) continue;
+    if (codeWordsOf(pre) === null) pre.textContent = pre.textContent;
+    pre.__codeColour = undefined;
+    again = true;
+  }
+  if (again) colourCodeIn(host);
 }
 
 /* Ask for a slice, once, while anything waits. */

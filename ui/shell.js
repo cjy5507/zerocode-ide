@@ -15697,11 +15697,7 @@ function syncHelperPageStop(actions, run) {
   const busy = held !== null && held.__stop.phase !== "idle";
   const wanted = busy || (run.status === "running" && Boolean(agentVoice(run.agent).helper_stop));
   if (!wanted) {
-    if (held) {
-      clearTimeout(held.__stop.timer);
-      held.remove();
-      actions.querySelector(".helper-foot-told")?.remove();
-    }
+    if (held) dropHelperPageStop(held);
     return;
   }
   if (held) {
@@ -15719,6 +15715,20 @@ function syncHelperPageStop(actions, run) {
   told.setAttribute("role", "status");
   actions.append(stop, told);
   paintHelperPageStop(stop);
+}
+
+/* The stop let go: its beat's timer, its read-out and the button. */
+function dropHelperPageStop(stop) {
+  clearTimeout(stop.__stop.timer);
+  stop.parentElement?.querySelector(".helper-foot-told")?.remove();
+  stop.remove();
+}
+
+/* A page set aside (`parkChatPage`, t-54304) lets its stop go as a page that
+ * is left does: an answer still out is dropped with the button it was for,
+ * and the page that comes back stands a new one (`syncHelperPageStop`). */
+function leaveHelperPageStop(host) {
+  for (const stop of host.querySelectorAll(".helper-foot-stop")) dropHelperPageStop(stop);
 }
 
 function paintHelperPageStop(stop) {
