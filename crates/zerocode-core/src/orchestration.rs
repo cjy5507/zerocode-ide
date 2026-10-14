@@ -3276,40 +3276,49 @@ struct HandoverEligible<'a> {
 
 /// An open attempt, its worker live and not the person's, a checkout to
 /// inherit, not walked already, and its task under the table's ceiling — or
-/// the reason it is not.
-fn handover_eligible<'a>(run: &'a Run, dispatch_id: &str) -> Result<HandoverEligible<'a>, String> {
+/// the reason it is not, by its code.
+fn handover_eligible<'a>(
+    run: &'a Run,
+    dispatch_id: &str,
+) -> Result<HandoverEligible<'a>, WallRefusal> {
     let dispatch = run
         .dispatch(dispatch_id)
-        .ok_or_else(|| format!("unknown dispatch: {dispatch_id}"))?;
+        .ok_or_else(|| WallRefusal::UnknownDispatch {
+            dispatch: dispatch_id.to_string(),
+        })?;
     if !dispatch.is_open() {
-        return Err(format!(
-            "dispatch {dispatch_id} has ended — a handover follows an OPEN attempt"
-        ));
+        return Err(WallRefusal::AttemptEnded {
+            dispatch: dispatch_id.to_string(),
+        });
     }
     let worker = run
         .worker(&dispatch.worker)
-        .ok_or_else(|| format!("unknown worker: {}", dispatch.worker))?;
+        .ok_or_else(|| WallRefusal::UnknownWorker {
+            worker: dispatch.worker.clone(),
+        })?;
     if !worker.state.is_live() {
-        return Err(format!("worker {} is {}", worker.id, worker.state.as_str()));
+        return Err(WallRefusal::WorkerNotLive {
+            worker: worker.id.clone(),
+            state: worker.state,
+        });
     }
     if worker.taken_over {
-        return Err(format!(
-            "worker {}'s pane was taken over by the person — the terminal is theirs",
-            worker.id
-        ));
+        return Err(WallRefusal::PaneTakenOver {
+            worker: worker.id.clone(),
+        });
     }
-    let checkout = worker.checkout.clone().ok_or_else(|| {
-        format!(
-            "worker {} reported no checkout — there is nothing to inherit",
-            worker.id
-        )
-    })?;
+    let checkout = worker
+        .checkout
+        .clone()
+        .ok_or_else(|| WallRefusal::NoCheckout {
+            worker: worker.id.clone(),
+        })?;
     if run.messages.iter().any(|held| {
         handover_consumes_attempt(held) && held.dispatch.as_deref() == Some(dispatch_id)
     }) {
-        return Err(format!(
-            "dispatch {dispatch_id} was already walked — one handover per attempt"
-        ));
+        return Err(WallRefusal::AlreadyWalked {
+            dispatch: dispatch_id.to_string(),
+        });
     }
     let walked = run
         .messages
@@ -3319,10 +3328,10 @@ fn handover_eligible<'a>(run: &'a Run, dispatch_id: &str) -> Result<HandoverElig
         })
         .count();
     if walked >= QUOTA_POLICY.handover_max {
-        return Err(format!(
-            "task {} has been handed over {walked} time(s), which is the table's ceiling",
-            dispatch.task
-        ));
+        return Err(WallRefusal::HandoverCeiling {
+            task: dispatch.task.clone(),
+            count: walked,
+        });
     }
     Ok(HandoverEligible {
         worker,
@@ -12031,7 +12040,7 @@ impl Ledger {
             let current =
                 resume_plan(run, &plan.worker, &plan.marker, now_ms).map_err(|not| match not {
                     NotResumed::InFlight => RESUME_IN_FLIGHT.to_string(),
-                    NotResumed::Refused(why) => why,
+                    NotResumed::Refused(why) => why.to_string(),
                 })?;
             if current != *plan {
                 return Err("the worker, its seat or its attempt changed — plan again".into());
@@ -15445,10 +15454,232 @@ pub struct QuotaWallChip {
     /// Who a standing order hands this task to, when one names an alternative.
     pub declared_alt: Option<Pinned>,
     /// Why 「지금 다시 시도」 would not be taken now — the continuation's own
-    /// rules ([`resume_plan`]) in the ledger's words. `None`: it would.
-    pub retry_refusal: Option<String>,
+    /// rules ([`resume_plan`]), by their code. `None`: it would.
+    pub retry_refusal: Option<WallRefusal>,
     /// Why 「다른 에이전트로 넘기기」 would not be taken now. `None`: it would.
-    pub hand_over_refusal: Option<String>,
+    pub hand_over_refusal: Option<WallRefusal>,
+}
+
+/// Why a press at a quota wall would not be taken, read off the ledger's rows
+/// (t-47935): a code the window turns into the person's language, and the
+/// facts its sentence names — never the sentence, so nothing on the way to a
+/// screen reads English to decide anything. `Display` is the ledger's English
+/// sentence, for every reader that is not a person's screen: the beat, the
+/// CLI, a log.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum WallRefusal {
+    /// Not live, or in a state that holds no pane: asleep for an account
+    /// move, or let go.
+    WorkerNotLive {
+        worker: String,
+        state: WorkerState,
+    },
+    /// The person took the worker's pane: the terminal is theirs.
+    PaneTakenOver {
+        worker: String,
+    },
+    NoOpenAttempt {
+        worker: String,
+    },
+    /// No `quota_walled` row for the open attempt.
+    NoWall {
+        worker: String,
+    },
+    /// The wall no longer explains the silence.
+    WallLifted {
+        worker: String,
+    },
+    /// An account switch seated the worker again after the wall: the wall
+    /// was the account's it left.
+    AccountMoved {
+        worker: String,
+    },
+    /// This window holds no pane of the worker.
+    PaneNotHere {
+        worker: String,
+    },
+    /// The beat's continuation with no `--on-transient-error resume` order.
+    NoTransientOrder,
+    UnknownRun {
+        run: String,
+    },
+    UnknownWorker {
+        worker: String,
+    },
+    UnknownDispatch {
+        dispatch: String,
+    },
+    UnknownTask {
+        task: String,
+    },
+    /// Another worker holds the worker's seat.
+    SeatLost {
+        worker: String,
+    },
+    /// The worker waits on an answer to its own question.
+    AwaitingAnswer {
+        worker: String,
+    },
+    /// The beat's continuation at a standing wall: the handover answers it.
+    AtWall {
+        dispatch: String,
+    },
+    /// A press for a wall the attempt does not stand at now.
+    WallNotNow {
+        dispatch: String,
+    },
+    /// A continuation is being typed for the attempt ([`RESUME_IN_FLIGHT`]).
+    ResumeInFlight,
+    /// [`RESUME_POLICY`]`.attempts_max` continuations already.
+    ResumeCeiling {
+        dispatch: String,
+        count: usize,
+    },
+    /// The words for this key may already be on the line.
+    AlreadyTyped {
+        dispatch: String,
+    },
+    /// Inside [`RESUME_POLICY`]`.retry_after_ms` of the last continuation.
+    TooSoon {
+        dispatch: String,
+        typed_ms_ago: i64,
+    },
+    /// This window does not hold the seat the handover's verbs are
+    /// presented from.
+    CoordinatorSeatElsewhere {
+        run: String,
+    },
+    /// The run's coordinator seat is empty.
+    NoLiveCoordinator {
+        run: String,
+    },
+    /// A continuation is being typed: a handover waits until it settles.
+    HandoverWaitsForTyping {
+        dispatch: String,
+    },
+    /// A handover follows an open attempt.
+    AttemptEnded {
+        dispatch: String,
+    },
+    /// Nothing to inherit.
+    NoCheckout {
+        worker: String,
+    },
+    /// One handover per attempt.
+    AlreadyWalked {
+        dispatch: String,
+    },
+    /// [`QUOTA_POLICY`]`.handover_max` handovers of the task already.
+    HandoverCeiling {
+        task: String,
+        count: usize,
+    },
+    /// The wall's own row is gone from the ledger.
+    WallRowGone {
+        wall: String,
+    },
+}
+
+impl std::fmt::Display for WallRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkerNotLive { worker, state } => {
+                write!(f, "worker {worker} is {}", state.as_str())
+            }
+            Self::PaneTakenOver { worker } => write!(
+                f,
+                "worker {worker}'s pane was taken over by the person — the terminal is theirs"
+            ),
+            Self::NoOpenAttempt { worker } => write!(f, "worker {worker} carries no open attempt"),
+            Self::NoWall { worker } => write!(
+                f,
+                "worker {worker} stands at no quota wall the ledger has witnessed"
+            ),
+            Self::WallLifted { worker } => write!(
+                f,
+                "worker {worker}'s quota wall no longer stands — it lifted"
+            ),
+            Self::AccountMoved { worker } => write!(
+                f,
+                "worker {worker} was seated again on another account after this wall"
+            ),
+            Self::PaneNotHere { worker } => {
+                write!(f, "this window holds no pane of worker {worker}")
+            }
+            Self::NoTransientOrder => {
+                f.write_str("no standing order says --on-transient-error resume")
+            }
+            Self::UnknownRun { run } => write!(f, "unknown run: {run}"),
+            Self::UnknownWorker { worker } => write!(f, "unknown worker: {worker}"),
+            Self::UnknownDispatch { dispatch } => write!(f, "unknown dispatch: {dispatch}"),
+            Self::UnknownTask { task } => write!(f, "unknown task: {task}"),
+            Self::SeatLost { worker } => write!(f, "worker {worker} no longer holds its seat"),
+            Self::AwaitingAnswer { worker } => {
+                write!(f, "worker {worker} is waiting on an answer it asked for")
+            }
+            Self::AtWall { dispatch } => write!(
+                f,
+                "dispatch {dispatch} is at its quota wall — the handover road answers it"
+            ),
+            Self::WallNotNow { dispatch } => write!(
+                f,
+                "the press names a wall dispatch {dispatch} does not stand at now"
+            ),
+            Self::ResumeInFlight => f.write_str(RESUME_IN_FLIGHT),
+            Self::ResumeCeiling { dispatch, count } => write!(
+                f,
+                "dispatch {dispatch} has been resumed {count} time(s), which is the table's ceiling"
+            ),
+            Self::AlreadyTyped { dispatch } => write!(
+                f,
+                "this error was already typed at for dispatch {dispatch} — its words may be on \
+                 the line"
+            ),
+            Self::TooSoon {
+                dispatch,
+                typed_ms_ago,
+            } => write!(
+                f,
+                "the last continuation for dispatch {dispatch} was typed {typed_ms_ago} ms ago"
+            ),
+            Self::CoordinatorSeatElsewhere { run } => {
+                write!(f, "this window does not hold run {run}'s coordinator seat")
+            }
+            Self::NoLiveCoordinator { run } => write!(f, "run {run} has no live coordinator seat"),
+            Self::HandoverWaitsForTyping { dispatch } => write!(
+                f,
+                "a continuation is being typed at dispatch {dispatch} — a handover waits until \
+                 it settles"
+            ),
+            Self::AttemptEnded { dispatch } => write!(
+                f,
+                "dispatch {dispatch} has ended — a handover follows an OPEN attempt"
+            ),
+            Self::NoCheckout { worker } => write!(
+                f,
+                "worker {worker} reported no checkout — there is nothing to inherit"
+            ),
+            Self::AlreadyWalked { dispatch } => write!(
+                f,
+                "dispatch {dispatch} was already walked — one handover per attempt"
+            ),
+            Self::HandoverCeiling { task, count } => write!(
+                f,
+                "task {task} has been handed over {count} time(s), which is the table's ceiling"
+            ),
+            Self::WallRowGone { wall } => {
+                write!(f, "the row of wall {wall} is gone from the ledger")
+            }
+        }
+    }
+}
+
+/// The ledger's English sentence, for a road that answers in words.
+impl From<WallRefusal> for String {
+    fn from(why: WallRefusal) -> Self {
+        why.to_string()
+    }
 }
 
 /// Whether the ledger wrote a PANE move of `worker_id` (an account switch that
@@ -15466,8 +15697,8 @@ fn account_moved_since(run: &Run, worker_id: &str, since_ms: i64) -> bool {
 }
 
 /// The chip `worker` wears for the newest wall of its open attempt, or why it
-/// wears none — the reason, in the ledger's words, that a press made from a
-/// screen drawn earlier is refused with.
+/// wears none — the reason, by its code, that a press made from a screen
+/// drawn earlier is refused with.
 ///
 /// None for a worker asleep for an account move ([`WorkerState::Sleeping`] is
 /// not a pane) or no longer live, for a pane the person took, for an attempt
@@ -15480,15 +15711,17 @@ pub fn wall_chip_for(
     worker: &Worker,
     seat: WallChipSeat,
     now_ms: i64,
-) -> Result<QuotaWallChip, String> {
+) -> Result<QuotaWallChip, WallRefusal> {
     if !worker.state.is_live() || !worker.state.may_occupy_pane() {
-        return Err(format!("worker {} is {}", worker.id, worker.state.as_str()));
+        return Err(WallRefusal::WorkerNotLive {
+            worker: worker.id.clone(),
+            state: worker.state,
+        });
     }
     if worker.taken_over {
-        return Err(format!(
-            "worker {}'s pane was taken over by the person — the terminal is theirs",
-            worker.id
-        ));
+        return Err(WallRefusal::PaneTakenOver {
+            worker: worker.id.clone(),
+        });
     }
     let Some(dispatch) = worker
         .dispatch
@@ -15496,28 +15729,29 @@ pub fn wall_chip_for(
         .and_then(|id| run.dispatch(id))
         .filter(|held| held.is_open())
     else {
-        return Err(format!("worker {} carries no open attempt", worker.id));
+        return Err(WallRefusal::NoOpenAttempt {
+            worker: worker.id.clone(),
+        });
     };
     let Some(wall) = newest_wall(run, &dispatch.id) else {
-        return Err(format!(
-            "worker {} stands at no quota wall the ledger has witnessed",
-            worker.id
-        ));
+        return Err(WallRefusal::NoWall {
+            worker: worker.id.clone(),
+        });
     };
     if !wall.stands(now_ms) {
-        return Err(format!(
-            "worker {}'s quota wall no longer stands — it lifted",
-            worker.id
-        ));
+        return Err(WallRefusal::WallLifted {
+            worker: worker.id.clone(),
+        });
     }
     if account_moved_since(run, &worker.id, wall.observed_at_ms) {
-        return Err(format!(
-            "worker {} was seated again on another account after this wall",
-            worker.id
-        ));
+        return Err(WallRefusal::AccountMoved {
+            worker: worker.id.clone(),
+        });
     }
     if !seat.worker_here {
-        return Err(format!("this window holds no pane of worker {}", worker.id));
+        return Err(WallRefusal::PaneNotHere {
+            worker: worker.id.clone(),
+        });
     }
     let retry_refusal = match resume_plan(
         run,
@@ -15526,19 +15760,17 @@ pub fn wall_chip_for(
         now_ms,
     ) {
         Ok(_) => None,
-        Err(NotResumed::InFlight) => Some(RESUME_IN_FLIGHT.to_string()),
+        Err(NotResumed::InFlight) => Some(WallRefusal::ResumeInFlight),
         Err(NotResumed::Refused(why)) => Some(why),
     };
     let hand_over_refusal = if !seat.coordinator_here {
-        Some(format!(
-            "this window does not hold run {}'s coordinator seat",
-            run.id
-        ))
+        Some(WallRefusal::CoordinatorSeatElsewhere {
+            run: run.id.clone(),
+        })
     } else if resume_rows(run, &dispatch.id).any(|body| body["status"] == RESUME_TYPING) {
-        Some(format!(
-            "a continuation is being typed at dispatch {} — a handover waits until it settles",
-            dispatch.id
-        ))
+        Some(WallRefusal::HandoverWaitsForTyping {
+            dispatch: dispatch.id.clone(),
+        })
     } else {
         handover_eligible(run, &dispatch.id).err()
     };
@@ -15768,8 +16000,8 @@ pub enum NotResumed {
     /// One is being typed for this attempt already: the silence is its, and
     /// neither a second continuation nor a quiet notice is owed.
     InFlight,
-    /// Anything else, said — the silence stays the news it always was.
-    Refused(String),
+    /// Anything else, by its code — the silence stays the news it always was.
+    Refused(WallRefusal),
 }
 
 /// What became of one typed continuation, as the window saw it.
@@ -15826,7 +16058,7 @@ pub fn resume_plan(
     marker: &TransientErrorMarker,
     now_ms: i64,
 ) -> Result<ResumePlan, NotResumed> {
-    let refused = |why: String| Err(NotResumed::Refused(why));
+    let refused = |why: WallRefusal| Err(NotResumed::Refused(why));
     // A person's press stands in for the declared order AND is asked at a wall
     // (t-39771): the two refusals it waives, and nothing else of the plan.
     let by_person = marker.source == PERSON_MARKER_SOURCE;
@@ -15838,25 +16070,31 @@ pub fn resume_plan(
             .and_then(|policy| policy.on_transient_error)
             != Some(OnTransientError::Resume)
     {
-        return refused("no standing order says --on-transient-error resume".into());
+        return refused(WallRefusal::NoTransientOrder);
     }
     let Some(worker) = run.worker(worker_id) else {
-        return refused(format!("unknown worker: {worker_id}"));
+        return refused(WallRefusal::UnknownWorker {
+            worker: worker_id.to_string(),
+        });
     };
     if !worker.state.is_live() || !worker.state.may_occupy_pane() {
-        return refused(format!("worker {} is {}", worker.id, worker.state.as_str()));
+        return refused(WallRefusal::WorkerNotLive {
+            worker: worker.id.clone(),
+            state: worker.state,
+        });
     }
     if worker.taken_over {
-        return refused(format!(
-            "worker {}'s pane was taken over by the person — the composer is theirs",
-            worker.id
-        ));
+        return refused(WallRefusal::PaneTakenOver {
+            worker: worker.id.clone(),
+        });
     }
     if run
         .worker_in_pane(&worker.team, &worker.pane)
         .is_none_or(|current| current.id != worker.id)
     {
-        return refused(format!("worker {} no longer holds its seat", worker.id));
+        return refused(WallRefusal::SeatLost {
+            worker: worker.id.clone(),
+        });
     }
     let Some(dispatch) = worker
         .dispatch
@@ -15864,19 +16102,19 @@ pub fn resume_plan(
         .and_then(|id| run.dispatch(id))
         .filter(|dispatch| dispatch.is_open())
     else {
-        return refused(format!("worker {} carries no open attempt", worker.id));
+        return refused(WallRefusal::NoOpenAttempt {
+            worker: worker.id.clone(),
+        });
     };
     if awaiting_reply(run, &worker.id) {
-        return refused(format!(
-            "worker {} is waiting on an answer it asked for",
-            worker.id
-        ));
+        return refused(WallRefusal::AwaitingAnswer {
+            worker: worker.id.clone(),
+        });
     }
     if !by_person && newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms)) {
-        return refused(format!(
-            "dispatch {} is at its quota wall — the handover road answers it",
-            dispatch.id
-        ));
+        return refused(WallRefusal::AtWall {
+            dispatch: dispatch.id.clone(),
+        });
     }
     // A press is about ONE wall: the one the attempt stands at now. A press
     // made on an older wall, or on one that lifted, is not this one's.
@@ -15885,39 +16123,35 @@ pub fn resume_plan(
             .filter(|wall| wall.stands(now_ms))
             .is_none_or(|wall| person_wall_key(&dispatch.id, &wall.wall) != marker.key)
     {
-        return refused(format!(
-            "the press names a wall dispatch {} does not stand at now",
-            dispatch.id
-        ));
+        return refused(WallRefusal::WallNotNow {
+            dispatch: dispatch.id.clone(),
+        });
     }
     let rows: Vec<serde_json::Value> = resume_rows(run, &dispatch.id).collect();
     if rows.iter().any(|body| body["status"] == RESUME_TYPING) {
         return Err(NotResumed::InFlight);
     }
     if rows.len() >= RESUME_POLICY.attempts_max {
-        return refused(format!(
-            "dispatch {} has been resumed {} time(s), which is the table's ceiling",
-            dispatch.id,
-            rows.len()
-        ));
+        return refused(WallRefusal::ResumeCeiling {
+            dispatch: dispatch.id.clone(),
+            count: rows.len(),
+        });
     }
     if rows
         .iter()
         .any(|body| body["marker"]["key"] == marker.key.as_str() && resume_may_have_typed(body))
     {
-        return refused(format!(
-            "this error was already typed at for dispatch {} — its words may be on the line",
-            dispatch.id
-        ));
+        return refused(WallRefusal::AlreadyTyped {
+            dispatch: dispatch.id.clone(),
+        });
     }
     if let Some(last) = rows.last().and_then(|body| body["typedMs"].as_i64())
         && now_ms < last.saturating_add(RESUME_POLICY.retry_after_ms)
     {
-        return refused(format!(
-            "the last continuation for dispatch {} was typed {} ms ago",
-            dispatch.id,
-            now_ms.saturating_sub(last)
-        ));
+        return refused(WallRefusal::TooSoon {
+            dispatch: dispatch.id.clone(),
+            typed_ms_ago: now_ms.saturating_sub(last),
+        });
     }
     Ok(ResumePlan {
         run: run.id.clone(),

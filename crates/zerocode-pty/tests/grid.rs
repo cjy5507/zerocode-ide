@@ -1767,6 +1767,98 @@ fn an_address_that_is_not_text_is_not_a_link() {
     );
 }
 
+/// An address may hold `;` — a matrix parameter, a query that separates its
+/// pairs with it — and the parser splits the whole OSC on every one, so the
+/// address is everything after the second separator, joined back whole.
+#[test]
+fn an_address_that_holds_a_semicolon_survives_whole() {
+    let address = "https://example.com/build;jsessionid=42?a=1;b=2";
+    let terminal = fed(format!("\x1b]8;;{address}\x1b\\log\x1b]8;;\x1b\\").as_bytes());
+    let grid = terminal.grid();
+    let link = grid.row_cells(0)[0].style.link.expect("the name is linked");
+    assert_eq!(grid.link_uri(link), Some(address));
+}
+
+/// An address the parser could not hold whole is no link at all.
+///
+/// The parser keeps sixteen parameters — every `;` after the sixteenth is
+/// dropped with the text behind it — and it drops every byte past its buffer.
+/// Either way what reaches the grid is the front of the address: a link to
+/// somewhere the program never named, which the tip would then show as if it
+/// were the real one. The text still prints.
+#[test]
+fn an_address_the_parser_cut_short_is_not_a_link() {
+    let many = format!("https://example.com/{}", "a;".repeat(20));
+    let long = format!("https://example.com/{}", "b".repeat(2_000));
+    for address in [many, long] {
+        let mut terminal = Terminal::new(6, 20);
+        terminal.feed(b"\x1b]8;;https://good.example/\x1b\\ok\x1b]8;;\x1b\\ ");
+        terminal.feed(format!("\x1b]8;;{address}\x1b\\cut\x1b]8;;\x1b\\").as_bytes());
+        let grid = terminal.grid();
+        assert_eq!(grid.line(0), "ok cut");
+        assert!(
+            grid.row_cells(0)[0].style.link.is_some(),
+            "the good one linked"
+        );
+        let cut = grid.row_cells(0)[3].style.link;
+        assert_eq!(
+            cut,
+            None,
+            "an address of {} bytes became a link to {:?}",
+            address.len(),
+            cut.and_then(|id| grid.link_uri(id)),
+        );
+    }
+}
+
+/// The bytes zo writes for a Markdown link (zo-ide `tui/ansi.rs`): the label's
+/// colour and underline first, then the link around the label alone, closed
+/// before the colour comes off and before the row ends; a label that wraps
+/// opens the same address again on its next row. Every cell of the label
+/// carries the one id, nothing beside it does, and the frame names the address.
+#[test]
+fn zos_link_bytes_link_the_label_alone_and_the_frame_names_the_address() {
+    let address = "https://gitlab.example.com/group/project/-/merge_requests/489";
+    let open = format!("\x1b]8;;{address}\x1b\\");
+    let close = "\x1b]8;;\x1b\\";
+    let label = "\x1b[4m\x1b[36;49m";
+    let tail = "\x1b[39m\x1b[49m\x1b[0m";
+    let mut terminal = Terminal::new(6, 40);
+    terminal.feed(
+        format!(
+            "\x1b[39;49m\x1b[K  See {label}{open}!489 merge{close}{tail}\r\n\
+             \x1b[39;49m\x1b[K  {label}{open}request{close}\x1b[24m\x1b[39;49m now.{tail}"
+        )
+        .as_bytes(),
+    );
+    let grid = terminal.grid();
+    assert_eq!(grid.line(0), "  See !489 merge");
+    assert_eq!(grid.line(1), "  request now.");
+    let link = grid.row_cells(0)[6]
+        .style
+        .link
+        .expect("the label is linked");
+    assert_eq!(grid.link_uri(link), Some(address));
+    for (col, cell) in grid.row_cells(0).iter().enumerate().take(16).skip(6) {
+        assert_eq!(cell.style.link, Some(link), "row 0 column {col}");
+    }
+    for (col, cell) in grid.row_cells(1).iter().enumerate().take(9).skip(2) {
+        assert_eq!(cell.style.link, Some(link), "row 1 column {col}");
+    }
+    for (row, col) in [(0, 5), (0, 16), (1, 0), (1, 1), (1, 9)] {
+        assert_eq!(
+            grid.row_cells(row)[col].style.link,
+            None,
+            "row {row} column {col}"
+        );
+    }
+    let delta = terminal.grid_mut().take_delta().expect("a frame");
+    assert_eq!(
+        delta.links,
+        vec![(u32::from(link), Arc::<str>::from(address))]
+    );
+}
+
 /* ---- the colour questions (Q-1) ------------------------------------------
  *
  * A program is allowed to ask what it is being drawn in, and the ones that ask

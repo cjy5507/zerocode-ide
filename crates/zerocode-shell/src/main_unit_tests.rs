@@ -26142,3 +26142,409 @@ mod exit_capture {
         );
     }
 }
+
+mod desktop_wait_for_tests {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+    use zerocode_core::computer_use::{self as core, COMPUTER_WAIT_FOR_POLL_MS};
+    use zerocode_core::computer_use_protocol::error_code;
+
+    use crate::{agent_tools_runtime::desktop_wait_for_with, computer_use};
+
+    fn probe(
+        params: &Value,
+        helper: computer_use::eye::Call<'_>,
+    ) -> Result<Value, computer_use::ComputerUseError> {
+        let elapsed = Cell::new(Duration::ZERO);
+        let memory = computer_use::eye::Memory::new();
+        desktop_wait_for_with(
+            params,
+            &memory,
+            helper,
+            &mut || elapsed.get(),
+            &mut |pause| elapsed.set(elapsed.get() + pause),
+        )
+    }
+
+    fn fixture() -> Vec<Value> {
+        serde_json::from_str(include_str!("../tests/fixtures/scoped-wait-for.json")).unwrap()
+    }
+
+    fn scoped(absent: bool) -> Value {
+        json!({"app":"org.example.fixture", "windowId":41, "label":"Busy", "absent":absent,
+            "timeoutMs":COMPUTER_WAIT_FOR_POLL_MS * 3})
+    }
+
+    fn actual(matches: Value) -> Value {
+        json!({"app":"Fixture Display", "window":{"id":41,"title":"Actual document"}, "matches":matches})
+    }
+
+    fn batch_after_wait(
+        params: &Value,
+        helper: computer_use::eye::Call<'_>,
+    ) -> (core::Walked<()>, usize) {
+        let mut wait = vec![
+            "wait-for".to_string(),
+            "--app".into(),
+            params["app"].as_str().unwrap().into(),
+            "--window-id".into(),
+            params["windowId"].to_string(),
+            "--label".into(),
+            params["label"].as_str().unwrap().into(),
+            "--timeout-ms".into(),
+            params["timeoutMs"].to_string(),
+            "--json".into(),
+        ];
+        if params["absent"] == true {
+            wait.push("--absent".into());
+        }
+        if let Some(role) = params["role"].as_str() {
+            wait.extend(["--role".into(), role.into()]);
+        }
+        if params["background"] == true {
+            wait.push("--background".into());
+        }
+        let steps = vec![
+            wait,
+            vec![
+                "type-text".into(),
+                "--app".into(),
+                "org.example.fixture".into(),
+                "--window-id".into(),
+                "41".into(),
+                "--text".into(),
+                "fixture".into(),
+                "--background".into(),
+                "--json".into(),
+            ],
+        ];
+        let mut inputs = 0;
+        let walked = core::walk(
+            &steps,
+            &core::WalkBudget {
+                deadline_ms: core::batch_deadline_ms(&steps),
+                out_of_time: (),
+            },
+            |_, argv| core::held_ms(&core::parse_command(argv).unwrap()),
+            |_, argv| core::Next::Run(argv.clone()),
+            |n, _, argv| {
+                let envelope = if n == 1 {
+                    let command = core::parse_command(argv).unwrap();
+                    match probe(&command.params, helper) {
+                        Ok(result) => json!({"ok":true,"result":result}),
+                        Err(error) => {
+                            json!({"ok":false,"error":{"code":error.code,"message":error.message}})
+                        }
+                    }
+                } else {
+                    inputs += 1;
+                    json!({"ok":true,"result":{}})
+                };
+                let report = core::walk_step_report(n, argv, true, Some(&envelope), "");
+                let halt = (report["ok"] != true).then_some(());
+                (report, halt)
+            },
+            || true,
+            || 0,
+        );
+        (walked, inputs)
+    }
+
+    #[test]
+    fn scoped_element_waits_produce_the_shared_present_and_absent_receipts() {
+        for case in fixture() {
+            let mut calls = Vec::new();
+            let result = probe(&case["params"], &mut |method, params| {
+                calls.push(method.to_string());
+                assert_eq!(method, "findElements");
+                let mut expected = case["params"].clone();
+                expected.as_object_mut().unwrap().remove("timeoutMs");
+                expected.as_object_mut().unwrap().remove("absent");
+                assert_eq!(params, expected);
+                Ok(case["helper"].clone())
+            })
+            .unwrap();
+            assert_eq!(result, case["result"]);
+            assert_eq!(calls, ["findElements"]);
+        }
+    }
+
+    #[test]
+    fn scoped_waits_preserve_actual_app_names_without_reinterpreting_aliases() {
+        for alias in [
+            "org.example.fixture",
+            "pid:410",
+            "Fixture",
+            "/Applications/Fixture.app",
+        ] {
+            let mut params = scoped(false);
+            params["app"] = json!(alias);
+            let result = probe(&params, &mut |method, asked| {
+                assert_eq!(method, "findElements");
+                assert_eq!(asked["app"], alias);
+                Ok(actual(json!([{"label":"Busy"}])))
+            })
+            .unwrap();
+            assert_eq!(result["app"], "Fixture Display");
+            assert_eq!(result["window"]["id"], 41);
+        }
+    }
+
+    #[test]
+    fn scoped_waits_reject_wrong_missing_and_malformed_receipts_for_both_conditions() {
+        for absent in [false, true] {
+            let matches = if absent {
+                json!([])
+            } else {
+                json!([{"label":"Busy"}])
+            };
+            for (answer, code) in [
+                (
+                    json!({"app":"Fixture Display", "matches":matches}),
+                    "window_scope_unverified",
+                ),
+                (
+                    json!({"app":"Fixture Display", "window":{"id":0}, "matches":matches}),
+                    "window_scope_unverified",
+                ),
+                (
+                    json!({"app":"Fixture Display", "window":{"id":52}, "matches":matches}),
+                    "window_scope_mismatch",
+                ),
+                (
+                    json!({"window":{"id":41}, "matches":matches}),
+                    "window_scope_unverified",
+                ),
+                (
+                    json!({"app":" ", "window":{"id":41}, "matches":matches}),
+                    "window_scope_unverified",
+                ),
+                (
+                    json!({"app":"Fixture Display", "window":{"id":41}}),
+                    "window_scope_unverified",
+                ),
+                (
+                    json!({"app":"Fixture Display", "window":{"id":41}, "matches":null}),
+                    "window_scope_unverified",
+                ),
+            ] {
+                let mut calls = 0;
+                let error = probe(&scoped(absent), &mut |_, _| {
+                    calls += 1;
+                    Ok(answer.clone())
+                })
+                .unwrap_err();
+                assert_eq!(error.code, code);
+                assert_eq!(calls, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn retryable_missing_windows_never_verify_scoped_absence() {
+        for code in core::WAIT_FOR_RETRIABLE_CODES {
+            for absent in [false, true] {
+                let mut calls = 0;
+                let error = probe(&scoped(absent), &mut |_, _| {
+                    calls += 1;
+                    Err(computer_use::ComputerUseError::new(*code, "not readable"))
+                })
+                .unwrap_err();
+                assert_eq!(error.code, error_code::TIMEOUT);
+                assert_eq!(calls, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn later_scoped_polls_cannot_reuse_an_earlier_valid_receipt() {
+        for (later, code, looks) in [
+            (Ok(json!({"matches":[]})), "window_scope_unverified", 2),
+            (
+                Ok(json!({"app":"Fixture Display", "window":{"id":52}, "matches":[]})),
+                "window_scope_mismatch",
+                2,
+            ),
+            (
+                Err(computer_use::ComputerUseError::new(
+                    error_code::WINDOW_NOT_FOUND,
+                    "closed",
+                )),
+                error_code::TIMEOUT,
+                3,
+            ),
+            (
+                Err(computer_use::ComputerUseError::new(
+                    error_code::APP_NOT_FOUND,
+                    "quit",
+                )),
+                error_code::TIMEOUT,
+                3,
+            ),
+        ] {
+            let mut calls = 0;
+            let error = probe(&scoped(true), &mut |_, _| {
+                calls += 1;
+                if calls == 1 {
+                    Ok(actual(json!([{"label":"Busy"}])))
+                } else {
+                    later.clone()
+                }
+            })
+            .unwrap_err();
+            assert_eq!(error.code, code);
+            assert_eq!(calls, looks);
+        }
+    }
+
+    #[test]
+    fn scoped_absence_keeps_only_the_final_actual_observation_after_a_missing_window() {
+        for ocr in [false, true] {
+            let mut params = scoped(true);
+            params["ocr"] = json!(ocr);
+            let mut calls = 0;
+            let mut final_read = actual(json!([]));
+            final_read["window"]["title"] = json!("Final actual document");
+            let result = probe(&params, &mut |method, _| {
+                assert_eq!(method, "findElements");
+                calls += 1;
+                match calls {
+                    1 => Ok(actual(json!([{"label":"Busy"}]))),
+                    2 => Err(computer_use::ComputerUseError::new(
+                        error_code::WINDOW_NOT_FOUND,
+                        "temporarily unreadable",
+                    )),
+                    _ => Ok(final_read.clone()),
+                }
+            })
+            .unwrap();
+            assert_eq!(result["window"], final_read["window"]);
+            assert_eq!(result["app"], final_read["app"]);
+            assert_eq!(result["matches"], json!([]));
+            assert_eq!(result["looks"], 3);
+            assert_eq!(result["elapsedMs"], COMPUTER_WAIT_FOR_POLL_MS * 2);
+            assert_eq!(calls, 3);
+        }
+    }
+
+    #[test]
+    fn backend_title_scope_is_rejected_before_any_helper_call() {
+        for scope in [
+            json!({"app":"Fixture"}),
+            json!({"windowId":41}),
+            json!({"windowIndex":0}),
+            json!({"background":true}),
+        ] {
+            for absent in [false, true] {
+                let mut params = json!({"window":"Document", "absent":absent});
+                params
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(scope.as_object().unwrap().clone());
+                let error = probe(&params, &mut |_, _| {
+                    panic!("a scoped title must never list global windows")
+                })
+                .unwrap_err();
+                assert_eq!(error.code, error_code::INVALID_ARGUMENT);
+            }
+        }
+    }
+
+    #[test]
+    fn unscoped_title_waits_keep_title_matching_and_own_window_exclusion() {
+        for absent in [false, true] {
+            let result = probe(
+                &json!({"window":"document", "absent":absent}),
+                &mut |method, params| {
+                    assert_eq!(method, "listAllWindows");
+                    assert_eq!(params, json!({}));
+                    let mut windows = vec![
+                        json!({"id":9,"title":"Document","own":true}),
+                        json!({"id":52,"title":"Other"}),
+                    ];
+                    if !absent {
+                        windows.push(json!({"id":41,"title":"Target Document"}));
+                    }
+                    Ok(json!({"windows":windows}))
+                },
+            )
+            .unwrap();
+            assert_eq!(result["satisfied"], true);
+            assert_eq!(
+                result["matches"].as_array().unwrap().len(),
+                usize::from(!absent)
+            );
+            assert!(result.get("window").is_none() && result.get("app").is_none());
+        }
+    }
+
+    #[test]
+    fn unscoped_ocr_waits_use_only_the_injected_helper_for_eye_and_exclusion_reads() {
+        for absent in [false, true] {
+            let mut calls = Vec::new();
+            let result = probe(&json!({"ocr":true,"text":"Ready","absent":absent}), &mut |method, params| {
+                calls.push(method.to_string());
+                match method {
+                    "findElements" => {
+                        assert_eq!(params["ownRegion"], json!([]));
+                        Ok(json!({"matches": if absent { json!([]) } else { json!([{"text":"Ready"}]) }}))
+                    }
+                    "listAllWindows" => Ok(json!({"windows":[]})),
+                    _ => Err(computer_use::ComputerUseError::new(error_code::UNSUPPORTED_CAPABILITY, "fixture has no eye")),
+                }
+            }).unwrap();
+            assert_eq!(result["satisfied"], true);
+            assert!(calls.iter().any(|method| method == "listAllWindows"));
+            assert!(calls.iter().any(|method| method == "findElements"));
+            assert!(result.get("window").is_none());
+        }
+    }
+
+    #[test]
+    fn an_unverified_scoped_wait_stops_the_shared_batch_before_following_input() {
+        let cases = [
+            Ok(json!({"matches":[]})),
+            Ok(json!({"app":"Fixture Display","window":{"id":52},"matches":[]})),
+            Err(computer_use::ComputerUseError::new(
+                error_code::WINDOW_NOT_FOUND,
+                "closed",
+            )),
+            Err(computer_use::ComputerUseError::new(
+                error_code::APP_NOT_FOUND,
+                "quit",
+            )),
+        ];
+        for answer in cases {
+            for after_valid in [false, true] {
+                let mut calls = 0;
+                let (walked, inputs) = batch_after_wait(&scoped(true), &mut |_, _| {
+                    calls += 1;
+                    if after_valid && calls == 1 {
+                        Ok(actual(json!([{"label":"Busy"}])))
+                    } else {
+                        answer.clone()
+                    }
+                });
+                assert_eq!(inputs, 0);
+                assert_eq!(walked.halted, Some((1, ())));
+                assert_eq!(walked.reports.len(), 1);
+                assert_eq!(walked.reports[0]["ok"], false);
+            }
+        }
+    }
+
+    #[test]
+    fn verified_scoped_producer_receipts_allow_the_following_batch_input() {
+        for case in fixture() {
+            let (walked, inputs) = batch_after_wait(&case["params"], &mut |method, _| {
+                assert_eq!(method, "findElements");
+                Ok(case["helper"].clone())
+            });
+            assert_eq!(inputs, 1);
+            assert!(walked.finished());
+            assert_eq!(walked.reports[0]["result"], case["result"]);
+        }
+    }
+}

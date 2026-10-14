@@ -106,6 +106,10 @@ impl RowCells {
     pub(super) fn fill(&mut self, line: &Line, cols: usize, color: bool) -> bool {
         self.cells.clear();
         for span in &line.spans {
+            // 링크는 칸에 담기지 않는다 — 링크가 든 행은 통째로 써야 주소가 함께 간다.
+            if color && span.link.is_some() {
+                return false;
+            }
             let style = if color { span.style.patch(line.style) } else { Style::new() };
             for ch in span.text.chars() {
                 if !stable_width(ch) {

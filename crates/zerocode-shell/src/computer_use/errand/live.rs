@@ -138,7 +138,13 @@ impl LiveJudge {
     /// for the walk's `workspace`, and `seat` is the surface's own row.
     #[must_use]
     pub fn new(keys: &dyn RouterKeys, workspace: Option<&Path>, seat: &'static JevUse) -> Self {
-        let wire = Wire::new(keys);
+        Self::over(Wire::new(keys), workspace, seat)
+    }
+
+    /// The same judge asking down `wire`: the window's reads zo's own settings
+    /// ([`Self::new`]); a test hands it a wire over a file of its own.
+    #[must_use]
+    pub(crate) fn over(wire: Wire, workspace: Option<&Path>, seat: &'static JevUse) -> Self {
         // The walk's first look is longer than a handshake: connect now,
         // so the first question pays for its answer alone.
         wire.warm();

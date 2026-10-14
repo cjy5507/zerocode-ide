@@ -38,6 +38,17 @@ const READ_DISPLAY_MAX_CHARS: usize = 6_000;
 // Tool input previews
 // ============================================================================
 
+/// A stable print of a tool call's whole input as the model gave it: the
+/// SHA-256 of its JSON, in hex. A hash and never the input, so a reader that
+/// must tell two calls apart — the window's step gate, to which zo's hook
+/// otherwise shows only a command's first word or a file's path — can do so
+/// without being handed a command's or a file's contents.
+#[must_use]
+pub fn tool_input_print(input: &Value) -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(input.to_string().as_bytes()))
+}
+
 /// Convert a tool-call input JSON payload into a typed preview.
 ///
 /// Recognises the 15 canonical tool names handled by the legacy

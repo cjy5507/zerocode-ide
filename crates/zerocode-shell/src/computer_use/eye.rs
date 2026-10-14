@@ -38,7 +38,7 @@ pub struct Memory {
 }
 
 impl Memory {
-    pub(super) const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             refused: Mutex::new(None),
         }
@@ -222,7 +222,7 @@ pub fn reading(params: &Value) -> Value {
     reading_with(&MEMORY, params, &mut super::call)
 }
 
-pub(super) fn reading_with(memory: &Memory, params: &Value, call: Call<'_>) -> Value {
+pub(crate) fn reading_with(memory: &Memory, params: &Value, call: Call<'_>) -> Value {
     let reads_the_desktop =
         params.get("ocr").and_then(Value::as_bool) == Some(true) && params.get("app").is_none();
     if !reads_the_desktop {

@@ -281,45 +281,86 @@ export async function testQuotaWallChip({ browser, origin, ok, faults: shared })
         && handed.done.said === "w-9에게 넘겼습니다", JSON.stringify(handed));
 
     /* ---- 거절은 사람이 읽는 글로: 누른 뒤의 거절과 미리 아는 거절 -------------- */
+    /* 원장과 창은 거절을 문장이 아니라 코드와 그 문장이 이름하는 사실로 보낸다(t-47935). 띠는 그
+     * 코드를 사람의 언어로 말한다 — 원장의 영어 문장도, 날것의 코드도 화면에 오르지 않는다. */
     let refusalsSeen = 0;
     const refused = await page.evaluate(async () => {
-      window.__ANSWER__.quota_wall_handover = (args) => {
-        window.__SENT__.push({ command: "quota_wall_handover", ...args });
-        return Promise.reject("worker w-4 is at work again — it is not handed over");
+      const pressRefusedWith = async (reply) => {
+        window.__ANSWER__.quota_wall_handover = (args) => {
+          window.__SENT__.push({ command: "quota_wall_handover", ...args });
+          return Promise.reject(reply);
+        };
+        document.querySelector('#board-view [data-worker="run-desk/w-4"] .board-desk-worker-wall-handover').click();
+        for (let frame = 0; frame < 30 && document.querySelector("#ask-yes")?.offsetParent === null; frame += 1) {
+          await new Promise((done) => requestAnimationFrame(done));
+        }
+        document.querySelector("#ask-yes").click();
+        for (let frame = 0; frame < 30; frame += 1) await new Promise((done) => requestAnimationFrame(done));
+        return window.__READ_STRIP__();
       };
-      document.querySelector('#board-view [data-worker="run-desk/w-4"] .board-desk-worker-wall-handover').click();
-      for (let frame = 0; frame < 30 && document.querySelector("#ask-yes")?.offsetParent === null; frame += 1) {
-        await new Promise((done) => requestAnimationFrame(done));
-      }
-      document.querySelector("#ask-yes").click();
-      for (let frame = 0; frame < 30; frame += 1) await new Promise((done) => requestAnimationFrame(done));
-      return window.__READ_STRIP__();
+      return {
+        working: await pressRefusedWith({ code: "at_work_again", worker: "w-4" }),
+        asleep: await pressRefusedWith({ code: "worker_not_live", worker: "w-4", state: "sleeping" }),
+        released: await pressRefusedWith({ code: "worker_not_live", worker: "w-4", state: "released" }),
+        unstarted: await pressRefusedWith({ code: "replacement_not_started", dispatch: "dp-4",
+          detail: "claude is at 99% of its claude session quota" }),
+        sentence: await pressRefusedWith("worker w-4 is at work again — it is not handed over"),
+      };
     });
-    const refusedShown = refused.said === "안 됨 — worker w-4 is at work again — it is not handed over" && refused.tone === "refused";
+    const refusedShown = refused.working.said === "안 됨 — 워커 w-4가 다시 일하고 있어 넘기지 않았습니다"
+      && refused.working.tone === "refused";
     if (refusedShown) refusalsSeen += 1;
-    ok("a press the ledger refused says why, in the ledger's words, beside the buttons", refusedShown, JSON.stringify(refused));
+    ok("a press the ledger refused says why, in the person's language, beside the buttons", refusedShown, JSON.stringify(refused.working));
+    const statesShown = refused.asleep.said === "안 됨 — 워커 w-4가 계정 이동으로 잠들어 있습니다"
+      && refused.released.said === "안 됨 — 워커 w-4는 이미 손을 놓았습니다 — 끝났거나 다른 에이전트로 넘어갔습니다";
+    if (statesShown) refusalsSeen += 2;
+    ok("a worker no longer live is said by its state: asleep for an account move, or already let go",
+      statesShown, JSON.stringify({ asleep: refused.asleep.said, released: refused.released.said }));
+    const unstartedShown = refused.unstarted.said
+      === "안 됨 — 시도 dp-4는 끝났지만 대신할 워커가 시작되지 않았습니다 — 과업은 다시 대기 중입니다: claude is at 99% of its claude session quota";
+    if (unstartedShown) refusalsSeen += 1;
+    ok("a replacement that did not start says the attempt is ended and the task is ready, with the start's own line",
+      unstartedShown, refused.unstarted.said);
+    ok("an answer that is a sentence, not a code, is never shown as it came",
+      refused.sentence.said === "안 됨 — 까닭을 이 창이 알아듣지 못했습니다" && !refused.sentence.said.includes("worker w-4"),
+      refused.sentence.said);
 
     const known = await page.evaluate(async () => {
       const cases = {};
-      cases.retry = (await window.__SET_CHIP__(window.__CHIP__({ retry_refusal: "worker w-4 is waiting on an answer it asked for" })), window.__READ_STRIP__());
-      cases.typing = (await window.__SET_CHIP__(window.__CHIP__({ retry_refusal: "a continuation is already being typed",
-        hand_over_refusal: "a continuation is being typed at dispatch dp-4 — a handover waits until it settles" })), window.__READ_STRIP__());
+      cases.retry = (await window.__SET_CHIP__(window.__CHIP__({ retry_refusal: { code: "awaiting_answer", worker: "w-4" } })), window.__READ_STRIP__());
+      cases.typing = (await window.__SET_CHIP__(window.__CHIP__({ retry_refusal: { code: "resume_in_flight" },
+        hand_over_refusal: { code: "handover_waits_for_typing", dispatch: "dp-4" } })), window.__READ_STRIP__());
+      setLocale("en", { persist: false });
+      scheduleDeskPaint();
+      for (let frame = 0; frame < 30; frame += 1) await new Promise((done) => requestAnimationFrame(done));
+      cases.english = window.__READ_STRIP__();
+      setLocale("ko", { persist: false });
+      scheduleDeskPaint();
+      for (let frame = 0; frame < 30; frame += 1) await new Promise((done) => requestAnimationFrame(done));
+      cases.tomorrow = (await window.__SET_CHIP__(window.__CHIP__({ retry_refusal: { code: "a_reason_from_tomorrow", worker: "w-4" } })), window.__READ_STRIP__());
       agentRows = [{ id: "zo", name: "zo", installed: true }];
       cases.nobody = (await window.__SET_CHIP__(window.__CHIP__({ wall: "m-wall-5" })), window.__READ_STRIP__());
       cases.declared = (await window.__SET_CHIP__(window.__CHIP__({ wall: "m-wall-6", declared_alt: { agent: "codex", model: "gpt-6-astra" } })), window.__READ_STRIP__());
       return cases;
     });
     const retryRefused = known.retry.retry.disabled === true
-      && known.retry.why === "다시 시도 안 됨 — worker w-4 is waiting on an answer it asked for"
+      && known.retry.why === "다시 시도 안 됨 — 워커 w-4가 자기가 물은 질문의 답을 기다리고 있습니다"
       && known.retry.hand.disabled === false;
     if (retryRefused) refusalsSeen += 1;
     ok("a retry the ledger would refuse is held, its reason written under it", retryRefused, JSON.stringify(known.retry));
     const typingRefused = known.typing.retry.disabled === true && known.typing.hand.disabled === true
-      && known.typing.why.includes("다시 시도 안 됨 — a continuation is already being typed")
-      && known.typing.why.includes("넘기기 안 됨 — a continuation is being typed at dispatch dp-4");
+      && known.typing.why === "다시 시도 안 됨 — 이어서 하라는 한 줄을 지금 넣는 중입니다 · "
+        + "넘기기 안 됨 — 시도 dp-4에 이어 쓰기를 넣는 중입니다 — 넘기기는 그것이 끝난 뒤에 됩니다";
     if (typingRefused) refusalsSeen += 2;
     ok("while a continuation is typed both buttons hold and say why: no second retry, no handover",
       typingRefused, JSON.stringify(known.typing));
+    ok("the reasons speak the window's language from the catalog",
+      known.english.why === "Retry not possible — a line asking it to continue is being typed right now · "
+        + "Handover not possible — a line is being typed for attempt dp-4 — a handover waits until it settles",
+      known.english.why);
+    ok("a code the window has no words for is said as unknown, never shown raw",
+      known.tomorrow.retry.disabled === true && known.tomorrow.why === "다시 시도 안 됨 — 까닭을 이 창이 알아듣지 못했습니다"
+        && !known.tomorrow.why.includes("a_reason_from_tomorrow"), JSON.stringify(known.tomorrow));
     const nobodyRefused = known.nobody.hand.disabled === true && known.nobody.why === "넘길 에이전트가 이 기계에 없음"
       && known.nobody.toShown === false && known.nobody.said === "";
     if (nobodyRefused) refusalsSeen += 1;
