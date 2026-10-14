@@ -356,7 +356,7 @@ export async function testLandBatch({ browser, origin, ok, faults: shared }) {
       window.__ANSWER__.land_batch_promote = (args) => {
         window.__SENT__.push({ command: "land_batch_promote", ...args });
         return new Promise((done) => {
-          window.__RELEASE__ = () => done({ state: "promoted", batch: args.batch, generation: 1, from: "0909090", to: "f6f6f6f" });
+          window.__BATCH_RELEASE__ = () => done({ state: "promoted", batch: args.batch, generation: 1, from: "0909090", to: "f6f6f6f" });
         });
       };
       return true;
@@ -367,7 +367,7 @@ export async function testLandBatch({ browser, origin, ok, faults: shared }) {
     await page.click(act("lb-1791940000000-1", "promote"), { force: true, timeout: 2_000 }).catch(() => {});
     await frames(page, 10);
     const askedAgain = await page.evaluate(() => document.querySelector("#ask-yes")?.offsetParent !== null);
-    await page.evaluate(() => window.__RELEASE__?.());
+    await page.evaluate(() => window.__BATCH_RELEASE__?.());
     await frames(page, 30);
     const done = await page.evaluate(() => ({ sent: [...window.__SENT__], card: window.__READ_BATCHES__().cards[0] }));
     ok("27 a yes calls land_batch_promote once, for the run and the batch",
