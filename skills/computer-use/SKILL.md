@@ -112,7 +112,7 @@ Managed working tabs refuse arbitrary `eval`. Use `read`, `marks`,
 Ordinary website scripts and network requests can continue while paused,
 and a script, timer or request the site already started can still finish
 after a handoff. A handoff first waits briefly until the browser engine
-itself has answered every navigation this window sent (`goto`, the
+itself has answered the current navigation this window sent (`goto`, the
 person's address bar, a popup, a working tab's first page) and then
 reports nothing loading in the affected tabs, including a load the page
 began itself. A page's own "finished" message, its `readyState` or time
