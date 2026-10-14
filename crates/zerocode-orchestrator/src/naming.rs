@@ -140,8 +140,12 @@ pub fn checkout_task_id<'a>(
     branch: Option<&str>,
     prefix: &str,
 ) -> Option<&'a str> {
-    let _ = (folder, branch, prefix);
-    None
+    let task = worker_task_id(folder)?;
+    let Some(branch) = branch else {
+        return Some(task);
+    };
+    let below = branch.strip_prefix(prefix)?.strip_prefix('/')?;
+    (worker_task_id(below) == Some(task)).then_some(task)
 }
 
 fn task_id_prefix(component: &str) -> Option<&str> {

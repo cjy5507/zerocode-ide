@@ -109,8 +109,21 @@ impl Roots {
     /// the same repository as the worker's own checkout. Two small files and a
     /// few stats, no git process — so the stat survey a cleanup asks stays one.
     fn beside(&self, path: &Path) -> bool {
-        let _ = path;
-        false
+        let (Some(task), Some(checkout)) = (self.task.as_deref(), self.checkout.as_deref()) else {
+            return false;
+        };
+        let Some(root) = path.ancestors().find(|dir| dir.join(".git").exists()) else {
+            return false;
+        };
+        root.join(".git").is_file()
+            && root
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .and_then(zerocode_orchestrator::naming::worker_task_id)
+                == Some(task)
+            && linked_worktrees_of(root).is_some_and(|listed| {
+                linked_worktrees_of(checkout).as_deref() == Some(listed.as_path())
+            })
     }
 }
 

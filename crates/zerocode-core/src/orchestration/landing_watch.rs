@@ -259,7 +259,8 @@ fn late_landings(
         }
         // What the worker left beside its checkout when it handed in, as the window saw it — told
         // once, at the hand-in, whatever the window then took back (t-45336).
-        let left: &[String] = &[];
+        let left: &[String] =
+            witness_of(witnesses, checkout).map_or(&[][..], |held| held.beside.as_slice());
         if !left.is_empty() {
             reasons.push((StallReason::CheckoutsLeft, done_ms));
         }

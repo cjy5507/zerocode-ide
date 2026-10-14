@@ -267,6 +267,10 @@ async function refreshPaneLedger() {
         at: Number(row?.at) || 0,
         // The person took this worker's pane over (t-45938): the pane is theirs, 사람 rather than 워커.
         takenOver: row?.taken_over === true,
+        // The ledger's reasons this attempt's head is late (t-45336), newest first: the sidebar's one word of
+        // what holds the work back reads them, beside the seat's own health — whose missing pane rides too.
+        stalled: Array.isArray(row?.stalled) ? row.stalled : [],
+        pane_missing_since_ms: Number.isFinite(row?.pane_missing_since_ms) ? row.pane_missing_since_ms : null,
       };
       if (typeof row?.term === "number") next.set(row.term, facts);
       else if (row?.settled === true && row.checkout) {
@@ -336,7 +340,8 @@ function paneLedgerSaid(map) {
       `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${f.failed ? 1 : 0}` +
       `:${JSON.stringify(f.review)}:${JSON.stringify(f.progress)}:${JSON.stringify(f.closed)}:${f.review_since_ms ?? ""}` +
       `:${f.asking ? 1 : 0}:${f.wall?.stands_until_ms ?? ""}:${f.handed_in ?? ""}:${f.model ?? ""}` +
-      `:${f.worker}:${f.takenOver ? 1 : 0}:${JSON.stringify(f.quotaWall)}`)
+      `:${f.worker}:${f.takenOver ? 1 : 0}:${JSON.stringify(f.quotaWall)}:${(f.stalled ?? []).join("+")}` +
+      `:${f.pane_missing_since_ms ?? ""}`)
     .join(",");
 }
 
@@ -10433,12 +10438,42 @@ function worktreeStageOf(path) {
   return stage;
 }
 
+/* What holds the work in one checkout back, in one word beside its stage (t-45336). The seat's own health first,
+ * by the desk's table for it (`DESK_HEALTH`, `DESK_TASK_BLOCKERS`): the pane gone, a quota wall, a question
+ * waiting, a sleeper. Then the ledger's own reason the head is late on its way to main — the landing watch's word
+ * (`stalled`, newest first) — the newest that still fits where the work stands: a late review only while it waits
+ * for one, a late landing only while it waits to land. The landing chip already says a clash with main and 정리
+ * 가능, so neither is said twice here; nothing is said while nothing holds the work. */
+const WORKTREE_STALL_WORDS = Object.freeze({
+  no_review: { key: "worktree.stall.noReview", word: "검증 늦음", stages: ["handedIn", "reviewing"] },
+  no_merge: { key: "worktree.stall.noMerge", word: "착지 늦음", stages: ["landWait"] },
+  merged_unrecorded: { key: "worktree.stall.mergedUnrecorded", word: "병합 기록 없음", stages: ["handedIn", "reviewing", "landWait"] },
+  ledger_merged_git_not: { key: "worktree.stall.gitNot", word: "main에 없음", stages: ["landed"] },
+});
+
+function worktreeBlockerWord(path) {
+  const seats = worktreeSeatFacts(path);
+  const now = Date.now();
+  for (const facts of seats) {
+    const health = deskWorkerHealth(facts, null, now);
+    if (health && DESK_TASK_BLOCKERS.includes(health.id)) return t(health.key, health.word);
+  }
+  const stage = worktreeStageOf(path);
+  for (const facts of seats) {
+    for (const reason of facts.stalled ?? []) {
+      const said = WORKTREE_STALL_WORDS[reason];
+      if (said?.stages.includes(stage)) return t(said.key, said.word);
+    }
+  }
+  return "";
+}
+
 /* What the work in one checkout says on its row, as one string — the repaint compares it (t-44016). The empty
- * coordinator seat said on the line is part of it (t-45938). */
+ * coordinator seat said on the line is part of it (t-45938), and so is what holds the work back (t-45336). */
 function worktreeWorkSaid(path) {
   const vacant = coordinatorVacancyAt(path);
-  return [worktreeWorkFacts(path)?.taskId ?? "", landingStageWord(worktreeStageOf(path)), worktreeWorkerWords(path),
-    vacant.map((seat) => seat.run).join(",")].join("|");
+  return [worktreeWorkFacts(path)?.taskId ?? "", landingStageWord(worktreeStageOf(path)), worktreeBlockerWord(path),
+    worktreeWorkerWords(path), vacant.map((seat) => seat.run).join(",")].join("|");
 }
 
 /* The terminals standing in one checkout: its tabs' panes, and the agents parked off the stage there. */
@@ -16646,17 +16681,26 @@ listen("worktree:landing", () => {
  * that carries the deletions. Those go to the window log with their reason,
  * beside the refusals the existing automatic cleanup already writes there. */
 listen("worktree:reclaimed", (event) => {
-  const { name, branch, base } = event.payload ?? {};
+  const { name, branch, base, beside } = event.payload ?? {};
   // The list refresh is not repeated here: the backend emits
   // `worktree:removed` for the same reclaim, and that listener already owns
   // it. This one carries the sentence and nothing else.
   if (typeof name !== "string" || name === "") return;
+  // A checkout a worker cut beside its own goes because its task was handed in
+  // (t-45336): its sentence names the task, and the head that holds its commits.
+  const handedIn = typeof beside === "string" && beside !== "";
   toast(
-    t(
-      "worktree.reclaimed",
-      "워커가 끝나 워크스페이스 {{name}}을(를) 회수했습니다 — {{branch}}의 커밋은 모두 {{base}}에 있고 저장되지 않은 변경은 없었습니다. 브랜치는 그대로 남아 있습니다.",
-      { name, branch: branch ?? "", base: base ?? "" },
-    ),
+    handedIn
+      ? t(
+        "worktree.reclaimedBeside",
+        "{{task}}이(가) 넘겨져 워커 체크아웃 곁의 {{name}}을(를) 회수했습니다 — {{branch}}의 커밋은 모두 넘긴 머리({{base}})에 있고 저장되지 않은 변경은 없었습니다.",
+        { task: beside, name, branch: branch ?? "", base: base ?? "" },
+      )
+      : t(
+        "worktree.reclaimed",
+        "워커가 끝나 워크스페이스 {{name}}을(를) 회수했습니다 — {{branch}}의 커밋은 모두 {{base}}에 있고 저장되지 않은 변경은 없었습니다. 브랜치는 그대로 남아 있습니다.",
+        { name, branch: branch ?? "", base: base ?? "" },
+      ),
     "done",
   );
 });

@@ -18915,8 +18915,9 @@ values masked, {cap_mb} MB at most). An intended failure is evidence too — nam
 name — and a report that is not a plain report says what it is: `\"{report_kind}\":\"review\"` \
 (one of {kinds}). Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
-a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{conditions}{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+a new request. `zerocode-orc help` lists the rest. {find} {plain} {one_checkout} {purpose}\n\n{conditions}{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
         conditions = conditions,
+        one_checkout = WORKER_ONE_CHECKOUT_CONTEXT,
         evidence = crate::hand_in::EVIDENCE_KEY,
         expect = crate::hand_in::EXPECT_KEY,
         report_kind = crate::hand_in::REPORT_KIND_KEY,
@@ -18972,8 +18973,9 @@ nobody on either side can answer one. Keep the summary short and carry a \
 longer answer as a path — `--payload '{{\"reportPath\":\"/abs/path\",\"lifetime\":\"ephemeral\"}}'` — \
 naming it once in the summary too, and say whether that file outlives your \
 worktree, because the home window is not on this machine. Every command that CHANGES anything needs --retry-request. \
-`zerocode-orc help` lists the rest. {plain} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+`zerocode-orc help` lists the rest. {plain} {one_checkout} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
         plain = WORKER_PLAIN_REPORT_CONTEXT,
+        one_checkout = WORKER_ONE_CHECKOUT_CONTEXT,
         purpose = WORKER_PURPOSE_CONTEXT,
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,

@@ -1602,8 +1602,7 @@ impl Orchestrator {
         worktree: impl AsRef<Path>,
         holder: &str,
     ) -> Result<(), OrchestratorError> {
-        let _ = holder;
-        self.remove_checked(worktree.as_ref(), Removal::ConfirmedIfClean, None)
+        self.remove_checked(worktree.as_ref(), Removal::ConfirmedIfClean, Some(holder))
     }
 
     /// Delete a local branch whose every commit is already in `into`, the way
@@ -1624,10 +1623,26 @@ impl Orchestrator {
     /// commit (or either name does not resolve), [`OrchestratorError::Git`]
     /// when `git branch -d` refuses.
     pub fn delete_landed_branch(&self, branch: &str, into: &str) -> Result<(), OrchestratorError> {
-        Err(OrchestratorError::BranchNotLanded {
-            branch: branch.to_string(),
-            into: into.to_string(),
-        })
+        // A name that begins with a dash would be read as an option; git
+        // forbids such branch names, so one is never a branch of ours.
+        if branch.is_empty() || branch.starts_with('-') {
+            return Err(OrchestratorError::NoSuchBranch {
+                branch: branch.to_string(),
+            });
+        }
+        let outstanding =
+            self.commits_beyond(&self.repo_root, into, &format!("refs/heads/{branch}"))?;
+        if outstanding != Some(0) {
+            return Err(OrchestratorError::BranchNotLanded {
+                branch: branch.to_string(),
+                into: into.to_string(),
+            });
+        }
+        let output = self.git(&["branch", "-d", branch])?;
+        if !output.ok {
+            return Err(self.failure("branch -d", &output));
+        }
+        Ok(())
     }
 
     fn remove_checked(

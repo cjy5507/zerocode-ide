@@ -406,13 +406,15 @@ const DESK_LAND_CHECK = Object.freeze({
   error: { key: "board.desk.landCheckError", word: "합치기를 끝내지 못했어요" },
 });
 
-/* 늦은 착지의 다섯 까닭(t-22105) — 원장의 낱말마다. 표에 없는 낱말은 원장의 말 그대로 선다. */
+/* 늦은 착지의 다섯 까닭(t-22105)과 넘길 때 남긴 체크아웃(t-45336) — 원장의 낱말마다. 표에 없는 낱말은 원장의 말
+ * 그대로 선다. */
 const DESK_LANDING_REASONS = Object.freeze({
   no_review: { key: "board.desk.landingNoReview", word: "보고했는데 검증이 늦어요" },
   no_merge: { key: "board.desk.landingNoMerge", word: "검증했는데 병합 기록이 없어요" },
   merged_unrecorded: { key: "board.desk.landingUnrecorded", word: "git엔 main에 있는데 원장에 병합 기록이 없어요" },
   cleanable: { key: "board.desk.landingCleanable", word: "병합된 작업 폴더가 남아 있어요 (정리 가능)" },
   ledger_merged_git_not: { key: "board.desk.landingGitNot", word: "원장은 병합됐다는데 git엔 그 커밋이 main에 없어요" },
+  checkouts_left: { key: "board.desk.landingCheckoutsLeft", word: "넘길 때 같은 과업의 체크아웃을 곁에 남겼어요" },
 });
 
 /* 분류기 거절 뒤에 무엇이 서 있는가(t-6747): 선언된 워커에게 넘기는 중, 넘길 곳을

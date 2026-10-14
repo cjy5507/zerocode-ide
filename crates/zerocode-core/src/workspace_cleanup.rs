@@ -313,7 +313,9 @@ pub fn reasons(archived: bool, idle_days: i64, landed: bool) -> Vec<Reason> {
     if idle_days >= IDLE_CLEAN_DAYS {
         found.push(Reason::IdleClean);
     }
-    let _ = landed;
+    if landed {
+        found.push(Reason::Landed);
+    }
     found
 }
 

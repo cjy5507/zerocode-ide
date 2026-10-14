@@ -1845,7 +1845,8 @@ function worktreeListShape(held) {
         `W${worktree.path}|${worktree.branch ?? ""}|${worktree.base ?? ""}|${worktree.is_main ? 1 : 0}` +
           `|${landingShape(worktree.landing)}` +
           `|${worktree.is_folder ? 1 : 0}|${(held.get(worktree.path) ?? []).length}` +
-          `|${expandedWorktrees.has(worktree.path) ? 1 : 0}|${worktreeTaskTitle(worktree.path)}`,
+          `|${expandedWorktrees.has(worktree.path) ? 1 : 0}|${worktreeTaskTitle(worktree.path)}` +
+          `|${taskFoldsUnder.get(worktree.path)?.rows.length ?? 0}`,
       );
     }
   }
@@ -2399,6 +2400,14 @@ function workspaceActivityRank(path) {
 /* Which checkouts an automation cut, by path. The run ledger IS the
  * provenance — there is no second store to keep in step with it. */
 const automationBornPaths = new Set();
+
+/* A task's checkouts folded under one row (t-45336, `foldTaskCheckouts`): the
+ * paths folded away, the row each fold stands under with what it holds, and the
+ * folds the person opened. Declared with the chain's other state, ahead of
+ * every road that reads the list. */
+let taskFoldedPaths = new Set();
+let taskFoldsUnder = new Map();
+const openedTaskFolds = new Set();
 
 /* Where each worktree's session rows are hung, by path. Rebuilt with the
  * list, so it never outlives the nodes it points at. */
@@ -4543,7 +4552,9 @@ function dressWorktreeWork(row, path) {
   };
   set(row.querySelector(".wt-task-id"), worktreeWorkFacts(path)?.taskId ?? "");
   set(row.querySelector(".wt-stage"), landingStageWord(worktreeStageOf(path)));
+  set(row.querySelector(".wt-blocker"), worktreeBlockerWord(path));
   set(row.querySelector(".wt-worker"), worktreeWorkerWords(path));
+  dressWorktreeFold(row.querySelector(".wt-fold"), path);
   // A run whose coordinator seat nobody holds, said once, on this line when it is that run's (t-45938).
   const vacant = coordinatorVacancyAt(path);
   const empty = row.querySelector(".wt-coordinator-vacant");
@@ -4804,6 +4815,23 @@ function makeWorktreeNode(worktree, held) {
   const stage = document.createElement("span");
   stage.className = "wt-stage";
   stage.hidden = true;
+  // What holds the work back, in one word beside its stage (t-45336).
+  const blocker = document.createElement("span");
+  blocker.className = "wt-blocker";
+  blocker.hidden = true;
+  // The checkouts of this row's task folded under it (t-45336): how many, and the way to open them.
+  const fold = document.createElement("button");
+  fold.className = "wt-fold";
+  fold.type = "button";
+  fold.hidden = true;
+  fold.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const key = fold.dataset.foldKey;
+    if (!key) return;
+    if (openedTaskFolds.has(key)) openedTaskFolds.delete(key);
+    else openedTaskFolds.add(key);
+    void refreshWorktrees();
+  });
   const worker = document.createElement("span");
   worker.className = "wt-worker";
   worker.hidden = true;
@@ -4812,8 +4840,9 @@ function makeWorktreeNode(worktree, held) {
   vacant.className = "wt-coordinator-vacant";
   vacant.hidden = true;
   branch.prepend(taskId);
-  branch.append(stage, worker, vacant);
+  branch.append(stage, blocker, worker, vacant);
   branch.appendChild(unseated);
+  branch.appendChild(fold);
   // A workspace can be carried straight from the rail into a board lane. If
   // the board was closed, the drag opens a preview sheet; a successful drop
   // makes it real, while a cancelled drag gives the stage back exactly as it
@@ -5078,7 +5107,85 @@ function shownWorktrees(project) {
     && !(hideAgentScratchWorkspaces && worktree.ownership === "agent-scratch")
     && !(sleepingPaths.has(worktree.path) && !worktree.active
       && !(keepDefaultBranchAwake && worktree.is_main))
-    && !(worktree.external_hidden && worktreeAgentRows(worktree.path).length === 0));
+    && !(worktree.external_hidden && worktreeAgentRows(worktree.path).length === 0)
+    && !(taskFoldedPaths.has(worktree.path) && !worktree.active && worktreeAgentRows(worktree.path).length === 0));
+}
+
+/* A task's checkouts, folded under one row (t-45336).
+ *
+ * A worker cuts checkouts beside its own for one task — a red to prove a test
+ * fails, a detached verify, a folder of evidence — and the person saw one task
+ * stand in the sidebar four times, each row saying 「미반영 N · 에이전트 창 없음」,
+ * and finished work pile up. The catalog names the task each checkout belongs
+ * to (`task_id`: the window's one reading of its checkout names, the same the
+ * reclaim beside a hand-in takes a checkout by). Per project, one row stands
+ * for a task and the others fold under it — the fifth axis of the one chain
+ * above — with a chip on that row saying how many, until the person opens
+ * them. A row never folds while the window stands in it or an agent runs in it:
+ * hiding the place hides the work. */
+function foldTaskCheckouts(catalog) {
+  const folded = new Set();
+  const under = new Map();
+  for (const project of catalog) {
+    const byTask = new Map();
+    for (const worktree of project.worktrees ?? []) {
+      if (!worktree.task_id) continue;
+      byTask.set(worktree.task_id, [...(byTask.get(worktree.task_id) ?? []), worktree]);
+    }
+    for (const [task, group] of byTask) {
+      if (group.length < 2) continue;
+      const lead = taskLeadRow(task, group);
+      const tucked = group.filter((worktree) => worktree !== lead && !worktree.active
+        && worktreeAgentRows(worktree.path).length === 0);
+      if (tucked.length === 0) continue;
+      const key = `${project.path}|${task}`;
+      under.set(lead.path, { key, rows: tucked });
+      if (openedTaskFolds.has(key)) continue;
+      for (const worktree of tucked) folded.add(worktree.path);
+    }
+  }
+  taskFoldedPaths = folded;
+  taskFoldsUnder = under;
+}
+
+/* The row that stands for a task: the checkout the ledger seated its work in —
+ * where the head was handed in from — else the one the window stands in, one
+ * with an agent running, then one on a branch (a worker's own checkout is; the
+ * ones it cuts beside are mostly detached), the one used last first. */
+function taskLeadRow(task, group) {
+  const recent = (one, other) => (other.last_activity_ms ?? 0) - (one.last_activity_ms ?? 0);
+  return group.find((worktree) => worktreeWorkFacts(worktree.path)?.taskId === task)
+    ?? group.find((worktree) => worktree.active)
+    ?? group.find((worktree) => worktreeAgentRows(worktree.path).length > 0)
+    ?? [...group].sort((one, other) => Number(Boolean(other.branch)) - Number(Boolean(one.branch))
+      || recent(one, other))[0];
+}
+
+/* The chip on a task's row that stands for its other checkouts (t-45336): how
+ * many are folded under it, their folders in the tooltip, and a press that
+ * opens them or folds them again. */
+function dressWorktreeFold(chip, path) {
+  if (!chip) return;
+  const held = taskFoldsUnder.get(path);
+  const opened = held ? openedTaskFolds.has(held.key) : false;
+  const count = held?.rows.length ?? 0;
+  let words = "";
+  let tip = "";
+  if (held && opened) {
+    words = t("worktree.taskFoldOpen", "접기");
+    tip = t("worktree.taskFoldOpenTip", "이 과업의 다른 체크아웃 {{count}}개를 다시 이 행 밑에 접습니다", { count });
+  } else if (held) {
+    words = t("worktree.taskFold", "+{{count}} 접힘", { count });
+    tip = t("worktree.taskFoldTip", "이 과업의 다른 체크아웃 {{count}}개({{names}})를 이 행 밑에 접었습니다 — 누르면 펼칩니다. 넘긴 머리에 담긴 것은 창이 거둡니다.", {
+      count,
+      names: held.rows.map((one) => basename(one.path)).join(", "),
+    });
+  }
+  if (chip.textContent !== words) chip.textContent = words;
+  if (chip.hidden !== (words === "")) chip.hidden = words === "";
+  if ((chip.dataset.tip ?? "") !== tip) chip.dataset.tip = tip;
+  if ((chip.dataset.foldKey ?? "") !== (held?.key ?? "")) chip.dataset.foldKey = held?.key ?? "";
+  chip.setAttribute("aria-expanded", opened ? "true" : "false");
 }
 
 /* What a workspace row is CALLED — the branch, or the folder's own name.
@@ -5231,6 +5338,8 @@ async function refreshWorktrees() {
     );
     allWorktrees.push(...project.worktrees);
   }
+  // One row a task before anything below reads the list (t-45336).
+  foldTaskCheckouts(projects);
   const staged = allWorktrees.find((worktree) => worktree.active);
   activeWorktreePath = staged?.path ?? null;
   // The native browser panes hear about the swap NOW — the stage repaint
@@ -10737,6 +10846,15 @@ function buildCleanupRow(row) {
   git.textContent = wscleanGitWord(row);
   head.append(git);
 
+  // Work that has landed is offered for what it is (t-45336): every commit in it
+  // is in the compare ref, by the sidebar's own landing answer.
+  if ((row.reasons ?? []).includes("landed")) {
+    const landed = document.createElement("span");
+    landed.className = "wsclean-chip is-clean";
+    landed.textContent = t("cleanup.reasonLanded", "착지됨");
+    head.append(landed);
+  }
+
   const acts = document.createElement("div");
   acts.className = "wsclean-acts";
 
@@ -10995,7 +11113,13 @@ async function removeCleanupRows(rows) {
     try {
       // 기존 제거 경로를 그대로 쓴다. `force`는 방금 다시 잰 값이지 확인
       // 화면이 들고 있던 값이 아니다.
-      await invoke("remove_worktree", { path: row.path, discardChanges: now.force });
+      // Landed work takes its task's landed branches with it (t-45336): only
+      // ones the compare ref holds, by `git branch -d`, never with force.
+      await invoke("remove_worktree", {
+        path: row.path,
+        discardChanges: now.force,
+        landedBranches: (now.reasons ?? []).includes("landed"),
+      });
       removed.push(row.name);
       wsclean.picked.delete(row.id);
     } catch (error) {

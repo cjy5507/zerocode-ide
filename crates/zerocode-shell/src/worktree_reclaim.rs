@@ -526,8 +526,15 @@ fn beside_of(
     own: &Worktree,
     task: &str,
 ) -> Result<Vec<Worktree>, zerocode_orchestrator::OrchestratorError> {
-    let _ = (owner, own, task);
-    Ok(Vec::new())
+    Ok(owner
+        .list()?
+        .into_iter()
+        .filter(|known| {
+            !known.is_main
+                && !same_worktree_path(&known.path, &own.path)
+                && carries_task(known, task, owner.branch_prefix())
+        })
+        .collect())
 }
 
 /// The checkouts of a task found beside a worker's own when its hand-in was
@@ -1268,8 +1275,32 @@ fn held_by_hand_in(
     holder: &str,
     takes: Vec<String>,
 ) -> (Verdict, Examined) {
-    let _ = (orchestrator, known, task, head, holder, takes);
-    unknown("nothing beside a hand-in is judged".to_string())
+    if !carries_task(known, task, orchestrator.branch_prefix()) {
+        return shared(format!("its name does not carry {task}"));
+    }
+    let Some(at) = known.head.as_deref() else {
+        return unknown("git did not say which commit it is on".to_string());
+    };
+    match orchestrator.commits_beyond(&known.path, head, at) {
+        Ok(Some(0)) => (
+            Verdict::Reclaim {
+                branch: known
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| format!("the detached HEAD {}", short_commit(at))),
+                base: format!("{holder} at {}", short_commit(head)),
+                takes,
+            },
+            Examined::Landed,
+        ),
+        Ok(Some(outstanding)) => unknown(format!(
+            "{outstanding} commit(s) in it are not in the head {task} handed in"
+        )),
+        Ok(None) => unknown(format!(
+            "{head} cannot be resolved here, so whether it holds this checkout is unknown"
+        )),
+        Err(error) => unknown(format!("git could not compare it with {head}: {error}")),
+    }
 }
 
 /// Whether a checkout is one of `task`'s by the names this window gives them
