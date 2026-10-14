@@ -6581,6 +6581,16 @@
               <option value="never" data-i18n="project.never">실행하지 않기</option>
             </select>
           </label>
+          <!-- 묶음 통합 큐(t-45315): 저장소마다 따로 두고 기본은 꺼짐이다. 이 기계가 큐를 돌리지
+               못하면(지금은 macOS만 돌린다) 줄은 잠긴 채 까닭을 보인다. -->
+          <label class="settings-check" for="project-integration-queue">
+            <input type="checkbox" id="project-integration-queue" />
+            <span>
+              <span class="settings-label" data-i18n="board.batch.settingLabel">묶음 통합 큐</span>
+              <span class="settings-row-desc" data-i18n="board.batch.settingDesc">준비된 과업 여럿을 main 위에 함께 쌓아 한 번 게이트하고, 초록이면 main을 빨리감기합니다. 이 저장소에만 적용됩니다.</span>
+              <span class="settings-row-desc" id="project-integration-queue-why" data-i18n="board.batch.settingLocked" hidden>macOS에서만 켤 수 있습니다 — 다른 플랫폼에서는 아직 시험되지 않았습니다.</span>
+            </span>
+          </label>
         </div>
         </section>
 

@@ -9457,6 +9457,9 @@ function setSettingsOpen(on, focus = null) {
     // a branch changes what this section says without the window doing
     // anything.
     refreshProjectScripts();
+    // The integration queue's switch is the same project's (t-45315): one
+    // more read on the same open.
+    void refreshIntegrationQueue();
     // The branch prefix rides along with it: one section, one open, one pair
     // of reads.
     void refreshWorktreePrefs();

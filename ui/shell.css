@@ -32968,6 +32968,7 @@ details.task-board-section > summary {
   display: grid;
   grid-template:
     "machine  machine" auto
+    "batches  batches" auto
     "mail     workers" auto
     "pipeline workers" auto
     "release  workers" auto
@@ -32983,6 +32984,7 @@ details.task-board-section > summary {
 .task-board-desk:where(:has(> [data-desk-block="pipeline"][data-desk-column="left"]):has(> [data-desk-block="release"][data-desk-column="right"])) {
   grid-template:
     "machine  machine" auto
+    "batches  batches" auto
     "mail     workers" auto
     "pipeline release" auto
     / minmax(0, 1fr) minmax(0, 1fr);
@@ -32992,6 +32994,7 @@ details.task-board-section > summary {
 .task-board-desk:where(:has(> [data-desk-block="pipeline"][data-desk-column="right"]):has(> [data-desk-block="release"][data-desk-column="right"])) {
   grid-template:
     "machine machine" auto
+    "batches batches" auto
     "mail    workers" auto
     "mail    pipeline" auto
     "mail    release" auto
@@ -33025,6 +33028,7 @@ details.task-board-section > summary {
 .board-desk-block[data-desk-block="workers"] { grid-area: workers; }
 .board-desk-block[data-desk-block="pipeline"] { grid-area: pipeline; }
 .board-desk-block[data-desk-block="release"] { grid-area: release; }
+.board-desk-block[data-desk-block="batches"] { grid-area: batches; }
 
 .task-board-desk .agent-graph-node-state::before {
   animation: none;
@@ -33802,6 +33806,113 @@ details.task-board-section > summary {
 .board-desk-release-skips {
   padding-left: var(--space-4);
 }
+
+/* ---- 묶음 통합 큐의 카드 (t-45315) ----------------------------------------------
+ * 데스크의 둘째 행(`batches`)을 두 열에 걸쳐 쓴다. 큐가 꺼져 있거나 묶음이 없으면 블록이 숨어
+ * 그 행은 높이도 간격도 없다(간격은 블록의 위 여백이다). 말은 릴리즈 레인 카드와 할당량
+ * 벽의 띠의 것이다: 칩은 신호의 잉크, 단추는 편지 단추, 안 되는 까닭과 누른 결과는 조용한 글씨. */
+.board-batch-off {
+  margin: 0 0 var(--space-2);
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+}
+
+.board-batch-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.board-batch {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+}
+
+.board-batch > p,
+.board-batch-held {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.board-batch-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+}
+
+.board-batch-name {
+  color: var(--ink-label);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.board-batch-chip {
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.board-batch-chip[data-tone="wait"] { color: var(--signal-wait-ink); }
+.board-batch-chip[data-tone="ready"] { color: var(--signal-ready); }
+.board-batch-chip[data-tone="done"] { color: var(--signal-done); }
+.board-batch-chip[data-tone="halt"] { color: var(--signal-halt-ink); }
+.board-batch-chip[data-tone="quiet"] { color: var(--ink-label); }
+
+.board-batch-why {
+  color: var(--signal-halt-ink);
+}
+
+.board-batch[data-standing="searching"] .board-batch-why {
+  color: var(--signal-wait-ink);
+}
+
+.board-batch-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-batch-members > li {
+  padding: 0 var(--space-2);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.8;
+}
+
+.board-batch-facts,
+.board-batch-dropped,
+.board-batch-chosen,
+.board-batch-pressed,
+.board-batch-held,
+.board-batch-said {
+  color: var(--ink-label);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-batch-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  padding-top: var(--space-1);
+}
+
+.board-batch-held {
+  padding-left: var(--space-4);
+  font-size: var(--text-2xs);
+}
+
+.board-batch-said[data-tone="ok"] { color: var(--signal-done); }
+.board-batch-said[data-tone="refused"] { color: var(--signal-halt-ink); }
 
 @container board (max-width: 699px) {
   /* 목록 티어: 한 열, DOM 차례. 영역 이름과 걸침도 함께 풀어야 둘째 열이 암묵적으로

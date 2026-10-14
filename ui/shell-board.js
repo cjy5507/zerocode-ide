@@ -176,6 +176,7 @@ function deskBlock(desk, { id, quietHead = false }) {
  * 블록에 쓸 것이 있으면 참을 돌려주고, 거짓이면 그 블록은 접힌다. */
 const DESK_BLOCKS = Object.freeze([
   { id: "machine", paint: paintDeskMachine, quietHead: true },
+  { id: "batches", paint: paintDeskBatches },
   { id: "mail", paint: paintDeskMail },
   { id: "workers", paint: paintDeskWorkers },
   { id: "pipeline", paint: paintDeskPipeline },
@@ -1189,6 +1190,489 @@ async function pressQuotaWall(view, row, act, to) {
     refreshDeskLedger();
   } catch (error) {
     held.text = t("quotaWall.refused", "안 됨 — {{why}}", { why: String(error) });
+  } finally {
+    held.sending = false;
+    paintCoordinatorDesk(view);
+  }
+}
+
+/* ---- 묶음 통합 큐의 카드 (t-45315) ---------------------------------------------
+ *
+ * 코디가 고른 준비된 과업 여럿이 main 위에 함께 쌓이고, 끝의 트리가 한 번 게이트되고, 초록이면
+ * main이 빨리감기된다. 카드는 원장이 접은 묶음(`DeskSnapshot.land_batches`의 `batch`, core
+ * `BatchState`)을 그대로 읽는다. 칩은 원장의 한 낱말(`standing`)이고, 단추의 켜짐·꺼짐은 원장이 그
+ * 누름을 받을 규칙(core `promotable`·`searchable`·`restackable`·`cancellable`)과 같다 — 원장이
+ * 거절할 단추를 켜 두지 않고, 받을 단추를 꺼 두지 않는다. 꺼진 단추는 까닭을 팁과 단추 밑의 목록에
+ * 적는다. 큐가 꺼진 저장소의 묶음은 그리지 않는다 — 켰다가 끈 저장소에 열린 묶음이 남았으면
+ * 「꺼짐: 열린 묶음 N개」 한 줄과 그 묶음의 취소만 선다(꺼진 큐가 받는 누름은 취소뿐이다). */
+
+/* 원장의 낱말마다 칩의 말과 신호. */
+const BATCH_CHIPS = Object.freeze({
+  chosen: { key: "board.batch.chipChosen", word: "고름 · 쌓기 기다림", tone: "wait" },
+  stacking: { key: "board.batch.chipStacking", word: "쌓는 중", tone: "wait" },
+  stack_stopped: { key: "board.batch.chipStackStopped", word: "쌓기 멈춤", tone: "halt" },
+  stack_abandoned: { key: "board.batch.chipStackAbandoned", word: "쌓기 끊김", tone: "halt" },
+  stacked: { key: "board.batch.chipStacked", word: "쌓음 · 게이트 기다림", tone: "ready" },
+  gating: { key: "board.batch.chipGating", word: "게이트 중", tone: "wait" },
+  green: { key: "board.batch.chipGreen", word: "초록", tone: "done" },
+  red: { key: "board.batch.chipRed", word: "빨강", tone: "halt" },
+  searching: { key: "board.batch.chipSearching", word: "범인 찾는 중", tone: "wait" },
+  culprit_found: { key: "board.batch.chipCulprit", word: "범인: {{task}}", tone: "halt" },
+  promoting: { key: "board.batch.chipPromoting", word: "올리는 중", tone: "wait" },
+  promote_stopped: { key: "board.batch.chipPromoteStopped", word: "올리기 멈춤", tone: "halt" },
+  promoted: { key: "board.batch.chipPromoted", word: "main에 올림", tone: "done" },
+  cancelled: { key: "board.batch.chipCancelled", word: "취소됨", tone: "quiet" },
+});
+
+/* 카드의 단추, 늘 이 차례로. */
+const BATCH_ACTS = Object.freeze(["promote", "bisect", "restack-drop", "restack", "cancel"]);
+
+/* 꺼진 단추의 까닭. 보내는 중은 팁에만 서고 목록에는 서지 않는다 — 누른 결과 줄이 이미 말한다. */
+const BATCH_HELD = Object.freeze({
+  promoting: { key: "board.batch.heldPromoting", word: "올리는 중 — 끝나야 결과가 정해집니다" },
+  stacking: { key: "board.batch.heldStacking", word: "쌓는 중" },
+  noStack: { key: "board.batch.heldNoStack", word: "쌓은 것이 없음" },
+  red: { key: "board.batch.heldRed", word: "게이트가 빨강 — 범인을 찾거나 다시 쌓으세요" },
+  noGreen: { key: "board.batch.heldNoGreen", word: "끝의 초록 게이트가 아직 없음" },
+  searching: { key: "board.batch.heldSearching", word: "범인 찾는 중" },
+  culpritFound: { key: "board.batch.heldCulpritFound", word: "범인을 이미 찾았음" },
+  nothingLeft: { key: "board.batch.heldNothingLeft", word: "빼고 나면 남는 과업이 없음" },
+  sending: { key: "board.batch.heldSending", word: "보내는 중…" },
+});
+
+/* 빠진 과업의 까닭, 원장의 낱말(`DropWhy`)마다. */
+const BATCH_DROPPED = Object.freeze({
+  culprit: { key: "board.batch.droppedCulprit", word: "범인" },
+  asked: { key: "board.batch.droppedAsked", word: "빼 달라고 함" },
+  on_main: { key: "board.batch.droppedOnMain", word: "이미 main에 있음" },
+});
+
+/* 누른 결과는 카드가 누른 때의 단계나 답이 말한 단계에 있는 동안만 남는다 — 원장이 그 뒤로 더
+ * 움직였으면 칩과 줄이 이미 새 사실을 말한다. 답의 낱말마다 그 단계들. */
+const BATCH_ANSWER_STANDINGS = Object.freeze({
+  stacking: ["chosen", "stacking", "stacked"],
+  stacked: ["stacked"],
+  searching: ["searching", "gating"],
+  culprit_found: ["culprit_found"],
+  cancelled: ["cancelled"],
+  promoting: ["promoting"],
+  promoted: ["promoted"],
+  promote_stopped: ["promote_stopped"],
+  stack_stopped: ["stack_stopped"],
+});
+
+/* 누른 결과, 묶음마다(`run/batch`). 다음 누름이 갈아 끼운다. 말은 그릴 때 짓는다 — 언어를 바꾸면
+ * 지난 답도 그 언어로 읽힌다. */
+const deskBatchSaid = new Map();
+
+function batchEnded(batch) {
+  return Boolean(batch.promotion) || Boolean(batch.cancelled);
+}
+
+/* 쌓기가 아직 열려 있다: 시작했고, 끝나지도 멈추지도 끊기지도 않았다. */
+function batchStackingOpen(batch) {
+  return Boolean(batch.stacking) && !batch.stacked && !batch.stackHalt && batch.stackAbandoned !== true;
+}
+
+/* 다시 쌓기가 뺄 과업: 찾은 범인, 아니면 쌓기를 멈춘 과업. */
+function batchDropTask(batch) {
+  return String(batch.culprit?.task || batch.stackHalt?.task || "");
+}
+
+/* 카드에 서는 단추. 끝난 묶음에는 없고, 큐가 꺼진 저장소의 열린 묶음에는 취소 하나다. */
+function batchActs(batch, on) {
+  if (batchEnded(batch)) return [];
+  if (!on) return ["cancel"];
+  return BATCH_ACTS.filter((act) => (act !== "bisect" || batch.tipGate?.verdict === "red")
+    && (act !== "restack-drop" || batchDropTask(batch) !== ""));
+}
+
+/* 그 단추를 원장이 지금 받지 않을 까닭(`BATCH_HELD`의 이름), 받으면 null. */
+function batchHeldReason(batch, act) {
+  if (batch.promoting) return "promoting";
+  if (act === "cancel") return null;
+  if (act === "promote") {
+    if (batchStackingOpen(batch)) return "stacking";
+    if (!batch.stacked) return "noStack";
+    const gate = batch.tipGate?.tree === batch.stacked.tree ? batch.tipGate : null;
+    if (gate?.verdict === "green") return null;
+    return gate?.verdict === "red" ? "red" : "noGreen";
+  }
+  if (act === "bisect") {
+    if (batch.culprit) return "culpritFound";
+    return batch.search ? "searching" : null;
+  }
+  if (batchStackingOpen(batch)) return "stacking";
+  return act === "restack-drop" && (batch.members ?? []).length <= 1 ? "nothingLeft" : null;
+}
+
+function batchActLabel(batch, act) {
+  switch (act) {
+    case "promote": return t("board.batch.actPromote", "main으로 올리기");
+    case "bisect": return t("board.batch.actBisect", "범인 찾기");
+    case "restack-drop": return batch.culprit
+      ? t("board.batch.actDropCulprit", "범인 빼고 다시 쌓기")
+      : t("board.batch.actDropTask", "{{task}} 빼고 다시 쌓기", { task: batchDropTask(batch) });
+    case "restack": return t("board.batch.actRestack", "새 main 위에 다시 쌓기");
+    default: return t("board.batch.actCancel", "취소");
+  }
+}
+
+function batchWho(by) {
+  if (by?.kind === "person") return t("board.batch.whoPerson", "사람");
+  if (by?.kind === "coordinator") return t("board.batch.whoCoordinator", "코디");
+  return t("board.batch.whoApp", "앱");
+}
+
+/* 카드의 시각: 하루 안이면 시:분, 그 밖이면 날짜 — 브라우저의 언어가 아니라 창이 고른 언어로. */
+function batchClock(ms, now) {
+  if (!ms) return "—";
+  const tongue = document.documentElement.lang || undefined;
+  const when = new Date(ms);
+  return Math.abs(now - ms) < 86_400_000
+    ? when.toLocaleTimeString(tongue, { hour: "2-digit", minute: "2-digit" })
+    : when.toLocaleDateString(tongue);
+}
+
+/* 원장이 적은 이름은 앞의 몇 개, 수는 전체다 — 다 적지 못했으면 줄임표가 붙는다. */
+function batchFiles(files, total) {
+  const names = Array.isArray(files) ? files.map(String) : [];
+  return (Number(total) > names.length ? [...names, "…"] : names).join(", ");
+}
+
+function batchStackStop(halt) {
+  if (!halt) return "";
+  const said = { step: halt.step, task: halt.task, total: halt.total, files: batchFiles(halt.files, halt.total) };
+  switch (halt.why) {
+    case "conflict": return t("board.batch.stopConflict", "S{{step}} {{task}}에서 충돌 — 파일 {{total}}개: {{files}}", said);
+    case "git_silent": return t("board.batch.stopGitSilent", "S{{step}} {{task}}에서 git이 한도 안에 답하지 않음", said);
+    case "git_refused": return t("board.batch.stopGitRefused", "S{{step}} {{task}}에서 git이 거절함", said);
+    default: return t("board.batch.stopPublishRefused", "쌓은 끝을 통합 ref로 게시하지 못함 — 다시 쌓기", said);
+  }
+}
+
+function batchPromoteStop(halt, base) {
+  if (!halt) return "";
+  switch (halt.why) {
+    case "main_moved":
+      return halt.seen
+        ? t("board.batch.stopMainMoved", "main이 움직였어요({{from}} → {{to}}). 새 main 위에 다시 쌓기",
+          { from: String(base ?? "").slice(0, 7), to: String(halt.seen).slice(0, 7) })
+        : t("board.batch.stopMainMovedPlain", "main이 움직였어요. 새 main 위에 다시 쌓기");
+    case "unfinished_files":
+      return t("board.batch.stopUnfinished", "main 체크아웃에 고치다 만 파일 {{total}}개: {{files}}. 정리하고 다시 누르세요",
+        { total: halt.total, files: batchFiles(halt.files, halt.total) });
+    case "two_checkouts":
+      return t("board.batch.stopTwoCheckouts", "main이 체크아웃 여러 곳에 나가 있어요 — 한 곳만 남기고 다시 누르세요");
+    case "git_refused":
+      return t("board.batch.stopPromoteRefused", "git이 빨리감기를 거절했어요 — 아무것도 바뀌지 않았습니다");
+    case "git_silent":
+      return t("board.batch.stopPromoteSilent", "git이 한도 안에 답하지 않았어요 — 아무것도 바뀌지 않았습니다");
+    default:
+      return t("board.batch.stopUnknownState", "main의 상태를 알 수 없어요 — 손으로 확인하세요");
+  }
+}
+
+/* 멈춤·끊김·범인 찾기의 한 줄. 칩이 말하는 단계의 것만 선다. */
+function batchWhy(batch) {
+  switch (batch.standing) {
+    case "stack_stopped": return batchStackStop(batch.stackHalt);
+    case "stack_abandoned": return t("board.batch.stopAbandoned", "쌓기가 끊김: 다시 쌓기");
+    case "searching": {
+      const search = batch.search;
+      if (!search) return "";
+      const span = { lo: search.lo, hi: search.hi, next: search.next };
+      return search.next == null
+        ? t("board.batch.searchSpan", "구간 S{{lo}}–S{{hi}} · 다음 게이트를 고르는 중", span)
+        : t("board.batch.searchNext", "다음 게이트: S{{next}} · 구간 S{{lo}}–S{{hi}}", span);
+    }
+    case "culprit_found": {
+      const culprit = batch.culprit;
+      if (!culprit) return "";
+      const line = t("board.batch.culpritLine", "범인 {{task}} — S{{step}}에서 빨강이 됨", { task: culprit.task, step: culprit.step });
+      return culprit.mainFirst ? `${line} · ${t("board.batch.culpritMainFirst", "main 자체가 초록인지 먼저 확인하세요")}` : line;
+    }
+    case "promote_stopped": return batchPromoteStop(batch.promoteHalt, batch.base);
+    default: return "";
+  }
+}
+
+function batchFacts(batch) {
+  const said = {
+    generation: batch.generation, branch: batch.baseBranch, base: String(batch.base ?? "").slice(0, 7),
+    tip: String(batch.stacked?.tip ?? "").slice(0, 7),
+  };
+  const line = batch.stacked
+    ? t("board.batch.factsStacked", "세대 {{generation}} · {{branch}} {{base}} → 끝 {{tip}}", said)
+    : t("board.batch.facts", "세대 {{generation}} · {{branch}} {{base}}", said);
+  const overlaps = Number(batch.stacked?.overlaps ?? 0);
+  return overlaps > 0 ? `${line} · ${t("board.batch.overlaps", "양쪽이 고친 파일 {{count}}개", { count: overlaps })}` : line;
+}
+
+function batchDropped(batch) {
+  const dropped = Array.isArray(batch.dropped) ? batch.dropped : [];
+  if (dropped.length === 0) return "";
+  const tasks = dropped.map((one) => {
+    const why = BATCH_DROPPED[one.why];
+    return why ? t("board.batch.droppedTask", "{{task}}({{why}})", { task: one.task, why: t(why.key, why.word) }) : String(one.task);
+  }).join(", ");
+  return t("board.batch.droppedLine", "빠진 과업: {{tasks}}", { tasks });
+}
+
+/* 누가 눌렀는가: 취소, 올림, 올리는 중, 범인 찾기 — 원장이 적은 것만. */
+function batchPressed(batch, now) {
+  if (batch.cancelled) return t("board.batch.cancelledBy", "취소한 쪽: {{who}}", { who: batchWho(batch.cancelled) });
+  const promotion = batch.promotion;
+  if (promotion) {
+    const line = t("board.batch.promotedBy", "올린 쪽: {{who}} · {{at}}", { who: batchWho(promotion.by), at: batchClock(promotion.at, now) });
+    return promotion.settledLater ? `${line} · ${t("board.batch.settledLater", "다음 실행이 확인함")}` : line;
+  }
+  if (batch.promoting) {
+    return t("board.batch.pressedPromote", "올리기를 누른 쪽: {{who}} · {{at}}",
+      { who: batchWho(batch.promoting.by), at: batchClock(batch.promoting.at, now) });
+  }
+  return batch.search ? t("board.batch.pressedSearch", "범인 찾기를 누른 쪽: {{who}}", { who: batchWho(batch.search.by) }) : "";
+}
+
+/* 창의 답(`state`)마다 누른 결과의 말과 신호. 아직 올리는 중은 멈춤이 아니다 — git은 끝까지 돈다. */
+function batchAnswerWords(answer, batch) {
+  switch (answer?.state) {
+    case "promoted": return { tone: "ok", say: () => t("board.batch.saidPromoted", "눌렀습니다 — main에 올림") };
+    case "promoting": return { tone: "ok", say: () => t("board.batch.saidPromoting", "아직 올리는 중 — git이 끝나면 적습니다") };
+    case "stacking": return { tone: "ok", say: () => t("board.batch.saidStacking", "눌렀습니다 — 다시 쌓는 중") };
+    case "stacked": return { tone: "ok", say: () => t("board.batch.saidStacked", "눌렀습니다 — 다시 쌓음 · 게이트 기다림") };
+    case "searching": return { tone: "ok", say: () => t("board.batch.saidSearching", "눌렀습니다 — 범인 찾기를 시작함") };
+    case "culprit_found": return { tone: "ok", say: () => t("board.batch.saidCulprit", "눌렀습니다 — 범인을 찾음") };
+    case "cancelled": return { tone: "ok", say: () => t("board.batch.saidCancelled", "눌렀습니다 — 취소됨") };
+    case "promote_stopped": {
+      const halt = { why: answer.why, files: answer.files, total: answer.total, seen: answer.seen };
+      return { tone: "refused", say: () => t("board.batch.saidStopped", "멈춤 — {{why}}", { why: batchPromoteStop(halt, batch.base) }) };
+    }
+    case "stack_stopped": {
+      const halt = { step: answer.step, task: answer.task, why: answer.why, files: answer.files, total: answer.total };
+      return { tone: "refused", say: () => t("board.batch.saidStopped", "멈춤 — {{why}}", { why: batchStackStop(halt) }) };
+    }
+    case "refused": {
+      const why = String(answer.why ?? "");
+      return { tone: "refused", say: () => t("board.batch.saidRefused", "안 됨 — {{why}}", { why }) };
+    }
+    default: return { tone: "ok", say: () => t("board.batch.saidDone", "눌렀습니다") };
+  }
+}
+
+/* 단추마다 확인 창의 물음: 무엇을 하는지 하기 전에 말한다. 취소만 되돌릴 수 없는 단추의 옷을 입는다. */
+function batchAsk(batch, act, drop) {
+  const count = (batch.members ?? []).length;
+  const deny = t("board.batch.askKeep", "그대로 두기");
+  const next = Number(batch.generation ?? 1) + 1;
+  const branch = String(batch.baseBranch ?? "");
+  switch (act) {
+    case "promote": return {
+      title: t("board.batch.askPromoteTitle", "main으로 올릴까요?"),
+      body: t("board.batch.askPromoteBody", "{{branch}} 가지를 묶음 {{batch}}의 끝 {{tip}}까지 빨리감기합니다 — 과업 {{count}}개가 한 번에 올라갑니다. 새 커밋은 생기지 않고, 그 가지의 체크아웃 파일도 함께 바뀝니다.",
+        { branch, batch: batch.batch, tip: String(batch.stacked?.tip ?? "").slice(0, 7), count }),
+      confirm: batchActLabel(batch, act), deny, cancel: false,
+    };
+    case "bisect": return {
+      title: t("board.batch.askBisectTitle", "범인을 찾을까요?"),
+      body: t("board.batch.askBisectBody", "끝의 게이트가 빨강입니다. 쌓은 차례를 반씩 나눠 다시 게이트해 처음 빨강이 되는 과업을 찾습니다 — 과업 {{count}}개면 게이트가 {{gates}}번쯤 더 듭니다.",
+        { count, gates: Math.ceil(Math.log2(Math.max(count, 1))) }),
+      confirm: batchActLabel(batch, act), deny, cancel: false,
+    };
+    case "restack-drop": {
+      const task = drop[0] ?? "";
+      return {
+        title: batch.culprit
+          ? t("board.batch.askDropCulpritTitle", "범인을 빼고 다시 쌓을까요?")
+          : t("board.batch.askDropTaskTitle", "{{task}} 빼고 다시 쌓을까요?", { task }),
+        body: t("board.batch.askDropBody", "{{task}} 없이 나머지 과업 {{count}}개를 지금 {{branch}} 위에 {{generation}}번째 세대로 다시 쌓습니다. 빠진 과업의 가지는 그대로 남습니다.",
+          { task, count: Math.max(count - drop.length, 0), branch, generation: next }),
+        confirm: batchActLabel(batch, act), deny, cancel: false,
+      };
+    }
+    case "restack": return {
+      title: t("board.batch.askRestackTitle", "새 main 위에 다시 쌓을까요?"),
+      body: t("board.batch.askRestackBody", "과업 {{count}}개를 지금 {{branch}} 위에 {{generation}}번째 세대로 다시 쌓습니다. 지금 세대의 게이트 결과는 쓰지 않습니다.",
+        { count, branch, generation: next }),
+      confirm: batchActLabel(batch, act), deny, cancel: false,
+    };
+    default: return {
+      title: t("board.batch.askCancelTitle", "묶음을 취소할까요?"),
+      body: t("board.batch.askCancelBody", "이 묶음({{batch}})을 닫고 이 세대의 게시에 묘비를 세웁니다. 과업의 가지와 워커 체크아웃은 그대로 둡니다.",
+        { batch: batch.batch }),
+      confirm: t("board.batch.askCancelYes", "묶음 취소"), deny, danger: true, cancel: false,
+    };
+  }
+}
+
+/* 그릴 묶음: 큐가 켜진 저장소의 묶음은 다, 꺼진 저장소의 묶음은 아직 열린 것만. */
+function deskBatchEntries() {
+  const all = Array.isArray(deskLedger?.land_batches) ? deskLedger.land_batches : [];
+  return all.filter((entry) => entry?.batch && (entry.on === true || !batchEnded(entry.batch)));
+}
+
+/* 묶음 하나도 그릴 것이 없으면 블록은 접히고 그 안의 카드는 DOM에서 나간다 — 꺼진 큐는 카드도,
+ * 단추도, 칩도 남기지 않는다. */
+function paintDeskBatches(block, now, view) {
+  const entries = deskBatchEntries();
+  const body = block.lastElementChild;
+  if (entries.length === 0) {
+    if (body.childElementCount > 0) body.replaceChildren();
+    return false;
+  }
+  writeTextContent(block.firstElementChild, t("board.batch.head", "묶음 통합"));
+  let off = body.firstElementChild;
+  let list = body.lastElementChild;
+  if (!off?.classList.contains("board-batch-off") || !list?.classList.contains("board-batch-list")) {
+    off = deskElement("p", "board-batch-off");
+    list = deskElement("div", "board-batch-list");
+    body.replaceChildren(off, list);
+  }
+  const resting = entries.filter((entry) => entry.on !== true).length;
+  writeHidden(off, resting === 0);
+  writeTextContent(off, resting === 0 ? "" : t("board.batch.off", "꺼짐: 열린 묶음 {{count}}개", { count: resting }));
+  const held = new Map([...list.children].map((node) => [node.dataset.batch, node]));
+  reconcileElementOrder(list, entries.map((entry) => {
+    const card = held.get(`${entry.run}/${entry.batch.batch}`) ?? deskBatchCard(view);
+    paintDeskBatchCard(card, entry, now);
+    return card;
+  }));
+  return true;
+}
+
+/* 카드 하나: 이름과 칩, 멈춤의 한 줄, 과업들, 사실, 빠진 과업, 고른 쪽과 누른 쪽, 단추, 꺼진 단추의
+ * 까닭, 누른 결과. 한 번 짓고 묶음의 키(`run/batch`)로 살아남는다. */
+function deskBatchCard(view) {
+  const card = deskElement("article", "board-batch");
+  const top = deskElement("p", "board-batch-top");
+  top.append(deskElement("code", "board-batch-name"), deskElement("strong", "board-batch-chip"));
+  const acts = deskElement("div", "board-batch-acts");
+  for (const act of BATCH_ACTS) {
+    const button = deskElement("button", "board-desk-letter-act board-batch-act");
+    button.type = "button";
+    button.dataset.act = act;
+    button.hidden = true;
+    button.onclick = () => void pressLandBatch(view, card.__batchEntry, act);
+    acts.append(button);
+  }
+  card.append(top, deskElement("p", "board-batch-why"), deskElement("ol", "board-batch-members"),
+    deskElement("p", "board-batch-facts"), deskElement("p", "board-batch-dropped"), deskElement("p", "board-batch-chosen"),
+    deskElement("p", "board-batch-pressed"), acts, deskElement("ul", "board-batch-held"), deskElement("p", "board-batch-said"));
+  return card;
+}
+
+function writeBatchLine(node, text) {
+  writeHidden(node, text === "");
+  writeTextContent(node, text);
+}
+
+/* 꺼진 단추만 팁을 단다 — 켜진 단추의 빈 팁은 빈 말풍선이 된다. */
+function writeBatchTip(button, tip) {
+  if (tip) writeAttribute(button, "data-tip", tip);
+  else if (button.hasAttribute("data-tip")) button.removeAttribute("data-tip");
+}
+
+function paintDeskBatchCard(card, entry, now) {
+  const batch = entry.batch;
+  const on = entry.on === true;
+  const key = `${entry.run}/${batch.batch}`;
+  card.__batchEntry = entry;
+  writeAttribute(card, "data-batch", key);
+  writeAttribute(card, "data-standing", on ? String(batch.standing ?? "") : "off");
+  writeTextContent(card.querySelector(".board-batch-name"), String(batch.batch));
+  const chipSaid = on ? BATCH_CHIPS[batch.standing] ?? null : null;
+  const chip = card.querySelector(".board-batch-chip");
+  writeHidden(chip, !chipSaid);
+  writeTextContent(chip, chipSaid ? t(chipSaid.key, chipSaid.word, { task: batch.culprit?.task ?? "" }) : "");
+  writeAttribute(chip, "data-tone", chipSaid?.tone ?? "");
+  writeBatchLine(card.querySelector(".board-batch-why"), on ? batchWhy(batch) : "");
+  const list = card.querySelector(".board-batch-members");
+  const items = new Map([...list.children].map((node) => [node.dataset.task, node]));
+  reconcileElementOrder(list, (batch.members ?? []).map((member) => {
+    const item = items.get(String(member.task)) ?? deskElement("li", "");
+    writeAttribute(item, "data-task", String(member.task));
+    writeTextContent(item, String(member.task));
+    return item;
+  }));
+  writeBatchLine(card.querySelector(".board-batch-facts"), on ? batchFacts(batch) : "");
+  writeBatchLine(card.querySelector(".board-batch-dropped"), on ? batchDropped(batch) : "");
+  writeBatchLine(card.querySelector(".board-batch-chosen"), on
+    ? t("board.batch.chosen", "고른 쪽: {{who}} · {{at}}", { who: batchWho(batch.chosenBy), at: batchClock(batch.chosenAt, now) })
+    : "");
+  writeBatchLine(card.querySelector(".board-batch-pressed"), on ? batchPressed(batch, now) : "");
+  const said = deskBatchSaid.get(key);
+  const mine = said && (said.sending || (said.generation === batch.generation && said.standings.includes(batch.standing)))
+    ? said : null;
+  const shown = batchActs(batch, on);
+  const groups = new Map();
+  for (const button of card.querySelectorAll(".board-batch-act")) {
+    const act = button.dataset.act;
+    const stands = shown.includes(act);
+    writeHidden(button, !stands);
+    if (!stands) {
+      writeTextContent(button, "");
+      writeDisabled(button, true);
+      writeBatchTip(button, "");
+      continue;
+    }
+    const label = batchActLabel(batch, act);
+    writeTextContent(button, label);
+    const reason = batchHeldReason(batch, act);
+    if (reason) groups.set(reason, [...(groups.get(reason) ?? []), label]);
+    const held = reason ? BATCH_HELD[reason] : mine?.sending ? BATCH_HELD.sending : null;
+    writeDisabled(button, held !== null);
+    writeBatchTip(button, held ? t(held.key, held.word) : "");
+  }
+  const heldList = card.querySelector(".board-batch-held");
+  const lines = [...groups].map(([reason, names]) => t("board.batch.heldLine", "{{acts}}: {{why}}",
+    { acts: names.join(", "), why: t(BATCH_HELD[reason].key, BATCH_HELD[reason].word) }));
+  writeHidden(heldList, lines.length === 0);
+  reconcileElementOrder(heldList, lines.map((line, at) => {
+    const item = heldList.children[at] ?? deskElement("li", "");
+    writeTextContent(item, line);
+    return item;
+  }));
+  const saidLine = card.querySelector(".board-batch-said");
+  writeHidden(saidLine, !mine);
+  writeTextContent(saidLine, mine ? mine.say() : "");
+  writeAttribute(saidLine, "data-tone", mine ? mine.tone : "");
+}
+
+/* 카드의 단추. 사람이 확인 창에서 「예」라고 해야만 창의 명령을 부른다 — 명령은 주 창에서만 받고,
+ * 눌린 때의 원장을 다시 읽어 코디의 동사와 같은 규칙으로 거절할 것은 거절한다. 보내는 동안 그 카드의
+ * 단추는 다 잠긴다 — 두 번 눌러도 한 번이다. 답과 거절은 그 카드에 남고, 원장을 다시 읽는다. */
+async function pressLandBatch(view, entry, act) {
+  const batch = entry?.batch;
+  if (!batch) return;
+  const key = `${entry.run}/${batch.batch}`;
+  if (deskBatchSaid.get(key)?.sending) return;
+  if (!batchActs(batch, entry.on === true).includes(act) || batchHeldReason(batch, act) !== null) return;
+  const drop = act === "restack-drop" ? [batchDropTask(batch)] : [];
+  const said = await askConfirm(batchAsk(batch, act, drop));
+  if (said !== true) return;
+  const held = {
+    sending: true, tone: "sending", generation: batch.generation, standings: [batch.standing],
+    say: () => t("board.batch.saidSending", "보내는 중…"),
+  };
+  deskBatchSaid.set(key, held);
+  paintCoordinatorDesk(view);
+  try {
+    const run = entry.run;
+    const answer = act === "promote" ? await invoke("land_batch_promote", { run, batch: batch.batch })
+      : act === "bisect" ? await invoke("land_batch_bisect", { run, batch: batch.batch })
+        : act === "cancel" ? await invoke("land_batch_cancel", { run, batch: batch.batch })
+          : await invoke("land_batch_restack", { run, batch: batch.batch, drop });
+    const words = batchAnswerWords(answer, batch);
+    const generation = Number(answer?.generation ?? batch.generation);
+    held.tone = words.tone;
+    held.say = words.say;
+    held.generation = generation;
+    held.standings = [...(generation === batch.generation ? [batch.standing] : []), ...(BATCH_ANSWER_STANDINGS[answer?.state] ?? [])];
+    refreshDeskLedger();
+  } catch (error) {
+    const why = String(error);
+    held.tone = "refused";
+    held.say = () => t("board.batch.saidRefused", "안 됨 — {{why}}", { why });
   } finally {
     held.sending = false;
     paintCoordinatorDesk(view);
