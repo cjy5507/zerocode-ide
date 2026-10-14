@@ -593,6 +593,31 @@ async fn browser_snapshot_png_for(
         .shell_runtime()
         .browser_workspaces
         .begin_snapshot_for(label, spectator)?;
+    snapshot_leased(pane, frame).await
+}
+
+pub(crate) async fn browser_evidence_png(
+    app: &AppHandle,
+    state: &AppState,
+    label: &str,
+    control: Option<&crate::browser_workspace::StepControl>,
+) -> Result<Option<Vec<u8>>, String> {
+    let pane = browser_pane_of(app, state, label)?;
+    let Some((frame, check)) = state
+        .shell_runtime()
+        .browser_workspaces
+        .admit_evidence(label, control)?
+    else {
+        return Ok(None);
+    };
+    let bytes = snapshot_leased(pane, frame).await?;
+    Ok(check.holds().then_some(bytes))
+}
+
+async fn snapshot_leased(
+    pane: BrowserPane,
+    frame: crate::browser_workspace::Frame,
+) -> Result<Vec<u8>, String> {
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     {
         let (tx, rx) = tokio::sync::oneshot::channel();

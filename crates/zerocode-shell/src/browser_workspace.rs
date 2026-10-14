@@ -182,6 +182,25 @@ pub(crate) struct Snapshot {
     pub(crate) snapshot_supported: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StepControl {
+    label: String,
+    owner: String,
+    revision: u64,
+}
+
+pub(crate) struct EvidenceCheck(Option<(Arc<Workspace>, StepControl)>);
+
+impl EvidenceCheck {
+    pub(crate) fn holds(&self) -> bool {
+        self.0.as_ref().is_none_or(|(workspace, control)| {
+            workspace
+                .lock()
+                .is_ok_and(|state| agent_holds(&state, control))
+        })
+    }
+}
+
 struct State {
     mode: Mode,
     revision: u64,
@@ -272,6 +291,13 @@ fn owner_ready(held: &BTreeMap<String, Arc<Workspace>>, actor: &str) -> Result<(
         }
     }
     Ok(())
+}
+
+fn agent_holds(state: &State, control: &StepControl) -> bool {
+    !state.closed
+        && state.mode == Mode::Agent
+        && state.revision == control.revision
+        && state.owner.as_deref() == Some(control.owner.as_str())
 }
 
 impl Workspaces {
@@ -722,6 +748,32 @@ impl Workspaces {
         Ok(Frame(frame))
     }
 
+    pub(crate) fn admit_evidence(
+        &self,
+        label: &str,
+        control: Option<&StepControl>,
+    ) -> Result<Option<(Frame, EvidenceCheck)>, String> {
+        match (self.get(label)?, control) {
+            (None, None) => Ok(Some((
+                self.begin_snapshot_for(label, false)?,
+                EvidenceCheck(None),
+            ))),
+            (Some(workspace), Some(control)) if control.label == label => {
+                let state = workspace.lock()?;
+                if !agent_holds(&state, control) {
+                    return Ok(None);
+                }
+                let frame = self.begin_snapshot_for(label, false)?;
+                drop(state);
+                Ok(Some((
+                    frame,
+                    EvidenceCheck(Some((workspace, control.clone()))),
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub(crate) fn publish(
         &self,
         label: &str,
@@ -953,6 +1005,14 @@ impl Operation {
     pub(crate) fn notifying(mut self, notice: impl Fn(Snapshot) + Send + Sync + 'static) -> Self {
         self.notice = Some(Box::new(notice));
         self
+    }
+
+    pub(crate) fn step_control(&self) -> Option<StepControl> {
+        Some(StepControl {
+            label: self.workspace.label.clone(),
+            owner: self.owner.clone()?,
+            revision: self.revision,
+        })
     }
 
     /// Issue the read's captured revision only while the same actor still

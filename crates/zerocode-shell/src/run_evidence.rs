@@ -82,6 +82,9 @@ pub enum FrameSkipped {
     Capped,
     /// The capture failed, timed out, or was not a PNG.
     CaptureFailed,
+    /// The tab's control moved after the step: no picture of another
+    /// control interval is taken or kept as this step's frame.
+    ControlChanged,
 }
 
 /// A frame's place on the screen (`ShotFrame`: picture pixels per point and

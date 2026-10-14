@@ -315,9 +315,7 @@ fn step_frames_are_bound_to_the_steps_control_and_rechecked_before_they_are_kept
     assert!(leave.contains("control: Option<crate::browser_workspace::StepControl>"));
     assert!(leave.contains("Frame::After(Capture::Browser {"));
     let take = block_after(evidence, "impl Surface for Capture {");
-    let browser = &take[take
-        .find("Self::Browser { app, label, control } =>")
-        .unwrap()..];
+    let browser = &take[take.find("async fn take(self)").unwrap()..];
     assert!(browser.contains("browser_evidence_png(&app, &state, &label, control.as_ref())"));
     assert!(browser.contains("Ok(None) => Err(FrameSkipped::ControlChanged)"));
     assert!(!take.contains("browser_snapshot_png("));
@@ -338,7 +336,9 @@ fn step_frames_are_bound_to_the_steps_control_and_rechecked_before_they_are_kept
     let admission = block_after(source, "fn admit_evidence(");
     assert!(
         admission.find("agent_holds(&state, control)").unwrap()
-            < admission.find(".begin_snapshot_for(label, false)").unwrap()
+            < admission
+                .rfind(".begin_snapshot_for(label, false)")
+                .unwrap()
     );
     assert!(!admission.contains("needs_observation") && !admission.contains("in_flight"));
     let held = block_after(source, "fn agent_holds(");
@@ -351,7 +351,9 @@ fn step_frames_are_bound_to_the_steps_control_and_rechecked_before_they_are_kept
         assert!(held.contains(guard), "{guard}");
     }
     let step = block_after(RUNTIME, "async fn browser_step_at(");
-    assert!(step.contains("let (answer, control) = answer_browser_command("));
+    assert!(step.contains(
+        "answer_browser_command(app, argv, pane, expected_revision, &mut control).await"
+    ));
     assert!(step.contains("control,"));
     let answer = block_after(RUNTIME, "async fn answer_browser_command(");
     assert!(answer.contains(".and_then(crate::browser_workspace::Operation::step_control)"));

@@ -3125,7 +3125,8 @@ async fn browser_step_at(
 ) -> zerocode_hookd::TeamAnswer {
     let observation = step_actor(app, pane).on(run_evidence::observation());
     let began = std::time::Instant::now();
-    let answer = answer_browser_command(app, argv, pane, expected_revision).await;
+    let mut control = None;
+    let answer = answer_browser_command(app, argv, pane, expected_revision, &mut control).await;
     if let Some(dir) = dir {
         evidence_runtime::leave_browser_evidence(
             app,
@@ -3133,6 +3134,7 @@ async fn browser_step_at(
             logged,
             &answer,
             run_evidence::measured(observation, "browser", argv, began.elapsed()),
+            control,
         );
     }
     answer
@@ -5248,6 +5250,7 @@ impl computer_use::enter::Typer for LiveTyper<'_> {
             words,
             self.pane.as_deref(),
             workspace_revision,
+            &mut None,
         )))
     }
 
@@ -6611,6 +6614,7 @@ pub(super) async fn answer_browser_command(
     argv: &[String],
     pane: Option<&str>,
     expected_revision: Option<u64>,
+    control: &mut Option<crate::browser_workspace::StepControl>,
 ) -> zerocode_hookd::TeamAnswer {
     let command =
         match zerocode_core::agent_browser::parse_workspace_command(argv, expected_revision) {
@@ -6666,6 +6670,9 @@ pub(super) async fn answer_browser_command(
         },
         None => None,
     };
+    *control = operation
+        .as_ref()
+        .and_then(crate::browser_workspace::Operation::step_control);
     let actor_app = app.clone();
     let actor_operation = match state.shell_runtime().browser_workspaces.begin_actor_target(
         pane,
