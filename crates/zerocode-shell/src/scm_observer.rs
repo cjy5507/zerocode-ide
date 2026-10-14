@@ -23,8 +23,13 @@ pub(crate) struct Observer {
     times: BTreeMap<PathBuf, Times>,
     next_root: usize,
     retry_roots: BTreeSet<PathBuf>,
+    /// While a tick is out asking GitHub: the checkouts a person asked to
+    /// retry since it was planned, and when. The tick's close writes them
+    /// again after its own answers, so a retry asked for during a tick
+    /// outlives the tick, as it did when it had to wait for it (t-47457).
+    retried: Option<BTreeMap<PathBuf, i64>>,
 }
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Times {
     reviews: Option<i64>,
     force: Option<i64>,
@@ -48,6 +53,9 @@ impl Observer {
         health.retry(&root.to_string_lossy(), now_ms);
         self.book.update_health(health, effects)?;
         self.retry_roots.insert(root.to_path_buf());
+        if let Some(retried) = &mut self.retried {
+            retried.insert(root.to_path_buf(), now_ms);
+        }
         Ok(())
     }
 
@@ -155,7 +163,8 @@ impl Observer {
 }
 
 /// The observer, held. Every reader and writer of the observer comes through
-/// here.
+/// here, and a tick holds it a statement at a time, never while `gh` runs
+/// (t-47457; the source contract `scm_observer_lock` reads this file for it).
 fn hold(observer: &Mutex<Observer>) -> MutexGuard<'_, Observer> {
     observer
         .lock()
@@ -322,7 +331,10 @@ fn poll(app: &AppHandle, limits: &Limits, now_ms: i64) -> Result<(), String> {
 
 /// One tick over the live checkouts, apart from the window: the caller
 /// brings the roots, the tick's `gh` budget, the durable effects and the
-/// directory of the event log.
+/// directory of the event log. The observer is held one statement at a
+/// time — to read what the tick needs and to write down what it heard — and
+/// never while `gh` runs, so the Checks pane's health read and a person's
+/// retry wait on the book alone, never on GitHub (t-47457).
 fn observe(
     observer: &Mutex<Observer>,
     roots: &[PathBuf],
@@ -332,30 +344,167 @@ fn observe(
     now_ms: i64,
     log_root: &Path,
 ) -> Result<(), String> {
-    hold(observer).observe(roots, budget, effects, limits, now_ms, log_root)
+    let Some(mut tick) = hold(observer).plan(roots, now_ms) else {
+        return Ok(());
+    };
+    let discovered = tick.discover(observer, roots, budget, limits);
+    let candidates = hold(observer).record_discovery(discovered, effects)?;
+    let mut refreshes = Refreshes::default();
+    for found in candidates {
+        let mut refreshed = tick.refresh(observer, found, budget, limits, now_ms);
+        let applied =
+            hold(observer)
+                .book
+                .apply(&refreshed.key, &refreshed.observed, limits, now_ms, effects);
+        if let Err(error) = applied {
+            refreshed.complete = false;
+            crate::note_window_event(log_root, &format!("scm-observer: {error}"));
+        }
+        if refreshed.complete {
+            refreshes.done.push(refreshed.update);
+        } else {
+            refreshes.failed.insert(refreshed.update.repo);
+        }
+    }
+    hold(observer).close(roots, tick.health, refreshes, effects, now_ms, log_root)
 }
+
+/// A tick's own state while it asks GitHub with the observer free: where
+/// its rotation starts, and the health it judges what is due by.
+struct Tick {
+    rotate: usize,
+    health: TickHealth,
+}
+
+/// What a tick's discovery heard: where the rotation goes next, the
+/// checkouts whose retry it answered, and each PR `gh pr view` named.
+struct Discovered {
+    next_root: usize,
+    settled: Vec<PathBuf>,
+    found: Vec<Found>,
+}
+
+/// A PR a tick found: its checkout, what `gh pr view` said, the subject it
+/// is in the book as, and the candidate cache to read it with.
+struct Found {
+    root: PathBuf,
+    review: gh::HostedReview,
+    subject: Subject,
+    client: Client,
+}
+
+/// One PR's facts as a tick read them, whether every due read came back, and
+/// the cache and clocks to keep once the facts are written down.
+struct Refreshed {
+    key: String,
+    observed: Observation,
+    complete: bool,
+    update: CacheUpdate,
+}
+
+/// What a tick's refreshes leave for its close: the caches and clocks of the
+/// PRs read whole, and the repositories where one was not.
+#[derive(Default)]
+struct Refreshes {
+    done: Vec<CacheUpdate>,
+    failed: BTreeSet<String>,
+}
+
 impl Observer {
-    fn observe(
+    /// Opens a tick over `roots`, with a note of the retries asked for until
+    /// it closes. `None` when there is no checkout to look at.
+    fn plan(&mut self, roots: &[PathBuf], now_ms: i64) -> Option<Tick> {
+        let rotate = self.next_root.checked_rem(roots.len())?;
+        self.retried = Some(BTreeMap::new());
+        Some(Tick {
+            rotate,
+            health: TickHealth::new(&self.book, now_ms),
+        })
+    }
+
+    /// Writes a tick's discovery down: the rotation moves on, the retries it
+    /// answered are done unless a person asked again since the tick was
+    /// planned, and each PR the tick will read is in the book before any of
+    /// its facts — a PR no longer open only when the book already follows it.
+    fn record_discovery(
+        &mut self,
+        discovered: Discovered,
+        effects: &mut impl Effects,
+    ) -> Result<Vec<Found>, String> {
+        self.next_root = discovered.next_root;
+        for root in &discovered.settled {
+            let asked_again = self
+                .retried
+                .as_ref()
+                .is_some_and(|retried| retried.contains_key(root));
+            if !asked_again {
+                self.retry_roots.remove(root);
+            }
+        }
+        let candidates: Vec<Found> = discovered
+            .found
+            .into_iter()
+            .filter(|found| {
+                found.review.state == "open"
+                    || self.book.subjects.contains_key(&found.subject.key())
+            })
+            .collect();
+        self.book.discover(
+            &candidates
+                .iter()
+                .map(|found| found.subject.clone())
+                .collect::<Vec<_>>(),
+            effects,
+        )?;
+        Ok(candidates)
+    }
+
+    /// Closes a tick: the caches and clocks of the PRs it read whole, the
+    /// checkouts it no longer looks at let go, and what it heard about each
+    /// operation's health written into the book's health as that stands now.
+    /// The retries a person asked for while it ran are then written again,
+    /// after the tick's own answers.
+    fn close(
         &mut self,
         roots: &[PathBuf],
-        budget: &mut Budget,
+        health: TickHealth,
+        refreshes: Refreshes,
         effects: &mut impl Effects,
-        limits: &Limits,
         now_ms: i64,
         log_root: &Path,
     ) -> Result<(), String> {
-        let Some(rotate) = self.next_root.checked_rem(roots.len()) else {
-            return Ok(());
-        };
-        let mut candidates = Vec::new();
-        let mut health = TickHealth::new(&self.book, now_ms);
+        self.finish_refreshes(refreshes.done, &refreshes.failed, now_ms);
+        self.clients.retain(|root, _| roots.contains(root));
+        self.times.retain(|root, _| roots.contains(root));
+        health.commit(&mut self.book, effects, log_root)?;
+        for (root, asked_ms) in self.retried.take().unwrap_or_default() {
+            self.request_retry(&root, asked_ms, effects)?;
+        }
+        Ok(())
+    }
+}
+
+impl Tick {
+    /// Asks each due checkout's branch for its pull request, from where the
+    /// last tick stopped and for as many checkouts as the budget has whole
+    /// subjects for. What it reads of the observer, it reads in a statement
+    /// of its own.
+    fn discover(
+        &mut self,
+        observer: &Mutex<Observer>,
+        roots: &[PathBuf],
+        budget: &mut Budget,
+        limits: &Limits,
+    ) -> Discovered {
+        let mut settled = Vec::new();
+        let mut found = Vec::new();
         let mut visited = 0;
         let mut reserved = 0;
         // Reserve complete subjects before discovery so the first root cannot
         // consume the last root's CI allocation. Rotate overload on the next tick.
         // A root that asks `gh` nothing reserves nothing.
         let capacity = (limits.gh_calls_max / SUBJECT_CALLS_MAX).max(1);
-        for root in roots.iter().cycle().skip(rotate).take(roots.len()) {
+        for root in roots.iter().cycle().skip(self.rotate).take(roots.len()) {
             if reserved == capacity {
                 break;
             }
@@ -364,34 +513,42 @@ impl Observer {
                 continue;
             };
             if !on_a_branch(&branch) {
-                self.retry_roots.remove(root);
+                settled.push(root.clone());
                 continue;
             }
-            if !health.due(root, Operation::Discovery, &branch) {
+            if !self.health.due(root, Operation::Discovery, &branch) {
                 continue;
             }
-            if self.book.subjects.values().any(|t| {
+            let stopped = hold(observer).book.subjects.values().any(|t| {
                 t.subject.root == root.to_string_lossy()
                     && t.subject.branch == branch
                     && t.record.stopped
-            }) {
-                self.retry_roots.remove(root);
+            });
+            if stopped {
+                settled.push(root.clone());
                 continue;
             }
             reserved += 1;
-            let client = self.clients.get(root).cloned().unwrap_or_default();
+            let client = hold(observer)
+                .clients
+                .get(root)
+                .cloned()
+                .unwrap_or_default();
             let discovery = client.discover(root, budget);
             if !matches!(discovery, Err(gh::GhError::Budget)) {
-                self.retry_roots.remove(root);
+                settled.push(root.clone());
             }
-            health.observe(root, Operation::Discovery, &branch, &discovery);
+            self.health
+                .observe(root, Operation::Discovery, &branch, &discovery);
             match discovery {
                 Ok(Some(review)) => {
                     let discovered = subject(root, &review, branch);
-                    if review.state == "open" || self.book.subjects.contains_key(&discovered.key())
-                    {
-                        candidates.push((root.clone(), review, discovered, client));
-                    }
+                    found.push(Found {
+                        root: root.clone(),
+                        review,
+                        subject: discovered,
+                        client,
+                    });
                 }
                 Ok(None) => {
                     for operation in [
@@ -400,141 +557,142 @@ impl Observer {
                         Operation::Reviews,
                         Operation::Stack,
                     ] {
-                        health.forget(root, operation);
+                        self.health.forget(root, operation);
                     }
                 }
                 Err(_) => {}
             }
         }
-        self.next_root = (rotate + visited) % roots.len();
-        self.book.discover(
-            &candidates
-                .iter()
-                .map(|(_, _, subject, _)| subject.clone())
-                .collect::<Vec<_>>(),
-            effects,
-        )?;
-        let mut cache_updates = Vec::new();
-        let mut failed_repos = BTreeSet::new();
-        for (root, review, subject, mut candidate) in candidates {
-            let key = subject.key();
-            let times = self.times.get(&root);
-            let force = due(times.and_then(|t| t.force), now_ms, limits.force_ms);
-            let reviews_due = due(times.and_then(|t| t.reviews), now_ms, limits.review_ms);
-            let mut observed = Observation {
-                state: read_state(&review.state),
-                ..Observation::default()
+        Discovered {
+            next_root: (self.rotate + visited) % roots.len(),
+            settled,
+            found,
+        }
+    }
+
+    /// Reads one PR's facts: its CI and, when the book says a failure will be
+    /// mailed, the failure's detail; its reviews when they are due; and its
+    /// stack when it conflicts. What it reads of the observer, it reads in a
+    /// statement of its own.
+    fn refresh(
+        &mut self,
+        observer: &Mutex<Observer>,
+        found: Found,
+        budget: &mut Budget,
+        limits: &Limits,
+        now_ms: i64,
+    ) -> Refreshed {
+        let Found {
+            root,
+            review,
+            subject,
+            client: mut candidate,
+        } = found;
+        let key = subject.key();
+        let times = hold(observer).times.get(&root).copied();
+        let force = due(times.and_then(|t| t.force), now_ms, limits.force_ms);
+        let reviews_due = due(times.and_then(|t| t.reviews), now_ms, limits.review_ms);
+        let health = &mut self.health;
+        let mut observed = Observation {
+            state: read_state(&review.state),
+            ..Observation::default()
+        };
+        let mut complete = true;
+        if observed.state == Some(PrState::Open) {
+            // Fact families are independent: an unreadable review must not hide CI.
+            let checks = if health.due(&root, Operation::Checks, &review.head_sha) {
+                let checks = candidate.checks(&root, &review, force, budget);
+                health.observe(&root, Operation::Checks, &review.head_sha, &checks);
+                Some(checks)
+            } else {
+                None
             };
-            let mut complete = true;
-            if observed.state == Some(PrState::Open) {
-                // Fact families are independent: an unreadable review must not hide CI.
-                let checks = if health.due(&root, Operation::Checks, &review.head_sha) {
-                    let checks = candidate.checks(&root, &review, force, budget);
-                    health.observe(&root, Operation::Checks, &review.head_sha, &checks);
-                    Some(checks)
-                } else {
-                    None
-                };
-                match checks {
-                    Some(Ok(mut ci)) => {
-                        let needs_detail = self.book.subjects.get(&key).is_some_and(|held| {
-                            core::react(
-                                &held.record,
-                                &Observation {
-                                    ci: Some(ci.clone()),
-                                    ..Observation::default()
-                                },
-                                limits,
-                            )
-                            .iter()
-                            .any(|r| r.body.is_some())
-                        });
-                        if needs_detail {
-                            if health.due(&root, Operation::Details, &review.head_sha) {
-                                let detail =
-                                    candidate.detail(&root, &review, &mut ci, force, budget);
-                                health.observe(
-                                    &root,
-                                    Operation::Details,
-                                    &review.head_sha,
-                                    &detail,
-                                );
-                                if detail.is_ok() {
-                                    observed.ci = Some(ci);
-                                } else {
-                                    complete = false;
-                                }
+            match checks {
+                Some(Ok(mut ci)) => {
+                    let needs_detail = hold(observer).book.subjects.get(&key).is_some_and(|held| {
+                        core::react(
+                            &held.record,
+                            &Observation {
+                                ci: Some(ci.clone()),
+                                ..Observation::default()
+                            },
+                            limits,
+                        )
+                        .iter()
+                        .any(|r| r.body.is_some())
+                    });
+                    if needs_detail {
+                        if health.due(&root, Operation::Details, &review.head_sha) {
+                            let detail = candidate.detail(&root, &review, &mut ci, force, budget);
+                            health.observe(&root, Operation::Details, &review.head_sha, &detail);
+                            if detail.is_ok() {
+                                observed.ci = Some(ci);
                             } else {
                                 complete = false;
                             }
                         } else {
-                            health.forget(&root, Operation::Details);
-                            observed.ci = Some(ci);
-                        }
-                    }
-                    Some(Err(_)) | None => {
-                        complete = false;
-                    }
-                }
-                if reviews_due || force {
-                    if health.due(&root, Operation::Reviews, &review.head_sha) {
-                        let reviews = candidate.reviews(&root, &review, budget);
-                        health.observe(&root, Operation::Reviews, &review.head_sha, &reviews);
-                        match reviews {
-                            Ok(reviews) => observed.reviews = Some(reviews),
-                            Err(_) => complete = false,
+                            complete = false;
                         }
                     } else {
-                        complete = false;
+                        health.forget(&root, Operation::Details);
+                        observed.ci = Some(ci);
                     }
                 }
-                observed.mergeable = read_mergeability(review.mergeable.as_deref());
-                if observed.mergeable == Some(core::Mergeability::Conflicting) {
-                    if health.due(&root, Operation::Stack, &review.head_sha) {
-                        let stack =
-                            candidate.stack(&root, &review, limits.stack_prs_max, force, budget);
-                        health.observe(&root, Operation::Stack, &review.head_sha, &stack);
-                        match stack {
-                            Ok(stacked) => observed.stacked = Some(stacked),
-                            Err(_) => complete = false,
-                        }
-                    } else {
-                        complete = false;
+                Some(Err(_)) | None => {
+                    complete = false;
+                }
+            }
+            if reviews_due || force {
+                if health.due(&root, Operation::Reviews, &review.head_sha) {
+                    let reviews = candidate.reviews(&root, &review, budget);
+                    health.observe(&root, Operation::Reviews, &review.head_sha, &reviews);
+                    match reviews {
+                        Ok(reviews) => observed.reviews = Some(reviews),
+                        Err(_) => complete = false,
                     }
                 } else {
-                    health.forget(&root, Operation::Stack);
-                }
-            } else {
-                for operation in [
-                    Operation::Checks,
-                    Operation::Details,
-                    Operation::Reviews,
-                    Operation::Stack,
-                ] {
-                    health.forget(&root, operation);
+                    complete = false;
                 }
             }
-            if let Err(error) = self.book.apply(&key, &observed, limits, now_ms, effects) {
-                complete = false;
-                crate::note_window_event(log_root, &format!("scm-observer: {error}"));
-            }
-            if complete {
-                cache_updates.push(CacheUpdate {
-                    root,
-                    repo: review.owner_repo.clone(),
-                    client: candidate,
-                    force,
-                    reviewed: observed.reviews.is_some(),
-                });
+            observed.mergeable = read_mergeability(review.mergeable.as_deref());
+            if observed.mergeable == Some(core::Mergeability::Conflicting) {
+                if health.due(&root, Operation::Stack, &review.head_sha) {
+                    let stack =
+                        candidate.stack(&root, &review, limits.stack_prs_max, force, budget);
+                    health.observe(&root, Operation::Stack, &review.head_sha, &stack);
+                    match stack {
+                        Ok(stacked) => observed.stacked = Some(stacked),
+                        Err(_) => complete = false,
+                    }
+                } else {
+                    complete = false;
+                }
             } else {
-                failed_repos.insert(review.owner_repo.clone());
+                health.forget(&root, Operation::Stack);
+            }
+        } else {
+            for operation in [
+                Operation::Checks,
+                Operation::Details,
+                Operation::Reviews,
+                Operation::Stack,
+            ] {
+                health.forget(&root, operation);
             }
         }
-        self.finish_refreshes(cache_updates, &failed_repos, now_ms);
-        self.clients.retain(|root, _| roots.contains(root));
-        self.times.retain(|root, _| roots.contains(root));
-        health.commit(&mut self.book, effects, log_root)?;
-        Ok(())
+        let reviewed = observed.reviews.is_some();
+        Refreshed {
+            key,
+            observed,
+            complete,
+            update: CacheUpdate {
+                root,
+                repo: review.owner_repo,
+                client: candidate,
+                force,
+                reviewed,
+            },
+        }
     }
 }
 
@@ -912,8 +1070,12 @@ mod tests {
     }
     impl SlowGitHub {
         fn new() -> Self {
+            Self::answering(github)
+        }
+        /// The same slow GitHub, answering as `answer` does once it answers.
+        fn answering(answer: FakeAnswer) -> Self {
             Self {
-                github: FakeRunner::answering(github),
+                github: FakeRunner::answering(answer),
                 gate: Mutex::new((0, false)),
                 moved: Condvar::new(),
             }
@@ -1036,6 +1198,92 @@ mod tests {
                 .any(|tracked| tracked.subject.number == 7),
             "the tick did not write down the PR GitHub named"
         );
+    }
+
+    /// A person asks to retry a checkout while a tick is out asking GitHub
+    /// about it, and the tick's own answer — another failed discovery, with
+    /// its longer backoff — does not undo the request: when the tick closes,
+    /// the checkout is still due at the time of the request and still on the
+    /// retry list, as when the request had to wait for the tick (t-47457).
+    #[test]
+    fn a_retry_asked_for_during_a_tick_outlives_the_tick() {
+        /// Room for a loaded test machine; the request takes well under a
+        /// millisecond when nothing holds the observer.
+        const ASK_WAIT_MAX: Duration = Duration::from_secs(1);
+        let dir = tempfile::tempdir().expect("checkouts");
+        let flaky = checkout(dir.path(), "flaky", Some("flaky"));
+        let topic = checkout(dir.path(), "topic", Some("topic"));
+        let roots = [flaky.clone(), topic];
+        let limits = Limits::default();
+        let first_ms = 1_000_000;
+        // flaky's discovery failed once: it is due again after the first backoff, 30 s.
+        let next_ms = first_ms + 30_000;
+        let asked_ms = next_ms + 5_000;
+        let mut held = Observer::default();
+        tick(
+            &mut held,
+            &roots,
+            github_losing_flaky,
+            &limits,
+            first_ms,
+            dir.path(),
+        );
+        let observer = Mutex::new(held);
+        let slow = SlowGitHub::answering(github_losing_flaky);
+        let (asked, ticked) = std::thread::scope(|scope| {
+            let answering = AnswerOnDrop(&slow);
+            let ticking = scope.spawn(|| {
+                let mut budget = Budget::over(&slow, &limits);
+                observe(
+                    &observer,
+                    &roots,
+                    &mut budget,
+                    &mut Accepted,
+                    &limits,
+                    next_ms,
+                    dir.path(),
+                )
+            });
+            assert!(
+                slow.asked_within(Duration::from_secs(60)),
+                "the tick never asked gh anything"
+            );
+            let (sent, came) = mpsc::channel();
+            let (observer, flaky) = (&observer, &flaky);
+            let _asking = scope.spawn(move || {
+                sent.send(hold(observer).request_retry(flaky, asked_ms, &mut Accepted))
+            });
+            let asked = came.recv_timeout(ASK_WAIT_MAX);
+            drop(answering);
+            (asked, ticking.join().expect("the tick's thread"))
+        });
+        asked
+            .expect("the retry waited for a tick that was waiting on gh")
+            .expect("the retry");
+        ticked.expect("the tick, once GitHub answered");
+        let held = hold(&observer);
+        assert_eq!(
+            slow.github
+                .calls()
+                .first()
+                .and_then(|call| call.cwd.clone()),
+            Some(flaky.clone()),
+            "the tick's first gh call was not flaky's discovery"
+        );
+        assert!(
+            held.retry_roots.contains(&flaky),
+            "the tick's close took flaky off the retry list it was put back on"
+        );
+        assert!(
+            held.book.health.due(
+                &flaky.to_string_lossy(),
+                Operation::Discovery,
+                &checkout_token(&flaky).expect("flaky's HEAD"),
+                asked_ms
+            ),
+            "the tick's failed discovery overwrote the retry asked for while it ran"
+        );
+        assert!(held.retried.is_none());
     }
 
     fn logged_discovery_refusals(log_root: &Path) -> usize {

@@ -79,6 +79,21 @@ pub(crate) fn quiet_command_on_path(
 /// `execvp` 의 걸음: 이름에 `/` 가 있으면 그대로, 없으면 `path` 의 디렉터리
 /// 차례로 실행 비트가 선 보통 파일. 없으면 첫 디렉터리(없으면 루트) 아래
 /// 그 이름 — 존재하지 않는 절대 경로라 spawn 이 `NotFound` 로 답한다.
+///
+/// `execvp` 와 다른 데가 둘 있다(t-47457).
+/// - 실행 비트는 `mode & 0o111` 로 본다: 누구의 비트든 하나만 서도 고른다.
+///   그래서 다른 사용자만 실행할 수 있는 파일도 골라지고, spawn 은
+///   `PermissionDenied` 로 답한다. `execvp` 는 `EACCES` 를 받으면 다음
+///   디렉터리로 넘어간다.
+/// - 빈 `PATH` 항목은 건너뛴다. `execvp` 는 빈 항목을 현재 디렉터리로
+///   읽지만, 창의 자식은 어느 cwd 에서 시작하든 그 자리에 놓인 파일을
+///   실행하지 않게 일부러 이렇게 한다.
+///
+/// 둘 다 제품의 `PATH` 에는 해당하지 않는다. 로그인 셸에서 읽은 `PATH` 는
+/// 빈 항목을 거른 값이고(`shell_path::parse_captured`·`merge`), 고정된
+/// `/usr/bin:/bin` 에도 빈 항목이 없다. 실행 비트의 차이는 남만 실행할 수
+/// 있는 같은 이름의 파일이 사람이 설치한 도구(`gh`·`glab`·`git`·에이전트
+/// CLI)보다 앞 디렉터리에 놓여야 드러난다.
 #[cfg(unix)]
 fn resolve_on_path(program: &OsStr, path: &OsStr) -> std::path::PathBuf {
     use std::os::unix::ffi::OsStrExt as _;
