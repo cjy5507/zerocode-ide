@@ -86,13 +86,54 @@ fn catalog_exposes_native_models_from_distinct_engine_families() {
 
 #[test]
 fn additive_metadata_preserves_the_existing_model_fingerprint() {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct LegacyArtifact {
+        path: String,
+        bytes: u64,
+        sha256: String,
+        url: String,
+        #[serde(default)]
+        package: Option<String>,
+        #[serde(default)]
+        version: Option<String>,
+        #[serde(default)]
+        license: Option<String>,
+    }
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct LegacyModel {
+        id: String,
+        label: String,
+        engine: String,
+        protocol: String,
+        revision: String,
+        license: String,
+        source: String,
+        quality: String,
+        files: Vec<LegacyArtifact>,
+    }
+
     let original: serde_json::Value =
         serde_json::from_str(include_str!("../manifests/models.json")).unwrap();
-    let expected = serde_json::from_value::<Model>(original["models"][0].clone()).unwrap();
+    let legacy = serde_json::from_value::<LegacyModel>(original["models"][0].clone()).unwrap();
+    let current = serde_json::from_value::<Model>(original["models"][0].clone()).unwrap();
+    let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
     assert_eq!(
-        serde_json::to_value(&expected).unwrap(),
-        original["models"][0],
+        serde_json::to_vec(&current).unwrap(),
+        legacy_bytes,
         "optional discovery fields must not change installed model receipts"
+    );
+    assert_eq!(
+        current.fingerprint().unwrap(),
+        format!("{:x}", Sha256::digest(&legacy_bytes)),
+    );
+    let mut changed = current.clone();
+    changed.weights_bytes = Some(current.download_bytes());
+    assert_ne!(
+        changed.fingerprint().unwrap(),
+        current.fingerprint().unwrap()
     );
 }
 

@@ -60,7 +60,7 @@ class BridgeBoundary(unittest.TestCase):
             (owned / "model.safetensors").write_bytes(payload)
             descriptor = {"path": "model.safetensors", "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
             initial = {"modelDirectory": str(owned), "modelFiles": [descriptor]}
-            self.assertEqual(bridge["verify_model_data"](initial), owned)
+            self.assertEqual(bridge["verify_model_data"](initial), owned.resolve(strict=True))
             (owned / "model.safetensors").write_bytes(b"changed")
             with self.assertRaisesRegex(ValueError, "integrity_failed"):
                 bridge["verify_model_data"](initial)
