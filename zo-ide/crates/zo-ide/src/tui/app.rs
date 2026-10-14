@@ -6360,6 +6360,29 @@ fn an_imitated_passport_label_never_reaches_the_screen() {
     assert!(frame.contains("[note] kept"), "a bracket that is not the label was held back: {frame:?}");
 }
 
+/// A resumed session draws its earlier answers through the handlers a live turn
+/// feeds, so a Markdown link in a saved answer still writes its address around
+/// its label (OSC 8) when the transcript is replayed.
+#[test]
+fn a_resumed_answer_keeps_its_links() {
+    let address = "https://gitlab.example.com/group/project/-/merge_requests/489";
+    let mut ui = test_ui();
+    // `test_ui` draws without colour, which writes the text alone.
+    ui.painter = Painter::new(std::io::stdout(), 80, 24, 1, true);
+    ui.painter.set_height(1);
+    ui.painter.take_frame();
+    let saved = core_types::session::ConversationMessage::assistant(vec![
+        core_types::session::ContentBlock::Text { text: format!("Merged [!489]({address}).") },
+    ]);
+    ui.replay(crate::session::plain_session::replay_items_from(&[saved]));
+    ui.flush_history();
+    let frame = ui.painter.take_frame();
+    assert!(
+        frame.contains(&format!("\u{1b}]8;;{address}\u{1b}\\!489\u{1b}]8;;\u{1b}\\")),
+        "the resumed answer lost its link: {frame:?}"
+    );
+}
+
 #[test]
 fn five_quiet_candidates_collapse_before_scrollback() {
     let mut ui = test_ui();

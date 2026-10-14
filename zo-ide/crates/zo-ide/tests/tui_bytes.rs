@@ -28,6 +28,7 @@
 //!     (codex `bottom_pane/request_user_input` 의 스냅샷 문법)
 //! 15. `/status`의 지속 목표와 autonomous 네 한도 행
 //! 16. 답이 길어져도 델타 하나가 내보내는 바이트는 평평하다
+//! 17. 링크 — 마크다운 링크의 주소가 OSC 8 로 이름표를 감싼다
 
 use std::time::{Duration, Instant};
 
@@ -3122,4 +3123,267 @@ fn bytes_per_delta_stay_flat_as_an_answer_grows() {
         "{} deltas: early {early} bytes each, late {late} bytes each",
         per_delta.len()
     );
+}
+
+// ============================================================================
+// 17. 링크 — 마크다운 링크의 주소가 OSC 8 로 이름표를 감싼다
+// ============================================================================
+
+/// OSC 8 의 머리(`ESC ] 8 ; ;`)와 끝(ST, `ESC \`) — 터미널 하이퍼링크의 문법이다.
+/// 주소 없이 머리와 끝만 오면 링크를 닫는다.
+const OSC8: &str = "\u{1b}]8;;";
+const ST: &str = "\u{1b}\\";
+
+fn opened(address: &str) -> String {
+    format!("{OSC8}{address}{ST}")
+}
+
+fn closed() -> String {
+    format!("{OSC8}{ST}")
+}
+
+/// 바이트가 연 링크의 주소들, 연 차례대로.
+fn link_addresses(bytes: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = bytes;
+    while let Some(at) = rest.find(OSC8) {
+        let after = &rest[at + OSC8.len()..];
+        let end = after.find(ST).expect("an OSC 8 ends with ST");
+        if end > 0 {
+            out.push(after[..end].to_string());
+        }
+        rest = &after[end + ST.len()..];
+    }
+    out
+}
+
+/// OSC 8 을 걷어낸 바이트 — 링크 말고는 한 글자도 움직이지 않았는지 견줄 때 쓴다.
+fn without_links(bytes: &str) -> String {
+    let mut out = String::new();
+    let mut rest = bytes;
+    while let Some(at) = rest.find(OSC8) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + OSC8.len()..];
+        let end = after.find(ST).expect("an OSC 8 ends with ST");
+        rest = &after[end + ST.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 터미널이 읽는 차례로 훑어, 줄 끝·커서 이동·지우기를 만날 때 링크가 열려 있으면
+/// 실패한다. 열린 채로 그 자리를 지나면 터미널은 그 뒤에 쓰는 칸까지 링크로 칠한다.
+fn assert_no_link_crosses_a_break(bytes: &str) {
+    let mut open: Option<&str> = None;
+    let mut rest = bytes;
+    while let Some(ch) = rest.chars().next() {
+        let crossing = if let Some(after) = rest.strip_prefix("\u{1b}]") {
+            // OSC 는 BEL 이나 ST 로 끝난다.
+            let end = after.find(['\u{7}', '\u{1b}']).expect("an OSC ends");
+            if let Some(link) = after[..end].strip_prefix("8;") {
+                let address = link.split_once(';').map_or("", |(_, address)| address);
+                open = (!address.is_empty()).then_some(address);
+            }
+            let terminator = if after[end..].starts_with('\u{7}') { 1 } else { ST.len() };
+            rest = &after[end + terminator..];
+            None
+        } else if let Some(after) = rest.strip_prefix("\u{1b}[") {
+            let end = after.find(|c: char| ('@'..='~').contains(&c)).expect("a CSI ends");
+            let moves = matches!(
+                after[end..].chars().next(),
+                Some('H' | 'f' | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'd' | 'K' | 'J' | 'r' | 'S' | 'T' | 'L' | 'M' | 'P' | 'X' | '@')
+            );
+            rest = &after[end + 1..];
+            moves.then_some("a cursor move or an erase")
+        } else if let Some(after) = rest.strip_prefix('\u{1b}') {
+            let next = after.chars().next();
+            rest = &after[next.map_or(0, char::len_utf8)..];
+            matches!(next, Some('7' | '8' | 'M' | 'D' | 'E' | 'c')).then_some("a cursor move")
+        } else {
+            rest = &rest[ch.len_utf8()..];
+            matches!(ch, '\r' | '\n').then_some("a line end")
+        };
+        if let Some(what) = crossing {
+            assert!(open.is_none(), "{what} with the link to {open:?} still open: {bytes:?}");
+        }
+    }
+    assert!(open.is_none(), "the bytes end with the link to {open:?} still open: {bytes:?}");
+}
+
+/// 사람의 화면(10-14): zo 가 쓴 `!489`·`Jenkins` 는 청록 밑줄로 그려졌는데 눌러도
+/// 아무 일이 없었다 — 렌더러가 링크의 주소를 버렸다. 이름표를 OSC 8 로 감싸 주소를
+/// 넘기고, 그 밖의 바이트는 한 글자도 움직이지 않는다. 한 글자씩 흘려 넣은 답과 한
+/// 번에 넣은 답이 같고, 히스토리로 커밋된 행에서 링크는 그 행 안에서 닫힌다.
+#[test]
+fn a_markdown_link_writes_its_address_around_the_label_and_nothing_else_moves() {
+    let mr = "https://gitlab.example.com/group/project/-/merge_requests/489";
+    let jenkins = "https://jenkins.example.com/job/zerocode/42/";
+    let source = format!("See [!489]({mr}) and [Jenkins]({jenkins}).\n");
+
+    let mut once = MarkdownStream::answer(120);
+    once.push(&source);
+    let rows = once.finish();
+    let mut streamed = MarkdownStream::answer(120);
+    let mut flowed: Vec<Line> = Vec::new();
+    let start = Instant::now();
+    for (step, ch) in source.chars().enumerate() {
+        streamed.push(&ch.to_string());
+        flowed.extend(streamed.tick(start + Duration::from_millis(step as u64)));
+    }
+    flowed.extend(streamed.finish());
+    assert_eq!(
+        flowed.iter().map(history_row).collect::<Vec<_>>(),
+        rows.iter().map(history_row).collect::<Vec<_>>()
+    );
+
+    let label = "\u{1b}[4m\u{1b}[36;49m";
+    let plain = "\u{1b}[24m\u{1b}[39;49m";
+    let row = history_row(&rows[1]);
+    assert_eq!(
+        row,
+        format!(
+            "\u{1b}[39;49m\u{1b}[K  See {label}{}!489{}{plain} and {label}{}Jenkins{}{plain}.\u{1b}[39m\u{1b}[49m\u{1b}[0m",
+            opened(mr),
+            closed(),
+            opened(jenkins),
+            closed(),
+        )
+    );
+    // 링크를 걷어내면 고치기 전의 바이트 그대로다 — 색·밑줄·열 폭이 그대로라는 뜻.
+    assert_eq!(
+        without_links(&row),
+        format!("\u{1b}[39;49m\u{1b}[K  See {label}!489{plain} and {label}Jenkins{plain}.\u{1b}[39m\u{1b}[49m\u{1b}[0m")
+    );
+    assert_eq!(rows[1].plain(), "  See !489 and Jenkins.");
+    assert_eq!(rows[1].width(), 23);
+
+    let mut painter = Painter::new(Vec::new(), 120, 40, 12, true);
+    painter.set_height(4);
+    painter.take_frame();
+    painter.insert_history(&rows);
+    let frame = painter.take_frame();
+    assert!(frame.contains(&format!("{}!489{}", opened(mr), closed())), "{frame:?}");
+    assert_eq!(link_addresses(&frame), vec![mr.to_string(), jenkins.to_string()]);
+    assert_no_link_crosses_a_break(&frame);
+}
+
+/// 접힌 이름표는 행마다 링크를 닫고 다음 행에서 같은 주소로 다시 연다 — 열린 채로
+/// 줄을 넘기면 다음 행의 들여쓰기 칸까지 링크가 된다. 접히는 자리와 열 폭은 그대로다.
+#[test]
+fn a_wrapped_link_label_closes_and_reopens_the_link_on_each_row() {
+    let address = "https://gitlab.example.com/group/project/-/merge_requests/504";
+    let mut stream = MarkdownStream::answer(30);
+    stream.push(&format!("Open [the merge request for this change]({address}) now.\n"));
+    let rows = stream.finish();
+    assert_eq!(
+        rows.iter().map(Line::plain).collect::<Vec<_>>(),
+        vec!["", "  Open the merge request for", "  this change now."]
+    );
+    assert_eq!(rows.iter().map(Line::width).collect::<Vec<_>>(), vec![0, 28, 18]);
+
+    let label = "\u{1b}[4m\u{1b}[36;49m";
+    assert_eq!(
+        history_row(&rows[1]),
+        format!(
+            "\u{1b}[39;49m\u{1b}[K  Open {label}{}the merge request for{}\u{1b}[39m\u{1b}[49m\u{1b}[0m",
+            opened(address),
+            closed(),
+        )
+    );
+    assert_eq!(
+        history_row(&rows[2]),
+        format!(
+            "\u{1b}[39;49m\u{1b}[K  {label}{}this change{}\u{1b}[24m\u{1b}[39;49m now.\u{1b}[39m\u{1b}[49m\u{1b}[0m",
+            opened(address),
+            closed(),
+        )
+    );
+
+    let mut painter = Painter::new(Vec::new(), 30, 40, 12, true);
+    painter.set_height(4);
+    painter.take_frame();
+    painter.insert_history(&rows);
+    let frame = painter.take_frame();
+    assert_eq!(link_addresses(&frame), vec![address.to_string(), address.to_string()]);
+    assert_no_link_crosses_a_break(&frame);
+}
+
+/// 표 칸 안의 링크도 주소를 싣는다 — 칸의 여백과 열 사이 간격은 링크가 아니고, 격자의
+/// 열 폭은 그대로다.
+#[test]
+fn a_table_cell_link_carries_its_address_and_the_grid_keeps_its_columns() {
+    let address = "https://jenkins.example.com/job/zerocode/42/";
+    let mut stream = MarkdownStream::answer(120);
+    stream.push(&format!("| Job | Build |\n| --- | --- |\n| [Jenkins]({address}) | ok |\n"));
+    let rows = stream.finish();
+    assert_eq!(
+        rows.iter().map(Line::plain).collect::<Vec<_>>(),
+        vec!["", "   Job        Build", "  ━━━━━━━━━  ━━━━━━━", "   Jenkins    ok"]
+    );
+    let body = history_row(&rows[3]);
+    assert_eq!(
+        body,
+        format!(
+            "\u{1b}[39;49m\u{1b}[K   \u{1b}[4m\u{1b}[36;49m{}Jenkins{}\u{1b}[24m\u{1b}[39;49m    ok\u{1b}[39m\u{1b}[49m\u{1b}[0m",
+            opened(address),
+            closed(),
+        )
+    );
+    assert_no_link_crosses_a_break(&body);
+}
+
+/// 창이 열 수 없는 주소는 쓰지 않는다 — `javascript:`·`data:`·앱 스킴·메일·상대
+/// 경로, 그리고 ESC 나 BEL 을 품은 주소(마크다운은 `&#27;`·`&#7;` 을 그 글자로
+/// 푼다). 그 링크는 고치기 전처럼 이름표만 청록 밑줄로 그려지고, 주소의 바이트는
+/// 터미널에 한 글자도 가지 않는다. 열 수 있는 주소 하나만 OSC 8 을 얻는다.
+#[test]
+fn a_link_the_window_must_not_open_is_drawn_as_its_label_only() {
+    use std::fmt::Write as _;
+
+    let good = "https://example.com/ok";
+    let refused = [
+        ("js", "javascript:alert(1)"),
+        ("data", "data:text/html,hi"),
+        ("app", "zerocode://open"),
+        ("mail", "mailto:someone@example.com"),
+        ("rel", "docs/notes.md"),
+        ("esc", "https://example.com/&#27;]8;;https://evil.example/"),
+        ("bel", "https://example.com/&#7;evil.example"),
+    ];
+    let mut source = format!("[ok]({good})");
+    for (label, destination) in refused {
+        let _ = write!(source, " [{label}]({destination})");
+    }
+    source.push('\n');
+    let mut stream = MarkdownStream::answer(200);
+    stream.push(&source);
+    let rows = stream.finish();
+    assert_eq!(rows[1].plain(), "  ok js data app mail rel esc bel");
+    let row = history_row(&rows[1]);
+    assert_eq!(link_addresses(&row), vec![good.to_string()], "{row:?}");
+    assert!(!row.contains("evil.example") && !row.contains('\u{7}'), "{row:?}");
+    for (label, _) in refused {
+        assert!(row.contains(&format!(" \u{1b}[4m\u{1b}[36;49m{label}")), "{label}: {row:?}");
+    }
+    assert_no_link_crosses_a_break(&row);
+}
+
+/// 뷰포트의 행은 바뀐 칸만 다시 쓰지만, 이름표가 자리를 옮기면 그 칸을 다시 쓰는
+/// 바이트에도 주소가 있어야 한다 — 링크를 단 행은 통째로 다시 쓴다. 어느 프레임도
+/// 링크를 연 채로 커서를 옮기거나 지우지 않는다.
+#[test]
+fn a_viewport_row_holding_a_link_is_rewritten_with_its_link() {
+    let address = "https://jenkins.example.com/job/zerocode/42/";
+    let mut painter = Painter::new(Vec::new(), 60, 20, 10, true);
+    painter.set_height(3);
+    painter.take_frame();
+    for source in [
+        format!("CI on [Jenkins]({address}) passed"),
+        format!("The CI on [Jenkins]({address}) passed"),
+    ] {
+        painter.paint(&markdown::render(&source));
+        let frame = painter.take_frame();
+        assert!(frame.contains(&format!("{}Jenkins{}", opened(address), closed())), "{source}: {frame:?}");
+        assert_no_link_crosses_a_break(&frame);
+    }
 }

@@ -57142,6 +57142,216 @@ suite("term-withheld", async ({ browser, origin, ok }) => {
   }
 });
 
+/* OSC 8 링크 — 프로그램은 주소를 이름표 뒤에 숨겨 쓴다(zo 의 `[!489](…)`,
+ * `ls --hyperlink`, cargo, gh). 격자는 그 주소를 읽어 번호→주소 표로 프레임에 실어
+ * 보냈는데(grid.rs `GridDelta::links`) 창은 그 표를 읽지 않았다 — 그래서 zo 의
+ * `!489`·`Jenkins` 는 청록 밑줄로 그려지고도 눌리지 않았다(사람의 10-14 화면).
+ * 링크를 단 실행은 그 주소를 `data-href` 로 입고, 누르면 인쇄된 URL 과 같은 길
+ * (`routeHttpLink`)로 간다 — 이 시험은 그 길을 바꿔 끼워 주소가 닿았는지만 보고,
+ * 어디서 열리는지는 묻지 않는다. 열 수 있는 스킴만 링크가 되고, 글자 자체가 URL
+ * 이면 그 글자가 이긴다. `TERM_LINKS_CAPTURE=<폴더>` 면 이름표 위에 손을 얹은
+ * 화면을 찍는다. */
+suite("term-osc8-links", async ({ browser, origin, ok }) => {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  const shots = process.env.TERM_LINKS_CAPTURE;
+  const urls = {
+    mr489: "https://gitlab.example.com/group/project/-/merge_requests/489",
+    mr504: "https://gitlab.example.com/group/project/-/merge_requests/504",
+    jenkins: "https://jenkins.example.com/job/zerocode/42/",
+    issue3: "https://gitlab.example.com/group/project/-/issues/3",
+    issue5: "https://gitlab.example.com/group/project/-/issues/5",
+    phish: "https://phish.example.net/login",
+    report: "file:///tmp/known-root/report.txt",
+    mr9: "https://gitlab.example.com/group/project/-/merge_requests/9",
+    moved: "https://gitlab.example.com/group/project/-/merge_requests/489#note_1",
+  };
+  try {
+    const first = await page.evaluate(async (urls) => {
+      const term = await openTermTab({ placement: "tab" });
+      setActiveTab(tabOfTerm(term).id);
+      const view = termView(term);
+      const cols = 64;
+      const feed = (delta) => window.__TERM_FEED__(term, {
+        rows: [], scrolled_lines: 0, cursor: [0, 0], title: null, alt_screen: false,
+        size: [8, cols], full: false, cursor_visible: true, mouse_tracking: "off",
+        mouse_sgr: false, focus_reporting: false, bell: false,
+        view_offset: 0, scrollback_len: 0, ...delta,
+      });
+      // 격자가 보내는 행의 모양(grid.rs `WireRow`: 글자 한 번, `[at, len, style]` 실행)에
+      // zo 가 링크 이름표에 입히는 옷(SGR 4 + SGR 36, zo-ide `tui/markdown.rs`
+      // `LINK_STYLE`)과 격자가 붙인 링크 번호. 실행마다 제 스타일 객체를 입는다.
+      const row = (index, parts) => {
+        let text = "";
+        const runs = [];
+        for (const [piece, link] of parts) {
+          if (link !== undefined) runs.push([text.length, piece.length, { fg: { indexed: 6 }, underline: true, link }]);
+          text += piece;
+        }
+        return { index, text: text.padEnd(cols, " "), runs };
+      };
+      const spanOf = (label) =>
+        [...view.pre.querySelectorAll(".term-row span")].find((one) => one.textContent === label) ?? null;
+      const hrefOf = (label) => spanOf(label)?.dataset.href ?? null;
+      const until = async (ready, ms = 1000) => {
+        const end = performance.now() + ms;
+        while (!ready() && performance.now() < end) await new Promise((done) => setTimeout(done, 20));
+      };
+      window.__L__ = { view, feed, row, spanOf, hrefOf, until };
+      window.__GONE__ = ["gone.txt"];
+      await feed({
+        full: true,
+        rows: [
+          row(0, [["• Merged "], ["!489", 1], [" and "], ["!504", 2], ["."]]),
+          row(1, [["  CI on "], ["Jenkins", 3], [" passed; see the "], ["release notes", 4], ["."]]),
+          row(2, [["  Side by side: "], ["!3", 5], ["!5", 6]]),
+          row(3, [["  "], ["js", 7], [" "], ["data", 8], [" "], ["bidi", 9], [" "], ["report", 10], [" "], ["gone", 11]]),
+          row(4, [["  "], ["https://text.example/a", 12]]),
+        ],
+        links: [
+          [1, urls.mr489], [2, urls.mr504], [3, urls.jenkins], [4, urls.phish], [5, urls.issue3],
+          [6, urls.issue5], [7, "javascript:alert(1)"], [8, "data:text/html,hi"],
+          [9, "https://example.com/\u202egnp.exe"], [10, urls.report],
+          [11, "file:///tmp/known-root/gone.txt"], [12, "https://other.example/b"],
+        ],
+      });
+      // `file://` 의 경로는 물어서 답이 온 뒤에야 링크로 선다(`termLinkStands`).
+      await until(() => hrefOf("report") !== null);
+      const labels = ["!489", "!504", "Jenkins", "release notes", "!3", "!5", "js", "data", "bidi",
+        "report", "gone", "https://text.example/a"];
+      const centre = (label) => {
+        const at = spanOf(label)?.getBoundingClientRect();
+        return at ? { x: at.left + at.width / 2, y: at.top + at.height / 2 } : null;
+      };
+      return {
+        hrefs: Object.fromEntries(labels.map((label) => [label, hrefOf(label)])),
+        tip489: spanOf("!489")?.dataset.tip ?? "",
+        tipNotes: spanOf("release notes")?.dataset.tip ?? "",
+        linkClass: spanOf("!489")?.classList.contains("term-link") ?? false,
+        underlined: spanOf("!489")?.classList.contains("underline") ?? false,
+        centres: { mr489: centre("!489"), notes: centre("release notes") },
+        tipDelay: TIP_DELAY_MS,
+      };
+    }, urls);
+
+    // 손을 이름표 위에 얹고 풍선이 뜰 때를 기다려 찍는다 — 고치기 전에는 풍선이 없다.
+    const shot = async (name, at) => {
+      if (!shots || !at) return null;
+      await page.mouse.move(at.x, at.y);
+      await page.waitForTimeout(first.tipDelay * 2);
+      const tip = await page.evaluate(() => {
+        const node = document.querySelector(".tooltip");
+        return node && !node.hidden ? node.textContent : "";
+      });
+      await page.screenshot({ path: `${shots}/${name}.png` });
+      await page.mouse.move(2, 2);
+      await page.waitForTimeout(first.tipDelay / 4);
+      return tip;
+    };
+    if (shots) {
+      const tips = {
+        mr489: await shot("term-osc8-links-489", first.centres.mr489),
+        notes: await shot("term-osc8-links-release-notes", first.centres.notes),
+      };
+      console.log(`term-osc8-links capture in ${shots}: tips ${JSON.stringify(tips)}`);
+    }
+
+    const later = await page.evaluate(async (urls) => {
+      const { view, feed, row, spanOf, hrefOf, until } = window.__L__;
+      const routed = [];
+      const heldRoute = routeHttpLink;
+      routeHttpLink = (raw) => {
+        routed.push(raw);
+        return true;
+      };
+      const press = async (label, extra = {}) => {
+        // Independent activations, not a double click.
+        await new Promise((done) => setTimeout(done, TERM_SELECT_MULTI_CLICK.windowMs + 20));
+        view.clearSelection();
+        const span = spanOf(label);
+        if (span === null) return;
+        const at = span.getBoundingClientRect();
+        const init = {
+          clientX: at.left + 2, clientY: at.top + at.height / 2,
+          bubbles: true, cancelable: true, ...extra,
+        };
+        span.dispatchEvent(new MouseEvent("mousedown", init));
+        span.dispatchEvent(new MouseEvent("mouseup", init));
+        span.dispatchEvent(new MouseEvent("click", init));
+        await new Promise((done) => setTimeout(done, 80));
+      };
+      await press("!489", window.__TEST_PRIMARY_EVENT__);
+      const commandClick = routed.splice(0);
+      await press("Jenkins");
+      const plainClick = routed.splice(0);
+      routeHttpLink = heldRoute;
+
+      // 델타는 표에 더한다 — 앞서 받은 번호는 그대로 그 주소다.
+      await feed({ rows: [row(5, [["  Also "], ["!9", 13]])], links: [[13, urls.mr9]] });
+      await until(() => hrefOf("!9") !== null);
+      const afterDelta = { "!9": hrefOf("!9"), "!489": hrefOf("!489") };
+      // 전체 프레임은 표를 갈아 끼운다 — 새 표에 없는 번호는 이제 아무 주소도 아니다.
+      await feed({
+        full: true,
+        rows: [row(0, [["• Merged "], ["!489", 1], [" and "], ["!504", 2], ["."]])],
+        links: [[1, urls.moved]],
+      });
+      await until(() => hrefOf("!489") === urls.moved);
+      const afterFull = {
+        "!489": hrefOf("!489"),
+        "!504": hrefOf("!504"),
+        painted504: spanOf("!504") !== null,
+        "!9": hrefOf("!9"),
+      };
+      return { commandClick, plainClick, afterDelta, afterFull };
+    }, urls);
+
+    const { hrefs } = first;
+    ok(
+      "a run carrying an OSC 8 link wears its address as data-href, underlined as the program drew it, with the link class and a tip that names the address",
+      hrefs["!489"] === urls.mr489 && hrefs["!504"] === urls.mr504 && hrefs.Jenkins === urls.jenkins &&
+        first.underlined && first.linkClass && first.tip489.includes(urls.mr489),
+      JSON.stringify(first),
+    );
+    ok(
+      "a label that does not say where it points still shows the real address in its tip",
+      hrefs["release notes"] === urls.phish && first.tipNotes.includes(urls.phish),
+      JSON.stringify(first),
+    );
+    ok(
+      "two links side by side in the same colours keep their own addresses",
+      hrefs["!3"] === urls.issue3 && hrefs["!5"] === urls.issue5,
+      JSON.stringify(hrefs),
+    );
+    ok(
+      "only an http, https or file address becomes a link: javascript:, data: and an address outside printable ASCII stay text, and a file address only while its path is there",
+      hrefs.js === null && hrefs.data === null && hrefs.bidi === null && hrefs.gone === null &&
+        hrefs.report === urls.report && hrefs.Jenkins === urls.jenkins,
+      JSON.stringify(hrefs),
+    );
+    ok(
+      "a URL printed in the text keeps its own address where an OSC 8 link also covers it",
+      hrefs["https://text.example/a"] === "https://text.example/a" && hrefs.Jenkins === urls.jenkins,
+      JSON.stringify(hrefs),
+    );
+    ok(
+      "⌘+click and a plain click hand the link's address to the window's link route (stubbed: where it opens is the route's own business)",
+      later.commandClick.length === 1 && later.commandClick[0] === urls.mr489 &&
+        later.plainClick.length === 1 && later.plainClick[0] === urls.jenkins,
+      JSON.stringify(later),
+    );
+    ok(
+      "a delta adds to the link table, and a full frame replaces it",
+      later.afterDelta["!9"] === urls.mr9 && later.afterDelta["!489"] === urls.mr489 &&
+        later.afterFull["!489"] === urls.moved && later.afterFull.painted504 &&
+        later.afterFull["!504"] === null && later.afterFull["!9"] === null,
+      JSON.stringify(later),
+    );
+    ok("the OSC 8 link checks raised no errors", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+});
+
 /* 컨텍스트 미터 — 세션이 준 두 수로 서는 고리 하나와, 그것을 비울 문. 창을
  * 아는 읽기는 백분율과 고리, 모르는 읽기는 상태바와 같은 낱말에 고리 없음,
  * 읽기가 없으면 알약도 없다. 문은 그 CLI의 명령을 그 길이 나를 수 있을

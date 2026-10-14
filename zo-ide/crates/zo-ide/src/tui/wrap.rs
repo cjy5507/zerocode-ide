@@ -77,7 +77,7 @@ fn wrap_spans(line: &Line, width: usize, indent: &Span) -> Vec<Line> {
     };
 
     let push_char = |ch: char,
-                         span_style,
+                         span: &Span,
                          out: &mut Vec<Line>,
                          current: &mut Vec<Span>,
                          used: &mut usize,
@@ -124,8 +124,8 @@ fn wrap_spans(line: &Line, width: usize, indent: &Span) -> Vec<Line> {
         }
         let target = if is_space { &mut *current } else { &mut *word };
         match target.last_mut() {
-            Some(last) if last.style == span_style => last.text.push(ch),
-            _ => target.push(Span::new(ch.to_string(), span_style)),
+            Some(last) if last.style == span.style && last.link == span.link => last.text.push(ch),
+            _ => target.push(Span::new(ch.to_string(), span.style).linked(span.link.clone())),
         }
         if is_space {
             *used += cell;
@@ -138,7 +138,7 @@ fn wrap_spans(line: &Line, width: usize, indent: &Span) -> Vec<Line> {
         for ch in span.text.chars() {
             push_char(
                 ch,
-                span.style,
+                span,
                 &mut out,
                 &mut current,
                 &mut used,
