@@ -984,11 +984,14 @@ function paintJevStage(tab) {
 }
 
 async function refreshJevDashboard({ force = false } = {}) {
-  const stale = Date.now() - jevNumbersAt >= JEV_POLL_MS;
-  if (!force && jevNumbers !== null && jevNumbersRecent && !stale) return;
+  const fresh = () => jevNumbers !== null && jevNumbersRecent && Date.now() - jevNumbersAt < JEV_POLL_MS;
+  if (!force && fresh()) return;
   // The switches' standing comes with the settings answer, the numbers with
   // zo's; the card's own refresh asks both and hands the numbers here.
-  if (!typesafeState) await refreshTypeSafe();
+  if (!typesafeState) {
+    await refreshTypeSafe();
+    if (!force && fresh()) return;
+  }
   await loadJevNumbers({ recent: true });
 }
 

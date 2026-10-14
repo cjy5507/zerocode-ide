@@ -6363,6 +6363,11 @@ await test("판단 상태는 다섯 언어·두 테마·좁은 폭에서 읽을 
     for (const theme of SETTINGS_QUALITY_SPEC.themes) {
       await setQualityTheme(page, theme);
       assertEqual(await axeViolations(page, AxeBuilder, "#judgment-current-status"), [], `${locale}/${theme} current judgment accessibility`);
+      if (process.env.JUDGMENT_STATUS_SHOTS && locale === "ko") {
+        const status = page.locator("#judgment-current-status");
+        await status.scrollIntoViewIfNeeded();
+        await status.screenshot({ path: resolve(process.env.JUDGMENT_STATUS_SHOTS, `judgment-status-${theme}.png`), animations: "disabled" });
+      }
     }
     await page.setViewportSize({ width: 980, height: 1069 });
     const size = await page.locator("#judgment-current-status").evaluate((status) => ({ client: status.clientWidth, scroll: status.scrollWidth }));
