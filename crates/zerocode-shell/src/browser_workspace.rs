@@ -970,10 +970,6 @@ impl ActorOperation {
         self
     }
 
-    pub(crate) fn finish(self, succeeded: bool) {
-        self.settle(Dispatch::of(succeeded));
-    }
-
     pub(crate) fn settle(mut self, dispatch: Dispatch) {
         self.completed = dispatch != Dispatch::Uncertain;
     }
@@ -1801,7 +1797,7 @@ mod boundary_tests {
                 .is_err()
         );
         assert!(transition.confirm_fence().is_err());
-        activity.finish(true);
+        activity.settle(Dispatch::Completed);
         tokio::time::timeout(Duration::from_millis(100), transition.wait())
             .await
             .unwrap()
@@ -2174,7 +2170,7 @@ mod boundary_tests {
             .begin_actor_target(Some("term-1"), "type", Some("browser-person"))
             .unwrap()
             .unwrap();
-        operation.finish(false);
+        operation.settle(Dispatch::Uncertain);
         assert_eq!(workspaces.snapshots().unwrap().len(), 1);
         assert_eq!(
             workspaces.snapshot("browser-1").unwrap().unwrap().mode,
