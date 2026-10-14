@@ -406,8 +406,8 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             app|pane|(platform,device), until: success text, max_steps} runs the window's judgment loop and \
             returns status. CAPTCHA/password (secure_input): handoff {text: what the person must do}. \
             One-time code: handoff {ask_code: true, into: input command words, e.g. \
-            [\"set-value\",\"--app\",\"A\",\"--element-index\",\"3\"]} has the window type it. The code never \
-            returns, but later looks may show it. stopped means stop/report. Payment/transfer/delete \
+            [\"set-value\",\"--app\",\"A\",\"--element-index\",\"3\"]}: the window types it, you never receive it, \
+            and a look after may show it. stopped means stop/report. Payment/transfer/delete \
             requires the person's confirmation; set confirming: payment|transfer|delete.",
         input_schema: {
             let mut properties =
