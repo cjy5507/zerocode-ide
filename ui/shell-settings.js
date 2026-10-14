@@ -1004,9 +1004,6 @@ function showSettingsPane(pane) {
   if (pane === "api-routers" && arriving) {
     void refreshApiRouters();
   }
-  if (pane === "judgment-models" && arriving) {
-    void refreshTypeSafe();
-  }
   if (pane === "onboarding" && arriving) {
     paintSettingsOnboarding();
     void refreshSetupGuide().then(paintSettingsOnboarding);
@@ -1055,6 +1052,7 @@ function showSettingsPane(pane) {
     if (item.dataset.pane === pane) item.setAttribute("aria-current", "page");
     else item.removeAttribute("aria-current");
   }
+  if (pane === "judgment-models" && arriving && showing) void refreshTypeSafe();
 }
 
 settingsRailItems.forEach((item) => {
@@ -6927,12 +6925,14 @@ async function refreshTypeSafe() {
       previous: judgmentProviderController.state,
       settings: settled(invoke("typesafe_settings")),
       managed: null,
+      latest: null,
       promise: null,
     };
     typesafeRefreshing = request;
     request.promise = Promise.resolve().then(async () => {
       const settings = await request.settings;
       const managed = request.managed ? await request.managed : null;
+      const latest = request.latest ? await request.latest : null;
       if (judgmentProviderController.state !== request.previous) return;
       typesafeRefreshFailed = false;
       if (managed) {
@@ -6951,6 +6951,8 @@ async function refreshTypeSafe() {
       } else {
         paintTypeSafe(settings.value);
       }
+      if (latest) judgmentProviderController.usageSnapshot = latest.value ?? null;
+      judgmentProviderController.renderStatus();
       if (jevViewsShowing() || (!settingsView.hidden && settingsPane === "judgment-models" && typesafeState?.jev?.on)) void loadJevNumbers();
     }).finally(() => {
       if (typesafeRefreshing !== request) return;
@@ -6964,6 +6966,7 @@ async function refreshTypeSafe() {
     managedJudgmentController.init();
     managedJudgmentController.loading = true;
     request.managed = settled(invoke("managed_judgment_status"));
+    request.latest = settled(invoke("judgment_latest_request"));
   }
   judgmentProviderController.renderStatus();
   return request.promise;

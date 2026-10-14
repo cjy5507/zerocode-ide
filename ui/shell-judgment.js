@@ -8,6 +8,53 @@ const judgmentProviderController = {
   loading: false,
   sequence: 0,
   localMode: "managed",
+  usageSnapshot: null,
+
+  currentUsage() {
+    const usage = this.usageSnapshot;
+    if (!this.state?.providerIdentity || usage?.providerIdentity !== this.state.providerIdentity || usage.scope !== "machine" ||
+        !Number.isSafeInteger(usage.observedAtMs) || usage.observedAtMs < 0 || typeof usage.unattributedNewer !== "boolean") return null;
+    if (usage.state === "unknown") return usage;
+    if (usage.coverage !== "window_requests") return null;
+    if (usage.state === "none_observed") return usage.lastRequest === null && !usage.unattributedNewer ? usage : null;
+    const last = usage.lastRequest;
+    if (usage.state !== "observed" || !last || typeof last.feature !== "string" || !last.feature ||
+        typeof last.outcome !== "string" || !last.outcome ||
+        (last.applied != null && typeof last.applied !== "boolean") ||
+        (last.atMs != null && (!Number.isSafeInteger(last.atMs) || last.atMs < 0 || last.atMs > 8_640_000_000_000_000)) ||
+        (last.elapsedMs != null && (!Number.isSafeInteger(last.elapsedMs) || last.elapsedMs < 0))) return null;
+    return usage;
+  },
+
+  usageWords() {
+    const usage = this.currentUsage();
+    if (!usage || usage.state === "unknown") return usage?.reason === "unattributed"
+      ? t("settings.judgment.usageUnattributed", "확인 불가 · 요청 당시 모델 정보가 없는 기록입니다.")
+      : t("settings.judgment.usageUnknown", "확인할 수 없음 · 현재 모델의 실제 요청 기록을 확인하지 못했습니다.");
+    const scope = t("settings.judgment.usageScope", "이 컴퓨터의 창 요청 · 최근 기록 범위");
+    if (usage.state === "none_observed") return `${scope} · ${t("settings.judgment.usageNoneObserved", "최근 기록에서 현재 모델의 실제 요청을 찾지 못했습니다.")}`;
+    const last = usage.lastRequest;
+    const feature = jevFeature(last.feature)?.name;
+    const name = feature ? t(feature.key, feature.source) : t("settings.judgment.usageFeature", "판단 기능");
+    const when = last.atMs == null ? t("settings.judgment.usageTimeUnknown", "시각 정보 없음")
+      : new Intl.DateTimeFormat(document.documentElement.lang || "ko", { dateStyle: "short", timeStyle: "medium" }).format(new Date(last.atMs));
+    const failure = jevTokenRow(last.outcome);
+    let outcome = last.outcome === "answered" ? t("settings.judgment.usageAnswered", "응답 성공")
+      : last.outcome === "settings_changed" ? t("settings.judgment.usageDiscarded", "설정 변경으로 응답 미사용")
+        : t("settings.judgment.usageFailed", "요청 실패");
+    if (last.outcome !== "answered" && last.outcome !== "settings_changed" && failure) outcome += ` · ${t(failure.key, failure.word)}`;
+    const http = /^http_(\d{3})$/.exec(last.outcome);
+    if (http) outcome += ` (HTTP ${http[1]})`;
+    const applied = last.applied === true ? t("settings.judgment.usageApplied", "결과 적용됨")
+      : last.applied === false ? t("settings.judgment.usageNotApplied", "결과 미적용")
+        : t("settings.judgment.usageAppliedUnknown", "결과 적용 여부 모름");
+    const words = [t("settings.judgment.usageObserved", "{{scope}} · 확인된 실제 요청: {{feature}} · {{time}} · {{outcome}} · {{applied}}", {
+      scope, feature: name, time: when, outcome, applied,
+    })];
+    if (last.elapsedMs != null) words.push(t("settings.judgment.usageLatency", "{{ms}} ms", { ms: last.elapsedMs }));
+    if (usage.unattributedNewer) words.push(t("settings.judgment.usageNewerUnknown", "더 새 기록에는 요청 당시 모델 정보가 없어 결과를 확인할 수 없습니다."));
+    return words.join(" · ");
+  },
 
   sameProvider(left, right) {
     return Boolean(left && right && JSON.stringify(this.copy(left)) === JSON.stringify(this.copy(right)));
@@ -73,10 +120,10 @@ const judgmentProviderController = {
       : this.checkStanding() === "failed"
         ? t("settings.judgment.responseFailed", "응답 확인 실패 · 실제 사용 이력과 별개")
         : t("settings.judgment.responseUnknown", "현재 모델의 응답 확인 결과가 없습니다."));
-    el("judgment-current-usage").dataset.state = "unknown";
-    say(el("judgment-current-usage"), () => t("settings.judgment.usageUnknown", "확인할 수 없음 · 현재 모델에 묶인 실제 요청 이력이 제공되지 않습니다."));
+    el("judgment-current-usage").dataset.state = this.currentUsage()?.state ?? "unknown";
+    say(el("judgment-current-usage"), () => this.usageWords());
     say(el("judgment-current-note"), () => typesafeRefreshing || managedJudgmentController.loading
-      ? t("settings.judgment.statusLoading", "현재 설정과 서버 상태를 읽는 중…")
+      ? t("settings.judgment.statusLoading", "현재 설정과 서버·실제 요청 기록을 읽는 중…")
       : typesafeRefreshFailed || managedJudgmentController.statusError
         ? t("settings.judgment.statusUnavailable", "현재 상태를 모두 읽지 못했습니다. 상태 새로고침으로 다시 확인하세요.") : "");
     el("judgment-status-refresh").disabled = Boolean(typesafeRefreshing || managedJudgmentController.loading);
@@ -239,6 +286,7 @@ const judgmentProviderController = {
     const wasDirty = this.dirty();
     const changed = this.state?.providerIdentity !== state.providerIdentity;
     this.state = state;
+    if (changed) this.usageSnapshot = null;
     if (!state.provider) {
       this.forgetList();
       this.draft = null;

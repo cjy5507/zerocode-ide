@@ -71,7 +71,8 @@ const managedJudgmentController = {
   },
 
   visible() {
-    return !settingsView.hidden && settingsPane === "judgment-models" && !document.hidden;
+    const pane = el("typesafe-card")?.closest(".settings-pane");
+    return Boolean(pane && !pane.hidden && !settingsView.hidden && settingsPane === "judgment-models" && !document.hidden);
   },
 
   say(words) {
