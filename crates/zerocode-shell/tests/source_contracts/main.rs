@@ -9830,9 +9830,11 @@ mod tests {
         assert!(
             leased.contains("pane.snapshot_png(")
                 && leased.contains("timeout(SNAPSHOT_BUDGET, rx)")
-                && leased.contains("snapshot_webview_png_held(pane, None, Some(Box::new(frame)))")
+                && leased.contains(
+                    "snapshot_webview_png_held(pane, None, Some((Box::new(frame), check)))"
+                )
                 && snapshot.contains(".begin_snapshot_for(label, spectator)")
-                && snapshot.contains("snapshot_leased(pane, frame)"),
+                && snapshot.contains("snapshot_leased(pane, frame, Default::default())"),
             "snapshot must select Chromium without losing the existing native fallback or deadline"
         );
         assert!(

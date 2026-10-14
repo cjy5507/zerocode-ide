@@ -697,17 +697,23 @@ impl BrowserPane {
         })
     }
 
-    pub(crate) fn snapshot_png<F>(&self, callback: F) -> Result<(), String>
+    pub(crate) fn snapshot_png<F>(
+        &self,
+        check: crate::browser_workspace::EvidenceCheck,
+        callback: F,
+    ) -> Result<(), String>
     where
         F: FnOnce(Result<Vec<u8>, String>) + Send + 'static,
     {
         let callback: SnapshotCallback = Box::new(callback);
         on_ui(&self.app, &self.label, move |pane| {
-            pane.devtools(
-                "Page.captureScreenshot",
-                json!({"format": "png", "fromSurface": true, "captureBeyondViewport": false}),
-                Pending::Snapshot(callback),
-            )
+            check.start(|| {
+                pane.devtools(
+                    "Page.captureScreenshot",
+                    json!({"format": "png", "fromSurface": true, "captureBeyondViewport": false}),
+                    Pending::Snapshot(callback),
+                )
+            })
         })
     }
 }

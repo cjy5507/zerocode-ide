@@ -192,11 +192,15 @@ fn capture_limits_survive_caller_cancellation_until_the_native_callback_complete
         capture
             .find(".begin_snapshot_for(label, spectator)")
             .unwrap()
-            < capture.find("snapshot_leased(pane, frame)").unwrap()
+            < capture
+                .find("snapshot_leased(pane, frame, Default::default())")
+                .unwrap()
     );
     let leased = block_after(SNAPSHOT, "async fn snapshot_leased(");
     assert!(leased.contains("let _frame = frame"));
-    assert!(leased.contains("snapshot_webview_png_held(pane, None, Some(Box::new(frame)))"));
+    assert!(
+        leased.contains("snapshot_webview_png_held(pane, None, Some((Box::new(frame), check)))")
+    );
     let webkit = include_str!("../../src/artifact_webkit.rs");
     let callback = block_after(webkit, "fn take_snapshot_png_held(");
     assert!(callback.contains("let _held = held.borrow_mut().take()"));
@@ -321,7 +325,9 @@ fn step_frames_are_bound_to_the_steps_control_and_rechecked_before_they_are_kept
     assert!(!take.contains("browser_snapshot_png("));
     let capture = block_after(SNAPSHOT, "async fn browser_evidence_png(");
     let admitted = capture.find(".admit_evidence(label, control)").unwrap();
-    let taken = capture.find("snapshot_leased(pane, frame)").unwrap();
+    let taken = capture
+        .find("snapshot_leased(pane, frame, check.clone())")
+        .unwrap();
     let kept = capture.find("check.holds()").unwrap();
     assert!(admitted < taken && taken < kept);
     for minted in [

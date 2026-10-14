@@ -593,7 +593,7 @@ async fn browser_snapshot_png_for(
         .shell_runtime()
         .browser_workspaces
         .begin_snapshot_for(label, spectator)?;
-    snapshot_leased(pane, frame).await
+    snapshot_leased(pane, frame, Default::default()).await
 }
 
 pub(crate) async fn browser_evidence_png(
@@ -610,18 +610,19 @@ pub(crate) async fn browser_evidence_png(
     else {
         return Ok(None);
     };
-    let bytes = snapshot_leased(pane, frame).await?;
+    let bytes = snapshot_leased(pane, frame, check.clone()).await?;
     Ok(check.holds().then_some(bytes))
 }
 
 async fn snapshot_leased(
     pane: BrowserPane,
     frame: crate::browser_workspace::Frame,
+    check: crate::browser_workspace::EvidenceCheck,
 ) -> Result<Vec<u8>, String> {
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        pane.snapshot_png(move |answer| {
+        pane.snapshot_png(check, move |answer| {
             let _frame = frame;
             let _ = tx.send(answer);
         })?;
@@ -631,7 +632,7 @@ async fn snapshot_leased(
             .map_err(|_| "스냅샷 응답이 끊겼습니다".to_string())?
     }
     #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
-    snapshot_webview_png_held(pane, None, Some(Box::new(frame))).await
+    snapshot_webview_png_held(pane, None, Some((Box::new(frame), check))).await
 }
 
 /// Snapshot an IDE-owned Tauri webview, including the artifact thumbnail pane.
@@ -646,7 +647,7 @@ pub(crate) async fn snapshot_webview_png(
 async fn snapshot_webview_png_held(
     pane: tauri::Webview,
     width: Option<f64>,
-    held: Option<Box<dyn Send>>,
+    held: Option<(Box<dyn Send>, crate::browser_workspace::EvidenceCheck)>,
 ) -> Result<Vec<u8>, String> {
     #[cfg(target_os = "macos")]
     {
@@ -662,8 +663,20 @@ async fn snapshot_webview_png_held(
             // artifact exports (t-18558) take theirs by the same road.
             let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
             match held {
-                Some(held) => {
-                    crate::artifact_webkit::take_snapshot_png_held(mtm, view, width, tx, Some(held))
+                Some((held, check)) => {
+                    let refused = tx.clone();
+                    if let Err(error) = check.start(|| {
+                        crate::artifact_webkit::take_snapshot_png_held(
+                            mtm,
+                            view,
+                            width,
+                            tx,
+                            Some(held),
+                        );
+                        Ok(())
+                    }) {
+                        let _ = refused.send(Err(error));
+                    }
                 }
                 None => crate::artifact_webkit::take_snapshot_png(mtm, view, width, tx),
             }

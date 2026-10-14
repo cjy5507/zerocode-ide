@@ -206,6 +206,7 @@ pub(crate) struct StepControl {
     revision: u64,
 }
 
+#[derive(Clone, Default)]
 pub(crate) struct EvidenceCheck(Option<(Arc<Workspace>, StepControl)>);
 
 impl EvidenceCheck {
@@ -215,6 +216,10 @@ impl EvidenceCheck {
                 .lock()
                 .is_ok_and(|state| agent_holds(&state, control))
         })
+    }
+
+    pub(crate) fn start<T>(&self, send: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        send()
     }
 }
 
