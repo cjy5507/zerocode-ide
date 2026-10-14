@@ -1,4 +1,4 @@
-import { openWindowTestPage } from "./window-boot.mjs";
+import { openWindowTestPage, PRIMARY_EVENT } from "./window-boot.mjs";
 
 const FRAME = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jr1sAAAAASUVORK5CYII=";
 
@@ -901,18 +901,47 @@ export async function testBrowserWorkspace(browser, origin, ok) {
         stopBrowserGrab(true);
         window.__WORKSPACE__.oldMenu = browserMenuItems(tab, {});
       }, label);
+      const shortcut = await page.evaluate((primary) => {
+        const before = window.__WORKSPACE__.mutators.length;
+        document.dispatchEvent(new KeyboardEvent("keydown", { ...primary, key: "r", code: "KeyR", bubbles: true, cancelable: true }));
+        return window.__WORKSPACE__.mutators.slice(before);
+      }, PRIMARY_EVENT);
+      ok("the managed human reload shortcut carries the current revision", shortcut.length === 1
+        && shortcut[0]?.command === "browser_reload" && shortcut[0]?.expectedRevision === 150, JSON.stringify(shortcut));
       const calls = await page.evaluate(() => window.__WORKSPACE__.mutators);
       const expected = ["browser_history", "browser_reload", "browser_stop", "browser_devtools", "browser_find", "browser_find_clear", "browser_zoom", "browser_grab_arm", "browser_grab_disarm"];
       ok("every managed toolbar mutator carries the observed human revision", expected.every((name) => calls.some((one) => one.command === name))
         && calls.every((one) => one.expectedRevision === 150), JSON.stringify(calls));
-      const before = calls.length;
-      await page.evaluate((label) => {
+      const away = await page.evaluate(({ label, primary }) => {
         window.__workspaceEmit({ label, mode: "agent", revision: 151, inFlight: 0, needsObservation: true });
+        const before = window.__WORKSPACE__.mutators.length;
+        document.dispatchEvent(new KeyboardEvent("keydown", { ...primary, key: "r", code: "KeyR", bubbles: true, cancelable: true }));
+        return { added: window.__WORKSPACE__.mutators.length - before, total: window.__WORKSPACE__.mutators.length };
+      }, { label, primary: PRIMARY_EVENT });
+      ok("the reload shortcut sends no page mutation while watching", away.added === 0, JSON.stringify(away));
+      await page.evaluate((label) => {
         window.__workspaceEmit({ label, mode: "human", revision: 152, inFlight: 0, needsObservation: false });
         for (const row of window.__WORKSPACE__.oldMenu ?? []) row.run?.();
       }, label);
       const after = await page.evaluate(() => window.__WORKSPACE__.mutators.length);
-      ok("a menu from an earlier human revision cannot execute after a round trip", after === before, JSON.stringify({ before, after }));
+      ok("a menu from an earlier human revision cannot execute after a round trip", after === away.total, JSON.stringify({ before: away.total, after }));
+      const pausedShortcut = await page.evaluate(({ label, primary }) => {
+        window.__workspaceEmit({ label, mode: "paused", revision: 153, inFlight: 0, needsObservation: true });
+        const before = window.__WORKSPACE__.mutators.length;
+        document.dispatchEvent(new KeyboardEvent("keydown", { ...primary, key: "r", code: "KeyR", bubbles: true, cancelable: true }));
+        return window.__WORKSPACE__.mutators.length - before;
+      }, { label, primary: PRIMARY_EVENT });
+      ok("the reload shortcut sends no mutation while paused", pausedShortcut === 0, String(pausedShortcut));
+      const pendingShortcut = await page.evaluate(({ label, primary }) => {
+        window.__WORKSPACE__.holdMode = true;
+        window.__workspaceClick(label, "human");
+        const before = window.__WORKSPACE__.mutators.length;
+        document.dispatchEvent(new KeyboardEvent("keydown", { ...primary, key: "r", code: "KeyR", bubbles: true, cancelable: true }));
+        return window.__WORKSPACE__.mutators.length - before;
+      }, { label, primary: PRIMARY_EVENT });
+      ok("the reload shortcut sends no mutation during handoff", pendingShortcut === 0, String(pendingShortcut));
+      await page.waitForTimeout(30);
+      await page.evaluate((label) => window.__WORKSPACE__.releaseMode?.({ label, mode: "human", revision: 154, inFlight: 0, needsObservation: false }), label);
       const person = await page.evaluate(async () => {
         const label = await openBrowserTab("https://example.com/person-mutators");
         const tab = tabs.find((one) => one.label === label);
@@ -924,6 +953,15 @@ export async function testBrowserWorkspace(browser, origin, ok) {
       const ordinary = await page.evaluate((label) => window.__WORKSPACE__.mutators.filter((one) => one.label === label), person);
       ok("ordinary user mutators preserve their existing argument contract", ordinary.length >= 3
         && ordinary.every((one) => one.expectedRevision === undefined), JSON.stringify(ordinary));
+      const missing = await page.evaluate(() => {
+        const action = [...BOUND.values()].find((one) => one.id === "browser.reload");
+        for (const tab of [...tabs].filter((one) => one.kind === "browser")) closeTab(tab.id);
+        const before = window.__WORKSPACE__.mutators.length;
+        let error = null;
+        try { action?.run(); } catch (caught) { error = String(caught); }
+        return { exists: !!action, error, added: window.__WORKSPACE__.mutators.length - before };
+      });
+      ok("a reload action whose browser closed does nothing", missing.exists && missing.error === null && missing.added === 0, JSON.stringify(missing));
       ok("workspace mutator revision handling raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
