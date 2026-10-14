@@ -76,11 +76,14 @@ async fn an_io_failure_closes_admission_before_its_supervisor_is_polled_again() 
         ticket,
         b"{}".to_vec(),
     ));
-    let mut context = Context::from_waker(Waker::noop());
-    assert!(matches!(
-        exchange.as_mut().poll(&mut context),
-        Poll::Pending
-    ));
+    {
+        let _io = lock(&state.engine.io);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            exchange.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+    }
     until(
         "the blocking exchange either closes or releases its turn",
         || state.admission.turn.is_closed() || state.admission.turn.available_permits() > 0,
