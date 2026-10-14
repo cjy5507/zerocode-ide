@@ -401,7 +401,7 @@ fn only_a_refusal_before_dispatch_is_known_to_have_no_effect() {
         (
             "(\"goto\", 3) =>",
             "(\"eval\", 3) | (\"eval\", 4) =>",
-            "pane.navigate(url)",
+            "cmd::browser::navigate_known(",
         ),
         (
             "(\"eval\", 3) | (\"eval\", 4) =>",
@@ -503,22 +503,27 @@ fn handoff_waits_for_a_known_navigation_before_the_page_fence() {
     let command = block_after(CONTROL, "async fn set_browser_workspace_mode(");
     let labels = command.find("transition.fence_labels()").unwrap();
     let settled = command
-        .find("settle_known_navigation(&state, &labels)")
+        .find("settle_known_navigation(&app, &state, &labels)")
         .unwrap();
     let fenced = command.find("workspace_page_fence(&pane)").unwrap();
     let confirmed = command.find("transition.confirm_fence()").unwrap();
     assert!(labels < settled && settled < fenced && fenced < confirmed);
     let settle = block_after(BROWSER, "async fn settle_known_navigation(");
-    assert!(settle.contains(".nav.pending()"));
+    assert!(settle.contains("probe_known_navigation(app, state, label)"));
     assert!(settle.contains("workspace_paused:"));
     let note = block_after(BROWSER, "fn note_navigation_request(");
     assert!(note.contains(".nav.admit("));
+    let known = block_after(BROWSER, "pub(crate) fn navigate_known(");
+    assert!(
+        known.find("note_navigation_request(").unwrap()
+            < known.find("send_known_navigation(").unwrap()
+    );
     let navigate = block_after(BROWSER, "fn browser_navigate(");
     assert!(
         navigate
-            .find("note_navigation_request(&state, &label)")
+            .find("navigate_known(&app, &pane, &label, parsed")
             .unwrap()
-            < navigate.find("pane.navigate(parsed)").unwrap()
+            < navigate.find(".taken()").unwrap()
     );
     let dispatch = block_after(RUNTIME, "async fn dispatch_browser_command(");
     let goto = arm(
@@ -526,11 +531,11 @@ fn handoff_waits_for_a_known_navigation_before_the_page_fence() {
         "(\"goto\", 3) =>",
         "(\"eval\", 3) | (\"eval\", 4) =>",
     );
-    assert!(
-        goto.find("cmd::browser::note_navigation_request(&state, &argv[1])")
-            .unwrap()
-            < goto.find("pane.navigate(url)").unwrap()
-    );
+    let checked = goto.find(".navigation_check(&argv[1], pane)").unwrap();
+    let sent = goto
+        .find("cmd::browser::navigate_known(app, &pane, &argv[1], url, check)")
+        .unwrap();
+    assert!(checked < sent && sent < goto.find("sent.taken().await").unwrap());
     let source = include_str!("../../src/browser_workspace.rs");
     let admission = block_after(source, "fn begin_at(");
     assert!(admission.contains("reads_history(verb)"));
@@ -568,38 +573,113 @@ fn a_capture_starts_only_inside_its_steps_control_and_a_transfer_waits_for_the_s
 }
 
 #[test]
-fn only_the_documents_own_finish_or_failure_releases_a_known_navigation() {
+fn only_the_engines_answer_and_idle_reading_settle_a_known_navigation() {
     let nav = include_str!("../../src/browser_nav_state.rs");
     let pending = block_after(nav, "pub(super) fn pending(&self) -> bool {");
     for clock in ["Instant", "Duration", "now", "observed(", "state"] {
         assert!(!pending.contains(clock), "{clock}");
     }
-    for visual in ["pub(super) fn observed(", "pub(super) fn dead_if_still("] {
-        assert!(!block_after(nav, visual).contains("awaiting"), "{visual}");
-    }
-    for (event, mark) in [
-        ("pub(super) fn admit(", "Some(Awaiting::Request)"),
-        (
-            "pub(super) fn started(",
-            "Some(Awaiting::Load(self.generation))",
-        ),
-        (
-            "pub(super) fn finished(",
-            "Some(Awaiting::Load(self.generation))",
-        ),
-        ("pub(super) fn failed(", "self.awaiting = None"),
+    for event in [
+        "pub(super) fn started(",
+        "pub(super) fn finished(",
+        "pub(super) fn failed(",
+        "pub(super) fn observed(",
+        "pub(super) fn dead_if_still(",
     ] {
-        assert!(block_after(nav, event).contains(mark), "{event}");
+        assert!(!block_after(nav, event).contains("request"), "{event}");
     }
+    assert!(nav.contains("static NEXT_REQUEST: AtomicU64"));
+    assert!(block_after(nav, "pub(super) fn admit(").contains("stage: Stage::Admitted"));
+    let idle = block_after(nav, "pub(super) fn settle_if_idle(");
+    assert!(idle.contains("!loading") && idle.contains("stage: Stage::Answered(_)"));
     let settle = block_after(BROWSER, "async fn settle_known_navigation(");
     for release in [
         ".nav.admit(",
         ".nav.started(",
         ".nav.finished(",
         ".nav.failed(",
+        "dead_if_still(",
     ] {
         assert!(!settle.contains(release), "{release}");
     }
+    let page_load = block_after(BROWSER, ".on_page_load(");
+    let cef_events = block_after(CEF, "fn emit_nav(");
+    let cef_failure = block_after(CEF, "fn on_load_error(");
+    for event in [page_load, cef_events, cef_failure] {
+        for answer in [
+            "navigation_answered(",
+            "navigation_settled(",
+            "navigation_withdrawn(",
+        ] {
+            assert!(!event.contains(answer), "{answer}");
+        }
+    }
+    let probe = block_after(BROWSER, "async fn probe_known_navigation(");
+    assert!(!probe.contains("readyState") && !probe.contains("page_json("));
+}
+
+#[test]
+fn a_known_navigation_is_sent_inside_its_steps_control_and_answered_by_its_engine() {
+    let cef_send = block_after(CEF, "fn send_navigation(");
+    let checked = cef_send.find("check.start(").unwrap();
+    let admitted = cef_send
+        .find("navigation_sent(&state, &label, number)")
+        .unwrap();
+    let sent = cef_send
+        .find("host.send_dev_tools_message(Some(&message))")
+        .unwrap();
+    assert!(checked < admitted && admitted < sent);
+    assert!(cef_send.contains("\"Page.navigate\""));
+    assert!(cef_send.contains("navigation_withdrawn(&state, &label, number)"));
+    let cef_idle = block_after(CEF, "pub(crate) fn settle_navigation(");
+    assert!(cef_idle.contains("pane.browser.is_loading() == 1"));
+    assert!(cef_idle.contains("navigation_settled("));
+    let observer = block_after(CEF, "fn on_dev_tools_method_result(");
+    assert!(observer.contains("self.navigations.borrow_mut().remove(&message_id)"));
+    let native = include_str!("../../src/browser_native_nav.rs");
+    for (engine, sends) in [
+        (
+            "#[cfg(all(target_os = \"macos\", not(feature = \"chromium-browser\")))]\nfn send_known_navigation(",
+            "crate::browser_native_nav::webkit::send(",
+        ),
+        (
+            "#[cfg(target_os = \"windows\")]\nfn send_known_navigation(",
+            "crate::browser_native_nav::webview2::send(",
+        ),
+    ] {
+        let send = block_after(BROWSER, engine);
+        let checked = send.find("check.start(").unwrap();
+        let admitted = send
+            .find("navigation_sent(&state, &native_label, number)")
+            .unwrap();
+        let sent = send.find(sends).unwrap();
+        assert!(checked < admitted && admitted < sent, "{engine}");
+        assert!(send.contains("navigation_withdrawn(&state, &native_label, number)"));
+    }
+    let webkit = block_after(native, "pub(crate) unsafe fn send(");
+    assert!(webkit.find("loadRequest(request)").unwrap() < webkit.find("isLoading()").unwrap());
+    let watch = block_after(native, "pub(crate) fn watch(");
+    for native_event in [
+        "add_NavigationStarting(",
+        "add_NavigationCompleted(",
+        "NavigationId(&mut navigation)",
+        "COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED",
+    ] {
+        assert!(watch.contains(native_event), "{native_event}");
+    }
+    assert!(native.contains("\"Page.navigate\""));
+    let opening = block_after(BROWSER, "fn open_webkit_browser_pane(");
+    assert!(opening.contains("|| managed"));
+    assert!(
+        opening
+            .find("watch_native_loads(app, &pane, &label)")
+            .unwrap()
+            < opening
+                .find("navigate_known(app, &pane, &label, parsed")
+                .unwrap()
+    );
+    let cef_events = block_after(CEF, "fn emit_nav(");
+    assert!(cef_events.contains("arm_dead_display(&self.app, &self.label, generation)"));
 }
 
 #[test]

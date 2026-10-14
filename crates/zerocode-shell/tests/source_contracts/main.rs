@@ -8977,15 +8977,20 @@ mod tests {
         // so a later navigation is never called dead by an earlier clock)
         // and tells the main webview `dead`; `tabs`, `diagnose` and the
         // spinner read that one record.
+        let arming = block_after(shell, "pub(crate) fn arm_dead_display(");
         assert!(
-            page_load.contains("Duration::from_secs(NAV_DEAD_AFTER_SECS)")
-                && page_load.contains("dead_if_still(generation")
-                && page_load.contains("state: \"dead\","),
-            "the dead-load clock left the page-load hook:\n{page_load}"
+            page_load.contains("arm_dead_display(&load_app, &load_label, generation)")
+                && arming.contains("Duration::from_secs(NAV_DEAD_AFTER_SECS)")
+                && arming.contains("dead_if_still(generation")
+                && arming.contains("state: \"dead\","),
+            "the dead-load clock left the page-load hook:\n{page_load}\n{arming}"
         );
         assert!(
-            page_load.matches("\"browser:nav\"").count() == 2 && !page_load.contains(".emit("),
-            "the dead verdict does not reach the main webview by the nav road, or a nav event is broadcast beyond it:\n{page_load}"
+            page_load.matches("\"browser:nav\"").count() == 1
+                && arming.matches("\"browser:nav\"").count() == 1
+                && !page_load.contains(".emit(")
+                && !arming.contains(".emit("),
+            "the dead verdict does not reach the main webview by the nav road, or a nav event is broadcast beyond it:\n{page_load}\n{arming}"
         );
         let nav_state = include_str!("../../src/browser_nav_state.rs");
         assert!(
@@ -9952,7 +9957,12 @@ mod tests {
             .find("prepare_browser_guest(&pane, WEBVIEW_NATIVE_QUERY_TIMEOUT)")
             .expect("guest isolation is missing");
         assert!(prepare < opening.find("inject_staged_cookies(").unwrap());
-        assert!(prepare < opening.find("pane.navigate(parsed)").unwrap());
+        assert!(
+            prepare
+                < opening
+                    .find("navigate_known(app, &pane, &label, parsed")
+                    .unwrap()
+        );
         let runtime = include_str!("../../src/browser_guest_runtime.rs");
         assert!(runtime.contains(
             "const BROWSER_GUEST_SCRIPTS: &[&str] = &[BROWSER_CLOAK_JS, BROWSER_RING_JS]"

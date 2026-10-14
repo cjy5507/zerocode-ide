@@ -111,11 +111,15 @@ Managed working tabs refuse arbitrary `eval`. Use `read`, `marks`,
 `fields`, `fill`, and the other known browser commands.
 Ordinary website scripts and network requests can continue while paused,
 and a script, timer or request the site already started can still finish
-after a handoff. A handoff first waits briefly for a main-document
-navigation this window already sent (`goto`, or the person's address bar)
-or saw start. Only that document's own finish or failure ends the wait;
-time alone never does, so a navigation that has not ended keeps control
+after a handoff. A handoff first waits briefly until the browser engine
+itself has answered every navigation this window sent (`goto`, the
+person's address bar, a popup, a working tab's first page) and then
+reports nothing loading in the affected tabs, including a load the page
+began itself. A page's own "finished" message, its `readyState` or time
+alone never ends the wait, so a load that has not ended keeps control
 paused, and asking again stays paused until it ends or the tab is closed.
+On Windows a working tab's loading state is unknown until one navigation
+seen from its start has ended; until then a handoff stays paused.
 A mutation the command refused before anything was sent (its arguments,
 URL, selector, mark, text length, scroll target, expression or pane)
 leaves control as it was. A mutation that was sent and then failed, timed

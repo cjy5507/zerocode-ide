@@ -5452,7 +5452,8 @@ mod known_navigation_proof_tests {
     }
 
     #[test]
-    fn an_engine_that_shows_no_load_right_after_taking_a_request_settles_on_its_next_idle_reading() {
+    fn an_engine_that_shows_no_load_right_after_taking_a_request_settles_on_its_next_idle_reading()
+    {
         let now = Instant::now();
         let mut record = NavRecord::born(true, now);
         let number = record.admit();
@@ -5495,6 +5496,110 @@ mod known_navigation_proof_tests {
             !record.dead_if_still(stale, now),
             "a newer load's clock is its own"
         );
+    }
+
+    #[test]
+    fn chromiums_page_navigate_answer_names_a_new_document_only_by_its_loader() {
+        let committed = serde_json::json!({"frameId": "main", "loaderId": "loader-b"});
+        assert_eq!(page_navigate_answer(true, &committed), NavAnswer::Loading);
+        for ended in [
+            serde_json::json!({"frameId": "main"}),
+            serde_json::json!({"frameId": "main", "loaderId": ""}),
+            serde_json::json!({"frameId": "main", "loaderId": "loader-b", "errorText": "net::ERR_NAME_NOT_RESOLVED"}),
+            serde_json::Value::Null,
+        ] {
+            assert_eq!(
+                page_navigate_answer(true, &ended),
+                NavAnswer::Resolved,
+                "{ended}"
+            );
+        }
+        assert_eq!(
+            page_navigate_answer(false, &committed),
+            NavAnswer::Resolved,
+            "a refused method sent nothing to wait for"
+        );
+        assert_eq!(
+            page_navigate_answer(
+                true,
+                &serde_json::json!({"loaderId": "loader-b", "errorText": ""})
+            ),
+            NavAnswer::Loading
+        );
+    }
+
+    #[test]
+    fn webview2_navigations_pair_by_number_and_start_unknown() {
+        let mut ids = NavigationIds::default();
+        assert_eq!(
+            ids.loading(),
+            None,
+            "a load under way before the watch was not seen"
+        );
+        ids.completed(1, true);
+        assert_eq!(
+            ids.loading(),
+            None,
+            "a completion never seen starting proves nothing"
+        );
+        ids.starting(2);
+        ids.completed(2, false);
+        assert_eq!(
+            ids.loading(),
+            None,
+            "a cancelled navigation replaced no document"
+        );
+        ids.starting(3);
+        assert_eq!(ids.loading(), None);
+        ids.completed(3, true);
+        assert_eq!(ids.loading(), Some(false));
+        ids.starting(4);
+        ids.starting(5);
+        ids.completed(4, true);
+        assert_eq!(
+            ids.loading(),
+            Some(true),
+            "the late completion of the navigation before does not end the newer one"
+        );
+        ids.starting(5);
+        ids.completed(5, true);
+        assert_eq!(
+            ids.loading(),
+            Some(false),
+            "a repeated Starting is one navigation"
+        );
+        ids.completed(6, true);
+        ids.starting(6);
+        assert_eq!(
+            ids.loading(),
+            Some(true),
+            "a completion seen before its Starting never ends it"
+        );
+        let mut waiting = NavigationIds::default();
+        waiting.starting(7);
+        waiting.starting(8);
+        waiting.completed(7, true);
+        assert_eq!(
+            waiting.loading(),
+            None,
+            "known only with nothing else in flight"
+        );
+        waiting.completed(8, true);
+        assert_eq!(waiting.loading(), Some(false));
+    }
+
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    #[test]
+    fn a_failed_load_is_never_marked_dead_by_its_clock() {
+        let now = Instant::now();
+        let stood = now
+            .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS + 1))
+            .unwrap();
+        let mut record = NavRecord::born(true, stood);
+        let generation = record.started(stood);
+        record.failed();
+        assert!(!record.dead_if_still(generation, now));
+        assert_eq!(record.observed(now), NavState::Dead);
     }
 }
 
