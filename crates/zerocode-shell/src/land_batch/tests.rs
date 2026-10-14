@@ -1089,7 +1089,8 @@ fn promote_stops_on_unfinished_files_in_the_main_checkout() {
     fn locked(repo: &Path) {
         fs::write(repo.join(".git").join("index.lock"), "").expect("a held index");
     }
-    let cases: [(&str, fn(&Path), &str); 4] = [
+    type Case = (&'static str, fn(&Path), &'static str);
+    let cases: [Case; 4] = [
         ("a changed file", modified, "a.txt"),
         ("a staged file", staged, "a.txt"),
         ("a merge in progress", merging, "MERGE_HEAD"),
