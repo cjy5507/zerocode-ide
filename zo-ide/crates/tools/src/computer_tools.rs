@@ -388,7 +388,9 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
 pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: "Computer",
-        description: "Drive desktop apps inside a ZeroCode pane. For background work, observe {app}, retain \
+        description: "Drive desktop apps inside a ZeroCode pane: screenshots/zoom, mouse moves/clicks/drags/scroll, \
+            keys/text/waits, app/window management, element/OCR reads, clipboard read/write and programs. \
+            For background work, observe {app}, retain \
             app/window_id and set background: true. Never fall back to activation or global input. \
             Unverified keyboard receiver: use a verified writable-field capability or handoff. \
             Positions/sizes, including returned positions and regions, use the last full screenshot's pixels; \
