@@ -6133,7 +6133,7 @@ await test("현재 판단 상태는 실행·요청 허용·응답 점검·실제
   assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected", "a matching native check was ignored");
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a native check was presented as task use");
   assert(!/\d/.test(await page.locator("#judgment-current-usage").textContent()), "usage without evidence invented a count or timestamp");
-  assertEqual(await page.locator("#judgment-current-check #typesafe-key-state").count(), 1, "the check badge still looks like the whole page's state");
+  assertEqual(await page.locator('.settings-pane[data-pane="judgment-models"] > header #typesafe-key-state').count(), 0, "the key/check badge still looks like the whole page's state");
   const order = await page.evaluate(() => Boolean(document.getElementById("judgment-current-status").compareDocumentPosition(document.getElementById("judgment-model-changes")) & Node.DOCUMENT_POSITION_FOLLOWING));
   assert(order, "model changes precede current status");
   const before = backend.calls.length;
