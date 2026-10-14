@@ -1492,6 +1492,8 @@ function sameStyle(a, b) {
     // takes a strike it was never given.
     a.strike === b.strike &&
     a.blink === b.blink &&
+    // OSC 8: two links side by side in one colour are still two links.
+    a.link === b.link &&
     sameColor(a.fg, b.fg) &&
     sameColor(a.bg, b.bg)
   );
@@ -1710,6 +1712,22 @@ function termLinkStands(href) {
   return false;
 }
 
+/* The addresses an OSC 8 link may carry into this window (the frame's `links`
+ * table, grid.rs `open_hyperlink`). A program chooses the text and the address
+ * apart, so the address is what gets checked: http, https or file, every byte
+ * printable ASCII. `javascript:`, `data:`, an app's own scheme, or an address
+ * hiding a control or bidi character stays the text it is. zo writes the same
+ * three (`HYPERLINK_SCHEMES`, zo-ide `tui/ansi.rs`). */
+const TERM_OSC8_SCHEMES = Object.freeze(["http://", "https://", "file://"]);
+const TERM_OSC8_PRINTABLE = /^[\x20-\x7e]+$/;
+
+/* Whether an OSC 8 address may stand as a link — and a `file://` one only while
+ * its path is there, the rule a printed path already lives by. */
+function termOsc8Stands(address) {
+  return typeof address === "string" && TERM_OSC8_PRINTABLE.test(address) &&
+    TERM_OSC8_SCHEMES.some((scheme) => address.startsWith(scheme)) && termLinkStands(address);
+}
+
 /* A URL ends where the text stops being a URL. Its body is the URL alphabet
  * (RFC 3986 unreserved, sub-delims, `:/?#[]@%`; quotes and the backtick left
  * out), so a glyph outside it — a Korean particle glued after the address,
@@ -1918,6 +1936,9 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
   // invalidating the pixels underneath the create palette every few ms.
   let paintPaused = false;
   const foldSummaries = new Map();
+  /* The grid's OSC 8 table: link number to address. A cell's style names its
+   * link by number only (grid.rs `CellStyle::link`). */
+  const linkAddresses = new Map();
   const hiddenBefore = [];
   let foldsShown = false;
 
@@ -2211,6 +2232,10 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       if (s.strike) classes += "strike ";
       if (s.blink) classes += "blink ";
       if (mark) classes += `${mark.cls} `;
+      // A link the program drew (OSC 8). A link read from the text already
+      // says where it goes, and keeps it.
+      const linked = mark?.href ? "" : osc8Href(s.link);
+      if (linked) classes += "term-link ";
       if (fgPaint.cls) classes += `${fgPaint.cls} `;
       if (bgPaint.cls) classes += `${bgPaint.cls} `;
       if (wide && wideAdjusted()) classes += "term-wide ";
@@ -2226,7 +2251,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
         sel,
         fg: sel ? "var(--term-selection-fg)" : fgPaint.inline,
         bg: sel ? "var(--term-selection-bg)" : bgPaint.inline,
-        href: mark?.href ?? "",
+        href: mark?.href || linked,
         cls: classes.trim(),
         // A run of double-width glyphs is drawn short by its fallback face, so
         // it carries the measured shortfall as tracking. One property on the
@@ -2242,6 +2267,14 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       runs.push(run);
     }
     return runs;
+  }
+
+  /* The address a run's OSC 8 link opens, or "" when the table does not hold
+   * the number or the window does not open the address (`termOsc8Stands`). */
+  function osc8Href(id) {
+    if (id === undefined) return "";
+    const address = linkAddresses.get(id);
+    return termOsc8Stands(address) ? address : "";
   }
 
   function sameRun(a, b) {
@@ -2706,6 +2739,10 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
         summary: meta.summary ?? "",
       });
     }
+    // `GridDelta::links`, as `[id, address]` pairs: a full frame carries the
+    // whole table and replaces what was held, any other only what is new.
+    if (delta.full) linkAddresses.clear();
+    for (const [id, address] of delta.links ?? []) linkAddresses.set(id, address);
 
     /* The shift contract, applied to the model and owed to the DOM.
      *
@@ -2868,6 +2905,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     rowLines = null;
     endSelectDrag();
     foldSummaries.clear();
+    linkAddresses.clear();
     hiddenBefore.length = 0;
     foldsShown = false;
     for (const handle of foldHandles) handle.hidden = true;

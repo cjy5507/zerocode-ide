@@ -570,13 +570,22 @@ impl Wire {
     /// empty item are both "no key": nothing is sent either way.
     #[must_use]
     pub fn new(keys: &dyn RouterKeys) -> Self {
+        Self::reading(keys, crate::api_routers::zo_settings_path())
+    }
+
+    /// The same wire over the settings file `settings` names: the window's is
+    /// zo's own ([`Self::new`]); a test names a file of its own, so the
+    /// provider the person chose — a local one needs no key — never decides
+    /// what the case sees.
+    #[must_use]
+    pub(crate) fn reading(keys: &dyn RouterKeys, settings: Option<PathBuf>) -> Self {
         let mut wire = Self {
             keys: KeySource::Read {
                 name: String::new(),
                 key: None,
             },
             base: base_url(),
-            settings: crate::api_routers::zo_settings_path(),
+            settings,
             socket: &SOCKET,
             review_origin: None,
         };

@@ -905,3 +905,164 @@ fn a_persons_press_at_a_wall_is_the_main_windows_alone_and_walks_the_beats_verbs
         assert!(pressing.contains(command), "the press lost {command}");
     }
 }
+
+/// The serde code of one variant line of a `rename_all = "snake_case"` enum:
+/// `    WallLifted { worker: String },` reads `wall_lifted`. Fields, doc
+/// comments and attributes sit deeper or start with a mark, and read nothing.
+fn variant_code(line: &str) -> Option<String> {
+    let name: String = line
+        .strip_prefix("    ")?
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    if !name.starts_with(|first: char| first.is_ascii_uppercase()) {
+        return None;
+    }
+    let mut code = String::new();
+    for (at, letter) in name.chars().enumerate() {
+        if letter.is_ascii_uppercase() {
+            if at > 0 {
+                code.push('_');
+            }
+            code.push(letter.to_ascii_lowercase());
+        } else {
+            code.push(letter);
+        }
+    }
+    Some(code)
+}
+
+/// The catalog keys and Korean fallbacks one row of a window table asks for:
+/// every `t("key", "korean"` in it.
+fn asked_words(row: &str) -> Vec<(&str, &str)> {
+    row.match_indices("t(\"")
+        .filter_map(|(at, _)| {
+            let rest = &row[at + 3..];
+            let (key, rest) = rest.split_once('"')?;
+            let rest = rest.strip_prefix(", \"")?;
+            let (korean, _) = rest.split_once('"')?;
+            Some((key, korean))
+        })
+        .collect()
+}
+
+/// t-47935: every reason a press at a quota wall can meet reaches the person
+/// in their own language. A reason is a code, never a sentence: the ledger's
+/// (`WallRefusal`, read off its rows) and the window's own (`WindowRefusal`,
+/// the press), each serialized as `code` by its variant's name in snake case.
+/// The board turns a code into words through ONE table, and this reads the
+/// codes out of the two enums, so a reason learned tomorrow is a red here and
+/// not an English sentence — or a raw code — on somebody's screen. Every row
+/// asks a catalog key with its Korean at the call site, and the other four
+/// languages carry that key. The board shows a refusal only through that
+/// table, the strip's and the press's alike.
+#[test]
+fn every_reason_a_press_at_a_wall_can_meet_has_words_in_all_five_languages() {
+    let core = core_source("orchestration.rs");
+    let press = shell_source("orchestration/wall_press.rs");
+    let mut codes: Vec<String> = Vec::new();
+    for (source, opened) in [
+        (&core, "pub enum WallRefusal {"),
+        (&press, "pub(crate) enum WindowRefusal {"),
+    ] {
+        let at = source
+            .find(opened)
+            .unwrap_or_else(|| panic!("`{opened}` is gone — a refusal is a sentence again"));
+        let derived = source[..at]
+            .rsplit_once("#[derive(")
+            .map_or("", |(_, tail)| tail);
+        assert!(
+            derived.contains("#[serde(tag = \"code\", rename_all = \"snake_case\")]"),
+            "`{opened}` no longer serializes its variant as `code` in snake case:\n{derived}"
+        );
+        let block = super::support::block_after(source, opened);
+        let read: Vec<String> = block.lines().filter_map(variant_code).collect();
+        assert!(
+            read.len() >= 10,
+            "only {} codes were read out of `{opened}` — the scan broke:\n{block}",
+            read.len()
+        );
+        codes.extend(read);
+    }
+
+    let window = super::support::window_source();
+    let table = super::support::block_after(window, "const QUOTA_WALL_REFUSALS = {");
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for line in table.lines().skip(1) {
+        let opens = line
+            .strip_prefix("  ")
+            .filter(|rest| rest.starts_with(|first: char| first.is_ascii_lowercase()))
+            .and_then(|rest| rest.split_once(": (said) =>"));
+        match (opens, rows.last_mut()) {
+            (Some((code, _)), _) => rows.push((code.to_string(), line.to_string())),
+            (None, Some((_, row))) => {
+                row.push('\n');
+                row.push_str(line);
+            }
+            (None, None) => {}
+        }
+    }
+    fn catalog<'a>(window: &'a str, language: &str) -> &'a str {
+        let opened = format!("\n  {language}: {{\n");
+        let at = window
+            .find(&opened)
+            .unwrap_or_else(|| panic!("no `{language}` catalog"));
+        let rest = &window[at..];
+        rest.split_once("\n  },").map_or(rest, |(block, _)| block)
+    }
+    let mut wordless: Vec<String> = Vec::new();
+    for code in &codes {
+        let Some((_, row)) = rows.iter().find(|(named, _)| named == code) else {
+            wordless.push(format!("{code}: no row in QUOTA_WALL_REFUSALS"));
+            continue;
+        };
+        let asked = asked_words(row);
+        if asked.is_empty() {
+            wordless.push(format!("{code}: the row asks no catalog key"));
+        }
+        for (key, korean) in asked {
+            if korean.trim().is_empty() {
+                wordless.push(format!("{code}: `{key}` has no Korean at its call site"));
+            }
+            for language in ["en", "ja", "zh", "es"] {
+                if !catalog(window, language).contains(&format!("\"{key}\":")) {
+                    wordless.push(format!(
+                        "{code}: `{key}` is not in the `{language}` catalog"
+                    ));
+                }
+            }
+        }
+    }
+    for (code, _) in &rows {
+        if !codes.contains(code) {
+            wordless.push(format!("{code}: a row for a code no enum names"));
+        }
+    }
+    assert!(
+        wordless.is_empty(),
+        "a refusal would reach the screen as a sentence or a raw code:\n  {}",
+        wordless.join("\n  ")
+    );
+
+    let words = super::support::block_after(window, "function quotaWallRefusalWords(");
+    assert!(
+        words.contains("Object.prototype.hasOwnProperty.call(QUOTA_WALL_REFUSALS, ")
+            && words.contains("t(\"quotaWall.why.unknown\", "),
+        "a code the table does not know is not said as unknown:\n{words}"
+    );
+    let strip = super::support::block_after(window, "function paintDeskWall(");
+    for needed in [
+        "quotaWallRefusalWords(chip.retry_refusal)",
+        "quotaWallRefusalWords(chip.hand_over_refusal)",
+    ] {
+        assert!(
+            strip.contains(needed),
+            "the strip lost `{needed}`:\n{strip}"
+        );
+    }
+    let pressing = super::support::block_after(window, "async function pressQuotaWall(");
+    assert!(
+        pressing.contains("quotaWallRefusalWords(error)") && !pressing.contains("String(error)"),
+        "a refused press shows what came back as it came:\n{pressing}"
+    );
+}

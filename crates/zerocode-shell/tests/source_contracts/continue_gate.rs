@@ -207,3 +207,23 @@ fn no_road_runs_an_agents_cli_headless_except_through_the_launch_ledgers_door() 
          every other road goes in by `run_budgeted`"
     );
 }
+
+/// zo's hook carries the print of a call's whole input under the key the step
+/// gate reads ([`zerocode_core::continue_gate::INPUT_PRINT_KEY`]). zo's reporter spells
+/// each key of the payloads the window reads itself, so each side names this one once —
+/// and a key spelled otherwise on one side would leave every zo worker judged on its
+/// compact input again, with no error anywhere.
+#[test]
+fn zo_sends_its_input_print_under_the_key_the_gate_reads() {
+    let key = zerocode_core::continue_gate::INPUT_PRINT_KEY;
+    let reporter = include_str!("../../../../zo-ide/crates/zo-ide/src/ide/reporter.rs");
+    assert!(
+        reporter.contains(&format!("pub const INPUT_PRINT_KEY: &str = \"{key}\";")),
+        "zo's reporter does not name the print's key `{key}` the way the gate does"
+    );
+    let start = strip_rust_comments(block_after(reporter, "pub fn pre_tool_use("));
+    assert!(
+        start.contains("[INPUT_PRINT_KEY]"),
+        "zo's tool start does not write its print under the named key:\n{start}"
+    );
+}

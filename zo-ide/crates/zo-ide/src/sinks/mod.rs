@@ -661,6 +661,7 @@ pub(crate) mod serializable {
                     name: name.clone(),
                     input_summary: summary.clone(),
                 },
+                input_print: None,
                 status: status_from_tag(status),
             },
             SerializableRenderBlock::ToolResult {

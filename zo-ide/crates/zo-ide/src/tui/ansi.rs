@@ -18,6 +18,7 @@
 //! 군더더기지만 바이트가 기준이므로 그대로 복제한다.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use unicode_width::UnicodeWidthStr;
 
@@ -188,11 +189,57 @@ impl Style {
 
 }
 
+/// 창이 여는 주소의 머리. 이 밖의 목적지 — `javascript:`, `data:`, 앱 전용
+/// 스킴, 상대 경로 — 는 링크가 되지 않고 이름표만 그려진다.
+const HYPERLINK_SCHEMES: [&str; 3] = ["http://", "https://", "file://"];
+
+/// OSC 8 의 머리. 주소와 [`HYPERLINK_END`] 가 뒤따르면 링크가 열리고, 주소
+/// 없이 바로 [`HYPERLINK_END`] 가 오면 닫힌다.
+const HYPERLINK_START: &str = "\u{1b}]8;;";
+
+/// OSC 8 을 끝내는 문자열 종결자(ST).
+const HYPERLINK_END: &str = "\u{1b}\\";
+
+/// 검사를 마친 링크 주소. 터미널로 나가는 이스케이프 안에 그대로 들어가므로
+/// [`Hyperlink::checked`] 말고는 만들 길이 없다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hyperlink(Arc<str>);
+
+impl Hyperlink {
+    /// 마크다운 링크의 목적지를 터미널에 쓸 주소로. `http://`·`https://`·`file://` 로
+    /// 시작하는 절대 주소만 받고, ASCII 밖의 바이트와 공백은 퍼센트 인코딩한다.
+    /// 제어 바이트(ESC·BEL 같은)가 하나라도 있으면 링크가 아니다.
+    #[must_use]
+    pub fn checked(destination: &str) -> Option<Self> {
+        if !HYPERLINK_SCHEMES.iter().any(|scheme| destination.starts_with(scheme)) {
+            return None;
+        }
+        let mut address = String::with_capacity(destination.len());
+        for byte in destination.bytes() {
+            if byte == b' ' || !byte.is_ascii() {
+                let _ = write!(address, "%{byte:02X}");
+            } else if byte.is_ascii_graphic() {
+                address.push(char::from(byte));
+            } else {
+                return None;
+            }
+        }
+        Some(Self(Arc::from(address)))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// 한 스팬 — 같은 스타일의 연속 텍스트.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
     pub text: String,
     pub style: Style,
+    /// 이 글이 가리키는 주소 — [`write_spans`] 가 OSC 8 로 감싼다.
+    pub link: Option<Hyperlink>,
 }
 
 impl Span {
@@ -201,7 +248,15 @@ impl Span {
         Self {
             text: text.into(),
             style,
+            link: None,
         }
+    }
+
+    /// 같은 글이 `link` 를 가리킨다.
+    #[must_use]
+    pub fn linked(mut self, link: Option<Hyperlink>) -> Self {
+        self.link = link;
+        self
     }
 
     #[must_use]
@@ -377,7 +432,7 @@ impl Line {
                 text.push(ch);
             }
             if !text.is_empty() {
-                spans.push(Span::new(text, span.style));
+                spans.push(Span::new(text, span.style).linked(span.link));
             }
         }
         spans.push(Span::dim("…"));
@@ -632,10 +687,41 @@ pub fn write_spans_for_palette(
     out: &mut String,
 ) {
     let mut writer = StyleWriter::with_palette(palette);
+    // 링크가 바뀌는 자리에서는 옛 링크를 스타일 전이 앞에서 닫고 새 링크를 그
+    // 뒤에서 연다. 행 끝까지 열린 링크는 행이 끝나기 전에 닫는다 — 줄바꿈·
+    // 커서 이동·지우기가 링크 안에 들면 그 칸들까지 링크가 된다.
+    let mut open: Option<&Hyperlink> = None;
     for span in &line.spans {
+        let target = span.link.as_ref();
+        let changes = open != target;
+        if changes && open.is_some() {
+            close_hyperlink(out);
+        }
         writer.transition(span.style.patch(line.style), out);
+        if changes {
+            if let Some(target) = target {
+                open_hyperlink(target, out);
+            }
+            open = target;
+        }
         out.push_str(&span.text);
     }
+    if open.is_some() {
+        close_hyperlink(out);
+    }
+}
+
+/// 이 뒤의 글이 `link` 를 가리킨다.
+fn open_hyperlink(link: &Hyperlink, out: &mut String) {
+    out.push_str(HYPERLINK_START);
+    out.push_str(link.as_str());
+    out.push_str(HYPERLINK_END);
+}
+
+/// 열린 링크를 닫는다 — 주소가 빈 OSC 8.
+fn close_hyperlink(out: &mut String) {
+    out.push_str(HYPERLINK_START);
+    out.push_str(HYPERLINK_END);
 }
 
 /// 색을 지운 평문 — `NO_COLOR` 경로.
@@ -760,6 +846,27 @@ mod tests {
         assert_eq!(line.plain(), "abc…");
         let wide = Line::from_text("한글한글").truncated(5);
         assert_eq!(wide.plain(), "한글…");
+    }
+
+    /// 나란히 선 두 링크: 앞 링크를 닫고서야 다음 링크를 연다. 같은 주소가 이어지면
+    /// 열린 채로 가고, 줄이 끝나기 전에는 늘 닫는다.
+    #[test]
+    fn a_link_closes_before_the_next_one_opens_and_before_the_row_ends() {
+        let line = &crate::tui::markdown::render(
+            "[a](https://a.example/)[b](https://b.example/)[**c**](https://b.example/) d",
+        )[0];
+        let mut out = String::new();
+        write_spans(line, &mut out);
+        let open = |address: &str| format!("\u{1b}]8;;{address}\u{1b}\\");
+        let close = "\u{1b}]8;;\u{1b}\\";
+        assert_eq!(
+            out,
+            format!(
+                "\u{1b}[4m\u{1b}[36;49m{}a{close}{}b\u{1b}[1mc{close}\u{1b}[22m\u{1b}[24m\u{1b}[39;49m d",
+                open("https://a.example/"),
+                open("https://b.example/"),
+            )
+        );
     }
 }
 

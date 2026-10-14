@@ -127,6 +127,13 @@ pub const BUDGET_NEAR_PERMILLE: u32 = 800;
 /// agent for nothing.
 pub const PRINT_BYTES: usize = 4_096;
 
+/// The key zo's hook carries a print of a call's whole input under — a hash,
+/// never the input — beside a `tool_input` that is the compact one zo's working
+/// line shows: a command's first word, a file's path without the offset it is
+/// read at. Two different calls look alike there; their prints do not. zo's
+/// reporter names the same key, and a source contract holds the two equal.
+pub const INPUT_PRINT_KEY: &str = "tool_input_print";
+
 /// The largest budget a settings file may name, in dollars: a typo guard. No
 /// worker's task costs a hundred thousand dollars; a budget that large is a
 /// slipped key and is read as none.
@@ -402,16 +409,19 @@ fn ratio_permille(top: f64, bottom: f64) -> u32 {
 
 /// What a tool call is, for the question "is this the call it just made": a
 /// hash of the tool's name and the first [`PRINT_BYTES`] bytes of its input's
-/// words. `None` for an event that names no tool — it cannot repeat anything.
+/// words — or, where the payload carries one, of the print of its whole input
+/// ([`INPUT_PRINT_KEY`]) in the input's place. `None` for an event that names
+/// no tool — it cannot repeat anything.
 fn call_print(payload: &str) -> Option<u64> {
     let payload = HookPayload::of(payload);
     let name = tool_name_in_parsed(&payload)?;
     let mut hasher = DefaultHasher::new();
     name.hash(&mut hasher);
-    if let Some(input) = payload
-        .tree()
-        .and_then(|tree| INPUT_KEYS.iter().find_map(|key| tree.get(*key)))
-    {
+    if let Some(input) = payload.tree().and_then(|tree| {
+        tree.get(INPUT_PRINT_KEY)
+            .filter(|print| print.as_str().is_some_and(|print| !print.is_empty()))
+            .or_else(|| INPUT_KEYS.iter().find_map(|key| tree.get(*key)))
+    }) {
         let mut room = PRINT_BYTES;
         feed(input, &mut hasher, &mut room);
     }

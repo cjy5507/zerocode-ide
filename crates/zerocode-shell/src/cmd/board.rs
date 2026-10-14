@@ -1,6 +1,7 @@
 //! Board commands.
 
 use crate::conversation_wake::{self, ConversationWake};
+use crate::orchestration::wall_press::PressRefusal;
 use crate::*;
 use zerocode_core::capabilities::SpawnRoad;
 
@@ -364,14 +365,15 @@ pub(crate) async fn desk_ack(
 /// (`wall_press::retry`). The main window only, and only after the renderer's
 /// own confirm: no beat, hook or worker endpoint reaches this command, and a
 /// press the ledger no longer takes (the wall lifted, an account switch moved
-/// the worker) is refused here whatever the chip still shows.
+/// the worker) is refused here whatever the chip still shows — by its code,
+/// which the board says in the person's language.
 #[tauri::command]
 pub(crate) async fn quota_wall_retry(
     app: AppHandle,
     webview: tauri::Webview,
     run: String,
     worker: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, PressRefusal> {
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
         let host = crate::agent_tools_runtime::TeamWindow { app };
@@ -394,7 +396,7 @@ pub(crate) async fn quota_wall_handover(
     run: String,
     worker: String,
     to: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, PressRefusal> {
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
         let overrides: Vec<_> = {
