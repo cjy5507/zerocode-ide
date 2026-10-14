@@ -1706,6 +1706,9 @@ fn announce_alias_moves(overlay: &runtime::model_discovery::Overlay) {
 /// picker opening under the person's key.
 fn spawn_model_discovery_refresh(policy: runtime::model_discovery::UpdatePolicy) {
     use std::sync::atomic::Ordering;
+    // A test gets here only from the harness's environment, where discovery
+    // is off (t-44087).
+    crate::support::test_env_ready();
     if policy == runtime::model_discovery::UpdatePolicy::Pinned
         || std::env::var_os("ZO_DISABLE_MODEL_DISCOVERY").is_some()
     {
