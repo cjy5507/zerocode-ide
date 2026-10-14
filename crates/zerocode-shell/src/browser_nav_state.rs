@@ -8,12 +8,37 @@
 //! and the one rule that closes the gap: a Started with no Finished after
 //! [`NAV_DEAD_AFTER_SECS`] is `dead`. The word says whose verdict it is.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Seconds a main-document load may stand Started without Finished before
 /// the record calls it dead. Twenty: a slow page is seconds, a dead server is
 /// forever, and an agent's `wait` budget is seven.
 pub(super) const NAV_DEAD_AFTER_SECS: u64 = 20;
+
+/// Request numbers for every pane the window ever opens: a label that is
+/// closed and opened again never meets an answer meant for its old record.
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+/// What the engine said about a known request once it took it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NavAnswer {
+    /// The request is a load the engine now carries.
+    Loading,
+    /// The engine ended the request with no new document: refused, failed
+    /// before commit, or moved within the same document.
+    Resolved,
+    /// The engine took the request and showed no load.
+    Silent,
+}
+
+/// Whether a known request still stands between a handoff and the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NavProof {
+    Ready,
+    Waiting,
+    Unproven,
+}
 
 /// The four words `tabs` speaks for a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,12 +112,41 @@ impl NavRecord {
         self.generation
     }
 
-    pub(super) fn requested(&mut self) {
+    /// A known request is admitted: answers the number its native send and
+    /// the engine's answer must present.
+    pub(super) fn admit(&mut self) -> u64 {
         self.awaiting = Some(Awaiting::Request);
+        NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Called on the engine's thread just before the native send: `false`
+    /// when the request is no longer the one admitted, so nothing is sent.
+    pub(super) fn sent(&mut self, _number: u64) -> bool {
+        true
+    }
+
+    /// The request was refused before any native send.
+    pub(super) fn withdrawn(&mut self, _number: u64) {}
+
+    /// The engine's own answer to the request it took.
+    pub(super) fn answered(&mut self, _number: u64, _answer: NavAnswer) {}
+
+    /// The engine's loading state, read on its thread in the same turn as
+    /// this record.
+    pub(super) fn settle_if_idle(&mut self, _loading: bool) -> NavProof {
+        self.proof()
+    }
+
+    pub(super) fn proof(&self) -> NavProof {
+        if self.awaiting.is_some() {
+            NavProof::Waiting
+        } else {
+            NavProof::Ready
+        }
     }
 
     pub(super) fn pending(&self) -> bool {
-        self.awaiting.is_some()
+        self.proof() != NavProof::Ready
     }
 
     /// The main document's Finished — on the blank page, that is `blank`.

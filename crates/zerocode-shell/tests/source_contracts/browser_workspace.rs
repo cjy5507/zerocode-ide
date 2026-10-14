@@ -512,7 +512,7 @@ fn handoff_waits_for_a_known_navigation_before_the_page_fence() {
     assert!(settle.contains(".nav.pending()"));
     assert!(settle.contains("workspace_paused:"));
     let note = block_after(BROWSER, "fn note_navigation_request(");
-    assert!(note.contains(".nav.requested("));
+    assert!(note.contains(".nav.admit("));
     let navigate = block_after(BROWSER, "fn browser_navigate(");
     assert!(
         navigate
@@ -578,7 +578,7 @@ fn only_the_documents_own_finish_or_failure_releases_a_known_navigation() {
         assert!(!block_after(nav, visual).contains("awaiting"), "{visual}");
     }
     for (event, mark) in [
-        ("pub(super) fn requested(", "Some(Awaiting::Request)"),
+        ("pub(super) fn admit(", "Some(Awaiting::Request)"),
         (
             "pub(super) fn started(",
             "Some(Awaiting::Load(self.generation))",
@@ -593,7 +593,7 @@ fn only_the_documents_own_finish_or_failure_releases_a_known_navigation() {
     }
     let settle = block_after(BROWSER, "async fn settle_known_navigation(");
     for release in [
-        ".nav.requested(",
+        ".nav.admit(",
         ".nav.started(",
         ".nav.finished(",
         ".nav.failed(",

@@ -5213,14 +5213,14 @@ fn a_requested_navigation_is_pending_until_its_document_settles() {
     let t0 = Instant::now();
     let mut record = NavRecord::born(true, t0);
     assert!(!record.pending());
-    record.requested();
+    record.admit();
     assert!(record.pending());
     assert_eq!(record.observed(t0), NavState::Blank);
     record.started(t0);
     assert!(record.pending());
     record.finished(false);
     assert!(!record.pending());
-    record.requested();
+    record.admit();
     record.finished(true);
     assert!(record.pending());
     let mut loading = NavRecord::born(false, t0);
@@ -5273,7 +5273,7 @@ fn a_requested_navigation_waits_for_the_finish_after_its_own_started() {
         .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS + 1))
         .unwrap();
     let mut record = NavRecord::born(true, stood);
-    record.requested();
+    record.admit();
     record.finished(false);
     assert!(
         record.pending(),

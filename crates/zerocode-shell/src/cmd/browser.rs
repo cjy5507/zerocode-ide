@@ -355,7 +355,7 @@ where
 
 pub(crate) fn note_navigation_request(state: &AppState, label: &str) {
     if let Some(record) = state.browser_records().get_mut(label) {
-        record.nav.requested();
+        record.nav.admit();
     }
 }
 
