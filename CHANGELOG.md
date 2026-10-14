@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.64] — 2026-10-14
+- Computer Use acts and reads only in the window it was given: clicks, keys, typing and scrolls keep the requested app and window, a coordinate or selector that belongs to another window is refused before anything is sent, content from a different window is never returned, and an action whose window disappears reports the observation as unavailable instead of reading whatever window is in front (t-52051).
+- Computer Use no longer invites a repeated input: once a click or keystroke has been sent, a scope it could not verify comes back as a receipt marked not to repeat rather than an error (t-52051).
+- Releases publish faster: the updater bundle packs the app that was just built and installed instead of building it a second time, and the gates keep their dependency caches warm.
+
 ## [1.1.63] — 2026-10-13
 - zo's terminal draws a resumed conversation the way the live screen drew it: the host's framing no longer appears as the person's words, a steer typed mid-turn stands after the call it followed, and a user message in a terminal without a color palette no longer sits between blank rows (t-51389).
 - zo's tool rows read tighter: a run of calls with nothing said between them is one block, a tool row's target starts one space after its verb, and a long command's text leaves its output room on the screen (t-51389).
