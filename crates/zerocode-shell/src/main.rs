@@ -244,6 +244,7 @@ use browser_diagnose::*;
 use browser_guest_runtime::*;
 use browser_nav_state::*;
 use browser_runtime::*;
+use cmd::judgment_latest_request;
 use cmd::{
     abort_conflict_operation, ack_board_agent, add_claude_account, add_codex_account, agent_icon,
     agent_launch_plans, agent_models, agent_teams_mode, agent_terms, answer_approval, answer_ask,
@@ -2611,6 +2612,7 @@ fn main() -> ExitCode {
             managed_judgment_stop,
             managed_judgment_switch_model,
             judgment_models,
+            judgment_latest_request,
             preflight_judgment_provider,
             set_summon_profiles,
             check_typesafe_key,

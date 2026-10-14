@@ -235,6 +235,61 @@ fn switching_a_model_or_endpoint_changes_the_evidence_identity() {
 }
 
 #[test]
+fn a_route_fingerprint_follows_every_part_of_the_route_for_every_kind() {
+    for kind in [ProviderKind::Jev, ProviderKind::Local, ProviderKind::Remote] {
+        let mut provider = local();
+        provider.kind = kind;
+        let held = provider.route_fingerprint();
+        assert_eq!(provider.clone().route_fingerprint(), held, "{kind:?}");
+        let mut moved = provider.clone();
+        moved.base_url = "http://127.0.0.1:4321/v1".to_string();
+        assert_ne!(moved.route_fingerprint(), held, "{kind:?} address");
+        moved = provider.clone();
+        moved.model = "acme/another-judge".to_string();
+        assert_ne!(moved.route_fingerprint(), held, "{kind:?} model");
+        moved = provider.clone();
+        moved.requires_auth = !provider.requires_auth;
+        assert_ne!(moved.route_fingerprint(), held, "{kind:?} auth");
+    }
+    let mut remote = local();
+    remote.kind = ProviderKind::Remote;
+    assert_ne!(remote.route_fingerprint(), local().route_fingerprint());
+}
+
+#[test]
+fn a_route_fingerprint_spells_no_address_model_or_identity() {
+    let mut overridden = Provider::jev(JEV_DEFAULT_MODEL);
+    overridden.base_url = "http://127.0.0.1:1234".to_string();
+    for provider in [local(), Provider::jev(JEV_DEFAULT_MODEL), overridden] {
+        let route = provider.route_fingerprint();
+        let digits = route.strip_prefix("route-").expect("a route fingerprint");
+        assert_eq!(digits.len(), 32, "{route}");
+        assert!(
+            digits
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        );
+        assert!(!route.contains(&provider.base_url));
+        assert!(!route.contains(&provider.model));
+        assert_ne!(route, provider.identity());
+    }
+}
+
+#[test]
+fn the_identity_keeps_its_meaning_beside_the_route() {
+    let mut overridden = Provider::jev("jev-1.13.0");
+    assert_eq!(overridden.identity(), "jev-1.13.0");
+    let held = overridden.route_fingerprint();
+    overridden.base_url = "http://127.0.0.1:1234".to_string();
+    assert_eq!(overridden.identity(), "jev-1.13.0");
+    assert_ne!(overridden.route_fingerprint(), held);
+    assert_eq!(
+        Provider::jev(JEV_DEFAULT_MODEL).evidence_dir(Path::new("evidence")),
+        Path::new("evidence")
+    );
+}
+
+#[test]
 fn changing_auth_requirements_cannot_reuse_the_old_judgment_identity() {
     let provider = local();
     let mut different = provider.clone();

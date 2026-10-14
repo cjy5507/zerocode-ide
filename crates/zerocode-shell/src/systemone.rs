@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
 };
-use zerocode_core::jev::summary::{HTTP_VERSION, INPUT_TOKENS, MODEL};
+use zerocode_core::jev::summary::{CLIENT_ROUTE, HTTP_VERSION, INPUT_TOKENS, MODEL};
 use zerocode_core::jev::{JevUse, count, memo};
 
 use crate::api_routers::{Keychain, RouterKeys};
@@ -225,7 +225,17 @@ pub fn act_line(wire: &Wire, seat: &JevUse) -> Option<u16> {
 /// uses, so a judgment here and a number on the screen read one file one way.
 #[must_use]
 pub fn read_rows(ledger: &Path) -> Vec<Value> {
-    let rows = zerocode_core::jev::journal::read(ledger).unwrap_or_default();
+    observed(
+        ledger,
+        zerocode_core::jev::journal::read(ledger).unwrap_or_default(),
+    )
+}
+
+/// `rows` of `ledger` as every counter reads them: the project rules seat's
+/// one logical request per delivered advisory
+/// ([`zerocode_core::jev::project_rules::observed_rows`]), any other seat's
+/// as written.
+fn observed(ledger: &Path, rows: Vec<Value>) -> Vec<Value> {
     if ledger
         .file_name()
         .is_some_and(|name| name == zerocode_core::jev::PROJECT_RULES.ledger)
@@ -397,6 +407,11 @@ pub struct Spent {
     /// t-13199); `None` when nothing came back, and for the memo's answer,
     /// which crossed no wire.
     pub version: Option<String>,
+    /// The judgment client the request this ask sent was put to
+    /// ([`Provider::route_fingerprint`], t-53792), read with the provider
+    /// before it left — on a row riding that request, the same one; `None`
+    /// when nothing was sent: a refusal at the door, the memo's answer.
+    pub route: Option<String>,
 }
 
 impl Spent {
@@ -436,6 +451,7 @@ impl Spent {
         if let Some(version) = self.version.as_deref() {
             fields.insert(HTTP_VERSION.canonical.to_string(), json!(version));
         }
+        stamp_route(row, self.route.as_deref());
     }
 
     /// What a row that rides a request another row paid for is charged: no
@@ -456,13 +472,16 @@ impl Spent {
             output_tokens: Some(0),
             model: self.model.clone(),
             version: self.version.clone(),
+            route: self.route.clone(),
         }
     }
 
     /// What several asks of one judgment came to together — a sharded
     /// question's requests side by side: their requests and withheld lines
     /// added, and the versions the first answer among them named and came
-    /// over.
+    /// over. The client is named only when every ask that sent a request
+    /// sent it to the same one (t-53792): a judgment asked of two clients,
+    /// or of one this cannot name, names none.
     #[must_use]
     pub fn together<'spent>(asks: impl IntoIterator<Item = &'spent Self>) -> Self {
         let empty = Self {
@@ -470,7 +489,8 @@ impl Spent {
             output_tokens: Some(0),
             ..Self::default()
         };
-        asks.into_iter().fold(empty, |mut all, one| {
+        let mut route: Option<Option<&str>> = None;
+        let mut all = asks.into_iter().fold(empty, |mut all, one| {
             if one.requests > 0 {
                 all.input_tokens = all
                     .input_tokens
@@ -480,6 +500,8 @@ impl Spent {
                     .output_tokens
                     .zip(one.output_tokens)
                     .map(|(held, added)| held + added);
+                let named = one.route.as_deref();
+                route = Some(route.map_or(named, |held| held.filter(|_| held == named)));
             }
             all.requests += one.requests;
             all.redacted_lines += one.redacted_lines;
@@ -490,7 +512,20 @@ impl Spent {
                 all.version.clone_from(&one.version);
             }
             all
-        })
+        });
+        all.route = route.flatten().map(str::to_string);
+        all
+    }
+}
+
+/// Write the judgment client a request was put to onto `row`, under the key
+/// table's spelling ([`CLIENT_ROUTE`], t-53792) — the one writer of that key,
+/// for [`Spent::stamp`] and for a seat that copies its account onto its row
+/// field by field (`pane_guard`'s guards). A row nothing was sent for names
+/// none.
+pub fn stamp_route(row: &mut Value, route: Option<&str>) {
+    if let (Some(fields), Some(route)) = (row.as_object_mut(), route) {
+        fields.insert(CLIENT_ROUTE.canonical.to_string(), json!(route));
     }
 }
 
@@ -948,6 +983,7 @@ impl Wire {
                 };
             }
         };
+        let route = provider.route_fingerprint();
         let key = self.key_for(&provider);
         let passed = match self.pass(
             row,
@@ -985,6 +1021,7 @@ impl Wire {
                     // the body the memo kept whole.
                     model: answered_by(&remembered.answer),
                     version: None,
+                    route: None,
                 },
                 request_bytes,
                 memo,
@@ -1045,6 +1082,7 @@ impl Wire {
                 .and_then(Value::as_u64),
             model: answer.as_deref().ok().and_then(answered_by),
             version,
+            route: Some(route),
         };
         // Keep the actual wire usage even when a late reply loses permission.
         let answer = if answer.is_ok() && !self.response_is_current(row, workspace, &allowed, mode)
@@ -1308,6 +1346,7 @@ pub(crate) fn today() -> String {
     count::day_of(now_ms, offset_minutes)
 }
 
+pub(crate) mod latest;
 mod standing;
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,7 @@ pub const CUSTOM_KEY_ENV_PREFIX: &str = "JUDGMENT_API_KEY_";
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_ADDRESS_BYTES: usize = 8 * 1024;
 pub const MAX_MODELS: usize = 2_000;
+const ROUTE_FINGERPRINT_BYTES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -244,6 +246,28 @@ impl Provider {
             hash.update([0]);
         }
         format!("judgment-{:x}", hash.finalize())
+    }
+
+    #[must_use]
+    pub fn route_fingerprint(&self) -> String {
+        let mut hash = Sha256::new();
+        for part in [
+            "route".to_string(),
+            format!("{:?}", self.kind),
+            format!("{:?}", self.protocol),
+            self.base_url.clone(),
+            self.model.clone(),
+            self.requires_auth.to_string(),
+        ] {
+            hash.update(part.as_bytes());
+            hash.update([0]);
+        }
+        let digest = hash.finalize();
+        let mut route = String::from("route-");
+        for byte in &digest[..ROUTE_FINGERPRINT_BYTES] {
+            let _ = write!(route, "{byte:02x}");
+        }
+        route
     }
 }
 
