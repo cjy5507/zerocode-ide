@@ -5976,6 +5976,23 @@ pub(super) fn install_confirm_asker(app: AppHandle) {
 pub(super) fn desktop_wait_for(
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+    let started = std::time::Instant::now();
+    desktop_wait_for_with(
+        params,
+        &computer_use::eye::MEMORY,
+        &mut computer_use::call,
+        &mut || started.elapsed(),
+        &mut std::thread::sleep,
+    )
+}
+
+pub(super) fn desktop_wait_for_with(
+    params: &serde_json::Value,
+    memory: &computer_use::eye::Memory,
+    helper: computer_use::eye::Call<'_>,
+    elapsed: &mut dyn FnMut() -> std::time::Duration,
+    sleep: &mut dyn FnMut(std::time::Duration),
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
     use zerocode_core::computer_use::{
         COMPUTER_WAIT_FOR_POLL_MS, desktop_wait_for_ms, wait_for_retries, wait_for_settled,
         window_title_matches,
@@ -5985,6 +6002,21 @@ pub(super) fn desktop_wait_for(
         .get("window")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
+    let scoped = ["app", "windowId", "windowIndex"]
+        .iter()
+        .any(|key| params.get(key).is_some());
+    if wanted_title.is_some()
+        && (scoped
+            || params
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true))
+    {
+        return Err(computer_use::ComputerUseError::new(
+            zerocode_core::computer_use_protocol::error_code::INVALID_ARGUMENT,
+            "a title wait cannot honor app/window or background scope; use a scoped element condition",
+        ));
+    }
     let (budget_ms, capped) =
         desktop_wait_for_ms(params.get("timeoutMs").and_then(serde_json::Value::as_u64));
     let mut probe = params.clone();
@@ -5993,30 +6025,29 @@ pub(super) fn desktop_wait_for(
             object.remove(key);
         }
     }
-    let started = std::time::Instant::now();
     let budget = std::time::Duration::from_millis(budget_ms);
     let poll = std::time::Duration::from_millis(COMPUTER_WAIT_FOR_POLL_MS);
     let mut looks = 0_u32;
     // An OCR wait reads the screen again only after the eye saw it change
     // where it reads; without the eye it reads every time.
-    let mut helper = computer_use::call;
     let reads_pixels = wanted_title.is_none()
         && probe.get("ocr").and_then(serde_json::Value::as_bool) == Some(true)
-        && probe.get("app").is_none();
+        && !scoped;
     let mut gate = reads_pixels
-        .then(|| computer_use::eye::Gate::new(&computer_use::eye::MEMORY, &probe, &mut helper))
+        .then(|| computer_use::eye::Gate::new(memory, &probe, helper))
         .flatten();
-    let mut last_read = serde_json::Value::Array(Vec::new());
+    let mut last_read = serde_json::Value::Null;
     // What the last desktop reading matched in ZeroCode's own windows and
     // left out: the agent's own words are not the app's answer.
     let mut excluded_regions = false;
     loop {
         looks += 1;
-        let unchanged = gate.as_mut().is_some_and(|gate| !gate.read(&mut helper));
+        let unchanged =
+            gate.as_mut().is_some_and(|gate| !gate.read(helper)) && !last_read.is_null();
         let seen = if unchanged {
             Ok(last_read.clone())
         } else if let Some(title) = wanted_title.as_deref() {
-            computer_use::call("listAllWindows", serde_json::json!({})).map(|answer| {
+            helper("listAllWindows", serde_json::json!({})).map(|answer| {
                 let windows = answer
                     .get("windows")
                     .and_then(serde_json::Value::as_array)
@@ -6033,46 +6064,58 @@ pub(super) fn desktop_wait_for(
                                 .is_some_and(|shown| window_title_matches(shown, title))
                     })
                     .collect::<Vec<_>>();
-                serde_json::Value::Array(windows)
+                serde_json::json!({ "matches": windows })
             })
         } else {
-            computer_use::call("findElements", computer_use::eye::reading(&probe)).map(|answer| {
+            let asked = computer_use::eye::reading_with(memory, &probe, helper);
+            helper("findElements", asked)
+        };
+        let seen = match seen {
+            Ok(answer) => {
+                if scoped {
+                    checked_wait_scope(params, &answer)?;
+                }
                 excluded_regions = answer
                     .get(zerocode_core::computer_use_protocol::eye::EXCLUDED_REGIONS_KEY)
                     .and_then(serde_json::Value::as_array)
                     .is_some_and(|regions| !regions.is_empty());
-                answer
-                    .get("matches")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::Value::Array(Vec::new()))
-            })
-        };
-        let matches = match seen {
-            Ok(matches) => matches,
-            Err(error) if wait_for_retries(&error.code) => serde_json::Value::Array(Vec::new()),
+                Some(answer)
+            }
+            Err(error) if wait_for_retries(&error.code) => None,
             Err(error) => return Err(error),
         };
-        last_read.clone_from(&matches);
-        let count = matches.as_array().map_or(0, Vec::len);
-        if wait_for_settled(count, absent) {
-            return Ok(serde_json::json!({
+        last_read = seen.clone().unwrap_or(serde_json::Value::Null);
+        let matches = seen.as_ref().and_then(|answer| answer.get("matches"));
+        let count = matches
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        if seen.is_some() && wait_for_settled(count, absent) {
+            let mut result = serde_json::json!({
                 "satisfied": true,
                 "absent": absent,
                 "looks": looks,
                 "reads": gate.as_ref().map_or(looks, |gate| gate.reads),
-                "elapsedMs": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "elapsedMs": u64::try_from(elapsed().as_millis()).unwrap_or(u64::MAX),
                 "budgetMs": budget_ms,
                 "budgetCapped": capped,
-                "matches": matches,
-            }));
+                "matches": matches.cloned().unwrap_or_else(|| serde_json::json!([])),
+            });
+            if let Some(answer) = seen {
+                for key in ["app", "window"] {
+                    if let Some(actual) = answer.get(key) {
+                        result[key] = actual.clone();
+                    }
+                }
+            }
+            return Ok(result);
         }
-        if started.elapsed() + poll >= budget {
+        if elapsed().saturating_add(poll) >= budget {
             return Err(computer_use::ComputerUseError {
                 code: zerocode_core::computer_use_protocol::error_code::TIMEOUT.into(),
                 message: format!(
                     "still {} after {} ms ({looks} looks, {count} matches{}{})",
                     if absent { "present" } else { "absent" },
-                    started.elapsed().as_millis(),
+                    elapsed().as_millis(),
                     gate.as_ref()
                         .map(|gate| format!(", {} reads", gate.reads))
                         .unwrap_or_default(),
@@ -6085,8 +6128,55 @@ pub(super) fn desktop_wait_for(
                 ),
             });
         }
-        std::thread::sleep(poll);
+        sleep(poll);
     }
+}
+
+fn checked_wait_scope(
+    params: &serde_json::Value,
+    answer: &serde_json::Value,
+) -> Result<(), computer_use::ComputerUseError> {
+    let actual = answer
+        .pointer("/window/id")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|id| *id > 0)
+        .ok_or_else(|| {
+            computer_use::ComputerUseError::new(
+                "window_scope_unverified",
+                "the wait observation did not identify its actual window",
+            )
+        })?;
+    if params
+        .get("windowId")
+        .is_some_and(|expected| expected.as_u64() != Some(actual))
+    {
+        return Err(computer_use::ComputerUseError::new(
+            "window_scope_mismatch",
+            "the wait observation came from a different window",
+        ));
+    }
+    if params.get("app").is_some()
+        && answer
+            .get("app")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|app| app.trim().is_empty())
+    {
+        return Err(computer_use::ComputerUseError::new(
+            "window_scope_unverified",
+            "the wait observation did not identify its actual app",
+        ));
+    }
+    if answer
+        .get("matches")
+        .and_then(serde_json::Value::as_array)
+        .is_none()
+    {
+        return Err(computer_use::ComputerUseError::new(
+            "window_scope_unverified",
+            "the wait observation did not include an element search result",
+        ));
+    }
+    Ok(())
 }
 
 /// QA's comparison (§4): the baseline file against another file or, by
