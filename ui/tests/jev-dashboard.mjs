@@ -437,7 +437,7 @@ async function testJevLongModelIds(browser, origin, ok) {
             text: caption.textContent, fullModel: caption.textContent.endsWith(id),
             faults: window.__JEV_TEXT_FAULTS__(view), wide,
             width: view.getBoundingClientRect().width,
-            theme: document.documentElement.dataset.theme,
+            theme: document.documentElement.dataset.theme ?? "dark",
           };
         }, model.id);
         const path = join(EVIDENCE_DIR, `jev-dashboard-model-${theme}-${model.name}.png`);
