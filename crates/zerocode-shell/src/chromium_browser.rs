@@ -1743,6 +1743,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_superseded_navigation_releases_its_callback_without_answering() {
+        let replies = Navigations::default();
+        let held = Rc::new(());
+        let retained = Rc::downgrade(&held);
+        replies.borrow_mut().insert(
+            1,
+            Box::new(move |_| {
+                drop(held);
+                panic!("a superseded navigation must not be answered");
+            }),
+        );
+        assert!(retained.upgrade().is_some());
+        replies.borrow_mut().insert(2, Box::new(|_| {}));
+        assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
+    fn a_late_navigation_answer_never_takes_the_current_callback() {
+        let replies = Navigations::default();
+        let answered = Rc::new(std::cell::Cell::new(None));
+        let observed = answered.clone();
+        replies.borrow_mut().insert(
+            1,
+            Box::new(|_| panic!("the previous navigation must not be answered")),
+        );
+        replies
+            .borrow_mut()
+            .insert(2, Box::new(move |answer| observed.set(Some(answer))));
+        assert!(replies.borrow_mut().remove(&1).is_none());
+        let answer = replies.borrow_mut().remove(&2).unwrap();
+        answer(crate::NavAnswer::Loading);
+        assert_eq!(answered.get(), Some(crate::NavAnswer::Loading));
+        assert!(replies.borrow_mut().remove(&2).is_none());
+    }
+
+    #[test]
     fn initialization_enables_page_before_scripts_and_counts_every_acknowledgement() {
         let scripts = vec!["first()".into(), "second()".into()];
         let commands = initialization_commands(&scripts, Some("fixture-agent"));
