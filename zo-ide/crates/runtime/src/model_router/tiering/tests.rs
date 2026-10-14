@@ -266,3 +266,30 @@ fn a_lone_implementer_leaves_the_hard_rung_to_the_top_model() {
     let alone = [row("a", "p", FRONTIER, 1)];
     assert!(rungs(&classify_model_tiers(&alone), "a").is_empty(), "a top model with no implementer below it stays the top");
 }
+
+/// t-46882: an older release names the newer release of its line that stands
+/// in its place — what the window resumes a session on instead of it — and
+/// nothing else names one: not the release that stands, not a model of
+/// another line, and not a twin of the same release (`acme-house[blue]`
+/// beside `[green]`, two models a person configured: neither is older, and
+/// moving one would move the person's choice).
+#[test]
+fn a_superseded_release_names_the_newer_release_of_its_line() {
+    let models = [
+        row("a-5-1", "p", FRONTIER, 51),
+        row("a-5", "p", FRONTIER, 50),
+        row("b-5", "p", BALANCED, 50),
+        row("acme-house[blue]", "p", FAST, 50),
+        row("acme-house[green]", "p", FAST, 50),
+    ];
+    let tiers = classify_model_tiers(&models);
+    assert_eq!(placed(&tiers, "a-5").band, ModelBand::Superseded, "{tiers:?}");
+    assert_eq!(placed(&tiers, "a-5").successor.as_deref(), Some("a-5-1"), "{tiers:?}");
+    for current in ["a-5-1", "b-5"] {
+        assert_eq!(placed(&tiers, current).successor, None, "{current}: {tiers:?}");
+    }
+    let twins: Vec<&ModelTierAssignment> =
+        tiers.iter().filter(|entry| entry.id.starts_with("acme-house")).collect();
+    assert!(twins.iter().any(|twin| twin.band == ModelBand::Superseded), "one twin folds: {tiers:?}");
+    assert!(twins.iter().all(|twin| twin.successor.is_none()), "a twin is no older release: {tiers:?}");
+}

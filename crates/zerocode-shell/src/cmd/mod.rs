@@ -9,7 +9,7 @@ pub(crate) mod appearance;
 pub(crate) mod artifacts;
 pub(crate) mod board;
 pub(crate) mod console;
-pub(crate) use console::{agent_models, slash_commands};
+pub(crate) use console::{agent_models, slash_commands, superseded_models};
 pub(crate) mod wire;
 pub(crate) use wire::{
     HAND_OVER_EXIT_POLL, HAND_OVER_EXIT_WAIT, program_left, wait_process_group_gone, wire_answer,

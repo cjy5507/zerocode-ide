@@ -369,6 +369,12 @@ pub(super) struct TermWorker {
     /// surface asks the door and seats the pane where the answer says when
     /// the seat acts (`judge_worker_room`); `None` seats it as a tab.
     pub(super) seat: Option<agent_teams::WorkerSeatWords>,
+    /// The model a restoration's launch names, when it names one — what the
+    /// window shows on the pane until its agent says, so a conversation that
+    /// last ran a superseded release does not wear that release's name off
+    /// its transcript while the CLI runs the one the launch named (t-46882).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) model: Option<String>,
 }
 
 /// The window carrying out what a team asked for.
@@ -1509,6 +1515,7 @@ impl agent_teams::Host for TeamWindow {
                     resumed: restored.map(|one| one.as_str()),
                     helper,
                     seat: seat_words,
+                    model: None,
                 },
             );
         } else {
@@ -1584,6 +1591,7 @@ impl agent_teams::Host for TeamWindow {
         worktree: &str,
         agent: &str,
         resumed: zerocode_core::orchestration::WorkerResume,
+        model: Option<&str>,
     ) {
         let state = self.app.state::<AppState>();
         let Some(parent) = state.pane_parents().get(&term).copied() else {
@@ -1602,6 +1610,7 @@ impl agent_teams::Host for TeamWindow {
                 resumed: Some(resumed.as_str()),
                 helper,
                 seat: None,
+                model: model.map(str::to_string),
             },
         );
     }

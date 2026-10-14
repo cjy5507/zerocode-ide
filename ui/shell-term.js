@@ -6419,6 +6419,7 @@ function setActivePane(tab, term) {
   tab.activePane = term;
   paintActivePane(tab);
   paintViewToggle();
+  paintStatusModel();
   // The sidebar's focused-row fill follows the stage — same beat as a tab
   // switch, same guard.
   scheduleAgentPaint(["cards"]);
@@ -7733,6 +7734,9 @@ function storedLeafGrid(root, ordinal, tab) {
 async function wakeConversation(agent, session, grid, restore = null, worktree = null) {
   const woke = await invoke("resume_session", { agent, session, ...grid, restore, worktree });
   if (!woke.standing) paneSessions.set(woke.term, { agent, session, resumable: true });
+  // The model the wake's launch named (t-46882): what the pane runs before its
+  // agent says, where its transcript still names the release it ran before.
+  if (!woke.standing && typeof woke.model === "string" && woke.model.length > 0) paneModels.set(woke.term, woke.model);
   if (!woke.standing) settleOwed(agent, session.id);
   return woke;
 }

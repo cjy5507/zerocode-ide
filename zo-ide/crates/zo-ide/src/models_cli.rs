@@ -164,6 +164,10 @@ impl Report<'_> {
                 // thousandths (t-45961).
                 "tierFrom": self.tier(row).map(|tier| tier.source.key()),
                 "tierConfidencePermille": self.tier(row).and_then(|tier| tier.confidence_permille),
+                // The newer release of its line a superseded row gives way
+                // to — what the window resumes a session on instead of the
+                // older one (t-46882).
+                "supersededBy": self.tier(row).and_then(|tier| tier.successor.as_deref()),
                 "efforts": api::accepted_efforts(&row.id)
                     .map(|levels| levels.iter().map(|level| level.key()).collect::<Vec<_>>()),
             })).collect::<Vec<_>>(),
@@ -639,6 +643,9 @@ mod tests {
             // t-45961: and who placed it there, and how sure that was.
             assert_eq!(row["tierFrom"], tier.source.key(), "{id}");
             assert_eq!(row["tierConfidencePermille"], serde_json::json!(tier.confidence_permille), "{id}");
+            // t-46882: and, for a superseded release, the release that
+            // stands in its place.
+            assert_eq!(row["supersededBy"], serde_json::json!(tier.successor), "{id}");
             match api::accepted_efforts(id) {
                 Some(levels) => {
                     let words: Vec<&str> = levels.iter().map(|level| level.key()).collect();

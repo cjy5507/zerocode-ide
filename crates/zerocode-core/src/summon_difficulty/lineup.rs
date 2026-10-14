@@ -112,6 +112,11 @@ pub struct LiveModel {
     /// The source stopped listing it; kept only because a session had it
     /// selected.
     pub unlisted: bool,
+    /// The newer release of its own line that stands in its place, when the
+    /// classifier superseded it and said which (`supersededBy`, t-46882);
+    /// `None` for a current model, a twin of the same release, and an older
+    /// zo that does not say.
+    pub superseded_by: Option<String>,
 }
 
 impl LiveModel {
@@ -267,6 +272,7 @@ impl Lineup {
                 efforts: None,
                 builtin: true,
                 unlisted: false,
+                superseded_by: None,
             });
         all.models.extend(custom);
         (!all.models.is_empty()).then_some(all)
@@ -306,6 +312,11 @@ impl Lineup {
                     unlisted: row
                         .get("unlistedSince")
                         .is_some_and(|since| !since.is_null()),
+                    superseded_by: row
+                        .get("supersededBy")
+                        .and_then(Value::as_str)
+                        .filter(|successor| !successor.is_empty())
+                        .map(str::to_string),
                 })
             })
             .collect();
@@ -346,6 +357,30 @@ impl Lineup {
     #[must_use]
     pub fn live(&self, model: &str) -> bool {
         self.find(model).is_some_and(|held| !held.folded())
+    }
+
+    /// The release that stands for `model` today, when the classifier
+    /// superseded it (t-46882): the newer release of its own line the row
+    /// names, followed while that one is superseded too, and only when the
+    /// release it ends on is live here. `None` for a current model, a model
+    /// this lineup does not list, a twin of the same release, and an older
+    /// release whose successor this lineup does not hold — nothing is
+    /// guessed.
+    #[must_use]
+    pub fn current_release(&self, model: &str) -> Option<&str> {
+        let mut held = self.find(model)?;
+        if held.band != Some(Band::Superseded) {
+            return None;
+        }
+        // A release followed past every row the lineup holds has met itself
+        // again: a catalog that says so is answered with nothing.
+        for _ in 0..self.models.len() {
+            held = self.find(held.superseded_by.as_deref()?)?;
+            if held.band != Some(Band::Superseded) {
+                return (!held.folded()).then_some(held.id.as_str());
+            }
+        }
+        None
     }
 
     /// Every live model, the newly arrived marked — what a person picks a
@@ -1002,6 +1037,51 @@ mod tests {
         }]);
         let rows = read(&Value::Null, Some(&today), None);
         assert_eq!(reaches(&rows, "model-c"), [LOW]);
+    }
+
+    /// t-46882: the release that stands for an older one is the newer
+    /// release of its line the classifier named — through an alias, across a
+    /// second release, and only onto a live one. A current model, a twin of
+    /// the same release (the classifier names it nothing), a release whose
+    /// successor is not listed or no longer listed, and a model the lineup
+    /// does not hold have none.
+    #[test]
+    fn a_superseded_release_resolves_to_the_live_release_of_its_line() {
+        let catalog = json!({
+            "models": [
+                {"provider": "claude", "id": "model-a-5", "band": "superseded", "supersededBy": "model-a-5-1"},
+                {"provider": "claude", "id": "model-a-5-1", "band": "top", "rungs": []},
+                {"provider": "claude", "id": "model-a-4", "band": "superseded", "supersededBy": "model-a-5"},
+                {"provider": "claude", "id": "model-twin-green", "band": "superseded"},
+                {"provider": "claude", "id": "model-twin-blue", "band": "rest", "rungs": ["easy"]},
+                {"provider": "claude", "id": "model-b-1", "band": "superseded", "supersededBy": "model-b-2"},
+                {"provider": "claude", "id": "model-c-1", "band": "superseded", "supersededBy": "model-c-2"},
+                {"provider": "claude", "id": "model-c-2", "band": "rest", "rungs": ["easy"], "unlistedSince": 1},
+            ],
+            "aliases": [{"alias": "model-a-old", "canonical": "model-a-5", "provider": "anthropic"}],
+        });
+        let held = Lineup::from_catalog(&catalog, "claude").expect("a lineup");
+        assert_eq!(held.current_release("model-a-5"), Some("model-a-5-1"));
+        assert_eq!(
+            held.current_release("model-a-old"),
+            Some("model-a-5-1"),
+            "through its alias"
+        );
+        assert_eq!(
+            held.current_release("model-a-4"),
+            Some("model-a-5-1"),
+            "two releases on"
+        );
+        for none in [
+            "model-a-5-1",
+            "model-twin-green",
+            "model-twin-blue",
+            "model-b-1",
+            "model-c-1",
+            "model-nobody",
+        ] {
+            assert_eq!(held.current_release(none), None, "{none}");
+        }
     }
 
     #[test]

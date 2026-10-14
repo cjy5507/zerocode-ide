@@ -3010,7 +3010,10 @@ listen("pane:autonomy", (event) => {
   if (typeof term !== "number") return;
   const current = paneSessions.get(term)?.session?.id;
   if (current && session && current !== session) return;
-  if (model) paneModels.set(term, model);
+  if (model) {
+    paneModels.set(term, model);
+    paintStatusModel();
+  }
   rememberPaneAutonomy(term, autonomy, session);
 });
 
@@ -9869,6 +9872,10 @@ function agentRowsSaid(rows) {
         // 바꾼다. 원료를 적는다(사다리를 두 번 오르지 않기 위해).
         `:${panePrompts.get(row.term) ?? ""}:${paneSaid.get(row.term) ?? ""}` +
         `:${paneModels.get(row.term) ?? ""}:${restoredWorkers.get(row.term) ?? ""}` +
+        // And what the row says of that model (t-46882): whether the catalog
+        // superseded it, in the words of the language in use — the verdict
+        // alone would leave the word in the language it was first drawn in.
+        `:${row.sub ? "" : `${agentRowModelWords(row)}|${agentRowModelTip(row)}`}` +
         // A helper's own model — its words and the facts behind them — is
         // what its row says about it; the pane's (above) is not.
         `:${row.sub ? `${agentRowModelWords(row)}|${agentRowModelTip(row)}` : ""}` +
@@ -9906,11 +9913,73 @@ function agentRowPane(row) {
  * (t-15625). Spelled once for the two roads that draw a row: the builder and
  * the re-dress. */
 function agentRowModelWords(row) {
-  return row.sub ? helperModelWords(row.sub, row.agent) : (paneModels.get(row.term) ?? "");
+  return row.sub ? helperModelWords(row.sub, row.agent) : paneModelWords(row.term).text;
 }
 
 function agentRowModelTip(row) {
-  return row.sub ? (helperModelTip(row.sub) || agentRowModelWords(row)) : (paneModels.get(row.term) ?? "");
+  return row.sub ? (helperModelTip(row.sub) || agentRowModelWords(row)) : paneModelWords(row.term).tip;
+}
+
+/* Which releases today's catalog has superseded, by agent, and the release
+ * that stands for each (t-46882) — the backend's word off the one lineup its
+ * restore roads judge by, never a rule of this window's: asked once as the
+ * window boots (`superseded_models`, off the critical path), since a read the
+ * backend finished before this page listened is not said again, and then
+ * said by every read (`summon-lineup:superseded`). Drawing a row asks
+ * nothing. */
+let supersededModels = {};
+
+function adoptSupersededModels(held) {
+  const next = held && typeof held === "object" ? held : {};
+  if (JSON.stringify(next) === JSON.stringify(supersededModels)) return;
+  supersededModels = next;
+  scheduleAgentPaint(["cards"]);
+  paintStatusModel();
+}
+
+listen("summon-lineup:superseded", (event) => adoptSupersededModels(event.payload));
+
+/* The release standing for the model `term`'s pane reports, when the catalog
+ * superseded that one; `null` for a current model, a pane that reported
+ * none, and an agent the catalog said nothing of. */
+function paneModelSupersededBy(term) {
+  const model = paneModels.get(term);
+  const agent = paneAgents.get(term);
+  if (!model || !agent) return null;
+  return supersededModels[agent]?.[model] ?? null;
+}
+
+/* A pane's model as its sidebar row and the status bar word it: the id its
+ * agent reported, and — when the catalog has superseded that release — the
+ * one word that says so, with the release standing for it in the tip. A
+ * ledger pane a restore brought back on such a release is moved to that one
+ * at its next rest (the backend's `superseded` sweep); a person's own is
+ * only told. */
+function paneModelWords(term) {
+  const model = paneModels.get(term) ?? "";
+  const standing = model ? paneModelSupersededBy(term) : null;
+  if (!standing) return { text: model, tip: model };
+  return {
+    text: `${model} · ${t("agent.model.superseded", "대체됨")}`,
+    tip: t("agent.model.supersededTip", "{{model}}은(는) 대체된 릴리스입니다 — 지금은 {{standing}}이(가) 그 자리에 섭니다", {
+      model,
+      standing,
+    }),
+  };
+}
+
+/* The status bar's model segment, for the terminal in front (t-46882): the
+ * superseded word and its tip when that pane's model is a release the
+ * catalog superseded, and nothing otherwise. A lane writes the same segment
+ * from its own session (`focusLane`) and is left to it. */
+function paintStatusModel() {
+  const tab = currentTab();
+  if (tab?.kind !== "term") return;
+  const segment = el("sb-model");
+  const term = activePaneOf(tab);
+  const words = term !== null && paneModelSupersededBy(term) ? paneModelWords(term) : { text: "", tip: "" };
+  writeTextContent(segment, words.text);
+  if ((segment.dataset.tip ?? "") !== words.tip) segment.dataset.tip = words.tip;
 }
 
 /* The account a pane's row wears beside its model (t-46106): the account
@@ -11933,7 +12002,13 @@ listen("hook:agent", (event) => {
   const clearedRestoreBirth = restoredWorkers.delete(term);
   // The model rides raw per event; the stickiness lives here (1-fv). An
   // event without one is an event about something else, not a forgetting.
-  if (event.payload.model) paneModels.set(term, event.payload.model);
+  // Whether it moved is read first: the row and the board wear it, and a
+  // move with no change of state repaints them below (t-46882).
+  const modelMoved = Boolean(event.payload.model) && paneModels.get(term) !== event.payload.model;
+  if (event.payload.model) {
+    paneModels.set(term, event.payload.model);
+    paintStatusModel();
+  }
   if (event.payload.permission_mode) panePermissionModes.set(term, event.payload.permission_mode);
   // The row's word ladder eats both of these (Orca's entry.prompt /
   // entry.lastAssistantMessage) — sticky for the same reason as the model.
@@ -12012,15 +12087,16 @@ listen("hook:agent", (event) => {
   if (owner && owner.id === activeTabId) acknowledgedPanes.set(`term:${term}`, heard);
   if (hookStates.get(term) === state) {
     // The state did not move but the card's lines may have — a second prompt
-    // inside one working stretch, or a turn ending with new words. The open
-    // board and the sidebar's rows both speak those lines now; the tab strip
-    // draws states, not sentences.
+    // inside one working stretch, a turn ending with new words, or a pane at
+    // rest moved to another model (`/model`, t-46882). The open board and the
+    // sidebar's rows both speak those lines now; the tab strip draws states,
+    // not sentences.
     if (confirmsSnapshot) {
       // The retained copy repaired the state before this matching push
       // arrived. Consume that origin once so all state-change consumers hear
       // the real push; later repeated tool events remain on the quiet path.
       scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
-    } else if (clearedRestoreBirth || event.payload.prompt || event.payload.said) {
+    } else if (clearedRestoreBirth || event.payload.prompt || event.payload.said || modelMoved) {
       scheduleAgentPaint(["cards", "board"]);
     }
     // The state stood still, but the model or the mode may have moved.
@@ -13406,6 +13482,7 @@ async function pollHelperPages() {
   if (held.id === PANE_LOG_ID && more.model && tab.worker.term !== undefined && !paneModels.get(tab.worker.term)) {
     paneModels.set(tab.worker.term, more.model);
     if (activeHelperPage() === tab) paintHelperSurface(tab);
+    paintStatusModel();
   }
   const replaced = after !== null && more.next < after;
   if (replaced) {
@@ -16719,7 +16796,7 @@ function reseatWorkerByAnswer(term, parent, worktree, agent, room) {
 }
 
 listen("term:worker", (event) => {
-  const { parent, term, worktree, agent, resumed, helper, seat } = event.payload ?? {};
+  const { parent, term, worktree, agent, resumed, helper, seat, model } = event.payload ?? {};
   if (
     typeof parent !== "number" ||
     typeof term !== "number" ||
@@ -16735,6 +16812,9 @@ listen("term:worker", (event) => {
   if (typeof helper === "string" && helper.length > 0) paneHelpers.set(term, helper);
   restoringWorkers.delete(worktree);
   if (agent) paneAgents.set(term, agent);
+  // The model a restoration's launch named (t-46882): the pane runs it before
+  // its agent says so, and its transcript still names the one it ran before.
+  if (typeof model === "string" && model.length > 0) paneModels.set(term, model);
   if (resumed === "session" || resumed === "fresh") restoredWorkers.set(term, resumed);
   // Seat first. The card may not exist yet, but the tab is the authoritative
   // term→worktree edge that `paintWorktreeAgents` reads when the refresh
@@ -18955,6 +19035,9 @@ async function boot() {
   // The plan segment and the agent registry, off the critical path: the
   // last snapshot paints at once and the scan renews it behind the bar.
   refreshAgents();
+  // And which releases the catalog superseded (t-46882), as the backend's
+  // last lineup read says: once — every later read says it on its own.
+  void invoke("superseded_models").then(adoptSupersededModels).catch(() => {});
   refreshBrowserProfiles();
   refreshClaudeUsage(false);
   refreshCodexUsage(false);

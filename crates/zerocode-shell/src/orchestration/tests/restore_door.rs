@@ -146,8 +146,7 @@ impl Door {
         agent: &str,
         session: &str,
     ) -> Result<ConversationWake, String> {
-        wake_conversation(
-            self,
+        self.wake_with(
             term,
             agent,
             zerocode_core::ProviderSession {
@@ -155,9 +154,18 @@ impl Door {
                 id: session.to_string(),
                 transcript_path: None,
             },
-            24,
-            80,
         )
+    }
+
+    /// The same wake, of the conversation as the door's record names it —
+    /// where its transcript is written included (t-46882).
+    pub(super) fn wake_with(
+        &self,
+        term: u32,
+        agent: &str,
+        session: zerocode_core::ProviderSession,
+    ) -> Result<ConversationWake, String> {
+        wake_conversation(self, term, agent, session, 24, 80)
     }
 
     /// Walk every armed wake through both of its receipt windows, on the
@@ -629,7 +637,11 @@ fn a_sleeper_the_ledger_will_not_seat_starts_nothing_and_comes_back_once_it_can(
 
     // The ledger writes again: the same road brings it back, once.
     let back = door.wake(DOOR, "claude", session).expect("the wake");
-    assert_eq!(back, ConversationWake::opened(DOOR));
+    // And says the model its launch named, for the window to show (t-46882).
+    assert_eq!(
+        back,
+        ConversationWake::opened(DOOR).naming(Some("claude-fable-5-1".to_string()))
+    );
     let started = door.started();
     assert_eq!(started.len(), 1, "{started:?}");
     let command = &started[0].1;
@@ -961,9 +973,10 @@ fn a_continuation_no_road_placed_goes_on_to_the_next_window() {
     host.cut.lock().unwrap().clear();
     host.typed.lock().unwrap().clear();
     let third_door = Door::new(checkout.path());
+    // The wake names the model the worker's row holds (t-46882).
     assert_eq!(
         third_door.wake(IDLE_DOOR, "codex", idle_session),
-        Ok(ConversationWake::opened(IDLE_DOOR))
+        Ok(ConversationWake::opened(IDLE_DOOR).naming(row(&idle).model))
     );
     assert_eq!(
         coordinator_back(&host, "owed-again", OLD_LEADER, THIRD_LEADER),
