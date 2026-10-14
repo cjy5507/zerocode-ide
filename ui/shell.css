@@ -39114,8 +39114,16 @@ details.task-board-section > summary {
 
 .browser-workspace-actions .btn {
   min-height: 30px;
+  min-width: 0;
+  max-width: 100%;
   padding: var(--space-1) var(--space-2);
   font-size: var(--text-xs);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.is-browser-workspace:not(.is-browser-workspace-human) .browser-toolbar .browser-btn {
+  display: none;
 }
 
 .browser-workspace-human:not(:disabled) {

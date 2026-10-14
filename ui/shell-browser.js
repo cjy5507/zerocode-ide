@@ -658,6 +658,7 @@ function paintBrowserWorkspace(host, tab) {
   const managed = tab.agentWorkspace === true;
   const control = browserWorkspaceCanControl(tab);
   host.classList.toggle("is-browser-workspace", managed);
+  host.classList.toggle("is-browser-workspace-human", managed && control);
   host.querySelector(".browser-workspace-bar").hidden = !managed;
   host.querySelector(".browser-address").readOnly = !control;
   host.querySelector(".browser-address").setAttribute("aria-label", managed
