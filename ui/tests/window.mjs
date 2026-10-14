@@ -107,6 +107,7 @@ import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testSidebarRoles } from "./sidebar-roles.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
+import { testLandBatch } from "./land-batch.mjs";
 import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
@@ -339,6 +340,8 @@ suite("sidebar-activity", testSidebarActivity);
 suite("sidebar-roles", testSidebarRoles);
 suite("landing-alerts", testLandingAlerts);
 suite("land-check-letter", testLandCheckLetter);
+// The integration queue's batch card on the desk and its switch in the project settings (t-45315).
+suite("land-batch", testLandBatch);
 /* The conversation view against the Claude Code extension's own webview
  * (t-6323, docs/design/agent-conversation-claude-code-grammar-20260915.md
  * §10): each suite one difference that was closed, read off the laid-out page. */
