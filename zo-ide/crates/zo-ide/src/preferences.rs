@@ -347,7 +347,7 @@ mod tests {
     const START_FIRST: &str = "start-first";
     /// The child reads the catalog file first, then asks.
     const CATALOG_FIRST: &str = "catalog-first";
-    /// The prefix of a child's answer lines on its stdout.
+    /// The marker before a child's answer on its stdout.
     const CATALOG_VIEW_LINE: &str = "catalog-view ";
 
     /// What the catalog answers: where the opus alias resolves, the alias that
@@ -464,9 +464,11 @@ mod tests {
             "the {order} child failed:\n{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        // libtest names the test (`test … ... `) on the line the child's
+        // first answer lands on, so the marker is looked for, not anchored.
         stdout
             .lines()
-            .filter_map(|line| line.strip_prefix(CATALOG_VIEW_LINE))
+            .filter_map(|line| line.split_once(CATALOG_VIEW_LINE).map(|(_, view)| view))
             .map(|line| serde_json::from_str(line).expect("a view line"))
             .collect()
     }
