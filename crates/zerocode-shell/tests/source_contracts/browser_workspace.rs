@@ -51,6 +51,10 @@ fn every_main_page_mutator_checks_revision_and_keeps_its_operation_until_complet
 #[test]
 fn handoff_waits_for_old_requests_then_same_pane_fences_before_granting_control() {
     let command = block_after(CONTROL, "async fn set_browser_workspace_mode(");
+    assert!(
+        command.contains("transition.fence_labels()"),
+        "handoff must confirm every affected page before granting control"
+    );
     let hidden = command.find("hide_browser_pane(").unwrap();
     let drained = command.find("transition.wait()").unwrap();
     let labels = command.find("transition.fence_labels()").unwrap();
@@ -84,12 +88,16 @@ fn both_native_engines_create_managed_views_without_an_interactive_visible_frame
     assert!(wry.contains("if managed { 0.0 } else { height.max(1.0) }"));
     assert!(
         wry.find("place_native_browser(").unwrap()
-            < wry.find("state.browser_panes().insert(").unwrap()
+            < wry.find("initialize_workspace_zoom(").unwrap()
     );
 }
 
 #[test]
 fn visibility_decision_and_bounds_run_together_on_the_native_ui_thread() {
+    assert!(
+        BROWSER.contains("fn place_native_browser("),
+        "native visibility must share the state check and the bounds operation"
+    );
     let wry = block_after(BROWSER, "fn place_native_browser(");
     assert!(wry.contains("pane.with_webview(move |platform|"));
     assert!(wry.contains(".with_placement(&label, revision, |allowed|"));
@@ -130,18 +138,37 @@ fn initial_zoom_uses_the_existing_setting_before_the_native_label_is_published()
             birth.contains(".browser.default_zoom_level") || birth.contains(".default_zoom_level")
         );
         let applied = birth
-            .find("pane.set_zoom(zoom_level_to_scale(level))")
+            .find("initialize_workspace_zoom(&pane, zoom_level_to_scale(level))")
             .unwrap();
-        let published = birth.find("state.browser_panes().insert(").unwrap();
-        assert!(applied < published, "{name}");
+        let returned = birth.rfind("Ok(label)").unwrap();
+        assert!(applied < returned, "{name}");
+        assert!(!birth.contains("browser_panes().insert("), "{name}");
     }
+    let publish = block_after(BROWSER, "fn open_browser_pane(");
+    assert!(
+        publish.find("open_chromium_browser_pane(").unwrap()
+            < publish.find(".publish(&label, revision,").unwrap()
+    );
+    assert!(
+        publish.find("open_webkit_browser_pane(").unwrap()
+            < publish.find(".publish(&label, revision,").unwrap()
+    );
+    let initial = block_after(BROWSER, "fn initialize_workspace_zoom(");
+    assert!(initial.contains("pane.with_webview(move |platform|"));
+    assert!(initial.contains("setPageZoom: scale"));
+    assert!(initial.contains("controller.SetZoomFactor(scale)"));
+    assert!(initial.contains("controller.ZoomFactor(&mut actual)"));
+    assert!(initial.contains("workspace_zoom_unconfirmed"));
     assert!(!BROWSER.contains("initial: Option<bool>"));
 }
 
 #[test]
 fn timed_out_open_is_cancelled_and_managed_viewport_does_not_claim_unconfirmed_success() {
     let dispatch = block_after(RUNTIME, "async fn dispatch_browser_command(");
-    assert!(dispatch.contains("cmd::browser::cancel_workspace_open(app, &state, &label)"));
+    assert!(
+        dispatch.contains("cmd::browser::cancel_workspace_open(")
+            && dispatch.contains("creation.revision")
+    );
     assert!(dispatch.contains("workspace_open_timeout"));
     let guarded = block_after(RUNTIME, "async fn answer_browser_command(");
     let refusal = guarded.find("workspace_viewport_unconfirmed").unwrap();
@@ -155,8 +182,12 @@ fn timed_out_open_is_cancelled_and_managed_viewport_does_not_claim_unconfirmed_s
 
 #[test]
 fn capture_limits_survive_caller_cancellation_until_the_native_callback_completes() {
-    let capture = block_after(SNAPSHOT, "async fn browser_snapshot_png(");
-    assert!(capture.contains(".begin_snapshot(label)"));
+    assert!(
+        SNAPSHOT.contains("async fn browser_snapshot_png_for("),
+        "native capture must keep the shared lease through its callback"
+    );
+    let capture = block_after(SNAPSHOT, "async fn browser_snapshot_png_for(");
+    assert!(capture.contains(".begin_snapshot_for(label, spectator)"));
     assert!(capture.contains("let _frame = frame"));
     assert!(capture.contains("snapshot_webview_png_held(pane, None, Some(Box::new(frame)))"));
     let webkit = include_str!("../../src/artifact_webkit.rs");
@@ -165,4 +196,26 @@ fn capture_limits_survive_caller_cancellation_until_the_native_callback_complete
     let ipc = block_after(SNAPSHOT, "async fn browser_snapshot(");
     assert!(ipc.contains("workspace_snapshot_unsupported"));
     assert!(ipc.contains("AGENT_SCREENSHOT_MAX_BYTES"));
+}
+
+#[test]
+fn agent_close_requires_the_origin_epoch_and_only_confirmed_native_close_can_be_acknowledged() {
+    let ipc = block_after(BROWSER, "fn close_browser_pane(");
+    assert!(ipc.contains("expected_revision: Option<u64>"));
+    assert!(ipc.contains("from_the_main_webview(&webview)?"));
+    assert!(ipc.contains("close_native_browser("));
+    let closing = block_after(BROWSER, "fn close_native_browser(");
+    assert!(closing.contains(".closed_at(label, revision)"));
+    assert!(closing.contains("expected_revision.is_some_and(|expected| expected != revision)"));
+    assert!(
+        closing.find("pane.close()").unwrap()
+            < closing.find(".confirm_closed(label, revision)").unwrap()
+    );
+    let canceled = block_after(BROWSER, "fn cancel_workspace_open(");
+    assert!(canceled.contains(".cancel_unpublished(label, revision,"));
+    assert!(canceled.contains("close_native_browser(app, &main, state, label, Some(revision))"));
+    assert!(canceled.contains("revision: Some(revision)"));
+    let pending = block_after(RUNTIME, "impl Drop for PendingBrowserOpen");
+    assert!(pending.contains("cancel_workspace_open("));
+    assert!(pending.contains("self.revision"));
 }

@@ -8555,9 +8555,15 @@ mod tests {
             steering.contains("browser_panes().contains(label)"),
             "the steer road stopped checking the mint:\n{steering}"
         );
-        let closing = block_after(shell, "fn close_browser_pane(");
+        let close_command = block_after(shell, "fn close_browser_pane(");
         assert!(
-            closing.contains("browser_panes().contains(&label)"),
+            close_command.contains(
+                "close_native_browser(&app, &webview, &state, &label, expected_revision)"
+            )
+        );
+        let closing = block_after(shell, "fn close_native_browser(");
+        assert!(
+            closing.contains("browser_panes().contains(label)"),
             "the close answers to labels nobody minted:\n{closing}"
         );
         // The close reaches the pane through the ENGINE-NEUTRAL handle. A
@@ -8566,7 +8572,7 @@ mod tests {
         // the stage — a closed tab's error page covering the terminal that
         // replaced it (live report 2026-09-09: "터미널창을 덮어버리는 버그").
         assert!(
-            closing.contains("browser_pane_of(&app, &state, &label)")
+            closing.contains("browser_pane_of(app, state, label)")
                 && !closing.contains("get_webview("),
             "the close no longer reaches the pane through the engine-neutral handle:\n{closing}"
         );
@@ -9069,7 +9075,7 @@ mod tests {
         // And the close hides first, closes second, burns the mint LAST — a
         // failure must leave a pane that can still be addressed (finding 6).
         let hid = closing
-            .find("hide_browser_pane(&pane, &webview)")
+            .find("hide_browser_pane(&pane, webview)")
             .or_else(|| closing.find("pane.hide()"))
             .expect("the close no longer hides first");
         let shut = closing
@@ -9674,7 +9680,7 @@ mod tests {
         let guarded = block_after(shell, "async fn answer_browser_command(");
         let admitted = guarded.find(".begin_at(").expect("workspace input guard");
         let dispatched = guarded
-            .find("dispatch_browser_command(app, argv, pane).await")
+            .find("dispatch_browser_command(app, argv, pane, expected_revision).await")
             .expect("dispatch");
         assert!(admitted < dispatched);
         assert!(guarded.contains("operation.finish(answer.exit_code == 0)"));
