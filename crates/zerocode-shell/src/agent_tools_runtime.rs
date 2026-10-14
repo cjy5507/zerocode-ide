@@ -209,9 +209,15 @@ pub(super) struct PromptSettled {
     /// parked behind a working agent (`busy`) and for a program that never
     /// said it was ready (`not_ready`). `None` for a delivery that landed.
     pub(super) why: Option<&'static str>,
-    /// The words that never landed, when they did not — so the person asked
-    /// to paste them has them.
+    /// The words that never landed, when they did not and were the
+    /// person's — so the person asked to paste them has them.
     pub(super) text: Option<String>,
+    /// Whether the words were the person's own (t-52566): their send, a
+    /// prompt they launched an agent with, an automation of theirs. The
+    /// window's own — the mail pointer's advice, a restart's continuation, a
+    /// briefing — are the road that sent them to answer for: no words come
+    /// back, and the window says neither their park nor their timeout.
+    pub(super) theirs: bool,
 }
 
 /// What closing a lane tells the webview.
@@ -847,6 +853,24 @@ impl agent_teams::Host for TeamWindow {
     /// until the pane's `working` hook or the watch's give-up removes it.
     fn wake_words_pending(&self, term: TermId) -> bool {
         self.app.state::<AppState>().pending_nudges().holds(term)
+    }
+
+    /// The panes the pump is typing at, the panes with prompts queued behind
+    /// that, and a fresh zo worker whose briefing waits for its channel
+    /// (t-52566) — each table asked under its own lock and let go.
+    fn prompts_on_their_way(&self) -> std::collections::HashSet<TermId> {
+        let state = self.app.state::<AppState>();
+        let mut terms: std::collections::HashSet<TermId> =
+            state.deliveries().keys().copied().collect();
+        terms.extend(
+            state
+                .prompt_queue()
+                .iter()
+                .filter(|(_, queued)| !queued.is_empty())
+                .map(|(term, _)| *term),
+        );
+        terms.extend(state.zo_worker_deliveries().keys().copied());
+        terms
     }
 
     /// The launch this terminal is holding, straight from the window's own

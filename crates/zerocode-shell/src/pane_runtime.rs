@@ -3377,12 +3377,16 @@ pub(super) fn pump_loop(app: &AppHandle) {
             // here: the entry is dropped a few lines below, and the child goes
             // with it.
             let mut gone: Vec<(TermId, Option<i32>, String)> = Vec::new();
-            let mut settled: Vec<(TermId, DeliveryOutcome, Option<String>)> = Vec::new();
+            // Each with the words it hands back and whether they were the
+            // person's own (t-52566), read before the settle drops it.
+            let mut settled: Vec<(TermId, DeliveryOutcome, (Option<String>, bool))> = Vec::new();
             // A prompt's park, landing or timeout, with its age, for the
-            // black box's line (t-47952). The age can only be read here,
-            // before the settle below drops the delivery; the line is written
-            // once the round has let go of its locks.
-            let mut prompt_notes: Vec<(TermId, prompt_transaction::Turned, Duration)> = Vec::new();
+            // black box's line (t-47952) — and whose words they were, for a
+            // park's notice (t-52566). The age can only be read here, before
+            // the settle below drops the delivery; the line is written once
+            // the round has let go of its locks.
+            let mut prompt_notes: Vec<(TermId, prompt_transaction::Turned, Duration, bool)> =
+                Vec::new();
             // Held across the walk, exactly as the old single pool lock was:
             // a settled delivery and the next queued prompt must swap under
             // one guard, and a death's cleanup must finish before anybody
@@ -3490,13 +3494,15 @@ pub(super) fn pump_loop(app: &AppHandle) {
                             *id,
                             turned,
                             at.saturating_duration_since(delivery.since()),
+                            delivery.hands_back(),
                         ));
                     }
                     if let prompt_transaction::Turned::Settled(outcome) = turned {
                         // The words travel with a failure: the person told
-                        // to paste them has to have them.
+                        // to paste them has to have them — when they were
+                        // the person's (t-52566).
                         let words = prompt_transaction::words_to_hand_back(delivery, outcome);
-                        settled.push((*id, outcome, words));
+                        settled.push((*id, outcome, (words, delivery.hands_back())));
                     }
                 }
                 /* The screen pulls; the pump only looks (design §4.1).
@@ -3877,22 +3883,25 @@ pub(super) fn pump_loop(app: &AppHandle) {
         // 08:5x timeout left no line at all (t-47952). And words parked
         // behind a working agent are said the round they park: they go in
         // when its turn ends, and the window tells the person so.
-        for (term, turned, after) in prompt_notes {
+        for (term, turned, after, theirs) in prompt_notes {
             let doing = prompt_transaction::pane_doing(&state, term);
             if let Some(line) = prompt_transaction::told_line(term, turned, after, doing) {
                 note_window_event(&local_data_root, &line);
             }
             if turned == prompt_transaction::Turned::Parked {
-                let _ = app.emit("term:prompt", prompt_transaction::parked_event(term));
+                let _ = app.emit(
+                    "term:prompt",
+                    prompt_transaction::parked_event(term, theirs),
+                );
             }
         }
         // Said out loud, both ways. A prompt that was never delivered is the
         // case a caller most needs to hear about — the agent is sitting there
         // with nothing to do and no error anywhere to explain why.
-        for (term, outcome, text) in settled {
+        for (term, outcome, (text, theirs)) in settled {
             let _ = app.emit(
                 "term:prompt",
-                prompt_transaction::settled_event(term, outcome, text),
+                prompt_transaction::settled_event(term, outcome, text, theirs),
             );
         }
 
