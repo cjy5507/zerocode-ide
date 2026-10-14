@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.66] — 2026-10-14
+- Computer Use batches keep their window: a wait step inside a batch inherits the batch's app, window and background scope instead of being refused, a conditional wait keeps the scope it actually observed, and the Computer tool's description is about 16% shorter (2281 → 1918 tokens on every request) while keeping every safety rule, including that a one-time code is typed by the window and never handed back (t-53224).
+- The Jev dashboard keeps a long model name inside its card: a local model's 96-character identifier wraps within a narrow window instead of pushing the table off the page (t-53875).
+- A worktree with uncommitted changes says how it stands against main: its sidebar chip adds "overlaps main N" when it touches files main has changed since it forked, and its tooltip names them and how far behind it is (t-52375).
+- A refused press at a quota wall says why in your language instead of a log sentence in English (t-52388).
+- A link zo prints is a real link in the window's terminal: hovering shows its address and ⌘+click opens it; only web and file addresses are accepted (t-52464).
+- zo workers are no longer paused as "repeating themselves" for calls that only look alike, such as two reads of one file at different places (t-52597).
+- Tests no longer read your own zo settings, so a machine with a local judgment model chosen builds and checks the same as any other (t-53864).
+
 ## [1.1.65] — 2026-10-14
 - The judgment model library: settings open on a guided setup that brings a model in from a Hugging Face address or a local folder and connects it, a candidate model is checked before it is applied so a switch only commits to the model that answered, errors say what to do next, and a failed restoration of the previous model is reported as such rather than as a cancellation (t-51504, t-51505, t-51535). D3 lite is shown as not supported.
 - A cancelled model switch no longer reports a runtime failure when the engine it stopped closes at the same moment (t-51504).
