@@ -403,10 +403,11 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
         Some(prepared) => prepared,
         None => return failure(StatusCode::BAD_REQUEST, Error::Protocol),
     };
+    if prepared.body.len() >= MAX_FRAME {
+        return failure(StatusCode::PAYLOAD_TOO_LARGE, Error::TooLarge);
+    }
     drop(request);
     drop(body);
-    // A caller that leaves while it waits drops this wait, and its request
-    // never reaches the runtime.
     let turn = match tokio::time::timeout(
         state.admission.limits.queue_wait,
         state.admission.turn.clone().acquire_owned(),
@@ -418,9 +419,6 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
         Err(_) => return failure(StatusCode::SERVICE_UNAVAILABLE, Error::Busy),
     };
     let bytes = std::mem::take(&mut prepared.body);
-    // The exchange and its deadline run apart from the caller: a caller that
-    // left must not take the deadline with it and leave the runtime answering
-    // nobody while the turn stays held.
     match tokio::spawn(exchange_in_turn(state.clone(), turn, ticket, bytes)).await {
         Ok(Ok(bytes)) => match state.provider.decode(&prepared, bytes.clone()) {
             Ok(_) => (
@@ -450,9 +448,14 @@ async fn exchange_in_turn(
 ) -> Result<Vec<u8>> {
     let _ticket = ticket;
     let engine = state.engine.clone();
+    let admission = state.admission.clone();
     let task = tokio::task::spawn_blocking(move || {
         let _turn = turn;
-        engine.exchange(&bytes)
+        let result = engine.exchange(&bytes);
+        if result.is_err() {
+            admission.close();
+        }
+        result
     });
     let error = match tokio::time::timeout(state.admission.limits.request, task).await {
         Ok(Ok(Ok(bytes))) => return Ok(bytes),
