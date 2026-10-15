@@ -1459,6 +1459,7 @@ mod tests {
             rubric_version: 1,
             outcome: outcome.to_string(),
             candidates: 1,
+            room: None,
             cached: false,
             elapsed_ms,
             retries: 0,
