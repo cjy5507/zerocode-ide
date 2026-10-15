@@ -787,9 +787,9 @@ mod hook_contract {
     use super::super::DeepGateConfig;
     use super::{
         first_words, internal_leg, standing_notices, turn, AsyncApiClient, ContentBlock,
-        ConversationMessage, ConversationRuntime, Declining, DecliningSync, Hermetic,
-        PermissionMode, PermissionPolicy, Session, StaticToolExecutor, TurnSummary, OTHER_WORDS,
-        REFUSAL_STANDING_NOTICE, UNROUTED, WORDS,
+        ConversationMessage, ConversationRuntime, Declining, DecliningSync, Hermetic, MessageRole,
+        PermissionMode, PermissionPolicy, Session, StaticToolExecutor, Trace, TurnSummary,
+        OTHER_WORDS, REFUSAL_STANDING_NOTICE, UNROUTED, WORDS,
     };
     use crate::compact::{compact_session, CompactionConfig, COMPACTION_SYSTEM_PROMPT};
     use crate::config::{ConfigLoader, RuntimeFeatureConfig};
@@ -1504,11 +1504,11 @@ mod hook_contract {
     /// What can happen to the conversation between two turns once a decline
     /// stood that makes it another conversation than the one the notice was
     /// pushed onto, even one that holds as many messages and still ends on the
-    /// same words and notice (Codex, m-57949 and m-57981). `/clear` starts a
-    /// fresh session, as `/new` does. The same-length replacement stands in
-    /// for deep mode's cleaned retry, which drops the exchange that stood and
-    /// pushes the model's answer.
-    fn changes() -> [Change; 6] {
+    /// same words and notice (Codex, m-57949, m-57981 and m-57999). `/clear`
+    /// starts a fresh session, as `/new` does. The same-length replacement
+    /// stands in for deep mode's cleaned retry, which drops the exchange that
+    /// stood and pushes the model's answer.
+    fn changes() -> [Change; 8] {
         [
             ("a compaction", |_, runtime| {
                 let config = CompactionConfig {
@@ -1544,29 +1544,62 @@ mod hook_contract {
                     runtime.session.mark_transcript_dirty();
                 },
             ),
+            ("a same-length removal and reinsertion of the exchange that stood", |_, runtime| {
+                let messages = Arc::make_mut(&mut runtime.session.messages);
+                let asked = messages
+                    .iter()
+                    .rposition(|message| message.role == MessageRole::User)
+                    .expect("the words");
+                let exchange = messages.split_off(asked);
+                messages.extend(exchange);
+                runtime.session.mark_transcript_dirty();
+            }),
+            ("a same-length context edit of an earlier message", |_, runtime| {
+                let mut edited = runtime.session.messages.to_vec();
+                edited[0].blocks = vec![ContentBlock::Text {
+                    text: "(edited)".to_string(),
+                }];
+                runtime
+                    .session
+                    .replace_context_atomic(Arc::new(edited))
+                    .expect("the edit is published");
+            }),
         ]
     }
 
+    /// How a case reads: the loop, the change, and whether a snapshot of the
+    /// conversation was held elsewhere while it was made, so that a change in
+    /// place copied the conversation rather than moved it.
+    fn case(road: Road, change: &str, snapshot_held: bool) -> String {
+        let held = if snapshot_held { ", a snapshot held elsewhere" } else { "" };
+        format!("{road:?}, after {change}{held}")
+    }
+
     /// After each of those changes the same words are asked, on every loop, as
-    /// before.
+    /// before, whether or not a snapshot of the conversation was held
+    /// elsewhere while it was made.
     #[test]
     fn the_same_words_after_the_conversation_changed_are_asked() {
         for road in ROADS {
             for (change, make) in changes() {
-                let env = Hermetic::new(&format!("changed-{road:?}"));
-                let provider = Declining::new(UNROUTED);
-                let hooks = CountingHooks::new(&env);
-                let mut runtime = road.runtime(&env, &provider, &hooks);
-                road.stand(&env, &mut runtime);
-                make(&env, &mut runtime);
+                for snapshot_held in [false, true] {
+                    let env = Hermetic::new(&format!("changed-{road:?}"));
+                    let provider = Declining::new(UNROUTED);
+                    let hooks = CountingHooks::new(&env);
+                    let mut runtime = road.runtime(&env, &provider, &hooks);
+                    road.stand(&env, &mut runtime);
+                    let _snapshot = snapshot_held.then(|| Arc::clone(&runtime.session.messages));
+                    make(&env, &mut runtime);
 
-                let before = provider.sent();
-                let _ = road.run(&mut runtime, WORDS);
-                assert_eq!(
-                    provider.asked(before).as_ref().and_then(first_words),
-                    Some(WORDS),
-                    "{road:?}, after {change}: the same words are asked"
-                );
+                    let before = provider.sent();
+                    let _ = road.run(&mut runtime, WORDS);
+                    assert_eq!(
+                        provider.asked(before).as_ref().and_then(first_words),
+                        Some(WORDS),
+                        "{}: the same words are asked",
+                        case(road, change, snapshot_held)
+                    );
+                }
             }
         }
     }
@@ -1580,18 +1613,55 @@ mod hook_contract {
         let mut taken = Vec::new();
         for road in ROADS {
             for (change, make) in changes() {
-                let env = Hermetic::new(&format!("changed-rule-{road:?}"));
-                let provider = Declining::new(UNROUTED);
-                let hooks = CountingHooks::new(&env);
-                let mut runtime = road.runtime(&env, &provider, &hooks);
-                road.stand(&env, &mut runtime);
-                make(&env, &mut runtime);
-                if runtime.repeats_a_standing_decline(WORDS) {
-                    taken.push(format!("{road:?}: {change}"));
+                for snapshot_held in [false, true] {
+                    let env = Hermetic::new(&format!("changed-rule-{road:?}"));
+                    let provider = Declining::new(UNROUTED);
+                    let hooks = CountingHooks::new(&env);
+                    let mut runtime = road.runtime(&env, &provider, &hooks);
+                    road.stand(&env, &mut runtime);
+                    let _snapshot = snapshot_held.then(|| Arc::clone(&runtime.session.messages));
+                    make(&env, &mut runtime);
+                    if runtime.repeats_a_standing_decline(WORDS) {
+                        taken.push(case(road, change, snapshot_held));
+                    }
                 }
             }
         }
         eprintln!("t-57512 changed conversations taken for a repeat | {taken:?}");
         assert!(taken.is_empty(), "the rule took these for a repeat: {taken:?}");
+    }
+
+    /// The contrast (Codex, m-57999). A change whose write failed is rolled
+    /// back to the conversation it captured, and that is the very one the
+    /// notice was pushed onto, unchanged: the change copied it, because the
+    /// capture held it. So the decline still stands, and the same words send
+    /// nothing and record nothing, on every loop. The rollback is made here as
+    /// the session makes it (capture, change, put the capture back); a real
+    /// write failure would need the test's folder made read-only mid-test.
+    #[test]
+    fn a_change_rolled_back_leaves_the_decline_standing() {
+        for road in ROADS {
+            let env = Hermetic::new(&format!("rolled-back-{road:?}"));
+            let provider = Declining::new(UNROUTED);
+            let hooks = CountingHooks::new(&env);
+            let mut runtime = road.runtime(&env, &provider, &hooks);
+            road.stand(&env, &mut runtime);
+            let captured = Arc::clone(&runtime.session.messages);
+            Arc::make_mut(&mut runtime.session.messages)
+                .push(ConversationMessage::user_text("a change whose write failed"));
+            runtime.session.messages = captured;
+            assert!(
+                runtime.repeats_a_standing_decline(WORDS),
+                "{road:?}: rolled back, the decline still stands"
+            );
+
+            let before = Trace::of(&provider, &runtime.session.messages, &env);
+            road.run(&mut runtime, WORDS).expect("the repeat ends cleanly");
+            assert_eq!(
+                Trace::of(&provider, &runtime.session.messages, &env),
+                before,
+                "{road:?}: the same words sent nothing and recorded nothing"
+            );
+        }
     }
 }
