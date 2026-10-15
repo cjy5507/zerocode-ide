@@ -1722,7 +1722,7 @@ mod destination {
     use super::{
         first_words, standing_notices, turn, ApiClient, ApiRequest, AssistantEvent, AsyncApiClient,
         BlockId, ConversationRuntime, Declining, Future, Hermetic, PermissionMode, PermissionPolicy,
-        Pin, RenderBlock, RuntimeError, StaticToolExecutor, Trace, UNROUTED, WORDS,
+        Pin, RenderBlock, RuntimeError, StaticToolExecutor, Trace, OTHER_WORDS, UNROUTED, WORDS,
     };
     use crate::message_stream::types::WireModelSource;
 
@@ -1913,9 +1913,24 @@ mod destination {
         }
     }
 
-    /// The words each loop asked, out of what [`Loop::again`] answered.
-    fn asked_words(asked: &[(Loop, Option<String>, usize)]) -> Vec<(Loop, Option<&str>)> {
-        asked.iter().map(|(turn_loop, words, _)| (*turn_loop, words.as_deref())).collect()
+    /// The same words on every loop, asked as any turn is once the decline
+    /// stood: as the person wrote them, in as many requests as other words
+    /// make there — main's compaction walk (t-16786) and all — so that a send
+    /// made twice fails as surely as one not made.
+    fn asked_as_any_turn() -> Vec<(Loop, Option<String>, usize)> {
+        LOOPS
+            .into_iter()
+            .map(|turn_loop| {
+                let env = Hermetic::new(&format!("destination-any-turn-{turn_loop:?}"));
+                let provider = Declining::new(UNROUTED);
+                let clients = Clients::new();
+                let mut runtime = turn_loop.runtime(&env, &provider, &clients);
+                turn_loop.stand(&mut runtime, || {});
+                let before = provider.sent();
+                turn_loop.run(&mut runtime, OTHER_WORDS);
+                (turn_loop, Some(WORDS.to_string()), provider.sent() - before)
+            })
+            .collect()
     }
 
     /// The same words on every loop after `change`, once the decline stood:
@@ -1949,11 +1964,7 @@ mod destination {
         let asked = asked_after(|clients, turn_loop| {
             clients.sent_on(turn_loop).move_to(Some(ELSEWHERE));
         });
-        assert_eq!(
-            asked_words(&asked),
-            LOOPS.map(|turn_loop| (turn_loop, Some(WORDS))),
-            "the same words are asked on every loop"
-        );
+        assert_eq!(asked, asked_as_any_turn(), "the same words are asked on every loop");
     }
 
     /// The client a loop sends on cannot say where it sends any more, so
@@ -1962,11 +1973,7 @@ mod destination {
     #[test]
     fn the_same_words_are_asked_once_the_client_their_loop_sends_on_cannot_say_where() {
         let asked = asked_after(|clients, turn_loop| clients.sent_on(turn_loop).move_to(None));
-        assert_eq!(
-            asked_words(&asked),
-            LOOPS.map(|turn_loop| (turn_loop, Some(WORDS))),
-            "the same words are asked on every loop"
-        );
+        assert_eq!(asked, asked_as_any_turn(), "the same words are asked on every loop");
     }
 
     /// The client a loop sends on never could say where it sends, neither for
@@ -1986,11 +1993,7 @@ mod destination {
             asked.push((turn_loop, words, requests));
         }
         println!("asked, and the requests each turn made: {asked:?}");
-        assert_eq!(
-            asked_words(&asked),
-            LOOPS.map(|turn_loop| (turn_loop, Some(WORDS))),
-            "the same words are asked on every loop"
-        );
+        assert_eq!(asked, asked_as_any_turn(), "the same words are asked on every loop");
     }
 
     /// The client a loop sends on moved while the request the decline stood
@@ -2017,11 +2020,7 @@ mod destination {
             asked.push((turn_loop, words, requests));
         }
         println!("asked, and the requests each turn made: {asked:?}");
-        assert_eq!(
-            asked_words(&asked),
-            LOOPS.map(|turn_loop| (turn_loop, Some(WORDS))),
-            "the same words are asked on every loop"
-        );
+        assert_eq!(asked, asked_as_any_turn(), "the same words are asked on every loop");
     }
 
     /// Only the client a loop never sends on moved: the same words would go
