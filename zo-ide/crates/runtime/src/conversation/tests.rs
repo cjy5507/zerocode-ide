@@ -20143,7 +20143,8 @@ fn a_second_continue_after_a_standing_decline_stands_too() {
     let sent = provider.requests().len();
     assert_eq!(sent, 5, "turn one's four requests, and turn two's one");
 
-    let (ended, blocks, took) = declined_turn(&mut runtime, CONTINUE_WORDS);
+    // Other words than turn two's, so one request; refusal_repeat_tests keeps the same words again (t-57512).
+    let (ended, blocks, took) = declined_turn(&mut runtime, "계속");
     ended.expect("turn three surfaces its decline");
     let third = request_kinds(&provider, sent);
     eprintln!(
@@ -20804,7 +20805,8 @@ fn the_sync_loop_surfaces_a_standing_decline_at_once_too() {
     // And the next bare continue stands too (t-16786): turn two folded
     // nothing, and the decline it kept still carries turn one's compaction.
     let sent = requests.lock().expect("requests").len();
-    runtime.run_turn(CONTINUE_WORDS, None).expect("turn three surfaces its decline");
+    // Other words than turn two's, so one request; refusal_repeat_tests keeps the same words again (t-57512).
+    runtime.run_turn("계속", None).expect("turn three surfaces its decline");
     assert_eq!(
         kinds(sent),
         vec![false],

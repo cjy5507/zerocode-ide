@@ -629,6 +629,18 @@ pub const REFUSAL_STANDING_NOTICE: &str =
      same request again — a bare \"continue\" — will be declined again. What helps: narrow or \
      rephrase the request, /model to another provider, or a fresh session (/new).";
 
+/// What a turn says when it sends nothing (t-57512): its words are, to the
+/// byte, the ones a decline stood on — the turn that recorded
+/// [`REFUSAL_STANDING_NOTICE`] asked once with them — and the conversation has
+/// not changed materially since, so the same request would meet the same
+/// decline. Shown on the screen only: the standing notice stays the one record
+/// of it, and what helps is that notice's own sentence.
+pub const REFUSAL_STANDING_REPEAT_NOTICE: &str =
+    "The safety classifier's decline still stands. These are the words it already declined, \
+     and the conversation has not changed materially since, so this turn sent nothing. What \
+     helps: narrow or rephrase the request, /model to another provider, or a fresh session \
+     (/new).";
+
 /// What stands beside a surfaced decline while pictures from earlier in the
 /// conversation are still in it (t-10956): each rides every request, the
 /// declined ones too — the declines of 2026-09-27 carried a screenshot from
@@ -1109,5 +1121,34 @@ mod tests {
         // send the person to a `/compact` the ladder already made for them.
         assert!(!REFUSAL_STANDING_NOTICE.contains("/compact"));
         assert_ne!(REFUSAL_STANDING_NOTICE, REFUSAL_COMPACTED_RETRY_DECLINED);
+    }
+
+    /// The line of a turn that sent nothing because its words repeat the ones a
+    /// decline stood on (t-57512): it says the decline stands and that nothing
+    /// went out, and ends on the standing notice's own "What helps" sentence,
+    /// so the two cannot come to say different things.
+    #[test]
+    fn a_turn_that_repeats_a_standing_decline_says_it_sent_nothing_and_what_helps() {
+        use super::{REFUSAL_STANDING_NOTICE, REFUSAL_STANDING_REPEAT_NOTICE};
+        let what_helps = REFUSAL_STANDING_NOTICE
+            .find("What helps:")
+            .map(|at| &REFUSAL_STANDING_NOTICE[at..])
+            .expect("the standing notice says what helps");
+        assert!(
+            REFUSAL_STANDING_REPEAT_NOTICE.ends_with(what_helps),
+            "{what_helps:?} ends: {REFUSAL_STANDING_REPEAT_NOTICE}"
+        );
+        for said in [
+            "decline still stands",
+            "the words it already declined",
+            "has not changed materially",
+            "this turn sent nothing",
+        ] {
+            assert!(
+                REFUSAL_STANDING_REPEAT_NOTICE.contains(said),
+                "{said:?} is in: {REFUSAL_STANDING_REPEAT_NOTICE}"
+            );
+        }
+        assert!(!REFUSAL_STANDING_REPEAT_NOTICE.contains("asked once"), "this turn asked nothing");
     }
 }

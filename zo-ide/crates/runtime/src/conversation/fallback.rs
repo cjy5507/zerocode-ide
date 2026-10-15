@@ -1067,6 +1067,51 @@ where
         (unchanged && declined.category == refusal_category_key(category)).then_some(declined)
     }
 
+    /// Whether a turn of `words` would only repeat the request a decline stood
+    /// on (t-57512), so that it has nothing to ask: the latest public turn
+    /// surfaced a decline the session kept, that decline still stands for this
+    /// conversation ([`Self::standing_decline`]), the last message is the
+    /// notice of a decline that stood — that turn asked once — and `words` are,
+    /// to the byte, the words that turn asked with, and nothing else; and the
+    /// request would go out on the model the person chose, as that one did,
+    /// with nothing armed to move it elsewhere when the turn starts. Other
+    /// words, another model, provider or session, and a routed category are
+    /// not this case; nor is a turn that brings pictures, which its caller
+    /// rules out.
+    pub(super) fn repeats_a_standing_decline(&self, words: &str) -> bool {
+        fn text_of(message: &ConversationMessage, role: crate::session::MessageRole) -> Option<&str> {
+            match message.blocks.as_slice() {
+                [ContentBlock::Text { text }] if message.role == role => Some(text.as_str()),
+                _ => None,
+            }
+        }
+        let Some(declined) = self.surfaced_decline.as_ref().filter(|declined| declined.renewed) else {
+            return false;
+        };
+        if self.standing_decline(declined.category.as_deref()).is_none() {
+            return false;
+        }
+        let on_the_chosen_model = matches!(self.wire_model(), Some((_, WireModelSource::Session)))
+            && self.quota_dry_until.is_none()
+            && self.refusal_dry_until.is_none();
+        if !on_the_chosen_model {
+            return false;
+        }
+        let mut said = self
+            .session
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| message.role != crate::session::MessageRole::System);
+        said.next()
+            .and_then(|notice| text_of(notice, crate::session::MessageRole::Assistant))
+            == Some(core_types::retry_signal::REFUSAL_STANDING_NOTICE)
+            && said
+                .next()
+                .and_then(|asked| text_of(asked, crate::session::MessageRole::User))
+                == Some(words)
+    }
+
     /// Fold this refused public turn into the consecutive-refusal streak and,
     /// on the threshold, arm the session-scoped cooldown that pre-arms the next
     /// turns onto the fallback. Shared by the same-provider override and the
