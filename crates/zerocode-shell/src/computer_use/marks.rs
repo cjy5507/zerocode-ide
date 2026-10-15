@@ -54,6 +54,8 @@ pub(super) struct MarkTable {
     omitted: usize,
     frame: ShotFrame,
     made: Instant,
+    /// The stop the look began under (`guard::stop_generation`).
+    epoch: u64,
 }
 
 impl MarkTable {
@@ -122,13 +124,15 @@ pub(super) fn desktop_windows(
         .unwrap_or_default())
 }
 
-/// The picture a look was taken of, and where.
+/// The picture a look was taken of, and where; and the stop the look began
+/// under.
 pub(super) struct Picture<'a> {
     pub clean: &'a RgbaImage,
     pub fingerprint: u64,
     pub placed: ShotFrame,
     pub place: &'a str,
     pub text: Option<&'a Value>,
+    pub epoch: u64,
 }
 
 struct Layout<'a> {
@@ -136,6 +140,7 @@ struct Layout<'a> {
     fingerprint: Option<u64>,
     placed: ShotFrame,
     place: &'a str,
+    epoch: u64,
 }
 
 impl Picture<'_> {
@@ -145,6 +150,7 @@ impl Picture<'_> {
             fingerprint: Some(self.fingerprint),
             placed: self.placed,
             place: self.place,
+            epoch: self.epoch,
         }
     }
 }
@@ -152,6 +158,7 @@ impl Picture<'_> {
 pub(super) fn structured_marks(
     frame_answer: &Value,
     place: &str,
+    epoch: u64,
 ) -> Result<Option<Marked>, ComputerUseError> {
     let snapshot = frame_answer.get("snapshot").ok_or_else(|| {
         ComputerUseError::new(
@@ -178,6 +185,7 @@ pub(super) fn structured_marks(
         fingerprint: None,
         placed,
         place,
+        epoch,
     };
     let table = table(snapshot, window, &layout, Vec::new(), None)?;
     if !table.has_readable_controls() {
@@ -364,6 +372,7 @@ fn table(
         window_frame: window,
         frame: picture.placed,
         made: Instant::now(),
+        epoch: picture.epoch,
     })
 }
 
@@ -648,6 +657,15 @@ pub struct PinnedClick {
 /// Turn `click --mark N --look L` into the element click on the look's
 /// window, pinned by what the look saw.
 pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
+    pinned_click_at(params, super::guard::stop_generation())
+}
+
+/// [`pinned_click`] under the stop `epoch` stands at now: the only door a
+/// mark is pressed through.
+pub(super) fn pinned_click_at(
+    params: &Value,
+    _epoch: u64,
+) -> Result<PinnedClick, ComputerUseError> {
     let look = params
         .get("look")
         .and_then(Value::as_str)

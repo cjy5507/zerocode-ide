@@ -78,11 +78,16 @@ pub fn stop(reason: &str) -> Value {
     *STOPPED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.to_string());
+    let signalled = stop_helper();
+    serde_json::json!({ "stopped": true, "reason": reason, "helperSignalled": signalled })
+}
+
+/// Tell the remembered helper to stop, by signal; false when there is none.
+pub fn stop_helper() -> bool {
     let pid = *HELPER_PID
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let signalled = pid.is_some_and(signal_helper);
-    serde_json::json!({ "stopped": true, "reason": reason, "helperSignalled": signalled })
+    pid.is_some_and(signal_helper)
 }
 
 #[cfg(unix)]
@@ -137,9 +142,375 @@ pub fn lift() {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
+/// Who asks to lift the stop: the person, from the window's band, naming the
+/// revision of the stop the band showed; or an agent's `resume`, which never
+/// lifts a stop the person made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lifter {
+    Person { revision: Option<u64> },
+    Agent,
+}
+
+/// What one `resume` came to: whether the stop was lifted, the stop standing
+/// after it, and what the helper answered when it was asked.
+#[derive(Debug)]
+pub struct Resumed {
+    pub lifted: bool,
+    pub stopped: Option<String>,
+    pub helper: Option<Result<Value, ComputerUseError>>,
+}
+
+impl Resumed {
+    /// The window's answer to its band.
+    #[must_use]
+    pub fn answer(&self) -> Value {
+        let helper = match &self.helper {
+            Some(Ok(said)) => said.clone(),
+            Some(Err(error)) => serde_json::json!({ "error": error.code }),
+            None => Value::Null,
+        };
+        serde_json::json!({ "resumed": self.lifted, "helper": helper })
+    }
+
+    /// An agent's `resume`, answered: what the helper said once the stop is
+    /// lifted, else the helper's own failure or the stop that still stands.
+    pub fn agent_answer(self) -> Result<Value, ComputerUseError> {
+        match self.helper {
+            Some(Err(error)) => Err(error),
+            helper if self.lifted => Ok(serde_json::json!({
+                "resumed": true,
+                "helper": helper.and_then(Result::ok).unwrap_or(Value::Null),
+            })),
+            _ => Err(refusal(self.stopped.as_deref().unwrap_or_default())),
+        }
+    }
+}
+
+/// The helper's own `resume`, when a session stands.
+pub fn helper_resume(reset: bool) -> Result<Value, ComputerUseError> {
+    if super::session_stands() {
+        super::call("resume", serde_json::json!({ "resetBudget": reset }))
+    } else {
+        Ok(Value::String("idle".into()))
+    }
+}
+
+/// One resume, the window's and an agent's alike: the stop is lifted and the
+/// helper resumed; an agent's is refused while the person's stop stands.
+pub fn resume(
+    lifter: Lifter,
+    resume_helper: impl FnOnce() -> Result<Value, ComputerUseError>,
+    _stop_helper_again: impl FnOnce() -> bool,
+) -> Resumed {
+    if lifter == Lifter::Agent
+        && let Some(reason) =
+            stopped_reason().filter(|reason| zerocode_core::computer_use::persons_stop(reason))
+    {
+        return Resumed {
+            lifted: false,
+            stopped: Some(reason),
+            helper: None,
+        };
+    }
+    lift();
+    let helper = resume_helper();
+    Resumed {
+        lifted: true,
+        stopped: stopped_reason(),
+        helper: Some(helper),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zerocode_core::computer_use::{
+        STOP_REASON_HOTKEY, STOP_REASON_REQUEST, STOP_REASON_WINDOW,
+    };
+
+    fn one_hand() -> std::sync::MutexGuard<'static, ()> {
+        crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn revision() -> Option<u64> {
+        activity_report(None)["revision"].as_u64()
+    }
+
+    #[test]
+    fn a_resume_naming_an_older_stop_neither_lifts_the_newer_one_nor_asks_the_helper() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_WINDOW);
+        let seen = revision();
+        stop(STOP_REASON_HOTKEY);
+        let newer = revision();
+        let mut asked = 0;
+        let resumed = resume(
+            Lifter::Person { revision: seen },
+            || {
+                asked += 1;
+                Ok(Value::from("idle"))
+            },
+            || true,
+        );
+        let standing = stopped_reason();
+        let after = revision();
+        lift();
+        assert!(
+            seen.is_some() && newer > seen,
+            "every stop moves the revision: {seen:?} → {newer:?}"
+        );
+        assert_eq!(asked, 0, "a stale resume never reaches the helper");
+        assert!(!resumed.lifted, "{resumed:?}");
+        assert_eq!(standing.as_deref(), Some(STOP_REASON_HOTKEY));
+        assert_eq!(after, newer, "nothing moved");
+    }
+
+    #[test]
+    fn a_resume_without_a_revision_lifts_nothing_and_asks_no_helper() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_WINDOW);
+        let mut asked = 0;
+        let resumed = resume(
+            Lifter::Person { revision: None },
+            || {
+                asked += 1;
+                Ok(Value::from("idle"))
+            },
+            || true,
+        );
+        let standing = stopped_reason();
+        lift();
+        assert_eq!(asked, 0, "no revision is no authority");
+        assert!(!resumed.lifted, "{resumed:?}");
+        assert_eq!(standing.as_deref(), Some(STOP_REASON_WINDOW));
+    }
+
+    #[test]
+    fn a_helper_that_fails_to_resume_leaves_the_persons_stop_standing() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_WINDOW);
+        let seen = revision();
+        let resumed = resume(
+            Lifter::Person { revision: seen },
+            || {
+                Err(ComputerUseError::new(
+                    "helper_unreachable",
+                    "the helper did not answer",
+                ))
+            },
+            || true,
+        );
+        let answer = resumed.answer();
+        let standing = stopped_reason();
+        let after = revision();
+        lift();
+        assert!(seen.is_some(), "the stop carries a revision");
+        assert_eq!(answer["resumed"], false, "{answer}");
+        assert_eq!(standing.as_deref(), Some(STOP_REASON_WINDOW));
+        assert_eq!(after, seen, "nothing moved");
+    }
+
+    #[test]
+    fn a_stop_made_while_the_helper_resumes_wins_and_the_helper_is_stopped_again() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_WINDOW);
+        let seen = revision();
+        let mut stopped_again = 0;
+        let resumed = resume(
+            Lifter::Person { revision: seen },
+            || {
+                stop(STOP_REASON_HOTKEY);
+                Ok(Value::from("resumed"))
+            },
+            || {
+                stopped_again += 1;
+                true
+            },
+        );
+        let answer = resumed.answer();
+        let standing = stopped_reason();
+        lift();
+        assert_eq!(answer["resumed"], false, "{answer}");
+        assert_eq!(
+            stopped_again, 1,
+            "the helper the late resume woke is stopped again"
+        );
+        assert_eq!(standing.as_deref(), Some(STOP_REASON_HOTKEY));
+    }
+
+    #[test]
+    fn an_agents_resume_never_lifts_the_persons_stop_nor_asks_the_helper() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_WINDOW);
+        let mut asked = 0;
+        let resumed = resume(
+            Lifter::Agent,
+            || {
+                asked += 1;
+                Ok(Value::from("idle"))
+            },
+            || true,
+        );
+        let standing = stopped_reason();
+        let said = resumed.agent_answer();
+        lift();
+        assert_eq!(asked, 0, "the person's stop is checked before the helper");
+        assert_eq!(standing.as_deref(), Some(STOP_REASON_WINDOW));
+        assert!(
+            said.as_ref()
+                .is_err_and(|error| error.message.contains("only they lift it")),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn an_agents_resume_cannot_outlast_a_persons_stop_made_while_the_helper_resumes() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_REQUEST);
+        let mut stopped_again = 0;
+        let resumed = resume(
+            Lifter::Agent,
+            || {
+                stop(STOP_REASON_WINDOW);
+                Ok(Value::from("resumed"))
+            },
+            || {
+                stopped_again += 1;
+                true
+            },
+        );
+        let standing = stopped_reason();
+        let said = resumed.agent_answer();
+        lift();
+        assert_eq!(standing.as_deref(), Some(STOP_REASON_WINDOW));
+        assert_eq!(
+            stopped_again, 1,
+            "the helper the late resume woke is stopped again"
+        );
+        assert!(
+            said.as_ref()
+                .is_err_and(|error| error.message.contains("only they lift it")),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn a_resume_naming_the_standing_stop_with_a_willing_helper_lifts_it() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_WINDOW);
+        let seen = revision();
+        let mut asked = 0;
+        let mut stopped_again = 0;
+        let resumed = resume(
+            Lifter::Person { revision: seen },
+            || {
+                asked += 1;
+                Ok(Value::from("resumed"))
+            },
+            || {
+                stopped_again += 1;
+                true
+            },
+        );
+        let standing = stopped_reason();
+        let after = revision();
+        let answer = resumed.answer();
+        lift();
+        assert!(resumed.lifted, "{resumed:?}");
+        assert_eq!(asked, 1);
+        assert_eq!(stopped_again, 0);
+        assert_eq!(standing, None);
+        assert!(
+            seen.is_some() && after > seen,
+            "a lift moves the revision: {seen:?} → {after:?}"
+        );
+        assert_eq!(answer["resumed"], true, "{answer}");
+        assert_eq!(
+            answer["revision"].as_u64(),
+            after,
+            "the answer names the revision it left: {answer}"
+        );
+        assert!(answer["stopped"].is_null(), "{answer}");
+    }
+
+    #[test]
+    fn a_stop_answers_the_revision_its_report_carries() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        let answer = stop(STOP_REASON_WINDOW);
+        let reported = revision();
+        lift();
+        assert!(reported.is_some(), "the report carries a revision");
+        assert_eq!(answer["revision"].as_u64(), reported, "{answer}");
+    }
+
+    /// A report is one moment: its stop and its revision are read together,
+    /// so a stop is never shown with the revision of the lift beside it.
+    #[test]
+    fn the_report_never_pairs_a_stop_with_another_moments_revision() {
+        const TURNS: usize = 2_000;
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        let start = revision();
+        let reader = std::thread::spawn(|| {
+            (0..TURNS)
+                .map(|_| {
+                    let report = activity_report(None);
+                    (report["stopped"].is_string(), report["revision"].as_u64())
+                })
+                .collect::<Vec<_>>()
+        });
+        for _ in 0..TURNS {
+            stop(STOP_REASON_WINDOW);
+            lift();
+        }
+        let seen = reader.join().expect("the reader finishes");
+        lift();
+        let start = start.expect("the report carries a revision");
+        for (stopped, revision) in seen {
+            let moved = revision.expect("every report carries a revision") - start;
+            assert_eq!(
+                stopped,
+                moved % 2 == 1,
+                "stopped {stopped} beside revision {revision:?}, counted from {start}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_agents_resume_lifts_the_stop_an_agent_asked_for() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_REQUEST);
+        let resumed = resume(Lifter::Agent, || Ok(Value::from("idle")), || true);
+        let standing = stopped_reason();
+        let said = resumed.agent_answer();
+        lift();
+        assert_eq!(standing, None);
+        assert_eq!(
+            said.ok().map(|answer| answer["resumed"].clone()),
+            Some(Value::Bool(true))
+        );
+    }
 
     #[test]
     fn a_stop_is_a_reason_until_lifted_and_a_missing_helper_is_said_not_raised() {

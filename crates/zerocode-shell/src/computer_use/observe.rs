@@ -131,6 +131,24 @@ impl<T> Kept<T> {
 
 static LAST: Mutex<Kept<LastFrame>> = Mutex::new(Kept::new(OBSERVE_FRAMES_MAX));
 
+/// The work screen panel's door (t-59372): the newest look the pane `pane`
+/// took under the assignment `scope` — its number, when, and its picture
+/// while one is kept.
+pub(crate) fn owned_look(_pane: &str, _scope: &str) -> Option<Value> {
+    None
+}
+
+/// What tells the window a pane took a look: the pane, the assignment it
+/// held and the look's number — never the picture.
+pub(crate) type LookNotice = dyn Fn(&str, &str, u64) + Send + Sync;
+
+static NOTICE: std::sync::OnceLock<Box<LookNotice>> = std::sync::OnceLock::new();
+
+/// Install the window's notice, once.
+pub(crate) fn install_notice(notice: Box<LookNotice>) {
+    let _ = NOTICE.set(notice);
+}
+
 /// Which place a look is of: an app's window (by id, index or the front one)
 /// or a desktop display and region — the key its last frame is kept under.
 fn frame_key(params: &Map<String, Value>) -> String {
@@ -487,6 +505,7 @@ fn structured_look(
     params: &Map<String, Value>,
     mut ask: Map<String, Value>,
     call: &mut dyn FnMut(&str, Value) -> Result<Value, ComputerUseError>,
+    epoch: u64,
 ) -> Result<Option<Value>, ComputerUseError> {
     let began = std::time::Instant::now();
     ask.insert("noScreenshot".into(), true.into());
@@ -496,7 +515,7 @@ fn structured_look(
     let frame = call("getAppState", Value::Object(ask))?;
     let key = resolved_key(params, &frame).unwrap_or_else(|| frame_key(params));
     let marked = if params.get("marks") == Some(&Value::Bool(true)) {
-        let Some(marked) = super::marks::structured_marks(&frame, &key)? else {
+        let Some(marked) = super::marks::structured_marks(&frame, &key, epoch)? else {
             return Ok(None);
         };
         Some(marked.answer)
@@ -550,6 +569,9 @@ fn look(
     wait: Option<&mut dyn FnMut(std::time::Duration)>,
 ) -> Result<Value, ComputerUseError> {
     let began = std::time::Instant::now();
+    // The stop the look began under, read before the helper is asked
+    // anything: its marks are pressed only while no stop came after it.
+    let epoch = super::guard::stop_generation();
     let app = params.contains_key("app");
     let marks = params.get("marks").and_then(Value::as_bool) == Some(true);
     let diffing = params.get("diff").and_then(Value::as_bool) == Some(true);
@@ -572,7 +594,7 @@ fn look(
         && !diffing
         && params.get("ocr") != Some(&Value::Bool(true))
         && params.get("settle") != Some(&Value::Bool(true))
-        && let Some(answer) = structured_look(params, ask.clone(), call)?
+        && let Some(answer) = structured_look(params, ask.clone(), call, epoch)?
     {
         return Ok(answer);
     }
@@ -790,6 +812,7 @@ fn look(
                     placed,
                     place: &key,
                     text: text.as_ref(),
+                    epoch,
                 };
                 let marked = super::marks::mark_look(params, &frame, &picture, before, call);
                 if let Some(png) = &marked.png {
@@ -829,6 +852,9 @@ fn note_line(line: &Value) {
 
 #[cfg(test)]
 mod structured_tests;
+
+#[cfg(test)]
+mod owned_tests;
 
 #[cfg(test)]
 mod tests {

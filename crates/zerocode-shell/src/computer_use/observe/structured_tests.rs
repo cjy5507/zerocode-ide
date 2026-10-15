@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 use zerocode_core::computer_use_protocol::marks::ELEMENTS_KEY;
 
-fn frame() -> Value {
+pub(super) fn frame() -> Value {
     json!({
         "snapshot": {
             "id": "fixture",
@@ -27,7 +27,7 @@ fn params(viewer: &str) -> Map<String, Value> {
         .clone()
 }
 
-fn with_picture(mut answer: Value) -> Value {
+pub(super) fn with_picture(mut answer: Value) -> Value {
     use base64::Engine as _;
     let image = RgbaImage::new(400, 300, vec![255; 400 * 300 * 4]).unwrap();
     answer["screenshot"] = json!({
@@ -39,6 +39,11 @@ fn with_picture(mut answer: Value) -> Value {
 
 #[test]
 fn structured_marks_need_one_tree_and_no_pixels() {
+    // The look reads the window's stop count and the press reads it again:
+    // no test stops the operator between them.
+    let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut calls = Vec::new();
     let answer = observe_with(
         &params("structured-one"),
@@ -79,7 +84,7 @@ fn structured_marks_revoke_the_pixel_diff_baseline() {
             before_act: None,
         },
     );
-    let answer = structured_look(&request, Map::new(), &mut |_, _| Ok(frame()))
+    let answer = structured_look(&request, Map::new(), &mut |_, _| Ok(frame()), 0)
         .unwrap()
         .unwrap();
     assert!(answer["changed"].is_null());
@@ -173,7 +178,7 @@ fn inaccessible_or_invalid_geometry_cannot_create_a_structured_pin() {
         answer["snapshot"]["window"]["width"] = bounds.0.into();
         answer["snapshot"]["window"]["height"] = bounds.1.into();
         assert!(
-            super::super::marks::structured_marks(&answer, "invalid")
+            super::super::marks::structured_marks(&answer, "invalid", 0)
                 .unwrap()
                 .is_none()
         );
@@ -183,7 +188,7 @@ fn inaccessible_or_invalid_geometry_cannot_create_a_structured_pin() {
         .as_object_mut()
         .unwrap()
         .remove(ELEMENTS_KEY);
-    assert!(super::super::marks::structured_marks(&answer, "missing").is_err());
+    assert!(super::super::marks::structured_marks(&answer, "missing", 0).is_err());
 }
 
 #[test]
@@ -191,14 +196,14 @@ fn unnamed_controls_alone_do_not_claim_to_describe_app_content() {
     let mut answer = frame();
     answer["snapshot"][ELEMENTS_KEY][0]["name"] = Value::Null;
     assert!(
-        super::super::marks::structured_marks(&answer, "unlabelled")
+        super::super::marks::structured_marks(&answer, "unlabelled", 0)
             .unwrap()
             .is_none()
     );
     answer["snapshot"][ELEMENTS_KEY][0]["role"] = "AXTextField".into();
     answer["snapshot"][ELEMENTS_KEY][0]["plainInput"] = "".into();
     assert!(
-        super::super::marks::structured_marks(&answer, "field")
+        super::super::marks::structured_marks(&answer, "field", 0)
             .unwrap()
             .is_some()
     );
@@ -209,18 +214,55 @@ fn structured_fields_follow_the_latest_value_not_cached_pixels() {
     let mut answer = frame();
     answer["snapshot"][ELEMENTS_KEY][0]["role"] = "AXTextField".into();
     answer["snapshot"][ELEMENTS_KEY][0]["plainInput"] = "".into();
-    let first = super::super::marks::structured_marks(&answer, "field")
+    let first = super::super::marks::structured_marks(&answer, "field", 0)
         .unwrap()
         .unwrap();
     answer["snapshot"][ELEMENTS_KEY][0]["plainInput"] = "changed".into();
-    let next = super::super::marks::structured_marks(&answer, "field")
+    let next = super::super::marks::structured_marks(&answer, "field", 0)
         .unwrap()
         .unwrap();
     assert_ne!(first.answer["lookId"], next.answer["lookId"]);
     assert_eq!(next.answer["fields"][0]["value"], "changed");
-    let pin = super::super::marks::pinned_click(&json!({
-        "mark": 1, "look": next.answer["lookId"], "value": "replacement"
-    }))
+    let pin = super::super::marks::pinned_click_at(
+        &json!({
+            "mark": 1, "look": next.answer["lookId"], "value": "replacement"
+        }),
+        0,
+    )
     .unwrap();
     assert_eq!(pin.params["expectedPlainValue"], "changed");
+}
+
+/// A stop that lands while a look is being taken leaves the look under the
+/// stop it began with (t-59372): its marks are not pressed after that stop,
+/// though the picture came back after it.
+#[test]
+fn a_look_a_stop_lands_in_is_never_pressed_after_the_stop() {
+    use zerocode_core::computer_use::STOP_REASON_WINDOW;
+    let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    super::super::guard::remember_helper(None);
+    super::super::guard::lift();
+    let answer = observe_with(
+        &params("structured-stopped-mid-look"),
+        &super::super::eye::Memory::new(),
+        &mut |_, _| {
+            super::super::guard::stop(STOP_REASON_WINDOW);
+            Ok(frame())
+        },
+        &mut |_| panic!("structured observation does not sleep"),
+    )
+    .unwrap();
+    let pressed = super::super::marks::pinned_click(&json!({
+        "mark": 1, "look": answer["marks"]["lookId"]
+    }));
+    super::super::guard::lift();
+    assert!(answer["marks"]["lookId"].is_string(), "{answer}");
+    assert!(
+        pressed
+            .as_ref()
+            .is_err_and(|refused| refused.message.contains("stopped")),
+        "{pressed:?}"
+    );
 }

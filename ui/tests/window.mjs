@@ -55290,11 +55290,11 @@ const computerHand = await page.evaluate(async () => {
   const seen = {};
   window.__ANSWER__.computer_stop = () => {
     window.__COMPUTER_STOPPED__ = true;
-    return { stopped: true };
+    return { stopped: true, reason: "window", revision: 2, helperSignalled: false };
   };
   window.__ANSWER__.computer_resume = (args) => {
     window.__COMPUTER_RESUMED__ = args;
-    return { resumed: true };
+    return { resumed: true, revision: 3, stopped: null, helper: "idle" };
   };
   window.__ANSWER__.computer_confirm_answer = (args) => {
     window.__COMPUTER_ANSWER__ = args;
@@ -55308,14 +55308,14 @@ const computerHand = await page.evaluate(async () => {
   const fire = (name, payload) => {
     for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
   };
-  fire("computer:activity", { active: true, verb: "mouse-click", actions: 3, stopped: null, hotkey: "control+option+escape" });
+  fire("computer:activity", { revision: 1, active: true, verb: "mouse-click", actions: 3, stopped: null, hotkey: "control+option+escape" });
   await settle();
   seen.bandShown = !el("computer-band").hidden;
   seen.count = el("computer-band-count").textContent;
   el("computer-band-stop").click();
   await settle();
   seen.stopAsked = window.__COMPUTER_STOPPED__ === true;
-  fire("computer:activity", { active: false, verb: "mouse-click", actions: 3, stopped: "window", hotkey: "control+option+escape" });
+  fire("computer:activity", { revision: 2, active: false, verb: "mouse-click", actions: 3, stopped: "window", hotkey: "control+option+escape" });
   await settle();
   seen.resumeShown = !el("computer-band-resume").hidden && el("computer-band-stop").hidden;
   const savedLocale = locale;

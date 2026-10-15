@@ -1,10 +1,13 @@
 import { openWindowTestPage } from "./window-boot.mjs";
 
 const STOP_HOTKEY = "control+option+escape";
-const SUBJECT = Object.freeze({ run: "run-a", viewer: "viewer-a", target: "target-a" });
-const OTHER_VIEWER = "viewer-b";
-const OTHER_TARGET = "target-b";
-const NEXT_RUN = "run-b";
+/* A pane (`term`) and the assignment it held when it looked (`scope`): what the
+ * window's own door (`computer_progress_frame`) answers for, and nothing a
+ * model names. */
+const SUBJECT = Object.freeze({ term: 7, scope: "scope-a" });
+const OTHER_TERM = 8;
+const OTHER_SCOPE = "scope-b";
+const NEXT_SCOPE = "scope-next";
 const BURST_FRAMES = 8;
 const OPEN_CLOSE_CYCLES = 5;
 
@@ -110,11 +113,15 @@ const installComputerHands = ({ hotkey }) => {
     }),
     readBand: () => {
       const band = document.getElementById("computer-band");
+      const note = document.getElementById("computer-band-note");
+      const view = document.getElementById("computer-band-view");
       return {
         shown: !band.hidden,
         showsStop: band.classList.contains("is-stopped"),
         offersStop: !document.getElementById("computer-band-stop").hidden,
         offersResume: !document.getElementById("computer-band-resume").hidden,
+        offersView: view !== null && !view.hidden,
+        note: note && !note.hidden ? note.textContent : null,
       };
     },
     pressBand: (button) => document.getElementById(`computer-band-${button}`).click(),
@@ -164,15 +171,22 @@ const installComputerHands = ({ hotkey }) => {
         delete window.__ANSWER__[command];
       }
     },
-    framePicture: (revision) => {
+    framePicture: (seq) => {
       const canvas = document.createElement("canvas");
       canvas.width = 2;
       canvas.height = 2;
       const drawing = canvas.getContext("2d");
-      drawing.fillStyle = `rgb(${revision % 256}, ${(revision * 7) % 256}, ${(revision * 13) % 256})`;
+      drawing.fillStyle = `rgb(${seq % 256}, ${(seq * 7) % 256}, ${(seq * 13) % 256})`;
       drawing.fillRect(0, 0, 2, 2);
       return canvas.toDataURL("image/png").split(",")[1];
     },
+    /* The door's answer, shaped as the window gives it: the pane, the
+     * assignment, the look's number and time, how it saw, and its picture
+     * when one is kept. */
+    look: (subject, seq, fields = {}) => ({
+      term: subject.term, scope: subject.scope, seq, at: 1791990000000 + seq,
+      perception: "screenshot", png: window.__COMPUTER_HANDS__.framePicture(seq), ...fields,
+    }),
     openPanel: (subject) => {
       if (typeof openComputerProgress !== "function") return false;
       openComputerProgress(subject);
@@ -186,10 +200,12 @@ const installComputerHands = ({ hotkey }) => {
     readPanel: () => {
       const panel = document.getElementById("computer-progress");
       const frame = document.getElementById("computer-progress-frame");
+      const note = document.getElementById("computer-progress-note");
       return {
         shown: panel !== null && !panel.hidden,
-        revision: frame?.dataset.revision ?? null,
+        seq: frame?.dataset.seq ?? null,
         picture: frame?.getAttribute("src") ?? null,
+        note: note && !note.hidden ? note.textContent : null,
       };
     },
     frameListeners: () => ["computer:frame", "computer:activity"]
@@ -200,8 +216,7 @@ const installComputerHands = ({ hotkey }) => {
 const evaluateCase = (page, body, args) =>
   page.evaluate(body, args).catch((error) => ({ thrown: String(error?.message ?? error).slice(0, 300) }));
 
-const asksFor = (asked, subject) =>
-  asked?.run === subject.run && asked?.viewer === subject.viewer && asked?.target === subject.target;
+const asksFor = (asked, subject) => asked?.term === subject.term && asked?.scope === subject.scope;
 
 const censusIsEmpty = (census) =>
   census?.timeouts === 0 && census?.intervals === 0 && census?.animationFrames === 0 && census?.objectUrls === 0;
@@ -408,13 +423,72 @@ async function testTheBand(browser, origin, ok) {
       lateLift.afterLateLift?.showsStop === true && lateLift.afterLateLift?.offersResume === true,
       JSON.stringify(lateLift),
     );
+
+    const failedResume = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 60, stopped: "window" }));
+      await hands.settle();
+      const resumes = hands.recordCommand("computer_resume", () => ({
+        resumed: false, revision: 60, stopped: "window", helper: { error: "helper_unreachable" },
+      }));
+      hands.pressBand("resume");
+      await hands.settle();
+      const afterFailure = hands.readBand();
+      hands.pressBand("resume");
+      await hands.settle();
+      hands.releaseCommands();
+      return { resumesSent: resumes.length, afterFailure };
+    });
+    ok(
+      "a resume the backend answered as not resumed leaves the person's stop on the band, says so, and offers the resume again",
+      failedResume.afterFailure?.showsStop === true && failedResume.afterFailure?.offersResume === true &&
+        Boolean(failedResume.afterFailure?.note) && failedResume.resumesSent === 2,
+      JSON.stringify(failedResume),
+    );
+
+    const stopWhileResuming = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 70, stopped: "window" }));
+      await hands.settle();
+      const resumes = hands.holdCommand("computer_resume");
+      const stops = hands.holdCommand("computer_stop");
+      hands.pressBand("resume");
+      await hands.settle();
+      const whileResumeWaits = hands.readBand();
+      hands.pressBand("stop");
+      await hands.settle();
+      const stopsSentAtOnce = stops.calls.length;
+      resumes.answerOldest({ resumed: true, revision: 71, stopped: null, helper: "idle" });
+      await hands.settle();
+      const afterLateResume = hands.readBand();
+      stops.answerOldest({ stopped: true, reason: "window", revision: 72, helperSignalled: false });
+      await hands.settle();
+      const afterStop = hands.readBand();
+      while (resumes.outstanding() > 0) resumes.answerOldest({ resumed: false, revision: 72, stopped: "window" });
+      while (stops.outstanding() > 0) stops.answerOldest({ stopped: true, reason: "window", revision: 73 });
+      await hands.settle();
+      hands.releaseCommands();
+      return { whileResumeWaits, stopsSentAtOnce, afterLateResume, afterStop };
+    });
+    ok(
+      "while a resume waits the band keeps the person's stop and offers the stop, and pressing it sends one stop at once",
+      stopWhileResuming.whileResumeWaits?.showsStop === true && stopWhileResuming.whileResumeWaits?.offersStop === true &&
+        stopWhileResuming.stopsSentAtOnce === 1,
+      JSON.stringify(stopWhileResuming),
+    );
+    ok(
+      "a resume answer that arrives after the person pressed stop again cannot take that stop off the band",
+      stopWhileResuming.afterLateResume?.showsStop === true && stopWhileResuming.afterStop?.showsStop === true &&
+        stopWhileResuming.afterStop?.offersResume === true,
+      JSON.stringify(stopWhileResuming),
+    );
     ok("the band scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   } finally { await page.close(); }
 }
 
 async function testTheProgressPanel(browser, origin, ok) {
   const { page, faults } = await openComputerPage(browser, origin);
-  const nextRunSubject = { ...SUBJECT, run: NEXT_RUN };
+  const nextRunSubject = { ...SUBJECT, scope: NEXT_SCOPE };
   try {
     const opening = await evaluateCase(page, async ({ subject }) => {
       const hands = window.__COMPUTER_HANDS__;
@@ -430,10 +504,10 @@ async function testTheProgressPanel(browser, origin, ok) {
       frames.answerOldest(null);
       await hands.settle();
       const withNothingYet = { panel: hands.readPanel(), fetches: frames.calls.length };
-      hands.announce("computer:frame", { ...subject, revision: 20 });
+      hands.announce("computer:frame", { ...subject, seq: 20 });
       await hands.settle();
       const announcedAsk = frames.calls[1] ?? null;
-      frames.answerOldest({ revision: 20, png: hands.framePicture(20) });
+      frames.answerOldest(hands.look(subject, 20));
       await hands.settle();
       return {
         opened,
@@ -458,27 +532,27 @@ async function testTheProgressPanel(browser, origin, ok) {
       JSON.stringify(opening),
     );
     ok(
-      "an announced newer frame is fetched once, for its subject and revision, and painted with that revision",
-      opening.fetchesInAll === 2 && asksFor(opening.announcedAsk, SUBJECT) && opening.announcedAsk?.revision === 20 &&
-        opening.painted?.revision === "20" && Boolean(opening.painted?.picture) && opening.outstanding === 0,
+      "an announced newer frame is fetched once, for its subject and number, and painted with that number",
+      opening.fetchesInAll === 2 && asksFor(opening.announcedAsk, SUBJECT) && opening.announcedAsk?.seq === 20 &&
+        opening.painted?.seq === "20" && Boolean(opening.painted?.picture) && opening.outstanding === 0,
       JSON.stringify(opening),
     );
 
-    const foreign = await evaluateCase(page, async ({ subject, otherViewer, otherTarget, nextRun }) => {
+    const foreign = await evaluateCase(page, async ({ subject, otherTerm, otherScope }) => {
       const hands = window.__COMPUTER_HANDS__;
       const frames = hands.holdCommand("computer_progress_frame");
-      hands.announce("computer:frame", { ...subject, viewer: otherViewer, revision: 35 });
-      hands.announce("computer:frame", { ...subject, target: otherTarget, revision: 36 });
-      hands.announce("computer:frame", { ...subject, run: nextRun, revision: 37 });
-      hands.announce("computer:frame", { ...subject, revision: 19 });
-      hands.announce("computer:frame", { ...subject, revision: 20 });
+      hands.announce("computer:frame", { ...subject, term: otherTerm, seq: 35 });
+      hands.announce("computer:frame", { ...subject, scope: otherScope, seq: 36 });
+      hands.announce("computer:frame", { seq: 37 });
+      hands.announce("computer:frame", { ...subject, seq: 19 });
+      hands.announce("computer:frame", { ...subject, seq: 20 });
       await hands.settle();
       const fetchesForForeignOrOld = frames.calls.length;
       const afterForeign = hands.readPanel();
-      hands.announce("computer:frame", { ...subject, revision: 21 });
+      hands.announce("computer:frame", { ...subject, seq: 21 });
       await hands.settle();
       const ownAsk = frames.calls.at(-1) ?? null;
-      frames.answerOldest({ revision: 21, png: hands.framePicture(21) });
+      frames.answerOldest(hands.look(subject, 21));
       await hands.settle();
       return {
         fetchesForForeignOrOld,
@@ -488,16 +562,16 @@ async function testTheProgressPanel(browser, origin, ok) {
         painted: hands.readPanel(),
         outstanding: frames.outstanding(),
       };
-    }, { subject: SUBJECT, otherViewer: OTHER_VIEWER, otherTarget: OTHER_TARGET, nextRun: NEXT_RUN });
+    }, { subject: SUBJECT, otherTerm: OTHER_TERM, otherScope: OTHER_SCOPE });
     ok(
-      "a frame of another viewer, of another target of the same viewer, of another run, or not newer than the frame shown is never fetched",
-      foreign.fetchesForForeignOrOld === 0 && foreign.afterForeign?.revision === "20",
+      "a frame of another pane, of another assignment in the same pane, of no pane, or not newer than the frame shown is never fetched",
+      foreign.fetchesForForeignOrOld === 0 && foreign.afterForeign?.seq === "20",
       JSON.stringify(foreign),
     );
     ok(
       "a foreign frame numbered above the next own frame does not keep the own frame from being fetched and painted",
-      foreign.fetchesInAll === 1 && asksFor(foreign.ownAsk, SUBJECT) && foreign.ownAsk?.revision === 21 &&
-        foreign.painted?.revision === "21" && foreign.outstanding === 0,
+      foreign.fetchesInAll === 1 && asksFor(foreign.ownAsk, SUBJECT) && foreign.ownAsk?.seq === 21 &&
+        foreign.painted?.seq === "21" && foreign.outstanding === 0,
       JSON.stringify(foreign),
     );
 
@@ -505,19 +579,19 @@ async function testTheProgressPanel(browser, origin, ok) {
     const burst = await evaluateCase(page, async ({ subject, burstFrames }) => {
       const hands = window.__COMPUTER_HANDS__;
       const frames = hands.holdCommand("computer_progress_frame");
-      hands.announce("computer:frame", { ...subject, revision: 22 });
+      hands.announce("computer:frame", { ...subject, seq: 22 });
       await hands.settle();
       const fetchesBeforeBurst = frames.calls.length;
-      for (let revision = 23; revision <= 22 + burstFrames; revision += 1) {
-        hands.announce("computer:frame", { ...subject, revision });
+      for (let seq = 23; seq <= 22 + burstFrames; seq += 1) {
+        hands.announce("computer:frame", { ...subject, seq });
       }
       await hands.settle();
       const fetchesDuringBurst = frames.calls.length;
-      frames.answerOldest({ revision: 22, png: hands.framePicture(22) });
+      frames.answerOldest(hands.look(subject, 22));
       await hands.settle();
       const fetchesAfterFirstAnswer = frames.calls.length;
       const nextAsk = frames.calls[1] ?? null;
-      frames.answerOldest({ revision: 22 + burstFrames, png: hands.framePicture(22 + burstFrames) });
+      frames.answerOldest(hands.look(subject, 22 + burstFrames));
       await hands.settle();
       return {
         fetchesBeforeBurst,
@@ -534,7 +608,7 @@ async function testTheProgressPanel(browser, origin, ok) {
     ok(
       "while one frame fetch is out, a burst of announcements asks for nothing more, and the next fetch asks only for the newest",
       burst.fetchesBeforeBurst === 1 && burst.fetchesDuringBurst === 1 && burst.fetchesAfterFirstAnswer === 2 &&
-        burst.nextAsk?.revision === newestOfBurst && burst.fetchesInAll === 2,
+        burst.nextAsk?.seq === newestOfBurst && burst.fetchesInAll === 2,
       JSON.stringify(burst),
     );
     ok(
@@ -545,16 +619,16 @@ async function testTheProgressPanel(browser, origin, ok) {
     );
     ok(
       "the newest frame of the burst is the one on screen",
-      burst.painted?.revision === String(newestOfBurst),
+      burst.painted?.seq === String(newestOfBurst),
       JSON.stringify(burst),
     );
 
     const olderAnswer = await evaluateCase(page, async ({ subject, shown }) => {
       const hands = window.__COMPUTER_HANDS__;
       const frames = hands.holdCommand("computer_progress_frame");
-      hands.announce("computer:frame", { ...subject, revision: shown + 1 });
+      hands.announce("computer:frame", { ...subject, seq: shown + 1 });
       await hands.settle();
-      frames.answerOldest({ revision: shown - 1, png: hands.framePicture(shown - 1) });
+      frames.answerOldest(hands.look(subject, shown - 1));
       await hands.settle();
       await hands.settle();
       return { fetchesInAll: frames.calls.length, outstanding: frames.outstanding(), painted: hands.readPanel() };
@@ -562,27 +636,27 @@ async function testTheProgressPanel(browser, origin, ok) {
     ok(
       "an answer older than the frame on screen does not replace it and is not asked for again",
       olderAnswer.fetchesInAll === 1 && olderAnswer.outstanding === 0 &&
-        olderAnswer.painted?.revision === String(newestOfBurst),
+        olderAnswer.painted?.seq === String(newestOfBurst),
       JSON.stringify(olderAnswer),
     );
 
     const nextRun = await evaluateCase(page, async ({ subject, nextRunSubject, oldRevision }) => {
       const hands = window.__COMPUTER_HANDS__;
       const frames = hands.holdCommand("computer_progress_frame");
-      hands.announce("computer:frame", { ...subject, revision: oldRevision });
+      hands.announce("computer:frame", { ...subject, seq: oldRevision });
       await hands.settle();
       const reopened = hands.openPanel(nextRunSubject);
       await hands.settle();
       const afterReplacement = hands.readPanel();
-      hands.announce("computer:frame", { ...nextRunSubject, revision: 3 });
-      hands.announce("computer:frame", { ...subject, revision: oldRevision + 1 });
+      hands.announce("computer:frame", { ...nextRunSubject, seq: 3 });
+      hands.announce("computer:frame", { ...subject, seq: oldRevision + 1 });
       await hands.settle();
       const fetchesWhileOldIsOut = frames.calls.length;
-      frames.answerOldest({ revision: oldRevision, png: hands.framePicture(oldRevision) });
+      frames.answerOldest(hands.look(subject, oldRevision));
       await hands.settle();
       const afterOldAnswer = hands.readPanel();
       for (let round = 0; round < 3 && frames.outstanding() > 0; round += 1) {
-        frames.answerOldest({ revision: 3, png: hands.framePicture(3) });
+        frames.answerOldest(hands.look(nextRunSubject, 3));
         await hands.settle();
       }
       return {
@@ -597,28 +671,28 @@ async function testTheProgressPanel(browser, origin, ok) {
       };
     }, { subject: SUBJECT, nextRunSubject, oldRevision: newestOfBurst + 2 });
     ok(
-      "opening the panel for another run takes the old run's frame off the panel at once",
+      "opening the panel for the pane's next assignment takes the old assignment's frame off the panel at once",
       nextRun.reopened === true && nextRun.afterReplacement?.shown === true &&
-        nextRun.afterReplacement?.revision !== String(newestOfBurst) && !nextRun.afterReplacement?.picture,
+        nextRun.afterReplacement?.seq !== String(newestOfBurst) && !nextRun.afterReplacement?.picture,
       JSON.stringify(nextRun),
     );
     ok(
-      "the old run's late answer paints nothing, and only the new run's frame is asked for after it, one fetch at a time",
-      nextRun.fetchesWhileOldIsOut === 1 && nextRun.afterOldAnswer?.revision !== String(newestOfBurst + 2) &&
+      "the old assignment's late answer paints nothing, and only the new assignment's frame is asked for after it, one fetch at a time",
+      nextRun.fetchesWhileOldIsOut === 1 && nextRun.afterOldAnswer?.seq !== String(newestOfBurst + 2) &&
         nextRun.laterAsks?.length === 1 && asksFor(nextRun.laterAsks[0], nextRunSubject) &&
         nextRun.mostInFlight === 1 && nextRun.outstanding === 0,
       JSON.stringify(nextRun),
     );
     ok(
-      "the new run's frame is painted although its number is lower than the old run's",
-      nextRun.painted?.revision === "3" && Boolean(nextRun.painted?.picture),
+      "the new assignment's frame is painted although its number is lower than the old assignment's",
+      nextRun.painted?.seq === "3" && Boolean(nextRun.painted?.picture),
       JSON.stringify(nextRun),
     );
 
     const failed = await evaluateCase(page, async ({ nextRunSubject }) => {
       const hands = window.__COMPUTER_HANDS__;
       const frames = hands.holdCommand("computer_progress_frame");
-      hands.announce("computer:frame", { ...nextRunSubject, revision: 4 });
+      hands.announce("computer:frame", { ...nextRunSubject, seq: 4 });
       await hands.settle();
       frames.refuseOldest("no frame");
       await hands.settle();
@@ -633,7 +707,7 @@ async function testTheProgressPanel(browser, origin, ok) {
     }, { nextRunSubject });
     ok(
       "a frame that failed to arrive leaves the last good frame on screen",
-      failed.afterFailure?.revision === "3" && Boolean(failed.afterFailure?.picture),
+      failed.afterFailure?.seq === "3" && Boolean(failed.afterFailure?.picture),
       JSON.stringify(failed),
     );
     ok(
@@ -646,17 +720,17 @@ async function testTheProgressPanel(browser, origin, ok) {
     const closing = await evaluateCase(page, async ({ nextRunSubject }) => {
       const hands = window.__COMPUTER_HANDS__;
       const frames = hands.holdCommand("computer_progress_frame");
-      hands.announce("computer:frame", { ...nextRunSubject, revision: 5 });
+      hands.announce("computer:frame", { ...nextRunSubject, seq: 5 });
       await hands.settle();
       const fetchesBeforeClose = frames.calls.length;
       const closed = hands.closePanel();
       await hands.settle();
       const afterClose = hands.readPanel();
-      frames.answerOldest({ revision: 5, png: hands.framePicture(5) });
+      frames.answerOldest(hands.look(nextRunSubject, 5));
       await hands.settle();
       const afterLateAnswer = hands.readPanel();
       const censusAfterClose = hands.census.live();
-      hands.announce("computer:frame", { ...nextRunSubject, revision: 6 });
+      hands.announce("computer:frame", { ...nextRunSubject, seq: 6 });
       await hands.settle();
       return {
         fetchesBeforeClose,
@@ -707,13 +781,140 @@ async function testTheProgressPanel(browser, origin, ok) {
       reopening.firstOpen === true && reopening.listenerGrowth === 0 && censusIsEmpty(reopening.census),
       JSON.stringify(reopening),
     );
+
+    const pictureless = await evaluateCase(page, async ({ subject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const frames = hands.holdCommand("computer_progress_frame");
+      hands.openPanel(subject);
+      await hands.settle();
+      frames.answerOldest(hands.look(subject, 40));
+      await hands.settle();
+      const withPicture = hands.readPanel();
+      hands.announce("computer:frame", { ...subject, seq: 41 });
+      await hands.settle();
+      frames.answerOldest(hands.look(subject, 41, { png: null, perception: "accessibility" }));
+      await hands.settle();
+      const treeOnly = hands.readPanel();
+      hands.announce("computer:frame", { ...subject, seq: 42 });
+      await hands.settle();
+      frames.answerOldest(hands.look(subject, 42, { png: null, perception: "gone" }));
+      await hands.settle();
+      const gone = hands.readPanel();
+      hands.closePanel();
+      await hands.settle();
+      hands.releaseCommands();
+      return { withPicture, treeOnly, gone, census: hands.census.live() };
+    }, { subject: SUBJECT });
+    ok(
+      "a newer look without a picture takes the older picture off the panel and says why, whether the look read the screen's structure or its picture is no longer kept",
+      pictureless.withPicture?.seq === "40" && Boolean(pictureless.withPicture?.picture) &&
+        pictureless.treeOnly?.seq === "41" && !pictureless.treeOnly?.picture && Boolean(pictureless.treeOnly?.note) &&
+        pictureless.gone?.seq === "42" && !pictureless.gone?.picture && Boolean(pictureless.gone?.note) &&
+        pictureless.treeOnly?.note !== pictureless.gone?.note && censusIsEmpty(pictureless.census),
+      JSON.stringify(pictureless),
+    );
     ok("the progress panel scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
+async function testTheBandWithThePanel(browser, origin, ok) {
+  const { page, faults } = await openComputerPage(browser, origin);
+  try {
+    const viewing = await evaluateCase(page, async ({ subject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 1, active: true }));
+      await hands.settle();
+      const beforeAnyLook = hands.readBand();
+      hands.announce("computer:frame", { ...subject, seq: 4 });
+      await hands.settle();
+      const afterLook = hands.readBand();
+      const fetchesBeforePress = hands.sentCount("computer_progress_frame");
+      const frames = hands.holdCommand("computer_progress_frame");
+      hands.pressBand("view");
+      await hands.settle();
+      const asked = frames.calls[0] ?? null;
+      frames.answerOldest(hands.look(subject, 4));
+      await hands.settle();
+      return { beforeAnyLook, afterLook, fetchesBeforePress, fetches: frames.calls.length, asked, panel: hands.readPanel() };
+    }, { subject: SUBJECT });
+    ok(
+      "the band offers its screen view only after a look was announced, and the view opens the panel for that pane and assignment and asks once",
+      viewing.beforeAnyLook?.offersView === false && viewing.afterLook?.offersView === true &&
+        viewing.fetchesBeforePress === 0 && viewing.fetches === 1 && asksFor(viewing.asked, SUBJECT) &&
+        viewing.panel?.shown === true && viewing.panel?.seq === "4" && Boolean(viewing.panel?.picture),
+      JSON.stringify(viewing),
+    );
+
+    await page.setViewportSize({ width: 360, height: 640 });
+    const small = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 2, stopped: "window" }));
+      await hands.settle();
+      const inside = (node) => {
+        const box = node.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && box.left >= 0 && box.top >= 0 &&
+          box.right <= window.innerWidth + 0.5 && box.bottom <= window.innerHeight + 0.5;
+      };
+      const band = document.getElementById("computer-band");
+      const panel = document.getElementById("computer-progress");
+      const buttons = [...band.querySelectorAll("button"), ...panel.querySelectorAll("button")]
+        .filter((button) => !button.hidden && button.getClientRects().length > 0);
+      return {
+        bandInside: inside(band),
+        buttons: buttons.length,
+        buttonsInside: buttons.every(inside),
+        panelShown: !panel.hidden,
+        panelInside: inside(panel),
+        panelHeight: panel.getBoundingClientRect().height,
+        screen: [window.innerWidth, window.innerHeight],
+      };
+    });
+    ok(
+      "on a 360 by 640 screen the band, its buttons and the open panel stay on screen, and the panel takes at most half the height",
+      small.bandInside === true && small.buttons >= 3 && small.buttonsInside === true && small.panelShown === true &&
+        small.panelInside === true && small.panelHeight <= small.screen?.[1] / 2,
+      JSON.stringify(small),
+    );
+
+    const words = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      const resumes = hands.holdCommand("computer_resume");
+      hands.pressBand("resume");
+      await hands.settle();
+      const title = () => document.getElementById("computer-progress-title")?.textContent ?? "";
+      const before = { note: hands.readBand().note, title: title() };
+      const savedLocale = locale;
+      locale = "en";
+      applyLocale();
+      await hands.settle();
+      const english = { note: hands.readBand().note, title: title() };
+      locale = savedLocale;
+      applyLocale();
+      await hands.settle();
+      while (resumes.outstanding() > 0) resumes.answerOldest({ resumed: false, revision: 2, stopped: "window" });
+      await hands.settle();
+      hands.closePanel();
+      await hands.settle();
+      hands.releaseCommands();
+      return { before, english, census: hands.census.live() };
+    });
+    const hangul = /[\u3131-\uD79D]/u;
+    ok(
+      "a language change repaints the band's waiting words and the panel's title",
+      Boolean(words.before?.note) && Boolean(words.english?.note) && words.before?.note !== words.english?.note &&
+        !hangul.test(words.english?.note ?? "") && Boolean(words.before?.title) &&
+        words.before?.title !== words.english?.title && !hangul.test(words.english?.title ?? "") &&
+        censusIsEmpty(words.census),
+      JSON.stringify(words),
+    );
+    ok("the band and panel scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   } finally { await page.close(); }
 }
 
 export async function testComputerProgress(browser, origin, ok) {
   await testTheBand(browser, origin, ok);
   await testTheProgressPanel(browser, origin, ok);
+  await testTheBandWithThePanel(browser, origin, ok);
 }
 
 if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {
