@@ -3604,6 +3604,9 @@ function paintBrowserView(tab) {
     armed: browserGrab !== null && browserGrab.label === tab.label && browserGrab.mode === "annotate",
   });
   paintArtifactHint(host.querySelector(".artifact-hint"), tab);
+  // 문서 보기(t-59665 ⑥): 아티팩트를 제 파일 위에서 보는 동안 주소줄이 접히고 머리가 한 줄이 된다.
+  // 링크로 다른 곳에 가면 — 머리띠는 서 있어도 — 주소줄이 다시 선다. 규칙은 한 선택자가 쥔다.
+  host.classList.toggle("is-artifact-reading", tab.artifact !== null && tab.artifact !== undefined && artifactTabOnItsFile(tab));
   // 다른 탭의 덮개 그림은 이 탭의 것이 아니다(t-59665 ④).
   const shade = artifactShadeOf(host);
   if (shade && !shade.hidden && shade._label !== tab.label) liftArtifactShade(host);

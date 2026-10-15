@@ -39847,6 +39847,55 @@ details.task-board-section > summary {
 
 .browser-body > .artifact-shade[hidden] { display: none; }
 
+/* 문서 보기(t-59665 ⑥): 아티팩트를 제 파일 위에서 보는 동안 주소줄은 접히고, 도구 줄의 나머지 자식은
+ * 머리띠와 한 줄에 선다 — 머리가 한 줄이 되어 읽는 면이 도구 줄 한 줄만큼 넓어진다. 링크로 다른
+ * 곳에 가면 `is-artifact-reading`이 내려가 주소줄이 다시 선다. 규칙은 아티팩트 탭의 판에만
+ * 닿고(`.browser-view.is-artifact-reading`), 접는 것은 주소 슬롯 하나다: 도구 줄의 다른 자식 —
+ * 뒤로·앞으로·새로고침·잡기·주석·그리기·찾기·개발자 도구·바깥·메뉴와, 뒤에 들어올 작업 공간
+ * 상태 같은 자식 — 은 그대로 보인다. 판은 두 열의 격자가 된다: 첫 줄은 도구 줄(왼쪽, 제 폭)과
+ * 머리띠(오른쪽, 남는 폭)이고, 그 아래 줄들은 전처럼 하나씩 선 뒤 몸이 남는 높이를 다 가진다. */
+.browser-view.is-artifact-reading {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto auto auto minmax(0, 1fr);
+}
+
+.browser-view.is-artifact-reading > * { grid-column: 1 / -1; }
+
+.browser-view.is-artifact-reading > .browser-toolbar {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.browser-view.is-artifact-reading .browser-address-slot { display: none; }
+
+/* 머리띠 한 줄: 제목 줄과 만든 이 줄이 한 줄에 나란히 서고, 좁으면 만든 이 줄이 아래로 접힌다. */
+.browser-view.is-artifact-reading > .artifact-strip {
+  grid-column: 2;
+  grid-row: 1;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-3);
+}
+
+.browser-view.is-artifact-reading > .artifact-strip > .artifact-strip-head {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.browser-view.is-artifact-reading > .artifact-strip > .artifact-strip-meta { flex: 0 1 auto; }
+
+.browser-view.is-artifact-reading > .artifact-strip .artifact-strip-version { margin-left: 0; }
+
+.browser-view.is-artifact-reading > .artifact-hint { grid-row: 2; }
+.browser-view.is-artifact-reading > .browser-suggest { grid-row: 3; }
+.browser-view.is-artifact-reading > .browser-dlbar { grid-row: 4; }
+.browser-view.is-artifact-reading > .browser-notes { grid-row: 5; }
+.browser-view.is-artifact-reading > .browser-grabbar { grid-row: 6; }
+.browser-view.is-artifact-reading > .browser-findbar { grid-row: 7; }
+.browser-view.is-artifact-reading > .browser-body { grid-row: 8; }
+
 /* ---- 스크린샷 마크업(B02 ②) — Orca MarkupOverlay의 실측 옷 ----
  * 오버레이 `absolute inset-0 z-20`, 바탕 이미지 `objectFit: fill`, 캔버스는
  * `touch-none cursor-crosshair`, 아래 가운데에 도구 막대(`rounded-md border
