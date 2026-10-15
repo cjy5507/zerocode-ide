@@ -35,14 +35,16 @@ function standDiagrams(page) {
       asked: [], waiting: [], hold: false, empty: false, logged: [], previewHold: null, previewRelease: null,
     });
     const labelOf = (source) => /\[([^\]]+)\]/.exec(source)?.[1] ?? "";
-    // Wider than any pane here, so a drawing that fits was shrunk to its column. The label carries
-    // markup, which must arrive as text.
+    // What a hostile label carries after its words: an image with a handler, and a script after a
+    // closed text element. Reports and repository files can be untrusted, so it must arrive as text.
+    const hostile = `<img src=x onerror="window.__PWNED__ = 2"></text><script>window.__PWNED__ = 3</script>`;
+    // Wider than any pane here, so a drawing that fits was shrunk to its column.
     const drawn = (label) => ({
       drawing: {
         width: 1200, height: 160,
         marks: [
           { mark: "rect", x: 10, y: 40, width: 220, height: 60, radius: 4, class: "mmd-node" },
-          { mark: "text", x: 120, y: 75, text: `${label}</text><script>window.__PWNED__ = 2</script>`, class: "mmd-label", anchor: "middle" },
+          { mark: "text", x: 120, y: 75, text: `${label}${hostile}`, class: "mmd-label", anchor: "middle" },
           { mark: "polyline", points: [[230, 70], [970, 70]], class: "mmd-edge", arrow: true },
           { mark: "rect", x: 970, y: 40, width: 220, height: 60, radius: 4, class: "mmd-node" },
         ],
@@ -111,13 +113,13 @@ function standDiagrams(page) {
         drawn: svg !== null,
         before: block?.previousElementSibling?.textContent.trim() ?? null,
         after: block?.nextElementSibling?.textContent.trim() ?? null,
-        labelled: texts.length === 1 && texts[0].textContent === `${label}</text><script>window.__PWNED__ = 2</script>`,
+        labelled: texts.length === 1 && texts[0].textContent === `${label}${hostile}`,
         mermaidCode: body?.querySelectorAll('pre.md-block[data-language="mermaid"]').length ?? null,
         heldCode: block?.querySelector('pre.md-block[data-language="mermaid"]')?.textContent.includes(label) ?? false,
         rustCode: body?.querySelector('pre.md-block[data-language="rust"]') !== null,
         fits: svg !== null && body !== null && svg.getBoundingClientRect().width > 0
           && svg.getBoundingClientRect().width <= body.getBoundingClientRect().width + 1,
-        markup: (body?.querySelectorAll("img, script").length ?? 0) + (svg?.querySelectorAll("script").length ?? 0),
+        markup: body?.querySelectorAll("img, script").length ?? 0,
         rawText: [...(body?.querySelectorAll(".md-para") ?? [])].some((one) => one.textContent.includes("onerror")),
         pwned: window.__PWNED__ ?? null,
       };
@@ -194,9 +196,9 @@ export async function testArtifactDiagrams(browser, origin, ok) {
       JSON.stringify(reader.held),
     );
     ok(
-      "the report's raw HTML line stays text and the diagram's label enters as text: no img or script element, nothing ran",
-      reader.drawn.markup === 0 && reader.drawn.pwned === null && reader.drawn.rawText,
-      JSON.stringify({ markup: reader.drawn.markup, pwned: reader.drawn.pwned, rawText: reader.drawn.rawText }),
+      "the report's raw HTML line stays text, and a diagram label holding <img src=x onerror=...> enters as text: no img or script element, no handler ran",
+      reader.drawn.drawn && reader.drawn.labelled && reader.drawn.markup === 0 && reader.drawn.pwned === null && reader.drawn.rawText,
+      JSON.stringify({ drawn: reader.drawn.drawn, labelled: reader.drawn.labelled, markup: reader.drawn.markup, pwned: reader.drawn.pwned, rawText: reader.drawn.rawText }),
     );
 
     /* ---- 4: the same report opened again keeps its drawing ------------------------------------ */
