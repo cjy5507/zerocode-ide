@@ -86,6 +86,7 @@ import { testPathBrowser } from "./path-browser.mjs";
 import { testNativeFolderPicker } from "./native-folder-picker.mjs";
 import { testSftpAndTeam } from "./sftp.mjs";
 import { testPaneFollowsCwd } from "./pane-follow.mjs";
+import { testPaneStrays } from "./pane-strays.mjs";
 import { testZoRestore } from "./zo-restore.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testSidebarStage } from "./sidebar-stage.mjs";
@@ -108,6 +109,7 @@ import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
 import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testSidebarRoles } from "./sidebar-roles.mjs";
 import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
+import { testSidebarTeam } from "./sidebar-team.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
 import { testLandBatch } from "./land-batch.mjs";
@@ -311,6 +313,7 @@ suite("jev-dashboard", async ({ browser, origin, ok }) => {
 suite("native-folder-picker", ({ browser, origin, ok }) => testNativeFolderPicker(browser, origin, ok));
 suite("sftp", ({ browser, origin, ok }) => testSftpAndTeam(browser, origin, ok));
 suite("pane-follow", ({ browser, origin, ok }) => testPaneFollowsCwd(browser, origin, ok));
+suite("pane-strays", ({ browser, origin, ok }) => testPaneStrays(browser, origin, ok));
 // The zo panes a restart brings back, in their own workspaces (t-12063).
 suite("zo-restore", ({ browser, origin, ok }) => testZoRestore(browser, origin, ok));
 // The panes a restart opens again, where they stood, in every workspace (t-14036).
@@ -348,6 +351,8 @@ suite("sidebar-activity", testSidebarActivity);
 suite("sidebar-roles", testSidebarRoles);
 // One task, one sidebar row: the checkouts a worker cut beside its own fold under it (t-45336).
 suite("sidebar-task-fold", testSidebarTaskFold);
+// The team view: coordinators, the workers under each, a row a worker's pane (t-56141).
+suite("sidebar-team", testSidebarTeam);
 suite("landing-alerts", testLandingAlerts);
 suite("land-check-letter", testLandCheckLetter);
 // The integration queue's batch card on the desk and its switch in the project settings (t-45315).
@@ -17830,6 +17835,70 @@ const nativeAndTargets = await page.evaluate(async () => {
   return { native, note, choices, unavailable, opened: window.__SKILL_CALLS__.filter((c) => c.command === 'open_term_tab').length - before };
 });
 ok('included skills use native installation and unsupported CLI targets are explicit', nativeAndTargets.native?.args.name === 'orchestration' && nativeAndTargets.note.includes('ZO') && nativeAndTargets.opened === 0 && !nativeAndTargets.choices.includes('zo') && nativeAndTargets.unavailable.includes('ZO'), JSON.stringify(nativeAndTargets));
+// t-55424: every copy of a skill this build ships, in every home an agent
+// reads (the window's own Claude home among them), is read against the texts
+// earlier releases shipped. The line says what each skill's copies are, and
+// 「고쳐 쓰기」 stands only where a copy is missing or an earlier release: a
+// copy edited by hand is named, never offered for rewriting.
+const bundledCopies = await page.evaluate(async (fixture) => {
+  const view = docHost(tabs.find((tab) => tab.kind === 'skills').pane, 'skills');
+  const kept = { list: window.__ANSWER__.skills_list, rescan: window.__ANSWER__.skills_rescan };
+  const copy = (agent, label, path, state) => ({ agent, label, path, state });
+  const report = { ...fixture, bundled: [
+    { name: 'orchestration', copies: [
+      copy('claude', 'Claude', '/home/.claude/skills/orchestration/SKILL.md', 'stale'),
+      copy('claude', 'Claude', '/app/.claude/skills/orchestration/SKILL.md', 'missing'),
+      copy('codex', 'Codex', '/home/.codex/skills/orchestration/SKILL.md', 'edited'),
+      copy('zo', 'ZO', '/home/.zo/skills/orchestration/SKILL.md', 'current'),
+    ] },
+    { name: 'computer-use', copies: [
+      copy('claude', 'Claude', '/home/.claude/skills/computer-use/SKILL.md', 'current'),
+      copy('codex', 'Codex', '/home/.codex/skills/computer-use/SKILL.md', 'edited'),
+    ] },
+    { name: 'second-brain', copies: [
+      copy('claude', 'Claude', '/home/.claude/skills/second-brain/SKILL.md', 'current'),
+      copy('zo', 'ZO', '/home/.zo/skills/second-brain/SKILL.md', 'current'),
+    ] },
+  ] };
+  window.__ANSWER__.skills_list = () => report;
+  window.__ANSWER__.skills_rescan = () => { window.__SKILL_CALLS__.push({ command: 'skills_rescan' }); return report; };
+  await refreshSkills(true);
+  const line = (name) => view.querySelector(`.skills-bundled-line[data-skill="${name}"]`);
+  const said = (name) => line(name)?.querySelector('.skills-bundled-state')?.textContent ?? null;
+  const count = (key, n) => skillText('copyCount', { state: skillText(key), count: n });
+  const result = {
+    said: { orchestration: said('orchestration'), computerUse: said('computer-use'), secondBrain: said('second-brain') },
+    expected: {
+      orchestration: [count('copyStale', 1), count('copyEdited', 1), count('copyMissing', 1)].join(' · '),
+      computerUse: count('copyEdited', 1),
+      secondBrain: skillText('copyCurrent'),
+    },
+    summary: view.querySelector('.skills-bundled-panel summary')?.textContent ?? null,
+    expectedSummary: skillText('bundledSummary', { count: 3, current: 1 }),
+    buttons: Object.fromEntries(['orchestration', 'computer-use', 'second-brain'].map((name) => [name, Boolean(line(name)?.querySelector('button'))])),
+    tip: line('orchestration')?.dataset.tip ?? '',
+    catalogs: ['ko','en','ja','zh','es'].every((locale) => ['skills.bundledSummary','skills.copyCurrent','skills.copyStale','skills.copyEdited','skills.copyMissing','skills.copyCount','skills.rewrite','skills.rewriteTip'].every((key) => CATALOG[locale]?.[key])),
+  };
+  const before = window.__SKILL_CALLS__.length;
+  line('orchestration')?.querySelector('button')?.click();
+  for (let wait = 0; wait < 100 && !window.__SKILL_CALLS__.slice(before).some((call) => call.command === 'skills_rescan'); wait++) await new Promise((resolve) => setTimeout(resolve, 10));
+  const after = window.__SKILL_CALLS__.slice(before);
+  result.installs = after.filter((call) => call.command === 'install_bundled_skill').map((call) => call.args);
+  result.rescanned = after.some((call) => call.command === 'skills_rescan');
+  window.__ANSWER__.skills_list = kept.list; window.__ANSWER__.skills_rescan = kept.rescan;
+  await refreshSkills(true);
+  return result;
+}, SKILL_VIEW_FIXTURE);
+ok('the skills screen says each bundled skill is current, stale or hand-edited and rewrites only stale copies',
+  bundledCopies.said.orchestration === bundledCopies.expected.orchestration
+    && bundledCopies.said.computerUse === bundledCopies.expected.computerUse
+    && bundledCopies.said.secondBrain === bundledCopies.expected.secondBrain
+    && bundledCopies.summary === bundledCopies.expectedSummary
+    && bundledCopies.buttons.orchestration && !bundledCopies.buttons['computer-use'] && !bundledCopies.buttons['second-brain']
+    && bundledCopies.tip.includes('/app/.claude/skills/orchestration/SKILL.md') && bundledCopies.tip.includes('/home/.codex/skills/orchestration/SKILL.md')
+    && bundledCopies.installs.length === 1 && bundledCopies.installs[0]?.name === 'orchestration' && bundledCopies.rescanned
+    && bundledCopies.catalogs,
+  JSON.stringify(bundledCopies));
 const skillTyped = await page.evaluate(async () => {
   const tab = tabs.find((tab) => tab.kind === 'skills'); const view = docHost(tab.pane, 'skills');
   await prepareSkillInstall(view, ['release-review'], [], 'update');
@@ -41634,11 +41703,15 @@ const teamed = await page.evaluate(async () => {
   for (const handler of window.__LISTENERS__["term:focus-pane"] ?? []) handler({ payload: 8802 });
   await settle();
   seen.focused = leader.activePane;
-  // 리더의 탭이 없으면 아무것도 만들지 않는다 — 조율자 없는 팀원을 무대에
-  // 올리는 것보다 아무 일도 안 하는 편이 낫다.
+  // 리더의 탭이 없으면 탭은 만들지 않는다 — 조율자 없는 팀원을 무대에 올리는
+  // 것보다 낫다. 다만 이미 도는 셸이므로 떼어 둔 행 하나는 남긴다: 아무것도
+  // 남기지 않으면 탭도 행도 없이 도는 셸이 된다(t-56480 R1). 그 셸은 이
+  // 시험과 함께 끝난다.
   const before = tabs.length;
   await fire({ parent: 99999, term: 8899, direction: "vertical", agent: "claude" });
   seen.orphanMadeNothing = tabs.length === before && !tabs.some((tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(8899));
+  seen.orphanKeptARow = detachedAgents.has(8899);
+  for (const handler of window.__LISTENERS__["term:exited"] ?? []) handler({ payload: { term: 8899 } });
   // 정리: 뒤따르는 시험들이 다섯 판짜리 탭 위에서 돌지 않게.
   for (const term of [8801, 8802, 8803, 8804]) {
     for (const handler of window.__LISTENERS__["term:exited"] ?? []) handler({ payload: { term } });
@@ -41695,6 +41768,7 @@ ok(
     teamed.stayedOnTab &&
     teamed.focused === 8802 &&
     teamed.orphanMadeNothing &&
+    teamed.orphanKeptARow &&
     teamed.pruned === 1,
   JSON.stringify(teamed),
 );

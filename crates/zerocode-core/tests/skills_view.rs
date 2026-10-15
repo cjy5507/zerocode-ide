@@ -212,6 +212,7 @@ fn a_cli_target_home_is_scanned_and_accepts_the_native_bundle() {
     let result = zerocode_core::skill_install::install_bundled_skill(
         &name,
         temp.path(),
+        &[],
         &[("qwen-code".into(), "Qwen".into())],
     )
     .unwrap();

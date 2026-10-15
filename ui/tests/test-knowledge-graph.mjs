@@ -1314,6 +1314,49 @@ ok(
   JSON.stringify(brainKinds),
 );
 
+/* 원본으로 찾기(t-55424): Claude 기억에서 옮겨 온 쪽은 제목과 태그가 아니라 머리말
+ * `source:`에 「claude memory <파일>」을 든다. 사람이 그 쪽들을 세려면 검색이 원본의
+ * 말에도 닿아야 한다. 열두 쪽 가운데 둘(1·7)이 기억 파일을 원본으로 들고, 하나(4)는
+ * 「claude」만 든다 — 낱말은 모두 맞아야 하므로 그 쪽은 밝아지지 않는다. */
+const brainBySource = await page.evaluate(async () => {
+  knowledgeSelectedKey = null;
+  window.__VAULT__ = {
+    pages: 12,
+    linksPer: 2,
+    ghosts: 0,
+    tags: ["core", "reading"],
+    pageSources: [null, "claude memory feedback-plain-words.md", null, null, "raw/claude-session.md",
+      null, null, "claude memory repo-tooling-traps.md"],
+  };
+  dropTab("knowledge");
+  document.getElementById("nav-knowledge").click();
+  await new Promise((done) => setTimeout(done, 400));
+  const viewOf = () => [...document.querySelectorAll(".file-view")]
+    .find((one) => one.classList.contains("knowledge-view") && !one.hidden);
+  const find = viewOf().querySelector(".knowledge-query");
+  find.value = "claude memory";
+  find.dispatchEvent(new Event("input", { bubbles: true }));
+  await new Promise((done) => setTimeout(done, 80));
+  const lit = [...viewOf().querySelectorAll(".knowledge-node.is-search-match")]
+    .map((node) => node.dataset.graphKey)
+    .sort();
+  const placeholder = find.placeholder;
+  find.value = "";
+  find.dispatchEvent(new Event("input", { bubbles: true }));
+  await new Promise((done) => setTimeout(done, 60));
+  return { lit, placeholder };
+});
+ok(
+  "a word found only in a page's source lights that page",
+  () => JSON.stringify(brainBySource.lit) === JSON.stringify(["wiki/Page-0001.md", "wiki/Page-0007.md"]),
+  JSON.stringify(brainBySource),
+);
+ok(
+  "the knowledge search box says it searches sources too",
+  () => brainBySource.placeholder.includes("출처"),
+  JSON.stringify(brainBySource),
+);
+
 // Test 6: Empty Vault Test (Adversarial edge case 0 nodes)
 const brainEmpty = await page.evaluate(async () => {
   window.__QUICK__ = [{

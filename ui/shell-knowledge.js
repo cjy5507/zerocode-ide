@@ -1042,9 +1042,9 @@ function buildKnowledgeView() {
   find.className = "settings-input knowledge-query";
   find.type = "search";
   find.dataset.i18nPlaceholder = "knowledge.search";
-  find.placeholder = t("knowledge.search", "제목·태그 검색");
+  find.placeholder = t("knowledge.search", "제목·태그·출처 검색");
   find.dataset.i18nAria = "knowledge.search";
-  find.setAttribute("aria-label", t("knowledge.search", "제목·태그 검색"));
+  find.setAttribute("aria-label", t("knowledge.search", "제목·태그·출처 검색"));
   /* 후보 목록을 든 입력은 콤보박스다(S7): 열림은 `aria-expanded`가 말한다(`setKnowledgeSuggesting`). */
   find.setAttribute("role", "combobox");
   find.setAttribute("aria-autocomplete", "list");
@@ -2383,11 +2383,12 @@ function parseKnowledgeSearchTokens(raw) {
   return { tokens, free, active: tokens.length > 0 || free.length > 0 };
 }
 
-/* 한 페이지가 자유 낱말 전부를 품는가 — 제목·열쇠·태그·관계 낱말에서. 검색의 디밍과
- * 연결 만들기의 대상 후보(S5)가 같은 물음을 같은 손으로 묻는다. */
+/* 한 페이지가 자유 낱말 전부를 품는가 — 제목·열쇠·태그·관계 낱말·원본(`source:`)에서. 검색의
+ * 디밍과 연결 만들기의 대상 후보(S5)가 같은 물음을 같은 손으로 묻는다. 원본은 제목과
+ * 태그 어디에도 없는 출처(옮겨 온 기억 쪽의 「claude memory …」)를 사람이 그 말로 찾는 길이다. */
 function knowledgePageMatches(model, at, words) {
   return words.every((word) => graphSearchMatch(word.toLocaleLowerCase(), [
-    model.titles[at], model.keys[at], ...model.tags[at], ...model.relationWords[at],
+    model.titles[at], model.keys[at], ...model.tags[at], ...model.relationWords[at], model.sources[at],
   ]));
 }
 

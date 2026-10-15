@@ -441,6 +441,17 @@ pub(crate) struct DeskRun {
     /// When the last holder's pane was proven gone (a leader exit or a window
     /// restart), while nobody has sat since.
     pub(crate) vacated_ms: Option<i64>,
+    /// What this run's coordinator owes, counted off the same letters the
+    /// desk lists ([`desk_letters`]): questions to answer (the 「답할 우편」)
+    /// and notices to acknowledge (the 「소식」) — the badges on the sidebar's
+    /// coordinator card (t-56141).
+    pub(crate) mail: usize,
+    pub(crate) news: usize,
+    /// Its tasks verified and not yet merged — the stage the desk calls
+    /// `verified` — and the members of its integration batches still open:
+    /// the sidebar's landing line (t-56141).
+    pub(crate) landing: usize,
+    pub(crate) batched: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -633,10 +644,12 @@ pub(crate) fn desk_snapshot(
     let mut land_batches = Vec::new();
     for run in ledger.runs().iter().filter(|run| in_play(run)) {
         let owed = desk_letters(run, now_ms);
+        let (run_mail, run_news) = (owed.mail.len(), owed.news.len());
         mail.extend(owed.mail);
         news.extend(owed.news);
         folded += owed.folded;
         folded_batches.extend(owed.folded_batch);
+        let batches_before = land_batches.len();
         land_batches.extend(
             zerocode_core::orchestration::land_batch::batches(run)
                 .into_iter()
@@ -649,20 +662,17 @@ pub(crate) fn desk_snapshot(
                     batch,
                 }),
         );
+        let batched = land_batches[batches_before..]
+            .iter()
+            .filter(|held| !held.batch.ended())
+            .map(|held| held.batch.members.len())
+            .sum::<usize>();
         // The seat as the ledger keeps it: the live one names its pane, an
         // empty one keeps its generation and when its holder was proven gone.
         let chair = run.coordinator.as_ref();
         let live = run.coordinator_live();
         let term = live.and_then(|held| seat_term(&held.seat));
-        runs.push(DeskRun {
-            run: run.id.clone(),
-            name: run.name.clone(),
-            seat: term.is_some(),
-            term,
-            held: live.is_some(),
-            generation: chair.map_or(0, |held| held.generation),
-            vacated_ms: chair.and_then(|held| held.vacated_ms),
-        });
+        let tasks_before = staged_tasks.len();
         for task in &run.tasks {
             let (stage, progress) = staged(run, task);
             staged_tasks.push((
@@ -688,6 +698,22 @@ pub(crate) fn desk_snapshot(
                 },
             ));
         }
+        runs.push(DeskRun {
+            run: run.id.clone(),
+            name: run.name.clone(),
+            seat: term.is_some(),
+            term,
+            held: live.is_some(),
+            generation: chair.map_or(0, |held| held.generation),
+            vacated_ms: chair.and_then(|held| held.vacated_ms),
+            mail: run_mail,
+            news: run_news,
+            landing: staged_tasks[tasks_before..]
+                .iter()
+                .filter(|(_, _, row)| row.stage == "verified")
+                .count(),
+            batched,
+        });
     }
     let mut stages = Vec::with_capacity(STAGES.len());
     let mut tasks = Vec::new();
@@ -1332,6 +1358,12 @@ mod tests {
         assert_eq!(
             desk["counts"]["news"], 5,
             "the notices are news, one line each: {desk}"
+        );
+        // The run's own row counts the same letters, for the sidebar's coordinator card (t-56141).
+        assert_eq!(
+            (&desk["runs"][0]["mail"], &desk["runs"][0]["news"]),
+            (&serde_json::json!(1), &serde_json::json!(5)),
+            "the run's counts are not the desk's: {desk}"
         );
     }
 
@@ -2589,6 +2621,17 @@ mod tests {
         ] {
             assert_eq!(stage(id), word, "{id}");
         }
+        // The run's row counts what waits to land — verified, not merged — and nothing else:
+        // the sidebar's landing line (t-56141). No batch is open here.
+        assert_eq!(
+            desk.runs
+                .iter()
+                .map(|one| (one.run.as_str(), one.landing, one.batched))
+                .collect::<Vec<_>>(),
+            vec![(run.as_str(), 1, 0)],
+            "{:?}",
+            desk.runs
+        );
         for word in [
             "reported", "verified", "merged", "deployed", "stale", "unknown",
         ] {

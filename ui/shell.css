@@ -1522,6 +1522,305 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   white-space: nowrap;
 }
 
+/* ---- the team view (t-56141) ----
+ * The sidebar while a coordinator sits: a card for each coordinator and one row for each worker under it. The dot,
+ * the chip and the steps wear the signal tokens the rows beside them already wear; the step the work is at wears
+ * the link ink — the one blue on the list, saying "here". A row is a button, as tall as its lines. */
+.team {
+  --team-current: var(--syntax-link);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1) 0 var(--space-2);
+}
+
+.team[hidden],
+.team-switch[hidden] {
+  display: none;
+}
+
+.team-mine {
+  display: flex;
+  gap: var(--space-1);
+  padding: 0 var(--space-1) var(--space-1);
+}
+
+.team-mine-chip,
+.team-toggle,
+.team-switch {
+  flex: none;
+  padding: 1px var(--space-2);
+  border: var(--rule-width) solid var(--nav-plane-rule);
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--text-2xs);
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.team-mine-chip:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.team-switch {
+  margin: var(--space-1) var(--space-1) var(--space-1) 0;
+}
+
+.team-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-xs);
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.team-row:hover,
+.team-row:focus-visible {
+  background: var(--nav-plane-accent);
+}
+
+.team-row:focus-visible {
+  outline: var(--rule-width) solid var(--signal-ready-ink);
+  outline-offset: -1px;
+}
+
+.team-row:disabled {
+  cursor: default;
+}
+
+.team-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.team-coordinator {
+  margin-top: var(--space-2);
+  background: color-mix(in srgb, var(--nav-plane-accent) 60%, transparent);
+}
+
+.team-face {
+  display: inline-flex;
+  flex: none;
+}
+
+.team-face .agent-ico {
+  width: 16px;
+  height: 16px;
+}
+
+.team-name {
+  flex: none;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.team-coordinator.is-vacant .team-name {
+  color: var(--signal-wait-ink);
+}
+
+.team-run {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-badge,
+.team-chip {
+  flex: none;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-3xs);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.team-badge.is-question,
+.team-chip.is-question {
+  background: color-mix(in srgb, var(--signal-wait) 24%, transparent);
+  color: var(--signal-wait-ink);
+}
+
+.team-badge.is-letters {
+  border: var(--rule-width) solid var(--nav-plane-rule);
+  color: var(--ink-mist);
+}
+
+/* A worker stands under its coordinator: indented by the lineage step the agent rows use. */
+.team-worker {
+  padding-left: calc(var(--space-2) + var(--nav-indent));
+}
+
+.team-worker.is-taken .team-title {
+  text-decoration: underline dashed;
+}
+
+.team-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-glyph);
+}
+
+.team-dot.is-working {
+  background: var(--signal-ready);
+}
+
+.team-dot.is-waiting,
+.team-dot.is-asking {
+  background: var(--signal-wait);
+}
+
+.team-dot.is-blocked {
+  background: var(--signal-halt);
+}
+
+.team-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-chip {
+  flex: 0 1 auto;
+  max-width: 40%;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--signal-halt) 18%, transparent);
+  color: var(--signal-halt-ink);
+  text-overflow: ellipsis;
+}
+
+.team-pane {
+  flex: none;
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+}
+
+.team-now {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The worker's second and third lines start under its title, past the dot. */
+.team-worker .team-now,
+.team-worker .team-strip {
+  margin-left: calc(8px + var(--space-1));
+}
+
+.team-now[hidden],
+.team-chip[hidden],
+.team-badge[hidden],
+.team-run[hidden],
+.team-pane[hidden] {
+  display: none;
+}
+
+.team-strip {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.team-step {
+  display: block;
+  flex: none;
+  width: 20px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--nav-plane-rule);
+}
+
+.team-step.is-on {
+  background: var(--signal-done);
+}
+
+.team-step.is-cur {
+  background: var(--team-current);
+}
+
+.team-step.is-stuck {
+  background: var(--signal-wait);
+}
+
+.team-step-word {
+  margin-left: var(--space-1);
+  color: var(--ink-mist);
+  font-size: var(--text-3xs);
+  font-weight: 500;
+}
+
+.team-landing {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+  border: var(--rule-width) dashed var(--nav-plane-rule);
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.team-landing-count {
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.team-landing.is-empty .team-landing-count {
+  color: var(--ink-mist);
+  font-weight: 400;
+}
+
+.team-arrow {
+  opacity: 0.6;
+}
+
+.team-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-1) 0;
+  color: var(--ink-mist);
+  font-size: var(--text-3xs);
+}
+
+.team-keys {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* The checkouts of a task folded under its row (t-45336): a small press at the end of the line, as tall as the
  * line's words so a row with it is as tall as one without. */
 .wt-fold {
@@ -2253,10 +2552,12 @@ svg.wt-agent-dot {
 .wt-wall,
 .wt-phase {
   /* The name gives way first and the word does not: it is the news, and a name
-   * cut to an ellipsis is still a name. Half the line is the most it takes, so
-   * a very narrow sidebar cuts the word rather than the name to nothing. */
-  flex: none;
-  max-width: 50%;
+   * cut to an ellipsis is still a name. The word takes up to half the line, and
+   * the room a short name leaves besides, but never more than its own width.
+   * When the line overflows nothing grows and the word stays at its half, so a
+   * very narrow sidebar cuts the word rather than the name to nothing. */
+  flex: 1 0 50%;
+  max-width: max-content;
   /* One pixel under `.wt-default`'s 16: the name's own line is 15.25 tall, so
    * a chip any taller than that grows the row when it arrives and shrinks it
    * when it leaves — and a row that changes height under the pointer is the
@@ -44724,6 +45025,19 @@ button.jev-token:hover {
   border: var(--skills-line) solid var(--edge-mark);
   border-radius: var(--radius-md);
 
+}
+
+.skills-bundled-panel {
+  color: var(--ink-mist);
+  font-size: var(--skills-meta-size);
+}
+
+.skills-bundled-line {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+  margin: var(--space-1) 0;
 }
 
 .skills-error {

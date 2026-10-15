@@ -263,13 +263,82 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       UNSAVED);
     const [b, c, d, unread] = UNSAVED.map((path) => chips[path]);
     ok(
-      "AT-②-1 ⑧ (t-45314): laid out from the backend's own rows, B — an edit nobody committed, of a file main changed too — says 커밋 없음 · 저장 안 한 변경 · main과 겹침 1 and never calls it a conflict, in word or colour; its tooltip names src/login.rs, says it runs 1 commit behind origin/main and that the overlap is by file; its head word stays 커밋 없음; C and D say nothing of an overlap",
-      b.word === "커밋 없음 · 저장 안 한 변경 · main과 겹침 1" && !b.word.includes("충돌") &&
+      "AT-②-1 ⑧ (t-45314): laid out from the backend's own rows, B — an edit nobody committed, of a file main changed too — says main과 겹침 1 · 커밋 없음 · 저장 안 한 변경, the overlap first (t-55424), and never calls it a conflict, in word or colour; its tooltip names src/login.rs, says it runs 1 commit behind origin/main and that the overlap is by file; its head word stays 커밋 없음; C and D say nothing of an overlap",
+      b.word === "main과 겹침 1 · 커밋 없음 · 저장 안 한 변경" && !b.word.includes("충돌") &&
         b.tone === "none" && b.color === chips["/r/nocommit"].color &&
         b.tip.includes("src/login.rs") && b.tip.includes(`${REF}보다 1커밋 뒤처져`) && b.tip.includes("파일 단위 겹침") &&
         !b.tip.includes("충돌") && heads["/r/overlap-b"] === "커밋 없음" &&
         c.word === "커밋 없음 · 저장 안 한 변경" && d.word === "커밋 없음" && !c.word.includes("겹침") && !d.word.includes("겹침"),
       JSON.stringify({ b, c, d, heads }),
+    );
+
+    // Read where the person reads it: the sidebar at its default width, the words' own ink against the chip's
+    // box. The ellipsis is drawn over the end of the box, so a word that shows ends before it. A chip's news is
+    // its words up to its last clash or overlap with its count, and with neither its first word; what follows
+    // may fall under the ellipsis, because the tooltip says it whole (t-34501).
+    const room = await page.evaluate((paths) => {
+      const read = (path, words) => {
+        const row = document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(path)}"]`);
+        const chip = row.querySelector(".wt-landing");
+        const title = row.querySelector(".wt-title");
+        const text = chip.firstChild;
+        const style = getComputedStyle(chip);
+        const px = (name) => parseFloat(style.getPropertyValue(name));
+        const span = (from, to) => {
+          const range = document.createRange();
+          range.setStart(text, from);
+          range.setEnd(text, to);
+          return range.getBoundingClientRect();
+        };
+        const pen = document.createElement("canvas").getContext("2d");
+        pen.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+        const box = chip.getBoundingClientRect();
+        const cut = chip.scrollWidth > chip.clientWidth;
+        const end = box.right - px("padding-right") - px("border-right-width") - (cut ? pen.measureText("…").width : 0);
+        const at = words ? text.data.indexOf(words) : -1;
+        const inner = box.width - px("padding-left") - px("padding-right") - px("border-left-width") - px("border-right-width");
+        return {
+          word: text.data,
+          shows: at >= 0 && span(at, at + words.length).right <= end + 0.5,
+          cut,
+          chip: box.width,
+          slack: inner - span(0, text.data.length).width,
+          line: row.querySelector(".wt-topline").clientWidth,
+          nameCut: title.scrollWidth > title.clientWidth,
+        };
+      };
+      const news = (word) => {
+        const parts = word.split(" · ");
+        const last = parts.findLastIndex((part) => /(^충돌|겹침) \d+$/.test(part));
+        return parts.slice(0, last + 1 || 1).join(" · ");
+      };
+      const every = {};
+      for (const path of paths) {
+        const chip = document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(path)}"] .wt-landing`);
+        if (!chip || getComputedStyle(chip).display === "none" || chip.textContent === "") continue;
+        const said = news(chip.textContent);
+        const one = read(path, said);
+        every[path] = { news: said, shows: one.shows, cut: one.cut };
+      }
+      return {
+        sidebar: getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width").trim(),
+        b: read("/r/overlap-b", "main과 겹침 1"),
+        d: read("/r/overlap-d", null),
+        unread: read("/r/overlap-unread", null),
+        every,
+      };
+    }, SCENE.map((one) => one.path));
+    const worded = Object.values(chips).filter((one) => one.word).length;
+    ok(
+      "at the sidebar's default 280 px every chip says its news whole, before any ellipsis — B's main과 겹침 1, said first (t-55424), 미반영 N · 충돌 N, 반영됨, 커밋 없음, even on the row whose long name holds its chip to half the line — and B's name is not cut for it",
+      room.sidebar === "280px" && room.b.shows && !room.b.nameCut &&
+        Object.keys(room.every).length === worded && Object.values(room.every).every((one) => one.shows),
+      JSON.stringify({ sidebar: room.sidebar, b: room.b, worded, every: room.every }),
+    );
+    ok(
+      "a chip is never wider than its words — D's 커밋 없음 has no empty room inside it — and a name too long for its line still holds the chip to half the line, so the word is cut and not the name to nothing",
+      Math.abs(room.d.slack) <= 1 && room.unread.nameCut && room.unread.chip <= room.unread.line / 2 + 0.5,
+      JSON.stringify({ d: room.d, unread: room.unread }),
     );
 
     ok(

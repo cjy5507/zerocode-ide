@@ -1197,6 +1197,8 @@ function primaryShortcut(event) {
   ) return { action, path: null };
   if (terminalFirst) return null;
   const index = digitIndex(chord);
+  // While the team stands the sidebar lists coordinators, and the digits count those (t-56141).
+  if (index !== null && sidebarTeamStood) return teamDigitShortcut(index);
   const path = index === null ? null : worktreeOrder[index - 1];
   return path ? { action: null, path } : null;
 }

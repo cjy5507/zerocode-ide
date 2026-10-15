@@ -5763,6 +5763,7 @@ function closeTab(id) {
     }
     closeChecks.delete(id);
     closeConfirmed.delete(id);
+    noteTabsLeaving([tab], "close-tab");
     // Every pane in it. A tab that was split holds several shells, and
     // leaving the ones that were not the tab's first behind would leak a
     // process with nothing on screen addressing it.
