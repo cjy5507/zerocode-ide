@@ -369,10 +369,11 @@ pub enum Refused {
     Budget,
     /// The model pin changed after the caller prepared this batch.
     SettingsChanged,
-    /// The seat applies nothing and rests: its own recent requests went
-    /// unanswered, or its request cannot fit what its provider reads, so
-    /// asking now would hold the judgment server for nothing. zo's door asks
-    /// this one (t-58193); a row of it sent nothing.
+    /// The seat rests, so asking now would hold the judgment server for
+    /// nothing: its server asked for a wait that has not passed, its smallest
+    /// request is longer than its provider reads, or it applies nothing and
+    /// its own recent requests went unanswered. zo's door asks this one
+    /// (t-58193); a row of it sent nothing.
     Resting,
 }
 
