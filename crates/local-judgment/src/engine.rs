@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
@@ -45,6 +45,19 @@ const STDERR_SETTLE: Duration = Duration::from_millis(500);
 /// How often a server looks at its runtime, so its end is told even while
 /// another process keeps the runtime's output open.
 const WATCH: Duration = Duration::from_millis(200);
+
+/// A stderr line that repeats what the runtime was last asked is left out of
+/// the tail, as mask finds keys and paths but not a person's sentence: the
+/// whole of an asked text of `ASKED_TEXT` to `ASKED_RUN` characters, or
+/// `ASKED_RUN` characters in a row of a longer one. Shorter texts are single
+/// words a runtime's own lines share by chance.
+const ASKED_TEXT: usize = 8;
+const ASKED_RUN: usize = 12;
+const _: () = assert!(STDERR_LINES <= u32::BITS as usize);
+
+/// How many whole seconds a client waits before it asks an ended server whose
+/// restart is planned or loading again.
+pub(crate) type RetryAfter = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// How the owned server admits requests to its runtime: how long one
 /// exchange may run, how long a request may wait for its turn, and how many
@@ -114,6 +127,7 @@ struct Held {
     lines: VecDeque<String>,
     bytes: usize,
     closed: bool,
+    asked: Vec<u8>,
 }
 
 struct Pipe {
@@ -346,6 +360,7 @@ impl Engine {
         if bytes.len() >= MAX_FRAME {
             return Err(Error::TooLarge);
         }
+        self.stderr.asking(bytes);
         let mut io = lock(&self.io);
         io.input
             .write_all(bytes)
@@ -477,19 +492,30 @@ impl Tail {
         self.closed.notify_all();
     }
 
-    /// The kept lines with their private values masked by the table the
-    /// release gate reads, once stderr has closed or [`STDERR_SETTLE`] has
-    /// passed, still within the bounds after masking.
+    /// Keeps the request the runtime is asked now in place of the last.
+    fn asking(&self, request: &[u8]) {
+        let mut held = lock(&self.held);
+        held.asked.clear();
+        held.asked.extend_from_slice(request);
+    }
+
+    /// The kept lines, once stderr has closed or [`STDERR_SETTLE`] has
+    /// passed: without those that repeat what the runtime was last asked
+    /// (see [`ASKED_RUN`]), with their private values masked by the table the
+    /// release gate reads, and still within the bounds after masking.
     fn lines(&self) -> Vec<String> {
         let held = self
             .closed
             .wait_timeout_while(lock(&self.held), STDERR_SETTLE, |held| !held.closed)
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .0;
+        let repeated = repeating(&held.lines, &held.asked);
         let mut lines: Vec<String> = held
             .lines
             .iter()
-            .map(|line| {
+            .enumerate()
+            .filter(|&(index, _)| repeated & (1 << index) == 0)
+            .map(|(_, line)| {
                 let mut masked = zerocode_core::private_data::mask(line).text;
                 let mut end = masked.len().min(STDERR_LINE_BYTES);
                 while !masked.is_char_boundary(end) {
@@ -511,6 +537,61 @@ impl Tail {
             .count();
         lines.drain(..lines.len() - kept);
         lines
+    }
+}
+
+/// Which of `lines` repeat text from `asked`, the request the runtime was
+/// last asked, one bit a line: see [`ASKED_RUN`].
+fn repeating(lines: &VecDeque<String>, asked: &[u8]) -> u32 {
+    let Ok(mut request) = serde_json::from_slice::<Value>(asked) else {
+        return 0;
+    };
+    if let Some(request) = request.as_object_mut() {
+        request.remove("model");
+    }
+    let mut texts = Vec::new();
+    strings(&request, &mut texts);
+    let mut runs: HashMap<&str, u32> = HashMap::new();
+    for (index, line) in lines.iter().enumerate() {
+        let starts = char_starts(line);
+        for (first, &from) in starts.iter().enumerate() {
+            for &to in starts
+                .iter()
+                .skip(first + ASKED_TEXT)
+                .take(ASKED_RUN - ASKED_TEXT + 1)
+            {
+                *runs.entry(&line[from..to]).or_default() |= 1 << index;
+            }
+        }
+    }
+    let mut repeated = 0;
+    for text in texts {
+        let starts = char_starts(text);
+        let run = (starts.len() - 1).min(ASKED_RUN);
+        if run < ASKED_TEXT {
+            continue;
+        }
+        for piece in starts.windows(run + 1) {
+            repeated |= runs.get(&text[piece[0]..piece[run]]).copied().unwrap_or(0);
+        }
+    }
+    repeated
+}
+
+/// Where each character of `text` starts, and where the last one ends.
+fn char_starts(text: &str) -> Vec<usize> {
+    text.char_indices()
+        .map(|(at, _)| at)
+        .chain([text.len()])
+        .collect()
+}
+
+fn strings<'a>(value: &'a Value, found: &mut Vec<&'a str>) {
+    match value {
+        Value::String(text) => found.push(text),
+        Value::Array(items) => items.iter().for_each(|item| strings(item, found)),
+        Value::Object(fields) => fields.values().for_each(|field| strings(field, found)),
+        _ => {}
     }
 }
 
@@ -576,6 +657,7 @@ struct Admission {
     turn: Arc<tokio::sync::Semaphore>,
     admitted: AtomicUsize,
     limits: Limits,
+    restarting: Mutex<Option<RetryAfter>>,
 }
 
 /// One admitted request's place, given back when it is dropped: when the
@@ -591,7 +673,15 @@ impl Admission {
             turn: Arc::new(tokio::sync::Semaphore::new(Self::RUNNING)),
             admitted: AtomicUsize::new(0),
             limits,
+            restarting: Mutex::new(None),
         })
+    }
+
+    /// The Retry-After an ended server answers with while its restart is
+    /// planned or loading.
+    fn retry_after(&self) -> Option<u64> {
+        let after = lock(&self.restarting).clone();
+        after.map(|after| after())
     }
 
     fn enter(self: &Arc<Self>) -> Option<Ticket> {
@@ -633,9 +723,26 @@ fn failure(status: StatusCode, error: Error) -> Response {
     (status, axum::Json(json!({"error":error.token()}))).into_response()
 }
 
+fn retry_later(seconds: u64) -> Response {
+    // A kept-alive connection would stay on the ended server after its
+    // restart; closing it sends the client's next request to the port anew.
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (axum::http::header::RETRY_AFTER, seconds.to_string()),
+            (axum::http::header::CONNECTION, "close".to_owned()),
+        ],
+        axum::Json(json!({"error":Error::Restarting.token()})),
+    )
+        .into_response()
+}
+
 async fn models(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if browser_request(&headers, &state.provider) {
         return failure(StatusCode::FORBIDDEN, Error::Protocol);
+    }
+    if let Some(seconds) = state.admission.retry_after() {
+        return retry_later(seconds);
     }
     if !state.engine.alive() {
         return failure(StatusCode::SERVICE_UNAVAILABLE, Error::ServerStopped);
@@ -646,6 +753,9 @@ async fn models(State(state): State<HttpState>, headers: HeaderMap) -> Response 
 async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes) -> Response {
     if browser_request(&headers, &state.provider) {
         return failure(StatusCode::FORBIDDEN, Error::Protocol);
+    }
+    if let Some(seconds) = state.admission.retry_after() {
+        return retry_later(seconds);
     }
     let Some(ticket) = state.admission.enter() else {
         return failure(StatusCode::SERVICE_UNAVAILABLE, Error::Busy);
@@ -880,6 +990,13 @@ impl Running {
 
     pub(crate) fn take_listener(&mut self) -> Result<std::net::TcpListener> {
         self.reservation.take().ok_or(Error::RuntimeFailed)
+    }
+
+    /// Answers every request from here on with `server_restarting` and the
+    /// Retry-After `after` gives: this server's runtime ended, and its restart
+    /// is planned or loading.
+    pub(crate) fn restarting(&self, after: RetryAfter) {
+        *lock(&self.admission.restarting) = Some(after);
     }
 
     pub(crate) async fn retire(mut self) {
