@@ -4810,12 +4810,17 @@ export async function testConversationCodeColours(browser, origin, ok) {
     }),
   });
   try {
+    await standColourProbe(bare.page);
     await openConversation(bare.page, [
       { role: "user", text: "고쳐 줘" },
       { role: "assistant", text: fencedAnswer(CODE_FENCES) },
     ]);
     const seen = await bare.page.evaluate(async () => {
-      for (let beat = 0; beat < 6; beat += 1) await window.__PAINTED__();
+      // The colouring runs in idle slices, each asked with a `CODE_COLOUR.waitMs`
+      // deadline: the fences are read once its line is empty, as the checks
+      // above read theirs — a count of frames is spent before the first slice
+      // when the machine is busy.
+      await window.__COLOURS__.settle();
       const pres = [...document.querySelectorAll("#worker-view .helper-said pre.md-block")];
       const spans = pres.reduce((sum, pre) => sum + pre.querySelectorAll(":scope > [class^='chat-code-']").length, 0);
       return { api: typeof window.Highlight, fences: pres.length, words: pres.map((pre) => pre.textContent), spans };
