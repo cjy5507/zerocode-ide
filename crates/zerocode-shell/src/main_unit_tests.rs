@@ -9731,9 +9731,20 @@ fn the_sidebar_remembers_how_it_was_asked_to_look() {
             group_by: SidebarGroupBy::Repo,
             sort_by: SidebarSortBy::Catalog,
             project_order: SidebarProjectOrder::Catalog,
+            layout: SidebarLayout::Team,
         },
         "the sidebar no longer opens grouped by project in catalogue order"
     );
+    // The team view and the branch list live in the same value (t-56141): the
+    // two words are taken, any other is refused, and a document written before
+    // the word existed opens on the team.
+    assert_eq!(SidebarLayout::parsed("team"), Ok(SidebarLayout::Team));
+    assert_eq!(SidebarLayout::parsed("branches"), Ok(SidebarLayout::Branches));
+    assert!(SidebarLayout::parsed("coordinators").is_err());
+    let before: SidebarView =
+        serde_json::from_str(r#"{"group_by":"repo","sort_by":"default","project_order":"default"}"#)
+            .expect("a view written before the layout word reads");
+    assert_eq!(before.layout, SidebarLayout::Team);
 }
 
 /// 보드 팝아웃 — 창은 하나, 수명은 메인 창에 매여 있고, 두 창은 한 문서다.
@@ -26547,4 +26558,99 @@ mod desktop_wait_for_tests {
             assert_eq!(walked.reports[0]["result"], case["result"]);
         }
     }
+}
+
+/// A Claude pane in the window runs with `CLAUDE_CONFIG_DIR` at the app-owned
+/// home and never reads `~/.claude/skills`, and a Codex pane runs with
+/// `CODEX_HOME` at the shared runtime home. An install that wrote only under
+/// `HOME` left every window pane without the bundled skills (t-55424: two
+/// window Claude conversations listed a skill found only in the app's home and
+/// none of the bundled ones). The install writes the window's homes as well,
+/// and the copy read names every one of them.
+#[test]
+fn claude_skills_install_into_the_windows_claude_home() {
+    use zerocode_core::skill_install::{CopyState, InstallState, bundled_copies, bundled_skill};
+    let home = tempfile::tempdir().expect("home");
+    let config = tempfile::tempdir().expect("config root");
+    let data = tempfile::tempdir().expect("local data root");
+    let launched = skills_runtime::window_agent_homes(config.path(), data.path());
+    let agents = vec![
+        ("claude".to_string(), "Claude".to_string()),
+        ("codex".to_string(), "Codex".to_string()),
+    ];
+    let outcomes =
+        skills_runtime::install_bundled_skill("second-brain", home.path(), &launched, &agents)
+            .expect("install");
+    let bundled = bundled_skill("second-brain").expect("bundled").content;
+    for root in [
+        home.path().join(".claude/skills"),
+        accounts::runtime_home(config.path()).join("skills"),
+        home.path().join(".codex/skills"),
+        codex_accounts::runtime_home(data.path()).join("skills"),
+    ] {
+        let copy = root
+            .join("second-brain")
+            .join(zerocode_core::skill::SKILL_FILE);
+        assert!(
+            outcomes
+                .iter()
+                .any(|row| row.path == copy && row.state == InstallState::Written),
+            "{} was not written: {outcomes:?}",
+            copy.display()
+        );
+        assert_eq!(std::fs::read_to_string(&copy).expect("copy"), bundled);
+    }
+    let copies = bundled_copies("second-brain", home.path(), &launched, &agents).expect("copies");
+    assert_eq!(copies.len(), 4, "{copies:?}");
+    assert!(
+        copies.iter().all(|copy| copy.state == CopyState::Current),
+        "{copies:?}"
+    );
+}
+
+/// The second brain's guide block reaches the panes the skill reaches. The
+/// window's Claude home gets its own `CLAUDE.md`: a Claude pane in the window
+/// reads that file and never `~/.claude/CLAUDE.md`, so a pane opened outside
+/// the person's home tree had no guide at all (t-55424: three such panes
+/// loaded no `CLAUDE.md`). Switching accounts rewrites only the login inside
+/// that home (`accounts::materialize`), so the block stays where it was written.
+#[test]
+fn the_second_brain_guide_reaches_the_windows_claude_home() {
+    use zerocode_core::second_brain::{
+        AGENTS_FILE, CLAUDE_FILE, GUIDE_START, GuideState, inspect_global_guides,
+        link_global_guides,
+    };
+    let home = tempfile::tempdir().expect("home");
+    let config = tempfile::tempdir().expect("config root");
+    let data = tempfile::tempdir().expect("local data root");
+    let vault = tempfile::tempdir().expect("vault");
+    let launched = skills_runtime::window_agent_homes(config.path(), data.path());
+    let agents = vec![
+        ("claude".to_string(), "Claude".to_string()),
+        ("codex".to_string(), "Codex".to_string()),
+    ];
+    let written = link_global_guides(home.path(), &launched, Some(vault.path()), &agents);
+    for file in [
+        accounts::runtime_home(config.path()).join(CLAUDE_FILE),
+        codex_accounts::runtime_home(data.path()).join(AGENTS_FILE),
+    ] {
+        assert!(
+            written
+                .iter()
+                .any(|row| row.path == file && row.state == GuideState::Linked),
+            "{} was not linked: {written:?}",
+            file.display()
+        );
+        assert!(
+            std::fs::read_to_string(&file)
+                .expect("guide")
+                .contains(GUIDE_START)
+        );
+    }
+    let read = inspect_global_guides(home.path(), &launched, Some(vault.path()), &agents);
+    assert_eq!(read.len(), 4, "{read:?}");
+    assert!(
+        read.iter().all(|row| row.state == GuideState::Linked),
+        "{read:?}"
+    );
 }

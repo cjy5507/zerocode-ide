@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.70] — 2026-10-16
+
+- 사이드바에 「팀」 보기가 생겼습니다. 코디가 있는 작업 공간은 워커마다 한 행으로 보이고, 읽기→커밋→줄→넘김→검증→착지 여섯 칸이 원장과 git에 적힌 사실로 채워지며, 지금 하는 일 한 줄과 우편·소식·착지·묶음 수가 함께 보입니다(⌘숫자로 행을 고릅니다). 목록은 요소 560→130개, 처음 그리기 9.4→2.1 ms(저사양 CPU×4 55.9→9.6 ms), 상태 편지 한 통의 갱신 0.3 ms입니다. (t-56141)
+- 판이 사라지지 않습니다. 분할로 연 판이 받을 탭이 없어도 떼어 둔 행으로 남고, 같은 이름의 탭이 서로 덮어쓰지 않으며, 알 수 없는 길로 잃은 에이전트도 1분 안에 사이드바 행으로 돌아오고, 판이 탭을 떠나는 14가지 길마다 창 기록에 한 줄이 남습니다. zo는 /resume·/new·/clear로 대화를 바꿀 때도 창에 알리므로 재시작 복원이 옛 대화를 다시 열지 않습니다(시험 장면에서 탭도 행도 없이 남던 판 5→0). (t-56480)
+- zo가 같은 답을 두 번 쓰지 않습니다. 「…정해 주시면 …하겠습니다」처럼 선택을 사람에게 넘기는 끝은 약속으로 보지 않아 재촉하지 않고, 약속 재촉은 턴당 한 번입니다(보고된 장면: 재촉 2→0, 답 3→1). (t-58176)
+- zo의 떠올린 기억에서 front matter에 recall: pointer를 둔 페이지는 발췌 없이 링크 줄만 보이고 발췌 자리를 쓰지 않습니다. 거절·분류기 화면을 인용한 페이지가 요청을 다시 거절당하게 하지 않도록 볼트가 정합니다. (t-57513, ZO)
+- Karpathy 목록 네 조각이 사람이 보는 자리에 들어갔습니다. 지식 그래프 검색이 페이지의 source 낱말도 찾아 Claude 기억에서 옮긴 288쪽이 검색되고, 번들 스킬 사본은 git blob으로 현재·옛 릴리스·손으로 고침·없음을 가려 손으로 고친 사본은 절대 덮어쓰지 않으며(스킬 화면과 세컨드 브레인 카드에 상태 표시, 없거나 옛 것에만 다시 쓰기 단추), 사이드바 칩은 main과의 겹침을 먼저 말해 280 px에서도 소식이 잘리지 않고, promote는 git을 제 스레드에서 돌려 7초 안에 답합니다. (t-55424, ZO)
+
 ## [1.1.69] — 2026-10-15
 - An artifact opens once: opening one that is already open brings its tab to the front instead of making another browser pane (same page reopened: new panes 1 → 0, requests 6 → 1), a page opened from the gallery reuses one preview tab until you keep it (double-click, annotate, pick a pane, link or 「beside」), the tab is named after the artifact's title, and the drawer's head opens the page in one press; the engine's first paint on that road 64.3 → 25.5 ms (50 KB, Chromium) and renderer memory after four openings 129.1 → 52.6 MiB; the settings suite's boot update-check race, which was already on main, is parked by the test that it hit (t-55370, stage 1).
 - The conversation you leave stands behind the page you go to, so coming back is a reveal, not a rebuild: leaving for another conversation, a terminal tab or the pane's own screen keeps the page rendered behind the front one (one rendered and one detached page per pane, two behind-pages per window), and 「대화」 shows the parked page before any read; on a 400-turn conversation the return's first paint is 27.6 → 11.6 ms (Chromium, the 16.7 ms target met), 60.0 → 13.0 ms (WebKit), terminal tab → conversation 27.3 → 8.9 ms, and 「대화」 shown again 17.0 → 10.2 ms; still open: the reader's-row placement at CPU ×4 (53 ms) and the first 「대화」 press (t-55369, stage 2).

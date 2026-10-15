@@ -99,7 +99,9 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
         })),
       }];
       window.__ANSWER__.set_sidebar_view = () => null;
-      setSidebarView({ groupBy: "repo" });
+      // The branch list's own rows are what this suite reads: with a coordinator sitting, the team view
+      // (t-56141, its own suite `sidebar-team`) would stand in their place.
+      setSidebarView({ groupBy: "repo", layout: "branches" });
       await refreshWorktrees();
       // The ledger moved: what the window does on its own beat. Waits for the rows to land, then for one paint.
       window.__LEDGER_MOVED__ = async (want) => {

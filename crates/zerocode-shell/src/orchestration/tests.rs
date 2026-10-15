@@ -1575,6 +1575,82 @@ fn a_workers_row_carries_its_question_its_wall_and_its_pane() {
     assert!(wall.stands_until_ms > 2_700_020, "{wall:?}");
 }
 
+/// The team view's worker row (t-56141) reads two facts off the board's row: what the worker
+/// last said it was doing — its newest `status` since it was summoned — and what the newest
+/// landing check of its task said since this attempt began. A worker that said nothing and a task
+/// nobody checked carry neither.
+#[test]
+fn a_workers_board_row_carries_its_last_status_and_its_tasks_newest_check() {
+    use zerocode_core::orchestration::land_check::LandCheckReceipt;
+    use zerocode_core::orchestration::{
+        Draft, Ledger, MessageKind, Priority, Text, worker_address,
+    };
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("team row", 1);
+    let task = ledger
+        .create_task(&run, "do".into(), "team task".into(), vec![], None, 2)
+        .expect("a task");
+    let started = ledger
+        .start_worker(&run, "claude", ("team-row", "%2"), Some(&task), 3)
+        .expect("a worker");
+    let row = |ledger: &Ledger| {
+        super::ledger_agents_for_seats(ledger, &super::TeamSeatIndex::new())
+            .into_iter()
+            .find(|one| one.worker == started.worker)
+            .expect("the worker's row")
+    };
+    let quiet = row(&ledger);
+    assert!(
+        quiet.last_status.is_none() && quiet.land_check.is_none(),
+        "{quiet:?}"
+    );
+    let address = ledger.run(&run).expect("the run").address();
+    ledger
+        .post(
+            &run,
+            Draft {
+                from: worker_address(&started.worker),
+                to: address,
+                kind: MessageKind::Status,
+                body: Text::from("reading the sidebar. then the tests"),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: None,
+                task: Some(task.clone()),
+                dispatch: started.dispatch.clone(),
+            },
+            10,
+        )
+        .expect("a status");
+    ledger
+        .land_checked(
+            &LandCheckReceipt {
+                run: run.clone(),
+                task: task.clone(),
+                check: "lc-1-1".into(),
+                evidence: r#"{"state":"passed","rc":0}"#.into(),
+            },
+            20,
+        )
+        .expect("a check");
+    let said = row(&ledger);
+    assert_eq!(
+        said.last_status
+            .as_ref()
+            .map(|one| (one.line.as_str(), one.created_ms)),
+        Some(("reading the sidebar. then the tests", 10)),
+        "{said:?}"
+    );
+    assert_eq!(
+        said.land_check
+            .as_ref()
+            .map(|one| (one.state.as_str(), one.rc)),
+        Some(("passed", Some(0))),
+        "{said:?}"
+    );
+}
+
 /// The desk calls a run's coordinator seat this window's only where the pane
 /// the seat names (`team/pane`) is in this window's pane table (t-6588) —
 /// the seat a reply from the board is written as — and names the terminal

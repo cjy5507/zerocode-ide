@@ -5065,15 +5065,7 @@ impl App {
     /// 배너 자리 — codex 의 부팅 카드.
     fn boot(&mut self) {
         self.session().fire_session_start();
-        if let Some(reporter) = self.ui.reporter.as_ref() {
-            reporter.session_start(
-                if self.session().resumed() { "resume" } else { "startup" },
-                &self.session().handle.id,
-                &self.session().handle.path.to_string_lossy(),
-                &self.session().cwd.to_string_lossy(),
-                &self.session().model,
-            );
-        }
+        self.announce_session();
         self.ui.painter.set_height(5);
         self.session_card();
         if self.session().resumed() {
@@ -5083,6 +5075,26 @@ impl App {
         // `StartupWarningsCell`); the viewer names the rest by their level.
         self.ui.warnings.start();
         self.ui.paint();
+    }
+
+    /// 지금 이 판이 쥔 대화를 IDE 에 말한다 — `SessionStart` 봉투 하나, 그
+    /// 대화 자신의 id·트랜스크립트·폴더·모델로(t-56480). 대화를 판에 앉히는
+    /// 길은 전부 이것을 지난다: 부팅, `/resume`, `/new`·`/clear`. IDE 는 판의
+    /// 대화를 이 봉투로만 알기 때문에, 조용히 갈아 끼운 길에서는 창이 마지막으로
+    /// 들은 대화를 쥔 채 판 기록에 적었고, 창이 다시 뜨면 그 대화를 이 판에
+    /// 되살렸다(2026-10-15: zo 판에서 `/resume` 한 뒤 창 재시작이 그 전 대화를
+    /// 데려왔다). source 는 사용자 훅(`fire_session_start`)과 같은 규칙이다.
+    fn announce_session(&self) {
+        if let Some(reporter) = self.ui.reporter.as_ref() {
+            let session = self.session();
+            reporter.session_start(
+                if session.resumed() { "resume" } else { "startup" },
+                &session.handle.id,
+                &session.handle.path.to_string_lossy(),
+                &session.cwd.to_string_lossy(),
+                &session.model,
+            );
+        }
     }
 
     /// codex 의 세션 정보 셀 — 부팅 카드다. 새로 열 때도, `/resume` 이 세션을
@@ -5585,6 +5597,7 @@ impl App {
                     self.ui.note(SystemLevel::Error, &text);
                 }
                 self.session().fire_session_start();
+                self.announce_session();
             }
             Err(error) => {
                 let text = format!("new chat failed: {error}");
@@ -5689,6 +5702,7 @@ impl App {
                     self.ui.history(&cell);
                 }
                 self.session().fire_session_start();
+                self.announce_session();
             }
             Err(error) => {
                 let text = format!("resume failed: {error}");

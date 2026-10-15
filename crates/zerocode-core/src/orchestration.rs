@@ -4572,33 +4572,61 @@ fn named_ids(ids: &[&str]) -> String {
     }
 }
 
+/// A worker's last `status` letter: which message, when, and its first line,
+/// clipped to [`LAST_STATUS_LINE_CHARS`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LastStatus {
+    pub message_id: String,
+    pub created_ms: i64,
+    pub line: String,
+}
+
+/// How much of a status letter's first line [`last_status`] keeps.
+pub const LAST_STATUS_LINE_CHARS: usize = 200;
+
+/// A worker's last `status` — what it last said it was doing or waiting on —
+/// among the letters posted at or after `since_ms`. The mail is in the order
+/// it was posted, so the walk back stops at the first letter older than
+/// that: a caller passing the moment the worker was summoned reads only the
+/// letters since, nothing it could not have written (the board's beat asks
+/// this of every live worker, t-56141). `i64::MIN` reads the whole run.
+pub fn last_status(run: &Run, worker_id: &str, since_ms: i64) -> Option<LastStatus> {
+    let reporter = worker_address(worker_id);
+    let said = run
+        .messages
+        .iter()
+        .rev()
+        .take_while(|message| message.created_ms >= since_ms)
+        .find(|message| message.from == reporter && message.kind == MessageKind::Status)?;
+    let first = said.body.as_str().lines().next().unwrap_or_default();
+    let line = match first.chars().count() > LAST_STATUS_LINE_CHARS {
+        true => format!(
+            "{}…",
+            first
+                .chars()
+                .take(LAST_STATUS_LINE_CHARS - 1)
+                .collect::<String>()
+        ),
+        false => first.to_string(),
+    };
+    Some(LastStatus {
+        message_id: said.id.clone(),
+        created_ms: said.created_ms,
+        line,
+    })
+}
+
 /// A worker's last `status`, as an idle notice carries it (t-15313): which
 /// message, when, and its first line — what the worker last said it was
 /// doing or waiting on, however long before its rest it said it. `null`
 /// for a worker that has sent none.
 fn last_status_json(run: &Run, worker_id: &str) -> serde_json::Value {
-    const LINE_CHARS: usize = 200;
-    let reporter = worker_address(worker_id);
-    let Some(said) = run
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.from == reporter && message.kind == MessageKind::Status)
-    else {
-        return serde_json::Value::Null;
-    };
-    let first = said.body.as_str().lines().next().unwrap_or_default();
-    let line = match first.chars().count() > LINE_CHARS {
-        true => format!(
-            "{}…",
-            first.chars().take(LINE_CHARS - 1).collect::<String>()
-        ),
-        false => first.to_string(),
-    };
-    serde_json::json!({
-        "messageId": said.id,
-        "createdMs": said.created_ms,
-        "line": line,
+    last_status(run, worker_id, i64::MIN).map_or(serde_json::Value::Null, |said| {
+        serde_json::json!({
+            "messageId": said.message_id,
+            "createdMs": said.created_ms,
+            "line": said.line,
+        })
     })
 }
 

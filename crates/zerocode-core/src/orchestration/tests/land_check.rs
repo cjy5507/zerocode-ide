@@ -5,7 +5,8 @@
 use super::*;
 use crate::mail_triage::{Triage, kind_rule};
 use crate::orchestration::land_check::{
-    CHECK_PREFIX, LAND_CHECK_VERB, LandCheckAsk, LandCheckReceipt, is_check_id,
+    CHECK_PREFIX, LAND_CHECK_VERB, LandCheckAsk, LandCheckReceipt, LandCheckSeen, is_check_id,
+    newest_land_check,
 };
 
 const CHECKOUT: &str = "/r/checkout";
@@ -317,6 +318,78 @@ fn a_check_letter_reaches_the_coordinator_once_with_its_task_and_evidence() {
     assert_eq!(kept["task"], task.as_str());
     assert_eq!(kept["state"], "passed");
     assert_eq!(kept["rc"], 0);
+}
+
+/// The sidebar's team view reads a task's newest check back (t-56141): the newest letter of the task
+/// wins, its exit code rides along, gate bookkeeping on the same kind of letter is no check, and a
+/// letter older than the moment asked about — an earlier attempt's — is not read.
+#[test]
+fn the_newest_check_of_a_task_is_read_back_and_bookkeeping_and_older_letters_are_not() {
+    let mut bench = Bench::new();
+    let (task, _pane) = handed_in(&mut bench, HEAD);
+    let run = bench.ledger.runs()[0].id.clone();
+    assert_eq!(
+        newest_land_check(bench.ledger.run(&run).expect("the run"), &task, i64::MIN),
+        None,
+        "no check ran yet"
+    );
+    for (check, at, evidence) in [
+        ("1-1", 5_000, serde_json::json!({"state": "started"})),
+        (
+            "1-2",
+            6_000,
+            serde_json::json!({"state": "failed", "rc": 2}),
+        ),
+    ] {
+        bench
+            .ledger
+            .land_checked(
+                &receipt(
+                    &run,
+                    &task,
+                    &format!("{CHECK_PREFIX}{check}"),
+                    &evidence.to_string(),
+                ),
+                at,
+            )
+            .expect("the letter is written");
+    }
+    let bookkeeping = serde_json::json!({"gateEvidenceV1": {"phase": "registered", "attempt": "none", "value": {}}});
+    bench
+        .ledger
+        .post(
+            &run,
+            Draft {
+                from: LEDGER_ITSELF.into(),
+                to: format!("run:{run}"),
+                kind: MessageKind::LandCheck,
+                body: Text::from("gate evidence"),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: bookkeeping.to_string().into(),
+                thread: None,
+                task: Some(task.clone()),
+                dispatch: None,
+            },
+            7_000,
+        )
+        .expect("the bookkeeping letter");
+    let held = bench.ledger.run(&run).expect("the run");
+    assert_eq!(
+        newest_land_check(held, &task, i64::MIN),
+        Some(LandCheckSeen {
+            state: "failed".to_string(),
+            rc: Some(2),
+            created_ms: 6_000,
+        }),
+        "the newest check, not the bookkeeping beside it"
+    );
+    assert_eq!(
+        newest_land_check(held, &task, 6_001),
+        None,
+        "a check older than the attempt asked about is not this attempt's"
+    );
+    assert_eq!(newest_land_check(held, "t-elsewhere", i64::MIN), None);
 }
 
 /// A letter with no state, no JSON object, or a check id the window could not have minted is not
