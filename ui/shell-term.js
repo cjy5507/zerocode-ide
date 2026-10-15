@@ -9178,6 +9178,10 @@ function tabLabel(tab) {
   // Orca's browser tab is born "New Browser Tab", wears the page's own title
   // as soon as one arrives, and falls back to the address between the two.
   if (tab.kind === "browser") {
+    // An artifact's page wears the artifact's title while it shows it
+    // (t-55370): the gallery's name for it, and the tab has it before the
+    // page names itself.
+    if (tab.artifact && artifactTabOnItsFile(tab)) return tab.artifact.title;
     if (tab.pageTitle) return tab.pageTitle;
     if (tab.url && tab.url !== BROWSER_BLANK_URL) return tab.url;
     return t("browser.tab", "새 브라우저 탭");
