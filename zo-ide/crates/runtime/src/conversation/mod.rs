@@ -2378,6 +2378,13 @@ where
         prompter: &mut Option<&mut dyn PermissionPrompter>,
         loop_count: usize,
     ) -> Result<(TurnSummary, Option<String>), RuntimeError> {
+        // The words a decline just stood on, again (t-57512): there is nothing
+        // to ask, so this leg sends nothing, records nothing and runs no hook,
+        // and returns no follow-up, which ends the turn.
+        if self.repeats_a_standing_decline(&user_input) {
+            eprintln!("[zo] {}", core_types::retry_signal::REFUSAL_STANDING_REPEAT_NOTICE);
+            return Ok((self.standing_repeat_summary(), None));
+        }
         // Baseline for this turn's output-token delta (see `TurnSummary.turn_output_tokens`).
         // `loop_count > 0` marks a Stop-hook followup leg (auto-continuation): it
         // preserves the cross-turn re-read tally, mirroring the streaming
@@ -2777,6 +2784,7 @@ where
                         self.session
                             .push_message(assistant_message)
                             .map_err(|error| RuntimeError::new(error.to_string()))?;
+                        self.remember_surfaced_notice();
                         if let Some(msg) = self.session.messages.last().cloned() {
                             assistant_messages.push(msg);
                         }

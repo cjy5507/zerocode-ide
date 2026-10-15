@@ -4,7 +4,7 @@
 //! module-level helpers, now `pub(super)` where the loops in `mod.rs` still
 //! reach them.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tokio::sync::mpsc;
 
@@ -155,7 +155,7 @@ const REFUSAL_DRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs
 /// turn — the classifier itself says whether they changed the request — so
 /// this keeps only which decline stood, on which conversation, and what the
 /// ladder had already done to it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct SurfacedDecline {
     /// The session it stood in: a new or a resumed session is another
     /// conversation.
@@ -180,6 +180,13 @@ pub(super) struct SurfacedDecline {
     /// [`RefusalDecision::Standing`] — so that the notice that turn pushed
     /// right after keeping it is the notice of a decline that stood (t-57512).
     pub(super) stood: bool,
+    /// The conversation the notice of a decline that stood was pushed onto,
+    /// held weakly from right after the push and its write succeeded
+    /// (t-57512). Any change to that conversation moves or copies its
+    /// messages, and a replacement is another allocation, so only that very
+    /// conversation answers to it; a change rolled back puts that very one
+    /// back. `None` until the push, and for a decline that did not stand.
+    pub(super) notice: Option<Weak<Vec<ConversationMessage>>>,
 }
 
 /// When a surfaced decline still stands — the one table of the rule
@@ -1065,7 +1072,17 @@ where
             compaction,
             renewed: true,
             stood,
+            notice: None,
         });
+    }
+
+    /// Tie a decline that stood to the conversation its notice was just
+    /// pushed onto (t-57512): called right after the push and its write
+    /// succeeded, and holding that conversation only weakly.
+    pub(super) fn remember_surfaced_notice(&mut self) {
+        if let Some(declined) = self.surfaced_decline.as_mut().filter(|declined| declined.stood) {
+            declined.notice = Some(Arc::downgrade(&self.session.messages));
+        }
     }
 
     /// The surfaced decline that still stands for `category` on this
@@ -1081,10 +1098,11 @@ where
 
     /// Whether a turn of `words` would only repeat the request a decline stood
     /// on (t-57512), so that it has nothing to ask: the latest public turn kept
-    /// a decline that stood, asking once ([`SurfacedDecline::stood`]), and it
-    /// still stands for this conversation ([`Self::standing_decline`]); the one
-    /// message the session gained since it was kept is the notice that turn
-    /// pushed right after, so no answer, fold or removal came since; `words`
+    /// a decline that stood, asking once ([`SurfacedDecline::stood`]), on the
+    /// very conversation the session holds, unchanged since its notice was
+    /// pushed ([`SurfacedDecline::notice`]), and it still stands for this
+    /// conversation ([`Self::standing_decline`]); the one message the session
+    /// gained since it was kept is that notice; `words`
     /// are, to the byte, the words that turn asked with, and nothing else; and
     /// the request would go out on the model the person chose, as that one
     /// did, with nothing armed to move it elsewhere when the turn starts. Other
@@ -1092,11 +1110,15 @@ where
     /// not this case; nor is a turn that brings pictures, which its caller
     /// rules out.
     pub(super) fn repeats_a_standing_decline(&self, words: &str) -> bool {
-        let Some(declined) = self
-            .surfaced_decline
-            .as_ref()
-            .filter(|declined| declined.renewed && declined.stood)
-        else {
+        let Some(declined) = self.surfaced_decline.as_ref().filter(|declined| {
+            declined.renewed
+                && declined.stood
+                && declined
+                    .notice
+                    .as_ref()
+                    .and_then(Weak::upgrade)
+                    .is_some_and(|notice| Arc::ptr_eq(&notice, &self.session.messages))
+        }) else {
             return false;
         };
         if self.standing_decline(declined.category.as_deref()).is_none() {
@@ -1122,6 +1144,25 @@ where
                     asked.role == crate::session::MessageRole::User
                         && matches!(asked.blocks.as_slice(), [ContentBlock::Text { text }] if text == words)
                 })
+    }
+
+    /// What a turn that only repeats the request a decline stood on
+    /// ([`Self::repeats_a_standing_decline`]) answers with: no round-trip, and
+    /// the one line that says nothing was sent, which the session never holds.
+    pub(super) fn standing_repeat_summary(&self) -> super::TurnSummary {
+        let output_tokens = self.usage_tracker.cumulative_usage().output_tokens;
+        self.build_turn_summary(
+            vec![ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: core_types::retry_signal::REFUSAL_STANDING_REPEAT_NOTICE.to_string(),
+            }])],
+            Vec::new(),
+            Vec::new(),
+            0,
+            None,
+            None,
+            output_tokens,
+            None,
+        )
     }
 
     /// Fold this refused public turn into the consecutive-refusal streak and,

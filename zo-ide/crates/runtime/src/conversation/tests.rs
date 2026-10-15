@@ -20357,6 +20357,7 @@ fn runtime_that_kept(
         compaction: Some(a_compaction_that_did_not_clear_it()),
         renewed: false,
         stood: false,
+        notice: None,
     });
     runtime
 }
@@ -20499,6 +20500,7 @@ fn a_compaction_a_decline_survived_is_not_made_twice_but_one_never_made_is() {
             compaction,
             renewed: false,
             stood: false,
+            notice: None,
         });
         runtime
     };
