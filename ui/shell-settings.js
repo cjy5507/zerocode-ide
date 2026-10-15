@@ -521,10 +521,12 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
     const view = snapshot.sidebar_view ?? {};
     const changed = sidebarGroupBy !== (view.group_by ?? "repo")
       || sidebarSortBy !== (view.sort_by ?? "default")
-      || sidebarProjectOrder !== (view.project_order ?? "default");
+      || sidebarProjectOrder !== (view.project_order ?? "default")
+      || sidebarLayout !== (view.layout ?? "team");
     sidebarGroupBy = view.group_by ?? "repo";
     sidebarSortBy = view.sort_by ?? "default";
     sidebarProjectOrder = view.project_order ?? "default";
+    sidebarLayout = view.layout ?? "team";
     if (!first && changed) void refreshWorktrees();
   }
   if (hasSetting(snapshot, "confirm_close_pinned")) {

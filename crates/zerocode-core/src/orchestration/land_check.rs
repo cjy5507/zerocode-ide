@@ -227,7 +227,10 @@ fn line_of(task: &str, evidence: &serde_json::Map<String, serde_json::Value>) ->
     parts.join(" · ")
 }
 
-/// What the newest landing check of a task said (t-56141, red: the reader is not written yet).
+/// What the newest landing check of a task said, read back from its letter (t-56141): the
+/// window's word for where the check stands (`started`, `prepared`, `passed`, `merged`,
+/// `conflict`, `failed`, `timed_out`, `unstartable`, `abandoned`, `error`) and the check
+/// command's exit code where one ran to an end.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LandCheckSeen {
     pub state: String,
@@ -235,10 +238,30 @@ pub struct LandCheckSeen {
     pub created_ms: i64,
 }
 
-/// Red: reads nothing yet.
+/// The newest landing check of `task` among the letters posted at or after `since_ms` — the
+/// start of the attempt a caller asks about, so a check of an earlier attempt's head is not read
+/// as this one's; the walk back stops at the first older letter, as [`super::last_status`] does.
+/// Gate bookkeeping rides the same kind of letter and is not a check
+/// ([`gate_reuse::is_gate_evidence`]).
 pub fn newest_land_check(run: &Run, task: &str, since_ms: i64) -> Option<LandCheckSeen> {
-    let _ = (run, task, since_ms);
-    None
+    run.messages
+        .iter()
+        .rev()
+        .take_while(|row| row.created_ms >= since_ms)
+        .filter(|row| {
+            row.kind == MessageKind::LandCheck
+                && row.from == LEDGER_ITSELF
+                && row.task.as_deref() == Some(task)
+                && !gate_reuse::is_gate_evidence(row)
+        })
+        .find_map(|row| {
+            let body: serde_json::Value = serde_json::from_str(row.payload.as_str()).ok()?;
+            Some(LandCheckSeen {
+                state: body["state"].as_str()?.to_string(),
+                rc: body["rc"].as_i64(),
+                created_ms: row.created_ms,
+            })
+        })
 }
 
 impl Ledger {
