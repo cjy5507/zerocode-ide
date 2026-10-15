@@ -180,6 +180,19 @@ fn last_textual_tool_call_marker(text: &str) -> Option<(usize, &'static str)> {
 /// (or genuinely needs the user) cannot be looped indefinitely.
 pub(super) const TURN_END_GATE_MAX_REPROMPTS: usize = 2;
 
+/// A promise is asked about once a turn (t-58176): a model that answers the
+/// reminder with the same ending has shown the reminder does not move it,
+/// and asking again only prints its answer once more. The callers keep one
+/// plain counter a turn for the whole gate, so the promise's "already asked"
+/// rides on that counter as its top bit — far above any count the cap lets
+/// it reach — and [`reprompts_taken`] reads the count beneath it.
+const PROMISE_ASKED: usize = 1 << (usize::BITS - 1);
+
+/// The gate's re-prompts this turn, whatever their issue.
+fn reprompts_taken(reprompts: usize) -> usize {
+    reprompts & !PROMISE_ASKED
+}
+
 /// Gate level from `ZO_TURN_END_GATE`: `0` disables, `1` (default) lints
 /// promise endings everywhere and question endings on autonomous surfaces,
 /// `2` also lints question endings in interactive sessions. Read per turn
@@ -233,6 +246,51 @@ const WAITING_ON_USER_MARKERS: [&str; 16] = [
     "중단하겠",
 ];
 
+/// Conditions that hang what follows on the person's word: "if you tell me
+/// which one, I'll start there", 「정해 주시면 그 범위로 작업하겠습니다」.
+/// The work such a promise names starts when the person answers, so the
+/// ending waits on them — re-prompting it only makes the model write its
+/// answer again (t-58176). Matched in lower case, and only before the
+/// promise in the same sentence (see [`promises_unconditionally`]).
+const USER_CONDITION_MARKERS: [&str; 12] = [
+    "if you ",
+    "once you ",
+    "when you ",
+    "after you ",
+    "주시면",
+    "주신다면",
+    "하시면",
+    "하신다면",
+    "원하시면",
+    "원하신다면",
+    "괜찮으시면",
+    "괜찮다면",
+];
+
+/// Where one sentence of a paragraph ends, for scoping a condition to the
+/// promise it governs.
+const SENTENCE_ENDS: [char; 5] = ['.', '!', '?', '。', '\n'];
+
+/// Whether `paragraph` promises work on its own word: some sentence carries a
+/// promise marker with no user condition before it. A promise that follows
+/// "if you …" / 「…해 주시면」 in its own sentence hands the choice back; a
+/// condition in another sentence leaves an unconditional promise one.
+fn promises_unconditionally(paragraph: &str) -> bool {
+    paragraph.split(SENTENCE_ENDS).any(|sentence| {
+        let Some(promise_at) = PROMISE_MARKERS
+            .iter()
+            .filter_map(|marker| sentence.find(marker))
+            .min()
+        else {
+            return false;
+        };
+        let before = sentence[..promise_at].to_lowercase();
+        !USER_CONDITION_MARKERS
+            .iter()
+            .any(|condition| before.contains(condition))
+    })
+}
+
 /// The last paragraph of a reply: the text after the final blank line,
 /// trimmed. Falls back to the whole (trimmed) text when there is no blank
 /// line, so single-paragraph replies are still screened.
@@ -275,10 +333,7 @@ pub(super) fn screen_turn_ending(
     {
         return None;
     }
-    if PROMISE_MARKERS
-        .iter()
-        .any(|marker| paragraph.contains(marker))
-    {
+    if promises_unconditionally(paragraph) {
         return Some(TurnEndingIssue::Promise);
     }
     None
@@ -294,7 +349,8 @@ pub(super) fn turn_end_gate_reminder(issue: TurnEndingIssue) -> &'static str {
              not done yet. Do not end the turn on a promise: do that work now with tool calls — \
              including retrying after errors and gathering missing information yourself. If you \
              are genuinely blocked on input only the user can provide, say exactly what you need \
-             and why instead. Then finish with a complete final answer.</system-reminder>"
+             and why instead. Do not repeat what you already wrote: the user has read it. When \
+             the work is done, add only what is new — what it found or changed.</system-reminder>"
         }
         TurnEndingIssue::TextualToolCall => {
             "[zo:turn-end-gate] <system-reminder>Your reply ended with a tool call written as \
@@ -347,14 +403,15 @@ where
     /// Evaluate the gate against a naturally-ending assistant message. Returns
     /// the issue to re-prompt on, bumping `reprompts`, or `None` when the turn
     /// may end. Reads the env level per call so the knob works without a
-    /// rebuild; bounded by [`TURN_END_GATE_MAX_REPROMPTS`] per turn.
+    /// rebuild; bounded by [`TURN_END_GATE_MAX_REPROMPTS`] per turn, and a
+    /// promise by one of those ([`PROMISE_ASKED`]).
     pub(super) fn take_turn_end_gate_issue(
         &self,
         final_text: &str,
         reprompts: &mut usize,
     ) -> Option<TurnEndingIssue> {
         let level = env_turn_end_gate_level();
-        if level == 0 || *reprompts >= TURN_END_GATE_MAX_REPROMPTS {
+        if level == 0 || reprompts_taken(*reprompts) >= TURN_END_GATE_MAX_REPROMPTS {
             return None;
         }
         let lint_questions = self.autonomous_surface || level >= 2;
@@ -365,7 +422,7 @@ where
         // reply that had read the file back to "verify" it was asked again),
         // and a reply already re-prompted for a promise has been told enough.
         let issue = screen_turn_ending(final_text, lint_questions).or_else(|| {
-            (*reprompts == 0
+            (reprompts_taken(*reprompts) == 0
                 && self.deep_subturn_depth == 0
                 && reports_unverified_completion(
                     final_text,
@@ -373,8 +430,11 @@ where
                 ))
             .then_some(TurnEndingIssue::UnverifiedCompletion)
         })?;
-        if issue == TurnEndingIssue::Promise && self.waits_on_background_work() {
-            return None;
+        if issue == TurnEndingIssue::Promise {
+            if self.waits_on_background_work() || (*reprompts & PROMISE_ASKED) != 0 {
+                return None;
+            }
+            *reprompts |= PROMISE_ASKED;
         }
         *reprompts += 1;
         Some(issue)
@@ -413,7 +473,7 @@ pub(super) fn take_textual_tool_call_issue(
     reprompts: &mut usize,
 ) -> Option<TurnEndingIssue> {
     let level = env_turn_end_gate_level();
-    if level == 0 || *reprompts >= TURN_END_GATE_MAX_REPROMPTS {
+    if level == 0 || reprompts_taken(*reprompts) >= TURN_END_GATE_MAX_REPROMPTS {
         return None;
     }
     if !ends_on_textual_tool_call(final_text) {
