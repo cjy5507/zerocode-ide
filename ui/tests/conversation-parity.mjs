@@ -4807,6 +4807,15 @@ export async function testConversationCodeColours(browser, origin, ok) {
   const bare = await openWindowTestPage(browser, origin, {
     before: (page) => page.addInitScript(() => {
       delete window.Highlight;
+      // And an engine whose idle comes late: the colouring's slice rides the
+      // idle callback (`askCodeSlice`), and on a busy machine the first one
+      // lands after the frames a check would count — l33's g5 (2026-10-15)
+      // saw 13 fences and 0 spans that way. The check waits for the
+      // colouring's own line to empty, so the late idle is part of the scene.
+      window.requestIdleCallback = (callback) => window.setTimeout(
+        () => callback({ didTimeout: true, timeRemaining: () => 0 }),
+        700,
+      );
     }),
   });
   try {
