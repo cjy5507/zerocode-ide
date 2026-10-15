@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::fallback::TurnLoop;
 use super::{
     ApiClient, ApiRequest, AssistantEvent, AsyncApiClient, ConversationRuntime, RuntimeError,
     StaticToolExecutor, StreamingTurnError, TurnSummary,
@@ -34,6 +35,10 @@ const WORDS: &str = "list what the last turn left unfinished";
 
 /// Words that are not those.
 const OTHER_WORDS: &str = "only the file names, please";
+
+/// Where every client here says it sends: one endpoint, so the same words go
+/// where the request a decline stood on went.
+const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 
 /// The premise of the tests below: on Opus 5.5 the provider routes
 /// [`UNROUTED`] nowhere, and `cyber` somewhere.
@@ -127,6 +132,10 @@ impl AsyncApiClient for Declining {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
         Box::pin(async move { Ok(self.reply(request)) })
     }
+
+    fn destination(&self) -> Option<String> {
+        Some(ENDPOINT.to_string())
+    }
 }
 
 /// The same provider behind the headless loop's client.
@@ -135,6 +144,10 @@ struct DecliningSync(Arc<Declining>);
 impl ApiClient for DecliningSync {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         Ok(self.0.reply(request))
+    }
+
+    fn destination(&self) -> Option<String> {
+        Some(ENDPOINT.to_string())
     }
 }
 
@@ -670,7 +683,10 @@ fn a_decline_that_stood_does_not_stop_the_same_words_on_another_road() {
         let env = Hermetic::new("another-road");
         let provider = Declining::new(UNROUTED);
         let mut runtime = stood_runtime(&env, &provider);
-        assert!(runtime.repeats_a_standing_decline(WORDS), "{road}: on its own road the words would repeat");
+        assert!(
+            runtime.repeats_a_standing_decline(WORDS, TurnLoop::Streaming),
+            "{road}: on its own road the words would repeat"
+        );
 
         let before = provider.sent();
         let iterations = take(&mut runtime);
@@ -705,7 +721,10 @@ fn a_routed_decline_repeated_walks_the_ladder_every_turn() {
         asked.push(provider.sent() - before);
         cleaned.push(lines.iter().any(|line| line == REFUSAL_CONTEXT_CLEANED_WARN));
         assert!(runtime.surfaced_decline.is_none(), "a routed decline is not kept");
-        assert!(!runtime.repeats_a_standing_decline(WORDS), "so its repeat is never found");
+        assert!(
+            !runtime.repeats_a_standing_decline(WORDS, TurnLoop::Streaming),
+            "so its repeat is never found"
+        );
     }
     eprintln!("t-57512 routed ladder | requests a turn {asked:?} | cleaned retry a turn {cleaned:?}");
 
@@ -724,15 +743,15 @@ fn a_repeat_needs_the_decline_kept_standing_and_the_same_words() {
     let (ended, _) = turn(&mut runtime, WORDS, Vec::new());
     ended.expect("turn one surfaces the decline");
     assert!(
-        !runtime.repeats_a_standing_decline(WORDS),
+        !runtime.repeats_a_standing_decline(WORDS, TurnLoop::Streaming),
         "a decline surfaced after the ladder has not stood yet: the next turn asks once"
     );
     let (ended, _) = turn(&mut runtime, WORDS, Vec::new());
     ended.expect("turn two stands");
-    assert!(runtime.repeats_a_standing_decline(WORDS));
-    assert!(!runtime.repeats_a_standing_decline(OTHER_WORDS), "other words");
+    assert!(runtime.repeats_a_standing_decline(WORDS, TurnLoop::Streaming));
+    assert!(!runtime.repeats_a_standing_decline(OTHER_WORDS, TurnLoop::Streaming), "other words");
     assert!(
-        !runtime.repeats_a_standing_decline(&format!("{WORDS} ")),
+        !runtime.repeats_a_standing_decline(&format!("{WORDS} "), TurnLoop::Streaming),
         "other bytes are other words"
     );
 
@@ -740,7 +759,7 @@ fn a_repeat_needs_the_decline_kept_standing_and_the_same_words() {
     ended_otherwise.renewed = false;
     let kept = runtime.surfaced_decline.replace(ended_otherwise);
     assert!(
-        !runtime.repeats_a_standing_decline(WORDS),
+        !runtime.repeats_a_standing_decline(WORDS, TurnLoop::Streaming),
         "the latest public turn did not surface it"
     );
     runtime.surfaced_decline = kept;
@@ -752,21 +771,21 @@ fn a_repeat_needs_the_decline_kept_standing_and_the_same_words() {
     drifted.extend(messages.iter().cloned());
     runtime.session.messages = Arc::new(drifted);
     assert!(
-        !runtime.repeats_a_standing_decline(WORDS),
+        !runtime.repeats_a_standing_decline(WORDS, TurnLoop::Streaming),
         "the conversation changed by the drift, though it still ends on the same words and notice"
     );
     runtime.session.messages = messages;
-    assert!(runtime.repeats_a_standing_decline(WORDS));
+    assert!(runtime.repeats_a_standing_decline(WORDS, TurnLoop::Streaming));
 
     runtime.quota_dry_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
     assert!(
-        !runtime.repeats_a_standing_decline(WORDS),
+        !runtime.repeats_a_standing_decline(WORDS, TurnLoop::Streaming),
         "a quota cooldown could carry the turn to another provider"
     );
     runtime.quota_dry_until = None;
 
     runtime.set_context_model("claude-opus-5");
-    assert!(!runtime.repeats_a_standing_decline(WORDS), "another model");
+    assert!(!runtime.repeats_a_standing_decline(WORDS, TurnLoop::Streaming), "another model");
 }
 
 /// The lifecycle hook contract, on every loop a turn runs on. A turn, or a
@@ -788,7 +807,7 @@ mod hook_contract {
     use super::{
         answer_of, first_words, internal_leg, standing_notices, turn, AsyncApiClient, ContentBlock,
         ConversationMessage, ConversationRuntime, Declining, DecliningSync, Hermetic, MessageRole,
-        PermissionMode, PermissionPolicy, Session, StaticToolExecutor, Trace, TurnSummary,
+        PermissionMode, PermissionPolicy, Session, StaticToolExecutor, Trace, TurnLoop, TurnSummary,
         OTHER_WORDS, REFUSAL_STANDING_NOTICE, REFUSAL_STANDING_REPEAT_NOTICE, UNROUTED, WORDS,
     };
     use crate::compact::{compact_session, CompactionConfig, COMPACTION_SYSTEM_PROMPT};
@@ -815,6 +834,14 @@ mod hook_contract {
     type Runtime = ConversationRuntime<DecliningSync, StaticToolExecutor>;
 
     impl Road {
+        /// The loop this road's turns run on.
+        fn turn_loop(self) -> TurnLoop {
+            match self {
+                Self::Headless => TurnLoop::Sync,
+                Self::Streaming | Self::Deep => TurnLoop::Streaming,
+            }
+        }
+
         /// Opus 5.5 with `hooks`, every request going to `provider`.
         fn runtime(self, env: &Hermetic, provider: &Arc<Declining>, hooks: &CountingHooks) -> Runtime {
             let mut runtime = ConversationRuntime::new_with_features(
@@ -860,7 +887,7 @@ mod hook_contract {
                 "{self:?}: the decline stood once"
             );
             assert!(
-                runtime.repeats_a_standing_decline(WORDS),
+                runtime.repeats_a_standing_decline(WORDS, self.turn_loop()),
                 "{self:?}: the same words again would only repeat it"
             );
         }
@@ -1276,7 +1303,7 @@ mod hook_contract {
         hooks.answer_with(&[FOLLOW_UP]);
         Road::Deep.run(&mut runtime, OTHER_WORDS).expect("the turn ends cleanly");
         assert!(
-            runtime.repeats_a_standing_decline(FOLLOW_UP),
+            runtime.repeats_a_standing_decline(FOLLOW_UP, Road::Deep.turn_loop()),
             "the decline stood on the follow-up"
         );
 
@@ -1459,7 +1486,7 @@ mod hook_contract {
                 road.stand(&env, &mut runtime);
                 arm(&mut runtime);
                 assert!(
-                    !runtime.repeats_a_standing_decline(WORDS),
+                    !runtime.repeats_a_standing_decline(WORDS, road.turn_loop()),
                     "{road:?}, {route}: not a repeat"
                 );
 
@@ -1624,7 +1651,7 @@ mod hook_contract {
                     road.stand(&env, &mut runtime);
                     let _snapshot = snapshot_held.then(|| Arc::clone(&runtime.session.messages));
                     make(&env, &mut runtime);
-                    if runtime.repeats_a_standing_decline(WORDS) {
+                    if runtime.repeats_a_standing_decline(WORDS, road.turn_loop()) {
                         taken.push(case(road, change, snapshot_held));
                     }
                 }
@@ -1654,7 +1681,7 @@ mod hook_contract {
                 .push(ConversationMessage::user_text("a change whose write failed"));
             runtime.session.messages = captured;
             assert!(
-                runtime.repeats_a_standing_decline(WORDS),
+                runtime.repeats_a_standing_decline(WORDS, road.turn_loop()),
                 "{road:?}: rolled back, the decline still stands"
             );
 
@@ -1810,6 +1837,10 @@ mod destination {
         fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
             Ok(self.reply(request))
         }
+
+        fn destination(&self) -> Option<String> {
+            self.place.now().map(str::to_string)
+        }
     }
 
     impl AsyncApiClient for Located {
@@ -1821,6 +1852,10 @@ mod destination {
         ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>>
         {
             Box::pin(async move { Ok(self.reply(request)) })
+        }
+
+        fn destination(&self) -> Option<String> {
+            self.place.now().map(str::to_string)
         }
     }
 

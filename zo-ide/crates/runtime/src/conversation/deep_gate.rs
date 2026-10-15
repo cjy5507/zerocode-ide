@@ -2828,7 +2828,8 @@ where
             // A leg that repeats the words a decline just stood on (t-57512)
             // runs no hook and no deep driver: the plain turn below sends
             // nothing for it, by the same rule, and the turn ends with it.
-            let repeat = round_images.is_empty() && self.repeats_a_standing_decline(&input);
+            let repeat = round_images.is_empty()
+                && self.repeats_a_standing_decline(&input, super::fallback::TurnLoop::Streaming);
             let deep_mode = self.deep_gate.as_ref().map(|cfg| cfg.mode).filter(|_| !repeat);
             if deep_mode.is_some() {
                 if let Err(error) = self.run_user_prompt_submit_for_streaming_user_entry(&input) {

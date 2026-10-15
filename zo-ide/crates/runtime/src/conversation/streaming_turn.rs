@@ -974,7 +974,10 @@ where
         // to ask, so the turn sends nothing, records nothing and runs no hook,
         // and says why in one line. Pictures, or a leg a turn runs inside
         // itself, make another request.
-        if !internal_subturn && images.is_empty() && self.repeats_a_standing_decline(&user_input) {
+        if !internal_subturn
+            && images.is_empty()
+            && self.repeats_a_standing_decline(&user_input, super::fallback::TurnLoop::Streaming)
+        {
             let _ = render_tx
                 .send(RenderBlock::System {
                     id: id_gen.next(),
@@ -1413,6 +1416,7 @@ where
                     }))
                     .await;
             }
+            self.sent_to = self.request_destination(super::fallback::TurnLoop::Streaming);
             let events_for_build: Vec<AssistantEvent> =
                 if let Some(async_client) = self.active_async_client() {
                     // Live async path (L7c seam) with retry on transient errors.

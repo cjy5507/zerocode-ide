@@ -1133,6 +1133,8 @@ pub struct ConversationRuntime<C, T> {
     /// the cooldown; cleared with the model world and by a public turn that
     /// did not surface it. See [`fallback::SurfacedDecline`].
     surfaced_decline: Option<fallback::SurfacedDecline>,
+    /// Where the latest request went, as its client said when it went out (t-57512).
+    sent_to: Option<fallback::RequestDestination>,
     /// The category of the refusal that armed [`Self::refusal_dry_until`]:
     /// the pre-arm routes that category, and only a routed one arms it.
     refusal_dry_category: Option<String>,
@@ -1879,6 +1881,7 @@ where
             refusal_compaction_used: false,
             refusal_compaction: None,
             surfaced_decline: None,
+            sent_to: None,
             refusal_dry_category: None,
             escalation_model_override: None,
             escalation_armed_fresh: false,
@@ -2381,7 +2384,7 @@ where
         // The words a decline just stood on, again (t-57512): there is nothing
         // to ask, so this leg sends nothing, records nothing and runs no hook,
         // and returns no follow-up, which ends the turn.
-        if self.repeats_a_standing_decline(&user_input) {
+        if self.repeats_a_standing_decline(&user_input, fallback::TurnLoop::Sync) {
             eprintln!("[zo] {}", core_types::retry_signal::REFUSAL_STANDING_REPEAT_NOTICE);
             return Ok((self.standing_repeat_summary(), None));
         }

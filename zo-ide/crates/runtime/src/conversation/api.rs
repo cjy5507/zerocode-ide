@@ -445,6 +445,14 @@ pub fn record_non_anthropic_prompt_cache_usage(
 /// Minimal streaming API contract required by [`super::ConversationRuntime`].
 pub trait ApiClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
+
+    /// Where this client sends a request: an endpoint that tells one
+    /// destination from another and carries no credential, or `None` when
+    /// the client cannot say (t-57512). `None` proves nothing, so a decline
+    /// that stood never keeps a request of this client from going out.
+    fn destination(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Asynchronous streaming API seam used by
@@ -494,6 +502,12 @@ pub trait AsyncApiClient: Send + Sync {
             dyn std::future::Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a,
         >,
     >;
+
+    /// Where this client sends a request, as [`ApiClient::destination`]
+    /// says it (t-57512).
+    fn destination(&self) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]
