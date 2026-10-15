@@ -602,6 +602,31 @@ mod tests {
         assert!(sources.len() > 100, "the scan found the workspace: {} files", sources.len());
     }
 
+    /// Every seat that sends through the door keeps what a managed server said
+    /// beside a refusal on its row, and through the one helper (t-58193): a
+    /// seat that sends and never calls it drops the reason a judgment failed.
+    #[test]
+    fn every_seat_that_sends_keeps_what_the_server_said() {
+        let seats = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/misc_tools/smart_router");
+        let gate = Path::new(file!()).file_name().expect("this file");
+        let mut senders = Vec::new();
+        for entry in std::fs::read_dir(&seats).expect("the seats' directory").flatten() {
+            let path = entry.path();
+            let rust = path.extension().is_some_and(|extension| extension == "rs");
+            if path.file_name() == Some(gate) || !rust {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a seat's source");
+            if text.contains("jev_gate::send(") || text.contains("jev_gate::send_once(") {
+                senders.push((path.display().to_string(), text.contains("ServerSaid::of(")));
+            }
+        }
+        assert!(senders.len() >= 18, "the scan found the seats: {senders:?}");
+        let silent: Vec<&String> =
+            senders.iter().filter(|(_, keeps)| !keeps).map(|(path, _)| path).collect();
+        assert!(silent.is_empty(), "these seats drop what the server said: {silent:?}");
+    }
+
     /// Both of zo's ledgers keep the door's counts under the door's own keys —
     /// the keys a migration reads a row's age by — and zo's wire names a
     /// missing key with the door's word.

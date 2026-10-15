@@ -1875,6 +1875,25 @@ mod tests {
         zerocode_core::jev::count::sent(&zerocode_core::jev::count::requests_path(home, "2026-09-17"))
     }
 
+    /// A managed server whose provider refused the answer says why beside its
+    /// `502`, and the row keeps both words next to the status (t-58193).
+    #[test]
+    fn a_refused_answers_row_keeps_what_the_server_said() {
+        let said = serde_json::json!({"error": "native_protocol_failed",
+            "refusal": "provider_context_truncated"});
+        let mock = Mock::serving(502, said.to_string());
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+
+        let door = door_with(None, home.path());
+        let row = waited_on(&client, &door, Duration::from_secs(5), "a refused answer");
+
+        assert_eq!(row.outcome, SystemOneFailure::Http(502).ledger_token());
+        let row = serde_json::to_value(&row).expect("a row");
+        assert_eq!(row["serverErrorCode"], "native_protocol_failed", "{row}");
+        assert_eq!(row["serverRefusal"], "provider_context_truncated", "{row}");
+    }
+
     /// A sample too small to name a rank is no plan at all: the judgment takes
     /// the road it took before, one request, and the row says nothing about a
     /// hedge it never had.

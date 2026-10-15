@@ -858,6 +858,41 @@ fn the_suggestion_asks_nothing_where_its_person_turned_the_search_off() {
     assert!(neither.0 && neither.1 >= 1 && neither.2 >= 1, "neither word: asked as before the split: {neither:?}");
 }
 
+/// A managed server whose provider refused the suggestion's answer says why
+/// beside its `502`, and the suggestion's row keeps both words next to the
+/// status (t-58193).
+#[test]
+fn a_refused_suggestions_row_keeps_what_the_server_said() {
+    use super::super::jev_mock::{machine_words, Mock};
+    let said = json!({"error": "native_protocol_failed", "refusal": "provider_context_truncated"});
+    let mock = Mock::serving(502, said.to_string());
+    machine_words(&[(SKILL_SUGGESTION.setting, JevMode::Auto.key())], &mock.base_url, |cwd| {
+        let skill = cwd.join(".zo").join("skills").join("docx");
+        std::fs::create_dir_all(&skill).expect("a skill folder");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: docx\ndescription: Create and edit Word documents.\n---\n# docx\n",
+        )
+        .expect("a skill");
+        let judge = SkillSuggestionJudge::at(cwd);
+        let asked = judge.suggest("draft the quarterly report as a Word file".to_string());
+        assert_eq!(api::sync_bridge::run_blocking(asked), None, "a recording seat hands nothing");
+        let ledger = skill_suggestion_path(cwd);
+        let started = Instant::now();
+        let mut rows = super::super::jev_summary::read_rows(&ledger);
+        while rows.is_empty() && started.elapsed() < Duration::from_secs(15) {
+            std::thread::sleep(Duration::from_millis(20));
+            rows = super::super::jev_summary::read_rows(&ledger);
+        }
+        finish_turn_suggestion(cwd, &[]);
+        let refused = SystemOneFailure::Http(502).ledger_token();
+        let row = rows.iter().find(|row| row["outcome"] == refused.as_str());
+        let row = row.expect("a refused row");
+        assert_eq!(row["serverErrorCode"], "native_protocol_failed", "{row}");
+        assert_eq!(row["serverRefusal"], "provider_context_truncated", "{row}");
+    });
+}
+
 #[test]
 fn judging_a_skill_label_does_not_invent_a_missing_baseline() {
     use zerocode_core::jev::promote::{judge_seat, Line, Verdict};
