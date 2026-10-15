@@ -84,6 +84,7 @@ tools-test:
     python3 tools/tests/test_routing_replay_seed.py
     python3 tools/tests/test_label_audit_seed.py
     python3 tools/tests/test_jev_seat_replay.py
+    python3 tools/tests/test_jev_answered.py
     python3 tools/tests/test_vault_pairs_replay_seed.py
     python3 tools/tests/test_command_guard_replay_seed.py
     python3 tools/tests/test_ask_wait_replay_seed.py

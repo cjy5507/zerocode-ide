@@ -992,6 +992,7 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
                 model: Some("jev-1.13.0".to_string()),
                 version: Some("HTTP/2.0".to_string()),
                 route: None,
+                server_error_code: None,
             })
         }
     }

@@ -26335,6 +26335,62 @@ fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_ef
 }
 
 #[test]
+fn a_named_model_says_the_ladder_set_its_effort() {
+    struct LowLauncher;
+    impl Launcher for LowLauncher {
+        fn command_for(
+            &self,
+            agent: &str,
+            prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            Catalog(&["claude"]).command_for(agent, prompt, tuning)
+        }
+        fn choose_assign(
+            &self,
+            _asked: &crate::summon_assign::AssignAsk,
+            _origin: [&str; 3],
+        ) -> crate::summon_assign::Receipts {
+            crate::summon_assign::Receipts {
+                difficulty: Some(serde_json::json!({"chosen": "low", "applied": true})),
+                model: None,
+                ..Default::default()
+            }
+        }
+    }
+    let launch = |flag: &str| {
+        let mut bench = Bench::new();
+        bench.json("run-create --name ladder");
+        let planned = planned_on(
+            &mut bench.ledger,
+            &mut bench.team,
+            &LowLauncher,
+            &format!("worker-start --agent claude --model opus --prompt translate-labels {flag}"),
+            bench.clock + 1,
+        );
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        serde_json::from_str::<serde_json::Value>(&planned.reply.stdout).unwrap()
+    };
+
+    let laddered = launch("");
+    assert_eq!(laddered["effort"], "medium", "the launch is unchanged");
+    assert_eq!(laddered["dials"]["modelFrom"], "request");
+    assert_eq!(
+        laddered["dials"]["why"]["effortRule"], "ladder",
+        "{}",
+        laddered["dials"]
+    );
+
+    let written = launch("--effort max");
+    assert_eq!(written["effort"], "max");
+    assert_ne!(
+        written["dials"]["why"]["effortRule"], "ladder",
+        "{}",
+        written["dials"]
+    );
+}
+
+#[test]
 fn summon_outcome_requires_receipt_and_bound_landing_and_a_retry_revokes_success() {
     use crate::summon_difficulty::outcomes::observe;
     let mut bench = Bench::new();

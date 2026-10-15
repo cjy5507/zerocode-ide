@@ -405,6 +405,7 @@ fn a_credential_on_the_screen_never_reaches_the_wire() {
             model: Some(ANSWERING_VERSION.to_string()),
             version: Some(version_word(reqwest::Version::HTTP_11)),
             route: crate::systemone::tests::route_of(judge.wire()),
+            server_error_code: None,
         })
     );
 }
@@ -601,6 +602,7 @@ fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() 
             model: Some(ANSWERING_VERSION.to_string()),
             version: Some(version_word(reqwest::Version::HTTP_11)),
             route: crate::systemone::tests::route_of(judge.wire()),
+            server_error_code: None,
         })
     );
     let heard = endpoint.asked();
@@ -823,6 +825,7 @@ fn a_risen_auto_answers_the_same_bytes_from_the_memo_and_sends_nothing() {
             model: Some(ANSWERING_VERSION.to_string()),
             version: None,
             route: None,
+            server_error_code: None,
         })
     );
     assert_eq!(endpoint.asked().len(), 2, "the third question never left");

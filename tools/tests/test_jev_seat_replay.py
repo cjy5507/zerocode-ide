@@ -65,6 +65,7 @@ class TheNamesAreTheRusts(unittest.TestCase):
             rust("zo-ide/crates/runtime/src/config/mod.rs"),
         )
         self.assertIn('.join("state")', rust("zo-ide/crates/runtime/src/config/mod.rs"))
+        self.assertIn(f'base.join("{replay.PROVIDER_LEDGERS}")', rust("crates/judgment-provider/src/lib.rs"))
 
     def test_the_slug_keeps_the_stem_zo_keeps_and_a_hash_of_its_width(self) -> None:
         # zo's rule, kept in the core since t-11349 so the window names a
@@ -116,6 +117,40 @@ class TheCopy(unittest.TestCase):
             (self.out / ".zo" / "jev" / "notify-call.jsonl").write_text("written\n")
         with self.assertRaises(PermissionError):
             (self.out / ".zo" / "jev" / "new.jsonl").write_text("written\n")
+
+    def test_the_copy_takes_the_provider_folders_the_seats_keep_their_rows_in(self) -> None:
+        # t-55423: a provider other than Jev keeps every seat's rows under
+        # `providers/<its identity>/` beside the base ledgers, in the window's
+        # folder and in each project's; a copy without them is a copy the
+        # binary finds no row in (33 seats, 0 found, 10-15 08:1x).
+        provider = "judgment-" + "ab" * 32
+        settings = {
+            "smart": {
+                "judgmentProvider": {"kind": "local", "protocol": "system_one", "baseUrl": "http://127.0.0.1:4321", "model": "acme/judge", "requiresAuth": False},
+                "managedJudgmentModel": {"modelId": "acme/judge", "revision": "0" * 40, "providerIdentity": provider},
+            },
+            "credentials": "secret",
+        }
+        (self.home / "settings.json").write_text(json.dumps(settings))
+        window = self.home / replay.WINDOW_LEDGERS / replay.PROVIDER_LEDGERS / provider
+        window.mkdir(parents=True)
+        (window / "notify-call.jsonl").write_text('{"at": 3}\n')
+        project = replay.project_dir(self.home, self.project).joinpath(*replay.PROJECT_LEDGERS) / replay.PROVIDER_LEDGERS / provider
+        project.mkdir(parents=True)
+        (project / "rerank-shadow.jsonl").write_text('{"at": 4}\n')
+        (project / "decision-labels.draft.jsonl").write_text('{"words": "a person\'s prompt"}\n')
+        before = {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}
+        copies = replay.snapshot(self.home, [self.project], ["notify-call.jsonl", "rerank-shadow.jsonl"], self.out)
+        home = self.out / ".zo"
+        copied = {path.relative_to(home) for path in copies}
+        slug = replay.project_dir(self.home, self.project).name
+        self.assertIn(Path(replay.WINDOW_LEDGERS, replay.PROVIDER_LEDGERS, provider, "notify-call.jsonl"), copied)
+        self.assertIn(Path("projects", slug, *replay.PROJECT_LEDGERS, replay.PROVIDER_LEDGERS, provider, "rerank-shadow.jsonl"), copied)
+        self.assertNotIn("decision-labels.draft.jsonl", {path.name for path in home.rglob("*")}, "a file no seat names was copied")
+        self.assertEqual(json.loads((home / "settings.json").read_text()), {"smart": settings["smart"]}, "the provider rides with its rows")
+        self.assertEqual(before, {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}, "the person's files changed")
+        with self.assertRaises(PermissionError):
+            (home / replay.WINDOW_LEDGERS / replay.PROVIDER_LEDGERS / provider / "new.jsonl").write_text("written\n")
 
     def test_a_project_folder_is_one_or_refused(self) -> None:
         self.assertTrue(replay.project_dir(self.home, self.project).name.endswith("-0123456789abcdef"))
