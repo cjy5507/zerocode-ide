@@ -3557,23 +3557,40 @@ const waitForSettingsMutations = (page, remaining) => page.waitForFunction(
 );
 const waitForSettingsIdle = (page) => waitForSettingsMutations(page, 0);
 
-// A no-IPC assertion belongs to its gesture, not the repository's ambient
-// stamp beat. Park that existing poller through its target predicate and
-// restore each document even when the assertion fails; settings broadcasts,
-// reads and writes keep their real stateful backend throughout.
-async function withoutWorktreePolling(pages, run) {
+// A no-IPC assertion belongs to its gesture, not to the window's own clocks:
+// the repository's ambient stamp beat, and the one update knock a window sends
+// a minute after its boot (`armUpdateBootCheck`) — the suite reaches the
+// user-agent gesture 60–70 s in, so that knock landed inside it on a fast run,
+// on main too (t-55370, reports/t-55370/settings-race). Park both and restore
+// each document even when the assertion fails; a boot knock still owed is sent
+// once on the way out. Settings broadcasts, reads and writes keep their real
+// stateful backend throughout.
+async function withoutAmbientReads(pages, run) {
   const setRead = (page, value) => page.evaluate((next) => {
     const previous = projectsRead;
     projectsRead = next;
     worktreePoll.sync();
     return previous;
   }, value);
+  const parkBootKnock = (page) => page.evaluate(() => {
+    clearTimeout(updateBootTimer);
+    return window.__SETTINGS_TEST_WINDOW__;
+  });
+  const bootKnocked = (id) => backend.calls.some((call) =>
+    call.window_id === id && call.command === "update_check" && call.args.knock === "clock");
   const held = [];
   try {
-    for (const page of pages) held.push({ page, previous: await setRead(page, false) });
+    for (const page of pages) {
+      const previous = await setRead(page, false);
+      const id = await parkBootKnock(page);
+      held.push({ page, previous, owed: !bootKnocked(id) });
+    }
     return await run();
   } finally {
-    for (const { page, previous } of held) await setRead(page, previous);
+    for (const { page, previous, owed } of held) {
+      await setRead(page, previous);
+      if (owed) await page.evaluate(() => void askUpdateCheck(UPDATE_KNOCK.clock));
+    }
   }
 }
 
@@ -11330,7 +11347,7 @@ await test("per-site user agents are one row patch: set by host, remove by host,
     await pageA.$eval("#browser-user-agent-host", (node) => node.value === "https://bad.test/path"),
     "a refused row lost the words to fix",
   );
-  await withoutWorktreePolling([pageA, pageB], async () => {
+  await withoutAmbientReads([pageA, pageB], async () => {
     // Deliver a canonical repaint only AFTER editing the refused row. A's
     // snapshot response waits; B's event waits until we broadcast it again.
     // Reuse the stateful backend's revision and delivery controls so this
