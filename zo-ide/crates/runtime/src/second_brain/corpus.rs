@@ -675,7 +675,7 @@ fn read_capped(path: &Path) -> Option<String> {
 /// Split a leading `---` YAML frontmatter block from the body. An unterminated
 /// block is treated as body, so a page that merely opens with a horizontal rule
 /// is still indexed.
-fn split_frontmatter(text: &str) -> (&str, &str) {
+pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
     let Some(rest) = text.strip_prefix("---\n") else {
         return ("", text);
     };
@@ -691,7 +691,7 @@ fn split_frontmatter(text: &str) -> (&str, &str) {
 /// One scalar frontmatter field, by key. Only the flat `key: value` form is
 /// read — a vault page's `title` and `tags` are written that way, and a YAML
 /// parser for two fields would be a dependency this module does not need.
-fn frontmatter_field<'a>(frontmatter: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn frontmatter_field<'a>(frontmatter: &'a str, key: &str) -> Option<&'a str> {
     frontmatter.lines().find_map(|line| {
         let (name, value) = line.split_once(':')?;
         (name.trim() == key).then(|| value.trim())
@@ -788,7 +788,7 @@ fn relation_target(item: &str) -> Option<String> {
     link_target(bare)
 }
 
-fn unquote(value: &str) -> &str {
+pub(crate) fn unquote(value: &str) -> &str {
     for mark in ['"', '\''] {
         if let Some(inner) = value
             .strip_prefix(mark)

@@ -1517,9 +1517,27 @@ fn load_memory_body_for_classification(display_path: &str) -> Option<String> {
     read_capped_text(&candidate, root.classification_read_bytes())
 }
 
-fn load_memory_snippet_for_render_path(display_path: &str) -> Option<String> {
+/// Front-matter field through which a page asks how it is recalled. zo only
+/// honours it; which pages set it is the vault's call.
+const RECALL_MODE_FIELD: &str = "recall";
+/// [`RECALL_MODE_FIELD`]'s value for a page recalled as its pointer line
+/// alone, without a snippet.
+const RECALL_POINTER_ONLY: &str = "pointer";
+
+/// What an entry's file puts under its pointer line.
+enum RecalledBody {
+    /// The head of the file, still to be escaped for the prompt.
+    Snippet(String),
+    /// The file's front matter sets `recall: pointer`.
+    PointerOnly,
+}
+
+fn load_memory_snippet_for_render_path(display_path: &str) -> Option<RecalledBody> {
     let (candidate, _root) = canonical_recall_path(display_path)?;
     let text = read_capped_text(&candidate, RECALL_SNIPPET_READ_BYTES)?;
+    if asks_for_pointer_only(&text) {
+        return Some(RecalledBody::PointerOnly);
+    }
     let snippet = truncate_on_char_boundary(
         text.trim(),
         RECALL_SNIPPET_MAX_BYTES,
@@ -1530,8 +1548,18 @@ fn load_memory_snippet_for_render_path(display_path: &str) -> Option<String> {
     if snippet.is_empty() {
         None
     } else {
-        Some(snippet)
+        Some(RecalledBody::Snippet(snippet))
     }
+}
+
+/// Whether a page's own front matter asks for its pointer line alone. Read
+/// from the whole capped head rather than the clipped snippet, so a long front
+/// matter still counts as long as it fits in [`RECALL_SNIPPET_READ_BYTES`].
+fn asks_for_pointer_only(text: &str) -> bool {
+    use crate::second_brain::corpus::{frontmatter_field, split_frontmatter, unquote};
+    let (frontmatter, _body) = split_frontmatter(text);
+    frontmatter_field(frontmatter, RECALL_MODE_FIELD)
+        .is_some_and(|value| unquote(value) == RECALL_POINTER_ONLY)
 }
 
 #[must_use]
@@ -1543,10 +1571,10 @@ pub fn render_recalled_memory_section(hits: &[MemoryHit]) -> Option<String> {
     let mut section = String::from(RECALL_SECTION_HEADER);
     // Snippets are counted against the entries that could carry one, not
     // against positions: a folded entry is a pointer and never carries a body,
-    // so it must not spend one of the two snippet slots either. Counting
-    // eligible entries rather than emitted snippets keeps this byte-identical
-    // to what it was whenever nothing folds — which is every session with no
-    // vault configured.
+    // and neither does a page whose front matter sets `recall: pointer`, so
+    // neither may spend one of the two snippet slots. Counting eligible
+    // entries rather than emitted snippets keeps this byte-identical to what
+    // it was whenever nothing folds and no page sets that field.
     let mut snippet_slot = 0;
     // Clamp entry COUNT here (not just per-field size) so a misbehaving retriever
     // returning more than it was asked for can never exceed the preflight reserve.
@@ -1577,13 +1605,17 @@ pub fn render_recalled_memory_section(hits: &[MemoryHit]) -> Option<String> {
             continue;
         }
         if snippet_slot < MAX_RECALLED_SNIPPETS {
-            if let Some(snippet) = load_memory_snippet_for_render_path(&hit.entry.path) {
-                let escaped = escape_memory_snippet_for_prompt(&snippet);
-                if !escaped.is_empty() {
-                    section.push_str("  snippet (untrusted excerpt):\n");
-                    section.push_str(&escaped);
-                    section.push('\n');
+            match load_memory_snippet_for_render_path(&hit.entry.path) {
+                Some(RecalledBody::PointerOnly) => continue,
+                Some(RecalledBody::Snippet(snippet)) => {
+                    let escaped = escape_memory_snippet_for_prompt(&snippet);
+                    if !escaped.is_empty() {
+                        section.push_str("  snippet (untrusted excerpt):\n");
+                        section.push_str(&escaped);
+                        section.push('\n');
+                    }
                 }
+                None => {}
             }
         }
         snippet_slot += 1;
