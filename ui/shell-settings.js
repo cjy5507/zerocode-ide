@@ -9825,15 +9825,14 @@ function paintSecondBrainGuides() {
 /* 「스킬」 줄. 판이 읽는 세컨드 브레인 스킬 사본마다, 창 안 Claude 홈까지,
  * 이 빌드의 글인지(최신), 이전 릴리스의 글인지(낡음), 사람이 고친 글인지,
  * 없는지를 스킬 화면과 같은 낱말로 센다. 어느 사본인지는 풍선 말이 말한다. */
-const SECOND_BRAIN_COPY_WORDS = Object.freeze({
-  current: ["skills.copyCurrent", "최신"],
-  stale: ["skills.copyStale", "낡음"],
-  edited: ["skills.copyEdited", "직접 고침"],
-  missing: ["skills.copyMissing", "없음"],
-});
 function paintSecondBrainSkill() {
   const copies = secondBrainReport?.skillCopies ?? [];
-  const word = (state) => t(...(SECOND_BRAIN_COPY_WORDS[state] ?? SECOND_BRAIN_COPY_WORDS.edited));
+  const word = (state) => {
+    if (state === "current") return t("skills.copyCurrent", "최신");
+    if (state === "stale") return t("skills.copyStale", "낡음");
+    if (state === "missing") return t("skills.copyMissing", "없음");
+    return t("skills.copyEdited", "직접 고침");
+  };
   const line = el("second-brain-skill");
   say(line, () => {
     if (copies.length === 0) return t("settings.integrations.unchecked", "확인 전");
