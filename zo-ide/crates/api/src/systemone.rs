@@ -451,7 +451,7 @@ pub struct SystemOneCall {
     /// with (t-55423): a managed server's `operation_busy` or `server_stopped`
     /// behind one `503`, and nothing else — never the body's own words. `None`
     /// when the body named neither or could not be read within
-    /// [`MAX_REFUSAL_BYTES`] and the call's deadline, and for every outcome but
+    /// `MAX_REFUSAL_BYTES` and the call's deadline, and for every outcome but
     /// a refusal.
     pub server_error_code: Option<&'static str>,
     /// The whole call, first byte to the answer that was used.

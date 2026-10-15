@@ -1031,6 +1031,7 @@ fn a_row_riding_another_rows_request_is_charged_nothing_and_a_batch_is_counted_o
         model: Some(ANSWERING_VERSION.to_string()),
         version: Some("HTTP/2.0".to_string()),
         route: None,
+        server_error_code: None,
     };
     let riding = paid.rider();
     assert_eq!(riding.requests, 0);

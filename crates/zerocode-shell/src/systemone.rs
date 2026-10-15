@@ -35,7 +35,9 @@ use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
 };
-use zerocode_core::jev::summary::{CLIENT_ROUTE, HTTP_VERSION, INPUT_TOKENS, MODEL, SERVER_ERROR_CODE};
+use zerocode_core::jev::summary::{
+    CLIENT_ROUTE, HTTP_VERSION, INPUT_TOKENS, MODEL, SERVER_ERROR_CODE,
+};
 use zerocode_core::jev::{JevUse, count, memo};
 
 use crate::api_routers::{Keychain, RouterKeys};
