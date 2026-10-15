@@ -10,6 +10,7 @@ const managedJudgmentController = {
   waiters: new Set(),
   importModel: null,
   importAttempt: null,
+  ownedOperation: null,
   subscription: null,
   query: "",
   filter: "all",
@@ -237,6 +238,7 @@ const managedJudgmentController = {
     }
     this.snapshot = snapshot;
     this.statusError = false;
+    judgmentModelSourceController.cancelOwnInspection();
     if (this.importAttempt && !this.importAttempt.operationId && this.busy &&
         snapshot.operation?.id !== this.importAttempt.previousId && snapshot.operation?.kind === "download" && snapshot.operation?.modelId === this.importModel?.id) {
       this.importAttempt.operationId = snapshot.operation.id;
@@ -283,8 +285,25 @@ const managedJudgmentController = {
     }
   },
 
+  owns(operation) {
+    const owned = this.ownedOperation;
+    return Boolean(owned && operation && operation.id === owned.id && this.snapshot?.instanceId === owned.instanceId);
+  },
+
+  async cancelOwned() {
+    const operation = this.snapshot?.operation;
+    if (!this.owns(operation) || operation.state !== "running") return;
+    try {
+      this.accept(await invoke("managed_judgment_cancel", { operationId: operation.id }));
+    } catch (error) {
+      this.say(this.failure(error));
+    }
+  },
+
   async completed(command, args) {
+    this.ownedOperation = null;
     const started = await invoke(command, args);
+    if (started?.operation) this.ownedOperation = { instanceId: started.instanceId, id: started.operation.id };
     this.accept(started);
     const operation = started.operation;
     if (!operation) throw new Error("missing_operation");

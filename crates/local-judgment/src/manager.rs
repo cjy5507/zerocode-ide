@@ -161,6 +161,8 @@ pub struct Operation {
     pub received_bytes: u64,
     pub total_bytes: u64,
     pub error: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_request_id: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -270,6 +272,16 @@ fn same_model_data(left: &Model, right: &Model) -> bool {
             file.path == other.path && file.bytes == other.bytes && file.sha256 == other.sha256
         })
     })
+}
+
+fn source_request_id(request_id: Option<String>) -> Result<Option<String>> {
+    let Some(request_id) = request_id else {
+        return Ok(None);
+    };
+    match uuid::Uuid::parse_str(&request_id) {
+        Ok(parsed) if parsed.hyphenated().to_string() == request_id => Ok(Some(request_id)),
+        _ => Err(Error::SourceInvalid),
+    }
 }
 
 impl Manager {
@@ -563,9 +575,10 @@ impl Manager {
     pub async fn inspect_source_with_request(
         self: &Arc<Self>,
         input: SourceInput,
-        _request_id: Option<String>,
+        request_id: Option<String>,
     ) -> Result<SourceInspection> {
-        let (operation_id, cancel) = self.begin("inspect", None, 0)?;
+        let request_id = source_request_id(request_id)?;
+        let (operation_id, cancel) = self.begin_for("inspect", None, 0, request_id)?;
         let work_stop = Arc::new(AtomicBool::new(false));
         let stop = work_stop.clone();
         let request_cancel = cancel.clone();
@@ -799,8 +812,21 @@ impl Manager {
         model: Option<&Model>,
         total: u64,
     ) -> Result<(String, Arc<Cancel>)> {
+        self.begin_for(kind, model, total, None)
+    }
+
+    fn begin_for(
+        &self,
+        kind: &'static str,
+        model: Option<&Model>,
+        total: u64,
+        request_id: Option<String>,
+    ) -> Result<(String, Arc<Cancel>)> {
         let mut inner = lock(&self.inner);
         let result = self.reserve(&mut inner, kind, model, total)?;
+        if let Some(operation) = &mut inner.operation {
+            operation.source_request_id = request_id;
+        }
         drop(inner);
         self.emit();
         Ok(result)
@@ -834,6 +860,7 @@ impl Manager {
             received_bytes: 0,
             total_bytes: total,
             error: None,
+            source_request_id: None,
         });
         inner.cancel = Some(cancel.clone());
         inner.revision += 1;

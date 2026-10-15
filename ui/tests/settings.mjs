@@ -6488,7 +6488,8 @@ await test("받는 중 취소하면 현재 모델을 지키고 같은 결과 줄
     const retryAt = backend.calls.length;
     await page.click("#judgment-source-retry");
     const reinspected = await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", retryAt);
-    assertEqual(reinspected.args, { source: { kind: "hugging_face", repository: "acme/native-decision" } });
+    assertEqual(reinspected.args.source, { kind: "hugging_face", repository: "acme/native-decision" });
+    assert(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(reinspected.args.requestId ?? ""), "the retried inspection has no request correlation");
     const retried = await backend.waitForCall("judgment-status", "managed_judgment_install_source", retryAt);
     assertEqual(retried.args.inspectionId, "retry-inspection", "retry reused a spent inspection");
     await page.waitForFunction((text) => document.getElementById("judgment-source-status").textContent === text, words.kept);

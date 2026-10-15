@@ -9,6 +9,7 @@ const judgmentModelSourceController = {
   working: false,
   inspecting: false,
   inflight: null,
+  request: null,
   sequence: 0,
   stepsSignature: "",
 
@@ -92,10 +93,20 @@ const judgmentModelSourceController = {
   },
 
   stopInspection() {
-    const operation = managedJudgmentController.snapshot?.operation;
-    if (!this.inflight || operation?.kind !== "inspect" || operation.state !== "running") return;
+    if (!this.request) return;
+    this.request.cancelWanted = true;
+    this.cancelOwnInspection();
+  },
+
+  cancelOwnInspection() {
+    const request = this.request;
+    const snapshot = managedJudgmentController.snapshot;
+    const operation = snapshot?.operation;
+    if (!request?.cancelWanted || request.cancelSent || snapshot?.instanceId !== request.instanceId ||
+      operation?.kind !== "inspect" || operation.state !== "running" || operation.sourceRequestId !== request.id) return;
+    request.cancelSent = true;
     invoke("managed_judgment_cancel", { operationId: operation.id })
-      .then((snapshot) => managedJudgmentController.accept(snapshot), () => {});
+      .then((answer) => managedJudgmentController.accept(answer), () => {});
   },
 
   say(words) {
@@ -178,14 +189,17 @@ const judgmentModelSourceController = {
       await this.inflight;
       if (sequence !== this.sequence) return null;
     }
-    const request = invoke("managed_judgment_inspect_source", { source });
-    const settled = request.then(() => {}, () => {});
+    const request = { id: crypto.randomUUID(), instanceId: managedJudgmentController.snapshot?.instanceId, cancelWanted: false, cancelSent: false };
+    this.request = request;
+    const pending = invoke("managed_judgment_inspect_source", { source, requestId: request.id });
+    const settled = pending.then(() => {}, () => {});
     this.inflight = settled;
     void settled.then(() => {
       if (this.inflight === settled) this.inflight = null;
+      if (this.request === request) this.request = null;
     });
     try {
-      const result = await request;
+      const result = await pending;
       if (sequence !== this.sequence || JSON.stringify(source) !== JSON.stringify(this.source())) return null;
       const snapshot = managedJudgmentController.snapshot;
       if (!result?.inspectionId || !result.model || result.instanceId !== snapshot?.instanceId || result.catalogFingerprint !== snapshot?.catalogFingerprint) throw "catalog_changed";
@@ -211,17 +225,38 @@ const judgmentModelSourceController = {
     }
   },
 
-  begin(intent) {
+  begin(intent, steps) {
     this.flow = {
       intent,
-      steps: intent === "keep" ? ["inspect", "download", "verify", "keep"] : ["inspect", "download", "verify", "runtime", "start", "check", "apply"],
+      steps,
       reached: 1,
       failed: false,
       done: false,
-      previousId: managedJudgmentController.snapshot?.operation?.id ?? null,
+      previousOwned: managedJudgmentController.ownedOperation,
     };
     this.stepsSignature = "";
     return this.flow;
+  },
+
+  flowOperation() {
+    const owned = managedJudgmentController.ownedOperation;
+    const operation = managedJudgmentController.snapshot?.operation;
+    return this.flow && owned && owned !== this.flow.previousOwned && managedJudgmentController.owns(operation) ? operation : null;
+  },
+
+  reusable(inspection) {
+    const model = inspection?.model.installed ? this.libraryModel(inspection) : null;
+    return model?.installed && managedJudgmentController.localSupported(model) ? model : null;
+  },
+
+  runnable(inspection) {
+    const model = this.reusable(inspection);
+    return Boolean(model && managedJudgmentController.runtimeFor(model)?.state === "ready");
+  },
+
+  selected(inspection) {
+    const model = inspection ? this.libraryModel(inspection) : null;
+    return Boolean(model && !managedJudgmentController.appliedModel(model) && managedJudgmentController.configuredModel(model));
   },
 
   async act() {
@@ -232,9 +267,14 @@ const judgmentModelSourceController = {
   },
 
   async use(inspection) {
-    const flow = this.begin("use");
+    const reused = this.reusable(inspection);
+    const steps = !reused ? ["inspect", "download", "verify", "runtime", "start", "check", "apply"]
+      : this.runnable(inspection) ? ["inspect", "start", "check", "apply"] : ["inspect", "runtime", "start", "check", "apply"];
+    const flow = this.begin("use", steps);
     this.say(t("settings.models.preparing", "다운로드·실행 준비·응답 확인을 진행합니다. 설정은 확인 뒤에만 전환하며, 로컬 모델을 교체하는 동안 판단이 잠시 멈출 수 있습니다."));
-    const applied = await managedJudgmentController.activate(this.modelOf(inspection), { command: "managed_judgment_install_source", args: this.installArgs(inspection) });
+    const applied = reused
+      ? await managedJudgmentController.activate(reused)
+      : await managedJudgmentController.activate(this.modelOf(inspection), { command: "managed_judgment_install_source", args: this.installArgs(inspection) });
     if (flow !== this.flow) return;
     flow.done = applied;
     flow.failed = !applied;
@@ -246,7 +286,7 @@ const judgmentModelSourceController = {
   },
 
   async keep(inspection) {
-    const flow = this.begin("keep");
+    const flow = this.begin("keep", ["inspect", "download", "verify", "keep"]);
     const { id, revision } = inspection.model;
     this.working = true;
     this.say(t("settings.models.keeping", "모델 파일만 받아 검증합니다. 실행 환경 설치·실행·적용은 하지 않으며 현재 모델은 그대로입니다."));
@@ -280,7 +320,7 @@ const judgmentModelSourceController = {
       managedJudgmentController.render();
       return;
     }
-    await managedJudgmentController.cancel();
+    if (this.flowOperation()) await managedJudgmentController.cancelOwned();
   },
 
   async retry() {
@@ -293,13 +333,13 @@ const judgmentModelSourceController = {
 
   track() {
     const flow = this.flow;
-    const operation = managedJudgmentController.snapshot?.operation;
-    if (!flow || flow.done || flow.failed || !operation || operation.id === flow.previousId) return;
+    const operation = this.flowOperation();
+    if (!flow || flow.done || flow.failed || !operation) return;
     const advance = (step) => {
       flow.reached = Math.max(flow.reached, flow.steps.indexOf(step));
     };
     if (["download", "import"].includes(operation.kind)) {
-      advance(operation.state === "done" || (operation.totalBytes > 0 && operation.receivedBytes >= operation.totalBytes) ? "verify" : "download");
+      advance(operation.state === "done" ? "verify" : "download");
     } else if (operation.kind === "runtime") {
       advance("runtime");
     } else if (operation.kind === "start" || operation.kind === "switch") {
@@ -336,15 +376,21 @@ const judgmentModelSourceController = {
     const bytes = running && operation.totalBytes > 0 && ["download", "import"].includes(operation.kind)
       ? t("settings.managed.progress", "{{received}} / {{total}}", { received: bytesLabel(operation.receivedBytes), total: bytesLabel(operation.totalBytes) }) : "";
     const labels = flow.steps.map((step) => this.stepLabel(step));
-    const signature = JSON.stringify([labels, states, bytes]);
-    if (signature === this.stepsSignature) return;
+    const words = flow.steps.map((step, index) => states[index] === "active" && step === "download" && bytes ? `${labels[index]} · ${bytes}` : labels[index]);
+    const signature = JSON.stringify([flow.steps, states]);
+    if (signature === this.stepsSignature) {
+      for (const [index, item] of [...list.children].entries()) {
+        if (item.textContent !== words[index]) item.textContent = words[index];
+      }
+      return;
+    }
     this.stepsSignature = signature;
     list.replaceChildren(...flow.steps.map((step, index) => {
       const item = document.createElement("li");
       item.dataset.step = step;
       item.dataset.state = states[index];
       if (states[index] === "active") item.setAttribute("aria-current", "step");
-      item.textContent = states[index] === "active" && step === "download" && bytes ? `${labels[index]} · ${bytes}` : labels[index];
+      item.textContent = words[index];
       return item;
     }));
   },
@@ -357,14 +403,17 @@ const judgmentModelSourceController = {
     const keepable = this.keepable(inspection);
     const installed = this.installed(inspection);
     const current = this.current(inspection);
+    const selected = !current && this.selected(inspection);
     row.dataset.state = this.inspecting ? "inspecting"
       : !inspection ? (this.problem === "cancelled" ? "cancelled" : "unsupported")
         : current ? "current" : usable ? "ready" : keepable ? (installed ? "kept" : "download-only") : "unsupported";
     el("judgment-source-model-name").textContent = inspection?.model.label
       ?? (this.kind === "local_directory" ? this.directory : el("judgment-source-repository").value.trim()) ?? "";
     const currentBadge = el("judgment-source-badge-current");
-    currentBadge.hidden = !current;
-    say(currentBadge, () => t("settings.models.badgeCurrent", "현재 사용 중"));
+    currentBadge.hidden = !current && !selected;
+    currentBadge.dataset.badge = current ? "current" : "selected";
+    say(currentBadge, () => this.current(this.inspection) ? t("settings.models.badgeCurrent", "현재 사용 중")
+      : t("settings.models.badgeSelected", "선택됨 · 실행되지 않음"));
     const installedBadge = el("judgment-source-badge-installed");
     installedBadge.hidden = !inspection;
     say(installedBadge, () => this.installed(this.inspection)
@@ -388,9 +437,9 @@ const judgmentModelSourceController = {
       el("judgment-source-model-support").textContent = [support, inputs].filter(Boolean).join(" · ");
       el("judgment-source-model-support").hidden = !support && !inputs;
     }
-    const operation = managedJudgmentController.snapshot?.operation;
+    const operation = this.flowOperation();
     const flow = this.flow;
-    const running = Boolean(flow && !flow.done && !flow.failed && operation && operation.id !== flow.previousId && ["running", "cancelling"].includes(operation.state));
+    const running = Boolean(flow && !flow.done && !flow.failed && operation && ["running", "cancelling"].includes(operation.state));
     this.renderSteps(operation, running);
     const progress = el("judgment-source-progress");
     progress.hidden = !this.inspecting && !running;
@@ -406,8 +455,9 @@ const judgmentModelSourceController = {
     use.disabled = !offered || locked || this.inspecting || !this.currentInspection();
     use.classList.toggle("btn--primary", offered);
     say(use, () => this.keepable(this.inspection) ? t("settings.models.downloadOnly", "파일만 받기")
-      : this.kind === "local_directory" || this.installed(this.inspection) ? t("settings.models.loadUse", "불러와서 사용")
-        : t("settings.models.downloadUse", "다운로드하고 사용"));
+      : this.runnable(this.inspection) ? t("settings.models.runUse", "실행하고 사용")
+        : this.kind === "local_directory" || this.installed(this.inspection) ? t("settings.models.loadUse", "불러와서 사용")
+          : t("settings.models.downloadUse", "다운로드하고 사용"));
     const cancel = el("judgment-source-cancel");
     cancel.hidden = !this.inspecting && !running;
     cancel.disabled = !this.inspecting && operation?.state !== "running";
