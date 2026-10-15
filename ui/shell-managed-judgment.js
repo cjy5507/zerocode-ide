@@ -438,9 +438,11 @@ const managedJudgmentController = {
     if (this.appliedModel(model)) return t("settings.managed.inUse", "실행 중 · 현재 적용됨");
     if ((this.statusError || snapshot.providerIdentity !== judgmentProviderController.state?.providerIdentity) &&
         [snapshot.appliedModelId, snapshot.configuredModelId].includes(model.id)) return t("settings.judgment.modelStateUnknown", "현재 설정과 실행 상태를 함께 확인해야 합니다.");
+    const restarting = snapshot.server.modelId === model.id && snapshot.server.state === "starting" && snapshot.server.exit ? this.endedState(snapshot.server.exit, true) : null;
+    if (restarting) return restarting;
     if (snapshot.server.modelId === model.id && snapshot.server.state === "starting") return t("settings.managed.starting", "모델을 시작하는 중 · 아직 적용하지 않음");
     if (snapshot.server.modelId === model.id && snapshot.server.state === "ready") return t("settings.managed.runningUnapplied", "실행 중 · 아직 적용하지 않음");
-    const stopped = snapshot.server.modelId === model.id && snapshot.server.state === "failed" && snapshot.server.exit ? this.stoppedState(snapshot.server.exit) : null;
+    const stopped = snapshot.server.modelId === model.id && snapshot.server.state === "failed" && snapshot.server.exit ? this.endedState(snapshot.server.exit) : null;
     if (stopped) return stopped;
     if (this.configuredModel(model)) return t("settings.managed.configuredStopped", "선택된 모델 · 실행되지 않음. 실행하고 적용을 눌러 다시 연결하세요.");
     if (this.downloadOnly(model)) {
@@ -453,7 +455,7 @@ const managedJudgmentController = {
     return model.installed ? t("settings.managed.installed", "설치됨 · 아직 적용하지 않음") : t("settings.managed.notInstalled", "아직 다운로드하지 않음");
   },
 
-  stoppedState(exit) {
+  endedState(exit, restarting = false) {
     let reason = null;
     switch (exit.cause) {
       case "runtime_memory_limit":
@@ -472,7 +474,10 @@ const managedJudgmentController = {
         else if (Number.isSafeInteger(exit.code)) reason = t("settings.managed.exit.code", "실행 환경이 스스로 끝났습니다(종료 코드 {{code}})", { code: exit.code });
         break;
     }
-    return reason && t("settings.managed.stoppedReason", "중지됨 · {{reason}}. 실행하고 적용을 눌러 다시 시작하세요.", { reason });
+    if (!reason) return null;
+    return restarting
+      ? t("settings.managed.restartingReason", "다시 띄우는 중 · {{reason}}. 중지를 누르면 다시 띄우지 않습니다.", { reason })
+      : t("settings.managed.stoppedReason", "중지됨 · {{reason}}. 실행하고 적용을 눌러 다시 시작하세요.", { reason });
   },
 
   configuredModel(model) {
