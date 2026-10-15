@@ -499,6 +499,12 @@ pub struct SystemOneCall {
     /// One of the provider's own refusal words, never the body's; `None` for
     /// every other outcome.
     pub server_refusal: Option<&'static str>,
+    /// How long the server asked to be left alone (t-58193): the
+    /// `Retry-After` beside a stopped or busy server's `503`, a rate limit's
+    /// `429` or the contract's overloaded `529`, in the whole seconds the
+    /// header gives. `None` for every other outcome, and for a header that
+    /// names no number of seconds.
+    pub retry_after: Option<Duration>,
     /// The whole call, first byte to the answer that was used.
     pub elapsed: Duration,
     /// Requests that actually left, across every attempt this call made —
@@ -775,6 +781,7 @@ impl SystemOneClient {
             retries: 0,
             server_error_code: None,
             server_refusal: None,
+            retry_after: None,
             elapsed: opened.elapsed(),
             requests: 0,
             hedge: None,
@@ -803,6 +810,7 @@ impl SystemOneClient {
             retries: run.retries,
             server_error_code: run.server_error_code,
             server_refusal: run.server_refusal,
+            retry_after: None,
             elapsed: opened.elapsed(),
             requests: requests.load(Ordering::Relaxed),
             hedge: ran,
@@ -1027,7 +1035,8 @@ mod tests {
         let response = serde_json::json!({"model":"fixture-decider",
             "answers":{"ready":{"type":"noul","noul":0.99}},
             "usage":{"input_tokens":10,"output_tokens":0}}).to_string();
-        let mock = MockSystemOne::serving(vec![Reply { status: 200, body: response, delay: Duration::from_millis(80) }]).await;
+        let answer = Reply { delay: Duration::from_millis(80), ..Reply::now(200, response) };
+        let mock = MockSystemOne::serving(vec![answer]).await;
         let config = SystemOneConfig::from_root(&serde_json::json!({"smart":{"judgmentProvider":{
             "kind":"local","protocol":"system_one","baseUrl":mock.base_url,
             "model":"fixture-decider","requiresAuth":false
@@ -1045,17 +1054,24 @@ mod tests {
     /// about time.
     const UNHURRIED: Duration = Duration::from_secs(10);
 
-    /// One scripted reply: a status, a body, and how long to wait first.
+    /// One scripted reply: a status, a body, how long to wait first, and the
+    /// `Retry-After` its head names, if any.
     #[derive(Clone)]
     struct Reply {
         status: u16,
         body: String,
         delay: Duration,
+        wait: Option<&'static str>,
     }
 
     impl Reply {
         fn now(status: u16, body: impl Into<String>) -> Self {
-            Self { status, body: body.into(), delay: Duration::ZERO }
+            Self { status, body: body.into(), delay: Duration::ZERO, wait: None }
+        }
+
+        /// This reply, its head naming `wait` as its `Retry-After`.
+        fn waiting(self, wait: &'static str) -> Self {
+            Self { wait: Some(wait), ..self }
         }
     }
 
@@ -1107,8 +1123,10 @@ mod tests {
             record.push(seen);
         }
         tokio::time::sleep(reply.delay).await;
+        let wait = reply.wait.map(|wait| format!("retry-after: {wait}\r\n")).unwrap_or_default();
         let response = format!(
-            "HTTP/1.1 {} Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            "HTTP/1.1 {} Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+             {wait}connection: close\r\n\r\n{}",
             reply.status,
             reply.body.len(),
             reply.body
@@ -1198,7 +1216,7 @@ mod tests {
 
     /// A reply `delay` from now.
     fn slow(delay: Duration) -> Reply {
-        Reply { status: 200, body: contract_answer(), delay }
+        Reply { status: 200, body: contract_answer(), delay, wait: None }
     }
 
     /// A typed request as the bytes the door would hand the wire.
@@ -1496,6 +1514,40 @@ mod tests {
             assert_eq!(answer.status().as_u16(), 503);
             let deadline = Instant::now() + left.unwrap_or_default();
             assert_eq!(refusal_read(answer, deadline).await, read, "{left:?} left");
+        }
+    }
+
+    /// A refusal whose head names a wait — a stopped or busy server's `503`,
+    /// a rate limit's `429`, the contract's overloaded `529` — is kept as that
+    /// wait, and the call sends nothing more before it has passed (t-58193):
+    /// a wait past the deadline ends the call at once, and a shorter one is
+    /// waited out in the back-off's place. A date, or a wait beside any other
+    /// status, names none.
+    #[tokio::test]
+    async fn a_refusal_that_names_a_wait_is_kept_and_nothing_is_sent_before_it() {
+        for status in [503, 429, 529] {
+            let mock = MockSystemOne::serving(vec![
+                Reply::now(status, "{}").waiting("60"),
+                Reply::now(200, contract_answer()),
+            ])
+            .await;
+            let call = ask(&mock, UNHURRIED).await;
+            assert_eq!(call.retry_after, Some(Duration::from_secs(60)), "{status}");
+            assert_eq!(mock.seen().len(), 1, "{status}: nothing more before the wait passed");
+        }
+        let mock = MockSystemOne::serving(vec![
+            Reply::now(429, "{}").waiting("1"),
+            Reply::now(200, contract_answer()),
+        ])
+        .await;
+        let call = ask(&mock, UNHURRIED).await;
+        assert!(call.outcome.is_ok(), "{:?}", call.outcome);
+        assert!(call.elapsed >= Duration::from_secs(1), "the wait was kept: {:?}", call.elapsed);
+        assert_eq!(call.retry_after, None, "an answered call was asked for no wait");
+        for (status, wait) in [(429, "Fri, 16 Oct 2026 07:28:00 GMT"), (500, "60")] {
+            let mock = MockSystemOne::serving(vec![Reply::now(status, "{}").waiting(wait)]).await;
+            let call = ask(&mock, UNHURRIED).await;
+            assert_eq!(call.retry_after, None, "{status} {wait}");
         }
     }
 

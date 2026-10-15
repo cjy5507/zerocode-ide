@@ -618,6 +618,11 @@ pub struct ServerSaid {
     pub server_error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_refusal: Option<String>,
+    /// Until when the server asked for nothing more from this seat, in Unix
+    /// milliseconds (t-58193): the call's `retry_after` from when its answer
+    /// was read, and never further off than one [`REST`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_retry_at: Option<i64>,
 }
 
 impl ServerSaid {
@@ -627,6 +632,7 @@ impl ServerSaid {
         Self {
             server_error_code: call.server_error_code.map(str::to_string),
             server_refusal: call.server_refusal.map(str::to_string),
+            server_retry_at: None,
         }
     }
 
@@ -1033,6 +1039,63 @@ mod tests {
                 "rubricVersions": [RECALL.rubric_version]}));
             ledger_holding(cwd, &RECALL, &rows);
             assert_eq!(door_says(cwd, &RECALL), None, "an auto its ledger raised");
+        });
+    }
+
+    /// A server that answers with a wait — a `503` or a `429` with a
+    /// `Retry-After` — asks that seat for nothing until then (t-58193): the
+    /// door refuses it with `resting` whatever its word, an applying seat's
+    /// too, and under any rubric, since the wait is the server's; once the
+    /// time has passed the seat asks again.
+    #[test]
+    fn a_seat_its_server_asked_to_wait_sends_nothing_until_then() {
+        use super::super::jev_mock;
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&RECALL, "shadow", &endpoint.base_url, |cwd| {
+            let now = super::super::decision_shadow::now_ms();
+            let mut asked = sent(&RECALL, "http_503", Duration::ZERO);
+            asked["serverRetryAt"] = (now + 60_000).into();
+            ledger_holding(cwd, &RECALL, &[asked.clone()]);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "shadow");
+            word_for(&RECALL, JevMode::On);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "on");
+            let moved = JevUse { rubric_version: RECALL.rubric_version + 1, ..RECALL };
+            assert_eq!(door_says(cwd, &moved), Some("resting"), "another rubric");
+            asked["serverRetryAt"] = (now - 1).into();
+            ledger_holding(cwd, &RECALL, &[asked]);
+            assert_eq!(door_says(cwd, &RECALL), None, "a wait that has passed");
+        });
+    }
+
+    /// An answer that asked for a wait is not an unanswered request
+    /// (t-58193): its server said when to come back, and the door holds the
+    /// seat until then instead. So such answers never bring the rest on —
+    /// [`UNANSWERED_BEFORE_REST`] of them whose waits have passed let the
+    /// next request go — and among other failures they count neither way.
+    #[test]
+    fn answers_that_asked_for_a_wait_do_not_count_toward_the_rest() {
+        use super::super::jev_mock;
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&RECALL, "shadow", &endpoint.base_url, |cwd| {
+            let minute = Duration::from_secs(60);
+            let passed = super::super::decision_shadow::now_ms() - 1;
+            let limited = api::SystemOneFailure::RateLimited.ledger_token();
+            let asked = |outcome: &str| {
+                let mut row = sent(&RECALL, outcome, minute);
+                row["serverRetryAt"] = passed.into();
+                row
+            };
+            let mut rows: Vec<Value> = (0..UNANSWERED_BEFORE_REST)
+                .map(|n| asked(if n % 2 == 0 { "http_503" } else { limited.as_str() }))
+                .collect();
+            ledger_holding(cwd, &RECALL, &rows);
+            assert_eq!(door_says(cwd, &RECALL), None, "a wait the server asked for is no rest");
+            for _ in 0..UNANSWERED_BEFORE_REST {
+                rows.push(sent(&RECALL, "http_502", minute));
+                rows.push(asked("http_503"));
+            }
+            ledger_holding(cwd, &RECALL, &rows);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "the others still count");
         });
     }
 

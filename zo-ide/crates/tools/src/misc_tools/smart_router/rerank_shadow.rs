@@ -2111,6 +2111,42 @@ mod tests {
         assert_eq!(read, expected);
     }
 
+    /// A server that asks the recall to wait — a `503` with a `Retry-After`,
+    /// as the local server sends while it waits to restart (t-58193) — is
+    /// sent nothing until the wait has passed, and then the next reading
+    /// goes. An answer that asked for a wait is no unanswered request: after
+    /// one less than [`jev_gate::UNANSWERED_BEFORE_REST`] that went
+    /// unanswered, it does not bring the rest on.
+    #[test]
+    fn a_recall_its_server_asked_to_wait_asks_again_once_the_wait_has_passed() {
+        let mock = Mock::waiting_first("1", reply_for(&[1]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+        let path = home.path().join(RECALL.ledger);
+        for _ in 1..jev_gate::UNANSWERED_BEFORE_REST {
+            let model = jev_gate::model_key(SYSTEMONE_MODEL);
+            let key = MemoKey::for_reading("a past reading", &[], model);
+            let mut row = RerankShadowRow::new(key, 1, SystemOneFailure::Timeout.ledger_token());
+            row.requests = Some(1);
+            append_shadow_row(&path, &row, SHADOW_LEDGER_MAX_BYTES).expect("an unanswered row");
+        }
+        let door = door_with(None, home.path());
+        let read = |query: &str| {
+            let row = waited_on(&client, &door, Duration::from_secs(5), query);
+            append_shadow_row(&path, &row, SHADOW_LEDGER_MAX_BYTES).expect("the reading's row");
+            row.outcome
+        };
+
+        let refused = SystemOneFailure::Http(503).ledger_token();
+        assert_eq!(read("a reading the server asks to wait"), refused);
+        assert_eq!(read("a reading inside the wait"), "resting", "nothing before the wait ends");
+        assert_eq!(mock.requests().len(), 1);
+        std::thread::sleep(Duration::from_millis(1_200));
+        let after = read("a reading after the wait");
+        assert_eq!(after, RERANK_OUTCOME_ANSWERED, "the next request goes out after the wait");
+        assert_eq!(mock.requests().len(), 2);
+    }
+
     /// A sample too small to name a rank is no plan at all: the judgment takes
     /// the road it took before, one request, and the row says nothing about a
     /// hedge it never had.
