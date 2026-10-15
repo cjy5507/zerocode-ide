@@ -68,6 +68,7 @@ pub struct ModelInfo {
 #[serde(rename_all = "camelCase")]
 pub struct LocalSupport {
     pub supported: bool,
+    pub download_only: bool,
     pub reason: Option<&'static str>,
     pub inputs: [&'static str; 2],
     pub unsupported_inputs: [&'static str; 2],
@@ -92,6 +93,7 @@ pub struct SourceInspection {
     pub local: LocalSupport,
     pub existing_server: ExistingServerSupport,
     pub ready_for_install: bool,
+    pub ready_for_download: bool,
     pub reason: Option<&'static str>,
     pub default_destination_directory: String,
     pub allows_destination_selection: bool,
@@ -463,6 +465,7 @@ impl Manager {
             .iter()
             .find(|profile| profile.engine == model.engine);
         let local_error = adapter::local_profile(model, profile, false).err();
+        let data_accepted = adapter::data_profile(model, profile).is_ok();
         let installed = self.store.installed(model);
         ModelInfo {
             id: model.id.clone(),
@@ -481,6 +484,7 @@ impl Manager {
             native_format: model.native_format.clone(),
             local: LocalSupport {
                 supported: local_error.is_none(),
+                download_only: local_error.is_some() && data_accepted,
                 reason: local_error.map(Error::token),
                 inputs: ["text", "json"],
                 unsupported_inputs: ["images", "videos"],
@@ -518,6 +522,7 @@ impl Manager {
             instance_id: self.instance.clone(),
             catalog_fingerprint: pending.catalog_fingerprint.clone(),
             ready_for_install: model.local.supported,
+            ready_for_download: model.local.supported || model.local.download_only,
             reason: model.local.reason,
             local: model.local.clone(),
             existing_server: model.existing_server.clone(),
@@ -628,7 +633,7 @@ impl Manager {
         let inspected = pending.inspected.clone();
         inspected.check_source()?;
         let model = inspected.model;
-        self.model_profile(&model)?;
+        self.data_profile(&model)?;
         if self.store.installed(&model) {
             drop(catalog);
             drop(inner);
@@ -714,6 +719,15 @@ impl Manager {
                 .iter()
                 .find(|profile| profile.engine == model.engine),
             self.validation_mode,
+        )
+    }
+
+    fn data_profile(&self, model: &Model) -> Result<&RuntimeProfile> {
+        adapter::data_profile(
+            model,
+            self.profiles
+                .iter()
+                .find(|profile| profile.engine == model.engine),
         )
     }
 

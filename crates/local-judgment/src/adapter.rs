@@ -11,6 +11,17 @@ pub fn local_profile<'profile>(
     profile: Option<&'profile RuntimeProfile>,
     allow_unverified: bool,
 ) -> Result<&'profile RuntimeProfile> {
+    let profile = data_profile(model, profile)?;
+    if !profile.validated && !allow_unverified {
+        return Err(Error::EngineUnverified);
+    }
+    Ok(profile)
+}
+
+pub fn data_profile<'profile>(
+    model: &Model,
+    profile: Option<&'profile RuntimeProfile>,
+) -> Result<&'profile RuntimeProfile> {
     match model.engine {
         EngineKind::Laya => {}
         EngineKind::TransformersSystemOne => {
@@ -23,13 +34,9 @@ pub fn local_profile<'profile>(
     if model.files.is_empty() {
         return Err(Error::ModelManifestMissing);
     }
-    let profile = profile
+    profile
         .filter(|profile| profile.engine == model.engine)
-        .ok_or(Error::Unsupported)?;
-    if !profile.validated && !allow_unverified {
-        return Err(Error::EngineUnverified);
-    }
-    Ok(profile)
+        .ok_or(Error::Unsupported)
 }
 
 pub fn verify_model(directory: &Path, model: &Model, cancel: &AtomicBool) -> Result<()> {
