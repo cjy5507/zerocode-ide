@@ -1735,6 +1735,18 @@ mod destination {
     /// Where a client that moved sends.
     const ELSEWHERE: &str = "https://proxy.example.com/v1/messages";
 
+    /// Where the sync client sends once it moved to another port of its host.
+    const SYNC_ON_ANOTHER_PORT: &str = "https://api.anthropic.com:8443/v1/messages";
+
+    /// Where the sync client sends once it moved under another path of its host.
+    const SYNC_UNDER_ANOTHER_PATH: &str = "https://api.anthropic.com/proxy/v1/messages";
+
+    /// Where the async client sends once it moved to another port of its host.
+    const ASYNC_ON_ANOTHER_PORT: &str = "https://gateway.example.com:9443/anthropic/v1/messages";
+
+    /// Where the async client sends once it moved under another path of its host.
+    const ASYNC_UNDER_ANOTHER_PATH: &str = "https://gateway.example.com:8443/proxy/v1/messages";
+
     /// Where a client says it sends — nothing when it cannot say — and where
     /// it will say so once the next request it sends is out.
     struct Place {
@@ -1989,6 +2001,54 @@ mod destination {
             clients.sent_on(turn_loop).move_to(None);
             let mut runtime = turn_loop.runtime(&env, &provider, &clients);
             turn_loop.stand(&mut runtime, || {});
+            let (words, requests) = turn_loop.again(&mut runtime, &provider);
+            asked.push((turn_loop, words, requests));
+        }
+        println!("asked, and the requests each turn made: {asked:?}");
+        assert_eq!(asked, asked_as_any_turn(), "the same words are asked on every loop");
+    }
+
+    /// The client a loop sends on names the same host on another port, or
+    /// under another path: another endpoint, so the same words are asked, on
+    /// every loop.
+    #[test]
+    fn the_same_words_are_asked_once_the_client_their_loop_sends_on_names_another_port_or_path() {
+        let on_another_port = asked_after(|clients, turn_loop| {
+            let moved = match turn_loop {
+                Loop::Headless => SYNC_ON_ANOTHER_PORT,
+                Loop::Streaming | Loop::Deep => ASYNC_ON_ANOTHER_PORT,
+            };
+            clients.sent_on(turn_loop).move_to(Some(moved));
+        });
+        let under_another_path = asked_after(|clients, turn_loop| {
+            let moved = match turn_loop {
+                Loop::Headless => SYNC_UNDER_ANOTHER_PATH,
+                Loop::Streaming | Loop::Deep => ASYNC_UNDER_ANOTHER_PATH,
+            };
+            clients.sent_on(turn_loop).move_to(Some(moved));
+        });
+        let any_turn = asked_as_any_turn();
+        assert_eq!(on_another_port, any_turn, "another port: asked on every loop");
+        assert_eq!(under_another_path, any_turn, "another path: asked on every loop");
+    }
+
+    /// The client a loop sends on could not say where it sends when the
+    /// request the decline stood on went out, and can now. Nothing proves the
+    /// same words would go where that request went: they are asked, on every
+    /// loop.
+    #[test]
+    fn the_same_words_are_asked_once_the_client_their_loop_sends_on_can_say_where_again() {
+        let mut asked = Vec::new();
+        for turn_loop in LOOPS {
+            let env = Hermetic::new(&format!("destination-unknown-to-known-{turn_loop:?}"));
+            let provider = Declining::new(UNROUTED);
+            let clients = Clients::new();
+            let place = clients.sent_on(turn_loop);
+            let known = place.now();
+            place.move_to(None);
+            let mut runtime = turn_loop.runtime(&env, &provider, &clients);
+            turn_loop.stand(&mut runtime, || {});
+            place.move_to(known);
             let (words, requests) = turn_loop.again(&mut runtime, &provider);
             asked.push((turn_loop, words, requests));
         }
