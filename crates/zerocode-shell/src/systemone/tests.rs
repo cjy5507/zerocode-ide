@@ -530,6 +530,66 @@ fn a_refused_request_keeps_the_servers_error_word_beside_its_status() {
     assert_eq!(code_of(&asked.spent), None, "no server spoke");
 }
 
+/// A managed server whose runtime ended refuses with `503` and
+/// `server_restarting` while its restart is planned or loading (t-57772). The
+/// row keeps that word as it keeps busy, and a word outside the managed
+/// server's codes is still dropped.
+#[test]
+fn a_restarting_servers_refusal_keeps_its_word_as_busy_does_and_an_unknown_word_is_dropped() {
+    use zerocode_core::jev::STALL;
+    use zerocode_core::jev::summary::SERVER_ERROR_CODE;
+
+    let home = tempfile::tempdir().expect("a zo home");
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {"jev": {"workspaces": [door::resolved_path(workspace.path())]}}})
+            .to_string(),
+    )
+    .expect("settings");
+    let body = request_body(&json!({"screen": "a quiet pane"}), &json!({}));
+    let restarting = local_judgment::Error::Restarting.token();
+    let busy = local_judgment::Error::Busy.token();
+    let words = [restarting, busy, "server_rebooting"];
+    let wanted = [Some(restarting), Some(busy), None];
+    let mut kept = Vec::new();
+    for word in words {
+        let endpoint = Endpoint::serving(
+            "HTTP/1.1 503 Service Unavailable",
+            json!({"error": word}).to_string(),
+            0,
+        );
+        let asked = Wire::at(&endpoint.base(), "test-key", Some(settings.clone())).ask(
+            &STALL,
+            Some(workspace.path()),
+            body.clone(),
+            Duration::from_secs(5),
+        );
+        assert_eq!(asked.answer, Err(token_for(503)), "{word}");
+        let mut row = json!({"outcome": token_for(503)});
+        asked.spent.stamp(&mut row);
+        kept.push(
+            SERVER_ERROR_CODE
+                .read(&row)
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        );
+    }
+    let wrong: Vec<&str> = words
+        .iter()
+        .zip(&kept)
+        .zip(wanted)
+        .filter(|((_, kept), wanted)| kept.as_deref() != *wanted)
+        .map(|((word, _), _)| *word)
+        .collect();
+    assert_eq!(
+        wrong,
+        Vec::<&str>::new(),
+        "a managed server's refusal word was kept or dropped wrongly: {kept:?}"
+    );
+}
+
 /// A loopback server that answers its one request with a `503` whose body
 /// breaks off: the head promises a refusal naming `code`, half of it is sent,
 /// and the connection is held for `hold` and then dropped.
