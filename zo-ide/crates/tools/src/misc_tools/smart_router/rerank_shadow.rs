@@ -1991,14 +1991,20 @@ mod tests {
     /// and one that fits is answered note by note. No number in it is a real
     /// model's.
     fn cutting_at(reads: usize) -> Mock {
+        cutting_when(move |body| questions_in(body) > reads)
+    }
+
+    /// A fake provider that refuses every request `cuts` says is longer than
+    /// it reads, as a managed server refuses a cut input, and answers every
+    /// other note by note.
+    fn cutting_when(cuts: impl Fn(&str) -> bool + Send + Sync + 'static) -> Mock {
         Mock::answering(move |body| {
-            let notes = questions_in(body);
-            if notes > reads {
+            if cuts(body) {
                 let said = serde_json::json!({"error": "native_protocol_failed",
                     "refusal": "provider_context_truncated"});
                 (502, said.to_string())
             } else {
-                (200, reply_for(&vec![1; notes]))
+                (200, reply_for(&vec![1; questions_in(body)]))
             }
         })
     }
@@ -2011,39 +2017,56 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// `readings` readings of the same eight notes, one after another, each
-    /// row written to the ledger as the seat writes it, after `past` requests
-    /// of the recall's that went unanswered: how many notes each put to the
-    /// judgment, how it ended, and the room it was asked under.
+    /// A recall of eight notes with a ledger of its own, asking one provider.
+    struct Reader {
+        client: SystemOneClient,
+        door: JevDoor,
+        path: PathBuf,
+        _home: tempfile::TempDir,
+    }
+
+    impl Reader {
+        /// The recall asking `mock`, after `past` requests of its that went
+        /// unanswered.
+        fn after(mock: &Mock, past: usize) -> Self {
+            let home = tempfile::tempdir().expect("a config home");
+            let path = home.path().join(RECALL.ledger);
+            for _ in 0..past {
+                let model = jev_gate::model_key(SYSTEMONE_MODEL);
+                let key = MemoKey::for_reading("a past reading", &[], model);
+                let timeout = SystemOneFailure::Timeout.ledger_token();
+                let mut row = RerankShadowRow::new(key, 1, timeout);
+                row.requests = Some(1);
+                append_shadow_row(&path, &row, SHADOW_LEDGER_MAX_BYTES).expect("an unanswered row");
+            }
+            let client = SystemOneClient::new(&mock.base_url, "test-key");
+            Self { client, door: door_with(None, home.path()), path, _home: home }
+        }
+
+        /// One reading of the eight notes under `query`, its row written to
+        /// the ledger as the seat writes it: how many notes it put to the
+        /// judgment, how it ended, and the room it was asked under.
+        fn read(&self, query: &str) -> (usize, String, Option<usize>) {
+            let eight: Vec<MemoryHit> =
+                (0..8).map(|n| hit(&format!("wiki/n{n}"), "one of many")).collect();
+            let wall = Duration::from_secs(5);
+            let row = shared_agent_runtime()
+                .block_on(judge(&self.door, Some(&self.client), query, &eight, wall, false));
+            append_shadow_row(&self.path, &row, SHADOW_LEDGER_MAX_BYTES).expect("the row");
+            (row.candidates, row.outcome, row.room)
+        }
+    }
+
+    /// `readings` readings of the same eight notes, one after another, after
+    /// `past` requests of the recall's that went unanswered ([`Reader`]).
     fn read_eight_notes(
         mock: &Mock,
         past: usize,
         readings: usize,
         name: &str,
     ) -> Vec<(usize, String, Option<usize>)> {
-        let client = SystemOneClient::new(&mock.base_url, "test-key");
-        let home = tempfile::tempdir().expect("a config home");
-        let door = door_with(None, home.path());
-        let path = home.path().join(RECALL.ledger);
-        for _ in 0..past {
-            let model = jev_gate::model_key(SYSTEMONE_MODEL);
-            let key = MemoKey::for_reading("a past reading", &[], model);
-            let mut row = RerankShadowRow::new(key, 1, SystemOneFailure::Timeout.ledger_token());
-            row.requests = Some(1);
-            append_shadow_row(&path, &row, SHADOW_LEDGER_MAX_BYTES).expect("an unanswered row");
-        }
-        let eight: Vec<MemoryHit> =
-            (0..8).map(|n| hit(&format!("wiki/n{n}"), "one of many")).collect();
-        (0..readings)
-            .map(|reading| {
-                let query = format!("{name} {reading}");
-                let wall = Duration::from_secs(5);
-                let row = shared_agent_runtime()
-                    .block_on(judge(&door, Some(&client), &query, &eight, wall, false));
-                append_shadow_row(&path, &row, SHADOW_LEDGER_MAX_BYTES).expect("the reading's row");
-                (row.candidates, row.outcome, row.room)
-            })
-            .collect()
+        let reader = Reader::after(mock, past);
+        (0..readings).map(|reading| reader.read(&format!("{name} {reading}"))).collect()
     }
 
     /// A provider that reads fewer notes than a reading sends refuses it as
@@ -2109,6 +2132,58 @@ mod tests {
         let answered = RERANK_OUTCOME_ANSWERED.to_string();
         let expected = vec![(8, cut.clone(), None), (4, cut, Some(4)), (2, answered, Some(2))];
         assert_eq!(read, expected);
+    }
+
+    /// A room grows back (t-58193): one long question halves the recall's
+    /// notes to two, and after [`jev_gate::UNANSWERED_BEFORE_REST`] answered
+    /// short readings under that room the next asks four, and after as many
+    /// under four, eight — the window that decides a rest decides a growth.
+    /// A grown request that is cut halves the room again.
+    #[test]
+    fn a_room_a_long_question_halved_grows_back_after_answers() {
+        let mock = cutting_when(|body| body.contains("a long question") && questions_in(body) > 2);
+        let reader = Reader::after(&mock, 0);
+        let window = jev_gate::UNANSWERED_BEFORE_REST;
+        let cut = SystemOneFailure::Http(502).ledger_token();
+        let answered = RERANK_OUTCOME_ANSWERED.to_string();
+
+        let long: Vec<_> = (0..2).map(|n| reader.read(&format!("a long question {n}"))).collect();
+        assert_eq!(long, [(8, cut.clone(), None), (4, cut.clone(), Some(4))]);
+        let short: Vec<_> =
+            (0..=2 * window).map(|n| reader.read(&format!("a short question {n}"))).collect();
+        let mut grown = vec![(2, answered.clone(), Some(2)); window];
+        grown.extend(vec![(4, answered.clone(), Some(4)); window]);
+        grown.push((8, answered.clone(), Some(8)));
+        assert_eq!(short, grown);
+        assert_eq!(reader.read("a long question again"), (8, cut, Some(8)));
+        assert_eq!(reader.read("a short question after it"), (4, answered, Some(4)));
+    }
+
+    /// A room of none never lasts (t-58193): once a long question has had
+    /// even one note cut the recall rests, and when [`jev_gate::REST`] has
+    /// passed since that cut it asks one note again, so a short question can
+    /// show the provider reads; answered, the room grows from one.
+    #[test]
+    fn a_room_of_none_wakes_after_a_rest_and_grows_from_one() {
+        let mock = cutting_when(|body| body.contains("a long question"));
+        let reader = Reader::after(&mock, 0);
+        let window = jev_gate::UNANSWERED_BEFORE_REST;
+        let answered = RERANK_OUTCOME_ANSWERED.to_string();
+
+        let rooms: Vec<_> =
+            (0..4).map(|n| reader.read(&format!("a long question {n}")).2).collect();
+        assert_eq!(rooms, [None, Some(4), Some(2), Some(1)]);
+        let resting = reader.read("a short question before the wake");
+        assert_eq!(resting, (0, "resting".to_string(), Some(0)));
+
+        let rested = jev_gate::REST + Duration::from_secs(60);
+        super::super::jev_mock::age_ledger(&reader.path, rested);
+        let woken: Vec<_> =
+            (0..=window).map(|n| reader.read(&format!("a short question {n}"))).collect();
+        let mut grown = vec![(1, answered.clone(), Some(1)); window];
+        grown.push((2, answered, Some(2)));
+        assert_eq!(woken, grown);
+        assert_eq!(mock.requests().len(), 4 + window + 1, "the rest sent nothing");
     }
 
     /// A server that asks the recall to wait — a `503` with a `Retry-After`,

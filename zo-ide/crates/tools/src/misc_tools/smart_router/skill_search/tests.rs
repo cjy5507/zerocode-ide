@@ -896,10 +896,12 @@ fn a_refused_suggestions_row_keeps_what_the_server_said() {
 /// A provider that cannot read the suggestion's catalog (t-58193): the first
 /// suggestion is refused as cut, and the next one does not ask that provider
 /// — its row says `resting` under a room of half the catalog that was cut,
-/// and no second request leaves.
+/// and no second request leaves. The suggestion cannot carry less than its
+/// whole catalog, so once [`jev_gate::REST`] has passed since the cut the
+/// whole catalog goes once more; cut again, it waits again.
 #[test]
-fn a_suggestion_whose_catalog_was_cut_does_not_ask_again() {
-    use super::super::jev_mock::{machine_words, Mock};
+fn a_suggestion_whose_catalog_was_cut_waits_a_rest_to_ask_again() {
+    use super::super::jev_mock::{age_ledger, machine_words, Mock};
     let said = json!({"error": "native_protocol_failed", "refusal": "provider_context_truncated"});
     let mock = Mock::serving(502, said.to_string());
     machine_words(&[(SKILL_SUGGESTION.setting, JevMode::Auto.key())], &mock.base_url, |cwd| {
@@ -936,6 +938,14 @@ fn a_suggestion_whose_catalog_was_cut_does_not_ask_again() {
         let catalog = rows[0]["candidates"].as_u64().expect("the catalog that was cut");
         assert_eq!(rows[1]["room"], catalog / 2, "{rows:?}");
         assert_eq!(mock.requests().len(), 1, "the cut catalog is not sent again");
+
+        age_ledger(&ledger, jev_gate::REST + Duration::from_secs(60));
+        let rows = suggest("summarise the contract as a one-page brief", 3);
+        assert_eq!(mock.requests().len(), 2, "a rest later the whole catalog goes once more");
+        assert_eq!(rows[2]["candidates"], catalog, "{rows:?}");
+        let rows = suggest("list the risks this plan leaves open", 4);
+        assert_eq!(rows[3]["outcome"], "resting", "{rows:?}");
+        assert_eq!(mock.requests().len(), 2, "cut again, it waits again");
     });
 }
 
