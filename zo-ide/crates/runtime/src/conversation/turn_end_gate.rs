@@ -631,15 +631,38 @@ mod tests {
         }
     }
 
-    /// The promise reminder asks for the work and for what is new — never for
-    /// the whole answer again, which the model then writes a second time.
+    /// Words that only look like a condition (ZO review of t-58176): "when
+    /// you …" / "after you …" usually tell what happened, and 「…하시면서」
+    /// is "while you …" — the promise beside them is still the model's own.
     #[test]
-    fn the_promise_reminder_asks_for_the_work_not_a_rewrite() {
+    fn a_time_clause_before_a_promise_is_not_a_condition() {
+        for text in [
+            "When you ran it the build broke, so I'll fix it.",
+            "After you pushed, CI went red, so I'll look at the log.",
+            "로그를 확인하시면서 저는 다음 단계를 진행하겠습니다.",
+            "결과를 검토하시면서 저는 남은 시험을 실행하겠습니다.",
+        ] {
+            assert_eq!(
+                screen_turn_ending(text, false),
+                Some(TurnEndingIssue::Promise),
+                "{text}"
+            );
+        }
+    }
+
+    /// The promise reminder asks for the work, and still for a complete final
+    /// answer: a headless run's summary and the deep mode's plan and checks
+    /// read the last assistant message alone (ZO review of t-58176), so a
+    /// last message that only adds to an earlier one would lose the answer.
+    #[test]
+    fn the_promise_reminder_keeps_the_last_message_a_complete_answer() {
         let reminder = turn_end_gate_reminder(TurnEndingIssue::Promise);
         assert!(reminder.contains("tool calls"), "{reminder}");
-        assert!(reminder.contains("Do not repeat"), "{reminder}");
-        assert!(reminder.contains("only what is new"), "{reminder}");
-        assert!(!reminder.contains("complete final answer"), "{reminder}");
+        assert!(
+            reminder.contains("Then finish with a complete final answer."),
+            "{reminder}"
+        );
+        assert!(!reminder.contains("Do not repeat"), "{reminder}");
     }
 
     #[test]

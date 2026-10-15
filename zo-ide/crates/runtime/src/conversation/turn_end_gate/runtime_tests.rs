@@ -36,6 +36,11 @@ const EVALUATION_THEN_PROMISE: &str = "설계 문서를 평가했습니다.\n\n\
      ## 약점\n1. 2단계의 롤백 절차가 빠져 있습니다.\n2. 성능 목표에 숫자가 없습니다.\n\n\
      다음으로 시험을 실행하겠습니다.";
 
+/// A promise after a clause that tells what happened, not what the person
+/// should do first (ZO review of t-58176).
+const TIME_CLAUSE_THEN_PROMISE: &str =
+    "The tests ran.\n\nWhen you ran it the build broke, so I'll fix it.";
+
 const QUESTION_ENDING: &str = "The migration is ready.\n\nShould I also update the staging config?";
 
 /// Answers with `replies` in order, then repeats the last one — a model that
@@ -190,6 +195,18 @@ fn an_unconditional_promise_is_asked_about_once_a_turn() {
     };
     assert_eq!(streaming_turn(&[EVALUATION_THEN_PROMISE]), expected);
     assert_eq!(autonomous_turn(&[EVALUATION_THEN_PROMISE]), expected);
+}
+
+/// "When you …" that tells what happened leaves the promise a promise: it
+/// is asked about once, like any other.
+#[test]
+fn a_promise_after_a_time_clause_is_asked_about_once() {
+    let expected = Seen {
+        reprompts: vec![TurnEndingIssue::Promise],
+        replies: 2,
+    };
+    assert_eq!(streaming_turn(&[TIME_CLAUSE_THEN_PROMISE]), expected);
+    assert_eq!(autonomous_turn(&[TIME_CLAUSE_THEN_PROMISE]), expected);
 }
 
 /// The other issues keep the shared cap of two: a question asked twice is
