@@ -143,8 +143,8 @@ pub use systemone::{
     HedgeRan, SystemOneCall, SystemOneChoiceAnswer, SystemOneClient, SystemOneConfig, SystemOneContrast,
     SystemOneCriteria, SystemOneFailure, SystemOneQuestion, SystemOneQuestionKind, SystemOneRequest,
     SystemOneResponse, SystemOneScoreAnswer, SystemOneUsage,
-    SYSTEMONE_API_KEY_ENV, SYSTEMONE_BASE_URL, SYSTEMONE_BASE_URL_ENV, SYSTEMONE_MAX_RETRIES,
-    SYSTEMONE_MODEL, SYSTEMONE_PATH, SYSTEMONE_RETRY_BASE_DELAY,
+    SYSTEMONE_API_KEY_ENV, SYSTEMONE_BASE_URL, SYSTEMONE_BASE_URL_ENV, SYSTEMONE_CUT_REFUSAL,
+    SYSTEMONE_MAX_RETRIES, SYSTEMONE_MODEL, SYSTEMONE_PATH, SYSTEMONE_RETRY_BASE_DELAY,
 };
 pub use types::{
     CacheControl, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,

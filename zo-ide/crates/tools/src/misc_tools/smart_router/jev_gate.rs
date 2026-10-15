@@ -360,10 +360,28 @@ impl JevDoor {
             .filter(|_| self.count_a_hedge().is_ok())
     }
 
-    /// Whether `row`'s seat rests now (t-58193): it applies nothing, and its
-    /// own ledger says it rests ([`Self::rest_of`]).
+    /// Whether `row`'s seat rests now (t-58193): its provider cut the
+    /// smallest request it can make, one item ([`Self::room_of`]), or it
+    /// applies nothing and its own ledger says it rests ([`Self::rest_of`]).
     fn resting(&self, row: &JevUse) -> bool {
-        self.rest_of(row).is_some() && !self.applies_now(row)
+        self.room_of(row) == Some(0) || (self.rest_of(row).is_some() && !self.applies_now(row))
+    }
+
+    /// The most items — notes, skills — one request of `row`'s seat may
+    /// carry to this provider (t-58193), as its own ledger in this provider's
+    /// folder says ([`room_in`]): `None` while the provider has cut none of
+    /// the seat's requests in its series.
+    ///
+    /// No provider declares how much it reads — not the local server's model
+    /// list, not a provider's settings — and zo cannot count a model's
+    /// tokens, so the room is learned from the provider's own refusal
+    /// ([`api::SYSTEMONE_CUT_REFUSAL`]), halved until a request fits. A limit
+    /// a provider declared would be read here, in place of the halving.
+    #[must_use]
+    pub fn room_of(&self, row: &JevUse) -> Option<usize> {
+        let ledger = self.ledgers.as_deref()?.join(row.ledger);
+        let tail = last_shadow_lines(&ledger, HEDGE_SAMPLE_ROWS);
+        room_in(row, tail.iter().rev().map(String::as_str))
     }
 
     /// `row`'s rest as its own ledger in this provider's folder says it
@@ -432,12 +450,15 @@ enum Reading {
 ///
 /// What is read is the requests the seat sent in its series
 /// ([`sent_in_series`]); a request the door refused, a memo's answer, a
-/// judge's transition and a mark are no request, and count neither way.
+/// judge's transition and a mark are no request, and count neither way. Nor
+/// does a request its provider cut under a room the seat had learned: the
+/// fit rule answers that one by halving the room ([`room_in`]), which ends
+/// the cuts within a few requests.
 fn rest_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>, now_ms: i64) -> Reading {
     let mut causes: Vec<String> = Vec::new();
     let mut newest = None;
     for row in lines.filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
-        if !sent_in_series(seat, &row) {
+        if !sent_in_series(seat, &row) || (cut(&row) && row.get(ROOM).is_some()) {
             continue;
         }
         if summary::OUTCOME.read(&row).and_then(Value::as_str) == Some(door::ANSWERED_OUTCOME) {
@@ -459,18 +480,62 @@ fn rest_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>, now_ms: i64)
 /// Where [`ServerSaid`] keeps the provider's refusal on a row.
 const SERVER_REFUSAL: &str = "serverRefusal";
 
-/// Whether `row` is a request `seat` sent in its series: one that asked
-/// something and left at least once, under the rubric the seat asks now —
-/// read as the judge reads a row's rubric, where a row naming none is the
-/// first rubric's (`zerocode_core::jev::promote`).
-fn sent_in_series(seat: &JevUse, row: &Value) -> bool {
+/// Where a seat's row keeps the room it was asked under, how many items its
+/// request carried, and the model that answered it.
+const ROOM: &str = "room";
+const CANDIDATES: &str = "candidates";
+const MODEL: &str = "model";
+
+/// A seat's room as a ledger's `lines` say it, newest line first: half the
+/// fewest items a request of its series carried that the provider cut
+/// ([`cut`]), and no more than the room its newest row was asked under —
+/// which holds every cut before that row, so the reading stops there.
+fn room_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>) -> Option<usize> {
+    let mut room: Option<usize> = None;
+    for row in lines.filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
+        if !in_series(seat, &row) {
+            continue;
+        }
+        let count = |key: &str| {
+            row.get(key).and_then(Value::as_u64).and_then(|count| usize::try_from(count).ok())
+        };
+        let halved = count(CANDIDATES).filter(|_| cut(&row)).map(|carried| carried / 2);
+        let held = count(ROOM);
+        room = [room, halved, held].into_iter().flatten().min();
+        if held.is_some() {
+            break;
+        }
+    }
+    room
+}
+
+/// Whether `row` keeps a request its provider cut for being longer than its
+/// model reads ([`api::SYSTEMONE_CUT_REFUSAL`]). A row that also names the
+/// model that answered had an earlier stage answered and a later one cut,
+/// whose items it does not count; it says nothing of the room.
+fn cut(row: &Value) -> bool {
+    row.get(SERVER_REFUSAL).and_then(Value::as_str) == Some(api::SYSTEMONE_CUT_REFUSAL)
+        && row.get(MODEL).is_none()
+}
+
+/// Whether `row` belongs to `seat`'s series: it names the rubric the seat
+/// asks now — read as the judge reads a row's rubric, where a row naming
+/// none is the first rubric's (`zerocode_core::jev::promote`). The provider
+/// is the ledger's folder.
+fn in_series(seat: &JevUse, row: &Value) -> bool {
     let rubric = summary::RUBRIC_VERSION.read(row).map_or(
         Some(zerocode_core::jev::questions::UNVERSIONED_RUBRIC),
         |spelled| spelled.as_u64().and_then(|version| u32::try_from(version).ok()),
     );
+    rubric == Some(seat.rubric_version)
+}
+
+/// Whether `row` is a request `seat` sent in its series ([`in_series`]): one
+/// that asked something and left at least once.
+fn sent_in_series(seat: &JevUse, row: &Value) -> bool {
     summary::asked_something(row).is_some()
         && summary::REQUESTS.read(row).and_then(Value::as_u64).is_some_and(|sent| sent > 0)
-        && rubric == Some(seat.rubric_version)
+        && in_series(seat, row)
 }
 
 /// The word `causes` hold most often, the first of them among equals.

@@ -817,6 +817,16 @@ async fn judge_suggestion(
         record_row(&SKILL_SUGGESTION, &skill_suggestion_path(&cwd), &row);
         return None;
     };
+    // The wide request carries the whole catalog and cannot carry less, so a
+    // catalog wider than this provider's room is not asked at all (t-58193).
+    row.room = door.room_of(&SKILL_SUGGESTION);
+    if row.room.is_some_and(|room| candidates.len() > room) {
+        let resting = Refused::Resting.token();
+        row.outcome = resting.into();
+        telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, resting);
+        record_row(&SKILL_SUGGESTION, &skill_suggestion_path(&cwd), &row);
+        return None;
+    }
     let started = Instant::now();
     let wide = ask_wide(&door, &client, &task, &candidates, acting, &mut row).await;
     let Some(wide) = wide else {

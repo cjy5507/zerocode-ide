@@ -219,6 +219,11 @@ const PROVIDER_REFUSALS: [judgment_provider::Refusal; 10] = {
         R::Response, R::TooLarge, R::SettingsChanged, R::Truncated]
 };
 
+/// The provider's refusal of a request longer than its model reads, as
+/// [`SystemOneCall::server_refusal`] names it (t-58193): the one refusal a
+/// seat answers by asking with less.
+pub const SYSTEMONE_CUT_REFUSAL: &str = judgment_provider::Refusal::Truncated.token();
+
 /// The code and the provider's refusal a refused `502` body names: the code
 /// when it is [`DECODE_REFUSAL_CODE`], and beside it the refusal when it is
 /// one of [`PROVIDER_REFUSALS`]. No other word the body says is kept.

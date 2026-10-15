@@ -1459,8 +1459,25 @@ async fn kept(row: RerankShadowRow, door: JevDoor, answer: Option<RowSender>) ->
 }
 
 /// One reading's row: recalled from the memo, refused at the door, or asked
-/// and checked.
+/// and checked — about as many of its notes as this provider has room for
+/// ([`JevDoor::room_of`], t-58193), and saying that room.
 pub(super) async fn judge(
+    door: &JevDoor,
+    client: Option<&SystemOneClient>,
+    query: &str,
+    hits: &[MemoryHit],
+    deadline: Duration,
+    waited: bool,
+) -> RerankShadowRow {
+    let room = door.room_of(&RECALL);
+    let fitted = &hits[..room.map_or(hits.len(), |room| room.min(hits.len()))];
+    let mut row = judge_fitted(door, client, query, fitted, deadline, waited).await;
+    row.room = room;
+    row
+}
+
+/// One reading's row, about every note in `hits`.
+async fn judge_fitted(
     door: &JevDoor,
     client: Option<&SystemOneClient>,
     query: &str,
