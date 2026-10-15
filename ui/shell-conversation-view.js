@@ -585,6 +585,7 @@ function freshWorkerHost() {
   const host = DOC_VIEWS.worker.build();
   host.removeAttribute("id");
   host.hidden = false;
+  DOC_VIEWS.worker.wire(host);
   applyLocale(host);
   return host;
 }
@@ -682,7 +683,13 @@ function passFocusBehind(event) {
   else target.blur();
 }
 
-document.addEventListener("focusin", passFocusBehind, true);
+/* A conversation's surface takes that guard when it is built — a leaf's view
+ * through the views' own wiring (`DOC_VIEWS`), a pane's conversation where it
+ * is made (`placePaneChat`): on the surface, since the document's `focusin` is
+ * the tooltip's one delegated listener. */
+function wireWorkerView(host) {
+  host.addEventListener("focusin", passFocusBehind);
+}
 
 /* The conversation list of the page `node` stands on, or null. */
 function pageTurnsOf(node) {

@@ -13185,6 +13185,7 @@ function placePaneChat(term, slot, shown) {
       held.host.className = "worker-view pane-chat";
       held.host.dataset.term = String(term);
       held.host.setAttribute("aria-label", t("worker.paneTranscript", "이 판의 대화"));
+      wireWorkerView(held.host);
     }
     if (held.host.parentElement !== slot) slot.appendChild(held.host);
     held.host.hidden = false;
@@ -19264,7 +19265,7 @@ const DOC_VIEWS = {
   mdview: { build: buildMdView, paint: paintMdView },
   csv: { build: buildCsvView, paint: paintCsvView },
   ipynb: { build: buildIpynbView, paint: paintIpynbView },
-  worker: { build: buildWorkerView, paint: paintWorkerView },
+  worker: { build: buildWorkerView, paint: paintWorkerView, wire: wireWorkerView },
   knowledge: { build: buildKnowledgeView, paint: paintKnowledgeStage },
   skills: { build: buildSkillsView, paint: paintSkillsStage },
   artifacts: { build: buildArtifactsView, paint: paintArtifactsStage },
