@@ -327,7 +327,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
     ],
     "column_width": 308
   },
-  "sidebar_view": { "group_by": "repo", "sort_by": "default", "project_order": "default" },
+  "sidebar_view": { "group_by": "repo", "sort_by": "default", "project_order": "default", "layout": "team" },
   "confirm_close_pinned": true,
   "skip_close_terminal_with_running_process_confirm": false,
   "ctrl_tab_order_mode": "mru",

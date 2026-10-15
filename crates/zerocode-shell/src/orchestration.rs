@@ -2535,6 +2535,16 @@ pub(crate) struct LedgerAgent {
     pub(crate) quiet_at: Option<i64>,
     /// The reconciler's proof that its pane is gone (`Worker::pane_missing_since_ms`).
     pub(crate) pane_missing_since_ms: Option<i64>,
+    /// The first line of the last `status` letter a live worker sent since it was summoned
+    /// (t-56141, [`zerocode_core::orchestration::last_status`]): what the sidebar's team view says
+    /// it is doing. `None` while it has sent none, and for finished work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_status: Option<zerocode_core::orchestration::LastStatus>,
+    /// What the newest landing check of its task said since this attempt began (t-56141,
+    /// [`zerocode_core::orchestration::land_check::newest_land_check`]): the team view's check
+    /// cell. `None` where no check ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) land_check: Option<zerocode_core::orchestration::land_check::LandCheckSeen>,
     /// What its task cost, once the task is finished (t-9470) — laid on by
     /// the board's beat from the window's cost book ([`cost_book::CostBook::dress`]);
     /// `None` for a task still moving, and on every row read another way.
@@ -3148,6 +3158,20 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 quota_wall,
                 quiet_at: worker.quiet_at,
                 pane_missing_since_ms: worker.pane_missing_since_ms,
+                // Read back only as far as this worker's own summons and attempt: nothing older
+                // can be its words or its head's check.
+                last_status: if finished {
+                    None
+                } else {
+                    zerocode_core::orchestration::last_status(run, &worker.id, worker.started_ms)
+                },
+                land_check: dispatch.zip(carried).and_then(|(attempt, held)| {
+                    zerocode_core::orchestration::land_check::newest_land_check(
+                        run,
+                        &held.id,
+                        attempt.started_ms,
+                    )
+                }),
                 cost: None,
                 gate: None,
                 writing: None,

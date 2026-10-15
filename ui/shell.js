@@ -10524,15 +10524,29 @@ function worktreeBlockerWord(path) {
   const seats = worktreeSeatFacts(path);
   const now = Date.now();
   for (const facts of seats) {
-    const health = deskWorkerHealth(facts, null, now);
-    if (health && DESK_TASK_BLOCKERS.includes(health.id)) return t(health.key, health.word);
+    const word = seatHealthBlockerWord(facts, now);
+    if (word) return word;
   }
   const stage = worktreeStageOf(path);
   for (const facts of seats) {
-    for (const reason of facts.stalled ?? []) {
-      const said = WORKTREE_STALL_WORDS[reason];
-      if (said?.stages.includes(stage)) return t(said.key, said.word);
-    }
+    const word = seatStallWord(facts, stage);
+    if (word) return word;
+  }
+  return "";
+}
+
+/* The two halves of that word for one seat's facts — a ledger row or a pane's — so the team view's worker row
+ * (t-56141) says what holds its work back from the same two tables: the seat's health when it is a blocker, then
+ * the newest stall reason that fits `stage`. */
+function seatHealthBlockerWord(facts, now) {
+  const health = deskWorkerHealth(facts, null, now);
+  return health && DESK_TASK_BLOCKERS.includes(health.id) ? t(health.key, health.word) : "";
+}
+
+function seatStallWord(facts, stage) {
+  for (const reason of facts.stalled ?? []) {
+    const said = WORKTREE_STALL_WORDS[reason];
+    if (said?.stages.includes(stage)) return t(said.key, said.word);
   }
   return "";
 }
@@ -11781,6 +11795,8 @@ function flushAgentPaint() {
     paintWorktreeDots();
     paintWorktreeUnread();
     paintWorktreeAgents();
+    // The team view's rows read the same panes' states (t-56141); a row whose words did not move is not touched.
+    paintSidebarTeam();
     paintStageCard();
     // 같은 사실의 다섯째 표면: 아티팩트 스튜디오의 「초안을 받을 에이전트」는
     // 에이전트가 앉은 판의 목록이다. 서 있을 때만 그린다(2026-09-13, 「에이전트가

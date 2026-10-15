@@ -9731,9 +9731,20 @@ fn the_sidebar_remembers_how_it_was_asked_to_look() {
             group_by: SidebarGroupBy::Repo,
             sort_by: SidebarSortBy::Catalog,
             project_order: SidebarProjectOrder::Catalog,
+            layout: SidebarLayout::Team,
         },
         "the sidebar no longer opens grouped by project in catalogue order"
     );
+    // The team view and the branch list live in the same value (t-56141): the
+    // two words are taken, any other is refused, and a document written before
+    // the word existed opens on the team.
+    assert_eq!(SidebarLayout::parsed("team"), Ok(SidebarLayout::Team));
+    assert_eq!(SidebarLayout::parsed("branches"), Ok(SidebarLayout::Branches));
+    assert!(SidebarLayout::parsed("coordinators").is_err());
+    let before: SidebarView =
+        serde_json::from_str(r#"{"group_by":"repo","sort_by":"default","project_order":"default"}"#)
+            .expect("a view written before the layout word reads");
+    assert_eq!(before.layout, SidebarLayout::Team);
 }
 
 /// 보드 팝아웃 — 창은 하나, 수명은 메인 창에 매여 있고, 두 창은 한 문서다.

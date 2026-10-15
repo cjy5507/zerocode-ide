@@ -28132,3 +28132,41 @@ fn a_chips_refusals_reach_the_window_as_codes_with_their_facts() {
         json!({ "refused": { "code": "worker_not_live", "worker": worker, "state": "sleeping" } })
     );
 }
+
+/// The sidebar's team view reads what a worker says it is doing off the board's beat (t-56141):
+/// the first line of the newest `status` it sent, clipped, read back no further than the moment
+/// asked about — the beat asks from the worker's summons, and nothing older is its own words.
+#[test]
+fn a_workers_last_status_is_its_newest_line_since_the_moment_asked_about() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name status");
+    let task = bench.json("task-create --spec status-task")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let run = bench.ledger.runs()[0].id.clone();
+    assert_eq!(
+        last_status(bench.ledger.run(&run).expect("the run"), &worker, i64::MIN),
+        None,
+        "a worker that sent nothing says nothing"
+    );
+    bench.json_at(&pane, "send --type status --body reading");
+    let long = "x".repeat(LAST_STATUS_LINE_CHARS + 50);
+    bench.json_at(&pane, &format!("send --type status --body {long}"));
+    let held = bench.ledger.run(&run).expect("the run");
+    let said = last_status(held, &worker, i64::MIN).expect("the newest status");
+    assert_eq!(said.line.chars().count(), LAST_STATUS_LINE_CHARS);
+    assert!(said.line.ends_with('…'), "{}", said.line);
+    assert_eq!(
+        last_status(held, &worker, said.created_ms).as_ref(),
+        Some(&said),
+        "the letter at the moment asked about is read"
+    );
+    assert_eq!(
+        last_status(held, &worker, said.created_ms + 1),
+        None,
+        "a letter older than the moment asked about is not read"
+    );
+    assert_eq!(last_status(held, "w-elsewhere", i64::MIN), None);
+}
