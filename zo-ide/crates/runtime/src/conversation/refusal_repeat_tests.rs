@@ -287,8 +287,8 @@ fn turn_through<C: ApiClient>(
 type Road = fn(&mut ConversationRuntime<NotAsked, StaticToolExecutor>) -> usize;
 
 /// One internal leg of `words` — a deep-gate subturn's, inside a turn.
-fn internal_leg(
-    runtime: &mut ConversationRuntime<NotAsked, StaticToolExecutor>,
+fn internal_leg<C: ApiClient>(
+    runtime: &mut ConversationRuntime<C, StaticToolExecutor>,
     words: &str,
 ) -> Result<TurnSummary, StreamingTurnError> {
     let prompter: Arc<dyn crate::permission::PermissionPrompter> = Arc::new(No);
@@ -729,9 +729,10 @@ fn a_repeat_needs_the_decline_kept_standing_and_the_same_words() {
 /// The lifecycle hook contract, on every loop a turn runs on. A turn, or a
 /// stop gate's follow-up, that repeats the words a decline just stood on runs
 /// no hook: no `UserPromptSubmit`, and no `TurnEnd`, so no stop gate asks a
-/// follow-up after it and the turn ends with it. It takes nothing from the
-/// team inbox. Everything else runs them as before. The hooks are shell
-/// commands, so these run where a POSIX shell does.
+/// follow-up after it and the turn ends with it, settling what the legs before
+/// it took. It takes nothing from the team inbox. Everything else runs them as
+/// before. The hooks are shell commands, so these run where a POSIX shell
+/// does.
 #[cfg(unix)]
 mod hook_contract {
     use std::path::{Path, PathBuf};
@@ -741,8 +742,8 @@ mod hook_contract {
 
     use super::super::DeepGateConfig;
     use super::{
-        first_words, standing_notices, turn, AsyncApiClient, ConversationRuntime, Declining,
-        DecliningSync, Hermetic, PermissionMode, PermissionPolicy, StaticToolExecutor,
+        first_words, internal_leg, standing_notices, turn, AsyncApiClient, ConversationRuntime,
+        Declining, DecliningSync, Hermetic, PermissionMode, PermissionPolicy, StaticToolExecutor,
         TurnSummary, OTHER_WORDS, UNROUTED, WORDS,
     };
     use crate::config::{ConfigLoader, RuntimeFeatureConfig};
@@ -841,7 +842,9 @@ mod hook_contract {
             self.dir.join(name).display().to_string()
         }
 
-        /// A runtime's features with these hooks, loaded as zo loads settings.
+        /// A runtime's features with these hooks, loaded as zo loads settings,
+        /// and a team inbox that gives a leg one update at most, so what each
+        /// leg took can be told apart.
         fn features(&self) -> RuntimeFeatureConfig {
             let prompt_submit = format!("echo ran >> '{}'", self.path("prompt-submit"));
             let turn_end = format!(
@@ -857,7 +860,8 @@ mod hook_contract {
             std::fs::create_dir_all(project.join(".zo")).expect("project settings folder");
             std::fs::create_dir_all(&home).expect("settings folder");
             let settings = serde_json::json!({
-                "hooks": { "UserPromptSubmit": [prompt_submit], "TurnEnd": [turn_end] }
+                "hooks": { "UserPromptSubmit": [prompt_submit], "TurnEnd": [turn_end] },
+                "teamInboxDigestMaxUpdates": 1
             });
             std::fs::write(home.join("settings.json"), settings.to_string()).expect("settings");
             ConfigLoader::new(&project, &home)
@@ -969,6 +973,31 @@ mod hook_contract {
         rows.map(|row| row.expect("a row")).collect()
     }
 
+    /// The deliveries of the team inbox in `cwd`, each with its state.
+    fn team_inbox_deliveries(cwd: &Path) -> Vec<String> {
+        team_inbox_taken(cwd)
+            .into_iter()
+            .filter(|row| row.starts_with("delivery "))
+            .collect()
+    }
+
+    /// Whether a turn left its cleanup something to settle: a team inbox batch
+    /// it took and did not settle, or a seat's turn it did not finish.
+    fn cleanup_left_open(runtime: &Runtime) -> bool {
+        runtime.team_inbox_turn.is_some()
+            || runtime.file_pick_pending_turn.is_some()
+            || runtime.skill_suggestion_turn_start.is_some()
+    }
+
+    /// The words of the requests `provider` was sent in `requests`, in order.
+    fn words_asked(provider: &Declining, requests: std::ops::Range<usize>) -> Vec<String> {
+        requests
+            .map(|at| {
+                provider.asked(at).as_ref().and_then(first_words).unwrap_or_default().to_string()
+            })
+            .collect()
+    }
+
     /// What a turn did that a turn which repeats a standing decline must not:
     /// the requests it sent, the hooks it ran, and whether it took anything
     /// from the team inbox.
@@ -1034,9 +1063,7 @@ mod hook_contract {
         let before = Mark::now(&provider, &hooks, &env.cwd);
         road.run(&mut runtime, WORDS).expect("the repeat ends cleanly");
         let repeated = Mark::now(&provider, &hooks, &env.cwd);
-        let left_open = runtime.team_inbox_turn.is_some()
-            || runtime.file_pick_pending_turn.is_some()
-            || runtime.skill_suggestion_turn_start.is_some();
+        let left_open = cleanup_left_open(&runtime);
         road.run(&mut runtime, OTHER_WORDS).expect("the next turn ends cleanly");
         let after = Mark::now(&provider, &hooks, &env.cwd);
 
@@ -1078,18 +1105,22 @@ mod hook_contract {
         assert_eq!(accounts[0].1, accounts[1].1, "the headless and the streaming loop do the same");
     }
 
-    /// What one turn sent and ran: the words of each request it sent, in
-    /// order, and how many times each hook ran.
+    /// What one turn sent, ran and settled: the words of each request it
+    /// sent, in order, how many times each hook ran, the team inbox's
+    /// deliveries after it, and whether it left its cleanup anything to settle.
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct Legs {
         asked: Vec<String>,
         prompt_submits: usize,
         turn_ends: usize,
+        inbox: Vec<String>,
+        left_open: bool,
     }
 
     /// One turn of [`OTHER_WORDS`] on `road` after the decline stood on
     /// [`WORDS`], beside a stop gate that answers with `follow_ups` and may
-    /// be followed at most `stop_loops` times.
+    /// be followed at most `stop_loops` times, and four team inbox updates for
+    /// the legs to take, one each.
     fn follow_up_turn(road: Road, follow_ups: &[&str], stop_loops: usize) -> Legs {
         let env = Hermetic::new(&format!("follow-ups-{road:?}"));
         let provider = Declining::new(UNROUTED);
@@ -1098,18 +1129,19 @@ mod hook_contract {
         runtime.set_max_stop_loops(stop_loops);
         road.stand(&env, &mut runtime);
         hooks.answer_with(follow_ups);
+        for id in ["u1", "u2", "u3", "u4"] {
+            post_to_team_inbox(&env.cwd, id);
+        }
 
         let before = Mark::now(&provider, &hooks, &env.cwd);
         road.run(&mut runtime, OTHER_WORDS).expect("the turn ends cleanly");
         let after = Mark::now(&provider, &hooks, &env.cwd);
         Legs {
-            asked: (before.requests..after.requests)
-                .map(|at| {
-                    provider.asked(at).as_ref().and_then(first_words).unwrap_or_default().to_string()
-                })
-                .collect(),
+            asked: words_asked(&provider, before.requests..after.requests),
             prompt_submits: after.runs.prompt_submit - before.runs.prompt_submit,
             turn_ends: after.runs.turn_end - before.runs.turn_end,
+            inbox: team_inbox_deliveries(&env.cwd),
+            left_open: cleanup_left_open(&runtime),
         }
     }
 
@@ -1117,7 +1149,8 @@ mod hook_contract {
     /// decline stands. The follow-up is asked once and the decline stands on
     /// it; the next time it is the words the decline just stood on, so that
     /// leg sends nothing and runs no hook, and the turn ends: two legs on
-    /// every loop, not one for each stop loop allowed.
+    /// every loop, not one for each stop loop allowed. The turn still settles
+    /// the team inbox update the follow-up took.
     #[test]
     fn a_stop_gate_repeating_its_follow_up_while_a_decline_stands_is_asked_once() {
         let turns = ROADS.map(|road| (road, follow_up_turn(road, &[FOLLOW_UP; 6], 4)));
@@ -1134,7 +1167,50 @@ mod hook_contract {
                 (2, 2),
                 "{road:?}: each leg asked ran both hooks, and the leg that sent nothing ran neither"
             );
+            assert_eq!(
+                legs.inbox,
+                ["delivery u1 acked", "delivery u2 acked"],
+                "{road:?}: each leg asked took one update, and the turn settled the follow-up's, \
+                 though the leg after it sent nothing"
+            );
+            assert!(!legs.left_open, "{road:?}: and left its cleanup nothing to settle");
         }
+    }
+
+    /// A stop gate's follow-up is the person's side of the turn, in deep mode
+    /// too, where the deep driver runs every leg as an internal one: given
+    /// again once the decline stood on it, it sends nothing. An internal leg
+    /// of the same words, from the same place, is the deep driver's own and is
+    /// asked as before.
+    #[test]
+    fn a_stop_gate_follow_up_is_never_taken_for_an_internal_deep_leg() {
+        let env = Hermetic::new("follow-up-or-internal-leg");
+        let provider = Declining::new(UNROUTED);
+        let hooks = CountingHooks::new(&env);
+        let mut runtime = Road::Deep.runtime(&env, &provider, &hooks);
+        runtime.set_max_stop_loops(4);
+        Road::Deep.stand(&env, &mut runtime);
+        hooks.answer_with(&[FOLLOW_UP, FOLLOW_UP]);
+
+        let before = provider.sent();
+        Road::Deep.run(&mut runtime, OTHER_WORDS).expect("the turn ends cleanly");
+        assert_eq!(
+            words_asked(&provider, before..provider.sent()),
+            [OTHER_WORDS, FOLLOW_UP],
+            "the follow-up given again, once the decline stood on it, sends nothing"
+        );
+        assert!(
+            runtime.repeats_a_standing_decline(FOLLOW_UP),
+            "the decline stood on the follow-up"
+        );
+
+        let before = provider.sent();
+        internal_leg(&mut runtime, FOLLOW_UP).expect("the internal leg ends cleanly");
+        assert_eq!(
+            words_asked(&provider, before..provider.sent()),
+            [FOLLOW_UP],
+            "an internal leg of the same words is asked, once"
+        );
     }
 
     /// A follow-up whose words are not the ones just declined is asked, on
@@ -1152,6 +1228,12 @@ mod hook_contract {
                 "{road:?}: every leg is asked"
             );
             assert_eq!(legs.turn_ends, 3, "{road:?}: and the stop gate runs after each");
+            assert_eq!(
+                legs.inbox,
+                ["delivery u1 acked", "delivery u2 acked", "delivery u3 acked"],
+                "{road:?}: each leg took one update, and the turn settled them all"
+            );
+            assert!(!legs.left_open, "{road:?}: and left its cleanup nothing to settle");
         }
     }
 
