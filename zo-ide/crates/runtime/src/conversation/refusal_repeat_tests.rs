@@ -12,6 +12,7 @@ use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,11 +44,12 @@ fn the_premise_one_category_is_routed_nowhere_and_one_somewhere() {
     assert!(!::api::refusal_route_candidates("claude-opus-5-5", Some("cyber")).is_empty());
 }
 
-/// A provider whose classifier declines every request, naming `category`, and
-/// keeps every request it was sent.
+/// A provider whose classifier declines every request, naming `category`,
+/// until it is told to answer, and keeps every request it was sent.
 struct Declining {
     category: &'static str,
     requests: Mutex<Vec<ApiRequest>>,
+    answers: AtomicBool,
 }
 
 impl Declining {
@@ -55,11 +57,23 @@ impl Declining {
         Arc::new(Self {
             category,
             requests: Mutex::new(Vec::new()),
+            answers: AtomicBool::new(false),
         })
     }
 
-    fn decline(&self, request: ApiRequest) -> Vec<AssistantEvent> {
+    /// From now on every request is answered.
+    fn answer_from_now_on(&self) {
+        self.answers.store(true, Ordering::SeqCst);
+    }
+
+    fn reply(&self, request: ApiRequest) -> Vec<AssistantEvent> {
         self.requests.lock().expect("requests").push(request);
+        if self.answers.load(Ordering::SeqCst) {
+            return vec![
+                AssistantEvent::TextDelta("here is the list".to_string()),
+                AssistantEvent::MessageStop,
+            ];
+        }
         vec![
             AssistantEvent::StopReason("refusal".to_string()),
             AssistantEvent::RefusalCategory(self.category.to_string()),
@@ -92,7 +106,7 @@ impl AsyncApiClient for Declining {
         _render_tx: tokio::sync::mpsc::Sender<RenderBlock>,
         _text_block_id: BlockId,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
-        Box::pin(async move { Ok(self.decline(request)) })
+        Box::pin(async move { Ok(self.reply(request)) })
     }
 }
 
@@ -101,7 +115,7 @@ struct DecliningSync(Arc<Declining>);
 
 impl ApiClient for DecliningSync {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-        Ok(self.0.decline(request))
+        Ok(self.0.reply(request))
     }
 }
 
@@ -1258,6 +1272,41 @@ mod hook_contract {
                     Some(WORDS),
                     "{road:?} on {model}: the same words are asked"
                 );
+            }
+        }
+    }
+
+    /// Deep mode never folds the decline it keeps, because every leg it runs
+    /// is internal, so a repeat is found only where the conversation ends on
+    /// the notice of the decline that stood. Words answered after that — the
+    /// same words on another model, or other words on the same one — are asked
+    /// when they are sent again, and so are the words the decline stood on,
+    /// on every loop.
+    #[test]
+    fn words_answered_after_a_decline_stood_are_asked_when_sent_again() {
+        let cases: [(&str, &[&str]); 2] = [
+            ("claude-opus-5", &[WORDS, WORDS]),
+            ("claude-opus-5-5", &[OTHER_WORDS, OTHER_WORDS, WORDS]),
+        ];
+        for road in ROADS {
+            for (model, turns) in cases {
+                let env = Hermetic::new(&format!("answered-{road:?}"));
+                let provider = Declining::new(UNROUTED);
+                let hooks = CountingHooks::new(&env);
+                let mut runtime = road.runtime(&env, &provider, &hooks);
+                road.stand(&env, &mut runtime);
+                runtime.set_context_model(model);
+                provider.answer_from_now_on();
+
+                for (at, words) in turns.iter().enumerate() {
+                    let before = provider.sent();
+                    road.run(&mut runtime, words).expect("the turn ends cleanly");
+                    assert_eq!(
+                        words_asked(&provider, before..provider.sent()),
+                        [*words],
+                        "{road:?} on {model}: turn {at} of {turns:?} is asked, once"
+                    );
+                }
             }
         }
     }
