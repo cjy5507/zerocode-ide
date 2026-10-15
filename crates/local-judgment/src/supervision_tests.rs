@@ -321,6 +321,118 @@ async fn a_deadline_stop_keeps_the_task_its_request_named_and_never_free_text() 
     manager.shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deadline_stop_keeps_a_seat_name_as_its_task_but_never_a_key_a_token_a_path_or_a_sentence()
+ {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    fs::write(&settings, b"{}").unwrap();
+    let data = home.path().join("data");
+    let (told, sink) = telling();
+    let manager = test_support::installed_manager(
+        &data,
+        &settings,
+        vec![crate::tests::fixture_model()],
+        Arc::new(|_| panic!("a deadline stop never starts a runtime")),
+        sink,
+    );
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    // Built here, so no private value stands in this file for the gate to find.
+    let cases = [
+        (
+            "home path",
+            format!("/{}/{}/models/fixture", "Users", "zqowner"),
+        ),
+        (
+            "bearer token",
+            format!("{} {}", "Bearer", "tq8Vw".repeat(6)),
+        ),
+        (
+            "allowlisted key",
+            format!("{}-{}", "sk-ant-api03", "Kp9".repeat(10)),
+        ),
+        (
+            "request sentence",
+            "Only my sister knows the harbor plan for Friday".to_owned(),
+        ),
+        ("seat name", "rerank_shadow".to_owned()),
+    ];
+    let mut kept = Vec::new();
+    for (case, task) in &cases {
+        let engine = Engine::from_command(
+            Command::new("sh").args(["-c", "while IFS= read -r line; do :; done"]),
+        );
+        let (server, provider) = test_support::running_limited(
+            &manager,
+            engine,
+            Limits {
+                request: Duration::from_millis(300),
+                queue_wait: SETTLE,
+                waiting: 1,
+            },
+        )
+        .await;
+        let response = client
+            .post(provider.request_url())
+            .json(&json!({
+                "model": provider.model,
+                "state": "fixture",
+                "questions": {"only": {"type": "noul", "instructions": "fixture"}},
+                "task": task,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "{case}"
+        );
+        let failed = told_failed(&told, &server).await;
+        assert_eq!(
+            failed["server"]["exit"]["cause"], "runtime_timeout",
+            "{case}: {failed}"
+        );
+        kept.push(failed["server"]["exit"]["task"].clone());
+    }
+    manager.shutdown();
+    let wanted = [
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        json!("rerank_shadow"),
+    ];
+    let wrong: Vec<&str> = cases
+        .iter()
+        .zip(kept.iter().zip(&wanted))
+        .filter(|(_, (kept, wanted))| kept != wanted)
+        .map(|((case, _), _)| *case)
+        .collect();
+    assert_eq!(
+        wrong,
+        Vec::<&str>::new(),
+        "a deadline stop kept as its task something other than a plain seat name: {kept:?}"
+    );
+    let record =
+        fs::read_to_string(data.join("managed-judgment/server-exits.jsonl")).unwrap_or_default();
+    let said = serde_json::to_string(&*told.lock().unwrap()).unwrap();
+    for (case, task) in &cases[..4] {
+        assert!(
+            !record.contains(task.as_str()),
+            "the {case} reached server-exits.jsonl"
+        );
+        assert!(
+            !said.contains(task.as_str()),
+            "the {case} reached the snapshot the card reads"
+        );
+    }
+    assert!(
+        record.contains("rerank_shadow") && said.contains("rerank_shadow"),
+        "the seat name was not kept with its deadline stop"
+    );
+}
+
 /// A runtime that answers System One requests as the native fixture does, N
 /// being which start of a server it is. With the file `hold-N` it says it is
 /// ready only once `go-N` appears. It ends when `end-N` appears: `code C`
