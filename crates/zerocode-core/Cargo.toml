@@ -14,6 +14,10 @@ model-prices = { workspace = true }
 # The per-repository script approval is pinned to a hash of what was approved,
 # so a repository whose setup script changed is asked about again.
 sha2 = { workspace = true }
+# A copy of a bundled skill is told apart by its git blob id, so the release
+# book (`skill_releases.tsv`) is `git log` output that anybody can check
+# against the history it came from. The version already in Cargo.lock.
+sha1 = "0.11.0"
 # A loopback address is decided by WHATWG canonicalization, not by pattern
 # matching: `http://localhost:80/` has no port once parsed, and
 # `http://2130706433:3000` is `127.0.0.1`. The localhost-label gate leans on

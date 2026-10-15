@@ -327,7 +327,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
     ],
     "column_width": 308
   },
-  "sidebar_view": { "group_by": "repo", "sort_by": "default", "project_order": "default" },
+  "sidebar_view": { "group_by": "repo", "sort_by": "default", "project_order": "default", "layout": "team" },
   "confirm_close_pinned": true,
   "skip_close_terminal_with_running_process_confirm": false,
   "ctrl_tab_order_mode": "mru",
@@ -12166,6 +12166,60 @@ await test("Second Brain detects, sets up, registers, and seeds its recurring wo
     closeAutoForm();
     setAutoOpen(false);
   });
+});
+
+// t-55424: the card's 「스킬」 line reads the second-brain skill's copies the
+// way the Skills screen reads them, in every home an installed agent reads
+// (the window's own Claude home among them), and the global-link line names
+// each agent once although Claude now keeps a guide in two homes.
+await test("the second-brain card says whether the installed skill is current", async () => {
+  const appClaude = "/Users/fixture/Library/Application Support/ZeroCode/.claude";
+  const skillAt = (root) => `${root}/skills/second-brain/SKILL.md`;
+  backend.secondBrain = {
+    ...backend.secondBrain,
+    guides: [
+      { agent: "claude", label: "Claude", path: "/Users/fixture/.claude/CLAUDE.md", state: "linked", detail: "" },
+      { agent: "claude", label: "Claude", path: `${appClaude}/CLAUDE.md`, state: "linked", detail: "" },
+      { agent: "codex", label: "Codex", path: "/Users/fixture/.codex/AGENTS.md", state: "linked", detail: "" },
+    ],
+    skill_copies: [
+      { agent: "claude", label: "Claude", path: skillAt("/Users/fixture/.claude"), state: "current" },
+      { agent: "claude", label: "Claude", path: skillAt(appClaude), state: "missing" },
+      { agent: "codex", label: "Codex", path: skillAt("/Users/fixture/.codex"), state: "stale" },
+    ],
+  };
+  const read = async () => {
+    const from = backend.calls.length;
+    await pageB.evaluate(() => refreshSecondBrain());
+    await backend.waitForCall("B", "second_brain_status", from);
+    return pageB.evaluate(() => {
+      const line = document.getElementById("second-brain-skill");
+      const count = (key, fallback) => t("skills.copyCount", "{{state}} {{count}}곳",
+        { state: t(key, fallback), count: 1 });
+      return {
+        skill: line?.textContent ?? null,
+        tip: line?.dataset.tip ?? "",
+        mixed: [count("skills.copyStale", "낡음"), count("skills.copyMissing", "없음")].join(" · "),
+        current: t("skills.copyCurrent", "최신"),
+        guides: document.getElementById("second-brain-guides").textContent,
+        linked: t("settings.secondBrain.linked", "{{agents}}에 연결됨", { agents: "Claude·Codex" }),
+      };
+    });
+  };
+  const mixed = await read();
+  assertEqual(
+    [mixed.skill, mixed.guides],
+    [mixed.mixed, mixed.linked],
+    "the card did not say which second-brain copies are outdated or missing, or named Claude twice",
+  );
+  assert(mixed.tip.includes(skillAt(appClaude)),
+    "the skill line did not name the window's own Claude copy");
+  backend.secondBrain = {
+    ...backend.secondBrain,
+    skill_copies: backend.secondBrain.skill_copies.map((row) => ({ ...row, state: "current" })),
+  };
+  const current = await read();
+  assertEqual(current.skill, current.current, "the card did not say the installed skill is current");
 });
 
 await test("concurrent GitHub status consumers share one canonical request", async () => {

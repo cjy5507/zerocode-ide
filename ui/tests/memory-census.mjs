@@ -16,6 +16,8 @@
  *   gallery        스크린숏 증거 카드 360장을 끝까지 내려 본 갤러리(그림은 사람의 카탈로그에서
  *                  잰 크기 분포: 1280×720·3460×2464·640×480·925×601, 압축 크기 중앙값 약 271 KiB)
  *   knowledge      합성 볼트 1,500쪽의 지식 그래프(평면 지도)
+ *   sidebar        코디 셋·워커 다섯·체크아웃 열셋의 합성 원장이 선 사이드바(t-56141 `sidebar-team`의 장면) —
+ *                  팀 보기가 있는 창은 팀을, 없는 창(기준 커밋)은 가지 목록을 그린다
  *
  * 저사양: 스크립트 전체를 `taskpolicy -b`(효율 코어·낮은 I/O 우선순위)로 돌리고 `--low-spec`로
  * 표시한다 — 띄운 브라우저도 그 정책을 물려받는다.
@@ -34,9 +36,10 @@ import { installTerminalWaits } from "./terminal-grid-selection.mjs";
 import { REAL_PANE, terminalFrameFixtureSource } from "./terminal-frames.mjs";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
 import { seedUniverseVault } from "./knowledge-universe-fixture.mjs";
+import { standTeamScene } from "./sidebar-team.mjs";
 
 export const SCENARIOS = Object.freeze([
-  "empty", "panes-1", "panes-10", "panes-30", "scrollback", "conversation", "gallery", "knowledge",
+  "empty", "panes-1", "panes-10", "panes-30", "scrollback", "conversation", "gallery", "knowledge", "sidebar",
 ]);
 /* 스크롤백 장면이 흘리는 줄 수 — 창의 기본 스크롤백(`DEFAULT_SCROLLBACK_LINES`). */
 const SCROLLBACK_LINES = 5000;
@@ -331,6 +334,7 @@ async function measureScenario({ engine, name, origin, pictures, folder }) {
       if (name === "conversation") return (await openFixtureConversation(page, conversationFixture())) ?? {};
       if (name === "gallery") return openGallery(page, pictures);
       if (name === "knowledge") return openKnowledge(page);
+      if (name === "sidebar") return standTeamScene(page).then(() => page.evaluate(() => window.__ROWS__()));
       if (name !== "empty") throw new Error(`no scenario named ${name}`);
       return {};
     };
