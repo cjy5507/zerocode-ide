@@ -8251,6 +8251,23 @@ body.is-dragging-pane {
   min-width: calc(var(--mmd-width) * var(--text-3xs) / var(--mmd-text-least));
 }
 
+/* macOS hides a scrollbar until it is used, so a drawing cut at its block's
+ * edge reads as finished. While the drawing is wider than its block
+ * (`mmd-block--wider`, set by paintMarkdownDiagrams) the block fades what
+ * overflows instead, the tab strip's own pattern (`.tabstrip`); a drawing that
+ * fits keeps its edges. A mask reads only alpha, so the opaque stop is
+ * `--ink-chalk`, as the clipped tool well's fade has it, rather than one more
+ * colour literal. */
+.mmd-block--wider {
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    var(--ink-chalk) var(--tab-fade),
+    var(--ink-chalk) calc(100% - var(--tab-fade)),
+    transparent 100%
+  );
+}
+
 .mmd-canvas .mmd {
   width: 100%;
 }

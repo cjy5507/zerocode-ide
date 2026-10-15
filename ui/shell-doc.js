@@ -3912,7 +3912,15 @@ function paintMermaid(body, source) {
  *
  * The text paints first: the observer answers after the frame that shows it,
  * and the fences on screen are laid out before the rest, which follow in page
- * order. */
+ * order.
+ *
+ * A drawing wider than its block scrolls in it, and the block wears
+ * `mmd-block--wider` while it does, so the stylesheet can fade the edges the
+ * drawing is cut at. A ResizeObserver measures it after layout rather than
+ * forcing one: whenever the column changes width, and once the drawing lands.
+ * The block is observed afresh then, because a block whose size the drawing
+ * left as it was reports nothing; Chromium and WebKit ignore `observe` on a
+ * block already observed, hence `unobserve` first. */
 function paintMarkdownDiagrams(body) {
   const sources = new Map();
   for (const fence of body.querySelectorAll('pre.md-block[data-language="mermaid"]')) {
@@ -3925,14 +3933,23 @@ function paintMarkdownDiagrams(body) {
     sources.set(block, fence.textContent);
   }
   if (sources.size === 0) return;
+  const resized = new ResizeObserver((entries) => {
+    for (const { target } of entries) target.classList.toggle("mmd-block--wider", target.scrollWidth > target.clientWidth);
+  });
   const watch = new IntersectionObserver((entries) => {
     watch.disconnect();
     const shown = entries.filter((entry) => entry.isIntersecting).map((entry) => entry.target);
     for (const block of new Set([...shown, ...sources.keys()])) {
-      if (block.isConnected) void paintDiagram(block, sources.get(block));
+      if (block.isConnected) void paintDiagram(block, sources.get(block)).then(() => {
+        resized.unobserve(block);
+        resized.observe(block);
+      });
     }
   });
-  for (const block of sources.keys()) watch.observe(block);
+  for (const block of sources.keys()) {
+    watch.observe(block);
+    resized.observe(block);
+  }
 }
 
 /* Every markdown view's painter: the words, then their ```mermaid fences as
