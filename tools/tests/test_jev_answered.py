@@ -202,6 +202,26 @@ class TheCount(unittest.TestCase):
         read = next(one for one in self.reads if one.path.endswith("model-tiers.jsonl"))
         self.assertEqual((read.lines, read.untimed), (2, 0))
 
+    def test_a_row_takes_the_version_its_writer_ran_when_it_was_written(self) -> None:
+        switch, opened = ms("2026-10-15T07:00") + 4, ms("2026-10-14T19:10")
+        out, kept = io.StringIO(), Path(self.dir.name) / "count.json"
+        with redirect_stdout(out):
+            answered.main(
+                ["--home", str(self.home), "--window", "before=2026-10-14T19:10..2026-10-15T07:10", "--window", "after=2026-10-15T07:12..",
+                 "--ran", f"window=1.1.66@{opened}..{switch}", "--ran", f"window=1.1.67@{switch}..",
+                 "--ran", f"zo=1.1.66@{opened}..", "--ran", f"zo=1.1.67@{ms('2026-10-15T06:00')}..", "--json", str(kept)]
+            )
+        rows = {(row["place"], row["seat"], row["folder"], row["window"]): row for row in json.loads(kept.read_text())["rows"]}
+        self.assertEqual(rows[("window", "command-guard", PROVIDER, "before")]["ran"], {"1.1.66": 4, "1.1.67": 4}, "a row at the switch is the new process's")
+        self.assertEqual(rows[("window", "command-guard", PROVIDER, "after")]["ran"], {"1.1.67": 1})
+        self.assertEqual(rows[("projects", "rerank-shadow", PROVIDER, "before")]["ran"], {answered.UNKNOWN_VERSION: 2}, "two zo versions ran at once")
+        self.assertIn("| 1.1.66 4 · 1.1.67 4 |", out.getvalue())
+        self.assertIn(f"window 1.1.67 {answered.utc(switch)}..open", out.getvalue())
+        tallies, _ = answered.count(self.home, self.windows)
+        self.assertEqual(dict(tallies[("window", "command-guard", PROVIDER, "before")].ran), {answered.UNKNOWN_VERSION: 8}, "an installed version names no row")
+        with self.assertRaises(SystemExit):
+            answered.ran("person=1.1.67@2026-10-15T07:00..")
+
     def test_the_table_says_counts_and_words_and_nothing_else_of_a_row(self) -> None:
         write(
             self.home / replay.WINDOW_LEDGERS / "mail-triage.jsonl",
