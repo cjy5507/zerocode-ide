@@ -818,9 +818,12 @@ async fn judge_suggestion(
         return None;
     };
     // The wide request carries the whole catalog and cannot carry less, so a
-    // catalog wider than this provider's room is not asked at all (t-58193).
-    row.room = door.room_of(&SKILL_SUGGESTION);
-    if row.room.is_some_and(|room| candidates.len() > room) {
+    // catalog wider than this provider's room is not asked — until a rest has
+    // passed since the seat last asked, when the whole catalog goes once
+    // more (t-58193). A room the catalog fits in is none.
+    let room = door.room_of(&SKILL_SUGGESTION).filter(|room| *room < candidates.len());
+    if room.is_some() && !door.rested(&SKILL_SUGGESTION) {
+        row.room = room;
         let resting = Refused::Resting.token();
         row.outcome = resting.into();
         telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, resting);

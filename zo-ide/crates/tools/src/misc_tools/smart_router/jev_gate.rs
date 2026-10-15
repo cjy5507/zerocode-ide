@@ -397,38 +397,56 @@ impl JevDoor {
     /// The most items — notes, skills — one request of `row`'s seat may
     /// carry to this provider (t-58193), as its own ledger in this provider's
     /// folder says ([`room_in`]): `None` while the provider has cut none of
-    /// the seat's requests in its series.
+    /// the seat's requests in its series, and again once the seat asks under
+    /// none.
     ///
     /// No provider declares how much it reads — not the local server's model
     /// list, not a provider's settings — and zo cannot count a model's
     /// tokens, so the room is learned from the provider's own refusal
-    /// ([`api::SYSTEMONE_CUT_REFUSAL`]), halved until a request fits. A limit
-    /// a provider declared would be read here, in place of the halving.
+    /// ([`api::SYSTEMONE_CUT_REFUSAL`]), halved until a request fits and
+    /// doubled again as answers come. A limit a provider declared would be
+    /// read here, in place of the halving.
     #[must_use]
     pub fn room_of(&self, row: &JevUse) -> Option<usize> {
-        let ledger = self.ledgers.as_deref()?.join(row.ledger);
-        let tail = last_shadow_lines(&ledger, HEDGE_SAMPLE_ROWS);
-        room_in(row, tail.iter().rev().map(String::as_str))
+        let now = super::decision_shadow::now_ms();
+        self.read_back(row, |lines| room_in(row, lines, now)).flatten()
+    }
+
+    /// Whether one [`REST`] has passed since `row`'s seat last sent this
+    /// provider a request in its series, or it sent none (t-58193): when a
+    /// seat that cannot carry fewer items than its room holds asks again.
+    #[must_use]
+    pub fn rested(&self, row: &JevUse) -> bool {
+        let now = super::decision_shadow::now_ms();
+        let newest = self.read_back(row, |lines| newest_sent_in(row, lines)).flatten();
+        !newest.is_some_and(|at| at.saturating_add(rest_ms()) > now)
     }
 
     /// `row`'s rest as its own ledger in this provider's folder says it
-    /// ([`rest_in`]), read from the tail the hedge reads and from the whole
-    /// ledger only when that tail holds fewer than
-    /// [`UNANSWERED_BEFORE_REST`] of its requests and no answer — a seat that
-    /// has rested for hours wrote a row each time it was asked meanwhile.
+    /// ([`rest_in`]).
     #[must_use]
     pub fn rest_of(&self, row: &JevUse) -> Option<Rest> {
-        let ledger = self.ledgers.as_deref()?.join(row.ledger);
         let now = super::decision_shadow::now_ms();
+        self.read_back(row, |lines| rest_in(row, lines, now)).flatten()
+    }
+
+    /// What `read` makes of `row`'s own ledger in this provider's folder,
+    /// newest line first: read from the tail the hedge reads, and from the
+    /// whole ledger only when that tail ran out before `read` settled — a
+    /// seat that has rested for hours wrote a row each time it was asked
+    /// meanwhile. `None` for a door that stands in no project.
+    fn read_back<T>(
+        &self,
+        row: &JevUse,
+        read: impl Fn(&mut dyn Iterator<Item = &str>) -> Reading<T>,
+    ) -> Option<T> {
+        let ledger = self.ledgers.as_deref()?.join(row.ledger);
         let tail = last_shadow_lines(&ledger, HEDGE_SAMPLE_ROWS);
-        match rest_in(row, tail.iter().rev().map(String::as_str), now) {
-            Reading::Settled(rest) => rest,
-            Reading::Short => {
+        match read(&mut tail.iter().rev().map(String::as_str)) {
+            Reading::Settled(said) => Some(said),
+            Reading::Short(_) => {
                 let whole = std::fs::read_to_string(&ledger).unwrap_or_default();
-                match rest_in(row, whole.lines().rev(), now) {
-                    Reading::Settled(rest) => rest,
-                    Reading::Short => None,
-                }
+                Some(read(&mut whole.lines().rev()).said())
             }
         }
     }
@@ -464,13 +482,20 @@ pub struct Rest {
     pub cause: String,
 }
 
-/// What a ledger's lines, read newest first, settled of a seat's rest.
-enum Reading {
-    /// An answer, or [`UNANSWERED_BEFORE_REST`] unanswered requests, settled
-    /// it: the rest, or none.
-    Settled(Option<Rest>),
-    /// The lines ran out first.
-    Short,
+/// What a ledger's lines, read newest first, settled — or, when they ran out
+/// first, what they said so far.
+enum Reading<T> {
+    Settled(T),
+    Short(T),
+}
+
+impl<T> Reading<T> {
+    /// What the lines said, settled or not.
+    fn said(self) -> T {
+        match self {
+            Self::Settled(said) | Self::Short(said) => said,
+        }
+    }
 }
 
 /// A seat's rest as a ledger's `lines` say it, newest line first.
@@ -482,8 +507,13 @@ enum Reading {
 /// fit rule answers that one by halving the room ([`room_in`]), which ends
 /// the cuts within a few requests. Nor does an answer that asked for a wait:
 /// its server said when to come back, and the door holds the seat until
-/// then ([`JevDoor::asked_to_wait`]).
-fn rest_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>, now_ms: i64) -> Reading {
+/// then ([`JevDoor::asked_to_wait`]). An answer, or
+/// [`UNANSWERED_BEFORE_REST`] unanswered requests, settles it.
+fn rest_in<'a>(
+    seat: &JevUse,
+    lines: impl Iterator<Item = &'a str>,
+    now_ms: i64,
+) -> Reading<Option<Rest>> {
     let mut causes: Vec<String> = Vec::new();
     let mut newest = None;
     for row in lines.filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
@@ -493,20 +523,41 @@ fn rest_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>, now_ms: i64)
         {
             continue;
         }
-        if summary::OUTCOME.read(&row).and_then(Value::as_str) == Some(door::ANSWERED_OUTCOME) {
+        if answered(&row) {
             return Reading::Settled(None);
         }
         newest = newest.or_else(|| summary::AT.read(&row).and_then(Value::as_i64));
         let refusal = row.get(SERVER_REFUSAL).or_else(|| summary::OUTCOME.read(&row));
         causes.push(refusal.and_then(Value::as_str).unwrap_or_default().to_string());
         if causes.len() == UNANSWERED_BEFORE_REST {
-            let rest = i64::try_from(REST.as_millis()).unwrap_or(i64::MAX);
-            let until_ms = newest.unwrap_or_default().saturating_add(rest);
+            let until_ms = newest.unwrap_or_default().saturating_add(rest_ms());
             let cause = most_common(causes);
             return Reading::Settled((until_ms > now_ms).then_some(Rest { until_ms, cause }));
         }
     }
-    Reading::Short
+    Reading::Short(None)
+}
+
+/// [`REST`] in the Unix milliseconds a row's `at` is written in.
+fn rest_ms() -> i64 {
+    i64::try_from(REST.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Whether `row` keeps a request its judgment answered.
+fn answered(row: &Value) -> bool {
+    summary::OUTCOME.read(row).and_then(Value::as_str) == Some(door::ANSWERED_OUTCOME)
+}
+
+/// When `seat` last sent a request in its series, as a ledger's `lines` say
+/// it, newest line first.
+fn newest_sent_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>) -> Reading<Option<i64>> {
+    let newest = lines
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|row| sent_in_series(seat, row));
+    match newest {
+        Some(row) => Reading::Settled(summary::AT.read(&row).and_then(Value::as_i64)),
+        None => Reading::Short(None),
+    }
 }
 
 /// Where [`ServerSaid`] keeps the provider's refusal, and the moment until
@@ -520,27 +571,58 @@ const ROOM: &str = "room";
 const CANDIDATES: &str = "candidates";
 const MODEL: &str = "model";
 
-/// A seat's room as a ledger's `lines` say it, newest line first: half the
-/// fewest items a request of its series carried that the provider cut
-/// ([`cut`]), and no more than the room its newest row was asked under —
-/// which holds every cut before that row, so the reading stops there.
-fn room_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>) -> Option<usize> {
-    let mut room: Option<usize> = None;
+/// A seat's room as a ledger's `lines` say it, newest line first, read from
+/// the requests the seat sent in its series ([`sent_in_series`]), back to
+/// the one that set the room:
+///
+/// - a request its provider cut ([`cut`]) leaves room for half the items it
+///   carried, and a cut that leaves room for none wakes as room for one once
+///   [`REST`] has passed since it, so a short question can show that the
+///   provider reads again;
+/// - [`UNANSWERED_BEFORE_REST`] answers under one room double it for the
+///   next request — the window that decides a rest decides a growth, so the
+///   growth has no number of its own — and a cut of that request halves it
+///   again;
+/// - a request asked under no room says there is none, which is how a seat
+///   whose room has grown to its whole request ends it.
+fn room_in<'a>(
+    seat: &JevUse,
+    lines: impl Iterator<Item = &'a str>,
+    now_ms: i64,
+) -> Reading<Option<usize>> {
+    let mut room = None;
+    let mut answers = 0;
     for row in lines.filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
-        if !in_series(seat, &row) {
+        if !sent_in_series(seat, &row) {
             continue;
         }
         let count = |key: &str| {
             row.get(key).and_then(Value::as_u64).and_then(|count| usize::try_from(count).ok())
         };
-        let halved = count(CANDIDATES).filter(|_| cut(&row)).map(|carried| carried / 2);
+        if let Some(carried) = count(CANDIDATES).filter(|_| cut(&row)) {
+            if room.is_some() {
+                return Reading::Settled(room);
+            }
+            let at = summary::AT.read(&row).and_then(Value::as_i64).unwrap_or_default();
+            let woke = at.saturating_add(rest_ms()) <= now_ms;
+            let halved = carried / 2;
+            return Reading::Settled(Some(if halved == 0 && woke { 1 } else { halved }));
+        }
         let held = count(ROOM);
-        room = [room, halved, held].into_iter().flatten().min();
-        if held.is_some() {
-            break;
+        match room {
+            None if held.is_none() => return Reading::Settled(None),
+            None => room = held,
+            Some(_) if held != room => return Reading::Settled(room),
+            Some(_) => {}
+        }
+        if answered(&row) {
+            answers += 1;
+            if answers == UNANSWERED_BEFORE_REST {
+                return Reading::Settled(room.map(|room| room.saturating_mul(2)));
+            }
         }
     }
-    room
+    Reading::Short(room)
 }
 
 /// Whether `row` keeps a request its provider cut for being longer than its
