@@ -44632,7 +44632,6 @@ button.jev-token:hover {
 .skills-bundled-panel {
   color: var(--ink-mist);
   font-size: var(--skills-meta-size);
-
 }
 
 .skills-bundled-line {
@@ -44641,7 +44640,6 @@ button.jev-token:hover {
   align-items: center;
   flex-wrap: wrap;
   margin: var(--space-1) 0;
-
 }
 
 .skills-error {
