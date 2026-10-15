@@ -67,6 +67,13 @@ function standStage2(page) {
       held.records.push(JSON.parse(JSON.stringify(args.record ?? args)));
       return null;
     };
+    // The store's versions reach the row's current number — the fixture's own answer stops at 2.
+    window.__ANSWER__.artifact_versions = (args) => {
+      const current = artifactRows.get(args.id)?.version ?? 2;
+      return Array.from({ length: current }, (_, at) => ({
+        n: at + 1, path: `/data/artifacts/versions/${args.id}/${at + 1}/page.html`, bytes: 10 + at, modified_ms: at + 1, sha256: String(at + 1).repeat(64),
+      }));
+    };
     window.__ANSWER__.artifact_export_formats = () => [
       { format: "html", available: true }, { format: "pdf", available: true }, { format: "png", available: true },
     ];
@@ -391,6 +398,105 @@ export async function testArtifactStage2(browser, origin, ok) {
       `⑥ the reading surface gains the folded row (body ${reading.stackedBodyHeight} → ${reading.bodyHeight} px, +${reading.gain} px; address row ${reading.plainToolbarHeight} px, strip ${reading.stackedStripHeight} → ${reading.stripHeight} px), and a link out of the artifact brings the address bar back (${reading.leftAddressHeight} px) until the page is its file again`,
       reading.gain >= reading.plainToolbarHeight - 2 && reading.leftReading === false && reading.leftAddressHeight > 0 && reading.backReading === true,
       JSON.stringify(reading),
+    );
+
+    /* ---- ⑦ a republished page swaps in behind the old picture and keeps the scroll ------- */
+    const swap = await page.evaluate(async () => {
+      const held = window.__STAGE2__;
+      const out = {};
+      const indexOf = (order, command, from = 0) => order.indexOf(command, from);
+      const pub = held.publication("p-swap", { bytes: 40 * 1024 });
+      const tab = await held.openFromGallery(pub.id);
+      setActiveTab(tab?.id);
+      await held.settle();
+      await held.navigate(tab, tab?.url ?? "", "finished");
+      out.shownBefore = tab?.artifact?.version ?? null;
+      // The reader is 420 px down the page.
+      held.scroll = [0, 420];
+      held.snapshots.length = 0;
+      held.walks.length = 0;
+      held.evals.length = 0;
+      held.places.length = 0;
+      window.__ORDER__ = [];
+      const next = { ...pub, version: 3, modified_ms: Date.now() + 1 };
+      held.extra.set(pub.id, next);
+      artifactRows.set(pub.id, next);
+      await held.published(next);
+      for (let beat = 0; beat < 40 && held.walks.length === 0; beat += 1) await held.settle(30);
+      const order = (window.__ORDER__ ?? []).slice();
+      out.walkedTo = held.walks[0]?.url ?? null;
+      out.walksToV3 = held.walks.length === 1 && /\/p-swap\/3\//.test(out.walkedTo ?? "");
+      out.snapshotFirst = indexOf(order, "browser_snapshot") >= 0 && indexOf(order, "browser_snapshot") < indexOf(order, "browser_navigate");
+      out.scrollRead = held.evals.some((one) => one.label === tab?.label && /scrollX/.test(one.expression) && /scrollY/.test(one.expression));
+      out.scrollReadFirst = indexOf(order, "browser_eval") >= 0 && indexOf(order, "browser_eval") < indexOf(order, "browser_navigate");
+      out.shadeUp = held.shadeOf(tab)?.hidden === false;
+      out.paneDownWhileLoading = held.lastPlace(tab?.label)?.shown === false;
+      // The new page paints: the scroll goes back first, then the pane stands and the picture goes.
+      held.evals.length = 0;
+      window.__ORDER__ = [];
+      await held.navigate(tab, out.walkedTo ?? "", "started");
+      await held.navigate(tab, out.walkedTo ?? "", "finished");
+      for (let beat = 0; beat < 40 && held.lastPlace(tab?.label)?.shown !== true; beat += 1) await held.settle(30);
+      await held.settle(120);
+      const after = (window.__ORDER__ ?? []).slice();
+      out.restored = held.evals.some((one) => one.label === tab?.label && /scrollTo\(\s*0\s*,\s*420\s*\)/.test(one.expression));
+      out.restoredBeforeShow = indexOf(after, "browser_eval") >= 0 && indexOf(after, "browser_eval") < after.lastIndexOf("browser_place");
+      out.paneBack = held.lastPlace(tab?.label)?.shown === true;
+      out.shadeLifted = held.shadeOf(tab)?.hidden !== false;
+      out.shownAfter = tab?.artifact?.version ?? null;
+      out.noteHidden = held.hostOf(tab)?.querySelector(".artifact-strip-note")?.hidden ?? null;
+      await held.fresh();
+      return out;
+    });
+    ok(
+      "⑦ a light republication swaps in by itself: the old page's picture is laid and the scroll read before the pane walks to the new version with the pane lying down",
+      swap.shownBefore === 2 && swap.walksToV3 && swap.snapshotFirst && swap.scrollRead && swap.scrollReadFirst && swap.shadeUp && swap.paneDownWhileLoading,
+      JSON.stringify(swap),
+    );
+    ok(
+      "⑦ when the new version paints the scroll is put back (420 px) before the pane stands, the picture goes, and the strip says the new version",
+      swap.restored && swap.restoredBeforeShow && swap.paneBack && swap.shadeLifted && swap.shownAfter === 3 && swap.noteHidden === true,
+      JSON.stringify(swap),
+    );
+
+    const heavy = await page.evaluate(async () => {
+      const held = window.__STAGE2__;
+      const out = {};
+      const pub = held.publication("p-heavy", { bytes: 5 * 1024 * 1024 });
+      const tab = await held.openFromGallery(pub.id);
+      setActiveTab(tab?.id);
+      await held.settle();
+      await held.navigate(tab, tab?.url ?? "", "finished");
+      held.walks.length = 0;
+      held.snapshots.length = 0;
+      const next = { ...pub, version: 3, modified_ms: Date.now() + 1 };
+      held.extra.set(pub.id, next);
+      artifactRows.set(pub.id, next);
+      await held.published(next);
+      await held.settle(150);
+      out.autoWalks = held.walks.length;
+      out.shownStill = tab?.artifact?.version ?? null;
+      const note = held.hostOf(tab)?.querySelector(".artifact-strip-note") ?? null;
+      const act = note?.querySelector(".artifact-strip-note-act") ?? null;
+      out.noteShown = note ? note.hidden === false && note.getBoundingClientRect().height > 0 : null;
+      out.noteWords = note?.querySelector(".artifact-strip-note-words")?.textContent ?? null;
+      out.actWords = act && !act.hidden ? act.textContent.trim() : null;
+      // 「최신으로」 does what the light page did by itself.
+      act?.click();
+      for (let beat = 0; beat < 40 && held.walks.length === 0; beat += 1) await held.settle(30);
+      out.walkedOnPress = held.walks.length === 1 && /\/p-heavy\/3\//.test(held.walks[0]?.url ?? "");
+      await held.navigate(tab, held.walks[0]?.url ?? "", "finished");
+      await held.settle(120);
+      out.shownAfter = tab?.artifact?.version ?? null;
+      out.noteGone = held.hostOf(tab)?.querySelector(".artifact-strip-note")?.hidden ?? null;
+      await held.fresh();
+      return out;
+    });
+    ok(
+      "⑦ a heavy republication (5 MiB) does not swap by itself: the strip offers 「최신으로」 with the new version named, and the press does the swap",
+      heavy.autoWalks === 0 && heavy.shownStill === 2 && heavy.noteShown === true && String(heavy.noteWords).includes("3")
+        && heavy.actWords === "최신으로" && heavy.walkedOnPress && heavy.shownAfter === 3 && heavy.noteGone === true,
+      JSON.stringify(heavy),
     );
 
     ok("the artifact-stage2 window raised no errors", faults.length === 0, faults.slice(0, 3).join(" | "));
