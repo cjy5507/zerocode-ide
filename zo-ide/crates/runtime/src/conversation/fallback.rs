@@ -175,6 +175,11 @@ pub(super) struct SurfacedDecline {
     /// Whether the latest public turn surfaced it (again): a public turn that
     /// ended any other way ended what stood.
     pub(super) renewed: bool,
+    /// Whether the turn that kept it found the decline before it still
+    /// standing and asked only once — the ladder's
+    /// [`RefusalDecision::Standing`] — so that the notice that turn pushed
+    /// right after keeping it is the notice of a decline that stood (t-57512).
+    pub(super) stood: bool,
 }
 
 /// When a surfaced decline still stands — the one table of the rule
@@ -1047,12 +1052,19 @@ where
         let compaction = self
             .refusal_compaction
             .or_else(|| self.standing_decline(category).and_then(|declined| declined.compaction));
+        // What the ladder just answered: Standing exactly when the decline kept
+        // before still stood and this leg asked only once.
+        let stood = unrouted
+            && self.standing_decline(category).is_some()
+            && !self.refusal_same_model_retry_used
+            && !self.refusal_compaction_used;
         self.surfaced_decline = unrouted.then(|| SurfacedDecline {
             session_id: self.session.session_id.clone(),
             category: refusal_category_key(category),
             messages: self.session.messages.len(),
             compaction,
             renewed: true,
+            stood,
         });
     }
 
@@ -1068,24 +1080,23 @@ where
     }
 
     /// Whether a turn of `words` would only repeat the request a decline stood
-    /// on (t-57512), so that it has nothing to ask: the latest public turn
-    /// surfaced a decline the session kept, that decline still stands for this
-    /// conversation ([`Self::standing_decline`]), the last message is the
-    /// notice of a decline that stood — that turn asked once — and `words` are,
-    /// to the byte, the words that turn asked with, and nothing else; and the
-    /// request would go out on the model the person chose, as that one did,
-    /// with nothing armed to move it elsewhere when the turn starts. Other
+    /// on (t-57512), so that it has nothing to ask: the latest public turn kept
+    /// a decline that stood, asking once ([`SurfacedDecline::stood`]), and it
+    /// still stands for this conversation ([`Self::standing_decline`]); the one
+    /// message the session gained since it was kept is the notice that turn
+    /// pushed right after, so no answer, fold or removal came since; `words`
+    /// are, to the byte, the words that turn asked with, and nothing else; and
+    /// the request would go out on the model the person chose, as that one
+    /// did, with nothing armed to move it elsewhere when the turn starts. Other
     /// words, another model, provider or session, and a routed category are
     /// not this case; nor is a turn that brings pictures, which its caller
     /// rules out.
     pub(super) fn repeats_a_standing_decline(&self, words: &str) -> bool {
-        fn text_of(message: &ConversationMessage, role: crate::session::MessageRole) -> Option<&str> {
-            match message.blocks.as_slice() {
-                [ContentBlock::Text { text }] if message.role == role => Some(text.as_str()),
-                _ => None,
-            }
-        }
-        let Some(declined) = self.surfaced_decline.as_ref().filter(|declined| declined.renewed) else {
+        let Some(declined) = self
+            .surfaced_decline
+            .as_ref()
+            .filter(|declined| declined.renewed && declined.stood)
+        else {
             return false;
         };
         if self.standing_decline(declined.category.as_deref()).is_none() {
@@ -1094,22 +1105,23 @@ where
         let on_the_chosen_model = matches!(self.wire_model(), Some((_, WireModelSource::Session)))
             && self.quota_dry_until.is_none()
             && self.refusal_dry_until.is_none();
-        if !on_the_chosen_model {
+        // The decline was kept on the conversation its notice was pushed onto
+        // next: one message more, and that one the notice, or the conversation
+        // moved since.
+        if !on_the_chosen_model || self.session.messages.len() != declined.messages + 1 {
             return false;
         }
-        let mut said = self
-            .session
-            .messages
-            .iter()
-            .rev()
-            .filter(|message| message.role != crate::session::MessageRole::System);
-        said.next()
-            .and_then(|notice| text_of(notice, crate::session::MessageRole::Assistant))
-            == Some(core_types::retry_signal::REFUSAL_STANDING_NOTICE)
-            && said
-                .next()
-                .and_then(|asked| text_of(asked, crate::session::MessageRole::User))
-                == Some(words)
+        let (before, since) = self.session.messages.split_at(declined.messages);
+        let notice = refusal_surfaced_message(true);
+        matches!(since, [pushed] if pushed.role == notice.role && pushed.blocks == notice.blocks)
+            && before
+                .iter()
+                .rev()
+                .find(|message| message.role != crate::session::MessageRole::System)
+                .is_some_and(|asked| {
+                    asked.role == crate::session::MessageRole::User
+                        && matches!(asked.blocks.as_slice(), [ContentBlock::Text { text }] if text == words)
+                })
     }
 
     /// Fold this refused public turn into the consecutive-refusal streak and,

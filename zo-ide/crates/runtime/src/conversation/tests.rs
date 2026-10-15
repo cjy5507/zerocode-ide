@@ -20356,6 +20356,7 @@ fn runtime_that_kept(
         messages: now.checked_add_signed(messages_from_now).expect("a message count"),
         compaction: Some(a_compaction_that_did_not_clear_it()),
         renewed: false,
+        stood: false,
     });
     runtime
 }
@@ -20497,6 +20498,7 @@ fn a_compaction_a_decline_survived_is_not_made_twice_but_one_never_made_is() {
             messages: now,
             compaction,
             renewed: false,
+            stood: false,
         });
         runtime
     };

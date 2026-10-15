@@ -12,7 +12,6 @@ use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,11 +44,13 @@ fn the_premise_one_category_is_routed_nowhere_and_one_somewhere() {
 }
 
 /// A provider whose classifier declines every request, naming `category`,
-/// until it is told to answer, and keeps every request it was sent.
+/// but those it was told to answer, and keeps every request it was sent.
 struct Declining {
     category: &'static str,
     requests: Mutex<Vec<ApiRequest>>,
-    answers: AtomicBool,
+    /// The requests it answers: those whose last user words are the given
+    /// ones — every request, for `None` — each with its answer.
+    answers: Mutex<Vec<(Option<&'static str>, &'static str)>>,
 }
 
 impl Declining {
@@ -57,22 +58,40 @@ impl Declining {
         Arc::new(Self {
             category,
             requests: Mutex::new(Vec::new()),
-            answers: AtomicBool::new(false),
+            answers: Mutex::new(Vec::new()),
         })
     }
 
     /// From now on every request is answered.
     fn answer_from_now_on(&self) {
-        self.answers.store(true, Ordering::SeqCst);
+        self.answer(None, "here is the list");
+    }
+
+    /// From now on a request whose last user words are `words` — every
+    /// request, for `None` — is answered with `text`.
+    fn answer(&self, words: Option<&'static str>, text: &'static str) {
+        self.answers.lock().expect("answers").push((words, text));
     }
 
     fn reply(&self, request: ApiRequest) -> Vec<AssistantEvent> {
+        let asked = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .and_then(first_words)
+            .map(str::to_string);
+        let answer = self
+            .answers
+            .lock()
+            .expect("answers")
+            .iter()
+            .rev()
+            .find(|(words, _)| words.is_none_or(|words| asked.as_deref() == Some(words)))
+            .map(|(_, text)| *text);
         self.requests.lock().expect("requests").push(request);
-        if self.answers.load(Ordering::SeqCst) {
-            return vec![
-                AssistantEvent::TextDelta("here is the list".to_string()),
-                AssistantEvent::MessageStop,
-            ];
+        if let Some(text) = answer {
+            return vec![AssistantEvent::TextDelta(text.to_string()), AssistantEvent::MessageStop];
         }
         vec![
             AssistantEvent::StopReason("refusal".to_string()),
@@ -555,42 +574,52 @@ fn a_repeat_ends_its_turn_cleanly_and_leaves_nothing_pending() {
     );
 
     let before = provider.sent();
-    let (ended, lines) = turn(&mut runtime, OTHER_WORDS, Vec::new());
+    let (ended, _) = turn(&mut runtime, OTHER_WORDS, Vec::new());
     ended.expect("the next turn ends cleanly");
-    assert_eq!(provider.sent() - before, 1, "the next turn asks once");
-    assert!(
-        lines.contains(&REFUSAL_STANDING_NOTICE.to_string()),
-        "and stands in the words of a decline that stands: {lines:?}"
+    assert_eq!(
+        provider.asked(before).as_ref().and_then(first_words),
+        Some(OTHER_WORDS),
+        "the next turn asks, with its words"
     );
 }
 
 /// Other words are another request: after a decline that stood, and after a
-/// repeat of it, they are asked once, as before — and the classifier judges
-/// them.
+/// repeat of it, they are asked as the person wrote them, and the classifier
+/// judges them, as before. The first of them walks the ladder's compaction, as
+/// any decline does once the conversation is long enough to fold (t-16786);
+/// after them, the words the decline stood on are asked once.
 #[test]
-fn other_words_after_a_decline_that_stood_are_asked_once() {
+fn other_words_after_a_decline_that_stood_are_asked() {
     let env = Hermetic::new("other-words");
     let provider = Declining::new(UNROUTED);
     let mut runtime = stood_runtime(&env, &provider);
     let (ended, _) = turn(&mut runtime, WORDS, Vec::new());
     ended.expect("the repeat ends cleanly");
 
-    for words in [OTHER_WORDS, WORDS] {
-        let before = provider.sent();
-        let (ended, _) = turn(&mut runtime, words, Vec::new());
-        ended.expect("the decline stands");
-        assert_eq!(provider.sent() - before, 1, "{words:?} after other words: asked once");
-        assert_eq!(
-            provider.asked(before).as_ref().and_then(first_words),
-            Some(words),
-            "as the person wrote them"
-        );
-    }
+    let before = provider.sent();
+    let (ended, _) = turn(&mut runtime, OTHER_WORDS, Vec::new());
+    ended.expect("the decline stands on other words too");
+    assert_eq!(
+        provider.asked(before).as_ref().and_then(first_words),
+        Some(OTHER_WORDS),
+        "other words are asked as the person wrote them"
+    );
+
+    let before = provider.sent();
+    let (ended, _) = turn(&mut runtime, WORDS, Vec::new());
+    ended.expect("the decline stands");
+    assert_eq!(provider.sent() - before, 1, "after them, the words the decline stood on are asked once");
+    assert_eq!(
+        provider.asked(before).as_ref().and_then(first_words),
+        Some(WORDS),
+        "as the person wrote them"
+    );
 }
 
-/// The same words with a picture are another request: they are asked once.
+/// The same words with a picture are another request: they are asked, the
+/// picture with them, as before.
 #[test]
-fn the_same_words_with_a_picture_are_asked_once() {
+fn the_same_words_with_a_picture_are_asked() {
     let env = Hermetic::new("picture");
     let provider = Declining::new(UNROUTED);
     let mut runtime = stood_runtime(&env, &provider);
@@ -600,8 +629,8 @@ fn the_same_words_with_a_picture_are_asked_once() {
     let (ended, _) = turn(&mut runtime, WORDS, picture);
     ended.expect("the decline stands");
 
-    assert_eq!(provider.sent() - before, 1, "asked once");
     let asked = provider.asked(before).expect("the request");
+    assert_eq!(first_words(&asked), Some(WORDS), "asked with the words");
     assert!(
         asked
             .blocks
@@ -751,15 +780,17 @@ fn a_repeat_needs_the_decline_kept_standing_and_the_same_words() {
 mod hook_contract {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use rusqlite::{params, Connection};
 
     use super::super::DeepGateConfig;
     use super::{
-        first_words, internal_leg, standing_notices, turn, AsyncApiClient, ConversationRuntime,
-        Declining, DecliningSync, Hermetic, PermissionMode, PermissionPolicy, StaticToolExecutor,
-        TurnSummary, OTHER_WORDS, UNROUTED, WORDS,
+        first_words, internal_leg, standing_notices, turn, AsyncApiClient, ContentBlock,
+        ConversationRuntime, Declining, DecliningSync, Hermetic, PermissionMode, PermissionPolicy,
+        StaticToolExecutor, TurnSummary, OTHER_WORDS, REFUSAL_STANDING_NOTICE, UNROUTED, WORDS,
     };
+    use crate::compact::COMPACTION_SYSTEM_PROMPT;
     use crate::config::{ConfigLoader, RuntimeFeatureConfig};
 
     /// What a stop gate's `TurnEnd` hook asks for.
@@ -826,6 +857,10 @@ mod hook_contract {
                 standing_notices(&runtime.session.messages),
                 1,
                 "{self:?}: the decline stood once"
+            );
+            assert!(
+                runtime.repeats_a_standing_decline(WORDS),
+                "{self:?}: the same words again would only repeat it"
             );
         }
     }
@@ -1003,11 +1038,23 @@ mod hook_contract {
             || runtime.skill_suggestion_turn_start.is_some()
     }
 
-    /// The words of the requests `provider` was sent in `requests`, in order.
+    /// How [`words_asked`] names the request a compaction sends for its
+    /// summary. The first time a decline stands on a conversation long enough
+    /// to fold, the ladder folds it once and asks again (t-16786).
+    const SUMMARY: &str = "(the compaction's summary request)";
+
+    /// The words of the requests `provider` was sent in `requests`, in order,
+    /// a compaction's summary request named [`SUMMARY`].
     fn words_asked(provider: &Declining, requests: std::ops::Range<usize>) -> Vec<String> {
         requests
             .map(|at| {
-                provider.asked(at).as_ref().and_then(first_words).unwrap_or_default().to_string()
+                let words =
+                    provider.asked(at).as_ref().and_then(first_words).unwrap_or_default().to_string();
+                if words.starts_with(COMPACTION_SYSTEM_PROMPT) {
+                    SUMMARY.to_string()
+                } else {
+                    words
+                }
             })
             .collect()
     }
@@ -1173,8 +1220,8 @@ mod hook_contract {
         for (road, legs) in &turns {
             assert_eq!(
                 legs.asked,
-                [OTHER_WORDS, FOLLOW_UP],
-                "{road:?}: the turn's words, then the follow-up once"
+                [OTHER_WORDS, SUMMARY, OTHER_WORDS, FOLLOW_UP],
+                "{road:?}: the turn's words, folded once and asked again, then the follow-up once"
             );
             assert_eq!(
                 (legs.prompt_submits, legs.turn_ends),
@@ -1210,7 +1257,7 @@ mod hook_contract {
         Road::Deep.run(&mut runtime, OTHER_WORDS).expect("the turn ends cleanly");
         assert_eq!(
             words_asked(&provider, before..provider.sent()),
-            [OTHER_WORDS, FOLLOW_UP],
+            [OTHER_WORDS, SUMMARY, OTHER_WORDS, FOLLOW_UP],
             "the follow-up given again, once the decline stood on it, sends nothing"
         );
         assert!(
@@ -1238,7 +1285,7 @@ mod hook_contract {
         for (road, legs) in &turns {
             assert_eq!(
                 legs.asked,
-                [OTHER_WORDS, FOLLOW_UP, OTHER_FOLLOW_UP],
+                [OTHER_WORDS, SUMMARY, OTHER_WORDS, FOLLOW_UP, OTHER_FOLLOW_UP],
                 "{road:?}: every leg is asked"
             );
             assert_eq!(legs.turn_ends, 3, "{road:?}: and the stop gate runs after each");
@@ -1309,5 +1356,129 @@ mod hook_contract {
                 }
             }
         }
+    }
+
+    /// An answer the model gave is not the notice of a decline that stood,
+    /// even when it reads the same, byte for byte (Codex, m-57924). After a
+    /// decline stood, other words answered in the notice's words are asked
+    /// when they are sent again, and so are the words the decline stood on, on
+    /// every loop — deep mode included, where the kept decline is never
+    /// folded.
+    #[test]
+    fn an_answer_in_the_notices_words_never_makes_a_repeat() {
+        for road in ROADS {
+            let env = Hermetic::new(&format!("notice-words-{road:?}"));
+            let provider = Declining::new(UNROUTED);
+            let hooks = CountingHooks::new(&env);
+            let mut runtime = road.runtime(&env, &provider, &hooks);
+            road.stand(&env, &mut runtime);
+            provider.answer(Some(OTHER_WORDS), REFUSAL_STANDING_NOTICE);
+
+            for words in [OTHER_WORDS, OTHER_WORDS, WORDS] {
+                let before = provider.sent();
+                road.run(&mut runtime, words).expect("the turn ends cleanly");
+                assert_eq!(
+                    words_asked(&provider, before..provider.sent()).first().map(String::as_str),
+                    Some(words),
+                    "{road:?}: {words:?} is asked"
+                );
+            }
+        }
+    }
+
+    /// The same for a stop gate's follow-up. After a leg the decline stood on,
+    /// a follow-up the model answered in the notice's words is asked when the
+    /// stop gate gives it again, on every loop: on the headless loop and in
+    /// deep mode a follow-up leg folds nothing, so the decline kept is still
+    /// the latest.
+    #[test]
+    fn a_follow_up_answered_in_the_notices_words_is_asked_again() {
+        for road in ROADS {
+            let env = Hermetic::new(&format!("notice-words-legs-{road:?}"));
+            let provider = Declining::new(UNROUTED);
+            let hooks = CountingHooks::new(&env);
+            let mut runtime = road.runtime(&env, &provider, &hooks);
+            runtime.set_max_stop_loops(4);
+            road.stand(&env, &mut runtime);
+            road.run(&mut runtime, OTHER_WORDS).expect("other words fold the conversation once");
+            hooks.answer_with(&[FOLLOW_UP, FOLLOW_UP]);
+            provider.answer(Some(FOLLOW_UP), REFUSAL_STANDING_NOTICE);
+
+            let before = provider.sent();
+            road.run(&mut runtime, OTHER_FOLLOW_UP).expect("the turn ends cleanly");
+            assert_eq!(
+                words_asked(&provider, before..provider.sent()),
+                [OTHER_FOLLOW_UP, FOLLOW_UP, FOLLOW_UP],
+                "{road:?}: the decline stands on the turn's words, and the follow-up the model \
+                 answered in the notice's words is asked again"
+            );
+        }
+    }
+
+    /// A route armed for the turn takes it elsewhere, to another classifier:
+    /// after a decline stood, the same words are asked on every loop with an
+    /// escalation installed, a quota cooldown armed or a refusal cooldown
+    /// armed, each its own case.
+    #[test]
+    fn a_routing_change_after_a_decline_that_stood_asks_the_same_words() {
+        let routes: [(&str, fn(&mut Runtime)); 3] = [
+            ("an escalation installed", |runtime| {
+                runtime.set_escalation_model_override(Some("claude-opus-5".to_string()));
+            }),
+            ("a quota cooldown armed", |runtime| {
+                runtime.quota_dry_until = Some(Instant::now() + Duration::from_secs(60));
+            }),
+            ("a refusal cooldown armed", |runtime| {
+                runtime.refusal_dry_until = Some(Instant::now() + Duration::from_secs(60));
+            }),
+        ];
+        for road in ROADS {
+            for (route, arm) in routes {
+                let env = Hermetic::new(&format!("route-{road:?}"));
+                let provider = Declining::new(UNROUTED);
+                let hooks = CountingHooks::new(&env);
+                let mut runtime = road.runtime(&env, &provider, &hooks);
+                road.stand(&env, &mut runtime);
+                arm(&mut runtime);
+                assert!(
+                    !runtime.repeats_a_standing_decline(WORDS),
+                    "{road:?}, {route}: not a repeat"
+                );
+
+                let before = provider.sent();
+                let _ = road.run(&mut runtime, WORDS);
+                assert_eq!(
+                    provider.asked(before).as_ref().and_then(first_words),
+                    Some(WORDS),
+                    "{road:?}, {route}: the same words are asked"
+                );
+            }
+        }
+    }
+
+    /// The same words with a picture are another request in deep mode too:
+    /// they are asked, the picture with them.
+    #[test]
+    fn the_same_words_with_a_picture_are_asked_in_deep_mode() {
+        let env = Hermetic::new("picture-deep");
+        let provider = Declining::new(UNROUTED);
+        let hooks = CountingHooks::new(&env);
+        let mut runtime = Road::Deep.runtime(&env, &provider, &hooks);
+        Road::Deep.stand(&env, &mut runtime);
+
+        let before = provider.sent();
+        let picture = vec![("image/png".to_string(), "c2NyZWVuc2hvdA==".to_string())];
+        let (ended, _) = turn(&mut runtime, WORDS, picture);
+        ended.expect("the decline stands");
+
+        let asked = provider.asked(before).expect("the request");
+        assert_eq!(first_words(&asked), Some(WORDS), "asked with the words");
+        assert!(
+            asked
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. })),
+            "with the picture: {asked:?}"
+        );
     }
 }
