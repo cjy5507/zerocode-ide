@@ -787,10 +787,11 @@ mod hook_contract {
     use super::super::DeepGateConfig;
     use super::{
         first_words, internal_leg, standing_notices, turn, AsyncApiClient, ContentBlock,
-        ConversationRuntime, Declining, DecliningSync, Hermetic, PermissionMode, PermissionPolicy,
-        StaticToolExecutor, TurnSummary, OTHER_WORDS, REFUSAL_STANDING_NOTICE, UNROUTED, WORDS,
+        ConversationMessage, ConversationRuntime, Declining, DecliningSync, Hermetic,
+        PermissionMode, PermissionPolicy, Session, StaticToolExecutor, TurnSummary, OTHER_WORDS,
+        REFUSAL_STANDING_NOTICE, UNROUTED, WORDS,
     };
-    use crate::compact::COMPACTION_SYSTEM_PROMPT;
+    use crate::compact::{compact_session, CompactionConfig, COMPACTION_SYSTEM_PROMPT};
     use crate::config::{ConfigLoader, RuntimeFeatureConfig};
 
     /// What a stop gate's `TurnEnd` hook asks for.
@@ -1240,12 +1241,10 @@ mod hook_contract {
 
     /// A stop gate's follow-up is the person's side of the turn, in deep mode
     /// too, where the deep driver runs every leg as an internal one: given
-    /// again once the decline stood on it, it sends nothing. An internal leg
-    /// of the same words, from the same place, is the deep driver's own and is
-    /// asked as before.
+    /// again once the decline stood on it, it sends nothing.
     #[test]
     fn a_stop_gate_follow_up_is_never_taken_for_an_internal_deep_leg() {
-        let env = Hermetic::new("follow-up-or-internal-leg");
+        let env = Hermetic::new("follow-up-in-deep-mode");
         let provider = Declining::new(UNROUTED);
         let hooks = CountingHooks::new(&env);
         let mut runtime = Road::Deep.runtime(&env, &provider, &hooks);
@@ -1260,6 +1259,22 @@ mod hook_contract {
             [OTHER_WORDS, SUMMARY, OTHER_WORDS, FOLLOW_UP],
             "the follow-up given again, once the decline stood on it, sends nothing"
         );
+    }
+
+    /// The contrast, on its own (m-57968): an internal leg is the deep
+    /// driver's own. Once a stop gate's follow-up met the decline standing, so
+    /// that the person's same words would only repeat it, an internal leg of
+    /// those words, from the same place, is asked once, as before.
+    #[test]
+    fn an_internal_deep_leg_of_the_words_a_decline_stood_on_is_asked() {
+        let env = Hermetic::new("internal-leg-in-deep-mode");
+        let provider = Declining::new(UNROUTED);
+        let hooks = CountingHooks::new(&env);
+        let mut runtime = Road::Deep.runtime(&env, &provider, &hooks);
+        runtime.set_max_stop_loops(4);
+        Road::Deep.stand(&env, &mut runtime);
+        hooks.answer_with(&[FOLLOW_UP]);
+        Road::Deep.run(&mut runtime, OTHER_WORDS).expect("the turn ends cleanly");
         assert!(
             runtime.repeats_a_standing_decline(FOLLOW_UP),
             "the decline stood on the follow-up"
@@ -1480,5 +1495,103 @@ mod hook_contract {
                 .any(|block| matches!(block, ContentBlock::Image { .. })),
             "with the picture: {asked:?}"
         );
+    }
+
+    /// A change to the conversation between two turns, named, and how a test
+    /// makes it.
+    type Change = (&'static str, fn(&Hermetic, &mut Runtime));
+
+    /// What can happen to the conversation between two turns once a decline
+    /// stood that makes it another conversation than the one the notice was
+    /// pushed onto, even one that holds as many messages and still ends on the
+    /// same words and notice (Codex, m-57949 and m-57981). `/clear` starts a
+    /// fresh session, as `/new` does. The same-length replacement stands in
+    /// for deep mode's cleaned retry, which drops the exchange that stood and
+    /// pushes the model's answer.
+    fn changes() -> [Change; 6] {
+        [
+            ("a compaction", |_, runtime| {
+                let config = CompactionConfig {
+                    preserve_recent_messages: 2,
+                    max_estimated_tokens: 1,
+                };
+                runtime.apply_manual_compaction(compact_session(&runtime.session, config));
+            }),
+            ("a fold of one message into its summary, which keeps the length", |_, runtime| {
+                let messages = runtime.session.messages.len();
+                let config = CompactionConfig {
+                    preserve_recent_messages: messages - 1,
+                    max_estimated_tokens: 1,
+                };
+                runtime.apply_manual_compaction(compact_session(&runtime.session, config));
+                assert_eq!(runtime.session.messages.len(), messages, "the fold kept the length");
+            }),
+            ("a rewind of the last turn", |_, runtime| {
+                assert!(runtime.rewind_turns(1) > 0, "the rewind took the turn back");
+            }),
+            ("a clear", |_, runtime| runtime.replace_session(Session::new())),
+            ("a resume of the session from its file", |env, runtime| {
+                let resumed =
+                    Session::load_from_path(env.session_file()).expect("the session file loads");
+                runtime.replace_session(resumed);
+            }),
+            (
+                "a same-length replacement ending in a model answer identical to the notice",
+                |_, runtime| {
+                    let messages = Arc::make_mut(&mut runtime.session.messages);
+                    let notice = messages.pop().expect("the notice");
+                    messages.push(ConversationMessage::assistant(notice.blocks));
+                    runtime.session.mark_transcript_dirty();
+                },
+            ),
+        ]
+    }
+
+    /// After each of those changes the same words are asked, on every loop, as
+    /// before.
+    #[test]
+    fn the_same_words_after_the_conversation_changed_are_asked() {
+        for road in ROADS {
+            for (change, make) in changes() {
+                let env = Hermetic::new(&format!("changed-{road:?}"));
+                let provider = Declining::new(UNROUTED);
+                let hooks = CountingHooks::new(&env);
+                let mut runtime = road.runtime(&env, &provider, &hooks);
+                road.stand(&env, &mut runtime);
+                make(&env, &mut runtime);
+
+                let before = provider.sent();
+                let _ = road.run(&mut runtime, WORDS);
+                assert_eq!(
+                    provider.asked(before).as_ref().and_then(first_words),
+                    Some(WORDS),
+                    "{road:?}, after {change}: the same words are asked"
+                );
+            }
+        }
+    }
+
+    /// The rule takes none of those changes for a repeat, on any loop: it
+    /// counts on the very conversation the notice was pushed onto, not on one
+    /// that holds as many messages and ends the same way. Every case runs
+    /// before the assertion, which names each case the rule took for a repeat.
+    #[test]
+    fn the_rule_takes_no_changed_conversation_for_a_repeat() {
+        let mut taken = Vec::new();
+        for road in ROADS {
+            for (change, make) in changes() {
+                let env = Hermetic::new(&format!("changed-rule-{road:?}"));
+                let provider = Declining::new(UNROUTED);
+                let hooks = CountingHooks::new(&env);
+                let mut runtime = road.runtime(&env, &provider, &hooks);
+                road.stand(&env, &mut runtime);
+                make(&env, &mut runtime);
+                if runtime.repeats_a_standing_decline(WORDS) {
+                    taken.push(format!("{road:?}: {change}"));
+                }
+            }
+        }
+        eprintln!("t-57512 changed conversations taken for a repeat | {taken:?}");
+        assert!(taken.is_empty(), "the rule took these for a repeat: {taken:?}");
     }
 }
