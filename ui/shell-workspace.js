@@ -5637,8 +5637,9 @@ const TEAM_CHECK_GOING = new Set(["started", "prepared"]);
  * where it stands. Work that landed, had nothing to land or was closed leaves the team. */
 const TEAM_SETTLED_STAGES = new Set(["handedIn", "reviewing", "landWait", "failed"]);
 
-/* What a step's cell says in the strip's tip: done, where the work is, where it is held, no record. */
-const TEAM_STEP_MARKS = Object.freeze({ on: "✓", cur: "…", stuck: "!", "": "—" });
+/* What a step's cell says in the strip's tip: done, where the work is, where it is held, no record — and a step
+ * behind the work that left no record, drawn passed on the strip and still "—" here. */
+const TEAM_STEP_MARKS = Object.freeze({ on: "✓", cur: "…", stuck: "!", past: "—", "": "—" });
 
 const sidebarTeam = document.createElement("div");
 sidebarTeam.className = "team";
@@ -5779,7 +5780,8 @@ function teamSentence(line) {
 
 /* Where one worker's work stands on its six steps, from the ledger's row and git's word for its checkout. The
  * step the work is at is `current` (blue; held, yellow, when something holds the work back); the steps before it
- * that have a record are done; a step with no record stays empty. */
+ * that have a record are done; a step with no record stays empty ahead of the work and is drawn passed behind it —
+ * the person, 10-16: 「초록색 가운데 2 다음 비어 있어」, a hole in the strip read as something broken. */
 function teamSteps(row, held) {
   const phase = ledgerLandingStage(row);
   const landing = row.checkout
@@ -5808,6 +5810,8 @@ function teamSteps(row, held) {
     land: landed ? "on" : current === "land" ? "cur" : "",
   };
   if (held && current !== null && cells[current] === "cur") cells[current] = "stuck";
+  const reached = current === null ? TEAM_STEPS.length : TEAM_STEPS.findIndex((step) => step.id === current);
+  for (const step of TEAM_STEPS.slice(0, reached)) if (cells[step.id] === "") cells[step.id] = "past";
   return { cells, current, commits, landing, check };
 }
 

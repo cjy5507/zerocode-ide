@@ -283,7 +283,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
         cells("w-b1") === "on,stuck,,,," && read["w-b1"].step === words.commit1 &&
         cells("w-b2") === "on,on,stuck,on,cur," && read["w-b2"].step === words.verify &&
         read["w-b2"].stepsTip.includes(words.checkFailed) &&
-        cells("w-c1") === "on,on,,on,on,cur" && read["w-c1"].step === words.land,
+        cells("w-c1") === "on,on,past,on,on,cur" && read["w-c1"].step === words.land,
       JSON.stringify(read),
     );
     ok(
@@ -497,7 +497,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
     });
     ok(
       "a released worker's handed-in work keeps its row under its coordinator — waiting at 검증, with no pane to name — while work that landed leaves the team",
-      settled.shown?.dot === "waiting" && settled.shown.pane === "" && settled.shown.cells.join(",") === "on,,,on,cur," &&
+      settled.shown?.dot === "waiting" && settled.shown.pane === "" && settled.shown.cells.join(",") === "on,past,past,on,cur," &&
         settled.landedGone && settled.order.indexOf("w:run-team-c/w-c2") === settled.order.indexOf("c:run-team-c") + 2 &&
         settled.afterGone,
       JSON.stringify(settled),

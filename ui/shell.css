@@ -1796,7 +1796,8 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   background: var(--nav-plane-rule);
 }
 
-.team-step.is-on {
+.team-step.is-on,
+.team-step.is-past {
   background: var(--signal-done);
 }
 
