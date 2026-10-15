@@ -75,7 +75,7 @@ const ELEMENT_CLICK: &str = "left_click";
 const QUIT_ACTION: &str = "quit";
 /// Actions whose answer names places on the screen: before the first of them
 /// the model is shown a picture, so what they answer is in its pixels.
-const ANSWERS_PLACES: &[&str] = &["find", "read", "wait_for", "list_windows", "cursor_position"];
+const ANSWERS_PLACES: &[&str] = &["find", "read", "wait_for", LIST_WINDOWS_ACTION, "cursor_position"];
 /// The model's own looks: their picture is the one it speaks in next, and
 /// what changed is measured against its own last look.
 const LOOKS: &[&str] = &["screenshot", "observe"];
@@ -92,6 +92,9 @@ const EXIT_POLL: Duration = Duration::from_millis(1);
 
 /// The one action whose steps are actions — named as the core names it.
 const BATCH_ACTION: &str = ComputerMethod::Batch.verb_name();
+/// The action whose `app` is a filter on the answer, not a target: the CLI
+/// lists the whole desktop and the tool keeps the named app's windows.
+const LIST_WINDOWS_ACTION: &str = "list_windows";
 /// The one action the window walks toward a goal on its own judgment — the
 /// core's verb, the loop the window's (`run_goal`); the tool never loops.
 const WALK_ACTION: &str = ComputerMethod::Walk.verb_name();
@@ -200,10 +203,47 @@ fn window_kinds(keep: impl Fn(ComputerMethod) -> bool) -> Vec<&'static str> {
     ComputerMethod::ALL.iter().copied().filter(|method| keep(*method)).filter_map(ComputerMethod::window_action).collect()
 }
 
+/// How a model writes a boolean or a number when its call is not strict JSON
+/// (`"true"`, `"1"`, `"250"`): read by this one pair for every field of every
+/// action and every batch step, so the receipts and the command line carry the
+/// normalized value (t-55888).
+mod loose {
+    use serde::de::{DeserializeOwned, Error};
+    use serde::{Deserialize, Deserializer};
+    use serde_json::{Number, Value};
+
+    pub(super) fn boolean<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+        match Option::<Value>::deserialize(deserializer)? {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(flag)) => Ok(Some(flag)),
+            Some(Value::String(text)) => match text.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" => Ok(Some(true)),
+                "false" | "0" => Ok(Some(false)),
+                _ => Err(D::Error::custom(format!("invalid value {text:?}, expected a boolean: true or false"))),
+            },
+            Some(other) => Err(D::Error::custom(format!("invalid type: {other}, expected a boolean"))),
+        }
+    }
+
+    pub(super) fn number<'de, D: Deserializer<'de>, T: DeserializeOwned>(deserializer: D) -> Result<Option<T>, D::Error> {
+        let number = match Option::<Value>::deserialize(deserializer)? {
+            None | Some(Value::Null) => return Ok(None),
+            Some(Value::Number(number)) => number,
+            Some(Value::String(text)) => text
+                .trim()
+                .parse::<Number>()
+                .map_err(|_| D::Error::custom(format!("invalid value {text:?}, expected a number")))?,
+            Some(other) => return Err(D::Error::custom(format!("invalid type: {other}, expected a number"))),
+        };
+        T::deserialize(Value::Number(number)).map(Some).map_err(D::Error::custom)
+    }
+}
+
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ComputerInput {
     pub action: String,
+    #[serde(default, deserialize_with = "loose::boolean")]
     pub background: Option<bool>,
     /// `[x, y]` in the pixels of the last screenshot, the Anthropic way.
     pub coordinate: Option<[f64; 2]>,
@@ -212,9 +252,12 @@ pub(crate) struct ComputerInput {
     /// held during a click, the text to find/wait for, the clipboard text.
     pub text: Option<String>,
     pub scroll_direction: Option<String>,
+    #[serde(default, deserialize_with = "loose::number")]
     pub scroll_amount: Option<u32>,
+    #[serde(default, deserialize_with = "loose::number")]
     pub scroll_pages: Option<f64>,
     /// Seconds, the Anthropic way, for `hold_key` and `wait`.
+    #[serde(default, deserialize_with = "loose::number")]
     pub duration: Option<f64>,
     /// `[x0, y0, x1, y1]` — two corners, the Anthropic way — in the last
     /// screenshot's pixels, for `zoom`/`find --ocr`/`read --ocr`.
@@ -226,17 +269,25 @@ pub(crate) struct ComputerInput {
     pub args: Option<String>,
     pub role: Option<String>,
     pub label: Option<String>,
+    #[serde(default, deserialize_with = "loose::boolean")]
     pub ocr: Option<bool>,
     /// An unscoped window title condition for `wait_for`.
     pub window: Option<String>,
+    #[serde(default, deserialize_with = "loose::number")]
     pub window_id: Option<u64>,
     /// The window action (`focus|move|resize|minimize|zoom|close`).
     pub kind: Option<String>,
+    #[serde(default, deserialize_with = "loose::number")]
     pub x: Option<f64>,
+    #[serde(default, deserialize_with = "loose::number")]
     pub y: Option<f64>,
+    #[serde(default, deserialize_with = "loose::number")]
     pub width: Option<f64>,
+    #[serde(default, deserialize_with = "loose::number")]
     pub height: Option<f64>,
+    #[serde(default, deserialize_with = "loose::number")]
     pub timeout_ms: Option<u64>,
+    #[serde(default, deserialize_with = "loose::boolean")]
     pub absent: Option<bool>,
     /// The model's own declaration that this press is a payment, transfer
     /// or delete — the window asks the person before the helper moves.
@@ -244,17 +295,23 @@ pub(crate) struct ComputerInput {
     /// `handoff`: ask for a one-time code on the person's card (the core's
     /// `--ask-code`); the window types it into the field `into` names, and
     /// the answer carries no code.
+    #[serde(default, deserialize_with = "loose::boolean")]
     pub ask_code: Option<bool>,
     /// `handoff` with `ask_code`: the words of the input command that puts
     /// the code into its field (`["set-value", "--app", …]`, a browser `type`,
     /// an emulator `text`) — the window runs it, so the code never comes back.
     pub into: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "loose::boolean")]
     pub force: Option<bool>,
+    #[serde(default, deserialize_with = "loose::boolean")]
     pub reset_budget: Option<bool>,
+    #[serde(default, deserialize_with = "loose::number")]
     pub last: Option<u64>,
     /// The ears' cursor: events heard after this number.
+    #[serde(default, deserialize_with = "loose::number")]
     pub after: Option<u64>,
     /// The least confidence a heard sound needs to end a `sound_wait`.
+    #[serde(default, deserialize_with = "loose::number")]
     pub min_confidence: Option<f64>,
     /// `watch`: `change` (the default) or `quiet`. `walk`: the text on the
     /// screen when it worked.
@@ -268,11 +325,15 @@ pub(crate) struct ComputerInput {
     pub device: Option<String>,
     /// `walk`: the most presses it may spend (the CLI's `--steps`, named apart
     /// from a batch's `steps`).
+    #[serde(default, deserialize_with = "loose::number")]
     pub max_steps: Option<u64>,
     /// `walk`: judge ahead while a press lands; a second reader before the
     /// person; a repeat of a walk walked before.
+    #[serde(default, deserialize_with = "loose::boolean")]
     pub overlap: Option<bool>,
+    #[serde(default, deserialize_with = "loose::boolean")]
     pub rescue: Option<bool>,
+    #[serde(default, deserialize_with = "loose::boolean")]
     pub replay: Option<bool>,
     /// `batch`: the actions to run in order in one call.
     pub steps: Option<Vec<ComputerInput>>,
@@ -281,12 +342,15 @@ pub(crate) struct ComputerInput {
     /// `recipe_run`: the values its `{{name}}`s are filled with.
     pub params: Option<serde_json::Map<String, Value>>,
     /// `recipe_run`: the step to walk from (counted from 1), as a stop said.
+    #[serde(default, deserialize_with = "loose::number")]
     pub start: Option<u64>,
     /// A click's target by its number on the last marked look, instead of a
     /// `coordinate`: the window presses that control and refuses if it moved.
+    #[serde(default, deserialize_with = "loose::number")]
     pub mark: Option<u64>,
     /// A `left_click`'s target by its index in the named app's tree (as an
     /// `observe` with `app` shows it), pressed through accessibility.
+    #[serde(default, deserialize_with = "loose::number")]
     pub element_index: Option<u64>,
     /// A `left_click` by the words a window shows (`app`, `label`, `ocr`):
     /// the line those words come after, telling recurring words apart.
@@ -296,6 +360,7 @@ pub(crate) struct ComputerInput {
     pub offset: Option<[f64; 2]>,
     /// Whether the look after an action waits for quiet. Continuous motion
     /// can be sampled immediately, while ordinary UI actions wait by default.
+    #[serde(default, deserialize_with = "loose::boolean")]
     pub settle: Option<bool>,
 }
 
@@ -397,6 +462,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             zoom does not change that frame. Actions wait for repaint and observe the same target; unchanged \
             pixels are omitted. observe {app} shows the accessibility tree; left_click {app, window_id, \
             element_index} presses its control. label/role resolve a fresh control in that window. \
+            list_windows {app} keeps that app's windows (all if none match); \"true\"/\"250\" strings work. \
             Batch familiar steps once with one final look; see steps for scope/waits. For windows without \
             trees (mirrored phones), left_click {app, label, ocr: true, after_text: the preceding line} presses \
             freshly read words; wait_for {app, ocr: true, text} checks values. listen_start hears machine/app; \
@@ -628,7 +694,7 @@ fn validate_scope(input: &ComputerInput) -> Result<(), ToolError> {
         }
     }
     if input.app.is_some() && !app_scoped_action(action) && !timer
-        && !matches!(action, "launch" | "quit" | "activate" | "open" | "listen_start" | WALK_ACTION)
+        && !matches!(action, "launch" | "quit" | "activate" | "open" | "listen_start" | LIST_WINDOWS_ACTION | WALK_ACTION)
     {
         return Err(ToolError::InvalidInput(format!("`app` is not supported by `{action}`; no desktop fallback was attempted")));
     }
@@ -963,7 +1029,7 @@ fn argv_apps_and_system(action: &str, input: &ComputerInput, argv: &mut Vec<Stri
                 push(argv, &["--width", &number(width), "--height", &number(height)]);
             }
         }
-        "list_windows" => push(argv, &["list-all-windows"]),
+        LIST_WINDOWS_ACTION => push(argv, &["list-all-windows"]),
         "clipboard_read" => push(argv, &["clipboard-read"]),
         "clipboard_write" => {
             let text = input
@@ -1909,6 +1975,41 @@ fn run_computer_walk(input: &ComputerInput, ctx: &ToolContext, road: &ComputerRo
     }))
 }
 
+/// `list_windows {app}`: keep the windows `app` names — by its name in any
+/// case, or `pid:<n>` — and say so in the receipt. An app with no window on the
+/// desktop is not a refusal: the whole list stays and the receipt says the
+/// filter stood aside, so the model sees what is there to choose from.
+fn filter_windows_by_app(answer: &mut Value, app: &str) {
+    let Some(result) = answer.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(Value::Array(windows)) = result.get_mut("windows") else {
+        return;
+    };
+    let wanted = app.trim();
+    let pid = wanted.strip_prefix("pid:").and_then(|pid| pid.trim().parse::<u64>().ok());
+    let of = windows.len();
+    let kept: Vec<Value> = windows
+        .iter()
+        .filter(|window| {
+            let owner = window.get("app");
+            let named = owner.and_then(|owner| owner.get("name")).and_then(Value::as_str);
+            named.is_some_and(|name| name.trim().eq_ignore_ascii_case(wanted))
+                || pid.is_some_and(|pid| owner.and_then(|owner| owner.get("pid")).and_then(Value::as_u64) == Some(pid))
+        })
+        .cloned()
+        .collect();
+    let filter = if kept.is_empty() {
+        json!({ "app": wanted, "state": "fell_back", "reason": "no window of that app is on the desktop; the whole list is shown", "of": of })
+    } else {
+        json!({ "app": wanted, "state": "applied", "kept": kept.len(), "of": of })
+    };
+    if !kept.is_empty() {
+        *windows = kept;
+    }
+    result.insert("app_filter".into(), filter);
+}
+
 pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<String, ToolError> {
     if input.get("action").and_then(Value::as_str).map(str::trim) == Some(BATCH_ACTION) {
         if let Some(steps) = input.get("steps").and_then(Value::as_array) {
@@ -1950,6 +2051,11 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
     let mut answer = call_shim(road, &argv, ctx.cwd.as_deref())?;
     if let Some(refused) = refusal(&answer) {
         return Err(refused.into());
+    }
+    if action == LIST_WINDOWS_ACTION {
+        if let Some(app) = input.app.as_deref() {
+            filter_windows_by_app(&mut answer, app);
+        }
     }
     let returned_window = match checked_window(&answer, input.window_id.filter(|_| action != "window" && !timed_wait(&action))) {
         Ok(window_id) => window_id,
