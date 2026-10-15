@@ -2906,6 +2906,7 @@ class StatefulBackend {
         return clone(await (this.managedSourceWait ?? this.managedSourceInspection));
       }
       case "managed_judgment_install_source": {
+        if (this.managedSourceInstallWait) return clone(await this.managedSourceInstallWait);
         const held = this.managedModelState;
         const inspection = this.managedSourceInspection;
         if (!inspection || args.inspectionId !== inspection.inspectionId || args.instanceId !== held.instanceId || args.expectedCatalogFingerprint !== held.catalogFingerprint) throw "source_changed";
@@ -3511,6 +3512,7 @@ async function withJudgmentStatus(run) {
     delete backend.judgmentUsage;
     delete backend.judgmentUsageError;
     delete backend.managedSourceWait;
+    delete backend.managedSourceInstallWait;
     delete backend.managedSourceResult;
     delete backend.managedSourceError;
     delete backend.managedSourceInspection;
@@ -5815,7 +5817,7 @@ await test("판단 모델 전용 화면은 HF 주소만 받아 기본 폴더에 
     await modelPage.fill("#judgment-source-repository", "https://huggingface.co/acme/decision-model");
     await modelPage.click("#judgment-source-inspect");
     const inspected = await backend.waitForCall("source-basic", "managed_judgment_inspect_source", inspectedAt);
-    assertEqual(inspected.args, { source: { kind: "hugging_face", repository: "https://huggingface.co/acme/decision-model" } }, "the user must supply a manifest or hashes");
+    assertEqual(inspected.args.source, { kind: "hugging_face", repository: "https://huggingface.co/acme/decision-model" }, "the user must supply a manifest or hashes");
     await modelPage.waitForFunction(() => judgmentModelSourceController.inspection?.readyForInstall && !judgmentModelSourceController.busy);
     assert(await modelPage.locator("#judgment-source-use").evaluate((element) => element.classList.contains("btn--primary")), "the inspected model has no primary use action");
     assertEqual(backend.typesafeSettings().provider, before, "inspection changed the active model");
@@ -5864,7 +5866,7 @@ await test("내 모델과 저장 폴더는 선택기로 고르고 설치 취소�
     const inspectedAt = backend.calls.length;
     await modelPage.click("#judgment-source-inspect");
     const inspected = await backend.waitForCall("source-local", "managed_judgment_inspect_source", inspectedAt);
-    assertEqual(inspected.args, { source: { kind: "local_directory", directory: "/models/source-folder" } });
+    assertEqual(inspected.args.source, { kind: "local_directory", directory: "/models/source-folder" });
     await modelPage.waitForFunction(() => judgmentModelSourceController.inspection?.readyForInstall && !judgmentModelSourceController.busy);
     const before = clone(backend.typesafeSettings().provider);
     const usingAt = backend.calls.length;
@@ -6394,7 +6396,7 @@ await test("주소를 붙여 넣으면 정보만 확인하고 실행 검증 전 
     input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste" }));
   }, address);
   const inspected = await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", pastedAt);
-  assertEqual(inspected.args, { source: { kind: "hugging_face", repository: address } }, "a pasted address was not inspected");
+  assertEqual(inspected.args.source, { kind: "hugging_face", repository: address }, "a pasted address was not inspected");
   await page.waitForFunction(() => judgmentModelSourceController.inspection?.readyForDownload && !judgmentModelSourceController.inspecting);
   assert(!backend.calls.slice(pastedAt).some((entry) => entry.command !== "managed_judgment_inspect_source" && entry.command.startsWith("managed_judgment_") && entry.command !== "managed_judgment_status"),
     "pasting an address did more than read its metadata", backend.calls.slice(pastedAt).map((entry) => entry.command));
@@ -6442,7 +6444,7 @@ await test("늦게 끝난 모델 확인은 새 주소의 결과와 진행 중 �
   await page.press("#judgment-source-repository", "Enter");
   finishStale(nativeSourceInspection(snapshot, { inspectionId: "stale-inspection", label: "Stale Native Model" }));
   const fresh = await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", freshAt);
-  assertEqual(fresh.args, { source: { kind: "hugging_face", repository: "acme/fresh-model" } });
+  assertEqual(fresh.args.source, { kind: "hugging_face", repository: "acme/fresh-model" });
   assert(await page.evaluate(() => judgmentModelSourceController.inspecting), "the stale inspection ended the newer one's progress");
   assert(await page.evaluate(() => judgmentModelSourceController.inspection === null), "a stale inspection became the selected result");
   assert((await page.locator("#judgment-source-model-name").textContent()) !== "Stale Native Model", "a stale inspection was drawn");
@@ -6534,11 +6536,129 @@ await test("실행 검증 전 라이브러리 모델은 주소 확인으로 같�
   const at = backend.calls.length;
   await button.evaluate((element) => element.click());
   const inspected = await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", at);
-  assertEqual(inspected.args, { source: { kind: "hugging_face", repository: native.source } });
+  assertEqual(inspected.args.source, { kind: "hugging_face", repository: native.source });
   assertEqual(await page.locator("#judgment-source-repository").inputValue(), native.source);
   await page.waitForFunction(() => judgmentModelSourceController.inspection?.readyForDownload && !judgmentModelSourceController.inspecting);
   assert(!backend.calls.slice(at).some((entry) => ["managed_judgment_install", "managed_judgment_install_source"].includes(entry.command)), "the library row downloaded before the person chose to");
   return "library row explains download-only · routes into the same inspected row · no download before the explicit action";
+}));
+
+await test("주소를 고쳐도 다른 요청이 시작한 모델 확인을 취소하지 않는다", async () => withJudgmentStatus(async (page, provider) => {
+  let finish;
+  backend.managedSourceResult = nativeSourceInspection(backend.managedJudgmentSettings());
+  backend.managedSourceWait = new Promise((resolve) => { finish = resolve; });
+  await page.evaluate(() => {
+    const original = window.__SETTINGS_INVOKE__;
+    window.__SOURCE_CANCEL_IDS__ = [];
+    window.__SETTINGS_INVOKE__ = (payload) => {
+      if (payload.command === "managed_judgment_cancel") window.__SOURCE_CANCEL_IDS__.push(payload.args.operationId);
+      return original(payload);
+    };
+  });
+  try {
+    const from = backend.calls.length;
+    await page.fill("#judgment-source-repository", "acme/own-source");
+    await page.press("#judgment-source-repository", "Enter");
+    await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", from);
+    const held = backend.managedModelState;
+    held.revision += 1;
+    held.operation = { id: "foreign-inspection", kind: "inspect", state: "running", sourceRequestId: "00000000-0000-4000-8000-000000000002", receivedBytes: 0, totalBytes: 0 };
+    await backend.emitManaged(clone(held));
+    await page.fill("#judgment-source-repository", "acme/new-source");
+    assertEqual(await page.evaluate(() => window.__SOURCE_CANCEL_IDS__), [], "editing the address cancelled another caller's inspection");
+    assertEqual(backend.typesafeSettings().provider, provider);
+  } finally { finish(backend.managedSourceResult); }
+  return "foreign inspection is not cancelled · current model is kept";
+}));
+
+await test("확인 취소는 자기 요청의 시작 통지가 늦어도 그 작업에만 한 번 보낸다", async () => withJudgmentStatus(async (page, provider) => {
+  let finish;
+  backend.managedSourceResult = nativeSourceInspection(backend.managedJudgmentSettings());
+  backend.managedSourceWait = new Promise((resolve) => { finish = resolve; });
+  try {
+    const from = backend.calls.length;
+    await page.fill("#judgment-source-repository", "acme/own-source");
+    await page.press("#judgment-source-repository", "Enter");
+    const request = await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", from);
+    assert(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(request.args.requestId ?? ""), "inspection has no request correlation");
+    await page.click("#judgment-source-cancel");
+    assert(!backend.calls.slice(from).some((entry) => entry.command === "managed_judgment_cancel"), "cancel guessed an operation before its own report");
+    const held = backend.managedModelState;
+    held.revision += 1;
+    held.operation = { id: "owned-inspection", kind: "inspect", state: "running", sourceRequestId: request.args.requestId, receivedBytes: 0, totalBytes: 0 };
+    const announcement = clone(held);
+    await backend.emitManaged(announcement);
+    const cancelled = await backend.waitForCall("judgment-status", "managed_judgment_cancel", from);
+    assertEqual(cancelled.args, { operationId: "owned-inspection" });
+    await backend.emitManaged(announcement);
+    assertEqual(backend.calls.slice(from).filter((entry) => entry.command === "managed_judgment_cancel").length, 1);
+    assertEqual(backend.typesafeSettings().provider, provider);
+  } finally { finish(backend.managedSourceResult); }
+  return "request correlation · late owned start is cancelled once · active model kept";
+}));
+
+await test("파일 받기 시작 응답 전에는 다른 작업의 진행과 취소를 가져오지 않는다", async () => withJudgmentStatus(async (page, provider) => {
+  let refuse;
+  backend.managedSourceResult = nativeSourceInspection(backend.managedJudgmentSettings());
+  backend.managedSourceInstallWait = new Promise((resolve, reject) => { refuse = reject; });
+  await page.evaluate(() => {
+    const original = window.__SETTINGS_INVOKE__;
+    window.__SOURCE_CANCEL_IDS__ = [];
+    window.__SETTINGS_INVOKE__ = (payload) => {
+      if (payload.command === "managed_judgment_cancel") window.__SOURCE_CANCEL_IDS__.push(payload.args.operationId);
+      return original(payload);
+    };
+  });
+  try {
+    await page.fill("#judgment-source-repository", "acme/native-decision");
+    await page.press("#judgment-source-repository", "Enter");
+    await page.waitForFunction(() => judgmentModelSourceController.inspection?.readyForDownload && !judgmentModelSourceController.inspecting);
+    const from = backend.calls.length;
+    await page.click("#judgment-source-use");
+    await backend.waitForCall("judgment-status", "managed_judgment_install_source", from);
+    const held = backend.managedModelState;
+    held.revision += 1;
+    held.operation = { id: "foreign-download", kind: "download", modelId: "fixture-native", state: "running", receivedBytes: 512, totalBytes: 1024 };
+    await backend.emitManaged(clone(held));
+    await page.evaluate(() => judgmentModelSourceController.cancel());
+    assertEqual(await page.evaluate(() => window.__SOURCE_CANCEL_IDS__), [], "pending install adopted another operation's cancel target");
+    assertEqual(await page.locator("#judgment-source-progress").getAttribute("value"), null, "foreign byte progress was shown as ours");
+    assertEqual(backend.typesafeSettings().provider, provider);
+  } finally { refuse("operation_busy"); }
+  return "no operation authority before start reply · no foreign progress or cancellation";
+}));
+
+await test("선택된 모델이 멈췄으면 다시 실행하고 이미 받은 파일은 재설치하지 않는다", async () => withJudgmentStatus(async (page) => {
+  const held = backend.managedModelState;
+  held.server = { id: null, state: "stopped", modelId: null, provider: null, checked: false, error: null };
+  held.operation = null;
+  held.revision += 1;
+  const model = clone(held.models[0]);
+  model.installed = true;
+  model.local = { supported: true, downloadOnly: false, reason: null };
+  model.runtime = { state: "ready", downloadBytes: 0, reason: null };
+  backend.managedSourceResult = {
+    inspectionId: "installed-inspection", instanceId: held.instanceId, catalogFingerprint: held.catalogFingerprint,
+    model, local: model.local, readyForInstall: true, readyForDownload: true, reason: null,
+    sourceKind: "hugging_face", downloadBytes: 0, runtimeDownloadBytes: 0, allowsDestinationSelection: false,
+  };
+  await backend.emitManaged(clone(held));
+  await page.fill("#judgment-source-repository", "acme/installed-model");
+  await page.press("#judgment-source-repository", "Enter");
+  await page.waitForFunction(() => judgmentModelSourceController.inspection?.inspectionId === "installed-inspection" && !judgmentModelSourceController.inspecting);
+  assert(await page.locator("#judgment-source-badge-current").isVisible());
+  assert(await page.locator("#judgment-source-use").isVisible(), "selection hid the action to start the stopped server");
+  assert(await page.locator("#judgment-source-use").isEnabled());
+  const label = await page.locator("#judgment-source-badge-current").textContent();
+  assert(!["In use", "현재 사용 중", "使用中", "正在使用", "En uso"].includes(label), "selected-but-stopped was labelled in use");
+  const from = backend.calls.length;
+  await page.click("#judgment-source-use");
+  await backend.waitForCall("judgment-status", "managed_judgment_apply", from);
+  const commands = backend.calls.slice(from).map((entry) => entry.command);
+  assert(!commands.some((command) => ["managed_judgment_install_source", "managed_judgment_install", "managed_judgment_prepare_runtime", "managed_judgment_prepare_model_runtime"].includes(command)), "already installed files/runtime were installed again", commands);
+  assertEqual(commands.filter((command) => command === "managed_judgment_start").length, 1);
+  assertEqual(commands.filter((command) => command === "managed_judgment_check").length, 1);
+  return "selection is not running · restart from the same row · no repeated installation";
 }));
 
 await test("판단 상태는 다섯 언어·두 테마·좁은 폭에서 읽을 수 있다", async () => withJudgmentStatus(async (page) => {

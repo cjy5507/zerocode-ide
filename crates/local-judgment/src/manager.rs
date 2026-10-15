@@ -557,6 +557,14 @@ impl Manager {
     }
 
     pub async fn inspect_source(self: &Arc<Self>, input: SourceInput) -> Result<SourceInspection> {
+        self.inspect_source_with_request(input, None).await
+    }
+
+    pub async fn inspect_source_with_request(
+        self: &Arc<Self>,
+        input: SourceInput,
+        _request_id: Option<String>,
+    ) -> Result<SourceInspection> {
         let (operation_id, cancel) = self.begin("inspect", None, 0)?;
         let work_stop = Arc::new(AtomicBool::new(false));
         let stop = work_stop.clone();
@@ -2161,6 +2169,15 @@ pub(crate) mod test_support {
     use super::*;
 
     pub fn manager(root: &Path, settings: &Path, model: Model) -> Arc<Manager> {
+        manager_with_sink(root, settings, model, Arc::new(|_| {}))
+    }
+
+    pub fn manager_with_sink(
+        root: &Path,
+        settings: &Path,
+        model: Model,
+        sink: Arc<dyn Fn(Snapshot) + Send + Sync>,
+    ) -> Arc<Manager> {
         let runtimes: serde_json::Value =
             serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
         let profile = serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
@@ -2172,7 +2189,7 @@ pub(crate) mod test_support {
                 models: vec![model],
             },
             Some(profile),
-            Arc::new(|_| {}),
+            sink,
         )
         .unwrap()
     }

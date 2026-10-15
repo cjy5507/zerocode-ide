@@ -61,6 +61,84 @@ fn native_fixture(directory: &Path) {
     fs::write(directory.join("model.safetensors"), weights()).unwrap();
 }
 
+#[tokio::test]
+async fn inspection_reports_bind_the_request_before_emitting_and_legacy_requests_clear_it() {
+    let home = tempfile::tempdir().unwrap();
+    let source = home.path().join("source");
+    local_fixture(&source);
+    let settings = home.path().join("settings.json");
+    fs::write(&settings, b"{}").unwrap();
+    let reports = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = reports.clone();
+    let manager = crate::manager::test_support::manager_with_sink(
+        &home.path().join("data"),
+        &settings,
+        super::tests::fixture_model(),
+        Arc::new(move |snapshot| observed.lock().unwrap().push(snapshot)),
+    );
+    let request_id = uuid::Uuid::new_v4().to_string();
+    manager
+        .inspect_source_with_request(
+            SourceInput::LocalDirectory {
+                directory: source.to_string_lossy().into_owned(),
+            },
+            Some(request_id.clone()),
+        )
+        .await
+        .unwrap();
+    let first = reports
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|snapshot| {
+            snapshot
+                .operation
+                .as_ref()
+                .filter(|operation| operation.kind == "inspect" && operation.state == "running")
+                .map(|operation| serde_json::to_value(operation).unwrap())
+        })
+        .unwrap();
+    assert_eq!(first["sourceRequestId"], json!(request_id));
+    manager
+        .inspect_source(SourceInput::LocalDirectory {
+            directory: source.to_string_lossy().into_owned(),
+        })
+        .await
+        .unwrap();
+    let legacy = serde_json::to_value(manager.snapshot().operation.unwrap()).unwrap();
+    assert!(legacy.get("sourceRequestId").is_none());
+    assert_eq!(fs::read(&settings).unwrap(), b"{}");
+    manager.shutdown();
+}
+
+#[tokio::test]
+async fn an_invalid_inspection_request_id_changes_no_operation_or_settings() {
+    let home = tempfile::tempdir().unwrap();
+    let source = home.path().join("source");
+    local_fixture(&source);
+    let settings = home.path().join("settings.json");
+    fs::write(&settings, b"{}").unwrap();
+    let manager = crate::manager::test_support::manager(
+        &home.path().join("data"),
+        &settings,
+        super::tests::fixture_model(),
+    );
+    let before = manager.snapshot().revision;
+    let result = manager
+        .inspect_source_with_request(
+            SourceInput::LocalDirectory {
+                directory: source.to_string_lossy().into_owned(),
+            },
+            Some("invalid-request".to_owned()),
+        )
+        .await;
+    assert!(matches!(result, Err(Error::SourceInvalid)));
+    assert_eq!(manager.snapshot().revision, before);
+    assert!(manager.snapshot().operation.is_none());
+    assert_eq!(fs::read(&settings).unwrap(), b"{}");
+    manager.shutdown();
+}
+
 #[test]
 fn hf_sources_resolve_repo_urls_revision_and_subfolder_without_other_hosts() {
     let source = source::hub_source(
