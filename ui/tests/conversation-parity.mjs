@@ -799,9 +799,11 @@ export async function testConversationFoot(browser, origin, ok) {
         window.__ANSWER__.wire_start = (args) => ({ id: wire, agent: args.agent, protocol: "claude-stream", version: "2.1.280", model: null, session: null });
       };
       // The list on screen, its door, and where both stand once the list has
-      // stopped moving (the door's glide included).
+      // stopped moving (the door's glide included). A conversation set aside
+      // stands in the document behind the one in front, hidden from assistive
+      // technology (t-55369): the list on screen is the one not hidden.
       window.__FOOT__ = {
-        list: () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility()) ?? null,
+        list: () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]')) ?? null,
         door: () => window.__FOOT__.list()?.parentElement.querySelector(":scope > .chat-foot-door") ?? null,
         async still() {
           const list = window.__FOOT__.list();
@@ -4805,15 +4807,29 @@ export async function testConversationCodeColours(browser, origin, ok) {
   const bare = await openWindowTestPage(browser, origin, {
     before: (page) => page.addInitScript(() => {
       delete window.Highlight;
+      // And an engine whose idle comes late: the colouring's slice rides the
+      // idle callback (`askCodeSlice`), and on a busy machine the first one
+      // lands after the frames a check would count — l33's g5 (2026-10-15)
+      // saw 13 fences and 0 spans that way. The check waits for the
+      // colouring's own line to empty, so the late idle is part of the scene.
+      window.requestIdleCallback = (callback) => window.setTimeout(
+        () => callback({ didTimeout: true, timeRemaining: () => 0 }),
+        700,
+      );
     }),
   });
   try {
+    await standColourProbe(bare.page);
     await openConversation(bare.page, [
       { role: "user", text: "고쳐 줘" },
       { role: "assistant", text: fencedAnswer(CODE_FENCES) },
     ]);
     const seen = await bare.page.evaluate(async () => {
-      for (let beat = 0; beat < 6; beat += 1) await window.__PAINTED__();
+      // The colouring runs in idle slices, each asked with a `CODE_COLOUR.waitMs`
+      // deadline: the fences are read once its line is empty, as the checks
+      // above read theirs — a count of frames is spent before the first slice
+      // when the machine is busy.
+      await window.__COLOURS__.settle();
       const pres = [...document.querySelectorAll("#worker-view .helper-said pre.md-block")];
       const spans = pres.reduce((sum, pre) => sum + pre.querySelectorAll(":scope > [class^='chat-code-']").length, 0);
       return { api: typeof window.Highlight, fences: pres.length, words: pres.map((pre) => pre.textContent), spans };

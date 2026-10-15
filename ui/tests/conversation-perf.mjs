@@ -904,7 +904,9 @@ export async function standSwitcher(page) {
     let wire = 60;
     // The rows each tab's list showed when it was last looked at.
     const seen = new Map();
-    const list = () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility()) ?? null;
+    // The list in front: a conversation set aside stands in the document under
+    // it, hidden from assistive technology (t-55369).
+    const list = () => [...document.querySelectorAll(".helper-turns")].find((one) => one.checkVisibility() && !one.closest('[aria-hidden="true"]')) ?? null;
     const rows = (held) => [...held.querySelectorAll(":scope > [data-turn]")];
     // The rows standing in the list's view, and those of them standing bare.
     const inView = (held) => {

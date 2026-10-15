@@ -422,7 +422,10 @@ const galleryDoors = await page.evaluate(async () => {
   window.__ARTIFACT_OPENED__ = null;
   await artifactAction(artifactsView(), "open", "gal-2");
   await new Promise((done) => setTimeout(done, 40));
-  seen.drawerOpenUsedBrowser = window.__BROWSER_OPENS__.length === 3 && window.__ARTIFACT_OPENED__ === null;
+  // 그 주소의 탭이 이미 서 있다: 서랍의 열기도 같은 문을 지나 그 탭을 앞으로 세운다 — 새 판도,
+  // 시스템 기본 앱도 아니다(t-55370).
+  seen.drawerOpenUsedBrowser = window.__BROWSER_OPENS__.length === 2 && window.__ARTIFACT_OPENED__ === null
+    && activeTabId === "browser:browser-gal-1";
   // 다시 읽기는 전사 가져오기도 한 번 청한다. (열기가 브라우저 탭을 앞에
   // 세웠으니 갤러리를 다시 앞으로.)
   openArtifacts();
@@ -450,7 +453,7 @@ const galleryDoors = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a claude.ai card opens its url in the window's browser, a page opens in the browser with the header strip and a version picker that navigates the same pane, feedback, Finder and share act on the picked immutable version, a document opens in the markdown viewer with the same strip, new-artifact asks for its recipient, and the drawer's open walks the same doors",
+  "a claude.ai card opens its url in the window's browser, a page opens in the browser with the header strip and a version picker that navigates the same pane, feedback, Finder and share act on the picked immutable version, a document opens in the markdown viewer with the same strip, new-artifact asks for its recipient, and the drawer's open walks the same doors (to the card's tab that already stands)",
   galleryDoors.webOpened.startsWith("https://claude.ai/code/artifact/") &&
     galleryDoors.webTabHasNoStrip && galleryDoors.webStripHidden === true &&
     galleryDoors.pageOpened.startsWith("file:///tmp/zerocode-window-test/project/page-0.html") &&

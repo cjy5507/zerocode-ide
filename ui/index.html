@@ -4288,12 +4288,24 @@
             <div class="settings-action-row">
               <button type="button" class="btn" id="judgment-source-inspect" data-i18n="settings.models.inspect" disabled>모델 확인</button>
             </div>
-            <article id="judgment-source-preview" hidden>
-              <h4 id="judgment-source-model-name"></h4>
+            <article class="judgment-source-result" id="judgment-source-result" data-state="inspecting" data-i18n-aria="settings.models.resultLabel" aria-label="확인 결과" hidden>
+              <div class="judgment-source-result-heading">
+                <h4 id="judgment-source-model-name"></h4>
+                <span class="judgment-source-badges">
+                  <span class="judgment-source-badge" id="judgment-source-badge-current" data-badge="current" hidden></span>
+                  <span class="judgment-source-badge" id="judgment-source-badge-installed" data-badge="installed" hidden></span>
+                  <span class="judgment-source-badge" id="judgment-source-badge-readiness" data-badge="readiness" hidden></span>
+                </span>
+              </div>
               <p class="settings-row-desc" id="judgment-source-model-info"></p>
               <p class="settings-row-desc" id="judgment-source-model-support"></p>
+              <ol class="judgment-source-steps" id="judgment-source-steps" data-i18n-aria="settings.models.stepsLabel" aria-label="진행 단계" hidden></ol>
+              <progress id="judgment-source-progress" aria-labelledby="judgment-source-status" hidden></progress>
               <div class="settings-action-row">
                 <button type="button" class="btn btn--primary" id="judgment-source-use" disabled>설치하고 사용</button>
+                <button type="button" class="btn" id="judgment-source-cancel" data-i18n="settings.managed.cancel" hidden>취소</button>
+                <button type="button" class="btn" id="judgment-source-retry" data-i18n="settings.models.retry" hidden>다시 시도</button>
+                <button type="button" class="btn" id="judgment-source-folder-instead" data-i18n="settings.models.folderInstead" hidden>폴더에서 불러오기</button>
               </div>
             </article>
             <p class="settings-status" id="judgment-source-status" role="status" aria-live="polite"></p>

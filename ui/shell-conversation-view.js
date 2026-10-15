@@ -154,17 +154,21 @@ function diffRowsNode(edit, words) {
  * The extension measures a message (`scrollHeight > maxHeight`) and cuts one
  * taller than the clip. Measured here too, in one pass after the rows of a
  * paint stand: every read first, then every write — a paint that brought ten
- * long messages lays the list out once for them, not ten times. How tall a
- * message stands depends on the pane's width, so none is judged by its
- * length alone. */
+ * long messages lays the list out once for them, not ten times — and in the
+ * frame they first stand in, before it is drawn (`syncHelperTurns`): a read in
+ * the task that built them laid the page out once more than its frame does
+ * (t-55369). How tall a message stands depends on the pane's width, so none is
+ * judged by its length alone. */
 function clipPersonRows(rows) {
   const tall = [];
+  let clip = null;
   for (const row of rows) {
     const said = row.querySelector(":scope > .helper-said");
     if (!said) continue;
     const style = getComputedStyle(said);
+    clip ??= parseFloat(style.getPropertyValue("--chat-user-clip-h"));
     const words = said.scrollHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
-    if (words > parseFloat(style.getPropertyValue("--chat-user-clip-h")) + 1) tall.push(said);
+    if (words > clip + 1) tall.push(said);
   }
   for (const said of tall) clipWith(said, true);
 }
@@ -314,6 +318,11 @@ function chatAway(list) {
  * every new turn dragged them to the foot at each poll). */
 function chatFollows(list) {
   if (!list) return false;
+  // A list not yet placed is placed at its first box (`standChatPlace`, from
+  // its watch): until then it follows unless its reader's place says not, and
+  // nothing is read off it — a read in the task that built the page laid it
+  // out once more before its first frame (t-55369).
+  if (list.__follow?.placed === false) return !list.__follow.away;
   const state = chatFollowState(list);
   return !state.away && (chatFootGap(list) < CHAT_FOLLOW.slack || state.gliding !== null);
 }
@@ -321,6 +330,8 @@ function chatFollows(list) {
 /* To the foot — gliding while a send's glide is young and motion is welcome,
  * at once otherwise. */
 function carryToFoot(list) {
+  // A list not yet placed goes to its foot when it is placed.
+  if (list.__follow?.placed === false) return;
   const state = chatFollowState(list);
   const young = state.gliding !== null && Date.now() - state.gliding < CHAT_FOLLOW.glide;
   if (!young) state.gliding = null;
@@ -445,109 +456,308 @@ function chatPlaceAcross(list, run) {
   return same ? { turn: String(same.seq), offset: reading.offset } : null;
 }
 
-/* ---- a conversation looked away from is kept aside (t-54304) ---------------
+/* ---- a conversation looked away from is kept aside (t-54304, t-55369) -------
  *
- * A leaf draws one conversation at a time on one host. A press on another
- * conversation's tab let the page go and built the next — and, coming back,
- * built this one again: every row of up to `HELPER_TURN_CAP` turns, 79 ms for
- * 400 in the harness and 360 ms at a 4x CPU (t-22100's open). The desktop apps
- * the person held it against never build a conversation they still hold:
- * Dots keeps a hidden view alive for 600 s (`ttlSeconds:600`, React
- * Activity); Claude's Code tab and Codex keep what a thread looked like when
- * it was left — its rows' heights, the row read and how far into it, whether
- * it followed its foot — and stand it there again (reports/t-54304/
- * findings-*.md). This page has no windowing to restore, so the cheapest way
- * to the same is to keep the page itself: the host's nodes, taken out of the
- * document and put back as they were.
+ * A leaf draws one conversation at a time. A press on another conversation's
+ * tab let the page go and built the next — and, coming back, built this one
+ * again: every row of up to `HELPER_TURN_CAP` turns, 79 ms for 400 in the
+ * harness and 360 ms at a 4x CPU (t-22100's open). The desktop apps the
+ * person held it against never build a conversation they still hold: Dots
+ * keeps a hidden view alive for 600 s (`ttlSeconds:600`, React Activity);
+ * Claude's Code tab and Codex keep what a thread looked like when it was left
+ * — its rows' heights, the row read and how far into it, whether it followed
+ * its foot — and stand it there again (reports/t-54304/findings-*.md).
  *
- * Out of the document nothing of a kept page is found, read aloud, laid out
- * or painted; its watchers' answers find its list disconnected and wait for
- * it (`judgeShelf`, `imageWatch`, the rail's frame). What lives only while a
- * page is looked at goes as it would with the page: a helper's stop and the
- * answer still out for it (`leaveHelperPageStop`); and the code blocks the
- * colouring let go while the page was out go back in line when it comes back
- * (`colourCodeAgainIn`). A leaf keeps `pages` of them — the ones looked at
- * last — for `ttlMs` each, and a closed tab's goes at once
- * (`releaseWorkerPage`). A 400-turn page is some 2,150 elements. */
-const CHAT_PARK = Object.freeze({ pages: 2, ttlMs: 600_000 });
+ * The first cut (t-54304) took the page out of the document and put it back
+ * as it was: no row built again, but an element out of the document loses its
+ * computed style, so the page came back to some 2,800 elements styled and
+ * laid out from nothing — 37 ms for 400 turns (127 ms at a 4x CPU, 86 ms on
+ * WebKit). The conversation left LAST now stays in the document (t-55369): its
+ * own host keeps the leaf's cell, out of the flow under the page in front
+ * (`.worker-view.is-behind`, shell.css) — drawn nothing, under no pointer,
+ * hidden from assistive technology, the keyboard's focus passing over it
+ * (`passFocusBehind`) — and coming back is the leaf taking that host as its
+ * view again. No node moves: nothing is styled or laid out again, the list
+ * stands where its reader left it, and the press is over before the frame
+ * (7 ms; 37 ms at a 4x CPU, 11 ms on WebKit). Hiding it any other way costs
+ * the press what it saves: `content-visibility: hidden` keeps the layout on
+ * Chromium and not on WebKit, which builds the page again (59–65 ms), and
+ * `inert` or `visibility: hidden` style every element again (23 ms; WebKit
+ * 37–44 ms) — reports/t-55369.
+ *
+ * A page standing rendered weighs what the page in front does (11 MB for 400
+ * turns, 2.9 MB out of the document), so the keeping has tiers, and these are
+ * its only numbers:
+ *  - `pages`: a leaf keeps this many conversations aside, the ones looked at
+ *    last; the oldest goes.
+ *  - `behind`: of the pages behind a leaf's front — conversations set aside,
+ *    and its view while it shows another tab (`standStageSurface`) — or behind
+ *    a pane's screen (its conversation, `placePaneChat`), this many stand
+ *    rendered: the ones left last. A page set aside waits out of the document
+ *    as the first cut kept it, the reader's place written on its run
+ *    (`keepChatPlace`); a view or a pane's conversation hides as before.
+ *  - `leaves`: so many leaves and panes of the window keep pages behind — those
+ *    that set one behind last (`sweepBehind`). The window holds at most
+ *    `leaves × behind` pages behind (22 MB at 400 turns).
+ *  - `ttlMs`: a page kept longer goes, and a closed tab's goes at once
+ *    (`releaseWorkerPage`).
+ * When the window must give memory back, `sweepParkedPages(host, now,
+ * { tight: true })` takes every page behind out of the document. A kept page's
+ * watchers stay with it: behind the front they answer as for a page in view;
+ * out of the document they find its list disconnected and wait for it
+ * (`judgeShelf`, `imageWatch`, the rail's frame), and the code blocks the
+ * colouring let go meanwhile go back in line when it comes back
+ * (`colourCodeAgainIn`). What lives only while a page is looked at goes as it
+ * would with the page: a helper's stop and the answer still out for it
+ * (`leaveHelperPageStop`). */
+const CHAT_PARK = Object.freeze({ pages: 2, behind: 1, leaves: 2, ttlMs: 600_000 });
 
-/* Take the conversation page standing on `host` out of the document and keep
- * it, when the tab coming is another one. Its reader's place is written on its
- * run as before (`keepChatPlace`), for the day the kept page is let go and the
- * conversation built again. */
-function parkChatPage(host, coming) {
+/* The host the leaf draws `coming`'s page on: the page standing on `host` is
+ * set aside, and `coming`'s own, kept when it left, comes back on its own host
+ * — `host` itself when nothing changes hands. A host that is not a leaf's view
+ * (a pane's own conversation, `paneChats`) holds one page and is its own. The
+ * leaf's kept pages ride its view (`__parked`), and so does the window's
+ * `#worker-view`. */
+function frontChatHost(host, coming) {
+  const group = groups.get(coming.pane);
+  if (!group || group.workerView !== host) return host;
   const page = host.__helperPage;
-  if (!page || page.id === coming.id) return;
-  const tab = tabs.find((one) => one.id === page.id);
-  if (!tab) return;
-  const list = page.turns;
-  keepChatPlace(list);
-  const kept = {
-    page,
-    pane: tab.pane,
-    nodes: [...host.childNodes],
-    classes: ["is-chat-page", "is-helper-page"].filter((name) => host.classList.contains(name)),
-    keyboard: host.dataset.keyboardOwner === "true",
-    at: Date.now(),
-    timer: 0,
-  };
-  host.__dockWatch?.disconnect();
-  host.__dockWatch = null;
-  leaveHelperPageStop(host);
-  host.replaceChildren();
-  host.__helperPage = null;
-  host.classList.remove("is-chat-page", "is-helper-page");
-  delete host.dataset.keyboardOwner;
+  if (page?.id === coming.id) return host;
+  const leaving = page && tabs.some((one) => one.id === page.id) ? page : null;
+  const kept = host.__parked?.get(coming.id) ?? null;
+  if (!leaving && !kept) return host;
   const parked = (host.__parked ??= new Map());
-  dropParkedPage(host, page.id);
-  parked.set(page.id, kept);
-  kept.timer = setTimeout(() => sweepParkedPages(host), CHAT_PARK.ttlMs);
-  sweepParkedPages(host);
-  // The page coming leaves the kept ones as it comes back (`unparkChatPage`),
-  // so it never counts against them — nor is it the oldest let go.
-  const aside = () => [...parked.keys()].filter((id) => id !== coming.id);
-  while (aside().length > CHAT_PARK.pages) dropParkedPage(host, aside()[0]);
+  if (kept) {
+    parked.delete(coming.id);
+    clearTimeout(kept.timer);
+  }
+  const front = kept?.host ?? freshWorkerHost();
+  if (leaving) {
+    keepChatPlace(leaving.turns);
+    leaveHelperPageStop(host);
+    const aside = {
+      page: leaving,
+      host,
+      pane: coming.pane,
+      at: Date.now(),
+      behind: true,
+      timer: setTimeout(() => sweepParkedPages(groups.get(coming.pane)?.workerView), CHAT_PARK.ttlMs),
+    };
+    parked.set(leaving.id, aside);
+    standBehind(host, true, { unit: `leaf:${coming.pane}`, demote: () => takeOutOfDocument(aside) });
+  } else {
+    // What stood here is not kept — a run's page, a closed conversation's, or
+    // nothing: its host goes with it.
+    if (page) forgetChatList(page.turns);
+    host.__dockWatch?.disconnect();
+    dropWorkerScreen(coming.pane);
+    leaveWorkerHost(host);
+  }
+  // A new host takes the place of the page it covers, so the leaf's front
+  // comes first in it.
+  if (!front.isConnected) {
+    if (leaving) host.before(front);
+    else group.el.appendChild(front);
+  }
+  standBehind(front, false);
+  front.__parked = parked;
+  host.__parked = null;
+  if (host.id) {
+    front.id = host.id;
+    host.removeAttribute("id");
+  }
+  front.hidden = false;
+  group.workerView = front;
+  // A page that waited out of the document lost its offset and its fences'
+  // places in the colouring's line with it: it stands again on the row its
+  // reader left (the place `keepChatPlace` wrote), its dock is watched again
+  // and its fences go back in line. A page from behind the front kept all of it.
+  if (kept && !kept.behind) {
+    const list = kept.page.turns;
+    if (list.__follow) list.__follow.placed = false;
+    standChatPlace(list);
+    if (kept.page.dock) front.__dockWatch = watchChatDock(front, kept.page.dock);
+    colourCodeAgainIn(front);
+  }
+  sweepParkedPages(front);
+  return front;
 }
 
-/* Put the page `tab` left on this host back as it was — its nodes, its
- * classes, the dock's watch, and the list where its reader left it: the offset
- * went out with the document, so the list stands again on the row read and its
- * height under the top (`standChatPlace` reads the place `parkChatPage` wrote),
- * or at its foot — now if it has a box, else when it gets one (`keepToFoot`'s
- * watch). The page then takes the road of any page standing as drawn: the new
- * turns, the head, the status. */
-function unparkChatPage(host, tab) {
-  const kept = host.__parked?.get(tab.id);
-  if (!kept || host.__helperPage) return;
-  host.__parked.delete(tab.id);
-  clearTimeout(kept.timer);
-  host.replaceChildren(...kept.nodes);
-  for (const name of kept.classes) host.classList.add(name);
-  if (kept.keyboard) host.dataset.keyboardOwner = "true";
-  host.__helperPage = kept.page;
-  const list = kept.page.turns;
-  if (list.__follow) list.__follow.placed = false;
-  standChatPlace(list);
-  if (kept.page.dock) host.__dockWatch = watchChatDock(host, kept.page.dock);
-  colourCodeAgainIn(host);
+/* A leaf's new view: the window's worker surface, built bare (`buildWorkerView`
+ * names it `#worker-view`, which only the leaf's view in front answers to). */
+function freshWorkerHost() {
+  const host = DOC_VIEWS.worker.build();
+  host.removeAttribute("id");
+  host.hidden = false;
+  DOC_VIEWS.worker.wire(host);
+  applyLocale(host);
+  return host;
 }
 
-/* Let a kept page go: its watchers and its timer. */
+/* A host that stops being a bare leaf view — set behind the front, or gone —
+ * while it is the one every other leaf's view is cloned from (`docTemplates`):
+ * a bare one takes that place, or a new leaf would open on a copy of a page
+ * standing hidden. */
+function retireWorkerTemplate(host) {
+  if (docTemplates.get("worker") === host) docTemplates.set("worker", DOC_VIEWS.worker.build());
+}
+
+/* A host the leaf will not show again leaves the document. */
+function leaveWorkerHost(host) {
+  retireWorkerTemplate(host);
+  host.remove();
+}
+
+/* Every page standing behind the front in the window, by its host — a
+ * conversation set aside in its leaf, a leaf's view while the leaf shows
+ * another tab (`standStageSurface`), a pane's conversation while the pane
+ * shows its screen (`placePaneChat`): where it stands (`unit`, its leaf or its
+ * pane — each one of the window's `CHAT_PARK.leaves`), since when, and how it
+ * leaves when the window keeps no more of them (`demote`: out of the document
+ * for a page set aside, hidden for a view or a pane's conversation, as they
+ * were before t-55369). */
+const chatBehind = new Map();
+
+/* A page set behind the front, or brought back: one class (shell.css draws it
+ * nothing and lets no pointer reach it), the one attribute that hides it from
+ * assistive technology, and its line in the window's book. The focus it held
+ * goes with it. */
+function standBehind(host, behind, { unit = null, demote = null } = {}) {
+  if (behind && host.contains(document.activeElement)) document.activeElement.blur();
+  if (behind) retireWorkerTemplate(host);
+  host.classList.toggle("is-behind", behind);
+  if (behind) {
+    host.setAttribute("aria-hidden", "true");
+    chatBehind.set(host, { unit, at: Date.now(), demote });
+  } else {
+    host.removeAttribute("aria-hidden");
+    chatBehind.delete(host);
+  }
+}
+
+/* The pages behind the front the window keeps standing: in each leaf or pane
+ * the last `CHAT_PARK.behind`, and of the leaves and panes the
+ * `CHAT_PARK.leaves` that set one behind last — none when the window must give
+ * memory back (`tight`). The others go as `demote` says. */
+function sweepBehind({ tight = false } = {}) {
+  const units = new Map();
+  for (const [host, one] of chatBehind) {
+    if (!host.isConnected) {
+      chatBehind.delete(host);
+      continue;
+    }
+    units.set(one.unit, [...(units.get(one.unit) ?? []), one]);
+  }
+  const standing = [];
+  for (const held of units.values()) {
+    held.sort((a, b) => b.at - a.at);
+    for (const one of held.slice(CHAT_PARK.behind)) one.demote();
+    standing.push(held.slice(0, CHAT_PARK.behind));
+  }
+  standing.sort((a, b) => b[0].at - a[0].at);
+  for (const held of standing.slice(tight ? 0 : CHAT_PARK.leaves)) for (const one of held) one.demote();
+}
+
+/* What the stage does with a surface: shows it, or hides the one no leaf
+ * shows — except a leaf's view holding a conversation, which stands behind
+ * what its leaf shows instead (t-55369): a conversation tab left for a
+ * terminal tab comes back as from another conversation, nothing styled or
+ * laid out again. A view off the stage's leaves, or past what the window
+ * keeps (`sweepBehind`), hides. */
+function standStageSurface(host, shown) {
+  if (shown) {
+    if (host.classList.contains("is-behind")) standBehind(host, false);
+    host.hidden = false;
+    return;
+  }
+  if (host.hidden || host.classList.contains("is-behind")) return;
+  const leaf = host.__helperPage && host.isConnected
+    ? [...groups.entries()].find(([, group]) => group.workerView === host)?.[0]
+    : undefined;
+  if (leaf === undefined) {
+    host.hidden = true;
+    return;
+  }
+  standBehind(host, true, {
+    unit: `leaf:${leaf}`,
+    demote: () => {
+      standBehind(host, false);
+      host.hidden = true;
+    },
+  });
+  sweepBehind();
+}
+
+/* A page behind the front leaves the document: its host goes with every node
+ * of the page in it, to wait as the first cut kept pages — its dock no longer
+ * watched until it comes back. */
+function takeOutOfDocument(kept) {
+  if (!kept.behind) return;
+  kept.behind = false;
+  chatBehind.delete(kept.host);
+  kept.host.__dockWatch?.disconnect();
+  kept.host.__dockWatch = null;
+  kept.host.remove();
+}
+
+/* Let a kept page go: its host, its watchers and its timer. */
 function dropParkedPage(host, id) {
   const kept = host?.__parked?.get(id);
   if (!kept) return;
   host.__parked.delete(id);
   clearTimeout(kept.timer);
   forgetChatList(kept.page.turns);
+  takeOutOfDocument(kept);
 }
 
 /* The kept pages whose time ran out, whose tab is gone, or whose tab now
- * stands in another leaf. */
-function sweepParkedPages(host, now = Date.now()) {
-  for (const [id, kept] of host?.__parked ?? []) {
-    const tab = tabs.find((one) => one.id === id);
-    if (!tab || tab.pane !== kept.pane || now - kept.at >= CHAT_PARK.ttlMs) dropParkedPage(host, id);
+ * stands in another leaf, and past the leaf's last `CHAT_PARK.pages`; then
+ * every page behind the front in the window as `sweepBehind` keeps them.
+ * `tight`, when the window must give memory back, keeps none standing behind:
+ * a page set aside goes out of the document, a view or a pane's conversation
+ * hides. */
+function sweepParkedPages(host, now = Date.now(), { tight = false } = {}) {
+  const parked = host?.__parked;
+  if (parked) {
+    for (const [id, kept] of parked) {
+      const tab = tabs.find((one) => one.id === id);
+      if (!tab || tab.pane !== kept.pane || now - kept.at >= CHAT_PARK.ttlMs) dropParkedPage(host, id);
+    }
+    const last = [...parked.values()].sort((a, b) => b.at - a.at);
+    for (const kept of last.slice(CHAT_PARK.pages)) dropParkedPage(host, kept.page.id);
   }
+  sweepBehind({ tight });
+}
+
+/* The keyboard's focus never stays on a page behind the front: a Tab that
+ * reaches it goes on to the next control past it (a Shift+Tab, to the one
+ * before it), and a `focus()` asked there from nowhere is let go. Ready
+ * controls are the dialogs' own (`MODAL_TAB_STOP`, `modalFocusReady`), which
+ * pass over every page behind — each is hidden from assistive technology. */
+function passFocusBehind(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const behind = target?.closest(".worker-view.is-behind") ?? null;
+  if (!behind) return;
+  const from = event.relatedTarget instanceof Element && !behind.contains(event.relatedTarget) ? event.relatedTarget : null;
+  if (from === null) {
+    target.blur();
+    return;
+  }
+  const forward = (from.compareDocumentPosition(behind) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+  const side = forward ? Node.DOCUMENT_POSITION_FOLLOWING : Node.DOCUMENT_POSITION_PRECEDING;
+  const stops = [...document.querySelectorAll(MODAL_TAB_STOP)].filter((node) =>
+    node.tabIndex >= 0 && !node.contains(behind) && (behind.compareDocumentPosition(node) & side) !== 0 && !behind.contains(node));
+  const next = (forward ? stops : stops.reverse()).find(modalFocusReady) ?? null;
+  if (next) next.focus();
+  else target.blur();
+}
+
+/* A conversation's surface takes that guard when it is built — a leaf's view
+ * through the views' own wiring (`DOC_VIEWS`), a pane's conversation where it
+ * is made (`placePaneChat`): on the surface, since the document's `focusin` is
+ * the tooltip's one delegated listener. */
+function wireWorkerView(host) {
+  host.addEventListener("focusin", passFocusBehind);
 }
 
 /* The conversation list of the page `node` stands on, or null. */
