@@ -227,6 +227,20 @@ fn line_of(task: &str, evidence: &serde_json::Map<String, serde_json::Value>) ->
     parts.join(" · ")
 }
 
+/// What the newest landing check of a task said (t-56141, red: the reader is not written yet).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LandCheckSeen {
+    pub state: String,
+    pub rc: Option<i64>,
+    pub created_ms: i64,
+}
+
+/// Red: reads nothing yet.
+pub fn newest_land_check(run: &Run, task: &str, since_ms: i64) -> Option<LandCheckSeen> {
+    let _ = (run, task, since_ms);
+    None
+}
+
 impl Ledger {
     /// One check's evidence, in the ledger's own voice, to the coordinator of the run that holds
     /// the task — once per check id, however many times the window asks. Answers the row's id,

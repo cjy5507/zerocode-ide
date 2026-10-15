@@ -742,6 +742,22 @@ pub(super) enum SidebarProjectOrder {
     Recent,
 }
 
+/// Red (t-56141): the team view or the branch list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum SidebarLayout {
+    #[default]
+    Team,
+    Branches,
+}
+
+impl SidebarLayout {
+    /// Red: refuses every word yet.
+    pub(super) fn parsed(layout: &str) -> Result<Self, String> {
+        Err(format!("unknown sidebar layout: {layout}"))
+    }
+}
+
 /// The sidebar's three ways of looking at one list.
 ///
 /// One value and not three, because they are one fact with three faces and
@@ -755,6 +771,8 @@ pub(super) struct SidebarView {
     pub(super) sort_by: SidebarSortBy,
     #[serde(default)]
     pub(super) project_order: SidebarProjectOrder,
+    #[serde(default)]
+    pub(super) layout: SidebarLayout,
 }
 
 impl SidebarView {
@@ -793,6 +811,7 @@ impl SidebarView {
             group_by: group,
             sort_by: sort,
             project_order: order,
+            layout: SidebarLayout::default(),
         })
     }
 }

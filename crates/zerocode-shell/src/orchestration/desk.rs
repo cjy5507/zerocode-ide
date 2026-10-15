@@ -441,6 +441,11 @@ pub(crate) struct DeskRun {
     /// When the last holder's pane was proven gone (a leader exit or a window
     /// restart), while nobody has sat since.
     pub(crate) vacated_ms: Option<i64>,
+    /// Red (t-56141): what the run's coordinator owes and what waits to land, not counted yet.
+    pub(crate) mail: usize,
+    pub(crate) news: usize,
+    pub(crate) landing: usize,
+    pub(crate) batched: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -662,6 +667,10 @@ pub(crate) fn desk_snapshot(
             held: live.is_some(),
             generation: chair.map_or(0, |held| held.generation),
             vacated_ms: chair.and_then(|held| held.vacated_ms),
+            mail: 0,
+            news: 0,
+            landing: 0,
+            batched: 0,
         });
         for task in &run.tasks {
             let (stage, progress) = staged(run, task);
@@ -1332,6 +1341,12 @@ mod tests {
         assert_eq!(
             desk["counts"]["news"], 5,
             "the notices are news, one line each: {desk}"
+        );
+        // The run's own row counts the same letters, for the sidebar's coordinator card (t-56141).
+        assert_eq!(
+            (&desk["runs"][0]["mail"], &desk["runs"][0]["news"]),
+            (&serde_json::json!(1), &serde_json::json!(5)),
+            "the run's counts are not the desk's: {desk}"
         );
     }
 
@@ -2589,6 +2604,17 @@ mod tests {
         ] {
             assert_eq!(stage(id), word, "{id}");
         }
+        // The run's row counts what waits to land — verified, not merged — and nothing else:
+        // the sidebar's landing line (t-56141). No batch is open here.
+        assert_eq!(
+            desk.runs
+                .iter()
+                .map(|one| (one.run.as_str(), one.landing, one.batched))
+                .collect::<Vec<_>>(),
+            vec![(run.as_str(), 1, 0)],
+            "{:?}",
+            desk.runs
+        );
         for word in [
             "reported", "verified", "merged", "deployed", "stale", "unknown",
         ] {

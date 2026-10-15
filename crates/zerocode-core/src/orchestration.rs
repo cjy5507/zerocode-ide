@@ -4572,6 +4572,23 @@ fn named_ids(ids: &[&str]) -> String {
     }
 }
 
+/// A worker's last `status` letter (t-56141, red: the reader is not written yet).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LastStatus {
+    pub message_id: String,
+    pub created_ms: i64,
+    pub line: String,
+}
+
+/// How much of a status letter's first line [`last_status`] keeps.
+pub const LAST_STATUS_LINE_CHARS: usize = 200;
+
+/// Red: reads nothing yet.
+pub fn last_status(run: &Run, worker_id: &str, since_ms: i64) -> Option<LastStatus> {
+    let _ = (run, worker_id, since_ms);
+    None
+}
+
 /// A worker's last `status`, as an idle notice carries it (t-15313): which
 /// message, when, and its first line — what the worker last said it was
 /// doing or waiting on, however long before its rest it said it. `null`

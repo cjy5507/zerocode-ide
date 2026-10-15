@@ -2535,6 +2535,12 @@ pub(crate) struct LedgerAgent {
     pub(crate) quiet_at: Option<i64>,
     /// The reconciler's proof that its pane is gone (`Worker::pane_missing_since_ms`).
     pub(crate) pane_missing_since_ms: Option<i64>,
+    /// Red (t-56141): the worker's last status, not read yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_status: Option<zerocode_core::orchestration::LastStatus>,
+    /// Red (t-56141): the task's newest landing check, not read yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) land_check: Option<zerocode_core::orchestration::land_check::LandCheckSeen>,
     /// What its task cost, once the task is finished (t-9470) — laid on by
     /// the board's beat from the window's cost book ([`cost_book::CostBook::dress`]);
     /// `None` for a task still moving, and on every row read another way.
@@ -3148,6 +3154,8 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 quota_wall,
                 quiet_at: worker.quiet_at,
                 pane_missing_since_ms: worker.pane_missing_since_ms,
+                last_status: None,
+                land_check: None,
                 cost: None,
                 gate: None,
                 writing: None,
