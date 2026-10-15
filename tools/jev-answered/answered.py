@@ -7,6 +7,7 @@ two versions wrote were counted by two formulas and are not compared.
 
     answered.py [--home <zo home>] [--project <dir> ...]
                 [--window <label>=<from>..<to> ...]
+                [--ran window|zo=<version>@<from>..<to> ...]
                 [--app <ZeroCode.app>] [--zo <zo>] [--json <file>]
 
 A time is local `YYYY-MM-DDTHH:MM[:SS]`, the same with `Z` or an offset, or
@@ -14,9 +15,14 @@ epoch milliseconds; an end left empty is open, and a window holds its start
 and not its end. Windows are reported in UTC. Without `--window` every row
 falls in one window, `all`. Without `--project` every project's folder is
 read and summed; with it, only the named ones, found by zo's slug rule.
-`--app` and `--zo` name the versions installed when the count was taken and
-when each one's file last changed; a row does not say which version wrote
-it, so a window a version file changed inside is marked.
+A row does not say which version wrote it. `--ran` names a process `ps`
+showed: the version of the bundle or binary it was started from, and when
+it ran. The window writes the window's rows and zo the projects'. A row
+takes the one version its writer ran when it was written; a row no process
+covers, or two versions cover at once, is counted as unknown. `--app` and
+`--zo` only name what was installed when the count was taken and when each
+file last changed, so a window a version file changed inside is marked; an
+installed version names no row.
 
 What a row counts as, from its own fields:
 - a row with an outcome is one judgment; a row without one (a label, a
@@ -133,6 +139,11 @@ NOT_A_WORD = "outcome_not_a_word"
 # The window every row falls in when none is asked for.
 ALL_WINDOW = "all"
 
+# Which process writes each place's rows, and the version of a row no one
+# version its writer ran covers.
+WRITERS = {WINDOW_PLACE: "window", PROJECTS_PLACE: "zo"}
+UNKNOWN_VERSION = "unknown"
+
 # Where a macOS app keeps its version, and how long `zo --version` may take.
 APP_INFO = ("Contents", "Info.plist")
 APP_VERSION_KEY = "CFBundleShortVersionString"
@@ -147,6 +158,20 @@ class Window:
 
     def holds(self, at: int) -> bool:
         return (self.start is None or at >= self.start) and (self.end is None or at < self.end)
+
+
+@dataclass(frozen=True)
+class Ran:
+    """A process `ps` showed running one version from `start` until `end`,
+    open while it still runs."""
+
+    writer: str
+    version: str
+    start: int
+    end: Optional[int]
+
+    def holds(self, at: int) -> bool:
+        return at >= self.start and (self.end is None or at < self.end)
 
 
 @dataclass
@@ -165,6 +190,7 @@ class Tally:
     unsent: Counter = field(default_factory=Counter)
     routes: Counter = field(default_factory=Counter)
     rubrics: Counter = field(default_factory=Counter)
+    ran: Counter = field(default_factory=Counter)
 
 
 @dataclass
@@ -201,6 +227,21 @@ def window(spec: str) -> Window:
     if not label or not equals or not dots:
         raise SystemExit(f"--window wants label=from..to, not {spec!r}")
     return Window(label, moment(start), moment(end))
+
+
+def ran(spec: str) -> Ran:
+    writer, equals, rest = spec.partition("=")
+    version, at, span = rest.partition("@")
+    start, dots, end = span.partition("..")
+    if writer not in WRITERS.values() or not equals or not WORD.fullmatch(version) or not at or not dots or not start.strip():
+        raise SystemExit(f"--ran wants window|zo=version@from..to, not {spec!r}")
+    return Ran(writer, version, moment(start), moment(end))
+
+
+def version_at(processes: list[Ran], writer: str, at: int) -> str:
+    """The one version a row's writer ran when the row was written."""
+    versions = {one.version for one in processes if one.writer == writer and one.holds(at)}
+    return versions.pop() if len(versions) == 1 else UNKNOWN_VERSION
 
 
 def places(home: Path, projects: list[Path]) -> list[tuple[str, Path]]:
@@ -280,10 +321,12 @@ def judge(row: dict, folder: str, tally: Tally) -> None:
         tally.rubrics[rubric] += 1
 
 
-def count(home: Path, windows: list[Window], projects: list[Path] = ()) -> tuple[dict[tuple[str, str, str, str], Tally], list[Read]]:
-    """Each judgment by (place, seat ledger, provider folder, window), and
-    what was read of each ledger: its bytes, their sha256, and the lines
-    that were corrupt or untimed."""
+def count(
+    home: Path, windows: list[Window], projects: list[Path] = (), processes: list[Ran] = ()
+) -> tuple[dict[tuple[str, str, str, str], Tally], list[Read]]:
+    """Each judgment by (place, seat ledger, provider folder, window) with
+    the version its writer ran, and what was read of each ledger: its bytes,
+    their sha256, and the lines that were corrupt or untimed."""
     tallies: dict[tuple[str, str, str, str], Tally] = {}
     reads: list[Read] = []
     for place, base in places(home, list(projects)):
@@ -309,9 +352,12 @@ def count(home: Path, windows: list[Window], projects: list[Path] = ()) -> tuple
                     if at is None:
                         read.untimed += 1
                         continue
+                    version = version_at(processes, WRITERS[place], at)
                     for one in windows:
                         if one.holds(at):
-                            judge(row, folder, tallies.setdefault((place, seat, folder, one.label), Tally()))
+                            tally = tallies.setdefault((place, seat, folder, one.label), Tally())
+                            judge(row, folder, tally)
+                            tally.ran[version] += 1
                 reads.append(read)
     return tallies, reads
 
@@ -356,6 +402,7 @@ def rows_of(tallies: dict[tuple[str, str, str, str], Tally], windows: list[Windo
                 "unattributed": tally.unattributed,
                 "routes": most_first(tally.routes),
                 "failures": most_first(tally.failures),
+                "ran": most_first(tally.ran),
             }
         )
     return rows
@@ -370,17 +417,19 @@ def totals_of(rows: list[dict], windows: list[Window]) -> list[dict]:
         total = sums.setdefault(
             (row["folder"], row["window"]),
             {"folder": row["folder"], "window": row["window"], "judgments": 0, "sent": 0, "attempts": 0,
-             "answered": 0, "noRequests": 0, "unsent": Counter(), "failures": Counter()},
+             "answered": 0, "noRequests": 0, "unsent": Counter(), "failures": Counter(), "ran": Counter()},
         )
         for name in ("judgments", "sent", "attempts", "answered", "noRequests"):
             total[name] += row[name]
         total["unsent"].update(row["unsent"])
         total["failures"].update(row["failures"])
+        total["ran"].update(row["ran"])
     totals = [sums[key] for key in sorted(sums, key=lambda key: (key[0] != JEV_FOLDER, key[0], order[key[1]]))]
     for total in totals:
         total["share"] = share(total["answered"], total["sent"])
         total["unsent"] = most_first(total["unsent"])
         total["failures"] = most_first(total["failures"])
+        total["ran"] = most_first(total["ran"])
     return totals
 
 
@@ -425,15 +474,20 @@ def render(rows: list[dict], totals: list[dict], reads: list[Read], windows: lis
             said_windows.append(f"{one.label} {utc(one.start) or 'open'}..{utc(one.end) or 'open'}{mark}")
         return " · ".join(said_windows)
 
+    def processes() -> str:
+        named = [f"{one['writer']} {one['version']} {one['startUtc']}..{one['endUtc'] or 'open'}" for one in counted.get("ran", [])]
+        return " · ".join(named) or f"none named, so every row's version is {UNKNOWN_VERSION}"
+
     out = [
         f"Counted {counted['countedAt']} from {counted['home']} · {version('app')} · {version('zo')}",
         f"Windows (UTC): {spans()}",
+        f"Processes (UTC, as ps showed them): {processes()}",
         "",
     ]
     out += table(
         ["seat ledger", "place", "provider folder", "window", "rubric", "judgments", "sent", "attempts",
          "answered of sent", "share", "applied", "not sent", "retried", "probed", "other provider",
-         "unattributed", "routes", "failures of sent (most first)"],
+         "unattributed", "routes", "failures of sent (most first)", "version its writer ran"],
         [
             [
                 row["seat"],
@@ -454,13 +508,15 @@ def render(rows: list[dict], totals: list[dict], reads: list[Read], windows: lis
                 f"{row['unattributed']:,}",
                 said(row["routes"], short),
                 said(row["failures"]),
+                said(row["ran"]),
             ]
             for row in rows
         ],
     )
     out += ["", "Every seat and place summed, by provider folder and window:", ""]
     out += table(
-        ["provider folder", "window", "judgments", "sent", "attempts", "answered of sent", "share", "not sent", "failures of sent (most first)"],
+        ["provider folder", "window", "judgments", "sent", "attempts", "answered of sent", "share", "not sent", "failures of sent (most first)",
+         "version its writer ran"],
         [
             [
                 short(total["folder"]),
@@ -472,6 +528,7 @@ def render(rows: list[dict], totals: list[dict], reads: list[Read], windows: lis
                 percent(total["share"]),
                 unsent(total),
                 said(total["failures"]),
+                said(total["ran"]),
             ]
             for total in totals
         ],
@@ -509,6 +566,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--home", type=Path, default=Path.home() / ".zo", help="the zo home to read")
     parser.add_argument("--project", type=Path, action="append", default=[], help="a project whose folder to read (default: every one)")
     parser.add_argument("--window", action="append", default=[], help="label=from..to, one per window")
+    parser.add_argument("--ran", action="append", default=[], help="window|zo=version@from..to, one per process ps showed")
     parser.add_argument("--app", type=Path, help="the installed app, to name its version")
     parser.add_argument("--zo", type=Path, help="the installed zo, to name its version")
     parser.add_argument("--json", type=Path, help="the rows and the files read, as JSON too")
@@ -516,13 +574,15 @@ def main(argv: list[str]) -> int:
     windows = [window(spec) for spec in args.window] or [Window(ALL_WINDOW, None, None)]
     if len({one.label for one in windows}) != len(windows):
         raise SystemExit("each --window wants its own label")
+    processes = [ran(spec) for spec in args.ran]
     counted = {
         "countedAt": utc(int(datetime.now(timezone.utc).timestamp() * 1000)),
         "home": str(args.home),
         "projects": [str(one) for one in args.project],
         "versions": {"app": app_installed(args.app), "zo": zo_installed(args.zo)},
+        "ran": [dict(asdict(one), startUtc=utc(one.start), endUtc=utc(one.end)) for one in processes],
     }
-    tallies, reads = count(args.home, windows, args.project)
+    tallies, reads = count(args.home, windows, args.project, processes)
     rows = rows_of(tallies, windows)
     totals = totals_of(rows, windows)
     print(render(rows, totals, reads, windows, counted))
