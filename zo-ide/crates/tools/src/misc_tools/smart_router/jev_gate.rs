@@ -1038,12 +1038,24 @@ mod tests {
             "rubricVersion": seat.rubric_version, "outcome": outcome, "requests": 1})
     }
 
+    /// A request of `seat`'s series its server answered with a wait until
+    /// `until`, in Unix milliseconds ([`SERVER_RETRY_AT`]).
+    fn waited(seat: &JevUse, until: i64) -> Value {
+        let mut row = sent(seat, "http_503", Duration::ZERO);
+        row[SERVER_RETRY_AT] = until.into();
+        row
+    }
+
     /// `seat`'s ledger under `cwd`, holding `rows` and nothing else.
     fn ledger_holding(cwd: &Path, seat: &JevUse, rows: &[Value]) {
-        let path = shadow_ledger_path(cwd, seat.ledger);
+        holding(&shadow_ledger_path(cwd, seat.ledger), rows);
+    }
+
+    /// The ledger at `path`, holding `rows` and nothing else.
+    fn holding(path: &Path, rows: &[Value]) {
         std::fs::create_dir_all(path.parent().expect("a ledger folder")).expect("the folder");
         let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
-        std::fs::write(&path, text).expect("the ledger");
+        std::fs::write(path, text).expect("the ledger");
     }
 
     /// The person's word for `seat`, written into the settings file the door
@@ -1222,6 +1234,76 @@ mod tests {
             }
             ledger_holding(cwd, &RECALL, &rows);
             assert_eq!(door_says(cwd, &RECALL), Some("resting"), "the others still count");
+        });
+    }
+
+    /// A guard keeps its rows under the config home, one ledger for every
+    /// project on this machine ([`super::super::tool_guard::command_guard_path`]),
+    /// and the door reads the wait its server named there (t-58193), until
+    /// the wait has passed. Every other seat's wait is read from the
+    /// project's folder as before: a recall's row in the guards' folder
+    /// holds nothing.
+    #[test]
+    fn a_guard_waits_on_its_own_ledger_and_a_project_seat_on_the_projects() {
+        use super::super::jev_mock;
+        use super::super::tool_guard::{command_guard_path, tool_text_guard_path};
+        use zerocode_core::jev::{COMMAND_GUARD, TOOL_TEXT_GUARD};
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        let words = [
+            (COMMAND_GUARD.setting, "on"),
+            (TOOL_TEXT_GUARD.setting, "on"),
+            (RECALL.setting, "shadow"),
+        ];
+        jev_mock::machine_words(&words, &endpoint.base_url, |cwd| {
+            let now = super::super::decision_shadow::now_ms();
+            let among_the_guards = command_guard_path().with_file_name(RECALL.ledger);
+            holding(&among_the_guards, &[waited(&RECALL, now + 60_000)]);
+            assert_eq!(door_says(cwd, &RECALL), None, "the guards' folder");
+            ledger_holding(cwd, &RECALL, &[waited(&RECALL, now + 60_000)]);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "the project's folder");
+            let own = [
+                (&COMMAND_GUARD, command_guard_path()),
+                (&TOOL_TEXT_GUARD, tool_text_guard_path()),
+            ];
+            for (guard, ledger) in own {
+                holding(&ledger, &[waited(guard, now + 60_000)]);
+                assert_eq!(door_says(cwd, guard), Some("resting"), "{}", guard.id);
+                holding(&ledger, &[waited(guard, now - 1)]);
+                assert_eq!(door_says(cwd, guard), None, "{} once its wait has passed", guard.id);
+            }
+        });
+    }
+
+    /// A guard's wait is the provider's that named it (t-58193): each
+    /// provider keeps its rows in a folder of its own
+    /// (`runtime::judgment_evidence_dir`), so a guard whose person's settings
+    /// name another provider asks it, and the first one's wait holds the
+    /// guard again once they name the first.
+    #[test]
+    fn a_wait_one_provider_named_does_not_hold_a_guard_asking_another() {
+        use super::super::jev_mock;
+        use super::super::tool_guard::command_guard_path;
+        use zerocode_core::jev::COMMAND_GUARD;
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&COMMAND_GUARD, "on", &endpoint.base_url, |cwd| {
+            let ahead = super::super::decision_shadow::now_ms() + 60_000;
+            holding(&command_guard_path(), &[waited(&COMMAND_GUARD, ahead)]);
+            let path = runtime::default_config_home().join(SETTINGS_FILE);
+            let first = std::fs::read_to_string(&path).expect("settings");
+            let another = judgment_provider::Provider {
+                kind: judgment_provider::ProviderKind::Local,
+                protocol: judgment_provider::Protocol::SystemOne,
+                base_url: endpoint.base_url.clone(),
+                model: "acme/decision-model".to_string(),
+                requires_auth: false,
+            };
+            let mut root: Value = serde_json::from_str(&first).expect("json");
+            root["smart"][judgment_provider::SETTINGS_KEY] =
+                serde_json::to_value(another).expect("a provider");
+            std::fs::write(&path, root.to_string()).expect("another provider");
+            assert_eq!(door_says(cwd, &COMMAND_GUARD), None, "another provider");
+            std::fs::write(&path, first).expect("the first provider again");
+            assert_eq!(door_says(cwd, &COMMAND_GUARD), Some("resting"), "the one that named it");
         });
     }
 

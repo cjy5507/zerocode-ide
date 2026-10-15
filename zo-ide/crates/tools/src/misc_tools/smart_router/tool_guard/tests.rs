@@ -445,22 +445,21 @@ fn an_acting_command_guard_hands_back_its_line_after_the_command_ran() {
 /// line handed back, the call as it was, the same verdict and the same row
 /// but for its outcome. The only difference is that no request leaves.
 ///
-/// The door holds a seat for a wait its server named where it reads that
-/// seat's rows, the project's own folder. The guards keep theirs under the
-/// config home ([`command_guard_path`]), so a guard is not held today and
-/// takes the `503` road itself; the wait is written here where the door
-/// reads, to hold this guard as the door holds the project's seats.
+/// The wait is the one its server named on the guard's own row, in its own
+/// ledger under the config home ([`command_guard_path`]) where a guard
+/// writes what its server said, not in the project's folder where the door
+/// reads every other seat's. A wait whose moment has passed holds nothing:
+/// the request leaves and takes the `503` road itself.
 #[test]
 fn a_command_guard_held_at_the_door_goes_on_as_after_a_503_that_named_no_wait() {
-    use super::super::shadow_ledger::shadow_ledger_path;
-    let decided = |mock: &Mock, held: bool| {
+    let decided = |mock: &Mock, wait: Option<i64>| {
         machine(&COMMAND_GUARD, JevMode::On.key(), &mock.base_url, |cwd| {
             forget_waiting(cwd);
-            if held {
+            if let Some(after) = wait {
                 let at = super::super::decision_shadow::now_ms();
                 let waited = serde_json::json!({"at": at, "outcome": "http_503", "requests": 1,
-                    "rubricVersion": COMMAND_GUARD.rubric_version, "serverRetryAt": at + 60_000});
-                let ledger = shadow_ledger_path(cwd, COMMAND_GUARD.ledger);
+                    "rubricVersion": COMMAND_GUARD.rubric_version, "serverRetryAt": at + after});
+                let ledger = command_guard_path();
                 std::fs::create_dir_all(ledger.parent().expect("a folder")).expect("the folder");
                 std::fs::write(&ledger, format!("{waited}\n")).expect("the wait it named");
             }
@@ -469,7 +468,8 @@ fn a_command_guard_held_at_the_door_goes_on_as_after_a_503_that_named_no_wait() 
             let (owner, tool_use_id) = ("turn-1".to_string(), "shell-1".to_string());
             let ran = CommandRan { owner, tool_use_id, failed: false, cancelled: false };
             let line = api::sync_bridge::run_blocking(judge.command_ran(ran));
-            let row = rows_of(&command_guard_path(), 1)[0].clone();
+            let rows = rows_of(&command_guard_path(), 1 + usize::from(wait.is_some()));
+            let row = rows.last().expect("its row").clone();
             let row: CommandGuardRow = serde_json::from_value(row).expect("a command row");
             (line, row)
         })
@@ -481,7 +481,7 @@ fn a_command_guard_held_at_the_door_goes_on_as_after_a_503_that_named_no_wait() 
     };
 
     let plain = Mock::serving(503, "{}".to_string());
-    let (line, after_503) = decided(&plain, false);
+    let (line, after_503) = decided(&plain, None);
     let refused = SystemOneFailure::Http(503).ledger_token();
     let sent = (after_503.asked.outcome.as_str(), after_503.asked.requests);
     assert_eq!(sent, (refused.as_str(), 1), "{after_503:?}");
@@ -489,8 +489,16 @@ fn a_command_guard_held_at_the_door_goes_on_as_after_a_503_that_named_no_wait() 
     assert_eq!(line, None, "nothing answered, so no line");
     assert_eq!(after_503.asked.route_use, ROUTE_USE_FALLBACK, "{after_503:?}");
 
+    let passed = Mock::serving(503, "{}".to_string());
+    let (passed_line, after_wait) = decided(&passed, Some(-1));
+    let sent = (after_wait.asked.outcome.as_str(), after_wait.asked.requests);
+    assert_eq!(sent, (refused.as_str(), 1), "a wait that has passed: {after_wait:?}");
+    assert_eq!(passed.requests().len(), 1);
+    assert_eq!(passed_line, line);
+    assert_eq!(decision(&after_wait), decision(&after_503));
+
     let waiting = Mock::serving(503, "{}".to_string());
-    let (held_line, held) = decided(&waiting, true);
+    let (held_line, held) = decided(&waiting, Some(60_000));
     assert_eq!((held.asked.outcome.as_str(), held.asked.requests), ("resting", 0), "{held:?}");
     assert!(waiting.requests().is_empty(), "no request leaves");
     assert_eq!(held_line, line);
