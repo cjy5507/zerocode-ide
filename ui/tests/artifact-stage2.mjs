@@ -207,6 +207,111 @@ export async function testArtifactStage2(browser, origin, ok) {
       JSON.stringify(shade),
     );
 
+    /* ---- ⑤ a page the person looked at gives the gallery its thumbnail ------------------- */
+    const seen = await page.evaluate(async () => {
+      const held = window.__STAGE2__;
+      const out = {};
+      // Two pictures: the seen pane's and the hidden pane's, told apart by their bytes.
+      const SEEN = "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
+      const HIDDEN = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+      held.thumbAsks = [];
+      window.__ANSWER__.artifact_thumbnail = async (args) => {
+        held.thumbAsks.push({ id: args.id, label: args.label ?? null });
+        await new Promise((done) => setTimeout(done, 4));
+        return { data_url: args.label ? SEEN : HIDDEN, cached: false };
+      };
+      // A beat after the first paint, not half a second: the number is the table's, overridden here.
+      document.documentElement.style.setProperty("--artifact-seen-thumb-ms", "40");
+      artifactThumbs.delete("gal-0");
+      artifactThumbFailed.delete("gal-0");
+      const tab = await held.openFromGallery("gal-0");
+      setActiveTab(tab?.id);
+      await held.settle();
+      const url = pathAsFileUrl(artifactRows.get("gal-0")?.path ?? "");
+      await held.navigate(tab, url, "started");
+      await held.navigate(tab, url, "finished");
+      for (let beat = 0; beat < 40 && !held.thumbAsks.some((one) => one.id === "gal-0" && one.label); beat += 1) await held.settle(30);
+      out.seenAsks = held.thumbAsks.filter((one) => one.id === "gal-0" && one.label === tab?.label).length;
+      out.hiddenAsksWhileOpen = held.thumbAsks.filter((one) => one.id === "gal-0" && one.label === null).length;
+      out.heldThumb = artifactThumbs.get("gal-0") === SEEN;
+      // Back in the gallery the card wears the seen picture and asks the hidden pane for nothing.
+      held.thumbAsks.length = 0;
+      await held.toGallery(null);
+      await held.settle(200);
+      const view = artifactsView();
+      view?.querySelector('[data-artifact-tab="pages"]')?.click();
+      await held.settle(200);
+      const card = view?.querySelector('.artifact-card[data-id="gal-0"]');
+      const thumb = card?.querySelector(".artifact-card-thumb");
+      out.cardShowsSeen = thumb ? thumb.hidden === false && thumb.getAttribute("src") === SEEN : null;
+      out.hiddenAsksInGallery = held.thumbAsks.filter((one) => one.id === "gal-0" && one.label === null).length;
+      document.documentElement.style.removeProperty("--artifact-seen-thumb-ms");
+      await held.fresh();
+      return out;
+    });
+    ok(
+      "⑤ a beat after a page's first paint the window asks artifact_thumbnail with the pane's label — once — and keeps that picture",
+      seen.seenAsks === 1 && seen.hiddenAsksWhileOpen === 0 && seen.heldThumb,
+      JSON.stringify(seen),
+    );
+    ok(
+      "⑤ back in the gallery the card wears the seen picture and the hidden pane is asked for nothing (hidden renders for a seen page 1 → 0)",
+      seen.cardShowsSeen === true && seen.hiddenAsksInGallery === 0,
+      JSON.stringify(seen),
+    );
+
+    /* ---- ⑤ a Markdown card's face is an excerpt without its fenced blocks ------------------ */
+    const excerpt = await page.evaluate(async () => {
+      const held = window.__STAGE2__;
+      const out = {};
+      const base = window.__buildArtifacts__({ count: 0, gallery: 6 });
+      const now = Date.now();
+      const doc = {
+        id: "doc-fence", kind: "document", title: "fenced.md", path: "/tmp/zerocode-window-test/project/fenced.md", bytes: 900,
+        created_ms: now, modified_ms: now, origin: { agent: "claude", project: "/tmp/zerocode-window-test/project" }, tags: [],
+        preview: {
+          kind: "markdown",
+          text: "# 보고서 제목\n\n```mermaid\ngraph TD; A-->B\n```\n\n첫 문단은 발췌에 선다.\n\n```js\nconst fence = 1;\n```\n\n둘째 문단도 선다.\n\n~~~\ntilde fence\n~~~\n\n셋째 문단까지 선다.\n\n```\nan open fence runs to the end",
+        },
+        source: "agent_page",
+      };
+      window.__ANSWER__.artifacts_list = () => ({
+        rows: [doc, ...base], total: base.length + 1, truncated: false, missing: [], missing_total: 0,
+        thumb: { width: 320, height: 240, queue_max: 24 },
+      });
+      window.__PREVIEW_ASKS__ = [];
+      held.thumbAsks = [];
+      window.__ANSWER__.artifact_thumbnail = async (args) => {
+        held.thumbAsks.push({ id: args.id, label: args.label ?? null });
+        return { data_url: null, cached: true };
+      };
+      artifactAskedAt = 0;
+      await refreshArtifacts();
+      await held.settle(120);
+      const view = artifactsView();
+      view?.querySelector('[data-artifact-tab="pages"]')?.click();
+      await held.settle(200);
+      const card = view?.querySelector('.artifact-card[data-id="doc-fence"]');
+      const face = card?.querySelector(".artifact-card-doc");
+      out.faceShown = face ? face.hidden === false : null;
+      out.face = face?.textContent ?? null;
+      out.hasProse = ["첫 문단은 발췌에 선다", "둘째 문단도 선다", "셋째 문단까지 선다"].every((words) => (out.face ?? "").includes(words));
+      out.noFences = !["graph TD", "const fence", "tilde fence", "open fence"].some((words) => (out.face ?? "").includes(words));
+      out.thumbHidden = card?.querySelector(".artifact-card-thumb")?.hidden ?? null;
+      out.pictureAsks = held.thumbAsks.filter((one) => one.id === "doc-fence").length
+        + (window.__PREVIEW_ASKS__ ?? []).filter((id) => id === "doc-fence").length;
+      delete window.__ANSWER__.artifacts_list;
+      artifactAskedAt = 0;
+      await refreshArtifacts();
+      await held.settle(120);
+      return out;
+    });
+    ok(
+      "⑤ a Markdown card's face is the excerpt of its text with every fenced block left out — code, mermaid, tilde and an unclosed fence — and no picture is asked for it",
+      excerpt.faceShown === true && excerpt.hasProse && excerpt.noFences && excerpt.thumbHidden === true && excerpt.pictureAsks === 0,
+      JSON.stringify(excerpt),
+    );
+
     ok("the artifact-stage2 window raised no errors", faults.length === 0, faults.slice(0, 3).join(" | "));
   } finally {
     await page.close();
