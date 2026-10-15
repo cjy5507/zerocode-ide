@@ -3005,6 +3005,124 @@ mod tests {
     }
 
     #[test]
+    fn a_page_that_asks_for_its_pointer_alone_carries_no_snippet_and_spends_no_slot() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().expect("tempdir");
+        let cwd = root.path().join("repo");
+        let config_home = root.path().join("home").join(".zo");
+        fs::create_dir_all(&cwd).expect("cwd");
+
+        // Three pages with readable bodies. The top one's front matter asks to
+        // be recalled as its pointer line alone, so both snippet slots go to
+        // the two pages behind it.
+        let section = with_config_home(&config_home, || {
+            let memory_dir = crate::memory::paths::memory_write_dir(&cwd, false);
+            fs::create_dir_all(&memory_dir).expect("memory dir");
+            let hits = (0..3)
+                .map(|index| {
+                    let slug = format!("pointer-page-{index}");
+                    let path = memory_dir.join(format!("{slug}.md"));
+                    let field = if index == 0 { "recall: pointer\n" } else { "" };
+                    fs::write(
+                        &path,
+                        format!("---\ntitle: page {index}\n{field}---\n\nbody of page {index}\n"),
+                    )
+                    .expect("page");
+                    MemoryHit {
+                        entry: MemoryEntry {
+                            slug,
+                            path: path.display().to_string(),
+                            summary: format!("summary {index}"),
+                        },
+                        score: 10 - index,
+                    }
+                })
+                .collect::<Vec<_>>();
+            render_recalled_memory_section(&hits).expect("section")
+        });
+
+        assert!(
+            !section.contains("body of page 0"),
+            "a page that asks for its pointer alone carries no snippet: {section}"
+        );
+        assert!(
+            section.contains("- [pointer-page-0]("),
+            "it is still named by its pointer line: {section}"
+        );
+        assert!(section.contains("body of page 1"), "{section}");
+        assert!(
+            section.contains("body of page 2"),
+            "the slot it did not spend goes to the next page: {section}"
+        );
+    }
+
+    #[test]
+    fn a_page_that_does_not_set_the_pointer_field_renders_byte_identical_to_what_it_was() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().expect("tempdir");
+        let cwd = root.path().join("repo");
+        let config_home = root.path().join("home").join(".zo");
+        fs::create_dir_all(&cwd).expect("cwd");
+
+        // Only front matter can ask: a body that says the words, front matter
+        // without the field and a page with no front matter all render as they
+        // did before the field existed, the third past both snippet slots.
+        let pages = [
+            "A body may say\nrecall: pointer\nin prose.",
+            "---\ntitle: plain page\ntags: [one, two]\n---\n\nFront matter without the field.",
+            "No front matter at all.",
+        ];
+        let (hits, section) = with_config_home(&config_home, || {
+            let memory_dir = crate::memory::paths::memory_write_dir(&cwd, false);
+            fs::create_dir_all(&memory_dir).expect("memory dir");
+            let hits = pages
+                .iter()
+                .zip(0_u32..)
+                .map(|(page, index)| {
+                    let slug = format!("plain-page-{index}");
+                    let path = memory_dir.join(format!("{slug}.md"));
+                    fs::write(&path, page).expect("page");
+                    MemoryHit {
+                        entry: MemoryEntry {
+                            slug,
+                            path: path.display().to_string(),
+                            summary: format!("summary {index}"),
+                        },
+                        score: 10 - index,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let section = render_recalled_memory_section(&hits).expect("section");
+            (hits, section)
+        });
+
+        let pointer = |index: usize| {
+            format!(
+                "- [plain-page-{index}]({}) — summary {index}\n",
+                hits[index].entry.path
+            )
+        };
+        let expected = [
+            super::RECALL_SECTION_HEADER,
+            &pointer(0),
+            "  snippet (untrusted excerpt):\n",
+            "  > A body may say\n",
+            "  > recall: pointer\n",
+            "  > in prose.\n",
+            &pointer(1),
+            "  snippet (untrusted excerpt):\n",
+            "  > ---\n",
+            "  > title: plain page\n",
+            "  > tags: [one, two]\n",
+            "  > ---\n",
+            "  > Front matter without the field.\n",
+            &pointer(2),
+        ]
+        .concat();
+        assert_eq!(section, expected);
+    }
+
+    #[test]
     fn two_pages_that_disagree_arrive_side_by_side_and_say_so() {
         use crate::second_brain::corpus::RelationKind;
         let _lock = crate::test_env_lock();
