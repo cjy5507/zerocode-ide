@@ -499,6 +499,94 @@ export async function testArtifactStage2(browser, origin, ok) {
       JSON.stringify(heavy),
     );
 
+    /* ---- ⑧ the open is timed in visible time and recorded; a late page says so ------------- */
+    const clock = await page.evaluate(async () => {
+      const held = window.__STAGE2__;
+      const out = {};
+      // The marks are the table's (8 s, 30 s), pulled in here so the suite does not wait on them.
+      document.documentElement.style.setProperty("--artifact-open-slow-ms", "150");
+      document.documentElement.style.setProperty("--artifact-open-stalled-ms", "400");
+      const noteOf = (tab) => held.hostOf(tab)?.querySelector(".artifact-strip-note") ?? null;
+      const noteWords = (tab) => (noteOf(tab)?.hidden === false ? noteOf(tab).querySelector(".artifact-strip-note-words")?.textContent ?? "" : null);
+      // A: an ordinary open paints after a while and is recorded once, with the visible time.
+      held.records.length = 0;
+      const pressed = performance.now();
+      const tab = await held.openFromGallery("gal-0");
+      setActiveTab(tab?.id);
+      await held.settle(80);
+      const url = pathAsFileUrl(artifactRows.get("gal-0")?.path ?? "");
+      await held.navigate(tab, url, "finished");
+      const wallA = performance.now() - pressed;
+      const recordsA = held.records.filter((one) => one.id === "gal-0");
+      out.recordsA = recordsA.length;
+      out.outcomeA = recordsA[0]?.outcome ?? null;
+      out.visibleA = recordsA[0]?.visible_ms ?? null;
+      out.wallA = Math.round(wallA);
+      out.visibleAPlausible = Number.isFinite(out.visibleA) && out.visibleA >= 60 && out.visibleA <= wallA + 5;
+      out.noteA = noteWords(tab);
+      await held.fresh();
+      // B: only visible time counts — the clock stops while the gallery is in front of the page.
+      held.records.length = 0;
+      const pressedB = performance.now();
+      const tabB = await held.openFromGallery("gal-3");
+      setActiveTab(tabB?.id);
+      await held.settle(40);
+      openArtifacts();
+      await held.settle(250);
+      setActiveTab(tabB?.id);
+      await held.settle(40);
+      const wallB = performance.now() - pressedB;
+      await held.navigate(tabB, pathAsFileUrl(artifactRows.get("gal-3")?.path ?? ""), "finished");
+      const recordB = held.records.find((one) => one.id === "gal-3") ?? null;
+      out.visibleB = recordB?.visible_ms ?? null;
+      out.wallB = Math.round(wallB);
+      out.awayLeftOut = Number.isFinite(out.visibleB) && out.visibleB <= wallB - 200;
+      await held.fresh();
+      // C: a page that does not come — the strip says so past the slow mark, and the open is recorded as stalled past the stalled mark.
+      held.records.length = 0;
+      const slow = held.publication("p-slow");
+      const tabC = await held.openFromGallery(slow.id);
+      setActiveTab(tabC?.id);
+      await held.settle(60);
+      out.noteEarly = noteWords(tabC);
+      await held.settle(200);
+      out.noteSlow = noteWords(tabC);
+      out.recordsSlow = held.records.filter((one) => one.id === slow.id).length;
+      await held.settle(300);
+      out.noteStalled = noteWords(tabC);
+      const stalled = held.records.filter((one) => one.id === slow.id);
+      out.recordsStalled = stalled.length;
+      out.outcomeStalled = stalled[0]?.outcome ?? null;
+      out.visibleStalled = stalled[0]?.visible_ms ?? null;
+      out.actStalled = noteOf(tabC)?.querySelector(".artifact-strip-note-act")?.hidden === false
+        ? noteOf(tabC).querySelector(".artifact-strip-note-act").textContent.trim() : null;
+      // The page comes at last: the note goes.
+      await held.navigate(tabC, tabC?.url ?? "", "finished");
+      out.noteAfter = noteWords(tabC);
+      document.documentElement.style.removeProperty("--artifact-open-slow-ms");
+      document.documentElement.style.removeProperty("--artifact-open-stalled-ms");
+      await held.fresh();
+      return out;
+    });
+    ok(
+      `⑧ an open is recorded once when the page paints, with the visible time (${clock.visibleA} ms of ${clock.wallA} ms wall), and the strip says nothing`,
+      clock.recordsA === 1 && clock.outcomeA === "painted" && clock.visibleAPlausible && clock.noteA === null,
+      JSON.stringify(clock),
+    );
+    ok(
+      `⑧ only visible time counts: with the gallery in front for 250 ms the record says ${clock.visibleB} ms of ${clock.wallB} ms wall`,
+      clock.awayLeftOut,
+      JSON.stringify(clock),
+    );
+    ok(
+      "⑧ past the slow mark the strip says the page is still loading; past the stalled mark the open is recorded as stalled and the strip says so, and the note goes when the page comes",
+      clock.noteEarly === null && typeof clock.noteSlow === "string" && clock.noteSlow.includes("아직 읽는 중") && clock.recordsSlow === 0
+        && typeof clock.noteStalled === "string" && clock.noteStalled.includes("멈춘") && clock.recordsStalled >= 1
+        && clock.outcomeStalled === "stalled" && Number.isFinite(clock.visibleStalled) && clock.visibleStalled >= 380
+        && clock.actStalled === "다시 읽기" && clock.noteAfter === null,
+      JSON.stringify(clock),
+    );
+
     ok("the artifact-stage2 window raised no errors", faults.length === 0, faults.slice(0, 3).join(" | "));
   } finally {
     await page.close();
