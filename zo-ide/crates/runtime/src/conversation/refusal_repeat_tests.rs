@@ -786,10 +786,10 @@ mod hook_contract {
 
     use super::super::DeepGateConfig;
     use super::{
-        first_words, internal_leg, standing_notices, turn, AsyncApiClient, ContentBlock,
+        answer_of, first_words, internal_leg, standing_notices, turn, AsyncApiClient, ContentBlock,
         ConversationMessage, ConversationRuntime, Declining, DecliningSync, Hermetic, MessageRole,
         PermissionMode, PermissionPolicy, Session, StaticToolExecutor, Trace, TurnSummary,
-        OTHER_WORDS, REFUSAL_STANDING_NOTICE, UNROUTED, WORDS,
+        OTHER_WORDS, REFUSAL_STANDING_NOTICE, REFUSAL_STANDING_REPEAT_NOTICE, UNROUTED, WORDS,
     };
     use crate::compact::{compact_session, CompactionConfig, COMPACTION_SYSTEM_PROMPT};
     use crate::config::{ConfigLoader, RuntimeFeatureConfig};
@@ -1661,6 +1661,45 @@ mod hook_contract {
                 Trace::of(&provider, &runtime.session.messages, &env),
                 before,
                 "{road:?}: the same words sent nothing and recorded nothing"
+            );
+        }
+    }
+
+    /// The real repeat on every loop, through each loop's public entry and
+    /// with the hooks in place: the same words after the decline stood send
+    /// nothing, record nothing and say so in one line. So what the rule counts
+    /// on survived the ending of the turn that stood: its hooks, its settling
+    /// and its save (m-58078).
+    #[test]
+    fn a_real_repeat_sends_and_records_nothing_on_every_loop() {
+        for road in ROADS {
+            let env = Hermetic::new(&format!("real-repeat-{road:?}"));
+            let provider = Declining::new(UNROUTED);
+            let hooks = CountingHooks::new(&env);
+            let mut runtime = road.runtime(&env, &provider, &hooks);
+            road.stand(&env, &mut runtime);
+            let stood = Trace::of(&provider, &runtime.session.messages, &env);
+
+            let said: Vec<String> = match road {
+                Road::Headless => {
+                    let summary = runtime.run_turn(WORDS, None).expect("the repeat ends cleanly");
+                    answer_of(&summary).map(str::to_string).into_iter().collect()
+                }
+                Road::Streaming | Road::Deep => {
+                    let (ended, lines) = turn(&mut runtime, WORDS, Vec::new());
+                    ended.expect("the repeat ends cleanly");
+                    lines
+                }
+            };
+            assert_eq!(
+                Trace::of(&provider, &runtime.session.messages, &env),
+                stood,
+                "{road:?}: the repeat sent nothing and recorded nothing"
+            );
+            assert_eq!(
+                said,
+                [REFUSAL_STANDING_REPEAT_NOTICE.to_string()],
+                "{road:?}: and said so in one line"
             );
         }
     }
