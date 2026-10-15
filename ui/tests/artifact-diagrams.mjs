@@ -14,7 +14,8 @@
  *   5. a drawing that arrives after the person moved to another card never lands in that card —
  *      neither when it arrives after the new card's text, nor before it;
  *   6. in the drawer's column a drawing shrinks only until its smallest label reads at the window's
- *      caption size (`--text-3xs`); a wider one keeps that scale and its block scrolls sideways.
+ *      caption size (`--text-3xs`); a wider one keeps that scale, its block scrolls sideways and
+ *      fades the edges it is cut at, as the tab strip does, and the fade follows the column's width.
  *
  * Every wait is a condition read once a frame, bounded; an answer the test needs to hold is held
  * until the test releases it. Every read of the page is defensive (`?.`, `?? null`): on a tree that
@@ -324,6 +325,9 @@ export async function testArtifactDiagrams(browser, origin, ok) {
       artifactPreviews.delete("r-old");
       open("t-503");
       const stood = await window.__UNTIL__(() => showing("크기 문단.") && md.querySelectorAll(".mmd-block svg.mmd").length === 3);
+      // A fade is set where the frame that lays a drawing out reports its sizes, which comes after
+      // that frame's animation callbacks, where the check above ran; so the blocks are read a frame on.
+      await new Promise(requestAnimationFrame);
       // The window's caption size, which no label may be drawn below.
       const caption = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--text-3xs"));
       const blocks = [...(md?.querySelectorAll(".mmd-block") ?? [])].map((block) => {
@@ -335,6 +339,7 @@ export async function testArtifactDiagrams(browser, origin, ok) {
           natural, width: Math.round(width * 10) / 10, column: block.clientWidth, smallestSet: Math.min(...set),
           smallestShown: natural > 0 ? Math.round((Math.min(...set) * width / natural) * 100) / 100 : 0,
           scrolls: block.scrollWidth > block.clientWidth + 1,
+          faded: /gradient/.test(getComputedStyle(block).maskImage),
         };
       });
       return { away, stood, caption, blocks, readerScrolls: md ? md.scrollWidth > md.clientWidth + 1 : null };
@@ -356,6 +361,46 @@ export async function testArtifactDiagrams(browser, origin, ok) {
       sizes.stood && sized.length === 3 && sized.every((one) => one.right) && !sized[0].scrolls && !sized[1].scrolls && sized[2].scrolls
         && sizes.readerScrolls === false,
       JSON.stringify({ sized, column: sizes.blocks[0]?.column, readerScrolls: sizes.readerScrolls }),
+    );
+    ok(
+      "a drawing that fits the drawer's column keeps its edges, and one wider than its block fades the edges it is cut at, as the tab strip does: macOS hides the scrollbar until it is used",
+      sizes.stood && sizes.blocks.length === 3 && !sizes.blocks[0].faded && !sizes.blocks[1].faded && sizes.blocks[2].faded,
+      JSON.stringify(sizes.blocks.map((one) => ({ natural: one.natural, scrolls: one.scrolls, faded: one.faded }))),
+    );
+
+    /* ---- 6: the fade follows the column's width ---------------------------------------------- */
+    const resized = await page.evaluate(async () => {
+      const seen = window.__DIAGRAMS__;
+      const box = document.createElement("div");
+      box.style.cssText = "position: fixed; left: 0; top: 0; width: 420px; height: 400px; overflow: auto; z-index: 99999";
+      document.body.appendChild(box);
+      const faded = () => {
+        const block = box.querySelector(".mmd-block");
+        return block ? /gradient/.test(getComputedStyle(block).maskImage) : null;
+      };
+      const settle = async () => {
+        for (let at = 0; at < 3; at += 1) await new Promise(requestAnimationFrame);
+      };
+      seen.hold = false;
+      if (typeof paintMarkdownView === "function") {
+        paintMarkdownView(box, ["```mermaid", "flowchart LR", "  A[조금-넓은-그림] -- 예 --> B[끝]", "```", ""].join("\n"));
+      }
+      const stood = await window.__UNTIL__(() => box.querySelector(".mmd-block svg.mmd"));
+      await settle();
+      const narrow = faded();
+      box.style.width = "700px";
+      await settle();
+      const wide = faded();
+      box.style.width = "420px";
+      await settle();
+      const narrowAgain = faded();
+      box.remove();
+      return { stood, narrow, wide, narrowAgain };
+    });
+    ok(
+      "the fade follows the column: a 600 px drawing in a 420 px column fades, keeps its edges once the column widens to 700 px, and fades again when it narrows",
+      resized.stood && resized.narrow === true && resized.wide === false && resized.narrowAgain === true,
+      JSON.stringify(resized),
     );
 
     /* ---- 1: a read-only tab (a document outside the project, t-16006) ------------------------- */
