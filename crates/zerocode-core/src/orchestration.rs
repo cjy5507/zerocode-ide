@@ -21968,13 +21968,20 @@ fn plan_inner(
             });
             let model = model.or_else(|| model_pick.as_ref().map(|(picked, _, _)| picked.clone()));
             let model = model.or_else(|| profile.as_ref().map(|p| p.model.clone()));
-            let effort = effort
-                .or_else(|| profile.as_ref().map(|p| p.effort.clone()))
-                .or_else(|| {
-                    chosen
-                        .and_then(|d| difficulty_effort(&agent, d))
-                        .map(str::to_string)
-                });
+            let effort = effort.or_else(|| profile.as_ref().map(|p| p.effort.clone()));
+            let laddered = chosen
+                .filter(|_| effort.is_none())
+                .and_then(|d| difficulty_effort(&agent, d));
+            let effort = effort.or_else(|| laddered.map(str::to_string));
+            // The dials say what set the effort even beside a model the
+            // request named, which no profile row speaks for (t-55423).
+            let dials = dials.map(|mut dials| {
+                if laddered.is_some() {
+                    dials["why"]["effortRule"] =
+                        serde_json::json!(crate::summon_difficulty::lineup::EffortRule::Ladder);
+                }
+                dials
+            });
             if effort.is_some() && model.is_none() {
                 return Err("--effort requires --model or a configured summon profile".to_string());
             }
