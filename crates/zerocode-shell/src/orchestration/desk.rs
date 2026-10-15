@@ -1367,6 +1367,87 @@ mod tests {
         );
     }
 
+    /// The coordinator card counts what the ledger counts (t-59383): a
+    /// question the seat wrote back about, in a letter naming it, is owed
+    /// nothing more — the letter filed in this run to the asker's pane, or
+    /// in the asker's own run to its chair. Three questions from another
+    /// run's coordinator, two letters naming one each, one letter naming
+    /// none: the card goes from 3 to 1.
+    #[test]
+    fn a_question_the_seat_wrote_back_about_leaves_the_card() {
+        let start = crate::now_epoch_ms() - HOUR_MS;
+        let mut ledger = Ledger::new();
+        let (run_id, worker) = a_worker_carrying_a_task(&mut ledger, start);
+        let asking = ledger.create_run("asker", start + 4);
+        let (here, there) = (format!("run:{run_id}"), format!("run:{asking}"));
+        // The panes the two chairs sit in: this run's, and the asking run's.
+        let (seat_here, seat_there) = ("team-here/%1", "team-there/%1");
+        let (from_here, asker) = (format!("pane:{seat_here}"), format!("pane:{seat_there}"));
+        let letter = |from: &str, to: &str, kind: MessageKind, body: &str| Draft {
+            from: from.to_string(),
+            to: to.to_string(),
+            kind,
+            body: Text::from(body),
+            subject: Text::default(),
+            priority: Priority::Normal,
+            payload: Text::default(),
+            thread: None,
+            task: None,
+            dispatch: None,
+        };
+        let signed = |ledger: &mut Ledger, run: &str, seat: &str, at: i64, draft: Draft| {
+            ledger
+                .post_as(run, draft, Some(seat), start + at)
+                .expect("posted")
+        };
+        let card = |ledger: &Ledger| {
+            let desk = desk_json(ledger);
+            let row = desk["runs"]
+                .as_array()
+                .and_then(|runs| runs.iter().find(|row| row["run"] == run_id.as_str()))
+                .cloned()
+                .unwrap_or_else(|| panic!("the run has no card: {desk}"));
+            (row["mail"].clone(), desk["counts"]["mail"].clone())
+        };
+        // Each chair signs once as its run: how a run remembers who sat in it.
+        let go = letter(&here, &worker_address(&worker), MessageKind::Status, "go");
+        signed(&mut ledger, &run_id, seat_here, 5, go);
+        let on_duty = letter(&there, &there, MessageKind::Status, "on duty");
+        signed(&mut ledger, &asking, seat_there, 6, on_duty);
+        let asked: Vec<String> = (7..10)
+            .map(|at| {
+                let question = letter(&asker, &here, MessageKind::Question, "which?");
+                signed(&mut ledger, &run_id, seat_there, at, question)
+            })
+            .collect();
+        assert_eq!(card(&ledger), (serde_json::json!(3), serde_json::json!(3)));
+
+        let filed_there = format!("{} 답: 네", asked[0]);
+        let filed_here = format!("{}에 답: 아니요", asked[1]);
+        let writes = [
+            (
+                &asking,
+                letter(&from_here, &there, MessageKind::Status, &filed_there),
+            ),
+            (
+                &run_id,
+                letter(&here, &asker, MessageKind::Status, &filed_here),
+            ),
+            (
+                &asking,
+                letter(&from_here, &there, MessageKind::Status, "셋째는 내일"),
+            ),
+        ];
+        for (at, (run, draft)) in (10..).zip(writes) {
+            signed(&mut ledger, run, seat_here, at, draft);
+        }
+        assert_eq!(
+            card(&ledger),
+            (serde_json::json!(1), serde_json::json!(1)),
+            "a question written back about is still on the card"
+        );
+    }
+
     /// A notice stands as a line for a day from when the ledger wrote it;
     /// after that it folds into the count — the inbox still holds it.
     #[test]

@@ -108,7 +108,12 @@ fn a_root_letter_from_the_asked_seat_naming_the_question_closes_it_for_the_count
 
     // ② a letter without the id, and one whose number only starts like it.
     let unnamed = ask_at(&mut bench, &second_pane, &seat, "may-i-merge?");
-    send_at(&mut bench, lead, &format!("worker:{second}"), "답: 네, 올리세요");
+    send_at(
+        &mut bench,
+        lead,
+        &format!("worker:{second}"),
+        "답: 네, 올리세요",
+    );
     send_at(
         &mut bench,
         lead,
@@ -138,7 +143,11 @@ fn a_root_letter_from_the_asked_seat_naming_the_question_closes_it_for_the_count
         .ledger
         .post(
             &run_id,
-            letter(&seat, &format!("worker:{first}"), &format!("{coming} 답: main")),
+            letter(
+                &seat,
+                &format!("worker:{first}"),
+                &format!("{coming} 답: main"),
+            ),
             bench.clock,
         )
         .expect("the early letter");
@@ -154,7 +163,10 @@ fn a_root_letter_from_the_asked_seat_naming_the_question_closes_it_for_the_count
             bench.clock,
         )
         .expect("the question after it");
-    assert_eq!(early, coming, "the letter does not name the question after it");
+    assert_eq!(
+        early, coming,
+        "the letter does not name the question after it"
+    );
 
     // One letter, two questions.
     let both_one = ask_at(&mut bench, &second_pane, &seat, "first-half?");
@@ -177,7 +189,8 @@ fn a_root_letter_from_the_asked_seat_naming_the_question_closes_it_for_the_count
     let run = bench.ledger.run(&run_id).expect("the run");
     for id in [&answered, &both_one, &both_two] {
         assert!(
-            run.answer_to(run.message(id).expect("the question")).is_none(),
+            run.answer_to(run.message(id).expect("the question"))
+                .is_none(),
             "a letter became the thread's answer to {id}"
         );
     }
@@ -217,5 +230,255 @@ fn a_question_answered_by_a_letter_closes_no_ring_of_waiting() {
         bench.json("check --peek --types deadlocked")["count"],
         0,
         "a question its seat answered by letter closed a ring"
+    );
+}
+
+/// Run `argv` from the leader pane of `team`, swapped in for the bench's own
+/// team and back — another window's coordinator. Answers its JSON.
+fn as_leader_of(bench: &mut Bench, team: &mut Team, argv: &[&str]) -> serde_json::Value {
+    std::mem::swap(&mut bench.team, team);
+    let planned = bench.at_argv(
+        agent_teams::LEADER_PANE,
+        argv.iter().map(|word| word.to_string()).collect(),
+    );
+    std::mem::swap(&mut bench.team, team);
+    assert_eq!(
+        planned.reply.exit_code, 0,
+        "{argv:?}: {}",
+        planned.reply.stderr
+    );
+    serde_json::from_str(&planned.reply.stdout).expect("the verb answers JSON")
+}
+
+/// A run `team`'s leader creates, and so sits in the chair of.
+fn run_of(bench: &mut Bench, team: &mut Team, name: &str) -> String {
+    as_leader_of(bench, team, &["run-create", "--name", name])["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string()
+}
+
+/// A question `team`'s leader puts to another run's chair — filed in that
+/// run under the leader's pane address, as `send --run` files it.
+fn ask_another_run(bench: &mut Bench, team: &mut Team, run_id: &str, body: &str) -> String {
+    let chair = format!("run:{run_id}");
+    as_leader_of(
+        bench,
+        team,
+        &[
+            "send", "--run", run_id, "--to", &chair, "--type", "question", "--body", body,
+        ],
+    )["messageId"]
+        .as_str()
+        .expect("a question id")
+        .to_string()
+}
+
+/// A letter `team`'s leader files in `run_id`, to that run's chair: the road
+/// a coordinator answers another run's question by.
+fn write_to_run(bench: &mut Bench, team: &mut Team, run_id: &str, body: &str) -> String {
+    let chair = format!("run:{run_id}");
+    as_leader_of(
+        bench,
+        team,
+        &[
+            "send", "--run", run_id, "--to", &chair, "--type", "status", "--body", body,
+        ],
+    )["messageId"]
+        .as_str()
+        .expect("a letter id")
+        .to_string()
+}
+
+/// One cross-run case, seats as they were (A1, the asker's run): the
+/// answering chair's letter in the asker's run closes the question it names.
+/// The words without the id, the same words from a pane that never sat in the
+/// chair asked, and the same words in a run whose chair the asker never sat
+/// in all leave theirs open.
+#[test]
+fn a_letter_in_the_askers_run_from_the_chair_it_asked_closes_the_question() {
+    let mut bench = Bench::new();
+    let mut asker = Team::new("team-asker", "asker", 60);
+    let mut answerer = Team::new("team-answerer", "answerer", 70);
+    let mut stranger = Team::new("team-stranger", "stranger", 80);
+    let asking = run_of(&mut bench, &mut asker, "asker");
+    let answering = run_of(&mut bench, &mut answerer, "answerer");
+    let elsewhere = run_of(&mut bench, &mut stranger, "elsewhere");
+
+    let named = ask_another_run(&mut bench, &mut asker, &answering, "which-branch?");
+    let unnamed = ask_another_run(&mut bench, &mut asker, &answering, "which-port?");
+    let by_a_stranger = ask_another_run(&mut bench, &mut asker, &answering, "which-host?");
+    let filed_astray = ask_another_run(&mut bench, &mut asker, &answering, "which-tag?");
+    let before: Vec<String> = sorted(vec![
+        named.clone(),
+        unnamed.clone(),
+        by_a_stranger.clone(),
+        filed_astray.clone(),
+    ]);
+    assert_eq!(held_open(&bench, &answering), (before.clone(), before));
+
+    write_to_run(
+        &mut bench,
+        &mut answerer,
+        &asking,
+        &format!("[{answering}] {named} 답: main"),
+    );
+    write_to_run(&mut bench, &mut answerer, &asking, "답: 8080");
+    write_to_run(
+        &mut bench,
+        &mut stranger,
+        &asking,
+        &format!("{by_a_stranger} 답: example.test"),
+    );
+    write_to_run(
+        &mut bench,
+        &mut answerer,
+        &elsewhere,
+        &format!("{filed_astray} 답: v1"),
+    );
+
+    let open = sorted(vec![unnamed, by_a_stranger, filed_astray]);
+    assert_eq!(
+        held_open(&bench, &answering),
+        (open.clone(), open),
+        "the asker's run was not read, or was read too widely"
+    );
+}
+
+/// The other cross-run case: the chairs moved between the question and its
+/// answer (A1, seats that have sat). A window restart seats every
+/// coordinator in a new pane — twice on the night of 2026-10-16 — so the
+/// asker's pane is no run's chair any more, and the answers come from the old
+/// answering pane before the move and from the new one after it. Each chair
+/// signed one letter as its run first, which is how a run remembers who sat in
+/// it.
+#[test]
+fn a_question_asked_before_the_chairs_moved_is_closed_by_letters_from_either_side_of_it() {
+    let mut bench = Bench::new();
+    let mut asker = Team::new("team-asker", "asker", 60);
+    let mut answerer = Team::new("team-answerer", "answerer", 70);
+    let mut asker_after = Team::new("team-asker-after", "asker-after", 80);
+    let mut answerer_after = Team::new("team-answerer-after", "answerer-after", 90);
+    let asking = run_of(&mut bench, &mut asker, "asker");
+    let answering = run_of(&mut bench, &mut answerer, "answerer");
+    for (team, run_id) in [(&mut asker, &asking), (&mut answerer, &answering)] {
+        let chair = format!("run:{run_id}");
+        as_leader_of(
+            &mut bench,
+            team,
+            &[
+                "send", "--to", &chair, "--type", "status", "--body", "on-duty",
+            ],
+        );
+    }
+
+    let answered_before = ask_another_run(&mut bench, &mut asker, &answering, "which-branch?");
+    let answered_after = ask_another_run(&mut bench, &mut asker, &answering, "which-port?");
+    write_to_run(
+        &mut bench,
+        &mut answerer,
+        &asking,
+        &format!("{answered_before} 답: main"),
+    );
+
+    // The restart: both chairs are taken from panes that are gone.
+    let gone = format!("{}/%1", asker.id);
+    as_leader_of(
+        &mut bench,
+        &mut asker_after,
+        &[
+            "run-takeover",
+            "--run",
+            &asking,
+            "--from",
+            &gone,
+            "--reason",
+            "restart",
+        ],
+    );
+    let gone = format!("{}/%1", answerer.id);
+    as_leader_of(
+        &mut bench,
+        &mut answerer_after,
+        &[
+            "run-takeover",
+            "--run",
+            &answering,
+            "--from",
+            &gone,
+            "--reason",
+            "restart",
+        ],
+    );
+    assert_eq!(
+        held_open(&bench, &answering),
+        (vec![answered_after.clone()], vec![answered_after.clone()]),
+        "the old chairs' letter stopped counting once the chairs moved"
+    );
+
+    write_to_run(
+        &mut bench,
+        &mut answerer_after,
+        &asking,
+        &format!("{answered_after} 답: 8080"),
+    );
+    assert_eq!(
+        held_open(&bench, &answering),
+        (vec![], vec![]),
+        "a question asked from a pane that is no chair now stayed open"
+    );
+}
+
+/// A6: the pile as one desk saw it, in small — two coordinators, five
+/// questions from one to the other, three answered by root letters (two
+/// filed in the asker's run, one in the answering run to the asker's pane),
+/// one written back about without its id and one not at all: five open
+/// before the letters, two after.
+#[test]
+fn two_coordinators_five_questions_three_letters_leave_two_open() {
+    let mut bench = Bench::new();
+    let mut asker = Team::new("team-asker", "asker", 60);
+    let mut answerer = Team::new("team-answerer", "answerer", 70);
+    let asking = run_of(&mut bench, &mut asker, "asker");
+    let answering = run_of(&mut bench, &mut answerer, "answerer");
+
+    let asked: Vec<String> = (1..=5)
+        .map(|at| ask_another_run(&mut bench, &mut asker, &answering, &format!("q{at}?")))
+        .collect();
+    assert_eq!(held_open(&bench, &answering).0.len(), 5);
+
+    write_to_run(
+        &mut bench,
+        &mut answerer,
+        &asking,
+        &format!("{} 답: 네", asked[0]),
+    );
+    write_to_run(
+        &mut bench,
+        &mut answerer,
+        &asking,
+        &format!("{}에 답: 아니요", asked[1]),
+    );
+    let asker_pane = format!("pane:{}/%1", asker.id);
+    as_leader_of(
+        &mut bench,
+        &mut answerer,
+        &[
+            "send",
+            "--to",
+            &asker_pane,
+            "--type",
+            "status",
+            "--body",
+            &format!("{} 답: 나중에", asked[2]),
+        ],
+    );
+    write_to_run(&mut bench, &mut answerer, &asking, "답: 넷째는 내일");
+
+    let open = sorted(vec![asked[3].clone(), asked[4].clone()]);
+    assert_eq!(
+        held_open(&bench, &answering),
+        (open.clone(), open),
+        "five questions, three letters: two should stay open"
     );
 }
