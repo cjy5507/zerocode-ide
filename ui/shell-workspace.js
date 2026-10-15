@@ -3988,13 +3988,14 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     tone = "none";
   }
   head ??= word;
-  if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
-  // What the compare ref changed too among the unsaved files (t-45314), right after them: it is said of the
-  // unsaved work and by file, so it wears neither the conflict's word nor its colour.
+  // What the compare ref changed too among the unsaved files (t-45314), said before the unsaved mark and not
+  // after it: the ellipsis cuts the end of a chip, and at the sidebar's default width this one's end is cut
+  // (t-55424). It is said of the unsaved work and by file, so it wears neither the conflict's word nor its colour.
   const overlapping = landing.dirty && !check ? landing.overlap?.total ?? 0 : 0;
   if (overlapping > 0) {
     word += ` · ${t("worktree.landOverlap", "{{ref}}과 겹침 {{count}}", { ref: landingRefName(ref), count: overlapping })}`;
   }
+  if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
   // Said of work that is in the compare ref and of nothing else: the backend
   // asks only landed rows, and a row that is in doubt says nothing more.
   const holdsIgnored = gitIn && !check && landing.ignored === true;

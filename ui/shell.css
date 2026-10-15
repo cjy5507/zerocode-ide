@@ -2253,10 +2253,12 @@ svg.wt-agent-dot {
 .wt-wall,
 .wt-phase {
   /* The name gives way first and the word does not: it is the news, and a name
-   * cut to an ellipsis is still a name. Half the line is the most it takes, so
-   * a very narrow sidebar cuts the word rather than the name to nothing. */
-  flex: none;
-  max-width: 50%;
+   * cut to an ellipsis is still a name. The word takes up to half the line, and
+   * the room a short name leaves besides, but never more than its own width.
+   * When the line overflows nothing grows and the word stays at its half, so a
+   * very narrow sidebar cuts the word rather than the name to nothing. */
+  flex: 1 0 50%;
+  max-width: max-content;
   /* One pixel under `.wt-default`'s 16: the name's own line is 15.25 tall, so
    * a chip any taller than that grows the row when it arrives and shrinks it
    * when it leaves — and a row that changes height under the pointer is the
