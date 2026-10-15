@@ -21,6 +21,8 @@ export async function testConversationSwitch(browser, origin, ok) {
   await testPageBehind(browser, origin, ok);
   await testKeepingAcrossLeaves(browser, origin, ok);
   await testBehindUnseen(browser, origin, ok);
+  await testBehindTheScreen(browser, origin, ok);
+  await testBehindAcrossKinds(browser, origin, ok);
   await testFocusPassesAside(browser, origin, ok);
   await testColoursAfterAside(browser, origin, ok);
   await testPaneHandover(browser, origin, ok, { refuse: false });
@@ -306,6 +308,181 @@ async function testBehindUnseen(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok("page behind unseen: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* The other two returns a person makes to a conversation (t-55369, the
+ * coordinator 09:04: 「사람이 느끼는 흐름은 셋 다 같은 돌아오기」): a pane's
+ * 「대화」 turned to the pane's screen and back, and a conversation tab left for
+ * a terminal tab of the same leaf and back. Both used to hide the page
+ * (`hidden`, display: none), which drops its styles and layout: back, every
+ * element was styled and laid out again (a 400-turn pane's conversation 18.7 ms,
+ * a conversation tab 28.1 ms). Now the page stands behind what is shown, as a
+ * conversation set aside does, and comes back with no node put into the
+ * document and its list where its reader left it. */
+async function testBehindTheScreen(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standSwitcher(page);
+    const seen = await page.evaluate(async ({ a }) => {
+      const settle = async () => {
+        for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      };
+      const off = (node) => node.hidden || node.getAttribute("aria-hidden") === "true";
+      const putting = (root, list) => {
+        const put = [];
+        const watch = new MutationObserver((records) => {
+          for (const record of records) for (const node of record.addedNodes) if (node.contains?.(list)) put.push(node.className ?? node.nodeName);
+        });
+        watch.observe(root, { childList: true, subtree: true });
+        return () => {
+          watch.disconnect();
+          return put;
+        };
+      };
+      // A pane's conversation, turned to the screen and back.
+      const rows = [];
+      for (let at = 0; at < 200; at += 1) {
+        rows.push({ role: "user", text: `부탁 ${at}`, at_ms: 1_790_000_000_000 + at * 4000 });
+        rows.push({ role: "assistant", text: `답 ${at}: ${"긴 문장이 여러 줄로 이어진다. ".repeat(4)}`, at_ms: 1_790_000_002_000 + at * 4000 });
+      }
+      window.__ANSWER__.pane_log = (args) => ({ found: true, next: 1, turns: args.after === null || args.after === undefined ? rows : [], skipped: false, more: false, folded: false, model: "claude-opus-5" });
+      const term = await openTermTab({ placement: "tab" });
+      paneAgents.set(term, "claude");
+      hookStates.set(term, "idle");
+      setActiveTab(tabOfTerm(term).id);
+      await setPaneChat(term, true, { wire: false });
+      await pollHelperPages();
+      await settle();
+      const slot = document.querySelector(`.pane-slot[data-term="${term}"]`);
+      const chat = slot.querySelector(".pane-chat");
+      const list = chat.querySelector(".helper-turns");
+      list.scrollTop = Math.round(list.scrollHeight / 2);
+      await settle();
+      const top = list.scrollTop;
+      await setPaneChat(term, false);
+      await settle();
+      const pane = {
+        screen: termViews.get(term)?.host.hidden === false,
+        off: off(chat),
+        hidden: chat.hidden,
+        behind: chat.getAttribute("aria-hidden"),
+        listIn: list.isConnected,
+      };
+      let done = putting(slot, list);
+      await setPaneChat(term, true, { wire: false });
+      await settle();
+      Object.assign(pane, { put: done(), back: !off(chat) && chat.querySelector(".helper-turns") === list, top: list.scrollTop === top });
+      // A conversation tab of a leaf, left for a terminal tab of the same leaf.
+      const tab = await window.__SWITCH__.open(a);
+      const view = docHost(focusedPane, "worker");
+      const listA = view.querySelector(".helper-turns");
+      listA.scrollTop = Math.round(listA.scrollHeight / 3);
+      await settle();
+      const topA = listA.scrollTop;
+      setActiveTab(tabOfTerm(term).id);
+      await settle();
+      const leaf = { off: off(view), hidden: view.hidden, behind: view.getAttribute("aria-hidden"), listIn: listA.isConnected, front: view.id };
+      done = putting(view.parentElement, listA);
+      setActiveTab(tab);
+      await settle();
+      Object.assign(leaf, { put: done(), back: !off(view) && view.querySelector(".helper-turns") === listA, top: listA.scrollTop === topA });
+      // Closed while it stands behind the terminal tab: the view lets the page
+      // go and stands behind no longer.
+      setActiveTab(tabOfTerm(term).id);
+      await settle();
+      closeTab(tab);
+      await settle();
+      leaf.closed = { behind: view.getAttribute("aria-hidden"), empty: view.querySelector(".helper-turns") === null, listIn: listA.isConnected };
+      return { pane, leaf };
+    }, { a: conversationFixture({ blocks: 20 }) });
+    ok(
+      "a_pane_conversation_turned_to_its_screen_stands_behind_it: a pane's 「대화」 turned to the pane's screen stays rendered behind the screen — not hidden, hidden from assistive technology, its list in the document — and 「대화」 again brings back the same list, where its reader left it, with no node holding its rows put into the slot",
+      seen.pane.screen && seen.pane.off && seen.pane.hidden === false && seen.pane.behind === "true" && seen.pane.listIn &&
+        seen.pane.put.length === 0 && seen.pane.back && seen.pane.top,
+      JSON.stringify(seen.pane),
+    );
+    ok(
+      "a_conversation_tab_left_for_a_terminal_tab_stands_behind_it: a conversation tab whose leaf turns to a terminal tab stays rendered behind it — not hidden, hidden from assistive technology, still the window's `#worker-view` — and comes back to the same list, where its reader left it, with no node holding its rows put into the leaf; closed while it stands behind, it lets its page go and stands behind no longer",
+      seen.leaf.off && seen.leaf.hidden === false && seen.leaf.behind === "true" && seen.leaf.listIn && seen.leaf.front === "worker-view" &&
+        seen.leaf.put.length === 0 && seen.leaf.back && seen.leaf.top &&
+        seen.leaf.closed.behind === null && seen.leaf.closed.empty && seen.leaf.closed.listIn === false,
+      JSON.stringify(seen.leaf),
+    );
+    ok("behind the screen: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* The window counts every kind of page standing behind alike — a conversation
+ * set aside, a leaf's view behind a terminal tab, a pane's conversation behind
+ * the pane's screen, each leaf or pane one of `CHAT_PARK.leaves` (2): with one
+ * of each, the one that went behind first hides (a view, as it did before
+ * t-55369), and a tight sweep leaves none standing. */
+async function testBehindAcrossKinds(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standSwitcher(page);
+    const seen = await page.evaluate(async ({ one }) => {
+      const settle = async () => {
+        for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      };
+      const leaves = [focusedPane];
+      for (let k = 0; k < 2; k += 1) {
+        const group = nextGroupId;
+        nextGroupId += 1;
+        setStageTree(splitStageLeaf(stageTree(), leaves.at(-1), group, "horizontal", "second"));
+        leaves.push(group);
+      }
+      const state = (host) => (!host ? null : host.isConnected === false ? "out" : host.hidden ? "hidden" : host.getAttribute("aria-hidden") === "true" ? "behind" : "shown");
+      // Leaf 0: a conversation, then a terminal tab over it.
+      focusedPane = leaves[0];
+      await window.__SWITCH__.open(one);
+      const view0 = docHost(leaves[0], "worker");
+      const shell0 = await openTermTab({ placement: "tab" });
+      setActiveTab(tabOfTerm(shell0).id);
+      await settle();
+      // Leaf 1: a pane's conversation turned to its screen.
+      focusedPane = leaves[1];
+      const said = [];
+      for (let at = 0; at < 20; at += 1) {
+        said.push({ role: "user", text: `부탁 ${at}`, at_ms: 1_790_000_000_000 + at * 4000 });
+        said.push({ role: "assistant", text: `답 ${at}`, at_ms: 1_790_000_002_000 + at * 4000 });
+      }
+      window.__ANSWER__.pane_log = (args) => ({ found: true, next: 1, turns: args.after === null || args.after === undefined ? said : [], skipped: false, more: false, folded: false, model: "claude-opus-5" });
+      const term = await openTermTab({ placement: "tab" });
+      paneAgents.set(term, "claude");
+      hookStates.set(term, "idle");
+      setActiveTab(tabOfTerm(term).id);
+      await setPaneChat(term, true, { wire: false });
+      await pollHelperPages();
+      await settle();
+      const chat1 = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
+      await setPaneChat(term, false);
+      await settle();
+      // Leaf 2: a conversation set aside under another.
+      focusedPane = leaves[2];
+      await window.__SWITCH__.open(one);
+      const aside2 = docHost(leaves[2], "worker");
+      await window.__SWITCH__.open(one);
+      await settle();
+      const capped = { view0: state(view0), chat1: state(chat1), aside2: state(aside2) };
+      if (typeof sweepParkedPages === "function") sweepParkedPages(docHost(leaves[2], "worker"), Date.now(), { tight: true });
+      await settle();
+      const tight = { view0: state(view0), chat1: state(chat1), aside2: state(aside2) };
+      return { leaves: typeof CHAT_PARK === "undefined" ? null : CHAT_PARK.leaves, capped, tight };
+    }, { one: conversationFixture({ blocks: 2 }) });
+    ok(
+      "the_window_counts_every_page_behind_alike: a leaf's conversation behind a terminal tab, a pane's conversation behind its screen and a conversation set aside under another stand behind as long as the window keeps two (`CHAT_PARK.leaves`) — the one that went behind first hides — and a tight sweep leaves none standing: views and panes hidden, the page set aside out of the document",
+      seen.leaves === 2 &&
+        JSON.stringify(seen.capped) === JSON.stringify({ view0: "hidden", chat1: "behind", aside2: "behind" }) &&
+        JSON.stringify(seen.tight) === JSON.stringify({ view0: "hidden", chat1: "hidden", aside2: "out" }),
+      JSON.stringify(seen),
+    );
+    ok("behind across kinds: no page errors", faults.length === 0, faults.slice(0, 3).join("\n"));
   } finally {
     await page.close();
   }
