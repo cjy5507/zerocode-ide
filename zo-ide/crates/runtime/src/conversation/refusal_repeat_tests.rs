@@ -218,11 +218,33 @@ fn stood_runtime(env: &Hermetic, provider: &Arc<Declining>) -> ConversationRunti
     runtime
 }
 
-/// One streaming turn of `words` and `images`: how it ended, and the lines the
-/// screen was told — read to the end, which comes only when the turn has let
-/// go of the screen.
-fn turn(
-    runtime: &mut ConversationRuntime<NotAsked, StaticToolExecutor>,
+/// One streaming turn of `words` and `images` through the dispatcher hosts
+/// drive turns with: how it ended, and the lines the screen was told.
+fn turn<C: ApiClient>(
+    runtime: &mut ConversationRuntime<C, StaticToolExecutor>,
+    words: &str,
+    images: Vec<(String, String)>,
+) -> (Result<TurnSummary, StreamingTurnError>, Vec<String>) {
+    turn_through(runtime, Entry::Dispatcher, words, images)
+}
+
+/// The streaming entries a host can call.
+#[derive(Debug, Clone, Copy)]
+enum Entry {
+    /// The dispatcher, with its stop loop and deep mode.
+    Dispatcher,
+    /// The ordinary turn without the dispatcher; it takes no pictures.
+    Streaming,
+    /// The same, with pictures.
+    StreamingWithImages,
+}
+
+/// One streaming turn of `words` and `images` through `entry`: how it ended,
+/// and the lines the screen was told — read to the end, which comes only when
+/// the turn has let go of the screen.
+fn turn_through<C: ApiClient>(
+    runtime: &mut ConversationRuntime<C, StaticToolExecutor>,
+    entry: Entry,
     words: &str,
     images: Vec<(String, String)>,
 ) -> (Result<TurnSummary, StreamingTurnError>, Vec<String>) {
@@ -243,9 +265,19 @@ fn turn(
             }
             lines
         });
-        let ended = runtime
-            .run_turn_streaming_maybe_deep(words, images, render_tx, prompter)
-            .await;
+        let ended = match entry {
+            Entry::Dispatcher => {
+                runtime
+                    .run_turn_streaming_maybe_deep(words, images, render_tx, prompter)
+                    .await
+            }
+            Entry::Streaming => runtime.run_turn_streaming(words, render_tx, prompter).await,
+            Entry::StreamingWithImages => {
+                runtime
+                    .run_turn_streaming_with_images(words, images, render_tx, prompter)
+                    .await
+            }
+        };
         (ended, screen.await.expect("the screen task"))
     })
 }
@@ -443,6 +475,28 @@ fn the_headless_loop_sends_nothing_for_the_same_words_either() {
     }
     let last = runtime.session.messages.last().expect("the standing notice");
     assert_eq!(words_of(last), Some(REFUSAL_STANDING_NOTICE), "the conversation still ends on it");
+}
+
+/// The streaming entries a host can call without the dispatcher keep the
+/// rule too: the same words after a decline that stood send nothing through
+/// either, leave nothing behind, and tell the screen why in one line.
+#[test]
+fn the_public_streaming_entries_send_nothing_for_the_same_words_either() {
+    let env = Hermetic::new("public-entries");
+    let provider = Declining::new(UNROUTED);
+    let mut runtime = stood_runtime(&env, &provider);
+    let stood = Trace::of(&provider, &runtime.session.messages, &env);
+
+    for entry in [Entry::Streaming, Entry::StreamingWithImages] {
+        let (ended, lines) = turn_through(&mut runtime, entry, WORDS, Vec::new());
+        ended.expect("the repeat ends cleanly");
+        assert_eq!(lines, [REFUSAL_STANDING_REPEAT_NOTICE.to_string()], "{entry:?}: one line");
+    }
+    assert_eq!(
+        Trace::of(&provider, &runtime.session.messages, &env),
+        stood,
+        "neither entry sent a request or added anything to the conversation, the turn records or the session file"
+    );
 }
 
 /// A turn that sends nothing writes nothing: the session file is, byte for
@@ -670,4 +724,459 @@ fn a_repeat_needs_the_decline_kept_standing_and_the_same_words() {
 
     runtime.set_context_model("claude-opus-5");
     assert!(!runtime.repeats_a_standing_decline(WORDS), "another model");
+}
+
+/// The lifecycle hook contract, on every loop a turn runs on. A turn, or a
+/// stop gate's follow-up, that repeats the words a decline just stood on runs
+/// no hook: no `UserPromptSubmit`, and no `TurnEnd`, so no stop gate asks a
+/// follow-up after it and the turn ends with it. It takes nothing from the
+/// team inbox. Everything else runs them as before. The hooks are shell
+/// commands, so these run where a POSIX shell does.
+#[cfg(unix)]
+mod hook_contract {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use rusqlite::{params, Connection};
+
+    use super::super::DeepGateConfig;
+    use super::{
+        first_words, standing_notices, turn, AsyncApiClient, ConversationRuntime, Declining,
+        DecliningSync, Hermetic, PermissionMode, PermissionPolicy, StaticToolExecutor,
+        TurnSummary, OTHER_WORDS, UNROUTED, WORDS,
+    };
+    use crate::config::{ConfigLoader, RuntimeFeatureConfig};
+
+    /// What a stop gate's `TurnEnd` hook asks for.
+    const FOLLOW_UP: &str = "keep going until the list is complete";
+
+    /// A follow-up that is not that.
+    const OTHER_FOLLOW_UP: &str = "now say which of them is the oldest";
+
+    /// The loops a turn runs on: the headless one, the streaming dispatcher,
+    /// and the dispatcher in deep mode, whose legs run as internal turns.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Road {
+        Headless,
+        Streaming,
+        Deep,
+    }
+
+    const ROADS: [Road; 3] = [Road::Headless, Road::Streaming, Road::Deep];
+
+    /// The runtime every road drives.
+    type Runtime = ConversationRuntime<DecliningSync, StaticToolExecutor>;
+
+    impl Road {
+        /// Opus 5.5 with `hooks`, every request going to `provider`.
+        fn runtime(self, env: &Hermetic, provider: &Arc<Declining>, hooks: &CountingHooks) -> Runtime {
+            let mut runtime = ConversationRuntime::new_with_features(
+                env.session(),
+                DecliningSync(Arc::clone(provider)),
+                StaticToolExecutor::new(),
+                PermissionPolicy::new(PermissionMode::DangerFullAccess),
+                vec!["system".to_string()],
+                &hooks.features(),
+            );
+            if self != Self::Headless {
+                runtime = runtime
+                    .with_async_api_client(Arc::clone(provider) as Arc<dyn AsyncApiClient>);
+            }
+            if self == Self::Deep {
+                runtime.set_deep_gate(Some(DeepGateConfig::default()));
+            }
+            runtime.set_context_model("claude-opus-5-5");
+            runtime.set_workspace_cwd(env.cwd.clone());
+            runtime
+        }
+
+        /// One turn of `words` on this road.
+        fn run(self, runtime: &mut Runtime, words: &str) -> Result<TurnSummary, String> {
+            match self {
+                Self::Headless => runtime.run_turn(words, None).map_err(|error| format!("{error:?}")),
+                Self::Streaming | Self::Deep => {
+                    turn(runtime, words, Vec::new()).0.map_err(|error| format!("{error:?}"))
+                }
+            }
+        }
+
+        /// Stands the decline on [`WORDS`] beside an empty team inbox: turn
+        /// one surfaces it, turn two asks once and it stands.
+        fn stand(self, env: &Hermetic, runtime: &mut Runtime) {
+            open_team_inbox(&env.cwd, &runtime.session.session_id);
+            for _ in 0..2 {
+                self.run(runtime, WORDS).expect("the decline is surfaced, then stands");
+            }
+            assert_eq!(
+                standing_notices(&runtime.session.messages),
+                1,
+                "{self:?}: the decline stood once"
+            );
+        }
+    }
+
+    /// How many times each counted hook has run.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct HookRuns {
+        prompt_submit: usize,
+        turn_end: usize,
+    }
+
+    /// Hooks that keep count: `UserPromptSubmit` and `TurnEnd` each add a
+    /// line to their own file, and the `TurnEnd` one, as a stop gate does,
+    /// answers with the next follow-up it was given, if any. They sit in the
+    /// person's own settings, the scope zo takes hooks from.
+    struct CountingHooks {
+        dir: PathBuf,
+    }
+
+    impl CountingHooks {
+        fn new(env: &Hermetic) -> Self {
+            let dir = env.cwd.join("hooks");
+            std::fs::create_dir_all(&dir).expect("hooks folder");
+            Self { dir }
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.dir.join(name).display().to_string()
+        }
+
+        /// A runtime's features with these hooks, loaded as zo loads settings.
+        fn features(&self) -> RuntimeFeatureConfig {
+            let prompt_submit = format!("echo ran >> '{}'", self.path("prompt-submit"));
+            let turn_end = format!(
+                "echo ran >> '{runs}'; if [ -s '{queue}' ]; then \
+                 next=$(head -n 1 '{queue}'); tail -n +2 '{queue}' > '{queue}.rest'; \
+                 mv '{queue}.rest' '{queue}'; \
+                 printf '{{\"hookSpecificOutput\":{{\"followupMessage\":\"%s\"}}}}' \"$next\"; fi",
+                runs = self.path("turn-end"),
+                queue = self.path("follow-ups"),
+            );
+            let project = self.dir.join("project");
+            let home = self.dir.join("home").join(".zo");
+            std::fs::create_dir_all(project.join(".zo")).expect("project settings folder");
+            std::fs::create_dir_all(&home).expect("settings folder");
+            let settings = serde_json::json!({
+                "hooks": { "UserPromptSubmit": [prompt_submit], "TurnEnd": [turn_end] }
+            });
+            std::fs::write(home.join("settings.json"), settings.to_string()).expect("settings");
+            ConfigLoader::new(&project, &home)
+                .load()
+                .expect("the settings load")
+                .feature_config()
+                .clone()
+        }
+
+        /// From now on the `TurnEnd` hook answers with `follow_ups`, one per
+        /// run and in order, then with nothing.
+        fn answer_with(&self, follow_ups: &[&str]) {
+            let queue: String = follow_ups.iter().flat_map(|words| [*words, "\n"]).collect();
+            std::fs::write(self.dir.join("follow-ups"), queue).expect("the stop gate's follow-ups");
+        }
+
+        fn runs(&self) -> HookRuns {
+            let count = |name: &str| {
+                std::fs::read_to_string(self.dir.join(name)).map_or(0, |ran| ran.lines().count())
+            };
+            HookRuns {
+                prompt_submit: count("prompt-submit"),
+                turn_end: count("turn-end"),
+            }
+        }
+    }
+
+    fn team_inbox_file(cwd: &Path) -> PathBuf {
+        cwd.join(".zo").join("team_inbox").join("team_inbox.sqlite3")
+    }
+
+    /// A team inbox for the session `session_id` in `cwd`, as the window keeps
+    /// one: its tables, and a reader that has read nothing yet.
+    fn open_team_inbox(cwd: &Path, session_id: &str) {
+        let file = team_inbox_file(cwd);
+        std::fs::create_dir_all(file.parent().expect("its folder")).expect("team inbox folder");
+        let inbox = Connection::open(&file).expect("the team inbox");
+        inbox
+            .execute_batch(
+                "CREATE TABLE updates (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
+                    channel TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at_unix INTEGER NOT NULL,
+                    priority TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    body_ref_json TEXT,
+                    task_id TEXT,
+                    status TEXT
+                );
+                CREATE TABLE cursors (
+                    consumer_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    last_seen_seq INTEGER NOT NULL,
+                    PRIMARY KEY (consumer_id, channel)
+                );
+                CREATE TABLE deliveries (
+                    update_id TEXT NOT NULL,
+                    consumer_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    turn_id TEXT,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at_unix INTEGER NOT NULL,
+                    PRIMARY KEY (update_id, consumer_id)
+                );
+                CREATE TABLE jsonl_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_json TEXT NOT NULL
+                );",
+            )
+            .expect("the team inbox tables");
+        inbox
+            .execute(
+                "INSERT INTO cursors (consumer_id, channel, last_seen_seq) VALUES (?1, 'ci', 0)",
+                params![format!("session:{session_id}")],
+            )
+            .expect("its reader");
+    }
+
+    /// One update posted to the team inbox in `cwd`.
+    fn post_to_team_inbox(cwd: &Path, id: &str) {
+        Connection::open(team_inbox_file(cwd))
+            .expect("the team inbox")
+            .execute(
+                "INSERT INTO updates (id, channel, source, created_at_unix, priority, summary)
+                 VALUES (?1, 'ci', 'agent:reviewer', 1, 'high', 'the build is green again')",
+                params![id],
+            )
+            .expect("the update");
+    }
+
+    /// The rows of the team inbox in `cwd` that its reader changes by taking
+    /// an update: each delivery and its state, how far each cursor has read,
+    /// and how many events wait in the outbox.
+    fn team_inbox_taken(cwd: &Path) -> Vec<String> {
+        let inbox = Connection::open(team_inbox_file(cwd)).expect("the team inbox");
+        let mut taken = inbox
+            .prepare(
+                "SELECT 'delivery ' || update_id || ' ' || state FROM deliveries
+                 UNION ALL SELECT 'cursor ' || channel || ' ' || last_seen_seq FROM cursors
+                 UNION ALL SELECT 'outbox ' || count(*) FROM jsonl_outbox
+                 ORDER BY 1",
+            )
+            .expect("read the team inbox");
+        let rows = taken
+            .query_map(params![], |row| row.get::<_, String>(0))
+            .expect("its rows");
+        rows.map(|row| row.expect("a row")).collect()
+    }
+
+    /// What a turn did that a turn which repeats a standing decline must not:
+    /// the requests it sent, the hooks it ran, and whether it took anything
+    /// from the team inbox.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    struct TurnDid {
+        requests: usize,
+        prompt_submits: usize,
+        turn_ends: usize,
+        took_from_the_inbox: bool,
+    }
+
+    /// Where a runtime stands between turns.
+    struct Mark {
+        requests: usize,
+        runs: HookRuns,
+        inbox: Vec<String>,
+    }
+
+    impl Mark {
+        fn now(provider: &Declining, hooks: &CountingHooks, cwd: &Path) -> Self {
+            Self {
+                requests: provider.sent(),
+                runs: hooks.runs(),
+                inbox: team_inbox_taken(cwd),
+            }
+        }
+
+        /// What happened between this mark and `later`.
+        fn until(&self, later: &Self) -> TurnDid {
+            TurnDid {
+                requests: later.requests - self.requests,
+                prompt_submits: later.runs.prompt_submit - self.runs.prompt_submit,
+                turn_ends: later.runs.turn_end - self.runs.turn_end,
+                took_from_the_inbox: later.inbox != self.inbox,
+            }
+        }
+    }
+
+    /// One road's account: what the repeat did, whether it left a turn's
+    /// cleanup anything to settle, what the next turn did, and whether that
+    /// turn's stop gate follow-up was asked.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Account {
+        repeat: TurnDid,
+        left_open: bool,
+        next: TurnDid,
+        follow_up_asked: bool,
+    }
+
+    /// Stands the decline on [`WORDS`] on `road`, gives the stop gate one
+    /// follow-up and posts an inbox update, then runs the repeat and a turn
+    /// of other words.
+    fn account(road: Road) -> Account {
+        let env = Hermetic::new(&format!("hooks-{road:?}"));
+        let provider = Declining::new(UNROUTED);
+        let hooks = CountingHooks::new(&env);
+        let mut runtime = road.runtime(&env, &provider, &hooks);
+        runtime.set_max_stop_loops(1);
+        road.stand(&env, &mut runtime);
+        hooks.answer_with(&[FOLLOW_UP]);
+        post_to_team_inbox(&env.cwd, "u1");
+
+        let before = Mark::now(&provider, &hooks, &env.cwd);
+        road.run(&mut runtime, WORDS).expect("the repeat ends cleanly");
+        let repeated = Mark::now(&provider, &hooks, &env.cwd);
+        let left_open = runtime.team_inbox_turn.is_some()
+            || runtime.file_pick_pending_turn.is_some()
+            || runtime.skill_suggestion_turn_start.is_some();
+        road.run(&mut runtime, OTHER_WORDS).expect("the next turn ends cleanly");
+        let after = Mark::now(&provider, &hooks, &env.cwd);
+
+        Account {
+            repeat: before.until(&repeated),
+            left_open,
+            next: repeated.until(&after),
+            follow_up_asked: (repeated.requests..after.requests)
+                .any(|at| provider.asked(at).as_ref().and_then(first_words) == Some(FOLLOW_UP)),
+        }
+    }
+
+    /// The case of a stop gate. The same words after a decline that stood run
+    /// no `UserPromptSubmit` and no `TurnEnd` hook on the headless loop, the
+    /// streaming dispatcher or its deep mode, so nothing asks a follow-up;
+    /// they take nothing from the team inbox and leave a turn's cleanup
+    /// nothing to settle. The next turn, other words, runs both hooks, takes
+    /// the inbox update and asks the follow-up — the same on the headless and
+    /// the streaming loop.
+    #[test]
+    fn a_repeat_runs_no_lifecycle_hook_on_any_loop_and_the_next_turn_runs_them() {
+        let accounts = ROADS.map(|road| (road, account(road)));
+        eprintln!("t-57512 hooks | {accounts:?}");
+
+        for (road, seen) in accounts {
+            assert_eq!(
+                seen.repeat,
+                TurnDid::default(),
+                "{road:?}: the repeat sends nothing, runs no hook and takes nothing from the inbox"
+            );
+            assert!(!seen.left_open, "{road:?}: and leaves a turn's cleanup nothing to settle");
+            assert!(
+                seen.next.prompt_submits > 0 && seen.next.turn_ends > 0,
+                "{road:?}: the next turn runs both hooks: {seen:?}"
+            );
+            assert!(seen.next.took_from_the_inbox, "{road:?}: takes the inbox update");
+            assert!(seen.follow_up_asked, "{road:?}: and its stop gate's follow-up is asked");
+        }
+        assert_eq!(accounts[0].1, accounts[1].1, "the headless and the streaming loop do the same");
+    }
+
+    /// What one turn sent and ran: the words of each request it sent, in
+    /// order, and how many times each hook ran.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Legs {
+        asked: Vec<String>,
+        prompt_submits: usize,
+        turn_ends: usize,
+    }
+
+    /// One turn of [`OTHER_WORDS`] on `road` after the decline stood on
+    /// [`WORDS`], beside a stop gate that answers with `follow_ups` and may
+    /// be followed at most `stop_loops` times.
+    fn follow_up_turn(road: Road, follow_ups: &[&str], stop_loops: usize) -> Legs {
+        let env = Hermetic::new(&format!("follow-ups-{road:?}"));
+        let provider = Declining::new(UNROUTED);
+        let hooks = CountingHooks::new(&env);
+        let mut runtime = road.runtime(&env, &provider, &hooks);
+        runtime.set_max_stop_loops(stop_loops);
+        road.stand(&env, &mut runtime);
+        hooks.answer_with(follow_ups);
+
+        let before = Mark::now(&provider, &hooks, &env.cwd);
+        road.run(&mut runtime, OTHER_WORDS).expect("the turn ends cleanly");
+        let after = Mark::now(&provider, &hooks, &env.cwd);
+        Legs {
+            asked: (before.requests..after.requests)
+                .map(|at| {
+                    provider.asked(at).as_ref().and_then(first_words).unwrap_or_default().to_string()
+                })
+                .collect(),
+            prompt_submits: after.runs.prompt_submit - before.runs.prompt_submit,
+            turn_ends: after.runs.turn_end - before.runs.turn_end,
+        }
+    }
+
+    /// A stop gate that asks the same follow-up again and again while a
+    /// decline stands. The follow-up is asked once and the decline stands on
+    /// it; the next time it is the words the decline just stood on, so that
+    /// leg sends nothing and runs no hook, and the turn ends: two legs on
+    /// every loop, not one for each stop loop allowed.
+    #[test]
+    fn a_stop_gate_repeating_its_follow_up_while_a_decline_stands_is_asked_once() {
+        let turns = ROADS.map(|road| (road, follow_up_turn(road, &[FOLLOW_UP; 6], 4)));
+        eprintln!("t-57512 repeated follow-up | {turns:?}");
+
+        for (road, legs) in &turns {
+            assert_eq!(
+                legs.asked,
+                [OTHER_WORDS, FOLLOW_UP],
+                "{road:?}: the turn's words, then the follow-up once"
+            );
+            assert_eq!(
+                (legs.prompt_submits, legs.turn_ends),
+                (2, 2),
+                "{road:?}: each leg asked ran both hooks, and the leg that sent nothing ran neither"
+            );
+        }
+    }
+
+    /// A follow-up whose words are not the ones just declined is asked, on
+    /// every loop, as before.
+    #[test]
+    fn a_different_follow_up_after_a_decline_is_still_asked() {
+        let turns =
+            ROADS.map(|road| (road, follow_up_turn(road, &[FOLLOW_UP, OTHER_FOLLOW_UP], 4)));
+        eprintln!("t-57512 different follow-ups | {turns:?}");
+
+        for (road, legs) in &turns {
+            assert_eq!(
+                legs.asked,
+                [OTHER_WORDS, FOLLOW_UP, OTHER_FOLLOW_UP],
+                "{road:?}: every leg is asked"
+            );
+            assert_eq!(legs.turn_ends, 3, "{road:?}: and the stop gate runs after each");
+        }
+    }
+
+    /// Another model is another classifier. After `/model` to another model
+    /// of the same provider, or to another provider's, the same words are
+    /// asked on every loop, as before.
+    #[test]
+    fn a_model_or_provider_change_after_a_decline_that_stood_asks_the_same_words() {
+        for road in ROADS {
+            for model in ["claude-opus-5", "gpt-5.6-sol"] {
+                let env = Hermetic::new(&format!("model-{road:?}"));
+                let provider = Declining::new(UNROUTED);
+                let hooks = CountingHooks::new(&env);
+                let mut runtime = road.runtime(&env, &provider, &hooks);
+                road.stand(&env, &mut runtime);
+                runtime.set_context_model(model);
+
+                let before = provider.sent();
+                let _ = road.run(&mut runtime, WORDS);
+                assert_eq!(
+                    provider.asked(before).as_ref().and_then(first_words),
+                    Some(WORDS),
+                    "{road:?} on {model}: the same words are asked"
+                );
+            }
+        }
+    }
 }
