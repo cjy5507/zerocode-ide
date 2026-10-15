@@ -1164,19 +1164,32 @@ export async function testBrowserWorkspace(browser, origin, ok) {
     try {
       const label = await openManaged(page);
       await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "paused", revision: 500, inFlight: 0, needsObservation: true, ownerTerm: null });
+        setActiveTab(`browser:${label}`);
         const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
         const select = host?.querySelector(".browser-workspace-owner-select");
         if (select) { select.value = window.__WORKSPACE__.actorTerm; select.dispatchEvent(new Event("change", { bubbles: true })); }
         window.__workspaceClick(label, "agent");
       }, label);
-      await page.waitForTimeout(60);
+      await page.waitForFunction((label) => {
+        const tab = tabs.find((one) => one.label === label);
+        return tab?.workspace?.mode === "agent" && !tab.workspacePending;
+      }, label);
       await page.evaluate((label) => window.__workspaceClick(label, "pause"), label);
-      await page.waitForTimeout(60);
+      await page.waitForFunction((label) => {
+        const tab = tabs.find((one) => one.label === label);
+        return tab?.workspace?.mode === "paused" && !tab.workspacePending;
+      }, label);
       await page.evaluate((label) => window.__workspaceClick(label, "human"), label);
-      await page.waitForTimeout(60);
+      await page.waitForFunction((label) => {
+        const tab = tabs.find((one) => one.label === label);
+        const last = window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1);
+        return tab?.workspace?.mode === "human" && !tab.workspacePending && last?.shown === true;
+      }, label);
       const granted = await page.evaluate((label) => ({
         workspace: tabs.find((one) => one.label === label).workspace,
         last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+        modes: window.__WORKSPACE__.modes.map((request) => request.mode),
       }), label);
       await page.evaluate(({ label, revision }) => window.__workspaceEmit({
         label, mode: "human", revision, inFlight: 1, needsObservation: false,
@@ -1188,7 +1201,8 @@ export async function testBrowserWorkspace(browser, origin, ok) {
         addressReadOnly: groupOf(tabs.find((one) => one.label === label).pane)?.browserView?.querySelector(".browser-address")?.readOnly,
       }), label);
       ok("the person's own request in flight keeps the human view placed and usable",
-        granted.workspace?.mode === "human" && granted.last?.shown === true && own.last?.shown === true
+        granted.modes.join(",") === "agent,paused,human"
+          && granted.workspace?.mode === "human" && granted.last?.shown === true && own.last?.shown === true
           && own.error === null && own.addressReadOnly === false, JSON.stringify({ granted, own }));
       await page.evaluate(({ label, revision }) => window.__workspaceEmit({
         label, mode: "paused", revision: revision + 1, inFlight: 1, needsObservation: true,
