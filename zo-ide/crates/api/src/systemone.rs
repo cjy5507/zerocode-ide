@@ -454,6 +454,12 @@ pub struct SystemOneCall {
     /// `MAX_REFUSAL_BYTES` and the call's deadline, and for every outcome but
     /// a refusal.
     pub server_error_code: Option<&'static str>,
+    /// The provider's refusal a managed server named beside a `502` (t-58193):
+    /// its runtime answered and the provider refused the answer —
+    /// `provider_context_truncated` for a request longer than the model reads.
+    /// One of the provider's own refusal words, never the body's; `None` for
+    /// every other outcome.
+    pub server_refusal: Option<&'static str>,
     /// The whole call, first byte to the answer that was used.
     pub elapsed: Duration,
     /// Requests that actually left, across every attempt this call made —
@@ -727,6 +733,7 @@ impl SystemOneClient {
             outcome: Err(failure),
             retries: 0,
             server_error_code: None,
+            server_refusal: None,
             elapsed: opened.elapsed(),
             requests: 0,
             hedge: None,
@@ -754,6 +761,7 @@ impl SystemOneClient {
             outcome: run.outcome,
             retries: run.retries,
             server_error_code: run.server_error_code,
+            server_refusal: None,
             elapsed: opened.elapsed(),
             requests: requests.load(Ordering::Relaxed),
             hedge: ran,
@@ -1353,6 +1361,41 @@ mod tests {
         let call = ask(&nobody, UNHURRIED).await;
         assert_eq!(call.outcome, Err(SystemOneFailure::Transport));
         assert_eq!(call.server_error_code, None, "no server spoke");
+    }
+
+    /// A managed server whose runtime answered but whose provider refused the
+    /// answer says so with a `502` naming local-judgment's `Error::Protocol`
+    /// and the provider's refusal (t-58193) — `provider_context_truncated` is
+    /// a request longer than the model reads. The call keeps the status as its
+    /// failure and, beside it, the code and the refusal: words from those two
+    /// closed lists, never the body's own, and no second request. A `503`'s
+    /// words stay the `503`'s.
+    #[tokio::test]
+    async fn a_502_names_the_providers_refusal_beside_the_servers_code() {
+        // local-judgment's `Error::Protocol`, which this crate does not depend on.
+        let decode = "native_protocol_failed";
+        let truncated = "provider_context_truncated";
+        let refused = |refusal: &str| serde_json::json!({"error": decode, "refusal": refusal});
+        for (said, words) in [
+            (refused(truncated), (Some(decode), Some(truncated))),
+            (refused("schema"), (Some(decode), Some("schema"))),
+            (refused("the answer ran long"), (Some(decode), None)),
+            (serde_json::json!({"error": decode}), (Some(decode), None)),
+            (serde_json::json!({"error": "operation_busy", "refusal": truncated}), (None, None)),
+            (serde_json::json!({"error": "Bad Gateway"}), (None, None)),
+        ] {
+            let said = said.to_string();
+            let mock = MockSystemOne::serving(vec![Reply::now(502, said.clone())]).await;
+            let call = ask(&mock, UNHURRIED).await;
+            assert_eq!(call.outcome, Err(SystemOneFailure::Http(502)), "{said}");
+            assert_eq!((call.server_error_code, call.server_refusal), words, "{said}");
+            assert_eq!(mock.seen().len(), 1, "{said}: one request, no second");
+        }
+        let said = refused(truncated).to_string();
+        let mock = MockSystemOne::serving(vec![Reply::now(503, said)]).await;
+        let call = ask(&mock, UNHURRIED).await;
+        let words = (call.server_error_code, call.server_refusal);
+        assert_eq!(words, (None, None), "a 503 keeps its own words");
     }
 
     /// A loopback server that answers its one request with a `503` whose body
