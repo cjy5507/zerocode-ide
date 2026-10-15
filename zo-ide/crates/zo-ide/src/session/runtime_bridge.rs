@@ -1757,4 +1757,79 @@ pub(in crate::session) mod tests {
             );
         });
     }
+
+    /// A live client of `client` on Sonnet 4.6, as a turn installs one.
+    fn live_client_of(client: ProviderClient) -> LiveAsyncApiClient {
+        LiveAsyncApiClient::new(
+            client,
+            "claude-sonnet-4-6".to_string(),
+            AuthRoute::Auto,
+            false,
+            None,
+            GlobalToolRegistry::builtin(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Where a live client of an Anthropic client at `base_url` says its
+    /// turns go.
+    fn named_at(base_url: &str) -> Option<String> {
+        let client = api::AnthropicClient::from_auth(api::AuthSource::BearerToken(
+            "a-login".to_string(),
+        ))
+        .with_base_url(base_url);
+        live_client_of(ProviderClient::Anthropic(client)).destination()
+    }
+
+    /// A live Anthropic client names the URL it posts a turn to, as that
+    /// client builds it, path and port included (t-57512): two clients that
+    /// would send to different places never name the same one.
+    #[test]
+    fn a_live_anthropic_client_names_the_url_its_turns_are_posted_to() {
+        let _lock = crate::test_env_lock();
+        assert!(!api::cloud_gateway_active(), "the premise: no cloud gateway routes this process");
+        let named = [
+            "https://api.anthropic.com",
+            "https://api.anthropic.com/",
+            "https://api.anthropic.com:8443",
+            "https://gateway.example.com:8443/anthropic",
+        ]
+        .map(named_at);
+        assert_eq!(
+            named,
+            [
+                Some("https://api.anthropic.com/v1/messages".to_string()),
+                Some("https://api.anthropic.com/v1/messages".to_string()),
+                Some("https://api.anthropic.com:8443/v1/messages".to_string()),
+                Some("https://gateway.example.com:8443/anthropic/v1/messages".to_string()),
+            ]
+        );
+    }
+
+    /// A base URL that carries userinfo, a query or a fragment can hold a
+    /// credential, and one that does not parse names no place: a client at
+    /// such a URL names none, so its turns are never kept from going out
+    /// (t-57512).
+    #[test]
+    fn a_live_anthropic_client_at_a_url_with_userinfo_a_query_or_a_fragment_names_no_place() {
+        let _lock = crate::test_env_lock();
+        for base_url in [
+            "https://someone@gateway.example.com",
+            "https://someone:word@gateway.example.com",
+            "https://api.anthropic.com/?region=eu",
+            "https://api.anthropic.com/#messages",
+            "api.anthropic.com",
+        ] {
+            assert_eq!(named_at(base_url), None, "{base_url}");
+        }
+    }
+
+    /// A live client of any other provider names no place (t-57512).
+    #[test]
+    fn a_live_client_of_another_provider_names_no_place() {
+        let client = api::OpenAiCompatClient::new("a-key", api::OpenAiCompatConfig::openai());
+        assert_eq!(live_client_of(ProviderClient::OpenAi(client)).destination(), None);
+    }
 }
