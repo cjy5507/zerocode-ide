@@ -316,6 +316,83 @@ export async function testArtifactStage2(browser, origin, ok) {
       JSON.stringify(excerpt),
     );
 
+    /* ---- ⑥ reading a page, the address bar folds and the header is one line --------------- */
+    const reading = await page.evaluate(async () => {
+      const held = window.__STAGE2__;
+      const out = {};
+      const widthOf = (node) => Math.round(node?.getBoundingClientRect().width ?? 0);
+      const heightOf = (node) => Math.round(node?.getBoundingClientRect().height ?? 0);
+      // A plain browser tab first: the body's height with the address bar standing.
+      await openBrowserTab("https://example.com/plain");
+      await held.settle();
+      const plain = tabs.find((one) => one.kind === "browser" && one.url === "https://example.com/plain") ?? null;
+      setActiveTab(plain?.id);
+      await held.settle();
+      const plainHost = held.hostOf(plain);
+      out.plainAddressHeight = heightOf(plainHost?.querySelector(".browser-address-slot"));
+      out.plainToolbarHeight = heightOf(plainHost?.querySelector(".browser-toolbar"));
+      out.plainBodyHeight = heightOf(plainHost?.querySelector(".browser-body"));
+      out.plainReading = plainHost?.classList.contains("is-artifact-reading") ?? null;
+      // Then the artifact page, in the same group — the same host, the same height to share.
+      const pub = held.publication("p-read");
+      const tab = await held.openFromGallery(pub.id);
+      setActiveTab(tab?.id);
+      await held.settle();
+      const host = held.hostOf(tab);
+      const toolbar = host?.querySelector(".browser-toolbar");
+      // What a later hand puts in the toolbar (the browser workspace work, C8) stays in sight.
+      let planted = toolbar?.querySelector(".browser-workspace-status") ?? null;
+      if (!planted && toolbar) {
+        planted = document.createElement("span");
+        planted.className = "browser-workspace-status";
+        planted.textContent = "작업 공간";
+        toolbar.appendChild(planted);
+        paintBrowserView(tab);
+        await held.settle();
+      }
+      const strip = host?.querySelector(".artifact-strip");
+      out.reading = host?.classList.contains("is-artifact-reading") ?? null;
+      out.addressHeight = heightOf(host?.querySelector(".browser-address-slot"));
+      out.addressWidth = widthOf(host?.querySelector(".browser-address-slot"));
+      out.toolbarChildrenHidden = [...(toolbar?.children ?? [])]
+        .filter((one) => !one.classList.contains("browser-address-slot") && !one.hidden && widthOf(one) === 0)
+        .map((one) => one.className);
+      out.plantedShown = widthOf(planted) > 0 && heightOf(planted) > 0;
+      out.stripHeight = heightOf(strip);
+      out.headHeight = heightOf(strip?.querySelector(".artifact-strip-head"));
+      out.oneLine = out.stripHeight > 0 && out.stripHeight <= Math.round(out.headHeight * 1.6);
+      out.sameRow = toolbar && strip ? Math.round(toolbar.getBoundingClientRect().top) === Math.round(strip.getBoundingClientRect().top) : false;
+      out.bodyHeight = heightOf(host?.querySelector(".browser-body"));
+      // Before and after in one run: with the reading class taken off, the host lays the toolbar
+      // and the strip out as it did before — that body is the before.
+      host?.classList.remove("is-artifact-reading");
+      out.stackedBodyHeight = heightOf(host?.querySelector(".browser-body"));
+      out.stackedStripHeight = heightOf(strip);
+      if (out.reading) host?.classList.add("is-artifact-reading");
+      out.gain = out.bodyHeight - out.stackedBodyHeight;
+      // A link out of the artifact: the address bar stands again.
+      await held.navigate(tab, "https://example.com/elsewhere");
+      out.leftReading = host?.classList.contains("is-artifact-reading") ?? null;
+      out.leftAddressHeight = heightOf(host?.querySelector(".browser-address-slot"));
+      // And back on its file it folds again.
+      await held.navigate(tab, pathAsFileUrl(pub.path));
+      out.backReading = host?.classList.contains("is-artifact-reading") ?? null;
+      await held.fresh();
+      return out;
+    });
+    ok(
+      `⑥ reading an artifact page the address bar folds (height ${reading.addressHeight} px) while the toolbar's other children stay in sight — including one planted later — and the header is one line: toolbar and strip on one row`,
+      reading.plainReading === false && reading.reading === true && reading.addressHeight === 0 && reading.addressWidth === 0
+        && Array.isArray(reading.toolbarChildrenHidden) && reading.toolbarChildrenHidden.length === 0 && reading.plantedShown
+        && reading.oneLine && reading.sameRow,
+      JSON.stringify(reading),
+    );
+    ok(
+      `⑥ the reading surface gains the folded row (body ${reading.stackedBodyHeight} → ${reading.bodyHeight} px, +${reading.gain} px; address row ${reading.plainToolbarHeight} px, strip ${reading.stackedStripHeight} → ${reading.stripHeight} px), and a link out of the artifact brings the address bar back (${reading.leftAddressHeight} px) until the page is its file again`,
+      reading.gain >= reading.plainToolbarHeight - 2 && reading.leftReading === false && reading.leftAddressHeight > 0 && reading.backReading === true,
+      JSON.stringify(reading),
+    );
+
     ok("the artifact-stage2 window raised no errors", faults.length === 0, faults.slice(0, 3).join(" | "));
   } finally {
     await page.close();
