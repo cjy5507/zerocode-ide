@@ -198,7 +198,9 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
         modified_ms: spec.modifiedMs?.[at] ?? 1700000000000 + at,
         out_links: 0,
         in_links: 0,
-        source: args.sources ? `raw/source-${at % 5}.md` : null,
+        /* 시험이 준 자리는 그 `source:` 그대로다(t-55424) — 백엔드는 쪽의 원본을 원본 점을
+         * 청했든 아니든 싣는다(`second_brain_graph::assemble`). */
+        source: spec.pageSources?.[at] ?? (args.sources ? `raw/source-${at % 5}.md` : null),
         excerpt: `개념 ${at}의 첫 문단 요약입니다.`,
         folder: at % 3 === 0 ? "topics" : "",
       });

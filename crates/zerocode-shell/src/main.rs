@@ -3460,7 +3460,11 @@ fn main() -> ExitCode {
             // setup wrote, written again for a vault saved before this road
             // existed or an agent installed since — idempotent, off the boot
             // path.
-            cmd::second_brain::relink_saved_vault_at_boot(saved_vault);
+            cmd::second_brain::relink_saved_vault_at_boot(
+                saved_vault,
+                app.state::<AppState>().config_root().to_path_buf(),
+                local_data_root.clone(),
+            );
             // The runs the last window left, before its road is open. An
             // orchestration is a plan and a plan outlives the screen that
             // showed it — what does not outlive it is the terminals, and every

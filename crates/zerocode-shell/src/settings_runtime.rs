@@ -742,7 +742,31 @@ pub(super) enum SidebarProjectOrder {
     Recent,
 }
 
-/// The sidebar's three ways of looking at one list.
+/// What the sidebar shows while a coordinator sits in a run this window
+/// plays (t-56141): its team — coordinators, the workers under each, one row
+/// a worker — or the branch list the three choices below arrange. A window
+/// with no live coordinator seat shows the branches whatever this says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum SidebarLayout {
+    #[default]
+    Team,
+    Branches,
+}
+
+impl SidebarLayout {
+    /// The word the window sent, or a refusal naming it — the same rule as
+    /// [`SidebarView::parsed`].
+    pub(super) fn parsed(layout: &str) -> Result<Self, String> {
+        match layout {
+            "team" => Ok(Self::Team),
+            "branches" => Ok(Self::Branches),
+            other => Err(format!("unknown sidebar layout: {other}")),
+        }
+    }
+}
+
+/// The sidebar's three ways of looking at one list, and which list.
 ///
 /// One value and not three, because they are one fact with three faces and
 /// they are chosen from one menu — three settings would let a window arrive
@@ -755,6 +779,8 @@ pub(super) struct SidebarView {
     pub(super) sort_by: SidebarSortBy,
     #[serde(default)]
     pub(super) project_order: SidebarProjectOrder,
+    #[serde(default)]
+    pub(super) layout: SidebarLayout,
 }
 
 impl SidebarView {
@@ -793,6 +819,7 @@ impl SidebarView {
             group_by: group,
             sort_by: sort,
             project_order: order,
+            layout: SidebarLayout::default(),
         })
     }
 }

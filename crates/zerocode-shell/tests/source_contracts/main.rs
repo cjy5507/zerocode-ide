@@ -3231,6 +3231,14 @@ mod tests {
             "a digit is not resolved from the sidebar order and routed to that worktree:\n\
              resolver:\n{resolving}\nrouter:\n{routing}"
         );
+        // While the team stands the sidebar lists coordinators and the digits
+        // count those — asked here, the one place a digit is read (t-56141).
+        assert!(
+            resolving.contains(
+                "if (index !== null && sidebarTeamStood) return teamDigitShortcut(index);"
+            ),
+            "the team view's digits are read somewhere else:\n{resolving}"
+        );
         // The eye and the keyboard must index the same list.
         let built = block_after(source, "async function refreshWorktrees(");
         assert!(
@@ -4298,8 +4306,25 @@ mod tests {
                 && painting_once.matches("paint(").count() == 1,
             "several frames of one pull paint the DOM more than once:\n{painting_once}"
         );
+        // A reader that paints nothing may still look through the read-only
+        // door (`term_snapshot`, board.rs) — listed here by name, each one
+        // checked to paint nothing of what it read.
+        let read_only_looks = [
+            // The team row's hover peek: three lines into a tip (t-56141,
+            // the person's approved design).
+            "async function peekTeamRow(node) {",
+        ];
+        let mut painting = window.to_string();
+        for opens in read_only_looks {
+            let look = block_after(window, opens);
+            assert!(
+                !look.contains("applyFrames") && !look.contains("set_watched_terms"),
+                "`{opens}` paints the screen it only looks at:\n{look}"
+            );
+            painting = painting.replacen(look, "", 1);
+        }
         assert!(
-            !window.contains("term:screen") && !window.contains("term_snapshot\", { term })"),
+            !painting.contains("term:screen") && !painting.contains("term_snapshot\", { term })"),
             "a screen still arrives by an event, or a reveal still seeds from a \
              snapshot beside its pull"
         );

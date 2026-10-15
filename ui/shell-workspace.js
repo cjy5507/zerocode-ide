@@ -657,6 +657,7 @@ async function removeProjectFromList(path) {
   const gone = new Set(
     (projects.find((held) => held.path === path)?.worktrees ?? []).map((held) => held.path),
   );
+  noteTabsLeaving(tabs.filter((held) => gone.has(held.worktree)), "project-removed");
   for (const held of tabs.filter((held) => gone.has(held.worktree))) {
     if (held.kind === "term") {
       for (const term of paneLeaves(held.layout)) {
@@ -2248,6 +2249,10 @@ const sidebarHiddenProjects = new Set();
 let sidebarGroupBy = "repo";
 let sidebarSortBy = "default";
 let sidebarProjectOrder = "default";
+/* And which list (t-56141): the team — coordinators, the workers under each — or the branches the three
+ * choices above arrange. Stored with them in `sidebar_view`; the team stands only while a coordinator sits
+ * in a run this window plays (`sidebarTeamStands`). */
+let sidebarLayout = "team";
 
 /* 활동 정렬과 상태 그룹이 읽는, 얼려 둔 한 장.
  *
@@ -3371,19 +3376,22 @@ function setSidebarView(patch) {
     groupBy: sidebarGroupBy,
     sortBy: sidebarSortBy,
     projectOrder: sidebarProjectOrder,
+    layout: sidebarLayout,
     ...patch,
   };
   if (next.groupBy === sidebarGroupBy && next.sortBy === sidebarSortBy
-    && next.projectOrder === sidebarProjectOrder) return;
+    && next.projectOrder === sidebarProjectOrder && next.layout === sidebarLayout) return;
   sidebarGroupBy = next.groupBy;
   sidebarSortBy = next.sortBy;
   sidebarProjectOrder = next.projectOrder;
+  sidebarLayout = next.layout;
   paintSidebarTitle();
   void refreshWorktrees();
   void commitSetting("sidebar_view", "set_sidebar_view", {
     groupBy: next.groupBy,
     sortBy: next.sortBy,
     projectOrder: next.projectOrder,
+    layout: next.layout,
   });
 }
 
@@ -3988,13 +3996,15 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     tone = "none";
   }
   head ??= word;
-  if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
-  // What the compare ref changed too among the unsaved files (t-45314), right after them: it is said of the
-  // unsaved work and by file, so it wears neither the conflict's word nor its colour.
+  // What the compare ref changed too among the unsaved files (t-45314) is said first: the ellipsis cuts the end
+  // of a chip, and at the sidebar's default width it cuts even the middle of this one (t-55424). The one-word
+  // place keeps the state word. It is said of the unsaved work and by file, so it wears neither the conflict's
+  // word nor its colour.
   const overlapping = landing.dirty && !check ? landing.overlap?.total ?? 0 : 0;
   if (overlapping > 0) {
-    word += ` · ${t("worktree.landOverlap", "{{ref}}과 겹침 {{count}}", { ref: landingRefName(ref), count: overlapping })}`;
+    word = `${t("worktree.landOverlap", "{{ref}}과 겹침 {{count}}", { ref: landingRefName(ref), count: overlapping })} · ${word}`;
   }
+  if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
   // Said of work that is in the compare ref and of nothing else: the backend
   // asks only landed rows, and a row that is in doubt says nothing more.
   const holdsIgnored = gitIn && !check && landing.ignored === true;
@@ -5455,6 +5465,16 @@ async function refreshWorktrees() {
 
   const held = worktreeLanes();
 
+  // The team stands in the list's place (t-56141): no branch row is built behind it, and the catalog just read
+  // may have moved a worker's commits, which its row says.
+  if (standSidebarLayout({ rebuild: false })) {
+    scheduleSidebarTeamPaint();
+    if (!el("ext-scrim").hidden) paintExternalWorktrees();
+    paintHistoryButtons();
+    scheduleWorkspaceBoardPaint();
+    return allWorktrees;
+  }
+
   // Nothing about the list itself moved — only which row is current, which are
   // selected, or what the agents inside them are doing, and every one of those
   // is a class on a row that already exists. A workspace click used to rebuild
@@ -5556,6 +5576,746 @@ async function refreshWorktrees() {
   paintHistoryButtons();
   scheduleWorkspaceBoardPaint();
   return allWorktrees;
+}
+
+/* ---- the team view (t-56141) ----------------------------------------------
+ *
+ * The person, 10-15: 「코디 별로 밑에 생성된 워커를 표시… 각자 자기 창을 보게… 직관적인 UI」. While a run this
+ * window plays has a coordinator in its seat, the sidebar is that team: a card for each coordinator, and under it
+ * one row for each worker it summoned — the row is that worker's pane: pressed, the pane comes to the front;
+ * pointed at, its last three lines. The branch list stays one press away (「가지별 보기」, `sidebar_view.layout`).
+ *
+ * Every word on a row is a fact the window already holds or the ledger wrote: the task, the pane id the ledger
+ * keeps for the worker (`%5` — an account switch moves it and the row stays, keyed by the worker id), one word
+ * of what holds the work back (`seatHealthBlockerWord`·`seatStallWord`, the workspace line's), the first sentence
+ * of the last `status` the worker sent (`last_status`, read on the board's beat), and six steps whose evidence is
+ * the ledger's and git's, never a letter's prose: 읽기 (the attempt stands, nothing committed), 커밋 N (the
+ * checkout's `landing.ahead`, the catalog's), 검사 (the task's newest landing check, `land_check`), 넘김
+ * (`handed_in`), 검증 and 착지 (the coordinator's review). A step with no record stays empty. The build line a
+ * worker queues on is a tool outside the repository and no record of this window's, so no step says it.
+ *
+ * Drawn the way the branch list's agent rows are: a row is built once and written again only when what it says
+ * moved (`__said`, one string a row), and kept in order by moving nodes. Nothing is read while no coordinator
+ * sits — the stand is asked of the seats the ledger's beat already reads (`coordinatorSeats`). */
+
+/* How much of the last status line a row shows, how many of a pane's last lines its tip shows and how wide
+ * each may be, how long such a reading stands, and how often the rows' clocks are said again. */
+const TEAM_NOW_CHARS = 30;
+const TEAM_PEEK_LINES = 3;
+const TEAM_PEEK_CHARS = 80;
+const TEAM_PEEK_FRESH_MS = 3_000;
+const TEAM_CLOCK_MS = 30_000;
+
+/* A worker's state, in the order a coordinator's rows stand: a question or a blocker first, then work going,
+ * then work waiting on the coordinator, then rest. */
+const TEAM_STATES = Object.freeze({
+  asking: { rank: 0, key: "sidebar.team.stateAsking", word: "질문" },
+  blocked: { rank: 1, key: "sidebar.team.stateBlocked", word: "막힘" },
+  working: { rank: 2, key: "sidebar.team.stateWorking", word: "일하는 중" },
+  waiting: { rank: 3, key: "sidebar.team.stateWaiting", word: "기다림" },
+  resting: { rank: 4, key: "sidebar.team.stateResting", word: "쉼" },
+});
+
+/* The six steps of a worker's way to main, in order. */
+const TEAM_STEPS = Object.freeze([
+  { id: "read", key: "sidebar.team.step.read", word: "읽기" },
+  { id: "commit", key: "sidebar.team.step.commit", word: "커밋" },
+  { id: "check", key: "sidebar.team.step.check", word: "검사" },
+  { id: "handIn", key: "sidebar.team.step.handIn", word: "넘김" },
+  { id: "verify", key: "sidebar.team.step.verify", word: "검증" },
+  { id: "land", key: "sidebar.team.step.land", word: "착지" },
+]);
+
+/* A landing check that ended well, and one still going — the window's own words for a check (`DESK_LAND_CHECK`
+ * names every ending). Any other word is a check that did not pass. */
+const TEAM_CHECK_PASSED = new Set(["passed", "merged"]);
+const TEAM_CHECK_GOING = new Set(["started", "prepared"]);
+
+/* A worker is released when it hands its work in; the work it left standing keeps its row while it still waits on
+ * its coordinator — handed in, being reviewed, verified and not landed, or failed — since the steps after 넘김 are
+ * where it stands. Work that landed, had nothing to land or was closed leaves the team. */
+const TEAM_SETTLED_STAGES = new Set(["handedIn", "reviewing", "landWait", "failed"]);
+
+/* What a step's cell says in the strip's tip: done, where the work is, where it is held, no record. */
+const TEAM_STEP_MARKS = Object.freeze({ on: "✓", cur: "…", stuck: "!", "": "—" });
+
+const sidebarTeam = document.createElement("div");
+sidebarTeam.className = "team";
+sidebarTeam.id = "sidebar-team";
+sidebarTeam.setAttribute("role", "group");
+// Its rows take their own keys: the window's floor (`rearmKeySink`) would hand an arrow or an Enter pressed on a
+// row to the staged terminal.
+sidebarTeam.dataset.keyboardOwner = "true";
+sidebarTeam.hidden = true;
+/* The branch list's way back to the team, standing over it while a coordinator sits. */
+const sidebarTeamSwitch = document.createElement("button");
+sidebarTeamSwitch.type = "button";
+sidebarTeamSwitch.className = "team-switch";
+sidebarTeamSwitch.hidden = true;
+sidebarTeamSwitch.addEventListener("click", () => setSidebarView({ layout: "team" }));
+sidebarScroller.insertBefore(sidebarTeamSwitch, worktreeList);
+sidebarScroller.insertBefore(sidebarTeam, worktreeList);
+
+/* What the team view read on the ledger's beat: the workers still summoned (`ledger_agents`, the answer the
+ * navigator's own read shares) and the runs in play with what each coordinator owes (`coordinator_seats`). */
+const sidebarTeamData = { read: false, rows: [], seats: [] };
+let sidebarTeamAsking = false;
+let sidebarTeamAgain = false;
+let sidebarTeamStood = false;
+let sidebarTeamFrame = 0;
+let sidebarTeamClock = 0;
+/* The row nodes by key (`c:<run>`, `w:<run>/<worker>`, and the four lines), the panes' last lines read for
+ * tips, and the row the keyboard stands on. */
+const sidebarTeamNodes = new Map();
+const sidebarTeamPeeks = new Map();
+let sidebarTeamFocus = null;
+/* What the view did, counted: paints, rows built, rows written again, ledger reads. The tests and the
+ * measurement harness read it. */
+const sidebarTeamCounts = { paints: 0, built: 0, dressed: 0, reads: 0 };
+
+/* A pop-out board has no sidebar of its own to stand in. */
+function sidebarTeamStands() {
+  return !isPopout && sidebarLayout === "team" && coordinatorSeats.some((seat) => seat.held);
+}
+
+function refreshSidebarTeam() {
+  if (sidebarTeamAsking) {
+    sidebarTeamAgain = true;
+    return;
+  }
+  sidebarTeamAsking = true;
+  sidebarTeamCounts.reads += 1;
+  Promise.all([readLedgerAgents(), invoke("coordinator_seats")])
+    .then(([rows, seats]) => {
+      sidebarTeamData.rows = Array.isArray(rows)
+        ? rows.filter((row) => row && (row.settled !== true || TEAM_SETTLED_STAGES.has(ledgerLandingStage(row))))
+        : [];
+      if (Array.isArray(seats)) sidebarTeamData.seats = seats;
+      scheduleSidebarTeamPaint();
+    })
+    .catch(() => {})
+    .finally(() => {
+      sidebarTeamData.read = true;
+      sidebarTeamAsking = false;
+      if (!sidebarTeamAgain) return;
+      sidebarTeamAgain = false;
+      if (sidebarTeamStands()) refreshSidebarTeam();
+    });
+}
+
+listen("ledger:changed", () => {
+  if (sidebarTeamStands()) refreshSidebarTeam();
+});
+
+function scheduleSidebarTeamPaint() {
+  if (sidebarTeamFrame) return;
+  sidebarTeamFrame = requestAnimationFrame(() => {
+    sidebarTeamFrame = 0;
+    paintSidebarTeam();
+  });
+}
+
+/* Which list stands, said once a change: the team in the branch list's place — whose rows go, since nobody sees
+ * them behind it, and come back through the shape guard — or the list, with the team's rows gone. `rebuild` asks
+ * for the branch rows at once (a caller that is not building them itself). */
+function standSidebarLayout({ rebuild }) {
+  const stands = sidebarTeamStands();
+  const offered = !stands && coordinatorSeats.some((seat) => seat.held);
+  writeHidden(sidebarTeamSwitch, !offered);
+  if (offered) {
+    writeTextContent(sidebarTeamSwitch, t("sidebar.team.toTeam", "팀 보기"));
+    const tip = t("sidebar.team.toTeamTip", "코디와 그 밑의 워커를 한 줄씩 봅니다");
+    if ((sidebarTeamSwitch.dataset.tip ?? "") !== tip) sidebarTeamSwitch.dataset.tip = tip;
+  }
+  if (stands === sidebarTeamStood) return stands;
+  sidebarTeamStood = stands;
+  writeHidden(sidebarTeam, !stands);
+  writeHidden(worktreeList, stands);
+  sidebarTeam.setAttribute("aria-label", t("sidebar.team.label", "팀"));
+  if (stands) startSidebarTeamClock();
+  else stopSidebarTeamClock();
+  if (stands) {
+    dropSidebarWindows();
+    worktreeList.replaceChildren();
+    worktreeChildren.clear();
+    worktreeListDrawn = null;
+    // What stood behind a branch list may be old by now: read it again before the rows come back.
+    refreshSidebarTeam();
+    scheduleSidebarTeamPaint();
+  } else {
+    sidebarTeam.replaceChildren();
+    sidebarTeamNodes.clear();
+    sidebarTeamPeeks.clear();
+    if (rebuild) void refreshWorktrees();
+  }
+  return stands;
+}
+
+/* The rows' clocks are said again on a slow beat while the team stands — a paint whose words did not move writes
+ * nothing. The beat only schedules that paint: it asks the backend nothing. */
+function startSidebarTeamClock() {
+  if (!sidebarTeamClock) sidebarTeamClock = window.setInterval(scheduleSidebarTeamPaint, TEAM_CLOCK_MS);
+}
+
+function stopSidebarTeamClock() {
+  if (sidebarTeamClock) clearInterval(sidebarTeamClock);
+  sidebarTeamClock = 0;
+}
+
+/* The words of a time past, as a row's clock says it: 「방금」 under a minute, 「N분 전」 after. */
+function teamAgo(at, now) {
+  const word = agoWord(at, now);
+  return now - at < 60_000 ? word : t("sidebar.team.ago", "{{time}} 전", { time: word });
+}
+
+/* The first sentence of a status line, cut to what a row holds. */
+function teamSentence(line) {
+  const text = String(line).trim();
+  const first = /^.*?[.!?。！？](?=\s|$)/u.exec(text)?.[0] ?? text;
+  const chars = [...first];
+  return chars.length > TEAM_NOW_CHARS ? `${chars.slice(0, TEAM_NOW_CHARS - 1).join("")}…` : first;
+}
+
+/* Where one worker's work stands on its six steps, from the ledger's row and git's word for its checkout. The
+ * step the work is at is `current` (blue; held, yellow, when something holds the work back); the steps before it
+ * that have a record are done; a step with no record stays empty. */
+function teamSteps(row, held) {
+  const phase = ledgerLandingStage(row);
+  const landing = row.checkout
+    ? worktreeLandings.get(row.checkout) ?? worktreeLandings.get(checkoutKey(row.checkout)) ?? null
+    : null;
+  const commits = landing?.state === "unlanded" ? Number(landing.ahead) || 0 : 0;
+  const committed = commits > 0 || landing?.state === "landed";
+  const landed = phase === "landed" || phase === "nothing";
+  const verified = landed || phase === "landWait" || row.review?.verified === true;
+  const handed = Boolean(row.handed_in) && !row.failed;
+  let current = null;
+  if (!landed) {
+    if (verified) current = "land";
+    else if (handed) current = "verify";
+    else if (row.failed) current = "handIn";
+    else if (committed) current = "commit";
+    else current = "read";
+  }
+  const check = row.land_check?.state ?? null;
+  const cells = {
+    read: current === "read" ? "cur" : "on",
+    commit: committed ? (current === "commit" ? "cur" : "on") : "",
+    check: check === null ? "" : TEAM_CHECK_PASSED.has(check) ? "on" : TEAM_CHECK_GOING.has(check) ? "cur" : "stuck",
+    handIn: row.failed ? "stuck" : handed || verified ? "on" : "",
+    verify: verified ? "on" : current === "verify" ? "cur" : "",
+    land: landed ? "on" : current === "land" ? "cur" : "",
+  };
+  if (held && current !== null && cells[current] === "cur") cells[current] = "stuck";
+  return { cells, current, commits, landing, check };
+}
+
+function teamStepWord(id, commits) {
+  if (id === "commit" && commits > 0) return t("sidebar.team.step.commitCount", "커밋 {{count}}", { count: commits });
+  const step = TEAM_STEPS.find((one) => one.id === id);
+  return t(step.key, step.word);
+}
+
+/* What the strip says when pointed at: each step and its mark, the coordinator's word for the work, git's for the
+ * commits and the landing check's. */
+function teamStepsTip(row, steps) {
+  const marks = TEAM_STEPS.map((step) => `${teamStepWord(step.id, steps.commits)} ${TEAM_STEP_MARKS[steps.cells[step.id]]}`);
+  const ref = steps.landing?.compare_ref ? landingRefName(steps.landing.compare_ref) : "";
+  const lines = [marks.join(" · "), ledgerReviewWord(row)];
+  if (steps.commits > 0 && ref) {
+    lines.push(t("sidebar.team.commitsTip", "{{ref}}에 없는 커밋 {{count}}개", { ref, count: steps.commits }));
+  }
+  if (steps.check !== null) {
+    const said = Object.hasOwn(DESK_LAND_CHECK, steps.check) ? DESK_LAND_CHECK[steps.check] : null;
+    lines.push(said
+      ? t(said.key, said.word, { count: 0, rc: row.land_check?.rc ?? "?" })
+      : TEAM_CHECK_GOING.has(steps.check) ? t("sidebar.team.checkGoing", "착지 전 점검 중")
+        : t(DESK_LAND_CHECK.error.key, DESK_LAND_CHECK.error.word));
+  }
+  return lines.filter(Boolean).join("\n");
+}
+
+/* One worker's row, as words: its state and the one word of what holds it, its title, its pane, what it last
+ * said it was doing, and its steps. */
+function teamWorkerEntry(row, at, now) {
+  const stage = ledgerLandingStage(row);
+  const blocker = seatHealthBlockerWord(row, now) || seatStallWord(row, stage);
+  const hook = Number.isInteger(row.term) && hookStates.has(row.term)
+    ? autonomousPaneState(row.term, hookStates.get(row.term)) : null;
+  let state = "resting";
+  if (row.asking === true || hook === "needs-attention") state = "asking";
+  else if (blocker) state = "blocked";
+  else if (hook === "working" || (hook === null && row.state === "working")) state = "working";
+  else if (stage === "handedIn" || stage === "reviewing" || stage === "landWait") state = "waiting";
+  const chip = blocker || (hook === "needs-attention" ? bucketWord("attention") : "");
+  const steps = teamSteps(row, state === "blocked" || state === "asking");
+  const said = row.last_status;
+  const role = { kind: "worker", facts: { worker: row.worker, task: row.task, taskId: row.task_id }, takenOver: row.taken_over === true };
+  return {
+    key: `w:${row.run}/${row.worker}`,
+    kind: "worker",
+    row,
+    at,
+    state,
+    chip,
+    title: row.task?.trim() || row.task_id || agentName(row.agent),
+    // A released worker has no pane left to name.
+    pane: row.pane && row.settled !== true ? t("sidebar.team.pane", "판 {{pane}}", { pane: row.pane }) : "",
+    paneTip: row.pane && row.settled !== true
+      ? t("sidebar.team.paneTip", "워커 {{worker}}의 판 — 계정이 바뀌어 판 번호가 옮겨도 이 행은 그 워커를 따라갑니다", { worker: row.worker })
+      : "",
+    now: said?.line ? `${teamSentence(said.line)} · ${teamAgo(said.created_ms, now)}` : "",
+    nowTip: said?.line ?? "",
+    steps,
+    step: steps.current === null ? teamStepWord("land", 0) : teamStepWord(steps.current, steps.commits),
+    stepsTip: teamStepsTip(row, steps),
+    tip: [paneRoleTip(role), [row.model, row.effort].filter(Boolean).join(" · ")].filter(Boolean).join("\n"),
+    taken: row.taken_over === true,
+    term: Number.isInteger(row.term) ? row.term : null,
+  };
+}
+
+/* One coordinator's card, as words: who sits (or that nobody does), what its pane is doing, on which model and
+ * account, and what it owes — questions to answer and news to read. */
+function teamCoordinatorEntry(seat) {
+  const term = Number.isInteger(seat.term) ? seat.term : null;
+  const agent = term === null ? null : paneAgents.get(term) ?? null;
+  const run = seat.name || seat.run;
+  let name;
+  if (!seat.held) name = t("agent.role.coordinatorVacant", "코디 (비어 있음)");
+  else name = t("agent.role.tab", "{{role}} · {{label}}", {
+    role: t("agent.role.coordinator", "코디"),
+    label: agent ? agentName(agent) : run,
+  });
+  let doing = "";
+  if (term !== null) {
+    const tab = tabOfTerm(term);
+    const lead = tab ? worktreeAgentRows(tab.worktree).find((one) => one.term === term && !one.sub) : null;
+    if (lead) {
+      const state = agentRowState(lead);
+      doing = agentRowSecondary(lead, state, agentRowPrimary(lead, state));
+      // The card's name already says which agent it is.
+      if (agent && doing === agentName(agent)) doing = "";
+    }
+  }
+  const model = term === null ? { text: "", tip: "" } : paneModelWords(term);
+  const account = term === null || typeof paneAccountWords !== "function" ? null : paneAccountWords(term);
+  const questions = Number(seat.mail) || 0;
+  const letters = Number(seat.news) || 0;
+  return {
+    key: `c:${seat.run}`,
+    kind: "coordinator",
+    seat,
+    term,
+    agent,
+    name,
+    run: seat.held && agent ? run : "",
+    now: [doing, model.text, account?.words ?? ""].filter(Boolean).join(" · "),
+    nowTip: [model.tip, account?.tip ?? ""].filter(Boolean).join("\n"),
+    questions: questions > 0 ? t("sidebar.team.questions", "질문 {{count}}", { count: questions }) : "",
+    questionsTip: t("sidebar.team.questionsTip", "이 코디가 답해야 할 질문 {{count}}통", { count: questions }),
+    letters: letters > 0 ? t("sidebar.team.letters", "편지 {{count}}", { count: letters }) : "",
+    lettersTip: t("sidebar.team.lettersTip", "이 코디가 아직 확인하지 않은 소식 {{count}}통", { count: letters }),
+    tip: paneRoleTip({ kind: "coordinator", seats: [{ name: seat.name, run: seat.run, generation: seat.generation ?? 0 }] }),
+  };
+}
+
+/* The panes of this window the person drives: an agent the ledger seated nowhere (내 판), and a worker's pane the
+ * person took over (인수한 판). */
+function teamPersonPanes(rows) {
+  const own = [];
+  for (const tab of tabs) {
+    if (tab.kind !== "term") continue;
+    for (const term of paneLeaves(tab.layout)) {
+      if (!paneAgents.has(term) && !hookStates.has(term) && !paneSessions.has(term)) continue;
+      if (paneRole(term) === null) own.push(term);
+    }
+  }
+  const taken = rows.filter((row) => row.taken_over === true && Number.isInteger(row.term)).map((row) => row.term);
+  return { own, taken };
+}
+
+/* Everything the view says, in the order it stands. */
+function sidebarTeamEntries(now) {
+  const byRun = new Map();
+  sidebarTeamData.rows.forEach((row, at) => {
+    if (!byRun.has(row.run)) byRun.set(row.run, []);
+    byRun.get(row.run).push(teamWorkerEntry(row, at, now));
+  });
+  const panes = teamPersonPanes(sidebarTeamData.rows);
+  const entries = [{
+    key: "mine",
+    kind: "mine",
+    own: panes.own,
+    taken: panes.taken,
+    ownWords: t("sidebar.team.own", "내 판 {{count}}", { count: panes.own.length }),
+    ownTip: t("sidebar.team.ownTip", "이 창에서 직접 연 에이전트 판 — 누르면 첫 판으로 갑니다"),
+    takenWords: t("sidebar.team.taken", "인수한 판 {{count}}", { count: panes.taken.length }),
+    takenTip: t("sidebar.team.takenTip", "사람이 넘겨받은 워커 판 — 누르면 첫 판으로 갑니다"),
+  }];
+  let landing = 0;
+  let batched = 0;
+  for (const seat of sidebarTeamData.seats) {
+    landing += Number(seat.landing) || 0;
+    batched += Number(seat.batched) || 0;
+    entries.push(teamCoordinatorEntry(seat));
+    const workers = byRun.get(seat.run) ?? [];
+    workers.sort((one, other) => TEAM_STATES[one.state].rank - TEAM_STATES[other.state].rank || one.at - other.at);
+    entries.push(...workers);
+  }
+  entries.push({
+    key: "landing",
+    kind: "landing",
+    landing,
+    words: [
+      t("sidebar.team.landing", "착지 대기 {{count}}", { count: landing }),
+      batched > 0 ? t("sidebar.team.batchCount", "묶음 {{count}}", { count: batched }) : t("sidebar.team.batch", "묶음"),
+      t("sidebar.team.release", "다음 릴리즈"),
+    ],
+    tip: t("sidebar.team.landingTip", "검증됐고 아직 병합되지 않은 과업 {{count}}개 — 누르면 작업 상황판에서 그 목록을 엽니다", { count: landing }),
+  }, {
+    key: "foot",
+    kind: "foot",
+    keys: t("sidebar.team.keys", "↑↓ 이동 · ⏎ 판 열기 · {{mod}}1·2·3 코디", { mod: usesCommandModifier ? "⌘" : "Ctrl+" }),
+    toggle: t("sidebar.team.toBranches", "가지별 보기"),
+    toggleTip: t("sidebar.team.toBranchesTip", "가지와 워크스페이스 목록으로 돌아갑니다 — 팀 보기는 그 목록 위에서 다시 켭니다"),
+  });
+  return entries;
+}
+
+/* What one entry says, as one string: a row is written again only when this moved. */
+function teamEntrySaid(entry) {
+  switch (entry.kind) {
+    case "worker":
+      return [entry.state, entry.chip, entry.title, entry.pane, entry.paneTip, entry.now, entry.nowTip,
+        TEAM_STEPS.map((step) => entry.steps.cells[step.id]).join(","), entry.step, entry.stepsTip, entry.tip,
+        entry.taken ? 1 : 0, entry.term ?? "", t(TEAM_STATES[entry.state].key, TEAM_STATES[entry.state].word)].join("|");
+    case "coordinator":
+      return [entry.name, entry.run, entry.agent ?? "", entry.now, entry.nowTip, entry.questions, entry.questionsTip,
+        entry.letters, entry.lettersTip, entry.tip, entry.term ?? "", entry.seat.held ? 1 : 0].join("|");
+    case "mine":
+      return [entry.ownWords, entry.ownTip, entry.takenWords, entry.takenTip, entry.own.join(","), entry.taken.join(",")].join("|");
+    case "landing":
+      return [...entry.words, entry.tip].join("|");
+    default:
+      return [entry.keys, entry.toggle, entry.toggleTip].join("|");
+  }
+}
+
+function teamPart(node, tag, className) {
+  const part = deskElement(tag, className);
+  node.append(part);
+  return part;
+}
+
+/* A row's node, built once by kind; its words are written by `dressTeamNode`. */
+function buildTeamNode(entry) {
+  sidebarTeamCounts.built += 1;
+  if (entry.kind === "mine") {
+    const node = deskElement("div", "team-mine");
+    const own = teamPart(node, "button", "team-mine-chip");
+    own.type = "button";
+    own.dataset.mine = "own";
+    const taken = teamPart(node, "button", "team-mine-chip");
+    taken.type = "button";
+    taken.dataset.mine = "taken";
+    node.__parts = { own, taken };
+    return node;
+  }
+  if (entry.kind === "foot") {
+    const node = deskElement("div", "team-foot");
+    const keys = teamPart(node, "span", "team-keys");
+    const toggle = teamPart(node, "button", "team-toggle");
+    toggle.type = "button";
+    toggle.addEventListener("click", () => setSidebarView({ layout: "branches" }));
+    node.__parts = { keys, toggle };
+    return node;
+  }
+  const node = deskElement("button", `team-row team-${entry.kind}`);
+  node.type = "button";
+  node.tabIndex = -1;
+  node.dataset.teamRow = entry.kind;
+  node.dataset.tipSide = "end";
+  if (entry.kind === "landing") {
+    node.__parts = { words: [] };
+    entry.words.forEach((unused, at) => {
+      if (at > 0) teamPart(node, "span", "team-arrow").textContent = "→";
+      node.__parts.words.push(teamPart(node, "span", at === 0 ? "team-landing-count" : "team-landing-step"));
+    });
+    return node;
+  }
+  const line = teamPart(node, "span", "team-line");
+  if (entry.kind === "coordinator") {
+    const face = teamPart(line, "span", "team-face");
+    const name = teamPart(line, "span", "team-name");
+    const run = teamPart(line, "span", "team-run");
+    const questions = teamPart(line, "span", "team-badge is-question");
+    const letters = teamPart(line, "span", "team-badge is-letters");
+    const now = teamPart(node, "span", "team-now");
+    node.__parts = { face, name, run, questions, letters, now };
+    return node;
+  }
+  const dot = teamPart(line, "span", "team-dot");
+  const title = teamPart(line, "span", "team-title");
+  const chip = teamPart(line, "span", "team-chip");
+  const pane = teamPart(line, "span", "team-pane");
+  const now = teamPart(node, "span", "team-now");
+  const strip = teamPart(node, "span", "team-strip");
+  const cells = TEAM_STEPS.map((step) => {
+    const cell = teamPart(strip, "i", "team-step");
+    cell.dataset.step = step.id;
+    return cell;
+  });
+  const step = teamPart(strip, "b", "team-step-word");
+  node.__parts = { dot, title, chip, pane, now, strip, cells, step };
+  return node;
+}
+
+function writeTeamText(node, words, tip = "") {
+  writeTextContent(node, words);
+  writeHidden(node, words === "");
+  if ((node.dataset.tip ?? "") !== tip) node.dataset.tip = tip;
+}
+
+/* A row's tip, with the last lines of its pane when they were read (`peekTeamRow`). */
+function writeTeamTip(node) {
+  const term = Number(node.dataset.teamTerm);
+  const lines = Number.isInteger(term) ? sidebarTeamPeeks.get(term)?.lines ?? [] : [];
+  const tip = [node.__tip ?? "", ...(lines.length ? ["", ...lines] : [])].join("\n").trim();
+  if ((node.dataset.tip ?? "") !== tip) node.dataset.tip = tip;
+}
+
+function dressTeamNode(node, entry) {
+  sidebarTeamCounts.dressed += 1;
+  const parts = node.__parts;
+  if (entry.kind === "mine") {
+    writeTeamText(parts.own, entry.ownWords, entry.ownTip);
+    writeTeamText(parts.taken, entry.takenWords, entry.takenTip);
+    parts.own.disabled = entry.own.length === 0;
+    parts.taken.disabled = entry.taken.length === 0;
+    return;
+  }
+  if (entry.kind === "foot") {
+    writeTextContent(parts.keys, entry.keys);
+    writeTeamText(parts.toggle, entry.toggle, entry.toggleTip);
+    return;
+  }
+  if (entry.kind === "landing") {
+    entry.words.forEach((word, at) => writeTextContent(parts.words[at], word));
+    node.__tip = entry.tip;
+    writeTeamTip(node);
+    node.classList.toggle("is-empty", entry.landing === 0);
+    node.setAttribute("aria-label", entry.words.join(" → "));
+    return;
+  }
+  if (entry.kind === "coordinator") {
+    const face = entry.agent ? agentIcon(agentRows.find((one) => one.id === entry.agent)
+      ?? { id: entry.agent, name: agentName(entry.agent), favicon_domain: "" }) : null;
+    parts.face.replaceChildren(...(face ? [face] : []));
+    writeTextContent(parts.name, entry.name);
+    writeTeamText(parts.run, entry.run);
+    writeTeamText(parts.questions, entry.questions, entry.questionsTip);
+    writeTeamText(parts.letters, entry.letters, entry.lettersTip);
+    writeTeamText(parts.now, entry.now, entry.nowTip);
+    node.classList.toggle("is-vacant", !entry.seat.held);
+    node.disabled = entry.term === null;
+    node.__tip = entry.tip;
+    if (entry.term === null) delete node.dataset.teamTerm;
+    else node.dataset.teamTerm = String(entry.term);
+    writeTeamTip(node);
+    node.setAttribute("aria-label", [entry.name, entry.run, entry.questions, entry.letters, entry.now].filter(Boolean).join(" · "));
+    return;
+  }
+  const state = TEAM_STATES[entry.state];
+  parts.dot.className = `team-dot is-${entry.state}`;
+  parts.dot.dataset.tip = t(state.key, state.word);
+  writeTextContent(parts.title, entry.title);
+  writeTeamText(parts.chip, entry.chip);
+  parts.chip.classList.toggle("is-question", entry.state === "asking");
+  writeTeamText(parts.pane, entry.pane, entry.paneTip);
+  writeTeamText(parts.now, entry.now, entry.nowTip);
+  TEAM_STEPS.forEach((step, at) => {
+    const cell = parts.cells[at];
+    const said = entry.steps.cells[step.id];
+    const wanted = said ? `team-step is-${said}` : "team-step";
+    if (cell.className !== wanted) cell.className = wanted;
+  });
+  writeTextContent(parts.step, entry.step);
+  if ((parts.strip.dataset.tip ?? "") !== entry.stepsTip) parts.strip.dataset.tip = entry.stepsTip;
+  node.classList.toggle("is-taken", entry.taken);
+  node.__tip = entry.tip;
+  if (entry.term === null) delete node.dataset.teamTerm;
+  else node.dataset.teamTerm = String(entry.term);
+  writeTeamTip(node);
+  node.setAttribute("aria-label", [entry.title, t(state.key, state.word), entry.chip, entry.pane, entry.now, entry.step]
+    .filter(Boolean).join(" · "));
+}
+
+function paintSidebarTeam() {
+  if (!standSidebarLayout({ rebuild: true })) return;
+  if (!sidebarTeamData.read) return;
+  sidebarTeamCounts.paints += 1;
+  const now = Date.now();
+  const wanted = [];
+  const terms = new Set();
+  for (const entry of sidebarTeamEntries(now)) {
+    let node = sidebarTeamNodes.get(entry.key);
+    if (!node || node.dataset.teamRow !== undefined && node.dataset.teamRow !== entry.kind) {
+      node = buildTeamNode(entry);
+      node.dataset.teamKey = entry.key;
+      sidebarTeamNodes.set(entry.key, node);
+    }
+    node.__entry = entry;
+    const said = teamEntrySaid(entry);
+    if (node.__said !== said) {
+      node.__said = said;
+      dressTeamNode(node, entry);
+    }
+    if (Number.isInteger(entry.term)) terms.add(entry.term);
+    wanted.push(node);
+  }
+  reconcileElementOrder(sidebarTeam, wanted);
+  const standing = new Set(wanted);
+  for (const [key, node] of sidebarTeamNodes) if (!standing.has(node)) sidebarTeamNodes.delete(key);
+  for (const term of sidebarTeamPeeks.keys()) if (!terms.has(term)) sidebarTeamPeeks.delete(term);
+  rovingTeamFocus();
+}
+
+/* The rows the arrows walk, in order — and the one the keyboard stands on keeps the tab stop. */
+function teamSteppedRows() {
+  return [...sidebarTeam.querySelectorAll(":scope > .team-row")].filter((node) => !node.disabled);
+}
+
+function rovingTeamFocus() {
+  const rows = teamSteppedRows();
+  const stop = rows.find((node) => node.dataset.teamKey === sidebarTeamFocus) ?? rows[0] ?? null;
+  for (const node of sidebarTeam.querySelectorAll(":scope > .team-row")) {
+    const index = node === stop ? 0 : -1;
+    if (node.tabIndex !== index) node.tabIndex = index;
+  }
+}
+
+/* The coordinators in the order their cards stand — what ⌘1, ⌘2 and ⌘3 reach. */
+function sidebarTeamCoordinators() {
+  return sidebarTeamData.seats;
+}
+
+function pressTeamSeat(seat) {
+  const term = Number.isInteger(seat?.term) ? seat.term : null;
+  if (term === null) return false;
+  const tab = tabOfTerm(term);
+  void focusAgentPane(tab?.worktree ?? null, tab?.id ?? null, term, paneAgents.get(term) ?? null);
+  return true;
+}
+
+/* A worker's row brings its pane to the front; a worker this window holds no pane for brings its checkout. */
+function pressTeamWorker(row) {
+  if (Number.isInteger(row.term)) {
+    const tab = tabOfTerm(row.term);
+    void focusAgentPane(tab?.worktree ?? row.checkout ?? null, tab?.id ?? null, row.term, row.agent ?? null);
+    return;
+  }
+  if (row.checkout && projects.some((project) => project.worktrees.some((one) => one.path === row.checkout))) {
+    void activateWorktree(row.checkout);
+  }
+}
+
+/* The landing line opens what waits to land: the task board's desk, its verified tasks listed. */
+function pressTeamLanding() {
+  deskChoice.stage = "verified";
+  agentBoardMode = "tasks";
+  openBoard();
+}
+
+function pressTeamMine(kind, entry) {
+  const term = (kind === "taken" ? entry.taken : entry.own)[0];
+  if (!Number.isInteger(term)) return;
+  const tab = tabOfTerm(term);
+  void focusAgentPane(tab?.worktree ?? null, tab?.id ?? null, term, paneAgents.get(term) ?? null);
+}
+
+sidebarTeam.addEventListener("click", (event) => {
+  const mine = event.target.closest?.("[data-mine]");
+  if (mine && sidebarTeam.contains(mine)) {
+    pressTeamMine(mine.dataset.mine, mine.parentElement.__entry);
+    return;
+  }
+  const node = event.target.closest?.(".team-row");
+  if (!node || !sidebarTeam.contains(node) || !node.__entry) return;
+  sidebarTeamFocus = node.dataset.teamKey;
+  const entry = node.__entry;
+  if (entry.kind === "coordinator") pressTeamSeat(entry.seat);
+  else if (entry.kind === "worker") pressTeamWorker(entry.row);
+  else if (entry.kind === "landing") pressTeamLanding();
+});
+
+sidebarTeam.addEventListener("focusin", (event) => {
+  const node = event.target.closest?.(".team-row");
+  if (node && sidebarTeam.contains(node)) sidebarTeamFocus = node.dataset.teamKey;
+});
+
+/* ↑↓ walk the rows, Home and End go to the ends; ⏎ is the row's own press (it is a button). */
+sidebarTeam.addEventListener("keydown", (event) => {
+  const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+  if (step === 0 && event.key !== "Home" && event.key !== "End") return;
+  const rows = teamSteppedRows();
+  if (rows.length === 0) return;
+  const at = rows.indexOf(event.target.closest?.(".team-row"));
+  const next = event.key === "Home" ? rows[0]
+    : event.key === "End" ? rows.at(-1)
+      : rows[Math.min(rows.length - 1, Math.max(0, (at < 0 ? -1 : at) + step))];
+  event.preventDefault();
+  event.stopPropagation();
+  sidebarTeamFocus = next.dataset.teamKey;
+  rovingTeamFocus();
+  next.focus();
+});
+
+/* Pointed at, a row with a pane in this window reads that pane's last lines into its tip — once, and again only
+ * after they have stood a while: the tip is the cheap look before going there. */
+async function peekTeamRow(node) {
+  const term = Number(node.dataset.teamTerm);
+  if (!Number.isInteger(term) || node.__peeking) return;
+  const held = sidebarTeamPeeks.get(term);
+  if (held && Date.now() - held.at < TEAM_PEEK_FRESH_MS) return;
+  node.__peeking = true;
+  let lines = [];
+  try {
+    // The read-only look for a reader that paints nothing (`term_snapshot`, the way the skills install reads its
+    // pane): a tip is not a screen, so it takes no share of the pane's pull.
+    const frame = await invoke("term_snapshot", { term });
+    lines = (frame?.rows ?? [])
+      .map((row) => String(row?.text ?? "").trimEnd())
+      .filter((line) => line.trim() !== "")
+      .slice(-TEAM_PEEK_LINES)
+      .map((line) => ([...line].length > TEAM_PEEK_CHARS ? `${[...line].slice(0, TEAM_PEEK_CHARS - 1).join("")}…` : line));
+  } catch {
+    lines = [];
+  } finally {
+    node.__peeking = false;
+  }
+  sidebarTeamPeeks.set(term, { at: Date.now(), lines });
+  writeTeamTip(node);
+  if (tipAnchor === node && !tipNode.hidden) showTip(node);
+}
+
+sidebarTeam.addEventListener("pointerover", (event) => {
+  const node = event.target.closest?.(".team-row[data-team-term]");
+  if (node && sidebarTeam.contains(node)) void peekTeamRow(node);
+});
+
+/* ⌘1·2·3 reach the coordinators while the team stands. The window's one shortcut resolver (`primaryShortcut`) asks
+ * this where it would index the branch list, so a chord bound to an action stays the action's and a terminal that
+ * keeps its chords keeps them. The digits count the list the eye reads: a digit past the last coordinator is held
+ * and reaches nothing, never a workspace of the branch list standing behind the team. */
+function teamDigitShortcut(index) {
+  const seat = sidebarTeamCoordinators()[index - 1];
+  const run = () => {
+    if (!seat || !Number.isInteger(seat.term)) return;
+    sidebarTeamFocus = `c:${seat.run}`;
+    pressTeamSeat(seat);
+  };
+  return { action: { run }, path: null };
 }
 
 /* ---- workspace board drawer ---------------------------------------------
@@ -10612,6 +11372,7 @@ async function askToRemoveWorktree(worktree) {
  * tree per checkout it had ever stood in — each holding group numbers that can
  * never be drawn again. */
 function dropWorktreeSurfaces(path) {
+  noteTabsLeaving(tabs.filter((one) => one.worktree === path), "worktree-removed");
   for (const held of tabs.filter((one) => one.worktree === path)) {
     if (held.kind === "term") {
       for (const term of paneLeaves(held.layout)) {
@@ -12411,7 +13172,7 @@ function resourceChevron(open) {
   return mark;
 }
 
-function openResourceSession(session) {
+function openResourceSession(session, worktreeKey = null) {
   setResourceOpen(false);
   if (session.kind === "lane") {
     void focusLane(session.lane);
@@ -12421,7 +13182,25 @@ function openResourceSession(session) {
     setTermVisible(true);
     return;
   }
+  if (!tabOfTerm(session.term)) {
+    void openStrandedSession(session.term, worktreeKey);
+    return;
+  }
   void openPaneFromBoard(session.term);
+}
+
+/* A shell the stage does not hold opens through the detached row's own door
+ * (t-56480): one parked off the stage is reattached as it is, and one no tab and
+ * no row held — the backend's pool still has it, this window lost it — is first
+ * stood as that row, under the checkout this tree files it in, else under where
+ * its process stands. `openPaneFromBoard` asks a tab, and these have none: the
+ * name used to open nothing. */
+async function openStrandedSession(term, worktreeKey) {
+  if (!detachedAgents.has(term)) {
+    adoptStrandedTerm(term, worktreeAt(worktreeKey) ? worktreeKey : strandHome(term), "resource");
+  }
+  const agent = paneSessions.get(term)?.agent ?? paneAgents.get(term) ?? null;
+  await focusAgentPane(detachedAgents.get(term), null, term, agent);
 }
 
 async function killResourceSession(session) {
@@ -12534,14 +13313,25 @@ function resourceSessionNode(session, worktreeKey) {
   const state = document.createElement("span");
   state.className = `resource-session-state${session.bound ? " is-bound" : ""}`;
   state.setAttribute("aria-hidden", "true");
-  const name = document.createElement(session.bound ? "button" : "span");
+  // A shell of the pool that no tab holds opens too (t-56480): its name is the
+  // 열기, said on the button because nothing else on the row says it can be
+  // pressed. A row only the resource sample knows is not a shell to open.
+  const opens = session.bound
+    || (session.kind === "term" && resourceManager.sessions.some((one) => one.term === session.term));
+  const name = document.createElement(opens ? "button" : "span");
   name.className = "resource-session-name";
   name.textContent = session.label;
-  if (session.bound) {
+  if (opens) {
     name.type = "button";
     name.classList.add("resource-session-open");
     markResourceFocus(name, `session:${session.key}:open`);
-    name.addEventListener("click", () => openResourceSession(session));
+    if (!session.bound) {
+      name.setAttribute(
+        "aria-label",
+        t("resource.openSession", "세션 {{name}} 열기", { name: session.label }),
+      );
+    }
+    name.addEventListener("click", () => openResourceSession(session, worktreeKey));
   }
   row.append(state, name, resourceMetricPair(session.cpu, session.memory, true));
   const gutter = document.createElement("span");

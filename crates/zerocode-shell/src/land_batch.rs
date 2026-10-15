@@ -8,8 +8,10 @@
 //!   - 쌓기는 앱 전용 ref(`refs/zerocode/stack/<묶음>/<세대>`)와 그 세대의 통합 ref
 //!     (`refs/zerocode/integration/<묶음>/<세대>`)만 움직인다. 작업 트리, 색인, 가지는 건드리지 않는다.
 //!   - 기준 가지는 올리기에서만 움직인다. 초록 게이트를 받은 끝 커밋으로 빨리감기하고, 새 커밋은 없다.
-//!     빨리감기 git은 죽이지 않는다 — [`PROMOTE_GIT_BUDGET`]이 지나면 「아직 올리는 중」으로 답하고,
-//!     git이 끝나면 정리 길이 결과를 적는다.
+//!     올리기의 git은 제 스레드에서 돈다. 누름은 [`ANSWER_BUDGET`] 안에 그 끝을 듣고, 못 들으면
+//!     「아직 올리는 중」을 듣는다 — 빨리감기 앞의 읽기만으로도 다리가 기다리는
+//!     [`zerocode_hookd::TEAM_DEADLINE`]을 넘길 수 있다. 빨리감기 git은 죽이지 않는다 —
+//!     [`PROMOTE_GIT_BUDGET`]이 지나면 지켜보는 스레드가 맡고, git이 끝나면 정리 길이 결과를 적는다.
 //!   - 게이트 폴더는 착지 전 점검(`land_check`)의 준비 길로 만들고 기록 길로 치운다.
 //!   - 이 저장소에서 큐가 꺼져 있으면 취소 말고는 아무것도 하지 않는다. ref도 폴더도 만들지 않는다.
 //!   - ref와 경로는 [`is_batch_id`]가 받은 묶음 id로만 만든다.
@@ -45,15 +47,14 @@ use zerocode_orchestrator::git_publisher::{
 use zerocode_orchestrator::publish::{PublishVerification, PublisherFailure};
 use zerocode_orchestrator::workflow::{INTEGRATION_REF_PREFIX, RefBinding, STACK_REF_PREFIX};
 
-/// How long a promote's fast-forward of the base branch's checkout runs before the press answers
-/// "still promoting". The git is never killed at this mark: it finishes, and the settle road
-/// writes what it left.
+/// How long a promote's fast-forward of the base branch's checkout runs before a watcher takes it
+/// over. The git is never killed at this mark: it finishes, and the settle road writes what it
+/// left. The press hears its end only when it comes within [`Policy::answer_budget`].
 ///
 /// Measured on a no-hardlink clone of this repository (build-line job measure-promote, 2026-10-14):
 /// 18 fast-forwards of a checked-out main over 1 to 32 landings (249 files at most)
 /// took 50 ms at the median and 201 ms at the worst. The budget is three times the worst,
-/// rounded up to a whole second, at least 5 s and at most 20 s, so the press's answer and the git
-/// reads around it stay inside the 30 s the command line waits for a reply.
+/// rounded up to a whole second, at least 5 s and at most 20 s.
 pub(crate) const PROMOTE_GIT_BUDGET: Duration = Duration::from_secs(5);
 
 /// The slack a stacking or promoting lease gets past the sum of its git limits. A lease past its
@@ -114,6 +115,9 @@ pub(crate) struct Policy {
     pub(crate) git_budget: Duration,
     /// [`PROMOTE_GIT_BUDGET`], or a shorter one a test injects to outlive.
     pub(crate) promote_budget: Duration,
+    /// How long a press on promote waits for its end before it answers "still promoting":
+    /// [`ANSWER_BUDGET`], or a shorter one a test injects.
+    pub(crate) answer_budget: Duration,
     /// The git a fast-forward runs: `git`, or a test's slow or meddling stand-in.
     pub(crate) git: PathBuf,
 }
@@ -125,6 +129,7 @@ impl Policy {
             pinned_base: None,
             git_budget: GIT_BUDGET,
             promote_budget: PROMOTE_GIT_BUDGET,
+            answer_budget: ANSWER_BUDGET,
             git: PathBuf::from("git"),
         }
     }
@@ -1540,9 +1545,9 @@ fn tombstone(at: &At<'_>, batch: &BatchState) -> bool {
     }
 }
 
-/// ④ Promote: `promoting` first, then the base branch, its checkout and that checkout's unfinished
-/// work read fresh, then the fast-forward — never killed. Past [`Policy::promote_budget`] the press
-/// answers "still promoting" and the settle road writes the end when git has one.
+/// ④ Promote: `promoting` first, then its git on its own thread. The press hears the end when it
+/// comes within [`Policy::answer_budget`], and "still promoting" otherwise: the reads before the
+/// fast-forward may each take [`Policy::git_budget`], longer together than the bridge holds a press.
 fn promote(at: &At<'_>, batch: &BatchState) -> Result<String, String> {
     let stack = batch
         .stacked
@@ -1566,6 +1571,65 @@ fn promote(at: &At<'_>, batch: &BatchState) -> Result<String, String> {
             lease_until_ms: promoting.lease_until_ms,
         },
     )?;
+    let (target, lease_until_ms) = (promoting.target.clone(), promoting.lease_until_ms);
+    let (answer, first_answer) = mpsc::channel::<Result<String, String>>();
+    let mark = mark_live(at.run, &batch.batch);
+    let (run, by, state, repo, policy, roads, now_ms) = (
+        at.run.to_string(),
+        at.by.clone(),
+        batch.clone(),
+        at.repo.to_path_buf(),
+        at.policy.clone(),
+        at.roads.clone(),
+        at.now_ms,
+    );
+    let spawned = std::thread::Builder::new()
+        .name("land-batch-promoting".to_string())
+        .spawn(move || {
+            let host = Host::for_workspace(&repo);
+            let at = At {
+                run: &run,
+                by: &by,
+                repo: &repo,
+                host: &host,
+                policy: &policy,
+                roads: &roads,
+                now_ms,
+            };
+            let said = promote_job(&at, &state, promoting);
+            drop(mark);
+            let _ = answer.send(said);
+        });
+    if let Err(why) = spawned {
+        return Err(format!(
+            "the promote could not start: {why} — the next run settles batch {}",
+            batch.batch
+        ));
+    }
+    match first_answer.recv_timeout(at.policy.answer_budget) {
+        Ok(said) => said,
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(json!({
+            "state": "promoting",
+            "still": true,
+            "batch": batch.batch,
+            "generation": batch.generation,
+            "target": target,
+            "leaseUntilMs": lease_until_ms,
+            "message": "still promoting: git is still reading or fast-forwarding the base branch; \
+                        it is not stopped, and the promote's end is written when git ends",
+        })
+        .to_string()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("the promote stopped before it answered".to_string())
+        }
+    }
+}
+
+/// The promote's git on its own thread: the base branch, its checkout and that checkout's
+/// unfinished work read fresh, then the fast-forward — never killed. Past
+/// [`Policy::promote_budget`] a watcher holds git and the settle road writes the end when git has
+/// one. Answers what the press hears if it still waits.
+fn promote_job(at: &At<'_>, batch: &BatchState, promoting: Promoting) -> Result<String, String> {
     let budget = at.policy.git_budget;
     let Some(base_now) = commit_of(at.host, at.repo, &promoting.base_branch, budget) else {
         return promote_stopped(at, batch, PromoteStop::GitRefused, Vec::new(), 0, None);

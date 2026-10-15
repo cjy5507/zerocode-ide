@@ -521,10 +521,12 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
     const view = snapshot.sidebar_view ?? {};
     const changed = sidebarGroupBy !== (view.group_by ?? "repo")
       || sidebarSortBy !== (view.sort_by ?? "default")
-      || sidebarProjectOrder !== (view.project_order ?? "default");
+      || sidebarProjectOrder !== (view.project_order ?? "default")
+      || sidebarLayout !== (view.layout ?? "team");
     sidebarGroupBy = view.group_by ?? "repo";
     sidebarSortBy = view.sort_by ?? "default";
     sidebarProjectOrder = view.project_order ?? "default";
+    sidebarLayout = view.layout ?? "team";
     if (!first && changed) void refreshWorktrees();
   }
   if (hasSetting(snapshot, "confirm_close_pinned")) {
@@ -9719,6 +9721,16 @@ function normalizeSecondBrainReport(answer) {
             detail: String(row.detail ?? ""),
           }))
       : [],
+    skillCopies: Array.isArray(answer?.skill_copies)
+      ? answer.skill_copies
+          .filter((row) => row && typeof row.path === "string")
+          .map((row) => ({
+            agent: String(row.agent ?? ""),
+            label: String(row.label || row.agent || ""),
+            path: row.path,
+            state: String(row.state ?? "missing"),
+          }))
+      : [],
     weeklyReviewEnabled: answer?.weekly_review_enabled === true,
     weeklyReview: answer?.weekly_review && typeof answer.weekly_review === "object"
       ? {
@@ -9785,19 +9797,17 @@ function paintSecondBrainRawCapture() {
 /* 「전역 연결」 줄. 사람이 볼 수 없는 사실 하나를 말한다: 볼트 밖 어느
  * 프로젝트에서 판을 열어도 그 에이전트가 볼트를 아는가. 아는 근거는 그
  * 에이전트의 전역 지시문 파일 안에 우리가 관리하는 블록이 서 있다는 것이고,
- * 실패는 어느 파일인지까지 말해야 사람이 고칠 수 있다. */
+ * 실패는 어느 파일인지까지 말해야 사람이 고칠 수 있다. 한 에이전트가 사람의 홈과 창의
+ * 홈에 파일을 하나씩 두어도 이름은 한 번만 말한다. */
 function paintSecondBrainGuides() {
   const guides = secondBrainReport?.guides ?? [];
   const linked = guides.filter((row) => row.state === "linked");
+  const agents = [...new Set(linked.map((row) => row.label))].join("·");
   const line = el("second-brain-guides");
   if (linked.length > 0 && linked.length === guides.length) {
-    say(line, () => t("settings.secondBrain.linked", "{{agents}}에 연결됨", {
-      agents: linked.map((row) => row.label).join("·"),
-    }));
+    say(line, () => t("settings.secondBrain.linked", "{{agents}}에 연결됨", { agents }));
   } else if (linked.length > 0) {
-    say(line, () => t("settings.secondBrain.linkStale", "{{agents}}에만 연결됨 · 다시 연결 필요", {
-      agents: linked.map((row) => row.label).join("·"),
-    }));
+    say(line, () => t("settings.secondBrain.linkStale", "{{agents}}에만 연결됨 · 다시 연결 필요", { agents }));
   } else {
     say(line, () => t("settings.secondBrain.notLinked", "연결 안 됨"));
   }
@@ -9812,6 +9822,31 @@ function paintSecondBrainGuides() {
       { file: row.path, detail: row.detail },
     ))
     .join(" ");
+}
+
+/* 「스킬」 줄. 판이 읽는 세컨드 브레인 스킬 사본마다, 창 안 Claude 홈까지,
+ * 이 빌드의 글인지(최신), 이전 릴리스의 글인지(낡음), 사람이 고친 글인지,
+ * 없는지를 스킬 화면과 같은 낱말로 센다. 어느 사본인지는 풍선 말이 말한다. */
+function paintSecondBrainSkill() {
+  const copies = secondBrainReport?.skillCopies ?? [];
+  const word = (state) => {
+    if (state === "current") return t("skills.copyCurrent", "최신");
+    if (state === "stale") return t("skills.copyStale", "낡음");
+    if (state === "missing") return t("skills.copyMissing", "없음");
+    return t("skills.copyEdited", "직접 고침");
+  };
+  const line = el("second-brain-skill");
+  say(line, () => {
+    if (copies.length === 0) return t("settings.integrations.unchecked", "확인 전");
+    const counts = ["stale", "edited", "missing"]
+      .map((state) => [state, copies.filter((copy) => copy.state === state).length])
+      .filter(([, count]) => count);
+    if (counts.length === 0) return word("current");
+    return counts
+      .map(([state, count]) => t("skills.copyCount", "{{state}} {{count}}곳", { state: word(state), count }))
+      .join(" · ");
+  });
+  line.dataset.tip = copies.map((copy) => `${copy.path} · ${word(copy.state)}`).join("\n");
 }
 
 function paintSecondBrain() {
@@ -9875,6 +9910,7 @@ function paintSecondBrain() {
   el("second-brain-new").disabled = secondBrainLoading;
   el("second-brain-setup").disabled = secondBrainLoading || !vault?.exists;
   paintSecondBrainGuides();
+  paintSecondBrainSkill();
   // 저장된 볼트가 있어야 다시 연결할 것이 있다 — 아직 고르기만 한 폴더는
   // 어느 에이전트에게도 실리지 않는다.
   el("second-brain-link").disabled = secondBrainLoading || !secondBrainReport?.savedPath;
