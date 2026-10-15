@@ -16992,9 +16992,10 @@ listen("term:split", (event) => {
   // and inventing one would put a teammate on the stage without the
   // coordinator it belongs to. It stands as a row instead, beside its
   // leader's when the leader has one: returning here with nothing left a
-  // running shell no tab and no row could reach (t-56480 R1).
+  // running shell no tab and no row could reach (t-56480 R1). The pop-out
+  // hears the same event and has no stage to hold a row for.
   if (!host) {
-    if (!tabOfTerm(term) && !detachedAgents.has(term)) adoptStrandedTerm(term, strandHome(term), "split");
+    if (!isPopout && !tabOfTerm(term) && !detachedAgents.has(term)) adoptStrandedTerm(term, strandHome(term), "split");
     return;
   }
   if (parkTeamWorkers(host, parent, term)) return;
