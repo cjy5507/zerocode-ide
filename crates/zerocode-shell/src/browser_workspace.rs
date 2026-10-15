@@ -2173,23 +2173,58 @@ mod boundary_tests {
     }
 
     #[test]
-    fn managed_requests_require_an_epoch_even_when_the_owner_is_correct() {
+    fn managed_mutations_require_an_epoch_even_when_the_owner_is_correct() {
         let workspaces = owned();
         observe(&workspaces);
-        assert!(
-            workspaces
-                .begin_at("browser-1", Some("term-1"), "read", None)
-                .is_err()
-        );
-        assert!(
-            workspaces
-                .begin_at("browser-1", Some("term-1"), "click", None)
-                .is_err()
-        );
-        assert_eq!(
-            workspaces.snapshot("browser-1").unwrap().unwrap().in_flight,
-            0
-        );
+        for entry in zerocode_core::agent_browser::BROWSER_VERBS {
+            if !entry.changes_page {
+                continue;
+            }
+            assert!(
+                workspaces
+                    .begin_at("browser-1", Some("term-1"), entry.word, None)
+                    .is_err(),
+                "{}",
+                entry.word
+            );
+            assert_eq!(
+                workspaces.snapshot("browser-1").unwrap().unwrap().in_flight,
+                0,
+                "{}",
+                entry.word
+            );
+        }
+    }
+
+    #[test]
+    fn a_first_observation_acquires_its_revision_only_when_it_completes() {
+        let workspaces = owned();
+        let initial = workspaces.snapshot("browser-1").unwrap().unwrap();
+        let reading = workspaces
+            .begin_at("browser-1", Some("term-1"), "read", None)
+            .unwrap()
+            .unwrap();
+        let pending = workspaces.snapshot("browser-1").unwrap().unwrap();
+        assert_eq!(pending.in_flight, 1);
+        assert!(pending.needs_observation);
+        assert_eq!(reading.finish_observation().unwrap(), initial.revision);
+        let completed = workspaces.snapshot("browser-1").unwrap().unwrap();
+        assert_eq!(completed.in_flight, 0);
+        assert!(!completed.needs_observation);
+    }
+
+    #[test]
+    fn a_stale_read_cannot_borrow_a_resumed_agents_revision() {
+        let workspaces = owned();
+        let original = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        change(&workspaces, Mode::Human);
+        let current = change(&workspaces, Mode::Agent);
+        let delayed = workspaces.begin_at("browser-1", Some("term-1"), "read", Some(original));
+        assert!(matches!(delayed, Err(error) if error.starts_with("workspace_stale:")));
+        let state = workspaces.snapshot("browser-1").unwrap().unwrap();
+        assert_eq!(state.revision, current.revision);
+        assert_eq!(state.in_flight, 0);
+        assert!(state.needs_observation);
     }
 
     #[test]
