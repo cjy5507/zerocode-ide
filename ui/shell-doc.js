@@ -10648,7 +10648,11 @@ function liftArtifactShadeAfterPane(tab, host) {
 const ARTIFACT_PAGE_TOKENS = Object.freeze({
   seenThumb: "--artifact-seen-thumb-ms",
   republishAutoMaxKb: "--artifact-republish-auto-max-kb",
+  openSlow: "--artifact-open-slow-ms",
+  openStalled: "--artifact-open-stalled-ms",
 });
+/* 열기의 두 결과 — 기록의 낱말이고 스토어(`record_open`)가 아는 둘이다. */
+const ARTIFACT_OPEN_OUTCOMES = Object.freeze({ painted: "painted", stalled: "stalled" });
 /* 토큰 하나를 읽는다 — 열 때마다 한 번이라 캐시하지 않는다(시험이 덮어쓴 값도 그대로 읽힌다). */
 function artifactPageNumber(token, fallback) {
   const value = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(token));
@@ -10666,6 +10670,10 @@ function artifactPaneShown(tab) {
 
 function startArtifactOpenClock(tab, url, pressedAt = performance.now()) {
   stopArtifactOpenClock(tab.label);
+  // 닫힌 탭의 시계는 떠난다 — 탭이 닫힐 때 문이 따로 없으니 새 시계가 설 때 쓸어 둔다.
+  for (const [label, held] of artifactOpenClocks) {
+    if (!tabs.includes(held.tab)) stopArtifactOpenClock(label);
+  }
   const clock = {
     tab,
     url,
@@ -10674,6 +10682,10 @@ function startArtifactOpenClock(tab, url, pressedAt = performance.now()) {
     shownSince: null,
     painted: false,
     paintedAtMs: 0,
+    // 느림(⑧ 8 s)과 멈춤(30 s)의 눈금을 지났는가 — 머리띠의 한 줄이 읽는다.
+    slow: false,
+    stalled: false,
+    markTimer: 0,
     seenTimer: 0,
   };
   artifactOpenClocks.set(tab.label, clock);
@@ -10686,7 +10698,7 @@ function startArtifactOpenClock(tab, url, pressedAt = performance.now()) {
 function stopArtifactOpenClock(label) {
   const clock = artifactOpenClocks.get(label);
   if (!clock) return;
-  clearTimeout(clock.seenTimer);
+  disarmArtifactOpenTimers(clock);
   artifactOpenClocks.delete(label);
 }
 
@@ -10709,11 +10721,29 @@ function artifactOpenTick(tab, shown) {
   }
 }
 
-/* 보이는 동안만 가는 타이머: 첫 그림 뒤 한 박자에 본 판의 그림을 찍는다. */
+/* 보이는 동안만 가는 타이머. 첫 그림 전에는 다음 눈금 — 느림(`--artifact-open-slow-ms`), 그
+ * 다음 멈춤(`--artifact-open-stalled-ms`) — 까지, 첫 그림 뒤에는 본 판의 그림을 찍는 한 박자까지.
+ * 눈금은 보인 시간으로 재므로 판이 숨으면 멈추고 다시 서면 남은 만큼만 간다. */
 function armArtifactOpenTimers(clock) {
   disarmArtifactOpenTimers(clock);
-  if (!clock.painted || artifactSeenShots.get(clock.tab.artifact?.id) === artifactThumbnailKey(clock.tab.artifact?.row)) return;
-  const wait = artifactPageNumber(ARTIFACT_PAGE_TOKENS.seenThumb, 500) - (artifactOpenVisibleMs(clock) - clock.paintedAtMs);
+  const visible = artifactOpenVisibleMs(clock);
+  if (!clock.painted) {
+    const mark = !clock.slow
+      ? { at: artifactPageNumber(ARTIFACT_PAGE_TOKENS.openSlow, 8000), reached: artifactOpenSlow }
+      : !clock.stalled
+        ? { at: artifactPageNumber(ARTIFACT_PAGE_TOKENS.openStalled, 30000), reached: artifactOpenStalled }
+        : null;
+    if (mark === null) return;
+    clock.markTimer = setTimeout(() => {
+      clock.markTimer = 0;
+      if (artifactOpenClocks.get(clock.tab.label) !== clock || clock.shownSince === null || clock.painted) return;
+      mark.reached(clock);
+      armArtifactOpenTimers(clock);
+    }, Math.max(0, mark.at - visible));
+    return;
+  }
+  if (artifactSeenShots.get(clock.tab.artifact?.id) === artifactThumbnailKey(clock.tab.artifact?.row)) return;
+  const wait = artifactPageNumber(ARTIFACT_PAGE_TOKENS.seenThumb, 500) - (visible - clock.paintedAtMs);
   clock.seenTimer = setTimeout(() => {
     clock.seenTimer = 0;
     if (artifactOpenClocks.get(clock.tab.label) !== clock || clock.shownSince === null) return;
@@ -10723,15 +10753,67 @@ function armArtifactOpenTimers(clock) {
 
 function disarmArtifactOpenTimers(clock) {
   clearTimeout(clock.seenTimer);
+  clearTimeout(clock.markTimer);
   clock.seenTimer = 0;
+  clock.markTimer = 0;
 }
 
-/* 첫 그림: 열려던 주소의 `finished`. */
+/* 느림의 눈금: 머리띠가 「아직 읽는 중」이라 말한다. 기록은 아직이다 — 끝을 모른다. */
+function artifactOpenSlow(clock) {
+  clock.slow = true;
+  paintArtifactOpenNote(clock.tab);
+}
+
+/* 멈춤의 눈금: 「멈춘 열기」로 기록에 남고, 머리띠가 그렇게 말하며 다시 읽기를 내민다. 덮개 뒤에서
+ * 준비하던 새 판(⑦)이 안 오는 것이면 판은 더 숨어 있을 이유가 없다. */
+function artifactOpenStalled(clock) {
+  clock.stalled = true;
+  recordArtifactOpen(clock, ARTIFACT_OPEN_OUTCOMES.stalled);
+  dropArtifactSwap(clock.tab);
+  paintArtifactOpenNote(clock.tab);
+}
+
+/* 첫 그림: 열려던 주소의 `finished`. 보인 시간이 기록에 한 줄로 남고, 늦다던 말은 내려간다. */
 function artifactOpenPainted(clock) {
   if (clock.painted) return;
   clock.painted = true;
   clock.paintedAtMs = artifactOpenVisibleMs(clock);
+  recordArtifactOpen(clock, ARTIFACT_OPEN_OUTCOMES.painted);
+  const said = clock.slow || clock.stalled;
+  clock.slow = false;
+  clock.stalled = false;
   if (clock.shownSince !== null) armArtifactOpenTimers(clock);
+  else disarmArtifactOpenTimers(clock);
+  if (said) paintArtifactOpenNote(clock.tab);
+}
+
+/* 기록 한 줄(`artifact_open_record`): 어느 아티팩트의 어느 판을, 보인 시간 몇 ms에, 어떻게 — 첫 그림이
+ * 왔는가(`painted`) 멈춘 열기의 눈금을 지났는가(`stalled`). 저장은 스토어의 책이다. 못 적어도 페이지는 선다. */
+function recordArtifactOpen(clock, outcome) {
+  const facts = clock.tab.artifact;
+  if (!facts?.id) return;
+  const record = {
+    id: facts.id,
+    version: facts.version ?? facts.current ?? null,
+    visible_ms: Math.round(artifactOpenVisibleMs(clock)),
+    outcome,
+  };
+  invoke("artifact_open_record", { record }).catch(() => {});
+}
+
+/* 머리띠의 한 줄을 다시 그린다 — 머리띠는 브라우저 판의 그림과 함께 선다. */
+function paintArtifactOpenNote(tab) {
+  if (stillShowing(tab)) paintBrowserView(tab);
+}
+
+/* 멈춘 열기의 「다시 읽기」: 판을 다시 읽히고 시계를 새로 세운다 — 새 열기다. */
+function retryArtifactOpen(tab) {
+  const clock = artifactOpenClocks.get(tab.label);
+  const url = clock?.url ?? tab.url;
+  tab.loading = true;
+  invoke("browser_reload", { label: tab.label }).catch(() => {});
+  startArtifactOpenClock(tab, url);
+  if (stillShowing(tab)) paintBrowserView(tab);
 }
 
 /* 브라우저 판의 탐색 소식 가운데 아티팩트 페이지가 듣는 것(`listen("browser:nav")`): 여는 시계의
@@ -10845,7 +10927,27 @@ function paintArtifactStripNote(strip, tab) {
     note.hidden = false;
     return;
   }
+  // 늦은 열기(⑧): 느림의 눈금을 지나면 「아직 읽는 중」, 멈춤의 눈금을 지나면 「멈춘 열기」와 다시 읽기.
+  const clock = tab?.kind === "browser" ? artifactOpenClocks.get(tab.label) ?? null : null;
+  if (clock && clock.tab === tab && !clock.painted && (clock.slow || clock.stalled)) {
+    if (clock.stalled) {
+      words.textContent = t("artifacts.open.stalled", "멈춘 열기 — 페이지가 {{seconds}}초 동안 뜨지 않았습니다", {
+        seconds: Math.round(artifactPageNumber(ARTIFACT_PAGE_TOKENS.openStalled, 30000) / 1000),
+      });
+      act.textContent = t("artifacts.open.retry", "다시 읽기");
+      act.hidden = false;
+      act.onclick = () => retryArtifactOpen(tab);
+      note.dataset.kind = "stalled";
+    } else {
+      words.textContent = t("artifacts.open.slow", "아직 읽는 중입니다…");
+      act.hidden = true;
+      note.dataset.kind = "slow";
+    }
+    note.hidden = false;
+    return;
+  }
   note.hidden = true;
+  act.hidden = true;
   delete note.dataset.kind;
 }
 

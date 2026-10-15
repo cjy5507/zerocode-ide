@@ -562,8 +562,9 @@ mod tests {
         let back = decode_png(&small).expect("decodes");
         assert_eq!((back.width, back.height), (16, 8));
         let narrow = RgbaImage::new(8, 40, vec![10u8; 8 * 40 * 4]).expect("an image");
-        let kept = decode_png(&shrink_to_card(&narrow.encode().expect("png"), 16, 12).expect("cut"))
-            .expect("decodes");
+        let kept =
+            decode_png(&shrink_to_card(&narrow.encode().expect("png"), 16, 12).expect("cut"))
+                .expect("decodes");
         assert_eq!((kept.width, kept.height), (8, 12));
         assert!(shrink_to_card(b"not a png", 16, 12).is_err());
     }
