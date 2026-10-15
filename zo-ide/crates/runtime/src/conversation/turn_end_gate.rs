@@ -539,6 +539,49 @@ mod tests {
         assert_eq!(screen_turn_ending(korean, false), None);
     }
 
+    /// The live case (t-58176): a long evaluation that ends by handing the
+    /// choice to the person — the work it names starts on their word, so the
+    /// ending waits on them, in Korean and in English alike.
+    #[test]
+    fn a_promise_that_hangs_on_the_users_choice_waits_on_the_user() {
+        let photo = "설계 문서를 평가했습니다.\n\n## 약점\n1. 롤백 절차가 빠져 있습니다.\n2. 성능 목표에 숫자가 없습니다.\n\n어느 항목부터 진행할지 정해 주시면 그 범위로 작업하겠습니다.";
+        assert_eq!(screen_turn_ending(photo, false), None);
+        assert_eq!(screen_turn_ending(photo, true), None);
+        let english = "Three gaps stand out.\n\nIf you tell me which one, I'll start there.";
+        assert_eq!(screen_turn_ending(english, false), None);
+    }
+
+    /// The condition counts only for the promise it governs: an unconditional
+    /// promise stays one, after a conditional paragraph above it or a
+    /// conditional sentence beside it.
+    #[test]
+    fn an_unconditional_promise_is_still_flagged_beside_a_condition() {
+        for text in [
+            "원인을 찾았습니다.\n\n다음으로 시험을 실행하겠습니다.",
+            "Found it.\n\nI'll run the tests next.",
+            "정해 주시면 그 범위로 작업하겠습니다.\n\n다음으로 시험을 실행하겠습니다.",
+            "If you tell me which one, I'll start there.\n\nI'll run the tests next.",
+            "When you ran it, the build broke. I'll fix the linker next.",
+        ] {
+            assert_eq!(
+                screen_turn_ending(text, false),
+                Some(TurnEndingIssue::Promise),
+                "{text}"
+            );
+        }
+    }
+
+    /// The promise reminder asks for the work and for what is new — never for
+    /// the whole answer again, which the model then writes a second time.
+    #[test]
+    fn the_promise_reminder_asks_for_the_work_not_a_rewrite() {
+        let reminder = turn_end_gate_reminder(TurnEndingIssue::Promise);
+        assert!(reminder.contains("tool calls"), "{reminder}");
+        assert!(reminder.contains("Do not repeat"), "{reminder}");
+        assert!(reminder.contains("only what is new"), "{reminder}");
+        assert!(!reminder.contains("complete final answer"), "{reminder}");
+    }
+
     #[test]
     fn question_ending_only_flagged_when_linting_questions() {
         let text = "The migration is ready.\n\nShould I also update the staging config?";
@@ -593,6 +636,11 @@ mod tests {
         assert_eq!(screen_turn_ending("\n\n", true), None);
     }
 }
+
+/// The gate driven through a whole turn: how many re-prompts and replies a
+/// scripted reply sequence draws (t-58176).
+#[cfg(test)]
+mod runtime_tests;
 
 /// The receipt is read by a person (t-48216): plain words, no internal tag.
 #[cfg(test)]
