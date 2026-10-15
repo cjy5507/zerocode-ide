@@ -4,11 +4,13 @@ const managedJudgmentController = {
   loading: false,
   busy: false,
   activating: false,
+  lastError: null,
   statusError: false,
   rows: new Map(),
   waiters: new Set(),
   importModel: null,
   importAttempt: null,
+  ownedOperation: null,
   subscription: null,
   query: "",
   filter: "all",
@@ -48,6 +50,7 @@ const managedJudgmentController = {
       else if (action === "remove") void this.perform("managed_judgment_remove", this.modelArgs(model));
       else if (action === "stop") void this.perform("managed_judgment_stop", { serverId: this.snapshot.server.id });
       else if (action === "connect") judgmentProviderController.connectModel(model);
+      else if (action === "inspect-source") judgmentModelSourceController.inspectAddress(model.source);
       else if (action === "import") {
         this.importModel = model;
         this.sayImport("");
@@ -170,6 +173,10 @@ const managedJudgmentController = {
     return model.local ? model.local.supported === true : model.compatibility === "supported";
   },
 
+  downloadOnly(model) {
+    return model.local?.supported !== true && model.local?.downloadOnly === true;
+  },
+
   runtimeFor(model) {
     return model.runtime ?? this.snapshot?.runtime;
   },
@@ -231,6 +238,7 @@ const managedJudgmentController = {
     }
     this.snapshot = snapshot;
     this.statusError = false;
+    judgmentModelSourceController.cancelOwnInspection();
     if (this.importAttempt && !this.importAttempt.operationId && this.busy &&
         snapshot.operation?.id !== this.importAttempt.previousId && snapshot.operation?.kind === "download" && snapshot.operation?.modelId === this.importModel?.id) {
       this.importAttempt.operationId = snapshot.operation.id;
@@ -277,8 +285,25 @@ const managedJudgmentController = {
     }
   },
 
+  owns(operation) {
+    const owned = this.ownedOperation;
+    return Boolean(owned && operation && operation.id === owned.id && this.snapshot?.instanceId === owned.instanceId);
+  },
+
+  async cancelOwned() {
+    const operation = this.snapshot?.operation;
+    if (!this.owns(operation) || operation.state !== "running") return;
+    try {
+      this.accept(await invoke("managed_judgment_cancel", { operationId: operation.id }));
+    } catch (error) {
+      this.say(this.failure(error));
+    }
+  },
+
   async completed(command, args) {
+    this.ownedOperation = null;
     const started = await invoke(command, args);
+    if (started?.operation) this.ownedOperation = { instanceId: started.instanceId, id: started.operation.id };
     this.accept(started);
     const operation = started.operation;
     if (!operation) throw new Error("missing_operation");
@@ -310,6 +335,7 @@ const managedJudgmentController = {
   },
 
   async activate(model, source = null) {
+    this.lastError = null;
     if (this.busy || this.operating() || typesafeBusy || judgmentModelSourceController.busy || !this.localSupported(model)) return false;
     const expectedProviderIdentity = this.snapshot.providerIdentity;
     if (!expectedProviderIdentity) return false;
@@ -356,6 +382,7 @@ const managedJudgmentController = {
       this.say(t("settings.managed.applied", "로컬 모델을 적용했습니다. 응답 확인은 작업 정확도 검증과 별개입니다."));
       return true;
     } catch (error) {
+      this.lastError = error;
       this.say(this.failure(error));
       return false;
     } finally {
@@ -393,7 +420,7 @@ const managedJudgmentController = {
     identity.className = "settings-row-desc";
     details.append(summary, identity, source);
     const buttons = {};
-    for (const action of ["prepare", "install", "activate", "connect", "import", "stop", "remove"]) {
+    for (const action of ["prepare", "install", "activate", "inspect-source", "connect", "import", "stop", "remove"]) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "btn";
@@ -414,6 +441,11 @@ const managedJudgmentController = {
     if (snapshot.server.modelId === model.id && snapshot.server.state === "starting") return t("settings.managed.starting", "모델을 시작하는 중 · 아직 적용하지 않음");
     if (snapshot.server.modelId === model.id && snapshot.server.state === "ready") return t("settings.managed.runningUnapplied", "실행 중 · 아직 적용하지 않음");
     if (this.configuredModel(model)) return t("settings.managed.configuredStopped", "선택된 모델 · 실행되지 않음. 실행하고 적용을 눌러 다시 연결하세요.");
+    if (this.downloadOnly(model)) {
+      return model.installed
+        ? t("settings.managed.filesReady", "파일 준비됨 · 이 컴퓨터의 직접 실행은 아직 검증되지 않았습니다. 현재 모델은 바뀌지 않습니다.")
+        : t("settings.managed.downloadOnlyState", "이 컴퓨터의 직접 실행은 아직 검증 전입니다. 모델 주소로 확인하면 파일만 받아 둘 수 있습니다.");
+    }
     if (!this.localSupported(model)) return this.failure(model.local?.reason ?? model.compatibilityReason ?? "platform_unsupported");
     if (model.installed && this.runtimeFor(model)?.state !== "ready") return t("settings.managed.needsRuntime", "모델 파일 설치됨 · 이 모델의 실행 환경을 설치한 뒤 연결하세요.");
     return model.installed ? t("settings.managed.installed", "설치됨 · 아직 적용하지 않음") : t("settings.managed.notInstalled", "아직 다운로드하지 않음");
@@ -519,6 +551,7 @@ const managedJudgmentController = {
       row.buttons.prepare.textContent = t("settings.managed.prepare", "실행 환경 설치");
       row.buttons.install.textContent = t("settings.managed.download", "다운로드");
       row.buttons.activate.textContent = model.installed ? t("settings.managed.activate", "실행하고 적용") : t("settings.models.installUse", "설치하고 사용");
+      row.buttons["inspect-source"].textContent = t("settings.managed.inspectSource", "주소로 확인");
       row.buttons.connect.textContent = t("settings.managed.connectServer", "이 모델의 서버 연결");
       row.buttons.import.textContent = t("settings.managed.import", "기존 파일 등록");
       row.buttons.stop.textContent = t("settings.managed.stop", "중지");
@@ -529,6 +562,7 @@ const managedJudgmentController = {
       row.buttons.import.hidden = model.installed || !local;
       row.buttons.activate.hidden = !local;
       row.buttons.connect.hidden = !serverModel;
+      row.buttons["inspect-source"].hidden = !this.downloadOnly(model) || model.installed || row.source.hidden;
       row.buttons.activate.disabled ||= applied || !["ready", "missing"].includes(this.runtimeFor(model)?.state);
       row.buttons.stop.hidden = !running;
       row.buttons.remove.hidden = !model.installed;

@@ -13790,6 +13790,33 @@ body.mod-held .term-link,
   --font-ui: var(--chat-font-ui);
 }
 
+/* A conversation set aside keeps its own page standing in the leaf
+ * (`frontChatHost`, t-55369): in the same cell as the page in front, out of
+ * the flow and under it, clipped to nothing — drawn nothing and under no
+ * pointer — so it comes back with no element styled or laid out again. Only
+ * properties no element inherits: one its rows inherit (`visibility`,
+ * `inert`) restyles every one of them at each press, and `content-visibility`
+ * drops the page's layout on WebKit. */
+.pane > .worker-view.is-behind {
+  position: absolute;
+  grid-row: -2 / -1;
+  grid-column: 1 / -1;
+  inset: 0;
+  z-index: -1;
+  clip-path: inset(50%);
+}
+
+/* The same for a pane's conversation behind the pane's screen (`placePaneChat`):
+ * the slot is its box, as it is the screen's. A named pane's slot also holds
+ * the name bar, so there the page stands a bar taller than it was and lays out
+ * again when it comes back — its styles still kept. */
+.pane-slot > .pane-chat.is-behind {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  clip-path: inset(50%);
+}
+
 .worker-head {
   display: flex;
   flex-wrap: wrap;
@@ -20958,6 +20985,78 @@ button.helper-sib:hover {
   margin: 0;
   padding: 0;
   border: 0;
+}
+
+.judgment-source-result {
+  margin-block: var(--space-3);
+  padding: var(--space-3);
+  min-width: 0;
+  border: var(--rule-width) solid var(--ink-chalk);
+  border-radius: var(--radius-sm);
+  background: var(--row-selected);
+  overflow-wrap: anywhere;
+}
+
+.judgment-source-result[data-state="unsupported"],
+.judgment-source-result[data-state="cancelled"] {
+  border-color: var(--edge-mark);
+  background: transparent;
+}
+
+.judgment-source-result-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.judgment-model-source .judgment-source-result-heading h4 {
+  margin: 0;
+}
+
+.judgment-source-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.judgment-source-badge {
+  padding: 0 var(--space-2);
+  border: var(--rule-width) solid var(--edge-mark);
+  border-radius: var(--radius-pill);
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.judgment-source-badge[data-badge="current"] {
+  border-color: var(--ink-chalk);
+  color: var(--ink-chalk);
+}
+
+.judgment-source-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-2) 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.judgment-source-steps li[data-state="done"],
+.judgment-source-steps li[data-state="active"] {
+  color: var(--ink-chalk);
+}
+
+.judgment-source-steps li[data-state="active"] {
+  font-weight: 600;
+}
+
+.judgment-source-steps li[data-state="failed"] {
+  color: var(--ink-chalk);
+  text-decoration: line-through;
 }
 
 .managed-judgment-library-tools {
@@ -46010,6 +46109,15 @@ button.jev-token:hover {
 .artifact-detail-more[aria-expanded="true"],
 .artifact-outline-toggle[aria-expanded="true"] {
   background: var(--surface-raised);
+}
+
+/* 머리의 「열기」(t-55370): 창 안에서 열리는 아티팩트를 한 번에 연다 — 세부 정보 단추와 같은 높이. */
+.artifact-detail-open {
+  gap: var(--space-1);
+  box-sizing: border-box;
+  height: var(--artifact-press-min);
+  padding: 0 var(--space-2);
+  white-space: nowrap;
 }
 
 /* 「세부 정보」 뒤: 크기·경로·런·워커·커밋, 그리고 행동들. */

@@ -7400,6 +7400,20 @@ let artifactDrawerSerial = 0;
  * 그리고 크기·경로·런·워커·커밋과 행동들은 「세부 정보」 뒤에 접힌다. 본문은 서랍과 함께
  * 흐르고(안쪽에 따로 스크롤되는 상자가 없다), 긴 보고서에는 머리 아래 붙어 있는 목차가 선다.
  * 증거는 JSON 원문이 아니라 런타임이 읽어 준 요약(`digest`)으로 그린다. */
+/* 서랍의 단추 하나 — 그림과 그 낱말(`{ glyph, key, word }`의 행). 머리의 「열기」·세부 정보의 행동·
+ * 점프가 같은 조립기로 짓는다. 낱말은 `applyLocale`이 키로 다시 읽는다. */
+function artifactWordButton(className, row) {
+  const one = document.createElement("button");
+  one.type = "button";
+  one.className = `btn ${className}`;
+  one.innerHTML = icon(row.glyph);
+  const label = document.createElement("span");
+  label.dataset.i18n = row.key;
+  label.textContent = t(row.key, row.word);
+  one.appendChild(label);
+  return one;
+}
+
 function buildArtifactDrawer() {
   const drawer = document.createElement("aside");
   drawer.className = "artifacts-drawer";
@@ -7439,13 +7453,17 @@ function buildArtifactDrawer() {
   attempts.setAttribute("aria-label", t("artifacts.attempts.label", "이 작업의 보고서"));
   const gap = document.createElement("span");
   gap.className = "artifact-detail-gap";
+  // 「열기」(t-55370): 창 안에서 열리는 것(페이지·문서·claude.ai)은 머리에서 한 번에 연다. 그때 세부
+  // 정보 안의 「열기」는 물러난다 — 한 가지 일에 단추 둘을 두지 않는다.
+  const open = artifactWordButton("btn--primary artifact-detail-open", ARTIFACT_ACTIONS.find((row) => row.action === "open"));
+  open.hidden = true;
   const more = document.createElement("button");
   more.type = "button";
   more.className = "artifact-detail-more";
   more.dataset.i18n = "artifacts.detail.more";
   more.textContent = t("artifacts.detail.more", "세부 정보");
   more.setAttribute("aria-expanded", "false");
-  bar.append(back, task, landing, when, maker, attempts, gap, more);
+  bar.append(back, task, landing, when, maker, attempts, gap, open, more);
 
   const facts = document.createElement("div");
   facts.className = "artifact-detail-facts";
@@ -7468,29 +7486,15 @@ function buildArtifactDrawer() {
   const links = document.createElement("div");
   links.className = "artifact-origin-links";
   for (const row of ARTIFACT_JUMPS) {
-    const one = document.createElement("button");
-    one.type = "button";
-    one.className = "btn artifact-jump";
+    const one = artifactWordButton("artifact-jump", row);
     one.dataset.artifactJump = row.jump;
-    one.innerHTML = icon(row.glyph);
-    const label = document.createElement("span");
-    label.dataset.i18n = row.key;
-    label.textContent = t(row.key, row.word);
-    one.appendChild(label);
     links.appendChild(one);
   }
   const actions = document.createElement("div");
   actions.className = "artifact-actions";
   for (const row of ARTIFACT_ACTIONS) {
-    const one = document.createElement("button");
-    one.type = "button";
-    one.className = `btn artifact-action${row.action === "delete" ? " btn--halt" : ""}`;
+    const one = artifactWordButton(`artifact-action${row.action === "delete" ? " btn--halt" : ""}`, row);
     one.dataset.artifactAction = row.action;
-    one.innerHTML = icon(row.glyph);
-    const label = document.createElement("span");
-    label.dataset.i18n = row.key;
-    label.textContent = t(row.key, row.word);
-    one.appendChild(label);
     actions.appendChild(one);
   }
   facts.append(meta, noOrigin, links, actions);
@@ -7789,6 +7793,9 @@ function wireArtifactDrawer(view) {
     paintArtifactTasks(view);
     paintArtifactDrawer(view);
     view.querySelector(".artifacts-tasks").focus({ preventScroll: true });
+  });
+  drawer.querySelector(".artifact-detail-open").addEventListener("click", () => {
+    if (artifactSelectedId) void artifactAction(view, "open", artifactSelectedId);
   });
   const more = drawer.querySelector(".artifact-detail-more");
   more.addEventListener("click", () => {
@@ -8620,6 +8627,10 @@ function paintArtifactDrawer(view) {
   // claude.ai 아티팩트에는 파일이 없다: Finder와 경로 복사는 설 자리가 없다.
   // 사라진 파일도 Finder에 보일 것이 없다.
   const fileless = !row.path;
+  // 창 안에서 열리는 종류는 머리의 「열기」가 맡는다(t-55370).
+  const inWindow = artifactOpensInWindow(row);
+  drawer.querySelector(".artifact-detail-open").hidden = !inWindow;
+  drawer.querySelector('.artifact-actions [data-artifact-action="open"]').hidden = inWindow;
   drawer.querySelector('[data-artifact-action="reveal"]').disabled = fileless || artifactMissing.has(row.id);
   drawer.querySelector('[data-artifact-action="copy"]').disabled = fileless;
   put(
@@ -9031,8 +9042,8 @@ async function artifactAction(view, action, id) {
       artifactOpening.add(id);
       try {
         // 페이지·문서·claude.ai 아티팩트는 창 안에서 연다(t-3233 §5); 나머지는
-        // 기존대로 시스템 기본 앱이다.
-        if (!(await openArtifactPage(row))) await invoke("artifact_open", { id });
+        // 기존대로 시스템 기본 앱이다. 갤러리가 연 페이지는 미리보기 탭이다(t-55370).
+        if (!(await openArtifactPage(row, { glance: true }))) await invoke("artifact_open", { id });
       } finally {
         artifactOpening.delete(id);
       }
@@ -9078,10 +9089,17 @@ async function artifactAction(view, action, id) {
  * 이미 타는 길(`openBrowserTab`)이고 둘째 길은 없다. 이 기계의 페이지(html/svg)
  * 도 같은 문으로 `file://`을 열되 창의 머리띠 한 줄을 얹고, 문서(md)는 기존
  * 마크다운 뷰어에 같은 머리띠를 얹는다. 열었으면 true, 이 길이 아닌 종류면
- * false — 그러면 부르는 쪽이 시스템 기본 앱으로 간다. */
-async function openArtifactPage(row, { version = null, seat = null, hint = null } = {}) {
+ * false — 그러면 부르는 쪽이 시스템 기본 앱으로 간다.
+ *
+ * 아티팩트를 여는 길(갤러리·서랍·상태 표시줄 알림·터미널 링크·「나란히」)은 모두 이 함수를
+ * 지난다(t-55370). 그 아티팩트의 그 판을 이미 보이는 탭이 있으면 그 탭을 앞으로 세우고 끝이다 —
+ * 판을 새로 만들지 않는다. 갤러리가 연 페이지(`glance`)는 미리보기 탭이고, 미리보기 탭이 서
+ * 있으면 그 판이 새 주소로 옮겨 간다(Codex의 미리보기 탭, Claude의 패널 하나). */
+async function openArtifactPage(row, { version = null, seat = null, hint = null, glance = false } = {}) {
+  if (!artifactOpensInWindow(row)) return false;
+  const standing = artifactTabFor(row, version);
+  if (standing) return standArtifactTab(standing, { glance });
   if (row.kind === "web") {
-    if (!row.url) return false;
     await openBrowserTab(row.url);
     return true;
   }
@@ -9099,6 +9117,13 @@ async function openArtifactPage(row, { version = null, seat = null, hint = null 
       path = artifactShownPath(facts);
       if (!path) throw new Error(t("artifacts.versionUnavailable", "선택한 발행 버전을 찾을 수 없습니다. 갤러리를 다시 읽어 주세요."));
     }
+    // 갤러리의 미리보기는 서 있는 미리보기 탭을 옮긴다. 자리를 정한 길(만든 판 옆·「나란히」)은
+    // 제 탭을 연다.
+    const walking = glance && seat === null ? artifactGlanceTab() : null;
+    if (walking) {
+      walkArtifactGlance(walking, facts, path);
+      return true;
+    }
     // 만든 판 옆에 여는 길(`seat`)은 초점을 그 판에 둔다: 사람은 그 판에서
     // 쓰던 중이고, 페이지는 옆에 서기만 한다.
     const label = await openBrowserTab(pathAsFileUrl(path), seat === null ? {} : { makerSeat: seat, focus: false });
@@ -9106,6 +9131,9 @@ async function openArtifactPage(row, { version = null, seat = null, hint = null 
     if (tab) {
       facts.hint = hint;
       tab.artifact = facts;
+      if (glance && seat === null) tab.preview = true;
+      // 탭 이름은 아티팩트의 제목이다 — 페이지가 제 이름을 말하기 전에도.
+      renderTabs();
       if (stillShowing(tab)) paintBrowserView(tab);
       // 여는 길이 무엇이든 탭이 섰으면 본 것이다 — 「새 N」은 여기서 내려간다
       // (t-11958). 버전을 묻는 사이 사람이 자리를 옮겨 열지 않았으면 남는다.
@@ -9113,7 +9141,8 @@ async function openArtifactPage(row, { version = null, seat = null, hint = null 
     }
     return true;
   }
-  if (row.kind === "document" && extensionOf(row.path) === "md") {
+  // 남은 것은 Markdown 문서다 — 창 안에서 열리는 종류는 `artifactOpensInWindow`가 가렸다.
+  if (row.kind === "document") {
     // 갤러리는 모든 프로젝트의 문서를 늘어놓는데 프로젝트의 파일 문(`read_text_file`)은 제 뿌리
     // 밖의 경로를 막는다 — 막아야 하는 문이다(t-16006). 그래서 어느 문으로 열지는 저장소에 묻는다:
     // 창은 행의 id만 보내고, 열린 프로젝트의 문이 읽을 파일이면 `in_project`가 참이다. 실패는
@@ -9132,6 +9161,73 @@ async function openArtifactPage(row, { version = null, seat = null, hint = null 
     return true;
   }
   return false;
+}
+
+/* 창 안에서 열리는 아티팩트인가(t-3233 §5): 주소가 있는 claude.ai 아티팩트, 이 기계의 페이지,
+ * Markdown 문서. 나머지는 시스템 기본 앱이다. 서랍 머리의 「열기」도 이것들에만 선다(t-55370). */
+function artifactOpensInWindow(row) {
+  if (row?.kind === "web") return Boolean(row.url);
+  if (row?.kind === "page") return true;
+  return row?.kind === "document" && extensionOf(row.path) === "md";
+}
+
+/* 탭이 지금 제 아티팩트의 파일 — 현재 파일이나 번호 붙은 판 — 을 보이는가. 링크를 따라 다른 곳에 간
+ * 탭은 머리띠가 서 있어도 그 아티팩트를 보이지 않는다(`artifactFeedbackSeat`). */
+function artifactTabOnItsFile(tab) {
+  return artifactFeedbackSeat(tab) !== null;
+}
+
+/* 이 체크아웃에서 이 아티팩트를 이미 보이는 브라우저 탭(t-55370). 페이지는 그 판으로 — 판을 정하지
+ * 않은 열기는 행이 말하는 판(발행물의 최신 번호, 아니면 현재 파일)이다 — 그리고 제 파일 위에 선 탭만.
+ * claude.ai 아티팩트는 그 주소의 탭이다. 없으면 null. */
+function artifactTabFor(row, version = null) {
+  const here = (one) => one.kind === "browser" && one.worktree === activeWorktreePath;
+  if (row.kind === "web") {
+    const url = navigableUrlOf(row.url) ?? row.url;
+    return tabs.find((one) => here(one) && !one.artifact && one.url === url) ?? null;
+  }
+  if (row.kind !== "page") return null;
+  const wanted = version ?? row.version ?? null;
+  return tabs.find((one) => here(one) && one.artifact?.id === row.id
+    && (one.artifact.version ?? one.artifact.current ?? null) === wanted && artifactTabOnItsFile(one)) ?? null;
+}
+
+/* 아티팩트가 이미 가진 탭을 앞으로 세운다 — 새 판도 판 목록 읽기도 없다(t-55370). 갤러리가 아닌 길의
+ * 열기는 일부러 연 것이라 미리보기 탭을 남는 탭으로 바꾼다: 파일 탭을 다시 여는 것과 같다(`openTab`). */
+function standArtifactTab(tab, { glance = false } = {}) {
+  if (!glance) keepTab(tab);
+  setActiveTab(tab.id);
+  if (tab.artifact) markArtifactSeen(tab.artifact.id);
+  return true;
+}
+
+/* 갤러리의 미리보기 탭 — 이 체크아웃에서 아직 미리보기인 아티팩트 페이지 탭(t-55370). */
+function artifactGlanceTab() {
+  return tabs.find((one) => one.kind === "browser" && one.preview === true && one.artifact
+    && one.worktree === activeWorktreePath) ?? null;
+}
+
+/* 미리보기 탭이 다른 아티팩트로 옮겨 간다: 판은 그대로 새 주소로 가고 — 엔진이 렌더러를 다시 쓴다 —
+ * 탭은 새 아티팩트의 머리띠를 입는다. 떠나는 주소에서 늦게 오는 답은 사람의 탐색이 아니다
+ * (`keepGlanceLeaving`). */
+function walkArtifactGlance(tab, facts, path) {
+  tab.glanceLeft = tab.url;
+  tab.artifact = facts;
+  submitBrowserAddress(tab, pathAsFileUrl(path));
+  setActiveTab(tab.id);
+  markArtifactSeen(facts.id);
+}
+
+/* 미리보기 탭을 제 아티팩트 밖으로 데려간 탐색 — 링크 따라가기, 뒤로 가기 — 은 사람의 것이다: 그 탭은
+ * 남는 탭이 된다(t-55370). 미리보기가 방금 떠난 주소의 늦은 답은 그런 탐색이 아니다. */
+function keepGlanceLeaving(tab) {
+  if (!tab?.preview || !tab.artifact) return;
+  if (artifactTabOnItsFile(tab)) {
+    tab.glanceLeft = null;
+    return;
+  }
+  if (tab.glanceLeft && sameFileUrl(tab.url, tab.glanceLeft)) return;
+  keepTab(tab);
 }
 
 /* 열린 프로젝트 밖의 문서를 아무도 쓸 수 없는 탭으로 연다(t-16006): 저장소가 그 행에서 읽어 준
@@ -9420,6 +9516,8 @@ function wireArtifactStrip(strip) {
       : facts?.versions?.find((one) => String(one.n) === versions.value);
     if (!facts || !picked) return;
     facts.version = picked.n;
+    // 판을 고른 탭은 사람이 두고 보는 탭이다(t-55370).
+    keepTab(strip._tab);
     paintArtifactStripActions(strip);
     strip._onVersion?.(picked);
   };
@@ -9479,6 +9577,8 @@ async function compareArtifactVersions(tab) {
   const facts = tab?.artifact;
   const other = artifactCompareVersion(facts);
   if (other === null || !facts.row) return;
+  // 두 판을 나란히 세우는 사람은 이 탭을 두고 본다 — 미리보기였으면 남는 탭이 된다(t-55370).
+  keepTab(tab);
   const standing = tabs.some((one) => one !== tab && one.kind === "browser"
     && one.artifact?.id === facts.id && one.artifact?.version === other);
   if (standing) return;
