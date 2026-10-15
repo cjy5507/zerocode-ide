@@ -3627,8 +3627,12 @@ function paintBrowserView(tab) {
   paintArtifactHint(host.querySelector(".artifact-hint"), tab);
   // 문서 보기(t-59665 ⑥): 아티팩트를 제 파일 위에서 보는 동안 주소줄이 접히고 머리가 한 줄이 된다.
   // 링크로 다른 곳에 가면 — 머리띠는 서 있어도 — 주소줄이 다시 선다. 규칙은 한 선택자가 쥔다.
-  host.classList.toggle("is-artifact-reading", tab.artifact !== null && tab.artifact !== undefined && artifactTabOnItsFile(tab));
-  syncArtifactReadingRow(host);
+  const reading = tab.artifact !== null && tab.artifact !== undefined && artifactTabOnItsFile(tab);
+  if (host.classList.contains("is-artifact-reading") !== reading) {
+    host.classList.toggle("is-artifact-reading", reading);
+    // 한 줄인지 두 줄인지는 판의 폭이 정한다 — 재는 것은 다음 프레임에, 그리기가 배치를 강제하지 않게.
+    requestAnimationFrame(() => syncArtifactReadingRow(host));
+  }
   // 다른 탭의 덮개 그림은 이 탭의 것이 아니다(t-59665 ④).
   const shade = artifactShadeOf(host);
   if (shade && !shade.hidden && shade._label !== tab.label) liftArtifactShade(host);
