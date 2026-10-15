@@ -62,7 +62,6 @@ class TheNamesAreTheRusts(unittest.TestCase):
     def test_every_key_is_the_summarys_spelling(self) -> None:
         summary = rust("crates/zerocode-core/src/jev/summary.rs")
         for name, key in [
-            ("AT", answered.AT_KEY),
             ("OUTCOME", answered.OUTCOME_KEY),
             ("REQUESTS", answered.REQUESTS_KEY),
             ("CACHED", answered.CACHED_KEY),
@@ -72,9 +71,10 @@ class TheNamesAreTheRusts(unittest.TestCase):
             ("SERVER_ERROR_CODE", answered.SERVER_ERROR_CODE_KEY),
         ]:
             self.assertIn(f'pub const {name}: LedgerKey = LedgerKey {{\n    canonical: "{key}",\n    also: &[],', summary)
-        canonical, *also = answered.RUBRIC_KEYS
-        spelled = ", ".join(f'"{one}"' for one in also)
-        self.assertIn(f'pub const RUBRIC_VERSION: LedgerKey = LedgerKey {{\n    canonical: "{canonical}",\n    also: &[{spelled}],', summary)
+        for name, keys in [("AT", answered.AT_KEYS), ("RUBRIC_VERSION", answered.RUBRIC_KEYS)]:
+            canonical, *also = keys
+            spelled = ", ".join(f'"{one}"' for one in also)
+            self.assertIn(f'pub const {name}: LedgerKey = LedgerKey {{\n    canonical: "{canonical}",\n    also: &[{spelled}],', summary)
         self.assertIn(f'pub const ANSWERED: &str = "{answered.ANSWERED}";', summary)
 
     def test_the_probe_word_and_the_provider_mark_are_the_products(self) -> None:
@@ -186,6 +186,21 @@ class TheCount(unittest.TestCase):
         data = self.ledger.read_bytes()
         self.assertEqual((read.bytes, read.sha256), (len(data), hashlib.sha256(data).hexdigest()))
         self.assertEqual((read.lines, read.corrupt, read.untimed), (12, 1, 1))
+
+    def test_a_model_tier_row_written_with_atMs_counts_in_its_window(self) -> None:
+        tiers = self.home / "projects" / "Users-dev-a-0123456789abcdef" / Path(*replay.PROJECT_LEDGERS) / replay.PROVIDER_LEDGERS / PROVIDER / "model-tiers.jsonl"
+        at, own = ms("2026-10-15T07:00"), f"{PROVIDER}:acme/judge"
+        write(
+            tiers,
+            [
+                {"atMs": at, "provider": PROVIDER, "outcome": "answered", "judged": 3, "requests": 1, "model": own},
+                {"at": at + 1, "provider": PROVIDER, "outcome": "answered", "judged": 3, "requests": 1, "model": own},
+            ],
+        )
+        held = {(row["seat"], row["window"]): row for row in self.table()}[("model-tiers", "before")]
+        self.assertEqual((held["judgments"], held["answered"]), (2, 2), "the old spelling of the time is still its time")
+        read = next(one for one in self.reads if one.path.endswith("model-tiers.jsonl"))
+        self.assertEqual((read.lines, read.untimed), (2, 0))
 
     def test_the_table_says_counts_and_words_and_nothing_else_of_a_row(self) -> None:
         write(
