@@ -20987,6 +20987,78 @@ button.helper-sib:hover {
   border: 0;
 }
 
+.judgment-source-result {
+  margin-block: var(--space-3);
+  padding: var(--space-3);
+  min-width: 0;
+  border: var(--rule-width) solid var(--ink-chalk);
+  border-radius: var(--radius-sm);
+  background: var(--row-selected);
+  overflow-wrap: anywhere;
+}
+
+.judgment-source-result[data-state="unsupported"],
+.judgment-source-result[data-state="cancelled"] {
+  border-color: var(--edge-mark);
+  background: transparent;
+}
+
+.judgment-source-result-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.judgment-model-source .judgment-source-result-heading h4 {
+  margin: 0;
+}
+
+.judgment-source-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.judgment-source-badge {
+  padding: 0 var(--space-2);
+  border: var(--rule-width) solid var(--edge-mark);
+  border-radius: var(--radius-pill);
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.judgment-source-badge[data-badge="current"] {
+  border-color: var(--ink-chalk);
+  color: var(--ink-chalk);
+}
+
+.judgment-source-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-2) 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.judgment-source-steps li[data-state="done"],
+.judgment-source-steps li[data-state="active"] {
+  color: var(--ink-chalk);
+}
+
+.judgment-source-steps li[data-state="active"] {
+  font-weight: 600;
+}
+
+.judgment-source-steps li[data-state="failed"] {
+  color: var(--ink-chalk);
+  text-decoration: line-through;
+}
+
 .managed-judgment-library-tools {
   display: flex;
   flex-wrap: wrap;
