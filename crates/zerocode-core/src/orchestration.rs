@@ -17957,6 +17957,9 @@ fn unjudged_reason(outcome: Option<&str>) -> serde_json::Value {
         (_, _, Some(Refused::SettingsChanged)) => {
             "No difficulty judgment: the Jev settings changed while it was asked.".to_string()
         }
+        (_, _, Some(Refused::Resting)) => {
+            "No difficulty judgment: Jev is resting this seat until its provider can answer it.".to_string()
+        }
         (word, None, None) => format!("No difficulty judgment: the request ended `{word}`."),
     };
     serde_json::json!({ "why": why, "says": says })

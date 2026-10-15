@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zerocode_core::jev::door::{self, Cleared, JevSettings, Refused};
 use zerocode_core::jev::{count, hedge, JevMode, JevUse, RECALL, ROUTING, SMART_SETTINGS_KEY};
+use zerocode_core::jev::summary;
 
 use super::shadow_ledger::{last_shadow_line, last_shadow_lines, shadow_ledger_dir, shadow_ledger_path};
 
@@ -227,8 +228,9 @@ impl JevDoor {
             |asking| {
                 let cleared = door::may_send(row, asking, body)?;
                 if !self.seat_asks_now(row) { Err(Refused::Off) }
-                else if settings.model == self.settings.model { Ok(cleared) }
-                else { Err(Refused::SettingsChanged) }
+                else if settings.model != self.settings.model { Err(Refused::SettingsChanged) }
+                else if self.resting(row) { Err(Refused::Resting) }
+                else { Ok(cleared) }
             },
             key,
             &settings,
@@ -268,8 +270,9 @@ impl JevDoor {
         };
         let cleared = door::may_send(row, &asking, body)?;
         if !self.seat_asks_now(row) { Err(Refused::Off) }
-        else if settings.model == self.settings.model { Ok(cleared) }
-        else { Err(Refused::SettingsChanged) }
+        else if settings.model != self.settings.model { Err(Refused::SettingsChanged) }
+        else if self.resting(row) { Err(Refused::Resting) }
+        else { Ok(cleared) }
     }
 
     /// Ask the door about a key check; cleared, it is counted in the day.
@@ -356,6 +359,135 @@ impl JevDoor {
             .flatten()
             .filter(|_| self.count_a_hedge().is_ok())
     }
+
+    /// Whether `row`'s seat rests now (t-58193): it applies nothing, and its
+    /// own ledger says it rests ([`Self::rest_of`]).
+    fn resting(&self, row: &JevUse) -> bool {
+        self.rest_of(row).is_some() && !self.applies_now(row)
+    }
+
+    /// `row`'s rest as its own ledger in this provider's folder says it
+    /// ([`rest_in`]), read from the tail the hedge reads and from the whole
+    /// ledger only when that tail holds fewer than
+    /// [`UNANSWERED_BEFORE_REST`] of its requests and no answer — a seat that
+    /// has rested for hours wrote a row each time it was asked meanwhile.
+    #[must_use]
+    pub fn rest_of(&self, row: &JevUse) -> Option<Rest> {
+        let ledger = self.ledgers.as_deref()?.join(row.ledger);
+        let now = super::decision_shadow::now_ms();
+        let tail = last_shadow_lines(&ledger, HEDGE_SAMPLE_ROWS);
+        match rest_in(row, tail.iter().rev().map(String::as_str), now) {
+            Reading::Settled(rest) => rest,
+            Reading::Short => {
+                let whole = std::fs::read_to_string(&ledger).unwrap_or_default();
+                match rest_in(row, whole.lines().rev(), now) {
+                    Reading::Settled(rest) => rest,
+                    Reading::Short => None,
+                }
+            }
+        }
+    }
+
+    /// Whether `row`'s seat applies its judgment now — the person's `on`, or
+    /// an `auto` its own ledger raised — which no rest touches. A door that
+    /// reads no settings file (a test's) knows no word, and applies nothing.
+    fn applies_now(&self, row: &JevUse) -> bool {
+        let (Some(_), Some(cwd), Some(ledgers)) =
+            (&self.settings_file, self.workspace.as_deref(), self.ledgers.as_deref())
+        else {
+            return false;
+        };
+        let loader = runtime::ConfigLoader::default_for(Path::new(cwd));
+        super::settings::merged_settings_root_from(&loader).is_some_and(|root| {
+            let mode = row.mode_in(&root);
+            let raised = || super::jev_summary::raised_in(row, &ledgers.join(row.ledger));
+            mode.applies_with(mode.automatic() && raised())
+        })
+    }
+}
+
+/// Why a seat that applies nothing does not ask now (t-58193): its last
+/// [`UNANSWERED_BEFORE_REST`] requests went unanswered, and [`REST`] has not
+/// passed since the newest of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rest {
+    /// When the rest ends, in Unix milliseconds.
+    pub until_ms: i64,
+    /// What those requests ended on most often, the newest first among
+    /// equals: the provider's refusal where the server named one, else the
+    /// row's outcome.
+    pub cause: String,
+}
+
+/// What a ledger's lines, read newest first, settled of a seat's rest.
+enum Reading {
+    /// An answer, or [`UNANSWERED_BEFORE_REST`] unanswered requests, settled
+    /// it: the rest, or none.
+    Settled(Option<Rest>),
+    /// The lines ran out first.
+    Short,
+}
+
+/// A seat's rest as a ledger's `lines` say it, newest line first.
+///
+/// What is read is the requests the seat sent in its series
+/// ([`sent_in_series`]); a request the door refused, a memo's answer, a
+/// judge's transition and a mark are no request, and count neither way.
+fn rest_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>, now_ms: i64) -> Reading {
+    let mut causes: Vec<String> = Vec::new();
+    let mut newest = None;
+    for row in lines.filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
+        if !sent_in_series(seat, &row) {
+            continue;
+        }
+        if summary::OUTCOME.read(&row).and_then(Value::as_str) == Some(door::ANSWERED_OUTCOME) {
+            return Reading::Settled(None);
+        }
+        newest = newest.or_else(|| summary::AT.read(&row).and_then(Value::as_i64));
+        let refusal = row.get(SERVER_REFUSAL).or_else(|| summary::OUTCOME.read(&row));
+        causes.push(refusal.and_then(Value::as_str).unwrap_or_default().to_string());
+        if causes.len() == UNANSWERED_BEFORE_REST {
+            let rest = i64::try_from(REST.as_millis()).unwrap_or(i64::MAX);
+            let until_ms = newest.unwrap_or_default().saturating_add(rest);
+            let cause = most_common(causes);
+            return Reading::Settled((until_ms > now_ms).then_some(Rest { until_ms, cause }));
+        }
+    }
+    Reading::Short
+}
+
+/// Where [`ServerSaid`] keeps the provider's refusal on a row.
+const SERVER_REFUSAL: &str = "serverRefusal";
+
+/// Whether `row` is a request `seat` sent in its series: one that asked
+/// something and left at least once, under the rubric the seat asks now —
+/// read as the judge reads a row's rubric, where a row naming none is the
+/// first rubric's (`zerocode_core::jev::promote`).
+fn sent_in_series(seat: &JevUse, row: &Value) -> bool {
+    let rubric = summary::RUBRIC_VERSION.read(row).map_or(
+        Some(zerocode_core::jev::questions::UNVERSIONED_RUBRIC),
+        |spelled| spelled.as_u64().and_then(|version| u32::try_from(version).ok()),
+    );
+    summary::asked_something(row).is_some()
+        && summary::REQUESTS.read(row).and_then(Value::as_u64).is_some_and(|sent| sent > 0)
+        && rubric == Some(seat.rubric_version)
+}
+
+/// The word `causes` hold most often, the first of them among equals.
+fn most_common(causes: Vec<String>) -> String {
+    let mut tally: Vec<(String, usize)> = Vec::new();
+    for cause in causes {
+        match tally.iter_mut().find(|(seen, _)| *seen == cause) {
+            Some((_, count)) => *count += 1,
+            None => tally.push((cause, 1)),
+        }
+    }
+    tally
+        .into_iter()
+        .rev()
+        .max_by_key(|(_, count)| *count)
+        .map(|(cause, _)| cause)
+        .unwrap_or_default()
 }
 
 /// What a hedge's plan reads of a ledger row, in whichever of the two
