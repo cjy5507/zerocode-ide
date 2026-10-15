@@ -171,9 +171,32 @@ struct RefusalRead {
 /// named: at most [`MAX_REFUSAL_BYTES`] of its body, for no longer than
 /// [`MAX_REFUSAL_WAIT`] or what is left until `deadline`, whichever ends
 /// first. A deadline already passed reads nothing.
-async fn refusal_read(answer: reqwest::Response, deadline: Instant) -> RefusalRead {
-    let _ = (answer, deadline);
-    RefusalRead::default()
+async fn refusal_read(mut answer: reqwest::Response, deadline: Instant) -> RefusalRead {
+    let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|left| !left.is_zero()) else {
+        return RefusalRead::default();
+    };
+    let mut body = Vec::new();
+    let whole = tokio::time::timeout(left.min(MAX_REFUSAL_WAIT), async {
+        while let Some(chunk) = answer.chunk().await.ok()? {
+            body.extend_from_slice(&chunk);
+            if body.len() > MAX_REFUSAL_BYTES { return None; }
+        }
+        Some(())
+    })
+    .await;
+    RefusalRead { code: whole.ok().flatten().and_then(|()| refusal_code(&body)), read: body.len() }
+}
+
+/// The codes a managed server names a refused request with: local-judgment's
+/// `Error::Busy` and `Error::ServerStopped`, which this crate does not depend
+/// on. No other word a refused body says is kept (t-55423).
+const REFUSAL_CODES: [&str; 2] = ["operation_busy", "server_stopped"];
+
+/// The code a refused body names, when it is one of [`REFUSAL_CODES`].
+fn refusal_code(body: &[u8]) -> Option<&'static str> {
+    let said = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let word = said.get("error")?.as_str()?;
+    REFUSAL_CODES.into_iter().find(|code| *code == word)
 }
 
 /// The criteria key under which a Noul says what its yes means.
@@ -472,6 +495,9 @@ pub struct HedgeRan {
 struct Attempted {
     outcome: Result<SystemOneResponse, SystemOneFailure>,
     retries: u32,
+    /// The code a managed server named its 503 with, when that 503 was the
+    /// outcome ([`refusal_read`], t-55423).
+    server_error_code: Option<&'static str>,
     elapsed: Duration,
 }
 
@@ -727,7 +753,7 @@ impl SystemOneClient {
         let done = |run: Attempted, ran: Option<HedgeRan>| SystemOneCall {
             outcome: run.outcome,
             retries: run.retries,
-            server_error_code: None,
+            server_error_code: run.server_error_code,
             elapsed: opened.elapsed(),
             requests: requests.load(Ordering::Relaxed),
             hedge: ran,
@@ -785,18 +811,20 @@ impl SystemOneClient {
         max_retries: u32,
     ) -> Attempted {
         let began = Instant::now();
-        let finish = |outcome, retries| Attempted { outcome, retries, elapsed: began.elapsed() };
+        let finish = |outcome, retries, server_error_code| Attempted { outcome, retries, server_error_code, elapsed: began.elapsed() };
         let mut retries = 0;
         loop {
             let Some(remaining) = deadline.checked_sub(opened.elapsed()) else {
-                return finish(Err(SystemOneFailure::Timeout), retries);
+                return finish(Err(SystemOneFailure::Timeout), retries, None);
             };
             let Some(lent) = self.socket.lend() else {
-                return finish(Err(SystemOneFailure::Transport), retries);
+                return finish(Err(SystemOneFailure::Transport), retries, None);
             };
             requests.fetch_add(1, Ordering::Relaxed);
-            let failure = match tokio::time::timeout(remaining, self.send_once(&lent.client, prepared)).await {
-                Ok(Ok(response)) => return finish(Ok(response), retries),
+            let mut refused = None;
+            let sent = tokio::time::timeout(remaining, self.send_once(&lent.client, prepared, &mut refused)).await;
+            let failure = match sent {
+                Ok(Ok(response)) => return finish(Ok(response), retries, None),
                 Ok(Err(failure)) => failure,
                 Err(_) => SystemOneFailure::Timeout,
             };
@@ -810,14 +838,20 @@ impl SystemOneClient {
                 || retries >= max_retries
                 || opened.elapsed() + backoff >= deadline
             {
-                return finish(Err(failure), retries);
+                // Read past the deadline's wrap above, so a slow body leaves a
+                // server's refusal its status and never makes it a timeout.
+                let server_error_code = match refused {
+                    Some(answer) => refusal_read(answer, opened + deadline).await.code,
+                    None => None,
+                };
+                return finish(Err(failure), retries, server_error_code);
             }
             tokio::time::sleep(backoff).await;
             retries += 1;
         }
     }
 
-    async fn send_once(&self, http: &reqwest::Client, prepared: &Prepared) -> Result<SystemOneResponse, SystemOneFailure> {
+    async fn send_once(&self, http: &reqwest::Client, prepared: &Prepared, refused: &mut Option<reqwest::Response>) -> Result<SystemOneResponse, SystemOneFailure> {
         let request = http
             .post(&self.endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -833,6 +867,9 @@ impl SystemOneClient {
             .map_err(|_| SystemOneFailure::Transport)?;
         let status = response.status();
         if !status.is_success() {
+            // A managed server says in the body why it refused; the caller reads
+            // it once the outcome stands, past this request's deadline (t-55423).
+            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE { *refused = Some(response); }
             return Err(SystemOneFailure::from_status(status.as_u16()));
         }
         let mut bytes = Vec::new();

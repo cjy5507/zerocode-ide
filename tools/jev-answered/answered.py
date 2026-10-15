@@ -34,6 +34,9 @@ What a row counts as, from its own fields:
   counted apart, by `cached` or by the outcome;
 - answered of sent, failures of sent by outcome word, and applied (its
   `applied` is true);
+- a sent `http_503` by the code its server named (`serverErrorCode`):
+  `none` when the row names none, as every row written before the code
+  does, and never read as busy;
 - probed: its `probe` asked a second question (any value but `not_asked`);
 - who it names: an answered row's `model` opens with `<provider identity>:`,
   and a row naming another folder's provider is counted; a window row names
@@ -187,6 +190,7 @@ class Tally:
     unattributed: int = 0
     no_requests: int = 0
     failures: Counter = field(default_factory=Counter)
+    codes503: Counter = field(default_factory=Counter)
     unsent: Counter = field(default_factory=Counter)
     routes: Counter = field(default_factory=Counter)
     rubrics: Counter = field(default_factory=Counter)
@@ -307,6 +311,9 @@ def judge(row: dict, folder: str, tally: Tally) -> None:
             tally.answered += 1
         else:
             tally.failures[outcome] += 1
+        if outcome == HTTP_503:
+            code = row.get(SERVER_ERROR_CODE_KEY)
+            tally.codes503[NO_CODE if code is None else word(code)] += 1
     tally.applied += row.get(APPLIED_KEY) is True
     tally.probed += PROBE_KEY in row and row[PROBE_KEY] != PROBE_NOT_ASKED
     route = row.get(CLIENT_ROUTE_KEY)
@@ -402,6 +409,7 @@ def rows_of(tallies: dict[tuple[str, str, str, str], Tally], windows: list[Windo
                 "unattributed": tally.unattributed,
                 "routes": most_first(tally.routes),
                 "failures": most_first(tally.failures),
+                "codes503": most_first(tally.codes503),
                 "ran": most_first(tally.ran),
             }
         )
@@ -417,18 +425,20 @@ def totals_of(rows: list[dict], windows: list[Window]) -> list[dict]:
         total = sums.setdefault(
             (row["folder"], row["window"]),
             {"folder": row["folder"], "window": row["window"], "judgments": 0, "sent": 0, "attempts": 0,
-             "answered": 0, "noRequests": 0, "unsent": Counter(), "failures": Counter(), "ran": Counter()},
+             "answered": 0, "noRequests": 0, "unsent": Counter(), "failures": Counter(), "codes503": Counter(), "ran": Counter()},
         )
         for name in ("judgments", "sent", "attempts", "answered", "noRequests"):
             total[name] += row[name]
         total["unsent"].update(row["unsent"])
         total["failures"].update(row["failures"])
+        total["codes503"].update(row["codes503"])
         total["ran"].update(row["ran"])
     totals = [sums[key] for key in sorted(sums, key=lambda key: (key[0] != JEV_FOLDER, key[0], order[key[1]]))]
     for total in totals:
         total["share"] = share(total["answered"], total["sent"])
         total["unsent"] = most_first(total["unsent"])
         total["failures"] = most_first(total["failures"])
+        total["codes503"] = most_first(total["codes503"])
         total["ran"] = most_first(total["ran"])
     return totals
 
@@ -482,12 +492,13 @@ def render(rows: list[dict], totals: list[dict], reads: list[Read], windows: lis
         f"Counted {counted['countedAt']} from {counted['home']} · {version('app')} · {version('zo')}",
         f"Windows (UTC): {spans()}",
         f"Processes (UTC, as ps showed them): {processes()}",
+        CODE_LIMIT,
         "",
     ]
     out += table(
         ["seat ledger", "place", "provider folder", "window", "rubric", "judgments", "sent", "attempts",
          "answered of sent", "share", "applied", "not sent", "retried", "probed", "other provider",
-         "unattributed", "routes", "failures of sent (most first)", "version its writer ran"],
+         "unattributed", "routes", "failures of sent (most first)", "sent 503 by server code", "version its writer ran"],
         [
             [
                 row["seat"],
@@ -508,6 +519,7 @@ def render(rows: list[dict], totals: list[dict], reads: list[Read], windows: lis
                 f"{row['unattributed']:,}",
                 said(row["routes"], short),
                 said(row["failures"]),
+                said(row["codes503"]),
                 said(row["ran"]),
             ]
             for row in rows
@@ -516,7 +528,7 @@ def render(rows: list[dict], totals: list[dict], reads: list[Read], windows: lis
     out += ["", "Every seat and place summed, by provider folder and window:", ""]
     out += table(
         ["provider folder", "window", "judgments", "sent", "attempts", "answered of sent", "share", "not sent", "failures of sent (most first)",
-         "version its writer ran"],
+         "sent 503 by server code", "version its writer ran"],
         [
             [
                 short(total["folder"]),
@@ -528,6 +540,7 @@ def render(rows: list[dict], totals: list[dict], reads: list[Read], windows: lis
                 percent(total["share"]),
                 unsent(total),
                 said(total["failures"]),
+                said(total["codes503"]),
                 said(total["ran"]),
             ]
             for total in totals

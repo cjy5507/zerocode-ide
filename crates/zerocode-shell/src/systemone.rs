@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
 };
-use zerocode_core::jev::summary::{CLIENT_ROUTE, HTTP_VERSION, INPUT_TOKENS, MODEL};
+use zerocode_core::jev::summary::{CLIENT_ROUTE, HTTP_VERSION, INPUT_TOKENS, MODEL, SERVER_ERROR_CODE};
 use zerocode_core::jev::{JevUse, count, memo};
 
 use crate::api_routers::{Keychain, RouterKeys};
@@ -118,9 +118,43 @@ struct RefusalRead {
 /// named: at most [`MAX_REFUSAL_BYTES`] of its body, for no longer than
 /// [`MAX_REFUSAL_WAIT`] or what is left until `deadline`, whichever ends
 /// first. A deadline already passed reads nothing.
-async fn refusal_read(answer: reqwest::Response, deadline: Instant) -> RefusalRead {
-    let _ = (answer, deadline);
-    RefusalRead::default()
+async fn refusal_read(mut answer: reqwest::Response, deadline: Instant) -> RefusalRead {
+    let Some(left) = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+    else {
+        return RefusalRead::default();
+    };
+    let mut body = Vec::new();
+    let whole = tokio::time::timeout(left.min(MAX_REFUSAL_WAIT), async {
+        while let Some(chunk) = answer.chunk().await.ok()? {
+            body.extend_from_slice(&chunk);
+            if body.len() > MAX_REFUSAL_BYTES {
+                return None;
+            }
+        }
+        Some(())
+    })
+    .await;
+    RefusalRead {
+        code: whole.ok().flatten().and_then(|()| refusal_code(&body)),
+        read: body.len(),
+    }
+}
+
+/// The codes a managed server names a refused request with — local-judgment's
+/// `Error::Busy` and `Error::ServerStopped`; no other word a refused body
+/// says is kept (t-55423).
+const REFUSAL_CODES: [&str; 2] = [
+    local_judgment::Error::Busy.token(),
+    local_judgment::Error::ServerStopped.token(),
+];
+
+/// The code a refused body names, when it is one of [`REFUSAL_CODES`].
+fn refusal_code(body: &[u8]) -> Option<&'static str> {
+    let said = serde_json::from_slice::<Value>(body).ok()?;
+    let word = said.get("error")?.as_str()?;
+    REFUSAL_CODES.into_iter().find(|code| *code == word)
 }
 
 /// A question's request body, as the endpoint takes it.
@@ -440,6 +474,10 @@ pub struct Spent {
     /// before it left — on a row riding that request, the same one; `None`
     /// when nothing was sent: a refusal at the door, the memo's answer.
     pub route: Option<String>,
+    /// The code a managed server named its 503 with ([`SERVER_ERROR_CODE`],
+    /// t-55423), read from at most [`MAX_REFUSAL_BYTES`] of the body within
+    /// [`MAX_REFUSAL_WAIT`]; `None` for every other answer and refusal.
+    pub server_error_code: Option<&'static str>,
 }
 
 impl Spent {
@@ -479,6 +517,9 @@ impl Spent {
         if let Some(version) = self.version.as_deref() {
             fields.insert(HTTP_VERSION.canonical.to_string(), json!(version));
         }
+        if let Some(code) = self.server_error_code {
+            fields.insert(SERVER_ERROR_CODE.canonical.to_string(), json!(code));
+        }
         stamp_route(row, self.route.as_deref());
     }
 
@@ -501,6 +542,7 @@ impl Spent {
             model: self.model.clone(),
             version: self.version.clone(),
             route: self.route.clone(),
+            server_error_code: self.server_error_code,
         }
     }
 
@@ -1059,6 +1101,7 @@ impl Wire {
                     model: answered_by(&remembered.answer),
                     version: None,
                     route: None,
+                    server_error_code: None,
                 },
                 request_bytes,
                 memo,
@@ -1085,11 +1128,13 @@ impl Wire {
             }
         };
         let request_bytes = prepared.body.len();
+        let mut server_error_code = None;
         let (answer, version, attempted) = tauri::async_runtime::block_on(self.send_once(
             &provider,
             key.as_deref(),
             prepared,
             deadline,
+            &mut server_error_code,
         ));
         if let (Some(review), Ok(body)) = (review, &answer)
             && let Ok(response) = serde_json::from_str::<Value>(body)
@@ -1120,6 +1165,7 @@ impl Wire {
             model: answer.as_deref().ok().and_then(answered_by),
             version,
             route: attempted.then_some(route),
+            server_error_code,
         };
         // Keep the actual wire usage even when a late reply loses permission.
         let answer = if answer.is_ok() && !self.response_is_current(row, workspace, &allowed, mode)
@@ -1186,7 +1232,9 @@ impl Wire {
         prepared: Prepared,
         deadline: Instant,
     ) -> (Result<String, String>, Option<String>) {
-        let (answer, version, _) = self.send_once(provider, key, prepared, deadline).await;
+        let (answer, version, _) = self
+            .send_once(provider, key, prepared, deadline, &mut None)
+            .await;
         (answer, version)
     }
 
@@ -1196,6 +1244,7 @@ impl Wire {
         key: Option<&str>,
         mut prepared: Prepared,
         deadline: Instant,
+        server_error_code: &mut Option<&'static str>,
     ) -> (Result<String, String>, Option<String>, bool) {
         if Instant::now() >= deadline {
             return (Err(TIMEOUT.to_string()), None, false);
@@ -1228,6 +1277,9 @@ impl Wire {
         let version = Some(version_word(answer.version()));
         let status = answer.status();
         if !status.is_success() {
+            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                *server_error_code = refusal_read(answer, deadline).await.code;
+            }
             return (Err(token_for(status.as_u16())), version, true);
         }
         let mut bytes = Vec::new();
