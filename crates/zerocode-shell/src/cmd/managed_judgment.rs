@@ -66,9 +66,10 @@ pub(crate) fn managed_judgment_status(app: AppHandle) -> Result<Snapshot, String
 pub(crate) async fn managed_judgment_inspect_source(
     app: AppHandle,
     source: SourceInput,
+    request_id: Option<String>,
 ) -> Result<SourceInspection, String> {
     service(&app)?
-        .inspect_source(source)
+        .inspect_source_with_request(source, request_id)
         .await
         .map_err(|error| error.to_string())
 }

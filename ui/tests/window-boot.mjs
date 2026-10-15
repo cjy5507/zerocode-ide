@@ -2433,6 +2433,25 @@ export const WINDOW_MOTION_REST = "no-preference";
 /** The browser every window suite shares: Chromium with the host answers above fixed. */
 export const launchWindowBrowser = () => chromium.launch({ headless: true, args: [...WINDOW_BROWSER_ARGS] });
 
+/* The boot's phases (`markBootPhase`), kept from the first script on — a `before` hand for a
+ * measurement. The page is usable once `BOUND` stands, but the boot goes on restoring the
+ * workspace's tabs behind it; a measurement that starts then measures the boot too (t-55370:
+ * WebKit's first gallery paint carried `restoreActiveWorktreeTab`'s two repaints). */
+export const recordBootPhases = (page) => page.addInitScript(() => {
+  window.__BOOT_PHASES__ = [];
+  window.__ANSWER__.boot_phase = (args) => {
+    window.__BOOT_PHASES__.push(args?.phase ?? null);
+    return null;
+  };
+});
+
+/* The boot's own last awaited phase reached, then two frames — the window standing as a
+ * person who opens it finds it. Needs `recordBootPhases` as the page's `before`. */
+export async function waitBootSettled(page) {
+  await page.waitForFunction(() => window.__BOOT_PHASES__?.includes("browser_tabs_restored"));
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+}
+
 /* A fresh document for scenarios that own their timing, adapters or pane
  * layout — and, since t-4017, for every suite that owns its state: the page
  * dies with the suite, so nothing the suite moved (the active workspace, the

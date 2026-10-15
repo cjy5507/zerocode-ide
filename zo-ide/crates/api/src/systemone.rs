@@ -58,6 +58,16 @@ pub const SYSTEMONE_MAX_RETRIES: u32 = 3;
 /// has no name there.
 const OVERLOADED_STATUS: u16 = 529;
 
+/// The most of a refused request's body read for the server's code
+/// (t-55423): a managed server's refusal is a few dozen bytes, and a body
+/// past this names no code — its status stands as it came.
+pub const MAX_REFUSAL_BYTES: usize = 256;
+
+/// The longest a refused request's body is waited on for the server's code
+/// (t-55423), and never past the call's own deadline: a managed server writes
+/// its refusal at once, and a body slower than this names no code.
+pub const MAX_REFUSAL_WAIT: Duration = Duration::from_millis(300);
+
 /// The statuses the contract names, and the failure each one is. Any other
 /// non-success status is [`SystemOneFailure::Http`].
 const NAMED_STATUSES: [(u16, SystemOneFailure); 4] = [
@@ -146,6 +156,47 @@ impl SystemOneFailure {
     const fn unanswered(self) -> bool {
         matches!(self, Self::Transport | Self::Timeout)
     }
+}
+
+/// What reading a refused request's body found (t-55423): the code its server
+/// named, when it was one a managed server uses, and how many of the body's
+/// bytes were read to find it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RefusalRead {
+    code: Option<&'static str>,
+    read: usize,
+}
+
+/// Reads `answer`, a refused request's response, for the code its server
+/// named: at most [`MAX_REFUSAL_BYTES`] of its body, for no longer than
+/// [`MAX_REFUSAL_WAIT`] or what is left until `deadline`, whichever ends
+/// first. A deadline already passed reads nothing.
+async fn refusal_read(mut answer: reqwest::Response, deadline: Instant) -> RefusalRead {
+    let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|left| !left.is_zero()) else {
+        return RefusalRead::default();
+    };
+    let mut body = Vec::new();
+    let whole = tokio::time::timeout(left.min(MAX_REFUSAL_WAIT), async {
+        while let Some(chunk) = answer.chunk().await.ok()? {
+            body.extend_from_slice(&chunk);
+            if body.len() > MAX_REFUSAL_BYTES { return None; }
+        }
+        Some(())
+    })
+    .await;
+    RefusalRead { code: whole.ok().flatten().and_then(|()| refusal_code(&body)), read: body.len() }
+}
+
+/// The codes a managed server names a refused request with: local-judgment's
+/// `Error::Busy` and `Error::ServerStopped`, which this crate does not depend
+/// on. No other word a refused body says is kept (t-55423).
+const REFUSAL_CODES: [&str; 2] = ["operation_busy", "server_stopped"];
+
+/// The code a refused body names, when it is one of [`REFUSAL_CODES`].
+fn refusal_code(body: &[u8]) -> Option<&'static str> {
+    let said = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let word = said.get("error")?.as_str()?;
+    REFUSAL_CODES.into_iter().find(|code| *code == word)
 }
 
 /// The criteria key under which a Noul says what its yes means.
@@ -396,6 +447,13 @@ pub struct SystemOneCall {
     /// The winning attempt's outcome, and the winner's own re-sends.
     pub outcome: Result<SystemOneResponse, SystemOneFailure>,
     pub retries: u32,
+    /// The code the server named in the body it refused the winning attempt
+    /// with (t-55423): a managed server's `operation_busy` or `server_stopped`
+    /// behind one `503`, and nothing else — never the body's own words. `None`
+    /// when the body named neither or could not be read within
+    /// `MAX_REFUSAL_BYTES` and the call's deadline, and for every outcome but
+    /// a refusal.
+    pub server_error_code: Option<&'static str>,
     /// The whole call, first byte to the answer that was used.
     pub elapsed: Duration,
     /// Requests that actually left, across every attempt this call made —
@@ -437,6 +495,9 @@ pub struct HedgeRan {
 struct Attempted {
     outcome: Result<SystemOneResponse, SystemOneFailure>,
     retries: u32,
+    /// The code a managed server named its 503 with, when that 503 was the
+    /// outcome ([`refusal_read`], t-55423).
+    server_error_code: Option<&'static str>,
     elapsed: Duration,
 }
 
@@ -665,6 +726,7 @@ impl SystemOneClient {
         let refused = |failure| SystemOneCall {
             outcome: Err(failure),
             retries: 0,
+            server_error_code: None,
             elapsed: opened.elapsed(),
             requests: 0,
             hedge: None,
@@ -691,6 +753,7 @@ impl SystemOneClient {
         let done = |run: Attempted, ran: Option<HedgeRan>| SystemOneCall {
             outcome: run.outcome,
             retries: run.retries,
+            server_error_code: run.server_error_code,
             elapsed: opened.elapsed(),
             requests: requests.load(Ordering::Relaxed),
             hedge: ran,
@@ -748,18 +811,20 @@ impl SystemOneClient {
         max_retries: u32,
     ) -> Attempted {
         let began = Instant::now();
-        let finish = |outcome, retries| Attempted { outcome, retries, elapsed: began.elapsed() };
+        let finish = |outcome, retries, server_error_code| Attempted { outcome, retries, server_error_code, elapsed: began.elapsed() };
         let mut retries = 0;
         loop {
             let Some(remaining) = deadline.checked_sub(opened.elapsed()) else {
-                return finish(Err(SystemOneFailure::Timeout), retries);
+                return finish(Err(SystemOneFailure::Timeout), retries, None);
             };
             let Some(lent) = self.socket.lend() else {
-                return finish(Err(SystemOneFailure::Transport), retries);
+                return finish(Err(SystemOneFailure::Transport), retries, None);
             };
             requests.fetch_add(1, Ordering::Relaxed);
-            let failure = match tokio::time::timeout(remaining, self.send_once(&lent.client, prepared)).await {
-                Ok(Ok(response)) => return finish(Ok(response), retries),
+            let mut refused = None;
+            let sent = tokio::time::timeout(remaining, self.send_once(&lent.client, prepared, &mut refused)).await;
+            let failure = match sent {
+                Ok(Ok(response)) => return finish(Ok(response), retries, None),
                 Ok(Err(failure)) => failure,
                 Err(_) => SystemOneFailure::Timeout,
             };
@@ -773,14 +838,20 @@ impl SystemOneClient {
                 || retries >= max_retries
                 || opened.elapsed() + backoff >= deadline
             {
-                return finish(Err(failure), retries);
+                // Read past the deadline's wrap above, so a slow body leaves a
+                // server's refusal its status and never makes it a timeout.
+                let server_error_code = match refused {
+                    Some(answer) => refusal_read(answer, opened + deadline).await.code,
+                    None => None,
+                };
+                return finish(Err(failure), retries, server_error_code);
             }
             tokio::time::sleep(backoff).await;
             retries += 1;
         }
     }
 
-    async fn send_once(&self, http: &reqwest::Client, prepared: &Prepared) -> Result<SystemOneResponse, SystemOneFailure> {
+    async fn send_once(&self, http: &reqwest::Client, prepared: &Prepared, refused: &mut Option<reqwest::Response>) -> Result<SystemOneResponse, SystemOneFailure> {
         let request = http
             .post(&self.endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -796,6 +867,9 @@ impl SystemOneClient {
             .map_err(|_| SystemOneFailure::Transport)?;
         let status = response.status();
         if !status.is_success() {
+            // A managed server says in the body why it refused; the caller reads
+            // it once the outcome stands, past this request's deadline (t-55423).
+            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE { *refused = Some(response); }
             return Err(SystemOneFailure::from_status(status.as_u16()));
         }
         let mut bytes = Vec::new();
@@ -971,12 +1045,31 @@ mod tests {
     }
 
     async fn answer(mut stream: TcpStream, reply: Reply, recorder: Arc<Mutex<Vec<Seen>>>) {
+        let Some(seen) = heard(&mut stream).await else { return };
+        if let Ok(mut record) = recorder.lock() {
+            record.push(seen);
+        }
+        tokio::time::sleep(reply.delay).await;
+        let response = format!(
+            "HTTP/1.1 {} Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            reply.status,
+            reply.body.len(),
+            reply.body
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+    }
+
+    /// One whole request off `stream`: its head, then as many body bytes as
+    /// its `content-length` names. `None` when the client left before its
+    /// head was whole.
+    async fn heard(stream: &mut TcpStream) -> Option<Seen> {
         let mut buffer = Vec::new();
         let mut chunk = [0u8; 4096];
         let head_end = loop {
-            let Ok(read) = stream.read(&mut chunk).await else { return };
+            let read = stream.read(&mut chunk).await.ok()?;
             if read == 0 {
-                return;
+                return None;
             }
             buffer.extend_from_slice(&chunk[..read]);
             if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
@@ -992,25 +1085,14 @@ mod tests {
             })
             .unwrap_or(0);
         while buffer.len() < head_end + length {
-            let Ok(read) = stream.read(&mut chunk).await else { return };
+            let read = stream.read(&mut chunk).await.ok()?;
             if read == 0 {
                 break;
             }
             buffer.extend_from_slice(&chunk[..read]);
         }
         let body = String::from_utf8_lossy(&buffer[head_end..]).to_string();
-        if let Ok(mut seen) = recorder.lock() {
-            seen.push(Seen { head, body });
-        }
-        tokio::time::sleep(reply.delay).await;
-        let response = format!(
-            "HTTP/1.1 {} Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-            reply.status,
-            reply.body.len(),
-            reply.body
-        );
-        let _ = stream.write_all(response.as_bytes()).await;
-        let _ = stream.shutdown().await;
+        Some(Seen { head, body })
     }
 
     fn questions() -> BTreeMap<String, SystemOneQuestion> {
@@ -1217,6 +1299,112 @@ mod tests {
         }
         assert_eq!(SystemOneFailure::Http(503).ledger_token(), "http_503");
         assert_eq!(SystemOneFailure::Unauthorized.ledger_token(), "unauthorized");
+    }
+
+    /// A managed server refuses with one status for two reasons — busy and
+    /// stopped both come back `503` — and says which in its body. The call
+    /// keeps the status as its failure and, beside it, the server's code: one
+    /// of those two, never the body's own words. Anything else leaves the code
+    /// unsaid, the status as it came and no second request — a word outside the
+    /// two, a sentence, HTML, a body past [`MAX_REFUSAL_BYTES`], a body that
+    /// broke off or is held back — and a request no server answered, a stopped
+    /// server's own case, names no server's code. How long a body is waited on
+    /// is [`refusal_read`]'s, tried on its own below.
+    #[tokio::test]
+    async fn a_503_names_whether_the_server_was_busy_or_stopped() {
+        // local-judgment's `Error::Busy`, `Error::ServerStopped` and
+        // `Error::ServerChanged`, which this crate does not depend on.
+        let (busy, stopped, changed) = ("operation_busy", "server_stopped", "server_changed");
+        for (said, code) in [
+            (serde_json::json!({"error": busy}).to_string(), Some(busy)),
+            (serde_json::json!({"error": stopped}).to_string(), Some(stopped)),
+            (serde_json::json!({"error": changed}).to_string(), None),
+            (serde_json::json!({"error": "Service Unavailable"}).to_string(), None),
+            ("<html><body>503 Service Unavailable</body></html>".to_string(), None),
+            (serde_json::json!({"error": busy, "pad": "x".repeat(MAX_REFUSAL_BYTES)}).to_string(), None),
+        ] {
+            let mock = MockSystemOne::serving(vec![Reply::now(503, said.clone())]).await;
+            let call = ask(&mock, UNHURRIED).await;
+            assert_eq!(call.outcome, Err(SystemOneFailure::Http(503)), "{said}");
+            assert_eq!(call.server_error_code, code, "{said}");
+            assert_eq!(mock.seen().len(), 1, "{said}: one request, no second");
+        }
+
+        let held = MAX_REFUSAL_WAIT * 10;
+        for (hold, within) in [(Duration::ZERO, None), (held, Some(held / 2))] {
+            let started = Instant::now();
+            let call = ask(&refusing_brokenly(busy, hold).await, UNHURRIED).await;
+            assert_eq!(
+                call.outcome,
+                Err(SystemOneFailure::Http(503)),
+                "a body held {hold:?} and broken off keeps its status"
+            );
+            assert_eq!(call.server_error_code, None, "held {hold:?}");
+            if let Some(within) = within {
+                assert!(started.elapsed() < within, "a refusal's body held {hold:?} is not waited out");
+            }
+        }
+
+        let gone = TcpListener::bind("127.0.0.1:0")
+            .await
+            .and_then(|seat| seat.local_addr())
+            .expect("a loopback address nobody holds");
+        let nobody = MockSystemOne { base_url: format!("http://{gone}"), seen: Arc::default() };
+        let call = ask(&nobody, UNHURRIED).await;
+        assert_eq!(call.outcome, Err(SystemOneFailure::Transport));
+        assert_eq!(call.server_error_code, None, "no server spoke");
+    }
+
+    /// A loopback server that answers its one request with a `503` whose body
+    /// breaks off: the head promises a refusal naming `code`, half of it is
+    /// sent, and the connection is held for `hold` and then dropped.
+    async fn refusing_brokenly(code: &str, hold: Duration) -> MockSystemOne {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind the server");
+        let base_url = format!("http://{}", listener.local_addr().expect("server address"));
+        let body = serde_json::json!({"error": code}).to_string();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else { return };
+            if heard(&mut stream).await.is_none() {
+                return;
+            }
+            let opening = format!(
+                "HTTP/1.1 503 Scripted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                &body[..body.len() / 2]
+            );
+            let _ = stream.write_all(opening.as_bytes()).await;
+            tokio::time::sleep(hold).await;
+        });
+        MockSystemOne { base_url, seen: Arc::default() }
+    }
+
+    /// A refusal's body is read only while its call's deadline lasts: with
+    /// time left the whole of a managed server's refusal is read and its code
+    /// named; with the deadline already passed not a byte is read and no code
+    /// is named — however promptly the body came.
+    #[tokio::test]
+    async fn a_refused_body_is_read_only_while_the_deadline_lasts() {
+        // local-judgment's `Error::Busy`, which this crate does not depend on.
+        let busy = "operation_busy";
+        let said = serde_json::json!({"error": busy}).to_string();
+        for (left, read) in [
+            (Some(UNHURRIED), RefusalRead { code: Some(busy), read: said.len() }),
+            (None, RefusalRead::default()),
+        ] {
+            let mock = MockSystemOne::serving(vec![Reply::now(503, said.clone())]).await;
+            let answer = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("a loopback client")
+                .post(&mock.base_url)
+                .body("{}")
+                .send()
+                .await
+                .expect("the mock answers");
+            assert_eq!(answer.status().as_u16(), 503);
+            let deadline = Instant::now() + left.unwrap_or_default();
+            assert_eq!(refusal_read(answer, deadline).await, read, "{left:?} left");
+        }
     }
 
     #[tokio::test]

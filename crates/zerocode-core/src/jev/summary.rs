@@ -62,10 +62,11 @@ impl LedgerKey {
     }
 }
 
-/// When the request was made, in milliseconds since the epoch.
+/// When the request was made, in milliseconds since the epoch. The model
+/// tiers seat wrote it as `atMs` until t-55423.
 pub const AT: LedgerKey = LedgerKey {
     canonical: "at",
-    also: &[],
+    also: &["atMs"],
 };
 /// What became of it: `answered`, a failure token, or a door's refusal token.
 pub const OUTCOME: LedgerKey = LedgerKey {
@@ -252,6 +253,19 @@ pub const CLIENT_ROUTE: LedgerKey = LedgerKey {
     also: &[],
 };
 
+/// The code a server named in the body it refused a request with —
+/// `operation_busy` or `server_stopped`, and nothing else — beside the status
+/// [`OUTCOME`] keeps (`http_503`): a managed judgment server answers `503`
+/// both when it is busy and when it has stopped, and only its code tells the
+/// two apart (t-55423). Never the body's own words. Absent when the body named
+/// neither, could not be read within its cap and the request's deadline, on a
+/// request no server answered, and on every row written before: an old `503`
+/// reads as no code, never as busy.
+pub const SERVER_ERROR_CODE: LedgerKey = LedgerKey {
+    canonical: "serverErrorCode",
+    also: &[],
+};
+
 /// The model a step of a zo turn ran on, on the step governor's own rows —
 /// never the version that answered anything, which is [`MODEL`]'s alone.
 ///
@@ -350,6 +364,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     RUBRIC_VERSIONS,
     HTTP_VERSION,
     CLIENT_ROUTE,
+    SERVER_ERROR_CODE,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.

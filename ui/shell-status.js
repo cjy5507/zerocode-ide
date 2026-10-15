@@ -4552,14 +4552,7 @@ function buildTabNode(tab, group) {
   node.addEventListener("click", () => setActiveTab(id));
   // Double-clicking the tab keeps it: Orca's `onMakePermanent`, on the
   // label's own double-click (EditorPanel-C3Tfktqz.js:610).
-  node.addEventListener("dblclick", () => {
-    const held = owner();
-    if (!held?.preview) return;
-    held.preview = false;
-    renderTabs();
-    // A kept tab is kept across the restart too.
-    persistStageLayouts();
-  });
+  node.addEventListener("dblclick", () => keepTab(owner()));
   // Middle-click closes it, the way Orca's strip does and the way every
   // strip a person has used does (`onAuxClick` checking `event.button === 1`,
   // unsaved-close-queue-DB-LbON-.js:2540-2605). It goes through `closeTab`,
@@ -5078,6 +5071,19 @@ function endTabDrag() {
 window.addEventListener("pointermove", tabDragOver);
 window.addEventListener("pointerup", endTabDrag);
 window.addEventListener("pointercancel", endTabDrag);
+
+/* A glance kept: the person has claimed the tab, so the next glance takes a
+ * seat of its own instead of this one (Orca's `onMakePermanent`). The double
+ * click on the tab claims any glance; an artifact page is claimed by more
+ * gestures than that — an annotation, a version picked, 「나란히」, a link
+ * followed (t-55370). */
+function keepTab(tab) {
+  if (!tab?.preview) return;
+  tab.preview = false;
+  renderTabs();
+  // A kept tab is kept across the restart too.
+  persistStageLayouts();
+}
 
 /* Which tab kinds share the one preview slot. Orca's editor family — editor,
  * diff, conflict-review, check-details — replace each other's preview and
@@ -6097,7 +6103,9 @@ function updateStage() {
 
   for (const host of surfaces) {
     const on = shown.get(host);
-    host.hidden = on === undefined;
+    // Hidden unless a leaf shows it — a leaf's conversation stands behind what
+    // the leaf shows instead (`standStageSurface`, t-55369).
+    standStageSurface(host, on !== undefined);
     // A surface follows its tab into the leaf that holds it. Moving the node
     // rather than drawing a second one is what keeps a terminal's scrollback
     // and a file's scroll position across a split.

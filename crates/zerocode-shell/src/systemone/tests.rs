@@ -439,6 +439,157 @@ fn a_sent_request_names_its_client_whatever_came_back_and_an_unsent_one_names_no
     assert!(endpoint.asked().is_empty());
 }
 
+/// A managed server refuses with one status for two reasons — busy and
+/// stopped both come back `503` — and says which in its body. The row keeps
+/// the status as its outcome and, beside it, the server's code
+/// ([`SERVER_ERROR_CODE`]): one of those two, never the body's own words.
+/// Anything else leaves the key off and the status as it came — a word
+/// outside the two, a sentence, HTML, a body past [`MAX_REFUSAL_BYTES`], a
+/// body that broke off or is held back — and a request no server answered, a
+/// stopped server's own case, names no server's code. How long a body is
+/// waited on is [`refusal_read`]'s, tried on its own below.
+#[test]
+fn a_refused_request_keeps_the_servers_error_word_beside_its_status() {
+    use zerocode_core::jev::STALL;
+    use zerocode_core::jev::summary::SERVER_ERROR_CODE;
+
+    let home = tempfile::tempdir().expect("a zo home");
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {"jev": {"workspaces": [door::resolved_path(workspace.path())]}}})
+            .to_string(),
+    )
+    .expect("settings");
+    let body = request_body(&json!({"screen": "a quiet pane"}), &json!({}));
+    let ask = |base: &str, wall: Duration| {
+        Wire::at(base, "test-key", Some(settings.clone())).ask(
+            &STALL,
+            Some(workspace.path()),
+            body.clone(),
+            wall,
+        )
+    };
+    let code_of = |spent: &Spent| {
+        let mut row = json!({"outcome": token_for(503)});
+        spent.stamp(&mut row);
+        SERVER_ERROR_CODE
+            .read(&row)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let busy = local_judgment::Error::Busy.token();
+    let stopped = local_judgment::Error::ServerStopped.token();
+    for (said, code) in [
+        (json!({"error": busy}).to_string(), Some(busy)),
+        (json!({"error": stopped}).to_string(), Some(stopped)),
+        (
+            json!({"error": local_judgment::Error::ServerChanged.token()}).to_string(),
+            None,
+        ),
+        (json!({"error": "Service Unavailable"}).to_string(), None),
+        (
+            "<html><body>503 Service Unavailable</body></html>".to_string(),
+            None,
+        ),
+        (
+            json!({"error": busy, "pad": "x".repeat(MAX_REFUSAL_BYTES)}).to_string(),
+            None,
+        ),
+    ] {
+        let endpoint = Endpoint::serving("HTTP/1.1 503 Service Unavailable", said.clone(), 0);
+        let asked = ask(&endpoint.base(), Duration::from_secs(5));
+        assert_eq!(asked.answer, Err(token_for(503)), "{said}");
+        assert_eq!(code_of(&asked.spent).as_deref(), code, "{said}");
+    }
+
+    let held = MAX_REFUSAL_WAIT * 10;
+    for (hold, within) in [(Duration::ZERO, None), (held, Some(held / 2))] {
+        let started = std::time::Instant::now();
+        let asked = ask(&refusing_brokenly(busy, hold), Duration::from_secs(5));
+        assert_eq!(
+            asked.answer,
+            Err(token_for(503)),
+            "a body held {hold:?} and broken off keeps its status"
+        );
+        assert_eq!(code_of(&asked.spent), None, "held {hold:?}");
+        if let Some(within) = within {
+            assert!(
+                started.elapsed() < within,
+                "a refusal's body held {hold:?} is not waited out"
+            );
+        }
+    }
+
+    let gone = TcpListener::bind("127.0.0.1:0")
+        .and_then(|seat| seat.local_addr())
+        .expect("a loopback address nobody holds");
+    let asked = ask(&format!("http://{gone}"), Duration::from_secs(5));
+    assert_eq!(asked.answer, Err(TRANSPORT.to_string()));
+    assert_eq!(code_of(&asked.spent), None, "no server spoke");
+}
+
+/// A loopback server that answers its one request with a `503` whose body
+/// breaks off: the head promises a refusal naming `code`, half of it is sent,
+/// and the connection is held for `hold` and then dropped.
+fn refusing_brokenly(code: &str, hold: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback seat");
+    let addr = listener.local_addr().expect("its address");
+    let body = json!({"error": code}).to_string();
+    thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        read_request(&mut socket);
+        let head = format!(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            &body[..body.len() / 2]
+        );
+        let _ = socket.write_all(head.as_bytes());
+        let _ = socket.flush();
+        thread::sleep(hold);
+    });
+    format!("http://{addr}")
+}
+
+/// A refusal's body is read only while its request's deadline lasts: with
+/// time left the whole of a managed server's refusal is read and its code
+/// named; with the deadline already passed not a byte is read and no code is
+/// named — however promptly the body came.
+#[test]
+fn a_refused_body_is_read_only_while_the_deadline_lasts() {
+    let said = json!({"error": local_judgment::Error::Busy.token()}).to_string();
+    for (left, read) in [
+        (
+            Some(Duration::from_secs(5)),
+            RefusalRead {
+                code: Some(local_judgment::Error::Busy.token()),
+                read: said.len(),
+            },
+        ),
+        (None, RefusalRead::default()),
+    ] {
+        let endpoint = Endpoint::serving("HTTP/1.1 503 Service Unavailable", said.clone(), 0);
+        let found = tauri::async_runtime::block_on(async {
+            let answer = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("a loopback client")
+                .post(endpoint.base())
+                .body("{}")
+                .send()
+                .await
+                .expect("the endpoint answers");
+            assert_eq!(answer.status().as_u16(), 503);
+            let deadline = std::time::Instant::now() + left.unwrap_or_default();
+            refusal_read(answer, deadline).await
+        });
+        assert_eq!(found, read, "{left:?} left");
+    }
+}
+
 #[test]
 fn expiration_before_sending_is_not_recorded_as_real_model_use() {
     use zerocode_core::jev::STALL;
@@ -880,6 +1031,7 @@ fn a_row_riding_another_rows_request_is_charged_nothing_and_a_batch_is_counted_o
         model: Some(ANSWERING_VERSION.to_string()),
         version: Some("HTTP/2.0".to_string()),
         route: None,
+        server_error_code: None,
     };
     let riding = paid.rider();
     assert_eq!(riding.requests, 0);
@@ -1024,6 +1176,34 @@ fn requests_asked_together_never_have_more_than_the_lanes_in_flight() {
         most >= 2,
         "the requests were asked one after another: {most} in flight at most"
     );
+}
+
+/// zo's client keeps its own copy of the codes a managed server refuses with,
+/// because it does not depend on local-judgment; the copy is held to the
+/// window's, word for word and in order, so a renamed code cannot be lost on
+/// one side only (t-55423).
+#[test]
+fn zo_keeps_the_windows_refusal_codes_word_for_word() {
+    let zo = include_str!("../../../../zo-ide/crates/api/src/systemone.rs");
+    assert_eq!(codes(zo), super::REFUSAL_CODES);
+    let code = super::REFUSAL_CODES[1];
+    let renamed = zo.replace(&format!("\"{code}\""), &format!("\"{code}_renamed\""));
+    assert_ne!(
+        codes(&renamed),
+        super::REFUSAL_CODES,
+        "a code renamed on zo's side only is caught"
+    );
+}
+
+/// The quoted words of the line in `text` that declares `REFUSAL_CODES`.
+fn codes(text: &str) -> Vec<&str> {
+    text.lines()
+        .find(|line| line.starts_with("const REFUSAL_CODES:"))
+        .expect("zo's client names the codes it keeps")
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .collect()
 }
 
 /// Which connection a question rides (t-13199).

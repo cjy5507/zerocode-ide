@@ -436,3 +436,41 @@ fn the_lineups_due_a_question_are_asked_together_under_one_wall() {
     assert!(second.rows.is_empty(), "nothing is asked again: {:?}", second.rows);
     assert!(started.elapsed() < wall, "the second pass waits on nothing");
 }
+
+/// A tier row says its moment under `at`, as every other seat's row does; the
+/// rows written before said it under `atMs`, the camelCase of its field. Both
+/// are the same moment in the same unit, milliseconds since the epoch: both
+/// read back as the row they were, and both count in the window the moment
+/// falls in (t-55423).
+#[test]
+fn a_model_tier_row_written_with_at_ms_counts_in_its_window() {
+    use zerocode_core::jev::summary::{summarize, AT};
+
+    let row = TierRow {
+        at_ms: NOW_MS,
+        provider: "p1".to_string(),
+        fingerprint: "f1".to_string(),
+        models: 2,
+        outcome: OUTCOME_ANSWERED.to_string(),
+        judged: 2,
+        applied: true,
+        elapsed_ms: 5,
+        retries: 0,
+        requests: 1,
+        model: None,
+        input_tokens: Some(10),
+    };
+    let new = serde_json::to_value(&row).expect("a tier row serializes");
+    assert_eq!(new.get(AT.canonical), Some(&serde_json::json!(NOW_MS)), "a new row says `at`: {new}");
+    let mut old = new.clone();
+    if let Some(fields) = old.as_object_mut() {
+        let at = fields.remove(AT.canonical).unwrap_or_default();
+        fields.insert("atMs".to_string(), at);
+    }
+    for (written, value) in [("new", &new), ("old", &old)] {
+        assert_eq!(serde_json::from_value::<TierRow>(value.clone()).ok().as_ref(), Some(&row), "the {written} row reads back: {value}");
+        let counted = |since_ms| summarize(std::slice::from_ref(value), since_ms).rows;
+        assert_eq!(counted(NOW_MS), 1, "the {written} row's moment is inside a window that starts there: {value}");
+        assert_eq!(counted(NOW_MS + 1), 0, "a window that starts after the {written} row leaves it out");
+    }
+}

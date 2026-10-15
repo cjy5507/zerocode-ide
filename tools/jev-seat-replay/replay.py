@@ -52,6 +52,10 @@ WINDOW_LEDGERS = "jev"
 # (`runtime::jev_ledger_dir`).
 PROJECT_LEDGERS = ("state", "smart-router")
 
+# Under either folder, the one every provider but Jev keeps its own rows in,
+# one folder per provider (`judgment_provider::Provider::evidence_dir`).
+PROVIDER_LEDGERS = "providers"
+
 # How many characters of a sanitized path a project slug keeps before its
 # hash (`runtime::project_slug`), and the hash's own spelling.
 SLUG_STEM_CHARS = 80
@@ -130,7 +134,8 @@ def read_only(path: Path) -> None:
 
 
 def snapshot(zo_home: Path, projects: list[Path], ledgers: list[str], out: Path) -> list[Path]:
-    """Copy the named ledgers and the settings' `smart` block into
+    """Copy the named ledgers — beside each place's base ledgers and in
+    every provider's folder under it — and the settings' `smart` block into
     `out/.zo`, read-only; answer the copies made. Reads `zo_home`, writes
     only under `out`."""
     home = out / ".zo"
@@ -141,10 +146,18 @@ def snapshot(zo_home: Path, projects: list[Path], ledgers: list[str], out: Path)
         sources.append((found.joinpath(*PROJECT_LEDGERS), home / "projects" / found.name / Path(*PROJECT_LEDGERS)))
     for source, target in sources:
         target.mkdir(parents=True, exist_ok=True)
-        for name in ledgers:
-            if (source / name).is_file():
-                shutil.copy2(source / name, target / name)
-                copies.append(target / name)
+        providers = source / PROVIDER_LEDGERS
+        folders = [(source, target)] + [
+            (folder, target / PROVIDER_LEDGERS / folder.name)
+            for folder in (sorted(providers.iterdir()) if providers.is_dir() else [])
+            if folder.is_dir()
+        ]
+        for origin, copy in folders:
+            for name in ledgers:
+                if (origin / name).is_file():
+                    copy.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(origin / name, copy / name)
+                    copies.append(copy / name)
     settings = zo_home / "settings.json"
     smart = json.loads(settings.read_text()).get(SMART_SETTINGS_KEY, {}) if settings.is_file() else {}
     (home / "settings.json").write_text(json.dumps({SMART_SETTINGS_KEY: smart}, indent=1) + "\n")

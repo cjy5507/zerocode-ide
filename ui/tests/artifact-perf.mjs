@@ -32,21 +32,34 @@
  *      `--without a,b` measures with the window's functions of those names doing nothing — what a
  *      number owes to one step of a painting is the difference.
  *
+ * `--rows N` measures a catalog of N rows of the same shape (its tasks and vanished rows scaled with
+ * it — the first screen of a smaller gallery, t-55370), and `--engine webkit` measures on the
+ * window's own engine: its timings only, since the renderer's clocks, heap and profile are read
+ * over CDP, which WebKit has not got (the soak and the attribution are Chromium's).
+ *
  * Run (`WINDOW_CPU_THROTTLE=4` slows the page's CPU four times — the low-spec level cpu4x):
  *   node ui/tests/artifact-perf.mjs                               Chromium, median of 5 rounds
+ *   node ui/tests/artifact-perf.mjs --rows 300 --engine webkit --soak 0
  *   WINDOW_CPU_THROTTLE=4 node ui/tests/artifact-perf.mjs
  *   node ui/tests/artifact-perf.mjs --rounds 3 --soak 500 --json out.json
  *   node ui/tests/artifact-perf.mjs --rounds 1 --soak 500 --attribute 30 --profile --count --json out.json */
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
-import { median, quantile } from "./coordinator-desk-perf.mjs";
+import { chromium, createWindowServer, openWindowTestPage, recordBootPhases, waitBootSettled } from "./window-boot.mjs";
+import { median, quantile, webkitType } from "./coordinator-desk-perf.mjs";
 import { loadNote } from "./machine-load.mjs";
 
 /* The window a person has open, where the tab measures 809px. */
 const REAL_WINDOW = Object.freeze({ width: 1440, height: 900 });
 const CATALOG = Object.freeze({ rows: 1500, tasks: 400, vanished: 555 });
+
+/* A catalog of `rows` rows shaped like the measured one: its tasks and vanished rows in the same
+ * shares of the rows. */
+export function catalogOf(rows = CATALOG.rows) {
+  const share = (part) => Math.round((part * rows) / CATALOG.rows);
+  return Object.freeze({ rows, tasks: Math.max(1, share(CATALOG.tasks)), vanished: share(CATALOG.vanished) });
+}
 const SOAK_ROUNDS = 500;
 /* The reports the soak walks, and how many frames one painted drawer may take before the round is
  * called stuck — a bound, so a window that never paints fails the run instead of hanging it. */
@@ -70,7 +83,7 @@ const PROFILE_INTERVAL_US = 200;
 const PROFILE_TOP = 16;
 
 /* The synthetic catalog and the fake runtime, stood in the page. */
-function standCatalog(page) {
+function standCatalog(page, catalog = CATALOG) {
   return page.evaluate(({ rows: total, tasks, vanished }) => {
     const now = Date.now();
     const minute = 60 * 1000;
@@ -79,9 +92,11 @@ function standCatalog(page) {
     const rows = [];
     const gone = new Set();
     for (let at = 0; at < total; at += 1) {
-      // 760 reports, 360 screenshots, 200 evidence files, 110 pages, 60 documents, 10 web rows.
-      const kind = at % 150 < 76 ? "report" : at % 150 < 112 ? "screenshot" : at % 150 < 132 ? "evidence"
-        : at % 150 < 143 ? "page" : at % 150 < 149 ? "document" : "web";
+      // 760 reports, 360 screenshots, 200 evidence files, 110 pages, 60 documents, 10 web rows. A
+      // catalog smaller than the cycle walks the cycle in its own length, so it keeps every kind.
+      const slot = total >= 150 ? at % 150 : Math.floor((at * 150) / total);
+      const kind = slot < 76 ? "report" : slot < 112 ? "screenshot" : slot < 132 ? "evidence"
+        : slot < 143 ? "page" : slot < 149 ? "document" : "web";
       const id = `row-${String(at).padStart(4, "0")}`;
       const linked = kind === "report" ? at % 4 !== 0 : kind === "page" && at % 10 === 0;
       const task = linked ? `t-${at % tasks}` : null;
@@ -194,7 +209,7 @@ function standCatalog(page) {
       reports: reports.slice(0, 8).map((one) => one.id), task: reports[0].origin.task, vanished: gone.size,
       tasks: lines.slice(0, 8).map((line) => line.task), taskLines: lines.length,
     };
-  }, CATALOG);
+  }, catalog);
 }
 
 async function heapBytes(cdp) {
@@ -410,10 +425,16 @@ const namedFor = (word, held) => Object.fromEntries(
   Object.entries(held).map(([key, value]) => [`${word}${key[0].toUpperCase()}${key.slice(1)}`, value]),
 );
 
-export async function measureArtifacts(page, { soak = 0, attribute = 0, profile = false, without = [] } = {}) {
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Performance.enable");
-  const fixture = await standCatalog(page);
+export async function measureArtifacts(page, { soak = 0, attribute = 0, profile = false, without = [], catalog = CATALOG, engine = "chromium" } = {}) {
+  // WebKit has no CDP: its run reads the timings, and the clocks, the heap and the profile are not asked.
+  const cdp = engine === "chromium" ? await page.context().newCDPSession(page) : null;
+  if (cdp === null) {
+    soak = 0;
+    attribute = 0;
+  } else {
+    await cdp.send("Performance.enable");
+  }
+  const fixture = await standCatalog(page, catalog);
   const stoodDown = without.length > 0 ? await standDown(page, without) : [];
   const first = await page.evaluate(async () => {
     dropTab("artifacts");
@@ -559,7 +580,7 @@ export async function measureArtifacts(page, { soak = 0, attribute = 0, profile 
     }));
   }
   Object.assign(result, await measureTasks(page, cdp, fixture, { soak, attribute, profile }));
-  await cdp.detach();
+  await cdp?.detach();
   return result;
 }
 
@@ -668,19 +689,26 @@ async function measureTasks(page, cdp, fixture, { soak, attribute, profile }) {
   return result;
 }
 
-export async function measureArtifactRounds({ rounds = 5, soak = 0, attribute = 0, profile = false, count = false, without = [] } = {}) {
+export async function measureArtifactRounds({ rounds = 5, soak = 0, attribute = 0, profile = false, count = false, without = [], rows = CATALOG.rows, engine = "chromium" } = {}) {
+  const catalog = catalogOf(rows);
   const { files, origin } = await createWindowServer();
-  const browser = await chromium.launch({ headless: true });
+  const browser = await (engine === "webkit" ? webkitType() : chromium).launch({ headless: true });
   const taken = [];
   try {
     for (let round = 0; round < rounds; round += 1) {
-      const { page, faults } = await openWindowTestPage(browser, origin, { before: count ? countPageWork : null });
+      const before = async (page) => {
+        await recordBootPhases(page);
+        if (count) await countPageWork(page);
+      };
+      const { page, faults } = await openWindowTestPage(browser, origin, { before });
       try {
         await page.setViewportSize(REAL_WINDOW);
+        // The window as a person finds it: the boot's restoring done, so the first paint is the tab's own.
+        await waitBootSettled(page);
         // The soak and the attribution run once, on the last round: they are questions about growth
         // and about where the time goes, not about a median.
         const last = round === rounds - 1;
-        taken.push(await measureArtifacts(page, { soak: last ? soak : 0, attribute: last ? attribute : 0, profile, without }));
+        taken.push(await measureArtifacts(page, { soak: last ? soak : 0, attribute: last ? attribute : 0, profile, without, catalog, engine }));
         if (faults.length) taken.at(-1).faults = faults.slice(0, 3);
       } finally {
         await page.close();
@@ -695,7 +723,7 @@ export async function measureArtifactRounds({ rounds = 5, soak = 0, attribute = 
   const last = taken.at(-1);
   const ofTheSoak = (key) => /^(task)?(soak|heap|elements|listeners|nodes|cardsMade)/i.test(key);
   for (const key of Object.keys(last)) if (!(key in summary) || ofTheSoak(key)) summary[key] = last[key];
-  return { catalog: CATALOG, throttle: Number(process.env.WINDOW_CPU_THROTTLE ?? 1), rounds, load: loadNote(), summary, taken };
+  return { catalog, engine, throttle: Number(process.env.WINDOW_CPU_THROTTLE ?? 1), rounds, load: loadNote(), summary, taken };
 }
 
 const direct = process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
@@ -709,6 +737,8 @@ if (direct) {
     soak: Number(option("--soak", SOAK_ROUNDS)),
     attribute: Number(option("--attribute", 0)),
     profile: process.argv.includes("--profile"),
+    rows: Number(option("--rows", CATALOG.rows)),
+    engine: option("--engine", "chromium"),
     count: process.argv.includes("--count"),
     without: option("--without", "").split(",").filter(Boolean),
   });

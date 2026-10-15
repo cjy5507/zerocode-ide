@@ -4094,6 +4094,8 @@ function toggleBrowserGrab(host, mode = "copy") {
     return;
   }
   if (browserGrab !== null) stopBrowserGrab(true);
+  // 주석을 다는 사람은 이 페이지를 두고 본다 — 미리보기 탭이었으면 남는 탭이 된다(t-55370).
+  if (mode === "annotate") keepTab(tab);
   const button = host.querySelector(mode === "annotate" ? ".browser-annotate" : ".browser-grab");
   browserGrab = { label: tab.label, mode, timer: 0, button };
   refreshGrabButtons();
@@ -5077,6 +5079,8 @@ listen("browser:nav", (event) => {
   // (wry never reports a failed provisional navigation, and a dead dev
   // server's tab span forever, 2026-09-07). Either one stops the wheel.
   applyBrowserNavigation(tab, said);
+  // 아티팩트 미리보기 탭이 링크·뒤로 가기로 제 아티팩트를 떠나면 남는 탭이 된다(t-55370).
+  keepGlanceLeaving(tab);
   if (!tab.loading) rememberBrowserOpenTabs();
   renderTabs();
   if (stillShowing(tab)) paintBrowserView(tab);

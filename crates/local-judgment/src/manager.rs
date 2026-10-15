@@ -68,6 +68,7 @@ pub struct ModelInfo {
 #[serde(rename_all = "camelCase")]
 pub struct LocalSupport {
     pub supported: bool,
+    pub download_only: bool,
     pub reason: Option<&'static str>,
     pub inputs: [&'static str; 2],
     pub unsupported_inputs: [&'static str; 2],
@@ -92,6 +93,7 @@ pub struct SourceInspection {
     pub local: LocalSupport,
     pub existing_server: ExistingServerSupport,
     pub ready_for_install: bool,
+    pub ready_for_download: bool,
     pub reason: Option<&'static str>,
     pub default_destination_directory: String,
     pub allows_destination_selection: bool,
@@ -159,6 +161,8 @@ pub struct Operation {
     pub received_bytes: u64,
     pub total_bytes: u64,
     pub error: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_request_id: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -268,6 +272,16 @@ fn same_model_data(left: &Model, right: &Model) -> bool {
             file.path == other.path && file.bytes == other.bytes && file.sha256 == other.sha256
         })
     })
+}
+
+fn source_request_id(request_id: Option<String>) -> Result<Option<String>> {
+    let Some(request_id) = request_id else {
+        return Ok(None);
+    };
+    match uuid::Uuid::parse_str(&request_id) {
+        Ok(parsed) if parsed.hyphenated().to_string() == request_id => Ok(Some(request_id)),
+        _ => Err(Error::SourceInvalid),
+    }
 }
 
 impl Manager {
@@ -463,6 +477,7 @@ impl Manager {
             .iter()
             .find(|profile| profile.engine == model.engine);
         let local_error = adapter::local_profile(model, profile, false).err();
+        let data_accepted = adapter::data_profile(model, profile).is_ok();
         let installed = self.store.installed(model);
         ModelInfo {
             id: model.id.clone(),
@@ -481,6 +496,7 @@ impl Manager {
             native_format: model.native_format.clone(),
             local: LocalSupport {
                 supported: local_error.is_none(),
+                download_only: local_error.is_some() && data_accepted,
                 reason: local_error.map(Error::token),
                 inputs: ["text", "json"],
                 unsupported_inputs: ["images", "videos"],
@@ -518,6 +534,7 @@ impl Manager {
             instance_id: self.instance.clone(),
             catalog_fingerprint: pending.catalog_fingerprint.clone(),
             ready_for_install: model.local.supported,
+            ready_for_download: model.local.supported || model.local.download_only,
             reason: model.local.reason,
             local: model.local.clone(),
             existing_server: model.existing_server.clone(),
@@ -552,7 +569,16 @@ impl Manager {
     }
 
     pub async fn inspect_source(self: &Arc<Self>, input: SourceInput) -> Result<SourceInspection> {
-        let (operation_id, cancel) = self.begin("inspect", None, 0)?;
+        self.inspect_source_with_request(input, None).await
+    }
+
+    pub async fn inspect_source_with_request(
+        self: &Arc<Self>,
+        input: SourceInput,
+        request_id: Option<String>,
+    ) -> Result<SourceInspection> {
+        let request_id = source_request_id(request_id)?;
+        let (operation_id, cancel) = self.begin_for("inspect", None, 0, request_id)?;
         let work_stop = Arc::new(AtomicBool::new(false));
         let stop = work_stop.clone();
         let request_cancel = cancel.clone();
@@ -628,7 +654,7 @@ impl Manager {
         let inspected = pending.inspected.clone();
         inspected.check_source()?;
         let model = inspected.model;
-        self.model_profile(&model)?;
+        self.data_profile(&model)?;
         if self.store.installed(&model) {
             drop(catalog);
             drop(inner);
@@ -717,6 +743,15 @@ impl Manager {
         )
     }
 
+    fn data_profile(&self, model: &Model) -> Result<&RuntimeProfile> {
+        adapter::data_profile(
+            model,
+            self.profiles
+                .iter()
+                .find(|profile| profile.engine == model.engine),
+        )
+    }
+
     fn emit(&self) {
         (self.sink)(self.snapshot());
     }
@@ -777,8 +812,21 @@ impl Manager {
         model: Option<&Model>,
         total: u64,
     ) -> Result<(String, Arc<Cancel>)> {
+        self.begin_for(kind, model, total, None)
+    }
+
+    fn begin_for(
+        &self,
+        kind: &'static str,
+        model: Option<&Model>,
+        total: u64,
+        request_id: Option<String>,
+    ) -> Result<(String, Arc<Cancel>)> {
         let mut inner = lock(&self.inner);
         let result = self.reserve(&mut inner, kind, model, total)?;
+        if let Some(operation) = &mut inner.operation {
+            operation.source_request_id = request_id;
+        }
         drop(inner);
         self.emit();
         Ok(result)
@@ -812,6 +860,7 @@ impl Manager {
             received_bytes: 0,
             total_bytes: total,
             error: None,
+            source_request_id: None,
         });
         inner.cancel = Some(cancel.clone());
         inner.revision += 1;
@@ -2147,6 +2196,15 @@ pub(crate) mod test_support {
     use super::*;
 
     pub fn manager(root: &Path, settings: &Path, model: Model) -> Arc<Manager> {
+        manager_with_sink(root, settings, model, Arc::new(|_| {}))
+    }
+
+    pub fn manager_with_sink(
+        root: &Path,
+        settings: &Path,
+        model: Model,
+        sink: Arc<dyn Fn(Snapshot) + Send + Sync>,
+    ) -> Arc<Manager> {
         let runtimes: serde_json::Value =
             serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
         let profile = serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
@@ -2156,6 +2214,26 @@ pub(crate) mod test_support {
             Catalog {
                 version: 1,
                 models: vec![model],
+            },
+            Some(profile),
+            sink,
+        )
+        .unwrap()
+    }
+
+    pub fn unverified_native_manager(root: &Path, settings: &Path) -> Arc<Manager> {
+        let runtimes: serde_json::Value =
+            serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
+        let mut profile: RuntimeProfile =
+            serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
+        profile.engine = EngineKind::TransformersSystemOne;
+        profile.validated = false;
+        Manager::with_catalog(
+            root,
+            settings,
+            Catalog {
+                version: 1,
+                models: Vec::new(),
             },
             Some(profile),
             Arc::new(|_| {}),
