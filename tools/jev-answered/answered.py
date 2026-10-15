@@ -79,7 +79,7 @@ _spec.loader.exec_module(replay)
 # The row keys a judgment is counted by, canonical spelling first
 # (`zerocode_core::jev::summary::{AT, OUTCOME, REQUESTS, CACHED, APPLIED,
 # MODEL, CLIENT_ROUTE, RUBRIC_VERSION}`), and the one outcome that answered.
-AT_KEY = "at"
+AT_KEYS = ("at", "atMs")
 OUTCOME_KEY = "outcome"
 REQUESTS_KEY = "requests"
 CACHED_KEY = "cached"
@@ -355,7 +355,7 @@ def count(
                         continue
                     if OUTCOME_KEY not in row:
                         continue
-                    at = whole(row.get(AT_KEY))
+                    at = whole(next((row[key] for key in AT_KEYS if key in row), None))
                     if at is None:
                         read.untimed += 1
                         continue

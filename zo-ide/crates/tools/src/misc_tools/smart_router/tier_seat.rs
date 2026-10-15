@@ -147,6 +147,9 @@ fn write_kept(path: &Path, kept: &Kept) -> std::io::Result<()> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TierRow {
+    /// Kept under `at`, the key every Jev ledger's time is read by; rows
+    /// written before t-55423 said `atMs`.
+    #[serde(rename = "at", alias = "atMs")]
     pub at_ms: i64,
     pub provider: String,
     pub fingerprint: String,

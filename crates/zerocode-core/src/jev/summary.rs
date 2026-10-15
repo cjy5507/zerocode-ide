@@ -62,10 +62,11 @@ impl LedgerKey {
     }
 }
 
-/// When the request was made, in milliseconds since the epoch.
+/// When the request was made, in milliseconds since the epoch. The model
+/// tiers seat wrote it as `atMs` until t-55423.
 pub const AT: LedgerKey = LedgerKey {
     canonical: "at",
-    also: &[],
+    also: &["atMs"],
 };
 /// What became of it: `answered`, a failure token, or a door's refusal token.
 pub const OUTCOME: LedgerKey = LedgerKey {
