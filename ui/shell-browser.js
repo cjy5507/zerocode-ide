@@ -4688,6 +4688,8 @@ function syncBrowserPanes() {
       !host.hidden &&
       // 마크업 중엔 편집기가 그 사각형의 주인이다 — 판은 눕는다.
       !tab.marking &&
+      // 다시 발행된 새 판을 덮개 뒤에서 준비하는 동안도 눕는다(t-59665 ⑦).
+      !tab.artifactSwap &&
       !tab.navFailure &&
       tab.worktree === activeWorktreePath &&
       activeTabIn(tab.pane)?.id === tab.id

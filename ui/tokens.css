@@ -2108,6 +2108,8 @@
   --artifact-doc-lines: 7;
   /* 본 페이지의 그림(t-59665 ⑤): 첫 그림 뒤 이만큼 더 본 페이지가 갤러리에 제 그림을 준다. */
   --artifact-seen-thumb-ms: 500;
+  /* 다시 발행(t-59665 ⑦): 이 KB까지의 페이지는 저절로 새 판으로 바뀌고, 더 큰 것은 「최신으로」를 기다린다. */
+  --artifact-republish-auto-max-kb: 1024;
   --artifact-emoji-size: 32px;
   --artifact-strip-bg: var(--surface-well);
   --artifact-strip-ink: var(--ink-chalk);

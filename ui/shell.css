@@ -46215,9 +46215,53 @@ button.jev-token:hover {
   font-size: var(--text-xs);
 }
 
+/* 머리띠의 셋째 줄(t-59665 ⑦·⑧): 새 판이 기다리거나 열기가 늦을 때만 선다 — 낱말 한 줄과 행동 하나.
+ * 문서 보기의 한 줄 머리띠에서는 제 줄로 접혀 내려온다. */
+.artifact-strip-note {
+  display: flex;
+  flex: 1 0 100%;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--artifact-strip-ink-soft);
+  font-size: var(--text-2xs);
+}
+
+.artifact-strip-note[hidden] { display: none; }
+
+.artifact-strip-note-words {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-strip-note-act {
+  flex: none;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--artifact-new-ink);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--motion-fast);
+}
+
+.artifact-strip-note-act[hidden] { display: none; }
+
+.artifact-strip-note-act:hover,
+.artifact-strip-note-act:focus-visible {
+  background: var(--artifact-new-bg);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .artifact-strip-act,
-  .artifact-strip-more { transition: none; }
+  .artifact-strip-more,
+  .artifact-strip-note-act { transition: none; }
 }
 
 /* 파일 뷰의 머리는 한 줄 플렉스라 머리띠가 서면 두 줄로 접힌다. */

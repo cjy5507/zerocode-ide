@@ -9574,7 +9574,19 @@ function artifactStripNode() {
   versions.dataset.i18nAria = ARTIFACT_LABELS.versions.key;
   versions.setAttribute("aria-label", ARTIFACT_LABELS.versions.word);
   meta.append(maker, project, versions);
-  strip.append(head, meta);
+  // 셋째 줄(t-59665 ⑦·⑧): 새 판이 기다리거나 열기가 늦을 때만 선다 — 낱말 한 줄과 행동 하나.
+  const note = document.createElement("div");
+  note.className = "artifact-strip-note";
+  note.hidden = true;
+  note.setAttribute("role", "status");
+  const noteWords = document.createElement("span");
+  noteWords.className = "artifact-strip-note-words";
+  const noteAct = document.createElement("button");
+  noteAct.type = "button";
+  noteAct.className = "artifact-strip-note-act";
+  noteAct.hidden = true;
+  note.append(noteWords, noteAct);
+  strip.append(head, meta, note);
   return strip;
 }
 
@@ -10093,6 +10105,7 @@ function paintArtifactStrip(strip, tab, onVersion, actions = null) {
     paintArtifactStripActions(strip);
   };
   paintVersions();
+  paintArtifactStripNote(strip, tab);
   if (facts.versionsGeneration !== artifactVersionsGeneration && facts.versionsRequest !== artifactVersionsGeneration) {
     const generation = artifactVersionsGeneration;
     facts.versionsRequest = generation;
@@ -10370,9 +10383,16 @@ async function openArtifactBesideOnce(row, maker, { hint = null } = {}) {
 
 /* 다시 발행: 그 아티팩트를 든 탭이 선 자리에서 새 판으로 바뀐다. 사람이 지난
  * 번호를 골라 보고 있으면 그 선택을 넘어 가지 않는다 — 고르개에 새 번호만 선다. */
-function refreshArtifactTab(tab, row) {
+function refreshArtifactTab(tab, row, { force = false } = {}) {
   const held = tab.artifact;
   const picked = held.version != null && held.current != null && held.version !== held.current;
+  // 무거운 발행물은 저절로 바꾸지 않는다(t-59665 ⑦): 머리띠에 「최신으로」가 서고, 사람이 누를 때
+  // 바뀐다. 지난 번호를 골라 보는 탭은 전처럼 고르개에 새 번호만 선다.
+  if (!force && !picked && artifactRepublishIsHeavy(row)) {
+    held.pending = row;
+    if (stillShowing(tab)) paintBrowserView(tab);
+    return;
+  }
   const facts = artifactStripFacts(row);
   facts.hint = held.hint;
   if (picked) facts.version = held.version;
@@ -10383,16 +10403,17 @@ function refreshArtifactTab(tab, row) {
   }
   // 새 판도 그 번호의 불변 스냅샷으로 선다(t-11959) — 머리띠가 「버전 N」이라 말하는
   // 판이 바뀌는 최신 사본이면 미리보기와 Finder와 주석이 서로 다른 것을 가리킨다.
-  // 목록을 못 읽을 때만 최신 사본으로 간다: 지난 판을 띄워 두는 것보다 낫다.
+  // 목록을 못 읽을 때만 최신 사본으로 간다: 지난 판을 띄워 두는 것보다 낫다. 바꾸는
+  // 길은 읽던 자리를 지키는 `swapArtifactTab`이다(t-59665 ⑦).
   invoke("artifact_versions", { id: row.id })
     .then((versions) => {
       if (tab.artifact !== facts) return;
       facts.versions = Array.isArray(versions) ? versions : [];
       const kept = facts.versions.find((one) => one.n === facts.version);
-      submitBrowserAddress(tab, pathAsFileUrl(kept?.path ?? row.path));
+      void swapArtifactTab(tab, facts, kept?.path ?? row.path);
     })
     .catch(() => {
-      if (tab.artifact === facts) submitBrowserAddress(tab, pathAsFileUrl(row.path));
+      if (tab.artifact === facts) void swapArtifactTab(tab, facts, row.path);
     });
 }
 
@@ -10626,6 +10647,7 @@ function liftArtifactShadeAfterPane(tab, host) {
  * 숫자는 토큰 표(`ui/tokens.css`)의 것이다. 시험은 토큰을 덮어 박자를 당긴다. */
 const ARTIFACT_PAGE_TOKENS = Object.freeze({
   seenThumb: "--artifact-seen-thumb-ms",
+  republishAutoMaxKb: "--artifact-republish-auto-max-kb",
 });
 /* 토큰 하나를 읽는다 — 열 때마다 한 번이라 캐시하지 않는다(시험이 덮어쓴 값도 그대로 읽힌다). */
 function artifactPageNumber(token, fallback) {
@@ -10712,8 +10734,19 @@ function artifactOpenPainted(clock) {
   if (clock.shownSince !== null) armArtifactOpenTimers(clock);
 }
 
-/* 브라우저 판의 탐색 소식 가운데 아티팩트 페이지의 시계가 듣는 것(`listen("browser:nav")`). */
+/* 브라우저 판의 탐색 소식 가운데 아티팩트 페이지가 듣는 것(`listen("browser:nav")`): 여는 시계의
+ * 첫 그림(⑤·⑧)과, 숨겨 준비하던 새 판의 끝(⑦). */
 function noteArtifactPageNav(tab, said) {
+  const swap = tab.artifactSwap ?? null;
+  if (swap) {
+    if (sameFileUrl(said.url, swap.url)) {
+      if (said.state === "finished") void settleArtifactSwap(tab, swap);
+      else if (said.state === "failed" || said.state === "dead") dropArtifactSwap(tab);
+    } else {
+      // 사람이 다른 곳으로 갔다(또는 늦은 소식): 판이 더 숨어 있을 이유가 없다.
+      dropArtifactSwap(tab);
+    }
+  }
   const clock = artifactOpenClocks.get(tab.label);
   if (!clock || clock.tab !== tab) return;
   if (!sameFileUrl(said.url, clock.url)) return;
@@ -10721,6 +10754,101 @@ function noteArtifactPageNav(tab, said) {
   // 연결 실패는 잰 것이 아니다 — 실패 상자가 제 말을 한다.
   else if (said.state === "failed" || said.state === "dead") stopArtifactOpenClock(tab.label);
 }
+
+/* ---- 2단계 B(t-59665) ⑦: 새 판은 숨겨 준비한 뒤 바꾸고 읽던 자리를 지킨다 ----------------
+ *
+ * 다시 발행된 페이지는 전에는 그 자리에서 바로 새 주소로 갔다 — 읽던 페이지가 하얗게 비고 맨 위로
+ * 돌아왔다. 이제 보고 있는 탭은: 보이던 그림을 깔고(④의 덮개), 스크롤을 묻고(`browser_eval`,
+ * 판의 제 세계에서 `[scrollX, scrollY]`), 판을 눕힌 채(`tab.artifactSwap`) 새 판을 읽은 뒤, 그
+ * 판이 다 뜨면 스크롤을 돌려놓고 판을 세운다 — 덮개는 한 프레임 뒤에 떠난다. 확대는 탭의
+ * 것이라 그대로다. 보이지 않는 탭은 전처럼 바로 간다: 읽는 이가 없다.
+ * 가벼운 발행물(HTML·Markdown)은 저절로, 무거운 것(PDF·토큰 표의 KB를 넘는 큰 페이지)은
+ * 머리띠의 「최신으로」를 기다린다 — 큰 페이지를 읽던 사람 아래에서 몇 MB를 다시 읽지 않는다. */
+function artifactRepublishIsHeavy(row) {
+  if (extensionOf(row?.path ?? "") === "pdf") return true;
+  const cap = artifactPageNumber(ARTIFACT_PAGE_TOKENS.republishAutoMaxKb, 1024) * 1024;
+  return (Number(row?.bytes) || 0) > cap;
+}
+
+async function swapArtifactTab(tab, facts, path) {
+  const url = pathAsFileUrl(path);
+  const host = groupOf(tab.pane)?.browserView ?? null;
+  const reading = host && !host.hidden && host._browserTab === tab && tab.worktree === activeWorktreePath
+    && activeTabIn(tab.pane)?.id === tab.id && artifactPaneShown(tab);
+  if (!reading) {
+    submitBrowserAddress(tab, url);
+    startArtifactOpenClock(tab, url);
+    return;
+  }
+  await layArtifactShade(tab, host);
+  let scroll = null;
+  try {
+    scroll = await invoke("browser_eval", { label: tab.label, expression: "[scrollX, scrollY]" });
+  } catch {
+    scroll = null;
+  }
+  // 묻는 사이 또 바뀌었거나 탭이 떠났으면 이 바꾸기는 지난 것이다.
+  if (tab.artifact !== facts || !tabs.includes(tab)) return;
+  const at = Array.isArray(scroll) && scroll.length === 2 && scroll.every((n) => Number.isFinite(n))
+    ? scroll.map((n) => Math.round(n))
+    : null;
+  tab.artifactSwap = { url, scroll: at };
+  // 판이 덮개 뒤에 눕는다 — 덮개는 이미 깔렸으니 찍지 않는다.
+  syncBrowserPanes();
+  submitBrowserAddress(tab, url);
+  startArtifactOpenClock(tab, url);
+}
+
+/* 새 판이 떴다: 읽던 자리로 돌려놓은 다음 판을 세운다. 자리를 못 돌려도 새 판은 선다. */
+async function settleArtifactSwap(tab, swap) {
+  const [x, y] = swap.scroll ?? [0, 0];
+  if (x !== 0 || y !== 0) {
+    try {
+      await invoke("browser_eval", { label: tab.label, expression: `scrollTo(${x}, ${y})` });
+    } catch {
+      // 판의 세계가 답하지 않았다 — 맨 위라도 새 판이다.
+    }
+  }
+  if (tab.artifactSwap !== swap) return;
+  tab.artifactSwap = null;
+  syncBrowserPanes();
+}
+
+function dropArtifactSwap(tab) {
+  if (!tab.artifactSwap) return;
+  tab.artifactSwap = null;
+  syncBrowserPanes();
+}
+
+/* 머리띠의 셋째 줄(⑦·⑧): 기다리는 새 판 — 「새 버전 N이 발행되었습니다 · 최신으로」. 없으면 접힌다. */
+function paintArtifactStripNote(strip, tab) {
+  const note = strip.querySelector(".artifact-strip-note");
+  if (!note) return;
+  const facts = tab?.artifact ?? null;
+  const words = note.querySelector(".artifact-strip-note-words");
+  const act = note.querySelector(".artifact-strip-note-act");
+  let pending = facts?.pending ?? null;
+  // 사람이 고르개로 그 번호를 골랐거나 그 사이 더 새 판이 섰으면 기다릴 것이 없다.
+  if (pending && (pending.version === facts.version || (pending.version ?? 0) <= (facts.current ?? 0))) {
+    facts.pending = null;
+    pending = null;
+  }
+  if (pending) {
+    words.textContent = t("artifacts.strip.newVersion", "새 버전 {{n}}이 발행되었습니다", { n: pending.version });
+    act.textContent = t("artifacts.strip.latest", "최신으로");
+    act.hidden = false;
+    act.onclick = () => {
+      facts.pending = null;
+      refreshArtifactTab(tab, pending, { force: true });
+    };
+    note.dataset.kind = "pending";
+    note.hidden = false;
+    return;
+  }
+  note.hidden = true;
+  delete note.dataset.kind;
+}
+
 
 /* 본 판의 그림을 갤러리 썸네일로: 현재 파일(최신 번호)을 보는 페이지 판만, 열쇠마다 한 번. 답이
  * 그림이면 카드의 캐시에 들고, 서 있는 카드와 서랍에 바로 입힌다. */
