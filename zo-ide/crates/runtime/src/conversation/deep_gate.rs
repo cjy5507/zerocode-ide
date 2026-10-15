@@ -2801,6 +2801,7 @@ where
     ///
     /// # Errors
     /// Propagates any [`StreamingTurnError`] from the underlying turn.
+    #[allow(clippy::too_many_lines)]
     pub async fn run_turn_streaming_maybe_deep(
         &mut self,
         user_input: impl Into<String>,

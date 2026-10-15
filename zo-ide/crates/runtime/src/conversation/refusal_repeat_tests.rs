@@ -1430,13 +1430,16 @@ mod hook_contract {
         }
     }
 
+    /// A route armed for a turn, named, and how a test arms it.
+    type Route = (&'static str, fn(&mut Runtime));
+
     /// A route armed for the turn takes it elsewhere, to another classifier:
     /// after a decline stood, the same words are asked on every loop with an
     /// escalation installed, a quota cooldown armed or a refusal cooldown
     /// armed, each its own case.
     #[test]
     fn a_routing_change_after_a_decline_that_stood_asks_the_same_words() {
-        let routes: [(&str, fn(&mut Runtime)); 3] = [
+        let routes: [Route; 3] = [
             ("an escalation installed", |runtime| {
                 runtime.set_escalation_model_override(Some("claude-opus-5".to_string()));
             }),
