@@ -251,12 +251,12 @@ const WAITING_ON_USER_MARKERS: [&str; 16] = [
 /// The work such a promise names starts when the person answers, so the
 /// ending waits on them — re-prompting it only makes the model write its
 /// answer again (t-58176). Matched in lower case, and only before the
-/// promise in the same sentence (see [`promises_unconditionally`]).
-const USER_CONDITION_MARKERS: [&str; 12] = [
+/// promise in the same sentence (see [`promises_unconditionally`]). "when
+/// you" / "after you" are left out: they usually tell what happened ("When
+/// you ran it the build broke, so I'll fix it").
+const USER_CONDITION_MARKERS: [&str; 10] = [
     "if you ",
     "once you ",
-    "when you ",
-    "after you ",
     "주시면",
     "주신다면",
     "하시면",
@@ -284,10 +284,17 @@ fn promises_unconditionally(paragraph: &str) -> bool {
         else {
             return false;
         };
-        let before = sentence[..promise_at].to_lowercase();
-        !USER_CONDITION_MARKERS
-            .iter()
-            .any(|condition| before.contains(condition))
+        !names_a_user_condition(&sentence[..promise_at].to_lowercase())
+    })
+}
+
+/// Whether `text` holds a user condition. A Korean one that runs on into
+/// 「서」 is not one: 「확인하시면서」 is "while you check", and the promise
+/// after it does not wait on the person.
+fn names_a_user_condition(text: &str) -> bool {
+    USER_CONDITION_MARKERS.iter().any(|condition| {
+        text.match_indices(condition)
+            .any(|(at, _)| !text[at + condition.len()..].starts_with('서'))
     })
 }
 
@@ -349,8 +356,7 @@ pub(super) fn turn_end_gate_reminder(issue: TurnEndingIssue) -> &'static str {
              not done yet. Do not end the turn on a promise: do that work now with tool calls — \
              including retrying after errors and gathering missing information yourself. If you \
              are genuinely blocked on input only the user can provide, say exactly what you need \
-             and why instead. Do not repeat what you already wrote: the user has read it. When \
-             the work is done, add only what is new — what it found or changed.</system-reminder>"
+             and why instead. Then finish with a complete final answer.</system-reminder>"
         }
         TurnEndingIssue::TextualToolCall => {
             "[zo:turn-end-gate] <system-reminder>Your reply ended with a tool call written as \
