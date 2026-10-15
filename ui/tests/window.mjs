@@ -42,6 +42,7 @@ import { testArtifactPreferences } from "./artifact-preferences.mjs";
 import { testArtifactCards } from "./artifact-cards.mjs";
 import { testArtifactTasks } from "./artifact-tasks.mjs";
 import { testArtifactReopen } from "./artifact-reopen.mjs";
+import { testArtifactDiagrams } from "./artifact-diagrams.mjs";
 import { testAgentSupport } from "./agent-support.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testQuotaWallChip } from "./quota-wall-chip.mjs";
@@ -264,6 +265,7 @@ suite("artifact-preferences", ({ browser, origin, ok }) => testArtifactPreferenc
 suite("artifact-cards", ({ browser, origin, ok }) => testArtifactCards(browser, origin, ok));
 suite("artifact-tasks", ({ browser, origin, ok }) => testArtifactTasks(browser, origin, ok));
 suite("artifact-reopen", ({ browser, origin, ok }) => testArtifactReopen(browser, origin, ok));
+suite("artifact-diagrams", ({ browser, origin, ok }) => testArtifactDiagrams(browser, origin, ok));
 suite("agent-support", ({ browser, origin, ok }) => testAgentSupport(browser, origin, ok));
 // The coordinator's desk above the task list (t-6588, docs/design/agent-board-round4.md).
 suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));
