@@ -2364,7 +2364,8 @@ export async function testJevDashboardScope(browser, origin, ok) {
  * its own after how many unanswered requests, by the door's own number,
  * read here from its source (`UNANSWERED_BEFORE_REST`) so a rule that moves
  * moves the words. A wait its server asked for has no count, and a feature
- * whose rest has passed says neither. */
+ * whose rest has passed says neither. The rest's chip takes a wait's tone
+ * (`--jev-tone-under`), as a state's chip takes its state's. */
 export async function testJevDashboardResting(browser, origin, ok) {
   const gate = readFileSync(join(ROOT, "zo-ide", "crates", "tools", "src", "misc_tools", "smart_router", "jev_gate.rs"), "utf8");
   const unanswered = Number(gate.match(/\npub const UNANSWERED_BEFORE_REST: usize = (\d+);/)?.[1]);
@@ -2397,11 +2398,18 @@ export async function testJevDashboardResting(browser, origin, ok) {
         look();
       });
       const time = quotaWallClock(untilMs);
+      const wait = document.createElement("span");
+      wait.style.color = "var(--jev-tone-under)";
+      view().append(wait);
+      const waitTone = getComputedStyle(wait).color;
+      wait.remove();
       const restOf = (id) => {
         const holder = view().querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="status"]`);
         const sentence = holder?.querySelector("[data-jev-rest]")?.textContent ?? null;
+        const chip = holder?.querySelector(".jev-chip[data-jev-resting]");
         return {
-          chip: holder?.querySelector(".jev-chip[data-jev-resting]")?.textContent ?? null,
+          chip: chip?.textContent ?? null,
+          tone: chip ? getComputedStyle(chip).color : null,
           sentence,
           // The numbers the sentence says besides its time.
           numbers: sentence === null ? [] : sentence.replace(time, "").match(/\d[\d,.]*/g) ?? [],
@@ -2409,7 +2417,7 @@ export async function testJevDashboardResting(browser, origin, ok) {
       };
       return {
         recall: restOf("recall"), routing: restOf("routing"), placement: restOf("placement"),
-        time, count: jevCount(count), word: t("jev.token.resting", "쉬는 중"),
+        time, waitTone, count: jevCount(count), word: t("jev.token.resting", "쉬는 중"),
         timeout: t("jev.rest.cause.timeout", "시간 초과"), waiting: t("jev.rest.cause.waiting", "서버가 기다려 달라고 했습니다"),
       };
     }, unanswered).catch((error) => ({ error: String(error) }));
@@ -2422,6 +2430,9 @@ export async function testJevDashboardResting(browser, origin, ok) {
       !seen.error && routing.chip === seen.word && Boolean(routing.sentence?.includes(seen.time))
         && routing.sentence.includes(seen.waiting) && routing.numbers.length === 0,
       JSON.stringify(seen.error ?? { routing, time: seen.time, cause: seen.waiting }));
+    ok("a resting feature's chip takes a wait's tone",
+      !seen.error && Boolean(seen.waitTone) && recall.tone === seen.waitTone && routing.tone === seen.waitTone,
+      JSON.stringify(seen.error ?? { recall: recall.tone, routing: routing.tone, wait: seen.waitTone }));
     ok("a feature whose rest has passed shows neither the chip nor the sentence",
       !seen.error && placement.chip === null && placement.sentence === null,
       JSON.stringify(seen.error ?? placement));
