@@ -2113,6 +2113,8 @@
   /* 여는 시계(t-59665 ⑧): 보인 시간으로 이만큼 지나도 첫 그림이 없으면 「아직 읽는 중」, 그 다음은 「멈춘 열기」. */
   --artifact-open-slow-ms: 8000;
   --artifact-open-stalled-ms: 30000;
+  /* 문서 보기의 머리 한 줄(t-59665 ⑥): 도구 줄 곁에 머리띠가 서려면 머리띠에 적어도 이만큼(px)은 남아야 한다. */
+  --artifact-reading-strip-min: 400;
   --artifact-emoji-size: 32px;
   --artifact-strip-bg: var(--surface-well);
   --artifact-strip-ink: var(--ink-chalk);

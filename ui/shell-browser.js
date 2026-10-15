@@ -432,6 +432,26 @@ const browserAddressSlotWatch = new ResizeObserver((entries) => {
   for (const one of entries) syncAddressOverlay(one.target.closest(".browser-view"));
 });
 
+/* 문서 보기의 머리 한 줄(t-59665 ⑥): 도구 줄과 머리띠가 한 줄에 서려면 판이 도구 줄의 폭에
+ * 머리띠의 최소 폭(`--artifact-reading-strip-min`)을 더한 만큼은 되어야 한다. 좁으면 둘은 전처럼
+ * 위아래로 선다 — 주소줄만 접힌 채. 판의 폭으로 판다: CSS에는 판의 폭을 묻는 컨테이너가 없다. */
+function syncArtifactReadingRow(host) {
+  if (!host || !host.classList.contains("is-artifact-reading")) {
+    host?.classList.remove("is-artifact-reading-stacked");
+    return;
+  }
+  const toolbar = host.querySelector(".browser-toolbar");
+  const width = host.getBoundingClientRect().width;
+  if (!toolbar || width === 0) return;
+  const stripMin = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--artifact-reading-strip-min"));
+  const stacked = width < toolbar.scrollWidth + (Number.isFinite(stripMin) ? stripMin : 400);
+  host.classList.toggle("is-artifact-reading-stacked", stacked);
+}
+
+const browserReadingRowWatch = new ResizeObserver((entries) => {
+  for (const one of entries) syncArtifactReadingRow(one.target);
+});
+
 /* The browser surface, BUILT rather than found: the markup file is not this
  * window's to edit, and the view is a toolbar and a hole the native page
  * shows through. Same section shape as the markup's own doc views. */
@@ -624,6 +644,7 @@ function wireBrowserHost(host) {
   // nothing while no pane is in front (1-g13).
   watchBrowserMenu();
   browserBodyWatch.observe(host.querySelector(".browser-body"));
+  browserReadingRowWatch.observe(host);
   const held = () => host._browserTab;
   host.querySelector(".browser-failure-retry").addEventListener("click", () => {
     const tab = held();
@@ -3607,6 +3628,7 @@ function paintBrowserView(tab) {
   // 문서 보기(t-59665 ⑥): 아티팩트를 제 파일 위에서 보는 동안 주소줄이 접히고 머리가 한 줄이 된다.
   // 링크로 다른 곳에 가면 — 머리띠는 서 있어도 — 주소줄이 다시 선다. 규칙은 한 선택자가 쥔다.
   host.classList.toggle("is-artifact-reading", tab.artifact !== null && tab.artifact !== undefined && artifactTabOnItsFile(tab));
+  syncArtifactReadingRow(host);
   // 다른 탭의 덮개 그림은 이 탭의 것이 아니다(t-59665 ④).
   const shade = artifactShadeOf(host);
   if (shade && !shade.hidden && shade._label !== tab.label) liftArtifactShade(host);
