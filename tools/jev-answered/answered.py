@@ -238,7 +238,7 @@ def ran(spec: str) -> Ran:
     version, at, span = rest.partition("@")
     start, dots, end = span.partition("..")
     if writer not in WRITERS.values() or not equals or not WORD.fullmatch(version) or not at or not dots or not start.strip():
-        raise SystemExit(f"--ran wants window|zo=version@from..to, not {spec!r}")
+        raise SystemExit(f"--ran wants window|zo=<version>@<from>..<to>, not {spec!r}")
     return Ran(writer, version, moment(start), moment(end))
 
 
@@ -579,7 +579,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--home", type=Path, default=Path.home() / ".zo", help="the zo home to read")
     parser.add_argument("--project", type=Path, action="append", default=[], help="a project whose folder to read (default: every one)")
     parser.add_argument("--window", action="append", default=[], help="label=from..to, one per window")
-    parser.add_argument("--ran", action="append", default=[], help="window|zo=version@from..to, one per process ps showed")
+    parser.add_argument("--ran", action="append", default=[], help="window|zo=<version>@<from>..<to>, one per process ps showed")
     parser.add_argument("--app", type=Path, help="the installed app, to name its version")
     parser.add_argument("--zo", type=Path, help="the installed zo, to name its version")
     parser.add_argument("--json", type=Path, help="the rows and the files read, as JSON too")
