@@ -3604,6 +3604,9 @@ function paintBrowserView(tab) {
     armed: browserGrab !== null && browserGrab.label === tab.label && browserGrab.mode === "annotate",
   });
   paintArtifactHint(host.querySelector(".artifact-hint"), tab);
+  // 다른 탭의 덮개 그림은 이 탭의 것이 아니다(t-59665 ④).
+  const shade = artifactShadeOf(host);
+  if (shade && !shade.hidden && shade._label !== tab.label) liftArtifactShade(host);
   const reload = host.querySelector(".browser-reload");
   // The face is markup, so it is only rebuilt when it CHANGES — a paint per
   // frame rewriting identical SVG would cost layout for nothing.
@@ -4713,11 +4716,17 @@ function syncBrowserPanes() {
     const place = rect
       ? { label, x: rect.x, y: rect.y, width: rect.width, height: rect.height, shown: true }
       : { label, x: 0, y: 0, width: 1, height: 1, shown: false };
-    browserPlacing = browserPlacing.then(() =>
-      invoke("browser_place", place).catch(() => {
+    // 아티팩트 페이지의 판이 사람이 보는 자리에서 눕는다 — 메뉴·고르개가 덮거나 새 판을
+    // 준비하거나: 눕기 전에 찍어 그 자리에 깔고, 다시 서면 한 프레임 뒤에 걷는다(t-59665 ④·⑦).
+    const shading = rect === null && artifactShadeWanted(tab, host, covered);
+    browserPlacing = browserPlacing
+      .then(() => (shading ? layArtifactShade(tab, host) : null))
+      .then(() => invoke("browser_place", place).catch(() => {
         browserSaid.delete(label);
-      }),
-    );
+      }))
+      .then(() => {
+        if (rect !== null) liftArtifactShadeAfterPane(tab, host);
+      });
   }
 }
 

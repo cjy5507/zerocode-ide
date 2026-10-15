@@ -39832,6 +39832,21 @@ details.task-board-section > summary {
   background: var(--surface-deck);
 }
 
+/* 덮개 그림(t-59665 ④): 메뉴·고르개가 덮어 판이 눕는 동안 판의 마지막 그림이 그 자리에 선다 —
+ * 네이티브 판과 같은 사각형을 입고, 판이 다시 서면 걷힌다. 손은 받지 않는다: 그 위의 메뉴가
+ * 손의 주인이다. */
+.browser-body > .artifact-shade {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
+}
+
+.browser-body > .artifact-shade[hidden] { display: none; }
+
 /* ---- 스크린샷 마크업(B02 ②) — Orca MarkupOverlay의 실측 옷 ----
  * 오버레이 `absolute inset-0 z-20`, 바탕 이미지 `objectFit: fill`, 캔버스는
  * `touch-none cursor-crosshair`, 아래 가운데에 도구 막대(`rounded-md border

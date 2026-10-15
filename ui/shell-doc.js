@@ -10523,6 +10523,77 @@ function paintArtifactHint(hint, tab) {
   };
 }
 
+/* ---- 2단계 B(t-59665) ④: 덮개 그림 ----------------------------------------------
+ *
+ * 네이티브 판은 창의 DOM 위에 뜨므로 메뉴·고르개가 페이지 위에 서려면 판이 눕는다
+ * (`browserCovered`·`syncBrowserPanes`). 눕는 동안 그 자리는 빈 사각형이었다. 이제 아티팩트
+ * 페이지의 판은 눕기 전에 제 그림을 한 장 찍고 — 창의 판 캡처 문 `browser_snapshot`, 마크업
+ * 편집기가 쓰는 그 문이고 그 문의 검사(이 창이 만든 판인가)도 그대로다, 새 길은 없다 — 그
+ * 그림이 판의 자리(`.browser-body`)에 선다. 판이 다시 서면 그림은 한 프레임 뒤에 걷힌다:
+ * 판이 먼저 제 그림을 올리고 덮개가 떠나야 깜빡임이 없다. 찍지 못하면(판이 아직 없거나
+ * 문이 거절) 전처럼 빈 자리다 — 메뉴는 그래도 선다. */
+function artifactShadeOf(host, make = false) {
+  const body = host?.querySelector(".browser-body");
+  if (!body) return null;
+  let shade = body.querySelector(":scope > .artifact-shade");
+  if (!shade && make) {
+    shade = document.createElement("img");
+    shade.className = "artifact-shade";
+    shade.alt = "";
+    shade.hidden = true;
+    body.appendChild(shade);
+  }
+  return shade;
+}
+
+/* 눕는 판이 덮개를 원하는가: 아티팩트 페이지의 판이, 제 탭이 앞에 선 채(사람이 그 자리를 보는
+ * 채) 덮개 아래 눕거나(④) 새 판을 준비하느라 눕을 때(⑦). 마크업과 연결 실패는 그 자리에 제
+ * 상자가 서므로 아니다. */
+function artifactShadeWanted(tab, host, covered) {
+  if (!tab?.artifact || !host || host.hidden || tab.marking || tab.navFailure) return false;
+  if (tab.worktree !== activeWorktreePath || activeTabIn(tab.pane)?.id !== tab.id) return false;
+  return covered || Boolean(tab.artifactSwap);
+}
+
+/* 판을 찍어 그 자리에 깐다. 같은 판의 같은 주소를 이미 깔았으면 다시 찍지 않는다. 깔렸으면 true. */
+async function layArtifactShade(tab, host) {
+  const shade = artifactShadeOf(host, true);
+  if (!shade) return false;
+  if (!shade.hidden && shade._label === tab.label && shade._url === tab.url) return true;
+  let picture = null;
+  try {
+    picture = await invoke("browser_snapshot", { label: tab.label });
+  } catch {
+    picture = null;
+  }
+  if (typeof picture !== "string" || picture === "" || host._browserTab !== tab) return false;
+  shade.src = picture;
+  shade._label = tab.label;
+  shade._url = tab.url;
+  shade.hidden = false;
+  return true;
+}
+
+function liftArtifactShade(host) {
+  const shade = artifactShadeOf(host);
+  if (!shade || shade.hidden) return;
+  shade.hidden = true;
+  shade.removeAttribute("src");
+  shade._label = null;
+  shade._url = null;
+}
+
+/* 판이 다시 선 뒤 한 프레임: 판이 제 그림을 올린 다음에 덮개가 떠난다. 그 사이 판이 또 누웠으면
+ * 덮개는 남는다. */
+function liftArtifactShadeAfterPane(tab, host) {
+  const shade = artifactShadeOf(host);
+  if (!shade || shade.hidden) return;
+  requestAnimationFrame(() => {
+    if (host._browserTab === tab && artifactShadeWanted(tab, host, browserCovered())) return;
+    liftArtifactShade(host);
+  });
+}
+
 /* 머리띠가 든 만든 판 — 주석의 받을 곳이 기본으로 고른다. 없으면 null. */
 function artifactFactsMaker(facts) {
   if (!facts?.maker) return null;
