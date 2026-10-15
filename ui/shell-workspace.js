@@ -6278,6 +6278,8 @@ async function peekTeamRow(node) {
   node.__peeking = true;
   let lines = [];
   try {
+    // The read-only look for a reader that paints nothing (`term_snapshot`, the way the skills install reads its
+    // pane): a tip is not a screen, so it takes no share of the pane's pull.
     const frame = await invoke("term_snapshot", { term });
     lines = (frame?.rows ?? [])
       .map((row) => String(row?.text ?? "").trimEnd())
@@ -6299,23 +6301,19 @@ sidebarTeam.addEventListener("pointerover", (event) => {
   if (node && sidebarTeam.contains(node)) void peekTeamRow(node);
 });
 
-/* ⌘1·2·3 reach the coordinators while the team stands — asked before the branch list's own ⌘1…9 (capture), on
- * the same three conditions that road keeps: a chord bound to an action is the action's, a terminal that keeps its
- * chords keeps them, and a pop-out has no panes of its own. The digits then count the list the eye reads: a digit
- * past the last coordinator reaches nothing, never a workspace of the branch list standing behind the team. */
-window.addEventListener("keydown", (event) => {
-  if (isPopout || !sidebarTeamStood || !hasPrimaryModifier(event) || event.shiftKey || event.altKey) return;
-  const chord = chordOf(event);
-  const index = digitIndex(chord);
-  if (index === null || BOUND.get(chord)) return;
-  if (terminalShortcutPolicy === "terminal-first" && terminalOwnsShortcutContext()) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
+/* ⌘1·2·3 reach the coordinators while the team stands. The window's one shortcut resolver (`primaryShortcut`) asks
+ * this where it would index the branch list, so a chord bound to an action stays the action's and a terminal that
+ * keeps its chords keeps them. The digits count the list the eye reads: a digit past the last coordinator is held
+ * and reaches nothing, never a workspace of the branch list standing behind the team. */
+function teamDigitShortcut(index) {
   const seat = sidebarTeamCoordinators()[index - 1];
-  if (!seat || !Number.isInteger(seat.term)) return;
-  sidebarTeamFocus = `c:${seat.run}`;
-  pressTeamSeat(seat);
-}, true);
+  const run = () => {
+    if (!seat || !Number.isInteger(seat.term)) return;
+    sidebarTeamFocus = `c:${seat.run}`;
+    pressTeamSeat(seat);
+  };
+  return { action: { run }, path: null };
+}
 
 /* ---- workspace board drawer ---------------------------------------------
  *

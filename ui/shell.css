@@ -1587,6 +1587,7 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   line-height: 1.3;
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
 .team-row:hover,
