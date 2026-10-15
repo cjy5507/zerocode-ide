@@ -517,6 +517,7 @@ pub const SEAT: &[(&str, Carry)] = &[
     ("askers", Carry::Recounted),
     ("reach", Carry::Across),
     ("across", Carry::Across),
+    ("resting", Carry::Own),
 ];
 
 /// One window of a seat's rows.

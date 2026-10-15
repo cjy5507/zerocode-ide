@@ -2967,6 +2967,26 @@ pub struct SeatNumbers {
     /// reading of one checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub across: Option<crate::jev_scope::SeatAcross>,
+    /// Why the seat rests now and until when, as zo's door reads it
+    /// (t-58193): the one field the panel's chip and sentence both read;
+    /// absent while it may ask, and from a zo older than the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resting: Option<SeatResting>,
+}
+
+/// Why a seat rests and until when (t-58193). `cause` is the word zo's door
+/// rests it for (`RestCause::word`), which the panel words in every language
+/// and never shows; `unanswered` is how many of its requests in a row went
+/// unanswered, for a rest of its own — the door's own number, which the
+/// panel's sentence counts with.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatResting {
+    /// When the seat may ask again, in Unix milliseconds.
+    pub until_ms: i64,
+    pub cause: String,
+    #[serde(default)]
+    pub unanswered: Option<usize>,
 }
 
 /// One agent's line under a seat a pane's moments ask (t-10916): its

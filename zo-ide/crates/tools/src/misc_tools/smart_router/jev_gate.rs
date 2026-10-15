@@ -153,6 +153,25 @@ impl JevDoor {
         }
     }
 
+    /// The door for words from `cwd` as it stands, consenting nothing: what a
+    /// reader of the door's state stands on, such as the summary that says
+    /// why a seat rests (t-58193), which must not write the person's
+    /// settings.
+    #[must_use]
+    pub fn reading(cwd: &Path) -> Self {
+        let home = runtime::default_config_home();
+        let settings_path = home.join(SETTINGS_FILE);
+        Self {
+            settings: JevSettings::from_root(&read_settings_root(&settings_path)).resolved(),
+            workspace: Some(door::resolved_path(cwd)),
+            requests: todays_requests(&home),
+            ledgers: Some(shadow_ledger_dir(cwd)),
+            review_home: None,
+            settings_file: Some(settings_path),
+            review_origin: None,
+        }
+    }
+
     /// A door told exactly these facts, for a test that must not read the
     /// machine's settings.
     #[cfg(test)]
@@ -360,14 +379,32 @@ impl JevDoor {
             .filter(|_| self.count_a_hedge().is_ok())
     }
 
-    /// Whether `row`'s seat rests now (t-58193): its server asked it to wait
-    /// and the time has not come ([`Self::asked_to_wait`]), its provider cut
-    /// the smallest request it can make, one item ([`Self::room_of`]), or it
-    /// applies nothing and its own ledger says it rests ([`Self::rest_of`]).
+    /// Whether `row`'s seat rests now ([`Self::resting_now`]).
     fn resting(&self, row: &JevUse) -> bool {
-        self.asked_to_wait(row).is_some()
-            || self.room_of(row) == Some(0)
-            || (self.rest_of(row).is_some() && !self.applies_now(row))
+        self.resting_now(row).is_some()
+    }
+
+    /// Why `row`'s seat rests now and until when (t-58193): what the door
+    /// refuses it with `resting` for, and what the panel says of it
+    /// (`super::jev_summary::with_rests`). Its server asked it to wait and
+    /// the time has not come ([`Self::asked_to_wait`]); its provider cut the
+    /// smallest request it can make, one item, and [`REST`] has not passed
+    /// since ([`Self::room_of`]); or it applies nothing and its own ledger
+    /// says it rests ([`Self::rest_of`]). `None` while it may ask.
+    #[must_use]
+    pub fn resting_now(&self, row: &JevUse) -> Option<Resting> {
+        if let Some(until_ms) = self.asked_to_wait(row) {
+            return Some(Resting { until_ms, cause: RestCause::Waiting, unanswered: None });
+        }
+        if self.room_of(row) == Some(0) {
+            let cut = self.read_back(row, |lines| newest_sent_in(row, lines)).flatten();
+            let cut = cut.unwrap_or_else(super::decision_shadow::now_ms);
+            let until_ms = cut.saturating_add(rest_ms());
+            return Some(Resting { until_ms, cause: RestCause::TooLong, unanswered: None });
+        }
+        let rest = self.rest_of(row).filter(|_| !self.applies_now(row))?;
+        let cause = RestCause::of_rest(&rest.cause);
+        Some(Resting { until_ms: rest.until_ms, cause, unanswered: Some(UNANSWERED_BEFORE_REST) })
     }
 
     /// Until when `row`'s seat waits because its server asked it to
@@ -490,6 +527,68 @@ pub struct Rest {
     /// equals: the provider's refusal where the server named one, else the
     /// row's outcome.
     pub cause: String,
+}
+
+/// Why a seat rests now and until when (t-58193), as the door reads it
+/// (`JevDoor::resting_now`): the one field the summary hands the panel,
+/// whose chip and sentence both read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resting {
+    /// When the seat may ask again, in Unix milliseconds.
+    pub until_ms: i64,
+    pub cause: RestCause,
+    /// For a rest of the seat's own, how many of its requests in a row went
+    /// unanswered (`UNANSWERED_BEFORE_REST`); `None` for a wait its server
+    /// asked for and for a room of none.
+    pub unanswered: Option<usize>,
+}
+
+/// What a seat rests for (t-58193), by the word the summary writes, which
+/// the panel words in every language (`ui/shell-jev.js`, `JEV_REST_CAUSES`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestCause {
+    /// Its server asked it to wait (`JevDoor::asked_to_wait`).
+    Waiting,
+    /// Its provider cut a request of one item (`JevDoor::room_of`).
+    TooLong,
+    /// Its last `UNANSWERED_BEFORE_REST` requests went unanswered, most
+    /// often because the provider cut them for their length,
+    Cut,
+    /// because they timed out,
+    Timeout,
+    /// because they never reached the server,
+    Unreachable,
+    /// or because the server refused them another way.
+    Refused,
+}
+
+impl RestCause {
+    /// The word the summary writes for the cause.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::TooLong => "too_long",
+            Self::Cut => "cut",
+            Self::Timeout => "timeout",
+            Self::Unreachable => "unreachable",
+            Self::Refused => "refused",
+        }
+    }
+
+    /// The cause of a rest of the seat's own, from what its unanswered
+    /// requests ended on most often ([`Rest::cause`]).
+    fn of_rest(cause: &str) -> Self {
+        if cause == api::SYSTEMONE_CUT_REFUSAL {
+            Self::Cut
+        } else if cause == api::SystemOneFailure::Timeout.token() {
+            Self::Timeout
+        } else if cause == api::SystemOneFailure::Transport.token() {
+            Self::Unreachable
+        } else {
+            Self::Refused
+        }
+    }
 }
 
 /// What a ledger's lines, read newest first, settled — or, when they ran out
