@@ -657,6 +657,7 @@ async function removeProjectFromList(path) {
   const gone = new Set(
     (projects.find((held) => held.path === path)?.worktrees ?? []).map((held) => held.path),
   );
+  noteTabsLeaving(tabs.filter((held) => gone.has(held.worktree)), "project-removed");
   for (const held of tabs.filter((held) => gone.has(held.worktree))) {
     if (held.kind === "term") {
       for (const term of paneLeaves(held.layout)) {
@@ -11369,6 +11370,7 @@ async function askToRemoveWorktree(worktree) {
  * tree per checkout it had ever stood in — each holding group numbers that can
  * never be drawn again. */
 function dropWorktreeSurfaces(path) {
+  noteTabsLeaving(tabs.filter((one) => one.worktree === path), "worktree-removed");
   for (const held of tabs.filter((one) => one.worktree === path)) {
     if (held.kind === "term") {
       for (const term of paneLeaves(held.layout)) {
@@ -13168,7 +13170,7 @@ function resourceChevron(open) {
   return mark;
 }
 
-function openResourceSession(session) {
+function openResourceSession(session, worktreeKey = null) {
   setResourceOpen(false);
   if (session.kind === "lane") {
     void focusLane(session.lane);
@@ -13178,7 +13180,25 @@ function openResourceSession(session) {
     setTermVisible(true);
     return;
   }
+  if (!tabOfTerm(session.term)) {
+    void openStrandedSession(session.term, worktreeKey);
+    return;
+  }
   void openPaneFromBoard(session.term);
+}
+
+/* A shell the stage does not hold opens through the detached row's own door
+ * (t-56480): one parked off the stage is reattached as it is, and one no tab and
+ * no row held — the backend's pool still has it, this window lost it — is first
+ * stood as that row, under the checkout this tree files it in, else under where
+ * its process stands. `openPaneFromBoard` asks a tab, and these have none: the
+ * name used to open nothing. */
+async function openStrandedSession(term, worktreeKey) {
+  if (!detachedAgents.has(term)) {
+    adoptStrandedTerm(term, worktreeAt(worktreeKey) ? worktreeKey : strandHome(term), "resource");
+  }
+  const agent = paneSessions.get(term)?.agent ?? paneAgents.get(term) ?? null;
+  await focusAgentPane(detachedAgents.get(term), null, term, agent);
 }
 
 async function killResourceSession(session) {
@@ -13291,14 +13311,25 @@ function resourceSessionNode(session, worktreeKey) {
   const state = document.createElement("span");
   state.className = `resource-session-state${session.bound ? " is-bound" : ""}`;
   state.setAttribute("aria-hidden", "true");
-  const name = document.createElement(session.bound ? "button" : "span");
+  // A shell of the pool that no tab holds opens too (t-56480): its name is the
+  // 열기, said on the button because nothing else on the row says it can be
+  // pressed. A row only the resource sample knows is not a shell to open.
+  const opens = session.bound
+    || (session.kind === "term" && resourceManager.sessions.some((one) => one.term === session.term));
+  const name = document.createElement(opens ? "button" : "span");
   name.className = "resource-session-name";
   name.textContent = session.label;
-  if (session.bound) {
+  if (opens) {
     name.type = "button";
     name.classList.add("resource-session-open");
     markResourceFocus(name, `session:${session.key}:open`);
-    name.addEventListener("click", () => openResourceSession(session));
+    if (!session.bound) {
+      name.setAttribute(
+        "aria-label",
+        t("resource.openSession", "세션 {{name}} 열기", { name: session.label }),
+      );
+    }
+    name.addEventListener("click", () => openResourceSession(session, worktreeKey));
   }
   row.append(state, name, resourceMetricPair(session.cpu, session.memory, true));
   const gutter = document.createElement("span");
