@@ -187,6 +187,7 @@ fn on() -> Policy {
         pinned_base: None,
         git_budget: GIT_BUDGET,
         promote_budget: PROMOTE_GIT_BUDGET,
+        answer_budget: ANSWER_BUDGET,
         git: PathBuf::from("git"),
     }
 }
@@ -1593,5 +1594,80 @@ fn promote_outlives_its_budget_is_not_killed_and_the_next_settle_records_promote
         ),
         "{:?}",
         again.record
+    );
+}
+
+/// A press on promote answers within [`Policy::answer_budget`] however long its git takes: the
+/// reads before the fast-forward may each take [`GIT_BUDGET`], longer together than the bridge
+/// holds the press. The fast-forward is the git a test can slow, so it is the slow one here, well
+/// inside its own budget; its end is still written, in the presser's name.
+#[cfg(unix)]
+#[test]
+fn a_press_on_promote_answers_within_its_answer_budget_however_long_git_takes() {
+    const SLOW_SECS: u64 = 3;
+    let fixture = Fixture::new(1, &[]);
+    let window = window(&fixture);
+    let (mut state, _) = stacked(&fixture, &window);
+    green(&mut state);
+    let tip = state.stacked.clone().expect("a stack").tip;
+    let slow = script(
+        &fixture.root.join("slow-git"),
+        &format!("#!/bin/sh\nsleep {SLOW_SECS}\nexec git \"$@\"\n"),
+    );
+    let policy = Policy {
+        answer_budget: Duration::from_millis(300),
+        promote_budget: Duration::from_secs(SLOW_SECS * 10),
+        git: slow,
+        ..on()
+    };
+    let started = Instant::now();
+    let answer = said(run(
+        &|_| policy.clone(),
+        &ask(
+            person_press(),
+            Action::Promote {
+                batch: state.clone(),
+            },
+        ),
+        &[],
+        NOW,
+        &window.roads,
+    ));
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(SLOW_SECS),
+        "the press waited {waited:?} for git, past its answer budget: {answer}"
+    );
+    assert_eq!(answer["state"], "promoting", "{answer}");
+    assert_eq!(answer["still"], true, "{answer}");
+    let Record::Promoting { lease_until_ms, .. } = window.next().record else {
+        panic!("the promote did not begin with `promoting`");
+    };
+    assert_eq!(answer["leaseUntilMs"], lease_until_ms, "{answer}");
+
+    let ended = window.next();
+    assert_eq!(ended.by, PressedBy::Person, "the presser was not kept");
+    let Record::Promoted { from, to, .. } = &ended.record else {
+        panic!("{:?}", ended.record);
+    };
+    assert_eq!((from, to), (&fixture.main, &tip));
+    assert_eq!(fixture.rev("refs/heads/main"), tip);
+    while live(RUN, &state.batch) {
+        assert!(started.elapsed() < RECORD_WAIT, "the promote never let go");
+        std::thread::sleep(POLL);
+    }
+}
+
+/// The bridge holds a `land-batch` press for [`zerocode_hookd::TEAM_DEADLINE`], as the verb
+/// reserves no wait slot, and the CLI waits longer than the bridge. A press that answers within its
+/// budget is heard by both.
+#[test]
+fn the_promote_answer_budget_ends_before_the_bridge_and_the_cli_stop_waiting() {
+    let answer = Policy::off().answer_budget;
+    let bridge = zerocode_hookd::TEAM_DEADLINE;
+    let cli = Duration::from_secs(u64::from(zerocode_core::agent_teams::SHIM_DEADLINE_SECONDS));
+    assert!(
+        answer < bridge && bridge < cli,
+        "the press answers within {answer:?}, the bridge waits {bridge:?}, the CLI {cli:?}"
     );
 }

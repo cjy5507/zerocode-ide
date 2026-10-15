@@ -23,6 +23,9 @@ pub(crate) struct SecondBrainReport {
     /// the card's 「전역 연결」 line. Read-only on the status road, written on
     /// setup and on 「다시 연결」.
     guides: Vec<zerocode_core::second_brain::GuideOutcome>,
+    /// What each copy of the second-brain skill is, in every home an installed
+    /// agent reads, the window's own among them: the card's 「스킬」 line.
+    skill_copies: Vec<zerocode_core::skill_install::SkillCopy>,
     /// The opt-in: the skill's weekly review as a zo cron turn in the vault.
     weekly_review_enabled: bool,
     /// What the vault's zo cron registry says about that record — only read
@@ -283,6 +286,7 @@ struct SetupWork {
     quick_commands_added: usize,
     skill_installs: Vec<zerocode_core::skill_install::SkillInstallOutcome>,
     guides: Vec<zerocode_core::second_brain::GuideOutcome>,
+    skill_copies: Vec<zerocode_core::skill_install::SkillCopy>,
 }
 
 use crate::skills_runtime::installed_agents;
@@ -329,6 +333,7 @@ fn second_brain_report(
     saved_path: String,
     selected_path: Option<String>,
     guides: Vec<zerocode_core::second_brain::GuideOutcome>,
+    skill_copies: Vec<zerocode_core::skill_install::SkillCopy>,
     weekly_review_enabled: bool,
 ) -> SecondBrainReport {
     let vaults = zerocode_core::second_brain::detected_vaults(&obsidian_config(home));
@@ -342,6 +347,7 @@ fn second_brain_report(
     SecondBrainReport {
         vault: selected.map(|path| zerocode_core::second_brain::inspect(Path::new(&path))),
         guides,
+        skill_copies,
         saved_path,
         vaults,
         obsidian_installed: obsidian_is_installed(home),
@@ -360,6 +366,16 @@ fn saved_vault(saved_path: &str) -> Option<PathBuf> {
     (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
 }
 
+/// The second-brain skill's copies, read the way the Skills screen reads them.
+fn second_brain_copies(
+    home: &Path,
+    launched: &[(String, PathBuf)],
+    agents: &[(String, String)],
+) -> Vec<zerocode_core::skill_install::SkillCopy> {
+    zerocode_core::skill_install::bundled_copies(SECOND_BRAIN_SKILL, home, launched, agents)
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 pub(crate) async fn second_brain_status(
     state: State<'_, AppState>,
@@ -369,16 +385,22 @@ pub(crate) async fn second_brain_status(
     let document = load_settings_resilient(state.settings()).document;
     let saved = document.second_brain_vault;
     let weekly = document.second_brain_weekly_review;
+    let config_root = state.config_root().to_path_buf();
+    let data_root = state.local_data_root().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
+        let launched = skills_runtime::window_agent_homes(&config_root, &data_root);
+        let agents = installed_agents();
         // The link is about the SAVED vault, never the folder somebody is
         // still browsing: the block in `~/.claude/CLAUDE.md` names the vault
         // agents will actually be sent to.
         let guides = zerocode_core::second_brain::inspect_global_guides(
             &home,
+            &launched,
             saved_vault(&saved).as_deref(),
-            &installed_agents(),
+            &agents,
         );
-        second_brain_report(&home, saved, path, guides, weekly)
+        let copies = second_brain_copies(&home, &launched, &agents);
+        second_brain_report(&home, saved, path, guides, copies, weekly)
     })
     .await
     .map_err(|join| join.to_string())
@@ -403,6 +425,7 @@ pub(crate) async fn second_brain_setup(
     }
     let home = dirs::home_dir().ok_or("홈 폴더를 찾을 수 없습니다")?;
     let config_root = state.config_root().to_path_buf();
+    let data_root = state.local_data_root().to_path_buf();
     let weekly = load_settings_resilient(state.settings())
         .document
         .second_brain_weekly_review;
@@ -413,15 +436,22 @@ pub(crate) async fn second_brain_setup(
         let outcome =
             zerocode_core::second_brain::setup(&setup_path).map_err(|error| error.to_string())?;
         let skill_targets = installed_agents();
-        let skill_installs =
-            skills_runtime::install_bundled_skill(SECOND_BRAIN_SKILL, &setup_home, &skill_targets)?;
+        let launched = skills_runtime::window_agent_homes(&config_root, &data_root);
+        let skill_installs = skills_runtime::install_bundled_skill(
+            SECOND_BRAIN_SKILL,
+            &setup_home,
+            &launched,
+            &skill_targets,
+        )?;
         // And the same agents' GLOBAL instructions learn where the vault is,
         // so a pane opened in any other project already knows.
         let guides = zerocode_core::second_brain::link_global_guides(
             &setup_home,
+            &launched,
             Some(&setup_path),
             &skill_targets,
         );
+        let skill_copies = second_brain_copies(&setup_home, &launched, &skill_targets);
         let quick_agent = skill_targets.iter().find_map(|(agent, _)| {
             agent_spec(agent)
                 .filter(|spec| spec.capabilities().takes_prompt_at_start())
@@ -434,6 +464,7 @@ pub(crate) async fn second_brain_setup(
             quick_commands_added,
             skill_installs,
             guides,
+            skill_copies,
         })
     })
     .await
@@ -449,7 +480,14 @@ pub(crate) async fn second_brain_setup(
             Ok(())
         },
     )?;
-    let mut report = second_brain_report(&home, saved_path, None, work.guides, weekly);
+    let mut report = second_brain_report(
+        &home,
+        saved_path,
+        None,
+        work.guides,
+        work.skill_copies,
+        weekly,
+    );
     report.created = work.outcome.created;
     report.vault = Some(work.outcome.status);
     report.quick_commands_added = work.quick_commands_added;
@@ -473,9 +511,14 @@ pub(crate) async fn second_brain_link(
     let document = load_settings_resilient(state.settings()).document;
     let saved = document.second_brain_vault;
     let weekly = document.second_brain_weekly_review;
+    let config_root = state.config_root().to_path_buf();
+    let data_root = state.local_data_root().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
-        let guides = link_saved_vault(&home, &saved);
-        second_brain_report(&home, saved, None, guides, weekly)
+        let launched = skills_runtime::window_agent_homes(&config_root, &data_root);
+        let agents = installed_agents();
+        let guides = link_saved_vault(&home, &launched, &saved, &agents);
+        let copies = second_brain_copies(&home, &launched, &agents);
+        second_brain_report(&home, saved, None, guides, copies, weekly)
     })
     .await
     .map_err(|join| join.to_string())
@@ -483,11 +526,17 @@ pub(crate) async fn second_brain_link(
 
 /// The SAVED vault into every installed agent's global instructions — what
 /// setup writes, and what the 「다시 연결」 button and the boot run again.
-fn link_saved_vault(home: &Path, saved: &str) -> Vec<zerocode_core::second_brain::GuideOutcome> {
+fn link_saved_vault(
+    home: &Path,
+    launched: &[(String, PathBuf)],
+    saved: &str,
+    agents: &[(String, String)],
+) -> Vec<zerocode_core::second_brain::GuideOutcome> {
     zerocode_core::second_brain::link_global_guides(
         home,
+        launched,
         saved_vault(saved).as_deref(),
-        &installed_agents(),
+        agents,
     )
 }
 
@@ -501,8 +550,14 @@ fn link_saved_vault(home: &Path, saved: &str) -> Vec<zerocode_core::second_brain
 /// says the right thing is left as it is, and a person's own lines around it
 /// are never touched. Without a saved vault nothing is written — the block is
 /// a fact about that vault alone. What went wrong, if anything, the card says
-/// the next time it is opened.
-pub(crate) fn relink_saved_vault_at_boot(saved: String) {
+/// the next time it is opened. The window's own agent homes get the block
+/// too ([`skills_runtime::window_agent_homes`]), named on the thread so the
+/// account store is not read on the boot path.
+pub(crate) fn relink_saved_vault_at_boot(
+    saved: String,
+    config_root: PathBuf,
+    local_data_root: PathBuf,
+) {
     if saved_vault(&saved).is_none() {
         return;
     }
@@ -512,7 +567,8 @@ pub(crate) fn relink_saved_vault_at_boot(saved: String) {
     let _ = std::thread::Builder::new()
         .name("second-brain-link".into())
         .spawn(move || {
-            let _ = link_saved_vault(&home, &saved);
+            let launched = skills_runtime::window_agent_homes(&config_root, &local_data_root);
+            let _ = link_saved_vault(&home, &launched, &saved, &installed_agents());
         });
 }
 

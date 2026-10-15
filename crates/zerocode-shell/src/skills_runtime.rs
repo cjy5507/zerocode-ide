@@ -14,6 +14,8 @@ pub(crate) struct Context {
     repos: Vec<PathBuf>,
     data: PathBuf,
     policy: Policy,
+    /// The homes this window launches agents into ([`window_agent_homes`]).
+    launched: Vec<(String, PathBuf)>,
 }
 impl Context {
     pub(crate) fn from_state(state: &AppState) -> Result<Self, String> {
@@ -36,6 +38,7 @@ impl Context {
             repos,
             data: state.local_data_root().to_path_buf(),
             policy,
+            launched: window_agent_homes(state.config_root(), state.local_data_root()),
         })
     }
     fn sources(&self) -> Vec<SkillSource> {
@@ -206,6 +209,13 @@ pub(crate) struct RequiredSkill {
     pub name: String,
     pub missing_agents: Vec<String>,
 }
+/// Every copy of one skill this build ships, in every home an installed agent
+/// reads, and what each copy is.
+#[derive(Debug, Serialize)]
+pub(crate) struct BundledCopies {
+    pub name: String,
+    pub copies: Vec<zerocode_core::skill_install::SkillCopy>,
+}
 #[derive(Debug, Serialize)]
 pub(crate) struct Report {
     pub families: Vec<SkillFamily>,
@@ -215,6 +225,7 @@ pub(crate) struct Report {
     pub external_unavailable: Vec<String>,
     pub installed_agents_by_skill: BTreeMap<String, Vec<String>>,
     pub required: Vec<RequiredSkill>,
+    pub bundled: Vec<BundledCopies>,
     pub policy: Policy,
     pub reads: usize,
     pub capped: bool,
@@ -260,6 +271,19 @@ pub(crate) fn list(context: Context, force: bool) -> Report {
             }
         })
         .collect();
+    let bundled = zerocode_core::skill_install::BUNDLED_SKILLS
+        .iter()
+        .map(|skill| BundledCopies {
+            name: skill.name.to_string(),
+            copies: zerocode_core::skill_install::bundled_copies(
+                skill.name,
+                &context.home,
+                &context.launched,
+                &agents,
+            )
+            .unwrap_or_default(),
+        })
+        .collect();
     let installed_agents_by_skill = found
         .skills
         .iter()
@@ -298,6 +322,7 @@ pub(crate) fn list(context: Context, force: bool) -> Report {
         sources: found.sources,
         agents,
         required,
+        bundled,
         policy: context.policy,
         reads,
         capped,
@@ -338,14 +363,34 @@ pub(crate) fn install_bundled(
     context: Context,
     name: String,
 ) -> Result<Vec<zerocode_core::skill_install::SkillInstallOutcome>, String> {
-    install_bundled_skill(&name, &context.home, &installed_agents())
+    install_bundled_skill(&name, &context.home, &context.launched, &installed_agents())
+}
+/// The homes this window launches agents into, beside the person's own. A
+/// Claude pane reads the app-owned `CLAUDE_CONFIG_DIR` unless the person chose
+/// the machine's own login, and a Codex pane reads the `CODEX_HOME` mirror
+/// under the app's data. A skill or a guide written under `HOME` alone never
+/// reaches those panes.
+pub(crate) fn window_agent_homes(
+    config_root: &Path,
+    local_data_root: &Path,
+) -> Vec<(String, PathBuf)> {
+    let mut homes = Vec::new();
+    if let accounts::LoginLook::Managed(home) = accounts::login_look(config_root) {
+        homes.push((AgentKind::Claude.slug().to_string(), home));
+    }
+    homes.push((
+        AgentKind::Codex.slug().to_string(),
+        codex_accounts::runtime_home(local_data_root),
+    ));
+    homes
 }
 pub(crate) fn install_bundled_skill(
     name: &str,
     home: &Path,
+    launched: &[(String, PathBuf)],
     agents: &[(String, String)],
 ) -> Result<Vec<zerocode_core::skill_install::SkillInstallOutcome>, String> {
-    let answer = zerocode_core::skill_install::install_bundled_skill(name, home, agents)?;
+    let answer = zerocode_core::skill_install::install_bundled_skill(name, home, launched, agents)?;
     runtime().roots.clear();
     Ok(answer)
 }
@@ -776,6 +821,7 @@ mod tests {
             repos: Vec::new(),
             data: temp.path().into(),
             policy: Policy::default(),
+            launched: Vec::new(),
         };
         let outside = temp.path().join("SKILL.md");
         std::fs::write(&outside, "# Outside").unwrap();
