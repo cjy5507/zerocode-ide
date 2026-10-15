@@ -466,7 +466,7 @@ impl JevDoor {
     pub fn rested(&self, row: &JevUse) -> bool {
         let now = super::decision_shadow::now_ms();
         let newest = self.read_back(row, |lines| newest_sent_in(row, lines)).flatten();
-        !newest.is_some_and(|at| at.saturating_add(rest_ms()) > now)
+        newest.is_none_or(|at| at.saturating_add(rest_ms()) <= now)
     }
 
     /// `row`'s rest as its own ledger in this provider's folder says it
@@ -843,6 +843,8 @@ pub fn millis(elapsed: Duration) -> u64 {
 /// answer and wherever the server named nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// The `server_*` prefix is the point: each field is the ledger key the window reads.
+#[allow(clippy::struct_field_names)]
 pub struct ServerSaid {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_error_code: Option<String>,
@@ -1162,8 +1164,12 @@ mod tests {
 
     /// The ledger at `path`, holding `rows` and nothing else.
     fn holding(path: &Path, rows: &[Value]) {
+        use std::fmt::Write as _;
         std::fs::create_dir_all(path.parent().expect("a ledger folder")).expect("the folder");
-        let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        let mut text = String::new();
+        for row in rows {
+            let _ = writeln!(text, "{row}");
+        }
         std::fs::write(path, text).expect("the ledger");
     }
 

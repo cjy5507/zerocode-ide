@@ -660,6 +660,7 @@ fn under_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
 /// one, and nor does any seat that never rested.
 #[test]
 fn a_resting_seat_says_until_when_why_and_after_how_many() {
+    use std::fmt::Write as _;
     use zerocode_core::jev::RECALL;
     let home = tempfile::tempdir().expect("a config home");
     let project = tempfile::tempdir().expect("a project");
@@ -671,12 +672,12 @@ fn a_resting_seat_says_until_when_why_and_after_how_many() {
         let ledger = jev_summary::ledger_roots(project.path())[1].join(RECALL.ledger);
         std::fs::create_dir_all(ledger.parent().expect("a folder")).expect("the folder");
         let timed_out = |newest: i64| {
-            let rows: String = (0..unanswered)
-                .rev()
-                .map(|before| json!({"at": newest - before * 1_000, "outcome": "timeout",
-                    "requests": 1, "rubricVersion": RECALL.rubric_version}))
-                .map(|row| format!("{row}\n"))
-                .collect();
+            let mut rows = String::new();
+            for before in (0..unanswered).rev() {
+                let row = json!({"at": newest - before * 1_000, "outcome": "timeout",
+                    "requests": 1, "rubricVersion": RECALL.rubric_version});
+                let _ = writeln!(rows, "{row}");
+            }
             std::fs::write(&ledger, rows).expect("the ledger");
         };
         let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
