@@ -1177,5 +1177,20 @@ fn requests_asked_together_never_have_more_than_the_lanes_in_flight() {
     );
 }
 
+/// zo's client keeps its own copy of the codes a managed server refuses with,
+/// because it does not depend on local-judgment; the copy is held to the
+/// window's, word for word and in order, so a renamed code cannot be lost on
+/// one side only (t-55423).
+#[test]
+fn zo_keeps_the_windows_refusal_codes_word_for_word() {
+    let zo = include_str!("../../../../zo-ide/crates/api/src/systemone.rs");
+    let line = zo
+        .lines()
+        .find(|line| line.starts_with("const REFUSAL_CODES:"))
+        .expect("zo's client names the codes it keeps");
+    let words: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+    assert_eq!(words, super::REFUSAL_CODES, "{line}");
+}
+
 /// Which connection a question rides (t-13199).
 mod socket;
