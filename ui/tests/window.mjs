@@ -56064,8 +56064,11 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       seen.toggleMs = +(performance.now() - t0).toFixed(2);
       await settle();
       const chat = slot?.querySelector(".pane-chat");
+      // Off screen: hidden, or standing behind the pane's screen — kept rendered
+      // and hidden from assistive technology (t-55369).
+      const off = (node) => node.hidden || node.getAttribute("aria-hidden") === "true";
       seen.screenHidden = view.host.hidden;
-      seen.chatShown = Boolean(chat) && !chat.hidden;
+      seen.chatShown = Boolean(chat) && !off(chat);
       seen.chatArrived = Boolean(chat) && chat.classList.contains("is-arriving");
       seen.turns = chat?.querySelectorAll(".helper-turn").length ?? 0;
       seen.composer = Boolean(chat?.querySelector(".worker-composer"));
@@ -56143,7 +56146,7 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
           { kind: "del", text: "a", old: null, new: null }, { kind: "add", text: "b", old: null, new: null }] }] } });
       await window.__PAINTED__();
       const card = chat.querySelector(".pane-chat-ask");
-      seen.cardShown = Boolean(card) && !chat.hidden && view.host.hidden;
+      seen.cardShown = Boolean(card) && !off(chat) && view.host.hidden;
       seen.cardTool = card?.querySelector(".board-approve-title")?.textContent ?? "";
       seen.wantCardTool = t("board.approve.title", "{{tool}} 허용할까요?", { tool: "Edit" });
       seen.cardDiff = card?.querySelectorAll(".helper-tool-diff .diff-line").length ?? 0;
@@ -56186,15 +56189,15 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       // A question the hook only SIGNALLED is on the screen alone, so the screen comes back.
       tell("hook:agent", { term, state: "needs-attention", agent: "claude", session: "s-view", resumable: false });
       await window.__PAINTED__();
-      seen.backOnQuestion = !view.host.hidden && chat.hidden;
+      seen.backOnQuestion = !view.host.hidden && off(chat);
       seen.termPressed = el("view-toggle-term").getAttribute("aria-pressed");
       // And back to the conversation by hand, then to the screen by hand.
       el("view-toggle-chat").click();
       await settle();
-      seen.againChat = view.host.hidden && !chat.hidden;
+      seen.againChat = view.host.hidden && !off(chat);
       el("view-toggle-term").click();
       await settle();
-      seen.backByHand = !view.host.hidden && chat.hidden;
+      seen.backByHand = !view.host.hidden && off(chat);
       // A pane whose agent named no transcript says so instead of guessing.
       window.__ANSWER__.pane_log = () => ({ found: false, next: 0, turns: [], skipped: false });
       const quiet = await openTermTab({ placement: "tab" });

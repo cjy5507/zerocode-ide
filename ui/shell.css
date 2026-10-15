@@ -13790,6 +13790,33 @@ body.mod-held .term-link,
   --font-ui: var(--chat-font-ui);
 }
 
+/* A conversation set aside keeps its own page standing in the leaf
+ * (`frontChatHost`, t-55369): in the same cell as the page in front, out of
+ * the flow and under it, clipped to nothing — drawn nothing and under no
+ * pointer — so it comes back with no element styled or laid out again. Only
+ * properties no element inherits: one its rows inherit (`visibility`,
+ * `inert`) restyles every one of them at each press, and `content-visibility`
+ * drops the page's layout on WebKit. */
+.pane > .worker-view.is-behind {
+  position: absolute;
+  grid-row: -2 / -1;
+  grid-column: 1 / -1;
+  inset: 0;
+  z-index: -1;
+  clip-path: inset(50%);
+}
+
+/* The same for a pane's conversation behind the pane's screen (`placePaneChat`):
+ * the slot is its box, as it is the screen's. A named pane's slot also holds
+ * the name bar, so there the page stands a bar taller than it was and lays out
+ * again when it comes back — its styles still kept. */
+.pane-slot > .pane-chat.is-behind {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  clip-path: inset(50%);
+}
+
 .worker-head {
   display: flex;
   flex-wrap: wrap;
