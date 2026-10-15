@@ -392,7 +392,7 @@ impl Workspaces {
             }),
             drained: Notify::new(),
         });
-        let snapshot = workspace.snapshot(&workspace.lock()?);
+        let snapshot = workspace.snapshot(&*workspace.lock()?);
         self.closed
             .lock()
             .map_err(|_| "workspace_unavailable: 닫기 확인 상태를 읽을 수 없습니다")?
@@ -407,14 +407,14 @@ impl Workspaces {
 
     pub(crate) fn snapshot(&self, label: &str) -> Result<Option<Snapshot>, String> {
         self.get(label)?
-            .map(|workspace| Ok(workspace.snapshot(&workspace.lock()?)))
+            .map(|workspace| Ok(workspace.snapshot(&*workspace.lock()?)))
             .transpose()
     }
 
     pub(crate) fn snapshots(&self) -> Result<Vec<Snapshot>, String> {
         self.lock()?
             .values()
-            .map(|workspace| Ok(workspace.snapshot(&workspace.lock()?)))
+            .map(|workspace| Ok(workspace.snapshot(&*workspace.lock()?)))
             .collect()
     }
 
@@ -1175,7 +1175,7 @@ impl Transition {
     }
 
     pub(crate) fn snapshot(&self) -> Result<Snapshot, String> {
-        Ok(self.workspace.snapshot(&self.workspace.lock()?))
+        Ok(self.workspace.snapshot(&*self.workspace.lock()?))
     }
 
     pub(crate) async fn wait(&self) -> Result<(), String> {
