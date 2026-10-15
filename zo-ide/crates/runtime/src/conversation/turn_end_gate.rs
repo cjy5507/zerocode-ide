@@ -180,6 +180,19 @@ fn last_textual_tool_call_marker(text: &str) -> Option<(usize, &'static str)> {
 /// (or genuinely needs the user) cannot be looped indefinitely.
 pub(super) const TURN_END_GATE_MAX_REPROMPTS: usize = 2;
 
+/// A promise is asked about once a turn (t-58176): a model that answers the
+/// reminder with the same ending has shown the reminder does not move it,
+/// and asking again only prints its answer once more. The callers keep one
+/// plain counter a turn for the whole gate, so the promise's "already asked"
+/// rides on that counter as its top bit — far above any count the cap lets
+/// it reach — and [`reprompts_taken`] reads the count beneath it.
+const PROMISE_ASKED: usize = 1 << (usize::BITS - 1);
+
+/// The gate's re-prompts this turn, whatever their issue.
+fn reprompts_taken(reprompts: usize) -> usize {
+    reprompts & !PROMISE_ASKED
+}
+
 /// Gate level from `ZO_TURN_END_GATE`: `0` disables, `1` (default) lints
 /// promise endings everywhere and question endings on autonomous surfaces,
 /// `2` also lints question endings in interactive sessions. Read per turn
@@ -233,6 +246,58 @@ const WAITING_ON_USER_MARKERS: [&str; 16] = [
     "중단하겠",
 ];
 
+/// Conditions that hang what follows on the person's word: "if you tell me
+/// which one, I'll start there", 「정해 주시면 그 범위로 작업하겠습니다」.
+/// The work such a promise names starts when the person answers, so the
+/// ending waits on them — re-prompting it only makes the model write its
+/// answer again (t-58176). Matched in lower case, and only before the
+/// promise in the same sentence (see [`promises_unconditionally`]). "when
+/// you" / "after you" are left out: they usually tell what happened ("When
+/// you ran it the build broke, so I'll fix it").
+const USER_CONDITION_MARKERS: [&str; 10] = [
+    "if you ",
+    "once you ",
+    "주시면",
+    "주신다면",
+    "하시면",
+    "하신다면",
+    "원하시면",
+    "원하신다면",
+    "괜찮으시면",
+    "괜찮다면",
+];
+
+/// Where one sentence of a paragraph ends, for scoping a condition to the
+/// promise it governs.
+const SENTENCE_ENDS: [char; 5] = ['.', '!', '?', '。', '\n'];
+
+/// Whether `paragraph` promises work on its own word: some sentence carries a
+/// promise marker with no user condition before it. A promise that follows
+/// "if you …" / 「…해 주시면」 in its own sentence hands the choice back; a
+/// condition in another sentence leaves an unconditional promise one.
+fn promises_unconditionally(paragraph: &str) -> bool {
+    paragraph.split(SENTENCE_ENDS).any(|sentence| {
+        let Some(promise_at) = PROMISE_MARKERS
+            .iter()
+            .filter_map(|marker| sentence.find(marker))
+            .min()
+        else {
+            return false;
+        };
+        !names_a_user_condition(&sentence[..promise_at].to_lowercase())
+    })
+}
+
+/// Whether `text` holds a user condition. A Korean one that runs on into
+/// 「서」 is not one: 「확인하시면서」 is "while you check", and the promise
+/// after it does not wait on the person.
+fn names_a_user_condition(text: &str) -> bool {
+    USER_CONDITION_MARKERS.iter().any(|condition| {
+        text.match_indices(condition)
+            .any(|(at, _)| !text[at + condition.len()..].starts_with('서'))
+    })
+}
+
 /// The last paragraph of a reply: the text after the final blank line,
 /// trimmed. Falls back to the whole (trimmed) text when there is no blank
 /// line, so single-paragraph replies are still screened.
@@ -275,10 +340,7 @@ pub(super) fn screen_turn_ending(
     {
         return None;
     }
-    if PROMISE_MARKERS
-        .iter()
-        .any(|marker| paragraph.contains(marker))
-    {
+    if promises_unconditionally(paragraph) {
         return Some(TurnEndingIssue::Promise);
     }
     None
@@ -347,14 +409,15 @@ where
     /// Evaluate the gate against a naturally-ending assistant message. Returns
     /// the issue to re-prompt on, bumping `reprompts`, or `None` when the turn
     /// may end. Reads the env level per call so the knob works without a
-    /// rebuild; bounded by [`TURN_END_GATE_MAX_REPROMPTS`] per turn.
+    /// rebuild; bounded by [`TURN_END_GATE_MAX_REPROMPTS`] per turn, and a
+    /// promise by one of those ([`PROMISE_ASKED`]).
     pub(super) fn take_turn_end_gate_issue(
         &self,
         final_text: &str,
         reprompts: &mut usize,
     ) -> Option<TurnEndingIssue> {
         let level = env_turn_end_gate_level();
-        if level == 0 || *reprompts >= TURN_END_GATE_MAX_REPROMPTS {
+        if level == 0 || reprompts_taken(*reprompts) >= TURN_END_GATE_MAX_REPROMPTS {
             return None;
         }
         let lint_questions = self.autonomous_surface || level >= 2;
@@ -365,7 +428,7 @@ where
         // reply that had read the file back to "verify" it was asked again),
         // and a reply already re-prompted for a promise has been told enough.
         let issue = screen_turn_ending(final_text, lint_questions).or_else(|| {
-            (*reprompts == 0
+            (reprompts_taken(*reprompts) == 0
                 && self.deep_subturn_depth == 0
                 && reports_unverified_completion(
                     final_text,
@@ -373,8 +436,11 @@ where
                 ))
             .then_some(TurnEndingIssue::UnverifiedCompletion)
         })?;
-        if issue == TurnEndingIssue::Promise && self.waits_on_background_work() {
-            return None;
+        if issue == TurnEndingIssue::Promise {
+            if self.waits_on_background_work() || (*reprompts & PROMISE_ASKED) != 0 {
+                return None;
+            }
+            *reprompts |= PROMISE_ASKED;
         }
         *reprompts += 1;
         Some(issue)
@@ -413,7 +479,7 @@ pub(super) fn take_textual_tool_call_issue(
     reprompts: &mut usize,
 ) -> Option<TurnEndingIssue> {
     let level = env_turn_end_gate_level();
-    if level == 0 || *reprompts >= TURN_END_GATE_MAX_REPROMPTS {
+    if level == 0 || reprompts_taken(*reprompts) >= TURN_END_GATE_MAX_REPROMPTS {
         return None;
     }
     if !ends_on_textual_tool_call(final_text) {
@@ -539,6 +605,72 @@ mod tests {
         assert_eq!(screen_turn_ending(korean, false), None);
     }
 
+    /// The live case (t-58176): a long evaluation that ends by handing the
+    /// choice to the person — the work it names starts on their word, so the
+    /// ending waits on them, in Korean and in English alike.
+    #[test]
+    fn a_promise_that_hangs_on_the_users_choice_waits_on_the_user() {
+        let photo = "설계 문서를 평가했습니다.\n\n## 약점\n1. 롤백 절차가 빠져 있습니다.\n2. 성능 목표에 숫자가 없습니다.\n\n어느 항목부터 진행할지 정해 주시면 그 범위로 작업하겠습니다.";
+        assert_eq!(screen_turn_ending(photo, false), None);
+        assert_eq!(screen_turn_ending(photo, true), None);
+        let english = "Three gaps stand out.\n\nIf you tell me which one, I'll start there.";
+        assert_eq!(screen_turn_ending(english, false), None);
+    }
+
+    /// The condition counts only for the promise it governs: an unconditional
+    /// promise stays one, after a conditional paragraph above it or a
+    /// conditional sentence beside it.
+    #[test]
+    fn an_unconditional_promise_is_still_flagged_beside_a_condition() {
+        for text in [
+            "원인을 찾았습니다.\n\n다음으로 시험을 실행하겠습니다.",
+            "Found it.\n\nI'll run the tests next.",
+            "정해 주시면 그 범위로 작업하겠습니다.\n\n다음으로 시험을 실행하겠습니다.",
+            "If you tell me which one, I'll start there.\n\nI'll run the tests next.",
+            "When you ran it, the build broke. I'll fix the linker next.",
+        ] {
+            assert_eq!(
+                screen_turn_ending(text, false),
+                Some(TurnEndingIssue::Promise),
+                "{text}"
+            );
+        }
+    }
+
+    /// Words that only look like a condition (ZO review of t-58176): "when
+    /// you …" / "after you …" usually tell what happened, and 「…하시면서」
+    /// is "while you …" — the promise beside them is still the model's own.
+    #[test]
+    fn a_time_clause_before_a_promise_is_not_a_condition() {
+        for text in [
+            "When you ran it the build broke, so I'll fix it.",
+            "After you pushed, CI went red, so I'll look at the log.",
+            "로그를 확인하시면서 저는 다음 단계를 진행하겠습니다.",
+            "결과를 검토하시면서 저는 남은 시험을 실행하겠습니다.",
+        ] {
+            assert_eq!(
+                screen_turn_ending(text, false),
+                Some(TurnEndingIssue::Promise),
+                "{text}"
+            );
+        }
+    }
+
+    /// The promise reminder asks for the work, and still for a complete final
+    /// answer: a headless run's summary and the deep mode's plan and checks
+    /// read the last assistant message alone (ZO review of t-58176), so a
+    /// last message that only adds to an earlier one would lose the answer.
+    #[test]
+    fn the_promise_reminder_keeps_the_last_message_a_complete_answer() {
+        let reminder = turn_end_gate_reminder(TurnEndingIssue::Promise);
+        assert!(reminder.contains("tool calls"), "{reminder}");
+        assert!(
+            reminder.contains("Then finish with a complete final answer."),
+            "{reminder}"
+        );
+        assert!(!reminder.contains("Do not repeat"), "{reminder}");
+    }
+
     #[test]
     fn question_ending_only_flagged_when_linting_questions() {
         let text = "The migration is ready.\n\nShould I also update the staging config?";
@@ -593,6 +725,11 @@ mod tests {
         assert_eq!(screen_turn_ending("\n\n", true), None);
     }
 }
+
+/// The gate driven through a whole turn: how many re-prompts and replies a
+/// scripted reply sequence draws (t-58176).
+#[cfg(test)]
+mod runtime_tests;
 
 /// The receipt is read by a person (t-48216): plain words, no internal tag.
 #[cfg(test)]
