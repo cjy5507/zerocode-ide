@@ -439,13 +439,13 @@ fn a_sent_request_names_its_client_whatever_came_back_and_an_unsent_one_names_no
     assert!(endpoint.asked().is_empty());
 }
 
-/// A managed server refuses with one status for two reasons — busy and
-/// stopped both come back `503` — and says which in its body. The row keeps
-/// the status as its outcome and, beside it, the server's code
-/// ([`SERVER_ERROR_CODE`]): one of those two, never the body's own words.
-/// Anything else leaves the key off and the status as it came — a word
-/// outside the two, a sentence, HTML, a body past [`MAX_REFUSAL_BYTES`], a
-/// body that broke off or is held back — and a request no server answered, a
+/// A managed server refuses with one status for several reasons — busy,
+/// stopped and restarting all come back `503` — and says which in its body.
+/// The row keeps the status as its outcome and, beside it, the server's code
+/// ([`SERVER_ERROR_CODE`]): one of [`REFUSAL_CODES`], never the body's own
+/// words. Anything else leaves the key off and the status as it came — a word
+/// outside them, a sentence, HTML, a body past [`MAX_REFUSAL_BYTES`], a body
+/// that broke off or is held back — and a request no server answered, a
 /// stopped server's own case, names no server's code. How long a body is
 /// waited on is [`refusal_read`]'s, tried on its own below.
 #[test]
