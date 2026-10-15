@@ -1317,7 +1317,7 @@ function paintFileView(tab) {
       const inert = mdInertLinks;
       mdInertLinks = tab.readOnly === true;
       try {
-        paintMarkdown(body, snapshot.text);
+        paintMarkdownView(body, snapshot.text);
       } finally {
         mdInertLinks = inert;
       }
@@ -1327,10 +1327,7 @@ function paintFileView(tab) {
       body.appendChild(source);
     }
   } else if (showing === "markdown") {
-    paintMarkdown(body, tab.text);
-    // A markdown file can hold diagrams too, which is Orca's `MermaidBlock`
-    // inside its rich markdown rather than a viewer of its own.
-    paintMarkdownDiagrams(body);
+    paintMarkdownView(body, tab.text);
     paintMarkdownReviewTools(body, tab);
   } else if (showing === "csv") paintTable(body, tab.text, extensionOf(tab.path) === "tsv");
   else if (showing === "notebook") paintNotebook(body, tab.text);
@@ -3848,18 +3845,24 @@ function diagramNote(undrawn) {
  *
  * A failed call leaves the source showing. `render_mermaid` reads no files and
  * touches no state, so the only way it fails is the window going away, and
- * blanking the text in that moment would be the worst possible answer. */
+ * blanking the text in that moment would be the worst possible answer. The
+ * window log gets one line for it, without the source: that is the author's
+ * text, and the log is not where it belongs. */
 async function paintDiagram(into, source) {
   let render;
   try {
     render = await invoke("render_mermaid", { source });
-  } catch {
+  } catch (error) {
+    tellWindowLog(`mermaid: the layout was refused (${error})`);
     return;
   }
   // An answer that is not a render leaves the source showing, the same as a
   // failed call. The two are the same situation from here: something went wrong
   // on the way to a layout, and the text is what the person can still use.
-  if (!render) return;
+  if (!render) {
+    tellWindowLog("mermaid: the layout came back empty");
+    return;
+  }
   // The element may have been thrown away while we were waiting — another file
   // opened, or the mode toggled back to source.
   if (!into.isConnected) return;
@@ -3898,15 +3901,43 @@ function paintMermaid(body, source) {
  * A sweep after the fact rather than a branch inside the markdown walker: the
  * walker is synchronous and this is not, and a fence that stays a code block
  * until its diagram arrives is the correct intermediate state — it is what the
- * author typed. */
+ * author typed. So the fence waits inside the block its diagram will fill, and
+ * stays there when the layout fails. The block takes the fence's source lines,
+ * so a review note on them stands beside the diagram, not inside the code the
+ * diagram replaces.
+ *
+ * The text paints first: the observer answers after the frame that shows it,
+ * and the fences on screen are laid out before the rest, which follow in page
+ * order. */
 function paintMarkdownDiagrams(body) {
+  const sources = new Map();
   for (const fence of body.querySelectorAll('pre.md-block[data-language="mermaid"]')) {
-    const source = fence.textContent;
     const block = document.createElement("div");
     block.className = "mmd-block mmd-block--inline";
+    markMarkdownReviewTarget(block, Number(fence.dataset.markdownStartLine), Number(fence.dataset.markdownLine));
+    fence.classList.remove("md-review-target");
     fence.replaceWith(block);
-    paintDiagram(block, source);
+    block.appendChild(fence);
+    sources.set(block, fence.textContent);
   }
+  if (sources.size === 0) return;
+  const watch = new IntersectionObserver((entries) => {
+    watch.disconnect();
+    const shown = entries.filter((entry) => entry.isIntersecting).map((entry) => entry.target);
+    for (const block of new Set([...shown, ...sources.keys()])) {
+      if (block.isConnected) void paintDiagram(block, sources.get(block));
+    }
+  });
+  for (const block of sources.keys()) watch.observe(block);
+}
+
+/* Every markdown view's painter: the words, then their ```mermaid fences as
+ * diagrams — Orca's `MermaidBlock` inside its rich markdown rather than a
+ * viewer of its own. A view that paints with `paintMarkdown` alone shows its
+ * diagrams as code. */
+function paintMarkdownView(body, text) {
+  paintMarkdown(body, text);
+  paintMarkdownDiagrams(body);
 }
 
 /* ---- 렌더된 미리보기 탭 (1-g36) ----
@@ -4298,13 +4329,11 @@ function renderMarkdownPage(page, text, base) {
   page.replaceChildren();
   mdWhere = { base, page };
   try {
-    paintMarkdown(page, text);
+    paintMarkdownView(page, text);
   } finally {
     // 그리는 동안만 서 있는 자리 — 손들은 이미 제 몫을 쥐었다.
     mdWhere = null;
   }
-  // markdown 파일 속의 다이어그램도 여기선 그려진다(파일 뷰어와 같은 문).
-  paintMarkdownDiagrams(page);
   dressMarkdownFences(page);
   // 마지막에 여백이 선다(1-g46) — 다이어그램과 울타리가 제 옷을 다 입은 뒤라,
   // 무엇으로 변했든 블록 하나가 여백 한 칸을 얻는다.
@@ -4321,7 +4350,8 @@ function fenceLanguageWords(fence) {
  *
  * 워커 안의 가지가 아니라 뒤따르는 비질인 이유는 다이어그램 비질과 같다:
  * 울타리는 파일 뷰어에서도 그려지고, 그 판에는 이 장식이 없다. 그리고 이
- * 비질은 다이어그램이 자기 울타리를 가져간 뒤에 온다 — 남은 것만 옷을 입는다. */
+ * 비질은 다이어그램 비질 뒤에 온다 — 그림을 기다리는 울타리도 그림이 올
+ * 때까지는 코드로 서 있으니 다른 울타리처럼 옷을 입는다. */
 function dressMarkdownFences(page) {
   for (const fence of page.querySelectorAll("pre.md-block")) {
     const source = fence.textContent;
@@ -5760,7 +5790,7 @@ async function selectSkillFamily(view, id, variantId = null) {
     host.append(evidence);
     const markdown = skillElement("div", "md-page skills-markdown"); host.append(markdown);
     const previous = mdWhere;
-    try { mdWhere = { base: variant.directory, page: markdown }; paintMarkdown(markdown, detail?.markdown ?? ""); } finally { mdWhere = previous; }
+    try { mdWhere = { base: variant.directory, page: markdown }; paintMarkdownView(markdown, detail?.markdown ?? ""); } finally { mdWhere = previous; }
     view.querySelector(".skills-detail").scrollIntoView({ block: "nearest" });
   } catch (error) { if (generation === state.generation) host.replaceChildren(skillElement("p", "skills-error", skillsError(error))); }
 }
@@ -8720,7 +8750,7 @@ async function paintArtifactPreview(view, row) {
     if (md._painted !== payload.text) {
       md._painted = payload.text;
       md.replaceChildren();
-      paintMarkdown(md, payload.text ?? "");
+      paintMarkdownView(md, payload.text ?? "");
     }
   } else if (payload.kind === "image" && payload.data_url) {
     img.src = payload.data_url;

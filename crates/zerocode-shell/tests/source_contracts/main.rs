@@ -31552,9 +31552,11 @@ mod tests {
             viewer.contains(r#"showing === "mermaid") paintMermaid(body, tab.text)"#),
             "the rich view of a `.mmd` file draws nothing:\n{viewer}"
         );
+        let painter = block_after(source, "function paintMarkdownView(body, text) {");
         assert!(
-            viewer.contains("paintMarkdownDiagrams(body)"),
-            "a diagram inside a markdown file stays a code fence:\n{viewer}"
+            viewer.contains("paintMarkdownView(body, tab.text)")
+                && painter.contains("paintMarkdownDiagrams(body)"),
+            "a diagram inside a markdown file stays a code fence:\n{viewer}\n{painter}"
         );
         let fences = block_after(source, "function paintMarkdownDiagrams(body) {");
         assert!(
