@@ -180,6 +180,9 @@ pub struct RerankShadowRow {
     /// apply road existed, which read as what it was: not applied.
     #[serde(default)]
     pub applied: bool,
+    /// What the server said beside a refusal (t-58193).
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
 }
 
 /// A checked judgment folded into recall's order, and the readings it came
@@ -248,6 +251,7 @@ impl RerankShadowRow {
         self.hedge_fired = hedge.map(|_| call.hedge.is_some());
         self.hedge_won = call.hedge.map(|ran| ran.won);
         self.loser_ms = call.hedge.and_then(|ran| ran.loser_ms);
+        self.server_said = jev_gate::ServerSaid::of(call);
     }
 
     fn new(key: MemoKey, candidates: usize, outcome: String) -> Self {
@@ -273,6 +277,7 @@ impl RerankShadowRow {
             rejected_at: None,
             judged: None,
             applied: false,
+            server_said: jev_gate::ServerSaid::default(),
         }
     }
 }

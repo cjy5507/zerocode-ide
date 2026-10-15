@@ -384,6 +384,56 @@ pub fn millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// What a managed server said beside a refusal (t-55423, t-58193): the code it
+/// refused with, and beside a `502` the provider's refusal of the answer —
+/// `provider_context_truncated` for a request longer than the model reads.
+/// Every seat's row keeps the two under the window's keys, through
+/// [`ServerSaid::of`], so a refused judgment says why; both are absent on an
+/// answer and wherever the server named nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerSaid {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_refusal: Option<String>,
+}
+
+impl ServerSaid {
+    /// What `call`'s server said.
+    #[must_use]
+    pub fn of(call: &SystemOneCall) -> Self {
+        Self {
+            server_error_code: call.server_error_code.map(str::to_string),
+            server_refusal: call.server_refusal.map(str::to_string),
+        }
+    }
+
+    /// The words written onto `row`, a row kept as JSON.
+    pub fn stamp(&self, row: &mut Value) {
+        let said = serde_json::to_value(self);
+        if let (Ok(Value::Object(said)), Some(fields)) = (said, row.as_object_mut()) {
+            fields.extend(said);
+        }
+    }
+
+    /// `row` written with the words beside it, for a row whose type is not
+    /// zo's own to add them to.
+    #[must_use]
+    pub fn beside<R: Serialize>(self, row: R) -> Beside<R> {
+        Beside { row, said: self }
+    }
+}
+
+/// A row and what its server said, written as one ([`ServerSaid::beside`]).
+#[derive(Serialize)]
+pub struct Beside<R> {
+    #[serde(flatten)]
+    row: R,
+    #[serde(flatten)]
+    said: ServerSaid,
+}
+
 /// Research replays make one paid attempt and keep their own explicit receipts.
 /// The supplied request has already passed the same settings and consent door.
 #[cfg(test)]
@@ -657,6 +707,7 @@ mod tests {
             reading: None,
             rule: None,
             hangul_permille: None,
+            server_said: ServerSaid::default(),
         }
     }
 
@@ -684,6 +735,7 @@ mod tests {
             rejected_at: None,
             judged: None,
             applied: false,
+            server_said: ServerSaid::default(),
         }
     }
 

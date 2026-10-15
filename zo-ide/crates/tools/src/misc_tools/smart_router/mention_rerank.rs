@@ -265,6 +265,9 @@ pub struct MentionRerankRow {
     /// surface then DID reorder — it does not when the selection had moved —
     /// is the label's `applied`, written by the surface that knows.
     pub applied: bool,
+    /// What the server said beside a refusal (t-58193).
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
 }
 
 /// A checked judgment beside the fuzzy page it was asked about.
@@ -302,6 +305,7 @@ impl MentionRerankRow {
             judged: None,
             route_use: ROUTE_USE_FALLBACK.to_string(),
             applied: false,
+            server_said: jev_gate::ServerSaid::default(),
         }
     }
 
@@ -312,6 +316,7 @@ impl MentionRerankRow {
         self.retries = call.retries;
         self.requests = call.requests;
         self.redacted_lines = withheld;
+        self.server_said = jev_gate::ServerSaid::of(call);
     }
 }
 

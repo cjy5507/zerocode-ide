@@ -169,6 +169,9 @@ pub struct SkillSearchRow {
     /// the number that says whether a search that answered found anything.
     #[serde(default)]
     pub under_floor: usize,
+    /// What the server said beside a refusal (t-58193).
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
 }
 
 /// One skill a search handed back.
@@ -282,6 +285,7 @@ impl SkillSearchRow {
             rejected_at: None,
             chosen: Vec::new(),
             under_floor: 0,
+            server_said: jev_gate::ServerSaid::default(),
         }
     }
 }
@@ -899,6 +903,7 @@ async fn ask_wide(
     row.retries = call.retries;
     row.elapsed_ms = jev_gate::millis(call.elapsed);
     row.redacted_lines = Some(withheld);
+    row.server_said = jev_gate::ServerSaid::of(&call);
     let response = match call.outcome {
         Ok(response) => response,
         Err(failure) => {
@@ -951,6 +956,7 @@ async fn ask_narrow(
     row.retries = row.retries.saturating_add(call.retries);
     row.elapsed_ms = row.elapsed_ms.saturating_add(jev_gate::millis(call.elapsed));
     row.redacted_lines = Some(row.redacted_lines.unwrap_or(0).saturating_add(withheld));
+    row.server_said = jev_gate::ServerSaid::of(&call);
     let response = call.outcome.map_err(|failure| NarrowFailure::Wire(failure.ledger_token()))?;
     row.input_tokens = Some(row.input_tokens.unwrap_or(0).saturating_add(response.usage.input_tokens));
     let winner = read_narrow(&response, candidates, &details).map_err(|rule| NarrowFailure::Refused(rule.to_string()))?;
@@ -1128,6 +1134,7 @@ fn fold(
     let mut row = SkillSearchRow::new(key, candidates.len(), shards.len(), String::new());
     let mut readings: Vec<SkillReading> = Vec::new();
     let mut first_refusal: Option<Refusal> = None;
+    let mut first_said = jev_gate::ServerSaid::default();
     let (mut requests, mut withheld, mut input_tokens, mut elapsed, mut retries) = (0, 0, 0, 0, 0);
     for answer in answers {
         withheld += answer.withheld;
@@ -1149,6 +1156,9 @@ fn fold(
             Err(refusal) => {
                 if first_refusal.is_none() {
                     first_refusal = Some(refusal);
+                    if let Some(call) = &answer.call {
+                        first_said = jev_gate::ServerSaid::of(call);
+                    }
                 }
             }
         }
@@ -1178,6 +1188,7 @@ fn fold(
     row.outcome = refusal.outcome;
     row.rejected = refusal.rejected;
     row.rejected_at = refusal.rejected_at;
+    row.server_said = first_said;
     (row, Vec::new())
 }
 

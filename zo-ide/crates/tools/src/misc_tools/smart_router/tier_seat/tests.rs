@@ -459,6 +459,7 @@ fn a_model_tier_row_written_with_at_ms_counts_in_its_window() {
         requests: 1,
         model: None,
         input_tokens: Some(10),
+        server_said: crate::misc_tools::smart_router::jev_gate::ServerSaid::default(),
     };
     let new = serde_json::to_value(&row).expect("a tier row serializes");
     assert_eq!(new.get(AT.canonical), Some(&serde_json::json!(NOW_MS)), "a new row says `at`: {new}");

@@ -183,12 +183,15 @@ fn replay_priced(plan: &Plan, output: &Path, client: &SystemOneClient, cap: usiz
         let call = api::sync_bridge::run_blocking(jev_gate::send_once(cleared, client, WALL));
         wire_requests += call.requests;
         let elapsed = jev_gate::millis(call.elapsed);
+        let said = jev_gate::ServerSaid::of(&call);
         let response = match call.outcome {
             Ok(response) => response,
             Err(failure) => {
-                write_line(&mut journal, &json!({"kind":"result","baseCaseId":row.base_case_id,
+                let mut line = json!({"kind":"result","baseCaseId":row.base_case_id,
                     "outcome":failure.ledger_token(),"requests":call.requests,"retries":call.retries,
-                    "elapsedMs":elapsed,"costUnknown":call.requests>0}))?;
+                    "elapsedMs":elapsed,"costUnknown":call.requests>0});
+                said.stamp(&mut line);
+                write_line(&mut journal, &line)?;
                 return Err("replay failed; an uncertain bill is not retried".into());
             }
         };
