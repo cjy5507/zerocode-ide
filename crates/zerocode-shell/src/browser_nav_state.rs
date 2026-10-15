@@ -92,7 +92,7 @@ impl NavigationIds {
 
     /// `None` while the loads are unknown.
     pub(super) fn loading(&self) -> Option<bool> {
-        self.known.then(|| !self.started.is_empty())
+        self.known.then_some(!self.started.is_empty())
     }
 }
 
