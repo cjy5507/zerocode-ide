@@ -114,6 +114,9 @@ pub(crate) struct Policy {
     pub(crate) git_budget: Duration,
     /// [`PROMOTE_GIT_BUDGET`], or a shorter one a test injects to outlive.
     pub(crate) promote_budget: Duration,
+    /// How long a press on promote waits for its end before it answers "still promoting":
+    /// [`ANSWER_BUDGET`], or a shorter one a test injects.
+    pub(crate) answer_budget: Duration,
     /// The git a fast-forward runs: `git`, or a test's slow or meddling stand-in.
     pub(crate) git: PathBuf,
 }
@@ -125,6 +128,7 @@ impl Policy {
             pinned_base: None,
             git_budget: GIT_BUDGET,
             promote_budget: PROMOTE_GIT_BUDGET,
+            answer_budget: ANSWER_BUDGET,
             git: PathBuf::from("git"),
         }
     }
