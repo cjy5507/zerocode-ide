@@ -769,7 +769,7 @@ pub async fn serve(
     engine: Arc<Engine>,
     failed: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<Running> {
-    serve_on(model, engine, failed, None).await
+    serve_on(model, engine, failed, None, Limits::DEFAULT).await
 }
 
 #[cfg(all(test, unix))]
@@ -782,13 +782,14 @@ pub(crate) async fn serve_limited(
     serve_with(model, engine, failed, None, limits).await
 }
 
-pub async fn serve_on(
+pub(crate) async fn serve_on(
     model: &Model,
     engine: Arc<Engine>,
     failed: Arc<dyn Fn() + Send + Sync>,
     listener: Option<std::net::TcpListener>,
+    limits: Limits,
 ) -> Result<Running> {
-    serve_with(model, engine, failed, listener, Limits::DEFAULT).await
+    serve_with(model, engine, failed, listener, limits).await
 }
 
 async fn serve_with(

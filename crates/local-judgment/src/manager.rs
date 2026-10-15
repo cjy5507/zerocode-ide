@@ -126,6 +126,40 @@ struct StartOptions {
     require_listener: bool,
 }
 
+/// When a planned restart's wait ends: the app waits on tokio's clock, and a
+/// test holds a clock of its own that moves only when the test moves it.
+pub(crate) trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+    /// Runs `due` on `runtime` once `wait` has passed.
+    fn after(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        wait: Duration,
+        due: Box<dyn FnOnce() + Send>,
+    );
+}
+
+/// The clock the app runs on.
+struct Tokio;
+
+impl Clock for Tokio {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn after(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        wait: Duration,
+        due: Box<dyn FnOnce() + Send>,
+    ) {
+        runtime.spawn(async move {
+            tokio::time::sleep(wait).await;
+            due();
+        });
+    }
+}
+
 struct SwitchRequest {
     model: Model,
     profile: RuntimeProfile,
@@ -236,6 +270,9 @@ struct Inner {
     model_switch: Option<ModelSwitchInfo>,
     restoring: bool,
     held_listeners: BTreeMap<String, StdListener>,
+    recovering: Option<Running>,
+    clock: Arc<dyn Clock>,
+    serve_limits: engine::Limits,
 }
 
 pub struct Manager {
@@ -387,6 +424,9 @@ impl Manager {
                 model_switch: None,
                 restoring: false,
                 held_listeners: BTreeMap::new(),
+                recovering: None,
+                clock: Arc::new(Tokio),
+                serve_limits: engine::Limits::DEFAULT,
             }),
             sink,
             closed: AtomicBool::new(false),
@@ -1397,6 +1437,7 @@ impl Manager {
             native_pipe_check(&provider, &engine, cancel).await?;
         }
         let manager = Arc::downgrade(self);
+        let limits = lock(&self.inner).serve_limits;
         let running = engine::serve_on(
             model,
             engine,
@@ -1406,6 +1447,7 @@ impl Manager {
                 }
             }),
             Some(listener),
+            limits,
         )
         .await?;
         let mut inner = lock(&self.inner);
@@ -2370,6 +2412,26 @@ pub(crate) mod test_support {
         fs::write(executable, b"fixture").unwrap();
         manager.store.commit_runtime(&mut stage, &profile).unwrap();
         manager
+    }
+
+    /// Makes the manager wait for its restarts on `clock`.
+    #[cfg(unix)]
+    pub fn use_clock(manager: &Manager, clock: Arc<dyn Clock>) {
+        lock(&manager.inner).clock = clock;
+    }
+
+    /// Serves every server the manager starts from here on under `limits`.
+    #[cfg(unix)]
+    pub fn serve_limits(manager: &Manager, limits: engine::Limits) {
+        lock(&manager.inner).serve_limits = limits;
+    }
+
+    /// Lets the ended server that waits for its restart go, and its port
+    /// with it, as when another process takes the port meanwhile.
+    #[cfg(unix)]
+    pub fn lose_waiting_port(manager: &Manager) {
+        let waiting = lock(&manager.inner).recovering.take();
+        drop(waiting);
     }
 
     #[cfg(unix)]
