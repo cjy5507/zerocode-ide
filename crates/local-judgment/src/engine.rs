@@ -821,7 +821,9 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
 }
 
 /// The task a request names in its body, kept with a deadline stop so the
-/// next stop says which seat sent it: a short plain name, never free text.
+/// next stop says which seat sent it: a short plain name, never free text,
+/// and never a name the private-value table would mask, as a key's shape
+/// fits a name's characters.
 fn task_name(request: &Value) -> Option<String> {
     request
         .get("task")
@@ -831,6 +833,7 @@ fn task_name(request: &Value) -> Option<String> {
                 && task
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+                && zerocode_core::private_data::mask(task).text == *task
         })
         .map(str::to_owned)
 }
