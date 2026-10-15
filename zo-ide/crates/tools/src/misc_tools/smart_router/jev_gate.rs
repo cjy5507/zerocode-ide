@@ -379,11 +379,21 @@ impl JevDoor {
     /// stop, a remote provider when it is overloaded. Every seat waits, one
     /// that applies its judgment too, since the server would refuse it.
     ///
+    /// The rows are read where the seat writes them: a guard's in its own
+    /// ledger under the config home, one for every project on this machine
+    /// ([`super::tool_guard::guard_ledger_of`]), every other seat's in this
+    /// project's folder. Each is the provider's own folder
+    /// (`runtime::judgment_evidence_dir`), so a wait one provider named
+    /// holds no seat asking another.
+    ///
     /// Read from the tail the hedge reads alone: no wait is longer than one
     /// [`REST`], and a tail without a request lets one go, whose answer
     /// names the wait again.
     fn asked_to_wait(&self, row: &JevUse) -> Option<i64> {
-        let ledger = self.ledgers.as_deref()?.join(row.ledger);
+        let ledger = match super::tool_guard::guard_ledger_of(row) {
+            Some(own) => own,
+            None => self.ledgers.as_deref()?.join(row.ledger),
+        };
         let tail = last_shadow_lines(&ledger, HEDGE_SAMPLE_ROWS);
         let newest = tail
             .iter()

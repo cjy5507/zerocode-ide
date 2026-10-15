@@ -169,6 +169,14 @@ fn guard_ledger(seat: &JevUse) -> PathBuf {
     runtime::judgment_evidence_dir(&runtime::default_config_home().join(REQUESTS_DIR)).join(seat.ledger)
 }
 
+/// Where `seat` keeps its rows when it is one of the guards, its own ledger
+/// under the config home ([`guard_ledger`]), and `None` for every other
+/// seat, whose rows live in the project's folder. The door reads a guard's
+/// server's wait there (t-58193).
+pub(super) fn guard_ledger_of(seat: &JevUse) -> Option<PathBuf> {
+    [COMMAND.seat, TEXT.seat].iter().any(|guard| guard.id == seat.id).then(|| guard_ledger(seat))
+}
+
 /// Where the command guard's ledger lives.
 #[must_use]
 pub fn command_guard_path() -> PathBuf {
