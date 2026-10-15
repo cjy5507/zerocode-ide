@@ -1899,6 +1899,70 @@ mod tests {
         assert_eq!(row["serverRefusal"], "provider_context_truncated", "{row}");
     }
 
+    /// A recall whose last [`jev_gate::UNANSWERED_BEFORE_REST`] requests went
+    /// unanswered rests (t-58193): nothing reaches the server, nothing is
+    /// counted, and its row says `resting` and spends no request.
+    #[test]
+    fn a_resting_recall_sends_nothing_and_says_so() {
+        let mock = Mock::serving(200, reply_for(&[1]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+        let path = home.path().join(RECALL.ledger);
+        for _ in 0..jev_gate::UNANSWERED_BEFORE_REST {
+            let model = jev_gate::model_key(SYSTEMONE_MODEL);
+            let key = MemoKey::for_reading("a past reading", &[], model);
+            let mut row = RerankShadowRow::new(key, 1, SystemOneFailure::Http(502).ledger_token());
+            row.requests = Some(1);
+            append_shadow_row(&path, &row, SHADOW_LEDGER_MAX_BYTES).expect("an unanswered row");
+        }
+
+        let door = door_with(None, home.path());
+        let row = waited_on(&client, &door, Duration::from_secs(5), "a resting reading");
+
+        assert_eq!(row.outcome, "resting");
+        assert_eq!(row.requests, Some(0), "{row:?}");
+        assert!(mock.requests().is_empty(), "a resting seat sends nothing");
+        assert_eq!(counted(home.path()), 0);
+    }
+
+    /// A recall's rest ends by itself (t-58193): once [`jev_gate::REST`] has
+    /// passed since its newest unanswered request, the next reading goes to
+    /// the server, and an answer to it ends the rest, so the one after goes
+    /// too — a provider back from an outage is found without anyone's word.
+    #[test]
+    fn a_rested_recall_tries_once_and_an_answer_ends_its_rest() {
+        let mock = Mock::serving(200, reply_for(&[1]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+        let path = home.path().join(RECALL.ledger);
+        let unanswered_at = |at: u64| {
+            let _ = std::fs::remove_file(&path);
+            for _ in 0..jev_gate::UNANSWERED_BEFORE_REST {
+                let model = jev_gate::model_key(SYSTEMONE_MODEL);
+                let key = MemoKey::for_reading("a past reading", &[], model);
+                let failed = SystemOneFailure::Http(502).ledger_token();
+                let mut row = RerankShadowRow::new(key, 1, failed);
+                row.requests = Some(1);
+                row.at = at;
+                append_shadow_row(&path, &row, SHADOW_LEDGER_MAX_BYTES).expect("an unanswered row");
+            }
+        };
+        let door = door_with(None, home.path());
+        let minute = 60_000;
+        let rest = u64::try_from(jev_gate::REST.as_millis()).expect("a rest of minutes");
+
+        unanswered_at(unix_millis() - minute);
+        let resting = waited_on(&client, &door, Duration::from_secs(5), "a reading in a rest");
+        assert_eq!(resting.outcome, "resting");
+        unanswered_at(unix_millis() - rest - minute);
+        let tried = waited_on(&client, &door, Duration::from_secs(5), "the try after a rest");
+        assert_eq!(tried.outcome, RERANK_OUTCOME_ANSWERED, "a rest that has passed lets one go");
+        append_shadow_row(&path, &tried, SHADOW_LEDGER_MAX_BYTES).expect("the try's row");
+        let next = waited_on(&client, &door, Duration::from_secs(5), "a reading after an answer");
+        assert_eq!(next.outcome, RERANK_OUTCOME_ANSWERED, "an answer ends the rest");
+        assert_eq!(mock.requests().len(), 2, "the try and the reading after it, nothing more");
+    }
+
     /// A sample too small to name a rank is no plan at all: the judgment takes
     /// the road it took before, one request, and the row says nothing about a
     /// hedge it never had.
