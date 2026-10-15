@@ -1707,3 +1707,374 @@ mod hook_contract {
         }
     }
 }
+
+/// Where the request a decline stood on went (m-59387): the same words are
+/// taken for its repeat only while the client their loop would send them on
+/// names the endpoint that request went to when it went out, on the model it
+/// went out on. Every runtime here has both clients installed, each at its own
+/// endpoint, so each loop shows that what counts is the client that loop
+/// really sends on: the sync one for the headless loop, the async one for the
+/// streaming dispatcher and for deep mode.
+mod destination {
+    use std::sync::{Arc, Mutex};
+
+    use super::super::DeepGateConfig;
+    use super::{
+        first_words, standing_notices, turn, ApiClient, ApiRequest, AssistantEvent, AsyncApiClient,
+        BlockId, ConversationRuntime, Declining, Future, Hermetic, PermissionMode, PermissionPolicy,
+        Pin, RenderBlock, RuntimeError, StaticToolExecutor, Trace, UNROUTED, WORDS,
+    };
+    use crate::message_stream::types::WireModelSource;
+
+    /// Where the sync client sends.
+    const SYNC_AT: &str = "https://api.anthropic.com/v1/messages";
+
+    /// Where the async client sends: another endpoint, with a port and a path.
+    const ASYNC_AT: &str = "https://gateway.example.com:8443/anthropic/v1/messages";
+
+    /// Where a client that moved sends.
+    const ELSEWHERE: &str = "https://proxy.example.com/v1/messages";
+
+    /// Where a client says it sends — nothing when it cannot say — and where
+    /// it will say so once the next request it sends is out.
+    struct Place {
+        now: Mutex<Option<&'static str>>,
+        once_out: Mutex<Option<&'static str>>,
+    }
+
+    impl Place {
+        fn at(endpoint: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                now: Mutex::new(Some(endpoint)),
+                once_out: Mutex::new(None),
+            })
+        }
+
+        /// From now on the client says it sends to `endpoint`, or cannot say.
+        fn move_to(&self, endpoint: Option<&'static str>) {
+            *self.now.lock().expect("the place") = endpoint;
+        }
+
+        /// The client says it sends to `endpoint` from while its next request
+        /// is out.
+        fn move_while_the_next_request_is_out(&self, endpoint: &'static str) {
+            *self.once_out.lock().expect("the place") = Some(endpoint);
+        }
+
+        fn now(&self) -> Option<&'static str> {
+            *self.now.lock().expect("the place")
+        }
+
+        /// A request is out.
+        fn sending(&self) {
+            let moved = self.once_out.lock().expect("the place").take();
+            if let Some(endpoint) = moved {
+                self.move_to(Some(endpoint));
+            }
+        }
+    }
+
+    /// A client of `provider` at `place`, for either loop.
+    struct Located {
+        provider: Arc<Declining>,
+        place: Arc<Place>,
+    }
+
+    impl Located {
+        fn new(provider: &Arc<Declining>, place: &Arc<Place>) -> Self {
+            Self {
+                provider: Arc::clone(provider),
+                place: Arc::clone(place),
+            }
+        }
+
+        fn reply(&self, request: ApiRequest) -> Vec<AssistantEvent> {
+            self.place.sending();
+            self.provider.reply(request)
+        }
+    }
+
+    impl ApiClient for Located {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(self.reply(request))
+        }
+    }
+
+    impl AsyncApiClient for Located {
+        fn stream_async<'a>(
+            &'a self,
+            request: ApiRequest,
+            _render_tx: tokio::sync::mpsc::Sender<RenderBlock>,
+            _text_block_id: BlockId,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>>
+        {
+            Box::pin(async move { Ok(self.reply(request)) })
+        }
+    }
+
+    /// The places of a runtime's two clients.
+    struct Clients {
+        sync: Arc<Place>,
+        streaming: Arc<Place>,
+    }
+
+    impl Clients {
+        /// The sync client at [`SYNC_AT`], the async one at [`ASYNC_AT`].
+        fn new() -> Self {
+            Self {
+                sync: Place::at(SYNC_AT),
+                streaming: Place::at(ASYNC_AT),
+            }
+        }
+
+        /// The place of the client `turn_loop` sends its requests on.
+        fn sent_on(&self, turn_loop: Loop) -> &Arc<Place> {
+            match turn_loop {
+                Loop::Headless => &self.sync,
+                Loop::Streaming | Loop::Deep => &self.streaming,
+            }
+        }
+
+        /// The place of the client `turn_loop` never sends on.
+        fn unused_by(&self, turn_loop: Loop) -> &Arc<Place> {
+            match turn_loop {
+                Loop::Headless => &self.streaming,
+                Loop::Streaming | Loop::Deep => &self.sync,
+            }
+        }
+    }
+
+    /// The loops a turn runs on: the headless one, the streaming dispatcher,
+    /// and the dispatcher in deep mode, whose legs run as internal turns.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Loop {
+        Headless,
+        Streaming,
+        Deep,
+    }
+
+    const LOOPS: [Loop; 3] = [Loop::Headless, Loop::Streaming, Loop::Deep];
+
+    /// The runtime every loop drives.
+    type Runtime = ConversationRuntime<Located, StaticToolExecutor>;
+
+    impl Loop {
+        /// Opus 5.5 on this loop with both clients installed, each a client of
+        /// `provider` at its place in `clients`.
+        fn runtime(self, env: &Hermetic, provider: &Arc<Declining>, clients: &Clients) -> Runtime {
+            let mut runtime = ConversationRuntime::new(
+                env.session(),
+                Located::new(provider, &clients.sync),
+                StaticToolExecutor::new(),
+                PermissionPolicy::new(PermissionMode::DangerFullAccess),
+                vec!["system".to_string()],
+            )
+            .with_async_api_client(Arc::new(Located::new(provider, &clients.streaming)));
+            if self == Self::Deep {
+                runtime.set_deep_gate(Some(DeepGateConfig::default()));
+            }
+            runtime.set_context_model("claude-opus-5-5");
+            runtime.set_workspace_cwd(env.cwd.clone());
+            runtime
+        }
+
+        /// One turn of `words` on this loop.
+        fn run(self, runtime: &mut Runtime, words: &str) {
+            match self {
+                Self::Headless => {
+                    runtime.run_turn(words, None).expect("the turn ends cleanly");
+                }
+                Self::Streaming | Self::Deep => {
+                    turn(runtime, words, Vec::new()).0.expect("the turn ends cleanly");
+                }
+            }
+        }
+
+        /// Turn one surfaces the decline on [`WORDS`]; then `between` runs, and
+        /// turn two asks once and the decline stands.
+        fn stand(self, runtime: &mut Runtime, between: impl FnOnce()) {
+            self.run(runtime, WORDS);
+            between();
+            self.run(runtime, WORDS);
+            assert_eq!(
+                standing_notices(&runtime.session.messages),
+                1,
+                "{self:?}: the decline stood once"
+            );
+        }
+
+        /// [`WORDS`] once more on this loop: the words of the first request the
+        /// turn made, nothing when it made none, and how many it made.
+        fn again(self, runtime: &mut Runtime, provider: &Declining) -> (Option<String>, usize) {
+            let before = provider.sent();
+            self.run(runtime, WORDS);
+            let words = provider.asked(before).as_ref().and_then(first_words).map(str::to_string);
+            (words, provider.sent() - before)
+        }
+    }
+
+    /// The words each loop asked, out of what [`Loop::again`] answered.
+    fn asked_words(asked: &[(Loop, Option<String>, usize)]) -> Vec<(Loop, Option<&str>)> {
+        asked.iter().map(|(turn_loop, words, _)| (*turn_loop, words.as_deref())).collect()
+    }
+
+    /// The same words on every loop after `change`, once the decline stood:
+    /// what [`Loop::again`] answered, with the loop it ran on.
+    fn asked_after(change: fn(&Clients, Loop)) -> Vec<(Loop, Option<String>, usize)> {
+        let mut asked = Vec::new();
+        for turn_loop in LOOPS {
+            let env = Hermetic::new(&format!("destination-{turn_loop:?}"));
+            let provider = Declining::new(UNROUTED);
+            let clients = Clients::new();
+            let mut runtime = turn_loop.runtime(&env, &provider, &clients);
+            turn_loop.stand(&mut runtime, || {});
+            change(&clients, turn_loop);
+            assert_eq!(
+                runtime.wire_model(),
+                Some(("claude-opus-5-5", WireModelSource::Session)),
+                "{turn_loop:?}: the model the decline stood on"
+            );
+            let (words, requests) = turn_loop.again(&mut runtime, &provider);
+            asked.push((turn_loop, words, requests));
+        }
+        println!("asked, and the requests each turn made: {asked:?}");
+        asked
+    }
+
+    /// The client a loop sends on names another endpoint now, on the model
+    /// the decline stood on: the same words would go somewhere else, so they
+    /// are asked, on every loop.
+    #[test]
+    fn the_same_words_are_asked_once_the_client_their_loop_sends_on_has_moved() {
+        let asked = asked_after(|clients, turn_loop| {
+            clients.sent_on(turn_loop).move_to(Some(ELSEWHERE));
+        });
+        assert_eq!(
+            asked_words(&asked),
+            LOOPS.map(|turn_loop| (turn_loop, Some(WORDS))),
+            "the same words are asked on every loop"
+        );
+    }
+
+    /// The client a loop sends on cannot say where it sends any more, so
+    /// nothing proves the same words would go where the decline stood: they
+    /// are asked, on every loop.
+    #[test]
+    fn the_same_words_are_asked_once_the_client_their_loop_sends_on_cannot_say_where() {
+        let asked = asked_after(|clients, turn_loop| clients.sent_on(turn_loop).move_to(None));
+        assert_eq!(
+            asked_words(&asked),
+            LOOPS.map(|turn_loop| (turn_loop, Some(WORDS))),
+            "the same words are asked on every loop"
+        );
+    }
+
+    /// The client a loop sends on never could say where it sends, neither for
+    /// the request the decline stood on nor now. Two places nobody knows are
+    /// never the same place: the same words are asked, on every loop.
+    #[test]
+    fn the_same_words_are_asked_when_no_client_ever_said_where_their_loop_sends() {
+        let mut asked = Vec::new();
+        for turn_loop in LOOPS {
+            let env = Hermetic::new(&format!("destination-unknown-{turn_loop:?}"));
+            let provider = Declining::new(UNROUTED);
+            let clients = Clients::new();
+            clients.sent_on(turn_loop).move_to(None);
+            let mut runtime = turn_loop.runtime(&env, &provider, &clients);
+            turn_loop.stand(&mut runtime, || {});
+            let (words, requests) = turn_loop.again(&mut runtime, &provider);
+            asked.push((turn_loop, words, requests));
+        }
+        println!("asked, and the requests each turn made: {asked:?}");
+        assert_eq!(
+            asked_words(&asked),
+            LOOPS.map(|turn_loop| (turn_loop, Some(WORDS))),
+            "the same words are asked on every loop"
+        );
+    }
+
+    /// The client a loop sends on moved while the request the decline stood
+    /// on was out. Where that request went is where the client said it sends
+    /// when the request went out, not where it says so once the decline is
+    /// kept: the same words would go somewhere else, so they are asked.
+    #[test]
+    fn the_same_words_are_asked_when_the_client_moved_while_the_declined_request_was_out() {
+        let mut asked = Vec::new();
+        for turn_loop in LOOPS {
+            let env = Hermetic::new(&format!("destination-in-flight-{turn_loop:?}"));
+            let provider = Declining::new(UNROUTED);
+            let clients = Clients::new();
+            let mut runtime = turn_loop.runtime(&env, &provider, &clients);
+            turn_loop.stand(&mut runtime, || {
+                clients.sent_on(turn_loop).move_while_the_next_request_is_out(ELSEWHERE);
+            });
+            assert_eq!(
+                clients.sent_on(turn_loop).now(),
+                Some(ELSEWHERE),
+                "{turn_loop:?}: the client moved while the request was out"
+            );
+            let (words, requests) = turn_loop.again(&mut runtime, &provider);
+            asked.push((turn_loop, words, requests));
+        }
+        println!("asked, and the requests each turn made: {asked:?}");
+        assert_eq!(
+            asked_words(&asked),
+            LOOPS.map(|turn_loop| (turn_loop, Some(WORDS))),
+            "the same words are asked on every loop"
+        );
+    }
+
+    /// Only the client a loop never sends on moved: the same words would go
+    /// where the decline stood, so they send nothing and record nothing. What
+    /// counts is the client the loop really sends on.
+    #[test]
+    fn the_same_words_send_nothing_when_only_a_client_their_loop_never_uses_moved() {
+        for turn_loop in LOOPS {
+            let env = Hermetic::new(&format!("destination-unused-{turn_loop:?}"));
+            let provider = Declining::new(UNROUTED);
+            let clients = Clients::new();
+            let mut runtime = turn_loop.runtime(&env, &provider, &clients);
+            turn_loop.stand(&mut runtime, || {});
+            let stood = Trace::of(&provider, &runtime.session.messages, &env);
+            clients.unused_by(turn_loop).move_to(Some(ELSEWHERE));
+
+            turn_loop.run(&mut runtime, WORDS);
+            assert_eq!(
+                Trace::of(&provider, &runtime.session.messages, &env),
+                stood,
+                "{turn_loop:?}: the repeat sent nothing and recorded nothing"
+            );
+        }
+    }
+
+    /// A host installs a fresh client every turn. A fresh client at the same
+    /// endpoint sends the same words where the decline stood, so they send
+    /// nothing and record nothing.
+    #[test]
+    fn the_same_words_send_nothing_through_a_fresh_client_at_the_same_endpoint() {
+        for turn_loop in LOOPS {
+            let env = Hermetic::new(&format!("destination-fresh-{turn_loop:?}"));
+            let provider = Declining::new(UNROUTED);
+            let clients = Clients::new();
+            let mut runtime = turn_loop.runtime(&env, &provider, &clients);
+            turn_loop.stand(&mut runtime, || {});
+            let stood = Trace::of(&provider, &runtime.session.messages, &env);
+            match turn_loop {
+                Loop::Headless => {
+                    *runtime.api_client_mut() = Located::new(&provider, &clients.sync);
+                }
+                Loop::Streaming | Loop::Deep => {
+                    let fresh = Located::new(&provider, &clients.streaming);
+                    runtime.set_async_api_client(Arc::new(fresh));
+                }
+            }
+
+            turn_loop.run(&mut runtime, WORDS);
+            assert_eq!(
+                Trace::of(&provider, &runtime.session.messages, &env),
+                stood,
+                "{turn_loop:?}: the repeat sent nothing and recorded nothing"
+            );
+        }
+    }
+}
