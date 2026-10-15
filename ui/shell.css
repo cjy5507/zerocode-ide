@@ -13806,6 +13806,17 @@ body.mod-held .term-link,
   clip-path: inset(50%);
 }
 
+/* The same for a pane's conversation behind the pane's screen (`placePaneChat`):
+ * the slot is its box, as it is the screen's. A named pane's slot also holds
+ * the name bar, so there the page stands a bar taller than it was and lays out
+ * again when it comes back — its styles still kept. */
+.pane-slot > .pane-chat.is-behind {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  clip-path: inset(50%);
+}
+
 .worker-head {
   display: flex;
   flex-wrap: wrap;

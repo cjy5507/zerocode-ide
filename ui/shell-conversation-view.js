@@ -490,12 +490,15 @@ function chatPlaceAcross(list, run) {
  * its only numbers:
  *  - `pages`: a leaf keeps this many conversations aside, the ones looked at
  *    last; the oldest goes.
- *  - `behind`: of them, this many stay in the document behind the front — the
- *    ones left last; the others wait out of it as the first cut kept them, the
- *    reader's place written on their run (`keepChatPlace`).
- *  - `leaves`: so many leaves of the window keep pages behind — those that set
- *    one aside last; the others' go out of the document. The window holds at
- *    most `leaves × behind` pages behind (22 MB at 400 turns).
+ *  - `behind`: of the pages behind a leaf's front — conversations set aside,
+ *    and its view while it shows another tab (`standStageSurface`) — or behind
+ *    a pane's screen (its conversation, `placePaneChat`), this many stand
+ *    rendered: the ones left last. A page set aside waits out of the document
+ *    as the first cut kept it, the reader's place written on its run
+ *    (`keepChatPlace`); a view or a pane's conversation hides as before.
+ *  - `leaves`: so many leaves and panes of the window keep pages behind — those
+ *    that set one behind last (`sweepBehind`). The window holds at most
+ *    `leaves × behind` pages behind (22 MB at 400 turns).
  *  - `ttlMs`: a page kept longer goes, and a closed tab's goes at once
  *    (`releaseWorkerPage`).
  * When the window must give memory back, `sweepParkedPages(host, now,
@@ -532,15 +535,16 @@ function frontChatHost(host, coming) {
   if (leaving) {
     keepChatPlace(leaving.turns);
     leaveHelperPageStop(host);
-    standBehind(host, true);
-    parked.set(leaving.id, {
+    const aside = {
       page: leaving,
       host,
       pane: coming.pane,
       at: Date.now(),
       behind: true,
       timer: setTimeout(() => sweepParkedPages(groups.get(coming.pane)?.workerView), CHAT_PARK.ttlMs),
-    });
+    };
+    parked.set(leaving.id, aside);
+    standBehind(host, true, { unit: `leaf:${coming.pane}`, demote: () => takeOutOfDocument(aside) });
   } else {
     // What stood here is not kept — a run's page, a closed conversation's, or
     // nothing: its host goes with it.
@@ -604,15 +608,84 @@ function leaveWorkerHost(host) {
   host.remove();
 }
 
+/* Every page standing behind the front in the window, by its host — a
+ * conversation set aside in its leaf, a leaf's view while the leaf shows
+ * another tab (`standStageSurface`), a pane's conversation while the pane
+ * shows its screen (`placePaneChat`): where it stands (`unit`, its leaf or its
+ * pane — each one of the window's `CHAT_PARK.leaves`), since when, and how it
+ * leaves when the window keeps no more of them (`demote`: out of the document
+ * for a page set aside, hidden for a view or a pane's conversation, as they
+ * were before t-55369). */
+const chatBehind = new Map();
+
 /* A page set behind the front, or brought back: one class (shell.css draws it
- * nothing and lets no pointer reach it) and the one attribute that hides it
- * from assistive technology. The focus it held goes with it. */
-function standBehind(host, behind) {
+ * nothing and lets no pointer reach it), the one attribute that hides it from
+ * assistive technology, and its line in the window's book. The focus it held
+ * goes with it. */
+function standBehind(host, behind, { unit = null, demote = null } = {}) {
   if (behind && host.contains(document.activeElement)) document.activeElement.blur();
   if (behind) retireWorkerTemplate(host);
   host.classList.toggle("is-behind", behind);
-  if (behind) host.setAttribute("aria-hidden", "true");
-  else host.removeAttribute("aria-hidden");
+  if (behind) {
+    host.setAttribute("aria-hidden", "true");
+    chatBehind.set(host, { unit, at: Date.now(), demote });
+  } else {
+    host.removeAttribute("aria-hidden");
+    chatBehind.delete(host);
+  }
+}
+
+/* The pages behind the front the window keeps standing: in each leaf or pane
+ * the last `CHAT_PARK.behind`, and of the leaves and panes the
+ * `CHAT_PARK.leaves` that set one behind last — none when the window must give
+ * memory back (`tight`). The others go as `demote` says. */
+function sweepBehind({ tight = false } = {}) {
+  const units = new Map();
+  for (const [host, one] of chatBehind) {
+    if (!host.isConnected) {
+      chatBehind.delete(host);
+      continue;
+    }
+    units.set(one.unit, [...(units.get(one.unit) ?? []), one]);
+  }
+  const standing = [];
+  for (const held of units.values()) {
+    held.sort((a, b) => b.at - a.at);
+    for (const one of held.slice(CHAT_PARK.behind)) one.demote();
+    standing.push(held.slice(0, CHAT_PARK.behind));
+  }
+  standing.sort((a, b) => b[0].at - a[0].at);
+  for (const held of standing.slice(tight ? 0 : CHAT_PARK.leaves)) for (const one of held) one.demote();
+}
+
+/* What the stage does with a surface: shows it, or hides the one no leaf
+ * shows — except a leaf's view holding a conversation, which stands behind
+ * what its leaf shows instead (t-55369): a conversation tab left for a
+ * terminal tab comes back as from another conversation, nothing styled or
+ * laid out again. A view off the stage's leaves, or past what the window
+ * keeps (`sweepBehind`), hides. */
+function standStageSurface(host, shown) {
+  if (shown) {
+    if (host.classList.contains("is-behind")) standBehind(host, false);
+    host.hidden = false;
+    return;
+  }
+  if (host.hidden || host.classList.contains("is-behind")) return;
+  const leaf = host.__helperPage && host.isConnected
+    ? [...groups.entries()].find(([, group]) => group.workerView === host)?.[0]
+    : undefined;
+  if (leaf === undefined) {
+    host.hidden = true;
+    return;
+  }
+  standBehind(host, true, {
+    unit: `leaf:${leaf}`,
+    demote: () => {
+      standBehind(host, false);
+      host.hidden = true;
+    },
+  });
+  sweepBehind();
 }
 
 /* A page behind the front leaves the document: its host goes with every node
@@ -621,6 +694,7 @@ function standBehind(host, behind) {
 function takeOutOfDocument(kept) {
   if (!kept.behind) return;
   kept.behind = false;
+  chatBehind.delete(kept.host);
   kept.host.__dockWatch?.disconnect();
   kept.host.__dockWatch = null;
   kept.host.remove();
@@ -637,11 +711,11 @@ function dropParkedPage(host, id) {
 }
 
 /* The kept pages whose time ran out, whose tab is gone, or whose tab now
- * stands in another leaf; then the tiers (`CHAT_PARK`): the leaf's own — its
- * last `pages`, of them its last `behind` in the document — and the window's,
- * whose `leaves` that set a page aside last keep theirs behind. `tight`, when
- * the window must give memory back, takes every page behind out of the
- * document. */
+ * stands in another leaf, and past the leaf's last `CHAT_PARK.pages`; then
+ * every page behind the front in the window as `sweepBehind` keeps them.
+ * `tight`, when the window must give memory back, keeps none standing behind:
+ * a page set aside goes out of the document, a view or a pane's conversation
+ * hides. */
 function sweepParkedPages(host, now = Date.now(), { tight = false } = {}) {
   const parked = host?.__parked;
   if (parked) {
@@ -651,13 +725,8 @@ function sweepParkedPages(host, now = Date.now(), { tight = false } = {}) {
     }
     const last = [...parked.values()].sort((a, b) => b.at - a.at);
     for (const kept of last.slice(CHAT_PARK.pages)) dropParkedPage(host, kept.page.id);
-    for (const kept of last.slice(0, CHAT_PARK.pages).filter((one) => one.behind).slice(CHAT_PARK.behind)) takeOutOfDocument(kept);
   }
-  const leaves = [...groups.values()]
-    .map((group) => [...(group.workerView?.__parked?.values() ?? [])].filter((kept) => kept.behind))
-    .filter((behind) => behind.length > 0)
-    .sort((a, b) => Math.max(...b.map((kept) => kept.at)) - Math.max(...a.map((kept) => kept.at)));
-  for (const behind of leaves.slice(tight ? 0 : CHAT_PARK.leaves)) for (const kept of behind) takeOutOfDocument(kept);
+  sweepBehind({ tight });
 }
 
 /* The keyboard's focus never stays on a page behind the front: a Tab that

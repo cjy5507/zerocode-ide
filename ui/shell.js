@@ -13126,6 +13126,7 @@ function forgetPaneChat(term) {
   const held = paneChats.get(term);
   if (!held) return;
   dropWorkerScreen(held.tab.pane);
+  if (held.host?.classList.contains("is-behind")) standBehind(held.host, false);
   held.host?.remove();
   // 기다리던 글들은 이 대화의 것이었다 — 대화가 사라지면 같이 사라진다.
   held.run.queue = null;
@@ -13189,17 +13190,41 @@ function placePaneChat(term, slot, shown) {
     }
     if (held.host.parentElement !== slot) slot.appendChild(held.host);
     held.host.hidden = false;
+    if (held.host.classList.contains("is-behind")) standBehind(held.host, false);
     if (held.arriving === "chat") arriveView(held.host);
     held.arriving = null;
     paintPaneChat(term);
     return;
   }
-  if (held.host) held.host.hidden = true;
+  if (held.host) setPaneChatAside(held, term, slot);
   if (held.arriving === "term") {
     const view = termViews.get(term);
     if (view && !view.host.hidden) arriveView(view.host);
   }
   held.arriving = null;
+}
+
+/* A pane's conversation the pane no longer shows. Turned from to the pane's
+ * screen, on the stage, it stands behind the screen kept rendered, so
+ * 「대화」 again brings it back with nothing styled or laid out again
+ * (t-55369) — until the window keeps no more pages behind (`sweepBehind`),
+ * when it hides as it did. A pane off the stage takes it off with it: hidden. */
+function setPaneChatAside(held, term, slot) {
+  const host = held.host;
+  if (slot.closest("[hidden]") || !host.isConnected) {
+    if (host.classList.contains("is-behind")) standBehind(host, false);
+    host.hidden = true;
+    return;
+  }
+  if (host.hidden || host.classList.contains("is-behind")) return;
+  standBehind(host, true, {
+    unit: `pane:${term}`,
+    demote: () => {
+      standBehind(host, false);
+      host.hidden = true;
+    },
+  });
+  sweepBehind();
 }
 
 function arriveView(node) {
@@ -13236,7 +13261,9 @@ function paneChatKey(term) {
 
 function paintPaneChat(term) {
   const held = paneChats.get(term);
-  if (!held?.host || held.host.hidden) return;
+  // A conversation behind its pane's screen is not painted, as a hidden one
+  // is not: it is brought up to date when it comes back (t-55369).
+  if (!held?.host || held.host.hidden || held.host.classList.contains("is-behind")) return;
   const run = held.run;
   run.helper.hookKey = paneChatKey(term);
   run.agent = paneAgents.get(term) ?? run.agent;
@@ -16124,6 +16151,12 @@ function releaseWorkerPage(tab) {
   host.classList.remove("is-chat-page", "is-helper-page");
   delete host.dataset.keyboardOwner;
   host.replaceChildren();
+  // A view that stood behind another tab with this page stands no longer: an
+  // empty view keeps nothing rendered (t-55369).
+  if (host.classList.contains("is-behind")) {
+    standBehind(host, false);
+    host.hidden = true;
+  }
 }
 
 /* What a conversation's list holds onto beyond itself — its rail's frame and
@@ -17419,7 +17452,7 @@ function paintPaneNow(term) {
  * its live pieces now — and a reader at the tail stays at the tail. */
 function paintPaneLive(term) {
   const held = paneChats.get(term);
-  if (!held?.on || !held.host || held.host.hidden) return;
+  if (!held?.on || !held.host || held.host.hidden || held.host.classList.contains("is-behind")) return;
   const list = held.host.querySelector(".helper-turns");
   if (!list) return;
   const follow = chatFollows(list);

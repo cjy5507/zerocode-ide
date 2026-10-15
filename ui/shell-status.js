@@ -6097,7 +6097,9 @@ function updateStage() {
 
   for (const host of surfaces) {
     const on = shown.get(host);
-    host.hidden = on === undefined;
+    // Hidden unless a leaf shows it — a leaf's conversation stands behind what
+    // the leaf shows instead (`standStageSurface`, t-55369).
+    standStageSurface(host, on !== undefined);
     // A surface follows its tab into the leaf that holds it. Moving the node
     // rather than drawing a second one is what keeps a terminal's scrollback
     // and a file's scroll position across a split.
