@@ -252,8 +252,10 @@ pub(crate) struct DeskLetters {
     /// delivered, until it is answered or can no longer be — the ledger's
     /// own reading of a wait (`Run::awaits_answer`, the one
     /// `Run::awaiting_reply` asks) and the reply verb's own rule
-    /// (`Run::question_is_answerable`). The ledger's notices are never owed
-    /// an answer.
+    /// (`Run::question_is_answerable`), less the questions the seat wrote
+    /// back about in a letter naming them (`Ledger::answered_by_letters`,
+    /// t-59383), which the ledger's own counts take as answered. The
+    /// ledger's notices are never owed an answer.
     pub(crate) mail: Vec<DeskMail>,
     /// Owed an acknowledgement, oldest first: one line per notice or per
     /// quiet episode, as [`DESK_NEWS`] says.
@@ -265,13 +267,16 @@ pub(crate) struct DeskLetters {
     pub(crate) folded_batch: Option<DeskBatch>,
 }
 
-/// What the coordinator of `run` owes at `now_ms`.
-pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
+/// What the coordinator of `run` owes at `now_ms`. The ledger is read for
+/// the letters a question's answer may be filed in outside `run` — the
+/// asker's own run, when another run's coordinator asked.
+pub(crate) fn desk_letters(ledger: &Ledger, run: &Run, now_ms: i64) -> DeskLetters {
     let address = run.address();
     let inbox = InboxState::of(run, &address);
     let mut owed = DeskLetters::default();
     let mut episodes: HashMap<&str, usize> = HashMap::new();
     let mut folded_in_open = false;
+    let mut asked = Vec::new();
     for message in run.messages().iter().filter(|one| one.to == address) {
         if zerocode_core::orchestration::gate_reuse::is_gate_evidence(message) {
             continue;
@@ -282,7 +287,7 @@ pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
         }
         if run.awaits_answer(message) {
             if run.question_is_answerable(message).is_ok() {
-                owed.mail.push(mail_row(run, message, &inbox));
+                asked.push(message);
             }
             continue;
         }
@@ -318,6 +323,14 @@ pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
             _ => owed.news.push(row),
         }
     }
+    // The same count the ledger keeps (t-59383): a question the seat wrote
+    // back about, in a letter naming it, is owed nothing more.
+    let written_back = ledger.answered_by_letters(run, &asked);
+    owed.mail = asked
+        .into_iter()
+        .filter(|question| !written_back.contains(question.id.as_str()))
+        .map(|question| mail_row(run, question, &inbox))
+        .collect();
     owed.news.sort_by_key(|line| line.created_ms);
     // Folded notices in the batch the coordinator holds open are offered
     // beside the folded count — where no line of news stands in that batch to
@@ -643,7 +656,7 @@ pub(crate) fn desk_snapshot(
     let mut folded_batches = Vec::new();
     let mut land_batches = Vec::new();
     for run in ledger.runs().iter().filter(|run| in_play(run)) {
-        let owed = desk_letters(run, now_ms);
+        let owed = desk_letters(ledger, run, now_ms);
         let (run_mail, run_news) = (owed.mail.len(), owed.news.len());
         mail.extend(owed.mail);
         news.extend(owed.news);
@@ -1808,7 +1821,7 @@ mod tests {
             )
             .expect("question");
         assert_eq!(
-            desk_letters(ledger.run(&run_id).expect("run"), 4)
+            desk_letters(&ledger, ledger.run(&run_id).expect("run"), 4)
                 .mail
                 .len(),
             1
@@ -1819,7 +1832,7 @@ mod tests {
         assert_eq!(run.messages().len(), 1, "the question stays in the ledger");
         assert_eq!(run.messages()[0].id, question);
         assert!(
-            desk_letters(run, 4).mail.is_empty(),
+            desk_letters(&ledger, run, 4).mail.is_empty(),
             "unanswerable question is still owed"
         );
     }
@@ -1873,7 +1886,7 @@ mod tests {
             )
             .expect("pane question");
         assert_eq!(
-            desk_letters(ledger.run(&run_id).expect("run"), 20)
+            desk_letters(&ledger, ledger.run(&run_id).expect("run"), 20)
                 .mail
                 .len(),
             4
@@ -1902,10 +1915,10 @@ mod tests {
             .expect("pane answer");
         let run = ledger.run(&run_id).expect("run");
         assert_eq!(run.messages().len(), 5, "old questions were rewritten");
-        assert!(desk_letters(run, 22).mail.is_empty());
+        assert!(desk_letters(&ledger, run, 22).mail.is_empty());
         let rebuilt = Ledger::rebuild(ledger.export()).expect("same ledger rebuilt");
         assert!(
-            desk_letters(rebuilt.run(&run_id).expect("run"), 22)
+            desk_letters(&rebuilt, rebuilt.run(&run_id).expect("run"), 22)
                 .mail
                 .is_empty()
         );
@@ -1968,7 +1981,7 @@ mod tests {
         });
         let rebuilt = Ledger::rebuild(projected).expect("acked ledger");
         let run = rebuilt.run(&run_id).expect("run");
-        let owed = desk_letters(run, 4);
+        let owed = desk_letters(&rebuilt, run, 4);
         assert_eq!(owed.mail.len(), 1);
         assert_eq!(owed.mail[0].id, question);
         assert_eq!(owed.mail[0].delivery, "acked");

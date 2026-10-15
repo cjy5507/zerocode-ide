@@ -1660,6 +1660,34 @@ impl Message {
             && self.from != LEDGER_ITSELF
             && !self.kind.is_the_ledgers_own()
     }
+
+    /// Whether this is a LETTER about `question` in its writer's own voice:
+    /// a thread's root (a word filed in the thread is [`Self::answers`]' to
+    /// judge), not the ledger's, written no earlier than the question, and
+    /// naming it by its id ([`names_message`]) — the habit of a letter that
+    /// opens 「m-NNNNN 답」. Who wrote it, and to whom, is
+    /// [`answered_by_letters`]' to ask.
+    fn writes_about(&self, question: &Message) -> bool {
+        self.thread.is_none()
+            && self.from != LEDGER_ITSELF
+            && !self.kind.is_the_ledgers_own()
+            && self.id != question.id
+            && self.created_ms >= question.created_ms
+            && names_message(self.body.as_str(), &question.id)
+    }
+}
+
+/// Whether `text` names the message `id` as a word of its own. An ASCII
+/// letter, digit or `-` on either side makes it part of a longer word —
+/// `m-12` is not named by `m-123`, `xm-12` or `m-12-2` — and anything else
+/// ends it, a Korean particle written straight after the id (`m-12에`)
+/// included.
+fn names_message(text: &str, id: &str) -> bool {
+    let joins = |next: Option<char>| next.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-');
+    !id.is_empty()
+        && text.match_indices(id).any(|(at, _)| {
+            !joins(text[..at].chars().next_back()) && !joins(text[at + id.len()..].chars().next())
+        })
 }
 
 /// How far one message may sit from the root of its thread.
@@ -4933,13 +4961,140 @@ fn receiver_of_worker(run: &Run, worker_id: &str, fact_ms: i64) -> Option<(Strin
 /// The root questions in this run addressed to `to` that nobody has
 /// answered and nobody has closed. Read off the mail, like
 /// [`awaiting_reply`]: no table of open questions to fall out of step.
-fn open_questions_to<'a>(run: &'a Run, to: &str) -> Vec<&'a Message> {
-    run.messages
+///
+/// Answered in the thread, or by a letter the seat that was asked wrote
+/// back ([`answered_by_letters`]) — which is why it reads the ledger and
+/// not the run alone: that letter may be filed in the asker's run.
+fn open_questions_to<'a>(ledger: &Ledger, run: &'a Run, to: &str) -> Vec<&'a Message> {
+    let unanswered: Vec<&Message> = run
+        .messages
         .iter()
         .filter(|held| held.kind == MessageKind::Question && held.thread.is_none() && held.to == to)
         .filter(|question| {
             thread_answer(run, question).is_none() && !question_closed(run, question)
         })
+        .collect();
+    let written_back = answered_by_letters(ledger, run, &unanswered);
+    unanswered
+        .into_iter()
+        .filter(|question| !written_back.contains(question.id.as_str()))
+        .collect()
+}
+
+/// Of `asked` — questions in `run` with no answer in their thread — the
+/// ones the seat each was asked of has since written back about in a letter
+/// of its own: answered for every count of open questions (t-59383), and
+/// never for the thread.
+///
+/// Coordinators answer with `send` as often as with `reply`, and a `send`
+/// starts no thread, so [`Message::answers`] never sees it: the coordinator
+/// card's 「질문 N」 stood at 50 on 2026-10-16 for questions that had been
+/// answered. A letter that answers for the count is a root in its writer's
+/// own voice, written no earlier than the question and naming it by id
+/// ([`Message::writes_about`]), from the seat that was asked to the seat
+/// that asked — read in the two runs it can be filed in:
+///
+/// - this run, from the address that was asked to the address that asked;
+/// - for a question another run's coordinator put to this run's chair
+///   (`send --run <here>` files it under the asker's PANE address), the
+///   asker's own run, where the answer goes by `send --run <there> --to
+///   run:<there>`: a letter to that run's chair, from a pane that has sat in
+///   this run's chair, in a run whose chair the asker has sat in
+///   ([`chair_seats`]). Seats that have sat there, not the live seat alone:
+///   a window restart moves every chair to a new pane — twice on the night
+///   this was written — and a question asked before it was answered after.
+///
+/// It never becomes THE answer: `ask` still reads back the word in the
+/// thread ([`thread_answer`]), and `reply` still takes one per question.
+/// Derived, never stored, like [`question_closed`]: a question a letter
+/// answered before this rule existed reads as answered the moment it does.
+/// One walk of each run's mail whatever the number of questions, for
+/// [`open_questions`]' reason, and a body is read only once a letter's
+/// addresses fit.
+fn answered_by_letters<'a>(
+    ledger: &Ledger,
+    run: &Run,
+    asked: &[&'a Message],
+) -> std::collections::HashSet<&'a str> {
+    let mut answered = std::collections::HashSet::new();
+    let mut between: std::collections::HashMap<(&str, &str), Vec<&'a Message>> =
+        std::collections::HashMap::new();
+    for &question in asked {
+        between
+            .entry((question.to.as_str(), question.from.as_str()))
+            .or_default()
+            .push(question);
+    }
+    if between.is_empty() {
+        return answered;
+    }
+    for letter in run.messages() {
+        let Some(questions) = between.get(&(letter.from.as_str(), letter.to.as_str())) else {
+            continue;
+        };
+        for &question in questions {
+            if letter.writes_about(question) {
+                answered.insert(question.id.as_str());
+            }
+        }
+    }
+    let chair = run.address();
+    let mut by_asker: std::collections::HashMap<&str, Vec<&'a Message>> =
+        std::collections::HashMap::new();
+    for &question in asked {
+        if question.to == chair
+            && !answered.contains(question.id.as_str())
+            && let Some(asker) = question.from.strip_prefix(PANE_ADDRESS_PREFIX)
+        {
+            by_asker.entry(asker).or_default().push(question);
+        }
+    }
+    if by_asker.is_empty() {
+        return answered;
+    }
+    let sat_here = chair_seats(run);
+    for there in ledger.runs().iter().filter(|other| other.id != run.id) {
+        let their_chair = there.address();
+        let mut sat_there = None;
+        for letter in there.messages().iter().filter(|one| one.to == their_chair) {
+            let Some(writer) = letter.from.strip_prefix(PANE_ADDRESS_PREFIX) else {
+                continue;
+            };
+            if !sat_here.contains(writer) {
+                continue;
+            }
+            let sat_there = sat_there.get_or_insert_with(|| chair_seats(there));
+            for (asker, questions) in &by_asker {
+                if !sat_there.contains(asker) {
+                    continue;
+                }
+                for &question in questions {
+                    if letter.writes_about(question) {
+                        answered.insert(question.id.as_str());
+                    }
+                }
+            }
+        }
+    }
+    answered
+}
+
+/// Every seat that has sat in `run`'s chair, as far as the run itself can
+/// tell: the seat its chair names now, held or vacated, and the seat behind
+/// every letter it signed as the run ([`Message::author_seat`]) — an address
+/// [`sender`] mints for the chair and nobody else. Derived, never stored:
+/// the history of a chair is read off the letters written from it.
+fn chair_seats(run: &Run) -> std::collections::HashSet<&str> {
+    let address = run.address();
+    run.coordinator
+        .iter()
+        .map(|chair| chair.seat.as_str())
+        .chain(
+            run.messages()
+                .iter()
+                .filter(|letter| letter.from == address)
+                .filter_map(|letter| letter.author_seat.as_deref()),
+        )
         .collect()
 }
 
@@ -5089,7 +5244,7 @@ impl Ledger {
             let Some(run) = self.run(run_id) else {
                 return 0;
             };
-            open_questions_to(run, address)
+            open_questions_to(self, run, address)
                 .into_iter()
                 .filter(|question| {
                     let told: Vec<(&Message, serde_json::Value)> =
@@ -5353,19 +5508,27 @@ fn quiet_closure(run: &Run, message: &Message) -> Option<QuietClosure> {
 /// Three filters, and each one is a way for a wait to not be a wait. A thread's
 /// ROOT, because a reply wears the question kind and answering somebody is not
 /// asking. Unanswered by the seat it was asked of ([`Message::answers`]),
-/// because a bystander's word in the thread is not an answer. And not closed,
-/// because a question whose dispatch ended has nobody left to hand an answer to
-/// — its asker is not waiting, it is gone.
-fn open_questions(run: &Run) -> Vec<(&str, &str, &str)> {
+/// because a bystander's word in the thread is not an answer — nor written
+/// back about by that seat in a letter of its own ([`answered_by_letters`],
+/// filed in this run or the asker's), which is an answer to count by. And
+/// not closed, because a question whose dispatch ended has nobody left to
+/// hand an answer to — its asker is not waiting, it is gone.
+fn open_questions<'a>(ledger: &Ledger, run: &'a Run) -> Vec<(&'a str, &'a str, &'a str)> {
     let held = run.messages();
     let answered: std::collections::HashSet<(&str, &str)> = held
         .iter()
         .filter_map(|one| Some((one.thread.as_deref()?, one.from.as_str())))
         .collect();
-    held.iter()
+    let unanswered: Vec<&Message> = held
+        .iter()
         .filter(|one| one.kind == MessageKind::Question && one.thread.is_none())
         .filter(|one| !answered.contains(&(one.id.as_str(), one.to.as_str())))
         .filter(|one| !question_closed(run, one))
+        .collect();
+    let written_back = answered_by_letters(ledger, run, &unanswered);
+    unanswered
+        .into_iter()
+        .filter(|one| !written_back.contains(one.id.as_str()))
         .map(|one| (one.from.as_str(), one.to.as_str(), one.id.as_str()))
         .collect()
 }
@@ -5392,7 +5555,7 @@ fn open_questions(run: &Run) -> Vec<(&str, &str, &str)> {
 /// that is already a ring. Seats, not workers: a coordinator that asked a worker
 /// which is waiting on the coordinator is in the same trap, and `run:` is where
 /// the notice has to go anyway.
-fn ring_closed_by(run: &Run, question: &Message) -> Option<Vec<String>> {
+fn ring_closed_by(ledger: &Ledger, run: &Run, question: &Message) -> Option<Vec<String>> {
     let (start, goal) = (question.to.as_str(), question.from.as_str());
     /* A question addressed to its own asker is not a ring, and refusing to
      * call it one is not a nicety: a coordinator's `ask` with no `--to` goes
@@ -5406,7 +5569,7 @@ fn ring_closed_by(run: &Run, question: &Message) -> Option<Vec<String>> {
     }
     let mut ring = vec![question.id.clone()];
     {
-        let edges = open_questions(run);
+        let edges = open_questions(ledger, run);
         // How each seat was reached: itself, the seat before it, and the
         // question that leads from there to here.
         let mut came: Vec<(&str, &str, &str)> = Vec::new();
@@ -5444,8 +5607,8 @@ fn ring_closed_by(run: &Run, question: &Message) -> Option<Vec<String>> {
 /// The dedupe half of [`Ledger::announce_a_ring_of_waiting`], kept beside the
 /// walk that finds a ring rather than inside the poster: one is "is this a
 /// ring", the other is "is this ring news".
-fn already_told(run: &Run, seats: &[&str]) -> bool {
-    let open: std::collections::HashSet<&str> = open_questions(run)
+fn already_told(ledger: &Ledger, run: &Run, seats: &[&str]) -> bool {
+    let open: std::collections::HashSet<&str> = open_questions(ledger, run)
         .into_iter()
         .map(|(_, _, id)| id)
         .collect();
@@ -6621,6 +6784,19 @@ impl Ledger {
             .map(|run| run.id.clone())
     }
 
+    /// Of `asked` — questions in `run` with no answer in their thread — the
+    /// ones the seat each was asked of wrote back about in a letter, in this
+    /// run or in the asker's: answered for the count, never for the thread.
+    /// The window's desk reads its 「답할 우편」 through this, so the
+    /// coordinator card counts what the ledger counts (t-59383).
+    pub fn answered_by_letters<'a>(
+        &self,
+        run: &Run,
+        asked: &[&'a Message],
+    ) -> std::collections::HashSet<&'a str> {
+        answered_by_letters(self, run, asked)
+    }
+
     /// Which run this caller's bare verbs land in.
     pub fn bound_run(&self, caller: &str) -> Option<&str> {
         self.bound
@@ -7227,8 +7403,9 @@ impl Ledger {
     /// beside it: a table is the thing that falls out of step with the log, and
     /// `worker_fell_silent` reads its own JSON the same way.
     fn announce_a_ring_of_waiting(&mut self, run_id: &str, question_id: &str, now_ms: i64) {
-        let Some((address, told)) = self.run(run_id).and_then(|run| {
-            let ring = ring_closed_by(run, run.message(question_id)?)?;
+        let ledger: &Ledger = self;
+        let Some((address, told)) = ledger.run(run_id).and_then(|run| {
+            let ring = ring_closed_by(ledger, run, run.message(question_id)?)?;
             let waiting: Vec<serde_json::Value> = ring
                 .iter()
                 .filter_map(|id| run.message(id))
@@ -7250,7 +7427,7 @@ impl Ledger {
                 .filter_map(|row| row["address"].as_str())
                 .collect();
             seats.sort_unstable();
-            if already_told(run, &seats) {
+            if already_told(ledger, run, &seats) {
                 return None;
             }
             Some((
@@ -18619,7 +18796,9 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     (
         "send",
         "--to <address> --type <kind> [--body <text>] [--task <id>] [--dispatch <id>] \
-         · groups: @all @idle @<agent> @worktree:<checkout>",
+         · groups: @all @idle @<agent> @worktree:<checkout> · a letter from the seat a \
+         question was asked of to its asker that names the question's id counts it answered \
+         (the coordinator card, open questions); the asker's `ask` still waits for `reply`",
         Doing::Mutation,
     ),
     (
