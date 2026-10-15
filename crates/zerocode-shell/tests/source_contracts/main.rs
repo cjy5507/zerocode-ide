@@ -7447,7 +7447,7 @@ mod tests {
         // 프레젠트로 충분하다.
         assert!(
             spinning.contains("if (step !== worktreeSpinStep) {")
-                && spinning.contains("dot.className = `wt-dot is-working wt-spin-${step}`"),
+                && spinning.contains("dot.className = `${dot.classList.contains(\"team-dot\") ? \"team-dot\" : \"wt-dot\"} is-working wt-spin-${step}`"),
             "the JS spinner creates an inline angle again, or writes a class every frame:\n{spinning}"
         );
         let waking = block_after(window, "function wakeWorktreeSpin() {");
