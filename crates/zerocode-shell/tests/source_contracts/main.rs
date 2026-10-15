@@ -4,6 +4,7 @@ mod answer_door;
 mod artifact_export;
 mod ask_popup;
 mod beat_lock_order;
+mod browser_workspace;
 mod bundle_resources;
 mod cli_login;
 mod computer_use_mirrors;
@@ -8581,9 +8582,15 @@ mod tests {
             steering.contains("browser_panes().contains(label)"),
             "the steer road stopped checking the mint:\n{steering}"
         );
-        let closing = block_after(shell, "fn close_browser_pane(");
+        let close_command = block_after(shell, "fn close_browser_pane(");
         assert!(
-            closing.contains("browser_panes().contains(&label)"),
+            close_command.contains(
+                "close_native_browser(&app, &webview, &state, &label, expected_revision)"
+            )
+        );
+        let closing = block_after(shell, "fn close_native_browser(");
+        assert!(
+            closing.contains("browser_panes().contains(label)"),
             "the close answers to labels nobody minted:\n{closing}"
         );
         // The close reaches the pane through the ENGINE-NEUTRAL handle. A
@@ -8592,7 +8599,7 @@ mod tests {
         // the stage — a closed tab's error page covering the terminal that
         // replaced it (live report 2026-09-09: "터미널창을 덮어버리는 버그").
         assert!(
-            closing.contains("browser_pane_of(&app, &state, &label)")
+            closing.contains("browser_pane_of(app, state, label)")
                 && !closing.contains("get_webview("),
             "the close no longer reaches the pane through the engine-neutral handle:\n{closing}"
         );
@@ -8997,15 +9004,20 @@ mod tests {
         // so a later navigation is never called dead by an earlier clock)
         // and tells the main webview `dead`; `tabs`, `diagnose` and the
         // spinner read that one record.
+        let arming = block_after(shell, "pub(crate) fn arm_dead_display(");
         assert!(
-            page_load.contains("Duration::from_secs(NAV_DEAD_AFTER_SECS)")
-                && page_load.contains("dead_if_still(generation")
-                && page_load.contains("state: \"dead\","),
-            "the dead-load clock left the page-load hook:\n{page_load}"
+            page_load.contains("arm_dead_display(&load_app, &load_label, generation)")
+                && arming.contains("Duration::from_secs(NAV_DEAD_AFTER_SECS)")
+                && arming.contains("dead_if_still(generation")
+                && arming.contains("state: \"dead\","),
+            "the dead-load clock left the page-load hook:\n{page_load}\n{arming}"
         );
         assert!(
-            page_load.matches("\"browser:nav\"").count() == 2 && !page_load.contains(".emit("),
-            "the dead verdict does not reach the main webview by the nav road, or a nav event is broadcast beyond it:\n{page_load}"
+            page_load.matches("\"browser:nav\"").count() == 1
+                && arming.matches("\"browser:nav\"").count() == 1
+                && !page_load.contains(".emit(")
+                && !arming.contains(".emit("),
+            "the dead verdict does not reach the main webview by the nav road, or a nav event is broadcast beyond it:\n{page_load}\n{arming}"
         );
         let nav_state = include_str!("../../src/browser_nav_state.rs");
         assert!(
@@ -9095,7 +9107,7 @@ mod tests {
         // And the close hides first, closes second, burns the mint LAST — a
         // failure must leave a pane that can still be addressed (finding 6).
         let hid = closing
-            .find("hide_browser_pane(&pane, &webview)")
+            .find("hide_browser_pane(&pane, webview)")
             .or_else(|| closing.find("pane.hide()"))
             .expect("the close no longer hides first");
         let shut = closing
@@ -9527,7 +9539,10 @@ mod tests {
                 "the emulator screenshot route lost {owned}"
             );
         }
-        let evidence = block_after(shell, "async fn take(self) -> Option<Picture>");
+        let evidence = block_after(
+            shell,
+            "async fn take(self) -> Result<Picture, FrameSkipped>",
+        );
         assert!(
             evidence.contains("Self::Emulator") && evidence.contains("emulator_screenshot_bytes"),
             "a run's evidence frames the emulator by some road other than the pane's own backend"
@@ -9645,7 +9660,7 @@ mod tests {
     #[test]
     fn every_answer_with_a_pages_words_rides_inside_the_untrusted_fence() {
         let shell = shipped_backend();
-        let answering = block_after(shell, "async fn answer_browser_command(");
+        let answering = block_after(shell, "async fn dispatch_browser_command(");
         for arm in [
             "(\"list\", 1) => {",
             "(\"tabs\", 1) => {",
@@ -9697,7 +9712,14 @@ mod tests {
     #[test]
     fn the_agents_browser_door_rides_the_guarded_roads() {
         let shell = shipped_backend();
-        let answering = block_after(shell, "async fn answer_browser_command(");
+        let guarded = block_after(shell, "async fn answer_browser_command(");
+        let admitted = guarded.find(".begin_at(").expect("workspace input guard");
+        let dispatched = guarded
+            .find("dispatch_browser_command(app, argv, pane, expected_revision, &mut dispatched).await")
+            .expect("dispatch");
+        assert!(admitted < dispatched);
+        assert!(guarded.contains("operation.settle(dispatched)"));
+        let answering = block_after(shell, "async fn dispatch_browser_command(");
         for verb in zerocode_core::agent_browser::VERBS {
             assert!(
                 answering.contains(&format!(r#"("{verb}","#)),
@@ -9717,12 +9739,13 @@ mod tests {
         // `tabs` answers from the records the hooks wrote — the state by the
         // clock (`observed(now)`), the title, the jar and the reader — and
         // never asks a webview anything but whether it is still alive.
+        let simple_listing = block_after(answering, "(\"list\", 1) => {");
         let listing = block_after(answering, "(\"tabs\", 1) => {");
         assert!(
             listing.contains("browser_records()")
                 && listing.contains("nav.observed(now)")
                 && listing.contains("tabs_lines(&rows)")
-                && listing.contains("browser_pane_of(app, &state, label).is_ok()"),
+                && listing.contains("browser_pane_of(app, &state, &label).is_err()"),
             "`tabs` stopped answering from the hooks' records:\n{listing}"
         );
         for road in [
@@ -9828,21 +9851,28 @@ mod tests {
             "the automation executor lost its cap or pane mint:\n{browser}"
         );
         let filesystem = include_str!("../../src/cmd/fs.rs");
-        let snapshot = block_after(filesystem, "async fn browser_snapshot_png(");
+        let agent_snapshot = block_after(filesystem, "async fn browser_snapshot_png(");
+        assert!(agent_snapshot.contains("browser_snapshot_png_for(app, state, label, false)"));
+        let snapshot = block_after(filesystem, "async fn browser_snapshot_png_for(");
         assert!(
             snapshot.contains("browser_pane_of(app, state, label)?"),
             "an agent snapshot can bypass the live minted browser check:\n{snapshot}"
         );
+        let leased = block_after(filesystem, "async fn snapshot_leased(");
         assert!(
-            snapshot.contains("pane.snapshot_png(")
-                && snapshot.contains("timeout(SNAPSHOT_BUDGET, rx)")
-                && snapshot.contains("snapshot_webview_png(pane, None)"),
+            leased.contains("pane.snapshot_png(")
+                && leased.contains("timeout(SNAPSHOT_BUDGET, rx)")
+                && leased.contains(
+                    "snapshot_webview_png_held(pane, None, Some((Box::new(frame), check)))"
+                )
+                && snapshot.contains(".begin_snapshot_for(label, spectator)")
+                && snapshot.contains("snapshot_leased(pane, frame, Default::default())"),
             "snapshot must select Chromium without losing the existing native fallback or deadline"
         );
         assert!(
             !answering.contains("app.get_webview(")
-                && answering.contains("browser_pane_of(app, &state, &label).is_err()")
-                && answering.contains("browser_pane_of(app, &state, label).is_ok()"),
+                && simple_listing.contains("browser_pane_of(app, &state, &label).is_err()")
+                && listing.contains("browser_pane_of(app, &state, &label).is_err()"),
             "browser list/tabs must recognize Chromium panes without consulting Tauri's webview registry"
         );
         // The shim is installed beside the mirror shims — the dir already on
@@ -9954,7 +9984,12 @@ mod tests {
             .find("prepare_browser_guest(&pane, WEBVIEW_NATIVE_QUERY_TIMEOUT)")
             .expect("guest isolation is missing");
         assert!(prepare < opening.find("inject_staged_cookies(").unwrap());
-        assert!(prepare < opening.find("pane.navigate(parsed)").unwrap());
+        assert!(
+            prepare
+                < opening
+                    .find("navigate_known(app, &pane, &label, parsed")
+                    .unwrap()
+        );
         let runtime = include_str!("../../src/browser_guest_runtime.rs");
         assert!(runtime.contains(
             "const BROWSER_GUEST_SCRIPTS: &[&str] = &[BROWSER_CLOAK_JS, BROWSER_RING_JS]"
@@ -10154,7 +10189,9 @@ mod tests {
             );
             let execution = block_after(browser, &format!("async fn {executor}("));
             assert!(
-                execution.contains("browser_pane_of(app, state, label)?"),
+                execution.contains("browser_pane_of(app, state, label)?")
+                    || (execution.contains("send_after_checks(")
+                        && execution.contains("|| browser_pane_of(app, state, label),")),
                 "{executor} can act without a live minted pane:\n{execution}"
             );
         }

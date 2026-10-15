@@ -233,7 +233,16 @@ pub fn decide(
     ),
     Refused,
 > {
-    let lines = recipe_lines(text).map_err(Refused::invalid)?;
+    let mut lines = recipe_lines(text).map_err(Refused::invalid)?;
+    // A recording's control interval is never this run's observation. Strip
+    // valid recorded stamps before preflight, including its verb/budget reads.
+    for line in &mut lines {
+        if line.tool == RecipeTool::Browser {
+            line.argv = agent_browser::parse_workspace_command(&line.argv, None)
+                .map_err(Refused::invalid)?
+                .argv;
+        }
+    }
     let start = requested_start(command);
     let end = command
         .params
@@ -503,6 +512,55 @@ impl MoneyGate {
     }
 }
 
+/// Keep only observations completed inside this run, by their target tab.
+/// A saved stamp, a failed read, or another tab supplies no revision. The
+/// ordinary-tab path still sends omission and lets the shared guard decide.
+fn observed_browser_steps(
+    mut step: impl FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
+) -> impl FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer {
+    let mut revisions = BTreeMap::<String, u64>::new();
+    move |tool, argv, logged| {
+        if tool != RecipeTool::Browser {
+            return step(tool, argv, logged);
+        }
+        let command = match agent_browser::parse_workspace_command(argv, None) {
+            Ok(command) => command,
+            Err(error) => {
+                return TeamAnswer {
+                    stdout: String::new(),
+                    stderr: format!("zerocode-browser: {error}\n"),
+                    exit_code: 1,
+                };
+            }
+        };
+        let mut argv = command.argv;
+        let verb = argv.first().cloned().unwrap_or_default();
+        let label = argv.get(1).cloned();
+        if agent_browser::browser_verb(&verb).is_some_and(|row| row.changes_page) && verb != "open"
+        {
+            let revision = label
+                .as_ref()
+                .and_then(|label| revisions.get(label))
+                .copied();
+            agent_browser::with_workspace_revision(&mut argv, revision);
+        }
+        let answer = step(tool, &argv, logged);
+        if let Some(label) = label {
+            if agent_browser::observes(&verb) {
+                revisions.remove(&label);
+                if answer.exit_code == 0
+                    && let Some(revision) = agent_browser::observation_revision(&answer.stdout)
+                {
+                    revisions.insert(label, revision);
+                }
+            } else if answer.exit_code != 0 || verb == "close" {
+                revisions.remove(&label);
+            }
+        }
+        answer
+    }
+}
+
 /// Walk the recipe as `run` asks — its values, its start — each step through
 /// `step` (the lone command's road for the line's door, handing a guarded
 /// press back), given the door, the line to run and the line to log: the
@@ -514,16 +572,26 @@ impl MoneyGate {
 /// caller can tell the writer. Answers the report, or why nothing was walked.
 pub fn run(
     run: &Run<'_>,
-    mut step: impl FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
+    step: impl FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
     leave: impl FnOnce(&[String], &[String], &TeamAnswer),
     begin: impl FnOnce(EvidenceLevel),
     desk: impl Desk,
     caller_waits: impl Fn() -> bool,
 ) -> Result<Value, Refused> {
+    let mut step = observed_browser_steps(step);
     let desk = RefCell::new(desk);
     let elapsed = || desk.borrow().elapsed_ms();
     let began = elapsed();
-    let flow = parse_flow(run.text).map_err(Refused::invalid)?;
+    let mut flow = parse_flow(run.text).map_err(Refused::invalid)?;
+    if let Some(spec) = &mut flow {
+        for check in &mut spec.checks {
+            if check.tool == RecipeTool::Browser {
+                check.argv = agent_browser::parse_workspace_command(&check.argv, None)
+                    .map_err(Refused::invalid)?
+                    .argv;
+            }
+        }
+    }
     // The money gate binds before the preflight: a transaction missing its
     // values is `flow_money_unbound`, not a parameter the preflight lists.
     let gate = flow
@@ -1704,6 +1772,51 @@ mod tests {
         COMPUTER_USE_PROTOCOL_VERSION, FLOW_BASELINE_PROBE_MS, FLOW_VERIFY_MS, WALKED_STEP_FLAGS,
         WALKED_STEP_UNFRAMED_FLAGS,
     };
+
+    #[test]
+    fn a_recipe_uses_this_runs_observation_instead_of_the_recorded_revision() {
+        let bench = Bench::new();
+        let text = mixed_doc(&[
+            (RecipeTool::Browser, "marks browser-1 --json"),
+            (
+                RecipeTool::Browser,
+                "click browser-1 #submit --workspace-revision 3",
+            ),
+        ]);
+        let mut sent = Vec::new();
+        let result = run_lines(
+            &command(&[]),
+            ("f.md", &text),
+            DEADLINE,
+            |argv, _| {
+                sent.push(argv.to_vec());
+                if argv[0] == "marks" {
+                    TeamAnswer {
+                        stdout: "{\"items\":[],\"workspaceRevision\":7}\n".into(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                    }
+                } else {
+                    ok()
+                }
+            },
+            |_, _, _| {},
+            bench.desk(false, None),
+            || true,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(sent.len(), 2);
+        assert!(
+            sent[1]
+                .windows(2)
+                .any(|words| words == ["--workspace-revision", "7"])
+        );
+        assert!(
+            !sent[1]
+                .windows(2)
+                .any(|words| words == ["--workspace-revision", "3"])
+        );
+    }
 
     /// The walk as the older tests call it: desktop lines, one road, no
     /// evidence folder, no Flow.

@@ -1312,6 +1312,12 @@ impl Default for OpenInApplicationsSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct StoredBrowserTab {
     pub(super) url: String,
+    #[serde(
+        default,
+        rename = "agentWorkspace",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub(super) agent_workspace: bool,
     #[serde(default)]
     pub(super) viewport: Option<String>,
     /// The old spelling of the reader — `true` was the iPhone (1-g25). Still
@@ -1348,6 +1354,7 @@ where
         .map(|one| match one {
             Read::Bare(url) => StoredBrowserTab {
                 url,
+                agent_workspace: false,
                 viewport: None,
                 mobile: false,
                 reader: None,
@@ -2660,6 +2667,7 @@ impl SettingsDocument {
                 .filter_map(|tab| {
                     normalized_browser_url(&tab.url).map(|url| StoredBrowserTab {
                         url,
+                        agent_workspace: tab.agent_workspace,
                         // A dress is a short preset name, never free text.
                         viewport: tab.viewport.filter(|id| {
                             !id.is_empty()

@@ -53,6 +53,7 @@ pub struct WalkWorld<'a, Road, Walk> {
     pane: String,
     host: String,
     path: String,
+    workspace_revision: Option<u64>,
     /// The call's whole clock, and what the first walk already spent of it.
     deadline_ms: u64,
     spent_ms: u64,
@@ -77,6 +78,7 @@ impl<'a, Road, Walk> WalkWorld<'a, Road, Walk> {
             pane: pane.to_string(),
             host: page.0,
             path: page.1,
+            workspace_revision: None,
             deadline_ms,
             spent_ms,
             began: Instant::now(),
@@ -90,6 +92,7 @@ where
     Walk: FnMut(&mut Road, u64, usize) -> Option<Value>,
 {
     fn look(&mut self) -> Option<Screen> {
+        self.workspace_revision = None;
         let argv = vec!["marks".to_string(), self.pane.clone(), "--json".to_string()];
         let answer = (self.road)(RecipeTool::Browser, &argv, &argv);
         if answer.exit_code != 0 {
@@ -97,6 +100,8 @@ where
         }
         let said = serde_json::from_str::<Value>(answer.stdout.trim()).ok()?;
         let items = said.get(ITEMS_KEY)?.as_array()?.clone();
+        let snapshot = Snapshot::of(&said);
+        self.workspace_revision = snapshot.workspace_revision;
         Some(Screen {
             at: Seen::Page {
                 host: self.host.clone(),
@@ -104,19 +109,20 @@ where
             },
             items,
             shows: Vec::new(),
-            snapshot: Snapshot::default(),
+            snapshot,
         })
     }
 
     fn press(&mut self, mark: usize) -> bool {
         // By number, never by selector: the pane re-measures the element it
         // handed that number to and refuses a press whose pin no longer holds.
-        let argv = vec![
+        let mut argv = vec![
             "click".to_string(),
             self.pane.clone(),
             "--mark".to_string(),
             mark.to_string(),
         ];
+        zerocode_core::agent_browser::with_workspace_revision(&mut argv, self.workspace_revision);
         let holds = recipe_line_holds_ms(RecipeTool::Browser, &argv);
         let left = self.left_ms();
         if left == 0 || left < holds {

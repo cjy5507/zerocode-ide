@@ -27,7 +27,7 @@ use crate::{
     AppState, ShellStateExt,
     browser_cookie_import::{self, StagedCookie},
     browser_cookies::SameSite,
-    browser_runtime::{BrowserDownload, BrowserNav, BrowserPopup, BrowserTitle, browsable_target},
+    browser_runtime::{BrowserDownload, BrowserNav, BrowserTitle, browsable_target},
 };
 
 const FRAMEWORK: &str = "Chromium Embedded Framework.framework/Chromium Embedded Framework";
@@ -497,17 +497,36 @@ impl BrowserPane {
         })
     }
 
-    pub(crate) fn navigate(&self, url: tauri::Url) -> Result<(), String> {
+    pub(crate) fn navigate_known(
+        &self,
+        url: tauri::Url,
+        number: u64,
+        check: crate::browser_workspace::EvidenceCheck,
+    ) -> Result<(), crate::cmd::browser::BrowserRefusal> {
         if !browsable_target(&url) {
-            return Err("허용되지 않은 브라우저 주소입니다".to_string());
+            crate::cmd::browser::navigation_withdrawn(
+                &self.app.state::<AppState>(),
+                &self.label,
+                number,
+            );
+            return Err(crate::cmd::browser::BrowserRefusal::Unsent(
+                "허용되지 않은 브라우저 주소입니다".to_string(),
+            ));
         }
         on_ui(&self.app, &self.label, move |pane| {
-            let frame = pane
-                .browser
-                .main_frame()
-                .ok_or_else(|| "Chromium main frame is unavailable".to_string())?;
-            frame.load_url(Some(&CefString::from(url.as_str())));
-            Ok(())
+            Ok(pane.send_navigation(url.as_str(), number, &check))
+        })
+        .map_err(crate::cmd::browser::BrowserRefusal::Sent)?
+    }
+
+    pub(crate) fn settle_navigation(&self) -> Result<crate::NavProof, String> {
+        on_ui(&self.app, &self.label, |pane| {
+            let loading = pane.browser.is_loading() == 1;
+            Ok(crate::cmd::browser::navigation_settled(
+                &pane.app.state::<AppState>(),
+                &pane.label,
+                loading,
+            ))
         })
     }
 
@@ -517,9 +536,12 @@ impl BrowserPane {
         config_root: PathBuf,
         cookies: Vec<StagedCookie>,
         url: tauri::Url,
+        number: u64,
     ) -> Result<(), String> {
         if cookies.is_empty() {
-            return self.navigate(url);
+            return self
+                .navigate_known(url, number, Default::default())
+                .map_err(String::from);
         }
         // 저장소가 몇 번을 물어도 같은 답을 줄 쿠키는 시도하지 않는다.
         // 시도하면 실패로 세어지고, 실패가 있으면 스테이징이 보관되어
@@ -537,7 +559,9 @@ impl BrowserPane {
             // 앉힐 것이 하나도 남지 않았다 — 붙들고 있어도 다음 판이 받을
             // 답은 같다.
             browser_cookie_import::discard_staged_cookies(&config_root, &profile_id);
-            return self.navigate(url);
+            return self
+                .navigate_known(url, number, Default::default())
+                .map_err(String::from);
         }
         let cookies = cookies
             .into_iter()
@@ -556,6 +580,7 @@ impl BrowserPane {
                 app,
                 label,
                 url,
+                number,
                 config_root,
                 profile_id,
             });
@@ -631,14 +656,42 @@ impl BrowserPane {
         })
     }
 
-    pub(crate) fn set_bounds(&self, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
+    pub(crate) fn place(
+        &self,
+        bounds: [f64; 4],
+        shown: bool,
+        revision: Option<u64>,
+        main_webview: tauri::Webview,
+    ) -> Result<(), String> {
+        let app = self.app.clone();
+        let label = self.label.clone();
         on_ui(&self.app, &self.label, move |pane| {
-            pane.set_bounds(x, y, width, height)
+            let view = pane.native_view()?;
+            let owned = unsafe { crate::browser_runtime::browser_view_owns_first_responder(view) };
+            pane.set_hidden(true)?;
+            let mut displayed = false;
+            let result =
+                app.state::<AppState>()
+                    .shell_runtime()
+                    .browser_workspaces
+                    .with_placement(&label, revision, |allowed| {
+                        let visible = shown && allowed;
+                        displayed = visible;
+                        pane.set_bounds(bounds[0], bounds[1], bounds[2], bounds[3])?;
+                        if visible {
+                            pane.set_hidden(false)?;
+                        }
+                        if shown && !allowed {
+                            return Err("workspace_paused: 직접 조작은 제어권 전환 후 가능합니다"
+                                .to_string());
+                        }
+                        Ok(())
+                    });
+            if (!displayed || result.is_err()) && owned {
+                let _ = main_webview.set_focus();
+            }
+            result
         })
-    }
-
-    pub(crate) fn show(&self) -> Result<(), String> {
-        on_ui(&self.app, &self.label, |pane| pane.set_hidden(false))
     }
 
     pub(crate) fn hide(&self, main_webview: tauri::Webview) -> Result<(), String> {
@@ -669,17 +722,23 @@ impl BrowserPane {
         })
     }
 
-    pub(crate) fn snapshot_png<F>(&self, callback: F) -> Result<(), String>
+    pub(crate) fn snapshot_png<F>(
+        &self,
+        check: crate::browser_workspace::EvidenceCheck,
+        callback: F,
+    ) -> Result<(), String>
     where
         F: FnOnce(Result<Vec<u8>, String>) + Send + 'static,
     {
         let callback: SnapshotCallback = Box::new(callback);
         on_ui(&self.app, &self.label, move |pane| {
-            pane.devtools(
-                "Page.captureScreenshot",
-                json!({"format": "png", "fromSurface": true, "captureBeyondViewport": false}),
-                Pending::Snapshot(callback),
-            )
+            check.start(|| {
+                pane.devtools(
+                    "Page.captureScreenshot",
+                    json!({"format": "png", "fromSurface": true, "captureBeyondViewport": false}),
+                    Pending::Snapshot(callback),
+                )
+            })
         })
     }
 }
@@ -697,6 +756,7 @@ struct CookieBatch {
     app: AppHandle,
     label: String,
     url: tauri::Url,
+    number: u64,
     config_root: PathBuf,
     profile_id: String,
 }
@@ -756,16 +816,12 @@ impl CookieBatch {
                 );
             }
             let result: Result<(), String> = PANES.with(|panes| {
-                let panes = panes.borrow();
+                let mut panes = panes.borrow_mut();
                 let pane = panes
-                    .get(&batch.label)
+                    .get_mut(&batch.label)
                     .ok_or_else(|| "cookie import finished after pane close".to_string())?;
-                let frame = pane
-                    .browser
-                    .main_frame()
-                    .ok_or_else(|| "Chromium main frame is unavailable".to_string())?;
-                frame.load_url(Some(&CefString::from(batch.url.as_str())));
-                Ok(())
+                pane.send_navigation(batch.url.as_str(), batch.number, &Default::default())
+                    .map_err(String::from)
             });
             if let Err(error) = result {
                 eprintln!("zerocode-shell: Chromium cookie-first navigation failed: {error}");
@@ -839,7 +895,32 @@ fn cef_cookie(cookie: &StagedCookie) -> Cookie {
 }
 
 type EvalCallback = Box<dyn FnOnce(String) + Send>;
+type NavigationCallback = Box<dyn FnOnce(crate::NavAnswer)>;
+type Navigations = Rc<RefCell<NavigationReply>>;
 type SnapshotCallback = Box<dyn FnOnce(Result<Vec<u8>, String>) + Send>;
+
+#[derive(Default)]
+struct NavigationReply {
+    pending: Option<(i32, NavigationCallback)>,
+}
+
+impl NavigationReply {
+    fn insert(&mut self, message_id: i32, callback: NavigationCallback) {
+        self.pending = Some((message_id, callback));
+    }
+
+    fn remove(&mut self, message_id: &i32) -> Option<NavigationCallback> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(pending_id, _)| pending_id == message_id)
+        {
+            self.pending.take().map(|(_, callback)| callback)
+        } else {
+            None
+        }
+    }
+}
 
 enum Pending {
     Eval(EvalCallback),
@@ -872,9 +953,67 @@ struct NativePane {
     request_context: RequestContext,
     _observer: Registration,
     pending: Rc<RefCell<HashMap<i32, PendingCall>>>,
+    navigations: Navigations,
 }
 
 impl NativePane {
+    fn send_navigation(
+        &mut self,
+        url: &str,
+        number: u64,
+        check: &crate::browser_workspace::EvidenceCheck,
+    ) -> Result<(), crate::cmd::browser::BrowserRefusal> {
+        let app = self.app.clone();
+        let label = self.label.clone();
+        let state = app.state::<AppState>();
+        let id = NEXT_DEVTOOLS_ID.fetch_add(1, Ordering::Relaxed);
+        let prepared = serde_json::to_vec(
+            &json!({"id": id, "method": "Page.navigate", "params": {"url": url}}),
+        )
+        .map_err(|error| error.to_string())
+        .and_then(|message| {
+            self.browser
+                .host()
+                .map(|host| (host, message))
+                .ok_or_else(|| "Chromium browser host is unavailable".to_string())
+        });
+        let sent = prepared.and_then(|(host, message)| {
+            check.start(|| {
+                if !crate::cmd::browser::navigation_sent(&state, &label, number) {
+                    return Err(crate::cmd::browser::NAVIGATION_SUPERSEDED.to_string());
+                }
+                let answer_app = app.clone();
+                let answer_label = label.clone();
+                self.navigations.borrow_mut().insert(
+                    id,
+                    Box::new(move |answer| {
+                        crate::cmd::browser::navigation_answered(
+                            &answer_app.state::<AppState>(),
+                            &answer_label,
+                            number,
+                            answer,
+                        );
+                    }),
+                );
+                if host.send_dev_tools_message(Some(&message)) != 1 {
+                    self.navigations.borrow_mut().remove(&id);
+                    crate::cmd::browser::navigation_answered(
+                        &state,
+                        &label,
+                        number,
+                        crate::NavAnswer::Resolved,
+                    );
+                    return Err("Chromium DevTools method was rejected: Page.navigate".to_string());
+                }
+                Ok(())
+            })
+        });
+        sent.map_err(|why| {
+            crate::cmd::browser::navigation_withdrawn(&state, &label, number);
+            crate::cmd::browser::BrowserRefusal::Unsent(why)
+        })
+    }
+
     fn devtools(&mut self, method: &str, params: Value, pending: Pending) -> Result<(), String> {
         let id = NEXT_DEVTOOLS_ID.fetch_add(1, Ordering::Relaxed);
         let message = serde_json::to_vec(&json!({"id": id, "method": method, "params": params}))
@@ -1009,6 +1148,7 @@ pub(crate) struct CreatePane {
     pub(crate) y: f64,
     pub(crate) width: f64,
     pub(crate) height: f64,
+    pub(crate) hidden: bool,
     pub(crate) initialization_scripts: Vec<String>,
 }
 
@@ -1107,7 +1247,7 @@ fn begin_create_pane(
     };
     let mut request_context = request_context_create_context(Some(&context_settings), None)
         .ok_or_else(|| "Chromium request context creation failed".to_string())?;
-    let window = WindowInfo::default().set_as_child(
+    let mut window = WindowInfo::default().set_as_child(
         parent_view,
         &Rect {
             x: options.x.round() as i32,
@@ -1116,6 +1256,7 @@ fn begin_create_pane(
             height: options.height.max(1.0).round() as i32,
         },
     );
+    window.hidden = i32::from(options.hidden);
     let handler = HandlerState {
         app: options.app.clone(),
         label: options.label.clone(),
@@ -1153,7 +1294,8 @@ fn finish_create_pane(
         .and_then(|host| host.request_context())
         .ok_or_else(|| "Chromium request context is unavailable".to_string())?;
     let pending = Rc::new(RefCell::new(HashMap::new()));
-    let mut observer = DevToolsObserver::new(pending.clone());
+    let navigations = Navigations::default();
+    let mut observer = DevToolsObserver::new(pending.clone(), navigations.clone());
     let registration = browser
         .host()
         .and_then(|host| host.add_dev_tools_message_observer(Some(&mut observer)));
@@ -1167,8 +1309,10 @@ fn finish_create_pane(
         request_context,
         _observer: registration,
         pending,
+        navigations,
     };
     let prepared = (|| {
+        pane.set_hidden(options.hidden)?;
         pane.set_bounds(options.x, options.y, options.width, options.height)?;
         for (method, params) in initialization_commands(
             &options.initialization_scripts,
@@ -1256,12 +1400,19 @@ impl HandlerState {
         app_state
             .browser_urls()
             .insert(self.label.clone(), url.clone());
-        if let Some(record) = app_state.browser_records().get_mut(&self.label) {
-            if state == "started" {
-                record.nav.started(std::time::Instant::now());
-            } else {
-                record.nav.finished(url == "about:blank");
-            }
+        let generation = app_state
+            .browser_records()
+            .get_mut(&self.label)
+            .and_then(|record| {
+                if state == "started" {
+                    Some(record.nav.started(std::time::Instant::now()))
+                } else {
+                    record.nav.finished(url == "about:blank");
+                    None
+                }
+            });
+        if let Some(generation) = generation {
+            crate::cmd::browser::arm_dead_display(&self.app, &self.label, generation);
         }
         let _ = self.app.emit_to(
             "main",
@@ -1493,11 +1644,7 @@ wrap_life_span_handler! {
             _no_javascript_access: Option<&mut i32>,
         ) -> i32 {
             let url = target_url.map(CefString::to_string).unwrap_or_default();
-            let _ = self.inner.app.emit_to("main", "browser:popup", BrowserPopup {
-                label: self.inner.label.clone(),
-                url,
-                term: None,
-            });
+            crate::cmd::browser::workspace_popup(&self.inner.app, &self.inner.label, &url);
             1
         }
 
@@ -1542,11 +1689,7 @@ wrap_request_handler! {
             _user_gesture: i32,
         ) -> i32 {
             let url = target_url.map(CefString::to_string).unwrap_or_default();
-            let _ = self.inner.app.emit_to("main", "browser:popup", BrowserPopup {
-                label: self.inner.label.clone(),
-                url,
-                term: None,
-            });
+            crate::cmd::browser::workspace_popup(&self.inner.app, &self.inner.label, &url);
             1
         }
     }
@@ -1555,6 +1698,7 @@ wrap_request_handler! {
 wrap_dev_tools_message_observer! {
     struct DevToolsObserver {
         pending: Rc<RefCell<HashMap<i32, PendingCall>>>,
+        navigations: Navigations,
     }
     impl DevToolsMessageObserver {
         fn on_dev_tools_method_result(
@@ -1564,7 +1708,12 @@ wrap_dev_tools_message_observer! {
             success: i32,
             result: Option<&[u8]>,
         ) {
-            let Some(pending) = self.pending.borrow_mut().remove(&message_id) else {
+            let pending = self.pending.borrow_mut().remove(&message_id);
+            let Some(pending) = pending else {
+                let navigation = self.navigations.borrow_mut().remove(&message_id);
+                if let Some(answer) = navigation {
+                    answer(navigation_answer(success, result));
+                }
                 return;
             };
             pending.timeout.abort();
@@ -1605,9 +1754,52 @@ wrap_dev_tools_message_observer! {
     }
 }
 
+fn navigation_answer(success: i32, result: Option<&[u8]>) -> crate::NavAnswer {
+    let parsed = result
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+        .unwrap_or(Value::Null);
+    crate::page_navigate_answer(success == 1, &parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_superseded_navigation_releases_its_callback_without_answering() {
+        let replies = Navigations::default();
+        let held = Rc::new(());
+        let retained = Rc::downgrade(&held);
+        replies.borrow_mut().insert(
+            1,
+            Box::new(move |_| {
+                drop(held);
+                panic!("a superseded navigation must not be answered");
+            }),
+        );
+        assert!(retained.upgrade().is_some());
+        replies.borrow_mut().insert(2, Box::new(|_| {}));
+        assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
+    fn a_late_navigation_answer_never_takes_the_current_callback() {
+        let replies = Navigations::default();
+        let answered = Rc::new(std::cell::Cell::new(None));
+        let observed = answered.clone();
+        replies.borrow_mut().insert(
+            1,
+            Box::new(|_| panic!("the previous navigation must not be answered")),
+        );
+        replies
+            .borrow_mut()
+            .insert(2, Box::new(move |answer| observed.set(Some(answer))));
+        assert!(replies.borrow_mut().remove(&1).is_none());
+        let answer = replies.borrow_mut().remove(&2).unwrap();
+        answer(crate::NavAnswer::Loading);
+        assert_eq!(answered.get(), Some(crate::NavAnswer::Loading));
+        assert!(replies.borrow_mut().remove(&2).is_none());
+    }
 
     #[test]
     fn initialization_enables_page_before_scripts_and_counts_every_acknowledgement() {

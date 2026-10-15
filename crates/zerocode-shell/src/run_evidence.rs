@@ -82,6 +82,9 @@ pub enum FrameSkipped {
     Capped,
     /// The capture failed, timed out, or was not a PNG.
     CaptureFailed,
+    /// The tab's control moved after the step: no picture of another
+    /// control interval is taken or kept as this step's frame.
+    ControlChanged,
 }
 
 /// A frame's place on the screen (`ShotFrame`: picture pixels per point and
@@ -344,6 +347,10 @@ impl Drop for ActingFor {
 /// meanwhile. The guard puts back who stood before, on unwinding as well.
 pub fn acting_for(actor: Actor) -> ActingFor {
     ActingFor(ACTOR.with(|held| held.replace(Some(actor))))
+}
+
+pub(crate) fn actor_pane() -> Option<String> {
+    ACTOR.with(|held| held.borrow().as_ref().and_then(|actor| actor.pane.clone()))
 }
 
 /// The synchronous recipe/goal road's measured context, with the thread's

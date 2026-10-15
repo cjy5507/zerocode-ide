@@ -64,6 +64,7 @@ import { testAgentConversation } from "./agent-conversation.mjs";
 import { testHelperDoors } from "./helper-doors.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
+import { testBrowserWorkspace } from "./browser-workspace.mjs";
 import { testEmulatorSeat } from "./emulator-seat.mjs";
 import { testEmulatorLoans } from "./emulator-loans.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
@@ -297,6 +298,7 @@ suite("agent-conversation", ({ browser, origin, ok }) => testAgentConversation(b
 suite("helper-doors", ({ browser, origin, ok }) => testHelperDoors(browser, origin, ok));
 suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(browser, origin, ok));
 suite("browser-panes-survive", ({ browser, origin, ok }) => testBrowserPanesSurvive(browser, origin, ok));
+suite("browser-workspace", ({ browser, origin, ok }) => testBrowserWorkspace(browser, origin, ok));
 suite("emulator-seat", ({ browser, origin, ok }) => testEmulatorSeat(browser, origin, ok));
 suite("artifact-beside", ({ browser, origin, ok }) => testArtifactBeside(browser, origin, ok, join(UI, "..", "output/playwright")));
 suite("artifact-band", ({ browser, origin, ok }) => testArtifactBand(browser, origin, ok, join(UI, "..", "output/playwright")));

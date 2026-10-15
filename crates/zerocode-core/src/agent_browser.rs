@@ -34,6 +34,111 @@ use crate::computer_use_protocol::render::Rect;
 /// when its step goes through the browser door.
 pub const BROWSER_CLI: &str = "zerocode-browser";
 
+/// The control revision from the agent observation that selected an action.
+/// It is neither a document epoch nor an authorization capability.
+pub const WORKSPACE_REVISION_FLAG: &str = "--workspace-revision";
+pub const WORKSPACE_REVISION_HEADER: &str = "x-zerocode-workspace-revision";
+pub const WORKSPACE_REVISION_KEY: &str = "workspaceRevision";
+/// A backend line outside the page's untrusted-content fence.
+pub const WORKSPACE_REVISION_LINE: &str = "workspaceRevision: ";
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct WorkspaceCommand {
+    pub argv: Vec<String>,
+    pub workspace_revision: Option<u64>,
+}
+
+/// Read an unsigned decimal control revision without signs, whitespace,
+/// lists, fractions or overflow. The wire and nested callers share this rule.
+pub fn parse_workspace_revision(raw: &str) -> Result<u64, String> {
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("workspace_revision_invalid: expected an unsigned decimal u64".into());
+    }
+    raw.parse()
+        .map_err(|_| "workspace_revision_invalid: expected an unsigned decimal u64".into())
+}
+
+/// Remove the common option before interpreting a verb's grammar. A header
+/// and an argv option together are a duplicate, even when their values agree.
+/// Explicit `--value` payloads remain data, including a flag-shaped value.
+pub fn parse_workspace_command(
+    argv: &[String],
+    workspace_revision: Option<u64>,
+) -> Result<WorkspaceCommand, String> {
+    let mut command = WorkspaceCommand {
+        argv: Vec::with_capacity(argv.len()),
+        workspace_revision,
+    };
+    let mut words = argv.iter();
+    while let Some(word) = words.next() {
+        if word == WORKSPACE_REVISION_FLAG {
+            if command.workspace_revision.is_some() {
+                return Err("workspace_revision_invalid: repeated --workspace-revision".into());
+            }
+            let raw = words.next().ok_or(
+                "workspace_revision_invalid: --workspace-revision needs an unsigned decimal u64",
+            )?;
+            command.workspace_revision = Some(parse_workspace_revision(raw)?);
+        } else if word.starts_with("--workspace-revision=") {
+            return Err("workspace_revision_invalid: use --workspace-revision <u64>".into());
+        } else {
+            command.argv.push(word.clone());
+            if word == TYPE_VALUE_FLAG
+                && let Some(value) = words.next()
+            {
+                command.argv.push(value.clone());
+            }
+        }
+    }
+    Ok(command)
+}
+
+/// A successful backend observation's stamp. Plain output's last line is
+/// outside its page fence; JSON observations carry a backend-owned root key.
+/// Call only for read/marks/fields/agent-screenshot answers, never page eval
+/// output, observer images or an arbitrary page string.
+#[must_use]
+pub fn observation_revision(stdout: &str) -> Option<u64> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
+        return value.get(WORKSPACE_REVISION_KEY)?.as_u64();
+    }
+    parse_workspace_revision(
+        stdout
+            .trim_end()
+            .lines()
+            .last()?
+            .strip_prefix(WORKSPACE_REVISION_LINE)?,
+    )
+    .ok()
+}
+
+#[must_use]
+pub fn observes(verb: &str) -> bool {
+    matches!(verb, "read" | "marks" | "fields" | "screenshot")
+}
+
+#[must_use]
+pub fn reads_history(verb: &str) -> bool {
+    matches!(verb, "console" | "network" | "diagnose")
+}
+
+/// Bind a selected action to an already completed observation. Missing
+/// input stays missing; this helper never reads the current workspace state.
+pub fn with_workspace_revision(argv: &mut Vec<String>, revision: Option<u64>) {
+    if let Some(revision) = revision {
+        // Put the option before explicit --value payloads. A payload may
+        // itself equal the option's spelling and must remain data.
+        let at = argv
+            .iter()
+            .position(|word| word == TYPE_VALUE_FLAG)
+            .unwrap_or(argv.len());
+        drop(argv.splice(
+            at..at,
+            [WORKSPACE_REVISION_FLAG.into(), revision.to_string()],
+        ));
+    }
+}
+
 /// How long a `wait` watches for its selector when not told, the most it may
 /// be told, the least, and how often it looks. The authenticated `/browser`
 /// bridge gives a request ten seconds; seven leaves room for the final
@@ -83,6 +188,7 @@ pub struct BrowserVerb {
     /// The verb acts on the page it aims at — a Flow binds such a step to
     /// the hosts of its recording before sending it (plan D8).
     pub acts: bool,
+    pub changes_page: bool,
 }
 
 /// One row of a door's verb table — a plain verb that acts on nothing and
@@ -95,6 +201,7 @@ pub const fn verb(word: &'static str, min: usize, max: usize, hold_ms: u64) -> B
         hold_ms,
         check: false,
         acts: false,
+        changes_page: false,
     }
 }
 
@@ -103,7 +210,15 @@ pub const fn verb(word: &'static str, min: usize, max: usize, hold_ms: u64) -> B
 pub const fn act_verb(word: &'static str, min: usize, max: usize, hold_ms: u64) -> BrowserVerb {
     BrowserVerb {
         acts: true,
+        changes_page: true,
         ..verb(word, min, max, hold_ms)
+    }
+}
+
+const fn changes_page(row: BrowserVerb) -> BrowserVerb {
+    BrowserVerb {
+        changes_page: true,
+        ..row
     }
 }
 
@@ -176,7 +291,7 @@ pub fn arity_ok_in(table: &[BrowserVerb], cli: &str, argv: &[String]) -> Result<
 /// — the shape the shim sends for `--value-stdin`; so does `fill` its bundle.
 pub const BROWSER_VERBS: [BrowserVerb; 20] = [
     verb("list", 0, 0, 0),
-    verb("open", 1, 1, BROWSER_DOOR_BUDGET_MS),
+    changes_page(verb("open", 1, 1, BROWSER_DOOR_BUDGET_MS)),
     act_verb("goto", 2, 2, BROWSER_DOOR_BUDGET_MS),
     // `eval <label> <expr>` or `eval <label> --value <expr>` — the stdin road,
     // for a script that carries a person's details (t-37883).
@@ -197,10 +312,10 @@ pub const BROWSER_VERBS: [BrowserVerb; 20] = [
     verb("console", 1, 5, BROWSER_CALLBACK_DEADLINE_MS),
     verb("network", 1, 4, BROWSER_CALLBACK_DEADLINE_MS),
     verb("tabs", 0, 0, 0),
-    verb("close", 1, 1, BROWSER_DOOR_BUDGET_MS),
-    verb("viewport", 2, 2, BROWSER_CALLBACK_DEADLINE_MS),
+    changes_page(verb("close", 1, 1, BROWSER_DOOR_BUDGET_MS)),
+    changes_page(verb("viewport", 2, 2, BROWSER_CALLBACK_DEADLINE_MS)),
     act_verb("scroll", 2, 2, BROWSER_CALLBACK_DEADLINE_MS),
-    check_verb("find", 2, 2, BROWSER_CALLBACK_DEADLINE_MS),
+    changes_page(check_verb("find", 2, 2, BROWSER_CALLBACK_DEADLINE_MS)),
     verb("diagnose", 1, 2, BROWSER_CALLBACK_DEADLINE_MS),
     // `marks <label> [--json]` numbers the controls a person could hit; the
     // picture with the numbers on it is `screenshot --marks` (the line stays,
@@ -257,7 +372,8 @@ pub fn acts(verb: &str) -> bool {
 /// asked, so a recipe line that could never dispatch is refused in the
 /// preflight, not walked into a refusal.
 pub fn arity_ok(argv: &[String]) -> Result<(), String> {
-    arity_ok_in(&BROWSER_VERBS, BROWSER_CLI, argv)
+    let command = parse_workspace_command(argv, None)?;
+    arity_ok_in(&BROWSER_VERBS, BROWSER_CLI, &command.argv)
 }
 
 /// `diagnose <label> [--json]`.
@@ -1296,6 +1412,11 @@ pub fn usage() -> String {
         "  zerocode-browser diagnose <label> [--json]",
         "                                             왜 안 되는지 한 문단: 죽음 → 문서 4xx/5xx → 이름 게이팅 → 로그인 벽 → API 실패 → 스크립트 오류 → 이상 없음",
         "",
+        "공통 옵션: --workspace-revision <u64> — 행동을 선택한 원관측의 workspaceRevision을 그대로 전달합니다.",
+        "작업 탭의 read·marks·fields·agent screenshot 응답이 이 번호를 발급합니다. plain 응답은 페이지 울타리 밖의 workspaceRevision: 줄입니다.",
+        "작업 탭 변경은 번호가 없거나 오래되면 거절합니다. 현재 번호를 조회해 대신 넣지 마세요. 일반 탭은 생략할 수 있습니다.",
+        "예: zerocode-browser click <label> <css> --workspace-revision <원관측 번호>",
+        "",
         "라벨은 `list`가 말해 줍니다. 주소는 http(s)·file·about:blank만 —",
         "창의 주소창과 같은 규칙입니다.",
         "이 명령은 내장 브라우저로 연결되는 인증된 앱 IPC를 씁니다. 외부 Chrome CDP가 아닙니다.",
@@ -1333,6 +1454,107 @@ pub const PANE_HEADER: &str = "x-zerocode-pane";
 ///   a failure, and needs no window.
 pub fn shim_script(port_var: &str, browser_token_var: &str, hook_token_var: &str) -> String {
     bridge_shim(port_var, browser_token_var, hook_token_var).render_posix()
+}
+
+/// The shared shim inserts these stages around argument packing and header
+/// generation. No observation is remembered between CLI processes.
+pub(crate) fn revision_shim_posix() -> [String; 4] {
+    [
+        "workspace_revision=''\nrevision_seen=0\nrevision_pending=0\nrevision_payload=0\n".into(),
+        format!(
+            r#"  if [ "$revision_payload" = 1 ]; then
+    revision_payload=0
+  elif [ "$revision_pending" = 1 ]; then
+    case "$arg" in
+      ''|*[!0-9]*)
+        echo '{BROWSER_CLI}: workspace_revision_invalid: expected an unsigned decimal u64' >&2
+        exit 1 ;;
+    esac
+    workspace_revision="$arg"
+    while [ "${{workspace_revision#0}}" != "$workspace_revision" ]; do
+      workspace_revision="${{workspace_revision#0}}"
+    done
+    workspace_revision="${{workspace_revision:-0}}"
+    if [ "${{#workspace_revision}}" -gt 20 ] || {{ [ "${{#workspace_revision}}" -eq 20 ] && [ "$workspace_revision" \> '18446744073709551615' ]; }}; then
+      echo '{BROWSER_CLI}: workspace_revision_invalid: revision exceeds u64' >&2
+      exit 1
+    fi
+    revision_pending=0
+    continue
+  else
+    case "$arg" in
+      '{TYPE_VALUE_FLAG}') revision_payload=1 ;;
+      '{WORKSPACE_REVISION_FLAG}')
+        if [ "$revision_seen" = 1 ]; then
+          echo '{BROWSER_CLI}: workspace_revision_invalid: repeated --workspace-revision' >&2
+          exit 1
+        fi
+        revision_seen=1
+        revision_pending=1
+        continue ;;
+      {WORKSPACE_REVISION_FLAG}=*)
+        echo '{BROWSER_CLI}: workspace_revision_invalid: use --workspace-revision <u64>' >&2
+        exit 1 ;;
+    esac
+  fi
+"#
+        ),
+        format!(
+            r#"if [ "$revision_pending" = 1 ]; then
+  echo '{BROWSER_CLI}: workspace_revision_invalid: --workspace-revision needs an unsigned decimal u64' >&2
+  exit 1
+fi
+"#
+        ),
+        format!(
+            r#"if [ "$revision_seen" = 1 ]; then
+  printf 'header = "{WORKSPACE_REVISION_HEADER}: %s"\n' "$workspace_revision" >> "$headers"
+fi
+"#
+        ),
+    ]
+}
+
+pub(crate) fn revision_shim_powershell() -> [String; 4] {
+    [
+        "$workspaceRevision = $null\n$revisionSeen = $false\n$revisionPending = $false\n$revisionPayload = $false\n".into(),
+        format!(r#"  if ($revisionPayload) {{
+    $revisionPayload = $false
+  }} elseif ($revisionPending) {{
+    # u64 maximum: 18446744073709551615. No signed or floating point parse.
+    $unsigned = [uint64]0
+    if ($word -cnotmatch '^[0-9]+$' -or -not [uint64]::TryParse($word, [System.Globalization.NumberStyles]::None, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$unsigned)) {{
+      [Console]::Error.WriteLine('{BROWSER_CLI}: workspace_revision_invalid: expected an unsigned decimal u64')
+      exit 1
+    }}
+    $workspaceRevision = $unsigned.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    $revisionPending = $false
+    continue
+  }} else {{
+    if ($word -ceq '{TYPE_VALUE_FLAG}') {{ $revisionPayload = $true }}
+    if ($word -ceq '{WORKSPACE_REVISION_FLAG}') {{
+      if ($revisionSeen) {{
+        [Console]::Error.WriteLine('{BROWSER_CLI}: workspace_revision_invalid: repeated --workspace-revision')
+        exit 1
+      }}
+      $revisionSeen = $true
+      $revisionPending = $true
+      continue
+    }}
+    if ($word -clike '{WORKSPACE_REVISION_FLAG}=*') {{
+      [Console]::Error.WriteLine('{BROWSER_CLI}: workspace_revision_invalid: use --workspace-revision <u64>')
+      exit 1
+    }}
+  }}
+"#),
+        format!(r#"if ($revisionPending) {{
+  [Console]::Error.WriteLine('{BROWSER_CLI}: workspace_revision_invalid: --workspace-revision needs an unsigned decimal u64')
+  exit 1
+}}
+"#),
+        format!(r#"  if ($null -ne $workspaceRevision) {{ $request.Headers.Add('{WORKSPACE_REVISION_HEADER}', $workspaceRevision) }}
+"#),
+    ]
 }
 
 /// The browser door on the one bridge-shim chassis the Computer Use doors
@@ -1390,6 +1612,207 @@ pub fn pack_argv(argv: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::agent_teams::unpack_argv;
+
+    #[test]
+    fn common_workspace_revision_does_not_change_verb_arity() {
+        for raw in ["0", "42", "18446744073709551615"] {
+            let argv =
+                ["click", "browser-1", "#submit", "--workspace-revision", raw].map(str::to_string);
+            assert!(arity_ok(&argv).is_ok(), "valid original revision {raw}");
+        }
+    }
+
+    #[test]
+    fn both_browser_shims_send_the_original_workspace_revision_header() {
+        for script in [
+            shim_script("P", "B", "H"),
+            shim_script_powershell("P", "B", "H"),
+        ] {
+            assert!(script.contains("--workspace-revision"));
+            assert!(script.contains("x-zerocode-workspace-revision"));
+            assert!(script.contains("18446744073709551615"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_revision_option_is_a_header_and_invalid_values_never_reach_transport() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+
+        let scratch = tempfile::tempdir().unwrap();
+        let shim = scratch.path().join("browser.sh");
+        let curl = scratch.path().join("curl");
+        let headers = scratch.path().join("headers");
+        let body = scratch.path().join("body");
+        std::fs::write(&shim, shim_script("P", "B", "H")).unwrap();
+        // This fixture never contacts a server or reads an account.
+        std::fs::write(
+            &curl,
+            r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-K' ]; then cp "$2" "$CAPTURE_HEADERS"; shift 2; else shift; fi
+done
+cat > "$CAPTURE_BODY"
+printf 'ok\n200'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let run = |argv: &[String]| {
+            Command::new("sh")
+                .arg(&shim)
+                .args(argv)
+                .env_clear()
+                .env(
+                    "PATH",
+                    format!("{}:/usr/bin:/bin", scratch.path().display()),
+                )
+                .env("P", "1")
+                .env("B", "fixture-browser")
+                .env("H", "fixture-hook")
+                .env("CAPTURE_HEADERS", &headers)
+                .env("CAPTURE_BODY", &body)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        for raw in ["0", "0007", "18446744073709551615"] {
+            let argv = [
+                "click",
+                "browser-1",
+                "#submit",
+                WORKSPACE_REVISION_FLAG,
+                raw,
+            ]
+            .map(str::to_string);
+            let output = run(&argv);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let value = parse_workspace_revision(raw).unwrap();
+            assert!(
+                std::fs::read_to_string(&headers)
+                    .unwrap()
+                    .contains(&format!("{WORKSPACE_REVISION_HEADER}: {value}"))
+            );
+            assert_eq!(
+                std::fs::read_to_string(&body).unwrap(),
+                pack_argv(&argv[..3])
+            );
+        }
+        let ordinary = ["click", "browser-1", "#submit"].map(str::to_string);
+        assert!(run(&ordinary).status.success());
+        assert!(
+            !std::fs::read_to_string(&headers)
+                .unwrap()
+                .contains(WORKSPACE_REVISION_HEADER)
+        );
+        for extra in [
+            vec!["-1"],
+            vec!["+1"],
+            vec!["1.5"],
+            vec![""],
+            vec!["18446744073709551616"],
+            vec!["7", WORKSPACE_REVISION_FLAG, "7"],
+            vec![],
+        ] {
+            std::fs::remove_file(&headers).unwrap();
+            let mut argv = ["click", "browser-1", "#submit", WORKSPACE_REVISION_FLAG]
+                .map(str::to_string)
+                .to_vec();
+            argv.extend(extra.into_iter().map(str::to_string));
+            let output = run(&argv);
+            assert!(!output.status.success());
+            assert!(!headers.exists(), "invalid revision reached transport");
+            // Restore only the fixture marker for the next case.
+            std::fs::write(&headers, "fixture").unwrap();
+        }
+    }
+
+    #[test]
+    fn common_revision_parser_rejects_missing_duplicate_malformed_and_overflow_input() {
+        let base = ["click", "browser-1", "#submit"].map(str::to_string);
+        for raw in [
+            "",
+            "-1",
+            "+1",
+            "1.0",
+            " 1",
+            "1,2",
+            "18446744073709551616",
+            "x",
+        ] {
+            let mut argv = base.to_vec();
+            argv.extend([WORKSPACE_REVISION_FLAG.into(), raw.into()]);
+            assert!(parse_workspace_command(&argv, None).is_err(), "{raw:?}");
+        }
+        let mut missing = base.to_vec();
+        missing.push(WORKSPACE_REVISION_FLAG.into());
+        assert!(parse_workspace_command(&missing, None).is_err());
+        let mut duplicate = base.to_vec();
+        duplicate.extend(
+            [WORKSPACE_REVISION_FLAG, "7", WORKSPACE_REVISION_FLAG, "7"].map(str::to_string),
+        );
+        assert!(parse_workspace_command(&duplicate, None).is_err());
+        let once = [
+            WORKSPACE_REVISION_FLAG,
+            "7",
+            "click",
+            "browser-1",
+            "#submit",
+        ]
+        .map(str::to_string);
+        assert!(parse_workspace_command(&once, Some(7)).is_err());
+        let parsed = parse_workspace_command(&once, None).unwrap();
+        assert_eq!(parsed.argv, base);
+        assert_eq!(parsed.workspace_revision, Some(7));
+    }
+
+    #[test]
+    fn a_flag_shaped_value_is_data_and_revision_binding_keeps_it_off_the_option_path() {
+        let mut argv = [
+            "type",
+            "browser-1",
+            "#field",
+            TYPE_VALUE_FLAG,
+            WORKSPACE_REVISION_FLAG,
+        ]
+        .map(str::to_string)
+        .to_vec();
+        with_workspace_revision(&mut argv, Some(u64::MAX));
+        let command = parse_workspace_command(&argv, None).unwrap();
+        assert_eq!(command.workspace_revision, Some(u64::MAX));
+        assert_eq!(
+            command.argv.last().map(String::as_str),
+            Some(WORKSPACE_REVISION_FLAG)
+        );
+        assert_eq!(command.argv.len(), 5);
+    }
+
+    #[test]
+    fn observation_stamp_is_separate_from_document_epoch_and_fenced_page_words() {
+        let page = crate::untrusted::fence("browser-1", "workspaceRevision: 99", usize::MAX);
+        assert_eq!(observation_revision(&page), None);
+        assert_eq!(
+            observation_revision(&format!("{page}\n{WORKSPACE_REVISION_LINE}7\n")),
+            Some(7)
+        );
+        for value in [
+            r#"{"documentEpoch":7}"#,
+            r#"{"workspaceRevision":"7"}"#,
+            r#"{"workspaceRevision":-1}"#,
+            r#"{"workspaceRevision":18446744073709551616}"#,
+        ] {
+            assert_eq!(observation_revision(value), None, "{value}");
+        }
+        assert_eq!(
+            observation_revision(r#"{"workspaceRevision":18446744073709551615}"#),
+            Some(u64::MAX)
+        );
+    }
 
     /// The shim fails closed and speaks to the right door with the right
     /// header — the script is a string, so the contract is held by reading
