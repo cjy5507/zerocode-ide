@@ -12,7 +12,9 @@
  *      code; a failed layout writes one line to the window log, without the diagram's source;
  *   4. the same report opened again keeps its drawing and asks for nothing;
  *   5. a drawing that arrives after the person moved to another card never lands in that card —
- *      neither when it arrives after the new card's text, nor before it.
+ *      neither when it arrives after the new card's text, nor before it;
+ *   6. in the drawer's column a drawing shrinks only until its smallest label reads at the window's
+ *      caption size (`--text-3xs`); a wider one keeps that scale and its block scrolls sideways.
  *
  * Every wait is a condition read once a frame, bounded; an answer the test needs to hold is held
  * until the test releases it. Every read of the page is defensive (`?.`, `?? null`): on a tree that
@@ -38,15 +40,18 @@ function standDiagrams(page) {
     // What a hostile label carries after its words: an image with a handler, and a script after a
     // closed text element. Reports and repository files can be untrusted, so it must arrive as text.
     const hostile = `<img src=x onerror="window.__PWNED__ = 2"></text><script>window.__PWNED__ = 3</script>`;
-    // Wider than any pane here, so a drawing that fits was shrunk to its column.
+    // Wider than any pane here unless the label asks for a size: a narrow drawing, one a little
+    // wider than the drawer's column, and by default one far wider. Each carries a node label and
+    // an edge label, the smallest text a drawing sets.
+    const widthOf = (label) => (label.startsWith("좁은") ? 300 : label.startsWith("조금") ? 600 : 1200);
     const drawn = (label) => ({
       drawing: {
-        width: 1200, height: 160,
+        width: widthOf(label), height: 160,
         marks: [
           { mark: "rect", x: 10, y: 40, width: 220, height: 60, radius: 4, class: "mmd-node" },
           { mark: "text", x: 120, y: 75, text: `${label}${hostile}`, class: "mmd-label", anchor: "middle" },
-          { mark: "polyline", points: [[230, 70], [970, 70]], class: "mmd-edge", arrow: true },
-          { mark: "rect", x: 970, y: 40, width: 220, height: 60, radius: 4, class: "mmd-node" },
+          { mark: "polyline", points: [[230, 70], [widthOf(label) - 10, 70]], class: "mmd-edge", arrow: true },
+          { mark: "text", x: widthOf(label) / 2, y: 64, text: "예", class: "mmd-edge-label", anchor: "middle" },
         ],
       },
       undrawn: null,
@@ -80,6 +85,7 @@ function standDiagrams(page) {
       "r-old": report("옛 빌드가 적은 보고서", "나-그림", "보고서 나 문단."),
     };
     for (const id of Object.keys(reports)) artifactPreviews.delete(id);
+    window.__REPORTS__ = reports;
     const previewed = window.__ANSWER__.artifact_preview;
     window.__ANSWER__.artifact_preview = (args) => {
       const text = reports[args.id];
@@ -104,21 +110,22 @@ function standDiagrams(page) {
       return true;
     };
     // What one painted body shows of its diagram: where the block stands, what it holds, and whether
-    // the drawing fits the body's column.
+    // the drawing stays in the body's column — fitted to it, or scrolling inside its own block.
     window.__READ_DIAGRAM__ = (body, label) => {
       const block = body?.querySelector(".mmd-block") ?? null;
       const svg = block?.querySelector("svg.mmd") ?? null;
-      const texts = [...(svg?.querySelectorAll("text") ?? [])];
+      const named = [...(svg?.querySelectorAll("text.mmd-label") ?? [])];
       return {
         drawn: svg !== null,
         before: block?.previousElementSibling?.textContent.trim() ?? null,
         after: block?.nextElementSibling?.textContent.trim() ?? null,
-        labelled: texts.length === 1 && texts[0].textContent === `${label}${hostile}`,
+        labelled: named.length === 1 && named[0].textContent === `${label}${hostile}`,
         mermaidCode: body?.querySelectorAll('pre.md-block[data-language="mermaid"]').length ?? null,
         heldCode: block?.querySelector('pre.md-block[data-language="mermaid"]')?.textContent.includes(label) ?? false,
         rustCode: body?.querySelector('pre.md-block[data-language="rust"]') !== null,
-        fits: svg !== null && body !== null && svg.getBoundingClientRect().width > 0
-          && svg.getBoundingClientRect().width <= body.getBoundingClientRect().width + 1,
+        contained: svg !== null && body !== null && svg.getBoundingClientRect().width > 0
+          && (block.clientWidth >= svg.getBoundingClientRect().width - 1 || block.scrollWidth > block.clientWidth + 1)
+          && body.scrollWidth <= body.clientWidth + 1,
         markup: body?.querySelectorAll("img, script").length ?? 0,
         rawText: [...(body?.querySelectorAll(".md-para") ?? [])].some((one) => one.textContent.includes("onerror")),
         pwned: window.__PWNED__ ?? null,
@@ -180,9 +187,9 @@ export async function testArtifactDiagrams(browser, origin, ok) {
     });
     ok("the tab by task opens on the task line the reader is read from", tabbed === true);
     ok(
-      "the reader of the tab by task draws the report's ```mermaid fence as a diagram where the fence stood: a .mmd-block holding its svg between the line before and the paragraph after, no mermaid code left, the rust fence still code, the drawing shrunk to the pane",
+      "the reader of the tab by task draws the report's ```mermaid fence as a diagram where the fence stood: a .mmd-block holding its svg between the line before and the paragraph after, no mermaid code left, the rust fence still code, the drawing kept in the pane's column",
       reader.drawn.drawn && reader.drawn.labelled && reader.drawn.mermaidCode === 0 && reader.drawn.rustCode
-        && reader.drawn.before?.startsWith("<img") === true && reader.drawn.after === "그림 다음 문단." && reader.drawn.fits,
+        && reader.drawn.before?.startsWith("<img") === true && reader.drawn.after === "그림 다음 문단." && reader.drawn.contained,
       JSON.stringify(reader.drawn),
     );
     ok(
@@ -237,7 +244,7 @@ export async function testArtifactDiagrams(browser, origin, ok) {
         return Boolean(preview && !preview.hidden && md?.textContent.includes(said));
       };
       const waits = (label) => seen.waiting.some((one) => one.label === label);
-      const labels = () => [...(md?.querySelectorAll("svg.mmd text") ?? [])].map((one) => one.textContent.split("<")[0]);
+      const labels = () => [...(md?.querySelectorAll("svg.mmd text.mmd-label") ?? [])].map((one) => one.textContent.split("<")[0]);
       seen.hold = true;
       open("t-503");
       const bAsked = await window.__UNTIL__(() => showing("보고서 나 문단.") && waits("나-그림"));
@@ -268,7 +275,7 @@ export async function testArtifactDiagrams(browser, origin, ok) {
         return Boolean(preview && !preview.hidden && md?.textContent.includes(said));
       };
       const waits = (label) => seen.waiting.some((one) => one.label === label);
-      const labels = () => [...(md?.querySelectorAll("svg.mmd text") ?? [])].map((one) => one.textContent.split("<")[0]);
+      const labels = () => [...(md?.querySelectorAll("svg.mmd text.mmd-label") ?? [])].map((one) => one.textContent.split("<")[0]);
       seen.hold = true;
       open("t-501");
       const away = await window.__UNTIL__(() => showing("한 줄 요약"));
@@ -298,6 +305,59 @@ export async function testArtifactDiagrams(browser, origin, ok) {
       JSON.stringify(leftBefore),
     );
 
+    /* ---- 6: a drawing in the drawer stays legible at any width -------------------------------- */
+    const sizes = await page.evaluate(async () => {
+      const seen = window.__DIAGRAMS__;
+      const view = artifactsView();
+      const md = view?.querySelector(".artifacts-drawer .artifact-preview-md") ?? null;
+      const open = (task) => view?.querySelector(`.artifact-task[data-task="${task}"]`)?.click();
+      const showing = (said) => {
+        const preview = view?.querySelector(".artifacts-drawer .artifact-preview");
+        return Boolean(preview && !preview.hidden && md?.textContent.includes(said));
+      };
+      seen.hold = false;
+      open("t-502");
+      const away = await window.__UNTIL__(() => showing("보고서 가 문단."));
+      const fence = (label) => ["```mermaid", "flowchart LR", `  A[${label}] -- 예 --> B[끝]`, "```", ""];
+      window.__REPORTS__["r-old"] = ["# 크기 보고", "", "크기 문단.", "", ...fence("좁은-그림"), ...fence("조금-넓은-그림"),
+        ...fence("넓은-그림"), "끝 문단.", ""].join("\n");
+      artifactPreviews.delete("r-old");
+      open("t-503");
+      const stood = await window.__UNTIL__(() => showing("크기 문단.") && md.querySelectorAll(".mmd-block svg.mmd").length === 3);
+      // The window's caption size, which no label may be drawn below.
+      const caption = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--text-3xs"));
+      const blocks = [...(md?.querySelectorAll(".mmd-block") ?? [])].map((block) => {
+        const svg = block.querySelector("svg.mmd");
+        const natural = svg?.viewBox.baseVal.width ?? 0;
+        const width = svg?.getBoundingClientRect().width ?? 0;
+        const set = [...(svg?.querySelectorAll("text") ?? [])].map((text) => parseFloat(getComputedStyle(text).fontSize));
+        return {
+          natural, width: Math.round(width * 10) / 10, column: block.clientWidth, smallestSet: Math.min(...set),
+          smallestShown: natural > 0 ? Math.round((Math.min(...set) * width / natural) * 100) / 100 : 0,
+          scrolls: block.scrollWidth > block.clientWidth + 1,
+        };
+      });
+      return { away, stood, caption, blocks, readerScrolls: md ? md.scrollWidth > md.clientWidth + 1 : null };
+    });
+    // Fitted to the column while the smallest label still reads at the caption size; past that,
+    // drawn at that scale and scrolled.
+    const sized = sizes.blocks.map((one) => {
+      const expected = one.natural <= one.column ? one.natural : Math.max(one.column, one.natural * sizes.caption / one.smallestSet);
+      return { natural: one.natural, width: one.width, expected: Math.round(expected * 10) / 10, scrolls: one.scrolls,
+        right: Math.abs(one.width - expected) <= 1 && one.scrolls === (expected > one.column + 1) };
+    });
+    ok(
+      "every label of a drawing in the drawer, the smallest edge label included, is drawn at the window's caption size (--text-3xs) or larger, however wide the drawing is",
+      sizes.stood && sizes.caption > 0 && sizes.blocks.length === 3 && sizes.blocks.every((one) => one.smallestShown >= sizes.caption - 0.05),
+      JSON.stringify(sizes),
+    );
+    ok(
+      "a drawing narrower than the drawer's column keeps its own size and one a little wider shrinks to the column, neither scrolling; a far wider one stops shrinking at the caption size and its block scrolls sideways, while the reader itself does not",
+      sizes.stood && sized.length === 3 && sized.every((one) => one.right) && !sized[0].scrolls && !sized[1].scrolls && sized[2].scrolls
+        && sizes.readerScrolls === false,
+      JSON.stringify({ sized, column: sizes.blocks[0]?.column, readerScrolls: sizes.readerScrolls }),
+    );
+
     /* ---- 1: a read-only tab (a document outside the project, t-16006) ------------------------- */
     const readOnly = await page.evaluate(async () => {
       const body = (said) => [...document.querySelectorAll(".file-body--markdown")]
@@ -308,9 +368,9 @@ export async function testArtifactDiagrams(browser, origin, ok) {
       return { stood, readOnly: currentTab()?.readOnly === true, drawn: window.__READ_DIAGRAM__(body("읽기 전용 문단."), "다-그림") };
     });
     ok(
-      "a read-only tab draws its ```mermaid fence as a diagram where the fence stood, with no mermaid code left and the drawing shrunk to the page",
+      "a read-only tab draws its ```mermaid fence as a diagram where the fence stood, with no mermaid code left and the drawing kept in the page's column",
       readOnly.stood && readOnly.readOnly && readOnly.drawn.drawn && readOnly.drawn.labelled && readOnly.drawn.mermaidCode === 0
-        && readOnly.drawn.after === "그림 다음 문단." && readOnly.drawn.fits,
+        && readOnly.drawn.after === "그림 다음 문단." && readOnly.drawn.contained,
       JSON.stringify(readOnly),
     );
 
@@ -397,9 +457,9 @@ export async function testArtifactDiagrams(browser, origin, ok) {
       return { stood, drawn: window.__READ_DIAGRAM__(body(), "바-그림") };
     });
     ok(
-      "the skill detail draws its SKILL.md's ```mermaid fence as a diagram where the fence stood, with no mermaid code left and the drawing shrunk to the pane",
+      "the skill detail draws its SKILL.md's ```mermaid fence as a diagram where the fence stood, with no mermaid code left and the drawing kept in the pane's column",
       skill.stood && skill.drawn.drawn && skill.drawn.labelled && skill.drawn.mermaidCode === 0
-        && skill.drawn.before === "스킬 문단." && skill.drawn.after === "그림 다음 문단." && skill.drawn.fits,
+        && skill.drawn.before === "스킬 문단." && skill.drawn.after === "그림 다음 문단." && skill.drawn.contained,
       JSON.stringify(skill),
     );
 
