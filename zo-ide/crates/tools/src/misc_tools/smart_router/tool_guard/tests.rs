@@ -440,6 +440,63 @@ fn an_acting_command_guard_hands_back_its_line_after_the_command_ran() {
     });
 }
 
+/// A command guard the door holds (t-58193) goes on exactly as it does after a
+/// `503` that named no wait — its road when nothing answers: no answer, no
+/// line handed back, the call as it was, the same verdict and the same row
+/// but for its outcome. The only difference is that no request leaves.
+///
+/// The door holds a seat for a wait its server named where it reads that
+/// seat's rows, the project's own folder. The guards keep theirs under the
+/// config home ([`command_guard_path`]), so a guard is not held today and
+/// takes the `503` road itself; the wait is written here where the door
+/// reads, to hold this guard as the door holds the project's seats.
+#[test]
+fn a_command_guard_held_at_the_door_goes_on_as_after_a_503_that_named_no_wait() {
+    use super::super::shadow_ledger::shadow_ledger_path;
+    let decided = |mock: &Mock, held: bool| {
+        machine(&COMMAND_GUARD, JevMode::On.key(), &mock.base_url, |cwd| {
+            forget_waiting(cwd);
+            if held {
+                let at = super::super::decision_shadow::now_ms();
+                let waited = serde_json::json!({"at": at, "outcome": "http_503", "requests": 1,
+                    "rubricVersion": COMMAND_GUARD.rubric_version, "serverRetryAt": at + 60_000});
+                let ledger = shadow_ledger_path(cwd, COMMAND_GUARD.ledger);
+                std::fs::create_dir_all(ledger.parent().expect("a folder")).expect("the folder");
+                std::fs::write(&ledger, format!("{waited}\n")).expect("the wait it named");
+            }
+            let judge = ToolGuardJudge::at(cwd);
+            judge.command(command_ask(cwd, "shell-1", "rm -rf build"));
+            let (owner, tool_use_id) = ("turn-1".to_string(), "shell-1".to_string());
+            let ran = CommandRan { owner, tool_use_id, failed: false, cancelled: false };
+            let line = api::sync_bridge::run_blocking(judge.command_ran(ran));
+            let row = rows_of(&command_guard_path(), 1)[0].clone();
+            let row: CommandGuardRow = serde_json::from_value(row).expect("a command row");
+            (line, row)
+        })
+    };
+    let decision = |row: &CommandGuardRow| {
+        let asked = &row.asked;
+        let road = (asked.answers.clone(), asked.route_use.clone(), asked.applied);
+        (row.verdict.clone(), road, row.noted)
+    };
+
+    let plain = Mock::serving(503, "{}".to_string());
+    let (line, after_503) = decided(&plain, false);
+    let refused = SystemOneFailure::Http(503).ledger_token();
+    let sent = (after_503.asked.outcome.as_str(), after_503.asked.requests);
+    assert_eq!(sent, (refused.as_str(), 1), "{after_503:?}");
+    assert_eq!(plain.requests().len(), 1);
+    assert_eq!(line, None, "nothing answered, so no line");
+    assert_eq!(after_503.asked.route_use, ROUTE_USE_FALLBACK, "{after_503:?}");
+
+    let waiting = Mock::serving(503, "{}".to_string());
+    let (held_line, held) = decided(&waiting, true);
+    assert_eq!((held.asked.outcome.as_str(), held.asked.requests), ("resting", 0), "{held:?}");
+    assert!(waiting.requests().is_empty(), "no request leaves");
+    assert_eq!(held_line, line);
+    assert_eq!(decision(&held), decision(&after_503));
+}
+
 #[test]
 fn command_and_text_advice_recheck_permissions_at_delivery() {
     use super::super::jev_mock::{SettingsChange, APPLICATION_CHANGES};
