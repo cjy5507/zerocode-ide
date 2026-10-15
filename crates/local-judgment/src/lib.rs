@@ -120,6 +120,8 @@ mod admission_tests;
 #[cfg(test)]
 mod source_tests;
 #[cfg(all(test, unix))]
+mod supervision_tests;
+#[cfg(all(test, unix))]
 mod switch_tests;
 #[cfg(test)]
 mod tests;

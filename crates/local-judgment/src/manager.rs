@@ -2258,6 +2258,25 @@ pub(crate) mod test_support {
         target: Model,
         factory: EngineFactory,
     ) -> Arc<Manager> {
+        installed_manager(
+            root,
+            settings,
+            vec![previous, target],
+            factory,
+            Arc::new(|_| {}),
+        )
+    }
+
+    /// A manager whose models and runtime are installed, whose engines come
+    /// from `factory`, and which tells `sink` every change.
+    #[cfg(unix)]
+    pub fn installed_manager(
+        root: &Path,
+        settings: &Path,
+        models: Vec<Model>,
+        factory: EngineFactory,
+        sink: Arc<dyn Fn(Snapshot) + Send + Sync>,
+    ) -> Arc<Manager> {
         let runtimes: serde_json::Value =
             serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
         let profile: RuntimeProfile =
@@ -2267,14 +2286,14 @@ pub(crate) mod test_support {
             settings,
             Catalog {
                 version: 1,
-                models: vec![previous.clone(), target.clone()],
+                models: models.clone(),
             },
             Some(profile.clone()),
-            Arc::new(|_| {}),
+            sink,
         )
         .unwrap();
         *lock(&manager.engine_factory) = Some(factory);
-        for model in [previous, target] {
+        for model in models {
             let mut stage = manager.store.stage().unwrap();
             fs::write(stage.path().join("model.safetensors"), b"weights").unwrap();
             manager.store.commit_model(&mut stage, &model).unwrap();
@@ -2302,6 +2321,41 @@ pub(crate) mod test_support {
         let running = engine::serve(&model, engine, Arc::new(|| {}))
             .await
             .unwrap();
+        hold(manager, &model, running, checked)
+    }
+
+    /// Serves `engine` as the manager's checked server under `limits`, and
+    /// tells the manager when it fails, as a server it started does.
+    #[cfg(unix)]
+    pub async fn running_limited(
+        manager: &Arc<Manager>,
+        engine: Arc<Engine>,
+        limits: engine::Limits,
+    ) -> (String, Provider) {
+        let model = lock(&manager.catalog).models[0].clone();
+        let told = Arc::downgrade(manager);
+        let running = engine::serve_limited(
+            &model,
+            engine,
+            Arc::new(move || {
+                if let Some(manager) = told.upgrade() {
+                    manager.emit();
+                }
+            }),
+            limits,
+        )
+        .await
+        .unwrap();
+        hold(manager, &model, running, true)
+    }
+
+    #[cfg(unix)]
+    fn hold(
+        manager: &Manager,
+        model: &Model,
+        running: Running,
+        checked: bool,
+    ) -> (String, Provider) {
         let id = running.id.clone();
         let provider = running.provider.clone();
         let mut inner = lock(&manager.inner);

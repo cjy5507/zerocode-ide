@@ -262,11 +262,17 @@ impl Engine {
 
     #[cfg(all(test, unix))]
     pub(crate) fn from_command(command: &mut Command) -> Arc<Self> {
-        let child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        // std on macOS marks a new pipe close-on-exec only after making it, so a
+        // fixture spawned beside another could keep that one's pipe open.
+        static SPAWNING: Mutex<()> = Mutex::new(());
+        let child = {
+            let _turn = lock(&SPAWNING);
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
         Self::from_child(child).unwrap()
     }
 }
