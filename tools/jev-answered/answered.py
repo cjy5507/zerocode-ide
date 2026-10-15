@@ -80,6 +80,21 @@ CLIENT_ROUTE_KEY = "clientRoute"
 RUBRIC_KEYS = ("rubricVersion", "rubric_version")
 ANSWERED = "answered"
 
+# The code a managed server named beside a refused request's status
+# (`zerocode_core::jev::summary::SERVER_ERROR_CODE`), the one status it is
+# read for (`systemone::token_for(503)`), and the word a sent 503 is counted
+# under when its row names no code — every row written before the key.
+SERVER_ERROR_CODE_KEY = "serverErrorCode"
+HTTP_503 = "http_503"
+NO_CODE = "none"
+
+# What the 503 split can and cannot be compared across, said under the table.
+CODE_LIMIT = (
+    "503 by server code: only rows written once the clients kept the code name one, so a 503 "
+    "with none is not a busy one. Compare 503 totals across versions; compare codes within one "
+    "client and after it. zo's seat rows keep no code yet."
+)
+
 # A decision row's second question, and its word for one never asked
 # (`smart_router::decision_shadow::PROBE_NOT_ASKED`).
 PROBE_KEY = "probe"

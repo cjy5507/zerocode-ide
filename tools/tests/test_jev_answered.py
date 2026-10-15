@@ -69,6 +69,7 @@ class TheNamesAreTheRusts(unittest.TestCase):
             ("APPLIED", answered.APPLIED_KEY),
             ("MODEL", answered.MODEL_KEY),
             ("CLIENT_ROUTE", answered.CLIENT_ROUTE_KEY),
+            ("SERVER_ERROR_CODE", answered.SERVER_ERROR_CODE_KEY),
         ]:
             self.assertIn(f'pub const {name}: LedgerKey = LedgerKey {{\n    canonical: "{key}",\n    also: &[],', summary)
         canonical, *also = answered.RUBRIC_KEYS
@@ -98,6 +99,16 @@ class TheNamesAreTheRusts(unittest.TestCase):
         self.assertIn('let _ = write!(route, "{byte:02x}");', lib)
         self.assertTrue(answered.ROUTE.fullmatch("route-" + "0f" * 8))
         self.assertFalse(answered.ROUTE.fullmatch("judgment-" + "0f" * 8))
+
+    def test_the_503_word_is_the_one_both_clients_write(self) -> None:
+        self.assertIn(
+            f'assert_eq!(token_for(503), "{answered.HTTP_503}");',
+            rust("crates/zerocode-shell/src/systemone/tests.rs"),
+        )
+        self.assertIn(
+            f'assert_eq!(SystemOneFailure::Http(503).ledger_token(), "{answered.HTTP_503}");',
+            rust("zo-ide/crates/api/src/systemone.rs"),
+        )
 
 
 class TheCount(unittest.TestCase):
@@ -211,6 +222,35 @@ class TheCount(unittest.TestCase):
         places = [line.split(" | ")[1] for line in text.splitlines() if line.startswith(f"| {self.ledger.stem} | ") or line.startswith("| rerank-shadow | ")]
         self.assertEqual(places, sorted(places, key=lambda place: place != answered.WINDOW_PLACE), "the window's rows first")
         self.assertEqual(set(places), {answered.WINDOW_PLACE, answered.PROJECTS_PLACE})
+
+    def test_a_503_is_split_by_the_servers_code_and_one_naming_none_is_never_busy(self) -> None:
+        at = ms("2026-10-15T07:40")
+        write(
+            self.home / replay.WINDOW_LEDGERS / replay.PROVIDER_LEDGERS / PROVIDER / "notify-call.jsonl",
+            [
+                {"at": at, "outcome": answered.HTTP_503, "requests": 1, "serverErrorCode": "operation_busy"},
+                {"at": at + 1, "outcome": answered.HTTP_503, "requests": 1, "serverErrorCode": "operation_busy"},
+                {"at": at + 2, "outcome": answered.HTTP_503, "requests": 1, "serverErrorCode": "server_stopped"},
+                {"at": at + 3, "outcome": answered.HTTP_503, "requests": 1},
+                {"at": at + 4, "outcome": answered.HTTP_503, "requests": 1, "serverErrorCode": "the person's words"},
+                {"at": at + 5, "outcome": answered.HTTP_503, "requests": 0, "serverErrorCode": "operation_busy"},
+                {"at": at + 6, "outcome": "timeout", "requests": 1, "serverErrorCode": "operation_busy"},
+            ],
+        )
+        rows = self.table()
+        held = next(row for row in rows if (row["seat"], row["window"]) == ("notify-call", "after"))
+        self.assertEqual(held["failures"], {answered.HTTP_503: 5, "timeout": 1}, "the 503 total stands as it was")
+        coded = {"operation_busy": 2, "server_stopped": 1, answered.NO_CODE: 1, answered.NOT_A_WORD: 1}
+        self.assertEqual(held["codes503"], coded, "sent 503s only; a row naming no code is none, never busy")
+        old = next(row for row in rows if (row["seat"], row["folder"], row["window"]) == ("command-guard", PROVIDER, "before"))
+        self.assertEqual(old["codes503"], {answered.NO_CODE: 2}, "rows written before the code read as none")
+        totals = answered.totals_of(rows, self.windows)
+        self.assertEqual(next(one for one in totals if (one["folder"], one["window"]) == (PROVIDER, "after"))["codes503"], coded)
+        counted = {"countedAt": "2026-10-15T00:00:00Z", "home": "/Users/dev/.zo", "versions": {"app": None, "zo": None}}
+        text = answered.render(rows, totals, self.reads, self.windows, counted)
+        self.assertIn(f"| http_503 5 · timeout 1 | operation_busy 2 · {answered.NO_CODE} 1 · {answered.NOT_A_WORD} 1 · server_stopped 1 |", text)
+        self.assertIn(answered.CODE_LIMIT, text)
+        self.assertNotIn("person's", text)
 
     def test_a_named_project_is_read_alone_by_zos_slug_and_an_unknown_one_is_refused(self) -> None:
         named = self.table([Path("/Users/dev/a")])

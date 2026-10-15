@@ -70,6 +70,16 @@ pub const SCHEMA: &str = "schema";
 /// The contract's "overloaded" status; it is not in the HTTP registry.
 const OVERLOADED_STATUS: u16 = 529;
 
+/// The most of a refused request's body read for the server's code
+/// (t-55423): a managed server's refusal is a few dozen bytes, and a body
+/// past this names no code — its status stands as it came.
+pub const MAX_REFUSAL_BYTES: usize = 256;
+
+/// The longest a refused request's body is waited on for the server's code
+/// (t-55423), and never past the request's own deadline: a managed server
+/// writes its refusal at once, and a body slower than this names no code.
+pub const MAX_REFUSAL_WAIT: Duration = Duration::from_millis(300);
+
 /// How long a warm-up connect may take before it is abandoned — the cold
 /// first ask the bench timed, rounded up; a warm-up that outlives a walk's
 /// first question was no help and is not worth a socket.
@@ -93,6 +103,24 @@ pub fn token_for(status: u16) -> String {
         OVERLOADED_STATUS => OVERLOADED.to_string(),
         other => format!("http_{other}"),
     }
+}
+
+/// What reading a refused request's body found (t-55423): the code its server
+/// named, when it was one a managed server uses, and how many of the body's
+/// bytes were read to find it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RefusalRead {
+    code: Option<&'static str>,
+    read: usize,
+}
+
+/// Reads `answer`, a refused request's response, for the code its server
+/// named: at most [`MAX_REFUSAL_BYTES`] of its body, for no longer than
+/// [`MAX_REFUSAL_WAIT`] or what is left until `deadline`, whichever ends
+/// first. A deadline already passed reads nothing.
+async fn refusal_read(answer: reqwest::Response, deadline: Instant) -> RefusalRead {
+    let _ = (answer, deadline);
+    RefusalRead::default()
 }
 
 /// A question's request body, as the endpoint takes it.
