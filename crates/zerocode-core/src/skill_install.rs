@@ -3,9 +3,10 @@
 //! `skill.rs` reads and never writes — those are directories the person and
 //! their agents own. This module is the one deliberate exception, and it is
 //! narrow on purpose: it writes only the skills carried inside this binary
-//! (every directory under `skills/`, as `build.rs` lists them), only into the global root
-//! each detected agent actually reads, and only over a file that is already
-//! ours. Anything else that lives at the destination is left as it is and
+//! (every directory under `skills/`, as `build.rs` lists them), only into the global roots
+//! each detected agent actually reads, and only where no copy stands or the copy
+//! holds the text of an earlier release (`skill_releases.tsv`). A copy with any
+//! other text, a person's edit or somebody else's skill, is left as it is and
 //! reported.
 //!
 //! Why the app carries its own copy: the manual road
@@ -31,6 +32,12 @@ pub struct BundledSkill {
 
 // Every skill this build carries, generated from the source directory.
 include!(concat!(env!("OUT_DIR"), "/bundled_skills.rs"));
+
+/// Every text each bundled skill's `SKILL.md` has had on main, one
+/// `<name>\t<git blob id>` line per text, oldest first: `git log --follow
+/// --raw` over `skills/<name>/SKILL.md`. A copy holding one of these texts is
+/// an earlier release of ours and is replaced; any other text is kept.
+const RELEASES: &str = include_str!("skill_releases.tsv");
 
 #[must_use]
 pub fn bundled_skill(name: &str) -> Option<&'static BundledSkill> {
@@ -130,23 +137,71 @@ pub fn agent_home(agent: &str, sources: &[SkillSource]) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Whether a `SKILL.md` at the destination is one of ours — the frontmatter
-/// names the skill and the body speaks of this product. Anything else is
-/// somebody else's file and is kept.
-fn is_ours(existing: &str, name: &str) -> bool {
-    let named = existing
+/// Every home `agent` reads: its own under the person's home, then each home
+/// a window launches it into, from `launched` as `(agent id, home)`.
+///
+/// A Claude pane in the window runs with `CLAUDE_CONFIG_DIR` at an app-owned
+/// home and never reads `~/.claude`; a Codex pane runs with its own
+/// `CODEX_HOME`. Written under the person's home alone, the bundled skills and
+/// the second brain's guide block never reached those panes (t-55424).
+#[must_use]
+pub fn agent_homes(
+    agent: &str,
+    sources: &[SkillSource],
+    launched: &[(String, PathBuf)],
+) -> Vec<PathBuf> {
+    let mut homes: Vec<PathBuf> = agent_home(agent, sources).into_iter().collect();
+    for (id, home) in launched {
+        if id == agent && !homes.contains(home) {
+            homes.push(home.clone());
+        }
+    }
+    homes
+}
+
+/// The skills folder of each home [`agent_homes`] names.
+fn skill_roots(
+    agent: &str,
+    sources: &[SkillSource],
+    launched: &[(String, PathBuf)],
+) -> Vec<PathBuf> {
+    agent_homes(agent, sources, launched)
+        .into_iter()
+        .map(|home| home.join("skills"))
+        .collect()
+}
+
+/// The id `git hash-object` prints for these bytes.
+fn git_blob_id(bytes: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(format!("blob {}\0", bytes.len()));
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Whether `blob` is a text `name` has shipped with.
+fn released(name: &str, blob: &str) -> bool {
+    RELEASES
         .lines()
-        .take(8)
-        .any(|line| line.trim() == format!("name: {name}"));
-    named && existing.contains("ZeroCode")
+        .any(|line| line.split_once('\t') == Some((name, blob)))
 }
 
-fn git_blob_id(_bytes: &[u8]) -> String {
-    String::new()
-}
-
-fn released(_name: &str, _blob: &str) -> bool {
-    false
+/// What the bytes of a copy are. Only an earlier release is ours to replace:
+/// the rule before this one (the frontmatter names the skill and the body says
+/// "ZeroCode") also matched a copy somebody had edited, and wrote over it.
+fn copy_state(skill: &BundledSkill, bytes: &[u8]) -> CopyState {
+    if bytes == skill.content.as_bytes() {
+        CopyState::Current
+    } else if released(skill.name, &git_blob_id(bytes)) {
+        CopyState::Stale
+    } else {
+        CopyState::Edited
+    }
 }
 
 /// Every copy of one bundled skill the detected agents read, and what each
@@ -156,40 +211,75 @@ fn released(_name: &str, _blob: &str) -> bool {
 /// The name is not a skill this build carries.
 pub fn bundled_copies(
     name: &str,
-    _home: &Path,
-    _launched: &[(String, PathBuf)],
-    _detected: &[(String, String)],
+    home: &Path,
+    launched: &[(String, PathBuf)],
+    detected: &[(String, String)],
 ) -> Result<Vec<SkillCopy>, String> {
-    bundled_skill(name).ok_or_else(|| format!("{name}: 이 빌드가 담고 있는 스킬이 아닙니다"))?;
-    Ok(Vec::new())
+    let skill = bundled_skill(name)
+        .ok_or_else(|| format!("{name}: 이 빌드가 담고 있는 스킬이 아닙니다"))?;
+    let sources = discovery_sources(home, &[]);
+    let mut copies: Vec<SkillCopy> = Vec::new();
+    for (agent, label) in detected {
+        for root in skill_roots(agent, &sources, launched) {
+            let path = root.join(skill.name).join(SKILL_FILE);
+            // Two agents that read one root (claude and openclaude, or the
+            // shared `.agents` home) hold one copy there, not two.
+            if copies.iter().any(|copy| copy.path == path) {
+                continue;
+            }
+            let state = match std::fs::read(&path) {
+                Ok(bytes) => copy_state(skill, &bytes),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => CopyState::Missing,
+                // A plain file where the skill's folder should stand, or a
+                // copy that cannot be read: not ours to touch either way.
+                Err(_) => CopyState::Edited,
+            };
+            copies.push(SkillCopy {
+                agent: agent.clone(),
+                label: label.clone(),
+                path,
+                state,
+            });
+        }
+    }
+    Ok(copies)
 }
 
-/// Install one bundled skill for every detected agent. `detected` is
-/// `(agent id, label)` in the picker's order; the outcomes keep that order.
+/// Install one bundled skill for every detected agent, in every root it
+/// reads. `detected` is `(agent id, label)` in the picker's order; the
+/// outcomes keep that order, one for each root.
 ///
 /// # Errors
 /// The name is not a skill this build carries.
 pub fn install_bundled_skill(
     name: &str,
     home: &Path,
-    _launched: &[(String, PathBuf)],
+    launched: &[(String, PathBuf)],
     detected: &[(String, String)],
 ) -> Result<Vec<SkillInstallOutcome>, String> {
     let skill = bundled_skill(name)
         .ok_or_else(|| format!("{name}: 이 빌드가 담고 있는 스킬이 아닙니다"))?;
     let sources = discovery_sources(home, &[]);
-    Ok(detected
-        .iter()
-        .map(|(agent, label)| install_one(skill, agent, label, &sources))
-        .collect())
+    let mut outcomes = Vec::new();
+    for (agent, label) in detected {
+        let roots = skill_roots(agent, &sources, launched);
+        if roots.is_empty() {
+            outcomes.push(SkillInstallOutcome {
+                agent: agent.clone(),
+                label: label.clone(),
+                path: PathBuf::new(),
+                state: InstallState::Failed,
+                detail: "이 에이전트가 읽는 스킬 폴더를 모릅니다".to_string(),
+            });
+        }
+        for root in roots {
+            outcomes.push(install_one(skill, agent, label, &root));
+        }
+    }
+    Ok(outcomes)
 }
 
-fn install_one(
-    skill: &BundledSkill,
-    agent: &str,
-    label: &str,
-    sources: &[SkillSource],
-) -> SkillInstallOutcome {
+fn install_one(skill: &BundledSkill, agent: &str, label: &str, root: &Path) -> SkillInstallOutcome {
     let outcome = |path: PathBuf, state: InstallState, detail: String| SkillInstallOutcome {
         agent: agent.to_string(),
         label: label.to_string(),
@@ -197,14 +287,7 @@ fn install_one(
         state,
         detail,
     };
-    let Some(root) = install_root(agent, sources) else {
-        return outcome(
-            PathBuf::new(),
-            InstallState::Failed,
-            "이 에이전트가 읽는 스킬 폴더를 모릅니다".to_string(),
-        );
-    };
-    let dir = root.path.join(skill.name);
+    let dir = root.join(skill.name);
     let path = dir.join(SKILL_FILE);
     // A plain file where the skill's directory should stand is somebody
     // else's: reading "<file>/SKILL.md" would only say "not a directory".
@@ -215,16 +298,16 @@ fn install_one(
             "스킬 폴더 자리에 다른 파일이 있어 그대로 두었습니다".to_string(),
         );
     }
-    match std::fs::read_to_string(&path) {
-        Ok(existing) if existing == skill.content => {
-            outcome(path, InstallState::Unchanged, String::new())
-        }
-        Ok(existing) if !is_ours(&existing, skill.name) => outcome(
-            path,
-            InstallState::Kept,
-            "다른 파일이 이미 있어 그대로 두었습니다".to_string(),
-        ),
-        Ok(_) => write_skill(&dir, &path, skill.content, outcome),
+    match std::fs::read(&path) {
+        Ok(existing) => match copy_state(skill, &existing) {
+            CopyState::Current => outcome(path, InstallState::Unchanged, String::new()),
+            CopyState::Stale => write_skill(&dir, &path, skill.content, outcome),
+            CopyState::Edited | CopyState::Missing => outcome(
+                path,
+                InstallState::Kept,
+                "다른 파일이 이미 있어 그대로 두었습니다".to_string(),
+            ),
+        },
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             write_skill(&dir, &path, skill.content, outcome)
         }
@@ -451,11 +534,6 @@ mod tests {
             assert!(
                 skill.content.starts_with("---\nname: "),
                 "{} has no frontmatter",
-                skill.name
-            );
-            assert!(
-                is_ours(skill.content, skill.name),
-                "{} would not be recognised as ours",
                 skill.name
             );
         }

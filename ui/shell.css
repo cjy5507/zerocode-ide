@@ -44627,6 +44627,21 @@ button.jev-token:hover {
 
 }
 
+.skills-bundled-panel {
+  color: var(--ink-mist);
+  font-size: var(--skills-meta-size);
+
+}
+
+.skills-bundled-line {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+  margin: var(--space-1) 0;
+
+}
+
 .skills-error {
   color: var(--skills-alert);
   overflow-wrap: anywhere;

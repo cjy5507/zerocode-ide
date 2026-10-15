@@ -354,27 +354,31 @@ pub fn write_guide(file: &Path, vault: Option<&Path>) -> io::Result<GuideState> 
 
 /// Every detected agent's global instruction file, resolved once.
 ///
-/// `detected` is `(agent id, label)` in the picker's order. The home root is
-/// [`crate::skill_install`]'s — the same directory that agent's skills are
-/// installed into — so this table and that one can never disagree about where
-/// an agent lives. Two ids that read the same file (claude and openclaude both
-/// read `~/.claude`) resolve to one row, or the card would count one file as
-/// two connections.
-fn guide_targets(home: &Path, detected: &[(String, String)]) -> Vec<(String, String, PathBuf)> {
+/// `detected` is `(agent id, label)` in the picker's order. The homes are
+/// [`crate::skill_install::agent_homes`]: the same directories that agent's
+/// skills are installed into, the window's own homes among them (`launched`),
+/// so this table and that one can never disagree about where an agent lives.
+/// Two ids that read the same file (claude and openclaude both read
+/// `~/.claude`) resolve to one row, or the card would count one file as two
+/// connections.
+fn guide_targets(
+    home: &Path,
+    launched: &[(String, PathBuf)],
+    detected: &[(String, String)],
+) -> Vec<(String, String, PathBuf)> {
     let sources = crate::skill::discovery_sources(home, &[]);
     let mut targets: Vec<(String, String, PathBuf)> = Vec::new();
     for (agent, label) in detected {
         let Some(file) = global_guide_file(agent) else {
             continue;
         };
-        let Some(root) = crate::skill_install::agent_home(agent, &sources) else {
-            continue;
-        };
-        let path = root.join(file);
-        if targets.iter().any(|(_, _, held)| *held == path) {
-            continue;
+        for root in crate::skill_install::agent_homes(agent, &sources, launched) {
+            let path = root.join(file);
+            if targets.iter().any(|(_, _, held)| *held == path) {
+                continue;
+            }
+            targets.push((agent.clone(), label.clone(), path));
         }
-        targets.push((agent.clone(), label.clone(), path));
     }
     targets
 }
@@ -383,11 +387,11 @@ fn guide_targets(home: &Path, detected: &[(String, String)]) -> Vec<(String, Str
 #[must_use]
 pub fn inspect_global_guides(
     home: &Path,
-    _launched: &[(String, PathBuf)],
+    launched: &[(String, PathBuf)],
     vault: Option<&Path>,
     detected: &[(String, String)],
 ) -> Vec<GuideOutcome> {
-    guide_targets(home, detected)
+    guide_targets(home, launched, detected)
         .into_iter()
         .map(|(agent, label, path)| {
             let (state, detail) = guide_state(&path, vault);
@@ -407,11 +411,11 @@ pub fn inspect_global_guides(
 #[must_use]
 pub fn link_global_guides(
     home: &Path,
-    _launched: &[(String, PathBuf)],
+    launched: &[(String, PathBuf)],
     vault: Option<&Path>,
     detected: &[(String, String)],
 ) -> Vec<GuideOutcome> {
-    guide_targets(home, detected)
+    guide_targets(home, launched, detected)
         .into_iter()
         .map(|(agent, label, path)| {
             let (state, detail) = match write_guide(&path, vault) {

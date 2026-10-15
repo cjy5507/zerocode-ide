@@ -5542,7 +5542,7 @@ function buildSkillsView() {
   // docHost clones templates, so listeners are wired on the actual host below.
   view.innerHTML = `<header class="skills-heading"><div><p class="skills-eyebrow"></p><h1></h1><p class="skills-about"></p></div><div class="skills-actions"><button type="button" class="btn skills-onboarding-return" hidden></button><button type="button" class="btn skills-rescan"></button><button type="button" class="btn primary skills-bundle-open"></button></div></header>
     <div class="skills-toolbar"><input type="search" class="skills-search"/><select class="skills-root-filter"></select><select class="skills-agent-filter"></select><span class="skills-total" role="status"></span></div>
-    <div class="skills-required"></div><p class="skills-evidence-scope skills-usage-scope"></p><p class="skills-error" role="alert" hidden></p><p class="skills-plan-status" role="status" hidden></p><p class="skills-native-status" role="status" hidden></p>
+    <div class="skills-required"></div><details class="skills-bundled-panel" hidden><summary></summary><div class="skills-bundled"></div></details><p class="skills-evidence-scope skills-usage-scope"></p><p class="skills-error" role="alert" hidden></p><p class="skills-plan-status" role="status" hidden></p><p class="skills-native-status" role="status" hidden></p>
     <div class="skills-columns"><div class="skills-list-pane"><div class="skills-card-list" role="list"></div><p class="skills-empty"></p><details class="skills-roots-panel"><summary></summary><div></div></details></div><aside class="skills-detail"><p class="skills-detail-empty"></p><div class="skills-detail-content" hidden></div></aside></div>
     <section class="skills-bundle" hidden></section>`;
   return view;
@@ -5692,6 +5692,11 @@ function paintSkillsView(view) {
       }
     }
     required.hidden = !missing.length;
+    const bundled = report.bundled ?? [];
+    const panel = view.querySelector(".skills-bundled-panel"); panel.hidden = !bundled.length;
+    const current = bundled.filter((item) => item.copies.every((copy) => copy.state === "current")).length;
+    panel.querySelector("summary").textContent = skillText("bundledSummary", { count: bundled.length, current });
+    panel.querySelector(".skills-bundled").replaceChildren(...bundled.map((item) => bundledSkillLine(view, item)));
     const latestPlan = report.plans?.at(-1);
     const planStatus = view.querySelector(".skills-plan-status"); planStatus.hidden = !latestPlan;
     planStatus.textContent = latestPlan ? (latestPlan.error || skillText(`plan_${latestPlan.status}`)) : "";
@@ -5705,6 +5710,29 @@ function paintSkillsView(view) {
     }
   }
   filterSkillsView(view);
+}
+/* One line per skill this build ships. 「고쳐 쓰기」 stands only where a copy is
+ * missing or an earlier release, and the backend writes only those: a copy
+ * edited by hand is named and never offered, and nothing is rewritten until
+ * the person presses it (t-55424). */
+const BUNDLED_COPY_WORDS = Object.freeze({ current: "copyCurrent", stale: "copyStale", edited: "copyEdited", missing: "copyMissing" });
+function bundledSkillLine(view, item) {
+  const line = skillElement("p", "skills-bundled-line");
+  line.dataset.skill = item.name;
+  const counts = ["stale", "edited", "missing"]
+    .map((state) => [state, item.copies.filter((copy) => copy.state === state).length])
+    .filter(([, count]) => count);
+  const said = counts.length
+    ? counts.map(([state, count]) => skillText("copyCount", { state: skillText(BUNDLED_COPY_WORDS[state]), count })).join(" · ")
+    : skillText("copyCurrent");
+  line.append(skillElement("strong", "", item.name), skillElement("span", "skills-bundled-state", said));
+  line.dataset.tip = item.copies.map((copy) => `${copy.path} · ${skillText(BUNDLED_COPY_WORDS[copy.state] ?? "copyEdited")}`).join("\n");
+  if (item.copies.some((copy) => copy.state === "stale" || copy.state === "missing")) {
+    const button = skillButton("rewrite", () => void installRequiredSkill(view, item.name));
+    button.dataset.tip = skillText("rewriteTip");
+    line.append(button);
+  }
+  return line;
 }
 function filterSkillsView(view) {
   const state = skillsViews.get(view); if (!state) return;
@@ -5833,8 +5861,8 @@ window.addEventListener("focus", () => {
 
 function skillInstallSummary(outcomes) {
   const labels = (state) => outcomes.filter((row) => row.state === state).map((row) => row.label);
-  const written = [...labels("written"), ...labels("unchanged")];
-  const kept = labels("kept");
+  const written = [...new Set([...labels("written"), ...labels("unchanged")])];
+  const kept = [...new Set(labels("kept"))];
   const failed = outcomes.filter((row) => row.state === "failed");
   const parts = [];
   if (written.length > 0) parts.push(t("orch.installedIn", "{{agents}}에 설치됨", { agents: written.join(" · ") }));
@@ -5908,7 +5936,7 @@ function watchSkillInstall(term, policy) {
 }
 
 async function installRequiredSkill(view, name) {
-  const buttons = [...view.querySelectorAll(".skills-required button")];
+  const buttons = [...view.querySelectorAll(".skills-required button, .skills-bundled button")];
   for (const button of buttons) button.disabled = true;
   try {
     await installBundledSkill(name, view.querySelector(".skills-native-status"), () => refreshSkills(true));
