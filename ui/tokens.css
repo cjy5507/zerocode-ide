@@ -2106,6 +2106,8 @@
   /* 카드 폭이 변해도 얼굴은 4:3, 가상화 행 높이도 같은 비율로 변한다. */
   --artifact-face-ratio: 0.75;
   --artifact-doc-lines: 7;
+  /* 본 페이지의 그림(t-59665 ⑤): 첫 그림 뒤 이만큼 더 본 페이지가 갤러리에 제 그림을 준다. */
+  --artifact-seen-thumb-ms: 500;
   --artifact-emoji-size: 32px;
   --artifact-strip-bg: var(--surface-well);
   --artifact-strip-ink: var(--ink-chalk);

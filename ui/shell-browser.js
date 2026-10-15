@@ -4706,6 +4706,8 @@ function syncBrowserPanes() {
       fenced && fenced.width > 0 && fenced.height > 0
         ? viewportBox(fenced, tab.viewport ?? null)
         : null;
+    // 아티팩트 페이지의 여는 시계는 판이 보이는 시간만 센다(t-59665 ⑤·⑧).
+    if (tab.artifact) artifactOpenTick(tab, rect !== null && !document.hidden);
     // 프리셋도 열쇠의 일부 — 같은 몸에서 프리셋만 바뀐 판은 다시 놓여야 한다.
     const said = rect
       ? [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height), tab.viewport ?? ""].join(",")
@@ -5090,6 +5092,8 @@ listen("browser:nav", (event) => {
   applyBrowserNavigation(tab, said);
   // 아티팩트 미리보기 탭이 링크·뒤로 가기로 제 아티팩트를 떠나면 남는 탭이 된다(t-55370).
   keepGlanceLeaving(tab);
+  // 아티팩트 페이지의 여는 시계가 첫 그림을 듣는다(t-59665 ⑤·⑧).
+  if (tab.artifact) noteArtifactPageNav(tab, said);
   if (!tab.loading) rememberBrowserOpenTabs();
   renderTabs();
   if (stillShowing(tab)) paintBrowserView(tab);
@@ -5264,6 +5268,8 @@ for (const float of [notePop, tabCreatePop, profilePop, el("sidebar-menu")]) {
 }
 browserOverlayWatch.observe(termFloat, { attributes: true, attributeFilter: ["hidden"] });
 window.addEventListener("resize", () => syncBrowserPanes());
+// 창이 가려지거나 돌아오면 판의 「보임」이 바뀐다 — 아티팩트 페이지의 여는 시계가 그것을 센다(t-59665 ⑧).
+document.addEventListener("visibilitychange", () => syncBrowserPanes());
 
 /* A pointer landing in this DOM is a claim on the keyboard. The native pane
  * never forwards its clicks here, so any pointer that DOES arrive means the

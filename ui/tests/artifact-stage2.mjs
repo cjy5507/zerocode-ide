@@ -224,7 +224,11 @@ export async function testArtifactStage2(browser, origin, ok) {
       document.documentElement.style.setProperty("--artifact-seen-thumb-ms", "40");
       artifactThumbs.delete("gal-0");
       artifactThumbFailed.delete("gal-0");
-      const tab = await held.openFromGallery("gal-0");
+      // Opened by a terminal link while no gallery card is on screen: nobody has seen this page, and
+      // no card has asked the hidden pane for it yet.
+      await openArtifactPageAt(artifactRows.get("gal-0")?.path ?? "");
+      await held.settle();
+      const tab = held.tabsOf("gal-0")[0] ?? null;
       setActiveTab(tab?.id);
       await held.settle();
       const url = pathAsFileUrl(artifactRows.get("gal-0")?.path ?? "");

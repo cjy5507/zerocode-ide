@@ -168,17 +168,27 @@ fn path_of_version(id: &str, version: Option<u32>) -> Result<PathBuf, String> {
 }
 
 /// The card's picture (t-3233 §3): from the cache, or from one render of
-/// the hidden thumbnail pane — one at a time, no retry. A `data_url` of
-/// `None` is a glyph, and final for this key.
+/// the hidden thumbnail pane — one at a time, no retry. With `label`
+/// (t-59665 ⑤) — the browser pane the person is looking at the page in — the
+/// picture is that pane's, through the browser snapshot door and its guard,
+/// and the hidden pane is not asked. A `data_url` of `None` is a glyph, and
+/// final for this key.
 #[tauri::command]
 pub(crate) async fn artifact_thumbnail(
     app: AppHandle,
     webview: tauri::Webview,
+    state: State<'_, AppState>,
     id: String,
+    label: Option<String>,
 ) -> Result<artifact_thumbs::Thumb, String> {
     from_the_main_webview(&webview)?;
     let store = store_or_refuse()?;
-    artifact_thumbs::thumbnail(&app, &store, &id).await
+    match label {
+        Some(label) => {
+            artifact_thumbs::thumbnail_of_pane(&app, &state, &store, &id, &label).await
+        }
+        None => artifact_thumbs::thumbnail(&app, &store, &id).await,
+    }
 }
 
 /// The listing's copy of the thumbnail numbers, so the window queues by the
