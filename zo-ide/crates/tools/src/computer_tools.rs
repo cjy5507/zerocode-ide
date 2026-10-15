@@ -3099,6 +3099,7 @@ target=''
 [ -n "$window" ] && target=',"window":{"id":'"$window"'},"fixture":"unrelated-window-fixture"'
 [ "$verb" = batch ] && { printf '%s' "$3" > '@DIR@/batch-commands'; cat '@DIR@/batch'; echo; exit 0; }
 [ "$verb" = wait-for ] && [ -f '@DIR@/wait-for' ] && { for word in "$@"; do printf '%s\n' "$word"; done > '@DIR@/wait-for-argv'; cat '@DIR@/wait-for'; echo; exit 0; }
+[ "$verb" = list-all-windows ] && [ -f '@DIR@/list-all-windows' ] && { cat '@DIR@/list-all-windows'; echo; exit 0; }
 [ "$verb" = walk ] && [ -f '@DIR@/walk' ] && { printf '%s\n' "$*" > '@DIR@/walk-argv'; cat '@DIR@/walk'; echo; exit 0; }
 if [ "$verb" = handoff ]; then
   for word in "$@"; do printf '%s\n' "$word"; done > '@DIR@/handoff-argv'
@@ -3129,6 +3130,86 @@ printf '%s
     #[cfg(unix)]
     fn staged(ctx: &ToolContext) -> usize {
         ctx.image_sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+    }
+
+    /// The desktop list a shim answers: two windows of Notes, one of Mail.
+    #[cfg(unix)]
+    fn desktop_with_windows(dir: &Path) {
+        let row = |id: u64, app: &str, pid: u64| json!({ "id": id, "title": "", "app": { "name": app, "pid": pid }, "x": 0, "y": 0, "width": 640, "height": 400 });
+        let answer = json!({ "ok": true, "result": { "windows": [row(11, "Notes", 501), row(12, "Mail", 502), row(13, "Notes", 501)] } });
+        std::fs::write(dir.join("list-all-windows"), answer.to_string()).unwrap();
+    }
+
+    /// t-55888: the person saw `list_windows` with an `app` refused ("no desktop fallback was
+    /// attempted"); the app is a filter on the list, and an app with no window is not a refusal.
+    #[cfg(unix)]
+    #[test]
+    fn list_windows_takes_an_app_as_a_filter_and_steps_back_to_the_whole_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (road, _) = fake_shim(dir.path());
+        desktop_with_windows(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let list = |app: &str| -> Value {
+            let answer = run_computer(&json!({ "action": "list_windows", "app": app }), &ctx, &road).expect("list_windows takes an app");
+            serde_json::from_str(&answer).unwrap()
+        };
+        let ids = |answer: &Value| -> Vec<u64> {
+            answer["result"]["windows"].as_array().unwrap().iter().filter_map(|row| row["id"].as_u64()).collect()
+        };
+        let notes = list("notes");
+        assert_eq!(ids(&notes), [11, 13], "only the named app's windows, any case");
+        assert_eq!(notes["result"]["app_filter"]["state"], "applied");
+        assert_eq!(notes["result"]["app_filter"]["kept"], 2);
+        assert_eq!(notes["result"]["app_filter"]["of"], 3);
+        assert_eq!(ids(&list("pid:502")), [12], "the helper's own pid: form names an app too");
+        let missing = list("Calendar");
+        assert_eq!(ids(&missing), [11, 12, 13], "no window of that app: the whole desktop list, not a refusal");
+        assert_eq!(missing["result"]["app_filter"]["state"], "fell_back");
+        let plain: Value = serde_json::from_str(&run_computer(&json!({ "action": "list_windows" }), &ctx, &road).unwrap()).unwrap();
+        assert!(plain["result"].get("app_filter").is_none(), "no app, no filter receipt");
+        assert_eq!(ids(&plain), [11, 12, 13]);
+    }
+
+    /// t-55888: `observe` with `"true"` failed twice with `invalid type: string "true", expected
+    /// a boolean`; every boolean and number of every action reads the common spellings.
+    #[test]
+    fn booleans_and_numbers_accept_the_strings_a_model_writes() {
+        let strict: ComputerInput = serde_json::from_value(json!({
+            "action": "observe", "app": "Fixture", "background": true, "window_id": 41, "timeout_ms": 250, "duration": 0.5,
+        })).unwrap();
+        let loose: ComputerInput = serde_json::from_value(json!({
+            "action": "observe", "app": "Fixture", "background": "true", "window_id": "41", "timeout_ms": " 250 ", "duration": "0.5",
+        })).expect("strings read as the values they spell");
+        assert_eq!(
+            (loose.background, loose.window_id, loose.timeout_ms, loose.duration),
+            (strict.background, strict.window_id, strict.timeout_ms, strict.duration),
+            "the normalized value is the strict one"
+        );
+        for (spelled, flag) in [("true", true), ("TRUE", true), ("1", true), ("false", false), ("False", false), ("0", false)] {
+            for field in ["background", "ocr", "absent", "ask_code", "force", "reset_budget", "overlap", "rescue", "replay", "settle"] {
+                let input: ComputerInput = serde_json::from_value(json!({ "action": "observe", (field): spelled }))
+                    .unwrap_or_else(|error| panic!("{field}: {spelled:?}: {error}"));
+                let read = [input.background, input.ocr, input.absent, input.ask_code, input.force, input.reset_budget, input.overlap, input.rescue, input.replay, input.settle];
+                assert_eq!(read.iter().flatten().copied().collect::<Vec<_>>(), [flag], "{field}: {spelled:?}");
+            }
+        }
+        let steps: ComputerInput = serde_json::from_value(json!({ "action": "batch", "steps": [{ "action": "wait", "duration": "1" }, { "action": "observe", "background": "false" }] })).expect("a step reads the same way");
+        assert_eq!(steps.steps.unwrap()[1].background, Some(false));
+        let bads = [
+            json!({ "action": "observe", "background": "maybe" }),
+            json!({ "action": "observe", "background": "" }),
+            json!({ "action": "wait", "duration": "soon" }),
+            json!({ "action": "wait", "duration": "NaN" }),
+            json!({ "action": "wait", "duration": "inf" }),
+            json!({ "action": "wait", "duration": [1] }),
+            json!({ "action": "wait", "timeout_ms": "-5" }),
+            json!({ "action": "wait", "timeout_ms": "2.5" }),
+            json!({ "action": "scroll", "scroll_amount": "-1" }),
+            json!({ "action": "scroll", "scroll_amount": "99999999999" }),
+        ];
+        for bad in bads {
+            assert!(serde_json::from_value::<ComputerInput>(bad.clone()).is_err(), "{bad} must still be refused");
+        }
     }
 
     #[cfg(unix)]
