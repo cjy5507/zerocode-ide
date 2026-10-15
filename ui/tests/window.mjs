@@ -85,6 +85,7 @@ import { testPathBrowser } from "./path-browser.mjs";
 import { testNativeFolderPicker } from "./native-folder-picker.mjs";
 import { testSftpAndTeam } from "./sftp.mjs";
 import { testPaneFollowsCwd } from "./pane-follow.mjs";
+import { testPaneStrays } from "./pane-strays.mjs";
 import { testZoRestore } from "./zo-restore.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testSidebarStage } from "./sidebar-stage.mjs";
@@ -309,6 +310,7 @@ suite("jev-dashboard", async ({ browser, origin, ok }) => {
 suite("native-folder-picker", ({ browser, origin, ok }) => testNativeFolderPicker(browser, origin, ok));
 suite("sftp", ({ browser, origin, ok }) => testSftpAndTeam(browser, origin, ok));
 suite("pane-follow", ({ browser, origin, ok }) => testPaneFollowsCwd(browser, origin, ok));
+suite("pane-strays", ({ browser, origin, ok }) => testPaneStrays(browser, origin, ok));
 // The zo panes a restart brings back, in their own workspaces (t-12063).
 suite("zo-restore", ({ browser, origin, ok }) => testZoRestore(browser, origin, ok));
 // The panes a restart opens again, where they stood, in every workspace (t-14036).
@@ -41632,11 +41634,15 @@ const teamed = await page.evaluate(async () => {
   for (const handler of window.__LISTENERS__["term:focus-pane"] ?? []) handler({ payload: 8802 });
   await settle();
   seen.focused = leader.activePane;
-  // 리더의 탭이 없으면 아무것도 만들지 않는다 — 조율자 없는 팀원을 무대에
-  // 올리는 것보다 아무 일도 안 하는 편이 낫다.
+  // 리더의 탭이 없으면 탭은 만들지 않는다 — 조율자 없는 팀원을 무대에 올리는
+  // 것보다 낫다. 다만 이미 도는 셸이므로 떼어 둔 행 하나는 남긴다: 아무것도
+  // 남기지 않으면 탭도 행도 없이 도는 셸이 된다(t-56480 R1). 그 셸은 이
+  // 시험과 함께 끝난다.
   const before = tabs.length;
   await fire({ parent: 99999, term: 8899, direction: "vertical", agent: "claude" });
   seen.orphanMadeNothing = tabs.length === before && !tabs.some((tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(8899));
+  seen.orphanKeptARow = detachedAgents.has(8899);
+  for (const handler of window.__LISTENERS__["term:exited"] ?? []) handler({ payload: { term: 8899 } });
   // 정리: 뒤따르는 시험들이 다섯 판짜리 탭 위에서 돌지 않게.
   for (const term of [8801, 8802, 8803, 8804]) {
     for (const handler of window.__LISTENERS__["term:exited"] ?? []) handler({ payload: { term } });
@@ -41693,6 +41699,7 @@ ok(
     teamed.stayedOnTab &&
     teamed.focused === 8802 &&
     teamed.orphanMadeNothing &&
+    teamed.orphanKeptARow &&
     teamed.pruned === 1,
   JSON.stringify(teamed),
 );
