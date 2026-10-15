@@ -159,11 +159,13 @@ impl SystemOneFailure {
 }
 
 /// What reading a refused request's body found (t-55423): the code its server
-/// named, when it was one a managed server uses, and how many of the body's
-/// bytes were read to find it.
+/// named, when it was one a managed server uses, the provider's refusal named
+/// beside a 502's code (t-58193), and how many of the body's bytes were read
+/// to find them.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct RefusalRead {
     code: Option<&'static str>,
+    refusal: Option<&'static str>,
     read: usize,
 }
 
@@ -175,6 +177,7 @@ async fn refusal_read(mut answer: reqwest::Response, deadline: Instant) -> Refus
     let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|left| !left.is_zero()) else {
         return RefusalRead::default();
     };
+    let status = answer.status();
     let mut body = Vec::new();
     let whole = tokio::time::timeout(left.min(MAX_REFUSAL_WAIT), async {
         while let Some(chunk) = answer.chunk().await.ok()? {
@@ -184,7 +187,12 @@ async fn refusal_read(mut answer: reqwest::Response, deadline: Instant) -> Refus
         Some(())
     })
     .await;
-    RefusalRead { code: whole.ok().flatten().and_then(|()| refusal_code(&body)), read: body.len() }
+    let (code, refusal) = match whole.ok().flatten() {
+        None => (None, None),
+        Some(()) if status == reqwest::StatusCode::BAD_GATEWAY => decode_refusal(&body),
+        Some(()) => (refusal_code(&body), None),
+    };
+    RefusalRead { code, refusal, read: body.len() }
 }
 
 /// The codes a managed server names a refused request with: local-judgment's
@@ -197,6 +205,31 @@ fn refusal_code(body: &[u8]) -> Option<&'static str> {
     let said = serde_json::from_slice::<serde_json::Value>(body).ok()?;
     let word = said.get("error")?.as_str()?;
     REFUSAL_CODES.into_iter().find(|code| *code == word)
+}
+
+/// The code a managed server names a `502` with when its runtime answered and
+/// the provider refused the answer: local-judgment's `Error::Protocol`, which
+/// this crate does not depend on (t-58193).
+const DECODE_REFUSAL_CODE: &str = "native_protocol_failed";
+
+/// Every refusal a provider names, in `judgment_provider`'s own words.
+const PROVIDER_REFUSALS: [judgment_provider::Refusal; 10] = {
+    use judgment_provider::Refusal as R;
+    [R::Settings, R::Address, R::LocalAddress, R::RemoteAddress, R::Model, R::Request,
+        R::Response, R::TooLarge, R::SettingsChanged, R::Truncated]
+};
+
+/// The code and the provider's refusal a refused `502` body names: the code
+/// when it is [`DECODE_REFUSAL_CODE`], and beside it the refusal when it is
+/// one of [`PROVIDER_REFUSALS`]. No other word the body says is kept.
+fn decode_refusal(body: &[u8]) -> (Option<&'static str>, Option<&'static str>) {
+    let Ok(said) = serde_json::from_slice::<serde_json::Value>(body) else { return (None, None) };
+    if said.get("error").and_then(serde_json::Value::as_str) != Some(DECODE_REFUSAL_CODE) {
+        return (None, None);
+    }
+    let word = said.get("refusal").and_then(serde_json::Value::as_str);
+    let mut refusals = PROVIDER_REFUSALS.into_iter().map(judgment_provider::Refusal::token);
+    (Some(DECODE_REFUSAL_CODE), refusals.find(|token| Some(*token) == word))
 }
 
 /// The criteria key under which a Noul says what its yes means.
@@ -449,8 +482,9 @@ pub struct SystemOneCall {
     pub retries: u32,
     /// The code the server named in the body it refused the winning attempt
     /// with (t-55423): a managed server's `operation_busy` or `server_stopped`
-    /// behind one `503`, and nothing else — never the body's own words. `None`
-    /// when the body named neither or could not be read within
+    /// behind one `503`, or its `native_protocol_failed` behind a `502`
+    /// (t-58193), and nothing else — never the body's own words. `None`
+    /// when the body named none of them or could not be read within
     /// `MAX_REFUSAL_BYTES` and the call's deadline, and for every outcome but
     /// a refusal.
     pub server_error_code: Option<&'static str>,
@@ -501,9 +535,11 @@ pub struct HedgeRan {
 struct Attempted {
     outcome: Result<SystemOneResponse, SystemOneFailure>,
     retries: u32,
-    /// The code a managed server named its 503 with, when that 503 was the
-    /// outcome ([`refusal_read`], t-55423).
+    /// The code a managed server named its 503 or 502 with, when that refusal
+    /// was the outcome ([`refusal_read`], t-55423), and the provider's refusal
+    /// beside a 502's (t-58193).
     server_error_code: Option<&'static str>,
+    server_refusal: Option<&'static str>,
     elapsed: Duration,
 }
 
@@ -761,7 +797,7 @@ impl SystemOneClient {
             outcome: run.outcome,
             retries: run.retries,
             server_error_code: run.server_error_code,
-            server_refusal: None,
+            server_refusal: run.server_refusal,
             elapsed: opened.elapsed(),
             requests: requests.load(Ordering::Relaxed),
             hedge: ran,
@@ -819,20 +855,26 @@ impl SystemOneClient {
         max_retries: u32,
     ) -> Attempted {
         let began = Instant::now();
-        let finish = |outcome, retries, server_error_code| Attempted { outcome, retries, server_error_code, elapsed: began.elapsed() };
+        let finish = |outcome, retries, read: RefusalRead| Attempted {
+            outcome,
+            retries,
+            server_error_code: read.code,
+            server_refusal: read.refusal,
+            elapsed: began.elapsed(),
+        };
         let mut retries = 0;
         loop {
             let Some(remaining) = deadline.checked_sub(opened.elapsed()) else {
-                return finish(Err(SystemOneFailure::Timeout), retries, None);
+                return finish(Err(SystemOneFailure::Timeout), retries, RefusalRead::default());
             };
             let Some(lent) = self.socket.lend() else {
-                return finish(Err(SystemOneFailure::Transport), retries, None);
+                return finish(Err(SystemOneFailure::Transport), retries, RefusalRead::default());
             };
             requests.fetch_add(1, Ordering::Relaxed);
             let mut refused = None;
             let sent = tokio::time::timeout(remaining, self.send_once(&lent.client, prepared, &mut refused)).await;
             let failure = match sent {
-                Ok(Ok(response)) => return finish(Ok(response), retries, None),
+                Ok(Ok(response)) => return finish(Ok(response), retries, RefusalRead::default()),
                 Ok(Err(failure)) => failure,
                 Err(_) => SystemOneFailure::Timeout,
             };
@@ -848,11 +890,11 @@ impl SystemOneClient {
             {
                 // Read past the deadline's wrap above, so a slow body leaves a
                 // server's refusal its status and never makes it a timeout.
-                let server_error_code = match refused {
-                    Some(answer) => refusal_read(answer, opened + deadline).await.code,
-                    None => None,
+                let read = match refused {
+                    Some(answer) => refusal_read(answer, opened + deadline).await,
+                    None => RefusalRead::default(),
                 };
-                return finish(Err(failure), retries, server_error_code);
+                return finish(Err(failure), retries, read);
             }
             tokio::time::sleep(backoff).await;
             retries += 1;
@@ -877,7 +919,9 @@ impl SystemOneClient {
         if !status.is_success() {
             // A managed server says in the body why it refused; the caller reads
             // it once the outcome stands, past this request's deadline (t-55423).
-            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE { *refused = Some(response); }
+            let named = status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                || status == reqwest::StatusCode::BAD_GATEWAY;
+            if named { *refused = Some(response); }
             return Err(SystemOneFailure::from_status(status.as_u16()));
         }
         let mut bytes = Vec::new();
@@ -1431,7 +1475,7 @@ mod tests {
         let busy = "operation_busy";
         let said = serde_json::json!({"error": busy}).to_string();
         for (left, read) in [
-            (Some(UNHURRIED), RefusalRead { code: Some(busy), read: said.len() }),
+            (Some(UNHURRIED), RefusalRead { code: Some(busy), refusal: None, read: said.len() }),
             (None, RefusalRead::default()),
         ] {
             let mock = MockSystemOne::serving(vec![Reply::now(503, said.clone())]).await;
