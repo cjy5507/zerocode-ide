@@ -8236,8 +8236,19 @@ body.is-dragging-pane {
 
 /* Orca: `.mermaid-block svg { max-width: 100%; height: auto }`. */
 .mmd {
+  /* The smallest text a drawing sets, as a number so a width can be divided
+   * by it. */
+  --mmd-text-least: 11;
   max-width: 100%;
   height: auto;
+}
+
+/* In markdown a drawing shrinks to the column only until its smallest text
+ * reads at the window's caption step, `--text-3xs`; a wider one keeps that
+ * scale and scrolls inside its block. `--mmd-width` is the drawing's own
+ * width, which diagramNode sets. */
+.mmd-block--inline .mmd {
+  min-width: calc(var(--mmd-width) * var(--text-3xs) / var(--mmd-text-least));
 }
 
 .mmd-canvas .mmd {
@@ -8300,7 +8311,7 @@ body.is-dragging-pane {
 .mmd-msg {
   fill: var(--ink-mist);
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: calc(var(--mmd-text-least) * 1px);
 }
 
 .mmd-lifeline {

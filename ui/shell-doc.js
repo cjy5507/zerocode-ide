@@ -3802,7 +3802,10 @@ function markNode(mark) {
  * `viewBox` with no width or height, plus the CSS rule that gives it
  * `max-width: 100%`, is Orca's own sizing contract for these
  * (`.mermaid-block svg { max-width: 100%; height: auto }`) — the diagram
- * shrinks to the column and never forces a horizontal scroll of the page. */
+ * shrinks to the column and never forces a horizontal scroll of the page.
+ * `--mmd-width` hands the stylesheet the drawing's own width as a number: in
+ * markdown it stops shrinking where its smallest text reaches the caption
+ * size, and scrolls inside its block past that. */
 function diagramNode(drawing) {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${drawing.width} ${drawing.height}`);
@@ -3810,6 +3813,7 @@ function diagramNode(drawing) {
   svg.setAttribute("height", drawing.height);
   svg.setAttribute("role", "img");
   svg.setAttribute("class", "mmd");
+  svg.style.setProperty("--mmd-width", drawing.width);
   for (const mark of drawing.marks) {
     const node = markNode(mark);
     if (node) svg.appendChild(node);
