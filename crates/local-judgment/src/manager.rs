@@ -174,6 +174,7 @@ pub struct ServerInfo {
     pub provider: Option<Provider>,
     pub checked: bool,
     pub error: Option<&'static str>,
+    pub exit: Option<engine::Ended>,
 }
 
 struct Cancel {
@@ -239,6 +240,7 @@ struct Inner {
 
 pub struct Manager {
     store: Store,
+    exits: PathBuf,
     catalog: Mutex<Catalog>,
     bundled_ids: BTreeSet<String>,
     profile: Option<RuntimeProfile>,
@@ -349,6 +351,7 @@ impl Manager {
         sink: Arc<dyn Fn(Snapshot) + Send + Sync>,
     ) -> Result<Arc<Self>> {
         let store = Store::open(root)?;
+        let exits = storage::child(root, "managed-judgment/server-exits.jsonl")?;
         let bundled_ids = catalog
             .models
             .iter()
@@ -360,6 +363,7 @@ impl Manager {
         }
         Ok(Arc::new(Self {
             store,
+            exits,
             catalog: Mutex::new(catalog),
             bundled_ids,
             profile: profiles.first().cloned(),
@@ -392,6 +396,7 @@ impl Manager {
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        self.reap();
         let mut inner = lock(&self.inner);
         let catalog = lock(&self.catalog);
         let selected = selection::read(&self.settings);
@@ -406,18 +411,6 @@ impl Manager {
             });
         if inner.provider_identity != provider_identity {
             inner.provider_identity.clone_from(&provider_identity);
-            inner.revision += 1;
-        }
-        if inner
-            .running
-            .as_ref()
-            .is_some_and(|running| !running.engine.alive())
-        {
-            inner.running.take();
-            inner.server.state = "failed";
-            inner.server.checked = false;
-            inner.server.provider = None;
-            inner.server.error = Some(Error::ServerStopped.token());
             inner.revision += 1;
         }
         let configured = selected
@@ -754,6 +747,38 @@ impl Manager {
 
     fn emit(&self) {
         (self.sink)(self.snapshot());
+    }
+
+    /// Notices that the owned runtime ended, whether its own end or a status
+    /// read asks first: the server comes down, and how the runtime ended stays
+    /// with the failed state and in the store's record of exits.
+    fn reap(&self) {
+        let engine = match &lock(&self.inner).running {
+            Some(running) if !running.engine.alive() => running.engine.clone(),
+            _ => return,
+        };
+        let ended = engine.ended();
+        let mut inner = lock(&self.inner);
+        let Some(running) = inner
+            .running
+            .take_if(|running| Arc::ptr_eq(&running.engine, &engine))
+        else {
+            return;
+        };
+        inner.server.state = "failed";
+        inner.server.checked = false;
+        inner.server.provider = None;
+        inner.server.error = Some(Error::ServerStopped.token());
+        inner.server.exit.clone_from(&ended);
+        inner.revision += 1;
+        drop(inner);
+        if let Some(ended) = ended {
+            let mut record = json!(ended);
+            record["atMs"] = json!(now_ms());
+            record["serverId"] = json!(running.id);
+            record["modelId"] = json!(running.model_id);
+            let _ = keep_exit(&self.exits, &record);
+        }
     }
 
     pub fn notify_settings_changed(&self) {
@@ -1398,6 +1423,7 @@ impl Manager {
             provider: Some(running.provider.clone()),
             checked: options.check_before_listen,
             error: None,
+            exit: None,
         };
         inner.held_listeners.remove(&model.id);
         inner.running = Some(running);
@@ -2030,6 +2056,46 @@ async fn wait_ready(engine: &Arc<Engine>, cancel: &Cancel) -> Result<()> {
     wait_ready_for(engine, cancel, engine::START_TIMEOUT).await
 }
 
+/// How many bytes of exit records the store keeps: the newest that fit, so a
+/// stopped server's cause outlives the window that saw it.
+const EXIT_RECORD_BYTES: usize = 64 * 1024;
+
+/// Adds one exit record to the store's file of them, one JSON object a line,
+/// letting the oldest go past [`EXIT_RECORD_BYTES`].
+fn keep_exit(path: &Path, record: &serde_json::Value) -> Result<()> {
+    let kept = storage::bounded_read(path, EXIT_RECORD_BYTES).unwrap_or_default();
+    let mut lines: Vec<String> = String::from_utf8_lossy(&kept)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    lines.push(record.to_string());
+    let mut bytes: usize = lines.iter().map(|line| line.len() + 1).sum();
+    let mut first = 0;
+    while bytes > EXIT_RECORD_BYTES && first + 1 < lines.len() {
+        bytes -= lines[first].len() + 1;
+        first += 1;
+    }
+    let mut text = lines[first..].join("\n");
+    text.push('\n');
+    let staged = path.with_extension("jsonl.partial");
+    let _ = fs::remove_file(&staged);
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&staged)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .map_err(|_| Error::Storage)?;
+    fs::rename(&staged, path).map_err(|_| Error::Storage)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 async fn wait_ready_for(engine: &Arc<Engine>, cancel: &Cancel, timeout: Duration) -> Result<()> {
     let process = engine.clone();
     let ready = tokio::task::spawn_blocking(move || process.ready());
@@ -2366,6 +2432,7 @@ pub(crate) mod test_support {
             provider: Some(provider.clone()),
             checked,
             error: None,
+            exit: None,
         };
         inner.running = Some(running);
         (id, provider)

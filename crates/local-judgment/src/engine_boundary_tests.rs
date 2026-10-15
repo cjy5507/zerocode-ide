@@ -75,6 +75,7 @@ async fn an_io_failure_closes_admission_before_its_supervisor_is_polled_again() 
         turn,
         ticket,
         b"{}".to_vec(),
+        None,
     ));
     {
         let _io = lock(&state.engine.io);

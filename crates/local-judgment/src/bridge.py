@@ -58,7 +58,8 @@ def memory_guard(process, limit):
         except Exception:
             os._exit(1)
         if over_limit:
-            os._exit(1)
+            # engine.rs MEMORY_LIMIT_EXIT: the parent keeps this end as the guard's stop.
+            os._exit(75)
         time.sleep(0.25)
 
 

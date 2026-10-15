@@ -1,10 +1,11 @@
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, sync_channel};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
@@ -12,6 +13,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use judgment_provider::{Protocol, Provider, ProviderKind};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::catalog::{EngineKind, Model, RuntimeProfile};
@@ -21,6 +23,28 @@ use crate::{Error, Result};
 pub const MAX_FRAME: usize = 2 * 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const START_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The exit code `bridge.py`'s memory guard ends the runtime with when its
+/// resident memory passes the profile's limit.
+const MEMORY_LIMIT_EXIT: i32 = 75;
+
+/// How long a runtime whose pipe failed may take to end by itself before the
+/// server stops it, so its record says how it ended rather than that it was
+/// stopped while ending.
+const EXIT_GRACE: Duration = Duration::from_millis(250);
+
+/// How much of its runtime's stderr a server keeps: the last lines, each cut
+/// short at a word, never more bytes in all.
+const STDERR_LINES: usize = 20;
+const STDERR_LINE_BYTES: usize = 512;
+const STDERR_BYTES: usize = 4 * 1024;
+
+/// How long the record of an ended runtime waits for the last of its stderr.
+const STDERR_SETTLE: Duration = Duration::from_millis(500);
+
+/// How often a server looks at its runtime, so its end is told even while
+/// another process keeps the runtime's output open.
+const WATCH: Duration = Duration::from_millis(200);
 
 /// How the owned server admits requests to its runtime: how long one
 /// exchange may run, how long a request may wait for its turn, and how many
@@ -47,7 +71,49 @@ pub struct Engine {
     child: Mutex<Child>,
     io: Mutex<Pipe>,
     exited: AtomicBool,
+    told: AtomicBool,
     on_exit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    stopped: Mutex<Option<Stop>>,
+    stderr: Arc<Tail>,
+}
+
+/// Why this side ended a runtime that was still running.
+#[derive(Clone)]
+enum Stop {
+    /// A request ran past its deadline; the task its body named, if any.
+    Deadline(Option<String>),
+    /// The pipe to the runtime failed, or the runtime broke its frames.
+    Failed,
+    /// Its owner retired it: the person's stop, a model change, app cleanup.
+    Owner,
+}
+
+/// How a runtime ended: the stop this side made or the runtime's own end,
+/// the code or signal it ended with, the task a deadline stop's request
+/// named, and the last of its stderr, bounded and scrubbed.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ended {
+    pub cause: &'static str,
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    pub task: Option<String>,
+    pub stderr: Vec<String>,
+}
+
+/// The last lines a runtime wrote to stderr, read as it writes them so a
+/// full pipe never holds it up.
+#[derive(Default)]
+struct Tail {
+    held: Mutex<Held>,
+    closed: Condvar,
+}
+
+#[derive(Default)]
+struct Held {
+    lines: VecDeque<String>,
+    bytes: usize,
+    closed: bool,
 }
 
 struct Pipe {
@@ -122,7 +188,7 @@ impl Engine {
             .current_dir(runtime)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -172,6 +238,7 @@ impl Engine {
             let _ = process.wait();
             return Err(Error::RuntimeFailed);
         };
+        let errors = process.stderr.take();
         let (sender, receiver) = sync_channel(2);
         let engine = Arc::new(Self {
             child: Mutex::new(process),
@@ -180,8 +247,21 @@ impl Engine {
                 output: receiver,
             }),
             exited: AtomicBool::new(false),
+            told: AtomicBool::new(false),
             on_exit: Mutex::new(None),
+            stopped: Mutex::new(None),
+            stderr: Arc::new(Tail::default()),
         });
+        match errors {
+            Some(errors) => {
+                let tail = engine.stderr.clone();
+                std::thread::Builder::new()
+                    .name("local-judgment-stderr".to_owned())
+                    .spawn(move || drain(errors, &tail))
+                    .map_err(|_| Error::RuntimeFailed)?;
+            }
+            None => engine.stderr.close(),
+        }
         let weak = Arc::downgrade(&engine);
         std::thread::Builder::new()
             .name("local-judgment-output".to_owned())
@@ -195,16 +275,45 @@ impl Engine {
                     }
                 }
                 if let Some(engine) = weak.upgrade() {
-                    engine.stop();
-                    engine.exited.store(true, Ordering::Release);
-                    let notify = lock(&engine.on_exit).clone();
-                    if let Some(notify) = notify {
-                        notify();
+                    let began = Instant::now();
+                    while engine.alive() && began.elapsed() < EXIT_GRACE {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    engine.stop_for(Stop::Failed);
+                    engine.tell_exit();
+                }
+            })
+            .map_err(|_| Error::RuntimeFailed)?;
+        let weak = Arc::downgrade(&engine);
+        std::thread::Builder::new()
+            .name("local-judgment-watch".to_owned())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(WATCH);
+                    let Some(engine) = weak.upgrade() else {
+                        break;
+                    };
+                    if !engine.alive() {
+                        engine.tell_exit();
+                        break;
                     }
                 }
             })
             .map_err(|_| Error::RuntimeFailed)?;
         Ok(engine)
+    }
+
+    /// Tells the owner once that the runtime has ended, whichever of the
+    /// output's end and the watch sees it first.
+    fn tell_exit(&self) {
+        self.exited.store(true, Ordering::Release);
+        if self.told.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let notify = lock(&self.on_exit).clone();
+        if let Some(notify) = notify {
+            notify();
+        }
     }
 
     fn on_exit(&self, notify: Arc<dyn Fn() + Send + Sync>) {
@@ -253,11 +362,43 @@ impl Engine {
     }
 
     pub fn stop(&self) {
+        self.stop_for(Stop::Owner);
+    }
+
+    /// Ends the runtime if it still runs, and keeps why: the first stop made
+    /// while it ran is the one its record names.
+    fn stop_for(&self, stop: Stop) {
         let mut child = lock(&self.child);
         if child.try_wait().is_ok_and(|status| status.is_none()) {
+            lock(&self.stopped).get_or_insert(stop);
             let _ = child.kill();
         }
         let _ = child.wait();
+    }
+
+    /// How the runtime ended, once it has. A stop this side made names the
+    /// end only when the runtime ended by this side's kill; any other end is
+    /// the runtime's own.
+    pub(crate) fn ended(&self) -> Option<Ended> {
+        let status = lock(&self.child).try_wait().ok().flatten()?;
+        let (code, signal) = exit_status(status);
+        let stop = lock(&self.stopped)
+            .clone()
+            .filter(|_| killed_here(code, signal));
+        let (cause, task) = match stop {
+            Some(Stop::Deadline(task)) => (Error::Timeout, task),
+            Some(Stop::Failed) => (Error::RuntimeFailed, None),
+            Some(Stop::Owner) => (Error::ServerStopped, None),
+            None if code == Some(MEMORY_LIMIT_EXIT) => (Error::MemoryLimit, None),
+            None => (Error::RuntimeExited, None),
+        };
+        Some(Ended {
+            cause: cause.token(),
+            code,
+            signal,
+            task,
+            stderr: self.stderr.lines(),
+        })
     }
 
     #[cfg(all(test, unix))]
@@ -270,11 +411,136 @@ impl Engine {
             command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap()
         };
         Self::from_child(child).unwrap()
     }
+}
+
+/// The code or the signal a process ended with.
+fn exit_status(status: ExitStatus) -> (Option<i32>, Option<i32>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        (status.code(), status.signal())
+    }
+    #[cfg(not(unix))]
+    {
+        (status.code(), None)
+    }
+}
+
+/// Whether an end is the one [`Child::kill`] makes: `SIGKILL` on Unix, and
+/// on Windows the exit code it terminates the process with.
+#[cfg(unix)]
+fn killed_here(_code: Option<i32>, signal: Option<i32>) -> bool {
+    signal == Some(libc::SIGKILL)
+}
+
+#[cfg(not(unix))]
+fn killed_here(code: Option<i32>, _signal: Option<i32>) -> bool {
+    code == Some(1)
+}
+
+impl Tail {
+    /// Keeps one line, cut at its last whole word when it ran past the
+    /// length a line may keep, so no value survives in part; the oldest
+    /// lines give way past the bounds.
+    fn push(&self, line: &[u8], long: bool) {
+        let mut line = String::from_utf8_lossy(line).into_owned();
+        if long {
+            let cut = line
+                .char_indices()
+                .rfind(|&(at, ch)| ch.is_whitespace() && at + '…'.len_utf8() <= STDERR_LINE_BYTES)
+                .map_or(0, |(at, _)| at);
+            line.truncate(cut);
+            line.push('…');
+        }
+        if line.trim().is_empty() {
+            return;
+        }
+        let mut held = lock(&self.held);
+        held.bytes += line.len();
+        held.lines.push_back(line);
+        while held.lines.len() > STDERR_LINES || held.bytes > STDERR_BYTES {
+            let Some(oldest) = held.lines.pop_front() else {
+                break;
+            };
+            held.bytes -= oldest.len();
+        }
+    }
+
+    fn close(&self) {
+        lock(&self.held).closed = true;
+        self.closed.notify_all();
+    }
+
+    /// The kept lines with their private values masked by the table the
+    /// release gate reads, once stderr has closed or [`STDERR_SETTLE`] has
+    /// passed, still within the bounds after masking.
+    fn lines(&self) -> Vec<String> {
+        let held = self
+            .closed
+            .wait_timeout_while(lock(&self.held), STDERR_SETTLE, |held| !held.closed)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0;
+        let mut lines: Vec<String> = held
+            .lines
+            .iter()
+            .map(|line| {
+                let mut masked = zerocode_core::private_data::mask(line).text;
+                let mut end = masked.len().min(STDERR_LINE_BYTES);
+                while !masked.is_char_boundary(end) {
+                    end -= 1;
+                }
+                masked.truncate(end);
+                masked
+            })
+            .collect();
+        drop(held);
+        let mut bytes = 0;
+        let kept = lines
+            .iter()
+            .rev()
+            .take_while(|line| {
+                bytes += line.len();
+                bytes <= STDERR_BYTES
+            })
+            .count();
+        lines.drain(..lines.len() - kept);
+        lines
+    }
+}
+
+/// Reads a runtime's stderr until it closes, keeping only its tail.
+fn drain(mut errors: ChildStderr, tail: &Tail) {
+    use std::io::Read;
+    let mut buffer = [0; 8 * 1024];
+    let mut line = Vec::with_capacity(STDERR_LINE_BYTES);
+    let mut long = false;
+    loop {
+        let read = match errors.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        for &byte in &buffer[..read] {
+            if byte == b'\n' || byte == b'\r' {
+                tail.push(&line, long);
+                line.clear();
+                long = false;
+            } else if line.len() < STDERR_LINE_BYTES {
+                line.push(byte);
+            } else {
+                long = true;
+            }
+        }
+    }
+    tail.push(&line, long);
+    tail.close();
 }
 
 impl Drop for Engine {
@@ -412,6 +678,7 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
     if prepared.body.len() >= MAX_FRAME {
         return failure(StatusCode::PAYLOAD_TOO_LARGE, Error::TooLarge);
     }
+    let named = task_name(&request);
     drop(request);
     drop(body);
     let turn = match tokio::time::timeout(
@@ -425,7 +692,7 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
         Err(_) => return failure(StatusCode::SERVICE_UNAVAILABLE, Error::Busy),
     };
     let bytes = std::mem::take(&mut prepared.body);
-    match tokio::spawn(exchange_in_turn(state.clone(), turn, ticket, bytes)).await {
+    match tokio::spawn(exchange_in_turn(state.clone(), turn, ticket, bytes, named)).await {
         Ok(Ok(bytes)) => match state.provider.decode(&prepared, bytes.clone()) {
             Ok(_) => (
                 [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -443,6 +710,21 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
     }
 }
 
+/// The task a request names in its body, kept with a deadline stop so the
+/// next stop says which seat sent it: a short plain name, never free text.
+fn task_name(request: &Value) -> Option<String> {
+    request
+        .get("task")
+        .and_then(Value::as_str)
+        .filter(|task| {
+            (1..=64).contains(&task.len())
+                && task
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+        })
+        .map(str::to_owned)
+}
+
 /// One request's exchange with the runtime, holding its turn, bounded by the
 /// request deadline. A runtime that misses the deadline or fails is stopped,
 /// and the requests waiting behind it are refused rather than handed to it.
@@ -451,6 +733,7 @@ async fn exchange_in_turn(
     turn: tokio::sync::OwnedSemaphorePermit,
     ticket: Ticket,
     bytes: Vec<u8>,
+    named: Option<String>,
 ) -> Result<Vec<u8>> {
     let _ticket = ticket;
     let engine = state.engine.clone();
@@ -463,13 +746,19 @@ async fn exchange_in_turn(
         }
         result
     });
-    let error = match tokio::time::timeout(state.admission.limits.request, task).await {
+    let (error, stop) = match tokio::time::timeout(state.admission.limits.request, task).await {
         Ok(Ok(Ok(bytes))) => return Ok(bytes),
-        Err(_) => Error::Timeout,
-        Ok(_) => Error::RuntimeFailed,
+        Err(_) => (Error::Timeout, Stop::Deadline(named)),
+        Ok(_) => {
+            let began = Instant::now();
+            while state.engine.alive() && began.elapsed() < EXIT_GRACE {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            (Error::RuntimeFailed, Stop::Failed)
+        }
     };
     state.admission.close();
-    state.engine.stop();
+    state.engine.stop_for(stop);
     (state.failed)();
     Err(error)
 }
