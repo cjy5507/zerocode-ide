@@ -169,6 +169,17 @@ struct RefusalRead {
     read: usize,
 }
 
+/// The wait a refusal's head names (t-58193): its `Retry-After` in whole
+/// seconds, read as the chat providers read it; a date names none.
+fn retry_after(answer: &reqwest::Response) -> Option<Duration> {
+    answer
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
 /// Reads `answer`, a refused request's response, for the code its server
 /// named: at most [`MAX_REFUSAL_BYTES`] of its body, for no longer than
 /// [`MAX_REFUSAL_WAIT`] or what is left until `deadline`, whichever ends
@@ -551,6 +562,8 @@ struct Attempted {
     /// beside a 502's (t-58193).
     server_error_code: Option<&'static str>,
     server_refusal: Option<&'static str>,
+    /// The wait the refusal that ended the sequence named (t-58193).
+    retry_after: Option<Duration>,
     elapsed: Duration,
 }
 
@@ -731,7 +744,10 @@ impl SystemOneClient {
     /// The deadline bounds the whole call — every attempt and every wait. A
     /// backoff that would end past it is not taken: the call ends on the
     /// failure that asked for it, which is the truer account than a timeout
-    /// nobody waited for. A retry re-sends these same bytes.
+    /// nobody waited for. A retry re-sends these same bytes, and no sooner
+    /// than a refusal's `Retry-After` asked: a server that names its wait is
+    /// left alone that long, and a wait past the deadline ends the call on
+    /// it at once, kept as its `retry_after` (t-58193).
     ///
     /// A hedge is not a retry, and the two are kept apart here because they
     /// answer different questions. A retry waits for a failure and asks again
@@ -810,7 +826,7 @@ impl SystemOneClient {
             retries: run.retries,
             server_error_code: run.server_error_code,
             server_refusal: run.server_refusal,
-            retry_after: None,
+            retry_after: run.retry_after,
             elapsed: opened.elapsed(),
             requests: requests.load(Ordering::Relaxed),
             hedge: ran,
@@ -873,6 +889,7 @@ impl SystemOneClient {
             retries,
             server_error_code: read.code,
             server_refusal: read.refusal,
+            retry_after: None,
             elapsed: began.elapsed(),
         };
         let mut retries = 0;
@@ -885,7 +902,9 @@ impl SystemOneClient {
             };
             requests.fetch_add(1, Ordering::Relaxed);
             let mut refused = None;
-            let sent = tokio::time::timeout(remaining, self.send_once(&lent.client, prepared, &mut refused)).await;
+            let mut wait = None;
+            let asked = self.send_once(&lent.client, prepared, &mut refused, &mut wait);
+            let sent = tokio::time::timeout(remaining, asked).await;
             let failure = match sent {
                 Ok(Ok(response)) => return finish(Ok(response), retries, RefusalRead::default()),
                 Ok(Err(failure)) => failure,
@@ -897,9 +916,12 @@ impl SystemOneClient {
                 self.socket.unanswered(&lent);
             }
             let backoff = SYSTEMONE_RETRY_BASE_DELAY.saturating_mul(2u32.saturating_pow(retries));
+            // A server that named how long to leave it alone is asked again
+            // no sooner (t-58193).
+            let pause = wait.map_or(backoff, |wait| wait.max(backoff));
             if !failure.retryable()
                 || retries >= max_retries
-                || opened.elapsed() + backoff >= deadline
+                || opened.elapsed().saturating_add(pause) >= deadline
             {
                 // Read past the deadline's wrap above, so a slow body leaves a
                 // server's refusal its status and never makes it a timeout.
@@ -907,14 +929,20 @@ impl SystemOneClient {
                     Some(answer) => refusal_read(answer, opened + deadline).await,
                     None => RefusalRead::default(),
                 };
-                return finish(Err(failure), retries, read);
+                return Attempted { retry_after: wait, ..finish(Err(failure), retries, read) };
             }
-            tokio::time::sleep(backoff).await;
+            tokio::time::sleep(pause).await;
             retries += 1;
         }
     }
 
-    async fn send_once(&self, http: &reqwest::Client, prepared: &Prepared, refused: &mut Option<reqwest::Response>) -> Result<SystemOneResponse, SystemOneFailure> {
+    async fn send_once(
+        &self,
+        http: &reqwest::Client,
+        prepared: &Prepared,
+        refused: &mut Option<reqwest::Response>,
+        wait: &mut Option<Duration>,
+    ) -> Result<SystemOneResponse, SystemOneFailure> {
         let request = http
             .post(&self.endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -930,6 +958,11 @@ impl SystemOneClient {
             .map_err(|_| SystemOneFailure::Transport)?;
         let status = response.status();
         if !status.is_success() {
+            // A server that asks to be left alone says for how long (t-58193).
+            let waits = status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status.as_u16() == OVERLOADED_STATUS;
+            if waits { *wait = retry_after(&response); }
             // A managed server says in the body why it refused; the caller reads
             // it once the outcome stands, past this request's deadline (t-55423).
             let named = status == reqwest::StatusCode::SERVICE_UNAVAILABLE

@@ -360,11 +360,38 @@ impl JevDoor {
             .filter(|_| self.count_a_hedge().is_ok())
     }
 
-    /// Whether `row`'s seat rests now (t-58193): its provider cut the
-    /// smallest request it can make, one item ([`Self::room_of`]), or it
+    /// Whether `row`'s seat rests now (t-58193): its server asked it to wait
+    /// and the time has not come ([`Self::asked_to_wait`]), its provider cut
+    /// the smallest request it can make, one item ([`Self::room_of`]), or it
     /// applies nothing and its own ledger says it rests ([`Self::rest_of`]).
     fn resting(&self, row: &JevUse) -> bool {
-        self.room_of(row) == Some(0) || (self.rest_of(row).is_some() && !self.applies_now(row))
+        self.asked_to_wait(row).is_some()
+            || self.room_of(row) == Some(0)
+            || (self.rest_of(row).is_some() && !self.applies_now(row))
+    }
+
+    /// Until when `row`'s seat waits because its server asked it to
+    /// (t-58193), in Unix milliseconds: the `serverRetryAt` ([`ServerSaid`])
+    /// of the newest request the seat sent to this provider, under any rubric
+    /// — the wait is the server's — while that moment is still ahead. A `503`
+    /// or `429` naming a `Retry-After` is the provider asking the seat to
+    /// wait: the local server says it while it waits to restart after a
+    /// stop, a remote provider when it is overloaded. Every seat waits, one
+    /// that applies its judgment too, since the server would refuse it.
+    ///
+    /// Read from the tail the hedge reads alone: no wait is longer than one
+    /// [`REST`], and a tail without a request lets one go, whose answer
+    /// names the wait again.
+    fn asked_to_wait(&self, row: &JevUse) -> Option<i64> {
+        let ledger = self.ledgers.as_deref()?.join(row.ledger);
+        let tail = last_shadow_lines(&ledger, HEDGE_SAMPLE_ROWS);
+        let newest = tail
+            .iter()
+            .rev()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(request_left)?;
+        let until = newest.get(SERVER_RETRY_AT).and_then(Value::as_i64)?;
+        (until > super::decision_shadow::now_ms()).then_some(until)
     }
 
     /// The most items — notes, skills — one request of `row`'s seat may
@@ -453,12 +480,17 @@ enum Reading {
 /// judge's transition and a mark are no request, and count neither way. Nor
 /// does a request its provider cut under a room the seat had learned: the
 /// fit rule answers that one by halving the room ([`room_in`]), which ends
-/// the cuts within a few requests.
+/// the cuts within a few requests. Nor does an answer that asked for a wait:
+/// its server said when to come back, and the door holds the seat until
+/// then ([`JevDoor::asked_to_wait`]).
 fn rest_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>, now_ms: i64) -> Reading {
     let mut causes: Vec<String> = Vec::new();
     let mut newest = None;
     for row in lines.filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
-        if !sent_in_series(seat, &row) || (cut(&row) && row.get(ROOM).is_some()) {
+        if !sent_in_series(seat, &row)
+            || (cut(&row) && row.get(ROOM).is_some())
+            || row.get(SERVER_RETRY_AT).is_some()
+        {
             continue;
         }
         if summary::OUTCOME.read(&row).and_then(Value::as_str) == Some(door::ANSWERED_OUTCOME) {
@@ -477,8 +509,10 @@ fn rest_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>, now_ms: i64)
     Reading::Short
 }
 
-/// Where [`ServerSaid`] keeps the provider's refusal on a row.
+/// Where [`ServerSaid`] keeps the provider's refusal, and the moment until
+/// which the server asked for nothing more, on a row.
 const SERVER_REFUSAL: &str = "serverRefusal";
+const SERVER_RETRY_AT: &str = "serverRetryAt";
 
 /// Where a seat's row keeps the room it was asked under, how many items its
 /// request carried, and the model that answered it.
@@ -530,12 +564,16 @@ fn in_series(seat: &JevUse, row: &Value) -> bool {
     rubric == Some(seat.rubric_version)
 }
 
-/// Whether `row` is a request `seat` sent in its series ([`in_series`]): one
-/// that asked something and left at least once.
-fn sent_in_series(seat: &JevUse, row: &Value) -> bool {
+/// Whether `row` is a request its seat sent: one that asked something and
+/// left at least once.
+fn request_left(row: &Value) -> bool {
     summary::asked_something(row).is_some()
         && summary::REQUESTS.read(row).and_then(Value::as_u64).is_some_and(|sent| sent > 0)
-        && in_series(seat, row)
+}
+
+/// Whether `row` is a request `seat` sent in its series ([`in_series`]).
+fn sent_in_series(seat: &JevUse, row: &Value) -> bool {
+    request_left(row) && in_series(seat, row)
 }
 
 /// The word `causes` hold most often, the first of them among equals.
@@ -606,10 +644,11 @@ pub fn millis(elapsed: Duration) -> u64 {
 }
 
 /// What a managed server said beside a refusal (t-55423, t-58193): the code it
-/// refused with, and beside a `502` the provider's refusal of the answer —
-/// `provider_context_truncated` for a request longer than the model reads.
-/// Every seat's row keeps the two under the window's keys, through
-/// [`ServerSaid::of`], so a refused judgment says why; both are absent on an
+/// refused with, beside a `502` the provider's refusal of the answer —
+/// `provider_context_truncated` for a request longer than the model reads —
+/// and, beside a refusal that named a `Retry-After`, until when it asked for
+/// nothing more. Every seat's row keeps them under the window's keys, through
+/// [`ServerSaid::of`], so a refused judgment says why; all are absent on an
 /// answer and wherever the server named nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -620,7 +659,8 @@ pub struct ServerSaid {
     pub server_refusal: Option<String>,
     /// Until when the server asked for nothing more from this seat, in Unix
     /// milliseconds (t-58193): the call's `retry_after` from when its answer
-    /// was read, and never further off than one [`REST`].
+    /// was read, and never further off than one [`REST`], so no header keeps
+    /// a seat silent longer than the rest does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_retry_at: Option<i64>,
 }
@@ -629,10 +669,14 @@ impl ServerSaid {
     /// What `call`'s server said.
     #[must_use]
     pub fn of(call: &SystemOneCall) -> Self {
+        let until = |after: Duration| {
+            let after = i64::try_from(after.min(REST).as_millis()).unwrap_or(i64::MAX);
+            super::decision_shadow::now_ms().saturating_add(after)
+        };
         Self {
             server_error_code: call.server_error_code.map(str::to_string),
             server_refusal: call.server_refusal.map(str::to_string),
-            server_retry_at: None,
+            server_retry_at: call.retry_after.map(until),
         }
     }
 
