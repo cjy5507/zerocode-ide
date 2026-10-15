@@ -7025,6 +7025,62 @@ await test("스스로 멈춘 판단 서버는 중지됨과 그 까닭을 다섯 
   return "stopped with its reason · five locales · each cause · no raw token or stderr in the card";
 });
 
+await test("다시 띄우기를 기다리는 판단 서버는 다시 띄우는 중과 그 까닭을 다섯 언어로 보이고 중지 단추를 남긴다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  const provider = { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32101", model: "fixture-decision", requiresAuth: false };
+  backend.zoSettings.smart = { ...(previous ?? {}), judgmentProvider: provider };
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  const held = backend.managedModelState;
+  held.runtime.state = "ready";
+  held.models[0].installed = true;
+  held.configuredModelId = "fixture-decision";
+  held.server = {
+    id: "fixture-waiting-server", state: "starting", modelId: "fixture-decision", provider: clone(provider), checked: false, error: null,
+    exit: { cause: "runtime_exited", code: 7, signal: null, task: null, stderr: ["fixture: last words"] },
+  };
+  const page = await context.newPage();
+  await installTauri(page, "server-restart");
+  attachFaultRecorder(page, "server-restart");
+  const card = page.locator('[data-model-id="fixture-decision"].managed-judgment-model');
+  try {
+    await bootPage(page, "server-restart");
+    await openSettings(page, "judgment-models");
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "starting");
+    const missing = await page.evaluate(() => ["en", "ja", "zh", "es"].filter((code) =>
+      typeof CATALOG?.[code]?.["settings.managed.restartingReason"] !== "string" || !CATALOG[code]["settings.managed.restartingReason"].includes("{{reason}}")));
+    assertEqual(missing, [], "a waiting restart's line is untranslated");
+    const said = {};
+    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      await setQualityLocale(page, locale);
+      await page.evaluate(() => managedJudgmentController.render());
+      const words = await page.evaluate(() => ({
+        line: t("settings.managed.restartingReason", "다시 띄우는 중 · {{reason}}. 중지를 누르면 다시 띄우지 않습니다.", {
+          reason: t("settings.managed.exit.code", "실행 환경이 스스로 끝났습니다(종료 코드 {{code}})", { code: 7 }),
+        }),
+        starting: t("settings.managed.starting", "모델을 시작하는 중 · 아직 적용하지 않음"),
+      }));
+      const text = await card.textContent();
+      assert(text.includes(words.line), `${locale} hides that the server is restarting and why`, { text, words });
+      assert(!text.includes(words.starting), `${locale} shows a restart as a first start`, text);
+      assert(!text.includes("fixture: last words"), `${locale} leaked stderr into the card`, text);
+      said[locale] = words.line;
+    }
+    assertEqual(new Set(Object.values(said)).size, SETTINGS_QUALITY_SPEC.locales.length, "a locale repeats another's restart line");
+    const stop = card.locator('[data-model-action="stop"]');
+    assert(await stop.isVisible(), "the stop button is gone while a restart waits");
+    await stop.click();
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "stopped");
+    assertEqual(backend.last("server-restart", "managed_judgment_stop")?.args.serverId, "fixture-waiting-server", "the stop did not name the waiting server");
+  } finally {
+    await page.close();
+    backend.zoSettings.smart = previous;
+    backend.managedModelState = previousManaged;
+  }
+  return "restarting with its reason · five locales · stop kept and sent for the waiting server";
+});
+
 await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 모델을 현재 설정 변경 없이 고른다", async () => {
   const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
   const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
