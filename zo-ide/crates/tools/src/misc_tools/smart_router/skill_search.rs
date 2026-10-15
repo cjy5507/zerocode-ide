@@ -123,6 +123,11 @@ pub struct SkillSearchRow {
     pub outcome: String,
     /// How many skills were put to the judgment.
     pub candidates: usize,
+    /// The most skills a suggestion could put to the judgment in this
+    /// provider's folder: half the fewest a request carried that the provider
+    /// refused as cut, once it refused one (t-58193). Absent before that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<usize>,
     /// How many requests the catalog was cut into, and how many of them came
     /// back checked. A shard is an independent request over its own skills,
     /// so the two differ whenever one reply was refused and the rest stood.
@@ -271,6 +276,7 @@ impl SkillSearchRow {
             gate_score: None,
             outcome,
             candidates,
+            room: None,
             shards,
             shards_answered: 0,
             route_use: ROUTE_USE_FALLBACK.to_string(),

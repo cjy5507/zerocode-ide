@@ -119,6 +119,11 @@ pub struct RerankShadowRow {
     pub outcome: String,
     /// How many notes were put to the judgment.
     pub candidates: usize,
+    /// The most notes this reading could put to the judgment in this
+    /// provider's folder: half the fewest a request carried that the provider
+    /// refused as cut, once it refused one (t-58193). Absent before that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<usize>,
     /// True when the judgment was recalled from this process's memo rather
     /// than asked; the timing fields then say nothing.
     #[serde(default)]
@@ -262,6 +267,7 @@ impl RerankShadowRow {
             rubric_version: key.rubric,
             outcome,
             candidates,
+            room: None,
             cached: false,
             elapsed_ms: 0,
             retries: 0,
@@ -1961,6 +1967,131 @@ mod tests {
         let next = waited_on(&client, &door, Duration::from_secs(5), "a reading after an answer");
         assert_eq!(next.outcome, RERANK_OUTCOME_ANSWERED, "an answer ends the rest");
         assert_eq!(mock.requests().len(), 2, "the try and the reading after it, nothing more");
+    }
+
+    /// A fake provider that reads `reads` notes of a reading (t-58193): a
+    /// request with more is refused as a managed server refuses a cut input,
+    /// and one that fits is answered note by note. No number in it is a real
+    /// model's.
+    fn cutting_at(reads: usize) -> Mock {
+        Mock::answering(move |body| {
+            let notes = questions_in(body);
+            if notes > reads {
+                let said = serde_json::json!({"error": "native_protocol_failed",
+                    "refusal": "provider_context_truncated"});
+                (502, said.to_string())
+            } else {
+                (200, reply_for(&vec![1; notes]))
+            }
+        })
+    }
+
+    /// How many notes a request put to the judgment: one question each.
+    fn questions_in(body: &str) -> usize {
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|request| request["questions"].as_object().map(serde_json::Map::len))
+            .unwrap_or(0)
+    }
+
+    /// `readings` readings of the same eight notes, one after another, each
+    /// row written to the ledger as the seat writes it, after `past` requests
+    /// of the recall's that went unanswered: how many notes each put to the
+    /// judgment, how it ended, and the room it was asked under.
+    fn read_eight_notes(
+        mock: &Mock,
+        past: usize,
+        readings: usize,
+        name: &str,
+    ) -> Vec<(usize, String, Option<usize>)> {
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+        let door = door_with(None, home.path());
+        let path = home.path().join(RECALL.ledger);
+        for _ in 0..past {
+            let model = jev_gate::model_key(SYSTEMONE_MODEL);
+            let key = MemoKey::for_reading("a past reading", &[], model);
+            let mut row = RerankShadowRow::new(key, 1, SystemOneFailure::Timeout.ledger_token());
+            row.requests = Some(1);
+            append_shadow_row(&path, &row, SHADOW_LEDGER_MAX_BYTES).expect("an unanswered row");
+        }
+        let eight: Vec<MemoryHit> =
+            (0..8).map(|n| hit(&format!("wiki/n{n}"), "one of many")).collect();
+        (0..readings)
+            .map(|reading| {
+                let query = format!("{name} {reading}");
+                let wall = Duration::from_secs(5);
+                let row = shared_agent_runtime()
+                    .block_on(judge(&door, Some(&client), &query, &eight, wall, false));
+                append_shadow_row(&path, &row, SHADOW_LEDGER_MAX_BYTES).expect("the reading's row");
+                (row.candidates, row.outcome, row.room)
+            })
+            .collect()
+    }
+
+    /// A provider that reads fewer notes than a reading sends refuses it as
+    /// cut, and the recall halves its notes for this provider's folder until
+    /// a reading fits (t-58193): eight cut, four cut, two answered, and the
+    /// reading after asks two again.
+    #[test]
+    fn a_cut_reading_halves_its_notes_until_one_fits() {
+        let mock = cutting_at(3);
+        let cut = SystemOneFailure::Http(502).ledger_token();
+        let answered = RERANK_OUTCOME_ANSWERED.to_string();
+
+        let read = read_eight_notes(&mock, 0, 4, "a reading three notes fit");
+
+        let expected = vec![
+            (8, cut.clone(), None),
+            (4, cut, Some(4)),
+            (2, answered.clone(), Some(2)),
+            (2, answered, Some(2)),
+        ];
+        assert_eq!(read, expected);
+        let sent: Vec<usize> =
+            mock.requests().iter().map(String::as_str).map(questions_in).collect();
+        assert_eq!(sent, vec![8, 4, 2, 2]);
+    }
+
+    /// A provider that reads not one note (t-58193): the recall halves down to
+    /// one, and once one note was cut it does not ask that provider — its row
+    /// says `resting` under a room of none, and nothing more leaves.
+    #[test]
+    fn a_reading_whose_one_note_was_cut_does_not_ask_again() {
+        let mock = cutting_at(0);
+        let cut = SystemOneFailure::Http(502).ledger_token();
+
+        let read = read_eight_notes(&mock, 0, 5, "a reading no note fits");
+
+        let halved = [
+            (8, cut.clone(), None),
+            (4, cut.clone(), Some(4)),
+            (2, cut.clone(), Some(2)),
+            (1, cut, Some(1)),
+        ];
+        assert_eq!(read[..4], halved);
+        assert_eq!(read[4], (0, "resting".to_string(), Some(0)));
+        let sent: Vec<usize> =
+            mock.requests().iter().map(String::as_str).map(questions_in).collect();
+        assert_eq!(sent, vec![8, 4, 2, 1]);
+    }
+
+    /// A cut the recall answers by halving is the fit rule's and not the
+    /// rest's (t-58193): after requests that went unanswered before, the first
+    /// cut counts toward the rest as any failure does, but a cut asked under
+    /// a room it had learned does not — the room it halves ends the cuts
+    /// within a few requests — so the halving reaches an answer at once.
+    #[test]
+    fn a_cut_under_a_learned_room_does_not_count_toward_the_rest() {
+        let mock = cutting_at(3);
+        let cut = SystemOneFailure::Http(502).ledger_token();
+        let past = jev_gate::UNANSWERED_BEFORE_REST - 2;
+
+        let read = read_eight_notes(&mock, past, 3, "a reading after a bad hour");
+
+        let answered = RERANK_OUTCOME_ANSWERED.to_string();
+        let expected = vec![(8, cut.clone(), None), (4, cut, Some(4)), (2, answered, Some(2))];
+        assert_eq!(read, expected);
     }
 
     /// A sample too small to name a rank is no plan at all: the judgment takes
