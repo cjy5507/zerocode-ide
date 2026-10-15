@@ -2163,6 +2163,26 @@ pub(crate) mod test_support {
         .unwrap()
     }
 
+    pub fn unverified_native_manager(root: &Path, settings: &Path) -> Arc<Manager> {
+        let runtimes: serde_json::Value =
+            serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
+        let mut profile: RuntimeProfile =
+            serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
+        profile.engine = EngineKind::TransformersSystemOne;
+        profile.validated = false;
+        Manager::with_catalog(
+            root,
+            settings,
+            Catalog {
+                version: 1,
+                models: Vec::new(),
+            },
+            Some(profile),
+            Arc::new(|_| {}),
+        )
+        .unwrap()
+    }
+
     pub fn begin_registration_blocker(manager: &Manager) -> String {
         manager.begin("download", None, 0).unwrap().0
     }

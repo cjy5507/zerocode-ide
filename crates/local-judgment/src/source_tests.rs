@@ -43,6 +43,24 @@ pub(crate) fn local_fixture(directory: &Path) {
     fs::write(directory.join("model.safetensors"), weights()).unwrap();
 }
 
+fn native_fixture(directory: &Path) {
+    fs::create_dir_all(directory).unwrap();
+    fs::write(
+        directory.join("config.json"),
+        br#"{"model_type":"qwen3_5"}"#,
+    )
+    .unwrap();
+    fs::write(
+        directory.join("decision_config.json"),
+        br#"{"format_version":1,"format_id":"d3-code-readout-v1"}"#,
+    )
+    .unwrap();
+    fs::write(directory.join("tokenizer.json"), b"{}").unwrap();
+    fs::write(directory.join("tokenizer_config.json"), b"{}").unwrap();
+    fs::write(directory.join("readout.safetensors"), weights()).unwrap();
+    fs::write(directory.join("model.safetensors"), weights()).unwrap();
+}
+
 #[test]
 fn hf_sources_resolve_repo_urls_revision_and_subfolder_without_other_hosts() {
     let source = source::hub_source(
@@ -549,4 +567,181 @@ async fn custom_destination_owns_only_its_created_child_and_survives_restart() {
         b"keep"
     );
     assert!(source.join("model.safetensors").is_file());
+}
+
+#[tokio::test]
+async fn recognised_native_data_is_kept_without_preparing_or_running_an_unverified_runtime() {
+    let home = tempfile::tempdir().unwrap();
+    let source = home.path().join("source");
+    native_fixture(&source);
+    let original = fs::read(source.join("model.safetensors")).unwrap();
+    let data = home.path().join("data");
+    let settings = home.path().join("settings.json");
+    fs::write(&settings, b"{}").unwrap();
+    let manager = crate::manager::test_support::unverified_native_manager(&data, &settings);
+    let inspection = manager
+        .inspect_source(SourceInput::LocalDirectory {
+            directory: source.to_string_lossy().into_owned(),
+        })
+        .await
+        .unwrap();
+    let shown = serde_json::to_value(&inspection).unwrap();
+    assert_eq!(shown["readyForInstall"], json!(false));
+    assert_eq!(shown["readyForDownload"], json!(true));
+    assert_eq!(shown["local"]["supported"], json!(false));
+    assert_eq!(shown["local"]["reason"], json!("engine_unverified"));
+    assert_eq!(shown["local"]["downloadOnly"], json!(true));
+    manager
+        .install_source(
+            &inspection.inspection_id,
+            &inspection.instance_id,
+            &inspection.catalog_fingerprint,
+            None,
+        )
+        .unwrap();
+    let settled = super::tests::settled_snapshot(&manager).await;
+    let operation = settled.operation.as_ref().unwrap();
+    assert_eq!((operation.kind, operation.state), ("import", "done"));
+    let kept = settled
+        .models
+        .iter()
+        .find(|model| model.id == inspection.model.id)
+        .unwrap();
+    assert!(kept.installed);
+    assert!(!kept.local.supported);
+    assert_eq!(
+        serde_json::to_value(kept).unwrap()["local"]["downloadOnly"],
+        json!(true)
+    );
+    assert_eq!(kept.runtime.state, "unverified");
+    assert_eq!(settled.server.state, "stopped");
+    assert!(settled.applied_model_id.is_none());
+    assert!(matches!(
+        manager.prepare_model_runtime(&kept.id, &kept.revision),
+        Err(Error::EngineUnverified)
+    ));
+    assert!(matches!(
+        manager.start(&kept.id, &kept.revision),
+        Err(Error::EngineUnverified)
+    ));
+    assert!(matches!(
+        manager.prepare_runtime(),
+        Err(Error::EngineUnverified)
+    ));
+    let after = manager.snapshot();
+    assert_eq!(
+        after.operation.as_ref().map(|operation| operation.kind),
+        Some("import")
+    );
+    assert_eq!(after.server.state, "stopped");
+    assert_eq!(after.runtime.state, "unverified");
+    assert_eq!(fs::read(&settings).unwrap(), b"{}");
+    assert_eq!(
+        fs::read(source.join("model.safetensors")).unwrap(),
+        original
+    );
+    manager.shutdown();
+}
+
+#[tokio::test]
+async fn native_data_without_a_runtime_profile_changed_or_malformed_stays_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let source = home.path().join("source");
+    native_fixture(&source);
+    let directory = source.to_string_lossy().into_owned();
+    let settings = home.path().join("settings.json");
+    fs::write(&settings, b"{}").unwrap();
+    let laya = crate::manager::test_support::manager(
+        &home.path().join("laya"),
+        &settings,
+        super::tests::fixture_model(),
+    );
+    let inspection = laya
+        .inspect_source(SourceInput::LocalDirectory {
+            directory: directory.clone(),
+        })
+        .await
+        .unwrap();
+    let shown = serde_json::to_value(&inspection).unwrap();
+    assert_eq!(shown["readyForInstall"], json!(false));
+    assert_eq!(shown["readyForDownload"], json!(false));
+    assert_eq!(shown["local"]["downloadOnly"], json!(false));
+    assert_eq!(shown["local"]["reason"], json!("platform_unsupported"));
+    assert!(matches!(
+        laya.install_source(
+            &inspection.inspection_id,
+            &inspection.instance_id,
+            &inspection.catalog_fingerprint,
+            None
+        ),
+        Err(Error::Unsupported)
+    ));
+    assert!(
+        !laya
+            .snapshot()
+            .models
+            .iter()
+            .any(|model| model.id == inspection.model.id)
+    );
+    laya.shutdown();
+
+    let native = crate::manager::test_support::unverified_native_manager(
+        &home.path().join("native"),
+        &settings,
+    );
+    let inspection = native
+        .inspect_source(SourceInput::LocalDirectory {
+            directory: directory.clone(),
+        })
+        .await
+        .unwrap();
+    let mut changed = weights();
+    changed.extend(1f32.to_le_bytes());
+    fs::write(source.join("model.safetensors"), changed).unwrap();
+    assert!(matches!(
+        native.install_source(
+            &inspection.inspection_id,
+            &inspection.instance_id,
+            &inspection.catalog_fingerprint,
+            None
+        ),
+        Err(Error::SourceChanged)
+    ));
+    native_fixture(&source);
+    let inspect = |directory: String| {
+        let native = native.clone();
+        async move {
+            native
+                .inspect_source(SourceInput::LocalDirectory { directory })
+                .await
+                .map(|_| ())
+        }
+    };
+    fs::write(
+        source.join("config.json"),
+        br#"{"model_type":"qwen3_5","trust_remote_code":true}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        inspect(directory.clone()).await,
+        Err(Error::ExecutableArtifact)
+    );
+    fs::write(source.join("config.json"), br#"{"model_type":"llama"}"#).unwrap();
+    assert_eq!(
+        inspect(directory.clone()).await,
+        Err(Error::ModelFormatUnsupported)
+    );
+    fs::write(source.join("config.json"), br#"{"model_type":"qwen3_5"}"#).unwrap();
+    fs::remove_file(source.join("readout.safetensors")).unwrap();
+    assert_eq!(
+        inspect(directory.clone()).await,
+        Err(Error::ModelManifestMissing)
+    );
+    fs::write(source.join("readout.safetensors"), b"not weights").unwrap();
+    assert_eq!(inspect(directory).await, Err(Error::WeightsFormat));
+    let snapshot = native.snapshot();
+    assert!(snapshot.models.iter().all(|model| !model.installed));
+    assert_eq!(snapshot.server.state, "stopped");
+    native.shutdown();
+    assert_eq!(fs::read(&settings).unwrap(), b"{}");
 }
