@@ -1185,12 +1185,25 @@ fn requests_asked_together_never_have_more_than_the_lanes_in_flight() {
 #[test]
 fn zo_keeps_the_windows_refusal_codes_word_for_word() {
     let zo = include_str!("../../../../zo-ide/crates/api/src/systemone.rs");
-    let line = zo
-        .lines()
+    assert_eq!(codes(zo), super::REFUSAL_CODES);
+    let code = super::REFUSAL_CODES[1];
+    let renamed = zo.replace(&format!("\"{code}\""), &format!("\"{code}_renamed\""));
+    assert_ne!(
+        codes(&renamed),
+        super::REFUSAL_CODES,
+        "a code renamed on zo's side only is caught"
+    );
+}
+
+/// The quoted words of the line in `text` that declares `REFUSAL_CODES`.
+fn codes(text: &str) -> Vec<&str> {
+    text.lines()
         .find(|line| line.starts_with("const REFUSAL_CODES:"))
-        .expect("zo's client names the codes it keeps");
-    let words: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
-    assert_eq!(words, super::REFUSAL_CODES, "{line}");
+        .expect("zo's client names the codes it keeps")
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .collect()
 }
 
 /// Which connection a question rides (t-13199).
