@@ -5614,6 +5614,25 @@ function termTabId(term) {
   return `term:${term}`;
 }
 
+/* The name a NEW tab around `term` takes (t-56480). A tab keeps the name of the
+ * shell it was born around after that shell leaves it — the split it was born
+ * in stays standing with the panes left in it — so when the shell comes back
+ * to a tab of its own (a parked pane reopened from its row, a pane following
+ * its process into another checkout), its own name can already be worn.
+ * `openTab` reads a name it already holds as that tab opened again and writes
+ * the new tab over it: every pane still in the old one left the stage with its
+ * process running and no row naming it — the silent road behind 「판이 안
+ * 보임」 (2026-10-15). A worn name gives way to the next free numbered one; the
+ * same shell already standing in that tab keeps the tab it has. */
+function termTabIdFor(term) {
+  const own = termTabId(term);
+  const wearing = tabs.find((tab) => tab.id === own);
+  if (!wearing || paneLeaves(wearing.layout).includes(term)) return own;
+  let n = 2;
+  while (tabs.some((tab) => tab.id === `${own}:${n}`)) n += 1;
+  return `${own}:${n}`;
+}
+
 /* A terminal tab's screen, made on first need and kept until the tab closes. */
 function termView(term) {
   const held = termViews.get(term);
@@ -8622,7 +8641,7 @@ function mountTermTab(term, extra = {}, { focus = true, placement = "auto" } = {
   // a far-away tab). Doc tabs keep Orca's tab road.
   const beside = besideBrowser ? standBesideFocused() : null;
   const tab = {
-    id: termTabId(term),
+    id: termTabIdFor(term),
     kind: "term",
     term,
     worktree: activeWorktreePath,
@@ -8866,6 +8885,95 @@ function detachedStillWorking(term) {
   return !hookStates.has(term) && (paneAgents.has(term) || paneSessions.has(term));
 }
 
+/* ---- 판이 탭을 떠나는 길의 블랙박스, 그리고 탭이 놓친 셸의 돌아올 문 (t-56480) ----
+ *
+ * 판이 탭을 떠나는 길은 열이 넘고(판 닫기, 프로세스를 따라 다른 체크아웃으로,
+ * 원장의 자리 잡기, 팀 주차, 목록에서 꺼내기, 끝남, 탭 닫기, 워크트리·프로젝트
+ * 제거, 미러 교체), 길마다 제 끝에서 떼어 둔 행을 남기거나 셸을 끝낸다. 그 둘
+ * 중 아무것도 하지 않은 길이 하나라도 있으면 그 셸은 백엔드에서 도는데 탭에도
+ * 행에도 없다 — 2026-10-15 사람이 본 「판이 안 보임」: 분할에 띄운 zo 판이
+ * 탭에서 빠졌고, 프로세스는 살았고, 사이드바 행도 「+」 옆 숫자도 없었고, 창
+ * 기록에는 그 판의 줄이 하나도 없었다. 그래서 두 가지를 둔다. 길마다 창 기록에
+ * 한 줄(다음 재현은 어느 길이었는지 이름으로 남는다), 그리고 탭도 행도 없는 산
+ * 에이전트를 떼어 둔 행으로 데려오는 느린 문. */
+
+/* 한 판이 탭을 떠난 사실 한 줄: 「term N left tab T by <길> → <간 곳>」. 간 곳은
+ * `detached <워크트리>`·`tab <id> in <워크트리>`·`worktree <워크트리>`·`exited`·
+ * `closed`. 탭 없이 발견된 셸은 「term N found no tab by <길> → …」. 싣는 것은
+ * 번호·탭 id·길 이름·경로뿐이다 — 판의 제목이나 프롬프트는 사람의 글이라 이
+ * 기록에 들어오지 않는다. 기존 「term N spawned …」 줄과 같은 창 기록으로 간다. */
+function noteLeafLeft(term, tab, road, to) {
+  const from = tab ? `left tab ${tab.id}` : "found no tab";
+  void invoke("log_window_error", { message: `term ${term} ${from} by ${road} → ${to}` }).catch(() => {});
+}
+
+/* 탭째 끝나는 길(탭 닫기, 워크트리·프로젝트 제거): 그 탭의 판마다 한 줄. */
+function noteTabsLeaving(held, road) {
+  for (const tab of held) {
+    if (tab.kind !== "term") continue;
+    for (const term of paneLeaves(tab.layout)) noteLeafLeft(term, tab, road, "closed");
+  }
+}
+
+/* 탭을 잃은 셸이 돌아갈 체크아웃: 그 프로세스가 서 있는 곳(파일 트리가 들고
+ * 있는 마지막 `term:cwd`), 아니면 그 판을 연 판이 서 있는 곳, 아니면 지금 앞의
+ * 체크아웃 — 엉뚱한 카드의 행도 문이지만, 행이 없으면 문이 없다. */
+function strandHome(term) {
+  const cwd = treeTermCwds.get(term);
+  const standing = cwd ? worktreeContaining(cwd) : null;
+  if (standing) return standing.path;
+  const parent = paneParents.get(term);
+  const parentHome = parent === undefined ? null : tabOfTerm(parent)?.worktree ?? detachedAgents.get(parent);
+  return parentHome || activeWorktreePath;
+}
+
+/* 탭 없는 셸을 떼어 둔 행으로 세운다 — 판 닫기가 남기는 바로 그 행이고, 누르면
+ * 다시 붙는다(`focusAgentPane`). */
+function adoptStrandedTerm(term, worktree, road) {
+  detachedAgents.set(term, worktree);
+  noteLeafLeft(term, null, road, `detached ${worktree}`);
+  paintRunningCount();
+  scheduleAgentPaint(["cards", "badge", "board"]);
+}
+
+/* 백엔드가 살아 있는 에이전트라고 말하는(`pane_agents`) 셸 가운데, 이 창이 한
+ * 번 그렸고(`paneBorn` — 화면을 처음 만들 때 서고 셸이 끝날 때만 지워진다) 지금
+ * 어느 탭의 잎도 아니고 떼어 둔 행도 없는 것. 순수한 셈이다 — 무엇을 할지는
+ * 아래 박자가 정한다. 한 번 그린 적 없는 셸은 세지 않는다: 띄우는 중이거나
+ * 깨우는 중인 셸은 아직 화면이 없고, 그것은 길 잃은 셸이 아니라 오는 중인 셸이다. */
+function strandedAgentTerms(panes) {
+  const held = new Set(detachedAgents.keys());
+  for (const tab of tabs) {
+    if (tab.kind === "term") for (const term of paneLeaves(tab.layout)) held.add(term);
+  }
+  const stranded = [];
+  for (const pane of panes ?? []) {
+    const term = pane?.term;
+    if (!Number.isInteger(term) || pane.hearing === "gone") continue;
+    if (!held.has(term) && paneBorn.has(term)) stranded.push(term);
+  }
+  return stranded;
+}
+
+/* 느린 문: 에이전트 시계가 30초마다 이미 묻는 `pane_agents`의 답 위에서만 돈다
+ * — 제 왕복은 없다. 두 답 연달아 길 잃은 셸만 데려온다(한 답 사이의 공백은 탭이
+ * 서기 직전의 한순간일 수 있다), 저장된 판을 세우는 중에는 세지 않는다, 그리고
+ * 무대가 없는 팝아웃에서는 돌지 않는다. */
+const strandSightings = new Set();
+
+function adoptStrandedAgents(panes) {
+  if (isPopout || restoringPanes || waking.size > 0 || eagerWakes.size > 0) {
+    strandSightings.clear();
+    return;
+  }
+  const now = strandedAgentTerms(panes);
+  for (const term of now) {
+    if (strandSightings.has(term)) adoptStrandedTerm(term, strandHome(term), "snapshot");
+  }
+  strandSightings.clear();
+  for (const term of now) if (!detachedAgents.has(term)) strandSightings.add(term);
+}
+
 /* 이 판의 프로그램이 판을 **떠났는가** — 셸만 남아 프롬프트를 그리는 판. 훅
  * 어휘 가운데 `idle` 한 낱말이 그 사실이다: 에이전트는 그 말을 보내지 않고,
  * 백엔드가 전경 그룹이 셸의 것으로 돌아온 것을 보고 적는다(`HOOK_STATE_CLASS`
@@ -8891,9 +8999,11 @@ function closePaneLeaf(tab, going) {
     dropTermScreen(going);
     // The person closed a tiled worker's pane: it went to the background.
     noteWorkerRoomChange(going, "background");
+    noteLeafLeft(going, tab, "close-pane", `detached ${tab.worktree}`);
   } else {
     invoke("close_term", { term: going }).catch(() => {});
     dropTermView(going);
+    noteLeafLeft(going, tab, "close-pane", "closed");
   }
   renderPanes(tab);
   updateStage();

@@ -11926,7 +11926,12 @@ async function refreshPaneAgentSnapshot() {
   if (paneSnapshotAsking) return;
   paneSnapshotAsking = true;
   try {
-    reconcilePaneAgentSnapshot(await invoke("pane_agents"));
+    const panes = await invoke("pane_agents");
+    reconcilePaneAgentSnapshot(panes);
+    // The same answer is the backend's list of live agents: one this window
+    // drew that no tab and no row holds any more is brought back as a row
+    // (t-56480) — no round trip of its own.
+    adoptStrandedAgents(panes);
   } catch {
     // The push path remains live. A periodic repair must never become an error
     // storm when the window is closing or the backend is briefly unavailable.
@@ -16462,6 +16467,7 @@ async function openMirrorPane(term, agent, path) {
       new Set(paneLeaves(tab.layout).filter((leaf) => leaf !== held)),
     );
     dropTermView(held);
+    noteLeafLeft(held, tab, "mirror-replaced", "closed");
   }
   mirrorPanes.set(seat, mirror);
   const source = activePaneOf(tab) ?? paneLeaves(tab.layout)[0];
@@ -16552,6 +16558,7 @@ listen("term:exited", (event) => {
     return;
   }
   const staying = paneLeaves(holder.layout).filter((held) => held !== term);
+  noteLeafLeft(term, holder, "exit", "exited");
   if (staying.length === 0) {
     dropTab(holder.id);
     return;
@@ -16584,6 +16591,9 @@ function seatLedgerManagedTerm(term, worktree, agent) {
  * seating and by a pane following its own process (`followPaneIntoWorktree`). */
 function reseatTerm(term, extra) {
   const { worktree } = extra;
+  // Which road moved it, for the window log: the ledger seating its worker,
+  // or a pane following its own process (t-56480).
+  const road = extra.ledgerManaged ? "seat-ledger" : "follow-cwd";
   const held = tabs.find(
     (tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(term),
   );
@@ -16599,7 +16609,9 @@ function reseatTerm(term, extra) {
     held.layout = prunePanes(held.layout, new Set(staying));
     if (held.activePane === term) held.activePane = staying[0];
     renderPanes(held);
-    return mountTermTab(term, extra, { focus: false, placement: "tab" });
+    const moved = mountTermTab(term, extra, { focus: false, placement: "tab" });
+    noteLeafLeft(term, held, road, `tab ${moved.id} in ${worktree}`);
+    return moved;
   }
 
   // A generic layout restored just before the ledger re-seated this term can
@@ -16607,6 +16619,7 @@ function reseatTerm(term, extra) {
   // view, and move its ownership metadata as one operation.
   const previousWorktree = held.worktree;
   Object.assign(held, extra);
+  if (previousWorktree !== worktree) noteLeafLeft(term, held, road, `worktree ${worktree}`);
   if (previousWorktree && previousWorktree !== worktree) {
     persistPaneLayouts(previousWorktree);
   }
@@ -16786,9 +16799,11 @@ function reseatWorkerByAnswer(term, parent, worktree, agent, room) {
     const onStage = host.id === activeTabId && host.worktree === activeWorktreePath;
     tileTermPane(host, term, agent ? { agent: agentSaidName(agent) } : {}, "down", onStage, parent);
     schedulePaneAlignment(host);
+    noteLeafLeft(term, own, "seat-answer", `tab ${host.id} in ${host.worktree}`);
   } else {
     detachedAgents.set(term, worktree);
     dropTermScreen(term);
+    noteLeafLeft(term, own, "seat-answer", `detached ${worktree}`);
   }
   renderTabs();
   updateStage();
@@ -16923,6 +16938,7 @@ function parkTeamWorkers(host, parent, arriving) {
   for (const term of parked) {
     detachedAgents.set(term, host.worktree);
     dropTermScreen(term);
+    if (term !== arriving) noteLeafLeft(term, host, "park-team", `detached ${host.worktree}`);
   }
   renderPanes(host);
   updateStage();
@@ -16939,7 +16955,10 @@ function revealListedWorker(term, worktree, agent) {
   detachedAgents.delete(term);
   if (viewer) {
     for (const previous of paneLeaves(viewer.layout)) {
-      if (previous !== term) { detachedAgents.set(previous, worktree); dropTermScreen(previous); }
+      if (previous === term) continue;
+      detachedAgents.set(previous, worktree);
+      dropTermScreen(previous);
+      noteLeafLeft(previous, viewer, "reveal-listed", `detached ${worktree}`);
     }
     viewer.term = term;
     viewer.activePane = term;
@@ -16967,11 +16986,17 @@ listen("term:split", (event) => {
   const host = tabs.find(
     (tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(parent),
   );
-  // The leader's tab closed between the ask and the answer. The shell is
-  // already running and the backend owns it; there is simply no tab to draw
-  // it in, and inventing one would put a teammate on the stage without the
-  // coordinator it belongs to.
-  if (!host) return;
+  // The leader's tab closed between the ask and the answer — or the leader is
+  // a pane somebody closed while it kept running (`detachedAgents`). The shell
+  // is already running and the backend owns it; there is no tab to draw it in,
+  // and inventing one would put a teammate on the stage without the
+  // coordinator it belongs to. It stands as a row instead, beside its
+  // leader's when the leader has one: returning here with nothing left a
+  // running shell no tab and no row could reach (t-56480 R1).
+  if (!host) {
+    if (!tabOfTerm(term) && !detachedAgents.has(term)) adoptStrandedTerm(term, strandHome(term), "split");
+    return;
+  }
   if (parkTeamWorkers(host, parent, term)) return;
   // The new pane is the tab's active one — Orca's own outcome, where the
   // reveal focuses the leaf it just made (`focusTerminalInitiatedTab`,
