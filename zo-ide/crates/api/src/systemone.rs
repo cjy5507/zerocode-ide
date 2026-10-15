@@ -497,12 +497,12 @@ pub struct SystemOneCall {
     pub outcome: Result<SystemOneResponse, SystemOneFailure>,
     pub retries: u32,
     /// The code the server named in the body it refused the winning attempt
-    /// with (t-55423): a managed server's `operation_busy` or `server_stopped`
-    /// behind one `503`, or its `native_protocol_failed` behind a `502`
-    /// (t-58193), and nothing else — never the body's own words. `None`
-    /// when the body named none of them or could not be read within
-    /// `MAX_REFUSAL_BYTES` and the call's deadline, and for every outcome but
-    /// a refusal.
+    /// with (t-55423): behind a `503`, one of a managed server's
+    /// `REFUSAL_CODES`; behind a `502`, its `native_protocol_failed`
+    /// (`DECODE_REFUSAL_CODE`, t-58193); and nothing else — never the body's
+    /// own words. `None` when the body named none of them or could not be read
+    /// within `MAX_REFUSAL_BYTES` and the call's deadline, and for every
+    /// outcome but a refusal.
     pub server_error_code: Option<&'static str>,
     /// The provider's refusal a managed server named beside a `502` (t-58193):
     /// its runtime answered and the provider refused the answer —
