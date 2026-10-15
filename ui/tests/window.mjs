@@ -17828,6 +17828,70 @@ const nativeAndTargets = await page.evaluate(async () => {
   return { native, note, choices, unavailable, opened: window.__SKILL_CALLS__.filter((c) => c.command === 'open_term_tab').length - before };
 });
 ok('included skills use native installation and unsupported CLI targets are explicit', nativeAndTargets.native?.args.name === 'orchestration' && nativeAndTargets.note.includes('ZO') && nativeAndTargets.opened === 0 && !nativeAndTargets.choices.includes('zo') && nativeAndTargets.unavailable.includes('ZO'), JSON.stringify(nativeAndTargets));
+// t-55424: every copy of a skill this build ships, in every home an agent
+// reads (the window's own Claude home among them), is read against the texts
+// earlier releases shipped. The line says what each skill's copies are, and
+// 「고쳐 쓰기」 stands only where a copy is missing or an earlier release: a
+// copy edited by hand is named, never offered for rewriting.
+const bundledCopies = await page.evaluate(async (fixture) => {
+  const view = docHost(tabs.find((tab) => tab.kind === 'skills').pane, 'skills');
+  const kept = { list: window.__ANSWER__.skills_list, rescan: window.__ANSWER__.skills_rescan };
+  const copy = (agent, label, path, state) => ({ agent, label, path, state });
+  const report = { ...fixture, bundled: [
+    { name: 'orchestration', copies: [
+      copy('claude', 'Claude', '/home/.claude/skills/orchestration/SKILL.md', 'stale'),
+      copy('claude', 'Claude', '/app/.claude/skills/orchestration/SKILL.md', 'missing'),
+      copy('codex', 'Codex', '/home/.codex/skills/orchestration/SKILL.md', 'edited'),
+      copy('zo', 'ZO', '/home/.zo/skills/orchestration/SKILL.md', 'current'),
+    ] },
+    { name: 'computer-use', copies: [
+      copy('claude', 'Claude', '/home/.claude/skills/computer-use/SKILL.md', 'current'),
+      copy('codex', 'Codex', '/home/.codex/skills/computer-use/SKILL.md', 'edited'),
+    ] },
+    { name: 'second-brain', copies: [
+      copy('claude', 'Claude', '/home/.claude/skills/second-brain/SKILL.md', 'current'),
+      copy('zo', 'ZO', '/home/.zo/skills/second-brain/SKILL.md', 'current'),
+    ] },
+  ] };
+  window.__ANSWER__.skills_list = () => report;
+  window.__ANSWER__.skills_rescan = () => { window.__SKILL_CALLS__.push({ command: 'skills_rescan' }); return report; };
+  await refreshSkills(true);
+  const line = (name) => view.querySelector(`.skills-bundled-line[data-skill="${name}"]`);
+  const said = (name) => line(name)?.querySelector('.skills-bundled-state')?.textContent ?? null;
+  const count = (key, n) => skillText('copyCount', { state: skillText(key), count: n });
+  const result = {
+    said: { orchestration: said('orchestration'), computerUse: said('computer-use'), secondBrain: said('second-brain') },
+    expected: {
+      orchestration: [count('copyStale', 1), count('copyEdited', 1), count('copyMissing', 1)].join(' · '),
+      computerUse: count('copyEdited', 1),
+      secondBrain: skillText('copyCurrent'),
+    },
+    summary: view.querySelector('.skills-bundled-panel summary')?.textContent ?? null,
+    expectedSummary: skillText('bundledSummary', { count: 3, current: 1 }),
+    buttons: Object.fromEntries(['orchestration', 'computer-use', 'second-brain'].map((name) => [name, Boolean(line(name)?.querySelector('button'))])),
+    tip: line('orchestration')?.dataset.tip ?? '',
+    catalogs: ['ko','en','ja','zh','es'].every((locale) => ['skills.bundledSummary','skills.copyCurrent','skills.copyStale','skills.copyEdited','skills.copyMissing','skills.copyCount','skills.rewrite','skills.rewriteTip'].every((key) => CATALOG[locale]?.[key])),
+  };
+  const before = window.__SKILL_CALLS__.length;
+  line('orchestration')?.querySelector('button')?.click();
+  for (let wait = 0; wait < 100 && !window.__SKILL_CALLS__.slice(before).some((call) => call.command === 'skills_rescan'); wait++) await new Promise((resolve) => setTimeout(resolve, 10));
+  const after = window.__SKILL_CALLS__.slice(before);
+  result.installs = after.filter((call) => call.command === 'install_bundled_skill').map((call) => call.args);
+  result.rescanned = after.some((call) => call.command === 'skills_rescan');
+  window.__ANSWER__.skills_list = kept.list; window.__ANSWER__.skills_rescan = kept.rescan;
+  await refreshSkills(true);
+  return result;
+}, SKILL_VIEW_FIXTURE);
+ok('the skills screen says each bundled skill is current, stale or hand-edited and rewrites only stale copies',
+  bundledCopies.said.orchestration === bundledCopies.expected.orchestration
+    && bundledCopies.said.computerUse === bundledCopies.expected.computerUse
+    && bundledCopies.said.secondBrain === bundledCopies.expected.secondBrain
+    && bundledCopies.summary === bundledCopies.expectedSummary
+    && bundledCopies.buttons.orchestration && !bundledCopies.buttons['computer-use'] && !bundledCopies.buttons['second-brain']
+    && bundledCopies.tip.includes('/app/.claude/skills/orchestration/SKILL.md') && bundledCopies.tip.includes('/home/.codex/skills/orchestration/SKILL.md')
+    && bundledCopies.installs.length === 1 && bundledCopies.installs[0]?.name === 'orchestration' && bundledCopies.rescanned
+    && bundledCopies.catalogs,
+  JSON.stringify(bundledCopies));
 const skillTyped = await page.evaluate(async () => {
   const tab = tabs.find((tab) => tab.kind === 'skills'); const view = docHost(tab.pane, 'skills');
   await prepareSkillInstall(view, ['release-review'], [], 'update');

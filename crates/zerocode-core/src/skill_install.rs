@@ -64,6 +64,32 @@ pub struct SkillInstallOutcome {
     pub detail: String,
 }
 
+/// What one copy of a bundled skill is, read against every text this product
+/// has shipped for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CopyState {
+    /// The same bytes this build carries.
+    Current,
+    /// The text of an earlier release: ours, and replaced by an install.
+    Stale,
+    /// Any other text: a person's edit, or somebody else's skill of the same
+    /// name. Never written over.
+    Edited,
+    /// No copy there.
+    Missing,
+}
+
+/// One copy of a bundled skill, in one root an agent reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkillCopy {
+    pub agent: String,
+    pub label: String,
+    /// The `SKILL.md` the copy is, or would be.
+    pub path: PathBuf,
+    pub state: CopyState,
+}
+
 /// The declared global root an agent reads. Existing private roots are reused;
 /// a shared root is accepted only when the capability table names that location.
 /// An unknown agent has no install root and cannot cause a write.
@@ -115,6 +141,29 @@ fn is_ours(existing: &str, name: &str) -> bool {
     named && existing.contains("ZeroCode")
 }
 
+fn git_blob_id(_bytes: &[u8]) -> String {
+    String::new()
+}
+
+fn released(_name: &str, _blob: &str) -> bool {
+    false
+}
+
+/// Every copy of one bundled skill the detected agents read, and what each
+/// copy is. Read only.
+///
+/// # Errors
+/// The name is not a skill this build carries.
+pub fn bundled_copies(
+    name: &str,
+    _home: &Path,
+    _launched: &[(String, PathBuf)],
+    _detected: &[(String, String)],
+) -> Result<Vec<SkillCopy>, String> {
+    bundled_skill(name).ok_or_else(|| format!("{name}: 이 빌드가 담고 있는 스킬이 아닙니다"))?;
+    Ok(Vec::new())
+}
+
 /// Install one bundled skill for every detected agent. `detected` is
 /// `(agent id, label)` in the picker's order; the outcomes keep that order.
 ///
@@ -123,6 +172,7 @@ fn is_ours(existing: &str, name: &str) -> bool {
 pub fn install_bundled_skill(
     name: &str,
     home: &Path,
+    _launched: &[(String, PathBuf)],
     detected: &[(String, String)],
 ) -> Result<Vec<SkillInstallOutcome>, String> {
     let skill = bundled_skill(name)
@@ -261,6 +311,11 @@ mod tests {
         home.join(".claude").join("skills").join("orchestration")
     }
 
+    /// A text an earlier release shipped (blob 9f3b7dbce): every second-brain
+    /// copy on the person's machine held it before setup ran on 2026-10-15.
+    const SECOND_BRAIN_9F3B7DBCE: &str =
+        include_str!("../tests/fixtures/second-brain-9f3b7dbce.md");
+
     #[cfg(unix)]
     #[test]
     fn a_dead_link_where_the_skill_should_stand_is_replaced_by_the_skill() {
@@ -273,6 +328,7 @@ mod tests {
         let outcomes = install_bundled_skill(
             "orchestration",
             home.path(),
+            &[],
             &detected(&[("claude", "Claude")]),
         )
         .unwrap();
@@ -298,6 +354,7 @@ mod tests {
         let again = install_bundled_skill(
             "orchestration",
             home.path(),
+            &[],
             &detected(&[("claude", "Claude")]),
         )
         .unwrap();
@@ -320,6 +377,7 @@ mod tests {
         let outcomes = install_bundled_skill(
             "orchestration",
             home.path(),
+            &[],
             &detected(&[("claude", "Claude")]),
         )
         .unwrap();
@@ -351,6 +409,7 @@ mod tests {
         let outcomes = install_bundled_skill(
             "orchestration",
             home.path(),
+            &[],
             &detected(&[("claude", "Claude")]),
         )
         .unwrap();
@@ -371,6 +430,7 @@ mod tests {
             let outcomes = install_bundled_skill(
                 name,
                 home.path(),
+                &[],
                 &detected(&[("claude", "Claude"), ("codex", "Codex"), ("zo", "zo")]),
             )
             .unwrap();
@@ -416,6 +476,7 @@ mod tests {
         let outcomes = install_bundled_skill(
             "computer-use",
             home.path(),
+            &[],
             &detected(&[
                 ("claude", "Claude"),
                 ("codex", "Codex"),
@@ -461,6 +522,7 @@ mod tests {
         let again = install_bundled_skill(
             "computer-use",
             home.path(),
+            &[],
             &detected(&[("claude", "Claude")]),
         )
         .unwrap();
@@ -473,6 +535,7 @@ mod tests {
         let outcomes = install_bundled_skill(
             "second-brain",
             home.path(),
+            &[],
             &detected(&[("claude", "Claude"), ("codex", "Codex"), ("zo", "ZO")]),
         )
         .unwrap();
@@ -497,37 +560,165 @@ mod tests {
     #[test]
     fn a_file_that_is_not_ours_is_kept_and_an_older_copy_of_ours_is_replaced() {
         let home = tempfile::tempdir().unwrap();
-        let theirs = home.path().join(".claude/skills/orchestration");
+        let theirs = home.path().join(".claude/skills/second-brain");
         std::fs::create_dir_all(&theirs).unwrap();
         std::fs::write(
             theirs.join(SKILL_FILE),
-            "---\nname: orchestration\n---\nSomebody's own guide.\n",
+            "---\nname: second-brain\n---\nSomebody's own guide.\n",
         )
         .unwrap();
-        let ours_old = home.path().join(".codex/skills/orchestration");
+        let ours_old = home.path().join(".codex/skills/second-brain");
         std::fs::create_dir_all(&ours_old).unwrap();
-        std::fs::write(
-            ours_old.join(SKILL_FILE),
-            "---\nname: orchestration\n---\nAn older ZeroCode orchestration guide.\n",
-        )
-        .unwrap();
+        std::fs::write(ours_old.join(SKILL_FILE), SECOND_BRAIN_9F3B7DBCE).unwrap();
 
         let outcomes = install_bundled_skill(
-            "orchestration",
+            "second-brain",
             home.path(),
+            &[],
             &detected(&[("claude", "Claude"), ("codex", "Codex")]),
         )
         .unwrap();
         assert_eq!(outcomes[0].state, InstallState::Kept);
         assert_eq!(
             std::fs::read_to_string(theirs.join(SKILL_FILE)).unwrap(),
-            "---\nname: orchestration\n---\nSomebody's own guide.\n",
+            "---\nname: second-brain\n---\nSomebody's own guide.\n",
             "a foreign file was rewritten"
         );
         assert_eq!(outcomes[1].state, InstallState::Written);
         assert_eq!(
             std::fs::read_to_string(ours_old.join(SKILL_FILE)).unwrap(),
-            bundled_skill("orchestration").unwrap().content
+            bundled_skill("second-brain").unwrap().content
+        );
+    }
+
+    /// A copy is told apart by its git blob id, the id `git hash-object`
+    /// prints, so the release book is `git log` output and each of its lines
+    /// can be checked against the history it came from. The bytes this build
+    /// carries are current; the text of an earlier release is stale; anything
+    /// else (a line the person added, or somebody else's skill of the same
+    /// name) is hand-edited; no copy at all is missing (t-55424).
+    #[test]
+    fn a_copy_reads_current_stale_or_hand_edited_by_its_git_blob() {
+        assert_eq!(
+            git_blob_id(b"hello\n"),
+            "ce013625030ba8dba906f756967f9e9ca394464a"
+        );
+        assert_eq!(
+            git_blob_id(SECOND_BRAIN_9F3B7DBCE.as_bytes()),
+            "9f3b7dbce63228d46cb1f51864e4231186f213f3"
+        );
+        let home = tempfile::tempdir().unwrap();
+        let current = bundled_skill("second-brain").unwrap().content;
+        let edited = format!("{current}\n- 내 볼트는 ~/Notes 다.\n");
+        for (root, text) in [
+            (".claude/skills", current),
+            (".codex/skills", SECOND_BRAIN_9F3B7DBCE),
+            (".zo/skills", edited.as_str()),
+        ] {
+            let dir = home.path().join(root).join("second-brain");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(SKILL_FILE), text).unwrap();
+        }
+        let copies = bundled_copies(
+            "second-brain",
+            home.path(),
+            &[],
+            &detected(&[
+                ("claude", "Claude"),
+                ("codex", "Codex"),
+                ("zo", "ZO"),
+                ("antigravity", "Antigravity"),
+            ]),
+        )
+        .unwrap();
+        let read: Vec<(&str, CopyState)> = copies
+            .iter()
+            .map(|copy| (copy.agent.as_str(), copy.state))
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                ("claude", CopyState::Current),
+                ("codex", CopyState::Stale),
+                ("zo", CopyState::Edited),
+                ("antigravity", CopyState::Missing),
+            ]
+        );
+        assert_eq!(
+            copies[3].path,
+            home.path()
+                .join(".gemini/antigravity/skills/second-brain")
+                .join(SKILL_FILE)
+        );
+        // Reading writes nothing.
+        assert!(!home.path().join(".gemini").exists());
+    }
+
+    /// An install writes only where a copy is missing or an earlier release.
+    /// A copy whose text no release had was changed by somebody, and it stays
+    /// to the byte, although it still names the skill and speaks of ZeroCode,
+    /// which was all the old rule asked before it wrote over a file (t-55424).
+    #[test]
+    fn a_hand_edited_copy_is_never_overwritten() {
+        let home = tempfile::tempdir().unwrap();
+        let current = bundled_skill("second-brain").unwrap().content;
+        let mine = format!("{current}\n- 내 볼트는 ~/Notes 다.\n");
+        let edited = home.path().join(".claude/skills/second-brain");
+        let stale = home.path().join(".codex/skills/second-brain");
+        for (dir, text) in [(&edited, mine.as_str()), (&stale, SECOND_BRAIN_9F3B7DBCE)] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(SKILL_FILE), text).unwrap();
+        }
+        let outcomes = install_bundled_skill(
+            "second-brain",
+            home.path(),
+            &[],
+            &detected(&[("claude", "Claude"), ("codex", "Codex"), ("zo", "ZO")]),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(edited.join(SKILL_FILE)).unwrap(),
+            mine,
+            "a hand-edited copy was written over"
+        );
+        let states: Vec<(&str, InstallState)> = outcomes
+            .iter()
+            .map(|outcome| (outcome.agent.as_str(), outcome.state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("claude", InstallState::Kept),
+                ("codex", InstallState::Written),
+                ("zo", InstallState::Written),
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(stale.join(SKILL_FILE)).unwrap(),
+            current
+        );
+    }
+
+    /// The text of every bundled skill is in the release book, so the copy
+    /// this build writes reads as an earlier release, and is replaced, once a
+    /// later build carries other text. A SKILL.md changed without its line
+    /// fails here, and the message is the line to add.
+    #[test]
+    fn every_bundled_skill_text_is_a_recorded_release() {
+        let unrecorded: Vec<String> = BUNDLED_SKILLS
+            .iter()
+            .map(|skill| (skill.name, git_blob_id(skill.content.as_bytes())))
+            .filter(|(name, blob)| !released(name, blob))
+            .map(|(name, blob)| format!("{name}\t{blob}"))
+            .collect();
+        assert!(
+            unrecorded.is_empty(),
+            "add these lines to crates/zerocode-core/src/skill_releases.tsv:\n{}",
+            unrecorded.join("\n")
+        );
+        assert!(
+            released("second-brain", "9f3b7dbce63228d46cb1f51864e4231186f213f3"),
+            "an earlier release is no longer in the book"
         );
     }
 
@@ -564,7 +755,7 @@ mod tests {
             .collect();
         for skill in BUNDLED_SKILLS {
             let home = tempfile::tempdir().unwrap();
-            let outcomes = install_bundled_skill(skill.name, home.path(), &rows).unwrap();
+            let outcomes = install_bundled_skill(skill.name, home.path(), &[], &rows).unwrap();
             assert_eq!(outcomes.len(), six.len(), "{}", skill.name);
             let sources = discovery_sources(home.path(), &[]);
             for ((agent, root), outcome) in six.into_iter().zip(&outcomes) {
@@ -656,6 +847,7 @@ mod tests {
             install_bundled_skill(
                 "../etc/passwd",
                 home.path(),
+                &[],
                 &detected(&[("claude", "Claude")])
             )
             .is_err()

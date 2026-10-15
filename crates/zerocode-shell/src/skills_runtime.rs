@@ -338,14 +338,21 @@ pub(crate) fn install_bundled(
     context: Context,
     name: String,
 ) -> Result<Vec<zerocode_core::skill_install::SkillInstallOutcome>, String> {
-    install_bundled_skill(&name, &context.home, &installed_agents())
+    install_bundled_skill(&name, &context.home, &[], &installed_agents())
+}
+pub(crate) fn window_agent_homes(
+    _config_root: &Path,
+    _local_data_root: &Path,
+) -> Vec<(String, PathBuf)> {
+    Vec::new()
 }
 pub(crate) fn install_bundled_skill(
     name: &str,
     home: &Path,
+    launched: &[(String, PathBuf)],
     agents: &[(String, String)],
 ) -> Result<Vec<zerocode_core::skill_install::SkillInstallOutcome>, String> {
-    let answer = zerocode_core::skill_install::install_bundled_skill(name, home, agents)?;
+    let answer = zerocode_core::skill_install::install_bundled_skill(name, home, launched, agents)?;
     runtime().roots.clear();
     Ok(answer)
 }

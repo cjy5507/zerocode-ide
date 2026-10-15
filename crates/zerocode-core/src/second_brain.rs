@@ -383,6 +383,7 @@ fn guide_targets(home: &Path, detected: &[(String, String)]) -> Vec<(String, Str
 #[must_use]
 pub fn inspect_global_guides(
     home: &Path,
+    _launched: &[(String, PathBuf)],
     vault: Option<&Path>,
     detected: &[(String, String)],
 ) -> Vec<GuideOutcome> {
@@ -406,6 +407,7 @@ pub fn inspect_global_guides(
 #[must_use]
 pub fn link_global_guides(
     home: &Path,
+    _launched: &[(String, PathBuf)],
     vault: Option<&Path>,
     detected: &[(String, String)],
 ) -> Vec<GuideOutcome> {
@@ -813,7 +815,7 @@ mod tests {
         .map(|(agent, label)| ((*agent).to_string(), (*label).to_string()))
         .collect();
 
-        let outcomes = link_global_guides(home.path(), Some(&vault), &detected);
+        let outcomes = link_global_guides(home.path(), &[], Some(&vault), &detected);
 
         assert_eq!(
             outcomes
@@ -841,7 +843,7 @@ mod tests {
         assert!(!home.path().join(".zo").exists());
 
         // And read back without writing: the same two rows, still linked.
-        let read = inspect_global_guides(home.path(), Some(&vault), &detected);
+        let read = inspect_global_guides(home.path(), &[], Some(&vault), &detected);
         assert!(read.iter().all(|row| row.state == GuideState::Linked));
         assert_eq!(read.len(), 2);
     }

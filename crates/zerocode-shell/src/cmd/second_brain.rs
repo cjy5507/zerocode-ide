@@ -375,6 +375,7 @@ pub(crate) async fn second_brain_status(
         // agents will actually be sent to.
         let guides = zerocode_core::second_brain::inspect_global_guides(
             &home,
+            &[],
             saved_vault(&saved).as_deref(),
             &installed_agents(),
         );
@@ -413,12 +414,17 @@ pub(crate) async fn second_brain_setup(
         let outcome =
             zerocode_core::second_brain::setup(&setup_path).map_err(|error| error.to_string())?;
         let skill_targets = installed_agents();
-        let skill_installs =
-            skills_runtime::install_bundled_skill(SECOND_BRAIN_SKILL, &setup_home, &skill_targets)?;
+        let skill_installs = skills_runtime::install_bundled_skill(
+            SECOND_BRAIN_SKILL,
+            &setup_home,
+            &[],
+            &skill_targets,
+        )?;
         // And the same agents' GLOBAL instructions learn where the vault is,
         // so a pane opened in any other project already knows.
         let guides = zerocode_core::second_brain::link_global_guides(
             &setup_home,
+            &[],
             Some(&setup_path),
             &skill_targets,
         );
@@ -486,6 +492,7 @@ pub(crate) async fn second_brain_link(
 fn link_saved_vault(home: &Path, saved: &str) -> Vec<zerocode_core::second_brain::GuideOutcome> {
     zerocode_core::second_brain::link_global_guides(
         home,
+        &[],
         saved_vault(saved).as_deref(),
         &installed_agents(),
     )
