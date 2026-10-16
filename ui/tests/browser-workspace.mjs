@@ -538,6 +538,49 @@ export async function testBrowserWorkspace(browser, origin, ok) {
   {
     const { page, faults } = await standWorkspace(browser, origin);
     try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        window.__workspaceEmit({ label, mode: "human", revision: 60, inFlight: 0, needsObservation: false });
+        setActiveTab(`browser:${label}`);
+        window.__workspaceClick(label, "watch");
+      }, label);
+      await page.waitForFunction((label) => window.__WORKSPACE__.placed
+        .filter((entry) => entry.label === label).at(-1)?.shown === true, label);
+      const shown = await page.evaluate(async (label) => {
+        await browserPlacing;
+        const mock = window.__WORKSPACE__;
+        const last = mock.placed.filter((entry) => entry.label === label).at(-1);
+        mock.holdPlacement = true;
+        browserSaid.delete(label);
+        syncBrowserPanes();
+        return last;
+      }, label);
+      await page.waitForFunction(() => typeof window.__WORKSPACE__.releasePlacement === "function");
+      const withheld = await page.evaluate(async (label) => {
+        const mock = window.__WORKSPACE__;
+        const tab = tabs.find((entry) => entry.label === label);
+        mock.placed = [];
+        browserSaid.delete(label);
+        syncBrowserPanes();
+        tab.artifactSwap = {};
+        mock.holdPlacement = false;
+        mock.releasePlacement(null);
+        await browserPlacing;
+        return {
+          shown: mock.placed.filter((entry) => entry.label === label && entry.shown),
+          last: mock.placed.filter((entry) => entry.label === label).at(-1),
+        };
+      }, label);
+      ok("artifact replacement control begins with a confirmed visible human workspace", shown?.shown === true, JSON.stringify(shown));
+      ok("a queued workspace show rechecks an artifact replacement before placing the native view",
+        withheld.shown.length === 0 && withheld.last?.shown === false, JSON.stringify(withheld));
+      ok("workspace artifact replacement races raise no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
       const original = await page.evaluate(async () => {
         const source = currentTab();
         const right = splitStageBesideFocused("horizontal");
