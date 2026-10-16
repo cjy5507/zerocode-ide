@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use zerocode_core::jev::questions::ROUTING_RUBRIC_VERSION;
 
 use super::jev_gate::{self, JevDoor};
-use super::probe_exec::{remember_bounded, ProbeSlot, ProbeUse, PROBE_TIMEOUT};
+use super::probe_exec::{remember_bounded, ProbeSlot, ProbeSpent, ProbeUse, PROBE_TIMEOUT};
 use super::settings::{decision_shadow_mode_from, DecisionShadowMode};
 use zerocode_core::jev::ROUTING;
 use zerocode_core::jev::promote::{self, Verdict};
@@ -338,6 +338,16 @@ pub struct DecisionShadowRow {
     /// What the call billed, when a response arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
+    /// What the chat probe spent on the same task where it answered for this
+    /// row — the input tokens its reply billed and its wall time: the current
+    /// side of the seat's paired records, the reader its judgment stands in
+    /// for (t-26584 decision 2). Absent where the probe did not run or its
+    /// verdict came from the memo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_input_tokens: Option<u64>,
+    /// See [`Self::current_input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_elapsed_ms: Option<u64>,
     /// Whether this row was comparison-only, applied, or fell back to the
     /// existing chat probe.
     #[serde(default)]
@@ -471,6 +481,8 @@ impl DecisionShadowRow {
             retries: 0,
             cached: false,
             input_tokens: None,
+            current_input_tokens: None,
+            current_elapsed_ms: None,
             route_use,
             requests: Some(0),
             redacted_lines: Some(0),
@@ -489,11 +501,14 @@ impl DecisionShadowRow {
         }
     }
 
-    /// The row's columns that describe the task rather than the call — the
-    /// keyword tables' reading and the language share — copied from its shot.
+    /// The row's columns that describe the task rather than the judgment's
+    /// call — the keyword tables' reading, the language share and what the
+    /// chat probe spent on the same words — copied from its shot.
     fn about(mut self, shot: &Shot) -> Self {
         self.rule = Some(shot.rule.clone());
         self.hangul_permille = shot.hangul_permille;
+        self.current_input_tokens = shot.probe_spent.map(|spent| spent.input_tokens);
+        self.current_elapsed_ms = shot.probe_spent.map(|spent| spent.elapsed_ms);
         self
     }
 }
@@ -569,10 +584,12 @@ struct Shot {
     rule: BTreeMap<String, String>,
     hangul_permille: Option<u16>,
     probe: ProbeCell,
+    /// What the probe spent answering, where it answered fresh.
+    probe_spent: Option<ProbeSpent>,
 }
 
 impl Shot {
-    fn of(description: &str, prompt: &str, facts: RoutingFacts, probe: ProbeCell) -> Self {
+    fn of(description: &str, prompt: &str, facts: RoutingFacts, probe: ProbeCell, probe_spent: Option<ProbeSpent>) -> Self {
         let state = runtime::rubric_task_whole(description, prompt);
         Self {
             task: super::probe_exec::task_fingerprint(description, prompt),
@@ -581,6 +598,7 @@ impl Shot {
             state,
             facts,
             probe,
+            probe_spent,
         }
     }
 }
@@ -696,11 +714,12 @@ pub(super) fn fire(
             if is_blank_task(description, prompt) {
                 return None;
             }
-            let probe = match probed.get(index).copied().flatten() {
+            let slot = probed.get(index).copied().flatten();
+            let probe = match slot {
                 Some(slot) => ProbeCell::from_verdict(slot.verdict),
                 None => ProbeCell::Failed(PROBE_NOT_ASKED.to_string()),
             };
-            let shot = Shot::of(description, prompt, facts_at(facts, index), probe);
+            let shot = Shot::of(description, prompt, facts_at(facts, index), probe, slot.and_then(|slot| slot.spent));
             named.insert(shot.task).then_some(shot)
         })
         .collect();
@@ -769,6 +788,7 @@ pub(super) fn active_assessments(
                 prompt,
                 facts_at(facts, index),
                 ProbeCell::Failed(PROBE_NOT_RUN.to_string()),
+                None,
             );
             named.insert(shot.task).then_some(shot)
         })
@@ -1033,6 +1053,21 @@ pub struct RouteLabelRow {
     /// ([`zerocode_core::jev::summary::NOT_COMPARED`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_compared: Option<String>,
+    /// What the judgment this label grades spent on its request — the input
+    /// tokens billed and the wall time — beside what the chat probe spent on
+    /// the same request, copied from the request's row: the two sides of the
+    /// paired record the rise bar prices (t-26584 decision 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// See [`Self::input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    /// See [`Self::input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_input_tokens: Option<u64>,
+    /// See [`Self::input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_elapsed_ms: Option<u64>,
 }
 
 /// The word a label writes when the turn's own words met no answered
@@ -1095,6 +1130,10 @@ pub fn note_route_followed(
         baseline_agreed: None,
         not_compared: Some(UNANSWERED.to_string()),
         label_source: unseated.is_none().then(|| "executed".to_string()),
+        input_tokens: None,
+        elapsed_ms: None,
+        current_input_tokens: None,
+        current_elapsed_ms: None,
     };
     if let Some(turn) = turn {
         grade(&mut row, turn, tail.iter().filter(|row| of_attempt(row)));
@@ -1126,6 +1165,12 @@ fn grade<'a>(
     let Some(answered) = answered else {
         return;
     };
+    // Both sides' spend on the request, as its row keeps them: the label is
+    // the paired record the rise bar prices (t-26584 decision 2).
+    label.input_tokens = answered.input_tokens;
+    label.elapsed_ms = Some(answered.elapsed_ms);
+    label.current_input_tokens = answered.current_input_tokens;
+    label.current_elapsed_ms = answered.current_elapsed_ms;
     let level = |token: Option<&str>| token.and_then(runtime::RouteTaskComplexity::from_label);
     let axis = runtime::COMPLEXITY_AXIS.name;
     let said = level(answered.jev.as_ref().and_then(|jev| jev.get(axis)).map(|judged| judged.choice.as_str()));

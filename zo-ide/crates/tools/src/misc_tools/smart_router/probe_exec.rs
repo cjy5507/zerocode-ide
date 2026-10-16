@@ -128,6 +128,32 @@ impl Admitted {
 pub(super) struct ProbeSlot {
     pub(super) fingerprint: u64,
     pub(super) verdict: Result<ProbeAssessment, &'static str>,
+    /// What the call spent, when a reply came back to bill — `None` for a
+    /// verdict recalled from the memo, which spent nothing on this task, and
+    /// for a call that never answered.
+    pub(super) spent: Option<ProbeSpent>,
+}
+
+/// What one probe call spent: the input tokens its reply billed and the wall
+/// time around the call ([`timed_probe_call`]). The routing judgment stands in
+/// for the probe, so this is the current side of its paired records (t-26584
+/// decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProbeSpent {
+    pub(super) input_tokens: u64,
+    pub(super) elapsed_ms: u64,
+}
+
+impl ProbeSpent {
+    /// What `outcome` spent, when a reply came back to bill.
+    fn of(outcome: &Result<(ProbeCallOutcome, u64), tokio::task::JoinError>) -> Option<Self> {
+        match outcome {
+            Ok((ProbeCallOutcome::Response(response), elapsed_ms)) => {
+                Some(Self { input_tokens: u64::from(response.usage.input_tokens), elapsed_ms: *elapsed_ms })
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Add `fresh` entries to a process memo bounded by [`PROBE_CACHE_CAP`]: a memo
@@ -323,6 +349,7 @@ fn fail_misses(
         slots[*index] = Some(ProbeSlot {
             fingerprint: *fingerprint,
             verdict: Err(reason),
+            spent: None,
         });
     }
 }
@@ -553,6 +580,7 @@ pub(super) fn probe_slots(
                     *slot = Some(ProbeSlot {
                         fingerprint: task_fingerprint(description, prompt),
                         verdict: Err(FAIL_CACHE_UNAVAILABLE),
+                        spent: None,
                     });
                 }
             }
@@ -568,6 +596,7 @@ pub(super) fn probe_slots(
                     slots[index] = Some(ProbeSlot {
                         fingerprint,
                         verdict: memoized.ok_or(FAIL_CACHED_MALFORMED),
+                        spent: None,
                     });
                     // A memo hit counts as a firing: the question this ledger
                     // answers is whether a probe verdict routed a turn, and a
@@ -643,8 +672,9 @@ pub(super) fn probe_slots(
     let responses = api::sync_bridge::run_blocking(collect_all);
     let mut fresh: Vec<(u64, Option<ProbeAssessment>)> = Vec::with_capacity(responses.len());
     for (index, fingerprint, outcome) in responses {
+        let spent = ProbeSpent::of(&outcome);
         let verdict = record_probe_outcome(&mut fresh, fingerprint, &model, outcome, attempt, road);
-        slots[index] = Some(ProbeSlot { fingerprint, verdict });
+        slots[index] = Some(ProbeSlot { fingerprint, verdict, spent });
     }
     if let Ok(mut cache) = probe_cache().lock() {
         remember_bounded(&mut cache, fresh);
@@ -2006,7 +2036,7 @@ mod live_path_tests {
             let mut batches = Vec::with_capacity(FIRES);
             for index in 0..FIRES {
                 let task = unique(&format!("latency-fire-{index}"));
-                let slot = ProbeSlot { fingerprint: task_fingerprint("", &task), verdict: Ok(verdict) };
+                let slot = ProbeSlot { fingerprint: task_fingerprint("", &task), verdict: Ok(verdict), spent: None };
                 let started = Instant::now();
                 let batch = fire(&[("", task.as_str())], &[], &[Some(slot)], "turn-7@1", WALL);
                 fired.push(started.elapsed());
