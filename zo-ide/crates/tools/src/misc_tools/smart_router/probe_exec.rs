@@ -1946,7 +1946,7 @@ mod live_path_tests {
                 ledger.iter().filter(|row| super::super::super::jev_summary::asked_something(row).is_some()).count(),
                 before + tasks.len()
             );
-            let judged = super::super::super::decision_shadow::judge_rows(&ledger, None).expect("routing is judged");
+            let judged = super::super::super::decision_shadow::judge_rows(&ledger).expect("routing is judged");
             assert_eq!((judged.agreement.compared, judged.agreement.agreed, judged.control_rows), (3, 0, 1));
             eprintln!("[decision-shadow control] {}", serde_json::to_string(control).expect("a row serializes"));
         }

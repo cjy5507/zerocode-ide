@@ -46,7 +46,7 @@ use super::probe_exec::{remember_bounded, ProbeSlot, ProbeSpent, ProbeUse, PROBE
 use super::settings::{decision_shadow_mode_from, DecisionShadowMode};
 use zerocode_core::jev::ROUTING;
 use zerocode_core::jev::promote::{self, Verdict};
-use zerocode_core::jev::provenance::{counts_toward_agreement, PairTally};
+use zerocode_core::jev::provenance::{counts_toward_agreement, source_of, stamp_label, LabelSource, PairTally};
 use zerocode_core::jev::summary::{self as jev_ledger};
 
 use super::shadow_ledger::{append_shadow_row, last_shadow_lines, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
@@ -1257,7 +1257,9 @@ fn draft_labels(cwd: &Path, tasks: &[(&str, &str)], shots: &[Shot]) {
 /// The ledger and the settings are handed in, both resolved before the batch
 /// that calls this detached: the environment that answers where either lives
 /// may have moved by now, and a test that had to pin it would be racing every
-/// other test in this binary.
+/// other test in this binary. The settings name the labels file a person
+/// wrote, read into the ledger as person rows before the seat is judged
+/// (`import_person_labels`).
 pub fn judge_ledger(
     ledger: &Path,
     settings: Option<&serde_json::Value>,
@@ -1274,8 +1276,23 @@ pub fn judge_ledger(
     if !promote::judgment_due_on(&ROUTING, &version, &rows) {
         return None;
     }
+    if import_person_labels(ledger, settings, &version.requests, &rows, now_ms) {
+        let rows = super::jev_summary::read_rows(ledger);
+        return judge_due(ledger, &promote::on_the_newest_version(&ROUTING, &rows), &rows, now_ms);
+    }
+    judge_due(ledger, &version, &rows, now_ms)
+}
+
+/// Judge the routing seat on `rows` read as `version`, a judgment being due,
+/// and write the transition when its standing changed.
+fn judge_due(
+    ledger: &Path,
+    version: &promote::OnVersion<'_>,
+    rows: &[serde_json::Value],
+    now_ms: i64,
+) -> Option<Verdict> {
     let line = zerocode_core::jev::threshold::line_beside(&ROUTING, ledger);
-    let judged = judge_rows_on(&version, &rows, settings, line)?;
+    let judged = judge_rows_on(version, rows, line)?;
     if let Some(row) = promote::transition_row(&ROUTING, now_ms, judged.verdict, &judged.window) {
         let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
     }
@@ -1290,8 +1307,8 @@ pub use zerocode_core::jev::promote::Judged;
 /// is judged until its labels draw a line.
 #[cfg(test)]
 #[must_use]
-pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Value>) -> Option<Judged> {
-    judge_rows_at(rows, settings, None)
+pub fn judge_rows(rows: &[serde_json::Value]) -> Option<Judged> {
+    judge_rows_at(rows, None)
 }
 
 /// Judge the routing seat on a ledger's rows — the one reading of the
@@ -1305,10 +1322,9 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
 #[must_use]
 pub fn judge_rows_at(
     rows: &[serde_json::Value],
-    settings: Option<&serde_json::Value>,
     line: Option<u16>,
 ) -> Option<Judged> {
-    judge_rows_on(&promote::on_the_newest_version(&ROUTING, rows), rows, settings, line)
+    judge_rows_on(&promote::on_the_newest_version(&ROUTING, rows), rows, line)
 }
 
 /// [`judge_rows`] on a series already read — the cadence and the verdict
@@ -1316,7 +1332,6 @@ pub fn judge_rows_at(
 fn judge_rows_on(
     version: &promote::OnVersion<'_>,
     rows: &[serde_json::Value],
-    settings: Option<&serde_json::Value>,
     line: Option<u16>,
 ) -> Option<Judged> {
     let floor = ROUTING.answer_floor_permille?;
@@ -1353,7 +1368,7 @@ fn judge_rows_on(
             .agreement_rows_wanted
             .unwrap_or(zerocode_core::jev::A_WINDOW_OF_COMPARISONS),
         window_forgives: ROUTING.window_forgives.unwrap_or(0),
-        labels: labels_standing(settings, &version.requests),
+        labels: promote::person_labels(rows, version.model),
         calibrating: gates.calibrating,
         pairs: gates.pairs,
         bar_reads: gates.bar_reads,
@@ -1505,25 +1520,95 @@ fn agreement_over(rows: &[&serde_json::Value], by_source: bool) -> promote::Agre
     agreement
 }
 
-/// What the labels a person wrote say about both readers, when they named a
-/// file and it can be read. Absent labels are not a bad verdict: §4 holds the
-/// seat and the screen asks for twenty.
-fn labels_standing(
+/// The writer a person row names ([`jev_ledger::LABEL_AUTHOR`]): the import
+/// of the labels file a person named ([`import_person_labels`]).
+const PERSON_LABEL_AUTHOR: &str = "labels_file";
+
+/// The kind of the row that counts a labels file's tasks against the ledger
+/// ([`import_person_labels`]).
+const PERSON_LABELS_KIND: &str = "person_labels";
+
+/// Read the labels file a person named (`smart.jev.labels`) into the ledger
+/// as person rows (t-26584 decision 3), the one place both judges read a
+/// person's verdicts from ([`promote::person_labels`]). One row per judged
+/// axis of a labelled task that the latest answered request of `requests`
+/// matches: the request's key, the axis, the version that answered, and
+/// whether each reader named what the person named — never a word of the
+/// file. A row is written only where the ledger holds none for the same
+/// request, axis and version, or its newest says otherwise. How many labelled
+/// tasks matched and how many did not go in a summary row whenever a person
+/// row is written or a count changes. A file that is missing or does not read
+/// writes nothing. Answers whether a person row was written.
+fn import_person_labels(
+    ledger: &Path,
     settings: Option<&serde_json::Value>,
-    rows: &[&serde_json::Value],
-) -> Option<promote::Labels> {
-    let path = promote::labels_path_in(settings?)?;
-    let text = std::fs::read_to_string(path).ok()?;
-    let judged: Vec<DecisionShadowRow> = rows
+    requests: &[&serde_json::Value],
+    rows: &[serde_json::Value],
+    now_ms: i64,
+) -> bool {
+    let Some(text) =
+        settings.and_then(promote::labels_path_in).and_then(|path| std::fs::read_to_string(path).ok())
+    else {
+        return false;
+    };
+    let answered: Vec<DecisionShadowRow> = requests
         .iter()
         .filter_map(|row| serde_json::from_value((*row).clone()).ok())
         .collect();
-    let evaluation = super::decision_report::evaluate_decision_labels(&text, &judged).ok()?;
-    Some(promote::Labels {
-        compared: evaluation.matched,
-        judgment_right: evaluation.axes.iter().map(|axis| axis.judgment.correct).sum(),
-        probe_right: evaluation.axes.iter().map(|axis| axis.probe.correct).sum(),
-    })
+    let Ok(read) = super::decision_report::evaluate_decision_labels(&text, &answered) else {
+        return false;
+    };
+    // What the ledger's person rows say now: the newest of each request, axis
+    // and version.
+    let mut said = HashMap::new();
+    for row in rows.iter().filter(|row| source_of(row) == Some(LabelSource::Person)) {
+        let verdicts = (
+            jev_ledger::AGREED.read(row).and_then(serde_json::Value::as_bool),
+            jev_ledger::BASELINE_AGREED.read(row).and_then(serde_json::Value::as_bool),
+        );
+        if let (Some(task), Some(axis)) = (
+            jev_ledger::LABEL.read(row).and_then(serde_json::Value::as_str),
+            jev_ledger::LABEL_PART.read(row).and_then(serde_json::Value::as_str),
+        ) {
+            said.insert((task, axis, jev_ledger::MODEL.read(row).and_then(serde_json::Value::as_str)), verdicts);
+        }
+    }
+    let mut written = 0_usize;
+    for mark in &read.marks {
+        let verdicts = (Some(mark.judgment_right), Some(mark.probe_right));
+        if said.get(&(mark.task.as_str(), mark.axis, mark.model.as_deref())) == Some(&verdicts) {
+            continue;
+        }
+        let mut row = serde_json::json!({
+            "at": now_ms,
+            (jev_ledger::LABEL.canonical): mark.task,
+            (jev_ledger::LABEL_PART.canonical): mark.axis,
+            (jev_ledger::AGREED.canonical): mark.judgment_right,
+            (jev_ledger::BASELINE_AGREED.canonical): mark.probe_right,
+        });
+        if let Some(model) = &mark.model {
+            row[jev_ledger::MODEL.canonical] = serde_json::Value::from(model.as_str());
+        }
+        stamp_label(&mut row, LabelSource::Person, PERSON_LABEL_AUTHOR);
+        written += usize::from(append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok());
+    }
+    let unmatched = read.labels.saturating_sub(read.matched);
+    let counted = rows
+        .iter()
+        .rev()
+        .find(|row| row.get("kind").and_then(serde_json::Value::as_str) == Some(PERSON_LABELS_KIND))
+        .is_some_and(|row| {
+            row.get("matched") == Some(&serde_json::json!(read.matched))
+                && row.get("unmatched") == Some(&serde_json::json!(unmatched))
+        });
+    if written > 0 || !counted {
+        let summary = serde_json::json!({
+            "at": now_ms, "kind": PERSON_LABELS_KIND,
+            "matched": read.matched, "unmatched": unmatched, "written": written,
+        });
+        let _ = append_shadow_row(ledger, &summary, SHADOW_LEDGER_MAX_BYTES);
+    }
+    written > 0
 }
 
 pub(super) fn now_ms() -> i64 {

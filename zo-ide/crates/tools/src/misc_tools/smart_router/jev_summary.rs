@@ -413,7 +413,7 @@ fn one_with(
     // the judgment, every other rising seat off the `agreed` marks its own
     // writer left (the window's orchestration seats).
     let judged = if seat.id == zerocode_core::jev::ROUTING.id {
-        super::decision_shadow::judge_rows_at(&rows, settings, line)
+        super::decision_shadow::judge_rows_at(&rows, line)
     } else {
         promote::judge_seat_in(seat, &rows, line)
     };

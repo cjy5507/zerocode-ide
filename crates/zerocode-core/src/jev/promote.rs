@@ -121,14 +121,15 @@ use crate::jev::questions::UNVERSIONED_RUBRIC;
 use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, CurrentSide, JevUse, Naming};
 
 use crate::jev::provenance::{
-    Acted, BarMiss, Bundle, BundleMiss, CalibrationMiss, HUMAN_BUNDLE, PROMOTION_BAR, PairTally,
-    bar_miss, bundle_miss, bundle_of, calibration_miss, counts_toward_agreement, pair_tally,
+    Acted, BarMiss, Bundle, BundleMiss, CalibrationMiss, HUMAN_BUNDLE, LabelSource, PROMOTION_BAR,
+    PairTally, bar_miss, bundle_miss, bundle_of, calibration_miss, counts_toward_agreement,
+    pair_tally, source_of,
 };
 use crate::jev::summary::{
-    AGREED, ANSWERED, AT, BASELINE_AGREED, JUDGED_EVERY_ROWS, LABEL, MODEL, NOT_COMPARED,
-    REQUEST_AT, RUBRIC_VERSION, RUBRIC_VERSIONS, TRANSITION, Tally, WILSON_Z_95, asked_something,
-    failures_in_a_row_of, is_control_row, is_request_or_mark, rows_that_can_clear_forgiving,
-    wilson_lower,
+    AGREED, ANSWERED, AT, BASELINE_AGREED, JUDGED_EVERY_ROWS, LABEL, LABEL_PART, MODEL,
+    NOT_COMPARED, REQUEST_AT, RUBRIC_VERSION, RUBRIC_VERSIONS, TRANSITION, Tally, WILSON_Z_95,
+    asked_something, failures_in_a_row_of, is_control_row, is_request_or_mark,
+    rows_that_can_clear_forgiving, wilson_lower,
 };
 use crate::jev::threshold::{CALIBRATION, Graded, answer_confidence};
 
@@ -915,7 +916,7 @@ pub fn judge_seat_at(
         agreement,
         agreement_rows_wanted: sample_floor,
         window_forgives: seat.window_forgives.unwrap_or(0),
-        labels: None,
+        labels: person_labels(rows, version.model),
         fallbacks_in_a_row: failures_in_a_row_of(version.requests.iter().copied()),
         negatives_wanted: seat.negatives_wanted.unwrap_or(0),
         disagreed_on_record: record.disagreed(),
@@ -1257,6 +1258,42 @@ impl Labels {
     }
 }
 
+/// A person's labels as both judges read them (t-26584, decision 3): the
+/// ledger's person rows ([`LabelSource::Person`]) that carry both marks —
+/// [`AGREED`] for the judgment, [`BASELINE_AGREED`] for the reader it would
+/// replace — and no other source. Of two rows naming one request and one
+/// part of it ([`LABEL_PART`]), the newest counts; a row graded against
+/// another version than `model`, the one answering now, counts for nothing.
+/// `None` where no row counts.
+#[must_use]
+pub fn person_labels(rows: &[Value], model: Option<&str>) -> Option<Labels> {
+    let mut newest = HashMap::new();
+    for row in rows {
+        if source_of(row) != Some(LabelSource::Person)
+            || named_version(row).is_some_and(|graded| Some(graded) != model)
+        {
+            continue;
+        }
+        let (Some(label), Some(judgment), Some(current)) = (
+            LABEL.read(row).and_then(Value::as_str),
+            AGREED.read(row).and_then(Value::as_bool),
+            BASELINE_AGREED.read(row).and_then(Value::as_bool),
+        ) else {
+            continue;
+        };
+        let part = LABEL_PART.read(row).and_then(Value::as_str);
+        newest.insert((label, part), (judgment, current));
+    }
+    if newest.is_empty() {
+        return None;
+    }
+    Some(Labels {
+        compared: newest.len(),
+        judgment_right: newest.values().filter(|(judgment, _)| *judgment).count(),
+        probe_right: newest.values().filter(|(_, current)| *current).count(),
+    })
+}
+
 /// Everything the judgment reads.
 #[derive(Debug, Clone, Copy)]
 pub struct Evidence<'window> {
@@ -1281,7 +1318,7 @@ pub struct Evidence<'window> {
     /// its answer floor ([`JevUse::window_forgives`]) — what the window's own
     /// width was derived from.
     pub window_forgives: usize,
-    /// What labels said, when a person wrote any.
+    /// What labels said, when a person wrote any ([`person_labels`]).
     pub labels: Option<Labels>,
     /// Fallbacks in a row while applying.
     pub fallbacks_in_a_row: u32,

@@ -433,7 +433,7 @@ fn the_screen_and_the_judge_read_one_window() {
     write(home.path(), seat.ledger, &rows);
     let report = one(seat, &roots, None, None, i64::MAX / 2, 0);
     let judged = report.judged.as_ref().expect("the routing seat is judged");
-    assert_eq!(Some(judged.clone()), super::super::decision_shadow::judge_rows(&rows, None));
+    assert_eq!(Some(judged.clone()), super::super::decision_shadow::judge_rows(&rows));
     assert_eq!(judged.window.rows, 30, "the window is the last rows the floor can be cleared on");
     assert_eq!(judged.agreement.compared, 90);
     assert_eq!(report.asked_toward_judgment, 30);
@@ -776,7 +776,7 @@ fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
     rows.push(control(102, "task-gone", jev, ["large", "low", "analysis"]));
     write(home.path(), seat.ledger, &rows);
 
-    let judged = super::super::decision_shadow::judge_rows(&rows, None).expect("routing is judged");
+    let judged = super::super::decision_shadow::judge_rows(&rows).expect("routing is judged");
     assert_eq!(judged.window.rows, 25, "a control row was counted in the window");
     assert_eq!(judged.window.answered, 25);
     assert_eq!(judged.window.p95_ms, Some(400), "a control row's zero elapsed joined the latency");
@@ -801,7 +801,7 @@ fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
 
     // Without the control rows the same window compares nothing at all.
     let bare: Vec<Value> = rows.iter().take(25).cloned().collect();
-    let bare = super::super::decision_shadow::judge_rows(&bare, None).expect("judged");
+    let bare = super::super::decision_shadow::judge_rows(&bare).expect("judged");
     assert_eq!((bare.agreement, bare.control_rows), (Agreement::default(), 0));
 }
 
@@ -1091,7 +1091,7 @@ fn both_judges_read_the_ledgers_person_rows_on_the_labels_line() {
         })
     }));
     let held = Verdict::Hold(Line::Labels { judgment_right: 0, probe_right: JUDGED_EVERY_ROWS });
-    let routing = super::super::decision_shadow::judge_rows(&rows, None).expect("routing is judged").verdict;
+    let routing = super::super::decision_shadow::judge_rows(&rows).expect("routing is judged").verdict;
     assert_eq!(routing, held, "the routing judge");
     let core = judge_seat(seat, &rows).expect("the core judges the same rows").verdict;
     assert_eq!(core, held, "the core's judge");
@@ -1208,7 +1208,7 @@ fn a_turn_label_is_one_comparison_in_the_window_of_the_turn_it_grades() {
     rows.push(label(102, "s@77", true));
     write(home.path(), seat.ledger, &rows);
 
-    let judged = super::super::decision_shadow::judge_rows(&rows, None).expect("routing is judged");
+    let judged = super::super::decision_shadow::judge_rows(&rows).expect("routing is judged");
     assert_eq!(judged.window.rows, 25, "a label was counted as a request");
     assert_eq!(judged.agreement, Agreement { compared: 2, agreed: 1, ..Agreement::default() }, "two labels of held turns, one of a turn gone");
     assert_eq!(judged.control_rows, 0, "a label was counted as a control row");
@@ -1315,7 +1315,7 @@ fn measure_what_a_label_and_a_judge_cost_on_this_machines_ledgers() {
     );
     let held = rows.clone();
     timed("decision_shadow::judge_rows (routing, in memory)", Box::new(move || {
-        let _ = super::super::decision_shadow::judge_rows(&held, None);
+        let _ = super::super::decision_shadow::judge_rows(&held);
     }));
     let ledger = routing.clone();
     timed("read_rows (routing, whole file)", Box::new(move || {
@@ -1406,7 +1406,7 @@ fn the_routing_judge_reads_the_current_rubrics_series_and_stands_on_nothing_olde
         None,
         "twenty of the second rubric are not a window, whatever the first left"
     );
-    let judged = super::super::decision_shadow::judge_rows(&rows, None).expect("judged");
+    let judged = super::super::decision_shadow::judge_rows(&rows).expect("judged");
     assert!(
         matches!(judged.verdict, Verdict::Hold(Line::TooFewRows { rows: 20, .. })),
         "{:?}",
