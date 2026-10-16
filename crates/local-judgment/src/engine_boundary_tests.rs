@@ -517,15 +517,21 @@ async fn the_manifest_pinned_runtime_refuses_a_cut_head_and_declares_the_config_
             place.display()
         );
     }
-    // A goal of 400 characters inside the instruction, as t-58268's request
-    // carried it, against the same question without it.
+    // A goal of 800 characters inside the instruction of a question with two
+    // criteria, the shape t-58268's requests carried at twice their goal, so
+    // the cut does not hang on a few tokens; against the same question
+    // without the goal.
     let goal: String = "작업 공간을 열고 결과를 확인한 다음 완료 상태를 확인하세요. "
-        .repeat(20)
+        .repeat(40)
         .chars()
-        .take(400)
+        .take(800)
         .collect();
-    let cut = json!({"type": "noul", "instructions": {"question": "Is the goal done?", "callerContext": {"goal": goal}}});
-    let whole = json!({"type": "noul", "instructions": "Is the goal done?"});
+    let criteria = json!({
+        "true": "The page shows a sign-in, payment or permission wall that keeps the goal from going on.",
+        "false": "Nothing on the page keeps the goal from going on.",
+    });
+    let cut = json!({"type": "noul", "instructions": {"question": "Is the goal done?", "callerContext": {"goal": goal}}, "criteria": criteria});
+    let whole = json!({"type": "noul", "instructions": "Is the goal done?", "criteria": criteria});
     let home = tempfile::tempdir().unwrap();
     let heads = Command::new(child(&runtime, &profile.executable).unwrap())
         .args(["-I", "-c", PINNED_HEADS])
