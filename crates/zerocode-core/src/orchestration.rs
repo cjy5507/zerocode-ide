@@ -1660,6 +1660,34 @@ impl Message {
             && self.from != LEDGER_ITSELF
             && !self.kind.is_the_ledgers_own()
     }
+
+    /// Whether this is a LETTER about `question` in its writer's own voice:
+    /// a thread's root (a word filed in the thread is [`Self::answers`]' to
+    /// judge), not the ledger's, written no earlier than the question, and
+    /// naming it by its id ([`names_message`]) — the habit of a letter that
+    /// opens 「m-NNNNN 답」. Who wrote it, and to whom, is
+    /// [`answered_by_letters`]' to ask.
+    fn writes_about(&self, question: &Message) -> bool {
+        self.thread.is_none()
+            && self.from != LEDGER_ITSELF
+            && !self.kind.is_the_ledgers_own()
+            && self.id != question.id
+            && self.created_ms >= question.created_ms
+            && names_message(self.body.as_str(), &question.id)
+    }
+}
+
+/// Whether `text` names the message `id` as a word of its own. An ASCII
+/// letter, digit or `-` on either side makes it part of a longer word —
+/// `m-12` is not named by `m-123`, `xm-12` or `m-12-2` — and anything else
+/// ends it, a Korean particle written straight after the id (`m-12에`)
+/// included.
+fn names_message(text: &str, id: &str) -> bool {
+    let joins = |next: Option<char>| next.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-');
+    !id.is_empty()
+        && text.match_indices(id).any(|(at, _)| {
+            !joins(text[..at].chars().next_back()) && !joins(text[at + id.len()..].chars().next())
+        })
 }
 
 /// How far one message may sit from the root of its thread.
@@ -3722,6 +3750,8 @@ impl Run {
 
     /// Whether a new answer can reach this question's asker. A standing
     /// answer is handled before this check by `reply` so retries still work.
+    /// Whether the asker still waits by the clock is the ledger's to say
+    /// ([`Ledger::still_owed`]), since that reads other runs' chairs.
     pub fn question_is_answerable(&self, question: &Message) -> Result<(), String> {
         if question_closed(self, question) {
             return Err(format!(
@@ -4931,15 +4961,321 @@ fn receiver_of_worker(run: &Run, worker_id: &str, fact_ms: i64) -> Option<(Strin
 }
 
 /// The root questions in this run addressed to `to` that nobody has
-/// answered and nobody has closed. Read off the mail, like
+/// answered and nobody has closed, at `now_ms`. Read off the mail, like
 /// [`awaiting_reply`]: no table of open questions to fall out of step.
-fn open_questions_to<'a>(run: &'a Run, to: &str) -> Vec<&'a Message> {
-    run.messages
+///
+/// Answered in the thread, or by a letter the seat that was asked wrote
+/// back, and not expired — [`still_owed`] — which is why it reads the
+/// ledger and not the run alone: that letter, and the chair the question
+/// was asked from, may be another run's.
+fn open_questions_to<'a>(ledger: &Ledger, run: &'a Run, to: &str, now_ms: i64) -> Vec<&'a Message> {
+    let unanswered: Vec<&Message> = run
+        .messages
         .iter()
         .filter(|held| held.kind == MessageKind::Question && held.thread.is_none() && held.to == to)
         .filter(|question| {
             thread_answer(run, question).is_none() && !question_closed(run, question)
         })
+        .collect();
+    still_owed(ledger, run, unanswered, now_ms)
+}
+
+/// Of `asked` — questions in `run` with no answer in their thread and no
+/// ended attempt under them — the ones still owed an answer at `now_ms`:
+/// not expired ([`expiry`]), and not written back about by the seat each
+/// was asked of ([`answered_by_letters`]). Every count of open questions
+/// reads this one door — the seat's ([`open_questions_to`]), the run's
+/// ([`open_questions`]) and the window's desk ([`Ledger::still_owed`]) — so
+/// the coordinator card says what the ledger says. Never what `ask` reads
+/// back: that is still the word in the thread ([`thread_answer`]).
+fn still_owed<'a>(
+    ledger: &Ledger,
+    run: &Run,
+    asked: Vec<&'a Message>,
+    now_ms: i64,
+) -> Vec<&'a Message> {
+    let mut pass = ExpiryPass::default();
+    let waited_on: Vec<&Message> = asked
+        .into_iter()
+        .filter(|question| expiry(ledger, run, question, now_ms, &mut pass).is_none())
+        .collect();
+    let written_back = answered_by_letters(ledger, run, &waited_on);
+    waited_on
+        .into_iter()
+        .filter(|question| !written_back.contains(question.id.as_str()))
+        .collect()
+}
+
+/// How long a root question stands with nobody answering it before nobody is
+/// taken to wait on it (t-59383 r2): three days — past a night, a restart and
+/// the morning after, and well short of the fifteen days the oldest question
+/// on the task board had stood on 2026-10-16.
+const QUESTION_EXPIRES_MS: i64 = 3 * DAY_MS;
+
+/// How long the coordinator's chair a question was asked from may stand empty,
+/// with nothing said from it, before the question goes with it (t-59383 r2):
+/// a day. A restart empties every chair and the coordinators sit again within
+/// minutes; one that stays away a whole day is not coming back for this
+/// answer.
+const EMPTY_CHAIR_CLOSES_MS: i64 = DAY_MS;
+
+/// Why nobody waits on a question's answer any more, though nobody gave it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expired {
+    /// Nobody answered it in [`QUESTION_EXPIRES_MS`].
+    Unanswered,
+    /// Its asker is a coordinator whose chairs all emptied, the last of them
+    /// [`EMPTY_CHAIR_CLOSES_MS`] ago or more, with nothing said since.
+    AskerGone,
+}
+
+impl Expired {
+    /// What a `reply` to it is refused with: the closed question's refusal,
+    /// saying it expired and why.
+    fn refusal(self, question: &str) -> String {
+        let hours = |span_ms: i64| span_ms / (DAY_MS / 24);
+        match self {
+            Self::Unanswered => format!(
+                "question {question} is closed — it expired: nobody answered it in the {} \
+                 hours after it was asked",
+                hours(QUESTION_EXPIRES_MS)
+            ),
+            Self::AskerGone => format!(
+                "question {question} is closed — it expired: the coordinator's chair it was \
+                 asked from has stood empty for {} hours with nothing said from it, and the \
+                 asker is gone",
+                hours(EMPTY_CHAIR_CLOSES_MS)
+            ),
+        }
+    }
+}
+
+/// What one pass over many questions reads once, however many it judges
+/// ([`expiry`]): the chairs of every run but the one the questions are filed
+/// in, each with every seat that has sat in it ([`chair_seats`]) — read on
+/// the first pane asker that needs them — and whether each asker met so far
+/// is gone ([`asker_gone`]).
+#[derive(Default)]
+struct ExpiryPass<'l> {
+    chairs: OtherChairs<'l>,
+    gone: std::collections::HashMap<String, bool>,
+}
+
+/// The chairs of every run but one, each with every seat that has sat in it.
+type OtherChairs<'l> = Option<Vec<(&'l Run, std::collections::HashSet<&'l str>)>>;
+
+/// Whether `question` — filed in `run`, unanswered in its thread — has
+/// expired at `now_ms`, and why (t-59383 r2).
+///
+/// A question that rides an attempt the ledger knows closes with it
+/// ([`question_closed`]) and never expires while it is open: a worker
+/// blocked in `ask` waits for as long as its attempt does. Every other — a
+/// coordinator's own, a pane's — had no end at all, so the task board's
+/// 「답할 우편」 kept them for as long as their run lived. Now two clocks end
+/// one, both read off `now_ms` and never stored: [`QUESTION_EXPIRES_MS`]
+/// with nobody answering, and [`EMPTY_CHAIR_CLOSES_MS`] since its asker
+/// was last seen, when the asker is a coordinator whose chairs all emptied
+/// ([`asker_gone`]).
+fn expiry<'l>(
+    ledger: &'l Ledger,
+    run: &Run,
+    question: &Message,
+    now_ms: i64,
+    pass: &mut ExpiryPass<'l>,
+) -> Option<Expired> {
+    if question
+        .dispatch
+        .as_deref()
+        .and_then(|id| run.dispatch(id))
+        .is_some_and(|held| held.ended_ms.is_none())
+    {
+        return None;
+    }
+    if now_ms.saturating_sub(question.created_ms) >= QUESTION_EXPIRES_MS {
+        return Some(Expired::Unanswered);
+    }
+    let gone = match pass.gone.get(question.from.as_str()) {
+        Some(&gone) => gone,
+        None => {
+            let gone = asker_gone(ledger, run, &question.from, now_ms, &mut pass.chairs);
+            pass.gone.insert(question.from.clone(), gone);
+            gone
+        }
+    };
+    gone.then_some(Expired::AskerGone)
+}
+
+/// Whether `asker` is a coordinator gone for a day: every chair it speaks
+/// from is empty ([`chairs_emptied`]), the last of them emptied
+/// [`EMPTY_CHAIR_CLOSES_MS`] or more before `now_ms`, and nothing has been
+/// written from its address since — the ledger's own reading of a pane that
+/// is gone ([`Ledger::vacated_pane_seat`]). A pane that speaks again after
+/// its chair emptied is somebody still asking, and its questions stand.
+fn asker_gone<'l>(
+    ledger: &'l Ledger,
+    filed_in: &Run,
+    asker: &str,
+    now_ms: i64,
+    chairs: &mut OtherChairs<'l>,
+) -> bool {
+    chairs_emptied(ledger, filed_in, asker, chairs).is_some_and(|last| {
+        now_ms.saturating_sub(last) >= EMPTY_CHAIR_CLOSES_MS && !ledger.spoken_since(asker, last)
+    })
+}
+
+/// When the last of the coordinator's chairs `asker` speaks from emptied,
+/// if every one of them is empty — `None` while one is held, and for an
+/// asker that is no coordinator. A `run:` address speaks from its run's
+/// chair; a pane from every chair it has sat in ([`chair_seats`]) outside
+/// `filed_in`, where it is the stranger asking, as [`answered_by_letters`]
+/// reads it. `chairs` keeps the other runs' chairs for the rest of a pass.
+fn chairs_emptied<'l>(
+    ledger: &'l Ledger,
+    filed_in: &Run,
+    asker: &str,
+    chairs: &mut OtherChairs<'l>,
+) -> Option<i64> {
+    let sat_in: Vec<&Run> = match asker.strip_prefix(RUN_ADDRESS_PREFIX) {
+        Some(id) => ledger.run(id).into_iter().collect(),
+        None => {
+            let seat = asker.strip_prefix(PANE_ADDRESS_PREFIX)?;
+            chairs
+                .get_or_insert_with(|| {
+                    ledger
+                        .runs()
+                        .iter()
+                        .filter(|there| there.id != filed_in.id)
+                        .map(|there| (there, chair_seats(there)))
+                        .collect()
+                })
+                .iter()
+                .filter(|(_, seats)| seats.contains(seat))
+                .map(|(there, _)| *there)
+                .collect()
+        }
+    };
+    let mut last: Option<i64> = None;
+    for there in sat_in {
+        let at = there.coordinator.as_ref()?.vacated_ms?;
+        last = Some(last.map_or(at, |held| held.max(at)));
+    }
+    last
+}
+
+/// Of `asked` — questions in `run` with no answer in their thread — the
+/// ones the seat each was asked of has since written back about in a letter
+/// of its own: answered for every count of open questions ([`still_owed`],
+/// t-59383), and never for the thread.
+///
+/// Coordinators answer with `send` as often as with `reply`, and a `send`
+/// starts no thread, so [`Message::answers`] never sees it: the coordinator
+/// card's 「질문 N」 stood at 50 on 2026-10-16 for questions that had been
+/// answered. A letter that answers for the count is a root in its writer's
+/// own voice, written no earlier than the question and naming it by id
+/// ([`Message::writes_about`]), from the seat that was asked to the seat
+/// that asked — read in the two runs it can be filed in:
+///
+/// - this run, from the address that was asked to the address that asked;
+/// - for a question another run's coordinator put to this run's chair
+///   (`send --run <here>` files it under the asker's PANE address), the
+///   asker's own run, where the answer goes by `send --run <there> --to
+///   run:<there>`: a letter to that run's chair, from a pane that has sat in
+///   this run's chair, in a run whose chair the asker has sat in
+///   ([`chair_seats`]). Seats that have sat there, not the live seat alone:
+///   a window restart moves every chair to a new pane — twice on the night
+///   this was written — and a question asked before it was answered after.
+///
+/// It never becomes THE answer: `ask` still reads back the word in the
+/// thread ([`thread_answer`]), and `reply` still takes one per question.
+/// Derived, never stored, like [`question_closed`]: a question a letter
+/// answered before this rule existed reads as answered the moment it does.
+/// One walk of each run's mail whatever the number of questions, for
+/// [`open_questions`]' reason, and a body is read only once a letter's
+/// addresses fit.
+fn answered_by_letters<'a>(
+    ledger: &Ledger,
+    run: &Run,
+    asked: &[&'a Message],
+) -> std::collections::HashSet<&'a str> {
+    let mut answered = std::collections::HashSet::new();
+    let mut between: std::collections::HashMap<(&str, &str), Vec<&'a Message>> =
+        std::collections::HashMap::new();
+    for &question in asked {
+        between
+            .entry((question.to.as_str(), question.from.as_str()))
+            .or_default()
+            .push(question);
+    }
+    if between.is_empty() {
+        return answered;
+    }
+    for letter in run.messages() {
+        let Some(questions) = between.get(&(letter.from.as_str(), letter.to.as_str())) else {
+            continue;
+        };
+        for &question in questions {
+            if letter.writes_about(question) {
+                answered.insert(question.id.as_str());
+            }
+        }
+    }
+    let chair = run.address();
+    let mut by_asker: std::collections::HashMap<&str, Vec<&'a Message>> =
+        std::collections::HashMap::new();
+    for &question in asked {
+        if question.to == chair
+            && !answered.contains(question.id.as_str())
+            && let Some(asker) = question.from.strip_prefix(PANE_ADDRESS_PREFIX)
+        {
+            by_asker.entry(asker).or_default().push(question);
+        }
+    }
+    if by_asker.is_empty() {
+        return answered;
+    }
+    let sat_here = chair_seats(run);
+    for there in ledger.runs().iter().filter(|other| other.id != run.id) {
+        let their_chair = there.address();
+        let mut sat_there = None;
+        for letter in there.messages().iter().filter(|one| one.to == their_chair) {
+            let Some(writer) = letter.from.strip_prefix(PANE_ADDRESS_PREFIX) else {
+                continue;
+            };
+            if !sat_here.contains(writer) {
+                continue;
+            }
+            let sat_there = sat_there.get_or_insert_with(|| chair_seats(there));
+            for (asker, questions) in &by_asker {
+                if !sat_there.contains(asker) {
+                    continue;
+                }
+                for &question in questions {
+                    if letter.writes_about(question) {
+                        answered.insert(question.id.as_str());
+                    }
+                }
+            }
+        }
+    }
+    answered
+}
+
+/// Every seat that has sat in `run`'s chair, as far as the run itself can
+/// tell: the seat its chair names now, held or vacated, and the seat behind
+/// every letter it signed as the run ([`Message::author_seat`]) — an address
+/// [`sender`] mints for the chair and nobody else. Derived, never stored:
+/// the history of a chair is read off the letters written from it.
+fn chair_seats(run: &Run) -> std::collections::HashSet<&str> {
+    let address = run.address();
+    run.coordinator
+        .iter()
+        .map(|chair| chair.seat.as_str())
+        .chain(
+            run.messages()
+                .iter()
+                .filter(|letter| letter.from == address)
+                .filter_map(|letter| letter.author_seat.as_deref()),
+        )
         .collect()
 }
 
@@ -5089,7 +5425,7 @@ impl Ledger {
             let Some(run) = self.run(run_id) else {
                 return 0;
             };
-            open_questions_to(run, address)
+            open_questions_to(self, run, address, now_ms)
                 .into_iter()
                 .filter(|question| {
                     let told: Vec<(&Message, serde_json::Value)> =
@@ -5353,19 +5689,30 @@ fn quiet_closure(run: &Run, message: &Message) -> Option<QuietClosure> {
 /// Three filters, and each one is a way for a wait to not be a wait. A thread's
 /// ROOT, because a reply wears the question kind and answering somebody is not
 /// asking. Unanswered by the seat it was asked of ([`Message::answers`]),
-/// because a bystander's word in the thread is not an answer. And not closed,
-/// because a question whose dispatch ended has nobody left to hand an answer to
-/// — its asker is not waiting, it is gone.
-fn open_questions(run: &Run) -> Vec<(&str, &str, &str)> {
+/// because a bystander's word in the thread is not an answer — nor written
+/// back about by that seat in a letter of its own ([`answered_by_letters`],
+/// filed in this run or the asker's), which is an answer to count by. And
+/// not closed, because a question whose dispatch ended has nobody left to
+/// hand an answer to — its asker is not waiting, it is gone — nor expired at
+/// `now_ms` ([`expiry`]), for the same reason told by a clock.
+fn open_questions<'a>(
+    ledger: &Ledger,
+    run: &'a Run,
+    now_ms: i64,
+) -> Vec<(&'a str, &'a str, &'a str)> {
     let held = run.messages();
     let answered: std::collections::HashSet<(&str, &str)> = held
         .iter()
         .filter_map(|one| Some((one.thread.as_deref()?, one.from.as_str())))
         .collect();
-    held.iter()
+    let unanswered: Vec<&Message> = held
+        .iter()
         .filter(|one| one.kind == MessageKind::Question && one.thread.is_none())
         .filter(|one| !answered.contains(&(one.id.as_str(), one.to.as_str())))
         .filter(|one| !question_closed(run, one))
+        .collect();
+    still_owed(ledger, run, unanswered, now_ms)
+        .into_iter()
         .map(|one| (one.from.as_str(), one.to.as_str(), one.id.as_str()))
         .collect()
 }
@@ -5392,21 +5739,26 @@ fn open_questions(run: &Run) -> Vec<(&str, &str, &str)> {
 /// that is already a ring. Seats, not workers: a coordinator that asked a worker
 /// which is waiting on the coordinator is in the same trap, and `run:` is where
 /// the notice has to go anyway.
-fn ring_closed_by(run: &Run, question: &Message) -> Option<Vec<String>> {
+fn ring_closed_by(
+    ledger: &Ledger,
+    run: &Run,
+    question: &Message,
+    now_ms: i64,
+) -> Option<Vec<String>> {
     let (start, goal) = (question.to.as_str(), question.from.as_str());
     /* A question addressed to its own asker is not a ring, and refusing to
      * call it one is not a nicety: a coordinator's `ask` with no `--to` goes
      * to `run:<id>`, which is the coordinator's OWN address. That is the
      * ordinary shape of a question put to the run — the one `question_closed`
-     * already describes as "a coordinator's own", which stays open as long as
-     * the run does — and reporting every one of them as a deadlock would make
+     * already describes as "a coordinator's own", which only a clock ends
+     * ([`expiry`]) — and reporting every one of them as a deadlock would make
      * this notice noise on the first day. Nobody else is held by it either. */
     if start == goal {
         return None;
     }
     let mut ring = vec![question.id.clone()];
     {
-        let edges = open_questions(run);
+        let edges = open_questions(ledger, run, now_ms);
         // How each seat was reached: itself, the seat before it, and the
         // question that leads from there to here.
         let mut came: Vec<(&str, &str, &str)> = Vec::new();
@@ -5444,8 +5796,8 @@ fn ring_closed_by(run: &Run, question: &Message) -> Option<Vec<String>> {
 /// The dedupe half of [`Ledger::announce_a_ring_of_waiting`], kept beside the
 /// walk that finds a ring rather than inside the poster: one is "is this a
 /// ring", the other is "is this ring news".
-fn already_told(run: &Run, seats: &[&str]) -> bool {
-    let open: std::collections::HashSet<&str> = open_questions(run)
+fn already_told(ledger: &Ledger, run: &Run, seats: &[&str], now_ms: i64) -> bool {
+    let open: std::collections::HashSet<&str> = open_questions(ledger, run, now_ms)
         .into_iter()
         .map(|(_, _, id)| id)
         .collect();
@@ -6621,6 +6973,21 @@ impl Ledger {
             .map(|run| run.id.clone())
     }
 
+    /// Of `asked` — questions in `run` with no answer in their thread, each
+    /// one the reply verb would still take an answer to — the ones still
+    /// owed an answer at `now_ms`: not expired (t-59383 r2) and not written
+    /// back about in a letter naming them (t-59383). The window's desk reads
+    /// its 「답할 우편」 through this, so the coordinator card counts what the
+    /// ledger counts.
+    pub fn still_owed<'a>(
+        &self,
+        run: &Run,
+        asked: Vec<&'a Message>,
+        now_ms: i64,
+    ) -> Vec<&'a Message> {
+        still_owed(self, run, asked, now_ms)
+    }
+
     /// Which run this caller's bare verbs land in.
     pub fn bound_run(&self, caller: &str) -> Option<&str> {
         self.bound
@@ -6966,12 +7333,16 @@ impl Ledger {
         }
         let (run, at) = vacated?;
         let address = format!("{PANE_ADDRESS_PREFIX}{team_pane}");
-        let spoke_since = self
-            .runs
+        (!self.spoken_since(&address, at)).then_some(run)
+    }
+
+    /// Whether anything has been written from `address`, in any run, at or
+    /// after `at` — somebody is there.
+    fn spoken_since(&self, address: &str, at: i64) -> bool {
+        self.runs
             .iter()
             .flat_map(|run| run.messages.iter())
-            .any(|held| held.from == address && held.created_ms >= at);
-        (!spoke_since).then_some(run)
+            .any(|held| held.from == address && held.created_ms >= at)
     }
 
     fn vacate_every_seat(&mut self, now_ms: i64) -> bool {
@@ -7227,8 +7598,9 @@ impl Ledger {
     /// beside it: a table is the thing that falls out of step with the log, and
     /// `worker_fell_silent` reads its own JSON the same way.
     fn announce_a_ring_of_waiting(&mut self, run_id: &str, question_id: &str, now_ms: i64) {
-        let Some((address, told)) = self.run(run_id).and_then(|run| {
-            let ring = ring_closed_by(run, run.message(question_id)?)?;
+        let ledger: &Ledger = self;
+        let Some((address, told)) = ledger.run(run_id).and_then(|run| {
+            let ring = ring_closed_by(ledger, run, run.message(question_id)?, now_ms)?;
             let waiting: Vec<serde_json::Value> = ring
                 .iter()
                 .filter_map(|id| run.message(id))
@@ -7250,7 +7622,7 @@ impl Ledger {
                 .filter_map(|row| row["address"].as_str())
                 .collect();
             seats.sort_unstable();
-            if already_told(run, &seats) {
+            if already_told(ledger, run, &seats, now_ms) {
                 return None;
             }
             Some((
@@ -17985,6 +18357,9 @@ fn unjudged_reason(outcome: Option<&str>) -> serde_json::Value {
         (_, _, Some(Refused::SettingsChanged)) => {
             "No difficulty judgment: the Jev settings changed while it was asked.".to_string()
         }
+        (_, _, Some(Refused::Resting)) => {
+            "No difficulty judgment: Jev is resting this seat until its provider can answer it.".to_string()
+        }
         (word, None, None) => format!("No difficulty judgment: the request ended `{word}`."),
     };
     serde_json::json!({ "why": why, "says": says })
@@ -18619,7 +18994,9 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     (
         "send",
         "--to <address> --type <kind> [--body <text>] [--task <id>] [--dispatch <id>] \
-         · groups: @all @idle @<agent> @worktree:<checkout>",
+         · groups: @all @idle @<agent> @worktree:<checkout> · a letter from the seat a \
+         question was asked of to its asker that names the question's id counts it answered \
+         (the coordinator card, open questions); the asker's `ask` still waits for `reply`",
         Doing::Mutation,
     ),
     (
@@ -19805,8 +20182,9 @@ fn thread_answer<'a>(run: &'a Run, question: &Message) -> Option<&'a Message> {
 ///
 /// Derived, never stored: a question rode in on a dispatch, and when that
 /// dispatch ends the asker is gone — there is nobody to hand the answer to.
-/// A question with no dispatch (a coordinator's own) stays open for as long
-/// as the run does. No Question table, no flag to fall out of step.
+/// A question with no dispatch (a coordinator's own) is not closed by this;
+/// the clocks in [`expiry`] end it for the counts and the reply verb
+/// (t-59383 r2). No Question table, no flag to fall out of step.
 fn question_closed(run: &Run, question: &Message) -> bool {
     question
         .dispatch
@@ -23293,7 +23671,9 @@ fn plan_inner(
              * the standing answer's name, so the corrector knows what to
              * read before deciding the correction still matters. And a
              * question whose dispatch ended unanswered is closed: the asker
-             * is gone, and mail to the gone is refused rather than filed. */
+             * is gone, and mail to the gone is refused rather than filed —
+             * as it is to a question that expired ([`expiry`], t-59383 r2),
+             * whose asker stopped waiting by the clock. */
             let standing = match answered.kind == MessageKind::Question {
                 true => match thread_answer(run, answered) {
                     Some(held) => Some((
@@ -23302,6 +23682,11 @@ fn plan_inner(
                     )),
                     None => {
                         run.question_is_answerable(answered)?;
+                        if let Some(expired) =
+                            expiry(ledger, run, answered, now_ms, &mut ExpiryPass::default())
+                        {
+                            return Err(expired.refusal(&thread));
+                        }
                         None
                     }
                 },

@@ -34,12 +34,13 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager as _};
 use zerocode_core::artifact::{Artifact, ArtifactKind, Limits};
 
-#[cfg(target_os = "macos")]
 use crate::AppState;
 #[cfg(target_os = "macos")]
 use crate::ShellStateExt as _;
 use crate::artifact_runtime::{Store, THUMBS_DIR_NAME};
 use crate::browser_runtime::{blank_page, browsable, browsable_target};
+use crate::computer_use::compare::decode_png;
+use crate::computer_use::screenshot_png::RgbaImage;
 
 /// The hidden pane's label. Not a `browser-N`, on purpose: the mint and the
 /// agents' door only ever name those.
@@ -261,6 +262,60 @@ pub(crate) async fn thumbnail(app: &AppHandle, store: &Store, id: &str) -> Resul
             })
         }
     }
+}
+
+/// The picture of a pane the person is looking at (t-59665 ⑤). The window
+/// asks with the pane's label a beat after the page's first paint; the picture
+/// is taken through the browser panes' own snapshot door —
+/// `cmd::fs::browser_snapshot_png`, with its guard that the pane is one this
+/// window made — shrunk to the card's size and kept under the row's key, so
+/// the hidden pane renders only pages nobody has seen. A row with no key (a
+/// kind without a picture, a file that is gone) answers a glyph, as
+/// [`thumbnail`] does; a pane that cannot be snapped is an error the window
+/// swallows, and the key stays unwritten for the hidden pane to render later.
+pub(crate) async fn thumbnail_of_pane(
+    app: &AppHandle,
+    state: &AppState,
+    store: &Store,
+    id: &str,
+    label: &str,
+) -> Result<Thumb, String> {
+    let artifact = store
+        .get(id)
+        .ok_or_else(|| "그 아티팩트가 없습니다".to_string())?;
+    let Some(key) = key_of(&artifact) else {
+        return Ok(Thumb {
+            data_url: None,
+            cached: true,
+        });
+    };
+    let limits = store.limits();
+    let png = crate::cmd::fs::browser_snapshot_png(app, state, label).await?;
+    let small = shrink_to_card(&png, limits.thumb_width, limits.thumb_height)?;
+    remember(store.root(), id, &key, &small)?;
+    Ok(Thumb {
+        data_url: Some(data_url_of(&small)),
+        cached: false,
+    })
+}
+
+/// A pane's picture at the card's size: box-filtered down to `width` pixels
+/// across and cut to `height` from the top — the hidden pane's own frame
+/// (`thumb_width` × `thumb_height`, the page's head). A picture already
+/// narrower keeps its width.
+pub(crate) fn shrink_to_card(png: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let image = decode_png(png).ok_or_else(|| "판의 그림을 읽을 수 없습니다".to_string())?;
+    let scale = f64::from(width.max(1)) / f64::from(image.width.max(1));
+    let small = if scale < 1.0 {
+        image.downscaled(scale)
+    } else {
+        image
+    };
+    let rows = small.height.min(height.max(1));
+    let kept = small.pixels[..small.width as usize * rows as usize * 4].to_vec();
+    RgbaImage::new(small.width, rows, kept)
+        .and_then(|cut| cut.encode())
+        .ok_or_else(|| "PNG 인코딩에 실패했습니다".to_string())
 }
 
 /// Load `address` in the hidden pane, wait for its Finished inside the
@@ -496,6 +551,22 @@ mod tests {
         );
         assert!(address_of(&row(ArtifactKind::Web, Path::new(""), Some("javascript:1"))).is_err());
         assert!(address_of(&row(ArtifactKind::Document, &page, None)).is_err());
+    }
+
+    /// A seen pane's picture is shrunk to the card's width and cut to its
+    /// height from the top; a picture already narrower keeps its width.
+    #[test]
+    fn a_panes_picture_is_shrunk_to_the_cards_width_and_cut_to_its_height() {
+        let wide = RgbaImage::new(64, 96, vec![200u8; 64 * 96 * 4]).expect("an image");
+        let small = shrink_to_card(&wide.encode().expect("png"), 16, 8).expect("shrunk");
+        let back = decode_png(&small).expect("decodes");
+        assert_eq!((back.width, back.height), (16, 8));
+        let narrow = RgbaImage::new(8, 40, vec![10u8; 8 * 40 * 4]).expect("an image");
+        let kept =
+            decode_png(&shrink_to_card(&narrow.encode().expect("png"), 16, 12).expect("cut"))
+                .expect("decodes");
+        assert_eq!((kept.width, kept.height), (8, 12));
+        assert!(shrink_to_card(b"not a png", 16, 12).is_err());
     }
 
     /// The cache answers only under its key, a failure is remembered under

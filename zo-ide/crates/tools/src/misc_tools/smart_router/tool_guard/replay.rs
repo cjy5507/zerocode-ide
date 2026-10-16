@@ -341,7 +341,7 @@ fn the_guards_on_the_synthetic_cases() {
             .iter()
             .map(|case| {
                 assert!(spent < CALL_CAP, "the cap");
-                let asked = api::sync_bridge::run_blocking(super::ask(
+                let (asked, _) = api::sync_bridge::run_blocking(super::ask(
                     &door,
                     Some(&client),
                     case.guard.seat,

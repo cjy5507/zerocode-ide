@@ -154,6 +154,9 @@ pub struct StepJudgmentRow {
     pub input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jev: Option<std::collections::BTreeMap<String, JudgedAxis>>,
+    /// What the server said beside a refusal (t-58193).
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
 }
 
 impl StepJudgmentRow {
@@ -174,6 +177,7 @@ impl StepJudgmentRow {
             redacted_lines: 0,
             input_tokens: None,
             jev: None,
+            server_said: jev_gate::ServerSaid::default(),
         }
     }
 }
@@ -385,6 +389,7 @@ async fn judge_step(
     row.retries = call.retries;
     row.requests = call.requests;
     row.redacted_lines = withheld;
+    row.server_said = jev_gate::ServerSaid::of(&call);
     (row, answer)
 }
 

@@ -42,6 +42,8 @@ import { testArtifactPreferences } from "./artifact-preferences.mjs";
 import { testArtifactCards } from "./artifact-cards.mjs";
 import { testArtifactTasks } from "./artifact-tasks.mjs";
 import { testArtifactReopen } from "./artifact-reopen.mjs";
+import { testArtifactDiagrams } from "./artifact-diagrams.mjs";
+import { testArtifactStage2 } from "./artifact-stage2.mjs";
 import { testAgentSupport } from "./agent-support.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testQuotaWallChip } from "./quota-wall-chip.mjs";
@@ -67,7 +69,7 @@ import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
 import { testEmulatorSeat } from "./emulator-seat.mjs";
 import { testEmulatorLoans } from "./emulator-loans.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
-import { testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardScope } from "./jev-dashboard.mjs";
+import { testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardResting, testJevDashboardScope } from "./jev-dashboard.mjs";
 
 import { testCrashReport } from "./crash-report.mjs";
 import { testTerminalSelection } from "./terminal-selection.mjs";
@@ -266,6 +268,8 @@ suite("artifact-preferences", ({ browser, origin, ok }) => testArtifactPreferenc
 suite("artifact-cards", ({ browser, origin, ok }) => testArtifactCards(browser, origin, ok));
 suite("artifact-tasks", ({ browser, origin, ok }) => testArtifactTasks(browser, origin, ok));
 suite("artifact-reopen", ({ browser, origin, ok }) => testArtifactReopen(browser, origin, ok));
+suite("artifact-diagrams", ({ browser, origin, ok }) => testArtifactDiagrams(browser, origin, ok));
+suite("artifact-stage2", ({ browser, origin, ok }) => testArtifactStage2(browser, origin, ok));
 suite("agent-support", ({ browser, origin, ok }) => testAgentSupport(browser, origin, ok));
 // The coordinator's desk above the task list (t-6588, docs/design/agent-board-round4.md).
 suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));
@@ -308,6 +312,7 @@ suite("jev-dashboard", async ({ browser, origin, ok }) => {
   await testJevDashboard(browser, origin, ok);
   await testJevDashboardPictures(browser, origin, ok);
   await testJevDashboardScope(browser, origin, ok);
+  await testJevDashboardResting(browser, origin, ok);
   await testJevDashboardEvidence(browser, origin, ok);
 });
 suite("native-folder-picker", ({ browser, origin, ok }) => testNativeFolderPicker(browser, origin, ok));

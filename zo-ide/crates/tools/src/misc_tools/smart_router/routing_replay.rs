@@ -99,6 +99,8 @@ struct Answer {
     axes: BTreeMap<String, (String, f64)>,
     /// The second version's whole reading.
     reading: Option<runtime::RoutingReading>,
+    /// What the server said beside a refusal (t-58193).
+    said: jev_gate::ServerSaid,
 }
 
 fn words_of(message: &ConversationMessage) -> Option<&str> {
@@ -228,7 +230,9 @@ async fn ask(door: &JevDoor, client: &SystemOneClient, task: &Task, second: bool
         return Answer { outcome: "refused".to_string(), ..Answer::default() };
     };
     let call = jev_gate::send(client, cleared, REPLAY_WALL, None).await;
-    let mut answer = Answer { elapsed_ms: jev_gate::millis(call.elapsed), ..Answer::default() };
+    let said = jev_gate::ServerSaid::of(&call);
+    let elapsed_ms = jev_gate::millis(call.elapsed);
+    let mut answer = Answer { elapsed_ms, said, ..Answer::default() };
     match call.outcome {
         Err(failure) => answer.outcome = failure.ledger_token(),
         Ok(response) => {
@@ -430,7 +434,10 @@ fn the_routing_seat_replayed_on_this_machines_turns() {
                     within_wall += usize::from(answer.elapsed_ms <= ROUTING_APPLY_DEADLINE_MS);
                 }
             } else {
-                *failures.entry(format!("{version}:{}", answer.outcome)).or_default() += 1;
+                let refused = answer.said.server_refusal.as_deref();
+                let refused = refused.map(|word| format!(":{word}")).unwrap_or_default();
+                let failure = format!("{version}:{}{refused}", answer.outcome);
+                *failures.entry(failure).or_default() += 1;
             }
         }
         first_tokens += first.input_tokens;

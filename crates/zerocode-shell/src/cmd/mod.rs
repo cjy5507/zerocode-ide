@@ -278,10 +278,11 @@ pub(crate) use supply_chain::{supply_chain_graph, supply_chain_report};
 pub(crate) use artifacts::{
     artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
     artifact_export, artifact_export_formats, artifact_export_reveal, artifact_feedback_record,
-    artifact_import_transcripts, artifact_open, artifact_page_at, artifact_preference_revoke,
-    artifact_preference_save, artifact_preferences, artifact_preview, artifact_register,
-    artifact_reveal, artifact_search, artifact_tasks, artifact_thumbnail, artifact_versions,
-    artifacts_list, explain_cancel, explain_preview, explain_roads, explain_start,
+    artifact_import_transcripts, artifact_open, artifact_open_record, artifact_page_at,
+    artifact_preference_revoke, artifact_preference_save, artifact_preferences, artifact_preview,
+    artifact_register, artifact_reveal, artifact_search, artifact_tasks, artifact_thumbnail,
+    artifact_versions, artifacts_list, explain_cancel, explain_preview, explain_roads,
+    explain_start,
 };
 pub(crate) use skills::{
     computer_use_skill_report, install_bundled_skill, list_skills, orchestration_report,

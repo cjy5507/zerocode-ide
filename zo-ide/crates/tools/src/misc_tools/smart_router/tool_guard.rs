@@ -169,6 +169,14 @@ fn guard_ledger(seat: &JevUse) -> PathBuf {
     runtime::judgment_evidence_dir(&runtime::default_config_home().join(REQUESTS_DIR)).join(seat.ledger)
 }
 
+/// Where `seat` keeps its rows when it is one of the guards, its own ledger
+/// under the config home ([`guard_ledger`]), and `None` for every other
+/// seat, whose rows live in the project's folder. The door reads a guard's
+/// server's wait there (t-58193).
+pub(super) fn guard_ledger_of(seat: &JevUse) -> Option<PathBuf> {
+    [COMMAND.seat, TEXT.seat].iter().any(|guard| guard.id == seat.id).then(|| guard_ledger(seat))
+}
+
 /// Where the command guard's ledger lives.
 #[must_use]
 pub fn command_guard_path() -> PathBuf {
@@ -258,7 +266,8 @@ pub fn text_guard_for(ask: &TextAsk, answers: &BTreeMap<String, f64>) -> TextGua
 /* ---- the one road to the door and the wire ---------------------------------- */
 
 /// Put `questions` over `state` to the wire through the door — refused there,
-/// or asked and read. Writes nothing; both guards and the replay ask here.
+/// or asked and read, with what the server said beside a refusal. Writes
+/// nothing; both guards and the replay ask here.
 pub(super) async fn ask(
     door: &JevDoor,
     client: Option<&SystemOneClient>,
@@ -267,7 +276,7 @@ pub(super) async fn ask(
     state: &Value,
     questions: &BTreeMap<String, SystemOneQuestion>,
     deadline: Duration,
-) -> Asked {
+) -> (Asked, jev_gate::ServerSaid) {
     let mut asked = Asked {
         route_use: ROUTE_USE_FALLBACK.to_string(),
         ..Asked::default()
@@ -279,13 +288,13 @@ pub(super) async fn ask(
     };
     let Some(body) = jev_gate::body_of(&request) else {
         asked.outcome = SystemOneFailure::InvalidRequest.ledger_token();
-        return asked;
+        return (asked, jev_gate::ServerSaid::default());
     };
     let (cleared, client) = match (door.pass(seat, client.is_some(), body), client) {
         (Ok(cleared), Some(client)) => (cleared, client),
         (passed, _) => {
             asked.outcome = passed.err().unwrap_or(Refused::NoKey).token().to_string();
-            return asked;
+            return (asked, jev_gate::ServerSaid::default());
         }
     };
     asked.redacted_lines = u32::try_from(cleared.withheld_lines()).unwrap_or(u32::MAX);
@@ -295,11 +304,12 @@ pub(super) async fn ask(
     asked.requests = call.requests;
     asked.retries = call.retries;
     asked.elapsed_ms = jev_gate::millis(call.elapsed);
+    let said = jev_gate::ServerSaid::of(&call);
     let response = match call.outcome {
         Ok(response) => response,
         Err(failure) => {
             asked.outcome = failure.ledger_token();
-            return asked;
+            return (asked, said);
         }
     };
     asked.model = Some(response.model.clone());
@@ -323,7 +333,7 @@ pub(super) async fn ask(
             asked.rejected = Some(rule.to_string());
         }
     }
-    asked
+    (asked, said)
 }
 
 /// What the row says the call went on with, once the verdict is in: the
@@ -526,7 +536,7 @@ async fn judge_command(
         forget_command(&project, row.judged);
         return None;
     };
-    row.asked = self::ask(
+    let (asked, said) = self::ask(
         &door,
         client.as_ref(),
         COMMAND.seat,
@@ -536,6 +546,7 @@ async fn judge_command(
         COMMAND.deadline,
     )
     .await;
+    row.asked = asked;
     let verdict = Verdict::of(row.asked.answers.as_ref(), COMMAND.flag_floor_permille);
     let still_acts = acting && door.permits_application_with(&project, COMMAND.seat, || raised(&COMMAND));
     let mode = if acting && !still_acts { JevMode::Shadow } else { mode };
@@ -545,7 +556,7 @@ async fn judge_command(
     row.noted = note.is_some();
     let confidence = row.asked.answers.as_ref().and_then(confidence_of);
     settle_command(&project, &ledger, row.judged, verdict, confidence, row.asked.applied);
-    write_row(ledger, COMMAND.seat, row);
+    write_row(ledger, COMMAND.seat, said.beside(row));
     note.map(|note| (note, Arc::new(door)))
 }
 
@@ -734,7 +745,7 @@ async fn judge_text(project: PathBuf, ledger: PathBuf, ask: TextAsk, judged: u64
         forget_text(&project, judged);
         return TextGuard::default();
     };
-    let mut asked = self::ask(
+    let (mut asked, said) = self::ask(
         &door,
         client.as_ref(),
         TEXT.seat,
@@ -774,7 +785,7 @@ async fn judge_text(project: PathBuf, ledger: PathBuf, ask: TextAsk, judged: u64
         pane: pane_of(&project),
         asked,
     };
-    write_row(ledger, TEXT.seat, row);
+    write_row(ledger, TEXT.seat, said.beside(row));
     guard
 }
 

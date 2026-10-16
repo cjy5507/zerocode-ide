@@ -432,6 +432,26 @@ const browserAddressSlotWatch = new ResizeObserver((entries) => {
   for (const one of entries) syncAddressOverlay(one.target.closest(".browser-view"));
 });
 
+/* 문서 보기의 머리 한 줄(t-59665 ⑥): 도구 줄과 머리띠가 한 줄에 서려면 판이 도구 줄의 폭에
+ * 머리띠의 최소 폭(`--artifact-reading-strip-min`)을 더한 만큼은 되어야 한다. 좁으면 둘은 전처럼
+ * 위아래로 선다 — 주소줄만 접힌 채. 판의 폭으로 판다: CSS에는 판의 폭을 묻는 컨테이너가 없다. */
+function syncArtifactReadingRow(host) {
+  if (!host || !host.classList.contains("is-artifact-reading")) {
+    host?.classList.remove("is-artifact-reading-stacked");
+    return;
+  }
+  const toolbar = host.querySelector(".browser-toolbar");
+  const width = host.getBoundingClientRect().width;
+  if (!toolbar || width === 0) return;
+  const stripMin = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--artifact-reading-strip-min"));
+  const stacked = width < toolbar.scrollWidth + (Number.isFinite(stripMin) ? stripMin : 400);
+  host.classList.toggle("is-artifact-reading-stacked", stacked);
+}
+
+const browserReadingRowWatch = new ResizeObserver((entries) => {
+  for (const one of entries) syncArtifactReadingRow(one.target);
+});
+
 /* The browser surface, BUILT rather than found: the markup file is not this
  * window's to edit, and the view is a toolbar and a hole the native page
  * shows through. Same section shape as the markup's own doc views. */
@@ -624,6 +644,7 @@ function wireBrowserHost(host) {
   // nothing while no pane is in front (1-g13).
   watchBrowserMenu();
   browserBodyWatch.observe(host.querySelector(".browser-body"));
+  browserReadingRowWatch.observe(host);
   const held = () => host._browserTab;
   host.querySelector(".browser-failure-retry").addEventListener("click", () => {
     const tab = held();
@@ -3604,6 +3625,17 @@ function paintBrowserView(tab) {
     armed: browserGrab !== null && browserGrab.label === tab.label && browserGrab.mode === "annotate",
   });
   paintArtifactHint(host.querySelector(".artifact-hint"), tab);
+  // 문서 보기(t-59665 ⑥): 아티팩트를 제 파일 위에서 보는 동안 주소줄이 접히고 머리가 한 줄이 된다.
+  // 링크로 다른 곳에 가면 — 머리띠는 서 있어도 — 주소줄이 다시 선다. 규칙은 한 선택자가 쥔다.
+  const reading = tab.artifact !== null && tab.artifact !== undefined && artifactTabOnItsFile(tab);
+  if (host.classList.contains("is-artifact-reading") !== reading) {
+    host.classList.toggle("is-artifact-reading", reading);
+    // 한 줄인지 두 줄인지는 판의 폭이 정한다 — 재는 것은 다음 프레임에, 그리기가 배치를 강제하지 않게.
+    requestAnimationFrame(() => syncArtifactReadingRow(host));
+  }
+  // 다른 탭의 덮개 그림은 이 탭의 것이 아니다(t-59665 ④).
+  const shade = artifactShadeOf(host);
+  if (shade && !shade.hidden && shade._label !== tab.label) liftArtifactShade(host);
   const reload = host.querySelector(".browser-reload");
   // The face is markup, so it is only rebuilt when it CHANGES — a paint per
   // frame rewriting identical SVG would cost layout for nothing.
@@ -4682,6 +4714,8 @@ function syncBrowserPanes() {
       !host.hidden &&
       // 마크업 중엔 편집기가 그 사각형의 주인이다 — 판은 눕는다.
       !tab.marking &&
+      // 다시 발행된 새 판을 덮개 뒤에서 준비하는 동안도 눕는다(t-59665 ⑦).
+      !tab.artifactSwap &&
       !tab.navFailure &&
       tab.worktree === activeWorktreePath &&
       activeTabIn(tab.pane)?.id === tab.id
@@ -4703,6 +4737,8 @@ function syncBrowserPanes() {
       fenced && fenced.width > 0 && fenced.height > 0
         ? viewportBox(fenced, tab.viewport ?? null)
         : null;
+    // 아티팩트 페이지의 여는 시계는 판이 보이는 시간만 센다(t-59665 ⑤·⑧).
+    if (tab.artifact) artifactOpenTick(tab, rect !== null && !document.hidden);
     // 프리셋도 열쇠의 일부 — 같은 몸에서 프리셋만 바뀐 판은 다시 놓여야 한다.
     const said = rect
       ? [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height), tab.viewport ?? ""].join(",")
@@ -4713,11 +4749,17 @@ function syncBrowserPanes() {
     const place = rect
       ? { label, x: rect.x, y: rect.y, width: rect.width, height: rect.height, shown: true }
       : { label, x: 0, y: 0, width: 1, height: 1, shown: false };
-    browserPlacing = browserPlacing.then(() =>
-      invoke("browser_place", place).catch(() => {
+    // 아티팩트 페이지의 판이 사람이 보는 자리에서 눕는다 — 메뉴·고르개가 덮거나 새 판을
+    // 준비하거나: 눕기 전에 찍어 그 자리에 깔고, 다시 서면 한 프레임 뒤에 걷는다(t-59665 ④·⑦).
+    const shading = rect === null && artifactShadeWanted(tab, host, covered);
+    browserPlacing = browserPlacing
+      .then(() => (shading ? layArtifactShade(tab, host) : null))
+      .then(() => invoke("browser_place", place).catch(() => {
         browserSaid.delete(label);
-      }),
-    );
+      }))
+      .then(() => {
+        if (rect !== null) liftArtifactShadeAfterPane(tab, host);
+      });
   }
 }
 
@@ -5081,6 +5123,8 @@ listen("browser:nav", (event) => {
   applyBrowserNavigation(tab, said);
   // 아티팩트 미리보기 탭이 링크·뒤로 가기로 제 아티팩트를 떠나면 남는 탭이 된다(t-55370).
   keepGlanceLeaving(tab);
+  // 아티팩트 페이지의 여는 시계가 첫 그림을 듣는다(t-59665 ⑤·⑧).
+  if (tab.artifact) noteArtifactPageNav(tab, said);
   if (!tab.loading) rememberBrowserOpenTabs();
   renderTabs();
   if (stillShowing(tab)) paintBrowserView(tab);
@@ -5255,6 +5299,8 @@ for (const float of [notePop, tabCreatePop, profilePop, el("sidebar-menu")]) {
 }
 browserOverlayWatch.observe(termFloat, { attributes: true, attributeFilter: ["hidden"] });
 window.addEventListener("resize", () => syncBrowserPanes());
+// 창이 가려지거나 돌아오면 판의 「보임」이 바뀐다 — 아티팩트 페이지의 여는 시계가 그것을 센다(t-59665 ⑧).
+document.addEventListener("visibilitychange", () => syncBrowserPanes());
 
 /* A pointer landing in this DOM is a claim on the keyboard. The native pane
  * never forwards its clicks here, so any pointer that DOES arrive means the

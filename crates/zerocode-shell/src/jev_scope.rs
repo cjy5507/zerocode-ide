@@ -517,6 +517,7 @@ pub const SEAT: &[(&str, Carry)] = &[
     ("askers", Carry::Recounted),
     ("reach", Carry::Across),
     ("across", Carry::Across),
+    ("resting", Carry::Own),
 ];
 
 /// One window of a seat's rows.
@@ -1317,9 +1318,14 @@ mod tests {
             "across": { "projects": 1, "applying": 0, "summed": false },
             "askersWeek": { "zo": 1 },
             "askers": [{ "agent": "opencode", "label": "OpenCode", "requests": 0, "unseen": "no_hooks", "notes": ["no_stop_flag"] }],
+            "resting": { "untilMs": 1, "cause": "timeout", "unanswered": 3 },
         }))
         .expect("a full seat");
         let sent = serde_json::to_value(&full).expect("the seat, sent");
+        assert!(
+            sent.get("resting").is_some(),
+            "a seat's rest, which the panel's chip and sentence read, never reaches the window"
+        );
         let named = |table: &[(&'static str, Carry)]| {
             let mut names: Vec<&'static str> = table.iter().map(|(name, _)| *name).collect();
             names.sort_unstable();

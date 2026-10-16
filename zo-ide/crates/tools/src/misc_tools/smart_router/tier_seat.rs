@@ -167,6 +167,9 @@ pub struct TierRow {
     pub model: Option<String>,
     #[serde(default)]
     pub input_tokens: Option<u64>,
+    /// What the server said beside a refusal (t-58193).
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
 }
 
 /// One provider's lineup, its models in the fact rule's order (superseded
@@ -224,6 +227,7 @@ async fn ask_lineup(
         requests: 0,
         model: None,
         input_tokens: None,
+        server_said: jev_gate::ServerSaid::default(),
     };
     let state = tier_state(provider, models, outcomes);
     let questions = tier_questions(models.len());
@@ -243,6 +247,7 @@ async fn ask_lineup(
     row.elapsed_ms = jev_gate::millis(call.elapsed);
     row.retries = call.retries;
     row.requests = call.requests;
+    row.server_said = jev_gate::ServerSaid::of(&call);
     let response = match call.outcome {
         Ok(response) => response,
         Err(failure) => {

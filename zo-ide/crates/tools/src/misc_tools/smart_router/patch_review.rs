@@ -151,6 +151,9 @@ pub struct PatchReviewRow {
     /// `schema`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected: Option<String>,
+    /// What the server said beside a refusal (t-58193).
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
 }
 
 impl PatchReviewRow {
@@ -181,6 +184,7 @@ impl PatchReviewRow {
             redacted_lines: 0,
             request_digest: None,
             rejected: None,
+            server_said: jev_gate::ServerSaid::default(),
         }
     }
 }
@@ -405,6 +409,7 @@ pub(super) async fn judge(
     row.requests = call.requests;
     row.retries = call.retries;
     row.elapsed_ms = jev_gate::millis(call.elapsed);
+    row.server_said = jev_gate::ServerSaid::of(&call);
     let response = match call.outcome {
         Ok(response) => response,
         Err(failure) => {
