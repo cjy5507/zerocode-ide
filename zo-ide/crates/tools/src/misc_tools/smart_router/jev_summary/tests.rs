@@ -1058,7 +1058,7 @@ fn turn_labels_carry_both_sides_spend_so_the_bar_prices_every_pair() {
     write(&dir, name, &rows);
     for n in 0..turns {
         let turn = vec![
-            ConversationMessage::user_text(&words(n)),
+            ConversationMessage::user_text(words(n)),
             ConversationMessage::assistant(vec![ContentBlock::ToolUse {
                 id: "toolu-bash".to_string(),
                 name: "bash".to_string(),
