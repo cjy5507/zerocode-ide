@@ -1022,6 +1022,55 @@ fn a_turn_label_grades_the_turns_own_judgment_on_what_the_turn_did() {
     }
 }
 
+/// The routing seat's paired records (t-26584 decision 2, t-47784): a turn's
+/// label carries both sides of its pair — what the judgment spent and what
+/// the probe it replaces spent on the same request, as the request's row
+/// keeps them — so a window of labelled turns is a window of priced pairs,
+/// and the rise bar reads its whole sample.
+#[test]
+fn turn_labels_carry_both_sides_spend_so_the_bar_prices_every_pair() {
+    use runtime::{ContentBlock, ConversationMessage};
+    use super::super::decision_shadow::{decision_shadow_path, note_route_followed};
+    use zerocode_core::jev::provenance::{pair_tally, PROMOTION_BAR};
+    let state = tempfile::tempdir().expect("a state home");
+    let work = tempfile::tempdir().expect("a workspace");
+    let _env = crate::tests::EnvGuard::set(core_types::paths::ZO_STATE_DIR_ENV, &state.path().to_string_lossy());
+    let ledger = decision_shadow_path(work.path());
+    let dir = ledger.parent().expect("a ledger dir").to_path_buf();
+    let name = ledger.file_name().and_then(|name| name.to_str()).expect("a ledger name");
+    // What each side spent on one request: the judgment's call, and the probe's.
+    let (judgment_tokens, probe_tokens, probe_ms) = (431, 120, 900);
+    let turns = PROMOTION_BAR.min_pairs;
+    let words = |n: usize| format!("rename the variable in step {n}");
+    let rows: Vec<Value> = (0..turns)
+        .map(|n| {
+            let at = i64::try_from(n).expect("a small turn");
+            let mut row = compared(at, ["small", "low", "other"], Some(["small", "low", "other"]));
+            row["attempt"] = json!(format!("s@{n}"));
+            row["task"] = json!(format!("{:016x}", super::super::probe_exec::task_fingerprint("", &words(n))));
+            row["rule"] = json!({"complexity": "trivial", "risk": "low", "intent": "other"});
+            row["inputTokens"] = json!(judgment_tokens);
+            row["currentInputTokens"] = json!(probe_tokens);
+            row["currentElapsedMs"] = json!(probe_ms);
+            row
+        })
+        .collect();
+    write(&dir, name, &rows);
+    for n in 0..turns {
+        let turn = vec![
+            ConversationMessage::user_text(&words(n)),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "toolu-bash".to_string(),
+                name: "bash".to_string(),
+                input: "{}".to_string(),
+            }]),
+        ];
+        assert!(note_route_followed(work.path(), &format!("s@{n}"), None, Some(&turn)), "turn {n} was labelled");
+    }
+    let tally = pair_tally(read_rows(&ledger).iter());
+    assert_eq!((tally.pairs, tally.priced), (turns, turns), "{tally:?}");
+}
+
 /// A row where the probe answered beside the judgment marks both readers on
 /// the probe's answer, axis by axis: the judgment's `agreed` and, from the
 /// keyword tables' reading on the same row, the baseline's — so the seat is

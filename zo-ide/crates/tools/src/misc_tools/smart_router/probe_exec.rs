@@ -950,6 +950,9 @@ mod live_path_tests {
         String::from_utf8(body).ok()
     }
 
+    /// The input tokens the scripted probe reply bills ([`responses_sse`]).
+    const PROBE_BILLED_INPUT_TOKENS: u64 = 120;
+
     /// The exact shape the live backend sends under `store: false`: the answer
     /// arrives only as text deltas, and the terminal frame's `output` is empty.
     fn responses_sse(answer: &str) -> String {
@@ -963,7 +966,7 @@ mod live_path_tests {
                 "id": "resp_probe",
                 "status": "completed",
                 "output": [],
-                "usage": { "input_tokens": 120, "output_tokens": 24 },
+                "usage": { "input_tokens": PROBE_BILLED_INPUT_TOKENS, "output_tokens": 24 },
             },
         });
         format!("data: {delta}\n\ndata: {completed}\n\ndata: [DONE]\n\n")
@@ -1085,7 +1088,7 @@ mod live_path_tests {
             PROBE_CONTROL_EVERY,
         };
         use super::super::{probe_and_shadow, task_fingerprint, ProbeSlot};
-        use super::{inventory, responses_sse, MockCodex, ProbeEnv};
+        use super::{inventory, responses_sse, MockCodex, ProbeEnv, PROBE_BILLED_INPUT_TOKENS};
 
         /// A wall far past any scripted delay, for the cases not about time.
         const UNHURRIED: Duration = Duration::from_secs(8);
@@ -1403,6 +1406,30 @@ mod live_path_tests {
             // The ledger keeps the fingerprint, never the task's words.
             let text = std::fs::read_to_string(&env.ledger).expect("the ledger");
             assert!(!text.contains(&task) && !text.contains("a description"), "{text}");
+        }
+
+        /// The routing seat's paired records (t-26584 decision 2, t-47784): the
+        /// probe is what the judgment replaces, so the row of a task the probe
+        /// answered carries what the probe spent — the input tokens its reply
+        /// billed and its wall time — as the current side, beside the
+        /// judgment's own.
+        #[test]
+        fn a_shadow_row_carries_what_the_probe_spent_as_the_current_side() {
+            let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
+            let judgment = judging(judgment_answer());
+            let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
+            env.set_mode(Some("shadow"));
+
+            let task = unique("spent");
+            let (results, _) = funnel(&[("", task.as_str())], UNHURRIED);
+            assert!(results[0].is_some(), "the probe routed");
+
+            let text = std::fs::read_to_string(&env.ledger).expect("the shadow wrote its row");
+            let rows: Vec<serde_json::Value> =
+                text.lines().map(|line| serde_json::from_str(line).expect("a ledger row")).collect();
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0]["currentInputTokens"], serde_json::json!(PROBE_BILLED_INPUT_TOKENS), "{}", rows[0]);
+            assert!(rows[0]["currentElapsedMs"].is_u64(), "the probe's wall time: {}", rows[0]);
         }
 
         /// `auto` records until something promotes it: the request and the row
