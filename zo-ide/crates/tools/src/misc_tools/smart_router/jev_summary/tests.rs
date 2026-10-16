@@ -1282,6 +1282,44 @@ fn a_label_taken_out_of_the_file_is_withdrawn_from_the_ledger() {
     assert_eq!(imported(&read_rows(&ledger)), imported(&rows), "nothing is taken back twice");
 }
 
+/// A person's rows stay apart from the model's judgment (t-26584 decision 3,
+/// m-60846). The routing seat names a request by its attempt, which a
+/// person row's task key never spells, so beside a window's worth of person
+/// rows — on the version answering now and on another — both judges read the
+/// same window and the same agreement as without them, and the rows reach
+/// them on the labels line alone, those of the version answering now only.
+#[test]
+fn a_persons_rows_stay_apart_from_the_models_judgment() {
+    use zerocode_core::jev::promote::{judge_seat, window_wanted_for, Line, Verdict};
+    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+    let seat = &zerocode_core::jev::ROUTING;
+    let wanted = i64::try_from(window_wanted_for(seat).expect("routing rises")).expect("a window fits");
+    let requests: Vec<Value> = (0..wanted)
+        .map(|at| {
+            let mut row = compared(at, ["small", "low", "other"], Some(["small", "low", "other"]));
+            row["attempt"] = json!(format!("session-1@{}", at + 1));
+            row["model"] = json!("m-1");
+            row
+        })
+        .collect();
+    let mut rows = requests.clone();
+    for model in ["m-1", "m-0"] {
+        rows.extend((0..JUDGED_EVERY_ROWS).map(|n| {
+            json!({
+                "at": wanted, "label": format!("{n:016x}"), "labelPart": "complexity", "model": model,
+                "labelSource": "person", "labelAuthor": "test", "agreed": false, "baselineAgreed": true,
+            })
+        }));
+    }
+    let routing_judge = |rows: &[Value]| super::super::decision_shadow::judge_rows(rows).expect("the routing judge judges");
+    let core_judge = |rows: &[Value]| judge_seat(seat, rows).expect("the core judges");
+    let held = Verdict::Hold(Line::Labels { judgment_right: 0, probe_right: JUDGED_EVERY_ROWS });
+    for (alone, beside) in [(routing_judge(&requests), routing_judge(&rows)), (core_judge(&requests), core_judge(&rows))] {
+        assert_eq!((&beside.window, beside.agreement), (&alone.window, alone.agreement));
+        assert_eq!(beside.verdict, held);
+    }
+}
+
 /// A row where the probe answered beside the judgment marks both readers on
 /// the probe's answer, axis by axis: the judgment's `agreed` and, from the
 /// keyword tables' reading on the same row, the baseline's — so the seat is
