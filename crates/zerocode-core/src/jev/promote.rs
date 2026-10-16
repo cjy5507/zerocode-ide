@@ -916,7 +916,7 @@ pub fn judge_seat_at(
         agreement,
         agreement_rows_wanted: sample_floor,
         window_forgives: seat.window_forgives.unwrap_or(0),
-        labels: person_labels(rows, version.model),
+        labels: person_labels(rows, version.model, seat.rubric_version),
         fallbacks_in_a_row: failures_in_a_row_of(version.requests.iter().copied()),
         negatives_wanted: seat.negatives_wanted.unwrap_or(0),
         disagreed_on_record: record.disagreed(),
@@ -1265,11 +1265,14 @@ impl Labels {
 /// said of that part of the request. Of two rows naming one request and one
 /// part of it ([`LABEL_PART`]), the newest counts. A row graded against
 /// another version than `model`, the one answering now, counts for nothing
-/// and takes nothing back. The requests are counted toward a window's worth,
-/// as the file a person named counted them; who was right, part by part.
-/// `None` where no row counts.
+/// and takes nothing back, and so does a row naming another rubric than
+/// `rubric`, the one the seat asks now ([`RUBRIC_VERSION`]): the judgment it
+/// graded was given under other words. A row naming no rubric counts, as
+/// every person row counted before person rows named one. The requests are
+/// counted toward a window's worth, as the file a person named counted them;
+/// who was right, part by part. `None` where no row counts.
 #[must_use]
-pub fn person_labels(rows: &[Value], model: Option<&str>) -> Option<Labels> {
+pub fn person_labels(rows: &[Value], model: Option<&str>, rubric: u32) -> Option<Labels> {
     let mut newest = HashMap::new();
     for row in rows {
         let graded = MODEL
@@ -1279,6 +1282,7 @@ pub fn person_labels(rows: &[Value], model: Option<&str>) -> Option<Labels> {
             .filter(|graded| !graded.is_empty());
         if source_of(row) != Some(LabelSource::Person)
             || graded.is_some_and(|graded| Some(graded) != model)
+            || ![Rubric::Absent, Rubric::Named(rubric)].contains(&Rubric::of(row))
         {
             continue;
         }

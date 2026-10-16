@@ -1368,7 +1368,7 @@ fn judge_rows_on(
             .agreement_rows_wanted
             .unwrap_or(zerocode_core::jev::A_WINDOW_OF_COMPARISONS),
         window_forgives: ROUTING.window_forgives.unwrap_or(0),
-        labels: promote::person_labels(rows, version.model),
+        labels: promote::person_labels(rows, version.model, ROUTING.rubric_version),
         calibrating: gates.calibrating,
         pairs: gates.pairs,
         bar_reads: gates.bar_reads,
@@ -1532,14 +1532,15 @@ const PERSON_LABELS_KIND: &str = "person_labels";
 /// as person rows (t-26584 decision 3), the one place both judges read a
 /// person's verdicts from ([`promote::person_labels`]). One row per judged
 /// axis of a labelled task that the latest answered request of `requests`
-/// matches: the request's key, the axis, the version that answered, and
-/// whether each reader named what the person named — never a word of the
-/// file. A task the file names on more than one line is labelled by its last.
-/// A row is written only where the ledger holds none for the same
-/// request, axis and version, or its newest says otherwise. A label the file
-/// no longer holds is taken back: where the newest row this import wrote of
-/// it says a verdict, a row of the same request, axis and version says none,
-/// and both judges read the newest. How many labelled tasks matched and how
+/// matches: the request's key, the axis, the version that answered, the
+/// rubric it was asked under, and whether each reader named what the person
+/// named — never a word of the file. A task the file names on more than one
+/// line is labelled by its last. A row is written only where the ledger holds
+/// none for the same request, axis, version and rubric, or its newest says
+/// otherwise. A label the file no longer holds is taken back: where the
+/// newest row this import wrote of it says a verdict, a row of the same
+/// request, axis, version and rubric says none, and both judges read the
+/// newest. How many labelled tasks matched and how
 /// many did not go in a summary row whenever a person row is written or a
 /// count changes. A file that is missing or does not read writes nothing and
 /// takes nothing back. Answers whether a person row was written.
@@ -1562,8 +1563,8 @@ fn import_person_labels(
     let Ok(read) = super::decision_report::evaluate_decision_labels(&text, &answered) else {
         return false;
     };
-    // What the ledger's person rows say now: the newest of each request, axis
-    // and version, and whether this import wrote it.
+    // What the ledger's person rows say now: the newest of each request, axis,
+    // version and rubric, and whether this import wrote it.
     let mut said = BTreeMap::new();
     for row in rows.iter().filter(|row| source_of(row) == Some(LabelSource::Person)) {
         let verdicts = (
@@ -1577,34 +1578,38 @@ fn import_person_labels(
             jev_ledger::LABEL_PART.read(row).and_then(serde_json::Value::as_str),
         ) {
             let model = jev_ledger::MODEL.read(row).and_then(serde_json::Value::as_str);
-            said.insert((task, axis, model), (verdicts, imported));
+            let rubric = jev_ledger::RUBRIC_VERSION.read(row).and_then(serde_json::Value::as_u64);
+            said.insert((task, axis, model, rubric), (verdicts, imported));
         }
     }
-    // One label per request, axis and version, the file's later line winning:
-    // compared one by one with what the ledger said before this import, two
-    // lines of one task would each write over the other at every import.
+    // One label per request, axis, version and rubric, the file's later line
+    // winning: compared one by one with what the ledger said before this
+    // import, two lines of one task would each write over the other at every
+    // import. A label held under another rubric does not stand in for this
+    // one's: the judgment it graded was given under other words.
     let mut marks = BTreeMap::new();
     for mark in &read.marks {
-        marks.insert((mark.task.as_str(), mark.axis, mark.model.as_deref()), mark);
+        let rubric = Some(u64::from(mark.rubric_version));
+        marks.insert((mark.task.as_str(), mark.axis, mark.model.as_deref(), rubric), mark);
     }
     let mut written = 0_usize;
-    for (key, mark) in &marks {
+    for (&(task, axis, model, rubric), mark) in &marks {
         let verdicts = (Some(mark.judgment_right), Some(mark.probe_right));
-        if said.get(key).is_some_and(|(then, _)| *then == verdicts) {
+        if said.get(&(task, axis, model, rubric)).is_some_and(|(then, _)| *then == verdicts) {
             continue;
         }
-        let mut row = person_row(now_ms, &mark.task, mark.axis, mark.model.as_deref());
+        let mut row = person_row(now_ms, task, axis, model, rubric);
         row[jev_ledger::AGREED.canonical] = serde_json::Value::from(mark.judgment_right);
         row[jev_ledger::BASELINE_AGREED.canonical] = serde_json::Value::from(mark.probe_right);
         written += usize::from(append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok());
     }
     let mut withdrawn = 0_usize;
-    for ((task, axis, model), (verdicts, imported)) in &said {
+    for ((task, axis, model, rubric), (verdicts, imported)) in &said {
         let held = read.labelled.get(*task).is_some_and(|axes| axes.contains(axis));
         if !imported || *verdicts == (None, None) || held {
             continue;
         }
-        let row = person_row(now_ms, task, axis, *model);
+        let row = person_row(now_ms, task, axis, *model, *rubric);
         withdrawn += usize::from(append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok());
     }
     let unmatched = read.labels.saturating_sub(read.matched);
@@ -1626,10 +1631,16 @@ fn import_person_labels(
     written + withdrawn > 0
 }
 
-/// A person row of the labels file's import naming one part of one request
-/// and the version that answered it, before any verdict: written as it is,
-/// the label taken back.
-fn person_row(now_ms: i64, task: &str, axis: &str, model: Option<&str>) -> serde_json::Value {
+/// A person row of the labels file's import naming one part of one request,
+/// the version that answered it and the rubric it was asked under, before
+/// any verdict: written as it is, the label taken back.
+fn person_row(
+    now_ms: i64,
+    task: &str,
+    axis: &str,
+    model: Option<&str>,
+    rubric: Option<u64>,
+) -> serde_json::Value {
     let mut row = serde_json::json!({
         "at": now_ms,
         (jev_ledger::LABEL.canonical): task,
@@ -1637,6 +1648,9 @@ fn person_row(now_ms: i64, task: &str, axis: &str, model: Option<&str>) -> serde
     });
     if let Some(model) = model {
         row[jev_ledger::MODEL.canonical] = serde_json::Value::from(model);
+    }
+    if let Some(rubric) = rubric {
+        row[jev_ledger::RUBRIC_VERSION.canonical] = serde_json::Value::from(rubric);
     }
     stamp_label(&mut row, LabelSource::Person, PERSON_LABEL_AUTHOR);
     row

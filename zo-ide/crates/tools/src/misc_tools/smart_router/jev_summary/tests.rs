@@ -1220,14 +1220,15 @@ fn the_same_labels_file_imported_twice_counts_once() {
     assert_eq!(imported(&once).len(), 5, "four labelled parts and one count");
     assert_eq!(imported(&twice), imported(&once));
     assert!(imported(&once).iter().filter(|row| row["labelSource"] == json!("person")).all(|row| row["model"] == json!("m-1")));
-    let labels_line = zerocode_core::jev::promote::person_labels(&twice, Some("m-1"));
+    let rubric = zerocode_core::jev::ROUTING.rubric_version;
+    let labels_line = zerocode_core::jev::promote::person_labels(&twice, Some("m-1"), rubric);
     assert_eq!(
         labels_line,
         Some(zerocode_core::jev::promote::Labels { compared: 2, judgment_right: 2, probe_right: 2 }),
         "{twice:?}"
     );
-    assert_eq!(labels_line, zerocode_core::jev::promote::person_labels(&once, Some("m-1")));
-    assert_eq!(zerocode_core::jev::promote::person_labels(&twice, Some("m-2")), None, "another version's labels are not these");
+    assert_eq!(labels_line, zerocode_core::jev::promote::person_labels(&once, Some("m-1"), rubric));
+    assert_eq!(zerocode_core::jev::promote::person_labels(&twice, Some("m-2"), rubric), None, "another version's labels are not these");
 }
 
 /// A label taken out of the labels file stops counting (t-26584 decision 3,
@@ -1268,7 +1269,7 @@ fn a_label_taken_out_of_the_file_is_withdrawn_from_the_ledger() {
     expected.sort();
     assert_eq!(withdrawn, expected);
     assert_eq!(
-        zerocode_core::jev::promote::person_labels(&rows, Some("m-1")),
+        zerocode_core::jev::promote::person_labels(&rows, Some("m-1"), zerocode_core::jev::ROUTING.rubric_version),
         Some(zerocode_core::jev::promote::Labels { compared: 1, judgment_right: 1, probe_right: 0 }),
         "only the first task's complexity stands"
     );
@@ -1307,7 +1308,7 @@ fn a_task_the_file_labels_twice_counts_its_later_line_once() {
     let twice = read_rows(&ledger);
     assert_eq!(imported(&twice), imported(&once), "the second import writes nothing");
     assert_eq!(
-        zerocode_core::jev::promote::person_labels(&twice, Some("m-1")),
+        zerocode_core::jev::promote::person_labels(&twice, Some("m-1"), zerocode_core::jev::ROUTING.rubric_version),
         Some(zerocode_core::jev::promote::Labels { compared: 1, judgment_right: 0, probe_right: 1 }),
         "the later line's verdict: the probe named what the person named"
     );

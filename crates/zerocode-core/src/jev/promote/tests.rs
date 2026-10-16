@@ -3721,7 +3721,7 @@ fn the_labels_line_counts_requests_not_their_parts() {
         })
         .collect();
     assert_eq!(
-        person_labels(&rows, None),
+        person_labels(&rows, None, UNVERSIONED_RUBRIC),
         Some(Labels {
             compared: 7,
             judgment_right: 0,
@@ -3757,7 +3757,7 @@ fn a_withdrawn_person_label_stops_counting_and_another_versions_never_counts() {
         .collect();
     rows.extend((0..20).map(|request| person(request, "b", Some(true))));
     assert_eq!(
-        person_labels(&rows, Some("a")),
+        person_labels(&rows, Some("a"), UNVERSIONED_RUBRIC),
         Some(Labels {
             compared: 20,
             judgment_right: 0,
@@ -3766,12 +3766,12 @@ fn a_withdrawn_person_label_stops_counting_and_another_versions_never_counts() {
         "version b's rows count nothing for version a"
     );
     assert_eq!(
-        person_labels(&rows, Some("b")).map(|labels| labels.judgment_right),
+        person_labels(&rows, Some("b"), UNVERSIONED_RUBRIC).map(|labels| labels.judgment_right),
         Some(20)
     );
     rows.push(person(0, "a", None));
     assert_eq!(
-        person_labels(&rows, Some("a")),
+        person_labels(&rows, Some("a"), UNVERSIONED_RUBRIC),
         Some(Labels {
             compared: 19,
             judgment_right: 0,
@@ -3780,7 +3780,7 @@ fn a_withdrawn_person_label_stops_counting_and_another_versions_never_counts() {
         "the withdrawn label no longer counts"
     );
     assert_eq!(
-        person_labels(&rows, Some("b")).map(|labels| labels.compared),
+        person_labels(&rows, Some("b"), UNVERSIONED_RUBRIC).map(|labels| labels.compared),
         Some(20),
         "a withdrawal names its version, and version b's label stands"
     );

@@ -166,6 +166,8 @@ pub struct PersonMark {
     pub axis: &'static str,
     /// The version that answered the request, where its row names one.
     pub model: Option<String>,
+    /// The rubric the request was asked under, as its row names it.
+    pub rubric_version: u32,
     pub judgment_right: bool,
     pub probe_right: bool,
 }
@@ -256,6 +258,7 @@ pub fn evaluate_decision_labels(
                 task: task.clone(),
                 axis: axis.name,
                 model: row.model.clone(),
+                rubric_version: row.rubric_version,
                 judgment_right: choice == position,
                 probe_right: probe == position,
             });
