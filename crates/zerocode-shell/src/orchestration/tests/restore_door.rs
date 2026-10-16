@@ -1433,10 +1433,16 @@ fn a_restored_conversation_names_its_folder_and_asks_the_ledger_for_its_seat() {
 
     let lines = door.noted("session-1789537852228-0 in ");
     assert_eq!(lines.len(), 1, "{lines:?}");
+    // The road and the ledger's word follow the folder (t-57717): a door
+    // that named no road, for a conversation no worker reported.
+    let (placed, origin) = lines[0]
+        .split_once(" road=")
+        .expect("the line ends with its road");
     assert!(
-        lines[0].ends_with(&checkout.path().display().to_string()),
+        placed.ends_with(&checkout.path().display().to_string()),
         "{lines:?}"
     );
+    assert_eq!(origin, "none ledger=none", "{lines:?}");
     assert!(door.did.lock().unwrap().contains(&Did::Rebound(DOOR)));
     crate::agent_teams::forget_term(DOOR);
 }

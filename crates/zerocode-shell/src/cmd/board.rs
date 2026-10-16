@@ -1470,6 +1470,14 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
             Ok(claim) => claim,
             Err(holder) => return Ok(ConversationWake::standing(holder)),
         };
+    // The road the door came by and the ledger's word on the conversation
+    // (t-57717): every line this wake writes ends with both, so the log says
+    // why a conversation came back and whose it was — the 2026-10-15/16
+    // lines that brought three finished workers back said neither.
+    let road = window.road();
+    let row = crate::orchestration::worker_of_conversation(agent, &session.id);
+    let origin = restart_nudge_runtime::origin(road.word(), &row);
+    let note = |line: String| window.note(&restart_nudge_runtime::with_origin(line, &origin));
     // A conversation whose last program an account switch closed and nobody
     // has seen leave is not opened again by any door (t-7538, astra R3):
     // not as the worker's witness, and not as a person's tab either — a
@@ -1482,14 +1490,14 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     }) {
         Ok(None) => {}
         Ok(Some(worker)) => {
-            window.note(&restart_nudge_runtime::held_line(term, agent, &worker));
+            note(restart_nudge_runtime::held_line(term, agent, &worker));
             return Err(format!(
                 "워커 {worker}의 옛 판 프로그램이 아직 떠나지 않아 그 대화를 열지 않았습니다 — \
                  떠난 뒤 다시 열 수 있습니다"
             ));
         }
         Err(why) => {
-            window.note(&restart_nudge_runtime::unread_hold_line(term, agent, &why));
+            note(restart_nudge_runtime::unread_hold_line(term, agent, &why));
             return Err(format!(
                 "원장을 읽지 못해 이 대화를 붙든 옛 프로그램이 없는지 확인할 수 없어 열지 \
                  않았습니다 — 원장을 다시 읽을 수 있게 되면 다시 열 수 있습니다 ({why})"
@@ -1504,6 +1512,26 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     let root = window.root();
     let root_words = root.to_string_lossy().into_owned();
     let reseating = crate::orchestration::sleeper_awaiting(&root_words, agent, &session.id);
+    // A finished worker's conversation does not come back on a road that read
+    // it off the window's stored record of a workspace (t-57717): nobody
+    // chose it there, and nobody is coming back to it — on 2026-10-15 and 16
+    // three came back that way as agent panes nobody had called, each on the
+    // first visit to its checkout after a restart. Nothing starts; the door
+    // stands a plain shell in its place and keeps no line of it. A person's
+    // pick by name (`reopen`) still opens it, and a ledger that did not
+    // answer stops nobody's conversation here.
+    if reseating.is_none()
+        && road.reads_a_stored_record()
+        && let Ok(Some(held)) = &row
+        && held.finished
+    {
+        note(restart_nudge_runtime::declined_line(
+            term,
+            agent,
+            &session.id,
+        ));
+        return Ok(ConversationWake::finished(term, held.worker.clone()));
+    }
     // A sleeper's conversation that cannot come back — its file is not on
     // disk, its agent has no resume for it — is not started as something it
     // is not: the ledger hears the loss once, and nothing starts (t-7812).
@@ -1639,7 +1667,7 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
             if let Ok(Some(held)) = &seated {
                 crate::orchestration::resumed_pane_never_started(held);
             }
-            window.note(&restart_nudge_runtime::unseated_line(
+            note(restart_nudge_runtime::unseated_line(
                 term,
                 kind.slug(),
                 worker,
@@ -1662,19 +1690,19 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
             return Err(error);
         }
     };
-    window.note(&restart_nudge_runtime::placed_line(
+    note(restart_nudge_runtime::placed_line(
         term,
         kind.slug(),
         &session.id,
         &root,
     ));
     if let Some(moved) = &moved {
-        window.note(&moved.line(term, kind.slug()));
+        note(moved.line(term, kind.slug()));
     }
     if fresh {
         // Not that conversation: the fresh agent's own SessionStart names
         // the one this pane now holds.
-        window.note(&restart_nudge_runtime::fresh_line(
+        note(restart_nudge_runtime::fresh_line(
             term,
             kind.slug(),
             &session.id,
@@ -1733,6 +1761,7 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
                         root: data_root,
                         worker,
                     },
+                    origin: origin.clone(),
                 },
             );
             window.arm(term, pending, delivery);
@@ -1743,7 +1772,7 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
             if let Some(key) = owed {
                 crate::orchestration::resumed_at_rest(&data_root, term, &key);
             }
-            window.note(&restart_nudge_runtime::log_line(
+            note(restart_nudge_runtime::log_line(
                 term,
                 kind.slug(),
                 &resumed_session_id,

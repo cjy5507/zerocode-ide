@@ -1762,6 +1762,7 @@ impl agent_teams::Host for TeamWindow {
                     agent,
                     session.as_deref().unwrap_or_default(),
                     placed.elapsed(),
+                    worker,
                 );
             }
             crate::restart_nudge_runtime::arm_left_unsent(

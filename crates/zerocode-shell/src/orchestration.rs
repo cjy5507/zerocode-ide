@@ -5988,6 +5988,41 @@ pub(crate) fn sleeper_awaiting(checkout: &str, agent: &str, session_id: &str) ->
         .map(|worker| worker.id.clone())
 }
 
+/// The ledger's word on a conversation a door is about to bring back
+/// (t-57717): the worker row it is ([`Ledger::worker_of_conversation`]), that
+/// row's state — `taken` for a pane the person took — and whether its worker
+/// is finished with it ([`Ledger::finished_worker_of`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConversationWorker {
+    pub(crate) worker: String,
+    pub(crate) word: &'static str,
+    pub(crate) finished: bool,
+}
+
+/// [`ConversationWorker`] for `agent`'s `session_id`, read now. `Ok(None)` for
+/// a conversation no worker reported, and for a window with no durable ledger
+/// at all; `Err` with why for a ledger on this disk that does not answer now
+/// ([`holds_ledger`]) — never read as "nobody's".
+pub(crate) fn worker_of_conversation(
+    agent: &str,
+    session_id: &str,
+) -> Result<Option<ConversationWorker>, String> {
+    let Some((_, ledger)) = holds_ledger()? else {
+        return Ok(None);
+    };
+    Ok(ledger
+        .worker_of_conversation(agent, session_id)
+        .map(|row| ConversationWorker {
+            worker: row.id.clone(),
+            word: if row.taken_over {
+                "taken"
+            } else {
+                row.state.as_str()
+            },
+            finished: ledger.finished_worker_of(agent, session_id).is_some(),
+        }))
+}
+
 /// The window is resuming a conversation into `term` (t-3058): this
 /// checkout, this agent, this provider session. If a sleeper is that
 /// conversation, the ledger seats it there as the same worker — dispatch and
