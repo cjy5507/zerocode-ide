@@ -565,38 +565,37 @@ impl AsyncApiClient for LiveAsyncApiClient {
         })
     }
 
-    /// The URL an Anthropic client posts a turn to, as that client builds it
-    /// (`{base_url}/v1/messages`), path and port included (t-57512). `None`
-    /// for any other client, for a base URL that does not parse or carries
-    /// userinfo, a query or a fragment, and while a cloud gateway carries
-    /// Anthropic requests elsewhere.
+    /// The URL this client posts a turn to (t-57512); see `destination_of`.
     fn destination(&self) -> Option<String> {
-        let ProviderClient::Anthropic(client) = &self.client else {
-            return None;
-        };
-        if api::cloud_gateway_active() {
-            return None;
-        }
-        let base_url = url::Url::parse(client.base_url()).ok()?;
-        if !base_url.username().is_empty()
-            || base_url.password().is_some()
-            || base_url.query().is_some()
-            || base_url.fragment().is_some()
-        {
-            return None;
-        }
-        Some(format!("{}/v1/messages", client.base_url().trim_end_matches('/')))
+        destination_of(&self.client, api::cloud_gateway_active)
     }
 }
 
-/// Where a turn on `client` is posted, as that client builds the URL, with
-/// `gateway_active` saying whether a cloud gateway carries Anthropic requests
-/// in this process (t-57512).
+/// Where a turn on `client` is posted, as that client builds the URL
+/// (`{base_url}/v1/messages`), path and port included (t-57512). `None` for
+/// any other client, for a base URL that does not parse or carries userinfo,
+/// a query or a fragment, and while a cloud gateway carries Anthropic
+/// requests elsewhere, which `gateway_active` says. It is asked only for an
+/// Anthropic client, so no other client reads the process-wide gateway state.
 fn destination_of(
-    _client: &ProviderClient,
-    _gateway_active: impl FnOnce() -> bool,
+    client: &ProviderClient,
+    gateway_active: impl FnOnce() -> bool,
 ) -> Option<String> {
-    None
+    let ProviderClient::Anthropic(client) = client else {
+        return None;
+    };
+    if gateway_active() {
+        return None;
+    }
+    let base_url = url::Url::parse(client.base_url()).ok()?;
+    if !base_url.username().is_empty()
+        || base_url.password().is_some()
+        || base_url.query().is_some()
+        || base_url.fragment().is_some()
+    {
+        return None;
+    }
+    Some(format!("{}/v1/messages", client.base_url().trim_end_matches('/')))
 }
 
 /// One transcript row for a mid-stream notice. Reconnects render as warnings
