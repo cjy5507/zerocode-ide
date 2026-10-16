@@ -1313,6 +1313,38 @@ fn a_task_the_file_labels_twice_counts_its_later_line_once() {
     );
 }
 
+/// An imported person row names the rubric its request was asked under
+/// (t-26584 decision 3, m-61235), as the request's own row does, and so does
+/// the row that takes it back: the labels line reads a person's label only
+/// while the seat asks the words it graded. What the ledger holds of the
+/// same label under another rubric does not stand in for it: the label is
+/// written again under the rubric asked now, its verdicts the same or not.
+#[test]
+fn an_imported_person_row_names_the_rubric_its_request_was_asked_under() {
+    let work = tempfile::tempdir().expect("tmp");
+    let prompts = ["port the settings page to the new form"];
+    let (ledger, labels, settings, keys) = labelled_window(work.path(), &prompts, "m-1");
+    let rubric = zerocode_core::jev::questions::ROUTING_RUBRIC_VERSION;
+    // What an import wrote of the task's complexity while the seat asked the
+    // rubric before: the verdicts the file's line gives again now.
+    let mut rows = read_rows(&ledger);
+    rows.push(json!({
+        "at": 0, "label": keys[0], "labelPart": "complexity", "model": "m-1", "rubricVersion": rubric - 1,
+        "labelSource": "person", "labelAuthor": "labels_file", "agreed": true, "baselineAgreed": false,
+    }));
+    ledger_with(work.path(), &rows);
+    write_labels(&labels, &[json!({"prompt": prompts[0], "complexity": "large", "risk": "high"})]);
+    let judge = |now| super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), now);
+    assert!(judge(9).is_some(), "a full window is due");
+    write_labels(&labels, &[json!({"prompt": prompts[0], "complexity": "large"})]);
+    assert!(judge(10).is_some(), "still due: no request was added");
+    let this_rubric: Vec<Value> = read_rows(&ledger)
+        .into_iter()
+        .filter(|row| row["labelSource"] == json!("person") && row["rubricVersion"] == json!(rubric))
+        .collect();
+    assert_eq!(this_rubric.len(), 3, "both labelled parts, then the one taken back: {this_rubric:?}");
+}
+
 /// A person's rows stay apart from the model's judgment (t-26584 decision 3,
 /// m-60846). The routing seat names a request by its attempt, which a
 /// person row's task key never spells, so beside a window's worth of person

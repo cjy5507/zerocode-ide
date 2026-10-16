@@ -3786,6 +3786,50 @@ fn a_withdrawn_person_label_stops_counting_and_another_versions_never_counts() {
     );
 }
 
+/// A person's label belongs to the rubric its request was asked under
+/// (t-26584 decision 3, m-61235): a window's worth of person rows naming
+/// another rubric than the seat asks graded judgments given under other
+/// words, and the labels line does not read them. Rows naming the seat's
+/// rubric count, and so do rows naming none, as every person row counted
+/// before person rows named one.
+#[test]
+fn a_person_row_of_another_rubric_does_not_count_on_the_labels_line() {
+    let seat = &crate::jev::RECALL;
+    let verdict_beside = |rubric: Option<u32>| {
+        let mut rows = window_then(seat, marks_that_rise);
+        rows.extend((0..JUDGED_EVERY_ROWS).map(|n| {
+            let mut row = json!({
+                "at": 1,
+                "label": format!("person-{n}"),
+                "labelSource": "person",
+                "labelAuthor": "test",
+                "agreed": false,
+                "baselineAgreed": true,
+            });
+            if let Some(rubric) = rubric {
+                row["rubricVersion"] = json!(rubric);
+            }
+            row
+        }));
+        judge_seat(seat, &rows).expect("judged").verdict
+    };
+    let held = Verdict::Hold(Line::Labels {
+        judgment_right: 0,
+        probe_right: JUDGED_EVERY_ROWS,
+    });
+    assert_eq!(verdict_beside(None), held, "a row naming no rubric counts");
+    assert_eq!(
+        verdict_beside(Some(seat.rubric_version)),
+        held,
+        "the seat's own rubric counts"
+    );
+    assert_eq!(
+        verdict_beside(Some(seat.rubric_version + 1)),
+        Verdict::Rise,
+        "another rubric's rows graded other words"
+    );
+}
+
 /// An act-line seat acts from a line read off its own graded answers
 /// (t-26584, ③). With no calibration record for it, it holds however clean
 /// its marks are: a line nobody calibrated is a default, and the judge says
