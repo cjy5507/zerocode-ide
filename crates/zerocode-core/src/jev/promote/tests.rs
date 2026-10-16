@@ -3698,6 +3698,38 @@ fn person_rows_in_the_ledger_reach_the_labels_line() {
     );
 }
 
+/// Decision 3 of t-26584 (t-47784): the labels line counts requests, as the
+/// file a person named counted them. A person row grades one part of a
+/// request, so seven requests labelled on three parts each are seven — short
+/// of a window's worth — while every part's verdict still counts toward who
+/// was right.
+#[test]
+fn the_labels_line_counts_requests_not_their_parts() {
+    let rows: Vec<Value> = (0..7)
+        .flat_map(|request| {
+            (0..3).map(move |part| {
+                json!({
+                    "at": 1,
+                    "label": format!("person-{request}"),
+                    "labelPart": format!("part-{part}"),
+                    "labelSource": "person",
+                    "labelAuthor": "test",
+                    "agreed": false,
+                    "baselineAgreed": true,
+                })
+            })
+        })
+        .collect();
+    assert_eq!(
+        person_labels(&rows, None),
+        Some(Labels {
+            compared: 7,
+            judgment_right: 0,
+            probe_right: 21,
+        })
+    );
+}
+
 /// An act-line seat acts from a line read off its own graded answers
 /// (t-26584, ③). With no calibration record for it, it holds however clean
 /// its marks are: a line nobody calibrated is a default, and the judge says
