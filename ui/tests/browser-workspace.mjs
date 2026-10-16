@@ -4,6 +4,10 @@ const FRAME = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAw
 
 async function standWorkspace(browser, origin, { holdState = false, actorName = "codex" } = {}) {
   const opened = await openWindowTestPage(browser, origin);
+  await opened.page.waitForFunction(() => {
+    const actorTab = tabs.find((tab) => tab.kind === "term");
+    return !!actorTab && activePaneOf(actorTab) !== null;
+  });
   await opened.page.evaluate(({ frame, holdState, actorName }) => {
     window.__WORKSPACE__ = {
       opened: [], placed: [], modes: [], snapshots: [], closed: [], closeCalls: [], saved: [],
