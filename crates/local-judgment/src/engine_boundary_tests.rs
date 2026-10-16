@@ -166,8 +166,9 @@ fn withheld_lines_count_alike_whether_they_end_in_lf_or_crlf_or_blank_pieces_sta
 /// The owned bridge over a stand-in for the laya runtime and the libraries
 /// the bridge imports: an agent that loads its folder's
 /// `rl_agent_config.json` and builds every question head through
-/// `laya.common.build_head`, one token per word, cutting the instruction to
-/// what the options leave of the config's head budget.
+/// `laya.common.build_head`, encoding the instruction and then each option as
+/// laya does, one token per word, and cutting the instruction to what the
+/// options leave of the config's head budget.
 const STAND_IN_LAYA: &str = r#"import json,os,sys,types
 class Words:
  mask_token,cls_token_id,sep_token_id,mask_token_id='[MASK]',1,2,3
@@ -175,8 +176,8 @@ class Words:
   ids=[10+len(word) for word in text.split()]
   return {'input_ids':ids[:max_length] if truncation else ids}
 def build_head(tok,q,head_max_len,option_order=None):
- options=[[tok.mask_token_id]+tok(' '+text,add_special_tokens=False,truncation=True,max_length=48)['input_ids'] for text in ('false','true')]
  instruction=tok('%s question: %s'%(q['t'],q['ins']),add_special_tokens=False)['input_ids']
+ options=[[tok.mask_token_id]+tok(' '+text,add_special_tokens=False,truncation=True,max_length=48)['input_ids'] for text in ('false','true')]
  ids=[tok.cls_token_id]+instruction[:head_max_len-sum(map(len,options))]+[tok.sep_token_id]
  markers=[]
  for option in options:
