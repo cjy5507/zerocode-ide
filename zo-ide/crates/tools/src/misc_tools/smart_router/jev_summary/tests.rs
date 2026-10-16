@@ -1282,6 +1282,37 @@ fn a_label_taken_out_of_the_file_is_withdrawn_from_the_ledger() {
     assert_eq!(imported(&read_rows(&ledger)), imported(&rows), "nothing is taken back twice");
 }
 
+/// A task the labels file names twice counts its later line, once (t-26584
+/// decision 3, m-61235): two lines of one prompt with different verdicts are
+/// one label, the later line's, so a second import over the same file writes
+/// nothing and the labels line reads the later line's verdict.
+#[test]
+fn a_task_the_file_labels_twice_counts_its_later_line_once() {
+    let work = tempfile::tempdir().expect("tmp");
+    let prompts = ["port the settings page to the new form"];
+    let (ledger, labels, settings, _) = labelled_window(work.path(), &prompts, "m-1");
+    // The judgment said large and the probe medium: the first line sides
+    // with the judgment, the later one with the probe.
+    write_labels(
+        &labels,
+        &[
+            json!({"prompt": prompts[0], "complexity": "large"}),
+            json!({"prompt": prompts[0], "complexity": "medium"}),
+        ],
+    );
+    let judge = |now| super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), now);
+    assert!(judge(9).is_some(), "a full window is due");
+    let once = read_rows(&ledger);
+    assert!(judge(10).is_some(), "still due: no request was added");
+    let twice = read_rows(&ledger);
+    assert_eq!(imported(&twice), imported(&once), "the second import writes nothing");
+    assert_eq!(
+        zerocode_core::jev::promote::person_labels(&twice, Some("m-1")),
+        Some(zerocode_core::jev::promote::Labels { compared: 1, judgment_right: 0, probe_right: 1 }),
+        "the later line's verdict: the probe named what the person named"
+    );
+}
+
 /// A person's rows stay apart from the model's judgment (t-26584 decision 3,
 /// m-60846). The routing seat names a request by its attempt, which a
 /// person row's task key never spells, so beside a window's worth of person
