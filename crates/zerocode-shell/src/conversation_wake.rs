@@ -386,5 +386,46 @@ mod tests {
             serde_json::to_value(ConversationWake::standing(3)).expect("json"),
             serde_json::json!({ "term": 3, "standing": true })
         );
+        // t-57717: a finished worker's conversation off a stored record —
+        // nothing opened, and the worker named for the shell's one line.
+        assert_eq!(
+            serde_json::to_value(ConversationWake::finished(5, "w-57717".to_string()))
+                .expect("json"),
+            serde_json::json!({ "term": 5, "standing": false, "finished": "w-57717" })
+        );
+    }
+
+    /// t-57717: the road a door names, as the webview spells it — a word this
+    /// window does not know is no road — and the four that read the
+    /// conversation off the window's stored record, the only roads a finished
+    /// worker's conversation is declined on.
+    #[test]
+    fn a_door_names_its_road_and_only_a_stored_records_roads_decline() {
+        let spelled: Vec<&str> = WakeRoad::NAMED.into_iter().map(WakeRoad::word).collect();
+        assert_eq!(
+            spelled,
+            [
+                "restore-front",
+                "restore-behind",
+                "visit",
+                "stage",
+                "reopen"
+            ]
+        );
+        for road in WakeRoad::NAMED {
+            assert_eq!(WakeRoad::named(Some(road.word())), road);
+            assert_eq!(
+                road.reads_a_stored_record(),
+                road != WakeRoad::Reopen,
+                "{}",
+                road.word()
+            );
+        }
+        for unknown in [None, Some("boot"), Some(""), Some("Visit")] {
+            let road = WakeRoad::named(unknown);
+            assert_eq!(road, WakeRoad::Unnamed, "{unknown:?}");
+            assert_eq!(road.word(), "none");
+            assert!(!road.reads_a_stored_record());
+        }
     }
 }

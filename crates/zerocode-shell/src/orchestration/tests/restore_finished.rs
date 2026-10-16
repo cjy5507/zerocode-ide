@@ -55,6 +55,21 @@ fn placed(door: &Door, session: &str) -> Vec<String> {
     door.noted(&format!("{session} in "))
 }
 
+/// A line a test has just held to its shape, printed for the report's
+/// examples (run with `--nocapture`).
+fn shown(line: &str) {
+    println!("LINE t-57717 {line}");
+}
+
+/// The processes a door started that re-enter a conversation: the
+/// `--resume` launches the three 2026-10-15/16 lines were.
+fn resumes(door: &Door) -> usize {
+    door.started()
+        .iter()
+        .filter(|(_, command)| command.contains("--resume"))
+        .count()
+}
+
 /// t-57717 red ①: a finished worker's conversation, asked for on each road
 /// that read it off a stored record — the boot's front and behind, a first
 /// visit, a sleeping tab on the stage — starts nothing: no launch built, no
@@ -111,6 +126,9 @@ fn a_finished_workers_conversation_off_a_stored_record_starts_nothing() {
         door.started()
     );
     assert_eq!(row(&worker).state, WorkerState::Released);
+    for line in door.noted(" did not resume ") {
+        shown(&line);
+    }
 
     // A person's pick by name still opens it — the person's own tab.
     door.on_road(WakeRoad::Reopen);
@@ -130,6 +148,7 @@ fn a_finished_workers_conversation_off_a_stored_record_starts_nothing() {
         line[0].ends_with(&format!("road=reopen ledger=released:{worker}")),
         "{line:?}"
     );
+    shown(&line[0]);
     assert_eq!(row(&worker).state, WorkerState::Released);
     for pane in [REOPENED, WORKER, LEADER] {
         crate::agent_teams::forget_term(pane);
@@ -174,6 +193,7 @@ fn a_sleepers_conversation_off_a_stored_record_is_seated_as_the_same_worker() {
         line[0].ends_with(&format!("road=visit ledger=sleeping:{worker}")),
         "{line:?}"
     );
+    shown(&line[0]);
     for pane in [DOOR, LEADER] {
         crate::agent_teams::forget_term(pane);
     }
@@ -201,6 +221,7 @@ fn a_conversation_no_worker_reported_comes_back_off_a_stored_record() {
     let line = placed(&door, session);
     assert_eq!(line.len(), 1, "{line:?}");
     assert!(line[0].ends_with("road=visit ledger=none"), "{line:?}");
+    shown(&line[0]);
     crate::agent_teams::forget_term(DOOR);
 }
 
@@ -310,13 +331,110 @@ fn a_save_writes_no_workers_conversation_and_keeps_the_persons() {
     }
 }
 
-/// t-57717 ⑥, the numbers: the three 2026-10-15/16 scenes replayed through
-/// the door on the road they took — a first visit to a finished worker's
-/// checkout after a restart (t-54563 16:27:46, t-55838-url 19:15:22,
-/// t-56480-zo 00:03:24) — and the 19:13:26 scene beside them, the ledger's
-/// own reseat of the third worker while it slept, before it finished. The
-/// processes started that nobody called: 3 before, 0 now; the sleeper's
-/// reseat: 1 before, 1 now.
+/// t-57717 ③, the seat: a conversation that holds a run's coordinator seat
+/// is the person's, whatever worker row once carried it — a save keeps it,
+/// while a finished worker's conversation saved beside it is struck (so the
+/// ledger was read, and the seat is what kept the first).
+#[test]
+fn a_save_keeps_a_conversation_that_holds_a_runs_seat() {
+    const LEADER: u32 = 577_190;
+    const FIRST: u32 = 577_191;
+    const SEATED: u32 = 577_195;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the checkout");
+    let host = Restoring::new(checkout.path(), FIRST, (0, test_actor(LEADER)));
+    let (team, _run) = a_run(&host, LEADER, "seat-kept");
+    // The conversation the second run's coordinator is (`test_actor`),
+    // carried first by a worker of the first run, which finished.
+    let seat = format!("test-session-of-term-{SEATED}");
+    let finished = "57717a2c-0000-4000-8000-000000000001";
+    let (_task, carried, _) = a_worker(&host, &team, "--agent claude", Some(&seat));
+    let (_task, done, _) = a_worker(&host, &team, "--agent claude", Some(finished));
+    for worker in [&carried, &done] {
+        say(
+            &host,
+            &team,
+            &format!("worker-stop --worker {worker} --reason handed-in"),
+        );
+    }
+    let (seated_team, _seated_run) = a_run(&host, SEATED, "seat-held");
+    let current: serde_json::Value =
+        serde_json::from_str(&say(&host, &seated_team, "run-current")).expect("run-current");
+    assert_eq!(current["seated"], true, "{current}");
+
+    let saved =
+        crate::cmd::settings::saved_set(vec![record("claude", &seat), record("claude", finished)]);
+
+    assert_eq!(saved.struck, vec![done], "{saved:?}");
+    assert_eq!(saved.tabs[0], Some(record("claude", &seat)));
+    assert_eq!(saved.tabs[1], None);
+    for pane in [FIRST, FIRST + 1, LEADER, SEATED] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// t-57717 ②, a ledger that does not answer: the decline is the ledger's
+/// word, so without one nothing new stops a wake — the unseen-exit hold that
+/// already refuses every door while the ledger cannot be read (t-7538, astra
+/// R3-1) answers as before — and the line names it, `ledger=unread`. Once
+/// the ledger reads again, the same door declines the finished worker's
+/// conversation.
+#[test]
+fn a_ledger_that_cannot_be_read_is_named_unread_and_the_decline_waits_for_it() {
+    const LEADER: u32 = 577_200;
+    const WORKER: u32 = 577_201;
+    const DOOR: u32 = 577_208;
+    let (_window, store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the worker's checkout");
+    let host = Restoring::new(checkout.path(), WORKER, (0, test_actor(LEADER)));
+    let (team, _run) = a_run(&host, LEADER, "unread");
+    let session = "57717a3c-0000-4000-8000-000000000001";
+    let (_task, worker, _term) = a_worker(&host, &team, "--agent claude", Some(session));
+    say(
+        &host,
+        &team,
+        &format!("worker-stop --worker {worker} --reason handed-in"),
+    );
+    let door = Door::new(checkout.path());
+    door.on_road(WakeRoad::Visit);
+
+    let writer = store.fault_connection_for_tests().expect("the store");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("the store's write lock, held");
+    let unread = door.wake(DOOR, "claude", session);
+    writer
+        .execute_batch("ROLLBACK")
+        .expect("the store's write lock let go");
+    drop(writer);
+
+    let refused = unread.expect_err("a wake opened on a ledger that could not be read");
+    assert!(refused.contains("원장을 읽지 못해"), "{refused}");
+    assert!(door.started().is_empty(), "{:?}", door.started());
+    let said = door.noted("road=visit ledger=unread");
+    assert_eq!(said.len(), 1, "{:#?}", door.did.lock().unwrap());
+    shown(&said[0]);
+
+    let read = door.wake(DOOR + 1, "claude", session);
+    assert_eq!(read, Ok(ConversationWake::finished(DOOR + 1, worker)));
+    assert!(door.started().is_empty(), "{:?}", door.started());
+    for pane in [DOOR, DOOR + 1, WORKER, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// t-57717 ⑥, the numbers: the three 2026-10-15/16 scenes replayed on the
+/// road they took — a first visit to a finished worker's checkout after a
+/// restart (t-54563 16:27:46, t-55838-url 19:15:22, t-56480-zo 00:03:24) —
+/// and the 19:13:26 scene beside them, the ledger's own reseat of the third
+/// worker while it slept, before it finished. A visit reads the checkout's
+/// stored set off the pane file (`pane_layouts`) and wakes every
+/// conversation left in it through the door on its road (`spawnStoredLeaf`);
+/// the door is also handed each scene's record as it stood, as a tab read
+/// before its worker finished would hand it. Counted: the visits whose read
+/// still held the finished worker's conversation, the `--resume` launches
+/// off those reads, and the door's own — 3, 3 and 3 before, 0, 0 and 0 now;
+/// the sleeper's reseat, 1 before and 1 now.
 #[test]
 fn the_three_unsummoned_resumes_are_none_and_the_sleepers_reseat_stays_one() {
     const LEADER: u32 = 577_160;
@@ -342,6 +460,7 @@ fn the_three_unsummoned_resumes_are_none_and_the_sleepers_reseat_stays_one() {
         std::fs::create_dir_all(&folder).expect("a checkout");
         folder
     };
+    let at = |name: &str| root.path().join(name).to_string_lossy().into_owned();
     let hosts: Vec<Restoring> = scenes
         .iter()
         .map(|&(name, _, first)| {
@@ -381,27 +500,62 @@ fn the_three_unsummoned_resumes_are_none_and_the_sleepers_reseat_stays_one() {
         assert_eq!(row(worker).state, WorkerState::Released, "{worker}");
     }
 
-    // Each first visit after a restart, through the door the window takes.
-    let mut started = 0;
-    for (at, (&(name, session, _), term)) in scenes.iter().zip(DOORS..).enumerate() {
+    // The pane file as the three visits found it: each checkout's one tab,
+    // its one leaf the finished worker's conversation.
+    let file = root.path().join("pane-layouts.json");
+    crate::pane_layout::rewrite(&file, |held| {
+        for &(name, session, _) in &scenes {
+            crate::pane_layout::store(held, at(name), vec![record("claude", session)]);
+        }
+        true
+    })
+    .expect("the stored sets");
+
+    // Each first visit after a restart: the read, then the door the window
+    // takes for every conversation the read left — and the door alone,
+    // handed the record as it stood.
+    let (mut read, mut off_read, mut alone) = (0, 0, 0);
+    for (scene, ((&(name, session, _), visit), handed)) in scenes
+        .iter()
+        .zip((DOORS..).step_by(2))
+        .zip((DOORS + 1..).step_by(2))
+        .enumerate()
+    {
+        let set = crate::cmd::settings::opened_set(&file, &at(name)).kept();
+        let held: Vec<_> = set.iter().flat_map(|tab| tab.agents.values()).collect();
+        read += usize::from(held.iter().any(|wake| wake.id == session));
         let door = Door::new(&root.path().join(name));
         door.on_road(WakeRoad::Visit);
-        let woke = door.wake(term, "claude", session);
-        started += door.started().len();
-        assert!(
-            woke.is_ok(),
-            "scene {at} ({name}) answered an error: {woke:?}"
-        );
-        crate::agent_teams::forget_term(term);
+        for wake in held {
+            let woke = door.wake(visit, &wake.agent, &wake.id);
+            assert!(woke.is_ok(), "scene {scene} ({name}), the visit: {woke:?}");
+        }
+        off_read += resumes(&door);
+        let door = Door::new(&root.path().join(name));
+        door.on_road(WakeRoad::Visit);
+        let woke = door.wake(handed, "claude", session);
+        assert!(woke.is_ok(), "scene {scene} ({name}), the door: {woke:?}");
+        alone += resumes(&door);
+        for term in [visit, handed] {
+            crate::agent_teams::forget_term(term);
+        }
     }
     println!(
-        "MEASURE t-57717 processes started that nobody called, on a first visit to a finished \
-         worker's checkout: {started}/3; the sleeper's reseat by the ledger: {reseated}/1"
+        "MEASURE t-57717 first visits to a finished worker's checkout, three scenes: reads that \
+         held its conversation {read}/3; --resume launched off those reads {off_read}/3; \
+         --resume launched by the door handed the stored record {alone}/3; the sleeper's reseat \
+         by the ledger {reseated}/1"
     );
-    assert_eq!(started, 0, "unsummoned resumes on a first visit");
+    assert_eq!(
+        (read, off_read, alone),
+        (0, 0, 0),
+        "unsummoned resumes on a first visit"
+    );
     assert_eq!(reseated, 1, "the sleeper's reseat");
-    for (_, term) in &workers {
-        crate::agent_teams::forget_term(*term);
+    for host in &hosts {
+        for (term, _) in host.cuts() {
+            crate::agent_teams::forget_term(term);
+        }
     }
     for pane in [NEW_LEADER, LEADER] {
         crate::agent_teams::forget_term(pane);

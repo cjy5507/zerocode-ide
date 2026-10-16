@@ -1898,6 +1898,77 @@ mod tests {
         );
     }
 
+    /// t-57717: what every wake's line ends with — the road its door named,
+    /// then the ledger's word on the conversation: the worker row by its
+    /// state, `taken` for a pane the person took, `none` for a conversation
+    /// no worker reported, `unread` for a ledger that did not answer — and
+    /// the ledger's own reseat of a sleeper, `road=ledger-reseat`. A row that
+    /// was told no origin files its line as before.
+    #[test]
+    fn every_wake_line_ends_with_its_road_and_the_ledgers_word() {
+        use crate::orchestration::ConversationWorker;
+        let row =
+            |word: &'static str, finished: bool| -> Result<Option<ConversationWorker>, String> {
+                Ok(Some(ConversationWorker {
+                    worker: "w-57717".to_string(),
+                    word,
+                    finished,
+                }))
+            };
+        assert_eq!(
+            with_origin(
+                declined_line(15, "claude", "57717c0d-0000-4000-8000-000000000001"),
+                &origin("visit", &row("released", true)),
+            ),
+            "term 15 did not resume claude 57717c0d: a finished worker's conversation, read off a \
+             stored record road=visit ledger=released:w-57717"
+        );
+        assert_eq!(
+            origin("stage", &row("taken", false)),
+            "road=stage ledger=taken:w-57717"
+        );
+        assert_eq!(
+            origin("restore-front", &Ok(None)),
+            "road=restore-front ledger=none"
+        );
+        assert_eq!(
+            origin(
+                "restore-behind",
+                &Err("the ledger did not answer".to_string())
+            ),
+            "road=restore-behind ledger=unread"
+        );
+        let reseat = with_origin(
+            continuation_taken_line(
+                TEST_TERM_WITH_RECEIPT,
+                "claude",
+                "01234567-session",
+                Duration::from_secs(6),
+            )
+            .expect("claude reports the prompts it takes"),
+            &reseat_origin("w-57717"),
+        );
+        assert_eq!(
+            reseat,
+            "term 41 resumed claude 01234567 nudge=composer receipt=working@6s \
+             road=ledger-reseat ledger=sleeping:w-57717"
+        );
+        println!("LINE t-57717 {reseat}");
+        let untold = pending("codex", zerocode_core::NudgeRoad::Composer, Instant::now());
+        assert_eq!(
+            filed_line(TEST_TERM_WITHOUT_RECEIPT, &untold, None),
+            "term 42 resumed codex 01234567 nudge=composer receipt=none"
+        );
+        let told = PendingNudge {
+            origin: "road=visit ledger=none".to_string(),
+            ..pending("codex", zerocode_core::NudgeRoad::Composer, Instant::now())
+        };
+        assert_eq!(
+            filed_line(TEST_TERM_WITHOUT_RECEIPT, &told, None),
+            "term 42 resumed codex 01234567 nudge=composer receipt=none road=visit ledger=none"
+        );
+    }
+
     /// The lost-Enter case, reproduced hermetically. A resumed Codex enters
     /// its alternate screen and prints its interrupted line and two MCP
     /// startup warnings BEFORE it draws the composer glyph — the exact screen
