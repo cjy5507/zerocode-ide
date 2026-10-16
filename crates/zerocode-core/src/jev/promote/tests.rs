@@ -3619,6 +3619,60 @@ fn a_rise_needs_paired_costs_and_latencies_inside_the_named_bar() {
     );
 }
 
+/// Decision 1a of t-26584 (t-47783): the cost line reads a seat whose
+/// current side is a model, and only such a seat. The challenger's current
+/// side is the incumbent's design, a model's answer: +1% in cost still holds
+/// it. Recall's current side is its own order, a rule that spends no tokens,
+/// so its rise is read on quality and latency alone — a gain over the line
+/// and a p95 under five percent above the current side's raise it, however
+/// many tokens the candidate spends against the rule's none.
+#[test]
+fn the_cost_line_reads_a_model_current_side_and_a_rule_side_rises_on_quality_and_latency() {
+    let priced = |seat: &JevUse, tokens: (u64, u64), ms: (u64, u64)| {
+        let asked = asked_count(seat);
+        let mut rows = recording(seat);
+        rows.extend((0..asked).map(|at| asked_by(seat, at)));
+        rows.extend(marks_that_rise(seat, asked).into_iter().map(|mut row| {
+            row["inputTokens"] = json!(tokens.0);
+            row["currentInputTokens"] = json!(tokens.1);
+            row["elapsedMs"] = json!(ms.0);
+            row["currentElapsedMs"] = json!(ms.1);
+            row
+        }));
+        rows
+    };
+    let model = &crate::jev::CHALLENGER;
+    let inside = judge_seat(model, &priced(model, (1_009, 1_000), (1_049, 1_000)))
+        .expect("judged")
+        .verdict;
+    assert_eq!(
+        inside,
+        Verdict::Rise,
+        "the positive control: the model side clears every other line"
+    );
+    let on_the_cost_line = judge_seat(model, &priced(model, (1_010, 1_000), (1_000, 1_000)))
+        .expect("judged")
+        .verdict;
+    assert!(
+        matches!(
+            on_the_cost_line,
+            Verdict::Hold(Line::Bar {
+                miss: BarMiss::Cost { .. }
+            })
+        ),
+        "+1% exactly on a model side: {on_the_cost_line:?}"
+    );
+    let rule = &crate::jev::RECALL;
+    let on_quality_and_latency = judge_seat(rule, &priced(rule, (1_000, 0), (1_049, 1_000)))
+        .expect("judged")
+        .verdict;
+    assert_eq!(
+        on_quality_and_latency,
+        Verdict::Rise,
+        "a rule side is read on quality and latency: {on_quality_and_latency:?}"
+    );
+}
+
 /// An act-line seat acts from a line read off its own graded answers
 /// (t-26584, ③). With no calibration record for it, it holds however clean
 /// its marks are: a line nobody calibrated is a default, and the judge says
