@@ -1312,6 +1312,7 @@ fn judge_rows_on(
         calibrating: gates.calibrating,
         pairs: gates.pairs,
         bar_reads: gates.bar_reads,
+        current_side: ROUTING.current_side,
         bundle: gates.bundle,
         fallbacks_in_a_row: jev_ledger::failures_in_a_row_of(version.requests.iter().copied()),
         negatives_wanted: ROUTING.negatives_wanted.unwrap_or(0),

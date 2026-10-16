@@ -106,7 +106,7 @@ fn the_quality_line_is_exclusive_at_two_percent() {
         .collect();
     let tally = pair_tally(at_line.iter());
     assert_eq!(
-        bar_miss(&tally, &PROMOTION_BAR),
+        bar_miss(&tally, &PROMOTION_BAR, CurrentSide::Model),
         Some(BarMiss::Quality {
             gain_permille: 20,
             over_permille: 20
@@ -115,7 +115,10 @@ fn the_quality_line_is_exclusive_at_two_percent() {
     let over: Vec<Value> = (0..1_000)
         .map(|n| paired(n < 521, n < 500, (100, 100), (100, 100)))
         .collect();
-    assert_eq!(bar_miss(&pair_tally(over.iter()), &PROMOTION_BAR), None);
+    assert_eq!(
+        bar_miss(&pair_tally(over.iter()), &PROMOTION_BAR, CurrentSide::Model),
+        None
+    );
 }
 
 #[test]
@@ -124,28 +127,44 @@ fn the_cost_line_is_exclusive_at_one_percent_and_the_latency_line_at_five() {
         .map(|_| paired(true, false, (1_010, 1_000), (100, 100)))
         .collect();
     assert!(matches!(
-        bar_miss(&pair_tally(cost_at_line.iter()), &PROMOTION_BAR),
+        bar_miss(
+            &pair_tally(cost_at_line.iter()),
+            &PROMOTION_BAR,
+            CurrentSide::Model
+        ),
         Some(BarMiss::Cost { .. })
     ));
     let cost_under: Vec<Value> = (0..30)
         .map(|_| paired(true, false, (1_009, 1_000), (100, 100)))
         .collect();
     assert_eq!(
-        bar_miss(&pair_tally(cost_under.iter()), &PROMOTION_BAR),
+        bar_miss(
+            &pair_tally(cost_under.iter()),
+            &PROMOTION_BAR,
+            CurrentSide::Model
+        ),
         None
     );
     let latency_at_line: Vec<Value> = (0..30)
         .map(|_| paired(true, false, (100, 100), (1_050, 1_000)))
         .collect();
     assert!(matches!(
-        bar_miss(&pair_tally(latency_at_line.iter()), &PROMOTION_BAR),
+        bar_miss(
+            &pair_tally(latency_at_line.iter()),
+            &PROMOTION_BAR,
+            CurrentSide::Model
+        ),
         Some(BarMiss::Latency { .. })
     ));
     let latency_under: Vec<Value> = (0..30)
         .map(|_| paired(true, false, (100, 100), (1_049, 1_000)))
         .collect();
     assert_eq!(
-        bar_miss(&pair_tally(latency_under.iter()), &PROMOTION_BAR),
+        bar_miss(
+            &pair_tally(latency_under.iter()),
+            &PROMOTION_BAR,
+            CurrentSide::Model
+        ),
         None
     );
 }
@@ -156,7 +175,7 @@ fn the_bar_wants_thirty_pairs_and_priced_pairs() {
         .map(|_| paired(true, false, (100, 100), (100, 100)))
         .collect();
     assert_eq!(
-        bar_miss(&pair_tally(few.iter()), &PROMOTION_BAR),
+        bar_miss(&pair_tally(few.iter()), &PROMOTION_BAR, CurrentSide::Model),
         Some(BarMiss::Pairs {
             pairs: 29,
             wanted: 30
@@ -166,7 +185,11 @@ fn the_bar_wants_thirty_pairs_and_priced_pairs() {
         .map(|_| json!({"at": 1, "label": "a", "labelSource": "executed", "agreed": true, "baselineAgreed": false}))
         .collect();
     assert_eq!(
-        bar_miss(&pair_tally(unpriced.iter()), &PROMOTION_BAR),
+        bar_miss(
+            &pair_tally(unpriced.iter()),
+            &PROMOTION_BAR,
+            CurrentSide::Model
+        ),
         Some(BarMiss::Unpriced {
             priced: 0,
             wanted: 30

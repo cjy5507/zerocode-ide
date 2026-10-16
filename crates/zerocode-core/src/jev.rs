@@ -449,6 +449,10 @@ pub struct JevUse {
     /// t-6342): its share over the same marks is the line the seat's lower
     /// bound has to clear before `auto` may rise.
     pub baseline: Baseline,
+    /// What the seat's answer replaces today ([`CurrentSide`], t-26584,
+    /// decision 1a): the rise bar's cost line reads a seat whose current side
+    /// is a model.
+    pub current_side: CurrentSide,
     /// How many disagreeing marks the answering version's record must hold
     /// before the seat's agreement may speak at all (t-6342,
     /// [`NEGATIVES_WANTED`]). `None` for a seat that never rises.
@@ -739,6 +743,20 @@ impl Baseline {
     pub const fn binds(self) -> bool {
         !matches!(self, Self::None)
     }
+}
+
+/// What a seat's answer replaces today: the current side of its paired
+/// records, which the rise bar weighs the answer against (ADR-150, t-26584,
+/// decision 1a). A model's answer spends tokens, so the cost line reads it; a
+/// rule spends none, so a seat that replaces one rises on quality and latency
+/// alone. It is named apart from [`Baseline`]: routing is graded against its
+/// keyword tables, but what its answer replaces is the chat probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentSide {
+    /// A rule or a constant, which spends no tokens.
+    Rule,
+    /// A model's answer.
+    Model,
 }
 
 /// How many disagreeing marks the answering version's record must hold
@@ -1095,6 +1113,9 @@ pub const ROUTING: JevUse = JevUse {
     // axis, on a row that carries the tables' reading, and the turn's work
     // on its label row.
     baseline: Baseline::TodaysRule,
+    // What its answer stands in for is the chat probe, a model call: the
+    // tables are what it is graded against, not what it replaces.
+    current_side: CurrentSide::Model,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: true,
@@ -1276,6 +1297,7 @@ pub const RECALL: JevUse = JevUse {
     agreement_kind: AgreementKind::Hindsight,
     // Recall's own order: the note it put first before any judgment.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
     reads_act_line: false,
@@ -1399,6 +1421,7 @@ pub const BROWSER: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // The walk's end grades the press the seat made; no press, no mark.
     baseline: Baseline::None,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
     reads_act_line: true,
@@ -1454,6 +1477,7 @@ pub const DESKTOP: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // The walk's end grades the press the seat made; no press, no mark.
     baseline: Baseline::None,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
     reads_act_line: true,
@@ -1506,6 +1530,7 @@ pub const EMULATOR: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // The walk's end grades the press the seat made; no press, no mark.
     baseline: Baseline::None,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
     reads_act_line: true,
@@ -1591,6 +1616,7 @@ pub const COVER: JevUse = JevUse {
     agreement_kind: AgreementKind::Hindsight,
     // Bring it to the front, then move it: what the hand does with no seat.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
     reads_act_line: true,
@@ -1642,6 +1668,7 @@ pub const STALL: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // The answer eleven of this machine's twelve stall answers named.
     baseline: Baseline::AlwaysSame(crate::stall_cause::Cause::LongRunningTool.word()),
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: true,
@@ -1756,6 +1783,7 @@ pub const PLACEMENT: JevUse = JevUse {
     agreement_kind: AgreementKind::Hindsight,
     // Today's room, the tab (`worker_placement::Placement::TODAYS`).
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
     reads_act_line: true,
@@ -1869,6 +1897,7 @@ pub const SUMMON: JevUse = JevUse {
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
     baseline: Baseline::None,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: true,
@@ -1934,6 +1963,7 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     agreement_rows_wanted: Some(crate::summon_difficulty::outcomes::MIN_EXECUTIONS),
     agreement_kind: AgreementKind::Hindsight,
     baseline: Baseline::AlwaysSame(crate::summon_difficulty::LADDER[2].0),
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(crate::summon_difficulty::outcomes::MIN_NEGATIVES),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: true,
@@ -2020,6 +2050,7 @@ pub const MODEL_TIERS: JevUse = JevUse {
     // What places a model without the seat is the fact rule, but a seat that
     // never rises compares against no baseline.
     baseline: Baseline::None,
+    current_side: CurrentSide::Rule,
     negatives_wanted: None,
     confidence_bands: None,
     reads_act_line: false,
@@ -2057,6 +2088,7 @@ pub const SUMMON_MODEL: JevUse = JevUse {
     agreement_kind: AgreementKind::Hindsight,
     // What runs without the seat: the lineup's model for the difficulty.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(crate::summon_difficulty::outcomes::MIN_NEGATIVES),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: true,
@@ -2139,6 +2171,7 @@ pub const STEP_EFFORT: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // The rule's own move between turns.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: false,
@@ -2373,6 +2406,7 @@ pub const SKILLS: JevUse = JevUse {
     // validated gold label is needed to compare that baseline with the hint;
     // the live first-load observation alone is not such a label.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
     reads_act_line: false,
@@ -2425,6 +2459,7 @@ pub const SKILL_SUGGESTION: JevUse = JevUse {
     // The turn's first load, against what the suggestion named — the
     // search's baseline, for the same reason.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
     reads_act_line: false,
@@ -2508,6 +2543,7 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // The governor's own table.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: false,
@@ -2699,6 +2735,7 @@ pub const COMPACTION: JevUse = JevUse {
     // Microcompact's age rule, which drops the oldest results. Its writer
     // stamps no baseline mark yet: the seat holds at `too_few_baseline`.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: false,
@@ -2810,6 +2847,7 @@ pub const AGENT_TOOL: JevUse = JevUse {
     agreement_rows_wanted: None,
     agreement_kind: AgreementKind::Comparison,
     baseline: Baseline::None,
+    current_side: CurrentSide::Rule,
     negatives_wanted: None,
     confidence_bands: None,
     reads_act_line: false,
@@ -2877,6 +2915,7 @@ pub const PROJECT_RULES: JevUse = JevUse {
     agreement_rows_wanted: None,
     agreement_kind: AgreementKind::Comparison,
     baseline: Baseline::None,
+    current_side: CurrentSide::Rule,
     negatives_wanted: None,
     confidence_bands: None,
     reads_act_line: false,
@@ -3066,6 +3105,7 @@ pub const BROWSER_READ: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // A fold is graded by the press that lands in it; no fold, no mark.
     baseline: Baseline::None,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(BROWSER_READ_FOLD_FLOOR_PERMILLE)),
     reads_act_line: true,
@@ -3245,6 +3285,7 @@ pub const NOTIFY: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // Today's rule table (`notify_call::Call::today`).
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: true,
@@ -3387,6 +3428,7 @@ pub const MENTION_RERANK: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // The fuzzy page's own first row.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
     reads_act_line: false,
@@ -3576,6 +3618,7 @@ pub const BRANCHING: JevUse = JevUse {
     // The emulator seat's own press, the first candidate. Its writer stamps
     // no baseline mark yet: the seat holds at `too_few_baseline`.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
     reads_act_line: true,
@@ -3642,6 +3685,7 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // The fresh answer it is compared with IS the reader it replaces.
     baseline: Baseline::None,
+    current_side: CurrentSide::Model,
     negatives_wanted: Some(NEGATIVES_WANTED),
     // The screen seats' line: the answer it hands back is pressed under theirs.
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
@@ -3785,6 +3829,7 @@ pub const MAIL_TRIAGE: JevUse = JevUse {
     agreement_rows_wanted: None,
     agreement_kind: AgreementKind::Comparison,
     baseline: Baseline::None,
+    current_side: CurrentSide::Rule,
     negatives_wanted: None,
     confidence_bands: None,
     reads_act_line: false,
@@ -3948,6 +3993,7 @@ pub const CHALLENGER: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     // The incumbent's design, which the attempt acts on anyway.
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Model,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: false,
@@ -4134,6 +4180,7 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     agreement_kind: AgreementKind::Hindsight,
     // "Always permit": 79.2% of this machine's 1,661 replayed reviews against the seat's 21.1%.
     baseline: Baseline::AlwaysSame(PATCH_REVIEW_PERMIT),
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     // Four Nouls: abstain inside the cookbook's uncertain middle, act from
     // the permit line's lean (an 800‰ yes is a 600‰ lean).
@@ -4206,6 +4253,7 @@ pub const CLAIM: JevUse = JevUse {
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
     baseline: Baseline::AlwaysSame(CLAIM_CRITERIA[0].0),
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands {
         abstain_below_permille: 600,
@@ -4284,6 +4332,7 @@ pub const VAULT_PAIRS: JevUse = JevUse {
     agreement_rows_wanted: None,
     agreement_kind: AgreementKind::Hindsight,
     baseline: Baseline::AlwaysSame("none"),
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::on_a_noul(
         NOUL_UNCERTAIN_TO_PERMILLE,
@@ -4342,6 +4391,7 @@ pub const FILE_PICK: JevUse = JevUse {
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::on_a_noul(
         NOUL_UNCERTAIN_TO_PERMILLE,
@@ -4461,6 +4511,7 @@ pub const COMMAND_GUARD: JevUse = JevUse {
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     // Two Nouls: abstain inside the cookbook's uncertain middle, act from the
     // flag line's lean (a 700‰ yes is a 400‰ lean).
@@ -4557,6 +4608,7 @@ pub const TOOL_TEXT_GUARD: JevUse = JevUse {
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
     baseline: Baseline::TodaysRule,
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::on_a_noul(
         NOUL_UNCERTAIN_TO_PERMILLE,
@@ -4660,6 +4712,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
     agreement_kind: AgreementKind::Hindsight,
     // The hand with no seat: it goes on acting as its plan says.
     baseline: Baseline::AlwaysSame(reflex_decide::CONTINUE),
+    current_side: CurrentSide::Rule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     // Nothing between: a live run has nobody to confirm a decision with, and
     // the autopilot carries out whatever answer passed its checks.

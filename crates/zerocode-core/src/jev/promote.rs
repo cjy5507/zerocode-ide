@@ -118,7 +118,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::{Value, json};
 
 use crate::jev::questions::UNVERSIONED_RUBRIC;
-use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, JevUse, Naming};
+use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, CurrentSide, JevUse, Naming};
 
 use crate::jev::provenance::{
     Acted, BarMiss, Bundle, BundleMiss, CalibrationMiss, HUMAN_BUNDLE, PROMOTION_BAR, PairTally,
@@ -924,6 +924,7 @@ pub fn judge_seat_at(
         calibrating: gates.calibrating,
         pairs: gates.pairs,
         bar_reads: gates.bar_reads,
+        current_side: seat.current_side,
         bundle: gates.bundle,
     };
     let stand = standing(seat, rows);
@@ -1303,6 +1304,9 @@ pub struct Evidence<'window> {
     /// which carry their own cost and latency lines, nor to a seat with no
     /// baseline, which has nothing to pair its marks with.
     pub bar_reads: bool,
+    /// What the seat's answer replaces today: the bar's cost line reads a
+    /// model's ([`CurrentSide`], t-26584, decision 1a).
+    pub current_side: CurrentSide,
     /// The person-judged rows, for a seat that reads an act line (ADR-176,
     /// t-26584, ④).
     pub bundle: Option<Bundle>,
@@ -1640,7 +1644,10 @@ fn gate_line(evidence: &Evidence) -> Option<Line> {
         .map(|miss| Line::Bundle { miss });
     let bar = evidence
         .bar_reads
-        .then(|| bar_miss(&evidence.pairs, &PROMOTION_BAR).map(|miss| Line::Bar { miss }))
+        .then(|| {
+            bar_miss(&evidence.pairs, &PROMOTION_BAR, evidence.current_side)
+                .map(|miss| Line::Bar { miss })
+        })
         .flatten();
     calibration.or(bundle).or(bar)
 }

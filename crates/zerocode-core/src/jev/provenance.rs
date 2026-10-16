@@ -33,7 +33,6 @@ use std::path::Path;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::jev::JevUse;
 use crate::jev::promote::permille;
 use crate::jev::summary::{
     AGREED, BASELINE_AGREED, CURRENT_ELAPSED_MS, CURRENT_INPUT_TOKENS, ELAPSED_MS, INPUT_TOKENS,
@@ -41,6 +40,7 @@ use crate::jev::summary::{
     wilson_lower,
 };
 use crate::jev::threshold::Graded;
+use crate::jev::{CurrentSide, JevUse};
 
 /// A label's source, best first (ADR-171). A label names one
 /// ([`LABEL_SOURCE`]); a label that names none is no label.
@@ -119,7 +119,7 @@ pub struct PromotionBar {
     /// The quality gain, per thousand of pairs, the candidate must exceed.
     pub quality_over_permille: u16,
     /// The rise in cost per decision, per thousand, the candidate must stay
-    /// under.
+    /// under where its current side is a model ([`CurrentSide`]).
     pub cost_rise_under_permille: u16,
     /// The rise in p95 latency, per thousand, the candidate must stay under.
     pub latency_rise_under_permille: u16,
@@ -205,7 +205,7 @@ pub enum BarMiss {
         gain_permille: i64,
         over_permille: u16,
     },
-    /// Cost per decision rose by the bar or more.
+    /// Cost per decision rose by the bar or more over a model's current side.
     Cost {
         candidate: u64,
         current: u64,
@@ -234,10 +234,12 @@ impl BarMiss {
 }
 
 /// The first bar `pairs` does not clear, in the order ADR-150 lists them, or
-/// `None` when it clears them all. The comparisons are exact: a rise written
-/// exactly on a line is not under it.
+/// `None` when it clears them all. The cost line reads a seat whose current
+/// side is a model (t-26584, decision 1a): a rule spends no tokens, so beside
+/// it any answer would be an infinite rise. The comparisons are exact: a rise
+/// written exactly on a line is not under it.
 #[must_use]
-pub fn bar_miss(pairs: &PairTally, bar: &PromotionBar) -> Option<BarMiss> {
+pub fn bar_miss(pairs: &PairTally, bar: &PromotionBar, side: CurrentSide) -> Option<BarMiss> {
     if pairs.pairs < bar.min_pairs {
         return Some(BarMiss::Pairs {
             pairs: pairs.pairs,
@@ -258,11 +260,13 @@ pub fn bar_miss(pairs: &PairTally, bar: &PromotionBar) -> Option<BarMiss> {
             over_permille: bar.quality_over_permille,
         });
     }
-    if !rises_under(
-        pairs.candidate_tokens,
-        pairs.current_tokens,
-        bar.cost_rise_under_permille,
-    ) {
+    if side == CurrentSide::Model
+        && !rises_under(
+            pairs.candidate_tokens,
+            pairs.current_tokens,
+            bar.cost_rise_under_permille,
+        )
+    {
         return Some(BarMiss::Cost {
             candidate: pairs.candidate_tokens,
             current: pairs.current_tokens,

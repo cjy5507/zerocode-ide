@@ -689,6 +689,7 @@ fn clean() -> Evidence<'static> {
         calibrating: Calibrating::NotRead,
         pairs: PairTally::default(),
         bar_reads: false,
+        current_side: CurrentSide::Rule,
         bundle: None,
     }
 }
@@ -3554,10 +3555,11 @@ fn a_proxy_or_unsourced_label_cannot_raise_a_seat() {
 }
 
 /// The rise bar is named and read on paired records (ADR-150, t-26584, ②):
-/// the candidate's cost per decision may not rise by one percent or more over
-/// the judgment it would replace, and its p95 latency not by five percent or
-/// more. A pair written exactly on the bar is not inside it. Marks alone, with
-/// no cost or latency beside them, do not rise a seat.
+/// the candidate's p95 latency may not rise by five percent or more over the
+/// judgment it would replace, and a pair written exactly on the bar is not
+/// inside it. Marks alone, with no cost or latency beside them, do not rise a
+/// seat. Recall replaces a rule, so its cost is not read: the cost line, read
+/// on a model's side, is the next test's (t-26584, decision 1a).
 #[test]
 fn a_rise_needs_paired_costs_and_latencies_inside_the_named_bar() {
     let seat = &crate::jev::RECALL;
@@ -3575,13 +3577,6 @@ fn a_rise_needs_paired_costs_and_latencies_inside_the_named_bar() {
         }));
         rows
     };
-    let on_the_cost_line = judge_seat(seat, &rows_with((1_010, 1_000), (1_000, 1_000)))
-        .expect("judged")
-        .verdict;
-    assert!(
-        !matches!(on_the_cost_line, Verdict::Rise),
-        "+1% exactly is not under the one-percent bar: {on_the_cost_line:?}"
-    );
     let on_the_latency_line = judge_seat(seat, &rows_with((1_000, 1_000), (1_050, 1_000)))
         .expect("judged")
         .verdict;
