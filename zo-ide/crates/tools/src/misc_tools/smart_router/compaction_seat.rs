@@ -152,6 +152,9 @@ pub struct CompactionRow {
     pub rejected: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected_at: Option<usize>,
+    /// What the server said beside a refusal (t-58193).
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
 }
 
 impl CompactionRow {
@@ -180,6 +183,7 @@ impl CompactionRow {
             redacted_lines: 0,
             rejected: None,
             rejected_at: None,
+            server_said: jev_gate::ServerSaid::default(),
         }
     }
 }
@@ -425,6 +429,7 @@ fn fold(ask: &CompactionAsk, shards: usize, answers: Vec<Shard>) -> (CompactionR
     let mut row = CompactionRow::new(ask, shards, String::new());
     let mut dropped = Vec::new();
     let mut first_refusal: Option<Refusal> = None;
+    let mut first_said = jev_gate::ServerSaid::default();
     let (mut requests, mut withheld, mut input_tokens, mut elapsed, mut retries) = (0, 0, 0, 0, 0);
     for answer in answers {
         withheld += answer.withheld;
@@ -446,6 +451,9 @@ fn fold(ask: &CompactionAsk, shards: usize, answers: Vec<Shard>) -> (CompactionR
             Err(refusal) => {
                 if first_refusal.is_none() {
                     first_refusal = Some(refusal);
+                    if let Some(call) = &answer.call {
+                        first_said = jev_gate::ServerSaid::of(call);
+                    }
                 }
             }
         }
@@ -476,6 +484,7 @@ fn fold(ask: &CompactionAsk, shards: usize, answers: Vec<Shard>) -> (CompactionR
     row.outcome = refusal.outcome;
     row.rejected = refusal.rejected;
     row.rejected_at = refusal.rejected_at;
+    row.server_said = first_said;
     (row, Vec::new())
 }
 

@@ -369,16 +369,23 @@ pub enum Refused {
     Budget,
     /// The model pin changed after the caller prepared this batch.
     SettingsChanged,
+    /// The seat rests, so asking now would hold the judgment server for
+    /// nothing: its server asked for a wait that has not passed, its smallest
+    /// request is longer than its provider reads, or it applies nothing and
+    /// its own recent requests went unanswered. zo's door asks this one
+    /// (t-58193); a row of it sent nothing.
+    Resting,
 }
 
 impl Refused {
     /// Every refusal, in the order the door asks.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::NoKey,
         Self::Off,
         Self::NotConsented,
         Self::Budget,
         Self::SettingsChanged,
+        Self::Resting,
     ];
 
     /// The token a ledger row, a counter and a pane name this refusal by.
@@ -390,6 +397,7 @@ impl Refused {
             Self::NotConsented => "not_consented",
             Self::Budget => "budget",
             Self::SettingsChanged => "settings_changed",
+            Self::Resting => "resting",
         }
     }
 

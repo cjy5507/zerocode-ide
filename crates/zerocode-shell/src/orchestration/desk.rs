@@ -252,7 +252,11 @@ pub(crate) struct DeskLetters {
     /// delivered, until it is answered or can no longer be — the ledger's
     /// own reading of a wait (`Run::awaits_answer`, the one
     /// `Run::awaiting_reply` asks) and the reply verb's own rule
-    /// (`Run::question_is_answerable`). The ledger's notices are never owed
+    /// (`Run::question_is_answerable`), less the questions the ledger's own
+    /// counts no longer hold open (`Ledger::still_owed`): written back about
+    /// in a letter naming them (t-59383), or expired — three days unanswered,
+    /// or a day after the coordinator's chair that asked emptied with nothing
+    /// said from it since (t-59383 r2). The ledger's notices are never owed
     /// an answer.
     pub(crate) mail: Vec<DeskMail>,
     /// Owed an acknowledgement, oldest first: one line per notice or per
@@ -265,13 +269,16 @@ pub(crate) struct DeskLetters {
     pub(crate) folded_batch: Option<DeskBatch>,
 }
 
-/// What the coordinator of `run` owes at `now_ms`.
-pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
+/// What the coordinator of `run` owes at `now_ms`. The ledger is read for
+/// the letters a question's answer may be filed in outside `run` — the
+/// asker's own run, when another run's coordinator asked.
+pub(crate) fn desk_letters(ledger: &Ledger, run: &Run, now_ms: i64) -> DeskLetters {
     let address = run.address();
     let inbox = InboxState::of(run, &address);
     let mut owed = DeskLetters::default();
     let mut episodes: HashMap<&str, usize> = HashMap::new();
     let mut folded_in_open = false;
+    let mut asked = Vec::new();
     for message in run.messages().iter().filter(|one| one.to == address) {
         if zerocode_core::orchestration::gate_reuse::is_gate_evidence(message) {
             continue;
@@ -282,7 +289,7 @@ pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
         }
         if run.awaits_answer(message) {
             if run.question_is_answerable(message).is_ok() {
-                owed.mail.push(mail_row(run, message, &inbox));
+                asked.push(message);
             }
             continue;
         }
@@ -318,6 +325,14 @@ pub(crate) fn desk_letters(run: &Run, now_ms: i64) -> DeskLetters {
             _ => owed.news.push(row),
         }
     }
+    // The same count the ledger keeps (t-59383): a question the seat wrote
+    // back about in a letter naming it, or one that expired, is owed nothing
+    // more.
+    owed.mail = ledger
+        .still_owed(run, asked, now_ms)
+        .into_iter()
+        .map(|question| mail_row(run, question, &inbox))
+        .collect();
     owed.news.sort_by_key(|line| line.created_ms);
     // Folded notices in the batch the coordinator holds open are offered
     // beside the folded count — where no line of news stands in that batch to
@@ -643,7 +658,7 @@ pub(crate) fn desk_snapshot(
     let mut folded_batches = Vec::new();
     let mut land_batches = Vec::new();
     for run in ledger.runs().iter().filter(|run| in_play(run)) {
-        let owed = desk_letters(run, now_ms);
+        let owed = desk_letters(ledger, run, now_ms);
         let (run_mail, run_news) = (owed.mail.len(), owed.news.len());
         mail.extend(owed.mail);
         news.extend(owed.news);
@@ -1015,6 +1030,18 @@ mod tests {
         serde_json::to_value(desk_snapshot(ledger, |_| None, no_cost)).expect("the desk serializes")
     }
 
+    /// The number on `run_id`'s coordinator card (the 「답할 우편」 it owes)
+    /// and the desk's count of the same over every run in play.
+    fn mail_counts(ledger: &Ledger, run_id: &str) -> (serde_json::Value, serde_json::Value) {
+        let desk = desk_json(ledger);
+        let row = desk["runs"]
+            .as_array()
+            .and_then(|runs| runs.iter().find(|row| row["run"] == run_id))
+            .cloned()
+            .unwrap_or_else(|| panic!("the run has no card: {desk}"));
+        (row["mail"].clone(), desk["counts"]["mail"].clone())
+    }
+
     /// Every letter the desk draws, in either of its lists.
     fn drawn(desk: &serde_json::Value) -> Vec<serde_json::Value> {
         ["mail", "news"]
@@ -1364,6 +1391,210 @@ mod tests {
             (&desk["runs"][0]["mail"], &desk["runs"][0]["news"]),
             (&serde_json::json!(1), &serde_json::json!(5)),
             "the run's counts are not the desk's: {desk}"
+        );
+    }
+
+    /// The coordinator card counts what the ledger counts (t-59383): a
+    /// question the seat wrote back about, in a letter naming it, is owed
+    /// nothing more — the letter filed in this run to the asker's pane, or
+    /// in the asker's own run to its chair. Three questions from another
+    /// run's coordinator, two letters naming one each, one letter naming
+    /// none: the card goes from 3 to 1.
+    #[test]
+    fn a_question_the_seat_wrote_back_about_leaves_the_card() {
+        let start = crate::now_epoch_ms() - HOUR_MS;
+        let mut ledger = Ledger::new();
+        let (run_id, worker) = a_worker_carrying_a_task(&mut ledger, start);
+        let asking = ledger.create_run("asker", start + 4);
+        let (here, there) = (format!("run:{run_id}"), format!("run:{asking}"));
+        // The panes the two chairs sit in: this run's, and the asking run's.
+        let (seat_here, seat_there) = ("team-here/%1", "team-there/%1");
+        let (from_here, asker) = (format!("pane:{seat_here}"), format!("pane:{seat_there}"));
+        let letter = |from: &str, to: &str, kind: MessageKind, body: &str| Draft {
+            from: from.to_string(),
+            to: to.to_string(),
+            kind,
+            body: Text::from(body),
+            subject: Text::default(),
+            priority: Priority::Normal,
+            payload: Text::default(),
+            thread: None,
+            task: None,
+            dispatch: None,
+        };
+        let signed = |ledger: &mut Ledger, run: &str, seat: &str, at: i64, draft: Draft| {
+            ledger
+                .post_as(run, draft, Some(seat), start + at)
+                .expect("posted")
+        };
+        // Each chair signs once as its run: how a run remembers who sat in it.
+        let go = letter(&here, &worker_address(&worker), MessageKind::Status, "go");
+        signed(&mut ledger, &run_id, seat_here, 5, go);
+        let on_duty = letter(&there, &there, MessageKind::Status, "on duty");
+        signed(&mut ledger, &asking, seat_there, 6, on_duty);
+        let asked: Vec<String> = (7..10)
+            .map(|at| {
+                let question = letter(&asker, &here, MessageKind::Question, "which?");
+                signed(&mut ledger, &run_id, seat_there, at, question)
+            })
+            .collect();
+        assert_eq!(
+            mail_counts(&ledger, &run_id),
+            (serde_json::json!(3), serde_json::json!(3))
+        );
+
+        let filed_there = format!("{} 답: 네", asked[0]);
+        let filed_here = format!("{}에 답: 아니요", asked[1]);
+        let writes = [
+            (
+                &asking,
+                letter(&from_here, &there, MessageKind::Status, &filed_there),
+            ),
+            (
+                &run_id,
+                letter(&here, &asker, MessageKind::Status, &filed_here),
+            ),
+            (
+                &asking,
+                letter(&from_here, &there, MessageKind::Status, "셋째는 내일"),
+            ),
+        ];
+        for (at, (run, draft)) in (10..).zip(writes) {
+            signed(&mut ledger, run, seat_here, at, draft);
+        }
+        assert_eq!(
+            mail_counts(&ledger, &run_id),
+            (serde_json::json!(1), serde_json::json!(1)),
+            "a question written back about is still on the card"
+        );
+    }
+
+    /// t-59383 r2 (A9, A10): the card and the desk count what the ledger
+    /// counts once nobody waits on a question. The pile in small: this run's
+    /// chair asked by two coordinators of other runs — one whose chair is
+    /// held, one whose chair emptied 25 hours ago — three questions each, 4
+    /// and 15 days old and one younger (2 hours for the held chair, 30 for the
+    /// emptied one, asked before it emptied); and its own worker's question,
+    /// 4 days old, riding an attempt still open. Seven on the card before;
+    /// two after — the held chair's two-hour question and the worker's.
+    #[test]
+    fn questions_nobody_waits_on_leave_the_card_and_the_desk() {
+        let now = crate::now_epoch_ms();
+        let day = 24 * HOUR_MS;
+        let mut ledger = Ledger::new();
+        let (run_id, worker) = a_worker_carrying_a_task(&mut ledger, now - 16 * day);
+        for (name, seat) in [
+            ("held-chair", "team-held/%1"),
+            ("emptied-chair", "team-gone/%1"),
+        ] {
+            let chaired = ledger.create_run(name, now - 16 * day);
+            ledger
+                .seat_coordinator(&chaired, seat, None, now - 16 * day)
+                .expect("the chair");
+        }
+        let asked = |from: &str| Draft {
+            from: from.to_string(),
+            to: format!("run:{run_id}"),
+            kind: MessageKind::Question,
+            body: Text::from("which?"),
+            subject: Text::default(),
+            priority: Priority::Normal,
+            payload: Text::default(),
+            thread: None,
+            task: None,
+            dispatch: None,
+        };
+        let attempt = ledger
+            .run(&run_id)
+            .and_then(|run| run.worker(&worker))
+            .and_then(|held| held.dispatch.clone())
+            .expect("an open attempt");
+        let questions = [
+            (asked("pane:team-held/%1"), 2 * HOUR_MS),
+            (asked("pane:team-held/%1"), 4 * day),
+            (asked("pane:team-held/%1"), 15 * day),
+            (asked("pane:team-gone/%1"), 30 * HOUR_MS),
+            (asked("pane:team-gone/%1"), 4 * day),
+            (asked("pane:team-gone/%1"), 15 * day),
+            (
+                Draft {
+                    dispatch: Some(attempt),
+                    ..asked(&worker_address(&worker))
+                },
+                4 * day,
+            ),
+        ];
+        for (question, age) in questions {
+            ledger.post(&run_id, question, now - age).expect("asked");
+        }
+        ledger.team_dissolved("team-gone", now - 25 * HOUR_MS);
+        assert_eq!(
+            mail_counts(&ledger, &run_id),
+            (serde_json::json!(2), serde_json::json!(2)),
+            "questions nobody waits on are still on the card"
+        );
+    }
+
+    /// t-59383 r2 (A7, A8) at the edges, on the desk's own clock: a
+    /// stranger's question is owed at 71 hours and not at 73; a question
+    /// from a chair that emptied after it is owed 23 hours after the chair
+    /// emptied and not at 25; a held chair's question is owed until its own
+    /// three days are up.
+    #[test]
+    fn the_desk_owes_a_question_until_three_days_or_a_day_after_its_askers_chair_emptied() {
+        let mut ledger = Ledger::new();
+        let (run_id, _) = a_worker_carrying_a_task(&mut ledger, 1_000);
+        for (name, seat) in [
+            ("held-chair", "team-held/%1"),
+            ("emptied-chair", "team-gone/%1"),
+        ] {
+            let chaired = ledger.create_run(name, 1_000);
+            ledger
+                .seat_coordinator(&chaired, seat, None, 1_000)
+                .expect("the chair");
+        }
+        let asked_at = 10_000;
+        let ask = |ledger: &mut Ledger, from: &str| {
+            let question = Draft {
+                from: from.to_string(),
+                to: format!("run:{run_id}"),
+                kind: MessageKind::Question,
+                body: Text::from("which?"),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: None,
+                task: None,
+                dispatch: None,
+            };
+            ledger.post(&run_id, question, asked_at).expect("asked")
+        };
+        let stranger = ask(&mut ledger, "pane:team-news/%9");
+        let gone = ask(&mut ledger, "pane:team-gone/%1");
+        let held = ask(&mut ledger, "pane:team-held/%1");
+        let emptied = asked_at + HOUR_MS;
+        ledger.team_dissolved("team-gone", emptied);
+        let run = ledger.run(&run_id).expect("the run");
+        let owed = |at: i64| -> Vec<String> {
+            desk_letters(&ledger, run, at)
+                .mail
+                .into_iter()
+                .map(|row| row.id)
+                .collect()
+        };
+        assert_eq!(
+            owed(emptied + 23 * HOUR_MS),
+            vec![stranger.clone(), gone, held.clone()]
+        );
+        assert_eq!(
+            owed(emptied + 25 * HOUR_MS),
+            vec![stranger.clone(), held.clone()],
+            "a question from a chair empty for 25 hours is still owed"
+        );
+        assert_eq!(owed(asked_at + 71 * HOUR_MS), vec![stranger, held]);
+        assert!(
+            owed(asked_at + 73 * HOUR_MS).is_empty(),
+            "questions 73 hours old are still owed"
         );
     }
 
@@ -1727,7 +1958,7 @@ mod tests {
             )
             .expect("question");
         assert_eq!(
-            desk_letters(ledger.run(&run_id).expect("run"), 4)
+            desk_letters(&ledger, ledger.run(&run_id).expect("run"), 4)
                 .mail
                 .len(),
             1
@@ -1738,7 +1969,7 @@ mod tests {
         assert_eq!(run.messages().len(), 1, "the question stays in the ledger");
         assert_eq!(run.messages()[0].id, question);
         assert!(
-            desk_letters(run, 4).mail.is_empty(),
+            desk_letters(&ledger, run, 4).mail.is_empty(),
             "unanswerable question is still owed"
         );
     }
@@ -1792,7 +2023,7 @@ mod tests {
             )
             .expect("pane question");
         assert_eq!(
-            desk_letters(ledger.run(&run_id).expect("run"), 20)
+            desk_letters(&ledger, ledger.run(&run_id).expect("run"), 20)
                 .mail
                 .len(),
             4
@@ -1821,10 +2052,10 @@ mod tests {
             .expect("pane answer");
         let run = ledger.run(&run_id).expect("run");
         assert_eq!(run.messages().len(), 5, "old questions were rewritten");
-        assert!(desk_letters(run, 22).mail.is_empty());
+        assert!(desk_letters(&ledger, run, 22).mail.is_empty());
         let rebuilt = Ledger::rebuild(ledger.export()).expect("same ledger rebuilt");
         assert!(
-            desk_letters(rebuilt.run(&run_id).expect("run"), 22)
+            desk_letters(&rebuilt, rebuilt.run(&run_id).expect("run"), 22)
                 .mail
                 .is_empty()
         );
@@ -1887,7 +2118,7 @@ mod tests {
         });
         let rebuilt = Ledger::rebuild(projected).expect("acked ledger");
         let run = rebuilt.run(&run_id).expect("run");
-        let owed = desk_letters(run, 4);
+        let owed = desk_letters(&rebuilt, run, 4);
         assert_eq!(owed.mail.len(), 1);
         assert_eq!(owed.mail[0].id, question);
         assert_eq!(owed.mail[0].delivery, "acked");

@@ -4400,12 +4400,13 @@ let worktreeSpinStep = -1;
 
 function spinWorktreeDots(now) {
   worktreeSpinFrame = 0;
-  const turning = document.querySelectorAll(".wt-dot.is-working");
+  // The team view's dots turn with the list's: one loop, one step, each dot keeping its own class.
+  const turning = document.querySelectorAll(".wt-dot.is-working, .team-dot.is-working");
   if (turning.length === 0) return;
   const step = Math.floor(((now % WORKTREE_SPIN_PERIOD_MS) / WORKTREE_SPIN_PERIOD_MS) * WORKTREE_SPIN_STEPS);
   if (step !== worktreeSpinStep) {
     worktreeSpinStep = step;
-    for (const dot of turning) dot.className = `wt-dot is-working wt-spin-${step}`;
+    for (const dot of turning) dot.className = `${dot.classList.contains("team-dot") ? "team-dot" : "wt-dot"} is-working wt-spin-${step}`;
   }
   worktreeSpinFrame = requestAnimationFrame(spinWorktreeDots);
 }
@@ -5583,7 +5584,7 @@ async function refreshWorktrees() {
  * The person, 10-15: 「코디 별로 밑에 생성된 워커를 표시… 각자 자기 창을 보게… 직관적인 UI」. While a run this
  * window plays has a coordinator in its seat, the sidebar is that team: a card for each coordinator, and under it
  * one row for each worker it summoned — the row is that worker's pane: pressed, the pane comes to the front;
- * pointed at, its last three lines. The branch list stays one press away (「가지별 보기」, `sidebar_view.layout`).
+ * pointed at, its last three lines. The branch list stays one press away (「브랜치 보기」, `sidebar_view.layout`).
  *
  * Every word on a row is a fact the window already holds or the ledger wrote: the task, the pane id the ledger
  * keeps for the worker (`%5` — an account switch moves it and the row stays, keyed by the worker id), one word
@@ -5636,8 +5637,9 @@ const TEAM_CHECK_GOING = new Set(["started", "prepared"]);
  * where it stands. Work that landed, had nothing to land or was closed leaves the team. */
 const TEAM_SETTLED_STAGES = new Set(["handedIn", "reviewing", "landWait", "failed"]);
 
-/* What a step's cell says in the strip's tip: done, where the work is, where it is held, no record. */
-const TEAM_STEP_MARKS = Object.freeze({ on: "✓", cur: "…", stuck: "!", "": "—" });
+/* What a step's cell says in the strip's tip: done, where the work is, where it is held, no record — and a step
+ * behind the work that left no record, drawn passed on the strip and still "—" here. */
+const TEAM_STEP_MARKS = Object.freeze({ on: "✓", cur: "…", stuck: "!", past: "—", "": "—" });
 
 const sidebarTeam = document.createElement("div");
 sidebarTeam.className = "team";
@@ -5778,7 +5780,8 @@ function teamSentence(line) {
 
 /* Where one worker's work stands on its six steps, from the ledger's row and git's word for its checkout. The
  * step the work is at is `current` (blue; held, yellow, when something holds the work back); the steps before it
- * that have a record are done; a step with no record stays empty. */
+ * that have a record are done; a step with no record stays empty ahead of the work and is drawn passed behind it —
+ * the person, 10-16: 「초록색 가운데 2 다음 비어 있어」, a hole in the strip read as something broken. */
 function teamSteps(row, held) {
   const phase = ledgerLandingStage(row);
   const landing = row.checkout
@@ -5807,6 +5810,8 @@ function teamSteps(row, held) {
     land: landed ? "on" : current === "land" ? "cur" : "",
   };
   if (held && current !== null && cells[current] === "cur") cells[current] = "stuck";
+  const reached = current === null ? TEAM_STEPS.length : TEAM_STEPS.findIndex((step) => step.id === current);
+  for (const step of TEAM_STEPS.slice(0, reached)) if (cells[step.id] === "") cells[step.id] = "past";
   return { cells, current, commits, landing, check };
 }
 
@@ -5877,6 +5882,23 @@ function teamWorkerEntry(row, at, now) {
 
 /* One coordinator's card, as words: who sits (or that nobody does), what its pane is doing, on which model and
  * account, and what it owes — questions to answer and news to read. */
+/* The project a coordinator works in — the person, 10-16: 「팀보기에서도 어디 프로젝트의 코디인지 표시 안 되는 게」.
+ * This window's seat says it from its own tab's checkout; a seat held in another window from where its workers'
+ * checkouts lie (`projectHoldingCheckout` follows a removed checkout's folder), the most common project winning.
+ * A seat elsewhere whose workers hold no checkout names none. */
+function teamCoordinatorProject(seat, term) {
+  const named = (checkout) => projectHoldingCheckout(checkout)?.name ?? "";
+  const own = term === null ? "" : named(tabOfTerm(term)?.worktree ?? null);
+  if (own !== "") return own;
+  const counts = new Map();
+  for (const row of sidebarTeamData.rows) {
+    if (row.run !== seat.run || !row.checkout) continue;
+    const name = named(row.checkout);
+    if (name !== "") counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts].sort((one, other) => other[1] - one[1])[0]?.[0] ?? "";
+}
+
 function teamCoordinatorEntry(seat) {
   const term = Number.isInteger(seat.term) ? seat.term : null;
   const agent = term === null ? null : paneAgents.get(term) ?? null;
@@ -5902,6 +5924,7 @@ function teamCoordinatorEntry(seat) {
   const account = term === null || typeof paneAccountWords !== "function" ? null : paneAccountWords(term);
   const questions = Number(seat.mail) || 0;
   const letters = Number(seat.news) || 0;
+  const project = teamCoordinatorProject(seat, term);
   return {
     key: `c:${seat.run}`,
     kind: "coordinator",
@@ -5910,6 +5933,8 @@ function teamCoordinatorEntry(seat) {
     agent,
     name,
     run: seat.held && agent ? run : "",
+    project,
+    projectTip: project === "" ? "" : t("sidebar.team.projectTip", "이 코디가 일하는 프로젝트: {{project}}", { project }),
     now: [doing, model.text, account?.words ?? ""].filter(Boolean).join(" · "),
     nowTip: [model.tip, account?.tip ?? ""].filter(Boolean).join("\n"),
     questions: questions > 0 ? t("sidebar.team.questions", "질문 {{count}}", { count: questions }) : "",
@@ -5977,8 +6002,8 @@ function sidebarTeamEntries(now) {
     key: "foot",
     kind: "foot",
     keys: t("sidebar.team.keys", "↑↓ 이동 · ⏎ 판 열기 · {{mod}}1·2·3 코디", { mod: usesCommandModifier ? "⌘" : "Ctrl+" }),
-    toggle: t("sidebar.team.toBranches", "가지별 보기"),
-    toggleTip: t("sidebar.team.toBranchesTip", "가지와 워크스페이스 목록으로 돌아갑니다 — 팀 보기는 그 목록 위에서 다시 켭니다"),
+    toggle: t("sidebar.team.toBranches", "브랜치 보기"),
+    toggleTip: t("sidebar.team.toBranchesTip", "브랜치와 워크스페이스 목록으로 돌아갑니다 — 팀 보기는 그 목록 위에서 다시 켭니다"),
   });
   return entries;
 }
@@ -5991,7 +6016,7 @@ function teamEntrySaid(entry) {
         TEAM_STEPS.map((step) => entry.steps.cells[step.id]).join(","), entry.step, entry.stepsTip, entry.tip,
         entry.taken ? 1 : 0, entry.term ?? "", t(TEAM_STATES[entry.state].key, TEAM_STATES[entry.state].word)].join("|");
     case "coordinator":
-      return [entry.name, entry.run, entry.agent ?? "", entry.now, entry.nowTip, entry.questions, entry.questionsTip,
+      return [entry.name, entry.project, entry.projectTip, entry.run, entry.agent ?? "", entry.now, entry.nowTip, entry.questions, entry.questionsTip,
         entry.letters, entry.lettersTip, entry.tip, entry.term ?? "", entry.seat.held ? 1 : 0].join("|");
     case "mine":
       return [entry.ownWords, entry.ownTip, entry.takenWords, entry.takenTip, entry.own.join(","), entry.taken.join(",")].join("|");
@@ -6048,11 +6073,12 @@ function buildTeamNode(entry) {
   if (entry.kind === "coordinator") {
     const face = teamPart(line, "span", "team-face");
     const name = teamPart(line, "span", "team-name");
+    const project = teamPart(line, "span", "team-project");
     const run = teamPart(line, "span", "team-run");
     const questions = teamPart(line, "span", "team-badge is-question");
     const letters = teamPart(line, "span", "team-badge is-letters");
     const now = teamPart(node, "span", "team-now");
-    node.__parts = { face, name, run, questions, letters, now };
+    node.__parts = { face, name, project, run, questions, letters, now };
     return node;
   }
   const dot = teamPart(line, "span", "team-dot");
@@ -6113,6 +6139,7 @@ function dressTeamNode(node, entry) {
       ?? { id: entry.agent, name: agentName(entry.agent), favicon_domain: "" }) : null;
     parts.face.replaceChildren(...(face ? [face] : []));
     writeTextContent(parts.name, entry.name);
+    writeTeamText(parts.project, entry.project, entry.projectTip);
     writeTeamText(parts.run, entry.run);
     writeTeamText(parts.questions, entry.questions, entry.questionsTip);
     writeTeamText(parts.letters, entry.letters, entry.lettersTip);
@@ -6123,11 +6150,14 @@ function dressTeamNode(node, entry) {
     if (entry.term === null) delete node.dataset.teamTerm;
     else node.dataset.teamTerm = String(entry.term);
     writeTeamTip(node);
-    node.setAttribute("aria-label", [entry.name, entry.run, entry.questions, entry.letters, entry.now].filter(Boolean).join(" · "));
+    node.setAttribute("aria-label", [entry.name, entry.project, entry.run, entry.questions, entry.letters, entry.now].filter(Boolean).join(" · "));
     return;
   }
   const state = TEAM_STATES[entry.state];
   parts.dot.className = `team-dot is-${entry.state}`;
+  // A working row moves: the dot's ring turns (`spinWorktreeDots`) and the row wears the flowing border.
+  node.classList.toggle("is-working", entry.state === "working");
+  if (entry.state === "working") wakeWorktreeSpin();
   parts.dot.dataset.tip = t(state.key, state.word);
   writeTextContent(parts.title, entry.title);
   writeTeamText(parts.chip, entry.chip);

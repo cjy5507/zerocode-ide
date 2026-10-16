@@ -614,3 +614,104 @@ fn named(text: &str, id: &str) -> usize {
         })
         .count()
 }
+
+/// The value `name` holds in zo's door, read from its source (t-58193): a
+/// rule's number is written once, there, and a test that names it moves with
+/// it. A `Duration` is read in its seconds.
+fn door_number(name: &str) -> i64 {
+    let gate = include_str!("../../../tools/src/misc_tools/smart_router/jev_gate.rs");
+    let line = gate
+        .lines()
+        .find(|line| line.starts_with(&format!("pub const {name}:")))
+        .unwrap_or_else(|| panic!("the door names no `{name}`"));
+    let value = line.split_once('=').expect("a value").1.trim().trim_end_matches(';');
+    let value = value.trim_start_matches("Duration::from_secs(").trim_end_matches(')');
+    value.split('*').map(|factor| factor.trim().parse::<i64>().expect("a number")).product()
+}
+
+/// `body` with zo's config home and its projects' state under `home`, under
+/// the lock every test that moves them takes, and the process's own put back
+/// after: after a failing `body` too, or the next test would read a folder
+/// that is gone.
+fn under_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
+    let _env = crate::test_env_lock();
+    let names = ["ZO_CONFIG_HOME", core_types::paths::ZO_STATE_DIR_ENV];
+    let before: Vec<_> = names.iter().map(std::env::var_os).collect();
+    for name in names {
+        std::env::set_var(name, home);
+    }
+    let said = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    for (name, value) in names.iter().zip(before) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+    match said {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// A seat the door rests says until when, why, and after how many
+/// unanswered requests (t-58193), in one field that the panel's chip and
+/// sentence both read: the door's own reading of the project's ledger, its
+/// count the rule's own number. A seat whose rest has passed says nothing of
+/// one, and nor does any seat that never rested.
+#[test]
+fn a_resting_seat_says_until_when_why_and_after_how_many() {
+    use std::fmt::Write as _;
+    use zerocode_core::jev::RECALL;
+    let home = tempfile::tempdir().expect("a config home");
+    let project = tempfile::tempdir().expect("a project");
+    let unanswered = door_number("UNANSWERED_BEFORE_REST");
+    let rest_ms = door_number("REST") * 1_000;
+    under_home(home.path(), || {
+        let settings = json!({"smart": {RECALL.setting: "shadow"}});
+        std::fs::write(home.path().join("settings.json"), settings.to_string()).expect("settings");
+        let ledger = jev_summary::ledger_roots(project.path())[1].join(RECALL.ledger);
+        std::fs::create_dir_all(ledger.parent().expect("a folder")).expect("the folder");
+        let timed_out = |newest: i64| {
+            let mut rows = String::new();
+            for before in (0..unanswered).rev() {
+                let row = json!({"at": newest - before * 1_000, "outcome": "timeout",
+                    "requests": 1, "rubricVersion": RECALL.rubric_version});
+                let _ = writeln!(rows, "{row}");
+            }
+            std::fs::write(&ledger, rows).expect("the ledger");
+        };
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+        let now = i64::try_from(since.expect("after 1970").as_millis()).expect("a time");
+        let request =
+            SummaryRequest { cwd: None, sessions: None, recent: 0, act_lines: false, json: true };
+        let said_rests = || -> Vec<(String, Value)> {
+            let text = run_summary(&request, project.path(), now, 0).text;
+            let said: Value = serde_json::from_str(&text).expect("json");
+            let seats = said["seats"].as_array().expect("seats").iter();
+            seats
+                .map(|seat| {
+                    let id = seat["id"].as_str().unwrap_or_default().to_string();
+                    (id, seat["resting"].clone())
+                })
+                .collect()
+        };
+        let recall_of = |rests: &[(String, Value)]| {
+            rests.iter().find(|(id, _)| id == RECALL.id).map(|(_, rest)| rest.clone())
+        };
+
+        timed_out(now - 60_000);
+        let resting = said_rests();
+        let until = now - 60_000 + rest_ms;
+        let expected = json!({"untilMs": until, "cause": "timeout", "unanswered": unanswered});
+        assert_eq!(recall_of(&resting), Some(expected), "the recall rests");
+        let others: Vec<&String> = resting
+            .iter()
+            .filter(|(id, rest)| id != RECALL.id && !rest.is_null())
+            .map(|(id, _)| id)
+            .collect();
+        assert!(others.is_empty(), "these seats never rested: {others:?}");
+
+        timed_out(now - rest_ms - 60_000);
+        assert_eq!(recall_of(&said_rests()), Some(Value::Null), "a rest that has passed");
+    });
+}

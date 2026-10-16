@@ -2357,6 +2357,90 @@ export async function testJevDashboardScope(browser, origin, ok) {
     await page.close();
   }
 }
+/* A feature the door rests says so where its state is said (t-58193): a chip
+ * in the rest's own word beside its state's, and one sentence — until when,
+ * in the person's local time by the window's own clock (`quotaWallClock`);
+ * why, in the language's words for the cause, never zo's; and for a rest of
+ * its own after how many unanswered requests, by the door's own number,
+ * read here from its source (`UNANSWERED_BEFORE_REST`) so a rule that moves
+ * moves the words. A wait its server asked for has no count, and a feature
+ * whose rest has passed says neither. The rest's chip takes a wait's tone
+ * (`--jev-tone-under`), as a state's chip takes its state's. */
+export async function testJevDashboardResting(browser, origin, ok) {
+  const gate = readFileSync(join(ROOT, "zo-ide", "crates", "tools", "src", "misc_tools", "smart_router", "jev_gate.rs"), "utf8");
+  const unanswered = Number(gate.match(/\npub const UNANSWERED_BEFORE_REST: usize = (\d+);/)?.[1]);
+  ok("the door's count of unanswered requests was read from its source", Number.isInteger(unanswered) && unanswered > 0, String(unanswered));
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.evaluate(jevDashboardFixture);
+    const seen = await page.evaluate(async (count) => {
+      const base = window.__ANSWER__.jev_summary;
+      const untilMs = Date.now() + 20 * 60_000;
+      const rests = {
+        recall: { untilMs, cause: "timeout", unanswered: count },
+        routing: { untilMs, cause: "waiting", unanswered: null },
+        placement: { untilMs: Date.now() - 1_000, cause: "timeout", unanswered: count },
+      };
+      window.__ANSWER__.jev_summary = (args) => {
+        const answered = base(args);
+        return { ...answered, seats: answered.seats.map((seat) => (rests[seat.id] ? { ...seat, resting: rests[seat.id] } : seat)) };
+      };
+      el("nav-jev").click();
+      const view = () => document.querySelector("#jev-view");
+      await new Promise((done, fail) => {
+        const until = performance.now() + 3_000;
+        const look = () => {
+          const rows = view()?.querySelectorAll("[data-jev-dash-row]") ?? [];
+          if ([...rows].some((row) => row.querySelector('[data-jev-fact="week"]')?.textContent === "50")) done();
+          else if (performance.now() > until) fail(new Error("the table never drew"));
+          else requestAnimationFrame(look);
+        };
+        look();
+      });
+      const time = quotaWallClock(untilMs);
+      const wait = document.createElement("span");
+      wait.style.color = "var(--jev-tone-under)";
+      view().append(wait);
+      const waitTone = getComputedStyle(wait).color;
+      wait.remove();
+      const restOf = (id) => {
+        const holder = view().querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="status"]`);
+        const sentence = holder?.querySelector("[data-jev-rest]")?.textContent ?? null;
+        const chip = holder?.querySelector(".jev-chip[data-jev-resting]");
+        return {
+          chip: chip?.textContent ?? null,
+          tone: chip ? getComputedStyle(chip).color : null,
+          sentence,
+          // The numbers the sentence says besides its time.
+          numbers: sentence === null ? [] : sentence.replace(time, "").match(/\d[\d,.]*/g) ?? [],
+        };
+      };
+      return {
+        recall: restOf("recall"), routing: restOf("routing"), placement: restOf("placement"),
+        time, waitTone, count: jevCount(count), word: t("jev.token.resting", "쉬는 중"),
+        timeout: t("jev.rest.cause.timeout", "시간 초과"), waiting: t("jev.rest.cause.waiting", "서버가 기다려 달라고 했습니다"),
+      };
+    }, unanswered).catch((error) => ({ error: String(error) }));
+    const { recall, routing, placement } = seen;
+    ok("a resting feature says until when, why and after how many unanswered requests, beside the rest's own chip",
+      !seen.error && recall.chip === seen.word && Boolean(recall.sentence?.includes(seen.time))
+        && recall.sentence.includes(seen.timeout) && recall.numbers.join(",") === seen.count,
+      JSON.stringify(seen.error ?? { recall, time: seen.time, cause: seen.timeout, count: seen.count }));
+    ok("a feature its server asked to wait says until when and why, and counts nothing",
+      !seen.error && routing.chip === seen.word && Boolean(routing.sentence?.includes(seen.time))
+        && routing.sentence.includes(seen.waiting) && routing.numbers.length === 0,
+      JSON.stringify(seen.error ?? { routing, time: seen.time, cause: seen.waiting }));
+    ok("a resting feature's chip takes a wait's tone",
+      !seen.error && Boolean(seen.waitTone) && recall.tone === seen.waitTone && routing.tone === seen.waitTone,
+      JSON.stringify(seen.error ?? { recall: recall.tone, routing: routing.tone, wait: seen.waitTone }));
+    ok("a feature whose rest has passed shows neither the chip nor the sentence",
+      !seen.error && placement.chip === null && placement.sentence === null,
+      JSON.stringify(seen.error ?? placement));
+    ok("the resting dashboard raised no renderer fault", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
 
 async function testJevReview(page, ok) {
   const seen = await page.evaluate(async () => {

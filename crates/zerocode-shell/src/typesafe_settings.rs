@@ -2473,6 +2473,60 @@ mod tests {
         );
     }
 
+    /// Every cause zo's door rests a seat for has the panel's words
+    /// (t-58193): a row in the panel's cause table, whose Korean is the row's
+    /// own, and a word in each of the four catalogs — never zo's word itself.
+    /// The sentence that counts a rest's unanswered requests fills the count
+    /// from the field zo sends, so no catalog spells the number. A cause the
+    /// door gains turns this red until it is worded.
+    #[test]
+    fn every_cause_a_seat_rests_for_has_the_panels_words() {
+        let gate =
+            include_str!("../../../zo-ide/crates/tools/src/misc_tools/smart_router/jev_gate.rs");
+        let causes: Vec<&str> = gate
+            .split_once("impl RestCause {")
+            .map_or("", |(_, rest)| {
+                rest.split_once("\n}").map_or(rest, |(body, _)| body)
+            })
+            .lines()
+            .filter_map(|line| line.split_once("=> \""))
+            .filter_map(|(_, rest)| rest.split('"').next())
+            .collect();
+        assert!(
+            causes.contains(&"waiting") && causes.contains(&"timeout"),
+            "zo's rest causes were not read: {causes:?}"
+        );
+        let table = include_str!("../../../ui/shell-jev.js")
+            .split_once("const JEV_REST_CAUSES = Object.freeze({")
+            .map_or("", |(_, rest)| {
+                rest.split_once("\n});").map_or(rest, |(table, _)| table)
+            });
+        let catalogs = include_str!("../../../ui/shell-i18n.js");
+        for cause in causes {
+            let row = table
+                .lines()
+                .find(|line| line.trim_start().starts_with(&format!("{cause}: {{")))
+                .unwrap_or_else(|| panic!("the panel's cause table does not word `{cause}`"));
+            let key = row
+                .split_once("key: \"")
+                .and_then(|(_, rest)| rest.split('"').next())
+                .unwrap_or_default();
+            assert_eq!(
+                catalogs.matches(&format!("\"{key}\":")).count(),
+                4,
+                "`{cause}`'s words `{key}` are not in each of the four catalogs"
+            );
+        }
+        let sentences: Vec<&str> = catalogs
+            .lines()
+            .filter(|line| line.trim_start().starts_with("\"jev.rest.unanswered\":"))
+            .collect();
+        assert!(
+            sentences.len() == 4 && sentences.iter().all(|line| line.contains("{{count}}")),
+            "every catalog's rest sentence counts with the number zo sends: {sentences:?}"
+        );
+    }
+
     /// The day's count the dashboard draws is the door's own: the file the
     /// door counts one byte per request into, for the day the window counts
     /// in, against the limit the door reads — and a day nothing was sent is
@@ -2913,6 +2967,26 @@ pub struct SeatNumbers {
     /// reading of one checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub across: Option<crate::jev_scope::SeatAcross>,
+    /// Why the seat rests now and until when, as zo's door reads it
+    /// (t-58193): the one field the panel's chip and sentence both read;
+    /// absent while it may ask, and from a zo older than the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resting: Option<SeatResting>,
+}
+
+/// Why a seat rests and until when (t-58193). `cause` is the word zo's door
+/// rests it for (`RestCause::word`), which the panel words in every language
+/// and never shows; `unanswered` is how many of its requests in a row went
+/// unanswered, for a rest of its own — the door's own number, which the
+/// panel's sentence counts with.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatResting {
+    /// When the seat may ask again, in Unix milliseconds.
+    pub until_ms: i64,
+    pub cause: String,
+    #[serde(default)]
+    pub unanswered: Option<usize>,
 }
 
 /// One agent's line under a seat a pane's moments ask (t-10916): its

@@ -190,6 +190,39 @@ impl Mock {
         Self { base_url, bodies, addr, stop }
     }
 
+    /// A port whose first answer is a `503` that asks the client to wait
+    /// `wait` — its `Retry-After`, as a server waiting out a restart sends
+    /// one (t-58193) — and whose later answers are `then`.
+    pub(super) fn waiting_first(wait: &'static str, then: String) -> Self {
+        let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
+        let recorder = Arc::clone(&bodies);
+        let watching = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            for (nth, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { break };
+                if watching.load(Ordering::SeqCst) {
+                    break;
+                }
+                let request = read_request(&mut stream);
+                if let Ok(mut seen) = recorder.lock() {
+                    seen.push(request);
+                }
+                let (head, body) = if nth == 0 {
+                    (format!("503 Service Unavailable\r\nRetry-After: {wait}"), "{}".to_string())
+                } else {
+                    ("200 OK".to_string(), then.clone())
+                };
+                let response = format!(
+                    "HTTP/1.1 {head}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Self { base_url, bodies, addr, stop }
+    }
+
     pub(super) fn serving(status: u16, body: String) -> Self {
         let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
         let recorder = Arc::clone(&bodies);
@@ -256,6 +289,27 @@ fn read_request(stream: &mut std::net::TcpStream) -> String {
 /// the environment held for the length of `body`.
 pub(super) fn machine<T>(seat: &JevUse, mode: &str, base_url: &str, body: impl FnOnce(&Path) -> T) -> T {
     machine_at(seat, mode, Some(base_url), body)
+}
+
+/// Every row of the ledger at `path` made `by` older, as if that long had
+/// passed since each was written — how a test reaches the end of a rest
+/// (t-58193). A line that is no row is kept as it was.
+pub(super) fn age_ledger(path: &Path, by: Duration) {
+    let by = i64::try_from(by.as_millis()).expect("a short time");
+    let text = std::fs::read_to_string(path).expect("the ledger");
+    let aged: String = text
+        .lines()
+        .map(|line| match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(mut row) => {
+                if let Some(at) = row.get("at").and_then(serde_json::Value::as_i64) {
+                    row["at"] = (at - by).into();
+                }
+                format!("{row}\n")
+            }
+            Err(_) => format!("{line}\n"),
+        })
+        .collect();
+    std::fs::write(path, aged).expect("the aged ledger");
 }
 
 /// The same machine on the REAL wire: the config home and the consented
@@ -327,6 +381,7 @@ mod tests {
             Mock::silent().base_url.clone(),
             Mock::slow_first(Duration::ZERO, "{}".to_string()).base_url.clone(),
             Mock::answering(|_| (200, "{}".to_string())).base_url.clone(),
+            Mock::waiting_first("1", "{}".to_string()).base_url.clone(),
             Mock::serving(200, "{}".to_string()).base_url.clone(),
         ];
         let deadline = Instant::now() + Duration::from_secs(5);

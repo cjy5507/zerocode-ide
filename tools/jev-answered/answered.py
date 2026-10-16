@@ -101,7 +101,7 @@ NO_CODE = "none"
 CODE_LIMIT = (
     "503 by server code: only rows written once the clients kept the code name one, so a 503 "
     "with none is not a busy one. Compare 503 totals across versions; compare codes within one "
-    "client and after it. zo's seat rows keep no code yet."
+    "client and after it. zo's seat rows keep the code from t-58193 on."
 )
 
 # A decision row's second question, and its word for one never asked

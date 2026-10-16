@@ -1019,6 +1019,7 @@ impl Drawn {
             request_digest: wire.request_digest,
             rejected: wire.rejected,
             confidence: wire.confidence,
+            server_said: wire.server_said,
             comparison: comparison.columns(),
         };
         arm.write(&row);
@@ -1109,6 +1110,10 @@ pub struct ChallengerRow {
     /// How sure the judge was of its choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
+    /// What the server said beside a refusal (t-58193). Before `comparison`,
+    /// so a row read back hands these two keys here and not to the map.
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
     #[serde(flatten)]
     pub comparison: Map<String, Value>,
 }
@@ -1130,6 +1135,7 @@ fn refused_row(attempt: &Attempt<'_>, incumbent: &str, refused: Refused, now_ms:
         request_digest: None,
         rejected: None,
         confidence: None,
+        server_said: jev_gate::ServerSaid::default(),
         comparison: Map::from_iter([
             (ATTEMPT.canonical.to_string(), Value::from(attempt.key)),
             (ROLE.canonical.to_string(), Value::from(attempt.role)),
@@ -1154,6 +1160,7 @@ struct Wire {
     rejected: Option<String>,
     confidence: Option<f64>,
     preferred: Option<Preferred>,
+    server_said: jev_gate::ServerSaid,
 }
 
 impl Wire {
@@ -1171,6 +1178,7 @@ impl Wire {
             rejected: None,
             confidence: None,
             preferred: None,
+            server_said: jev_gate::ServerSaid::default(),
         }
     }
 }
@@ -1207,6 +1215,7 @@ fn compare(door: &JevDoor, client: Option<&SystemOneClient>, asked: &arm::Compar
     wire.requests = call.requests;
     wire.retries = call.retries;
     wire.elapsed_ms = jev_gate::millis(call.elapsed);
+    wire.server_said = jev_gate::ServerSaid::of(&call);
     let response = match call.outcome {
         Ok(response) => response,
         Err(failure) => {

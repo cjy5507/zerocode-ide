@@ -1174,7 +1174,7 @@ fn the_desks_mail_is_the_coordinators_inbox_letter_by_letter() {
     .expect("a notice");
     // Every letter the desk draws, the answers first and the news after.
     let mail = |ledger: &Ledger| {
-        let owed = super::desk::desk_letters(ledger.run(&run_id).expect("the run"), 1_600);
+        let owed = super::desk::desk_letters(ledger, ledger.run(&run_id).expect("the run"), 1_600);
         [owed.mail, owed.news].concat()
     };
 
@@ -1277,7 +1277,7 @@ fn a_decline_and_a_switch_of_model_are_owed_on_the_desk() {
     )
     .expect("a switch");
 
-    let owed = super::desk::desk_letters(held.run(&run_id).expect("the run"), 1_300);
+    let owed = super::desk::desk_letters(&held, held.run(&run_id).expect("the run"), 1_300);
     assert!(owed.mail.is_empty(), "a notice is not owed an answer");
     let mail = owed.news;
 
