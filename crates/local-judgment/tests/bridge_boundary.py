@@ -87,5 +87,12 @@ class BridgeBoundary(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 bridge["memory_guard"](process, 1024)
 
+    def test_memory_guard_ends_the_runtime_with_its_own_code_past_the_limit(self):
+        process = SimpleNamespace(memory_info=lambda: SimpleNamespace(rss=2048))
+        with patch.object(bridge["os"], "_exit", side_effect=SystemExit) as ended:
+            with self.assertRaises(SystemExit):
+                bridge["memory_guard"](process, 1024)
+        ended.assert_called_once_with(75)
+
 
 unittest.main(argv=["bridge-boundary"], verbosity=2)

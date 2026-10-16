@@ -75,6 +75,7 @@ async fn an_io_failure_closes_admission_before_its_supervisor_is_polled_again() 
         turn,
         ticket,
         b"{}".to_vec(),
+        None,
     ));
     {
         let _io = lock(&state.engine.io);
@@ -131,4 +132,33 @@ async fn a_prepared_frame_at_the_pipe_limit_is_refused_without_stopping_the_runt
     assert!(state.engine.alive());
     assert_eq!(running.admitted(), 0);
     assert!(!root.path().join("received").exists());
+}
+
+#[test]
+fn withheld_lines_count_alike_whether_they_end_in_lf_or_crlf_or_blank_pieces_stand_between() {
+    let said = ["judging: the harbor plan", "still judging", "done"];
+    let lf = format!("{}\n", said.join("\n"));
+    let crlf = format!("{}\r\n", said.join("\r\n"));
+    // A vertical tab and an ideographic space are blank as str::trim judges,
+    // though an ASCII scan would count them.
+    let padded = format!("\n{}\n \t\n", said.join("\n   \n\u{b}\u{3000}\r\n\n"));
+    let counts: Vec<u32> = [lf, crlf, padded]
+        .into_iter()
+        .map(|written| {
+            let tail = Tail::default();
+            tail.withhold();
+            let (reader, mut writer) = std::io::pipe().unwrap();
+            writer.write_all(written.as_bytes()).unwrap();
+            drop(writer);
+            drain(ChildStderr::from(std::os::fd::OwnedFd::from(reader)), &tail);
+            let (kept, withheld) = tail.settled();
+            assert_eq!(kept, Vec::<String>::new(), "{written:?} left text kept");
+            withheld
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        [3, 3, 3],
+        "the same three lines counted differently"
+    );
 }

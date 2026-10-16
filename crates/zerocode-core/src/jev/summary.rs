@@ -253,14 +253,14 @@ pub const CLIENT_ROUTE: LedgerKey = LedgerKey {
     also: &[],
 };
 
-/// The code a server named in the body it refused a request with —
-/// `operation_busy` or `server_stopped`, and nothing else — beside the status
-/// [`OUTCOME`] keeps (`http_503`): a managed judgment server answers `503`
-/// both when it is busy and when it has stopped, and only its code tells the
-/// two apart (t-55423). Never the body's own words. Absent when the body named
-/// neither, could not be read within its cap and the request's deadline, on a
-/// request no server answered, and on every row written before: an old `503`
-/// reads as no code, never as busy.
+/// The code a server named in the body it refused a request with — one of
+/// the short list the window and zo keep (`REFUSAL_CODES`), and nothing else —
+/// beside the status [`OUTCOME`] keeps (`http_503`): a managed judgment server
+/// answers `503` when it is busy, stopped or restarting, and only its code
+/// tells them apart (t-55423, t-57772). Never the body's own words. Absent when
+/// the body named none of them, could not be read within its cap and the
+/// request's deadline, on a request no server answered, and on every row
+/// written before: an old `503` reads as no code, never as busy.
 pub const SERVER_ERROR_CODE: LedgerKey = LedgerKey {
     canonical: "serverErrorCode",
     also: &[],
