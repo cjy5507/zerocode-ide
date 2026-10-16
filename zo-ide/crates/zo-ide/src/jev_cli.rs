@@ -424,7 +424,16 @@ fn agreement_json(agreement: &jev_summary::SeatAgreement, withheld: &BTreeMap<St
         "baselineShare": agreement.baseline_share(),
         "notCompared": agreement.not_compared,
         "notComparedBy": withheld,
+        // Marks by a proxy, a person or an unsourced label, which no rise reads; not rows: an unmarked row is notCompared.
+        "proxied": agreement.proxied,
     })
+}
+
+/// A row's time in milliseconds as RFC 3339 in UTC, to the second — `None` at
+/// or before the epoch, where the counters put a row that names no time: a
+/// missing time never reads as 1970.
+fn rfc3339_of(at_ms: i64) -> Option<String> {
+    u64::try_from(at_ms).ok().filter(|ms| *ms > 0).map(|ms| api::oauth_store::codex_auth::rfc3339_utc(ms / 1000))
 }
 
 fn decision_json(decision: &jev_summary::SeatDecision) -> Value {
@@ -482,6 +491,10 @@ fn render_json(seats: &[SeatReport], act_lines: bool) -> Value {
                 "found": seat.found.as_ref().map(|path| path.display().to_string()).map_or(Value::Null, Value::from),
                 "today": tally_json(&seat.today),
                 "week": tally_json(&seat.week),
+                // The earliest row the rolling week counted, not the file's first
+                // row, and nothing of the judged window, which counts requests
+                // and may reach further back (t-60961).
+                "countedSince": seat.counted_since_ms.and_then(rfc3339_of),
                 "costUsd": seat.cost_usd,
                 // Which id the seat asks with — the person's pin, or the
                 // alias — and which version the newest answer named: the two
