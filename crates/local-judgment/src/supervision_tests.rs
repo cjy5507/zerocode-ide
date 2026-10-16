@@ -441,6 +441,10 @@ async fn a_deadline_stop_keeps_a_seat_name_as_its_task_but_never_a_key_a_token_a
 /// With the file `leak-N` it writes that file and the state it was asked
 /// about to stderr and exits with 1, as a runtime that dies repeating its
 /// input does. With the file `fail-N` it exits with 3 before it is ready.
+/// With the file `say-N` it writes that file to stderr as it starts. With the
+/// file `echo-N` it writes the state each request asks about to stderr: as
+/// it answers when the file says `now`, and only once the next request comes
+/// in when it says `late`.
 const ANSWERING: &str = r#"import json,os,sys,threading,time
 root,n=sys.argv[1],sys.argv[2]
 def at(name): return os.path.join(root,name+'-'+n)
@@ -451,11 +455,18 @@ def watch():
  os.kill(os.getpid(),int(value))
 threading.Thread(target=watch,daemon=True).start()
 if os.path.exists(at('fail')): os._exit(3)
+if os.path.exists(at('say')): sys.stderr.write(open(at('say')).read());sys.stderr.flush()
 if os.path.exists(at('hold')):
  while not os.path.exists(at('go')): time.sleep(0.005)
 print('{"ready":true}',flush=True)
+late=''
 for line in sys.stdin:
  r=json.loads(line);a={}
+ if late: sys.stderr.write(late);sys.stderr.flush();late=''
+ if os.path.exists(at('echo')):
+  said='judging: '+str(r.get('state'))+'\n'
+  if open(at('echo')).read()=='late': late=said
+  else: sys.stderr.write(said);sys.stderr.flush()
  if r.get('task')=='stall-seat':
   while True: time.sleep(60)
  if os.path.exists(at('leak')):
@@ -800,6 +811,38 @@ impl Recovering {
             .into_iter()
             .filter(|record| record["kind"] == "restart")
             .collect()
+    }
+
+    /// The end of `server` wherever the window or the store keeps it, each
+    /// place with the exit it holds and the whole of its text: the snapshots
+    /// the manager told by itself, the store's server-exits.jsonl, and the
+    /// status a read returns, which is what the window reads.
+    async fn kept_end(&self, server: &str) -> Vec<(&'static str, Value, String)> {
+        let told = self.ended(server).await["server"]["exit"].clone();
+        let record = self
+            .exits()
+            .into_iter()
+            .rfind(|record| record["serverId"] == server)
+            .unwrap_or_default();
+        let status = serde_json::to_value(self.manager.snapshot()).unwrap();
+        vec![
+            (
+                "server.exit",
+                told,
+                serde_json::to_string(&*self.told.lock().unwrap()).unwrap(),
+            ),
+            (
+                "server-exits.jsonl",
+                record,
+                fs::read_to_string(self.data.join("managed-judgment/server-exits.jsonl"))
+                    .unwrap_or_default(),
+            ),
+            (
+                "status",
+                status["server"]["exit"].clone(),
+                status.to_string(),
+            ),
+        ]
     }
 
     /// The 503 both routes of `provider`'s port answer: its Retry-After in
@@ -1551,12 +1594,161 @@ async fn a_runtime_that_repeats_the_request_it_was_answering_leaves_that_text_ou
         !said.contains("could not judge"),
         "a line repeating the request stayed in part: {said}"
     );
+    let ends = fixture.kept_end(&server).await;
+    assert_eq!(
+        reaching(&ends, &["Kp9Kp9", "tq8Vwtq8Vw"]),
+        Vec::<&str>::new(),
+        "the key or the token written while the runtime answered was kept"
+    );
+    assert_eq!(
+        reaching(&ends, &["zqowner"]),
+        Vec::<&str>::new(),
+        "the home path written while the runtime answered was kept"
+    );
+}
+
+/// What a person asks first: a sentence no mask finds.
+const ASKED_FIRST: &str = "Only my sister knows the harbor plan for Friday";
+
+/// What they ask next, which shares no 12 characters in a row with
+/// `ASKED_FIRST`, so nothing that matches the request in flight finds the
+/// first.
+const ASKED_NEXT: &str = "Rain gauges overflowed near the quarry wall";
+
+/// Starts the answering runtime, which writes `say` to stderr as it starts
+/// and each request's state as `echo` says, has it answer `ASKED_FIRST`, and
+/// lets it die while it handles `ASKED_NEXT`, repeating it.
+async fn first_then_second(say: Option<&str>, echo: &str) -> (Recovering, String) {
+    let next: Vec<char> = ASKED_NEXT.chars().collect();
     assert!(
-        said.matches("[redacted]").count() >= 2,
-        "the key and the token are not kept in their masked forms: {said}"
+        next.windows(12)
+            .all(|run| !ASKED_FIRST.contains(&run.iter().collect::<String>())),
+        "the second request shares 12 characters in a row with the first"
+    );
+    let fixture = recovering();
+    if let Some(say) = say {
+        fixture.tell("say", 1, say);
+    }
+    fixture.tell("echo", 1, echo);
+    let started = fixture.start(&fixture.model()).await;
+    let server = started.server.id.unwrap();
+    let provider = started.server.provider.unwrap();
+    let answered = fixture
+        .client
+        .post(provider.request_url())
+        .json(&question(&provider, ASKED_FIRST))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), reqwest::StatusCode::OK);
+    fixture.tell("leak", 1, "");
+    let died = fixture
+        .client
+        .post(provider.request_url())
+        .json(&question(&provider, ASKED_NEXT))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        died.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "the runtime did not end while it handled the second request"
+    );
+    (fixture, server)
+}
+
+/// The places in `kept` whose text holds any of `private`.
+fn reaching(kept: &[(&'static str, Value, String)], private: &[&str]) -> Vec<&'static str> {
+    kept.iter()
+        .filter(|(_, _, text)| private.iter().any(|&word| text.contains(word)))
+        .map(|(place, _, _)| *place)
+        .collect()
+}
+
+/// Asserts that none of `private` reached any place the end is kept, and
+/// that each place counts the stderr lines the server withheld.
+#[track_caller]
+fn withheld_everywhere(kept: &[(&'static str, Value, String)], private: &[&str]) {
+    let exits: Value = kept
+        .iter()
+        .map(|(place, exit, _)| json!({"place": place, "exit": exit}))
+        .collect();
+    assert_eq!(
+        reaching(kept, private),
+        Vec::<&str>::new(),
+        "an earlier request's text reached what is kept of the end: {exits}"
     );
     assert!(
-        said.contains(&format!("/{}/dev/models/fixture", "Users")),
-        "the home path is not kept in its masked form: {said}"
+        kept.iter().all(|(_, exit, _)| exit["stderrWithheld"]
+            .as_u64()
+            .is_some_and(|count| count > 0)),
+        "a place does not count the stderr lines the server withheld: {exits}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_answered_while_stderr_repeats_it_leaves_none_of_it_kept_when_the_runtime_dies_on_the_next()
+ {
+    let (fixture, server) = first_then_second(None, "now").await;
+    withheld_everywhere(&fixture.kept_end(&server).await, &[ASKED_FIRST]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_requests_stderr_that_drains_only_after_the_next_request_is_asked_is_not_kept_either() {
+    // The runtime writes what it was first asked only once the second request
+    // has reached it.
+    let (fixture, server) = first_then_second(None, "late").await;
+    withheld_everywhere(&fixture.kept_end(&server).await, &[ASKED_FIRST]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_still_open_when_the_runtime_is_first_asked_is_not_kept_in_part() {
+    // The runtime begins a line as it starts and ends it with what it was
+    // first asked.
+    let (fixture, server) = first_then_second(Some("warming up for "), "now").await;
+    withheld_everywhere(
+        &fixture.kept_end(&server).await,
+        &[ASKED_FIRST, "warming up for"],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runtime_that_ends_before_it_is_asked_anything_keeps_its_masked_tail_everywhere() {
+    let fixture = recovering();
+    // Built here, so no private value stands in this file for the gate to find.
+    let key = format!("{}={}", "api_key", "Kp9".repeat(8));
+    let token = format!("Authorization: {} {}", "Bearer", "tq8Vw".repeat(6));
+    let home = format!("/{}/{}/models/fixture", "Users", "zqowner");
+    fixture.tell(
+        "say",
+        1,
+        &format!("{key}\n{token}\nloading {home}\nready to judge\n"),
+    );
+    let server = fixture.start(&fixture.model()).await.server.id.unwrap();
+    fixture.end(1, "code 7");
+    for (place, exit, text) in fixture.kept_end(&server).await {
+        assert_eq!(exit["cause"], "runtime_exited", "{place}: {exit}");
+        let said = tail(&exit).join("\n");
+        assert!(
+            said.ends_with("ready to judge"),
+            "{place} lost the tail of a runtime never asked anything: {exit}"
+        );
+        assert!(
+            said.matches("[redacted]").count() >= 2,
+            "{place} keeps the key and the token unmasked or not at all: {said}"
+        );
+        assert!(
+            said.contains(&format!("/{}/dev/models/fixture", "Users")),
+            "{place} keeps the home path unmasked or not at all: {said}"
+        );
+        for raw in ["Kp9Kp9", "tq8Vwtq8Vw", "zqowner"] {
+            assert!(!text.contains(raw), "{raw} reached {place}");
+        }
+        assert!(
+            exit["stderrWithheld"]
+                .as_u64()
+                .is_none_or(|count| count == 0),
+            "{place} counts lines withheld from a runtime never asked anything: {exit}"
+        );
+    }
 }
