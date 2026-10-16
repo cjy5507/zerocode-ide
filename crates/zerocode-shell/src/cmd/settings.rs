@@ -1090,8 +1090,25 @@ pub(crate) fn pane_layouts(
     state: State<'_, AppState>,
     worktree: String,
 ) -> Vec<pane_layout::TabLayout> {
-    let file = pane_layouts_file(state.config_root());
-    pane_layouts_read(&file, &worktree)
+    opened_set(&pane_layouts_file(state.config_root()), &worktree).kept()
+}
+
+/// The stored set the window opens `worktree` with, off the file at `file`
+/// (t-57717): what [`pane_layouts`] answers.
+pub(crate) fn opened_set(file: &std::path::Path, worktree: &str) -> pane_layout::Left {
+    pane_layout::without_finished(pane_layouts_read(file, worktree), |_| None)
+}
+
+/// The workspaces the boot puts back behind the front, off the file at
+/// `file` (t-14036) — what [`standing_pane_worktrees`] answers.
+pub(crate) fn standing_set(file: &std::path::Path) -> Vec<String> {
+    pane_layout::standing_worktrees(&pane_layout::read(file))
+}
+
+/// A save's set (t-57717): what [`save_pane_layouts`] writes, each tab in
+/// the order given.
+pub(crate) fn saved_set(layouts: Vec<pane_layout::TabLayout>) -> pane_layout::Left {
+    pane_layout::without_finished(layouts, |_| None)
 }
 
 /// Carry the session identity a pane-owned Zo reported into its durable leaf.
@@ -1160,23 +1177,31 @@ pub(crate) fn save_pane_layouts(
     let sessions = state.pane_sessions().clone();
     let agents = state.agent_terms().clone();
     carry_zo_pane_sessions(&mut layouts, &sessions, &agents);
+    let left = saved_set(layouts);
+    let kept: Vec<bool> = left.tabs.iter().map(Option::is_some).collect();
     // The one writer, and not once the window is leaving (t-7812 D): the
     // file is then the next window's list, and a save of the window dying
     // would take its tabs off it.
     // The names the tabs were stored under go back to the window (t-14036):
     // a tab born in this session is nameless until the file names it, and the
-    // stage can only say where a named tab stands.
-    pane_layout::save_window_set(&file, worktree, layouts, &crate::exit_runtime::leaving)
-        .map(Option::unwrap_or_default)
-        .map_err(|error| error.to_string())
+    // stage can only say where a named tab stands. One name per tab sent, in
+    // the order sent — none for a tab the save struck whole.
+    let named =
+        pane_layout::save_window_set(&file, worktree, left.kept(), &crate::exit_runtime::leaving)
+            .map(Option::unwrap_or_default)
+            .map_err(|error| error.to_string())?;
+    let mut named = named.into_iter();
+    Ok(kept
+        .into_iter()
+        .map(|kept| if kept { named.next().flatten() } else { None })
+        .collect())
 }
 
 /// The workspaces whose conversations were running when the window last went,
 /// for the boot to put back behind the one in front (t-14036).
 #[tauri::command(async)]
 pub(crate) fn standing_pane_worktrees(state: State<'_, AppState>) -> Vec<String> {
-    let file = pane_layouts_file(state.config_root());
-    pane_layout::standing_worktrees(&pane_layout::read(&file))
+    standing_set(&pane_layouts_file(state.config_root()))
 }
 
 /// One worktree's stored stage — the document tabs, their groups, the split

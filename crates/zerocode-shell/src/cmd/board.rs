@@ -1,6 +1,6 @@
 //! Board commands.
 
-use crate::conversation_wake::{self, ConversationWake};
+use crate::conversation_wake::{self, ConversationWake, WakeRoad};
 use crate::orchestration::wall_press::PressRefusal;
 use crate::*;
 use zerocode_core::capabilities::SpawnRoad;
@@ -1251,9 +1251,9 @@ pub(crate) fn definitely_absent(path: &Path) -> bool {
     std::fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// Six wire arguments: a `#[tauri::command]`'s payload parameters ARE its
-/// wire shape (`launch_agent_tab` says the same), so folding `restore` and
-/// `worktree` into a struct would rename what every door sends — a payload
+/// Seven wire arguments: a `#[tauri::command]`'s payload parameters ARE its
+/// wire shape (`launch_agent_tab` says the same), so folding `restore`,
+/// `worktree` and `road` into a struct would rename what every door sends — a payload
 /// change to quiet a lint about a payload. `AppHandle` and `State` are
 /// injected by Tauri and are not wire fields. A door still sending the old
 /// `interrupted` mark sends a field nothing reads: whether a wake is told to
@@ -1281,6 +1281,10 @@ pub(crate) fn resume_session(
     // a place to open in: [`wake_root`] resolves it through the window's own
     // catalog, and a door that names none opens in the workspace in front.
     worktree: Option<String>,
+    // The road the door came by (t-57717, [`WakeRoad`]): a stored record's
+    // (`restore-front`, `restore-behind`, `visit`, `stage`) or a person's
+    // pick by name (`reopen`). A door that names none is no road.
+    road: Option<String>,
 ) -> Result<ConversationWake, String> {
     let root = wake_root(state.inner(), worktree.as_deref())?;
     let root = session_root(&session, root, |named| {
@@ -1291,6 +1295,7 @@ pub(crate) fn resume_session(
         state: state.inner(),
         restore,
         root,
+        road: WakeRoad::named(road.as_deref()),
     };
     let term = state.take_term_id();
     wake_conversation(&door, term, &agent, session, rows, cols)
@@ -1368,6 +1373,8 @@ pub(crate) trait WakeWindow {
     type Channel;
     /// The checkout the pane opens in — the window's active root.
     fn root(&self) -> PathBuf;
+    /// The road the door came by (t-57717).
+    fn road(&self) -> WakeRoad;
     /// Where the goodbye's note lives: the window's local data root.
     fn data_root(&self) -> PathBuf;
     /// The live pane already holding `wanted`, if one does.
@@ -1796,6 +1803,8 @@ pub(crate) struct ResumeDoor<'a> {
     restore: Option<super::settings::StoredScreen>,
     /// The folder the pane opens in ([`wake_root`]).
     root: PathBuf,
+    /// The road the door named (t-57717).
+    road: WakeRoad,
 }
 
 /// One resume's launch, built and seated and not yet started: the program,
@@ -1828,6 +1837,10 @@ impl WakeWindow for ResumeDoor<'_> {
 
     fn root(&self) -> PathBuf {
         self.root.clone()
+    }
+
+    fn road(&self) -> WakeRoad {
+        self.road
     }
 
     fn data_root(&self) -> PathBuf {

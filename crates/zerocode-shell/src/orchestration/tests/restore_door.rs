@@ -9,7 +9,7 @@ use super::restore::{
 };
 use super::*;
 use crate::cmd::board::{ResumeCommand, WakeWindow, wake_conversation};
-use crate::conversation_wake::ConversationWake;
+use crate::conversation_wake::{ConversationWake, WakeRoad};
 use crate::restart_nudge_runtime::{PendingNudge, PendingNudges, WakeReceipts};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::Receiver;
@@ -99,6 +99,9 @@ pub(super) struct Door {
     /// A program an account switch's close left behind is still there, as
     /// this window's look sees it (t-7538).
     pub(super) lingering: Mutex<bool>,
+    /// The road this door's wakes come by (t-57717): none named, unless a
+    /// test says.
+    pub(super) road: Mutex<WakeRoad>,
 }
 
 impl Door {
@@ -117,7 +120,13 @@ impl Door {
             during_prepare: Mutex::new(None),
             timeline: Mutex::new(None),
             lingering: Mutex::new(false),
+            road: Mutex::new(WakeRoad::Unnamed),
         }
+    }
+
+    /// This door's wakes come by `road` from now on (t-57717).
+    pub(super) fn on_road(&self, road: WakeRoad) {
+        *self.road.lock().unwrap() = road;
     }
 
     /// Write `did` into this door's book, and into the timeline if one is
@@ -300,6 +309,10 @@ impl WakeWindow for Door {
 
     fn root(&self) -> std::path::PathBuf {
         self.checkout.clone()
+    }
+
+    fn road(&self) -> WakeRoad {
+        *self.road.lock().unwrap()
     }
 
     fn data_root(&self) -> std::path::PathBuf {
