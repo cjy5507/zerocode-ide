@@ -1535,10 +1535,13 @@ const PERSON_LABELS_KIND: &str = "person_labels";
 /// matches: the request's key, the axis, the version that answered, and
 /// whether each reader named what the person named — never a word of the
 /// file. A row is written only where the ledger holds none for the same
-/// request, axis and version, or its newest says otherwise. How many labelled
-/// tasks matched and how many did not go in a summary row whenever a person
-/// row is written or a count changes. A file that is missing or does not read
-/// writes nothing. Answers whether a person row was written.
+/// request, axis and version, or its newest says otherwise. A label the file
+/// no longer holds is taken back: where the newest row this import wrote of
+/// it says a verdict, a row of the same request, axis and version says none,
+/// and both judges read the newest. How many labelled tasks matched and how
+/// many did not go in a summary row whenever a person row is written or a
+/// count changes. A file that is missing or does not read writes nothing and
+/// takes nothing back. Answers whether a person row was written.
 fn import_person_labels(
     ledger: &Path,
     settings: Option<&serde_json::Value>,
@@ -1559,38 +1562,43 @@ fn import_person_labels(
         return false;
     };
     // What the ledger's person rows say now: the newest of each request, axis
-    // and version.
-    let mut said = HashMap::new();
+    // and version, and whether this import wrote it.
+    let mut said = BTreeMap::new();
     for row in rows.iter().filter(|row| source_of(row) == Some(LabelSource::Person)) {
         let verdicts = (
             jev_ledger::AGREED.read(row).and_then(serde_json::Value::as_bool),
             jev_ledger::BASELINE_AGREED.read(row).and_then(serde_json::Value::as_bool),
         );
+        let imported =
+            jev_ledger::LABEL_AUTHOR.read(row).and_then(serde_json::Value::as_str) == Some(PERSON_LABEL_AUTHOR);
         if let (Some(task), Some(axis)) = (
             jev_ledger::LABEL.read(row).and_then(serde_json::Value::as_str),
             jev_ledger::LABEL_PART.read(row).and_then(serde_json::Value::as_str),
         ) {
-            said.insert((task, axis, jev_ledger::MODEL.read(row).and_then(serde_json::Value::as_str)), verdicts);
+            let model = jev_ledger::MODEL.read(row).and_then(serde_json::Value::as_str);
+            said.insert((task, axis, model), (verdicts, imported));
         }
     }
     let mut written = 0_usize;
     for mark in &read.marks {
         let verdicts = (Some(mark.judgment_right), Some(mark.probe_right));
-        if said.get(&(mark.task.as_str(), mark.axis, mark.model.as_deref())) == Some(&verdicts) {
+        let before = said.get(&(mark.task.as_str(), mark.axis, mark.model.as_deref()));
+        if before.is_some_and(|(then, _)| *then == verdicts) {
             continue;
         }
-        let mut row = serde_json::json!({
-            "at": now_ms,
-            (jev_ledger::LABEL.canonical): mark.task,
-            (jev_ledger::LABEL_PART.canonical): mark.axis,
-            (jev_ledger::AGREED.canonical): mark.judgment_right,
-            (jev_ledger::BASELINE_AGREED.canonical): mark.probe_right,
-        });
-        if let Some(model) = &mark.model {
-            row[jev_ledger::MODEL.canonical] = serde_json::Value::from(model.as_str());
-        }
-        stamp_label(&mut row, LabelSource::Person, PERSON_LABEL_AUTHOR);
+        let mut row = person_row(now_ms, &mark.task, mark.axis, mark.model.as_deref());
+        row[jev_ledger::AGREED.canonical] = serde_json::Value::from(mark.judgment_right);
+        row[jev_ledger::BASELINE_AGREED.canonical] = serde_json::Value::from(mark.probe_right);
         written += usize::from(append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok());
+    }
+    let mut withdrawn = 0_usize;
+    for ((task, axis, model), (verdicts, imported)) in &said {
+        let held = read.labelled.get(*task).is_some_and(|axes| axes.contains(axis));
+        if !imported || *verdicts == (None, None) || held {
+            continue;
+        }
+        let row = person_row(now_ms, task, axis, *model);
+        withdrawn += usize::from(append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok());
     }
     let unmatched = read.labels.saturating_sub(read.matched);
     let counted = rows
@@ -1601,14 +1609,30 @@ fn import_person_labels(
             row.get("matched") == Some(&serde_json::json!(read.matched))
                 && row.get("unmatched") == Some(&serde_json::json!(unmatched))
         });
-    if written > 0 || !counted {
+    if written > 0 || withdrawn > 0 || !counted {
         let summary = serde_json::json!({
             "at": now_ms, "kind": PERSON_LABELS_KIND,
-            "matched": read.matched, "unmatched": unmatched, "written": written,
+            "matched": read.matched, "unmatched": unmatched, "written": written, "withdrawn": withdrawn,
         });
         let _ = append_shadow_row(ledger, &summary, SHADOW_LEDGER_MAX_BYTES);
     }
-    written > 0
+    written + withdrawn > 0
+}
+
+/// A person row of the labels file's import naming one part of one request
+/// and the version that answered it, before any verdict: written as it is,
+/// the label taken back.
+fn person_row(now_ms: i64, task: &str, axis: &str, model: Option<&str>) -> serde_json::Value {
+    let mut row = serde_json::json!({
+        "at": now_ms,
+        (jev_ledger::LABEL.canonical): task,
+        (jev_ledger::LABEL_PART.canonical): axis,
+    });
+    if let Some(model) = model {
+        row[jev_ledger::MODEL.canonical] = serde_json::Value::from(model);
+    }
+    stamp_label(&mut row, LabelSource::Person, PERSON_LABEL_AUTHOR);
+    row
 }
 
 pub(super) fn now_ms() -> i64 {

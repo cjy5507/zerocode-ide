@@ -1121,7 +1121,7 @@ fn a_named_labels_file_reaches_the_ledger_as_person_rows_without_its_words() {
         json!({"description": description, "prompt": prompt, "complexity": "large", "risk": "high", "intent": "analysis"}),
         json!({"prompt": unread, "complexity": "small"}),
     ];
-    fs::write(&labels, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).expect("the labels file");
+    write_labels(&labels, &lines);
     let settings = json!({"smart": {"jev": {"labels": labels.to_string_lossy()}}});
     assert!(super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), 9).is_some(), "a full window is due");
 
@@ -1181,7 +1181,11 @@ fn labelled_window(home: &std::path::Path, prompts: &[&str], model: &str) -> (Pa
 }
 
 fn write_labels(path: &std::path::Path, lines: &[Value]) {
-    fs::write(path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).expect("the labels file");
+    let mut text = String::new();
+    for line in lines {
+        let _ = writeln!(text, "{line}");
+    }
+    fs::write(path, text).expect("the labels file");
 }
 
 /// What the import wrote: the person rows and the rows that count the file.
@@ -1271,8 +1275,8 @@ fn a_label_taken_out_of_the_file_is_withdrawn_from_the_ledger() {
     let summary = rows.iter().rev().find(|row| row["kind"] == json!("person_labels")).expect("a summary row");
     assert_eq!((&summary["matched"], &summary["written"], &summary["withdrawn"]), (&json!(1), &json!(0), &json!(5)), "{summary}");
     let text = fs::read_to_string(&ledger).expect("the ledger");
-    let path = labels.to_string_lossy();
-    assert!(prompts.iter().all(|prompt| !text.contains(prompt)) && !text.contains(path.as_ref()), "{text}");
+    let path = labels.to_str().expect("a path in UTF-8");
+    assert!(prompts.iter().all(|prompt| !text.contains(prompt)) && !text.contains(path), "{text}");
 
     assert!(judge(11).is_some(), "still due");
     assert_eq!(imported(&read_rows(&ledger)), imported(&rows), "nothing is taken back twice");

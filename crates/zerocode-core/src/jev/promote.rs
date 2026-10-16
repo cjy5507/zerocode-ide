@@ -1259,41 +1259,58 @@ impl Labels {
 }
 
 /// A person's labels as both judges read them (t-26584, decision 3): the
-/// ledger's person rows ([`LabelSource::Person`]) that carry both marks —
-/// [`AGREED`] for the judgment, [`BASELINE_AGREED`] for the reader it would
-/// replace — and no other source. Of two rows naming one request and one
-/// part of it ([`LABEL_PART`]), the newest counts; a row graded against
-/// another version than `model`, the one answering now, counts for nothing.
-/// The requests are counted toward a window's worth, as the file a person
-/// named counted them; who was right, part by part. `None` where no row
-/// counts.
+/// ledger's person rows ([`LabelSource::Person`]) and no other source that
+/// carry both marks — [`AGREED`] for the judgment, [`BASELINE_AGREED`] for
+/// the reader it would replace — or neither, which takes back what the person
+/// said of that part of the request. Of two rows naming one request and one
+/// part of it ([`LABEL_PART`]), the newest counts. A row graded against
+/// another version than `model`, the one answering now, counts for nothing
+/// and takes nothing back. The requests are counted toward a window's worth,
+/// as the file a person named counted them; who was right, part by part.
+/// `None` where no row counts.
 #[must_use]
 pub fn person_labels(rows: &[Value], model: Option<&str>) -> Option<Labels> {
     let mut newest = HashMap::new();
     for row in rows {
+        let graded = MODEL
+            .read(row)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|graded| !graded.is_empty());
         if source_of(row) != Some(LabelSource::Person)
-            || named_version(row).is_some_and(|graded| Some(graded) != model)
+            || graded.is_some_and(|graded| Some(graded) != model)
         {
             continue;
         }
-        let (Some(label), Some(judgment), Some(current)) = (
-            LABEL.read(row).and_then(Value::as_str),
-            AGREED.read(row).and_then(Value::as_bool),
-            BASELINE_AGREED.read(row).and_then(Value::as_bool),
-        ) else {
+        let Some(label) = LABEL.read(row).and_then(Value::as_str) else {
             continue;
         };
         let part = LABEL_PART.read(row).and_then(Value::as_str);
-        newest.insert((label, part), (judgment, current));
+        let marks = match (
+            AGREED.read(row).and_then(Value::as_bool),
+            BASELINE_AGREED.read(row).and_then(Value::as_bool),
+        ) {
+            (Some(judgment), Some(current)) => Some((judgment, current)),
+            (None, None) => None,
+            _ => continue,
+        };
+        newest.insert((label, part), marks);
     }
-    if newest.is_empty() {
+    let standing: Vec<(&str, (bool, bool))> = newest
+        .into_iter()
+        .filter_map(|((label, _), marks)| Some((label, marks?)))
+        .collect();
+    if standing.is_empty() {
         return None;
     }
-    let requests: HashSet<&str> = newest.keys().map(|(label, _)| *label).collect();
+    let requests: HashSet<&str> = standing.iter().map(|(label, _)| *label).collect();
     Some(Labels {
         compared: requests.len(),
-        judgment_right: newest.values().filter(|(judgment, _)| *judgment).count(),
-        probe_right: newest.values().filter(|(_, current)| *current).count(),
+        judgment_right: standing
+            .iter()
+            .filter(|(_, (judgment, _))| *judgment)
+            .count(),
+        probe_right: standing.iter().filter(|(_, (_, current))| *current).count(),
     })
 }
 
