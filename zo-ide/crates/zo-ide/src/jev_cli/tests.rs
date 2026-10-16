@@ -319,6 +319,64 @@ fn the_json_says_why_the_rows_compare_nothing_word_by_word() {
     );
 }
 
+/// A seat whose labels marked rows through a proxy says how many in every
+/// agreement the JSON carries (t-60961): `proxied` counts the marks the judge
+/// withholds from `compared` (t-26584, ①), so a seat that compared nothing is
+/// told apart from one whose labels marked nothing. It counts marks and not
+/// label rows: a proxy row that compared nothing counts in `notCompared` alone.
+#[test]
+fn a_summary_counts_the_marks_a_proxy_label_made() {
+    use zerocode_core::jev::provenance::{stamp_label, LabelSource};
+    use zerocode_core::worker_placement::UNSEEN;
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::PLACEMENT;
+    let began_ms = core_types::date::unix_secs_from_rfc3339("2026-10-16T04:17:22Z").expect("a time") * 1000;
+    let proxy_marks = [("w-1", true), ("w-2", false)];
+    let executed_marks = [("w-3", true)];
+    let unmarked = ["w-4"];
+    let asked = |at: i64, worker: &str| {
+        serde_json::json!({"at": at, "placement": worker, "outcome": "answered", "elapsedMs": 40, "requests": 1,
+                           "chosen": "split", "confidence": 0.7, "rubricVersion": seat.rubric_version})
+    };
+    let stamped = |mut row: serde_json::Value, source: LabelSource| {
+        stamp_label(&mut row, source, seat.id);
+        row
+    };
+    let workers = proxy_marks.iter().chain(&executed_marks).map(|(worker, _)| *worker).chain(unmarked);
+    let mut rows: Vec<serde_json::Value> =
+        workers.zip(0..).map(|(worker, n)| asked(began_ms + n * 1_000, worker)).collect();
+    let labelled_at = began_ms + 10_000;
+    rows.extend(proxy_marks.iter().map(|(worker, agreed)| {
+        stamped(serde_json::json!({"at": labelled_at, "label": worker, "agreed": agreed}), LabelSource::Proxy)
+    }));
+    rows.extend(executed_marks.iter().map(|(worker, agreed)| {
+        stamped(serde_json::json!({"at": labelled_at, "label": worker, "agreed": agreed}), LabelSource::Executed)
+    }));
+    rows.extend(unmarked.iter().map(|worker| {
+        stamped(serde_json::json!({"at": labelled_at, "label": worker, "notCompared": UNSEEN}), LabelSource::Proxy)
+    }));
+    std::fs::write(
+        home.path().join(seat.ledger),
+        rows.iter().map(|row| row.to_string() + "\n").collect::<String>(),
+    )
+    .expect("write");
+    let seats = tools::jev_summary::report(&roots, None, None, began_ms + 39_000, 0);
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
+    let placement = value["seats"]
+        .as_array()
+        .expect("seats")
+        .iter()
+        .find(|row| row["id"] == seat.id)
+        .expect("placement");
+    println!("{placement}");
+    assert_eq!(placement["agreementWeek"]["proxied"], proxy_marks.len(), "the week counts the marks a proxy label made");
+    assert_eq!(placement["agreementWeek"]["compared"], executed_marks.len(), "and compares only the executed ones");
+    assert_eq!(placement["agreementWeek"]["notCompared"], unmarked.len(), "a row that compared nothing is no mark");
+    assert_eq!(placement["judged"]["agreement"]["proxied"], proxy_marks.len(), "the judged window");
+    assert_eq!(placement["days"][6]["agreement"]["proxied"], proxy_marks.len(), "today");
+}
+
 /// A seat several programs ask says in the JSON who asked it this week
 /// (t-10916) — the name the window's dashboard reads it by.
 #[test]
