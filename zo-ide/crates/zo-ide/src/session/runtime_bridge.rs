@@ -589,6 +589,16 @@ impl AsyncApiClient for LiveAsyncApiClient {
     }
 }
 
+/// Where a turn on `client` is posted, as that client builds the URL, with
+/// `gateway_active` saying whether a cloud gateway carries Anthropic requests
+/// in this process (t-57512).
+fn destination_of(
+    _client: &ProviderClient,
+    _gateway_active: impl FnOnce() -> bool,
+) -> Option<String> {
+    None
+}
+
 /// One transcript row for a mid-stream notice. Reconnects render as warnings
 /// with the backoff/attempt detail; the quiet-reasoning heartbeat renders as
 /// an informational row (nothing is wrong — the model is thinking silently on
@@ -1796,14 +1806,18 @@ pub(in crate::session) mod tests {
         )
     }
 
+    /// An Anthropic client at `base_url`, as a turn's live client holds one.
+    fn anthropic_at(base_url: &str) -> ProviderClient {
+        ProviderClient::Anthropic(
+            api::AnthropicClient::from_auth(api::AuthSource::BearerToken("a-login".to_string()))
+                .with_base_url(base_url),
+        )
+    }
+
     /// Where a live client of an Anthropic client at `base_url` says its
     /// turns go.
     fn named_at(base_url: &str) -> Option<String> {
-        let client = api::AnthropicClient::from_auth(api::AuthSource::BearerToken(
-            "a-login".to_string(),
-        ))
-        .with_base_url(base_url);
-        live_client_of(ProviderClient::Anthropic(client)).destination()
+        live_client_of(anthropic_at(base_url)).destination()
     }
 
     /// A live Anthropic client names the URL it posts a turn to, as that
@@ -1854,5 +1868,45 @@ pub(in crate::session) mod tests {
     fn a_live_client_of_another_provider_names_no_place() {
         let client = api::OpenAiCompatClient::new("a-key", api::OpenAiCompatConfig::openai());
         assert_eq!(live_client_of(ProviderClient::OpenAi(client)).destination(), None);
+    }
+
+    /// While a cloud gateway carries Anthropic requests, a turn goes to the
+    /// gateway's own URL, not to `{base_url}/v1/messages`, so an Anthropic
+    /// client names no place; with none it names its own (t-57512). The
+    /// gateway state is a fixture: no test sets a gateway flag in this process.
+    #[test]
+    fn an_anthropic_client_names_no_place_while_a_cloud_gateway_carries_its_turns() {
+        for (base_url, posted_to) in [
+            ("https://api.anthropic.com", "https://api.anthropic.com/v1/messages"),
+            (
+                "https://gateway.example.com:8443/anthropic",
+                "https://gateway.example.com:8443/anthropic/v1/messages",
+            ),
+        ] {
+            let client = anthropic_at(base_url);
+            let named = destination_of(&client, || false);
+            assert_eq!(named, Some(posted_to.to_string()), "no gateway: {base_url}");
+            assert_eq!(destination_of(&client, || true), None, "a gateway: {base_url}");
+        }
+    }
+
+    /// Only an Anthropic client asks whether a cloud gateway carries its
+    /// turns, and once; a client of another provider names no place without
+    /// asking, so it never reads the process-wide gateway state (t-57512).
+    #[test]
+    fn only_an_anthropic_client_asks_whether_a_cloud_gateway_carries_its_turns() {
+        let asked = std::cell::Cell::new(0);
+        let no_gateway = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        let other = ProviderClient::OpenAi(api::OpenAiCompatClient::new(
+            "a-key",
+            api::OpenAiCompatConfig::openai(),
+        ));
+        assert_eq!(destination_of(&other, no_gateway), None);
+        assert_eq!(asked.get(), 0, "a client of another provider asked about a gateway");
+        let named = destination_of(&anthropic_at("https://api.anthropic.com"), no_gateway);
+        assert_eq!((named.is_some(), asked.get()), (true, 1), "an Anthropic client asks once");
     }
 }
