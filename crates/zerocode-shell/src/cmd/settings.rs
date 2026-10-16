@@ -609,7 +609,7 @@ pub(crate) fn set_hide_agent_scratch_workspaces(
 ///
 /// 하나의 패치인 이유는 이것이 하나의 메뉴에서 오는 하나의 선택이기 때문이다 —
 /// 셋으로 나누면 창이 선택의 3분의 2만 흡수한 채 서 있을 수 있다. 팀 보기와
-/// 가지별 보기(`layout`, t-56141)도 같은 값에 산다. 그 낱말을 싣지 않은 호출은
+/// 브랜치 보기(`layout`, t-56141)도 같은 값에 산다. 그 낱말을 싣지 않은 호출은
 /// 저장된 보기를 그대로 둔다.
 #[tauri::command(async)]
 pub(crate) fn set_sidebar_view(

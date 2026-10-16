@@ -1571,6 +1571,7 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 }
 
 .team-row {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -1646,6 +1647,21 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   white-space: nowrap;
 }
 
+/* Which project the coordinator works in (the person, 10-16: a card did not say), before the run's name and
+ * in a chip's dress, so a category reads as one. */
+.team-project {
+  flex: none;
+  max-width: 9em;
+  overflow: hidden;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--nav-plane-ink) 10%, transparent);
+  color: var(--ink-chalk);
+  font-size: var(--text-3xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .team-badge,
 .team-chip {
   flex: none;
@@ -1695,6 +1711,26 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 
 .team-dot.is-blocked {
   background: var(--signal-halt);
+}
+
+/* A working worker turns the way a working workspace does in the branch list — the person, 10-16: a still
+ * green dot did not say whether the worker was running. The ring is the one `.wt-dot.is-working::before`
+ * draws, around the state dot rather than in its place, and the window writes its twelve angles
+ * (`spinWorktreeDots`) for the same reason it does there: a CSS keyframe may stop presenting under the
+ * split+glass stage, a class write forces the frame. The row itself wears the list's flowing border
+ * (`.wt-activity-border`'s rule, below). */
+.team-dot.is-working {
+  position: relative;
+}
+
+.team-dot.is-working::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--edge-mark);
+  border-top-color: var(--ink-chalk);
+  transform: rotate(0deg);
 }
 
 .team-title {
@@ -1760,7 +1796,8 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   background: var(--nav-plane-rule);
 }
 
-.team-step.is-on {
+.team-step.is-on,
+.team-step.is-past {
   background: var(--signal-done);
 }
 
@@ -2812,7 +2849,8 @@ svg.wt-agent-dot {
 
 /* A separate leaf leaves the child row's lineage guide and elbow intact. */
 .wt-activity-border,
-#worktrees .wt-node::after {
+#worktrees .wt-node::after,
+.team-row::after {
   content: "";
   display: none;
   position: absolute;
@@ -2834,6 +2872,7 @@ svg.wt-agent-dot {
 /* The workspace takes over only when no working agent row is visible.
  * Its existing state dot also keeps permission requests ahead of motion. */
 #worktrees .wt-agent.is-working:not(.is-ancestry) > .wt-activity-border,
+.team-row.is-working::after,
 #worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"]):not(:has(> .wt-agents:not([hidden]) > .wt-agent.is-working:not(.is-ancestry)))::after,
 :root:is([data-worktree-card-layout="compact"], [data-worktree-card-off~="agents"]) #worktrees .wt-node:has(> .wt-row > .wt-dot[data-state="working"])::after {
   display: block;
@@ -2846,7 +2885,8 @@ svg.wt-agent-dot {
 
 @media (prefers-reduced-motion: reduce) {
   #worktrees .wt-activity-border,
-  #worktrees .wt-node::after {
+  #worktrees .wt-node::after,
+  .team-row::after {
     animation: none !important;
     background: var(--worktree-flow-ink);
   }
@@ -2969,18 +3009,30 @@ svg.wt-agent-dot {
   transform: rotate(0deg);
 }
 
-.wt-dot.wt-spin-0::before { transform: rotate(0deg); }
-.wt-dot.wt-spin-1::before { transform: rotate(30deg); }
-.wt-dot.wt-spin-2::before { transform: rotate(60deg); }
-.wt-dot.wt-spin-3::before { transform: rotate(90deg); }
-.wt-dot.wt-spin-4::before { transform: rotate(120deg); }
-.wt-dot.wt-spin-5::before { transform: rotate(150deg); }
-.wt-dot.wt-spin-6::before { transform: rotate(180deg); }
-.wt-dot.wt-spin-7::before { transform: rotate(210deg); }
-.wt-dot.wt-spin-8::before { transform: rotate(240deg); }
-.wt-dot.wt-spin-9::before { transform: rotate(270deg); }
-.wt-dot.wt-spin-10::before { transform: rotate(300deg); }
-.wt-dot.wt-spin-11::before { transform: rotate(330deg); }
+.wt-dot.wt-spin-0::before,
+.team-dot.wt-spin-0::before { transform: rotate(0deg); }
+.wt-dot.wt-spin-1::before,
+.team-dot.wt-spin-1::before { transform: rotate(30deg); }
+.wt-dot.wt-spin-2::before,
+.team-dot.wt-spin-2::before { transform: rotate(60deg); }
+.wt-dot.wt-spin-3::before,
+.team-dot.wt-spin-3::before { transform: rotate(90deg); }
+.wt-dot.wt-spin-4::before,
+.team-dot.wt-spin-4::before { transform: rotate(120deg); }
+.wt-dot.wt-spin-5::before,
+.team-dot.wt-spin-5::before { transform: rotate(150deg); }
+.wt-dot.wt-spin-6::before,
+.team-dot.wt-spin-6::before { transform: rotate(180deg); }
+.wt-dot.wt-spin-7::before,
+.team-dot.wt-spin-7::before { transform: rotate(210deg); }
+.wt-dot.wt-spin-8::before,
+.team-dot.wt-spin-8::before { transform: rotate(240deg); }
+.wt-dot.wt-spin-9::before,
+.team-dot.wt-spin-9::before { transform: rotate(270deg); }
+.wt-dot.wt-spin-10::before,
+.team-dot.wt-spin-10::before { transform: rotate(300deg); }
+.wt-dot.wt-spin-11::before,
+.team-dot.wt-spin-11::before { transform: rotate(330deg); }
 
 .wt-dot.is-permission::before {
   content: "?";
