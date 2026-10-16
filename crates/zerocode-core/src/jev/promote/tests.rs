@@ -1614,6 +1614,33 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
     );
 }
 
+/// Decision 4(a) of t-26584: a seat with no baseline has no current judgment
+/// to pair its marks with, so the paired line does not read it, and its own
+/// floors raise it as they did before that line. The browser read's marks
+/// grade only its own folds; its writer stamps no baseline mark.
+#[test]
+fn a_seat_with_no_baseline_rises_on_its_floors_without_pairs() {
+    let own = &crate::jev::BROWSER_READ;
+    assert!(!own.baseline.binds());
+    let unpaired = window_then(own, |own, at| {
+        marks_that_rise(own, at)
+            .into_iter()
+            .map(|mut mark| {
+                mark.as_object_mut()
+                    .expect("a mark")
+                    .remove("baselineAgreed");
+                mark
+            })
+            .collect()
+    });
+    let verdict = judge_seat(own, &unpaired).expect("judged").verdict;
+    assert_eq!(
+        verdict,
+        Verdict::Rise,
+        "its floors met, a seat with nothing to pair rises: {verdict:?}"
+    );
+}
+
 /// A seat whose label found nothing to grade says so — "no label" — rather
 /// than reading as one still counting a thin sample (t-6342): the step seat's
 /// every judgment was held back on its wire, so each label row names why it
