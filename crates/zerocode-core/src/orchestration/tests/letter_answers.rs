@@ -28,7 +28,7 @@ fn send_at(bench: &mut Bench, pane: &str, to: &str, body: &str) -> String {
 }
 
 /// A question `pane` puts to whoever `to` names.
-fn ask_at(bench: &mut Bench, pane: &str, to: &str, body: &str) -> String {
+pub(super) fn ask_at(bench: &mut Bench, pane: &str, to: &str, body: &str) -> String {
     bench.json_at(pane, &format!("ask --to {to} --body {body}"))["questionId"]
         .as_str()
         .expect("a question id")
@@ -36,7 +36,7 @@ fn ask_at(bench: &mut Bench, pane: &str, to: &str, body: &str) -> String {
 }
 
 /// A root status letter, for a fixture that posts straight to the ledger.
-fn letter(from: &str, to: &str, body: &str) -> Draft {
+pub(super) fn letter(from: &str, to: &str, body: &str) -> Draft {
     Draft {
         from: from.to_string(),
         to: to.to_string(),
@@ -234,24 +234,27 @@ fn a_question_answered_by_a_letter_closes_no_ring_of_waiting() {
 }
 
 /// Run `argv` from the leader pane of `team`, swapped in for the bench's own
-/// team and back — another window's coordinator. Answers its JSON.
-fn as_leader_of(bench: &mut Bench, team: &mut Team, argv: &[&str]) -> serde_json::Value {
+/// team and back — another window's coordinator. Answers what the verb
+/// answered, a refusal included.
+pub(super) fn answered_as_leader_of(bench: &mut Bench, team: &mut Team, argv: &[&str]) -> Reply {
     std::mem::swap(&mut bench.team, team);
     let planned = bench.at_argv(
         agent_teams::LEADER_PANE,
         argv.iter().map(|word| word.to_string()).collect(),
     );
     std::mem::swap(&mut bench.team, team);
-    assert_eq!(
-        planned.reply.exit_code, 0,
-        "{argv:?}: {}",
-        planned.reply.stderr
-    );
-    serde_json::from_str(&planned.reply.stdout).expect("the verb answers JSON")
+    planned.reply
+}
+
+/// The same, for a verb that must be taken: answers its JSON.
+pub(super) fn as_leader_of(bench: &mut Bench, team: &mut Team, argv: &[&str]) -> serde_json::Value {
+    let reply = answered_as_leader_of(bench, team, argv);
+    assert_eq!(reply.exit_code, 0, "{argv:?}: {}", reply.stderr);
+    serde_json::from_str(&reply.stdout).expect("the verb answers JSON")
 }
 
 /// A run `team`'s leader creates, and so sits in the chair of.
-fn run_of(bench: &mut Bench, team: &mut Team, name: &str) -> String {
+pub(super) fn run_of(bench: &mut Bench, team: &mut Team, name: &str) -> String {
     as_leader_of(bench, team, &["run-create", "--name", name])["runId"]
         .as_str()
         .expect("a run id")
@@ -260,7 +263,12 @@ fn run_of(bench: &mut Bench, team: &mut Team, name: &str) -> String {
 
 /// A question `team`'s leader puts to another run's chair — filed in that
 /// run under the leader's pane address, as `send --run` files it.
-fn ask_another_run(bench: &mut Bench, team: &mut Team, run_id: &str, body: &str) -> String {
+pub(super) fn ask_another_run(
+    bench: &mut Bench,
+    team: &mut Team,
+    run_id: &str,
+    body: &str,
+) -> String {
     let chair = format!("run:{run_id}");
     as_leader_of(
         bench,

@@ -25210,6 +25210,10 @@ mod landing_watch;
 mod letter_answers;
 /// t-47538: one reading of where a task's work stands (`tests/progress.rs`).
 mod progress;
+/// t-59383 r2: a question nobody waits on any more — three days unanswered,
+/// or a day after the chair it was asked from emptied — is closed for every
+/// count (`tests/question_expiry.rs`).
+mod question_expiry;
 /// t-7812: the window restart restore transitions (`tests/restore.rs`).
 mod restore;
 /// t-7812: the transitions those roads added (`tests/restore_seams.rs`).
