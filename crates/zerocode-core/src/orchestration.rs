@@ -12925,6 +12925,46 @@ impl Ledger {
         })
     }
 
+    /// The worker row a conversation is, as the ledger holds it now
+    /// (t-57717): the row still carrying it on — at work, asleep, or orphaned
+    /// with its pane perhaps still working — when one is, else the newest row
+    /// that carried it. `None` for a conversation no worker reported. A
+    /// read, for the window's resume lines and [`Self::finished_worker_of`];
+    /// nothing moves.
+    pub fn worker_of_conversation(&self, agent: &str, session_id: &str) -> Option<&Worker> {
+        let rows = || {
+            self.runs
+                .iter()
+                .flat_map(|run| run.workers.iter())
+                .filter(|worker| {
+                    worker.agent == agent
+                        && worker
+                            .session
+                            .as_ref()
+                            .is_some_and(|session| session.id == session_id)
+                })
+        };
+        rows()
+            .find(|worker| carries_its_conversation_on(worker.state))
+            .or_else(|| rows().max_by_key(|worker| worker.started_ms))
+    }
+
+    /// The finished worker a conversation was, if it was one (t-57717): its
+    /// row ended — released, a release asked for or never answered, its work
+    /// done and its pane left reclaimable or retained — no other row carries
+    /// the conversation on, and the person did not take its pane (a taken
+    /// pane is theirs, [`Worker::taken_over`]).
+    ///
+    /// What the window asks before a road that read the conversation off its
+    /// stored record of a workspace brings it back on its own: on 2026-10-15
+    /// and 16 three finished workers' conversations came back that way as
+    /// agent panes nobody had called, each on the first visit to its checkout
+    /// after a restart. A read; nothing moves.
+    pub fn finished_worker_of(&self, agent: &str, session_id: &str) -> Option<&Worker> {
+        self.worker_of_conversation(agent, session_id)
+            .filter(|worker| !worker.taken_over && !carries_its_conversation_on(worker.state))
+    }
+
     /// The launch words the sleeper `worker_id` comes back with (t-7812):
     /// `kept_worker_tuning`'s, asked by the window's resume road so the pane
     /// it opens for a sleeper's conversation is the launch the ledger's own
@@ -18147,6 +18187,17 @@ fn kept_worker_model(
     )
 }
 
+/// Whether a worker row in `state` still carries its conversation on
+/// (t-57717): at work, asleep for its coordinator to seat again, or orphaned
+/// with its pane perhaps still working. Every other state is a row that
+/// ended — the answer [`Ledger::finished_worker_of`] reads.
+const fn carries_its_conversation_on(state: WorkerState) -> bool {
+    matches!(
+        state,
+        WorkerState::Active | WorkerState::Sleeping | WorkerState::Orphaned
+    )
+}
+
 /// Assemble a reserved worker's command or put the reservation back exactly.
 ///
 /// The stable peer name needs the worker id, and the worker id exists only
@@ -20492,6 +20543,56 @@ fn formatted_over(decided: &mut Decided) {
         return;
     };
     answer["formatted"] = serde_json::Value::String(frame);
+    decided.reply.stdout = format!("{answer}\n");
+}
+
+/// The seat a pane bound to `run_id` is not (t-57705): who holds the run's
+/// coordinator seat, how much of the run's mail waits there, and the one verb
+/// that moves the seat — for a pane reading its own inbox (`address`), where
+/// the run's mail never arrives. `None` for the seat itself, a worker, a pane
+/// the run has no word with, and a run nobody sits in.
+fn seat_elsewhere(
+    ledger: &Ledger,
+    run_id: &str,
+    address: &str,
+    caller: &str,
+    seat: &str,
+) -> Option<serde_json::Value> {
+    if !address.starts_with(PANE_ADDRESS_PREFIX)
+        || standing_in(ledger, caller, seat).as_deref() != Some(run_id)
+    {
+        return None;
+    }
+    let run = ledger.run(run_id)?;
+    let held = run.coordinator_live().filter(|held| held.seat != seat)?;
+    let waiting = run.unread(&run.address()).len();
+    let takeover = format!(
+        "run-takeover --run {run_id} --from {} --reason <why> {RETRY_REQUEST} <name>",
+        held.seat
+    );
+    let said = format!(
+        "This pane is not run {run_id}'s coordinator seat: {} holds it (generation {}), and \
+         {waiting} of the run's messages wait there, not here. To move the seat to this pane: \
+         {takeover}",
+        held.seat, held.generation
+    );
+    Some(serde_json::json!({
+        "run": run_id,
+        "heldBy": held.seat,
+        "generation": held.generation,
+        "waiting": waiting,
+        "takeover": takeover,
+        "said": said,
+    }))
+}
+
+/// Put `value` under `key` beside what a look answered, leaving the rest of
+/// the answer as it was.
+fn said_beside(decided: &mut Decided, key: &str, value: serde_json::Value) {
+    let Ok(mut answer) = serde_json::from_str::<serde_json::Value>(&decided.reply.stdout) else {
+        return;
+    };
+    answer[key] = value;
     decided.reply.stdout = format!("{answer}\n");
 }
 
@@ -23864,6 +23965,17 @@ fn plan_inner(
             } else {
                 look(ledger, &run_id, &address, &kinds, Some((&seat, now_ms)))?
             };
+            /* A pane bound to this run that is not its seat reads its own
+             * pane inbox, and the run's mail waits at the seat (t-57705): on
+             * 2026-10-15 a coordinator's new pane read `count: 0` for two
+             * hours over 21 letters, and nothing in the answer said why. Not
+             * on a named check — its retry is rebuilt from the batch alone
+             * (`CheckV1`) and must answer the same bytes. */
+            let elsewhere = words
+                .value(RETRY_REQUEST)
+                .is_none()
+                .then(|| seat_elsewhere(ledger, &run_id, &address, &caller, &seat))
+                .flatten();
             // Nothing there, and the caller said it would rather sleep than
             // ask again. The ack above has already been spent — it happens
             // ONCE, before the first look — so the window may repeat the look
@@ -23883,6 +23995,10 @@ fn plan_inner(
             }
             if let Some(asked) = over_ceiling {
                 note_wait_ceiling(&mut decided, asked);
+            }
+            // A wait that sleeps answers with a later look, not this one.
+            if let Some(elsewhere) = elsewhere.filter(|_| decided.waiting.is_none()) {
+                said_beside(&mut decided, "seatElsewhere", elsewhere);
             }
             if words.has("--format") {
                 formatted_over(&mut decided);

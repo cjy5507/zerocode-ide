@@ -438,8 +438,12 @@ const managedJudgmentController = {
     if (this.appliedModel(model)) return t("settings.managed.inUse", "실행 중 · 현재 적용됨");
     if ((this.statusError || snapshot.providerIdentity !== judgmentProviderController.state?.providerIdentity) &&
         [snapshot.appliedModelId, snapshot.configuredModelId].includes(model.id)) return t("settings.judgment.modelStateUnknown", "현재 설정과 실행 상태를 함께 확인해야 합니다.");
+    const restarting = snapshot.server.modelId === model.id && snapshot.server.state === "starting" && snapshot.server.exit ? this.endedState(snapshot.server.exit, true) : null;
+    if (restarting) return restarting;
     if (snapshot.server.modelId === model.id && snapshot.server.state === "starting") return t("settings.managed.starting", "모델을 시작하는 중 · 아직 적용하지 않음");
     if (snapshot.server.modelId === model.id && snapshot.server.state === "ready") return t("settings.managed.runningUnapplied", "실행 중 · 아직 적용하지 않음");
+    const stopped = snapshot.server.modelId === model.id && snapshot.server.state === "failed" && snapshot.server.exit ? this.endedState(snapshot.server.exit) : null;
+    if (stopped) return stopped;
     if (this.configuredModel(model)) return t("settings.managed.configuredStopped", "선택된 모델 · 실행되지 않음. 실행하고 적용을 눌러 다시 연결하세요.");
     if (this.downloadOnly(model)) {
       return model.installed
@@ -449,6 +453,31 @@ const managedJudgmentController = {
     if (!this.localSupported(model)) return this.failure(model.local?.reason ?? model.compatibilityReason ?? "platform_unsupported");
     if (model.installed && this.runtimeFor(model)?.state !== "ready") return t("settings.managed.needsRuntime", "모델 파일 설치됨 · 이 모델의 실행 환경을 설치한 뒤 연결하세요.");
     return model.installed ? t("settings.managed.installed", "설치됨 · 아직 적용하지 않음") : t("settings.managed.notInstalled", "아직 다운로드하지 않음");
+  },
+
+  endedState(exit, restarting = false) {
+    let reason = null;
+    switch (exit.cause) {
+      case "runtime_memory_limit":
+        reason = t("settings.managed.exit.memory", "메모리 한도를 넘어 실행 환경이 스스로 멈췄습니다");
+        break;
+      case "runtime_timeout":
+        reason = exit.task
+          ? t("settings.managed.exit.timeoutTask", "{{task}} 요청이 제한 시간을 넘겨 서버를 멈췄습니다", { task: exit.task })
+          : t("settings.managed.exit.timeout", "요청이 제한 시간을 넘겨 서버를 멈췄습니다");
+        break;
+      case "runtime_failed":
+        reason = t("settings.managed.exit.failed", "실행 환경과 주고받지 못해 서버를 멈췄습니다");
+        break;
+      case "runtime_exited":
+        if (Number.isSafeInteger(exit.signal)) reason = t("settings.managed.exit.signal", "실행 환경이 끝났습니다(신호 {{signal}})", { signal: exit.signal });
+        else if (Number.isSafeInteger(exit.code)) reason = t("settings.managed.exit.code", "실행 환경이 스스로 끝났습니다(종료 코드 {{code}})", { code: exit.code });
+        break;
+    }
+    if (!reason) return null;
+    return restarting
+      ? t("settings.managed.restartingReason", "다시 띄우는 중 · {{reason}}. 중지를 누르면 다시 띄우지 않습니다.", { reason })
+      : t("settings.managed.stoppedReason", "중지됨 · {{reason}}. 실행하고 적용을 눌러 다시 시작하세요.", { reason });
   },
 
   configuredModel(model) {
@@ -524,7 +553,7 @@ const managedJudgmentController = {
       const running = snapshot.server.modelId === model.id && snapshot.server.state !== "stopped" && snapshot.server.state !== "failed";
       const applied = this.appliedModel(model);
       const configured = snapshot.configuredModelId === model.id;
-      const signature = JSON.stringify([model, busy, running, applied, configured, snapshot.server.state, snapshot.runtime.state,
+      const signature = JSON.stringify([model, busy, running, applied, configured, snapshot.server.state, snapshot.server.exit, snapshot.runtime.state,
         snapshot.providerIdentity, judgmentProviderController.state?.providerIdentity, this.statusError, t("settings.managed.download", "다운로드")]);
       if (row.signature === signature) continue;
       row.signature = signature;

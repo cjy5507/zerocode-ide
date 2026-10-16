@@ -1567,7 +1567,8 @@ pub(crate) fn term_text(
             })
         })?;
         if theirs {
-            orchestration::pane_taken_over(term, now_epoch_ms());
+            let seat = orchestration::pane_taken_over(term, now_epoch_ms());
+            note_takeover(state.local_data_root(), term, seat, "ime");
         }
     } else {
         write_terminal_text(&state, term, &text)?;
@@ -1581,6 +1582,7 @@ pub(crate) fn term_key(
     state: State<'_, AppState>,
     term: TermId,
     press: KeyPress,
+    road: Option<ChipRoad>,
 ) -> Result<(), String> {
     let Some(bytes) = encode_key(&press) else {
         return Ok(());
@@ -1589,7 +1591,11 @@ pub(crate) fn term_key(
         // A keystroke is aimed at the program, and the program is at the
         // bottom — reading history ends the moment typing starts.
         pty.terminal_mut().grid_mut().view_to_bottom();
-        crate::prompt_transaction::human_write(term, &bytes, || pty.write_input(&bytes))
+        let write = || pty.write_input(&bytes);
+        match road {
+            Some(_) => crate::prompt_transaction::chip_write(term, write),
+            None => crate::prompt_transaction::human_write(term, &bytes, write),
+        }
     })?;
     // A DELIVERED key from this road is a person's hand — paste delivery and
     // every programmatic write take other roads — and a hand that puts the
@@ -1597,9 +1603,14 @@ pub(crate) fn term_key(
     // write and only on success, for the same reason as the wait below: a
     // key this window failed to deliver took nothing over. A lone Enter on a
     // line holding none of their words only sent what the window placed
-    // there, and takes nothing (t-17644).
+    // there, and takes nothing (t-17644); nor does a key that adds no words,
+    // or a composer chip's own key (t-57712).
     if theirs {
-        orchestration::pane_taken_over(term, now_epoch_ms());
+        let seat = orchestration::pane_taken_over(term, now_epoch_ms());
+        note_takeover(state.local_data_root(), term, seat, &key_kind(&press));
+    }
+    if let Some(road) = road {
+        note_chip(state.local_data_root(), term, road);
     }
     // The same hand is the notify seat's label (t-6043): a key into a pane
     // that rang inside the last minute says the ring was worth it, and any
@@ -1628,6 +1639,52 @@ pub(crate) fn term_key(
     // an answer is decided here and a stop may have to SETTLE first.
     observe_stop_gesture(&app, term, &bytes);
     Ok(())
+}
+
+/// Which composer chip wrote to a pane, when one did (t-57712): its command
+/// is the person's click, not their words.
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ChipRoad {
+    Model,
+    Permission,
+}
+
+/// One window-log line per takeover (t-57712): the terminal, the seat the
+/// ledger marked and the kind of hand — `key <Name>`, `words`, `paste`,
+/// `ime` — never what it typed. Nothing when this report marked no seat: the
+/// pane was already the person's, or no worker sits there.
+fn note_takeover(local_data_root: &Path, term: TermId, seat: Option<String>, kind: &str) {
+    if let Some(seat) = seat {
+        note_window_event(
+            local_data_root,
+            &format!("term {term} taken over at seat {seat} by {kind}"),
+        );
+    }
+}
+
+/// A composer chip's fact in the window log (t-57712), which takes no pane
+/// over.
+fn note_chip(local_data_root: &Path, term: TermId, road: ChipRoad) {
+    let fact = match road {
+        ChipRoad::Model => "the person changed the model",
+        ChipRoad::Permission => "the person changed the permission mode",
+    };
+    note_window_event(
+        local_data_root,
+        &format!("term {term}: {fact} (composer chip, not a takeover)"),
+    );
+}
+
+/// A key's kind for the window log: `words` for a printable key — a single
+/// character, as `encode_key` reads it — and `key <Name>` for a named one,
+/// never the character itself (t-57712).
+fn key_kind(press: &KeyPress) -> String {
+    if press.key.chars().count() == 1 {
+        "words".to_owned()
+    } else {
+        format!("key {}", press.key)
+    }
 }
 
 /// Move a terminal's view through its own history — positive lines go back
@@ -1841,13 +1898,27 @@ pub(crate) fn term_paste(
     state: State<'_, AppState>,
     term: TermId,
     text: String,
+    road: Option<ChipRoad>,
 ) -> Result<(), String> {
-    with_terminal(&state, term, |pty| {
+    let theirs = with_terminal(&state, term, |pty| {
         pty.terminal_mut().grid_mut().view_to_bottom();
         let bracketed = pty.terminal().grid().bracketed_paste();
         let bytes = encode_paste(&text, bracketed);
-        crate::prompt_transaction::human_write(term, &bytes, || pty.write_input(&bytes)).map(drop)
+        let write = || pty.write_input(&bytes);
+        match road {
+            Some(_) => crate::prompt_transaction::chip_write(term, write),
+            None => crate::prompt_transaction::human_write(term, &bytes, write),
+        }
     })?;
+    // A person's paste is their words as much as a typed key is, and takes a
+    // worker's pane over the same way (t-57712).
+    if theirs {
+        let seat = orchestration::pane_taken_over(term, now_epoch_ms());
+        note_takeover(state.local_data_root(), term, seat, "paste");
+    }
+    if let Some(road) = road {
+        note_chip(state.local_data_root(), term, road);
+    }
     // A paste is a person's hand as much as a key is (t-6043).
     notify_call::note_hand(&app, term);
     Ok(())

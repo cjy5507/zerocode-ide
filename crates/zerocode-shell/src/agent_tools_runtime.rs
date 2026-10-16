@@ -871,6 +871,13 @@ impl agent_teams::Host for TeamWindow {
         schedule_orchestration_restore(&self.app, leader_term);
     }
 
+    /// The surface's own word (`note_term_detached`, t-57705): the person
+    /// closed this pane and its agent kept running. A window whose surface
+    /// never said so answers `false`, as it always did.
+    fn pane_detached(&self, term: TermId) -> bool {
+        orchestration::term_detached(term)
+    }
+
     /// The wake's own table, which its receipt watch walks: a row stands
     /// until the pane's `working` hook or the watch's give-up removes it.
     fn wake_words_pending(&self, term: TermId) -> bool {
@@ -1762,6 +1769,7 @@ impl agent_teams::Host for TeamWindow {
                     agent,
                     session.as_deref().unwrap_or_default(),
                     placed.elapsed(),
+                    worker,
                 );
             }
             crate::restart_nudge_runtime::arm_left_unsent(

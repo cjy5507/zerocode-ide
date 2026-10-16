@@ -145,11 +145,13 @@ async fn refusal_read(mut answer: reqwest::Response, deadline: Instant) -> Refus
 }
 
 /// The codes a managed server names a refused request with — local-judgment's
-/// `Error::Busy` and `Error::ServerStopped`; no other word a refused body
-/// says is kept (t-55423).
-const REFUSAL_CODES: [&str; 2] = [
+/// `Error::Busy` and `Error::ServerStopped` (t-55423), and `Error::Restarting`
+/// while an ended server waits for its restart (t-57772); no other word a
+/// refused body says is kept.
+const REFUSAL_CODES: [&str; 3] = [
     local_judgment::Error::Busy.token(),
     local_judgment::Error::ServerStopped.token(),
+    local_judgment::Error::Restarting.token(),
 ];
 
 /// The code a refused body names, when it is one of [`REFUSAL_CODES`].

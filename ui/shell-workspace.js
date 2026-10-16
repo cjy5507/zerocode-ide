@@ -5634,8 +5634,12 @@ const TEAM_CHECK_GOING = new Set(["started", "prepared"]);
 
 /* A worker is released when it hands its work in; the work it left standing keeps its row while it still waits on
  * its coordinator — handed in, being reviewed, verified and not landed, or failed — since the steps after 넘김 are
- * where it stands. Work that landed, had nothing to land or was closed leaves the team. */
+ * where it stands. Work that landed, had nothing to land or was closed leaves the team — whoever holds it: only
+ * `released` settles a worker in the ledger's eyes, and one whose release got no answer stood on landed work under
+ * a running coordinator with every step green at 착지 (t-60850; the person, 10-16: 「코덱스가 돌고 있는데 착지라 표시되는
+ * 버그」). A worker still at work keeps its row on such work (`teamWorkerAtWork`). */
 const TEAM_SETTLED_STAGES = new Set(["handedIn", "reviewing", "landWait", "failed"]);
+const TEAM_LEFT_STAGES = new Set(["landed", "nothing", "closed"]);
 
 /* What a step's cell says in the strip's tip: done, where the work is, where it is held, no record — and a step
  * behind the work that left no record, drawn passed on the strip and still "—" here. */
@@ -5689,9 +5693,7 @@ function refreshSidebarTeam() {
   sidebarTeamCounts.reads += 1;
   Promise.all([readLedgerAgents(), invoke("coordinator_seats")])
     .then(([rows, seats]) => {
-      sidebarTeamData.rows = Array.isArray(rows)
-        ? rows.filter((row) => row && (row.settled !== true || TEAM_SETTLED_STAGES.has(ledgerLandingStage(row))))
-        : [];
+      sidebarTeamData.rows = Array.isArray(rows) ? rows.filter((row) => row && teamKeepsRow(row)) : [];
       if (Array.isArray(seats)) sidebarTeamData.seats = seats;
       scheduleSidebarTeamPaint();
     })
@@ -5840,17 +5842,37 @@ function teamStepsTip(row, steps) {
   return lines.filter(Boolean).join("\n");
 }
 
+/* Whether a worker's row stands in the team: released work only while it waits on its coordinator
+ * (`TEAM_SETTLED_STAGES`); work that landed, had nothing to land or was closed (`TEAM_LEFT_STAGES`) only while its
+ * worker is at work. */
+function teamKeepsRow(row) {
+  const stage = ledgerLandingStage(row);
+  if (row.settled === true) return TEAM_SETTLED_STAGES.has(stage);
+  return !TEAM_LEFT_STAGES.has(stage) || teamWorkerAtWork(row);
+}
+
+/* What a worker's pane says it is doing, when the pane is here and its hook has spoken; `null` otherwise. */
+function teamWorkerHook(row) {
+  return Number.isInteger(row.term) && hookStates.has(row.term)
+    ? autonomousPaneState(row.term, hookStates.get(row.term)) : null;
+}
+
+/* Whether a worker is at work: its pane's hook says so, or, with no hook to read, the ledger says the worker lives.
+ * The one reading behind a row's state word and behind its standing in the team: a row drawn working never leaves. */
+function teamWorkerAtWork(row, hook = teamWorkerHook(row)) {
+  return hook === "working" || (hook === null && row.state === "working");
+}
+
 /* One worker's row, as words: its state and the one word of what holds it, its title, its pane, what it last
  * said it was doing, and its steps. */
 function teamWorkerEntry(row, at, now) {
   const stage = ledgerLandingStage(row);
   const blocker = seatHealthBlockerWord(row, now) || seatStallWord(row, stage);
-  const hook = Number.isInteger(row.term) && hookStates.has(row.term)
-    ? autonomousPaneState(row.term, hookStates.get(row.term)) : null;
+  const hook = teamWorkerHook(row);
   let state = "resting";
   if (row.asking === true || hook === "needs-attention") state = "asking";
   else if (blocker) state = "blocked";
-  else if (hook === "working" || (hook === null && row.state === "working")) state = "working";
+  else if (teamWorkerAtWork(row, hook)) state = "working";
   else if (stage === "handedIn" || stage === "reviewing" || stage === "landWait") state = "waiting";
   const chip = blocker || (hook === "needs-attention" ? bucketWord("attention") : "");
   const steps = teamSteps(row, state === "blocked" || state === "asking");

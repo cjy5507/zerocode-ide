@@ -439,13 +439,13 @@ fn a_sent_request_names_its_client_whatever_came_back_and_an_unsent_one_names_no
     assert!(endpoint.asked().is_empty());
 }
 
-/// A managed server refuses with one status for two reasons — busy and
-/// stopped both come back `503` — and says which in its body. The row keeps
-/// the status as its outcome and, beside it, the server's code
-/// ([`SERVER_ERROR_CODE`]): one of those two, never the body's own words.
-/// Anything else leaves the key off and the status as it came — a word
-/// outside the two, a sentence, HTML, a body past [`MAX_REFUSAL_BYTES`], a
-/// body that broke off or is held back — and a request no server answered, a
+/// A managed server refuses with one status for several reasons — busy,
+/// stopped and restarting all come back `503` — and says which in its body.
+/// The row keeps the status as its outcome and, beside it, the server's code
+/// ([`SERVER_ERROR_CODE`]): one of [`REFUSAL_CODES`], never the body's own
+/// words. Anything else leaves the key off and the status as it came — a word
+/// outside them, a sentence, HTML, a body past [`MAX_REFUSAL_BYTES`], a body
+/// that broke off or is held back — and a request no server answered, a
 /// stopped server's own case, names no server's code. How long a body is
 /// waited on is [`refusal_read`]'s, tried on its own below.
 #[test]
@@ -528,6 +528,66 @@ fn a_refused_request_keeps_the_servers_error_word_beside_its_status() {
     let asked = ask(&format!("http://{gone}"), Duration::from_secs(5));
     assert_eq!(asked.answer, Err(TRANSPORT.to_string()));
     assert_eq!(code_of(&asked.spent), None, "no server spoke");
+}
+
+/// A managed server whose runtime ended refuses with `503` and
+/// `server_restarting` while its restart is planned or loading (t-57772). The
+/// row keeps that word as it keeps busy, and a word outside the managed
+/// server's codes is still dropped.
+#[test]
+fn a_restarting_servers_refusal_keeps_its_word_as_busy_does_and_an_unknown_word_is_dropped() {
+    use zerocode_core::jev::STALL;
+    use zerocode_core::jev::summary::SERVER_ERROR_CODE;
+
+    let home = tempfile::tempdir().expect("a zo home");
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {"jev": {"workspaces": [door::resolved_path(workspace.path())]}}})
+            .to_string(),
+    )
+    .expect("settings");
+    let body = request_body(&json!({"screen": "a quiet pane"}), &json!({}));
+    let restarting = local_judgment::Error::Restarting.token();
+    let busy = local_judgment::Error::Busy.token();
+    let words = [restarting, busy, "server_rebooting"];
+    let wanted = [Some(restarting), Some(busy), None];
+    let mut kept = Vec::new();
+    for word in words {
+        let endpoint = Endpoint::serving(
+            "HTTP/1.1 503 Service Unavailable",
+            json!({"error": word}).to_string(),
+            0,
+        );
+        let asked = Wire::at(&endpoint.base(), "test-key", Some(settings.clone())).ask(
+            &STALL,
+            Some(workspace.path()),
+            body.clone(),
+            Duration::from_secs(5),
+        );
+        assert_eq!(asked.answer, Err(token_for(503)), "{word}");
+        let mut row = json!({"outcome": token_for(503)});
+        asked.spent.stamp(&mut row);
+        kept.push(
+            SERVER_ERROR_CODE
+                .read(&row)
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        );
+    }
+    let wrong: Vec<&str> = words
+        .iter()
+        .zip(&kept)
+        .zip(wanted)
+        .filter(|((_, kept), wanted)| kept.as_deref() != *wanted)
+        .map(|((word, _), _)| *word)
+        .collect();
+    assert_eq!(
+        wrong,
+        Vec::<&str>::new(),
+        "a managed server's refusal word was kept or dropped wrongly: {kept:?}"
+    );
 }
 
 /// A loopback server that answers its one request with a `503` whose body

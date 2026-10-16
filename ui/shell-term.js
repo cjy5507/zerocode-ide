@@ -7749,9 +7749,18 @@ function storedLeafGrid(root, ordinal, tab) {
  * that workspace's folder, never merely the one in front: zo looks a
  * conversation up in the store of the folder it starts in, and a wake that
  * crossed a workspace switch opened nothing ("session not found", 2026-09-28,
- * one zo pane of three back). */
-async function wakeConversation(agent, session, grid, restore = null, worktree = null) {
-  const woke = await invoke("resume_session", { agent, session, ...grid, restore, worktree });
+ * one zo pane of three back).
+ *
+ * `road` is the road the door came by (t-57717): a stored record's
+ * (`restore-front`, `restore-behind`, `visit`, `stage`) or a person's pick by
+ * name (`reopen`). Off a stored record, a finished worker's conversation opens
+ * nothing: the answer says `finished` — that worker — and no pane is written
+ * down. */
+async function wakeConversation(agent, session, grid, restore = null, worktree = null, road = null) {
+  const woke = await invoke("resume_session", { agent, session, ...grid, restore, worktree, road });
+  // A finished worker's conversation, off a stored record (t-57717): nothing
+  // was opened, so there is no pane to write down.
+  if (woke.finished) return woke;
   if (!woke.standing) paneSessions.set(woke.term, { agent, session, resumable: true });
   // The model the wake's launch named (t-46882): what the pane runs before its
   // agent says, where its transcript still names the release it ran before.
@@ -7859,8 +7868,9 @@ async function tellOwed(worktree) {
  * gets the agent's own resume command (`resume_session` — validated argv,
  * launch token, the session pre-seeded so the pane IS that conversation);
  * a wake that refuses falls back to a plain shell rather than a hole, which
- * is Orca's fallback too (`startFreshSpawn(null)` when the plan fails). */
-async function spawnStoredLeaf(wake, launched, grid = null, restore = null, worktree = null) {
+ * is Orca's fallback too (`startFreshSpawn(null)` when the plan fails).
+ * `road` is the road the wake came by (t-57717, `resume_session`). */
+async function spawnStoredLeaf(wake, launched, grid = null, restore = null, worktree = null, road = null) {
   // A wake that refused, kept for whatever pane stands in its place. Losing
   // it is how a single bad morning erased four workspaces: the fallback pane
   // holds no session, so the next persist writes a record with no `agents`,
@@ -7873,6 +7883,12 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null, work
   // plain shell and nothing else — not the program that was here, which would
   // be the very second process the judge exists to prevent.
   let duplicate = false;
+  // A record naming a finished worker's conversation (t-57717): the backend
+  // started nothing. The leaf is a plain shell that does not carry the
+  // conversation — the next save writes the leaf without it — and not the
+  // program that was here, which would be that worker's agent again in a
+  // checkout nobody is coming back to (t-19779).
+  let finished = false;
   // What the shell standing in the leaf's place says on its own screen
   // (t-12063): a toast is gone in six seconds, and on 2026-09-28 the person
   // read a bare shell where their conversation had been and typed `zo`.
@@ -7891,24 +7907,34 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null, work
       // a wake is told to go on is the backend's to say, from the goodbye's
       // own reading of a WORKER's turn; a person's conversation comes back as
       // it stood, whatever its record's mid-turn mark says.
-      const woke = await wakeConversation(wake.agent, session, { rows, cols }, restore, worktree);
-      if (!woke.standing) return { term: woke.term, woke: true, agent: wake.agent };
-      // One conversation, one process. Two records naming the same session used
-      // to resume it twice on every restart: the second `zo --resume` met the
-      // first's writer lease and never published its channel, or the two
-      // launches raced on the keychain and the second was refused there — and
-      // either way the fallback below then opened a NEW conversation in the
-      // pane the person was looking at, while the real one stood behind
-      // another tab ("zo는 resume으로 이어서 하지 않았어 새 릴리즈로 시작되고",
-      // 2026-09-13). A duplicate leaf opens as a plain shell and carries
-      // nothing: the conversation is standing in the pane the answer names, and
-      // a record that named it twice is what put two resumes on one transcript
-      // to begin with.
-      duplicate = true;
-      notice = t("session.wakeStanding", "{{agent}} 대화는 이미 다른 판에서 열려 있어, 이 판은 빈 셸로 섭니다", {
-        agent: agentName(wake.agent),
-      });
-      console.warn(`[restore] ${wake.agent} ${wake.id} is already standing in term ${woke.term}; this leaf opens as a plain shell`);
+      const woke = await wakeConversation(wake.agent, session, { rows, cols }, restore, worktree, road);
+      if (!woke.standing && !woke.finished) return { term: woke.term, woke: true, agent: wake.agent };
+      if (woke.finished) {
+        // Said on the shell's own screen, with the way back: the sidebar's row
+        // for that conversation is a person's pick by name, and opens it.
+        finished = true;
+        notice = t("session.wakeFinished", "끝난 워커 {{worker}}의 {{agent}} 대화라 이 판에서 다시 열지 않았습니다 — 이어 가려면 사이드바의 그 대화 줄을 누르세요", {
+          agent: agentName(wake.agent),
+          worker: woke.finished,
+        });
+      } else {
+        // One conversation, one process. Two records naming the same session used
+        // to resume it twice on every restart: the second `zo --resume` met the
+        // first's writer lease and never published its channel, or the two
+        // launches raced on the keychain and the second was refused there — and
+        // either way the fallback below then opened a NEW conversation in the
+        // pane the person was looking at, while the real one stood behind
+        // another tab ("zo는 resume으로 이어서 하지 않았어 새 릴리즈로 시작되고",
+        // 2026-09-13). A duplicate leaf opens as a plain shell and carries
+        // nothing: the conversation is standing in the pane the answer names, and
+        // a record that named it twice is what put two resumes on one transcript
+        // to begin with.
+        duplicate = true;
+        notice = t("session.wakeStanding", "{{agent}} 대화는 이미 다른 판에서 열려 있어, 이 판은 빈 셸로 섭니다", {
+          agent: agentName(wake.agent),
+        });
+        console.warn(`[restore] ${wake.agent} ${wake.id} is already standing in term ${woke.term}; this leaf opens as a plain shell`);
+      }
     } catch (error) {
       // The agent left the PATH, or the vendor dropped the session. The layout
       // still deserves its pane — and the conversation still deserves its line
@@ -7958,7 +7984,7 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null, work
   // pane's record, so the file forgot it too. The refused conversation gets
   // a plain shell carrying its line, the toast above says why, and the
   // sidebar's door reopens it once whatever refused it is gone.
-  if (launched && !refused && !duplicate) {
+  if (launched && !refused && !duplicate && !finished) {
     try {
       const term = await launchAgentTab({ agent: launched, prompt: "", rows, cols, restore });
       return { term, woke: false, agent: launched };
@@ -7991,8 +8017,9 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null, work
  * corpse — the stored screen goes back onto a REAL shell below, so the scroll
  * back a person recognises is sitting in a terminal they can type into.
  *
- * Answers whether the tab woke. It does not, only when every spawn failed. */
-async function mountStoredLayout(record, worktree, tab) {
+ * Answers whether the tab woke. It does not, only when every spawn failed.
+ * `road` is the road its conversations come back by (t-57717). */
+async function mountStoredLayout(record, worktree, tab, road) {
   const wanted = recordLeafCount(record.root);
   const terms = [];
   let wokeAgent = null;
@@ -8010,7 +8037,7 @@ async function mountStoredLayout(record, worktree, tab) {
     // from a file written before those names existed has no screens this
     // window can find, and asks for none rather than guessing at a position.
     const restore = record.id != null ? { worktree, id: record.id, ordinal: at } : null;
-    const spawned = await spawnStoredLeaf(wake, record.running?.[at], grid, restore, worktree);
+    const spawned = await spawnStoredLeaf(wake, record.running?.[at], grid, restore, worktree, road);
     if (!spawned) break;
     terms.push(spawned.term);
     if (spawned.woke && !wokeAgent) wokeAgent = wake.agent;
@@ -8117,8 +8144,12 @@ async function wakeStoredTab(tab) {
     await held;
     return;
   }
+  // The road this wake takes (t-57717): the restore's, marked on the tab, the
+  // once — any later wake of it is a person putting the tab on the stage.
+  const road = tab.wakeRoad ?? "stage";
+  delete tab.wakeRoad;
   const going = (async () => {
-    const woke = await mountStoredLayout(tab.asleep, tab.worktree, tab);
+    const woke = await mountStoredLayout(tab.asleep, tab.worktree, tab, road);
     // Every spawn refused — no shell could be started at all. The tab keeps
     // its record and stays asleep, but it stops trying: the stage repaints
     // for reasons that have nothing to do with this tab, and a spawn that
@@ -8171,7 +8202,7 @@ async function storedWakesSettled(worktree) {
  * `layout` of nothing. `asleep` holds the record they will be built from. */
 let asleepTabs = 0;
 
-function openStoredTab(record, worktree) {
+function openStoredTab(record, worktree, road) {
   const tab = {
     // Not `termTabId` — there is no shell to name it after yet, and the id
     // has to be stable across the wake that gives it one.
@@ -8181,6 +8212,8 @@ function openStoredTab(record, worktree) {
     layout: null,
     activePane: null,
     asleep: record,
+    // The road its conversations come back by, until its wake (t-57717).
+    wakeRoad: road,
     // The name the file knows it by, kept for every later save.
     ...(record.id != null && { storedId: record.id }),
     ...(record.pinned && { pinned: true }),
@@ -8286,8 +8319,17 @@ const paneSetsBehind = new Map();
  *
  * Answers whether anything came back, so the caller knows whether the plain
  * first terminal is still needed. Takes the records when the caller has
- * already read them; asks for itself when nobody has. */
-async function restoreWorktreeLayouts(worktree, stored, { behind = false } = {}) {
+ * already read them; asks for itself when nobody has.
+ *
+ * `road`: what every resume of this set names as the road it came by
+ * (t-57717) — `restore-behind` for the boot's put-back behind the front, else
+ * the caller's (`restore-front`, `visit`). Each tab carries it until its own
+ * wake, and a tab woken later by a person picking it says `stage`. */
+async function restoreWorktreeLayouts(
+  worktree,
+  stored,
+  { behind = false, road = behind ? "restore-behind" : "visit" } = {},
+) {
   // Already on the strip — the boot put it there, and now somebody stepped
   // in. Reading the file again would open every tab a second time; what a
   // visit adds is the stage's seats, the eye, and the conversations that
@@ -8296,6 +8338,8 @@ async function restoreWorktreeLayouts(worktree, stored, { behind = false } = {})
     if (behind) return true;
     const owned = tabs.filter((tab) => tab.worktree === worktree && tab.kind === "term");
     if (owned.length === 0) return false;
+    // The tabs still asleep come back on this visit's road now.
+    for (const tab of owned) if (tab.asleep) tab.wakeRoad = road;
     seatStoredTerms(worktree);
     // The record's eye first: the stage restore that ran just before this
     // put its own eye on a document of the group, which is right only when
@@ -8321,7 +8365,7 @@ async function restoreWorktreeLayouts(worktree, stored, { behind = false } = {})
   restoringPanes = true;
   let made = [];
   try {
-    made = records.map((record) => openStoredTab(record, worktree));
+    made = records.map((record) => openStoredTab(record, worktree, road));
   } finally {
     restoringPanes = false;
   }
@@ -8907,6 +8951,15 @@ function noteLeafLeft(term, tab, road, to) {
   void invoke("log_window_error", { message: `term ${term} ${from} by ${road} → ${to}` }).catch(() => {});
 }
 
+/* 떼어 둔 판을 백엔드에 알린다(t-57705): 「이 판은 닫혔고 그 에이전트는 돈다」,
+ * 또는 「다시 탭에 섰다」. 백엔드는 이 사실로 코디 자리가 그 대화를 따라 새 판으로
+ * 갈지 판정한다(`chair_for`) — 사람이 한도 벽에 선 코디 판을 닫고 같은 대화를 새
+ * 판에서 이어 가면, 원장의 자리가 닫힌 판에 남지 않는다. 싣는 것은 번호와
+ * 참·거짓뿐이고, 답을 기다리지 않는다. */
+function noteAgentDetachment(term, detached) {
+  void invoke("note_term_detached", { term, detached }).catch(() => {});
+}
+
 /* 탭째 끝나는 길(탭 닫기, 워크트리·프로젝트 제거): 그 탭의 판마다 한 줄. */
 function noteTabsLeaving(held, road) {
   for (const tab of held) {
@@ -8931,6 +8984,7 @@ function strandHome(term) {
  * 다시 붙는다(`focusAgentPane`). */
 function adoptStrandedTerm(term, worktree, road) {
   detachedAgents.set(term, worktree);
+  noteAgentDetachment(term, true);
   noteLeafLeft(term, null, road, `detached ${worktree}`);
   paintRunningCount();
   scheduleAgentPaint(["cards", "badge", "board"]);
@@ -8996,6 +9050,7 @@ function closePaneLeaf(tab, going) {
   tab.activePane = staying[0];
   if (termHoldsAgent(going)) {
     detachedAgents.set(going, tab.worktree);
+    noteAgentDetachment(going, true);
     dropTermScreen(going);
     // The person closed a tiled worker's pane: it went to the background.
     noteWorkerRoomChange(going, "background");

@@ -23265,6 +23265,10 @@ mod restore;
 /// t-7812 r2: the window's own resume road through a fake launcher, beside
 /// the ledger's reseat (`tests/restore_door.rs`).
 mod restore_door;
+/// t-57717: a finished worker's conversation does not come back on its own —
+/// not through a door that read it off a stored record, not off the file a
+/// visit reads, not into the file a save writes (`tests/restore_finished.rs`).
+mod restore_finished;
 /// t-9091: a closing window's beat leaves its sleepers to the next window
 /// (`tests/restore_goodbye.rs`).
 mod restore_goodbye;
@@ -23282,6 +23286,10 @@ mod restore_seams;
 /// and a working coordinator goes on without being spoken to
 /// (`tests/restore_wake.rs`).
 mod restore_wake;
+/// t-57705: a coordinator seat follows its conversation into a new pane when
+/// the pane it sat from is no longer that conversation's pane here
+/// (`tests/seat_follows.rs`).
+mod seat_follows;
 
 /* ---- account switch: the same seat, another login (t-7538) --------------- */
 

@@ -6956,6 +6956,131 @@ await test("실행 중인 판단 모델은 원자적 전환 한 번으로 바꾸
   return "one guarded switch · no duplicate start/check/apply · rollback preserved · newer selection preserved";
 });
 
+await test("스스로 멈춘 판단 서버는 중지됨과 그 까닭을 다섯 언어로 모델 카드에 보인다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  const provider = { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32101", model: "fixture-decision", requiresAuth: false };
+  backend.zoSettings.smart = { ...(previous ?? {}), judgmentProvider: provider };
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  const held = backend.managedModelState;
+  held.runtime.state = "ready";
+  held.models[0].installed = true;
+  held.configuredModelId = "fixture-decision";
+  const ended = (exit) => ({
+    id: "fixture-ended-server", state: "failed", modelId: "fixture-decision", provider: null, checked: false, error: "server_stopped",
+    exit: { code: null, signal: null, task: null, stderr: ["fixture: last words"], ...exit },
+  });
+  held.server = ended({ cause: "runtime_memory_limit", code: 75 });
+  const keys = ["settings.managed.stoppedReason", "settings.managed.exit.memory", "settings.managed.exit.timeout", "settings.managed.exit.timeoutTask",
+    "settings.managed.exit.failed", "settings.managed.exit.code", "settings.managed.exit.signal"];
+  const page = await context.newPage();
+  await installTauri(page, "server-exit");
+  attachFaultRecorder(page, "server-exit");
+  const shown = () => page.locator('[data-model-id="fixture-decision"].managed-judgment-model').textContent();
+  try {
+    await bootPage(page, "server-exit");
+    await openSettings(page, "judgment-models");
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "failed");
+    const missing = await page.evaluate((names) => ["en", "ja", "zh", "es"].flatMap((code) => names
+      .filter((key) => typeof CATALOG?.[code]?.[key] !== "string" || !CATALOG[code][key].trim()).map((key) => `${code}:${key}`)), keys);
+    assertEqual(missing, [], "a stopped server's reason is untranslated");
+    const said = {};
+    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      await setQualityLocale(page, locale);
+      await page.evaluate(() => managedJudgmentController.render());
+      const words = await page.evaluate(() => ({
+        line: t("settings.managed.stoppedReason", "중지됨 · {{reason}}. 실행하고 적용을 눌러 다시 시작하세요.", {
+          reason: t("settings.managed.exit.memory", "메모리 한도를 넘어 실행 환경이 스스로 멈췄습니다"),
+        }),
+        generic: t("settings.managed.configuredStopped", "선택된 모델 · 실행되지 않음. 실행하고 적용을 눌러 다시 연결하세요."),
+      }));
+      const text = await shown();
+      assert(text.includes(words.line), `${locale} hides why the server stopped`, { text, words });
+      assert(!text.includes(words.generic), `${locale} shows a stopped server as merely not running`, text);
+      assert(!text.includes("runtime_memory_limit") && !text.includes("fixture: last words"), `${locale} leaked a raw token or stderr into the card`, text);
+      said[locale] = words.line;
+    }
+    assertEqual(new Set(Object.values(said)).size, SETTINGS_QUALITY_SPEC.locales.length, "a locale repeats another's reason");
+    await setQualityLocale(page, "ko");
+    for (const [exit, part, absent] of [
+      [{ cause: "runtime_exited", code: 7 }, "종료 코드 7", "신호"],
+      [{ cause: "runtime_exited", signal: 9 }, "신호 9", "종료 코드"],
+      [{ cause: "runtime_timeout", signal: 9, task: "stall-seat" }, "stall-seat 요청이 제한 시간을 넘겨", "신호"],
+      [{ cause: "runtime_timeout", signal: 9 }, "요청이 제한 시간을 넘겨 서버를 멈췄습니다", "stall-seat"],
+      [{ cause: "runtime_failed", signal: 9 }, "실행 환경과 주고받지 못해", "제한 시간"],
+    ]) {
+      held.server = ended(exit);
+      held.revision += 1;
+      await backend.emitManaged(clone(held));
+      await page.waitForFunction((revision) => managedJudgmentController.snapshot?.revision === revision, held.revision);
+      const text = await shown();
+      assert(text.includes(part) && !text.includes(absent), `the card did not say how the server ended: ${JSON.stringify(exit)}`, text);
+    }
+  } finally {
+    await page.close();
+    backend.zoSettings.smart = previous;
+    backend.managedModelState = previousManaged;
+  }
+  return "stopped with its reason · five locales · each cause · no raw token or stderr in the card";
+});
+
+await test("다시 띄우기를 기다리는 판단 서버는 다시 띄우는 중과 그 까닭을 다섯 언어로 보이고 중지 단추를 남긴다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  const provider = { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32101", model: "fixture-decision", requiresAuth: false };
+  backend.zoSettings.smart = { ...(previous ?? {}), judgmentProvider: provider };
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  const held = backend.managedModelState;
+  held.runtime.state = "ready";
+  held.models[0].installed = true;
+  held.configuredModelId = "fixture-decision";
+  held.server = {
+    id: "fixture-waiting-server", state: "starting", modelId: "fixture-decision", provider: clone(provider), checked: false, error: null,
+    exit: { cause: "runtime_exited", code: 7, signal: null, task: null, stderr: ["fixture: last words"] },
+  };
+  const page = await context.newPage();
+  await installTauri(page, "server-restart");
+  attachFaultRecorder(page, "server-restart");
+  const card = page.locator('[data-model-id="fixture-decision"].managed-judgment-model');
+  try {
+    await bootPage(page, "server-restart");
+    await openSettings(page, "judgment-models");
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "starting");
+    const missing = await page.evaluate(() => ["en", "ja", "zh", "es"].filter((code) =>
+      typeof CATALOG?.[code]?.["settings.managed.restartingReason"] !== "string" || !CATALOG[code]["settings.managed.restartingReason"].includes("{{reason}}")));
+    assertEqual(missing, [], "a waiting restart's line is untranslated");
+    const said = {};
+    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      await setQualityLocale(page, locale);
+      await page.evaluate(() => managedJudgmentController.render());
+      const words = await page.evaluate(() => ({
+        line: t("settings.managed.restartingReason", "다시 띄우는 중 · {{reason}}. 중지를 누르면 다시 띄우지 않습니다.", {
+          reason: t("settings.managed.exit.code", "실행 환경이 스스로 끝났습니다(종료 코드 {{code}})", { code: 7 }),
+        }),
+        starting: t("settings.managed.starting", "모델을 시작하는 중 · 아직 적용하지 않음"),
+      }));
+      const text = await card.textContent();
+      assert(text.includes(words.line), `${locale} hides that the server is restarting and why`, { text, words });
+      assert(!text.includes(words.starting), `${locale} shows a restart as a first start`, text);
+      assert(!text.includes("fixture: last words"), `${locale} leaked stderr into the card`, text);
+      said[locale] = words.line;
+    }
+    assertEqual(new Set(Object.values(said)).size, SETTINGS_QUALITY_SPEC.locales.length, "a locale repeats another's restart line");
+    const stop = card.locator('[data-model-action="stop"]');
+    assert(await stop.isVisible(), "the stop button is gone while a restart waits");
+    await stop.click();
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "stopped");
+    assertEqual(backend.last("server-restart", "managed_judgment_stop")?.args.serverId, "fixture-waiting-server", "the stop did not name the waiting server");
+  } finally {
+    await page.close();
+    backend.zoSettings.smart = previous;
+    backend.managedModelState = previousManaged;
+  }
+  return "restarting with its reason · five locales · stop kept and sent for the waiting server";
+});
+
 await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 모델을 현재 설정 변경 없이 고른다", async () => {
   const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
   const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);

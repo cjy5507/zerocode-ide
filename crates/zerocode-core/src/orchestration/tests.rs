@@ -6082,6 +6082,69 @@ fn evidence_a_second_coordinator_binding_the_run_does_not_take_the_seat() {
     );
 }
 
+/// t-57705 — 2026-10-15 19:15 to 21:21: a coordinator's conversation went on
+/// in a new pane while the seat stayed on the pane it left, and the new
+/// pane's `check` answered `count: 0` for two hours over 21 letters waiting
+/// at the seat. A pane bound to the run that is not its seat is told so in
+/// the answer itself: who holds the seat, how much of the run's mail waits
+/// there, and the one verb that moves it. The seat's own answer carries no
+/// such word, and neither does a named check, whose retry is rebuilt from the
+/// batch alone.
+#[test]
+fn a_bound_pane_that_is_not_the_seat_is_told_where_the_runs_mail_waits() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name seat-elsewhere")["runId"]
+        .as_str()
+        .expect("a run")
+        .to_string();
+    let (_, worker_pane) = bench.seat("worker-start --agent codex");
+    bench.at(&worker_pane, "send --type status --body progress");
+    bench.at(&worker_pane, "send --type status --body more-progress");
+
+    let mut other = Team::new("team-2", "second", 70);
+    std::mem::swap(&mut bench.team, &mut other);
+    bench.json(&format!("run-use {run_id}"));
+    let looked = bench.json("check");
+    assert_eq!(looked["count"], 0, "{looked}");
+    let elsewhere = &looked["seatElsewhere"];
+    assert_eq!(
+        (
+            elsewhere["run"].as_str(),
+            elsewhere["heldBy"].as_str(),
+            elsewhere["waiting"].as_u64()
+        ),
+        (Some(run_id.as_str()), Some("team-1/%1"), Some(2)),
+        "the answer did not say where the run's mail waits: {looked}"
+    );
+    assert!(
+        elsewhere["takeover"].as_str().is_some_and(|line| {
+            line.starts_with(&format!("run-takeover --run {run_id} --from team-1/%1"))
+        }),
+        "the answer did not name the verb that moves the seat: {looked}"
+    );
+    assert!(
+        elsewhere["said"]
+            .as_str()
+            .is_some_and(|said| said.contains("team-1/%1") && said.contains("2 ")),
+        "the answer's sentence does not say who holds the seat and how much waits: {looked}"
+    );
+    let peeked = bench.json("check --peek");
+    assert_eq!(peeked["seatElsewhere"]["heldBy"], "team-1/%1", "{peeked}");
+    let named = bench.json("check --retry-request t57705-named");
+    assert!(
+        named.get("seatElsewhere").is_none(),
+        "a named check carries a word its retry cannot rebuild: {named}"
+    );
+
+    std::mem::swap(&mut bench.team, &mut other);
+    let seats = bench.json("check");
+    assert_eq!(seats["count"], 2, "the seat lost its own mail: {seats}");
+    assert!(
+        seats.get("seatElsewhere").is_none(),
+        "the seat was told it is not the seat: {seats}"
+    );
+}
+
 /// 12:4x — the Codex coordinator stalled and Fable came back as the main
 /// coordinator. Its `worker-list` showed w-2675 and w-2677 as `released`
 /// while both were alive and committing: the roster folded "not in MY
@@ -25195,6 +25258,9 @@ mod completion;
 /// t-26587: a success report must show the evidence of each pass condition
 /// its task wrote (`tests/evidence.rs`).
 mod evidence;
+/// t-57717: which conversation is a finished worker's, for the window's
+/// stored-record roads (`tests/finished_conversation.rs`).
+mod finished_conversation;
 mod gate_reuse;
 /// t-45315 (T3 stage 6): `land-batch` chooses verified work for the window to stack, and every
 /// record of a batch comes back as a receipt the ledger judges (`tests/land_batch.rs`).

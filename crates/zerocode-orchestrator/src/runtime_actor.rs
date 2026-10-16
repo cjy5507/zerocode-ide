@@ -638,6 +638,21 @@ pub enum RuntimeRequest {
         actor: Option<String>,
         now_ms: i64,
     },
+    /// The conversation that holds a run's LIVE seat goes on in another leader
+    /// pane, and the pane it sat from is no longer that conversation's pane in
+    /// the window (t-57705): the window walks the takeover road for it, naming
+    /// the holder it replaces in `from`. The holder it saw is the only one it
+    /// may replace — a seat that changed hands since is refused, and answered
+    /// as an ordinary `moved: false`.
+    CoordinatorFollowed {
+        run: String,
+        team: String,
+        pane: String,
+        actor: Option<String>,
+        from: String,
+        reason: String,
+        now_ms: i64,
+    },
     /// Build a sleeping worker's replacement split under the coordinator
     /// team's live pane-table borrow. This plans only; no ledger row moves
     /// until `WorkerReseated` arrives after the host walk.
@@ -1117,6 +1132,24 @@ impl std::fmt::Debug for RuntimeRequest {
                 .field("team", &team.len())
                 .field("pane", &pane.len())
                 .field("named_actor", &actor.is_some())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::CoordinatorFollowed {
+                run,
+                team,
+                pane,
+                actor,
+                from,
+                reason,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::CoordinatorFollowed")
+                .field("run", run)
+                .field("team", &team.len())
+                .field("pane", &pane.len())
+                .field("named_actor", &actor.is_some())
+                .field("from", &from.len())
+                .field("reason", &reason.len())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::PrepareWorkerReseat {
@@ -2572,6 +2605,36 @@ impl RuntimeActor {
         }
     }
 
+    /// The window says the conversation holding a run's live seat goes on in
+    /// the leader pane `team/pane`, and that the pane named `from` is no longer
+    /// that conversation's pane in the window (t-57705). Answers whether the
+    /// seat moved — `false` for a seat that is not `from`'s any more, or a pane
+    /// the ledger will not seat — and the revision that speaks for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn coordinator_followed(
+        &self,
+        run: impl Into<String>,
+        team: impl Into<String>,
+        pane: impl Into<String>,
+        actor: Option<String>,
+        from: impl Into<String>,
+        reason: impl Into<String>,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::CoordinatorFollowed {
+            run: run.into(),
+            team: team.into(),
+            pane: pane.into(),
+            actor,
+            from: from.into(),
+            reason: reason.into(),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// Plan one sleeping worker's replacement pane under its coordinator's
     /// current team table.
     #[allow(clippy::too_many_arguments)]
@@ -3549,6 +3612,23 @@ impl RuntimeState {
                 actor,
                 now_ms,
             } => self.coordinator_returned(&run, &team, &pane, actor.as_deref(), now_ms),
+            RuntimeRequest::CoordinatorFollowed {
+                run,
+                team,
+                pane,
+                actor,
+                from,
+                reason,
+                now_ms,
+            } => self.coordinator_followed(
+                &run,
+                &team,
+                &pane,
+                actor.as_deref(),
+                &from,
+                &reason,
+                now_ms,
+            ),
             RuntimeRequest::PrepareWorkerReseat {
                 run,
                 worker,
@@ -4281,6 +4361,57 @@ impl RuntimeState {
         }
         let seat = format!("{team}/{pane}");
         if !self.ledger.coordinator_returned(run, &seat, actor, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    /// A live seat follows its conversation into another leader pane, by the
+    /// ledger's one road for replacing a live holder (`run-takeover`), with
+    /// the window's reason in the holder's handoff receipt (t-57705). A
+    /// refusal is an ordinary answer: the seat changed hands since the window
+    /// looked, or `team/pane` is a pane the seat refuses.
+    #[allow(clippy::too_many_arguments)]
+    fn coordinator_followed(
+        &mut self,
+        run: &str,
+        team: &str,
+        pane: &str,
+        actor: Option<&str>,
+        from: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || run.is_empty()
+            || run.len() > MAX_NAME
+            || team.is_empty()
+            || team.len() > MAX_NAME
+            || pane.is_empty()
+            || pane.len() > MAX_NAME
+            || from.is_empty()
+            || from.len() > MAX_NAME
+            || reason.len() > MAX_PROSE
+            || actor.is_some_and(|actor| actor.is_empty() || actor.len() > MAX_NAME)
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let seat = format!("{team}/{pane}");
+        if self
+            .ledger
+            .take_over_coordinator(run, &seat, actor, from, reason, now_ms)
+            .is_err()
+        {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,
@@ -10531,6 +10662,75 @@ mod tests {
     #[test]
     fn a_native_leader_cannot_plan_a_reseat_after_the_coordinator_refuses_it() {
         assert_reseat_refused_for_native_leader(false);
+    }
+
+    /// t-57705: the window walks the takeover road for a seat whose
+    /// conversation went on in another pane, naming the holder it saw. The
+    /// seat moves once, one generation up, durably, and the holder is told in
+    /// its own pane inbox; the same ask again names a holder that is not the
+    /// seat any more, and is an ordinary `false` that writes nothing.
+    #[test]
+    fn a_followed_seat_moves_once_and_tells_the_holder_it_replaced() {
+        let fixture = Fixture::new();
+        let conversation = format!("actor-v1:{}", "c".repeat(64));
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("follows", 5);
+        ledger
+            .seat_coordinator(&run, "team-old/%1", Some(conversation.as_str()), 6)
+            .expect("the first seat");
+        let actor = start_with(
+            &fixture,
+            cutover(Some(ledger.export()), 7),
+            TableFixture::holding(Team::new("team-new", "token", 71)),
+            Box::new(AnsweringLauncher),
+        );
+        let (moved, revision) = actor
+            .coordinator_followed(
+                &run,
+                "team-new",
+                "%1",
+                Some(conversation.clone()),
+                "team-old/%1",
+                "the same conversation goes on in terminal 71",
+                8,
+            )
+            .expect("the follow is answered");
+        assert!(moved, "the seat did not follow its conversation");
+        let view = actor.view().expect("the rows");
+        let seat = view.projection().runs[0]
+            .coordinator
+            .clone()
+            .expect("a seat");
+        assert_eq!(
+            (seat.seat.as_str(), seat.generation, seat.actor.as_deref()),
+            ("team-new/%1", 2, Some(conversation.as_str()))
+        );
+        assert_eq!(
+            view.projection()
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.to == "pane:team-old/%1"
+                        && message.kind == zerocode_core::orchestration::MessageKind::Handoff
+                })
+                .count(),
+            1,
+            "the holder was not told in its own inbox"
+        );
+        let (again, unchanged) = actor
+            .coordinator_followed(
+                &run,
+                "team-new",
+                "%1",
+                Some(conversation),
+                "team-old/%1",
+                "the same conversation goes on in terminal 71",
+                9,
+            )
+            .expect("a second ask is answered");
+        assert!(!again, "a seat that changed hands moved again");
+        assert_eq!(unchanged, revision, "a refused follow wrote something");
+        actor.shutdown().expect("join private actor");
     }
 
     #[test]

@@ -31,7 +31,10 @@ pub enum Error {
     RuntimeMissing,
     ModelMissing,
     RuntimeFailed,
+    RuntimeExited,
+    MemoryLimit,
     ServerStopped,
+    Restarting,
     ServerChanged,
     NotChecked,
     Protocol,
@@ -77,7 +80,10 @@ impl Error {
             Self::RuntimeMissing => "runtime_missing",
             Self::ModelMissing => "model_missing",
             Self::RuntimeFailed => "runtime_failed",
+            Self::RuntimeExited => "runtime_exited",
+            Self::MemoryLimit => "runtime_memory_limit",
             Self::ServerStopped => "server_stopped",
+            Self::Restarting => "server_restarting",
             Self::ServerChanged => "server_changed",
             Self::NotChecked => "server_not_checked",
             Self::Protocol => "native_protocol_failed",
@@ -119,6 +125,8 @@ impl std::error::Error for Error {}
 mod admission_tests;
 #[cfg(test)]
 mod source_tests;
+#[cfg(all(test, unix))]
+mod supervision_tests;
 #[cfg(all(test, unix))]
 mod switch_tests;
 #[cfg(test)]

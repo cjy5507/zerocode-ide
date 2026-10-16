@@ -367,6 +367,10 @@ pub(super) struct PendingNudge {
     /// The goodbye's word to spend once the words may have reached the pane;
     /// `None` once spent, or for words that owe nobody.
     pub(super) owed: Option<Owed>,
+    /// The road this wake came by and the ledger's word on its conversation
+    /// ([`origin`], t-57717), which every line its row files ends with —
+    /// empty for a row that was not told.
+    pub(super) origin: String,
 }
 
 impl PendingNudge {
@@ -574,6 +578,56 @@ pub(super) fn placed_line(term: TermId, agent: &str, session_id: &str, folder: &
     )
 }
 
+/// The road the ledger's own reseat brings a sleeper back by (t-57717), as
+/// [`origin`] spells it beside the door roads (`conversation_wake::WakeRoad`).
+pub(crate) const LEDGER_RESEAT: &str = "ledger-reseat";
+
+/// What every line a wake writes ends with (t-57717): the road it came by —
+/// a door's (`restore-front`, `restore-behind`, `visit`, `stage`, `reopen`,
+/// `none`) or the ledger's own reseat ([`LEDGER_RESEAT`]) — and the ledger's
+/// word on the conversation: the worker row it is by that row's state
+/// (`released:w-56544`, `sleeping:w-…`, `taken:w-…` for a pane the person
+/// took), `none` for one no worker reported, `unread` for a ledger that did
+/// not answer. The three 2026-10-15/16 lines that brought finished workers
+/// back said neither, and nothing in the log could tell which road had.
+pub(crate) fn origin(
+    road: &str,
+    ledger: &Result<Option<crate::orchestration::ConversationWorker>, String>,
+) -> String {
+    let ledger = match ledger {
+        Ok(Some(row)) => format!("{}:{}", row.word, row.worker),
+        Ok(None) => "none".to_string(),
+        Err(_) => "unread".to_string(),
+    };
+    format!("road={road} ledger={ledger}")
+}
+
+/// The [`origin`] of the ledger's own reseat of sleeper `worker`.
+pub(crate) fn reseat_origin(worker: &str) -> String {
+    format!("road={LEDGER_RESEAT} ledger=sleeping:{worker}")
+}
+
+/// `line`, ending with the wake's [`origin`] when it knows one.
+pub(crate) fn with_origin(line: String, origin: &str) -> String {
+    if origin.is_empty() {
+        line
+    } else {
+        format!("{line} {origin}")
+    }
+}
+
+/// The line for a wake that started nothing because the conversation is a
+/// finished worker's and its road read it off a stored record (t-57717): no
+/// pane, no process, and the door stands a plain shell in its place. Its
+/// [`origin`] follows, as on every wake's line.
+pub(super) fn declined_line(term: TermId, agent: &str, session_id: &str) -> String {
+    format!(
+        "term {term} did not resume {agent} {}: a finished worker's conversation, read off a \
+         stored record",
+        session_prefix(session_id)
+    )
+}
+
 /// How a wake's receipt reads in its line: how long the pane took to report
 /// taking the words, or that it never did.
 fn receipt_word(receipt: Option<Duration>) -> String {
@@ -610,9 +664,10 @@ pub(super) fn retry_line(
 }
 
 /// The line a wake's row files when it ends, whichever way it ends: the
-/// retry's own when the Enter was pressed more than once.
+/// retry's own when the Enter was pressed more than once — and the row's
+/// [`origin`] after either (t-57717).
 fn filed_line(term: TermId, pending: &PendingNudge, receipt: Option<Duration>) -> String {
-    if pending.presses >= 2 {
+    let line = if pending.presses >= 2 {
         retry_line(
             term,
             &pending.agent,
@@ -628,7 +683,8 @@ fn filed_line(term: TermId, pending: &PendingNudge, receipt: Option<Duration>) -
             Some(pending.road),
             receipt,
         )
-    }
+    };
+    with_origin(line, &pending.origin)
 }
 
 /// What every wake's line opens with: the pane, the agent, the session's
@@ -652,7 +708,7 @@ fn resumed_head(
 /// again` for an Enter alone, `typed again` for the words at a composer that
 /// was not ready — the one word a transcript tells them apart by.
 pub(super) fn fallback_line(term: TermId, pending: &PendingNudge, fallback: Fallback) -> String {
-    format!(
+    let line = format!(
         "{} {} again",
         resumed_head(
             term,
@@ -661,7 +717,8 @@ pub(super) fn fallback_line(term: TermId, pending: &PendingNudge, fallback: Fall
             Some(pending.road)
         ),
         fallback.word()
-    )
+    );
+    with_origin(line, &pending.origin)
 }
 
 /// The line for a wake that found nothing to re-enter: the record's
@@ -687,6 +744,8 @@ pub(super) struct Words<'a> {
     /// The line's hand count as the words are placed (t-17037).
     pub(super) hand: Option<u64>,
     pub(super) owed: Owed,
+    /// The wake's [`origin`], for every line its row files (t-57717).
+    pub(super) origin: String,
 }
 
 /// Place a worker wake's words — the one delivery a wake makes on its own —
@@ -726,6 +785,7 @@ pub(super) fn place_words(
         presses: 0,
         retry_for: enter_retry_for(Some(words.agent)),
         owed: Some(words.owed),
+        origin: words.origin,
     };
     if said == Some(Said::Reached) {
         pending.spend();
@@ -759,16 +819,21 @@ pub(crate) fn continuation_taken_line(
         })
 }
 
-/// File [`continuation_taken_line`] in the window's log.
+/// File [`continuation_taken_line`] in the window's log, ending with the
+/// ledger reseat's [`origin`] for sleeper `worker` (t-57717).
 pub(crate) fn note_continuation_taken(
     state: &AppState,
     term: TermId,
     agent: &str,
     session_id: &str,
     elapsed: Duration,
+    worker: &str,
 ) {
     if let Some(line) = continuation_taken_line(term, agent, session_id, elapsed) {
-        note_window_event(state.local_data_root(), &line);
+        note_window_event(
+            state.local_data_root(),
+            &with_origin(line, &reseat_origin(worker)),
+        );
     }
 }
 
@@ -1074,6 +1139,11 @@ pub(crate) fn arm_left_unsent(
     owed: Option<Owed>,
 ) {
     if let Some((mut pending, delivery)) = left_unsent(words, outcome) {
+        // The ledger's own reseat, for the sleeper the goodbye's note names
+        // (t-57717).
+        if let Some(held) = &owed {
+            pending.origin = reseat_origin(&held.worker);
+        }
         if Said::of(outcome) == Said::NotReady {
             pending.owed = owed;
         }
@@ -1104,6 +1174,7 @@ pub(super) fn left_unsent(
         presses: 0,
         retry_for: enter_retry_for(Some(words.agent)),
         owed: None,
+        origin: String::new(),
     };
     let (answer, delivery) = std::sync::mpsc::sync_channel(1);
     answer.send(outcome).ok()?;
@@ -1182,6 +1253,7 @@ mod tests {
             presses: 0,
             retry_for: None,
             owed: None,
+            origin: String::new(),
         }
     }
 
@@ -1614,6 +1686,7 @@ mod tests {
                 root: root.path().to_path_buf(),
                 worker: worker.to_string(),
             },
+            origin: String::new(),
         };
         let typed = std::cell::Cell::new(0);
         let (row, delivery) = place_words(
@@ -1822,6 +1895,77 @@ mod tests {
         assert_eq!(
             line,
             "term 41 resumed codex 01234567 nudge=composer receipt=working@1s"
+        );
+    }
+
+    /// t-57717: what every wake's line ends with — the road its door named,
+    /// then the ledger's word on the conversation: the worker row by its
+    /// state, `taken` for a pane the person took, `none` for a conversation
+    /// no worker reported, `unread` for a ledger that did not answer — and
+    /// the ledger's own reseat of a sleeper, `road=ledger-reseat`. A row that
+    /// was told no origin files its line as before.
+    #[test]
+    fn every_wake_line_ends_with_its_road_and_the_ledgers_word() {
+        use crate::orchestration::ConversationWorker;
+        let row =
+            |word: &'static str, finished: bool| -> Result<Option<ConversationWorker>, String> {
+                Ok(Some(ConversationWorker {
+                    worker: "w-57717".to_string(),
+                    word,
+                    finished,
+                }))
+            };
+        assert_eq!(
+            with_origin(
+                declined_line(15, "claude", "57717c0d-0000-4000-8000-000000000001"),
+                &origin("visit", &row("released", true)),
+            ),
+            "term 15 did not resume claude 57717c0d: a finished worker's conversation, read off a \
+             stored record road=visit ledger=released:w-57717"
+        );
+        assert_eq!(
+            origin("stage", &row("taken", false)),
+            "road=stage ledger=taken:w-57717"
+        );
+        assert_eq!(
+            origin("restore-front", &Ok(None)),
+            "road=restore-front ledger=none"
+        );
+        assert_eq!(
+            origin(
+                "restore-behind",
+                &Err("the ledger did not answer".to_string())
+            ),
+            "road=restore-behind ledger=unread"
+        );
+        let reseat = with_origin(
+            continuation_taken_line(
+                TEST_TERM_WITH_RECEIPT,
+                "claude",
+                "01234567-session",
+                Duration::from_secs(6),
+            )
+            .expect("claude reports the prompts it takes"),
+            &reseat_origin("w-57717"),
+        );
+        assert_eq!(
+            reseat,
+            "term 41 resumed claude 01234567 nudge=composer receipt=working@6s \
+             road=ledger-reseat ledger=sleeping:w-57717"
+        );
+        println!("LINE t-57717 {reseat}");
+        let untold = pending("codex", zerocode_core::NudgeRoad::Composer, Instant::now());
+        assert_eq!(
+            filed_line(TEST_TERM_WITHOUT_RECEIPT, &untold, None),
+            "term 42 resumed codex 01234567 nudge=composer receipt=none"
+        );
+        let told = PendingNudge {
+            origin: "road=visit ledger=none".to_string(),
+            ..pending("codex", zerocode_core::NudgeRoad::Composer, Instant::now())
+        };
+        assert_eq!(
+            filed_line(TEST_TERM_WITHOUT_RECEIPT, &told, None),
+            "term 42 resumed codex 01234567 nudge=composer receipt=none road=visit ledger=none"
         );
     }
 
@@ -2390,6 +2534,7 @@ mod tests {
                         root: root.path().to_path_buf(),
                         worker: format!("w-{}", spec.id),
                     },
+                    origin: String::new(),
                 },
             );
             window.rows().register(TEST_TERM_WITHOUT_RECEIPT, row);

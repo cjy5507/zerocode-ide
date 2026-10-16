@@ -9,7 +9,7 @@ use super::restore::{
 };
 use super::*;
 use crate::cmd::board::{ResumeCommand, WakeWindow, wake_conversation};
-use crate::conversation_wake::ConversationWake;
+use crate::conversation_wake::{ConversationWake, WakeRoad};
 use crate::restart_nudge_runtime::{PendingNudge, PendingNudges, WakeReceipts};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::Receiver;
@@ -99,6 +99,9 @@ pub(super) struct Door {
     /// A program an account switch's close left behind is still there, as
     /// this window's look sees it (t-7538).
     pub(super) lingering: Mutex<bool>,
+    /// The road this door's wakes come by (t-57717): none named, unless a
+    /// test says.
+    pub(super) road: Mutex<WakeRoad>,
 }
 
 impl Door {
@@ -117,7 +120,13 @@ impl Door {
             during_prepare: Mutex::new(None),
             timeline: Mutex::new(None),
             lingering: Mutex::new(false),
+            road: Mutex::new(WakeRoad::Unnamed),
         }
+    }
+
+    /// This door's wakes come by `road` from now on (t-57717).
+    pub(super) fn on_road(&self, road: WakeRoad) {
+        *self.road.lock().unwrap() = road;
     }
 
     /// Write `did` into this door's book, and into the timeline if one is
@@ -300,6 +309,10 @@ impl WakeWindow for Door {
 
     fn root(&self) -> std::path::PathBuf {
         self.checkout.clone()
+    }
+
+    fn road(&self) -> WakeRoad {
+        *self.road.lock().unwrap()
     }
 
     fn data_root(&self) -> std::path::PathBuf {
@@ -1420,10 +1433,16 @@ fn a_restored_conversation_names_its_folder_and_asks_the_ledger_for_its_seat() {
 
     let lines = door.noted("session-1789537852228-0 in ");
     assert_eq!(lines.len(), 1, "{lines:?}");
+    // The road and the ledger's word follow the folder (t-57717): a door
+    // that named no road, for a conversation no worker reported.
+    let (placed, origin) = lines[0]
+        .split_once(" road=")
+        .expect("the line ends with its road");
     assert!(
-        lines[0].ends_with(&checkout.path().display().to_string()),
+        placed.ends_with(&checkout.path().display().to_string()),
         "{lines:?}"
     );
+    assert_eq!(origin, "none ledger=none", "{lines:?}");
     assert!(door.did.lock().unwrap().contains(&Did::Rebound(DOOR)));
     crate::agent_teams::forget_term(DOOR);
 }

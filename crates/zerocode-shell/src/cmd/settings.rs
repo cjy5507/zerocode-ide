@@ -1085,13 +1085,79 @@ pub(crate) fn set_panel_width(
 /// Already normalised — the ratio rules and every positional check ran when
 /// the layouts were stored, so what the window receives is what the file
 /// keeps and there is no second reading of the rules to drift.
+///
+/// Less every finished worker's conversation (t-57717): the window opens a
+/// workspace with what this answers, and nobody chose a conversation there.
+/// On 2026-10-15 and 16 three finished workers' conversations came back off
+/// the file as agent panes nobody had called, each on the first visit to its
+/// checkout after a restart; a workspace whose set held nothing else now
+/// opens as one that stored nothing — the person's own choice for it.
 #[tauri::command(async)]
 pub(crate) fn pane_layouts(
     state: State<'_, AppState>,
     worktree: String,
 ) -> Vec<pane_layout::TabLayout> {
-    let file = pane_layouts_file(state.config_root());
-    pane_layouts_read(&file, &worktree)
+    let left = opened_set(&pane_layouts_file(state.config_root()), &worktree);
+    note_struck(&state, "read", &worktree, &left.struck);
+    left.kept()
+}
+
+/// The stored set the window opens `worktree` with, off the file at `file`
+/// (t-57717): what [`pane_layouts`] answers, and the finished workers whose
+/// conversations it left out. A ledger this window cannot read leaves out
+/// nothing.
+pub(crate) fn opened_set(file: &std::path::Path, worktree: &str) -> pane_layout::Left {
+    let stored = pane_layouts_read(file, worktree);
+    let finished = crate::orchestration::finished_conversations();
+    pane_layout::without_finished(stored, |wake| {
+        finished
+            .as_ref()
+            .and_then(|finished| finished(&wake.agent, &wake.id))
+    })
+}
+
+/// The workspaces the boot puts back behind the front, off the file at
+/// `file` (t-14036): those standing for a conversation that is not a
+/// finished worker's (t-57717) — what [`standing_pane_worktrees`] answers.
+pub(crate) fn standing_set(file: &std::path::Path) -> Vec<String> {
+    let mut layouts = pane_layout::read(file);
+    if let Some(finished) = crate::orchestration::finished_conversations() {
+        for tabs in layouts.values_mut() {
+            *tabs = pane_layout::without_finished(std::mem::take(tabs), |wake| {
+                finished(&wake.agent, &wake.id)
+            })
+            .kept();
+        }
+    }
+    pane_layout::standing_worktrees(&layouts)
+}
+
+/// A save's set less every worker's conversation (t-57717): what
+/// [`save_pane_layouts`] writes, each tab in the order given. A ledger this
+/// window cannot read strikes nothing.
+pub(crate) fn saved_set(layouts: Vec<pane_layout::TabLayout>) -> pane_layout::Left {
+    let workers = crate::orchestration::worker_conversations();
+    pane_layout::without_finished(layouts, |wake| {
+        workers
+            .as_ref()
+            .and_then(|workers| workers(&wake.agent, &wake.key, &wake.id))
+    })
+}
+
+/// One line in the window's log for the workers' conversations a pane-layout
+/// road left out (t-57717) — nothing when it left out none.
+fn note_struck(state: &AppState, road: &str, worktree: &str, struck: &[String]) {
+    if struck.is_empty() {
+        return;
+    }
+    note_window_event(
+        state.local_data_root(),
+        &format!(
+            "pane layouts of {worktree}: the {road} left out {} worker conversation(s) — {}",
+            struck.len(),
+            struck.join(", ")
+        ),
+    );
 }
 
 /// Carry the session identity a pane-owned Zo reported into its durable leaf.
@@ -1160,23 +1226,41 @@ pub(crate) fn save_pane_layouts(
     let sessions = state.pane_sessions().clone();
     let agents = state.agent_terms().clone();
     carry_zo_pane_sessions(&mut layouts, &sessions, &agents);
+    // A worker's conversation is the ledger's to bring back, never this
+    // file's (t-57717): a worker pane the window seated in a tab without
+    // marking it the ledger's — a detached worker row pressed, a worker
+    // listed and opened — was saved here, and came back off the file as an
+    // agent pane after its worker had finished. The person's own panes and a
+    // run's coordinator stay; a ledger this window cannot read strikes
+    // nothing.
+    let left = saved_set(layouts);
+    note_struck(&state, "save", &worktree, &left.struck);
+    let kept: Vec<bool> = left.tabs.iter().map(Option::is_some).collect();
     // The one writer, and not once the window is leaving (t-7812 D): the
     // file is then the next window's list, and a save of the window dying
     // would take its tabs off it.
     // The names the tabs were stored under go back to the window (t-14036):
     // a tab born in this session is nameless until the file names it, and the
-    // stage can only say where a named tab stands.
-    pane_layout::save_window_set(&file, worktree, layouts, &crate::exit_runtime::leaving)
-        .map(Option::unwrap_or_default)
-        .map_err(|error| error.to_string())
+    // stage can only say where a named tab stands. One name per tab sent, in
+    // the order sent — none for a tab the save struck whole.
+    let named =
+        pane_layout::save_window_set(&file, worktree, left.kept(), &crate::exit_runtime::leaving)
+            .map(Option::unwrap_or_default)
+            .map_err(|error| error.to_string())?;
+    let mut named = named.into_iter();
+    Ok(kept
+        .into_iter()
+        .map(|kept| if kept { named.next().flatten() } else { None })
+        .collect())
 }
 
 /// The workspaces whose conversations were running when the window last went,
-/// for the boot to put back behind the one in front (t-14036).
+/// for the boot to put back behind the one in front (t-14036) — less the
+/// finished workers' conversations, which no road brings back on its own
+/// (t-57717, [`pane_layouts`]).
 #[tauri::command(async)]
 pub(crate) fn standing_pane_worktrees(state: State<'_, AppState>) -> Vec<String> {
-    let file = pane_layouts_file(state.config_root());
-    pane_layout::standing_worktrees(&pane_layout::read(&file))
+    standing_set(&pane_layouts_file(state.config_root()))
 }
 
 /// One worktree's stored stage — the document tabs, their groups, the split
