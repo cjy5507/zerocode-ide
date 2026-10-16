@@ -1,7 +1,8 @@
 //! How the owned server admits requests to its runtime, against a fake
 //! runtime the test releases one answer at a time: requests that arrive
 //! together, a full queue, a caller that leaves while it waits, a wait that
-//! runs out, a runtime that never answers, a truncated answer and shutdown.
+//! runs out, a runtime that never answers, a truncated answer, a cut head and
+//! shutdown.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use crate::engine::{Engine, Limits, Running};
 /// A runtime that writes down the questions of every request it reads, in
 /// the order it reads them, and answers request `n` only once the file
 /// `release-n` exists; `truncated` in that file makes it report a truncated
-/// context.
+/// context, and `cut` a cut head for every question.
 const GATED_RUNTIME: &str = r#"import json,os,sys,time
 root=sys.argv[1]
 for n,line in enumerate(sys.stdin):
@@ -24,7 +25,9 @@ for n,line in enumerate(sys.stdin):
  gate=os.path.join(root,'release-%d'%n)
  while not os.path.exists(gate): time.sleep(0.002)
  usage={'input_tokens':1,'output_tokens':0}
- if open(gate).read().strip()=='truncated': usage['truncated']=True
+ mode=open(gate).read().strip()
+ if mode=='truncated': usage['truncated']=True
+ if mode=='cut': usage['truncated_questions']=names
  print(json.dumps({'model':r['model'],'answers':{k:{'type':'noul','noul':0.5} for k in names},'usage':usage}),flush=True)
 "#;
 
@@ -338,6 +341,33 @@ async fn a_truncated_native_answer_names_its_reason_and_the_runtime_keeps_runnin
     })
     .await;
     gated.release(0, "truncated");
+    let response = pending.await.unwrap().unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"], "native_protocol_failed");
+    assert_eq!(body["refusal"], "provider_context_truncated");
+    assert!(gated.engine.alive());
+    assert!(!gated.failed.load(Ordering::Acquire));
+    until("the queue empties", SETTLE, || {
+        gated.running.admitted() == 0
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_head_cut_native_answer_names_its_reason_and_the_runtime_keeps_running() {
+    let limits = Limits {
+        request: PATIENT,
+        queue_wait: PATIENT,
+        waiting: 4,
+    };
+    let gated = gated(limits).await;
+    let pending = tokio::spawn(gated.ask(&["a", "b"], PATIENT).send());
+    until("the request reaches the runtime", SETTLE, || {
+        gated.arrived().len() == 1
+    })
+    .await;
+    gated.release(0, "cut");
     let response = pending.await.unwrap().unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
     let body: Value = response.json().await.unwrap();
