@@ -20,6 +20,8 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *   ⑥ an account switch moves the pane number and not the row;
  *   ⑦ a quiet beat writes no row, a status letter writes one, and pointing at a row reads its pane's last
  *      three lines once;
+ *      a released worker's work that waits on its coordinator keeps its row and landed work leaves — a worker
+ *      whose release got no answer too (t-60850), while a worker at work keeps its row on landed work;
  *   ⑧ the landing line counts what waits to land and opens that list on the task board;
  *   ⑨ 「브랜치 보기」 brings the branch list back, stored, and the list's own switch brings the team back;
  *      a restart restores the choice;
@@ -501,6 +503,58 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
         settled.landedGone && settled.order.indexOf("w:run-team-c/w-c2") === settled.order.indexOf("c:run-team-c") + 2 &&
         settled.afterGone,
       JSON.stringify(settled),
+    );
+
+    /* ⑦c — a worker the ledger could not confirm released (t-60850; the person, 10-16 13:1x: 「코덱스가 돌고 있는데
+     * 착지라 표시되는 버그」). Only `released` settles a worker in the ledger's eyes; one whose release got no answer
+     * stood under a running coordinator on landed work, every step green at 착지, as if it were going. Landed work
+     * leaves the team unless its worker is at work — its pane's hook working, or, with no hook to read, the ledger
+     * saying it lives. */
+    const unconfirmed = await page.evaluate(async () => {
+      const onLanded = (over) => window.__ROW_OF__({ run: "run-team-c", agent: "codex", settled: false, reported: true,
+        pane: "%8", model: "gpt-6-astra", handed_in: "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+        review: { verified: true, merged: true, deployed: false, written: true, author: "coordinator" },
+        progress: { stage: "merged" }, ...over });
+      // The worker at work here: seated in a pane whose hook says working.
+      const term = 9634;
+      tabs.push({ kind: "term", worktree: "/r/old-4", id: `tab-${term}`, layout: { type: "leaf", term } });
+      paneAgents.set(term, "codex");
+      window.__TELL__("hook:agent", { term, state: "working", agent: "codex", session: `s-${term}`, model: "gpt-6-astra" });
+      window.__LEDGER__ = [...window.__LEDGER__,
+        // The release was asked for and the answer never came: no pane to hear, the ledger's word `release_unknown`.
+        onLanded({ worker: "w-c4", checkout: "/r/old-3", task: "착지한 일, 놓지 못한 워커", task_id: "t-3004",
+          state: "waiting", ledger: "release_unknown" }),
+        onLanded({ worker: "w-c5", checkout: "/r/old-4", task: "착지한 일, 일하는 워커", task_id: "t-3005", term,
+          state: "working", ledger: "active" }),
+        // Seated in another window: no hook to read here, and the ledger alone says it lives.
+        onLanded({ worker: "w-c6", checkout: "/r/old-5", task: "착지한 일, 다른 창의 워커", task_id: "t-3006",
+          state: "working", ledger: "active" }),
+      ];
+      await window.__LEDGER_MOVED__();
+      const order = [...document.querySelectorAll("#sidebar-team > .team-row")].map((node) => node.dataset.teamKey);
+      const read = { unknownGone: window.__WORKER_ROW__("w-c4") === null, rows: window.__ROWS__(), order,
+        here: window.__READ_WORKER__("w-c5"), elsewhere: window.__READ_WORKER__("w-c6") };
+      window.__LEDGER__ = window.__LEDGER__.filter((row) => !["w-c4", "w-c5", "w-c6"].includes(row.worker));
+      tabs.splice(tabs.findIndex((tab) => tab.id === `tab-${term}`), 1);
+      paneAgents.delete(term);
+      await window.__LEDGER_MOVED__();
+      read.after = window.__ROWS__();
+      return read;
+    });
+    ok(
+      "a worker whose release got no answer leaves the team with its landed work — not a row of six green steps under a running coordinator — and the other rows stand as they were",
+      unconfirmed.unknownGone && !unconfirmed.order.includes("w:run-team-c/w-c4") && unconfirmed.rows.workers === 7 &&
+        unconfirmed.after.workers === 5,
+      JSON.stringify(unconfirmed),
+    );
+    ok(
+      "a worker at work keeps its row on landed work — its pane's hook working here, or the ledger alone saying it lives elsewhere — drawn working with every step at 착지",
+      unconfirmed.here?.dot === "working" && unconfirmed.here.cells.join(",") === "on,past,past,on,on,on" &&
+        unconfirmed.here.step === words.land && unconfirmed.elsewhere?.dot === "working" &&
+        unconfirmed.elsewhere.cells.join(",") === "on,past,past,on,on,on" &&
+        unconfirmed.order.indexOf("w:run-team-c/w-c5") < unconfirmed.order.indexOf("w:run-team-c/w-c1") &&
+        unconfirmed.order.indexOf("w:run-team-c/w-c6") < unconfirmed.order.indexOf("w:run-team-c/w-c1"),
+      JSON.stringify(unconfirmed),
     );
 
     /* ⑧ — the landing line opens what waits to land. */
