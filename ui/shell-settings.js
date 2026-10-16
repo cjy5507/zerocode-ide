@@ -5783,10 +5783,13 @@ function googleAccountNote() {
       "Google 로그인은 시스템 브라우저에서 진행됩니다. 계정을 고르면 이 창으로 자동으로 돌아옵니다.",
     );
   }
-  return t(
+  return `${t(
     "settings.googleAccount.hint",
     "zo와 이 창이 같은 파일의 같은 로그인을 씁니다 — 여기서 로그인하면 zo도, Antigravity 사용량 게이지도 그 로그인을 씁니다.",
-  );
+  )} ${t(
+    "settings.googleAccount.agyDiffers",
+    "터미널의 agy는 자기 로그인을 따로 가지므로 다른 계정일 수 있습니다.",
+  )}`;
 }
 
 /* Sign in, or sign in again — one road, because Google's own consent screen

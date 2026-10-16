@@ -4749,6 +4749,18 @@ await test("the provider accounts pane carries a Google card whose login the win
     words.signedOut,
     "a machine with no Google login did not say so",
   );
+  // t-59962: the card says whose login this is — the one zo and the window
+  // share — and that a terminal's agy may be signed in as someone else.
+  const loginWords = await pageA.evaluate(() => ({
+    about: document.querySelector('[data-i18n="settings.googleAccount.about"]')?.textContent ?? "",
+    note: document.getElementById("google-account-note")?.textContent ?? "",
+    differs: t("settings.googleAccount.agyDiffers", "터미널의 agy는 자기 로그인을 따로 가지므로 다른 계정일 수 있습니다."),
+    shared: t("settings.googleAccount.about", "zo와 창이 함께 쓰는 Google 로그인(credentials.json)입니다."),
+    gauge: t("usage.antigravityTip", "zo와 창이 함께 쓰는 Google 로그인(credentials.json)으로 읽습니다 — 터미널의 agy는 다른 계정일 수 있습니다."),
+  }));
+  assertEqual(loginWords.about.trim(), loginWords.shared, "the Google card does not say whose login it shows");
+  assert(loginWords.note.includes(loginWords.differs), "the Google card does not say agy may use another login");
+  assert(loginWords.gauge.includes("credentials.json"), "the Antigravity gauge tip does not name its login");
   // There is one Google login per machine, so there is nothing to choose —
   // and a pressed-state control here would be a radio with one option.
   assertEqual(
