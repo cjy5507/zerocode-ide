@@ -301,6 +301,7 @@ fn changing_auth_requirements_cannot_reuse_the_old_judgment_identity() {
 fn discovery_uses_server_model_ids_not_a_product_model_table() {
     let expected = vec![Model {
         id: "acme/new-model".to_string(),
+        limits: None,
     }];
     for body in [
         json!({"data":[{"id":"acme/new-model"}]}),
