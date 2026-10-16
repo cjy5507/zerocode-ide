@@ -1608,7 +1608,8 @@ pub(crate) fn computer_resume(
 /// The work screen panel's look (t-59372): the newest look the pane `term`
 /// took under the assignment `scope` it still holds — its number, when it was
 /// taken and its picture when one is kept. Only the window's own page asks,
-/// and only about a pane the window holds.
+/// and only about a pane the window holds; a pane whose assignment the window
+/// cannot tell is refused, never shown.
 #[tauri::command(async)]
 pub(crate) fn computer_progress_frame(
     app: AppHandle,
@@ -1621,9 +1622,10 @@ pub(crate) fn computer_progress_frame(
     from_the_main_webview(&webview)?;
     let held = crate::artifact_runtime::held_pane(&app, &crate::hooks::pane_key_of(term))
         .ok_or("computer_progress_pane_unknown: 이 창에 없는 판입니다")?;
-    if crate::agent_tools_runtime::computer_frame_scope(&app, &held).as_deref()
-        != Some(scope.as_str())
-    {
+    let holds = crate::agent_tools_runtime::computer_frame_scope(&app, &held).ok_or(
+        "computer_progress_scope_unknown: 이 판의 지금 일과 대화를 가릴 수 없어 화면을 보이지 않습니다",
+    )?;
+    if holds != scope {
         return Ok(None);
     }
     let Some(mut look) = computer_use::observe::owned_look(&held.key, &scope) else {

@@ -13,23 +13,62 @@
 /* How long the band stays after the last action before it slips away. */
 const COMPUTER_BAND_IDLE_MS = 8000;
 
-let computerBandState = { active: false, stopped: null, actions: 0, verb: null };
+/* What the backend last granted, and what the person has pressed that it has
+ * not answered yet (t-59372). `revision` numbers the backend's stop: a word
+ * numbered below the one shown changes nothing, one numbered the same moves
+ * only the counts, and once numbers came a word without one never moves the
+ * stop. `stopping` and `resuming` are the person's presses still out — neither
+ * paints itself as granted — and `resumeFailed` says the last resume left the
+ * stop standing. */
+let computerBandState = {
+  active: false,
+  stopped: null,
+  actions: 0,
+  verb: null,
+  revision: null,
+  stopping: false,
+  resuming: false,
+  resumeFailed: false,
+};
 let computerBandTimer = null;
+/* The pane and assignment of the newest look the backend announced: what the
+ * band's view opens. */
+let computerBandLook = null;
+
+function computerBandNote(state) {
+  if (state.stopping) return () => t("computer.band.stopping", "정지하는 중…");
+  if (state.resuming) return () => t("computer.band.resuming", "다시 시작하는 중…");
+  if (state.resumeFailed && state.stopped != null) {
+    return () => t("computer.band.resumeFailed", "다시 시작하지 못했습니다 · 정지는 그대로입니다");
+  }
+  return null;
+}
 
 function paintComputerBand() {
   const band = el("computer-band");
-  const stopped = computerBandState.stopped != null;
-  const show = stopped || computerBandState.active;
+  const state = computerBandState;
+  const stopped = state.stopped != null;
+  const show = stopped || state.active || state.stopping || state.resuming;
   band.hidden = !show;
   band.classList.toggle("is-stopped", stopped);
   say(el("computer-band-word"), () => stopped
-    ? t("computer.band.stopped", "Computer Use 정지됨 · {{reason}}", { reason: computerBandState.stopped })
+    ? t("computer.band.stopped", "Computer Use 정지됨 · {{reason}}", { reason: state.stopped })
     : t("computer.band.working", "Computer Use 진행 중"));
   say(el("computer-band-count"), () => t("computer.band.actions", "행동 {{count}}", {
-    count: computerBandState.actions ?? 0,
+    count: state.actions ?? 0,
   }));
-  el("computer-band-stop").hidden = stopped;
-  el("computer-band-resume").hidden = !stopped;
+  const note = el("computer-band-note");
+  const words = computerBandNote(state);
+  say(note, words);
+  if (!words) note.textContent = "";
+  note.hidden = !words;
+  // The stop stays in reach while a resume is out: the person's next stop
+  // does not wait behind their last resume.
+  el("computer-band-stop").hidden = state.stopping || (stopped && !state.resuming);
+  // A resume names the stop it lifts; with no number from the backend there is
+  // nothing to name.
+  el("computer-band-resume").hidden = !stopped || state.revision == null || state.resuming || state.stopping;
+  el("computer-band-view").hidden = computerBandLook == null;
 }
 
 function computerBandSlipAway() {
@@ -40,11 +79,28 @@ function computerBandSlipAway() {
   }, COMPUTER_BAND_IDLE_MS);
 }
 
+/* Take in the stop the backend says stands at `revision` (`null`: a word with
+ * no number). While the person's own stop is out, a newer word may show a stop
+ * but not take one away: their last press was a stop. */
+function takeComputerBandStop(revision, stopped) {
+  const state = computerBandState;
+  if (revision == null) {
+    if (state.revision == null) computerBandState = { ...state, stopped };
+    return;
+  }
+  if (state.revision != null && revision <= state.revision) return;
+  const kept = state.stopping && stopped == null ? state.stopped : stopped;
+  computerBandState = { ...state, revision, stopped: kept, resumeFailed: false };
+}
+
 listen("computer:activity", (event) => {
   const report = event.payload ?? {};
+  const revision = typeof report.revision === "number" ? report.revision : null;
+  if (revision != null && computerBandState.revision != null && revision < computerBandState.revision) return;
+  takeComputerBandStop(revision, report.stopped ?? null);
   computerBandState = {
+    ...computerBandState,
     active: report.active === true,
-    stopped: report.stopped ?? null,
     actions: report.actions ?? 0,
     verb: report.verb ?? null,
   };
@@ -53,15 +109,171 @@ listen("computer:activity", (event) => {
 });
 
 el("computer-band-stop").addEventListener("click", () => {
-  computerBandState = { ...computerBandState, stopped: "window" };
+  if (computerBandState.stopping) return;
+  computerBandState = { ...computerBandState, stopping: true };
   paintComputerBand();
-  invoke("computer_stop").catch(() => {});
+  invoke("computer_stop")
+    .then((answer) => {
+      if (answer?.stopped !== true) return;
+      const revision = typeof answer.revision === "number" ? answer.revision : null;
+      takeComputerBandStop(revision, answer.reason ?? "window");
+    })
+    .catch(() => {})
+    .finally(() => {
+      computerBandState = { ...computerBandState, stopping: false };
+      paintComputerBand();
+    });
 });
 
 el("computer-band-resume").addEventListener("click", () => {
-  computerBandState = { ...computerBandState, stopped: null, active: false };
+  const state = computerBandState;
+  if (state.stopped == null || state.revision == null || state.resuming || state.stopping) return;
+  computerBandState = { ...state, resuming: true, resumeFailed: false };
   paintComputerBand();
-  invoke("computer_resume", { reset: false }).catch(() => {});
+  invoke("computer_resume", { reset: false, revision: state.revision })
+    .then((answer) => {
+      if (typeof answer?.revision === "number") takeComputerBandStop(answer.revision, answer.stopped ?? null);
+      if (answer?.resumed === false) {
+        computerBandState = { ...computerBandState, resumeFailed: computerBandState.stopped != null };
+      }
+    })
+    .catch(() => {
+      computerBandState = { ...computerBandState, resumeFailed: computerBandState.stopped != null };
+    })
+    .finally(() => {
+      computerBandState = { ...computerBandState, resuming: false };
+      paintComputerBand();
+    });
+});
+
+el("computer-band-view").addEventListener("click", () => {
+  if (computerBandLook) openComputerProgress(computerBandLook);
+});
+
+/* The work screen panel (t-59372): the newest look one pane took under one
+ * assignment, below the band, opened only by the person. The backend tells the
+ * page a look was taken by its number (`computer:frame`), never by picture; the
+ * panel asks the window's own door for it — one ask out at a time, the newest
+ * number held while one is out — and keeps one picture, let go when it closes or
+ * turns to another assignment. Nothing here runs on a clock. The desktop only:
+ * the dedicated browser's tabs are watched in their own tab. */
+let computerProgress = null;
+let computerProgressSessions = 0;
+let computerProgressAsking = false;
+
+function computerProgressOwns(word) {
+  return computerProgress != null && word?.term === computerProgress.term &&
+    word?.scope === computerProgress.scope;
+}
+
+function computerProgressName(term) {
+  const tab = tabOfTerm(term);
+  return tab ? tabLabel(tab) : t("computer.progress.pane", "판 {{term}}", { term });
+}
+
+function paintComputerProgressSubject(look) {
+  const panel = computerProgress;
+  if (!panel) return;
+  say(el("computer-progress-subject"), () => {
+    const name = computerProgressName(panel.term);
+    if (!look) return t("computer.progress.empty", "{{name}} · 아직 본 화면이 없습니다", { name });
+    const time = new Date(look.at).toLocaleTimeString(document.documentElement.lang || undefined, {
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+    return t("computer.progress.seen", "{{name}} · {{time}}에 마지막으로 본 화면", { name, time });
+  });
+}
+
+/* Paint one look: its number, its picture when one was kept, and why there is
+ * none when there is not — never an older picture in its place. */
+function paintComputerProgressLook(look) {
+  const frame = el("computer-progress-frame");
+  const note = el("computer-progress-note");
+  frame.dataset.seq = String(look.seq);
+  const picture = typeof look.png === "string" && look.png !== "";
+  if (picture) frame.setAttribute("src", `data:image/png;base64,${look.png}`);
+  else frame.removeAttribute("src");
+  frame.hidden = !picture;
+  const words = picture ? null : look.perception === "accessibility"
+    ? () => t("computer.progress.accessibility", "이 관측은 화면의 구조만 읽어 그림이 없습니다")
+    : () => t("computer.progress.gone", "이 관측의 그림은 더는 보관하지 않습니다");
+  say(note, words);
+  if (!words) note.textContent = "";
+  note.hidden = !words;
+  paintComputerProgressSubject(look);
+}
+
+function takeComputerProgressLook(session, look) {
+  const panel = computerProgress;
+  if (!panel || panel.session !== session || !computerProgressOwns(look)) return;
+  if (typeof look.seq !== "number" || (panel.shown != null && look.seq <= panel.shown)) return;
+  panel.shown = look.seq;
+  paintComputerProgressLook(look);
+}
+
+function askComputerProgress() {
+  const panel = computerProgress;
+  if (!panel || !panel.wanted || computerProgressAsking) return;
+  const { session, term, scope } = panel;
+  const seq = panel.wantedSeq;
+  panel.wanted = false;
+  panel.asked = Math.max(panel.asked ?? 0, seq ?? 0);
+  computerProgressAsking = true;
+  invoke("computer_progress_frame", { term, scope, seq })
+    .then((look) => takeComputerProgressLook(session, look))
+    .catch(() => {})
+    .finally(() => {
+      computerProgressAsking = false;
+      askComputerProgress();
+    });
+}
+
+function closeComputerProgress() {
+  computerProgress = null;
+  el("computer-progress").hidden = true;
+  const frame = el("computer-progress-frame");
+  frame.removeAttribute("src");
+  delete frame.dataset.seq;
+  frame.hidden = true;
+  const note = el("computer-progress-note");
+  say(note, null);
+  note.textContent = "";
+  note.hidden = true;
+  say(el("computer-progress-subject"), null);
+}
+
+function openComputerProgress(subject) {
+  if (computerProgressOwns(subject)) return;
+  closeComputerProgress();
+  computerProgressSessions += 1;
+  computerProgress = {
+    session: computerProgressSessions,
+    term: subject.term,
+    scope: subject.scope,
+    shown: null,
+    asked: null,
+    wanted: true,
+    wantedSeq: null,
+  };
+  el("computer-progress").hidden = false;
+  paintComputerProgressSubject(null);
+  askComputerProgress();
+}
+
+el("computer-progress-close").addEventListener("click", closeComputerProgress);
+
+listen("computer:frame", (event) => {
+  const word = event.payload ?? {};
+  if (typeof word.term !== "number" || typeof word.scope !== "string" || typeof word.seq !== "number") return;
+  const first = computerBandLook == null;
+  computerBandLook = { term: word.term, scope: word.scope };
+  if (first) paintComputerBand();
+  const panel = computerProgress;
+  if (!computerProgressOwns(word)) return;
+  if (word.seq <= Math.max(panel.shown ?? 0, panel.asked ?? 0, panel.wantedSeq ?? 0)) return;
+  panel.wanted = true;
+  panel.wantedSeq = word.seq;
+  askComputerProgress();
 });
 
 function computerConfirmTitle(kind) {

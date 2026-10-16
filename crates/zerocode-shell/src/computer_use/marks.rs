@@ -258,8 +258,10 @@ pub(super) fn mark_look(
     }
 }
 
-/// The newest fresh table made at this place from these very pixels; its
-/// clock starts again, since this look saw the same screen.
+/// The newest fresh table made at this place from these very pixels under the
+/// stop this look began under; its clock starts again, since this look saw
+/// the same screen. A table from before a stop is never served again: the
+/// look after it is walked anew.
 fn latest_at(picture: &Picture<'_>) -> Option<MarkTable> {
     let mut held = tables();
     let key = held
@@ -269,6 +271,7 @@ fn latest_at(picture: &Picture<'_>) -> Option<MarkTable> {
             table.place == picture.place
                 && table.picture == Some(picture.fingerprint)
                 && table.frame == picture.placed
+                && table.epoch == picture.epoch
                 && !cache::is_expired(table.made, Instant::now())
         })
         .map(|(key, _)| key.clone())?;
@@ -662,10 +665,7 @@ pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
 
 /// [`pinned_click`] under the stop `epoch` stands at now: the only door a
 /// mark is pressed through.
-pub(super) fn pinned_click_at(
-    params: &Value,
-    _epoch: u64,
-) -> Result<PinnedClick, ComputerUseError> {
+pub(super) fn pinned_click_at(params: &Value, epoch: u64) -> Result<PinnedClick, ComputerUseError> {
     let look = params
         .get("look")
         .and_then(Value::as_str)
@@ -688,6 +688,14 @@ pub(super) fn pinned_click_at(
             format!(
                 "marked look {look} is older than {} s; look again with --marks",
                 cache::MAX_AGE.as_secs()
+            ),
+        ));
+    }
+    if table.epoch != epoch {
+        return Err(ComputerUseError::new(
+            error_code::ELEMENT_NOT_FOUND,
+            format!(
+                "marked look {look} was taken before the operator was stopped; look again with --marks"
             ),
         ));
     }

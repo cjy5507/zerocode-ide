@@ -3191,11 +3191,23 @@ pub(crate) fn computer_frame_scope(
 /// no two different seats write the same bytes, and the whole SHA-256 in
 /// lowercase hex.
 pub(crate) fn frame_scope_of(
-    _seat: [Option<&str>; 5],
-    _dispatch: Option<&str>,
-    _session: Option<&str>,
+    seat: [Option<&str>; 5],
+    dispatch: Option<&str>,
+    session: Option<&str>,
 ) -> Option<String> {
-    None
+    use sha2::{Digest as _, Sha256};
+    let dispatch = dispatch.filter(|id| !id.is_empty());
+    let session = session.filter(|id| !id.is_empty());
+    if dispatch.is_none() && session.is_none() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    for value in seat.into_iter().chain([dispatch, session]) {
+        let bytes = value.unwrap_or_default().as_bytes();
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 /// The automation the operator's own evidence folders are catalogued under.

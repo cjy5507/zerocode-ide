@@ -12,9 +12,25 @@ use zerocode_core::computer_use_protocol::error_code;
 
 use super::ComputerUseError;
 
-/// Why the window refuses actions, if it does.
-static STOPPED: Mutex<Option<String>> = Mutex::new(None);
+/// The window's stop: why it refuses actions, if it does, and its revision —
+/// a count that moves whenever a stop is made or lifted (t-59372), so a
+/// report and a resume name the very stop they speak of.
+struct Stop {
+    reason: Option<String>,
+    revision: u64,
+}
+
+static STOPPED: Mutex<Stop> = Mutex::new(Stop {
+    reason: None,
+    revision: 0,
+});
 static STOP_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn stopped() -> std::sync::MutexGuard<'static, Stop> {
+    STOPPED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 pub(super) fn stop_generation() -> u64 {
     STOP_GENERATION.load(Ordering::Acquire)
@@ -33,10 +49,15 @@ pub(super) fn remember_helper(pid: Option<i32>) {
 /// The reason the window is stopped, if it is.
 #[must_use]
 pub fn stopped_reason() -> Option<String> {
-    STOPPED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+    stopped().reason.clone()
+}
+
+/// The stop and its revision, read together: a report never pairs one
+/// moment's stop with another moment's revision.
+#[must_use]
+pub fn snapshot() -> (Option<String>, u64) {
+    let held = stopped();
+    (held.reason.clone(), held.revision)
 }
 
 /// The refusal an action gets while stopped: a stop the person made is
@@ -62,24 +83,33 @@ pub fn refusal(reason: &str) -> ComputerUseError {
 /// stop and the resume the person lifts it with. The helper is already
 /// stopped: nothing is signalled.
 pub fn adopt(reason: &str) {
-    let mut held = STOPPED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if held.is_none() {
+    let mut held = stopped();
+    if held.reason.is_none() {
         STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
-        *held = Some(reason.to_string());
+        held.reason = Some(reason.to_string());
+        held.revision += 1;
     }
 }
 
 /// Stop now: the window refuses every action from here on, and the helper is
 /// told by signal so an action already in flight ends at its next event.
+/// Every stop is a new revision, even over one standing: a resume that named
+/// the older one does not lift it.
 pub fn stop(reason: &str) -> Value {
-    STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
-    *STOPPED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.to_string());
+    let revision = {
+        let mut held = stopped();
+        STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
+        held.reason = Some(reason.to_string());
+        held.revision += 1;
+        held.revision
+    };
     let signalled = stop_helper();
-    serde_json::json!({ "stopped": true, "reason": reason, "helperSignalled": signalled })
+    serde_json::json!({
+        "stopped": true,
+        "reason": reason,
+        "revision": revision,
+        "helperSignalled": signalled,
+    })
 }
 
 /// Tell the remembered helper to stop, by signal; false when there is none.
@@ -116,30 +146,35 @@ pub fn note_action(verb: &str, at_epoch_ms: i64) {
     held.2 = at_epoch_ms;
 }
 
-/// What the page's band paints: stopped or not, the count, the last verb
-/// and when — `active` says an action just happened.
+/// What the page's band paints: stopped or not and the stop's revision, the
+/// count, the last verb and when — `active` says an action just happened.
 #[must_use]
 pub fn activity_report(just_now: Option<&str>) -> Value {
     let (count, last, at) = ACTIONS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
+    let (standing, revision) = snapshot();
     serde_json::json!({
         "active": just_now.is_some(),
         "verb": just_now.map(str::to_string).or(last),
         "actions": count,
         "at": at,
-        "stopped": stopped_reason(),
+        "stopped": standing,
+        "revision": revision,
         "hotkey": zerocode_core::computer_use::COMPUTER_STOP_HOTKEY,
     })
 }
 
-/// Lift the window's stop; the helper's is lifted by the caller's `resume`
-/// request when a session stands.
+/// Lift the window's stop outright — a new revision when one stood. Tests
+/// start from no stop this way; the window and agents lift one only through
+/// [`resume`].
+#[cfg(test)]
 pub fn lift() {
-    *STOPPED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    let mut held = stopped();
+    if held.reason.take().is_some() {
+        held.revision += 1;
+    }
 }
 
 /// Who asks to lift the stop: the person, from the window's band, naming the
@@ -151,12 +186,14 @@ pub enum Lifter {
     Agent,
 }
 
-/// What one `resume` came to: whether the stop was lifted, the stop standing
-/// after it, and what the helper answered when it was asked.
+/// What one `resume` came to: whether the operator runs again, the stop
+/// standing after it and its revision, and what the helper answered when it
+/// was asked — or why it was not, while another resume was under way.
 #[derive(Debug)]
 pub struct Resumed {
     pub lifted: bool,
     pub stopped: Option<String>,
+    pub revision: u64,
     pub helper: Option<Result<Value, ComputerUseError>>,
 }
 
@@ -169,7 +206,12 @@ impl Resumed {
             Some(Err(error)) => serde_json::json!({ "error": error.code }),
             None => Value::Null,
         };
-        serde_json::json!({ "resumed": self.lifted, "helper": helper })
+        serde_json::json!({
+            "resumed": self.lifted,
+            "revision": self.revision,
+            "stopped": self.stopped,
+            "helper": helper,
+        })
     }
 
     /// An agent's `resume`, answered: what the helper said once the stop is
@@ -195,28 +237,71 @@ pub fn helper_resume(reset: bool) -> Result<Value, ComputerUseError> {
     }
 }
 
-/// One resume, the window's and an agent's alike: the stop is lifted and the
-/// helper resumed; an agent's is refused while the person's stop stands.
+/// Held through one resume, from the check of the stop it names to stopping
+/// the helper again: a second resume inside that span would wake the helper
+/// the first is about to stop again, leaving the window running beside a
+/// stopped helper. A stop never takes it.
+static RESUMING: Mutex<()> = Mutex::new(());
+
+/// One resume, the window's and an agent's alike (t-59372). The person's
+/// names the revision of the stop the band showed and lifts only that one;
+/// an agent's never lifts the person's stop. The helper is asked outside the
+/// lock, and the stop is lifted only when the helper resumed and nothing
+/// moved meanwhile: a helper that failed leaves the stop standing, and a stop
+/// made while it resumed wins — the helper that late resume woke is stopped
+/// again. One resume runs at a time (`RESUMING`): one asked meanwhile is
+/// refused before it reaches the helper.
 pub fn resume(
     lifter: Lifter,
     resume_helper: impl FnOnce() -> Result<Value, ComputerUseError>,
-    _stop_helper_again: impl FnOnce() -> bool,
+    stop_helper_again: impl FnOnce() -> bool,
 ) -> Resumed {
-    if lifter == Lifter::Agent
-        && let Some(reason) =
-            stopped_reason().filter(|reason| zerocode_core::computer_use::persons_stop(reason))
-    {
+    let _resuming = match RESUMING.try_lock() {
+        Ok(held) => held,
+        Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let (reason, revision) = snapshot();
+            return Resumed {
+                lifted: false,
+                stopped: reason,
+                revision,
+                helper: Some(Err(ComputerUseError::new(
+                    error_code::STOPPED,
+                    "another resume is under way; ask again once it ends",
+                ))),
+            };
+        }
+    };
+    let (reason, before) = snapshot();
+    let named = match lifter {
+        Lifter::Person { revision } => revision == Some(before),
+        Lifter::Agent => !reason
+            .as_deref()
+            .is_some_and(zerocode_core::computer_use::persons_stop),
+    };
+    if !named {
         return Resumed {
             lifted: false,
-            stopped: Some(reason),
+            stopped: reason,
+            revision: before,
             helper: None,
         };
     }
-    lift();
     let helper = resume_helper();
+    let (standing, revision) = {
+        let mut held = stopped();
+        if helper.is_ok() && held.revision == before && held.reason.take().is_some() {
+            held.revision += 1;
+        }
+        (held.reason.clone(), held.revision)
+    };
+    if helper.is_ok() && standing.is_some() {
+        stop_helper_again();
+    }
     Resumed {
-        lifted: true,
-        stopped: stopped_reason(),
+        lifted: helper.is_ok() && standing.is_none(),
+        stopped: standing,
+        revision,
         helper: Some(helper),
     }
 }
