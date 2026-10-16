@@ -463,10 +463,16 @@ async fn a_ready_frame_declares_limits_only_for_its_own_model_and_runtime() {
 /// model the contract test below runs. No other test reads it.
 const PINNED_ROOT: &str = "LOCAL_JUDGMENT_PINNED_ROOT";
 
-/// Runs, in the pinned runtime, the runtime's own `build_head` on each
-/// question of its third argument with the loaded agent's tokenizer and head
-/// budget, with and without the bridge's measure around it; exits with a
-/// failure if the two differ, and prints whether each head was whole.
+/// Runs in the pinned runtime with the loaded agent's tokenizer and head
+/// budget. It grows a goal one sentence at a time until the instruction
+/// carrying it, the first text the runtime's own `build_head` encodes, is
+/// longer than the budget in whole tokens; each sentence adds a token, so a
+/// goal still inside the budget after one sentence more than the budget has
+/// tokens means the test did not run. It measures that question and the same
+/// question without the goal with and without the bridge's measure around
+/// `build_head`, exits with a failure if the two differ, and prints both
+/// questions, the goal's size and whether each head was whole. The questions'
+/// keys are sorted, so the server hands them to the bridge in that order.
 const PINNED_HEADS: &str = r#"import ast,json,sys
 source=ast.parse(sys.argv[1])
 kept=[node for node in source.body if isinstance(node,(ast.Import,ast.ImportFrom,ast.FunctionDef,ast.ClassDef))]
@@ -474,15 +480,40 @@ bridge={}
 exec(compile(ast.Module(body=kept,type_ignores=[]),'bridge','exec'),bridge)
 from laya import Agent,common
 agent=Agent(sys.argv[2],device='cpu',compile=False)
-whole=[]
-for question in json.loads(sys.argv[3]):
+budget=agent.cfg['head_max_len']
+class Counted:
+ def __init__(self,tok):
+  self.tok,self.counts=tok,[]
+ def __getattr__(self,name):
+  return getattr(self.tok,name)
+ def __call__(self,text,**kwargs):
+  uncut={key:value for key,value in kwargs.items() if key not in('truncation','max_length')}
+  self.counts.append(len(self.tok(text,**uncut)['input_ids']))
+  return self.tok(text,**kwargs)
+def sorted_keys(question):
+ return json.loads(json.dumps(question,sort_keys=True))
+asked={'type':'noul','instructions':{'question':'Is the goal done?'}}
+def with_goal(goal):
+ return sorted_keys(dict(asked,instructions=dict(asked['instructions'],callerContext={'goal':goal})))
+whole=sorted_keys(asked)
+sentence='작업 공간을 열고 결과를 확인한 다음 완료 상태를 확인하세요.'
+for sentences in range(1,budget+2):
+ cut=with_goal(' '.join([sentence]*sentences))
+ counted=Counted(agent.tok)
+ common.build_head(counted,Agent._to_internal(cut),budget)
+ if counted.counts[0]>budget:
+  break
+else:
+ sys.exit('did not run: a goal of %d sentences never made the instruction longer than the loaded head budget of %d tokens'%(sentences,budget))
+verdicts=[]
+for question in (cut,whole):
  internal=Agent._to_internal(question)
- plain=common.build_head(agent.tok,internal,agent.cfg['head_max_len'])
- head,measured=bridge['measured_head'](common.build_head,agent.tok,internal,agent.cfg['head_max_len'])
+ plain=common.build_head(agent.tok,internal,budget)
+ head,measured=bridge['measured_head'](common.build_head,agent.tok,internal,budget)
  if head!=plain:
   sys.exit('the measure changed what build_head computes')
- whole.append(measured)
-print(json.dumps(whole))
+ verdicts.append(measured)
+print(json.dumps({'sentences':sentences,'tokens':counted.counts[0],'head_max_len':budget,'questions':[cut,whole],'whole':verdicts}))
 "#;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -517,27 +548,14 @@ async fn the_manifest_pinned_runtime_refuses_a_cut_head_and_declares_the_config_
             place.display()
         );
     }
-    // A goal of 800 characters inside the instruction of a question with two
-    // criteria, the shape t-58268's requests carried at twice their goal, so
-    // the cut does not hang on a few tokens; against the same question
-    // without the goal.
-    let goal: String = "작업 공간을 열고 결과를 확인한 다음 완료 상태를 확인하세요. "
-        .repeat(40)
-        .chars()
-        .take(800)
-        .collect();
-    let criteria = json!({
-        "true": "The page shows a sign-in, payment or permission wall that keeps the goal from going on.",
-        "false": "Nothing on the page keeps the goal from going on.",
-    });
-    let cut = json!({"type": "noul", "instructions": {"question": "Is the goal done?", "callerContext": {"goal": goal}}, "criteria": criteria});
-    let whole = json!({"type": "noul", "instructions": "Is the goal done?", "criteria": criteria});
+    // Both questions come from the pinned runtime: a goal grown one sentence
+    // at a time until the loaded tokenizer makes the instruction carrying it
+    // longer than the loaded head budget, and the same question without it.
     let home = tempfile::tempdir().unwrap();
     let heads = Command::new(child(&runtime, &profile.executable).unwrap())
         .args(["-I", "-c", PINNED_HEADS])
         .arg(include_str!("bridge.py"))
         .arg(&folder)
-        .arg(json!([cut, whole]).to_string())
         .env_clear()
         .env("HOME", home.path())
         .env("HF_HUB_OFFLINE", "1")
@@ -553,11 +571,16 @@ async fn the_manifest_pinned_runtime_refuses_a_cut_head_and_declares_the_config_
             .last()
             .unwrap_or_default()
     );
+    let measured: Value = serde_json::from_slice(&heads.stdout).unwrap();
     assert_eq!(
-        serde_json::from_slice::<Value>(&heads.stdout).unwrap(),
+        measured["whole"],
         json!([false, true]),
-        "the pinned runtime's heads were measured otherwise"
+        "the pinned runtime's heads were measured otherwise: a goal of {} sentences made the instruction {} tokens against a head budget of {}",
+        measured["sentences"],
+        measured["tokens"],
+        measured["head_max_len"]
     );
+    let (cut, whole) = (&measured["questions"][0], &measured["questions"][1]);
     let engine = Engine::spawn(&runtime, &profile, Some((folder.as_path(), &model))).unwrap();
     let process = engine.clone();
     tokio::time::timeout(
@@ -570,8 +593,8 @@ async fn the_manifest_pinned_runtime_refuses_a_cut_head_and_declares_the_config_
     .unwrap();
     let running = serve(&model, engine, Arc::new(|| {})).await.unwrap();
     for (question, status) in [
-        (&cut, reqwest::StatusCode::BAD_GATEWAY),
-        (&whole, reqwest::StatusCode::OK),
+        (cut, reqwest::StatusCode::BAD_GATEWAY),
+        (whole, reqwest::StatusCode::OK),
     ] {
         let response = client()
             .post(running.provider.request_url())
