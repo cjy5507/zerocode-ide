@@ -168,17 +168,25 @@ fn path_of_version(id: &str, version: Option<u32>) -> Result<PathBuf, String> {
 }
 
 /// The card's picture (t-3233 §3): from the cache, or from one render of
-/// the hidden thumbnail pane — one at a time, no retry. A `data_url` of
-/// `None` is a glyph, and final for this key.
+/// the hidden thumbnail pane — one at a time, no retry. With `label`
+/// (t-59665 ⑤) — the browser pane the person is looking at the page in — the
+/// picture is that pane's, through the browser snapshot door and its guard,
+/// and the hidden pane is not asked. A `data_url` of `None` is a glyph, and
+/// final for this key.
 #[tauri::command]
 pub(crate) async fn artifact_thumbnail(
     app: AppHandle,
     webview: tauri::Webview,
+    state: State<'_, AppState>,
     id: String,
+    label: Option<String>,
 ) -> Result<artifact_thumbs::Thumb, String> {
     from_the_main_webview(&webview)?;
     let store = store_or_refuse()?;
-    artifact_thumbs::thumbnail(&app, &store, &id).await
+    match label {
+        Some(label) => artifact_thumbs::thumbnail_of_pane(&app, &state, &store, &id, &label).await,
+        None => artifact_thumbs::thumbnail(&app, &store, &id).await,
+    }
 }
 
 /// The listing's copy of the thumbnail numbers, so the window queues by the
@@ -222,6 +230,19 @@ pub(crate) fn artifact_feedback_record(
         let _ = app.emit(artifact_runtime::CHANGED_EVENT, ());
     }
     Ok(summary)
+}
+
+/// 아티팩트 페이지 하나를 여는 데 걸린 보인 시간을 적는다(t-59665 ⑧): 창이 열기에서 첫 그림까지
+/// 탭이 앞에 있던 시간만으로 재어 보내고 — 8 s가 지나면 「아직 읽는 중」, 30 s면 「멈춘 열기」
+/// 로 — 스토어는 제 책(`opens.jsonl`)에 한 줄 덧붙인다. 모양은 스토어가 검사하고 시각은
+/// 스토어가 찍는다; 창의 수를 고치지는 않는다.
+#[tauri::command(async)]
+pub(crate) fn artifact_open_record(
+    webview: tauri::Webview,
+    record: artifact_runtime::OpenRecord,
+) -> Result<(), String> {
+    from_the_main_webview(&webview)?;
+    store_or_refuse()?.record_open(record, now_epoch_ms())
 }
 
 #[derive(Serialize)]

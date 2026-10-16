@@ -527,6 +527,9 @@ pub struct AgentToolRow {
     pub hedge_won: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "loserMs")]
     pub loser_ms: Option<u64>,
+    /// What the server said beside a refusal (t-58193).
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
 }
 
 fn unix_millis() -> u64 {
@@ -562,6 +565,7 @@ impl AgentToolRow {
             hedge_fired: None,
             hedge_won: None,
             loser_ms: None,
+            server_said: jev_gate::ServerSaid::default(),
         }
     }
 }
@@ -868,6 +872,7 @@ fn fold(
     let mut choice = None;
     let mut scored: Vec<(usize, runtime::jev_score::ScoreReading)> = Vec::new();
     let mut first_refusal: Option<Refusal> = None;
+    let mut first_said = jev_gate::ServerSaid::default();
     let (mut requests, mut withheld, mut input_tokens, mut elapsed, mut retries) = (0, 0, 0, 0, 0);
     for reply in replies {
         withheld += reply.withheld;
@@ -899,6 +904,9 @@ fn fold(
             Err(refusal) => {
                 if first_refusal.is_none() {
                     first_refusal = Some(refusal);
+                    if let Some(call) = &reply.call {
+                        first_said = jev_gate::ServerSaid::of(call);
+                    }
                 }
             }
         }
@@ -927,6 +935,7 @@ fn fold(
         rejected: None,
     });
     row.outcome = refusal.outcome;
+    row.server_said = first_said;
     (row, None)
 }
 

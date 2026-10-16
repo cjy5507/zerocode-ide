@@ -102,7 +102,7 @@ const gallery = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "the gallery opens on 「페이지·문서」 with each tab's count, the tabs split kinds without asking, cards group by day and wear 🌐/🔒 with relative or month-day words, a document's face is its first block, a claude.ai card wears its favicon, and thumbnails are asked for visible page·web cards only, one at a time, failing to a glyph once",
+  "the gallery opens on 「페이지·문서」 with each tab's count, the tabs split kinds without asking, cards group by day and wear 🌐/🔒 with relative or month-day words, a document's face is its excerpt, a claude.ai card wears its favicon, and thumbnails are asked for visible page·web cards only, one at a time, failing to a glyph once",
   gallery.rows === 9 && gallery.cards > 0 && gallery.cards <= 9 &&
     gallery.defaultTab === "pages" &&
     gallery.tabs === "reports:1,evidence:2,pages:9,other:3" &&
@@ -118,7 +118,8 @@ ok(
     gallery.whenLocalToday.startsWith("🔒") &&
     gallery.whenLocalToday.includes("편집됨") &&
     gallery.whenYesterday.includes(gallery.yesterdayWords) &&
-    gallery.docFace.startsWith("문서 1") && gallery.docFace.includes("활자") && !gallery.docFace.includes("둘째") &&
+    // 문서의 얼굴은 첫 블록이 아니라 발췌다(t-59665 ⑤): 둘째 블록도 선다.
+    gallery.docFace.startsWith("문서 1") && gallery.docFace.includes("활자") && gallery.docFace.includes("둘째") &&
     gallery.docFaceHidden === false &&
     gallery.emoji === "🧱" && gallery.emojiGlyphHidden === true &&
     gallery.thumbAsks.includes("gal-0") && gallery.thumbAsks.includes("gal-2") &&
@@ -2307,7 +2308,7 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
     await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
   };
   try {
-    await page.setViewportSize({ width: 1440, height: 860 });
+    await page.setViewportSize({ width: 1800, height: 860 });
     await page.evaluate(() => {
       window.__BAND__ = {
         opens: [], navigations: [], pastes: [], prompts: [], records: [], exports: [], folders: 0,
@@ -2402,7 +2403,9 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
       });
     }, id);
 
-    /* ---- 1. 넓은 머리띠: 만든 이, 「주석」이 첫 행동, 피드백 수, 나란히, 내보내기 ---- */
+    /* ---- 1. 넓은 머리띠: 만든 이, 「주석」이 첫 행동, 피드백 수, 나란히, 내보내기 ----
+     * 문서 보기(t-59665 ⑥)에서 머리띠는 도구 줄과 한 줄을 나누므로, 행동이 다 펴지는 「넓은」 머리띠는
+     * 1800px 창의 판에서 잰다 — 1440px의 판에서는 둘째 행동들이 「⋯」로 접힌 한 줄이다. */
     const [wide] = await band("p-band");
     ok(
       "the header band names its maker (agent tile, pane, branch), leads with 「주석」, says 「피드백 2 · v2」 and offers 「나란히」 and 「내보내기」",
@@ -2730,7 +2733,7 @@ export async function testArtifactFollowed(browser, origin, ok, outputDir) {
   const plainUrl = "file:///tmp/zerocode-window-test/notes/plain.html";
   const directUrl = "file:///tmp/zerocode-window-test/notes/direct.html";
   try {
-    await page.setViewportSize({ width: 1440, height: 860 });
+    await page.setViewportSize({ width: 1800, height: 860 });
     const maker = await page.evaluate(async (pages) => {
       const now = Date.now();
       const row = (id, version, count, last) => ({

@@ -236,6 +236,29 @@ pub(crate) const FEEDBACK_COMMENT_MAX: usize = 4000;
 pub(crate) const FEEDBACK_AGENT_MAX: usize = 64;
 /// 링크를 따라간 페이지의 주소가 가질 수 있는 글자 수(t-14586).
 pub(crate) const FEEDBACK_PAGE_URL_MAX: usize = 2048;
+
+/// 아티팩트 페이지를 여는 데 걸린 보인 시간의 책(t-59665 ⑧): 스토어 뿌리의 `opens.jsonl`, 한 열기에
+/// 한 줄. 창이 재어 보내고(열기에서 첫 그림까지, 탭이 앞에 있던 시간만) 스토어는 적기만 한다.
+/// 상한에 닿으면 한 번 돈다 — 지난 책은 `.1`이다.
+pub(crate) const OPENS_FILE: &str = "opens.jsonl";
+pub(crate) const OPENS_FILE_ROTATED: &str = "opens.jsonl.1";
+pub(crate) const OPENS_FILE_MAX_BYTES: u64 = 1024 * 1024;
+/// 한 열기가 말할 수 있는 가장 긴 보인 시간 — 하루. 그보다 긴 수는 시계가 아니라 오류다.
+pub(crate) const OPEN_VISIBLE_MS_MAX: u64 = 24 * 60 * 60 * 1000;
+
+/// `opens.jsonl`의 한 줄 — 창이 보낸 것에 스토어가 시각을 붙인다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OpenRecord {
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) version: Option<u32>,
+    /// 열기에서 첫 그림(또는 멈춤의 눈금)까지 탭이 앞에 있던 시간.
+    pub(crate) visible_ms: u64,
+    /// `painted`(첫 그림이 왔다) 또는 `stalled`(멈춘 열기의 눈금을 지났다).
+    pub(crate) outcome: String,
+    #[serde(default)]
+    pub(crate) at_ms: i64,
+}
 /// 내보낼 파일 이름이 이미 있을 때 번호를 붙여 볼 횟수.
 const EXPORT_NAME_TRIES: u32 = 100;
 /// 내보낼 파일 이름에서 제목이 차지할 수 있는 글자 수.
@@ -1249,6 +1272,41 @@ impl Store {
             }
         }
         Err("the feedback must be recorded before it becomes a saved preference".into())
+    }
+
+    /// 한 열기의 보인 시간을 `opens.jsonl`에 한 줄로 적는다(t-59665 ⑧). 창이 잰 수를 믿되 모양은
+    /// 검사한다: 아는 결과 낱말, 하루 안의 시간, 카탈로그의 id. 거절은 한 바이트도 쓰지 않고,
+    /// 상한에 닿은 책은 한 번 돈다.
+    pub(crate) fn record_open(&self, mut record: OpenRecord, at_ms: i64) -> Result<(), String> {
+        use std::io::Write as _;
+        if !matches!(record.outcome.as_str(), "painted" | "stalled") {
+            return Err(format!("모르는 열기 결과입니다: {}", record.outcome));
+        }
+        if record.visible_ms > OPEN_VISIBLE_MS_MAX {
+            return Err("열기의 보인 시간이 하루를 넘습니다".into());
+        }
+        if record.id.is_empty() || record.id.len() > 128 || record.id.chars().any(char::is_control)
+        {
+            return Err("아티팩트 id가 올바르지 않습니다".into());
+        }
+        if self.get(&record.id).is_none() {
+            return Err("그 아티팩트가 없습니다".into());
+        }
+        record.at_ms = at_ms;
+        let mut line = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
+        line.push(b'\n');
+        let path = self.root.join(OPENS_FILE);
+        if std::fs::metadata(&path)
+            .is_ok_and(|meta| meta.len() + line.len() as u64 > OPENS_FILE_MAX_BYTES)
+        {
+            let _ = std::fs::rename(&path, self.root.join(OPENS_FILE_ROTATED));
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(&line))
+            .map_err(|error| error.to_string())
     }
 
     fn feedback_path(&self, id: &str) -> PathBuf {
@@ -5361,6 +5419,87 @@ mod tests {
         artifact_request(&store, request, &nobody).unwrap();
         let id = first["id"].as_str().unwrap().to_string();
         (store, id, source.canonicalize().unwrap())
+    }
+
+    /// 열기의 책(t-59665 ⑧): 한 열기에 한 줄, 창의 수에 스토어의 시각; 모르는 모양은 한 바이트도
+    /// 쓰지 않고 거절하고; 상한에 닿은 책은 한 번 돈다.
+    #[test]
+    fn an_open_is_one_line_of_the_opens_book_and_the_book_turns_at_its_cap() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, id, _) = published_twice(directory.path());
+        let ask = |outcome: &str, visible_ms: u64| OpenRecord {
+            id: id.clone(),
+            version: Some(2),
+            visible_ms,
+            outcome: outcome.into(),
+            at_ms: 0,
+        };
+        store.record_open(ask("painted", 412), 10).unwrap();
+        store.record_open(ask("stalled", 30_000), 20).unwrap();
+        let book = std::fs::read_to_string(store.root().join(OPENS_FILE)).unwrap();
+        let lines: Vec<OpenRecord> = book
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            (
+                lines[0].visible_ms,
+                lines[0].outcome.as_str(),
+                lines[0].at_ms
+            ),
+            (412, "painted", 10)
+        );
+        assert_eq!(
+            (
+                lines[1].visible_ms,
+                lines[1].outcome.as_str(),
+                lines[1].at_ms
+            ),
+            (30_000, "stalled", 20)
+        );
+        assert!(
+            store.record_open(ask("slow", 1), 30).is_err(),
+            "an outcome the store does not know"
+        );
+        assert!(
+            store
+                .record_open(ask("painted", OPEN_VISIBLE_MS_MAX + 1), 30)
+                .is_err(),
+            "a day and more"
+        );
+        assert!(
+            store
+                .record_open(
+                    OpenRecord {
+                        id: "p-nothere".into(),
+                        ..ask("painted", 1)
+                    },
+                    30
+                )
+                .is_err(),
+            "an unknown id"
+        );
+        assert_eq!(
+            std::fs::read_to_string(store.root().join(OPENS_FILE)).unwrap(),
+            book,
+            "a refusal wrote nothing"
+        );
+        std::fs::write(
+            store.root().join(OPENS_FILE),
+            vec![b'x'; usize::try_from(OPENS_FILE_MAX_BYTES).unwrap()],
+        )
+        .unwrap();
+        store.record_open(ask("painted", 5), 40).unwrap();
+        let fresh = std::fs::read_to_string(store.root().join(OPENS_FILE)).unwrap();
+        assert_eq!(fresh.lines().count(), 1, "the new line opened a new book");
+        assert_eq!(
+            std::fs::metadata(store.root().join(OPENS_FILE_ROTATED))
+                .unwrap()
+                .len(),
+            OPENS_FILE_MAX_BYTES,
+            "the full book turned over once"
+        );
     }
 
     fn feedback_ask(id: &str, version: u32, comment: &str) -> FeedbackAsk {

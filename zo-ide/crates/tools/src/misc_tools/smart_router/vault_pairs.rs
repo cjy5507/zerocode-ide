@@ -47,6 +47,9 @@ pub struct PairJudgment {
     pub rubric_version: u32,
     pub rubric_fingerprint: String,
     pub confidence: Option<f64>,
+    /// What the server said beside a refusal (t-58193).
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +240,7 @@ pub async fn judge_vault_pairs(graph: &VaultGraph, vault: &Path, limit: usize, n
             redacted_lines: 0, request_digest: None, rubric_version: VAULT_PAIR_RUBRIC_VERSION,
             rubric_fingerprint: vault_pair_rubric_fingerprint(),
             confidence: None,
+            server_said: jev_gate::ServerSaid::default(),
         };
         let Some(state) = state(graph, &pair) else { continue; };
         let request = SystemOneRequest { state: &state, model: SYSTEMONE_MODEL, questions: &asked };
@@ -249,6 +253,7 @@ pub async fn judge_vault_pairs(graph: &VaultGraph, vault: &Path, limit: usize, n
                 let call = jev_gate::send(client, cleared, Duration::from_millis(VAULT_PAIR_DEADLINE_MS), None).await;
                 row.elapsed_ms = jev_gate::millis(call.elapsed);
                 row.requests = call.requests;
+                row.server_said = jev_gate::ServerSaid::of(&call);
                 report.requests += call.requests;
                 match call.outcome {
                     Ok(response) => {
