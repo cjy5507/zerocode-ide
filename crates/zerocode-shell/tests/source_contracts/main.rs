@@ -28756,14 +28756,14 @@ mod tests {
         assert!(
             mounting.contains("{ worktree, id: record.id, ordinal: at }")
                 && mounting.contains(
-                    "spawnStoredLeaf(wake, record.running?.[at], grid, restore, worktree)"
+                    "spawnStoredLeaf(wake, record.running?.[at], grid, restore, worktree, road)"
                 )
                 && !window.contains(r#"invoke("replay_scrollback""#),
             "a restored leaf comes back blank, or its screen is replayed after its program started:\n{mounting}"
         );
         let leaf = block_after(window, "async function spawnStoredLeaf(");
         assert!(
-            leaf.contains("{ rows, cols }, restore, worktree)")
+            leaf.contains("{ rows, cols }, restore, worktree, road)")
                 && leaf.contains(r#"rows, cols, restore })"#)
                 && leaf.contains(
                     r#"invoke("open_term_tab", { rows, cols, plain: true, restore, notice })"#
@@ -29118,7 +29118,7 @@ mod tests {
         let spawn_at = mounting.find("spawnStoredLeaf(").expect("the leaves spawn");
         let paint_at = mounting.find("renderPanes(").expect("the tab paints");
         assert!(
-            spawn_at < paint_at && mounting.contains("grid, restore, worktree)"),
+            spawn_at < paint_at && mounting.contains("grid, restore, worktree, road)"),
             "a restored tab paints before its shells exist:\n{mounting}"
         );
 
@@ -29245,7 +29245,7 @@ mod tests {
             "    stored.length > 0 && !storedLayoutsHoldProgram(stored) \
              && defaultAgentChosen();",
             "  if (!yieldsToDefaultAgent) {",
-            "    if (await restoreWorktreeLayouts(activeWorktreePath, stored)) {",
+            "    if (await restoreWorktreeLayouts(activeWorktreePath, stored, { road })) {",
             "      settleVisitStage(worktree);",
             "      return;",
             "    }",
