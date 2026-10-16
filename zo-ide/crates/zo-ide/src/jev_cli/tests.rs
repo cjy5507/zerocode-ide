@@ -648,6 +648,8 @@ fn the_control_rows_the_agreement_borrowed_are_named_in_both_answers() {
             "baselineShare": null,
             "notCompared": 0,
             "notComparedBy": {},
+            // The control row's own axes made the three marks, and no label did, so none is withheld (t-60961).
+            "proxied": 0,
         })
     );
 

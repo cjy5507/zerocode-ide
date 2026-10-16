@@ -424,6 +424,8 @@ fn agreement_json(agreement: &jev_summary::SeatAgreement, withheld: &BTreeMap<St
         "baselineShare": agreement.baseline_share(),
         "notCompared": agreement.not_compared,
         "notComparedBy": withheld,
+        // Marks by a proxy, a person or an unsourced label, which no rise reads; not rows: an unmarked row is notCompared.
+        "proxied": agreement.proxied,
     })
 }
 
