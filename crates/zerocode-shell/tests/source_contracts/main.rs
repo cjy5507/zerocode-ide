@@ -22483,6 +22483,39 @@ mod tests {
         );
     }
 
+    /// Every door a person's hand comes through reports its takeover and
+    /// writes one window-log line naming the hand's kind, never what it typed
+    /// (t-57712: two panes were marked as the person's and the log could not
+    /// say by which hand). A person's paste is their words like a typed key;
+    /// a composer chip's command is not, and the chip's fact is logged.
+    #[test]
+    fn every_hand_door_names_its_takeover_and_a_composer_chip_is_not_the_persons_words() {
+        let backend = shipped_backend();
+        let paste = block_after(backend, "fn term_paste(");
+        assert!(
+            !paste.contains(".map(drop)")
+                && paste.contains("orchestration::pane_taken_over(term, now_epoch_ms());")
+                && paste.contains("note_takeover(state.local_data_root(), term, seat, \"paste\");"),
+            "a person's paste does not take the pane over or name itself:\n{paste}"
+        );
+        assert!(
+            paste.contains("Some(_) => crate::prompt_transaction::chip_write(")
+                && paste.contains("note_chip(state.local_data_root(), term, road);"),
+            "a composer chip's command counts as the person's words:\n{paste}"
+        );
+        let text = block_after(backend, "fn term_text(");
+        assert!(
+            text.contains("note_takeover(state.local_data_root(), term, seat, \"ime\");"),
+            "a takeover by typed text leaves no line in the window log:\n{text}"
+        );
+        let key = block_after(backend, "fn term_key(");
+        assert!(
+            key.contains("note_takeover(state.local_data_root(), term, seat, &key_kind(&press));")
+                && key.contains("note_chip(state.local_data_root(), term, road);"),
+            "a takeover by a key leaves no line naming the key:\n{key}"
+        );
+    }
+
     /// A RUNNING terminal takes a paste, whatever the registry says.
     ///
     /// `--prefill` is claude's DRAFT door, and for a while its existence
