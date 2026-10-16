@@ -835,7 +835,9 @@ pub fn gates_for(
                 .and_then(Value::as_i64)
                 .is_some_and(|at| at >= pairs_since)
         })),
-        bar_reads: !graded_by_executions(seat),
+        // A seat with no baseline has no current judgment to pair its marks
+        // with, so its floors raise it (t-26584, decision 4a).
+        bar_reads: seat.baseline.binds(),
         bundle: seat
             .reads_act_line
             .then(|| bundle_of(rows, seat.id, &HUMAN_BUNDLE)),
@@ -1298,7 +1300,8 @@ pub struct Evidence<'window> {
     /// The paired records the rise bar is read on (ADR-150, t-26584, ②).
     pub pairs: PairTally,
     /// Whether the rise bar applies: not to a seat graded by its executions,
-    /// which carry their own cost and latency lines.
+    /// which carry their own cost and latency lines, nor to a seat with no
+    /// baseline, which has nothing to pair its marks with.
     pub bar_reads: bool,
     /// The person-judged rows, for a seat that reads an act line (ADR-176,
     /// t-26584, ④).

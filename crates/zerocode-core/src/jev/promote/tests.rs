@@ -1526,9 +1526,7 @@ fn a_seat_whose_labels_never_say_no_cannot_rise() {
 /// marks, not only to its own floor (t-6342): a placement seat right four
 /// times in five beside a "today's tab" that was right every time has
 /// earned nothing, and one with no baseline marks at all has not been
-/// compared with anything yet. A seat whose marks grade only its own act has
-/// no such reader, and no current judgment to pair its marks with (ADR-150):
-/// its floor alone never raises it.
+/// compared with anything yet.
 #[test]
 fn a_seat_must_beat_its_baseline_not_only_its_floor() {
     let seat = &crate::jev::PLACEMENT;
@@ -1577,37 +1575,6 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
     // Beaten comfortably: it rises.
     assert_eq!(
         judge_seat(seat, &window_then(seat, marks_that_rise))
-            .expect("judged")
-            .verdict,
-        Verdict::Rise
-    );
-    // A seat with no baseline has no current judgment to pair its marks with
-    // (ADR-150): without the pairs it holds on the bar, and with them it rises
-    // like any seat — its floor alone is not a rise.
-    let own = &crate::jev::BROWSER_READ;
-    assert!(!own.baseline.binds());
-    let unpaired = window_then(own, |own, at| {
-        marks_that_rise(own, at)
-            .into_iter()
-            .map(|mut mark| {
-                mark.as_object_mut()
-                    .expect("a mark")
-                    .remove("baselineAgreed");
-                mark
-            })
-            .collect()
-    });
-    assert_eq!(
-        judge_seat(own, &unpaired).expect("judged").verdict,
-        Verdict::Hold(Line::Bar {
-            miss: BarMiss::Pairs {
-                pairs: 0,
-                wanted: PROMOTION_BAR.min_pairs,
-            },
-        })
-    );
-    assert_eq!(
-        judge_seat(own, &window_then(own, marks_that_rise))
             .expect("judged")
             .verdict,
         Verdict::Rise
