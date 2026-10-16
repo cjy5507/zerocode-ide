@@ -3730,6 +3730,62 @@ fn the_labels_line_counts_requests_not_their_parts() {
     );
 }
 
+/// Decision 3 of t-26584, with the controls the import is held to (m-60846):
+/// a person row that names a request's part and carries no verdict withdraws
+/// what the person said of it, so a label taken out of the file stops
+/// counting; and a row graded against another version counts for nothing in
+/// this one's labels.
+#[test]
+fn a_withdrawn_person_label_stops_counting_and_another_versions_never_counts() {
+    let person = |request: usize, model: &str, verdict: Option<bool>| {
+        let mut row = json!({
+            "at": 1,
+            "label": format!("person-{request}"),
+            "labelPart": "part-0",
+            "model": model,
+            "labelSource": "person",
+            "labelAuthor": "test",
+        });
+        if let Some(verdict) = verdict {
+            row["agreed"] = json!(verdict);
+            row["baselineAgreed"] = json!(!verdict);
+        }
+        row
+    };
+    let mut rows: Vec<Value> = (0..20)
+        .map(|request| person(request, "a", Some(false)))
+        .collect();
+    rows.extend((0..20).map(|request| person(request, "b", Some(true))));
+    assert_eq!(
+        person_labels(&rows, Some("a")),
+        Some(Labels {
+            compared: 20,
+            judgment_right: 0,
+            probe_right: 20,
+        }),
+        "version b's rows count nothing for version a"
+    );
+    assert_eq!(
+        person_labels(&rows, Some("b")).map(|labels| labels.judgment_right),
+        Some(20)
+    );
+    rows.push(person(0, "a", None));
+    assert_eq!(
+        person_labels(&rows, Some("a")),
+        Some(Labels {
+            compared: 19,
+            judgment_right: 0,
+            probe_right: 19,
+        }),
+        "the withdrawn label no longer counts"
+    );
+    assert_eq!(
+        person_labels(&rows, Some("b")).map(|labels| labels.compared),
+        Some(20),
+        "a withdrawal names its version, and version b's label stands"
+    );
+}
+
 /// An act-line seat acts from a line read off its own graded answers
 /// (t-26584, ③). With no calibration record for it, it holds however clean
 /// its marks are: a line nobody calibrated is a default, and the judge says

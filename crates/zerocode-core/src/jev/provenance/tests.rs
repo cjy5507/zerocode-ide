@@ -342,3 +342,26 @@ fn a_changed_person_label_counts_once_in_the_bundle() {
         "the newest verdict of each part"
     );
 }
+
+/// A person row with no verdict withdraws the label it names from the bundle
+/// too (t-26584, decision 3): the bundle reads what the person says now, and
+/// a label taken out of the file does not stay in it.
+#[test]
+fn a_withdrawn_person_label_leaves_the_bundle() {
+    let person = |part: &str, agreed: Option<bool>| {
+        let mut row =
+            json!({"at": 1, "label": "request-0", "labelPart": part, "labelSource": "person"});
+        if let Some(agreed) = agreed {
+            row["agreed"] = json!(agreed);
+        }
+        row
+    };
+    let rows = [
+        person("first", Some(true)),
+        person("second", Some(true)),
+        person("first", None),
+    ];
+    let bundle = bundle_of(&rows, "routing", &HUMAN_BUNDLE);
+    assert_eq!(bundle.rows, 1, "{bundle:?}");
+    assert_eq!(bundle, bundle_of(&rows[1..2], "routing", &HUMAN_BUNDLE));
+}

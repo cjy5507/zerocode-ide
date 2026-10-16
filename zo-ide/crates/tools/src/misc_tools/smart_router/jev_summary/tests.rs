@@ -1155,6 +1155,129 @@ fn a_named_labels_file_reaches_the_ledger_as_person_rows_without_its_words() {
     assert_eq!((&summary["matched"], &summary["unmatched"]), (&json!(1), &json!(1)), "{summary}");
 }
 
+/// A full window of routing rows answered by `model` — the judgment large,
+/// low, analysis; the probe medium, low, analysis — whose first requests are
+/// the tasks of `prompts`, and settings naming a labels file beside it.
+/// Answers the ledger, the labels file, the settings and each task's key.
+fn labelled_window(home: &std::path::Path, prompts: &[&str], model: &str) -> (PathBuf, PathBuf, Value, Vec<String>) {
+    let wanted = zerocode_core::jev::promote::window_wanted_for(&zerocode_core::jev::ROUTING).expect("routing rises");
+    let keys: Vec<String> = prompts
+        .iter()
+        .map(|prompt| format!("{:016x}", super::super::probe_exec::task_fingerprint("", prompt)))
+        .collect();
+    let mut rows: Vec<Value> = (0..i64::try_from(wanted).expect("a window fits"))
+        .map(|at| compared(at, ["large", "low", "analysis"], Some(["medium", "low", "analysis"])))
+        .collect();
+    for row in &mut rows {
+        row["model"] = json!(model);
+    }
+    for (row, key) in rows.iter_mut().zip(&keys) {
+        row["task"] = json!(key);
+    }
+    let ledger = ledger_with(home, &rows);
+    let labels = home.join("labels.jsonl");
+    let settings = json!({"smart": {"jev": {"labels": labels.to_string_lossy()}}});
+    (ledger, labels, settings, keys)
+}
+
+fn write_labels(path: &std::path::Path, lines: &[Value]) {
+    fs::write(path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).expect("the labels file");
+}
+
+/// What the import wrote: the person rows and the rows that count the file.
+fn imported(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .filter(|row| row["labelSource"] == json!("person") || row["kind"] == json!("person_labels"))
+        .cloned()
+        .collect()
+}
+
+/// Importing the same labels file twice counts it once (t-26584 decision 3,
+/// m-60846): judged again over an unchanged file, the routing judge writes no
+/// person row and no count, and the labels line reads what it read after the
+/// first import — the version that answered each request included.
+#[test]
+fn the_same_labels_file_imported_twice_counts_once() {
+    let work = tempfile::tempdir().expect("tmp");
+    let prompts = ["port the settings page to the new form", "split the router by provider"];
+    let (ledger, labels, settings, _) = labelled_window(work.path(), &prompts, "m-1");
+    write_labels(
+        &labels,
+        &[
+            json!({"prompt": prompts[0], "complexity": "large", "risk": "high", "intent": "analysis"}),
+            json!({"prompt": prompts[1], "complexity": "medium"}),
+        ],
+    );
+    let judge = |now| super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), now);
+    assert!(judge(9).is_some(), "a full window is due");
+    let once = read_rows(&ledger);
+    assert!(judge(10).is_some(), "still due: no request was added");
+    let twice = read_rows(&ledger);
+    assert_eq!(imported(&once).len(), 5, "four labelled parts and one count");
+    assert_eq!(imported(&twice), imported(&once));
+    assert!(imported(&once).iter().filter(|row| row["labelSource"] == json!("person")).all(|row| row["model"] == json!("m-1")));
+    let labels_line = zerocode_core::jev::promote::person_labels(&twice, Some("m-1"));
+    assert_eq!(
+        labels_line,
+        Some(zerocode_core::jev::promote::Labels { compared: 2, judgment_right: 2, probe_right: 2 }),
+        "{twice:?}"
+    );
+    assert_eq!(labels_line, zerocode_core::jev::promote::person_labels(&once, Some("m-1")));
+    assert_eq!(zerocode_core::jev::promote::person_labels(&twice, Some("m-2")), None, "another version's labels are not these");
+}
+
+/// A label taken out of the labels file stops counting (t-26584 decision 3,
+/// m-60846): the next import takes back what the file no longer holds — a
+/// person row of the same request, part and version with no verdict, and no
+/// word or path of the file — and leaves what it still holds alone. Imported
+/// again, the same file takes nothing back twice.
+#[test]
+fn a_label_taken_out_of_the_file_is_withdrawn_from_the_ledger() {
+    let work = tempfile::tempdir().expect("tmp");
+    let prompts = ["port the settings page to the new form", "split the router by provider"];
+    let (ledger, labels, settings, keys) = labelled_window(work.path(), &prompts, "m-1");
+    write_labels(
+        &labels,
+        &[
+            json!({"prompt": prompts[0], "complexity": "large", "risk": "high", "intent": "analysis"}),
+            json!({"prompt": prompts[1], "complexity": "medium", "risk": "low", "intent": "analysis"}),
+        ],
+    );
+    let judge = |now| super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), now);
+    assert!(judge(9).is_some(), "a full window is due");
+    // The person keeps the first task's complexity and takes out the rest.
+    write_labels(&labels, &[json!({"prompt": prompts[0], "complexity": "large"})]);
+    assert!(judge(10).is_some(), "still due: no request was added");
+
+    let rows = read_rows(&ledger);
+    let mut withdrawn: Vec<(String, String)> = rows
+        .iter()
+        .filter(|row| row["labelSource"] == json!("person") && row.get("agreed").is_none() && row.get("baselineAgreed").is_none())
+        .map(|row| {
+            assert_eq!((&row["model"], &row["labelAuthor"]), (&json!("m-1"), &json!("labels_file")), "{row}");
+            (row["label"].as_str().unwrap_or_default().to_string(), row["labelPart"].as_str().unwrap_or_default().to_string())
+        })
+        .collect();
+    withdrawn.sort();
+    let mut expected = vec![(keys[0].clone(), "intent".to_string()), (keys[0].clone(), "risk".to_string())];
+    expected.extend(["complexity", "intent", "risk"].map(|axis| (keys[1].clone(), axis.to_string())));
+    expected.sort();
+    assert_eq!(withdrawn, expected);
+    assert_eq!(
+        zerocode_core::jev::promote::person_labels(&rows, Some("m-1")),
+        Some(zerocode_core::jev::promote::Labels { compared: 1, judgment_right: 1, probe_right: 0 }),
+        "only the first task's complexity stands"
+    );
+    let summary = rows.iter().rev().find(|row| row["kind"] == json!("person_labels")).expect("a summary row");
+    assert_eq!((&summary["matched"], &summary["written"], &summary["withdrawn"]), (&json!(1), &json!(0), &json!(5)), "{summary}");
+    let text = fs::read_to_string(&ledger).expect("the ledger");
+    let path = labels.to_string_lossy();
+    assert!(prompts.iter().all(|prompt| !text.contains(prompt)) && !text.contains(path.as_ref()), "{text}");
+
+    assert!(judge(11).is_some(), "still due");
+    assert_eq!(imported(&read_rows(&ledger)), imported(&rows), "nothing is taken back twice");
+}
+
 /// A row where the probe answered beside the judgment marks both readers on
 /// the probe's answer, axis by axis: the judgment's `agreed` and, from the
 /// keyword tables' reading on the same row, the baseline's — so the seat is
