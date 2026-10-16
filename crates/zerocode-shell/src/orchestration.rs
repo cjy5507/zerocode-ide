@@ -6023,6 +6023,49 @@ pub(crate) fn worker_of_conversation(
         }))
 }
 
+/// Which stored conversations are finished workers' (t-57717), the ledger read
+/// once for a whole set of records: the worker, by `agent` and session id.
+/// `None` when this window has no ledger to ask or cannot read it now — the
+/// records then pass as they stand, so a ledger fault never takes a person's
+/// own conversation out of what a workspace opens with.
+pub(crate) fn finished_conversations() -> Option<impl Fn(&str, &str) -> Option<String>> {
+    let (_, ledger) = holds_ledger().ok()??;
+    Some(move |agent: &str, session_id: &str| {
+        ledger
+            .finished_worker_of(agent, session_id)
+            .map(|worker| worker.id.clone())
+    })
+}
+
+/// Which stored conversations are any worker's (t-57717), whatever its row
+/// stands at — a worker's conversation is the ledger's to bring back, never
+/// the window's file — save a pane the person took and a conversation that
+/// holds a run's seat: both are the person's. By `agent`, the record's key
+/// word (`session_id`, `conversation_id`) and the id; `None` as
+/// [`finished_conversations`] answers it.
+pub(crate) fn worker_conversations() -> Option<impl Fn(&str, &str, &str) -> Option<String>> {
+    let (_, ledger) = holds_ledger().ok()??;
+    Some(move |agent: &str, key: &str, session_id: &str| {
+        let key = if key == "conversation_id" {
+            zerocode_core::SessionKey::ConversationId
+        } else {
+            zerocode_core::SessionKey::SessionId
+        };
+        let actor = zerocode_core::orchestration::receipt_actor(agent, key, session_id);
+        if ledger
+            .runs()
+            .iter()
+            .any(|run| seated_as(run.coordinator.as_ref(), &actor))
+        {
+            return None;
+        }
+        ledger
+            .worker_of_conversation(agent, session_id)
+            .filter(|row| !row.taken_over)
+            .map(|row| row.id.clone())
+    })
+}
+
 /// The window is resuming a conversation into `term` (t-3058): this
 /// checkout, this agent, this provider session. If a sleeper is that
 /// conversation, the ledger seats it there as the same worker — dispatch and
