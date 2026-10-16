@@ -540,10 +540,15 @@ export async function testBrowserWorkspace(browser, origin, ok) {
     try {
       const label = await openManaged(page);
       await page.evaluate((label) => {
-        window.__workspaceEmit({ label, mode: "human", revision: 60, inFlight: 0, needsObservation: false });
-        setActiveTab(`browser:${label}`);
-        window.__workspaceClick(label, "watch");
+        window.__workspaceEmit({ label, mode: "agent", revision: 60, inFlight: 0, needsObservation: false });
       }, label);
+      await observe(page, label);
+      await page.evaluate((label) => window.__workspaceClick(label, "pause"), label);
+      await page.waitForFunction((label) => {
+        const tab = tabs.find((entry) => entry.label === label);
+        return tab?.workspace?.mode === "paused" && !tab.workspacePending;
+      }, label);
+      await page.evaluate((label) => window.__workspaceClick(label, "human"), label);
       await page.waitForFunction((label) => window.__WORKSPACE__.placed
         .filter((entry) => entry.label === label).at(-1)?.shown === true, label);
       const shown = await page.evaluate(async (label) => {
