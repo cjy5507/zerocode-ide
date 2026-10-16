@@ -2605,6 +2605,9 @@ fn every_promoting_row_names_a_baseline_and_an_abstain_band() {
         }
         if let Baseline::AlwaysSame(word) = row.baseline {
             assert!(!word.trim().is_empty(), "{}", row.id);
+            // One answer every time spends no tokens: what such a seat
+            // replaces is a rule (t-26584, decision 1a).
+            assert_eq!(row.current_side, CurrentSide::Rule, "{}", row.id);
         }
     }
     // The constant answers are words their own seats write.

@@ -42,11 +42,11 @@ use serde::{Deserialize, Serialize};
 use zerocode_core::jev::questions::ROUTING_RUBRIC_VERSION;
 
 use super::jev_gate::{self, JevDoor};
-use super::probe_exec::{remember_bounded, ProbeSlot, ProbeUse, PROBE_TIMEOUT};
+use super::probe_exec::{remember_bounded, ProbeSlot, ProbeSpent, ProbeUse, PROBE_TIMEOUT};
 use super::settings::{decision_shadow_mode_from, DecisionShadowMode};
 use zerocode_core::jev::ROUTING;
 use zerocode_core::jev::promote::{self, Verdict};
-use zerocode_core::jev::provenance::{counts_toward_agreement, PairTally};
+use zerocode_core::jev::provenance::{counts_toward_agreement, source_of, stamp_label, LabelSource, PairTally};
 use zerocode_core::jev::summary::{self as jev_ledger};
 
 use super::shadow_ledger::{append_shadow_row, last_shadow_lines, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
@@ -338,6 +338,16 @@ pub struct DecisionShadowRow {
     /// What the call billed, when a response arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
+    /// What the chat probe spent on the same task where it answered for this
+    /// row — the input tokens its reply billed and its wall time: the current
+    /// side of the seat's paired records, the reader its judgment stands in
+    /// for (t-26584 decision 2). Absent where the probe did not run or its
+    /// verdict came from the memo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_input_tokens: Option<u64>,
+    /// See [`Self::current_input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_elapsed_ms: Option<u64>,
     /// Whether this row was comparison-only, applied, or fell back to the
     /// existing chat probe.
     #[serde(default)]
@@ -471,6 +481,8 @@ impl DecisionShadowRow {
             retries: 0,
             cached: false,
             input_tokens: None,
+            current_input_tokens: None,
+            current_elapsed_ms: None,
             route_use,
             requests: Some(0),
             redacted_lines: Some(0),
@@ -489,11 +501,14 @@ impl DecisionShadowRow {
         }
     }
 
-    /// The row's columns that describe the task rather than the call — the
-    /// keyword tables' reading and the language share — copied from its shot.
+    /// The row's columns that describe the task rather than the judgment's
+    /// call — the keyword tables' reading, the language share and what the
+    /// chat probe spent on the same words — copied from its shot.
     fn about(mut self, shot: &Shot) -> Self {
         self.rule = Some(shot.rule.clone());
         self.hangul_permille = shot.hangul_permille;
+        self.current_input_tokens = shot.probe_spent.map(|spent| spent.input_tokens);
+        self.current_elapsed_ms = shot.probe_spent.map(|spent| spent.elapsed_ms);
         self
     }
 }
@@ -569,10 +584,12 @@ struct Shot {
     rule: BTreeMap<String, String>,
     hangul_permille: Option<u16>,
     probe: ProbeCell,
+    /// What the probe spent answering, where it answered fresh.
+    probe_spent: Option<ProbeSpent>,
 }
 
 impl Shot {
-    fn of(description: &str, prompt: &str, facts: RoutingFacts, probe: ProbeCell) -> Self {
+    fn of(description: &str, prompt: &str, facts: RoutingFacts, probe: ProbeCell, probe_spent: Option<ProbeSpent>) -> Self {
         let state = runtime::rubric_task_whole(description, prompt);
         Self {
             task: super::probe_exec::task_fingerprint(description, prompt),
@@ -581,6 +598,7 @@ impl Shot {
             state,
             facts,
             probe,
+            probe_spent,
         }
     }
 }
@@ -696,11 +714,12 @@ pub(super) fn fire(
             if is_blank_task(description, prompt) {
                 return None;
             }
-            let probe = match probed.get(index).copied().flatten() {
+            let asked = probed.get(index).copied().flatten();
+            let probe = match asked {
                 Some(slot) => ProbeCell::from_verdict(slot.verdict),
                 None => ProbeCell::Failed(PROBE_NOT_ASKED.to_string()),
             };
-            let shot = Shot::of(description, prompt, facts_at(facts, index), probe);
+            let shot = Shot::of(description, prompt, facts_at(facts, index), probe, asked.and_then(|slot| slot.spent));
             named.insert(shot.task).then_some(shot)
         })
         .collect();
@@ -769,6 +788,7 @@ pub(super) fn active_assessments(
                 prompt,
                 facts_at(facts, index),
                 ProbeCell::Failed(PROBE_NOT_RUN.to_string()),
+                None,
             );
             named.insert(shot.task).then_some(shot)
         })
@@ -1033,6 +1053,21 @@ pub struct RouteLabelRow {
     /// ([`zerocode_core::jev::summary::NOT_COMPARED`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_compared: Option<String>,
+    /// What the judgment this label grades spent on its request — the input
+    /// tokens billed and the wall time — beside what the chat probe spent on
+    /// the same request, copied from the request's row: the two sides of the
+    /// paired record the rise bar prices (t-26584 decision 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// See [`Self::input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    /// See [`Self::input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_input_tokens: Option<u64>,
+    /// See [`Self::input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_elapsed_ms: Option<u64>,
 }
 
 /// The word a label writes when the turn's own words met no answered
@@ -1095,6 +1130,10 @@ pub fn note_route_followed(
         baseline_agreed: None,
         not_compared: Some(UNANSWERED.to_string()),
         label_source: unseated.is_none().then(|| "executed".to_string()),
+        input_tokens: None,
+        elapsed_ms: None,
+        current_input_tokens: None,
+        current_elapsed_ms: None,
     };
     if let Some(turn) = turn {
         grade(&mut row, turn, tail.iter().filter(|row| of_attempt(row)));
@@ -1126,6 +1165,12 @@ fn grade<'a>(
     let Some(answered) = answered else {
         return;
     };
+    // Both sides' spend on the request, as its row keeps them: the label is
+    // the paired record the rise bar prices (t-26584 decision 2).
+    label.input_tokens = answered.input_tokens;
+    label.elapsed_ms = Some(answered.elapsed_ms);
+    label.current_input_tokens = answered.current_input_tokens;
+    label.current_elapsed_ms = answered.current_elapsed_ms;
     let level = |token: Option<&str>| token.and_then(runtime::RouteTaskComplexity::from_label);
     let axis = runtime::COMPLEXITY_AXIS.name;
     let said = level(answered.jev.as_ref().and_then(|jev| jev.get(axis)).map(|judged| judged.choice.as_str()));
@@ -1212,7 +1257,9 @@ fn draft_labels(cwd: &Path, tasks: &[(&str, &str)], shots: &[Shot]) {
 /// The ledger and the settings are handed in, both resolved before the batch
 /// that calls this detached: the environment that answers where either lives
 /// may have moved by now, and a test that had to pin it would be racing every
-/// other test in this binary.
+/// other test in this binary. The settings name the labels file a person
+/// wrote, read into the ledger as person rows before the seat is judged
+/// (`import_person_labels`).
 pub fn judge_ledger(
     ledger: &Path,
     settings: Option<&serde_json::Value>,
@@ -1229,8 +1276,23 @@ pub fn judge_ledger(
     if !promote::judgment_due_on(&ROUTING, &version, &rows) {
         return None;
     }
+    if import_person_labels(ledger, settings, &version.requests, &rows, now_ms) {
+        let rows = super::jev_summary::read_rows(ledger);
+        return judge_due(ledger, &promote::on_the_newest_version(&ROUTING, &rows), &rows, now_ms);
+    }
+    judge_due(ledger, &version, &rows, now_ms)
+}
+
+/// Judge the routing seat on `rows` read as `version`, a judgment being due,
+/// and write the transition when its standing changed.
+fn judge_due(
+    ledger: &Path,
+    version: &promote::OnVersion<'_>,
+    rows: &[serde_json::Value],
+    now_ms: i64,
+) -> Option<Verdict> {
     let line = zerocode_core::jev::threshold::line_beside(&ROUTING, ledger);
-    let judged = judge_rows_on(&version, &rows, settings, line)?;
+    let judged = judge_rows_on(version, rows, line)?;
     if let Some(row) = promote::transition_row(&ROUTING, now_ms, judged.verdict, &judged.window) {
         let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
     }
@@ -1245,8 +1307,8 @@ pub use zerocode_core::jev::promote::Judged;
 /// is judged until its labels draw a line.
 #[cfg(test)]
 #[must_use]
-pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Value>) -> Option<Judged> {
-    judge_rows_at(rows, settings, None)
+pub fn judge_rows(rows: &[serde_json::Value]) -> Option<Judged> {
+    judge_rows_at(rows, None)
 }
 
 /// Judge the routing seat on a ledger's rows — the one reading of the
@@ -1260,10 +1322,9 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
 #[must_use]
 pub fn judge_rows_at(
     rows: &[serde_json::Value],
-    settings: Option<&serde_json::Value>,
     line: Option<u16>,
 ) -> Option<Judged> {
-    judge_rows_on(&promote::on_the_newest_version(&ROUTING, rows), rows, settings, line)
+    judge_rows_on(&promote::on_the_newest_version(&ROUTING, rows), rows, line)
 }
 
 /// [`judge_rows`] on a series already read — the cadence and the verdict
@@ -1271,7 +1332,6 @@ pub fn judge_rows_at(
 fn judge_rows_on(
     version: &promote::OnVersion<'_>,
     rows: &[serde_json::Value],
-    settings: Option<&serde_json::Value>,
     line: Option<u16>,
 ) -> Option<Judged> {
     let floor = ROUTING.answer_floor_permille?;
@@ -1308,10 +1368,11 @@ fn judge_rows_on(
             .agreement_rows_wanted
             .unwrap_or(zerocode_core::jev::A_WINDOW_OF_COMPARISONS),
         window_forgives: ROUTING.window_forgives.unwrap_or(0),
-        labels: labels_standing(settings, &version.requests),
+        labels: promote::person_labels(rows, version.model, ROUTING.rubric_version),
         calibrating: gates.calibrating,
         pairs: gates.pairs,
         bar_reads: gates.bar_reads,
+        current_side: ROUTING.current_side,
         bundle: gates.bundle,
         fallbacks_in_a_row: jev_ledger::failures_in_a_row_of(version.requests.iter().copied()),
         negatives_wanted: ROUTING.negatives_wanted.unwrap_or(0),
@@ -1459,25 +1520,140 @@ fn agreement_over(rows: &[&serde_json::Value], by_source: bool) -> promote::Agre
     agreement
 }
 
-/// What the labels a person wrote say about both readers, when they named a
-/// file and it can be read. Absent labels are not a bad verdict: §4 holds the
-/// seat and the screen asks for twenty.
-fn labels_standing(
+/// The writer a person row names ([`jev_ledger::LABEL_AUTHOR`]): the import
+/// of the labels file a person named ([`import_person_labels`]).
+const PERSON_LABEL_AUTHOR: &str = "labels_file";
+
+/// The kind of the row that counts a labels file's tasks against the ledger
+/// ([`import_person_labels`]).
+const PERSON_LABELS_KIND: &str = "person_labels";
+
+/// Read the labels file a person named (`smart.jev.labels`) into the ledger
+/// as person rows (t-26584 decision 3), the one place both judges read a
+/// person's verdicts from ([`promote::person_labels`]). One row per judged
+/// axis of a labelled task that the latest answered request of `requests`
+/// matches: the request's key, the axis, the version that answered, the
+/// rubric it was asked under, and whether each reader named what the person
+/// named — never a word of the file. A task the file names on more than one
+/// line is labelled by its last. A row is written only where the ledger holds
+/// none for the same request, axis, version and rubric, or its newest says
+/// otherwise. A label the file no longer holds is taken back: where the
+/// newest row this import wrote of it says a verdict, a row of the same
+/// request, axis, version and rubric says none, and both judges read the
+/// newest. How many labelled tasks matched and how
+/// many did not go in a summary row whenever a person row is written or a
+/// count changes. A file that is missing or does not read writes nothing and
+/// takes nothing back. Answers whether a person row was written.
+fn import_person_labels(
+    ledger: &Path,
     settings: Option<&serde_json::Value>,
-    rows: &[&serde_json::Value],
-) -> Option<promote::Labels> {
-    let path = promote::labels_path_in(settings?)?;
-    let text = std::fs::read_to_string(path).ok()?;
-    let judged: Vec<DecisionShadowRow> = rows
+    requests: &[&serde_json::Value],
+    rows: &[serde_json::Value],
+    now_ms: i64,
+) -> bool {
+    let Some(text) =
+        settings.and_then(promote::labels_path_in).and_then(|path| std::fs::read_to_string(path).ok())
+    else {
+        return false;
+    };
+    let answered: Vec<DecisionShadowRow> = requests
         .iter()
         .filter_map(|row| serde_json::from_value((*row).clone()).ok())
         .collect();
-    let evaluation = super::decision_report::evaluate_decision_labels(&text, &judged).ok()?;
-    Some(promote::Labels {
-        compared: evaluation.matched,
-        judgment_right: evaluation.axes.iter().map(|axis| axis.judgment.correct).sum(),
-        probe_right: evaluation.axes.iter().map(|axis| axis.probe.correct).sum(),
-    })
+    let Ok(read) = super::decision_report::evaluate_decision_labels(&text, &answered) else {
+        return false;
+    };
+    // What the ledger's person rows say now: the newest of each request, axis,
+    // version and rubric, and whether this import wrote it.
+    let mut said = BTreeMap::new();
+    for row in rows.iter().filter(|row| source_of(row) == Some(LabelSource::Person)) {
+        let verdicts = (
+            jev_ledger::AGREED.read(row).and_then(serde_json::Value::as_bool),
+            jev_ledger::BASELINE_AGREED.read(row).and_then(serde_json::Value::as_bool),
+        );
+        let imported =
+            jev_ledger::LABEL_AUTHOR.read(row).and_then(serde_json::Value::as_str) == Some(PERSON_LABEL_AUTHOR);
+        if let (Some(task), Some(axis)) = (
+            jev_ledger::LABEL.read(row).and_then(serde_json::Value::as_str),
+            jev_ledger::LABEL_PART.read(row).and_then(serde_json::Value::as_str),
+        ) {
+            let model = jev_ledger::MODEL.read(row).and_then(serde_json::Value::as_str);
+            let rubric = jev_ledger::RUBRIC_VERSION.read(row).and_then(serde_json::Value::as_u64);
+            said.insert((task, axis, model, rubric), (verdicts, imported));
+        }
+    }
+    // One label per request, axis, version and rubric, the file's later line
+    // winning: compared one by one with what the ledger said before this
+    // import, two lines of one task would each write over the other at every
+    // import. A label held under another rubric does not stand in for this
+    // one's: the judgment it graded was given under other words.
+    let mut marks = BTreeMap::new();
+    for mark in &read.marks {
+        let rubric = Some(u64::from(mark.rubric_version));
+        marks.insert((mark.task.as_str(), mark.axis, mark.model.as_deref(), rubric), mark);
+    }
+    let mut written = 0_usize;
+    for (&(task, axis, model, rubric), mark) in &marks {
+        let verdicts = (Some(mark.judgment_right), Some(mark.probe_right));
+        if said.get(&(task, axis, model, rubric)).is_some_and(|(then, _)| *then == verdicts) {
+            continue;
+        }
+        let mut row = person_row(now_ms, task, axis, model, rubric);
+        row[jev_ledger::AGREED.canonical] = serde_json::Value::from(mark.judgment_right);
+        row[jev_ledger::BASELINE_AGREED.canonical] = serde_json::Value::from(mark.probe_right);
+        written += usize::from(append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok());
+    }
+    let mut withdrawn = 0_usize;
+    for ((task, axis, model, rubric), (verdicts, imported)) in &said {
+        let held = read.labelled.get(*task).is_some_and(|axes| axes.contains(axis));
+        if !imported || *verdicts == (None, None) || held {
+            continue;
+        }
+        let row = person_row(now_ms, task, axis, *model, *rubric);
+        withdrawn += usize::from(append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok());
+    }
+    let unmatched = read.labels.saturating_sub(read.matched);
+    let counted = rows
+        .iter()
+        .rev()
+        .find(|row| row.get("kind").and_then(serde_json::Value::as_str) == Some(PERSON_LABELS_KIND))
+        .is_some_and(|row| {
+            row.get("matched") == Some(&serde_json::json!(read.matched))
+                && row.get("unmatched") == Some(&serde_json::json!(unmatched))
+        });
+    if written > 0 || withdrawn > 0 || !counted {
+        let summary = serde_json::json!({
+            "at": now_ms, "kind": PERSON_LABELS_KIND,
+            "matched": read.matched, "unmatched": unmatched, "written": written, "withdrawn": withdrawn,
+        });
+        let _ = append_shadow_row(ledger, &summary, SHADOW_LEDGER_MAX_BYTES);
+    }
+    written + withdrawn > 0
+}
+
+/// A person row of the labels file's import naming one part of one request,
+/// the version that answered it and the rubric it was asked under, before
+/// any verdict: written as it is, the label taken back.
+fn person_row(
+    now_ms: i64,
+    task: &str,
+    axis: &str,
+    model: Option<&str>,
+    rubric: Option<u64>,
+) -> serde_json::Value {
+    let mut row = serde_json::json!({
+        "at": now_ms,
+        (jev_ledger::LABEL.canonical): task,
+        (jev_ledger::LABEL_PART.canonical): axis,
+    });
+    if let Some(model) = model {
+        row[jev_ledger::MODEL.canonical] = serde_json::Value::from(model);
+    }
+    if let Some(rubric) = rubric {
+        row[jev_ledger::RUBRIC_VERSION.canonical] = serde_json::Value::from(rubric);
+    }
+    stamp_label(&mut row, LabelSource::Person, PERSON_LABEL_AUTHOR);
+    row
 }
 
 pub(super) fn now_ms() -> i64 {

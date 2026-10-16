@@ -72,6 +72,19 @@ fn a_ledger_no_seat_keeps_names_no_author() {
     assert!(seat_of_ledger(Path::new("state").join("no-such-seat.jsonl").as_path()).is_none());
 }
 
+/// Decision 6 of t-26584 (t-47783): the model tier seat records only, and a
+/// label written to its ledger is a proxy of that seat's — the table names
+/// it, so the row says so and who wrote it.
+#[test]
+fn a_label_written_to_the_model_tier_ledger_is_that_seats_proxy() {
+    let seat = &crate::jev::MODEL_TIERS;
+    let ledger = Path::new("state").join(seat.ledger);
+    let mut row = json!({"at": 1, "label": "tiers:1", "requestAt": 1, "agreed": true});
+    stamp_for_ledger(&ledger, &mut row);
+    assert_eq!(row["labelSource"], json!("proxy"), "{row}");
+    assert_eq!(row["labelAuthor"], json!(seat.id), "{row}");
+}
+
 #[test]
 fn a_proxy_pair_is_no_pair() {
     let proxy = json!({"at": 1, "label": "a", "labelSource": "proxy", "agreed": true, "baselineAgreed": false});
@@ -93,7 +106,7 @@ fn the_quality_line_is_exclusive_at_two_percent() {
         .collect();
     let tally = pair_tally(at_line.iter());
     assert_eq!(
-        bar_miss(&tally, &PROMOTION_BAR),
+        bar_miss(&tally, &PROMOTION_BAR, CurrentSide::Model),
         Some(BarMiss::Quality {
             gain_permille: 20,
             over_permille: 20
@@ -102,7 +115,10 @@ fn the_quality_line_is_exclusive_at_two_percent() {
     let over: Vec<Value> = (0..1_000)
         .map(|n| paired(n < 521, n < 500, (100, 100), (100, 100)))
         .collect();
-    assert_eq!(bar_miss(&pair_tally(over.iter()), &PROMOTION_BAR), None);
+    assert_eq!(
+        bar_miss(&pair_tally(over.iter()), &PROMOTION_BAR, CurrentSide::Model),
+        None
+    );
 }
 
 #[test]
@@ -111,28 +127,44 @@ fn the_cost_line_is_exclusive_at_one_percent_and_the_latency_line_at_five() {
         .map(|_| paired(true, false, (1_010, 1_000), (100, 100)))
         .collect();
     assert!(matches!(
-        bar_miss(&pair_tally(cost_at_line.iter()), &PROMOTION_BAR),
+        bar_miss(
+            &pair_tally(cost_at_line.iter()),
+            &PROMOTION_BAR,
+            CurrentSide::Model
+        ),
         Some(BarMiss::Cost { .. })
     ));
     let cost_under: Vec<Value> = (0..30)
         .map(|_| paired(true, false, (1_009, 1_000), (100, 100)))
         .collect();
     assert_eq!(
-        bar_miss(&pair_tally(cost_under.iter()), &PROMOTION_BAR),
+        bar_miss(
+            &pair_tally(cost_under.iter()),
+            &PROMOTION_BAR,
+            CurrentSide::Model
+        ),
         None
     );
     let latency_at_line: Vec<Value> = (0..30)
         .map(|_| paired(true, false, (100, 100), (1_050, 1_000)))
         .collect();
     assert!(matches!(
-        bar_miss(&pair_tally(latency_at_line.iter()), &PROMOTION_BAR),
+        bar_miss(
+            &pair_tally(latency_at_line.iter()),
+            &PROMOTION_BAR,
+            CurrentSide::Model
+        ),
         Some(BarMiss::Latency { .. })
     ));
     let latency_under: Vec<Value> = (0..30)
         .map(|_| paired(true, false, (100, 100), (1_049, 1_000)))
         .collect();
     assert_eq!(
-        bar_miss(&pair_tally(latency_under.iter()), &PROMOTION_BAR),
+        bar_miss(
+            &pair_tally(latency_under.iter()),
+            &PROMOTION_BAR,
+            CurrentSide::Model
+        ),
         None
     );
 }
@@ -143,7 +175,7 @@ fn the_bar_wants_thirty_pairs_and_priced_pairs() {
         .map(|_| paired(true, false, (100, 100), (100, 100)))
         .collect();
     assert_eq!(
-        bar_miss(&pair_tally(few.iter()), &PROMOTION_BAR),
+        bar_miss(&pair_tally(few.iter()), &PROMOTION_BAR, CurrentSide::Model),
         Some(BarMiss::Pairs {
             pairs: 29,
             wanted: 30
@@ -153,7 +185,11 @@ fn the_bar_wants_thirty_pairs_and_priced_pairs() {
         .map(|_| json!({"at": 1, "label": "a", "labelSource": "executed", "agreed": true, "baselineAgreed": false}))
         .collect();
     assert_eq!(
-        bar_miss(&pair_tally(unpriced.iter()), &PROMOTION_BAR),
+        bar_miss(
+            &pair_tally(unpriced.iter()),
+            &PROMOTION_BAR,
+            CurrentSide::Model
+        ),
         Some(BarMiss::Unpriced {
             priced: 0,
             wanted: 30
@@ -284,4 +320,48 @@ fn a_bundle_needs_its_rows_and_its_pin_and_its_canary() {
         bundle_miss(&bundle_of(&half, "placement", &policy), &policy),
         Some(BundleMiss::Canary { .. })
     ));
+}
+
+/// A person who changes a label changes it (t-26584, decision 3): the new
+/// verdict arrives as a newer row, and the bundle reads the newest row of
+/// each request and part of it, as the labels line does — a changed label
+/// counts once, as it reads now.
+#[test]
+fn a_changed_person_label_counts_once_in_the_bundle() {
+    let person = |part: &str, agreed: bool| json!({"at": 1, "label": "request-0", "labelPart": part, "labelSource": "person", "agreed": agreed});
+    let changed = [
+        person("first", false),
+        person("second", true),
+        person("first", true),
+    ];
+    let bundle = bundle_of(&changed, "routing", &HUMAN_BUNDLE);
+    assert_eq!(bundle.rows, 2, "{bundle:?}");
+    assert_eq!(
+        bundle,
+        bundle_of(&changed[1..], "routing", &HUMAN_BUNDLE),
+        "the newest verdict of each part"
+    );
+}
+
+/// A person row with no verdict withdraws the label it names from the bundle
+/// too (t-26584, decision 3): the bundle reads what the person says now, and
+/// a label taken out of the file does not stay in it.
+#[test]
+fn a_withdrawn_person_label_leaves_the_bundle() {
+    let person = |part: &str, agreed: Option<bool>| {
+        let mut row =
+            json!({"at": 1, "label": "request-0", "labelPart": part, "labelSource": "person"});
+        if let Some(agreed) = agreed {
+            row["agreed"] = json!(agreed);
+        }
+        row
+    };
+    let rows = [
+        person("first", Some(true)),
+        person("second", Some(true)),
+        person("first", None),
+    ];
+    let bundle = bundle_of(&rows, "routing", &HUMAN_BUNDLE);
+    assert_eq!(bundle.rows, 1, "{bundle:?}");
+    assert_eq!(bundle, bundle_of(&rows[1..2], "routing", &HUMAN_BUNDLE));
 }
