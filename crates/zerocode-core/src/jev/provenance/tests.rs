@@ -72,6 +72,19 @@ fn a_ledger_no_seat_keeps_names_no_author() {
     assert!(seat_of_ledger(Path::new("state").join("no-such-seat.jsonl").as_path()).is_none());
 }
 
+/// Decision 6 of t-26584 (t-47783): the model tier seat records only, and a
+/// label written to its ledger is a proxy of that seat's — the table names
+/// it, so the row says so and who wrote it.
+#[test]
+fn a_label_written_to_the_model_tier_ledger_is_that_seats_proxy() {
+    let seat = &crate::jev::MODEL_TIERS;
+    let ledger = Path::new("state").join(seat.ledger);
+    let mut row = json!({"at": 1, "label": "tiers:1", "requestAt": 1, "agreed": true});
+    stamp_for_ledger(&ledger, &mut row);
+    assert_eq!(row["labelSource"], json!("proxy"), "{row}");
+    assert_eq!(row["labelAuthor"], json!(seat.id), "{row}");
+}
+
 #[test]
 fn a_proxy_pair_is_no_pair() {
     let proxy = json!({"at": 1, "label": "a", "labelSource": "proxy", "agreed": true, "baselineAgreed": false});
