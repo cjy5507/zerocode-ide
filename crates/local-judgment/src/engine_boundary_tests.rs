@@ -46,6 +46,7 @@ async fn fixture(program: &str, root: &Path) -> (Running, HttpState) {
         provider: running.provider.clone(),
         admission: running.admission.clone(),
         failed,
+        declared: None,
     };
     (running, state)
 }
