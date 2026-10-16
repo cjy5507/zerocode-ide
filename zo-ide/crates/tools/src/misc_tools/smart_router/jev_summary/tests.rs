@@ -433,7 +433,7 @@ fn the_screen_and_the_judge_read_one_window() {
     write(home.path(), seat.ledger, &rows);
     let report = one(seat, &roots, None, None, i64::MAX / 2, 0);
     let judged = report.judged.as_ref().expect("the routing seat is judged");
-    assert_eq!(Some(judged.clone()), super::super::decision_shadow::judge_rows(&rows, None));
+    assert_eq!(Some(judged.clone()), super::super::decision_shadow::judge_rows(&rows));
     assert_eq!(judged.window.rows, 30, "the window is the last rows the floor can be cleared on");
     assert_eq!(judged.agreement.compared, 90);
     assert_eq!(report.asked_toward_judgment, 30);
@@ -776,7 +776,7 @@ fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
     rows.push(control(102, "task-gone", jev, ["large", "low", "analysis"]));
     write(home.path(), seat.ledger, &rows);
 
-    let judged = super::super::decision_shadow::judge_rows(&rows, None).expect("routing is judged");
+    let judged = super::super::decision_shadow::judge_rows(&rows).expect("routing is judged");
     assert_eq!(judged.window.rows, 25, "a control row was counted in the window");
     assert_eq!(judged.window.answered, 25);
     assert_eq!(judged.window.p95_ms, Some(400), "a control row's zero elapsed joined the latency");
@@ -801,7 +801,7 @@ fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
 
     // Without the control rows the same window compares nothing at all.
     let bare: Vec<Value> = rows.iter().take(25).cloned().collect();
-    let bare = super::super::decision_shadow::judge_rows(&bare, None).expect("judged");
+    let bare = super::super::decision_shadow::judge_rows(&bare).expect("judged");
     assert_eq!((bare.agreement, bare.control_rows), (Agreement::default(), 0));
 }
 
@@ -1022,6 +1022,368 @@ fn a_turn_label_grades_the_turns_own_judgment_on_what_the_turn_did() {
     }
 }
 
+/// The routing seat's paired records (t-26584 decision 2, t-47784): a turn's
+/// label carries both sides of its pair — what the judgment spent and what
+/// the probe it replaces spent on the same request, as the request's row
+/// keeps them — so a window of labelled turns is a window of priced pairs,
+/// and the rise bar reads its whole sample.
+#[test]
+fn turn_labels_carry_both_sides_spend_so_the_bar_prices_every_pair() {
+    use runtime::{ContentBlock, ConversationMessage};
+    use super::super::decision_shadow::{decision_shadow_path, note_route_followed};
+    use zerocode_core::jev::provenance::{pair_tally, PROMOTION_BAR};
+    let state = tempfile::tempdir().expect("a state home");
+    let work = tempfile::tempdir().expect("a workspace");
+    let _env = crate::tests::EnvGuard::set(core_types::paths::ZO_STATE_DIR_ENV, &state.path().to_string_lossy());
+    let ledger = decision_shadow_path(work.path());
+    let dir = ledger.parent().expect("a ledger dir").to_path_buf();
+    let name = ledger.file_name().and_then(|name| name.to_str()).expect("a ledger name");
+    // What each side spent on one request: the judgment's call, and the probe's.
+    let (judgment_tokens, probe_tokens, probe_ms) = (431, 120, 900);
+    let turns = PROMOTION_BAR.min_pairs;
+    let words = |n: usize| format!("rename the variable in step {n}");
+    let rows: Vec<Value> = (0..turns)
+        .map(|n| {
+            let at = i64::try_from(n).expect("a small turn");
+            let mut row = compared(at, ["small", "low", "other"], Some(["small", "low", "other"]));
+            row["attempt"] = json!(format!("s@{n}"));
+            row["task"] = json!(format!("{:016x}", super::super::probe_exec::task_fingerprint("", &words(n))));
+            row["rule"] = json!({"complexity": "trivial", "risk": "low", "intent": "other"});
+            row["inputTokens"] = json!(judgment_tokens);
+            row["currentInputTokens"] = json!(probe_tokens);
+            row["currentElapsedMs"] = json!(probe_ms);
+            row
+        })
+        .collect();
+    write(&dir, name, &rows);
+    for n in 0..turns {
+        let turn = vec![
+            ConversationMessage::user_text(words(n)),
+            ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                id: "toolu-bash".to_string(),
+                name: "bash".to_string(),
+                input: "{}".to_string(),
+            }]),
+        ];
+        assert!(note_route_followed(work.path(), &format!("s@{n}"), None, Some(&turn)), "turn {n} was labelled");
+    }
+    let tally = pair_tally(read_rows(&ledger).iter());
+    assert_eq!((tally.pairs, tally.priced), (turns, turns), "{tally:?}");
+}
+
+/// Decision 3 of t-26584 (t-47784): a person's verdicts reach both judges
+/// from one place, the ledger's person rows, and both read them the same way:
+/// a window's worth that say the probe named what the person named and the
+/// judgment did not holds the routing seat on the labels line, in the
+/// routing judge and in the core's.
+#[test]
+fn both_judges_read_the_ledgers_person_rows_on_the_labels_line() {
+    use zerocode_core::jev::promote::{judge_seat, window_wanted_for, Line, Verdict};
+    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+    let seat = &zerocode_core::jev::ROUTING;
+    let wanted = i64::try_from(window_wanted_for(seat).expect("routing rises")).expect("a window fits");
+    let mut rows: Vec<Value> =
+        (0..wanted).map(|at| compared(at, ["small", "low", "other"], Some(["small", "low", "other"]))).collect();
+    rows.extend((0..JUDGED_EVERY_ROWS).map(|n| {
+        json!({
+            "at": wanted + 1, "label": format!("{n:016x}"), "labelPart": "complexity",
+            "labelSource": "person", "labelAuthor": "test", "agreed": false, "baselineAgreed": true,
+        })
+    }));
+    let held = Verdict::Hold(Line::Labels { judgment_right: 0, probe_right: JUDGED_EVERY_ROWS });
+    let routing = super::super::decision_shadow::judge_rows(&rows).expect("routing is judged").verdict;
+    assert_eq!(routing, held, "the routing judge");
+    let core = judge_seat(seat, &rows).expect("the core judges the same rows").verdict;
+    assert_eq!(core, held, "the core's judge");
+}
+
+/// Decision 3 of t-26584 (t-47784): the file a person names
+/// (`smart.jev.labels`) reaches the judges as the ledger's person rows. When
+/// a judgment is due, the routing judge writes one row per judged axis of a
+/// labelled task that an answered request of the ledger matches — the
+/// verdicts and the request's key, never a word of the file — and counts the
+/// entries nothing matched in one summary row.
+#[test]
+fn a_named_labels_file_reaches_the_ledger_as_person_rows_without_its_words() {
+    use zerocode_core::jev::promote::window_wanted_for;
+    let work = tempfile::tempdir().expect("tmp");
+    let seat = &zerocode_core::jev::ROUTING;
+    let wanted = i64::try_from(window_wanted_for(seat).expect("routing rises")).expect("a window fits");
+    let (description, prompt) = ("the settings page", "port the settings page to the new form");
+    let unread = "words no judgment ever read";
+    let key = format!("{:016x}", super::super::probe_exec::task_fingerprint(description, prompt));
+    let mut rows: Vec<Value> =
+        (0..wanted).map(|at| compared(at, ["large", "low", "analysis"], Some(["medium", "low", "analysis"]))).collect();
+    rows[0]["task"] = json!(key);
+    let ledger = ledger_with(work.path(), &rows);
+    let labels = work.path().join("labels.jsonl");
+    let lines = [
+        json!({"description": description, "prompt": prompt, "complexity": "large", "risk": "high", "intent": "analysis"}),
+        json!({"prompt": unread, "complexity": "small"}),
+    ];
+    write_labels(&labels, &lines);
+    let settings = json!({"smart": {"jev": {"labels": labels.to_string_lossy()}}});
+    assert!(super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), 9).is_some(), "a full window is due");
+
+    let written = read_rows(&ledger);
+    let mut person: Vec<(String, String, bool, bool)> = written
+        .iter()
+        .filter(|row| row["labelSource"] == json!("person"))
+        .map(|row| {
+            (
+                row["label"].as_str().unwrap_or_default().to_string(),
+                row["labelPart"].as_str().unwrap_or_default().to_string(),
+                row["agreed"].as_bool().unwrap_or_default(),
+                row["baselineAgreed"].as_bool().unwrap_or_default(),
+            )
+        })
+        .collect();
+    person.sort();
+    // The judgment said large, low, analysis; the probe medium, low, analysis;
+    // the person large, high, analysis.
+    assert_eq!(
+        person,
+        [
+            (key.clone(), "complexity".to_string(), true, false),
+            (key.clone(), "intent".to_string(), true, true),
+            (key.clone(), "risk".to_string(), false, false),
+        ]
+    );
+    let text = fs::read_to_string(&ledger).expect("the ledger");
+    assert!(!text.contains(prompt) && !text.contains(description) && !text.contains(unread), "{text}");
+    let summary = written.iter().rev().find(|row| row["kind"] == json!("person_labels")).expect("a summary row");
+    assert_eq!((&summary["matched"], &summary["unmatched"]), (&json!(1), &json!(1)), "{summary}");
+}
+
+/// A full window of routing rows answered by `model` — the judgment large,
+/// low, analysis; the probe medium, low, analysis — whose first requests are
+/// the tasks of `prompts`, and settings naming a labels file beside it.
+/// Answers the ledger, the labels file, the settings and each task's key.
+fn labelled_window(home: &std::path::Path, prompts: &[&str], model: &str) -> (PathBuf, PathBuf, Value, Vec<String>) {
+    let wanted = zerocode_core::jev::promote::window_wanted_for(&zerocode_core::jev::ROUTING).expect("routing rises");
+    let keys: Vec<String> = prompts
+        .iter()
+        .map(|prompt| format!("{:016x}", super::super::probe_exec::task_fingerprint("", prompt)))
+        .collect();
+    let mut rows: Vec<Value> = (0..i64::try_from(wanted).expect("a window fits"))
+        .map(|at| compared(at, ["large", "low", "analysis"], Some(["medium", "low", "analysis"])))
+        .collect();
+    for row in &mut rows {
+        row["model"] = json!(model);
+    }
+    for (row, key) in rows.iter_mut().zip(&keys) {
+        row["task"] = json!(key);
+    }
+    let ledger = ledger_with(home, &rows);
+    let labels = home.join("labels.jsonl");
+    let settings = json!({"smart": {"jev": {"labels": labels.to_string_lossy()}}});
+    (ledger, labels, settings, keys)
+}
+
+fn write_labels(path: &std::path::Path, lines: &[Value]) {
+    let mut text = String::new();
+    for line in lines {
+        let _ = writeln!(text, "{line}");
+    }
+    fs::write(path, text).expect("the labels file");
+}
+
+/// What the import wrote: the person rows and the rows that count the file.
+fn imported(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .filter(|row| row["labelSource"] == json!("person") || row["kind"] == json!("person_labels"))
+        .cloned()
+        .collect()
+}
+
+/// Importing the same labels file twice counts it once (t-26584 decision 3,
+/// m-60846): judged again over an unchanged file, the routing judge writes no
+/// person row and no count, and the labels line reads what it read after the
+/// first import — the version that answered each request included.
+#[test]
+fn the_same_labels_file_imported_twice_counts_once() {
+    let work = tempfile::tempdir().expect("tmp");
+    let prompts = ["port the settings page to the new form", "split the router by provider"];
+    let (ledger, labels, settings, _) = labelled_window(work.path(), &prompts, "m-1");
+    write_labels(
+        &labels,
+        &[
+            json!({"prompt": prompts[0], "complexity": "large", "risk": "high", "intent": "analysis"}),
+            json!({"prompt": prompts[1], "complexity": "medium"}),
+        ],
+    );
+    let judge = |now| super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), now);
+    assert!(judge(9).is_some(), "a full window is due");
+    let once = read_rows(&ledger);
+    assert!(judge(10).is_some(), "still due: no request was added");
+    let twice = read_rows(&ledger);
+    assert_eq!(imported(&once).len(), 5, "four labelled parts and one count");
+    assert_eq!(imported(&twice), imported(&once));
+    assert!(imported(&once).iter().filter(|row| row["labelSource"] == json!("person")).all(|row| row["model"] == json!("m-1")));
+    let rubric = zerocode_core::jev::ROUTING.rubric_version;
+    let labels_line = zerocode_core::jev::promote::person_labels(&twice, Some("m-1"), rubric);
+    assert_eq!(
+        labels_line,
+        Some(zerocode_core::jev::promote::Labels { compared: 2, judgment_right: 2, probe_right: 2 }),
+        "{twice:?}"
+    );
+    assert_eq!(labels_line, zerocode_core::jev::promote::person_labels(&once, Some("m-1"), rubric));
+    assert_eq!(zerocode_core::jev::promote::person_labels(&twice, Some("m-2"), rubric), None, "another version's labels are not these");
+}
+
+/// A label taken out of the labels file stops counting (t-26584 decision 3,
+/// m-60846): the next import takes back what the file no longer holds — a
+/// person row of the same request, part and version with no verdict, and no
+/// word or path of the file — and leaves what it still holds alone. Imported
+/// again, the same file takes nothing back twice.
+#[test]
+fn a_label_taken_out_of_the_file_is_withdrawn_from_the_ledger() {
+    let work = tempfile::tempdir().expect("tmp");
+    let prompts = ["port the settings page to the new form", "split the router by provider"];
+    let (ledger, labels, settings, keys) = labelled_window(work.path(), &prompts, "m-1");
+    write_labels(
+        &labels,
+        &[
+            json!({"prompt": prompts[0], "complexity": "large", "risk": "high", "intent": "analysis"}),
+            json!({"prompt": prompts[1], "complexity": "medium", "risk": "low", "intent": "analysis"}),
+        ],
+    );
+    let judge = |now| super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), now);
+    assert!(judge(9).is_some(), "a full window is due");
+    // The person keeps the first task's complexity and takes out the rest.
+    write_labels(&labels, &[json!({"prompt": prompts[0], "complexity": "large"})]);
+    assert!(judge(10).is_some(), "still due: no request was added");
+
+    let rows = read_rows(&ledger);
+    let mut withdrawn: Vec<(String, String)> = rows
+        .iter()
+        .filter(|row| row["labelSource"] == json!("person") && row.get("agreed").is_none() && row.get("baselineAgreed").is_none())
+        .map(|row| {
+            assert_eq!((&row["model"], &row["labelAuthor"]), (&json!("m-1"), &json!("labels_file")), "{row}");
+            (row["label"].as_str().unwrap_or_default().to_string(), row["labelPart"].as_str().unwrap_or_default().to_string())
+        })
+        .collect();
+    withdrawn.sort();
+    let mut expected = vec![(keys[0].clone(), "intent".to_string()), (keys[0].clone(), "risk".to_string())];
+    expected.extend(["complexity", "intent", "risk"].map(|axis| (keys[1].clone(), axis.to_string())));
+    expected.sort();
+    assert_eq!(withdrawn, expected);
+    assert_eq!(
+        zerocode_core::jev::promote::person_labels(&rows, Some("m-1"), zerocode_core::jev::ROUTING.rubric_version),
+        Some(zerocode_core::jev::promote::Labels { compared: 1, judgment_right: 1, probe_right: 0 }),
+        "only the first task's complexity stands"
+    );
+    let summary = rows.iter().rev().find(|row| row["kind"] == json!("person_labels")).expect("a summary row");
+    assert_eq!((&summary["matched"], &summary["written"], &summary["withdrawn"]), (&json!(1), &json!(0), &json!(5)), "{summary}");
+    let text = fs::read_to_string(&ledger).expect("the ledger");
+    let path = labels.to_str().expect("a path in UTF-8");
+    assert!(prompts.iter().all(|prompt| !text.contains(prompt)) && !text.contains(path), "{text}");
+
+    assert!(judge(11).is_some(), "still due");
+    assert_eq!(imported(&read_rows(&ledger)), imported(&rows), "nothing is taken back twice");
+}
+
+/// A task the labels file names twice counts its later line, once (t-26584
+/// decision 3, m-61235): two lines of one prompt with different verdicts are
+/// one label, the later line's, so a second import over the same file writes
+/// nothing and the labels line reads the later line's verdict.
+#[test]
+fn a_task_the_file_labels_twice_counts_its_later_line_once() {
+    let work = tempfile::tempdir().expect("tmp");
+    let prompts = ["port the settings page to the new form"];
+    let (ledger, labels, settings, _) = labelled_window(work.path(), &prompts, "m-1");
+    // The judgment said large and the probe medium: the first line sides
+    // with the judgment, the later one with the probe.
+    write_labels(
+        &labels,
+        &[
+            json!({"prompt": prompts[0], "complexity": "large"}),
+            json!({"prompt": prompts[0], "complexity": "medium"}),
+        ],
+    );
+    let judge = |now| super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), now);
+    assert!(judge(9).is_some(), "a full window is due");
+    let once = read_rows(&ledger);
+    assert!(judge(10).is_some(), "still due: no request was added");
+    let twice = read_rows(&ledger);
+    assert_eq!(imported(&twice), imported(&once), "the second import writes nothing");
+    assert_eq!(
+        zerocode_core::jev::promote::person_labels(&twice, Some("m-1"), zerocode_core::jev::ROUTING.rubric_version),
+        Some(zerocode_core::jev::promote::Labels { compared: 1, judgment_right: 0, probe_right: 1 }),
+        "the later line's verdict: the probe named what the person named"
+    );
+}
+
+/// An imported person row names the rubric its request was asked under
+/// (t-26584 decision 3, m-61235), as the request's own row does, and so does
+/// the row that takes it back: the labels line reads a person's label only
+/// while the seat asks the words it graded. What the ledger holds of the
+/// same label under another rubric does not stand in for it: the label is
+/// written again under the rubric asked now, its verdicts the same or not.
+#[test]
+fn an_imported_person_row_names_the_rubric_its_request_was_asked_under() {
+    let work = tempfile::tempdir().expect("tmp");
+    let prompts = ["port the settings page to the new form"];
+    let (ledger, labels, settings, keys) = labelled_window(work.path(), &prompts, "m-1");
+    let rubric = zerocode_core::jev::questions::ROUTING_RUBRIC_VERSION;
+    // What an import wrote of the task's complexity while the seat asked the
+    // rubric before: the verdicts the file's line gives again now.
+    let mut rows = read_rows(&ledger);
+    rows.push(json!({
+        "at": 0, "label": keys[0], "labelPart": "complexity", "model": "m-1", "rubricVersion": rubric - 1,
+        "labelSource": "person", "labelAuthor": "labels_file", "agreed": true, "baselineAgreed": false,
+    }));
+    ledger_with(work.path(), &rows);
+    write_labels(&labels, &[json!({"prompt": prompts[0], "complexity": "large", "risk": "high"})]);
+    let judge = |now| super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), now);
+    assert!(judge(9).is_some(), "a full window is due");
+    write_labels(&labels, &[json!({"prompt": prompts[0], "complexity": "large"})]);
+    assert!(judge(10).is_some(), "still due: no request was added");
+    let this_rubric: Vec<Value> = read_rows(&ledger)
+        .into_iter()
+        .filter(|row| row["labelSource"] == json!("person") && row["rubricVersion"] == json!(rubric))
+        .collect();
+    assert_eq!(this_rubric.len(), 3, "both labelled parts, then the one taken back: {this_rubric:?}");
+}
+
+/// A person's rows stay apart from the model's judgment (t-26584 decision 3,
+/// m-60846). The routing seat names a request by its attempt, which a
+/// person row's task key never spells, so beside a window's worth of person
+/// rows — on the version answering now and on another — both judges read the
+/// same window and the same agreement as without them, and the rows reach
+/// them on the labels line alone, those of the version answering now only.
+#[test]
+fn a_persons_rows_stay_apart_from_the_models_judgment() {
+    use zerocode_core::jev::promote::{judge_seat, window_wanted_for, Line, Verdict};
+    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+    let seat = &zerocode_core::jev::ROUTING;
+    let wanted = i64::try_from(window_wanted_for(seat).expect("routing rises")).expect("a window fits");
+    let requests: Vec<Value> = (0..wanted)
+        .map(|at| {
+            let mut row = compared(at, ["small", "low", "other"], Some(["small", "low", "other"]));
+            row["attempt"] = json!(format!("session-1@{}", at + 1));
+            row["model"] = json!("m-1");
+            row
+        })
+        .collect();
+    let mut rows = requests.clone();
+    for model in ["m-1", "m-0"] {
+        rows.extend((0..JUDGED_EVERY_ROWS).map(|n| {
+            json!({
+                "at": wanted, "label": format!("{n:016x}"), "labelPart": "complexity", "model": model,
+                "labelSource": "person", "labelAuthor": "test", "agreed": false, "baselineAgreed": true,
+            })
+        }));
+    }
+    let routing_judge = |rows: &[Value]| super::super::decision_shadow::judge_rows(rows).expect("the routing judge judges");
+    let core_judge = |rows: &[Value]| judge_seat(seat, rows).expect("the core judges");
+    let held = Verdict::Hold(Line::Labels { judgment_right: 0, probe_right: JUDGED_EVERY_ROWS });
+    for (alone, beside) in [(routing_judge(&requests), routing_judge(&rows)), (core_judge(&requests), core_judge(&rows))] {
+        assert_eq!((&beside.window, beside.agreement), (&alone.window, alone.agreement));
+        assert_eq!(beside.verdict, held);
+    }
+}
+
 /// A row where the probe answered beside the judgment marks both readers on
 /// the probe's answer, axis by axis: the judgment's `agreed` and, from the
 /// keyword tables' reading on the same row, the baseline's — so the seat is
@@ -1075,7 +1437,7 @@ fn a_turn_label_is_one_comparison_in_the_window_of_the_turn_it_grades() {
     rows.push(label(102, "s@77", true));
     write(home.path(), seat.ledger, &rows);
 
-    let judged = super::super::decision_shadow::judge_rows(&rows, None).expect("routing is judged");
+    let judged = super::super::decision_shadow::judge_rows(&rows).expect("routing is judged");
     assert_eq!(judged.window.rows, 25, "a label was counted as a request");
     assert_eq!(judged.agreement, Agreement { compared: 2, agreed: 1, ..Agreement::default() }, "two labels of held turns, one of a turn gone");
     assert_eq!(judged.control_rows, 0, "a label was counted as a control row");
@@ -1182,7 +1544,7 @@ fn measure_what_a_label_and_a_judge_cost_on_this_machines_ledgers() {
     );
     let held = rows.clone();
     timed("decision_shadow::judge_rows (routing, in memory)", Box::new(move || {
-        let _ = super::super::decision_shadow::judge_rows(&held, None);
+        let _ = super::super::decision_shadow::judge_rows(&held);
     }));
     let ledger = routing.clone();
     timed("read_rows (routing, whole file)", Box::new(move || {
@@ -1273,7 +1635,7 @@ fn the_routing_judge_reads_the_current_rubrics_series_and_stands_on_nothing_olde
         None,
         "twenty of the second rubric are not a window, whatever the first left"
     );
-    let judged = super::super::decision_shadow::judge_rows(&rows, None).expect("judged");
+    let judged = super::super::decision_shadow::judge_rows(&rows).expect("judged");
     assert!(
         matches!(judged.verdict, Verdict::Hold(Line::TooFewRows { rows: 20, .. })),
         "{:?}",

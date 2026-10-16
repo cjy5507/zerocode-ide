@@ -689,6 +689,7 @@ fn clean() -> Evidence<'static> {
         calibrating: Calibrating::NotRead,
         pairs: PairTally::default(),
         bar_reads: false,
+        current_side: CurrentSide::Rule,
         bundle: None,
     }
 }
@@ -1526,9 +1527,7 @@ fn a_seat_whose_labels_never_say_no_cannot_rise() {
 /// marks, not only to its own floor (t-6342): a placement seat right four
 /// times in five beside a "today's tab" that was right every time has
 /// earned nothing, and one with no baseline marks at all has not been
-/// compared with anything yet. A seat whose marks grade only its own act has
-/// no such reader, and no current judgment to pair its marks with (ADR-150):
-/// its floor alone never raises it.
+/// compared with anything yet.
 #[test]
 fn a_seat_must_beat_its_baseline_not_only_its_floor() {
     let seat = &crate::jev::PLACEMENT;
@@ -1581,9 +1580,14 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
             .verdict,
         Verdict::Rise
     );
-    // A seat with no baseline has no current judgment to pair its marks with
-    // (ADR-150): without the pairs it holds on the bar, and with them it rises
-    // like any seat — its floor alone is not a rise.
+}
+
+/// Decision 4(a) of t-26584: a seat with no baseline has no current judgment
+/// to pair its marks with, so the paired line does not read it, and its own
+/// floors raise it as they did before that line. The browser read's marks
+/// grade only its own folds; its writer stamps no baseline mark.
+#[test]
+fn a_seat_with_no_baseline_rises_on_its_floors_without_pairs() {
     let own = &crate::jev::BROWSER_READ;
     assert!(!own.baseline.binds());
     let unpaired = window_then(own, |own, at| {
@@ -1597,20 +1601,11 @@ fn a_seat_must_beat_its_baseline_not_only_its_floor() {
             })
             .collect()
     });
+    let verdict = judge_seat(own, &unpaired).expect("judged").verdict;
     assert_eq!(
-        judge_seat(own, &unpaired).expect("judged").verdict,
-        Verdict::Hold(Line::Bar {
-            miss: BarMiss::Pairs {
-                pairs: 0,
-                wanted: PROMOTION_BAR.min_pairs,
-            },
-        })
-    );
-    assert_eq!(
-        judge_seat(own, &window_then(own, marks_that_rise))
-            .expect("judged")
-            .verdict,
-        Verdict::Rise
+        verdict,
+        Verdict::Rise,
+        "its floors met, a seat with nothing to pair rises: {verdict:?}"
     );
 }
 
@@ -3560,10 +3555,11 @@ fn a_proxy_or_unsourced_label_cannot_raise_a_seat() {
 }
 
 /// The rise bar is named and read on paired records (ADR-150, t-26584, ②):
-/// the candidate's cost per decision may not rise by one percent or more over
-/// the judgment it would replace, and its p95 latency not by five percent or
-/// more. A pair written exactly on the bar is not inside it. Marks alone, with
-/// no cost or latency beside them, do not rise a seat.
+/// the candidate's p95 latency may not rise by five percent or more over the
+/// judgment it would replace, and a pair written exactly on the bar is not
+/// inside it. Marks alone, with no cost or latency beside them, do not rise a
+/// seat. Recall replaces a rule, so its cost is not read: the cost line, read
+/// on a model's side, is the next test's (t-26584, decision 1a).
 #[test]
 fn a_rise_needs_paired_costs_and_latencies_inside_the_named_bar() {
     let seat = &crate::jev::RECALL;
@@ -3581,13 +3577,6 @@ fn a_rise_needs_paired_costs_and_latencies_inside_the_named_bar() {
         }));
         rows
     };
-    let on_the_cost_line = judge_seat(seat, &rows_with((1_010, 1_000), (1_000, 1_000)))
-        .expect("judged")
-        .verdict;
-    assert!(
-        !matches!(on_the_cost_line, Verdict::Rise),
-        "+1% exactly is not under the one-percent bar: {on_the_cost_line:?}"
-    );
     let on_the_latency_line = judge_seat(seat, &rows_with((1_000, 1_000), (1_050, 1_000)))
         .expect("judged")
         .verdict;
@@ -3622,6 +3611,225 @@ fn a_rise_needs_paired_costs_and_latencies_inside_the_named_bar() {
     assert!(
         !matches!(unpaired, Verdict::Rise),
         "marks with no cost or latency pair: {unpaired:?}"
+    );
+}
+
+/// Decision 1a of t-26584 (t-47783): the cost line reads a seat whose
+/// current side is a model, and only such a seat. The challenger's current
+/// side is the incumbent's design, a model's answer: +1% in cost still holds
+/// it. Recall's current side is its own order, a rule that spends no tokens,
+/// so its rise is read on quality and latency alone — a gain over the line
+/// and a p95 under five percent above the current side's raise it, however
+/// many tokens the candidate spends against the rule's none.
+#[test]
+fn the_cost_line_reads_a_model_current_side_and_a_rule_side_rises_on_quality_and_latency() {
+    let priced = |seat: &JevUse, tokens: (u64, u64), ms: (u64, u64)| {
+        let asked = asked_count(seat);
+        let mut rows = recording(seat);
+        rows.extend((0..asked).map(|at| asked_by(seat, at)));
+        rows.extend(marks_that_rise(seat, asked).into_iter().map(|mut row| {
+            row["inputTokens"] = json!(tokens.0);
+            row["currentInputTokens"] = json!(tokens.1);
+            row["elapsedMs"] = json!(ms.0);
+            row["currentElapsedMs"] = json!(ms.1);
+            row
+        }));
+        rows
+    };
+    let model = &crate::jev::CHALLENGER;
+    let inside = judge_seat(model, &priced(model, (1_009, 1_000), (1_049, 1_000)))
+        .expect("judged")
+        .verdict;
+    assert_eq!(
+        inside,
+        Verdict::Rise,
+        "the positive control: the model side clears every other line"
+    );
+    let on_the_cost_line = judge_seat(model, &priced(model, (1_010, 1_000), (1_000, 1_000)))
+        .expect("judged")
+        .verdict;
+    assert!(
+        matches!(
+            on_the_cost_line,
+            Verdict::Hold(Line::Bar {
+                miss: BarMiss::Cost { .. }
+            })
+        ),
+        "+1% exactly on a model side: {on_the_cost_line:?}"
+    );
+    let rule = &crate::jev::RECALL;
+    let on_quality_and_latency = judge_seat(rule, &priced(rule, (1_000, 0), (1_049, 1_000)))
+        .expect("judged")
+        .verdict;
+    assert_eq!(
+        on_quality_and_latency,
+        Verdict::Rise,
+        "a rule side is read on quality and latency: {on_quality_and_latency:?}"
+    );
+}
+
+/// Decision 3 of t-26584 (t-47784): a person's verdicts reach the judge from
+/// one place, the ledger's person rows, and the judge reads them on the
+/// labels line. A window's worth that say the current side named what the
+/// person named and the judgment did not holds the seat there, however clean
+/// its own marks are.
+#[test]
+fn person_rows_in_the_ledger_reach_the_labels_line() {
+    let seat = &crate::jev::RECALL;
+    let mut rows = window_then(seat, marks_that_rise);
+    rows.extend((0..JUDGED_EVERY_ROWS).map(|n| {
+        json!({
+            "at": 1,
+            "label": format!("person-{n}"),
+            "labelSource": "person",
+            "labelAuthor": "test",
+            "agreed": false,
+            "baselineAgreed": true,
+        })
+    }));
+    let verdict = judge_seat(seat, &rows).expect("judged").verdict;
+    assert_eq!(
+        verdict,
+        Verdict::Hold(Line::Labels {
+            judgment_right: 0,
+            probe_right: JUDGED_EVERY_ROWS,
+        }),
+        "{verdict:?}"
+    );
+}
+
+/// Decision 3 of t-26584 (t-47784): the labels line counts requests, as the
+/// file a person named counted them. A person row grades one part of a
+/// request, so seven requests labelled on three parts each are seven — short
+/// of a window's worth — while every part's verdict still counts toward who
+/// was right.
+#[test]
+fn the_labels_line_counts_requests_not_their_parts() {
+    let rows: Vec<Value> = (0..7)
+        .flat_map(|request| {
+            (0..3).map(move |part| {
+                json!({
+                    "at": 1,
+                    "label": format!("person-{request}"),
+                    "labelPart": format!("part-{part}"),
+                    "labelSource": "person",
+                    "labelAuthor": "test",
+                    "agreed": false,
+                    "baselineAgreed": true,
+                })
+            })
+        })
+        .collect();
+    assert_eq!(
+        person_labels(&rows, None, UNVERSIONED_RUBRIC),
+        Some(Labels {
+            compared: 7,
+            judgment_right: 0,
+            probe_right: 21,
+        })
+    );
+}
+
+/// Decision 3 of t-26584, with the controls the import is held to (m-60846):
+/// a person row that names a request's part and carries no verdict withdraws
+/// what the person said of it, so a label taken out of the file stops
+/// counting; and a row graded against another version counts for nothing in
+/// this one's labels.
+#[test]
+fn a_withdrawn_person_label_stops_counting_and_another_versions_never_counts() {
+    let person = |request: usize, model: &str, verdict: Option<bool>| {
+        let mut row = json!({
+            "at": 1,
+            "label": format!("person-{request}"),
+            "labelPart": "part-0",
+            "model": model,
+            "labelSource": "person",
+            "labelAuthor": "test",
+        });
+        if let Some(verdict) = verdict {
+            row["agreed"] = json!(verdict);
+            row["baselineAgreed"] = json!(!verdict);
+        }
+        row
+    };
+    // Requests labelled on each version. Any count serves: the labels line,
+    // which wants a window's worth, is not judged here.
+    let requests = 20;
+    let mut rows: Vec<Value> = (0..requests)
+        .map(|request| person(request, "a", Some(false)))
+        .collect();
+    rows.extend((0..requests).map(|request| person(request, "b", Some(true))));
+    assert_eq!(
+        person_labels(&rows, Some("a"), UNVERSIONED_RUBRIC),
+        Some(Labels {
+            compared: requests,
+            judgment_right: 0,
+            probe_right: requests,
+        }),
+        "version b's rows count nothing for version a"
+    );
+    assert_eq!(
+        person_labels(&rows, Some("b"), UNVERSIONED_RUBRIC).map(|labels| labels.judgment_right),
+        Some(requests)
+    );
+    rows.push(person(0, "a", None));
+    assert_eq!(
+        person_labels(&rows, Some("a"), UNVERSIONED_RUBRIC),
+        Some(Labels {
+            compared: requests - 1,
+            judgment_right: 0,
+            probe_right: requests - 1,
+        }),
+        "the withdrawn label no longer counts"
+    );
+    assert_eq!(
+        person_labels(&rows, Some("b"), UNVERSIONED_RUBRIC).map(|labels| labels.compared),
+        Some(requests),
+        "a withdrawal names its version, and version b's label stands"
+    );
+}
+
+/// A person's label belongs to the rubric its request was asked under
+/// (t-26584 decision 3, m-61235): a window's worth of person rows naming
+/// another rubric than the seat asks graded judgments given under other
+/// words, and the labels line does not read them. Rows naming the seat's
+/// rubric count, and so do rows naming none, as every person row counted
+/// before person rows named one.
+#[test]
+fn a_person_row_of_another_rubric_does_not_count_on_the_labels_line() {
+    let seat = &crate::jev::RECALL;
+    let verdict_beside = |rubric: Option<u32>| {
+        let mut rows = window_then(seat, marks_that_rise);
+        rows.extend((0..JUDGED_EVERY_ROWS).map(|n| {
+            let mut row = json!({
+                "at": 1,
+                "label": format!("person-{n}"),
+                "labelSource": "person",
+                "labelAuthor": "test",
+                "agreed": false,
+                "baselineAgreed": true,
+            });
+            if let Some(rubric) = rubric {
+                row["rubricVersion"] = json!(rubric);
+            }
+            row
+        }));
+        judge_seat(seat, &rows).expect("judged").verdict
+    };
+    let held = Verdict::Hold(Line::Labels {
+        judgment_right: 0,
+        probe_right: JUDGED_EVERY_ROWS,
+    });
+    assert_eq!(verdict_beside(None), held, "a row naming no rubric counts");
+    assert_eq!(
+        verdict_beside(Some(seat.rubric_version)),
+        held,
+        "the seat's own rubric counts"
+    );
+    assert_eq!(
+        verdict_beside(Some(seat.rubric_version + 1)),
+        Verdict::Rise,
+        "another rubric's rows graded other words"
     );
 }
 

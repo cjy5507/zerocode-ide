@@ -1438,6 +1438,8 @@ mod tests {
             retries: 0,
             cached: false,
             input_tokens: None,
+            current_input_tokens: None,
+            current_elapsed_ms: None,
             route_use: super::super::decision_shadow::DecisionRouteUse::RecordOnly,
             requests: Some(0),
             redacted_lines: Some(0),

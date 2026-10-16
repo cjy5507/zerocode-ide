@@ -205,6 +205,14 @@ pub const LABEL_AUTHOR: LedgerKey = LedgerKey {
     canonical: "labelAuthor",
     also: &[],
 };
+/// The part of its request a person's label grades, where it grades one
+/// (t-26584, decision 3): the routing judgment's axis a labels-file entry
+/// names. Of two person labels naming one request and one part, the newest
+/// counts ([`crate::jev::promote::person_labels`]).
+pub const LABEL_PART: LedgerKey = LedgerKey {
+    canonical: "labelPart",
+    also: &[],
+};
 /// The input tokens the current judgment spent on the request a paired row
 /// grades, beside the candidate's [`INPUT_TOKENS`] (t-26584, ②, ADR-150).
 pub const CURRENT_INPUT_TOKENS: LedgerKey = LedgerKey {

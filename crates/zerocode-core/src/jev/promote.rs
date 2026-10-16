@@ -113,22 +113,23 @@
 //! recorded walk's clearing shares those seats and still presses under
 //! `auto` only on a rise ([`risen`]).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
 
 use crate::jev::questions::UNVERSIONED_RUBRIC;
-use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, JevUse, Naming};
+use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, CurrentSide, JevUse, Naming};
 
 use crate::jev::provenance::{
-    Acted, BarMiss, Bundle, BundleMiss, CalibrationMiss, HUMAN_BUNDLE, PROMOTION_BAR, PairTally,
-    bar_miss, bundle_miss, bundle_of, calibration_miss, counts_toward_agreement, pair_tally,
+    Acted, BarMiss, Bundle, BundleMiss, CalibrationMiss, HUMAN_BUNDLE, LabelSource, PROMOTION_BAR,
+    PairTally, bar_miss, bundle_miss, bundle_of, calibration_miss, counts_toward_agreement,
+    pair_tally, source_of,
 };
 use crate::jev::summary::{
-    AGREED, ANSWERED, AT, BASELINE_AGREED, JUDGED_EVERY_ROWS, LABEL, MODEL, NOT_COMPARED,
-    REQUEST_AT, RUBRIC_VERSION, RUBRIC_VERSIONS, TRANSITION, Tally, WILSON_Z_95, asked_something,
-    failures_in_a_row_of, is_control_row, is_request_or_mark, rows_that_can_clear_forgiving,
-    wilson_lower,
+    AGREED, ANSWERED, AT, BASELINE_AGREED, JUDGED_EVERY_ROWS, LABEL, LABEL_PART, MODEL,
+    NOT_COMPARED, REQUEST_AT, RUBRIC_VERSION, RUBRIC_VERSIONS, TRANSITION, Tally, WILSON_Z_95,
+    asked_something, failures_in_a_row_of, is_control_row, is_request_or_mark,
+    rows_that_can_clear_forgiving, wilson_lower,
 };
 use crate::jev::threshold::{CALIBRATION, Graded, answer_confidence};
 
@@ -835,7 +836,9 @@ pub fn gates_for(
                 .and_then(Value::as_i64)
                 .is_some_and(|at| at >= pairs_since)
         })),
-        bar_reads: !graded_by_executions(seat),
+        // A seat with no baseline has no current judgment to pair its marks
+        // with, so its floors raise it (t-26584, decision 4a).
+        bar_reads: seat.baseline.binds(),
         bundle: seat
             .reads_act_line
             .then(|| bundle_of(rows, seat.id, &HUMAN_BUNDLE)),
@@ -913,7 +916,7 @@ pub fn judge_seat_at(
         agreement,
         agreement_rows_wanted: sample_floor,
         window_forgives: seat.window_forgives.unwrap_or(0),
-        labels: None,
+        labels: person_labels(rows, version.model, seat.rubric_version),
         fallbacks_in_a_row: failures_in_a_row_of(version.requests.iter().copied()),
         negatives_wanted: seat.negatives_wanted.unwrap_or(0),
         disagreed_on_record: record.disagreed(),
@@ -922,6 +925,7 @@ pub fn judge_seat_at(
         calibrating: gates.calibrating,
         pairs: gates.pairs,
         bar_reads: gates.bar_reads,
+        current_side: seat.current_side,
         bundle: gates.bundle,
     };
     let stand = standing(seat, rows);
@@ -1238,11 +1242,11 @@ impl Agreement {
 /// instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Labels {
-    /// Labelled rows compared.
+    /// Labelled requests compared.
     pub compared: usize,
-    /// Rows where the judgment named what the label named.
+    /// Labelled parts of them where the judgment named what the label named.
     pub judgment_right: usize,
-    /// Rows where the probe did.
+    /// Labelled parts where the probe did.
     pub probe_right: usize,
 }
 
@@ -1252,6 +1256,66 @@ impl Labels {
     pub const fn judgment_at_least_as_right(&self) -> bool {
         self.judgment_right >= self.probe_right
     }
+}
+
+/// A person's labels as both judges read them (t-26584, decision 3): the
+/// ledger's person rows ([`LabelSource::Person`]) and no other source that
+/// carry both marks — [`AGREED`] for the judgment, [`BASELINE_AGREED`] for
+/// the reader it would replace — or neither, which takes back what the person
+/// said of that part of the request. Of two rows naming one request and one
+/// part of it ([`LABEL_PART`]), the newest counts. A row graded against
+/// another version than `model`, the one answering now, counts for nothing
+/// and takes nothing back, and so does a row naming another rubric than
+/// `rubric`, the one the seat asks now ([`RUBRIC_VERSION`]): the judgment it
+/// graded was given under other words. A row naming no rubric counts, as
+/// every person row counted before person rows named one. The requests are
+/// counted toward a window's worth, as the file a person named counted them;
+/// who was right, part by part. `None` where no row counts.
+#[must_use]
+pub fn person_labels(rows: &[Value], model: Option<&str>, rubric: u32) -> Option<Labels> {
+    let mut newest = HashMap::new();
+    for row in rows {
+        let graded = MODEL
+            .read(row)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|graded| !graded.is_empty());
+        if source_of(row) != Some(LabelSource::Person)
+            || graded.is_some_and(|graded| Some(graded) != model)
+            || ![Rubric::Absent, Rubric::Named(rubric)].contains(&Rubric::of(row))
+        {
+            continue;
+        }
+        let Some(label) = LABEL.read(row).and_then(Value::as_str) else {
+            continue;
+        };
+        let part = LABEL_PART.read(row).and_then(Value::as_str);
+        let marks = match (
+            AGREED.read(row).and_then(Value::as_bool),
+            BASELINE_AGREED.read(row).and_then(Value::as_bool),
+        ) {
+            (Some(judgment), Some(current)) => Some((judgment, current)),
+            (None, None) => None,
+            _ => continue,
+        };
+        newest.insert((label, part), marks);
+    }
+    let standing: Vec<(&str, (bool, bool))> = newest
+        .into_iter()
+        .filter_map(|((label, _), marks)| Some((label, marks?)))
+        .collect();
+    if standing.is_empty() {
+        return None;
+    }
+    let requests: HashSet<&str> = standing.iter().map(|(label, _)| *label).collect();
+    Some(Labels {
+        compared: requests.len(),
+        judgment_right: standing
+            .iter()
+            .filter(|(_, (judgment, _))| *judgment)
+            .count(),
+        probe_right: standing.iter().filter(|(_, (_, current))| *current).count(),
+    })
 }
 
 /// Everything the judgment reads.
@@ -1278,7 +1342,7 @@ pub struct Evidence<'window> {
     /// its answer floor ([`JevUse::window_forgives`]) — what the window's own
     /// width was derived from.
     pub window_forgives: usize,
-    /// What labels said, when a person wrote any.
+    /// What labels said, when a person wrote any ([`person_labels`]).
     pub labels: Option<Labels>,
     /// Fallbacks in a row while applying.
     pub fallbacks_in_a_row: u32,
@@ -1298,8 +1362,12 @@ pub struct Evidence<'window> {
     /// The paired records the rise bar is read on (ADR-150, t-26584, ②).
     pub pairs: PairTally,
     /// Whether the rise bar applies: not to a seat graded by its executions,
-    /// which carry their own cost and latency lines.
+    /// which carry their own cost and latency lines, nor to a seat with no
+    /// baseline, which has nothing to pair its marks with.
     pub bar_reads: bool,
+    /// What the seat's answer replaces today: the bar's cost line reads a
+    /// model's ([`CurrentSide`], t-26584, decision 1a).
+    pub current_side: CurrentSide,
     /// The person-judged rows, for a seat that reads an act line (ADR-176,
     /// t-26584, ④).
     pub bundle: Option<Bundle>,
@@ -1637,7 +1705,10 @@ fn gate_line(evidence: &Evidence) -> Option<Line> {
         .map(|miss| Line::Bundle { miss });
     let bar = evidence
         .bar_reads
-        .then(|| bar_miss(&evidence.pairs, &PROMOTION_BAR).map(|miss| Line::Bar { miss }))
+        .then(|| {
+            bar_miss(&evidence.pairs, &PROMOTION_BAR, evidence.current_side)
+                .map(|miss| Line::Bar { miss })
+        })
         .flatten();
     calibration.or(bundle).or(bar)
 }

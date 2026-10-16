@@ -970,6 +970,23 @@ where
     ) -> Result<TurnSummary, StreamingTurnError> {
         let id_gen = BlockIdGen::default();
         let user_input = user_input.into();
+        // The words a decline just stood on, again (t-57512): there is nothing
+        // to ask, so the turn sends nothing, records nothing and runs no hook,
+        // and says why in one line. Pictures, or a leg a turn runs inside
+        // itself, make another request.
+        if !internal_subturn
+            && images.is_empty()
+            && self.repeats_a_standing_decline(&user_input, super::fallback::TurnLoop::Streaming)
+        {
+            let _ = render_tx
+                .send(RenderBlock::System {
+                    id: id_gen.next(),
+                    level: SystemLevel::Warn,
+                    text: core_types::retry_signal::REFUSAL_STANDING_REPEAT_NOTICE.to_string(),
+                })
+                .await;
+            return Ok(self.standing_repeat_summary());
+        }
         // Baseline token count + pre-turn message index for rollback (see
         // [`Self::begin_streaming_turn`]). Internal deep-lane subturns carry
         // program-generated prompts, so they preserve the pre-A1 streaming
@@ -1399,6 +1416,7 @@ where
                     }))
                     .await;
             }
+            self.sent_to = self.request_destination(super::fallback::TurnLoop::Streaming);
             let events_for_build: Vec<AssistantEvent> =
                 if let Some(async_client) = self.active_async_client() {
                     // Live async path (L7c seam) with retry on transient errors.
@@ -2208,6 +2226,7 @@ where
                         self.session
                             .push_message(assistant_message)
                             .map_err(|error| StreamingTurnError::runtime(error.to_string()))?;
+                        self.remember_surfaced_notice();
                         if let Some(msg) = self.session.messages.last().cloned() {
                             assistant_messages.push(msg);
                         }

@@ -28,19 +28,20 @@
 //! as the sample floor (`Line::only_holds`): a missing record is a gap in
 //! the evidence, not a mark against the seat.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::jev::JevUse;
 use crate::jev::promote::permille;
 use crate::jev::summary::{
     AGREED, BASELINE_AGREED, CURRENT_ELAPSED_MS, CURRENT_INPUT_TOKENS, ELAPSED_MS, INPUT_TOKENS,
-    JUDGED_EVERY_ROWS, LABEL, LABEL_AUTHOR, LABEL_SOURCE, WILSON_Z_95, grades_a_request,
-    wilson_lower,
+    JUDGED_EVERY_ROWS, LABEL, LABEL_AUTHOR, LABEL_PART, LABEL_SOURCE, WILSON_Z_95,
+    grades_a_request, wilson_lower,
 };
 use crate::jev::threshold::Graded;
+use crate::jev::{CurrentSide, JevUse};
 
 /// A label's source, best first (ADR-171). A label names one
 /// ([`LABEL_SOURCE`]); a label that names none is no label.
@@ -119,7 +120,7 @@ pub struct PromotionBar {
     /// The quality gain, per thousand of pairs, the candidate must exceed.
     pub quality_over_permille: u16,
     /// The rise in cost per decision, per thousand, the candidate must stay
-    /// under.
+    /// under where its current side is a model ([`CurrentSide`]).
     pub cost_rise_under_permille: u16,
     /// The rise in p95 latency, per thousand, the candidate must stay under.
     pub latency_rise_under_permille: u16,
@@ -205,7 +206,7 @@ pub enum BarMiss {
         gain_permille: i64,
         over_permille: u16,
     },
-    /// Cost per decision rose by the bar or more.
+    /// Cost per decision rose by the bar or more over a model's current side.
     Cost {
         candidate: u64,
         current: u64,
@@ -234,10 +235,12 @@ impl BarMiss {
 }
 
 /// The first bar `pairs` does not clear, in the order ADR-150 lists them, or
-/// `None` when it clears them all. The comparisons are exact: a rise written
-/// exactly on a line is not under it.
+/// `None` when it clears them all. The cost line reads a seat whose current
+/// side is a model (t-26584, decision 1a): a rule spends no tokens, so beside
+/// it any answer would be an infinite rise. The comparisons are exact: a rise
+/// written exactly on a line is not under it.
 #[must_use]
-pub fn bar_miss(pairs: &PairTally, bar: &PromotionBar) -> Option<BarMiss> {
+pub fn bar_miss(pairs: &PairTally, bar: &PromotionBar, side: CurrentSide) -> Option<BarMiss> {
     if pairs.pairs < bar.min_pairs {
         return Some(BarMiss::Pairs {
             pairs: pairs.pairs,
@@ -258,11 +261,13 @@ pub fn bar_miss(pairs: &PairTally, bar: &PromotionBar) -> Option<BarMiss> {
             over_permille: bar.quality_over_permille,
         });
     }
-    if !rises_under(
-        pairs.candidate_tokens,
-        pairs.current_tokens,
-        bar.cost_rise_under_permille,
-    ) {
+    if side == CurrentSide::Model
+        && !rises_under(
+            pairs.candidate_tokens,
+            pairs.current_tokens,
+            bar.cost_rise_under_permille,
+        )
+    {
         return Some(BarMiss::Cost {
             candidate: pairs.candidate_tokens,
             current: pairs.current_tokens,
@@ -578,17 +583,34 @@ pub fn bundle_of(rows: &[Value], seat_id: &str, policy: &BundlePolicy) -> Bundle
     }
 }
 
-/// The (label, mark) pairs of the person-judged rows, in label order.
+/// The (label, mark) pairs of the person-judged rows, in label order. Of two
+/// rows naming one request and one part of it ([`LABEL_PART`]), the newest
+/// counts, as in the labels line ([`crate::jev::promote::person_labels`]): a
+/// label a person changed is read once, as it reads now, and one taken back —
+/// a newest row with neither mark — not at all.
 fn judged_of(rows: &[Value]) -> Vec<(String, bool)> {
-    let mut judged: Vec<(String, bool)> = rows
-        .iter()
-        .filter(|row| source_of(row) == Some(LabelSource::Person))
-        .filter_map(|row| {
-            Some((
-                LABEL.read(row)?.as_str()?.to_string(),
-                AGREED.read(row)?.as_bool()?,
-            ))
-        })
+    let mut newest = HashMap::new();
+    for row in rows {
+        if source_of(row) != Some(LabelSource::Person) {
+            continue;
+        }
+        let Some(label) = LABEL.read(row).and_then(Value::as_str) else {
+            continue;
+        };
+        let part = LABEL_PART.read(row).and_then(Value::as_str);
+        let agreed = match (
+            AGREED.read(row).and_then(Value::as_bool),
+            BASELINE_AGREED.read(row).and_then(Value::as_bool),
+        ) {
+            (Some(agreed), _) => Some(agreed),
+            (None, None) => None,
+            (None, Some(_)) => continue,
+        };
+        newest.insert((label, part), agreed);
+    }
+    let mut judged: Vec<(String, bool)> = newest
+        .into_iter()
+        .filter_map(|((label, _), agreed)| Some((label.to_string(), agreed?)))
         .collect();
     judged.sort();
     judged
@@ -713,6 +735,10 @@ pub const SEAT_LABEL_SOURCE: &[(&str, LabelSource)] = &[
     ("file_pick", LabelSource::Proxy),
     ("judgment_cache", LabelSource::Proxy),
     ("mention_rerank", LabelSource::Proxy),
+    // Records only and never rises (t-26584, decision 6): nothing writes its
+    // labels yet, and one would grade a tier against the work later seen on
+    // that model — an outcome watched afterwards, not the placement's own run.
+    ("model_tiers", LabelSource::Proxy),
     ("notify", LabelSource::Proxy),
     ("patch_review", LabelSource::Proxy),
     ("placement", LabelSource::Proxy),

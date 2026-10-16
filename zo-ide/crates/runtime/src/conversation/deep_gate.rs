@@ -2801,6 +2801,7 @@ where
     ///
     /// # Errors
     /// Propagates any [`StreamingTurnError`] from the underlying turn.
+    #[allow(clippy::too_many_lines)]
     pub async fn run_turn_streaming_maybe_deep(
         &mut self,
         user_input: impl Into<String>,
@@ -2824,7 +2825,12 @@ where
         let turn_base_output = self.usage_tracker.cumulative_usage().output_tokens;
         let result = loop {
             let round_images = std::mem::take(&mut images);
-            let deep_mode = self.deep_gate.as_ref().map(|cfg| cfg.mode);
+            // A leg that repeats the words a decline just stood on (t-57512)
+            // runs no hook and no deep driver: the plain turn below sends
+            // nothing for it, by the same rule, and the turn ends with it.
+            let repeat = round_images.is_empty()
+                && self.repeats_a_standing_decline(&input, super::fallback::TurnLoop::Streaming);
+            let deep_mode = self.deep_gate.as_ref().map(|cfg| cfg.mode).filter(|_| !repeat);
             if deep_mode.is_some() {
                 if let Err(error) = self.run_user_prompt_submit_for_streaming_user_entry(&input) {
                     break Err(error);
@@ -2898,15 +2904,20 @@ where
             // (`run_turn`). Hook commands run synchronously with the shared 5s
             // timeout; with no TurnEnd rules configured this is a no-op, so the
             // render loop only ever pauses when the user opted into a gate.
-            let files_changed = changed_files_snapshot_async().await;
-            let context = build_turn_end_hook_context(
-                &summary,
-                loop_count,
-                &files_changed,
-                self.session.session_goal.as_deref(),
-            );
-            let outcome = self.run_lifecycle_hook(HookEvent::TurnEnd, &context);
-            match outcome.followup().map(str::to_owned) {
+            let followup = if repeat {
+                None
+            } else {
+                let files_changed = changed_files_snapshot_async().await;
+                let context = build_turn_end_hook_context(
+                    &summary,
+                    loop_count,
+                    &files_changed,
+                    self.session.session_goal.as_deref(),
+                );
+                let outcome = self.run_lifecycle_hook(HookEvent::TurnEnd, &context);
+                outcome.followup().map(str::to_owned)
+            };
+            match followup {
                 Some(followup) if loop_count < self.max_stop_loops => {
                     loop_count += 1;
                     input = followup;

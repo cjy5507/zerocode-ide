@@ -6,14 +6,15 @@
 //! It uses only `judge_seat` and `judge_seat_in`, so the same file builds on
 //! both sides of the change.
 //!
-//! Prints: wrongly raised seats (a rise the truth says is wrong), the marks a
-//! right rise needs, and the judge's time per judgment in milliseconds.
+//! Prints: wrongly raised seats (a rise the truth says is wrong), recall's
+//! rule-side control apart from them, the marks a right rise needs, and the
+//! judge's time per judgment in milliseconds.
 
 use std::time::Instant;
 
 use serde_json::{Value, json};
 use zerocode_core::jev::promote::{Verdict, judge_seat, judge_seat_in};
-use zerocode_core::jev::{JevUse, PLACEMENT, RECALL};
+use zerocode_core::jev::{CHALLENGER, JevUse, PLACEMENT, RECALL};
 
 /// How one scenario's labels are written.
 #[derive(Clone, Copy)]
@@ -203,9 +204,11 @@ fn scenarios() -> Vec<Scenario> {
             },
             should_rise: false,
         },
+        // The cost line reads a seat whose current side is a model (t-26584,
+        // decision 1a): the challenger's is the incumbent's design.
         Scenario {
-            name: "executed labels, cost +1.5%",
-            seat: &RECALL,
+            name: "model-side seat, executed labels, cost +1.5%",
+            seat: &CHALLENGER,
             shape: Shape {
                 cost_scale_permille: 1_015,
                 ..executed
@@ -244,6 +247,22 @@ fn scenarios() -> Vec<Scenario> {
     ]
 }
 
+/// Recall's own control, apart from the eight: its current side is its own
+/// order, a rule that spends no tokens, so its cost is not read (t-26584,
+/// decision 1a) and the +1.5% that holds the model side raises it. On the
+/// code before that decision the cost line held it.
+fn rule_side_control() -> Scenario {
+    Scenario {
+        name: "rule-side control: executed labels, cost +1.5%",
+        seat: &RECALL,
+        shape: Shape {
+            cost_scale_permille: 1_015,
+            ..scenarios()[0].shape
+        },
+        should_rise: true,
+    }
+}
+
 fn main() {
     let cases = scenarios();
     let mut wrong = 0_usize;
@@ -266,6 +285,20 @@ fn main() {
     }
     let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
     println!("wrongly raised seats: {wrong} of {} scenarios", cases.len());
+    let control = rule_side_control();
+    let verdict = judge(
+        control.seat,
+        &ledger(control.seat, control.shape, 60),
+        control.shape,
+    );
+    let rose = matches!(verdict, Some(Verdict::Rise));
+    println!(
+        "{:<50} verdict={:<28} should_rise={:<5} as_intended={}",
+        control.name,
+        format!("{verdict:?}"),
+        control.should_rise,
+        rose == control.should_rise
+    );
     // Marks a right rise needs: the smallest count the judge rises on, scanned
     // from one (the same shape, the same window).
     let needed = (1..=200).find(|count| {

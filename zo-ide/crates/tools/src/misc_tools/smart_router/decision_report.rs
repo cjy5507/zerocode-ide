@@ -145,6 +145,31 @@ pub struct LabelEvaluation {
     /// Labelled tasks with a ledger row where both readers answered.
     pub matched: usize,
     pub axes: Vec<AxisEvaluation>,
+    /// Every judged axis of a matched task that the person labelled and both
+    /// readers answered on, whether or not the judgment wrote the
+    /// distribution the metrics above need.
+    pub marks: Vec<PersonMark>,
+    /// Every task the file labels, by its key, with the axes it labels there,
+    /// matched or not: what a person row stands on until the file no longer
+    /// holds it.
+    pub labelled: HashMap<String, Vec<&'static str>>,
+}
+
+/// One judged axis of a labelled task, graded against the latest row of its
+/// request where both readers answered: whether each named what the person
+/// named. The routing judge writes one as a person row (t-26584 decision 3),
+/// with the request's key and never a word of the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonMark {
+    /// The request's key: the task fingerprint its row carries.
+    pub task: String,
+    pub axis: &'static str,
+    /// The version that answered the request, where its row names one.
+    pub model: Option<String>,
+    /// The rubric the request was asked under, as its row names it.
+    pub rubric_version: u32,
+    pub judgment_right: bool,
+    pub probe_right: bool,
 }
 
 /// One labelled task on one axis where both readers answered, as positions in
@@ -172,7 +197,8 @@ struct LabelLine {
 /// per line, `prompt` (and `description` when the task had one) exactly as the
 /// probe read it, and a label per judged axis under the axis's name. A label
 /// is joined to the ledger by the task's fingerprint; the latest row where both
-/// readers answered is the one measured.
+/// readers answered is the one measured, and each of its axes is marked
+/// (`PersonMark`).
 ///
 /// # Errors
 /// A line that is not a labelled task, named by its line number.
@@ -191,6 +217,8 @@ pub fn evaluate_decision_labels(
     let axes: Vec<&'static RubricAxis> = runtime::judged_axes().collect();
     let mut scored: Vec<Vec<ScoredTask>> = std::iter::repeat_with(Vec::new).take(axes.len()).collect();
     let (mut labels, mut matched) = (0, 0);
+    let mut marks = Vec::new();
+    let mut labelled: HashMap<String, Vec<&'static str>> = HashMap::new();
     for (index, line) in labels_jsonl.lines().enumerate().filter(|(_, line)| !line.trim().is_empty()) {
         let number = index + 1;
         let label: LabelLine = serde_json::from_str(line).map_err(|error| format!("line {number}: {error}"))?;
@@ -202,6 +230,10 @@ pub fn evaluate_decision_labels(
         }
         labels += 1;
         let task = format!("{:016x}", task_fingerprint(&label.description, &label.prompt));
+        labelled
+            .entry(task.clone())
+            .or_default()
+            .extend(axes.iter().filter(|axis| label.labels.contains_key(axis.name)).map(|axis| axis.name));
         let row = latest.get(task.as_str());
         matched += usize::from(row.is_some());
         for (axis, samples) in axes.iter().zip(&mut scored) {
@@ -222,6 +254,14 @@ pub fn evaluate_decision_labels(
             let Some(choice) = axis.position(&judged.choice) else {
                 continue;
             };
+            marks.push(PersonMark {
+                task: task.clone(),
+                axis: axis.name,
+                model: row.model.clone(),
+                rubric_version: row.rubric_version,
+                judgment_right: choice == position,
+                probe_right: probe == position,
+            });
             let distribution: Option<Vec<f64>> =
                 axis.tokens.iter().map(|token| judged.probabilities.get(*token).copied()).collect();
             if let Some(distribution) = distribution {
@@ -248,7 +288,7 @@ pub fn evaluate_decision_labels(
             AxisEvaluation { axis, probe: axis_metrics(axis, &probe), judgment: axis_metrics(axis, &judgment) }
         })
         .collect();
-    Ok(LabelEvaluation { labels, matched, axes })
+    Ok(LabelEvaluation { labels, matched, axes, marks, labelled })
 }
 
 #[cfg(test)]
