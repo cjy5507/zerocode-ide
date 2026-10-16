@@ -1534,7 +1534,8 @@ const PERSON_LABELS_KIND: &str = "person_labels";
 /// axis of a labelled task that the latest answered request of `requests`
 /// matches: the request's key, the axis, the version that answered, and
 /// whether each reader named what the person named — never a word of the
-/// file. A row is written only where the ledger holds none for the same
+/// file. A task the file names on more than one line is labelled by its last.
+/// A row is written only where the ledger holds none for the same
 /// request, axis and version, or its newest says otherwise. A label the file
 /// no longer holds is taken back: where the newest row this import wrote of
 /// it says a verdict, a row of the same request, axis and version says none,
@@ -1579,11 +1580,17 @@ fn import_person_labels(
             said.insert((task, axis, model), (verdicts, imported));
         }
     }
-    let mut written = 0_usize;
+    // One label per request, axis and version, the file's later line winning:
+    // compared one by one with what the ledger said before this import, two
+    // lines of one task would each write over the other at every import.
+    let mut marks = BTreeMap::new();
     for mark in &read.marks {
+        marks.insert((mark.task.as_str(), mark.axis, mark.model.as_deref()), mark);
+    }
+    let mut written = 0_usize;
+    for (key, mark) in &marks {
         let verdicts = (Some(mark.judgment_right), Some(mark.probe_right));
-        let before = said.get(&(mark.task.as_str(), mark.axis, mark.model.as_deref()));
-        if before.is_some_and(|(then, _)| *then == verdicts) {
+        if said.get(key).is_some_and(|(then, _)| *then == verdicts) {
             continue;
         }
         let mut row = person_row(now_ms, &mark.task, mark.axis, mark.model.as_deref());
