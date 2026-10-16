@@ -1292,6 +1292,15 @@ pub trait Host {
     /// host that seats no sleepers keeps the chair without them.
     fn coordinator_sat(&self, _leader_term: u32) {}
 
+    /// Whether the person closed this pane while its agent kept running
+    /// (t-57705): no tab shows it, and its program goes on with its
+    /// conversation — the window's detached agent, as its surface reports it.
+    /// A coordinator seat follows its conversation out of a pane like that.
+    /// Hosts that draw no tabs detach nothing.
+    fn pane_detached(&self, _term: u32) -> bool {
+        false
+    }
+
     /// Which agent runs in this terminal, as the catalog spells it.
     ///
     /// The mail pointer's one exception reads this: a `cursor` composer
