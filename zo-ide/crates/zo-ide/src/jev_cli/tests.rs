@@ -377,6 +377,70 @@ fn a_summary_counts_the_marks_a_proxy_label_made() {
     assert_eq!(placement["days"][6]["agreement"]["proxied"], proxy_marks.len(), "today");
 }
 
+/// A seat's numbers say when they begin (t-60961): `countedSince` is the time
+/// of the earliest row the rolling week counted, so a ledger begun 39 s ago —
+/// as a judgment server's new port begins one — reads from that row and not
+/// from seven days back. A first row of the file older than the week is not
+/// counted. A week that counted nothing names no time, and nor does one that
+/// counted only a row with no time or one before the epoch: null, never 1970.
+#[test]
+fn a_summary_names_when_the_rows_it_counted_begin() {
+    use zerocode_core::jev::{JevUse, COMMAND_GUARD, PLACEMENT};
+    let began = "2026-10-16T04:17:22Z";
+    let began_ms = core_types::date::unix_secs_from_rfc3339(began).expect("a time") * 1000;
+    let now_ms = began_ms + 39_000;
+    let day_ms = 24 * 60 * 60 * 1000;
+    let before_the_week = now_ms - (tools::jev_summary::WINDOW_DAYS + 1) * day_ms;
+    let asked = |seat: &JevUse, at: Option<i64>| {
+        let mut row = serde_json::json!({"outcome": "answered", "elapsedMs": 40, "requests": 1,
+                                         "rubricVersion": seat.rubric_version});
+        if let Some(at) = at {
+            row["at"] = serde_json::json!(at);
+        }
+        row
+    };
+    let write = |root: &Path, seat: &JevUse, rows: &[serde_json::Value]| {
+        std::fs::write(root.join(seat.ledger), rows.iter().map(|row| row.to_string() + "\n").collect::<String>())
+            .expect("write");
+    };
+    let seat_in = |root: &Path, now_ms: i64, id: &str| {
+        let seats = tools::jev_summary::report(&[root.to_path_buf()], None, None, now_ms, 0);
+        let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
+        value["seats"].as_array().expect("seats").iter().find(|row| row["id"] == id).expect("the seat").clone()
+    };
+    let home = tempfile::tempdir().expect("tmp");
+    let in_the_week = [began_ms, began_ms + 5_000, began_ms + 30_000];
+    let guard_rows: Vec<serde_json::Value> =
+        std::iter::once(before_the_week).chain(in_the_week).map(|at| asked(&COMMAND_GUARD, Some(at))).collect();
+    write(home.path(), &COMMAND_GUARD, &guard_rows);
+    write(home.path(), &PLACEMENT, &[asked(&PLACEMENT, Some(before_the_week))]);
+    let guard = seat_in(home.path(), now_ms, COMMAND_GUARD.id);
+    println!("{guard}");
+    assert_eq!(guard["countedSince"], began, "the week of the guard begins at the first row it counted");
+    assert_eq!(guard["week"]["rows"], in_the_week.len(), "and the row before the week is not one");
+    let unasked = zerocode_core::jev::JEV_USES
+        .iter()
+        .find(|seat| !home.path().join(seat.ledger).exists())
+        .expect("a seat never asked");
+    for (id, what) in [(PLACEMENT.id, "a week that counted nothing"), (unasked.id, "a seat never asked")] {
+        let said = seat_in(home.path(), now_ms, id);
+        assert_eq!(said.get("countedSince"), Some(&serde_json::Value::Null), "{what} names no time");
+    }
+    // Every counter reads a row with no time at the epoch: a week read one day after it reaches back past it,
+    // counts such a row, and still names no time.
+    let epoch = tempfile::tempdir().expect("tmp");
+    let timeless = [asked(&PLACEMENT, None)];
+    let early = [asked(&COMMAND_GUARD, Some(-1_000))];
+    for (seat, rows, what) in
+        [(&PLACEMENT, &timeless, "a row that names no time"), (&COMMAND_GUARD, &early, "a row before the epoch")]
+    {
+        write(epoch.path(), seat, rows);
+        let read = seat_in(epoch.path(), day_ms, seat.id);
+        assert_eq!(read["week"]["rows"], rows.len(), "{what} is counted");
+        assert_eq!(read.get("countedSince"), Some(&serde_json::Value::Null), "{what} names no time, never 1970");
+    }
+}
+
 /// A seat several programs ask says in the JSON who asked it this week
 /// (t-10916) — the name the window's dashboard reads it by.
 #[test]
