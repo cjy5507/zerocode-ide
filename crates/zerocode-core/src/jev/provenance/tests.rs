@@ -321,3 +321,24 @@ fn a_bundle_needs_its_rows_and_its_pin_and_its_canary() {
         Some(BundleMiss::Canary { .. })
     ));
 }
+
+/// A person who changes a label changes it (t-26584, decision 3): the new
+/// verdict arrives as a newer row, and the bundle reads the newest row of
+/// each request and part of it, as the labels line does — a changed label
+/// counts once, as it reads now.
+#[test]
+fn a_changed_person_label_counts_once_in_the_bundle() {
+    let person = |part: &str, agreed: bool| json!({"at": 1, "label": "request-0", "labelPart": part, "labelSource": "person", "agreed": agreed});
+    let changed = [
+        person("first", false),
+        person("second", true),
+        person("first", true),
+    ];
+    let bundle = bundle_of(&changed, "routing", &HUMAN_BUNDLE);
+    assert_eq!(bundle.rows, 2, "{bundle:?}");
+    assert_eq!(
+        bundle,
+        bundle_of(&changed[1..], "routing", &HUMAN_BUNDLE),
+        "the newest verdict of each part"
+    );
+}
