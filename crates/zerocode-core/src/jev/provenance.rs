@@ -713,6 +713,10 @@ pub const SEAT_LABEL_SOURCE: &[(&str, LabelSource)] = &[
     ("file_pick", LabelSource::Proxy),
     ("judgment_cache", LabelSource::Proxy),
     ("mention_rerank", LabelSource::Proxy),
+    // Records only and never rises (t-26584, decision 6): nothing writes its
+    // labels yet, and one would grade a tier against the work later seen on
+    // that model — an outcome watched afterwards, not the placement's own run.
+    ("model_tiers", LabelSource::Proxy),
     ("notify", LabelSource::Proxy),
     ("patch_review", LabelSource::Proxy),
     ("placement", LabelSource::Proxy),
