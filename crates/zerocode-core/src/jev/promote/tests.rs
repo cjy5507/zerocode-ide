@@ -3668,6 +3668,36 @@ fn the_cost_line_reads_a_model_current_side_and_a_rule_side_rises_on_quality_and
     );
 }
 
+/// Decision 3 of t-26584 (t-47784): a person's verdicts reach the judge from
+/// one place, the ledger's person rows, and the judge reads them on the
+/// labels line. A window's worth that say the current side named what the
+/// person named and the judgment did not holds the seat there, however clean
+/// its own marks are.
+#[test]
+fn person_rows_in_the_ledger_reach_the_labels_line() {
+    let seat = &crate::jev::RECALL;
+    let mut rows = window_then(seat, marks_that_rise);
+    rows.extend((0..JUDGED_EVERY_ROWS).map(|n| {
+        json!({
+            "at": 1,
+            "label": format!("person-{n}"),
+            "labelSource": "person",
+            "labelAuthor": "test",
+            "agreed": false,
+            "baselineAgreed": true,
+        })
+    }));
+    let verdict = judge_seat(seat, &rows).expect("judged").verdict;
+    assert_eq!(
+        verdict,
+        Verdict::Hold(Line::Labels {
+            judgment_right: 0,
+            probe_right: JUDGED_EVERY_ROWS,
+        }),
+        "{verdict:?}"
+    );
+}
+
 /// An act-line seat acts from a line read off its own graded answers
 /// (t-26584, ③). With no calibration record for it, it holds however clean
 /// its marks are: a line nobody calibrated is a default, and the judge says

@@ -1071,6 +1071,90 @@ fn turn_labels_carry_both_sides_spend_so_the_bar_prices_every_pair() {
     assert_eq!((tally.pairs, tally.priced), (turns, turns), "{tally:?}");
 }
 
+/// Decision 3 of t-26584 (t-47784): a person's verdicts reach both judges
+/// from one place, the ledger's person rows, and both read them the same way:
+/// a window's worth that say the probe named what the person named and the
+/// judgment did not holds the routing seat on the labels line, in the
+/// routing judge and in the core's.
+#[test]
+fn both_judges_read_the_ledgers_person_rows_on_the_labels_line() {
+    use zerocode_core::jev::promote::{judge_seat, window_wanted_for, Line, Verdict};
+    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+    let seat = &zerocode_core::jev::ROUTING;
+    let wanted = i64::try_from(window_wanted_for(seat).expect("routing rises")).expect("a window fits");
+    let mut rows: Vec<Value> =
+        (0..wanted).map(|at| compared(at, ["small", "low", "other"], Some(["small", "low", "other"]))).collect();
+    rows.extend((0..JUDGED_EVERY_ROWS).map(|n| {
+        json!({
+            "at": wanted + 1, "label": format!("{n:016x}"), "labelPart": "complexity",
+            "labelSource": "person", "labelAuthor": "test", "agreed": false, "baselineAgreed": true,
+        })
+    }));
+    let held = Verdict::Hold(Line::Labels { judgment_right: 0, probe_right: JUDGED_EVERY_ROWS });
+    let routing = super::super::decision_shadow::judge_rows(&rows, None).expect("routing is judged").verdict;
+    assert_eq!(routing, held, "the routing judge");
+    let core = judge_seat(seat, &rows).expect("the core judges the same rows").verdict;
+    assert_eq!(core, held, "the core's judge");
+}
+
+/// Decision 3 of t-26584 (t-47784): the file a person names
+/// (`smart.jev.labels`) reaches the judges as the ledger's person rows. When
+/// a judgment is due, the routing judge writes one row per judged axis of a
+/// labelled task that an answered request of the ledger matches — the
+/// verdicts and the request's key, never a word of the file — and counts the
+/// entries nothing matched in one summary row.
+#[test]
+fn a_named_labels_file_reaches_the_ledger_as_person_rows_without_its_words() {
+    use zerocode_core::jev::promote::window_wanted_for;
+    let work = tempfile::tempdir().expect("tmp");
+    let seat = &zerocode_core::jev::ROUTING;
+    let wanted = i64::try_from(window_wanted_for(seat).expect("routing rises")).expect("a window fits");
+    let (description, prompt) = ("the settings page", "port the settings page to the new form");
+    let unread = "words no judgment ever read";
+    let key = format!("{:016x}", super::super::probe_exec::task_fingerprint(description, prompt));
+    let mut rows: Vec<Value> =
+        (0..wanted).map(|at| compared(at, ["large", "low", "analysis"], Some(["medium", "low", "analysis"]))).collect();
+    rows[0]["task"] = json!(key);
+    let ledger = ledger_with(work.path(), &rows);
+    let labels = work.path().join("labels.jsonl");
+    let lines = [
+        json!({"description": description, "prompt": prompt, "complexity": "large", "risk": "high", "intent": "analysis"}),
+        json!({"prompt": unread, "complexity": "small"}),
+    ];
+    fs::write(&labels, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).expect("the labels file");
+    let settings = json!({"smart": {"jev": {"labels": labels.to_string_lossy()}}});
+    assert!(super::super::decision_shadow::judge_ledger(&ledger, Some(&settings), 9).is_some(), "a full window is due");
+
+    let written = read_rows(&ledger);
+    let mut person: Vec<(String, String, bool, bool)> = written
+        .iter()
+        .filter(|row| row["labelSource"] == json!("person"))
+        .map(|row| {
+            (
+                row["label"].as_str().unwrap_or_default().to_string(),
+                row["labelPart"].as_str().unwrap_or_default().to_string(),
+                row["agreed"].as_bool().unwrap_or_default(),
+                row["baselineAgreed"].as_bool().unwrap_or_default(),
+            )
+        })
+        .collect();
+    person.sort();
+    // The judgment said large, low, analysis; the probe medium, low, analysis;
+    // the person large, high, analysis.
+    assert_eq!(
+        person,
+        [
+            (key.clone(), "complexity".to_string(), true, false),
+            (key.clone(), "intent".to_string(), true, true),
+            (key.clone(), "risk".to_string(), false, false),
+        ]
+    );
+    let text = fs::read_to_string(&ledger).expect("the ledger");
+    assert!(!text.contains(prompt) && !text.contains(description) && !text.contains(unread), "{text}");
+    let summary = written.iter().rev().find(|row| row["kind"] == json!("person_labels")).expect("a summary row");
+    assert_eq!((&summary["matched"], &summary["unmatched"]), (&json!(1), &json!(1)), "{summary}");
+}
+
 /// A row where the probe answered beside the judgment marks both readers on
 /// the probe's answer, axis by axis: the judgment's `agreed` and, from the
 /// keyword tables' reading on the same row, the baseline's — so the seat is
