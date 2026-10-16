@@ -25,7 +25,8 @@ use zerocode_core::{ConversationKey, ProviderSession};
 use crate::{AppState, ShellStateExt as _, TermId};
 
 /// A resume door's answer: the pane it opened, or — `standing`, with nothing
-/// spawned — the pane already holding the conversation.
+/// spawned — the pane already holding the conversation, or — `finished`, with
+/// nothing spawned — the finished worker whose conversation it is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ConversationWake {
     pub(crate) term: TermId,
@@ -37,6 +38,11 @@ pub(crate) struct ConversationWake {
     /// one the launch named.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
+    /// The finished worker whose conversation a road that read it off a
+    /// stored record asked for (t-57717): nothing was started, and the door
+    /// stands a plain shell in its place without carrying the conversation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) finished: Option<String>,
 }
 
 impl ConversationWake {
@@ -45,6 +51,7 @@ impl ConversationWake {
             term,
             standing: false,
             model: None,
+            finished: None,
         }
     }
 
@@ -53,12 +60,92 @@ impl ConversationWake {
             term,
             standing: true,
             model: None,
+            finished: None,
+        }
+    }
+
+    /// Nothing opened: the conversation is finished worker `worker`'s.
+    pub(crate) const fn finished(term: TermId, worker: String) -> Self {
+        Self {
+            term,
+            standing: false,
+            model: None,
+            finished: Some(worker),
         }
     }
 
     /// The same answer, saying the model the pane's launch named.
     pub(crate) fn naming(self, model: Option<String>) -> Self {
         Self { model, ..self }
+    }
+}
+
+/// The road a conversation's wake came by (t-57717): the door's own word for
+/// why it is waking this conversation, which every line the wake writes
+/// carries. The webview names it; a word this window does not know is no
+/// road at all.
+///
+/// Four of them read the conversation off the window's stored record of a
+/// workspace, and none of those is a person choosing it by name: the record
+/// may hold a conversation that is no longer anybody's to come back. On
+/// 2026-10-15 and 16 three finished workers' conversations came back that way
+/// — `term 33 resumed claude <id> in …/t-54563` — each on the first visit
+/// to its checkout after a restart, with no road in the line to say how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WakeRoad {
+    /// The boot putting back the workspace in front.
+    RestoreFront,
+    /// The boot putting back, behind the front, a workspace whose
+    /// conversations were running when the window went.
+    RestoreBehind,
+    /// The first visit to a workspace since the window started.
+    Visit,
+    /// A sleeping tab put on the stage.
+    Stage,
+    /// A person reopening the conversation by name: its row in the sidebar,
+    /// or its tab's 「이 대화 다시 열기」.
+    Reopen,
+    /// A door that named no road.
+    Unnamed,
+}
+
+impl WakeRoad {
+    /// Every road a door names, in its wire spelling.
+    pub(crate) const NAMED: [WakeRoad; 5] = [
+        Self::RestoreFront,
+        Self::RestoreBehind,
+        Self::Visit,
+        Self::Stage,
+        Self::Reopen,
+    ];
+
+    /// The road `word` names, as the webview spells it.
+    pub(crate) fn named(word: Option<&str>) -> Self {
+        Self::NAMED
+            .into_iter()
+            .find(|road| word == Some(road.word()))
+            .unwrap_or(Self::Unnamed)
+    }
+
+    /// Its spelling — on the wire, and in every line the wake writes.
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::RestoreFront => "restore-front",
+            Self::RestoreBehind => "restore-behind",
+            Self::Visit => "visit",
+            Self::Stage => "stage",
+            Self::Reopen => "reopen",
+            Self::Unnamed => "none",
+        }
+    }
+
+    /// Whether the conversation was read off the window's stored record of a
+    /// workspace rather than picked by name.
+    pub(crate) const fn reads_a_stored_record(self) -> bool {
+        matches!(
+            self,
+            Self::RestoreFront | Self::RestoreBehind | Self::Visit | Self::Stage
+        )
     }
 }
 
@@ -299,5 +386,46 @@ mod tests {
             serde_json::to_value(ConversationWake::standing(3)).expect("json"),
             serde_json::json!({ "term": 3, "standing": true })
         );
+        // t-57717: a finished worker's conversation off a stored record —
+        // nothing opened, and the worker named for the shell's one line.
+        assert_eq!(
+            serde_json::to_value(ConversationWake::finished(5, "w-57717".to_string()))
+                .expect("json"),
+            serde_json::json!({ "term": 5, "standing": false, "finished": "w-57717" })
+        );
+    }
+
+    /// t-57717: the road a door names, as the webview spells it — a word this
+    /// window does not know is no road — and the four that read the
+    /// conversation off the window's stored record, the only roads a finished
+    /// worker's conversation is declined on.
+    #[test]
+    fn a_door_names_its_road_and_only_a_stored_records_roads_decline() {
+        let spelled: Vec<&str> = WakeRoad::NAMED.into_iter().map(WakeRoad::word).collect();
+        assert_eq!(
+            spelled,
+            [
+                "restore-front",
+                "restore-behind",
+                "visit",
+                "stage",
+                "reopen"
+            ]
+        );
+        for road in WakeRoad::NAMED {
+            assert_eq!(WakeRoad::named(Some(road.word())), road);
+            assert_eq!(
+                road.reads_a_stored_record(),
+                road != WakeRoad::Reopen,
+                "{}",
+                road.word()
+            );
+        }
+        for unknown in [None, Some("boot"), Some(""), Some("Visit")] {
+            let road = WakeRoad::named(unknown);
+            assert_eq!(road, WakeRoad::Unnamed, "{unknown:?}");
+            assert_eq!(road.word(), "none");
+            assert!(!road.reads_a_stored_record());
+        }
     }
 }

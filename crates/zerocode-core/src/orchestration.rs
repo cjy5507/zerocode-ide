@@ -12925,6 +12925,46 @@ impl Ledger {
         })
     }
 
+    /// The worker row a conversation is, as the ledger holds it now
+    /// (t-57717): the row still carrying it on — at work, asleep, or orphaned
+    /// with its pane perhaps still working — when one is, else the newest row
+    /// that carried it. `None` for a conversation no worker reported. A
+    /// read, for the window's resume lines and [`Self::finished_worker_of`];
+    /// nothing moves.
+    pub fn worker_of_conversation(&self, agent: &str, session_id: &str) -> Option<&Worker> {
+        let rows = || {
+            self.runs
+                .iter()
+                .flat_map(|run| run.workers.iter())
+                .filter(|worker| {
+                    worker.agent == agent
+                        && worker
+                            .session
+                            .as_ref()
+                            .is_some_and(|session| session.id == session_id)
+                })
+        };
+        rows()
+            .find(|worker| carries_its_conversation_on(worker.state))
+            .or_else(|| rows().max_by_key(|worker| worker.started_ms))
+    }
+
+    /// The finished worker a conversation was, if it was one (t-57717): its
+    /// row ended — released, a release asked for or never answered, its work
+    /// done and its pane left reclaimable or retained — no other row carries
+    /// the conversation on, and the person did not take its pane (a taken
+    /// pane is theirs, [`Worker::taken_over`]).
+    ///
+    /// What the window asks before a road that read the conversation off its
+    /// stored record of a workspace brings it back on its own: on 2026-10-15
+    /// and 16 three finished workers' conversations came back that way as
+    /// agent panes nobody had called, each on the first visit to its checkout
+    /// after a restart. A read; nothing moves.
+    pub fn finished_worker_of(&self, agent: &str, session_id: &str) -> Option<&Worker> {
+        self.worker_of_conversation(agent, session_id)
+            .filter(|worker| !worker.taken_over && !carries_its_conversation_on(worker.state))
+    }
+
     /// The launch words the sleeper `worker_id` comes back with (t-7812):
     /// `kept_worker_tuning`'s, asked by the window's resume road so the pane
     /// it opens for a sleeper's conversation is the launch the ledger's own
@@ -18144,6 +18184,17 @@ fn kept_worker_model(
             .then(|| current(&worker.agent, named))
             .flatten()
             .unwrap_or_else(|| named.to_string()),
+    )
+}
+
+/// Whether a worker row in `state` still carries its conversation on
+/// (t-57717): at work, asleep for its coordinator to seat again, or orphaned
+/// with its pane perhaps still working. Every other state is a row that
+/// ended — the answer [`Ledger::finished_worker_of`] reads.
+const fn carries_its_conversation_on(state: WorkerState) -> bool {
+    matches!(
+        state,
+        WorkerState::Active | WorkerState::Sleeping | WorkerState::Orphaned
     )
 }
 

@@ -5300,6 +5300,10 @@ async function restoreActiveWorktreeTab({ firstTerminal = true } = {}) {
     setActiveTab(target.id);
     return;
   }
+  // The road this workspace's stored set comes back by (t-57717), which every
+  // resume line names: the window's first restore is the boot's own, of the
+  // workspace in front; every later one is a visit.
+  const road = restoredWorkspaces.size === 0 ? "restore-front" : "visit";
   // Read once per workspace and no more. Everything below OPENS what the file
   // holds, and a second reading of the same file opens it a second time.
   restoredWorkspaces.add(worktree);
@@ -5330,7 +5334,7 @@ async function restoreActiveWorktreeTab({ firstTerminal = true } = {}) {
   const yieldsToDefaultAgent =
     stored.length > 0 && !storedLayoutsHoldProgram(stored) && defaultAgentChosen();
   if (!yieldsToDefaultAgent) {
-    if (await restoreWorktreeLayouts(activeWorktreePath, stored)) {
+    if (await restoreWorktreeLayouts(activeWorktreePath, stored, { road })) {
       settleVisitStage(worktree);
       return;
     }

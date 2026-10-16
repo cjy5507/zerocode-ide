@@ -578,12 +578,15 @@ function resumableSessionOf(tab) {
  * conversation is what the row is for. */
 async function resumeSession(known, worktree = null) {
   try {
+    // A person's pick by name (t-57717): its sidebar row or its tab's menu —
+    // the road that still opens a finished worker's conversation.
     const woke = await wakeConversation(
       known.agent,
       known.session,
       spawnGrid({ placement: "tab" }),
       null,
       worktree,
+      "reopen",
     );
     if (woke.standing) {
       // Held in a tab: that pane is the answer. In none yet: the door that is

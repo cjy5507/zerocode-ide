@@ -549,6 +549,63 @@ pub(crate) fn standing_worktrees(layouts: &Layouts) -> Vec<String> {
     standing
 }
 
+/// What [`without_finished`] left of a set of tabs (t-57717).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Left {
+    /// Every tab in the order it was given — `None` for one whose every leaf
+    /// held a struck conversation, which is not worth keeping.
+    pub(crate) tabs: Vec<Option<TabLayout>>,
+    /// The worker each struck conversation was, in the order struck.
+    pub(crate) struck: Vec<String>,
+}
+
+impl Left {
+    /// The tabs kept, in order.
+    pub(crate) fn kept(self) -> Vec<TabLayout> {
+        self.tabs.into_iter().flatten().collect()
+    }
+}
+
+/// A set of tabs without the conversations `gone` names (t-57717): each leaf
+/// whose wake it answers a worker for keeps its place in the tree and comes
+/// back a plain shell — its wake and the program it ran both go — and a tab
+/// whose every leaf was one is not kept at all, so a workspace whose stored
+/// set held nothing else opens as one that stored nothing. A person's
+/// conversation and a leaf that held no conversation stay as they were.
+///
+/// The ledger's half is `gone`: the read roads strike a finished worker's
+/// conversation, the window's own save strikes any worker's. On 2026-10-15
+/// and 16 three finished workers' conversations came back off this file as
+/// agent panes nobody had called, each on the first visit to its checkout.
+pub(crate) fn without_finished(
+    tabs: Vec<TabLayout>,
+    gone: impl Fn(&WakeAgent) -> Option<String>,
+) -> Left {
+    let mut struck = Vec::new();
+    let tabs = tabs
+        .into_iter()
+        .map(|mut tab| {
+            let leaves = tab.root.leaves();
+            let mut ordinals: Vec<usize> = tab.agents.keys().copied().collect();
+            ordinals.sort_unstable();
+            let mut leaves_struck = 0;
+            for at in ordinals {
+                let Some(worker) = tab.agents.get(&at).and_then(&gone) else {
+                    continue;
+                };
+                tab.agents.remove(&at);
+                tab.running.remove(&at);
+                struck.push(worker);
+                if at < leaves {
+                    leaves_struck += 1;
+                }
+            }
+            (leaves_struck < leaves).then_some(tab)
+        })
+        .collect();
+    Left { tabs, struck }
+}
+
 /// A pane the window found running a conversation as it went: its shell,
 /// the workspace its agent last reported from, and the conversation.
 #[derive(Debug, Clone, PartialEq)]
@@ -1323,5 +1380,145 @@ mod tests {
             "a tab whose terminal had ended was called standing"
         );
         assert_eq!(standing_worktrees(&layouts), vec![trees[0].clone()]);
+    }
+
+    fn claude(id: &str) -> WakeAgent {
+        WakeAgent {
+            agent: "claude".to_string(),
+            key: "session_id".to_string(),
+            id: id.to_string(),
+            transcript_path: None,
+            interrupted: false,
+        }
+    }
+
+    /// A finished worker's conversation, standing in for the three
+    /// 2026-10-15/16 cases, and the worker it was (t-57717).
+    const FINISHED: &str = "57717a0c-0000-4000-8000-0000000000f1";
+
+    fn finished(wake: &WakeAgent) -> Option<String> {
+        (wake.id == FINISHED).then(|| "w-54907".to_string())
+    }
+
+    /// t-57717: the record the first visit to a finished worker's checkout
+    /// read — one tab, its one leaf that worker's conversation — is not kept,
+    /// so the workspace opens as one that stored nothing; a tab whose other
+    /// leaf is a person's keeps the person's leaf as it was and the struck
+    /// leaf comes back a plain shell; a person's tab and a plain shell are
+    /// untouched; and each struck conversation names its worker.
+    #[test]
+    fn a_finished_workers_conversation_leaves_the_set_and_a_persons_stays() {
+        let worker_tab = TabLayout {
+            id: Some(1),
+            agents: HashMap::from([(0, claude(FINISHED))]),
+            running: HashMap::from([(0, "claude".to_string())]),
+            focused: true,
+            awake: true,
+            ..bare(PaneNode::Leaf)
+        };
+        let shared = TabLayout {
+            id: Some(2),
+            agents: HashMap::from([
+                (0, claude(FINISHED)),
+                (1, claude("3f1e2d4c-0000-4000-8000-00000000c1a0")),
+            ]),
+            running: HashMap::from([(0, "claude".to_string()), (1, "claude".to_string())]),
+            titles: HashMap::from([(0, "the worker's pane".to_string())]),
+            ..bare(split(None))
+        };
+        let persons = TabLayout {
+            id: Some(3),
+            agents: HashMap::from([(0, zo("session-1790551803628-0"))]),
+            running: HashMap::from([(0, "zo".to_string())]),
+            ..bare(PaneNode::Leaf)
+        };
+        let shell = TabLayout {
+            id: Some(4),
+            ..bare(PaneNode::Leaf)
+        };
+
+        let left = without_finished(
+            vec![worker_tab, shared.clone(), persons.clone(), shell.clone()],
+            finished,
+        );
+
+        assert_eq!(
+            left.struck,
+            vec!["w-54907".to_string(), "w-54907".to_string()]
+        );
+        assert_eq!(left.tabs.len(), 4, "a tab's place in the answer moved");
+        assert_eq!(left.tabs[0], None, "the finished worker's tab came back");
+        let kept = left.tabs[1].as_ref().expect("the tab a person shares");
+        assert_eq!(kept.agents.keys().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(kept.running.keys().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(kept.root, shared.root, "the tree lost a leaf");
+        assert_eq!(kept.titles, shared.titles, "the leaf's name went with it");
+        assert_eq!(left.tabs[2].as_ref(), Some(&persons));
+        assert_eq!(left.tabs[3].as_ref(), Some(&shell));
+        assert_eq!(
+            left.kept()
+                .into_iter()
+                .filter_map(|tab| tab.id)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+    }
+
+    /// t-57717: nothing struck is the same set — a ledger that names no
+    /// worker for any conversation leaves the record exactly as it stood.
+    #[test]
+    fn a_set_with_no_finished_conversation_is_left_as_it_stands() {
+        let tabs = vec![
+            TabLayout {
+                id: Some(1),
+                agents: HashMap::from([(0, claude("3f1e2d4c-0000-4000-8000-00000000c1a0"))]),
+                running: HashMap::from([(0, "claude".to_string())]),
+                awake: true,
+                ..bare(PaneNode::Leaf)
+            },
+            bare(split(Some(0.3))),
+        ];
+        let left = without_finished(tabs.clone(), finished);
+        assert!(left.struck.is_empty());
+        assert_eq!(left.kept(), tabs);
+    }
+
+    /// t-57717: a workspace whose only standing conversation was a finished
+    /// worker's is not put back behind the front — the boot reads the set
+    /// with the finished leaves already gone.
+    #[test]
+    fn a_workspace_standing_only_for_a_finished_worker_is_not_put_back() {
+        let root = tempfile::tempdir().expect("the checkouts");
+        let worker_checkout = root.path().join("t-54563");
+        let persons_checkout = root.path().join("main");
+        std::fs::create_dir_all(&worker_checkout).expect("the worker's checkout");
+        std::fs::create_dir_all(&persons_checkout).expect("the person's checkout");
+        let mut layouts = Layouts::new();
+        layouts.insert(
+            worker_checkout.to_string_lossy().into_owned(),
+            vec![TabLayout {
+                agents: HashMap::from([(0, claude(FINISHED))]),
+                running: HashMap::from([(0, "claude".to_string())]),
+                awake: true,
+                ..bare(PaneNode::Leaf)
+            }],
+        );
+        layouts.insert(
+            persons_checkout.to_string_lossy().into_owned(),
+            vec![TabLayout {
+                agents: HashMap::from([(0, zo("session-1790551803628-0"))]),
+                awake: true,
+                ..bare(PaneNode::Leaf)
+            }],
+        );
+        let before = standing_worktrees(&layouts);
+        for tabs in layouts.values_mut() {
+            *tabs = without_finished(std::mem::take(tabs), finished).kept();
+        }
+        assert_eq!(before.len(), 2);
+        assert_eq!(
+            standing_worktrees(&layouts),
+            vec![persons_checkout.to_string_lossy().into_owned()]
+        );
     }
 }

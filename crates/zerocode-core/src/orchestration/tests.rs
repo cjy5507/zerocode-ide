@@ -25258,6 +25258,9 @@ mod completion;
 /// t-26587: a success report must show the evidence of each pass condition
 /// its task wrote (`tests/evidence.rs`).
 mod evidence;
+/// t-57717: which conversation is a finished worker's, for the window's
+/// stored-record roads (`tests/finished_conversation.rs`).
+mod finished_conversation;
 mod gate_reuse;
 /// t-45315 (T3 stage 6): `land-batch` chooses verified work for the window to stack, and every
 /// record of a batch comes back as a receipt the ledger judges (`tests/land_batch.rs`).
