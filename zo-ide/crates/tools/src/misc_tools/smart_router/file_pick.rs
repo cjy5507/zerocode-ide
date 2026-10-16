@@ -211,11 +211,12 @@ async fn score_candidates(
     row.requests = call.requests;
     row.retries = call.retries;
     row.elapsed_ms = jev_gate::millis(call.elapsed);
+    let said = jev_gate::ServerSaid::of(&call);
     let response = match call.outcome {
         Ok(response) => response,
         Err(failure) => {
             row.outcome = failure.ledger_token();
-            write_request_and_judge(cwd, &row);
+            write_request_and_judge(cwd, &said.beside(&row));
             return None;
         }
     };
@@ -255,7 +256,7 @@ fn read_answers(
     Ok(CheckedAnswers { value, probabilities })
 }
 
-fn write_request_and_judge(cwd: &Path, row: &FilePickRow) {
+fn write_request_and_judge(cwd: &Path, row: &impl serde::Serialize) {
     let ledger = file_pick_path(cwd);
     let _ = append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES);
     let _ = judge_ledger(&ledger, super::decision_shadow::now_ms());

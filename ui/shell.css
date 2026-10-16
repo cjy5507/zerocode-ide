@@ -43920,6 +43920,7 @@ h4.knowledge-inspector-head::after {
 .jev-view [data-status="blocked"],
 .settings-jev-standings [data-status="blocked"] { --jev-tone: var(--jev-tone-blocked); }
 .jev-view [data-status="dormant"] { --jev-tone: var(--jev-tone-dormant); }
+.jev-view [data-jev-resting] { --jev-tone: var(--jev-tone-under); }
 
 /* What the table says when no feature was asked all week (t-6277 D10):
    whether Jev is off, or on and quiet. */

@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zerocode_core::jev::door::{self, Cleared, JevSettings, Refused};
 use zerocode_core::jev::{count, hedge, JevMode, JevUse, RECALL, ROUTING, SMART_SETTINGS_KEY};
+use zerocode_core::jev::summary;
 
 use super::shadow_ledger::{last_shadow_line, last_shadow_lines, shadow_ledger_dir, shadow_ledger_path};
 
@@ -51,6 +52,30 @@ const SETTINGS_FILE: &str = "settings.json";
 /// 1.38 MB ledger and naming a delay from it took 495 us (least of 20, warm)
 /// — 0.03% of the 1,500 ms wall it is spent to land inside.
 const HEDGE_SAMPLE_ROWS: usize = 256;
+
+/// Requests in a row, of one seat's series, that may go unanswered before a
+/// seat that applies nothing rests (t-58193) — the series being the seat's
+/// ledger under this provider's folder and its current rubric.
+///
+/// More than the three in a row that end an acting seat's rise
+/// ([`zerocode_core::jev::promote::FALLBACKS_THAT_END_IT`]), so a bad minute
+/// of the wire — a restart, a few timeouts — never rests a seat that answers
+/// at all; few enough that a seat whose every request fails stops within
+/// two minutes at the pace the recall asked on 2026-10-15, when 343 of its
+/// requests were refused in 68 minutes.
+pub const UNANSWERED_BEFORE_REST: usize = 8;
+
+/// How long such a seat rests before one request tries the server again
+/// (t-58193), from the newest of its unanswered requests.
+///
+/// zo cannot see a server get better — a person or an update restarts it —
+/// so the rest is a time and not a signal. Two tries an hour cost a server
+/// that never answers two requests where the recall sent about five a
+/// minute, and those held the one-at-a-time server for 25.7 of 68 minutes
+/// on 2026-10-15; a server restarted on the same address is found within
+/// half an hour. A new address or model is a new ledger folder, where the
+/// seat has no rest to wait out.
+pub const REST: Duration = Duration::from_secs(30 * 60);
 
 /// The uses whose ledgers live under a zo project's state: the ones whose rows
 /// say a person had a judgment turned on in a workspace.
@@ -124,6 +149,25 @@ impl JevDoor {
             ledgers: None,
             review_home: None,
             settings_file: Some(home.join(SETTINGS_FILE)),
+            review_origin: None,
+        }
+    }
+
+    /// The door for words from `cwd` as it stands, consenting nothing: what a
+    /// reader of the door's state stands on, such as the summary that says
+    /// why a seat rests (t-58193), which must not write the person's
+    /// settings.
+    #[must_use]
+    pub fn reading(cwd: &Path) -> Self {
+        let home = runtime::default_config_home();
+        let settings_path = home.join(SETTINGS_FILE);
+        Self {
+            settings: JevSettings::from_root(&read_settings_root(&settings_path)).resolved(),
+            workspace: Some(door::resolved_path(cwd)),
+            requests: todays_requests(&home),
+            ledgers: Some(shadow_ledger_dir(cwd)),
+            review_home: None,
+            settings_file: Some(settings_path),
             review_origin: None,
         }
     }
@@ -203,8 +247,9 @@ impl JevDoor {
             |asking| {
                 let cleared = door::may_send(row, asking, body)?;
                 if !self.seat_asks_now(row) { Err(Refused::Off) }
-                else if settings.model == self.settings.model { Ok(cleared) }
-                else { Err(Refused::SettingsChanged) }
+                else if settings.model != self.settings.model { Err(Refused::SettingsChanged) }
+                else if self.resting(row) { Err(Refused::Resting) }
+                else { Ok(cleared) }
             },
             key,
             &settings,
@@ -244,8 +289,9 @@ impl JevDoor {
         };
         let cleared = door::may_send(row, &asking, body)?;
         if !self.seat_asks_now(row) { Err(Refused::Off) }
-        else if settings.model == self.settings.model { Ok(cleared) }
-        else { Err(Refused::SettingsChanged) }
+        else if settings.model != self.settings.model { Err(Refused::SettingsChanged) }
+        else if self.resting(row) { Err(Refused::Resting) }
+        else { Ok(cleared) }
     }
 
     /// Ask the door about a key check; cleared, it is counted in the day.
@@ -332,6 +378,410 @@ impl JevDoor {
             .flatten()
             .filter(|_| self.count_a_hedge().is_ok())
     }
+
+    /// Whether `row`'s seat rests now ([`Self::resting_now`]).
+    fn resting(&self, row: &JevUse) -> bool {
+        self.resting_now(row).is_some()
+    }
+
+    /// Why `row`'s seat rests now and until when (t-58193): what the door
+    /// refuses it with `resting` for, and what the panel says of it
+    /// (`super::jev_summary::with_rests`). Its server asked it to wait and
+    /// the time has not come ([`Self::asked_to_wait`]); its provider cut the
+    /// smallest request it can make, one item, and [`REST`] has not passed
+    /// since ([`Self::room_of`]); or it applies nothing and its own ledger
+    /// says it rests ([`Self::rest_of`]). `None` while it may ask.
+    #[must_use]
+    pub fn resting_now(&self, row: &JevUse) -> Option<Resting> {
+        if let Some(until_ms) = self.asked_to_wait(row) {
+            return Some(Resting { until_ms, cause: RestCause::Waiting, unanswered: None });
+        }
+        if self.room_of(row) == Some(0) {
+            let cut = self.read_back(row, |lines| newest_sent_in(row, lines)).flatten();
+            let cut = cut.unwrap_or_else(super::decision_shadow::now_ms);
+            let until_ms = cut.saturating_add(rest_ms());
+            return Some(Resting { until_ms, cause: RestCause::TooLong, unanswered: None });
+        }
+        let rest = self.rest_of(row).filter(|_| !self.applies_now(row))?;
+        let cause = RestCause::of_rest(&rest.cause);
+        Some(Resting { until_ms: rest.until_ms, cause, unanswered: Some(UNANSWERED_BEFORE_REST) })
+    }
+
+    /// Until when `row`'s seat waits because its server asked it to
+    /// (t-58193), in Unix milliseconds: the `serverRetryAt` ([`ServerSaid`])
+    /// of the newest request the seat sent to this provider, under any rubric
+    /// — the wait is the server's — while that moment is still ahead. A `503`
+    /// or `429` naming a `Retry-After` is the provider asking the seat to
+    /// wait: the local server says it while it waits to restart after a
+    /// stop, a remote provider when it is overloaded. Every seat waits, one
+    /// that applies its judgment too, since the server would refuse it.
+    ///
+    /// The rows are read where the seat writes them: a guard's in its own
+    /// ledger under the config home, one for every project on this machine
+    /// ([`super::tool_guard::guard_ledger_of`]), every other seat's in this
+    /// project's folder. Each is the provider's own folder
+    /// (`runtime::judgment_evidence_dir`), so a wait one provider named
+    /// holds no seat asking another.
+    ///
+    /// Read from the tail the hedge reads alone: no wait is longer than one
+    /// [`REST`], and a tail without a request lets one go, whose answer
+    /// names the wait again.
+    fn asked_to_wait(&self, row: &JevUse) -> Option<i64> {
+        let ledger = match super::tool_guard::guard_ledger_of(row) {
+            Some(own) => own,
+            None => self.ledgers.as_deref()?.join(row.ledger),
+        };
+        let tail = last_shadow_lines(&ledger, HEDGE_SAMPLE_ROWS);
+        let newest = tail
+            .iter()
+            .rev()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(request_left)?;
+        let until = newest.get(SERVER_RETRY_AT).and_then(Value::as_i64)?;
+        (until > super::decision_shadow::now_ms()).then_some(until)
+    }
+
+    /// The most items — notes, skills — one request of `row`'s seat may
+    /// carry to this provider (t-58193), as its own ledger in this provider's
+    /// folder says ([`room_in`]): `None` while the provider has cut none of
+    /// the seat's requests in its series, and again once the seat asks under
+    /// none.
+    ///
+    /// No provider declares how much it reads — not the local server's model
+    /// list, not a provider's settings — and zo cannot count a model's
+    /// tokens, so the room is learned from the provider's own refusal
+    /// ([`api::SYSTEMONE_CUT_REFUSAL`]), halved until a request fits and
+    /// doubled again as answers come. A limit a provider declared would be
+    /// read here, in place of the halving.
+    #[must_use]
+    pub fn room_of(&self, row: &JevUse) -> Option<usize> {
+        let now = super::decision_shadow::now_ms();
+        self.read_back(row, |lines| room_in(row, lines, now)).flatten()
+    }
+
+    /// Whether one [`REST`] has passed since `row`'s seat last sent this
+    /// provider a request in its series, or it sent none (t-58193): when a
+    /// seat that cannot carry fewer items than its room holds asks again.
+    #[must_use]
+    pub fn rested(&self, row: &JevUse) -> bool {
+        let now = super::decision_shadow::now_ms();
+        let newest = self.read_back(row, |lines| newest_sent_in(row, lines)).flatten();
+        newest.is_none_or(|at| at.saturating_add(rest_ms()) <= now)
+    }
+
+    /// `row`'s rest as its own ledger in this provider's folder says it
+    /// ([`rest_in`]).
+    #[must_use]
+    pub fn rest_of(&self, row: &JevUse) -> Option<Rest> {
+        let now = super::decision_shadow::now_ms();
+        self.read_back(row, |lines| rest_in(row, lines, now)).flatten()
+    }
+
+    /// What `read` makes of `row`'s own ledger in this provider's folder,
+    /// newest line first: read from the tail the hedge reads, and from the
+    /// whole ledger only when that tail ran out before `read` settled — a
+    /// seat that has rested for hours wrote a row each time it was asked
+    /// meanwhile. `None` for a door that stands in no project.
+    fn read_back<T>(
+        &self,
+        row: &JevUse,
+        read: impl Fn(&mut dyn Iterator<Item = &str>) -> Reading<T>,
+    ) -> Option<T> {
+        let ledger = self.ledgers.as_deref()?.join(row.ledger);
+        let tail = last_shadow_lines(&ledger, HEDGE_SAMPLE_ROWS);
+        match read(&mut tail.iter().rev().map(String::as_str)) {
+            Reading::Settled(said) => Some(said),
+            Reading::Short(_) => {
+                let whole = std::fs::read_to_string(&ledger).unwrap_or_default();
+                Some(read(&mut whole.lines().rev()).said())
+            }
+        }
+    }
+
+    /// Whether `row`'s seat applies its judgment now — the person's `on`, or
+    /// an `auto` its own ledger raised — which no rest touches. A door that
+    /// reads no settings file (a test's) knows no word, and applies nothing.
+    fn applies_now(&self, row: &JevUse) -> bool {
+        let (Some(_), Some(cwd), Some(ledgers)) =
+            (&self.settings_file, self.workspace.as_deref(), self.ledgers.as_deref())
+        else {
+            return false;
+        };
+        let loader = runtime::ConfigLoader::default_for(Path::new(cwd));
+        super::settings::merged_settings_root_from(&loader).is_some_and(|root| {
+            let mode = row.mode_in(&root);
+            let raised = || super::jev_summary::raised_in(row, &ledgers.join(row.ledger));
+            mode.applies_with(mode.automatic() && raised())
+        })
+    }
+}
+
+/// Why a seat that applies nothing does not ask now (t-58193): its last
+/// [`UNANSWERED_BEFORE_REST`] requests went unanswered, and [`REST`] has not
+/// passed since the newest of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rest {
+    /// When the rest ends, in Unix milliseconds.
+    pub until_ms: i64,
+    /// What those requests ended on most often, the newest first among
+    /// equals: the provider's refusal where the server named one, else the
+    /// row's outcome.
+    pub cause: String,
+}
+
+/// Why a seat rests now and until when (t-58193), as the door reads it
+/// (`JevDoor::resting_now`): the one field the summary hands the panel,
+/// whose chip and sentence both read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resting {
+    /// When the seat may ask again, in Unix milliseconds.
+    pub until_ms: i64,
+    pub cause: RestCause,
+    /// For a rest of the seat's own, how many of its requests in a row went
+    /// unanswered (`UNANSWERED_BEFORE_REST`); `None` for a wait its server
+    /// asked for and for a room of none.
+    pub unanswered: Option<usize>,
+}
+
+/// What a seat rests for (t-58193), by the word the summary writes, which
+/// the panel words in every language (`ui/shell-jev.js`, `JEV_REST_CAUSES`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestCause {
+    /// Its server asked it to wait (`JevDoor::asked_to_wait`).
+    Waiting,
+    /// Its provider cut a request of one item (`JevDoor::room_of`).
+    TooLong,
+    /// Its last `UNANSWERED_BEFORE_REST` requests went unanswered, most
+    /// often because the provider cut them for their length,
+    Cut,
+    /// because they timed out,
+    Timeout,
+    /// because they never reached the server,
+    Unreachable,
+    /// or because the server refused them another way.
+    Refused,
+}
+
+impl RestCause {
+    /// The word the summary writes for the cause.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::TooLong => "too_long",
+            Self::Cut => "cut",
+            Self::Timeout => "timeout",
+            Self::Unreachable => "unreachable",
+            Self::Refused => "refused",
+        }
+    }
+
+    /// The cause of a rest of the seat's own, from what its unanswered
+    /// requests ended on most often ([`Rest::cause`]).
+    fn of_rest(cause: &str) -> Self {
+        if cause == api::SYSTEMONE_CUT_REFUSAL {
+            Self::Cut
+        } else if cause == api::SystemOneFailure::Timeout.token() {
+            Self::Timeout
+        } else if cause == api::SystemOneFailure::Transport.token() {
+            Self::Unreachable
+        } else {
+            Self::Refused
+        }
+    }
+}
+
+/// What a ledger's lines, read newest first, settled — or, when they ran out
+/// first, what they said so far.
+enum Reading<T> {
+    Settled(T),
+    Short(T),
+}
+
+impl<T> Reading<T> {
+    /// What the lines said, settled or not.
+    fn said(self) -> T {
+        match self {
+            Self::Settled(said) | Self::Short(said) => said,
+        }
+    }
+}
+
+/// A seat's rest as a ledger's `lines` say it, newest line first.
+///
+/// What is read is the requests the seat sent in its series
+/// ([`sent_in_series`]); a request the door refused, a memo's answer, a
+/// judge's transition and a mark are no request, and count neither way. Nor
+/// does a request its provider cut under a room the seat had learned: the
+/// fit rule answers that one by halving the room ([`room_in`]), which ends
+/// the cuts within a few requests. Nor does an answer that asked for a wait:
+/// its server said when to come back, and the door holds the seat until
+/// then ([`JevDoor::asked_to_wait`]). An answer, or
+/// [`UNANSWERED_BEFORE_REST`] unanswered requests, settles it.
+fn rest_in<'a>(
+    seat: &JevUse,
+    lines: impl Iterator<Item = &'a str>,
+    now_ms: i64,
+) -> Reading<Option<Rest>> {
+    let mut causes: Vec<String> = Vec::new();
+    let mut newest = None;
+    for row in lines.filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
+        if !sent_in_series(seat, &row)
+            || (cut(&row) && row.get(ROOM).is_some())
+            || row.get(SERVER_RETRY_AT).is_some()
+        {
+            continue;
+        }
+        if answered(&row) {
+            return Reading::Settled(None);
+        }
+        newest = newest.or_else(|| summary::AT.read(&row).and_then(Value::as_i64));
+        let refusal = row.get(SERVER_REFUSAL).or_else(|| summary::OUTCOME.read(&row));
+        causes.push(refusal.and_then(Value::as_str).unwrap_or_default().to_string());
+        if causes.len() == UNANSWERED_BEFORE_REST {
+            let until_ms = newest.unwrap_or_default().saturating_add(rest_ms());
+            let cause = most_common(causes);
+            return Reading::Settled((until_ms > now_ms).then_some(Rest { until_ms, cause }));
+        }
+    }
+    Reading::Short(None)
+}
+
+/// [`REST`] in the Unix milliseconds a row's `at` is written in.
+fn rest_ms() -> i64 {
+    i64::try_from(REST.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Whether `row` keeps a request its judgment answered.
+fn answered(row: &Value) -> bool {
+    summary::OUTCOME.read(row).and_then(Value::as_str) == Some(door::ANSWERED_OUTCOME)
+}
+
+/// When `seat` last sent a request in its series, as a ledger's `lines` say
+/// it, newest line first.
+fn newest_sent_in<'a>(seat: &JevUse, lines: impl Iterator<Item = &'a str>) -> Reading<Option<i64>> {
+    let newest = lines
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|row| sent_in_series(seat, row));
+    match newest {
+        Some(row) => Reading::Settled(summary::AT.read(&row).and_then(Value::as_i64)),
+        None => Reading::Short(None),
+    }
+}
+
+/// Where [`ServerSaid`] keeps the provider's refusal, and the moment until
+/// which the server asked for nothing more, on a row.
+const SERVER_REFUSAL: &str = "serverRefusal";
+const SERVER_RETRY_AT: &str = "serverRetryAt";
+
+/// Where a seat's row keeps the room it was asked under, how many items its
+/// request carried, and the model that answered it.
+const ROOM: &str = "room";
+const CANDIDATES: &str = "candidates";
+const MODEL: &str = "model";
+
+/// A seat's room as a ledger's `lines` say it, newest line first, read from
+/// the requests the seat sent in its series ([`sent_in_series`]), back to
+/// the one that set the room:
+///
+/// - a request its provider cut ([`cut`]) leaves room for half the items it
+///   carried, and a cut that leaves room for none wakes as room for one once
+///   [`REST`] has passed since it, so a short question can show that the
+///   provider reads again;
+/// - [`UNANSWERED_BEFORE_REST`] answers under one room double it for the
+///   next request — the window that decides a rest decides a growth, so the
+///   growth has no number of its own — and a cut of that request halves it
+///   again;
+/// - a request asked under no room says there is none, which is how a seat
+///   whose room has grown to its whole request ends it.
+fn room_in<'a>(
+    seat: &JevUse,
+    lines: impl Iterator<Item = &'a str>,
+    now_ms: i64,
+) -> Reading<Option<usize>> {
+    let mut room = None;
+    let mut answers = 0;
+    for row in lines.filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
+        if !sent_in_series(seat, &row) {
+            continue;
+        }
+        let count = |key: &str| {
+            row.get(key).and_then(Value::as_u64).and_then(|count| usize::try_from(count).ok())
+        };
+        if let Some(carried) = count(CANDIDATES).filter(|_| cut(&row)) {
+            if room.is_some() {
+                return Reading::Settled(room);
+            }
+            let at = summary::AT.read(&row).and_then(Value::as_i64).unwrap_or_default();
+            let woke = at.saturating_add(rest_ms()) <= now_ms;
+            let halved = carried / 2;
+            return Reading::Settled(Some(if halved == 0 && woke { 1 } else { halved }));
+        }
+        let held = count(ROOM);
+        match room {
+            None if held.is_none() => return Reading::Settled(None),
+            None => room = held,
+            Some(_) if held != room => return Reading::Settled(room),
+            Some(_) => {}
+        }
+        if answered(&row) {
+            answers += 1;
+            if answers == UNANSWERED_BEFORE_REST {
+                return Reading::Settled(room.map(|room| room.saturating_mul(2)));
+            }
+        }
+    }
+    Reading::Short(room)
+}
+
+/// Whether `row` keeps a request its provider cut for being longer than its
+/// model reads ([`api::SYSTEMONE_CUT_REFUSAL`]). A row that also names the
+/// model that answered had an earlier stage answered and a later one cut,
+/// whose items it does not count; it says nothing of the room.
+fn cut(row: &Value) -> bool {
+    row.get(SERVER_REFUSAL).and_then(Value::as_str) == Some(api::SYSTEMONE_CUT_REFUSAL)
+        && row.get(MODEL).is_none()
+}
+
+/// Whether `row` belongs to `seat`'s series: it names the rubric the seat
+/// asks now — read as the judge reads a row's rubric, where a row naming
+/// none is the first rubric's (`zerocode_core::jev::promote`). The provider
+/// is the ledger's folder.
+fn in_series(seat: &JevUse, row: &Value) -> bool {
+    let rubric = summary::RUBRIC_VERSION.read(row).map_or(
+        Some(zerocode_core::jev::questions::UNVERSIONED_RUBRIC),
+        |spelled| spelled.as_u64().and_then(|version| u32::try_from(version).ok()),
+    );
+    rubric == Some(seat.rubric_version)
+}
+
+/// Whether `row` is a request its seat sent: one that asked something and
+/// left at least once.
+fn request_left(row: &Value) -> bool {
+    summary::asked_something(row).is_some()
+        && summary::REQUESTS.read(row).and_then(Value::as_u64).is_some_and(|sent| sent > 0)
+}
+
+/// Whether `row` is a request `seat` sent in its series ([`in_series`]).
+fn sent_in_series(seat: &JevUse, row: &Value) -> bool {
+    request_left(row) && in_series(seat, row)
+}
+
+/// The word `causes` hold most often, the first of them among equals.
+fn most_common(causes: Vec<String>) -> String {
+    let mut tally: Vec<(String, usize)> = Vec::new();
+    for cause in causes {
+        match tally.iter_mut().find(|(seen, _)| *seen == cause) {
+            Some((_, count)) => *count += 1,
+            None => tally.push((cause, 1)),
+        }
+    }
+    tally
+        .into_iter()
+        .rev()
+        .max_by_key(|(_, count)| *count)
+        .map(|(cause, _)| cause)
+        .unwrap_or_default()
 }
 
 /// What a hedge's plan reads of a ledger row, in whichever of the two
@@ -382,6 +832,70 @@ pub fn model_key(model: &str) -> u64 {
 #[must_use]
 pub fn millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// What a managed server said beside a refusal (t-55423, t-58193): the code it
+/// refused with, beside a `502` the provider's refusal of the answer —
+/// `provider_context_truncated` for a request longer than the model reads —
+/// and, beside a refusal that named a `Retry-After`, until when it asked for
+/// nothing more. Every seat's row keeps them under the window's keys, through
+/// [`ServerSaid::of`], so a refused judgment says why; all are absent on an
+/// answer and wherever the server named nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+// The `server_*` prefix is the point: each field is the ledger key the window reads.
+#[allow(clippy::struct_field_names)]
+pub struct ServerSaid {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_refusal: Option<String>,
+    /// Until when the server asked for nothing more from this seat, in Unix
+    /// milliseconds (t-58193): the call's `retry_after` from when its answer
+    /// was read, and never further off than one [`REST`], so no header keeps
+    /// a seat silent longer than the rest does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_retry_at: Option<i64>,
+}
+
+impl ServerSaid {
+    /// What `call`'s server said.
+    #[must_use]
+    pub fn of(call: &SystemOneCall) -> Self {
+        let until = |after: Duration| {
+            let after = i64::try_from(after.min(REST).as_millis()).unwrap_or(i64::MAX);
+            super::decision_shadow::now_ms().saturating_add(after)
+        };
+        Self {
+            server_error_code: call.server_error_code.map(str::to_string),
+            server_refusal: call.server_refusal.map(str::to_string),
+            server_retry_at: call.retry_after.map(until),
+        }
+    }
+
+    /// The words written onto `row`, a row kept as JSON.
+    pub fn stamp(&self, row: &mut Value) {
+        let said = serde_json::to_value(self);
+        if let (Ok(Value::Object(said)), Some(fields)) = (said, row.as_object_mut()) {
+            fields.extend(said);
+        }
+    }
+
+    /// `row` written with the words beside it, for a row whose type is not
+    /// zo's own to add them to.
+    #[must_use]
+    pub fn beside<R: Serialize>(self, row: R) -> Beside<R> {
+        Beside { row, said: self }
+    }
+}
+
+/// A row and what its server said, written as one ([`ServerSaid::beside`]).
+#[derive(Serialize)]
+pub struct Beside<R> {
+    #[serde(flatten)]
+    row: R,
+    #[serde(flatten)]
+    said: ServerSaid,
 }
 
 /// Research replays make one paid attempt and keep their own explicit receipts.
@@ -602,6 +1116,312 @@ mod tests {
         assert!(sources.len() > 100, "the scan found the workspace: {} files", sources.len());
     }
 
+    /// Every seat that sends through the door keeps what a managed server said
+    /// beside a refusal on its row, and through the one helper (t-58193): a
+    /// seat that sends and never calls it drops the reason a judgment failed.
+    #[test]
+    fn every_seat_that_sends_keeps_what_the_server_said() {
+        let seats = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/misc_tools/smart_router");
+        let gate = Path::new(file!()).file_name().expect("this file");
+        let mut senders = Vec::new();
+        for entry in std::fs::read_dir(&seats).expect("the seats' directory").flatten() {
+            let path = entry.path();
+            let rust = path.extension().is_some_and(|extension| extension == "rs");
+            if path.file_name() == Some(gate) || !rust {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a seat's source");
+            if text.contains("jev_gate::send(") || text.contains("jev_gate::send_once(") {
+                senders.push((path.display().to_string(), text.contains("ServerSaid::of(")));
+            }
+        }
+        assert!(senders.len() >= 18, "the scan found the seats: {senders:?}");
+        let silent: Vec<&String> =
+            senders.iter().filter(|(_, keeps)| !keeps).map(|(path, _)| path).collect();
+        assert!(silent.is_empty(), "these seats drop what the server said: {silent:?}");
+    }
+
+    /// A request of `seat`'s series as a seat's row keeps one: it left once,
+    /// ended `outcome`, `ago` before now.
+    fn sent(seat: &JevUse, outcome: &str, ago: Duration) -> Value {
+        let ago = i64::try_from(ago.as_millis()).expect("a short time");
+        serde_json::json!({"at": super::super::decision_shadow::now_ms() - ago,
+            "rubricVersion": seat.rubric_version, "outcome": outcome, "requests": 1})
+    }
+
+    /// A request of `seat`'s series its server answered with a wait until
+    /// `until`, in Unix milliseconds ([`SERVER_RETRY_AT`]).
+    fn waited(seat: &JevUse, until: i64) -> Value {
+        let mut row = sent(seat, "http_503", Duration::ZERO);
+        row[SERVER_RETRY_AT] = until.into();
+        row
+    }
+
+    /// `seat`'s ledger under `cwd`, holding `rows` and nothing else.
+    fn ledger_holding(cwd: &Path, seat: &JevUse, rows: &[Value]) {
+        holding(&shadow_ledger_path(cwd, seat.ledger), rows);
+    }
+
+    /// The ledger at `path`, holding `rows` and nothing else.
+    fn holding(path: &Path, rows: &[Value]) {
+        use std::fmt::Write as _;
+        std::fs::create_dir_all(path.parent().expect("a ledger folder")).expect("the folder");
+        let mut text = String::new();
+        for row in rows {
+            let _ = writeln!(text, "{row}");
+        }
+        std::fs::write(path, text).expect("the ledger");
+    }
+
+    /// The person's word for `seat`, written into the settings file the door
+    /// reads.
+    fn word_for(seat: &JevUse, mode: JevMode) {
+        let path = runtime::default_config_home().join(SETTINGS_FILE);
+        let mut root: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("settings")).expect("json");
+        root["smart"][seat.setting] = Value::String(mode.key().into());
+        std::fs::write(&path, root.to_string()).expect("settings written");
+    }
+
+    /// What the door says now of one request of `seat`'s: `None` when it lets
+    /// it through, else its refusal's word — asked both ways a seat asks,
+    /// clearing and passing, which must agree.
+    fn door_says(cwd: &Path, seat: &JevUse) -> Option<&'static str> {
+        let body = || serde_json::json!({"state": {"question": "test"}, "questions": {}});
+        let door = JevDoor::open(cwd);
+        let cleared = door.clear(seat, true, body()).err().map(Refused::token);
+        let passed = door.pass(seat, true, body()).err().map(Refused::token);
+        assert_eq!(cleared, passed, "clearing and passing disagree");
+        passed
+    }
+
+    /// A seat that applies nothing rests once its last
+    /// [`UNANSWERED_BEFORE_REST`] requests went unanswered (t-58193): the door
+    /// refuses it with `resting` and counts nothing. When [`REST`] has passed
+    /// since the newest of them one request goes, and a try that fails rests
+    /// the seat again; an answer among them is no rest at all.
+    #[test]
+    fn a_recording_seat_whose_requests_go_unanswered_rests_then_tries_once() {
+        use super::super::jev_mock;
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&RECALL, "shadow", &endpoint.base_url, |cwd| {
+            let minute = Duration::from_secs(60);
+            let failures = ["http_502", "timeout", "transport"];
+            let unanswered = |count: usize, ago: Duration| -> Vec<Value> {
+                (0..count).map(|n| sent(&RECALL, failures[n % failures.len()], ago)).collect()
+            };
+            ledger_holding(cwd, &RECALL, &unanswered(UNANSWERED_BEFORE_REST - 1, minute));
+            assert_eq!(door_says(cwd, &RECALL), None, "one short of the rule asks");
+
+            ledger_holding(cwd, &RECALL, &unanswered(UNANSWERED_BEFORE_REST, minute));
+            let requests = JevDoor::open(cwd).requests;
+            let counted = count::sent(&requests);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"));
+            assert_eq!(count::sent(&requests), counted, "a resting seat is not counted");
+
+            let mut rested = unanswered(UNANSWERED_BEFORE_REST, REST + minute);
+            ledger_holding(cwd, &RECALL, &rested);
+            assert_eq!(door_says(cwd, &RECALL), None, "a rest that has passed lets one try go");
+            rested.push(sent(&RECALL, "http_502", Duration::ZERO));
+            ledger_holding(cwd, &RECALL, &rested);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "a failed try rests it again");
+
+            let mut answered = unanswered(UNANSWERED_BEFORE_REST, minute);
+            answered[2] = sent(&RECALL, door::ANSWERED_OUTCOME, minute);
+            ledger_holding(cwd, &RECALL, &answered);
+            assert_eq!(door_says(cwd, &RECALL), None, "an answer among the last eight is no rest");
+            assert!(endpoint.requests().is_empty(), "the door sends nothing itself");
+        });
+    }
+
+    /// The rest reads the requests the seat sent in its series and nothing
+    /// else (t-58193): a door's refusal, a memo's answer, a judge's
+    /// transition and a mark count neither way, an answer under another
+    /// rubric is not this series' answer, and a seat whose rubric moved on
+    /// starts a new series with no rest to wait out.
+    #[test]
+    fn the_rest_reads_only_the_requests_a_seat_sent_in_its_series() {
+        use super::super::jev_mock;
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&RECALL, "shadow", &endpoint.base_url, |cwd| {
+            let minute = Duration::from_secs(60);
+            let now = super::super::decision_shadow::now_ms();
+            let rubric = RECALL.rubric_version;
+            let answered = door::ANSWERED_OUTCOME;
+            let mut rows = Vec::new();
+            for _ in 0..UNANSWERED_BEFORE_REST {
+                rows.push(sent(&RECALL, "http_502", minute));
+                rows.push(serde_json::json!({"at": now, "rubricVersion": rubric,
+                    "outcome": Refused::Budget.token(), "requests": 0}));
+                rows.push(serde_json::json!({"at": now, "rubricVersion": rubric,
+                    "outcome": answered, "cached": true, "requests": 0}));
+                rows.push(serde_json::json!({"at": now, "transition": "fall",
+                    "rubricVersions": [rubric]}));
+                rows.push(serde_json::json!({"at": now, "label": "1:1", "agreed": true}));
+            }
+            ledger_holding(cwd, &RECALL, &rows);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"));
+
+            let moved = JevUse { rubric_version: rubric + 1, ..RECALL };
+            assert_eq!(door_says(cwd, &moved), None, "a new rubric is a new series");
+            rows.push(sent(&moved, answered, Duration::ZERO));
+            ledger_holding(cwd, &RECALL, &rows);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "another rubric's answer");
+        });
+    }
+
+    /// A seat that applies its judgment never rests (t-58193): the person's
+    /// `on`, and an `auto` its own ledger raised. An `auto` nobody raised
+    /// records, and rests as `shadow` does.
+    #[test]
+    fn a_seat_that_applies_its_judgment_never_rests() {
+        use super::super::jev_mock;
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&RECALL, "shadow", &endpoint.base_url, |cwd| {
+            let minute = Duration::from_secs(60);
+            let mut rows: Vec<Value> =
+                (0..UNANSWERED_BEFORE_REST).map(|_| sent(&RECALL, "http_502", minute)).collect();
+            ledger_holding(cwd, &RECALL, &rows);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "shadow");
+            word_for(&RECALL, JevMode::On);
+            assert_eq!(door_says(cwd, &RECALL), None, "on");
+            word_for(&RECALL, JevMode::Auto);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "an auto nobody raised");
+            rows.push(serde_json::json!({"at": super::super::decision_shadow::now_ms(),
+                "transition": zerocode_core::jev::promote::ROSE,
+                "rubricVersions": [RECALL.rubric_version]}));
+            ledger_holding(cwd, &RECALL, &rows);
+            assert_eq!(door_says(cwd, &RECALL), None, "an auto its ledger raised");
+        });
+    }
+
+    /// A server that answers with a wait — a `503` or a `429` with a
+    /// `Retry-After` — asks that seat for nothing until then (t-58193): the
+    /// door refuses it with `resting` whatever its word, an applying seat's
+    /// too, and under any rubric, since the wait is the server's; once the
+    /// time has passed the seat asks again.
+    #[test]
+    fn a_seat_its_server_asked_to_wait_sends_nothing_until_then() {
+        use super::super::jev_mock;
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&RECALL, "shadow", &endpoint.base_url, |cwd| {
+            let now = super::super::decision_shadow::now_ms();
+            let mut asked = sent(&RECALL, "http_503", Duration::ZERO);
+            asked["serverRetryAt"] = (now + 60_000).into();
+            ledger_holding(cwd, &RECALL, &[asked.clone()]);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "shadow");
+            word_for(&RECALL, JevMode::On);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "on");
+            let moved = JevUse { rubric_version: RECALL.rubric_version + 1, ..RECALL };
+            assert_eq!(door_says(cwd, &moved), Some("resting"), "another rubric");
+            asked["serverRetryAt"] = (now - 1).into();
+            ledger_holding(cwd, &RECALL, &[asked]);
+            assert_eq!(door_says(cwd, &RECALL), None, "a wait that has passed");
+        });
+    }
+
+    /// An answer that asked for a wait is not an unanswered request
+    /// (t-58193): its server said when to come back, and the door holds the
+    /// seat until then instead. So such answers never bring the rest on —
+    /// [`UNANSWERED_BEFORE_REST`] of them whose waits have passed let the
+    /// next request go — and among other failures they count neither way.
+    #[test]
+    fn answers_that_asked_for_a_wait_do_not_count_toward_the_rest() {
+        use super::super::jev_mock;
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&RECALL, "shadow", &endpoint.base_url, |cwd| {
+            let minute = Duration::from_secs(60);
+            let passed = super::super::decision_shadow::now_ms() - 1;
+            let limited = api::SystemOneFailure::RateLimited.ledger_token();
+            let asked = |outcome: &str| {
+                let mut row = sent(&RECALL, outcome, minute);
+                row["serverRetryAt"] = passed.into();
+                row
+            };
+            let mut rows: Vec<Value> = (0..UNANSWERED_BEFORE_REST)
+                .map(|n| asked(if n % 2 == 0 { "http_503" } else { limited.as_str() }))
+                .collect();
+            ledger_holding(cwd, &RECALL, &rows);
+            assert_eq!(door_says(cwd, &RECALL), None, "a wait the server asked for is no rest");
+            for _ in 0..UNANSWERED_BEFORE_REST {
+                rows.push(sent(&RECALL, "http_502", minute));
+                rows.push(asked("http_503"));
+            }
+            ledger_holding(cwd, &RECALL, &rows);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "the others still count");
+        });
+    }
+
+    /// A guard keeps its rows under the config home, one ledger for every
+    /// project on this machine ([`super::super::tool_guard::command_guard_path`]),
+    /// and the door reads the wait its server named there (t-58193), until
+    /// the wait has passed. Every other seat's wait is read from the
+    /// project's folder as before: a recall's row in the guards' folder
+    /// holds nothing.
+    #[test]
+    fn a_guard_waits_on_its_own_ledger_and_a_project_seat_on_the_projects() {
+        use super::super::jev_mock;
+        use super::super::tool_guard::{command_guard_path, tool_text_guard_path};
+        use zerocode_core::jev::{COMMAND_GUARD, TOOL_TEXT_GUARD};
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        let words = [
+            (COMMAND_GUARD.setting, "on"),
+            (TOOL_TEXT_GUARD.setting, "on"),
+            (RECALL.setting, "shadow"),
+        ];
+        jev_mock::machine_words(&words, &endpoint.base_url, |cwd| {
+            let now = super::super::decision_shadow::now_ms();
+            let among_the_guards = command_guard_path().with_file_name(RECALL.ledger);
+            holding(&among_the_guards, &[waited(&RECALL, now + 60_000)]);
+            assert_eq!(door_says(cwd, &RECALL), None, "the guards' folder");
+            ledger_holding(cwd, &RECALL, &[waited(&RECALL, now + 60_000)]);
+            assert_eq!(door_says(cwd, &RECALL), Some("resting"), "the project's folder");
+            let own = [
+                (&COMMAND_GUARD, command_guard_path()),
+                (&TOOL_TEXT_GUARD, tool_text_guard_path()),
+            ];
+            for (guard, ledger) in own {
+                holding(&ledger, &[waited(guard, now + 60_000)]);
+                assert_eq!(door_says(cwd, guard), Some("resting"), "{}", guard.id);
+                holding(&ledger, &[waited(guard, now - 1)]);
+                assert_eq!(door_says(cwd, guard), None, "{} once its wait has passed", guard.id);
+            }
+        });
+    }
+
+    /// A guard's wait is the provider's that named it (t-58193): each
+    /// provider keeps its rows in a folder of its own
+    /// (`runtime::judgment_evidence_dir`), so a guard whose person's settings
+    /// name another provider asks it, and the first one's wait holds the
+    /// guard again once they name the first.
+    #[test]
+    fn a_wait_one_provider_named_does_not_hold_a_guard_asking_another() {
+        use super::super::jev_mock;
+        use super::super::tool_guard::command_guard_path;
+        use zerocode_core::jev::COMMAND_GUARD;
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&COMMAND_GUARD, "on", &endpoint.base_url, |cwd| {
+            let ahead = super::super::decision_shadow::now_ms() + 60_000;
+            holding(&command_guard_path(), &[waited(&COMMAND_GUARD, ahead)]);
+            let path = runtime::default_config_home().join(SETTINGS_FILE);
+            let first = std::fs::read_to_string(&path).expect("settings");
+            let another = judgment_provider::Provider {
+                kind: judgment_provider::ProviderKind::Local,
+                protocol: judgment_provider::Protocol::SystemOne,
+                base_url: endpoint.base_url.clone(),
+                model: "acme/decision-model".to_string(),
+                requires_auth: false,
+            };
+            let mut root: Value = serde_json::from_str(&first).expect("json");
+            root["smart"][judgment_provider::SETTINGS_KEY] =
+                serde_json::to_value(another).expect("a provider");
+            std::fs::write(&path, root.to_string()).expect("another provider");
+            assert_eq!(door_says(cwd, &COMMAND_GUARD), None, "another provider");
+            std::fs::write(&path, first).expect("the first provider again");
+            assert_eq!(door_says(cwd, &COMMAND_GUARD), Some("resting"), "the one that named it");
+        });
+    }
+
     /// Both of zo's ledgers keep the door's counts under the door's own keys —
     /// the keys a migration reads a row's age by — and zo's wire names a
     /// missing key with the door's word.
@@ -632,6 +1452,7 @@ mod tests {
             reading: None,
             rule: None,
             hangul_permille: None,
+            server_said: ServerSaid::default(),
         }
     }
 
@@ -644,6 +1465,7 @@ mod tests {
             rubric_version: 1,
             outcome: outcome.to_string(),
             candidates: 1,
+            room: None,
             cached: false,
             elapsed_ms,
             retries: 0,
@@ -659,6 +1481,7 @@ mod tests {
             rejected_at: None,
             judged: None,
             applied: false,
+            server_said: ServerSaid::default(),
         }
     }
 

@@ -92,7 +92,8 @@ fn the_door_asks_in_order_and_names_each_refusal() {
             "off",
             "not_consented",
             "budget",
-            "settings_changed"
+            "settings_changed",
+            "resting"
         ]
     );
     assert_eq!(Refused::Off.token(), JevMode::Off.key());

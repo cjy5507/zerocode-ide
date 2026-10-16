@@ -68,7 +68,7 @@ import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
 import { testEmulatorSeat } from "./emulator-seat.mjs";
 import { testEmulatorLoans } from "./emulator-loans.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
-import { testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardScope } from "./jev-dashboard.mjs";
+import { testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardResting, testJevDashboardScope } from "./jev-dashboard.mjs";
 
 import { testCrashReport } from "./crash-report.mjs";
 import { testTerminalSelection } from "./terminal-selection.mjs";
@@ -310,6 +310,7 @@ suite("jev-dashboard", async ({ browser, origin, ok }) => {
   await testJevDashboard(browser, origin, ok);
   await testJevDashboardPictures(browser, origin, ok);
   await testJevDashboardScope(browser, origin, ok);
+  await testJevDashboardResting(browser, origin, ok);
   await testJevDashboardEvidence(browser, origin, ok);
 });
 suite("native-folder-picker", ({ browser, origin, ok }) => testNativeFolderPicker(browser, origin, ok));

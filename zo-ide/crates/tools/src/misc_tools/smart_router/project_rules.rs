@@ -141,6 +141,7 @@ async fn check(workspace: PathBuf, recipient: String, turn_id: String, book: Boo
                 row["requests"] = json!(call.requests);
                 row["retries"] = json!(call.retries);
                 row["elapsedMs"] = json!(jev_gate::millis(call.elapsed));
+                jev_gate::ServerSaid::of(&call).stamp(&mut row);
                 match call.outcome {
                     Ok(response) => {
                         row["model"] = json!(response.model);

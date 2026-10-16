@@ -161,6 +161,7 @@ async fn ask_and_record(cwd: PathBuf, session: PathBuf, judged: u64, claims: Vec
         pane: super::tool_guard::pane_of(&cwd),
         cached: false,
     };
+    let mut said = jev_gate::ServerSaid::default();
     let mut verdicts = shared::code_verdicts(&claims);
     let asked = questions(&claims);
     if !asked.is_empty() {
@@ -177,6 +178,7 @@ async fn ask_and_record(cwd: PathBuf, session: PathBuf, judged: u64, claims: Vec
                         let call = jev_gate::send(&client, cleared, Duration::from_millis(CLAIM_APPLY_DEADLINE_MS), None).await;
                         row.elapsed_ms = jev_gate::millis(call.elapsed);
                         row.requests = call.requests;
+                        said = jev_gate::ServerSaid::of(&call);
                         match call.outcome {
                             Ok(response) => {
                                 row.model = Some(response.model.clone());
@@ -206,7 +208,7 @@ async fn ask_and_record(cwd: PathBuf, session: PathBuf, judged: u64, claims: Vec
     let confidence = row.confidence;
     let compared = shared::compared(&row.outcome, u64::try_from(row.code_settled).ok());
     let _ = tokio::task::spawn_blocking(move || {
-        let _ = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES);
+        let _ = append_shadow_row(&ledger, &said.beside(&row), SHADOW_LEDGER_MAX_BYTES);
         let _ = super::shadow_ledger::judge_seat_ledger(&CLAIM, &ledger, super::decision_shadow::now_ms());
     }).await;
     settle(&cwd, &session, judged, &verdict, confidence, compared);

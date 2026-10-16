@@ -574,6 +574,7 @@ const JEV_TOKENS = Object.freeze({
   provider_client_outdated: { key: "jev.token.clientOutdated", word: "판단 클라이언트 업데이트 필요", saidKey: "settings.judgment.outdated", said: "판단 제공자를 지원하는 최신 zo가 필요합니다. 앱과 zo의 업데이트 상태를 확인하세요." },
   rules_unavailable: { key: "jev.token.rulesUnavailable", word: "규칙 정의를 확인하거나 다시 준비해야 함" },
   budget: { key: "jev.token.budget", word: "하루 한도 초과", fix: "budget" },
+  resting: { key: "jev.token.resting", word: "쉬는 중" },
   timeout: { key: "jev.token.timeout", word: "시간 초과" },
   schema: { key: "jev.token.schema", word: "형식 오류" },
   transport: { key: "jev.token.transport", word: "연결 실패" },
@@ -593,6 +594,19 @@ function jevTokenRow(token) {
   const family = token.startsWith("http_") ? "http" : token.startsWith("schema_") ? "schema" : token;
   return JEV_TOKENS[family] ?? null;
 }
+
+/* What zo's door rests a feature for (t-58193), by the word zo sends
+ * (`jev_gate::RestCause::word`), each with the words a person reads for it,
+ * never zo's word itself. `typesafe_settings.rs` holds this table to the
+ * door's causes. */
+const JEV_REST_CAUSES = Object.freeze({
+  waiting: { key: "jev.rest.cause.waiting", word: "서버가 기다려 달라고 했습니다" },
+  too_long: { key: "jev.rest.cause.tooLong", word: "가장 짧은 요청도 이 모델이 읽기에 깁니다" },
+  cut: { key: "jev.rest.cause.cut", word: "모델이 읽는 길이를 넘음" },
+  timeout: { key: "jev.rest.cause.timeout", word: "시간 초과" },
+  unreachable: { key: "jev.rest.cause.unreachable", word: "서버에 닿지 못함" },
+  refused: { key: "jev.rest.cause.refused", word: "서버가 거절함" },
+});
 
 /* What a feature waits on a person for — the key (missing or refused) or a
  * folder's consent, whichever the door refused more often — when it was
@@ -1946,6 +1960,29 @@ function paintJevCaption(view, numbers) {
     : t("settings.typesafe.seatVersion", "모델 {{model}}", { model });
 }
 
+/* The rest zo's door holds a feature in (t-58193), while it lasts: `null`
+ * once its end has passed, for a reading older than the moment drawn. */
+function jevRestOf(held) {
+  const rest = held?.resting;
+  return rest && Number.isFinite(rest.untilMs) && rest.untilMs > Date.now() ? rest : null;
+}
+
+/* Why a feature rests and until when, in one sentence (t-58193): the end in
+ * the person's local time by the window's own clock (`quotaWallClock`), the
+ * cause in the language's words, and for a rest of its own how many of its
+ * requests in a row went unanswered: the door's own number, which zo sends
+ * (`unanswered`), never one spelled here. */
+function jevRestWords(rest) {
+  const time = quotaWallClock(rest.untilMs);
+  const row = Object.hasOwn(JEV_REST_CAUSES, rest.cause) ? JEV_REST_CAUSES[rest.cause] : null;
+  if (!row) return t("jev.rest.plain", "{{time}}까지 쉽니다", { time });
+  const cause = t(row.key, row.word);
+  return Number.isFinite(rest.unanswered)
+    ? t("jev.rest.unanswered", "{{time}}까지 쉽니다 — 최근 요청 {{count}}건이 답을 받지 못했습니다 ({{cause}})",
+      { time, count: jevCount(rest.unanswered), cause })
+    : t("jev.rest.until", "{{time}}까지 쉽니다 — {{cause}}", { time, cause });
+}
+
 /* A feature's state as a person reads it (t-6243 D2): one chip in the
  * state's tone and, from its line on, the samples still owed while the judge
  * wants some — in words; the bar filling toward the judgment is the chart's
@@ -1968,12 +2005,26 @@ function jevStatusCell(held, choice, standing, head) {
   // next judgment: the chip says off, and no countdown stands beside it.
   const counting = owed !== null && owed.wants !== "next" && status !== "dormant";
   const lead = jevNode("div", "jev-status-lead", chip);
+  // A feature the door rests says so beside its state (t-58193), in the
+  // rest's own word: the chip and the sentence under it read one field.
+  const rest = jevRestOf(held);
+  if (rest) {
+    const resting = jevNode("span", "jev-chip");
+    resting.dataset.jevResting = rest.cause;
+    resting.textContent = t(JEV_TOKENS.resting.key, JEV_TOKENS.resting.word);
+    lead.append(resting);
+  }
   if (counting) lead.append(jevNode("span", "jev-owed", document.createTextNode(jevOwedWords(owed, held))));
   const reason = across?.summed ? "" : jevStatusReason(held, status, choice, counting);
   if (reason) {
     const line = jevNode("p", "jev-status-reason", document.createTextNode(reason));
     // A feature measured under its bar says so in the tone of a miss.
     line.classList.toggle("is-under", status === "recording" && jevUnderBar(held));
+    lead.append(line);
+  }
+  if (rest) {
+    const line = jevNode("p", "jev-status-reason jev-rest", document.createTextNode(jevRestWords(rest)));
+    line.dataset.jevRest = rest.cause;
     lead.append(line);
   }
   if (across) {

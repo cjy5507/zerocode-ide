@@ -346,6 +346,8 @@ struct Asked {
     /// predicts a person who turns to it. The "today's question" baseline,
     /// on the same rows.
     shipped_predicts: Option<bool>,
+    /// What the server said beside a refusal (t-58193).
+    said: jev_gate::ServerSaid,
 }
 
 /// The seat's own decision on its own answers, as the label reads it.
@@ -374,6 +376,7 @@ async fn ask(door: &JevDoor, client: &SystemOneClient, seat: Seat, row: &Row, qu
         elapsed_ms: jev_gate::millis(call.elapsed), state_sent,
         requests: call.requests, retries: call.retries,
         cost_unknown: call.requests > 0 && call.outcome.is_err(),
+        said: jev_gate::ServerSaid::of(&call),
         ..Asked::default()
     };
     match call.outcome {
@@ -520,30 +523,31 @@ fn run_with_spend(round: &Round, door: &JevDoor, client: Option<&SystemOneClient
                 (CAPPED, json!({}), None, None, None, None, None, None, false, false)
             }
         };
-        lines.push(
-            json!({
-                "row": row.id,
-                "at": row.at,
-                "seq": row.seq,
-                "group": row.group,
-                "duplicate": duplicate_of(row, seat),
-                "label": row.label,
-                "shippedPredicts": predicts,
-                "labelWord": row.label_word,
-                "baseline": row.baseline,
-                "outcome": outcome,
-                "answers": answers,
-                "inputTokens": tokens,
-                "elapsedMs": elapsed,
-                "costUsd": tokens.filter(|_| !unknown).map(|tokens| rate.input_cost_usd(tokens)),
-                "costUnknown": unknown,
-                "budgetExceeded": overrun,
-                "requests": requests,
-                "retries": retries,
-                "model": model,
-            })
-            .to_string(),
-        );
+        let mut line = json!({
+            "row": row.id,
+            "at": row.at,
+            "seq": row.seq,
+            "group": row.group,
+            "duplicate": duplicate_of(row, seat),
+            "label": row.label,
+            "shippedPredicts": predicts,
+            "labelWord": row.label_word,
+            "baseline": row.baseline,
+            "outcome": outcome,
+            "answers": answers,
+            "inputTokens": tokens,
+            "elapsedMs": elapsed,
+            "costUsd": tokens.filter(|_| !unknown).map(|tokens| rate.input_cost_usd(tokens)),
+            "costUnknown": unknown,
+            "budgetExceeded": overrun,
+            "requests": requests,
+            "retries": retries,
+            "model": model,
+        });
+        if let Some(one) = one {
+            one.said.stamp(&mut line);
+        }
+        lines.push(line.to_string());
     }
     walls.sort_unstable();
     let summary = Summary {
