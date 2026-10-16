@@ -714,12 +714,12 @@ pub(super) fn fire(
             if is_blank_task(description, prompt) {
                 return None;
             }
-            let slot = probed.get(index).copied().flatten();
-            let probe = match slot {
+            let asked = probed.get(index).copied().flatten();
+            let probe = match asked {
                 Some(slot) => ProbeCell::from_verdict(slot.verdict),
                 None => ProbeCell::Failed(PROBE_NOT_ASKED.to_string()),
             };
-            let shot = Shot::of(description, prompt, facts_at(facts, index), probe, slot.and_then(|slot| slot.spent));
+            let shot = Shot::of(description, prompt, facts_at(facts, index), probe, asked.and_then(|slot| slot.spent));
             named.insert(shot.task).then_some(shot)
         })
         .collect();
