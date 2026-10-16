@@ -4,7 +4,7 @@
 //! module-level helpers, now `pub(super)` where the loops in `mod.rs` still
 //! reach them.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tokio::sync::mpsc;
 
@@ -155,7 +155,7 @@ const REFUSAL_DRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs
 /// turn — the classifier itself says whether they changed the request — so
 /// this keeps only which decline stood, on which conversation, and what the
 /// ladder had already done to it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct SurfacedDecline {
     /// The session it stood in: a new or a resumed session is another
     /// conversation.
@@ -175,6 +175,57 @@ pub(super) struct SurfacedDecline {
     /// Whether the latest public turn surfaced it (again): a public turn that
     /// ended any other way ended what stood.
     pub(super) renewed: bool,
+    /// Whether the turn that kept it found the decline before it still
+    /// standing and asked only once — the ladder's
+    /// [`RefusalDecision::Standing`] — so that the notice that turn pushed
+    /// right after keeping it is the notice of a decline that stood (t-57512).
+    pub(super) stood: bool,
+    /// The notice of a decline that stood, from right after its push and its
+    /// write succeeded (t-57512). `None` until the push, and for a decline
+    /// that did not stand.
+    pub(super) notice: Option<StoodNotice>,
+}
+
+/// What the notice of a decline that stood ties it to (t-57512).
+#[derive(Debug, Clone)]
+pub(super) struct StoodNotice {
+    /// The conversation the notice was pushed onto, held weakly. Any change to
+    /// that conversation moves or copies its messages, and a replacement is
+    /// another allocation, so only that very conversation answers to it; a
+    /// change rolled back puts that very one back.
+    conversation: Weak<Vec<ConversationMessage>>,
+    /// Where the request the decline stood on went, as its client said when
+    /// that request went out; the client is not asked again (m-59387). `None`
+    /// when it could not say.
+    sent_to: Option<RequestDestination>,
+}
+
+/// Where a request goes (t-57512, m-59387): the model it goes out on and the
+/// endpoint its client names ([`ApiClient::destination`]). Kept in process
+/// memory only; its `Debug` shows neither, so no log or panic message carries
+/// the endpoint.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct RequestDestination {
+    model: String,
+    endpoint: String,
+}
+
+impl std::fmt::Debug for RequestDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RequestDestination(..)")
+    }
+}
+
+/// The loop a turn runs on, which decides the client its requests go out on
+/// (t-57512, m-59387): the sync loop sends on the cross-provider fallback when
+/// the turn swapped to one, else on the runtime's own client
+/// ([`ConversationRuntime::sync_stream_events`]); the streaming dispatcher,
+/// deep legs included, on [`ConversationRuntime::active_async_client`], else
+/// on that own client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TurnLoop {
+    Sync,
+    Streaming,
 }
 
 /// When a surfaced decline still stands — the one table of the rule
@@ -1047,13 +1098,35 @@ where
         let compaction = self
             .refusal_compaction
             .or_else(|| self.standing_decline(category).and_then(|declined| declined.compaction));
+        // What the ladder just answered: Standing exactly when the decline kept
+        // before still stood and this leg asked only once.
+        let stood = unrouted
+            && self.standing_decline(category).is_some()
+            && !self.refusal_same_model_retry_used
+            && !self.refusal_compaction_used;
         self.surfaced_decline = unrouted.then(|| SurfacedDecline {
             session_id: self.session.session_id.clone(),
             category: refusal_category_key(category),
             messages: self.session.messages.len(),
             compaction,
             renewed: true,
+            stood,
+            notice: None,
         });
+    }
+
+    /// Tie a decline that stood to the conversation its notice was just
+    /// pushed onto (t-57512): called right after the push and its write
+    /// succeeded, and holding that conversation only weakly. Where the
+    /// request it stood on went is what that request's client said when it
+    /// went out ([`Self::sent_to`]), not what a client says now (m-59387).
+    pub(super) fn remember_surfaced_notice(&mut self) {
+        if let Some(declined) = self.surfaced_decline.as_mut().filter(|declined| declined.stood) {
+            declined.notice = Some(StoodNotice {
+                conversation: Arc::downgrade(&self.session.messages),
+                sent_to: self.sent_to.clone(),
+            });
+        }
     }
 
     /// The surfaced decline that still stands for `category` on this
@@ -1065,6 +1138,108 @@ where
         let unchanged = declined.session_id == self.session.session_id
             && self.session.messages.len().abs_diff(declined.messages) < STANDING_REFUSAL.message_drift;
         (unchanged && declined.category == refusal_category_key(category)).then_some(declined)
+    }
+
+    /// Whether a turn of `words` would only repeat the request a decline stood
+    /// on (t-57512), so that it has nothing to ask: the latest public turn kept
+    /// a decline that stood, asking once ([`SurfacedDecline::stood`]), on the
+    /// very conversation the session holds, unchanged since its notice was
+    /// pushed ([`SurfacedDecline::notice`]), and it still stands for this
+    /// conversation ([`Self::standing_decline`]); the one message the session
+    /// gained since it was kept is that notice; `words`
+    /// are, to the byte, the words that turn asked with, and nothing else; and
+    /// the request would go out on the model the person chose, as that one
+    /// did, with nothing armed to move it elsewhere when the turn starts; and
+    /// it would go where that one went: the client `turn_loop` sends on names
+    /// the endpoint that one's client named when it went out, on the same model
+    /// ([`Self::request_destination`], m-59387). Other words, another model,
+    /// provider, endpoint or session, an endpoint either client cannot name,
+    /// and a routed category are not this case; nor is a turn that brings
+    /// pictures, which its caller rules out.
+    pub(super) fn repeats_a_standing_decline(&self, words: &str, turn_loop: TurnLoop) -> bool {
+        let Some(declined) = self.surfaced_decline.as_ref().filter(|declined| {
+            declined.renewed
+                && declined.stood
+                && declined.notice.as_ref().is_some_and(|notice| {
+                    notice.conversation.upgrade().is_some_and(|conversation| {
+                        Arc::ptr_eq(&conversation, &self.session.messages)
+                    })
+                })
+        }) else {
+            return false;
+        };
+        if self.standing_decline(declined.category.as_deref()).is_none() {
+            return false;
+        }
+        // Two places nobody can name are never the same place.
+        let sent_to = declined.notice.as_ref().and_then(|notice| notice.sent_to.as_ref());
+        if sent_to.is_none() || self.request_destination(turn_loop).as_ref() != sent_to {
+            return false;
+        }
+        let on_the_chosen_model = matches!(self.wire_model(), Some((_, WireModelSource::Session)))
+            && self.quota_dry_until.is_none()
+            && self.refusal_dry_until.is_none();
+        // The decline was kept on the conversation its notice was pushed onto
+        // next: one message more, and that one the notice, or the conversation
+        // moved since.
+        if !on_the_chosen_model || self.session.messages.len() != declined.messages + 1 {
+            return false;
+        }
+        let (before, since) = self.session.messages.split_at(declined.messages);
+        let notice = refusal_surfaced_message(true);
+        matches!(since, [pushed] if pushed.role == notice.role && pushed.blocks == notice.blocks)
+            && before
+                .iter()
+                .rev()
+                .find(|message| message.role != crate::session::MessageRole::System)
+                .is_some_and(|asked| {
+                    asked.role == crate::session::MessageRole::User
+                        && matches!(
+                            asked.blocks.as_slice(),
+                            [ContentBlock::Text { text }] if text == words
+                        )
+                })
+    }
+
+    /// Where a request `turn_loop` sends now would go: the model on the wire
+    /// and the endpoint the client that loop sends on names; `None` when
+    /// either is unknown (t-57512, m-59387). The one answer for the request
+    /// that goes out ([`Self::sent_to`]) and for the repeat the rule weighs.
+    pub(super) fn request_destination(&self, turn_loop: TurnLoop) -> Option<RequestDestination> {
+        let endpoint = match turn_loop {
+            TurnLoop::Sync => match self.active_cross_fallback_client() {
+                Some((client, _)) => client.destination(),
+                None => self.api_client.destination(),
+            },
+            TurnLoop::Streaming => match self.active_async_client() {
+                Some(client) => client.destination(),
+                None => self.api_client.destination(),
+            },
+        }?;
+        let (model, _) = self.wire_model()?;
+        Some(RequestDestination {
+            model: model.to_string(),
+            endpoint,
+        })
+    }
+
+    /// What a turn that only repeats the request a decline stood on
+    /// ([`Self::repeats_a_standing_decline`]) answers with: no round-trip, and
+    /// the one line that says nothing was sent, which the session never holds.
+    pub(super) fn standing_repeat_summary(&self) -> super::TurnSummary {
+        let output_tokens = self.usage_tracker.cumulative_usage().output_tokens;
+        self.build_turn_summary(
+            vec![ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: core_types::retry_signal::REFUSAL_STANDING_REPEAT_NOTICE.to_string(),
+            }])],
+            Vec::new(),
+            Vec::new(),
+            0,
+            None,
+            None,
+            output_tokens,
+            None,
+        )
     }
 
     /// Fold this refused public turn into the consecutive-refusal streak and,
@@ -1553,6 +1728,7 @@ where
         &mut self,
         request: ApiRequest,
     ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        self.sent_to = self.request_destination(TurnLoop::Sync);
         if let Some((client, _)) = self.active_cross_fallback_client().cloned() {
             return block_on_async_client(client, request);
         }

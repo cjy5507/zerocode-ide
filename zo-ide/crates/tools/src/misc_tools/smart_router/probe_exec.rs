@@ -128,6 +128,32 @@ impl Admitted {
 pub(super) struct ProbeSlot {
     pub(super) fingerprint: u64,
     pub(super) verdict: Result<ProbeAssessment, &'static str>,
+    /// What the call spent, when a reply came back to bill — `None` for a
+    /// verdict recalled from the memo, which spent nothing on this task, and
+    /// for a call that never answered.
+    pub(super) spent: Option<ProbeSpent>,
+}
+
+/// What one probe call spent: the input tokens its reply billed and the wall
+/// time around the call ([`timed_probe_call`]). The routing judgment stands in
+/// for the probe, so this is the current side of its paired records (t-26584
+/// decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProbeSpent {
+    pub(super) input_tokens: u64,
+    pub(super) elapsed_ms: u64,
+}
+
+impl ProbeSpent {
+    /// What `outcome` spent, when a reply came back to bill.
+    fn of(outcome: &Result<(ProbeCallOutcome, u64), tokio::task::JoinError>) -> Option<Self> {
+        match outcome {
+            Ok((ProbeCallOutcome::Response(response), elapsed_ms)) => {
+                Some(Self { input_tokens: u64::from(response.usage.input_tokens), elapsed_ms: *elapsed_ms })
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Add `fresh` entries to a process memo bounded by [`PROBE_CACHE_CAP`]: a memo
@@ -323,6 +349,7 @@ fn fail_misses(
         slots[*index] = Some(ProbeSlot {
             fingerprint: *fingerprint,
             verdict: Err(reason),
+            spent: None,
         });
     }
 }
@@ -553,6 +580,7 @@ pub(super) fn probe_slots(
                     *slot = Some(ProbeSlot {
                         fingerprint: task_fingerprint(description, prompt),
                         verdict: Err(FAIL_CACHE_UNAVAILABLE),
+                        spent: None,
                     });
                 }
             }
@@ -568,6 +596,7 @@ pub(super) fn probe_slots(
                     slots[index] = Some(ProbeSlot {
                         fingerprint,
                         verdict: memoized.ok_or(FAIL_CACHED_MALFORMED),
+                        spent: None,
                     });
                     // A memo hit counts as a firing: the question this ledger
                     // answers is whether a probe verdict routed a turn, and a
@@ -643,8 +672,9 @@ pub(super) fn probe_slots(
     let responses = api::sync_bridge::run_blocking(collect_all);
     let mut fresh: Vec<(u64, Option<ProbeAssessment>)> = Vec::with_capacity(responses.len());
     for (index, fingerprint, outcome) in responses {
+        let spent = ProbeSpent::of(&outcome);
         let verdict = record_probe_outcome(&mut fresh, fingerprint, &model, outcome, attempt, road);
-        slots[index] = Some(ProbeSlot { fingerprint, verdict });
+        slots[index] = Some(ProbeSlot { fingerprint, verdict, spent });
     }
     if let Ok(mut cache) = probe_cache().lock() {
         remember_bounded(&mut cache, fresh);
@@ -950,6 +980,9 @@ mod live_path_tests {
         String::from_utf8(body).ok()
     }
 
+    /// The input tokens the scripted probe reply bills ([`responses_sse`]).
+    const PROBE_BILLED_INPUT_TOKENS: u64 = 120;
+
     /// The exact shape the live backend sends under `store: false`: the answer
     /// arrives only as text deltas, and the terminal frame's `output` is empty.
     fn responses_sse(answer: &str) -> String {
@@ -963,7 +996,7 @@ mod live_path_tests {
                 "id": "resp_probe",
                 "status": "completed",
                 "output": [],
-                "usage": { "input_tokens": 120, "output_tokens": 24 },
+                "usage": { "input_tokens": PROBE_BILLED_INPUT_TOKENS, "output_tokens": 24 },
             },
         });
         format!("data: {delta}\n\ndata: {completed}\n\ndata: [DONE]\n\n")
@@ -1085,7 +1118,7 @@ mod live_path_tests {
             PROBE_CONTROL_EVERY,
         };
         use super::super::{probe_and_shadow, task_fingerprint, ProbeSlot};
-        use super::{inventory, responses_sse, MockCodex, ProbeEnv};
+        use super::{inventory, responses_sse, MockCodex, ProbeEnv, PROBE_BILLED_INPUT_TOKENS};
 
         /// A wall far past any scripted delay, for the cases not about time.
         const UNHURRIED: Duration = Duration::from_secs(8);
@@ -1403,6 +1436,30 @@ mod live_path_tests {
             // The ledger keeps the fingerprint, never the task's words.
             let text = std::fs::read_to_string(&env.ledger).expect("the ledger");
             assert!(!text.contains(&task) && !text.contains("a description"), "{text}");
+        }
+
+        /// The routing seat's paired records (t-26584 decision 2, t-47784): the
+        /// probe is what the judgment replaces, so the row of a task the probe
+        /// answered carries what the probe spent — the input tokens its reply
+        /// billed and its wall time — as the current side, beside the
+        /// judgment's own.
+        #[test]
+        fn a_shadow_row_carries_what_the_probe_spent_as_the_current_side() {
+            let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
+            let judgment = judging(judgment_answer());
+            let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
+            env.set_mode(Some("shadow"));
+
+            let task = unique("spent");
+            let (results, _) = funnel(&[("", task.as_str())], UNHURRIED);
+            assert!(results[0].is_some(), "the probe routed");
+
+            let text = std::fs::read_to_string(&env.ledger).expect("the shadow wrote its row");
+            let rows: Vec<serde_json::Value> =
+                text.lines().map(|line| serde_json::from_str(line).expect("a ledger row")).collect();
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0]["currentInputTokens"], serde_json::json!(PROBE_BILLED_INPUT_TOKENS), "{}", rows[0]);
+            assert!(rows[0]["currentElapsedMs"].is_u64(), "the probe's wall time: {}", rows[0]);
         }
 
         /// `auto` records until something promotes it: the request and the row
@@ -1889,7 +1946,7 @@ mod live_path_tests {
                 ledger.iter().filter(|row| super::super::super::jev_summary::asked_something(row).is_some()).count(),
                 before + tasks.len()
             );
-            let judged = super::super::super::decision_shadow::judge_rows(&ledger, None).expect("routing is judged");
+            let judged = super::super::super::decision_shadow::judge_rows(&ledger).expect("routing is judged");
             assert_eq!((judged.agreement.compared, judged.agreement.agreed, judged.control_rows), (3, 0, 1));
             eprintln!("[decision-shadow control] {}", serde_json::to_string(control).expect("a row serializes"));
         }
@@ -1979,7 +2036,7 @@ mod live_path_tests {
             let mut batches = Vec::with_capacity(FIRES);
             for index in 0..FIRES {
                 let task = unique(&format!("latency-fire-{index}"));
-                let slot = ProbeSlot { fingerprint: task_fingerprint("", &task), verdict: Ok(verdict) };
+                let slot = ProbeSlot { fingerprint: task_fingerprint("", &task), verdict: Ok(verdict), spent: None };
                 let started = Instant::now();
                 let batch = fire(&[("", task.as_str())], &[], &[Some(slot)], "turn-7@1", WALL);
                 fired.push(started.elapsed());

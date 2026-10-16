@@ -319,6 +319,128 @@ fn the_json_says_why_the_rows_compare_nothing_word_by_word() {
     );
 }
 
+/// A seat whose labels marked rows through a proxy says how many in every
+/// agreement the JSON carries (t-60961): `proxied` counts the marks the judge
+/// withholds from `compared` (t-26584, ①), so a seat that compared nothing is
+/// told apart from one whose labels marked nothing. It counts marks and not
+/// label rows: a proxy row that compared nothing counts in `notCompared` alone.
+#[test]
+fn a_summary_counts_the_marks_a_proxy_label_made() {
+    use zerocode_core::jev::provenance::{stamp_label, LabelSource};
+    use zerocode_core::worker_placement::UNSEEN;
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::PLACEMENT;
+    let began_ms = core_types::date::unix_secs_from_rfc3339("2026-10-16T04:17:22Z").expect("a time") * 1000;
+    let proxy_marks = [("w-1", true), ("w-2", false)];
+    let executed_marks = [("w-3", true)];
+    let unmarked = ["w-4"];
+    let asked = |at: i64, worker: &str| {
+        serde_json::json!({"at": at, "placement": worker, "outcome": "answered", "elapsedMs": 40, "requests": 1,
+                           "chosen": "split", "confidence": 0.7, "rubricVersion": seat.rubric_version})
+    };
+    let stamped = |mut row: serde_json::Value, source: LabelSource| {
+        stamp_label(&mut row, source, seat.id);
+        row
+    };
+    let workers = proxy_marks.iter().chain(&executed_marks).map(|(worker, _)| *worker).chain(unmarked);
+    let mut rows: Vec<serde_json::Value> =
+        workers.zip(0..).map(|(worker, n)| asked(began_ms + n * 1_000, worker)).collect();
+    let labelled_at = began_ms + 10_000;
+    rows.extend(proxy_marks.iter().map(|(worker, agreed)| {
+        stamped(serde_json::json!({"at": labelled_at, "label": worker, "agreed": agreed}), LabelSource::Proxy)
+    }));
+    rows.extend(executed_marks.iter().map(|(worker, agreed)| {
+        stamped(serde_json::json!({"at": labelled_at, "label": worker, "agreed": agreed}), LabelSource::Executed)
+    }));
+    rows.extend(unmarked.iter().map(|worker| {
+        stamped(serde_json::json!({"at": labelled_at, "label": worker, "notCompared": UNSEEN}), LabelSource::Proxy)
+    }));
+    std::fs::write(
+        home.path().join(seat.ledger),
+        rows.iter().map(|row| row.to_string() + "\n").collect::<String>(),
+    )
+    .expect("write");
+    let seats = tools::jev_summary::report(&roots, None, None, began_ms + 39_000, 0);
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
+    let placement = value["seats"]
+        .as_array()
+        .expect("seats")
+        .iter()
+        .find(|row| row["id"] == seat.id)
+        .expect("placement");
+    println!("{placement}");
+    assert_eq!(placement["agreementWeek"]["proxied"], proxy_marks.len(), "the week counts the marks a proxy label made");
+    assert_eq!(placement["agreementWeek"]["compared"], executed_marks.len(), "and compares only the executed ones");
+    assert_eq!(placement["agreementWeek"]["notCompared"], unmarked.len(), "a row that compared nothing is no mark");
+    assert_eq!(placement["judged"]["agreement"]["proxied"], proxy_marks.len(), "the judged window");
+    assert_eq!(placement["days"][6]["agreement"]["proxied"], proxy_marks.len(), "today");
+}
+
+/// A seat's numbers say when they begin (t-60961): `countedSince` is the time
+/// of the earliest row the rolling week counted, so a ledger begun 39 s ago —
+/// as a judgment server's new port begins one — reads from that row and not
+/// from seven days back. A first row of the file older than the week is not
+/// counted. A week that counted nothing names no time, and nor does one that
+/// counted only a row with no time or one before the epoch: null, never 1970.
+#[test]
+fn a_summary_names_when_the_rows_it_counted_begin() {
+    use zerocode_core::jev::{JevUse, COMMAND_GUARD, PLACEMENT};
+    let began = "2026-10-16T04:17:22Z";
+    let began_ms = core_types::date::unix_secs_from_rfc3339(began).expect("a time") * 1000;
+    let now_ms = began_ms + 39_000;
+    let day_ms = 24 * 60 * 60 * 1000;
+    let before_the_week = now_ms - (tools::jev_summary::WINDOW_DAYS + 1) * day_ms;
+    let asked = |seat: &JevUse, at: Option<i64>| {
+        let mut row = serde_json::json!({"outcome": "answered", "elapsedMs": 40, "requests": 1,
+                                         "rubricVersion": seat.rubric_version});
+        if let Some(at) = at {
+            row["at"] = serde_json::json!(at);
+        }
+        row
+    };
+    let write = |root: &Path, seat: &JevUse, rows: &[serde_json::Value]| {
+        std::fs::write(root.join(seat.ledger), rows.iter().map(|row| row.to_string() + "\n").collect::<String>())
+            .expect("write");
+    };
+    let seat_in = |root: &Path, now_ms: i64, id: &str| {
+        let seats = tools::jev_summary::report(&[root.to_path_buf()], None, None, now_ms, 0);
+        let value: serde_json::Value = serde_json::from_str(&render_json(&seats, false).to_string()).expect("json");
+        value["seats"].as_array().expect("seats").iter().find(|row| row["id"] == id).expect("the seat").clone()
+    };
+    let home = tempfile::tempdir().expect("tmp");
+    let in_the_week = [began_ms, began_ms + 5_000, began_ms + 30_000];
+    let guard_rows: Vec<serde_json::Value> =
+        std::iter::once(before_the_week).chain(in_the_week).map(|at| asked(&COMMAND_GUARD, Some(at))).collect();
+    write(home.path(), &COMMAND_GUARD, &guard_rows);
+    write(home.path(), &PLACEMENT, &[asked(&PLACEMENT, Some(before_the_week))]);
+    let guard = seat_in(home.path(), now_ms, COMMAND_GUARD.id);
+    println!("{guard}");
+    assert_eq!(guard["countedSince"], began, "the week of the guard begins at the first row it counted");
+    assert_eq!(guard["week"]["rows"], in_the_week.len(), "and the row before the week is not one");
+    let unasked = zerocode_core::jev::JEV_USES
+        .iter()
+        .find(|seat| !home.path().join(seat.ledger).exists())
+        .expect("a seat never asked");
+    for (id, what) in [(PLACEMENT.id, "a week that counted nothing"), (unasked.id, "a seat never asked")] {
+        let said = seat_in(home.path(), now_ms, id);
+        assert_eq!(said.get("countedSince"), Some(&serde_json::Value::Null), "{what} names no time");
+    }
+    // Every counter reads a row with no time at the epoch: a week read one day after it reaches back past it,
+    // counts such a row, and still names no time.
+    let epoch = tempfile::tempdir().expect("tmp");
+    let timeless = [asked(&PLACEMENT, None)];
+    let early = [asked(&COMMAND_GUARD, Some(-1_000))];
+    for (seat, rows, what) in
+        [(&PLACEMENT, &timeless, "a row that names no time"), (&COMMAND_GUARD, &early, "a row before the epoch")]
+    {
+        write(epoch.path(), seat, rows);
+        let read = seat_in(epoch.path(), day_ms, seat.id);
+        assert_eq!(read["week"]["rows"], rows.len(), "{what} is counted");
+        assert_eq!(read.get("countedSince"), Some(&serde_json::Value::Null), "{what} names no time, never 1970");
+    }
+}
+
 /// A seat several programs ask says in the JSON who asked it this week
 /// (t-10916) — the name the window's dashboard reads it by.
 #[test]
@@ -590,6 +712,8 @@ fn the_control_rows_the_agreement_borrowed_are_named_in_both_answers() {
             "baselineShare": null,
             "notCompared": 0,
             "notComparedBy": {},
+            // The control row's own axes made the three marks, and no label did, so none is withheld (t-60961).
+            "proxied": 0,
         })
     );
 

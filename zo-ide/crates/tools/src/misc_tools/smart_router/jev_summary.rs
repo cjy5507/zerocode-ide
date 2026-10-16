@@ -80,6 +80,11 @@ pub struct SeatReport {
     /// the card again as it starts the judge.
     pub today: Tally,
     pub week: Tally,
+    /// The time of the earliest row of the seat's current series the week
+    /// counted (t-60961) — later than the week's start where the ledger began
+    /// inside it, as a judgment server's new port begins one. `None` when the
+    /// week counted no row.
+    pub counted_since_ms: Option<i64>,
     /// What the week's billed input tokens cost, when the price table names
     /// the judgment's model — every row's, whatever words asked it.
     pub cost_usd: Option<f64>,
@@ -399,6 +404,14 @@ fn one_with(
     let today = summary::summarize_rows(version.rows.iter().copied(), start_of_day_ms(now_ms, offset_s));
     let week_since_ms = now_ms - WINDOW_DAYS * MS_PER_DAY;
     let week = summary::summarize_rows(version.rows.iter().copied(), week_since_ms);
+    // Each row's time read as every counter reads it, the core's `at_or_after`
+    // (private to zerocode-core's jev/summary.rs): a row that names none is at the epoch.
+    let counted_since_ms = version
+        .rows
+        .iter()
+        .map(|row| summary::AT.read(row).and_then(Value::as_i64).unwrap_or(0))
+        .filter(|at| *at >= week_since_ms)
+        .min();
     let agreement_week = summary::agreement_rows(version.marks.iter().copied(), week_since_ms);
     let not_compared_week = summary::not_compared_words(version.marks.iter().copied(), week_since_ms);
     let askers_week = summary::askers_since(version.rows.iter().copied(), week_since_ms);
@@ -413,7 +426,7 @@ fn one_with(
     // the judgment, every other rising seat off the `agreed` marks its own
     // writer left (the window's orchestration seats).
     let judged = if seat.id == zerocode_core::jev::ROUTING.id {
-        super::decision_shadow::judge_rows_at(&rows, settings, line)
+        super::decision_shadow::judge_rows_at(&rows, line)
     } else {
         promote::judge_seat_in(seat, &rows, line)
     };
@@ -429,6 +442,7 @@ fn one_with(
         found,
         today,
         week,
+        counted_since_ms,
         cost_usd,
         model: version.model.map(str::to_string),
         cut: version.cut.map(str::to_string),
