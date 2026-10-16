@@ -3752,36 +3752,39 @@ fn a_withdrawn_person_label_stops_counting_and_another_versions_never_counts() {
         }
         row
     };
-    let mut rows: Vec<Value> = (0..20)
+    // Requests labelled on each version. Any count serves: the labels line,
+    // which wants a window's worth, is not judged here.
+    let requests = 20;
+    let mut rows: Vec<Value> = (0..requests)
         .map(|request| person(request, "a", Some(false)))
         .collect();
-    rows.extend((0..20).map(|request| person(request, "b", Some(true))));
+    rows.extend((0..requests).map(|request| person(request, "b", Some(true))));
     assert_eq!(
         person_labels(&rows, Some("a"), UNVERSIONED_RUBRIC),
         Some(Labels {
-            compared: 20,
+            compared: requests,
             judgment_right: 0,
-            probe_right: 20,
+            probe_right: requests,
         }),
         "version b's rows count nothing for version a"
     );
     assert_eq!(
         person_labels(&rows, Some("b"), UNVERSIONED_RUBRIC).map(|labels| labels.judgment_right),
-        Some(20)
+        Some(requests)
     );
     rows.push(person(0, "a", None));
     assert_eq!(
         person_labels(&rows, Some("a"), UNVERSIONED_RUBRIC),
         Some(Labels {
-            compared: 19,
+            compared: requests - 1,
             judgment_right: 0,
-            probe_right: 19,
+            probe_right: requests - 1,
         }),
         "the withdrawn label no longer counts"
     );
     assert_eq!(
         person_labels(&rows, Some("b"), UNVERSIONED_RUBRIC).map(|labels| labels.compared),
-        Some(20),
+        Some(requests),
         "a withdrawal names its version, and version b's label stands"
     );
 }
