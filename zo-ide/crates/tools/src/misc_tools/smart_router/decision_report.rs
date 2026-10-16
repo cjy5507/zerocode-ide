@@ -192,7 +192,7 @@ struct LabelLine {
 /// probe read it, and a label per judged axis under the axis's name. A label
 /// is joined to the ledger by the task's fingerprint; the latest row where both
 /// readers answered is the one measured, and each of its axes is marked
-/// ([`PersonMark`]).
+/// (`PersonMark`).
 ///
 /// # Errors
 /// A line that is not a labelled task, named by its line number.
