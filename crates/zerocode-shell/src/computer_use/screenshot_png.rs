@@ -32,9 +32,10 @@ impl RgbaImage {
 
     /// Box-filter downscale to `scale` of the size (at least one pixel each
     /// way). Every source pixel counts once; edge cells average whatever
-    /// falls in them.
+    /// falls in them. The artifact thumbnails shrink a seen pane's picture
+    /// by it too (t-59665 ⑤).
     #[must_use]
-    pub(super) fn downscaled(&self, scale: f64) -> Self {
+    pub(crate) fn downscaled(&self, scale: f64) -> Self {
         let width = ((f64::from(self.width) * scale).round() as u32).max(1);
         let height = ((f64::from(self.height) * scale).round() as u32).max(1);
         if width >= self.width && height >= self.height {

@@ -2106,6 +2106,15 @@
   /* 카드 폭이 변해도 얼굴은 4:3, 가상화 행 높이도 같은 비율로 변한다. */
   --artifact-face-ratio: 0.75;
   --artifact-doc-lines: 7;
+  /* 본 페이지의 그림(t-59665 ⑤): 첫 그림 뒤 이만큼 더 본 페이지가 갤러리에 제 그림을 준다. */
+  --artifact-seen-thumb-ms: 500;
+  /* 다시 발행(t-59665 ⑦): 이 KB까지의 페이지는 저절로 새 판으로 바뀌고, 더 큰 것은 「최신으로」를 기다린다. */
+  --artifact-republish-auto-max-kb: 1024;
+  /* 여는 시계(t-59665 ⑧): 보인 시간으로 이만큼 지나도 첫 그림이 없으면 「아직 읽는 중」, 그 다음은 「멈춘 열기」. */
+  --artifact-open-slow-ms: 8000;
+  --artifact-open-stalled-ms: 30000;
+  /* 문서 보기의 머리 한 줄(t-59665 ⑥): 도구 줄 곁에 머리띠가 서려면 머리띠에 적어도 이만큼(px)은 남아야 한다. */
+  --artifact-reading-strip-min: 400;
   --artifact-emoji-size: 32px;
   --artifact-strip-bg: var(--surface-well);
   --artifact-strip-ink: var(--ink-chalk);

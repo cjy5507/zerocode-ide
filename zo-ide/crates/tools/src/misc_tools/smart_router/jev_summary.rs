@@ -32,6 +32,8 @@ pub use zerocode_core::jev::recent::Decision as SeatDecision;
 pub use zerocode_core::jev::summary::{
     JUDGED_EVERY_ROWS, Tally as SeatTally, asked_something, failures_in_a_row, summarize_last,
 };
+/// Why a seat rests and until when, as the door reads it (t-58193).
+pub use super::jev_gate::{RestCause, Resting};
 
 use super::shadow_ledger::shadow_ledger_dir;
 
@@ -133,6 +135,10 @@ pub struct SeatReport {
     pub stand: Stand,
     /// Whether the seat acts right now: its mode, and for `auto` its standing.
     pub applies: bool,
+    /// Why the seat rests now and until when, as the door for the project
+    /// reads it ([`with_rests`], t-58193): `None` while it may ask, and in a
+    /// report no project's door was asked for.
+    pub resting: Option<Resting>,
     /// Today and the [`WINDOW_DAYS`]` - 1` days before it, oldest first.
     pub days: Vec<DayTally>,
     /// The last requests, newest first — as many as the caller asked for
@@ -266,6 +272,22 @@ pub fn report_with_recent(
         .iter()
         .map(|seat| one_with(seat, roots, sessions, settings, now_ms, offset_s, recent))
         .collect()
+}
+
+/// `seats` with each one's rest as the door for words from `cwd` reads it now
+/// (`JevDoor::resting_now`, t-58193), the one reading the
+/// door refuses a seat on: a seat whose words ask nothing rests for nothing.
+/// Read apart from [`report_with_recent`], which is handed its roots and
+/// never the project whose ledgers the door reads, and only by a caller that
+/// stands in one.
+#[must_use]
+pub fn with_rests(mut seats: Vec<SeatReport>, cwd: &Path) -> Vec<SeatReport> {
+    let door = super::jev_gate::JevDoor::reading(cwd);
+    for seat in &mut seats {
+        let asked = JEV_USES.iter().find(|one| one.id == seat.id).filter(|_| seat.mode.asks());
+        seat.resting = asked.and_then(|one| door.resting_now(one));
+    }
+    seats
 }
 
 /// Every ledger file a seat has under a folder of Computer Use sessions —
@@ -424,6 +446,7 @@ fn one_with(
         applies: seat
             .mode_in(settings.unwrap_or(&Value::Null))
             .applies_with(stand == Stand::Applying),
+        resting: None,
         days: days_of(&version.rows, now_ms, offset_s),
         recent: recent::recent(&rows, recent),
         calibration: calibration_of(seat, &version, line, now_ms),

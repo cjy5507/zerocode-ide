@@ -7447,7 +7447,7 @@ mod tests {
         // 프레젠트로 충분하다.
         assert!(
             spinning.contains("if (step !== worktreeSpinStep) {")
-                && spinning.contains("dot.className = `wt-dot is-working wt-spin-${step}`"),
+                && spinning.contains("dot.className = `${dot.classList.contains(\"team-dot\") ? \"team-dot\" : \"wt-dot\"} is-working wt-spin-${step}`"),
             "the JS spinner creates an inline angle again, or writes a class every frame:\n{spinning}"
         );
         let waking = block_after(window, "function wakeWorktreeSpin() {");
@@ -31577,9 +31577,11 @@ mod tests {
             viewer.contains(r#"showing === "mermaid") paintMermaid(body, tab.text)"#),
             "the rich view of a `.mmd` file draws nothing:\n{viewer}"
         );
+        let painter = block_after(source, "function paintMarkdownView(body, text) {");
         assert!(
-            viewer.contains("paintMarkdownDiagrams(body)"),
-            "a diagram inside a markdown file stays a code fence:\n{viewer}"
+            viewer.contains("paintMarkdownView(body, tab.text)")
+                && painter.contains("paintMarkdownDiagrams(body)"),
+            "a diagram inside a markdown file stays a code fence:\n{viewer}\n{painter}"
         );
         let fences = block_after(source, "function paintMarkdownDiagrams(body) {");
         assert!(

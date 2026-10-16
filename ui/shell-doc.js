@@ -1317,7 +1317,7 @@ function paintFileView(tab) {
       const inert = mdInertLinks;
       mdInertLinks = tab.readOnly === true;
       try {
-        paintMarkdown(body, snapshot.text);
+        paintMarkdownView(body, snapshot.text);
       } finally {
         mdInertLinks = inert;
       }
@@ -1327,10 +1327,7 @@ function paintFileView(tab) {
       body.appendChild(source);
     }
   } else if (showing === "markdown") {
-    paintMarkdown(body, tab.text);
-    // A markdown file can hold diagrams too, which is Orca's `MermaidBlock`
-    // inside its rich markdown rather than a viewer of its own.
-    paintMarkdownDiagrams(body);
+    paintMarkdownView(body, tab.text);
     paintMarkdownReviewTools(body, tab);
   } else if (showing === "csv") paintTable(body, tab.text, extensionOf(tab.path) === "tsv");
   else if (showing === "notebook") paintNotebook(body, tab.text);
@@ -3805,7 +3802,10 @@ function markNode(mark) {
  * `viewBox` with no width or height, plus the CSS rule that gives it
  * `max-width: 100%`, is Orca's own sizing contract for these
  * (`.mermaid-block svg { max-width: 100%; height: auto }`) — the diagram
- * shrinks to the column and never forces a horizontal scroll of the page. */
+ * shrinks to the column and never forces a horizontal scroll of the page.
+ * `--mmd-width` hands the stylesheet the drawing's own width as a number: in
+ * markdown it stops shrinking where its smallest text reaches the caption
+ * size, and scrolls inside its block past that. */
 function diagramNode(drawing) {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${drawing.width} ${drawing.height}`);
@@ -3813,6 +3813,7 @@ function diagramNode(drawing) {
   svg.setAttribute("height", drawing.height);
   svg.setAttribute("role", "img");
   svg.setAttribute("class", "mmd");
+  svg.style.setProperty("--mmd-width", drawing.width);
   for (const mark of drawing.marks) {
     const node = markNode(mark);
     if (node) svg.appendChild(node);
@@ -3848,18 +3849,24 @@ function diagramNote(undrawn) {
  *
  * A failed call leaves the source showing. `render_mermaid` reads no files and
  * touches no state, so the only way it fails is the window going away, and
- * blanking the text in that moment would be the worst possible answer. */
+ * blanking the text in that moment would be the worst possible answer. The
+ * window log gets one line for it, without the source: that is the author's
+ * text, and the log is not where it belongs. */
 async function paintDiagram(into, source) {
   let render;
   try {
     render = await invoke("render_mermaid", { source });
-  } catch {
+  } catch (error) {
+    tellWindowLog(`mermaid: the layout was refused (${error})`);
     return;
   }
   // An answer that is not a render leaves the source showing, the same as a
   // failed call. The two are the same situation from here: something went wrong
   // on the way to a layout, and the text is what the person can still use.
-  if (!render) return;
+  if (!render) {
+    tellWindowLog("mermaid: the layout came back empty");
+    return;
+  }
   // The element may have been thrown away while we were waiting — another file
   // opened, or the mode toggled back to source.
   if (!into.isConnected) return;
@@ -3898,15 +3905,60 @@ function paintMermaid(body, source) {
  * A sweep after the fact rather than a branch inside the markdown walker: the
  * walker is synchronous and this is not, and a fence that stays a code block
  * until its diagram arrives is the correct intermediate state — it is what the
- * author typed. */
+ * author typed. So the fence waits inside the block its diagram will fill, and
+ * stays there when the layout fails. The block takes the fence's source lines,
+ * so a review note on them stands beside the diagram, not inside the code the
+ * diagram replaces.
+ *
+ * The text paints first: the observer answers after the frame that shows it,
+ * and the fences on screen are laid out before the rest, which follow in page
+ * order.
+ *
+ * A drawing wider than its block scrolls in it, and the block wears
+ * `mmd-block--wider` while it does, so the stylesheet can fade the edges the
+ * drawing is cut at. A ResizeObserver measures it after layout rather than
+ * forcing one: whenever the column changes width, and once the drawing lands.
+ * The block is observed afresh then, because a block whose size the drawing
+ * left as it was reports nothing; Chromium and WebKit ignore `observe` on a
+ * block already observed, hence `unobserve` first. */
 function paintMarkdownDiagrams(body) {
+  const sources = new Map();
   for (const fence of body.querySelectorAll('pre.md-block[data-language="mermaid"]')) {
-    const source = fence.textContent;
     const block = document.createElement("div");
     block.className = "mmd-block mmd-block--inline";
+    markMarkdownReviewTarget(block, Number(fence.dataset.markdownStartLine), Number(fence.dataset.markdownLine));
+    fence.classList.remove("md-review-target");
     fence.replaceWith(block);
-    paintDiagram(block, source);
+    block.appendChild(fence);
+    sources.set(block, fence.textContent);
   }
+  if (sources.size === 0) return;
+  const resized = new ResizeObserver((entries) => {
+    for (const { target } of entries) target.classList.toggle("mmd-block--wider", target.scrollWidth > target.clientWidth);
+  });
+  const watch = new IntersectionObserver((entries) => {
+    watch.disconnect();
+    const shown = entries.filter((entry) => entry.isIntersecting).map((entry) => entry.target);
+    for (const block of new Set([...shown, ...sources.keys()])) {
+      if (block.isConnected) void paintDiagram(block, sources.get(block)).then(() => {
+        resized.unobserve(block);
+        resized.observe(block);
+      });
+    }
+  });
+  for (const block of sources.keys()) {
+    watch.observe(block);
+    resized.observe(block);
+  }
+}
+
+/* Every markdown view's painter: the words, then their ```mermaid fences as
+ * diagrams — Orca's `MermaidBlock` inside its rich markdown rather than a
+ * viewer of its own. A view that paints with `paintMarkdown` alone shows its
+ * diagrams as code. */
+function paintMarkdownView(body, text) {
+  paintMarkdown(body, text);
+  paintMarkdownDiagrams(body);
 }
 
 /* ---- 렌더된 미리보기 탭 (1-g36) ----
@@ -4298,13 +4350,11 @@ function renderMarkdownPage(page, text, base) {
   page.replaceChildren();
   mdWhere = { base, page };
   try {
-    paintMarkdown(page, text);
+    paintMarkdownView(page, text);
   } finally {
     // 그리는 동안만 서 있는 자리 — 손들은 이미 제 몫을 쥐었다.
     mdWhere = null;
   }
-  // markdown 파일 속의 다이어그램도 여기선 그려진다(파일 뷰어와 같은 문).
-  paintMarkdownDiagrams(page);
   dressMarkdownFences(page);
   // 마지막에 여백이 선다(1-g46) — 다이어그램과 울타리가 제 옷을 다 입은 뒤라,
   // 무엇으로 변했든 블록 하나가 여백 한 칸을 얻는다.
@@ -4321,7 +4371,8 @@ function fenceLanguageWords(fence) {
  *
  * 워커 안의 가지가 아니라 뒤따르는 비질인 이유는 다이어그램 비질과 같다:
  * 울타리는 파일 뷰어에서도 그려지고, 그 판에는 이 장식이 없다. 그리고 이
- * 비질은 다이어그램이 자기 울타리를 가져간 뒤에 온다 — 남은 것만 옷을 입는다. */
+ * 비질은 다이어그램 비질 뒤에 온다 — 그림을 기다리는 울타리도 그림이 올
+ * 때까지는 코드로 서 있으니 다른 울타리처럼 옷을 입는다. */
 function dressMarkdownFences(page) {
   for (const fence of page.querySelectorAll("pre.md-block")) {
     const source = fence.textContent;
@@ -5788,7 +5839,7 @@ async function selectSkillFamily(view, id, variantId = null) {
     host.append(evidence);
     const markdown = skillElement("div", "md-page skills-markdown"); host.append(markdown);
     const previous = mdWhere;
-    try { mdWhere = { base: variant.directory, page: markdown }; paintMarkdown(markdown, detail?.markdown ?? ""); } finally { mdWhere = previous; }
+    try { mdWhere = { base: variant.directory, page: markdown }; paintMarkdownView(markdown, detail?.markdown ?? ""); } finally { mdWhere = previous; }
     view.querySelector(".skills-detail").scrollIntoView({ block: "nearest" });
   } catch (error) { if (generation === state.generation) host.replaceChildren(skillElement("p", "skills-error", skillsError(error))); }
 }
@@ -8066,7 +8117,7 @@ function dressArtifactCard(node, row, selected) {
     node.querySelector(".artifact-card-glyph").hidden = Boolean(row.favicon);
     // 문서(md)는 기존 미리보기 활자의 첫 블록이 얼굴이다(t-3233 §3).
     const doc = node.querySelector(".artifact-card-doc");
-    const block = row.kind === "document" ? artifactFirstBlock(row.preview?.text ?? "") : "";
+    const block = row.kind === "document" ? artifactExcerpt(row.preview?.text ?? "") : "";
     doc.textContent = block;
     doc.hidden = block === "";
     const thumb = node.querySelector(".artifact-card-thumb");
@@ -8079,9 +8130,21 @@ function dressArtifactCard(node, row, selected) {
     const src = rendered ?? held?.data_url ?? "";
     thumb.hidden = src === "";
     thumb.src = src;
+    node._thumbSrc = src;
     if (pictured && !held && !artifactMissing.has(row.id)) void askArtifactThumb(node, row.id);
   }
-  if (ARTIFACT_THUMB_KINDS.has(row.kind) && !artifactMissing.has(row.id)) askArtifactThumbnail(row);
+  if (ARTIFACT_THUMB_KINDS.has(row.kind) && !artifactMissing.has(row.id)) {
+    // 본 판이 준 그림(t-59665 ⑤)은 카드가 옷을 입은 뒤에 올 수 있다 — 캐시의 그림이 입은 것과 다른
+    // 참조면 갈아입는다(같은 그림은 같은 참조라 비교가 한 번의 식별 비교다).
+    const kept = artifactThumbs.get(row.id);
+    if (kept !== undefined && kept !== node._thumbSrc) {
+      const thumb = node.querySelector(".artifact-card-thumb");
+      thumb.src = kept;
+      thumb.hidden = false;
+      node._thumbSrc = kept;
+    }
+    askArtifactThumbnail(row);
+  }
   // 반영 상태는 행과 따로 움직인다(git의 답이 뒤에 온다): 행이 바뀌었거나 그 답이 움직인
   // 때에만 다시 입는다.
   if (node._landingRow !== row || node._landingGeneration !== artifactLandingGeneration) {
@@ -8202,16 +8265,20 @@ function artifactFormatters() {
 
 /* 마크다운 미리보기의 첫 활자 — 제목과 그 아래 첫 문단, 표식을 벗긴 글. 카드
  * 얼굴에 서는 활자라 몇 줄이면 되고, 나머지는 CSS가 자른다. */
-const ARTIFACT_FACE_BLOCKS = 2;
-function artifactFirstBlock(text) {
-  const blocks = text.split(/\n\s*\n/).map((one) => one.trim()).filter((one) => one !== "");
+/* 문서 카드의 얼굴(t-59665 ⑤): 미리보기 글의 첫 부분을 발췌한다 — 길이는 백엔드 표가 자른
+ * 만큼(`preview_chars`, 1,200자)이고, 코드 울타리와 mermaid 블록(``` ~~~, 닫히지 않은 것은 끝까지)은
+ * 발췌에서 뺀다: 그림 대신 글이 얼굴인 카드에 다이어그램의 원문이 서면 글이 아니다. 블록은
+ * 「 — 」로 잇고, 보이는 줄 수는 CSS(`--artifact-doc-lines`)가 자른다. */
+const ARTIFACT_FENCE = /(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*(?:\n[\s\S]*?)?(?:\n[ \t]*\2[ \t]*(?=\n|$)|$)/g;
+function artifactExcerpt(text) {
+  const blocks = text.replace(ARTIFACT_FENCE, "\n").split(/\n\s*\n/).map((one) => one.trim()).filter((one) => one !== "");
   return blocks
-    .slice(0, ARTIFACT_FACE_BLOCKS)
     .map((block) => block
       .split("\n")
       .map((line) => line.replace(/^[#>*\-\s]+/, "").replace(/[*_\x60]/g, ""))
       .join(" ")
       .trim())
+    .filter((block) => block !== "")
     .join(" — ");
 }
 
@@ -8529,6 +8596,7 @@ async function pumpArtifactThumbs() {
           const thumb = node.querySelector(".artifact-card-thumb");
           thumb.src = answer.data_url;
           thumb.hidden = false;
+          node._thumbSrc = answer.data_url;
         }
         // 서랍이 이 페이지를 들고 있으면 그 미리보기도 이 그림이다.
         const view = artifactsView();
@@ -8748,7 +8816,7 @@ async function paintArtifactPreview(view, row) {
     if (md._painted !== payload.text) {
       md._painted = payload.text;
       md.replaceChildren();
-      paintMarkdown(md, payload.text ?? "");
+      paintMarkdownView(md, payload.text ?? "");
     }
   } else if (payload.kind === "image" && payload.data_url) {
     img.src = payload.data_url;
@@ -9125,6 +9193,8 @@ async function artifactAction(view, action, id) {
  * 있으면 그 판이 새 주소로 옮겨 간다(Codex의 미리보기 탭, Claude의 패널 하나). */
 async function openArtifactPage(row, { version = null, seat = null, hint = null, glance = false } = {}) {
   if (!artifactOpensInWindow(row)) return false;
+  // 여는 시계의 시작(t-59665 ⑧): 누른 때. 판이 서기까지의 기다림도 사람의 것이다.
+  const pressedAt = performance.now();
   const standing = artifactTabFor(row, version);
   if (standing) return standArtifactTab(standing, { glance });
   if (row.kind === "web") {
@@ -9149,7 +9219,7 @@ async function openArtifactPage(row, { version = null, seat = null, hint = null,
     // 제 탭을 연다.
     const walking = glance && seat === null ? artifactGlanceTab() : null;
     if (walking) {
-      walkArtifactGlance(walking, facts, path);
+      walkArtifactGlance(walking, facts, path, pressedAt);
       return true;
     }
     // 만든 판 옆에 여는 길(`seat`)은 초점을 그 판에 둔다: 사람은 그 판에서
@@ -9166,6 +9236,7 @@ async function openArtifactPage(row, { version = null, seat = null, hint = null,
       // 여는 길이 무엇이든 탭이 섰으면 본 것이다 — 「새 N」은 여기서 내려간다
       // (t-11958). 버전을 묻는 사이 사람이 자리를 옮겨 열지 않았으면 남는다.
       markArtifactSeen(row.id);
+      startArtifactOpenClock(tab, pathAsFileUrl(path), pressedAt);
     }
     return true;
   }
@@ -9238,12 +9309,13 @@ function artifactGlanceTab() {
 /* 미리보기 탭이 다른 아티팩트로 옮겨 간다: 판은 그대로 새 주소로 가고 — 엔진이 렌더러를 다시 쓴다 —
  * 탭은 새 아티팩트의 머리띠를 입는다. 떠나는 주소에서 늦게 오는 답은 사람의 탐색이 아니다
  * (`keepGlanceLeaving`). */
-function walkArtifactGlance(tab, facts, path) {
+function walkArtifactGlance(tab, facts, path, pressedAt = performance.now()) {
   tab.glanceLeft = tab.url;
   tab.artifact = facts;
   submitBrowserAddress(tab, pathAsFileUrl(path));
   setActiveTab(tab.id);
   markArtifactSeen(facts.id);
+  startArtifactOpenClock(tab, pathAsFileUrl(path), pressedAt);
 }
 
 /* 미리보기 탭을 제 아티팩트 밖으로 데려간 탐색 — 링크 따라가기, 뒤로 가기 — 은 사람의 것이다: 그 탭은
@@ -9502,7 +9574,19 @@ function artifactStripNode() {
   versions.dataset.i18nAria = ARTIFACT_LABELS.versions.key;
   versions.setAttribute("aria-label", ARTIFACT_LABELS.versions.word);
   meta.append(maker, project, versions);
-  strip.append(head, meta);
+  // 셋째 줄(t-59665 ⑦·⑧): 새 판이 기다리거나 열기가 늦을 때만 선다 — 낱말 한 줄과 행동 하나.
+  const note = document.createElement("div");
+  note.className = "artifact-strip-note";
+  note.hidden = true;
+  note.setAttribute("role", "status");
+  const noteWords = document.createElement("span");
+  noteWords.className = "artifact-strip-note-words";
+  const noteAct = document.createElement("button");
+  noteAct.type = "button";
+  noteAct.className = "artifact-strip-note-act";
+  noteAct.hidden = true;
+  note.append(noteWords, noteAct);
+  strip.append(head, meta, note);
   return strip;
 }
 
@@ -10021,6 +10105,7 @@ function paintArtifactStrip(strip, tab, onVersion, actions = null) {
     paintArtifactStripActions(strip);
   };
   paintVersions();
+  paintArtifactStripNote(strip, tab);
   if (facts.versionsGeneration !== artifactVersionsGeneration && facts.versionsRequest !== artifactVersionsGeneration) {
     const generation = artifactVersionsGeneration;
     facts.versionsRequest = generation;
@@ -10298,9 +10383,16 @@ async function openArtifactBesideOnce(row, maker, { hint = null } = {}) {
 
 /* 다시 발행: 그 아티팩트를 든 탭이 선 자리에서 새 판으로 바뀐다. 사람이 지난
  * 번호를 골라 보고 있으면 그 선택을 넘어 가지 않는다 — 고르개에 새 번호만 선다. */
-function refreshArtifactTab(tab, row) {
+function refreshArtifactTab(tab, row, { force = false } = {}) {
   const held = tab.artifact;
   const picked = held.version != null && held.current != null && held.version !== held.current;
+  // 무거운 발행물은 저절로 바꾸지 않는다(t-59665 ⑦): 머리띠에 「최신으로」가 서고, 사람이 누를 때
+  // 바뀐다. 지난 번호를 골라 보는 탭은 전처럼 고르개에 새 번호만 선다.
+  if (!force && !picked && artifactRepublishIsHeavy(row)) {
+    held.pending = row;
+    if (stillShowing(tab)) paintBrowserView(tab);
+    return;
+  }
   const facts = artifactStripFacts(row);
   facts.hint = held.hint;
   if (picked) facts.version = held.version;
@@ -10311,16 +10403,17 @@ function refreshArtifactTab(tab, row) {
   }
   // 새 판도 그 번호의 불변 스냅샷으로 선다(t-11959) — 머리띠가 「버전 N」이라 말하는
   // 판이 바뀌는 최신 사본이면 미리보기와 Finder와 주석이 서로 다른 것을 가리킨다.
-  // 목록을 못 읽을 때만 최신 사본으로 간다: 지난 판을 띄워 두는 것보다 낫다.
+  // 목록을 못 읽을 때만 최신 사본으로 간다: 지난 판을 띄워 두는 것보다 낫다. 바꾸는
+  // 길은 읽던 자리를 지키는 `swapArtifactTab`이다(t-59665 ⑦).
   invoke("artifact_versions", { id: row.id })
     .then((versions) => {
       if (tab.artifact !== facts) return;
       facts.versions = Array.isArray(versions) ? versions : [];
       const kept = facts.versions.find((one) => one.n === facts.version);
-      submitBrowserAddress(tab, pathAsFileUrl(kept?.path ?? row.path));
+      void swapArtifactTab(tab, facts, kept?.path ?? row.path);
     })
     .catch(() => {
-      if (tab.artifact === facts) submitBrowserAddress(tab, pathAsFileUrl(row.path));
+      if (tab.artifact === facts) void swapArtifactTab(tab, facts, row.path);
     });
 }
 
@@ -10470,6 +10563,428 @@ function paintArtifactHint(hint, tab) {
     }
     repaint();
   };
+}
+
+/* ---- 2단계 B(t-59665) ④: 덮개 그림 ----------------------------------------------
+ *
+ * 네이티브 판은 창의 DOM 위에 뜨므로 메뉴·고르개가 페이지 위에 서려면 판이 눕는다
+ * (`browserCovered`·`syncBrowserPanes`). 눕는 동안 그 자리는 빈 사각형이었다. 이제 아티팩트
+ * 페이지의 판은 눕기 전에 제 그림을 한 장 찍고 — 창의 판 캡처 문 `browser_snapshot`, 마크업
+ * 편집기가 쓰는 그 문이고 그 문의 검사(이 창이 만든 판인가)도 그대로다, 새 길은 없다 — 그
+ * 그림이 판의 자리(`.browser-body`)에 선다. 판이 다시 서면 그림은 한 프레임 뒤에 걷힌다:
+ * 판이 먼저 제 그림을 올리고 덮개가 떠나야 깜빡임이 없다. 찍지 못하면(판이 아직 없거나
+ * 문이 거절) 전처럼 빈 자리다 — 메뉴는 그래도 선다. */
+function artifactShadeOf(host, make = false) {
+  const body = host?.querySelector(".browser-body");
+  if (!body) return null;
+  let shade = body.querySelector(":scope > .artifact-shade");
+  if (!shade && make) {
+    shade = document.createElement("img");
+    shade.className = "artifact-shade";
+    shade.alt = "";
+    shade.hidden = true;
+    body.appendChild(shade);
+  }
+  return shade;
+}
+
+/* 눕는 판이 덮개를 원하는가: 아티팩트 페이지의 판이, 제 탭이 앞에 선 채(사람이 그 자리를 보는
+ * 채) 덮개 아래 눕거나(④) 새 판을 준비하느라 눕을 때(⑦). 마크업과 연결 실패는 그 자리에 제
+ * 상자가 서므로 아니다. */
+function artifactShadeWanted(tab, host, covered) {
+  if (!tab?.artifact || !host || host.hidden || tab.marking || tab.navFailure) return false;
+  if (tab.worktree !== activeWorktreePath || activeTabIn(tab.pane)?.id !== tab.id) return false;
+  return covered || Boolean(tab.artifactSwap);
+}
+
+/* 판을 찍어 그 자리에 깐다. 같은 판의 같은 주소를 이미 깔았으면 다시 찍지 않는다. 깔렸으면 true. */
+async function layArtifactShade(tab, host) {
+  const shade = artifactShadeOf(host, true);
+  if (!shade) return false;
+  if (!shade.hidden && shade._label === tab.label && shade._url === tab.url) return true;
+  let picture = null;
+  try {
+    picture = await invoke("browser_snapshot", { label: tab.label });
+  } catch {
+    picture = null;
+  }
+  if (typeof picture !== "string" || picture === "" || host._browserTab !== tab) return false;
+  shade.src = picture;
+  shade._label = tab.label;
+  shade._url = tab.url;
+  shade.hidden = false;
+  return true;
+}
+
+function liftArtifactShade(host) {
+  const shade = artifactShadeOf(host);
+  if (!shade || shade.hidden) return;
+  shade.hidden = true;
+  shade.removeAttribute("src");
+  shade._label = null;
+  shade._url = null;
+}
+
+/* 판이 다시 선 뒤 한 프레임: 판이 제 그림을 올린 다음에 덮개가 떠난다. 그 사이 판이 또 누웠으면
+ * 덮개는 남는다. */
+function liftArtifactShadeAfterPane(tab, host) {
+  const shade = artifactShadeOf(host);
+  if (!shade || shade.hidden) return;
+  requestAnimationFrame(() => {
+    if (host._browserTab === tab && artifactShadeWanted(tab, host, browserCovered())) return;
+    liftArtifactShade(host);
+  });
+}
+
+/* ---- 2단계 B(t-59665) ⑤·⑧: 여는 시계 ----------------------------------------------
+ *
+ * 아티팩트 페이지를 여는 때마다 판(label)에 시계 하나가 선다. 시계는 **보인 시간**만 센다 —
+ * 판이 화면에 선 동안(`syncBrowserPanes`가 판을 세운 사각형이 있고 창이 숨지 않은 동안)만
+ * 가고, 탭이 뒤로 가거나 창이 가려지면 멈춘다. 첫 그림은 페이지의 `finished`(열려던 주소의
+ * 것)다. 그 뒤 한 박자(`--artifact-seen-thumb-ms`)를 더 본 페이지는 갤러리에 제 그림을 준다:
+ * `artifact_thumbnail`에 판의 이름을 실어 청하면 스토어가 그 판을 찍어(창의 판 캡처 문,
+ * 그 검사 그대로) 카드 크기로 줄여 같은 열쇠에 둔다 — 숨은 판은 아무도 안 본 페이지만 그린다.
+ * 숫자는 토큰 표(`ui/tokens.css`)의 것이다. 시험은 토큰을 덮어 박자를 당긴다. */
+const ARTIFACT_PAGE_TOKENS = Object.freeze({
+  seenThumb: "--artifact-seen-thumb-ms",
+  republishAutoMaxKb: "--artifact-republish-auto-max-kb",
+  openSlow: "--artifact-open-slow-ms",
+  openStalled: "--artifact-open-stalled-ms",
+});
+/* 열기의 두 결과 — 기록의 낱말이고 스토어(`record_open`)가 아는 둘이다. */
+const ARTIFACT_OPEN_OUTCOMES = Object.freeze({ painted: "painted", stalled: "stalled" });
+/* 토큰 하나를 읽는다 — 열 때마다 한 번이라 캐시하지 않는다(시험이 덮어쓴 값도 그대로 읽힌다). */
+function artifactPageNumber(token, fallback) {
+  const value = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(token));
+  return Number.isFinite(value) ? value : fallback;
+}
+/* 판(label) → 시계. 같은 판의 새 열기는 앞의 시계를 지운다 — 버린 열기는 잰 것이 아니다. */
+const artifactOpenClocks = new Map();
+/* id → 본 판에서 찍어 준 그림의 열쇠. 같은 열쇠를 두 번 찍지 않는다. */
+const artifactSeenShots = new Map();
+
+function artifactPaneShown(tab) {
+  const said = browserSaid.get(tab.label);
+  return said !== undefined && said !== "hidden" && !document.hidden;
+}
+
+function startArtifactOpenClock(tab, url, pressedAt = performance.now()) {
+  stopArtifactOpenClock(tab.label);
+  // 닫힌 탭의 시계는 떠난다 — 탭이 닫힐 때 문이 따로 없으니 새 시계가 설 때 쓸어 둔다.
+  for (const [label, held] of artifactOpenClocks) {
+    if (!tabs.includes(held.tab)) stopArtifactOpenClock(label);
+  }
+  const clock = {
+    tab,
+    url,
+    // 누른 때부터 판이 서기까지도 사람이 기다린 시간이다 — 창이 보이는 동안만.
+    visibleMs: document.hidden ? 0 : Math.max(0, performance.now() - pressedAt),
+    shownSince: null,
+    painted: false,
+    paintedAtMs: 0,
+    // 느림(⑧ 8 s)과 멈춤(30 s)의 눈금을 지났는가 — 머리띠의 한 줄이 읽는다.
+    slow: false,
+    stalled: false,
+    markTimer: 0,
+    seenTimer: 0,
+  };
+  artifactOpenClocks.set(tab.label, clock);
+  artifactOpenTick(tab, artifactPaneShown(tab));
+  // 빠른 페이지는 탭이 서기 전에 다 읽었다(`browserEarly`가 들고 있던 `finished`): 그 끝은 지금이다.
+  if (!tab.loading && tab.url && sameFileUrl(tab.url, url)) artifactOpenPainted(clock);
+  return clock;
+}
+
+function stopArtifactOpenClock(label) {
+  const clock = artifactOpenClocks.get(label);
+  if (!clock) return;
+  disarmArtifactOpenTimers(clock);
+  artifactOpenClocks.delete(label);
+}
+
+function artifactOpenVisibleMs(clock) {
+  return clock.visibleMs + (clock.shownSince === null ? 0 : performance.now() - clock.shownSince);
+}
+
+/* 판이 보이거나 숨는 순간 — `syncBrowserPanes`가 판마다 부른다. */
+function artifactOpenTick(tab, shown) {
+  const clock = artifactOpenClocks.get(tab.label);
+  if (!clock || clock.tab !== tab) return;
+  const now = performance.now();
+  if (shown && clock.shownSince === null) {
+    clock.shownSince = now;
+    armArtifactOpenTimers(clock);
+  } else if (!shown && clock.shownSince !== null) {
+    clock.visibleMs += now - clock.shownSince;
+    clock.shownSince = null;
+    disarmArtifactOpenTimers(clock);
+  }
+}
+
+/* 보이는 동안만 가는 타이머. 첫 그림 전에는 다음 눈금 — 느림(`--artifact-open-slow-ms`), 그
+ * 다음 멈춤(`--artifact-open-stalled-ms`) — 까지, 첫 그림 뒤에는 본 판의 그림을 찍는 한 박자까지.
+ * 눈금은 보인 시간으로 재므로 판이 숨으면 멈추고 다시 서면 남은 만큼만 간다. */
+function armArtifactOpenTimers(clock) {
+  disarmArtifactOpenTimers(clock);
+  const visible = artifactOpenVisibleMs(clock);
+  if (!clock.painted) {
+    const mark = !clock.slow
+      ? { at: artifactPageNumber(ARTIFACT_PAGE_TOKENS.openSlow, 8000), reached: artifactOpenSlow }
+      : !clock.stalled
+        ? { at: artifactPageNumber(ARTIFACT_PAGE_TOKENS.openStalled, 30000), reached: artifactOpenStalled }
+        : null;
+    if (mark === null) return;
+    clock.markTimer = setTimeout(() => {
+      clock.markTimer = 0;
+      if (artifactOpenClocks.get(clock.tab.label) !== clock || clock.shownSince === null || clock.painted) return;
+      mark.reached(clock);
+      armArtifactOpenTimers(clock);
+    }, Math.max(0, mark.at - visible));
+    return;
+  }
+  if (artifactSeenShots.get(clock.tab.artifact?.id) === artifactThumbnailKey(clock.tab.artifact?.row)) return;
+  const wait = artifactPageNumber(ARTIFACT_PAGE_TOKENS.seenThumb, 500) - (visible - clock.paintedAtMs);
+  clock.seenTimer = setTimeout(() => {
+    clock.seenTimer = 0;
+    if (artifactOpenClocks.get(clock.tab.label) !== clock || clock.shownSince === null) return;
+    void snapArtifactSeen(clock);
+  }, Math.max(0, wait));
+}
+
+function disarmArtifactOpenTimers(clock) {
+  clearTimeout(clock.seenTimer);
+  clearTimeout(clock.markTimer);
+  clock.seenTimer = 0;
+  clock.markTimer = 0;
+}
+
+/* 느림의 눈금: 머리띠가 「아직 읽는 중」이라 말한다. 기록은 아직이다 — 끝을 모른다. */
+function artifactOpenSlow(clock) {
+  clock.slow = true;
+  paintArtifactOpenNote(clock.tab);
+}
+
+/* 멈춤의 눈금: 「멈춘 열기」로 기록에 남고, 머리띠가 그렇게 말하며 다시 읽기를 내민다. 덮개 뒤에서
+ * 준비하던 새 판(⑦)이 안 오는 것이면 판은 더 숨어 있을 이유가 없다. */
+function artifactOpenStalled(clock) {
+  clock.stalled = true;
+  recordArtifactOpen(clock, ARTIFACT_OPEN_OUTCOMES.stalled);
+  dropArtifactSwap(clock.tab);
+  paintArtifactOpenNote(clock.tab);
+}
+
+/* 첫 그림: 열려던 주소의 `finished`. 보인 시간이 기록에 한 줄로 남고, 늦다던 말은 내려간다. */
+function artifactOpenPainted(clock) {
+  if (clock.painted) return;
+  clock.painted = true;
+  clock.paintedAtMs = artifactOpenVisibleMs(clock);
+  recordArtifactOpen(clock, ARTIFACT_OPEN_OUTCOMES.painted);
+  const said = clock.slow || clock.stalled;
+  clock.slow = false;
+  clock.stalled = false;
+  if (clock.shownSince !== null) armArtifactOpenTimers(clock);
+  else disarmArtifactOpenTimers(clock);
+  if (said) paintArtifactOpenNote(clock.tab);
+}
+
+/* 기록 한 줄(`artifact_open_record`): 어느 아티팩트의 어느 판을, 보인 시간 몇 ms에, 어떻게 — 첫 그림이
+ * 왔는가(`painted`) 멈춘 열기의 눈금을 지났는가(`stalled`). 저장은 스토어의 책이다. 못 적어도 페이지는 선다. */
+function recordArtifactOpen(clock, outcome) {
+  const facts = clock.tab.artifact;
+  if (!facts?.id) return;
+  const record = {
+    id: facts.id,
+    version: facts.version ?? facts.current ?? null,
+    visible_ms: Math.round(artifactOpenVisibleMs(clock)),
+    outcome,
+  };
+  invoke("artifact_open_record", { record }).catch(() => {});
+}
+
+/* 머리띠의 한 줄을 다시 그린다 — 머리띠는 브라우저 판의 그림과 함께 선다. */
+function paintArtifactOpenNote(tab) {
+  if (stillShowing(tab)) paintBrowserView(tab);
+}
+
+/* 멈춘 열기의 「다시 읽기」: 판을 다시 읽히고 시계를 새로 세운다 — 새 열기다. */
+function retryArtifactOpen(tab) {
+  const clock = artifactOpenClocks.get(tab.label);
+  const url = clock?.url ?? tab.url;
+  tab.loading = true;
+  invoke("browser_reload", { label: tab.label }).catch(() => {});
+  startArtifactOpenClock(tab, url);
+  if (stillShowing(tab)) paintBrowserView(tab);
+}
+
+/* 브라우저 판의 탐색 소식 가운데 아티팩트 페이지가 듣는 것(`listen("browser:nav")`): 여는 시계의
+ * 첫 그림(⑤·⑧)과, 숨겨 준비하던 새 판의 끝(⑦). */
+function noteArtifactPageNav(tab, said) {
+  const swap = tab.artifactSwap ?? null;
+  if (swap) {
+    if (sameFileUrl(said.url, swap.url)) {
+      if (said.state === "finished") void settleArtifactSwap(tab, swap);
+      else if (said.state === "failed" || said.state === "dead") dropArtifactSwap(tab);
+    } else {
+      // 사람이 다른 곳으로 갔다(또는 늦은 소식): 판이 더 숨어 있을 이유가 없다.
+      dropArtifactSwap(tab);
+    }
+  }
+  const clock = artifactOpenClocks.get(tab.label);
+  if (!clock || clock.tab !== tab) return;
+  if (!sameFileUrl(said.url, clock.url)) return;
+  if (said.state === "finished") artifactOpenPainted(clock);
+  // 연결 실패는 잰 것이 아니다 — 실패 상자가 제 말을 한다.
+  else if (said.state === "failed" || said.state === "dead") stopArtifactOpenClock(tab.label);
+}
+
+/* ---- 2단계 B(t-59665) ⑦: 새 판은 숨겨 준비한 뒤 바꾸고 읽던 자리를 지킨다 ----------------
+ *
+ * 다시 발행된 페이지는 전에는 그 자리에서 바로 새 주소로 갔다 — 읽던 페이지가 하얗게 비고 맨 위로
+ * 돌아왔다. 이제 보고 있는 탭은: 보이던 그림을 깔고(④의 덮개), 스크롤을 묻고(`browser_eval`,
+ * 판의 제 세계에서 `[scrollX, scrollY]`), 판을 눕힌 채(`tab.artifactSwap`) 새 판을 읽은 뒤, 그
+ * 판이 다 뜨면 스크롤을 돌려놓고 판을 세운다 — 덮개는 한 프레임 뒤에 떠난다. 확대는 탭의
+ * 것이라 그대로다. 보이지 않는 탭은 전처럼 바로 간다: 읽는 이가 없다.
+ * 가벼운 발행물(HTML·Markdown)은 저절로, 무거운 것(PDF·토큰 표의 KB를 넘는 큰 페이지)은
+ * 머리띠의 「최신으로」를 기다린다 — 큰 페이지를 읽던 사람 아래에서 몇 MB를 다시 읽지 않는다. */
+function artifactRepublishIsHeavy(row) {
+  if (extensionOf(row?.path ?? "") === "pdf") return true;
+  const cap = artifactPageNumber(ARTIFACT_PAGE_TOKENS.republishAutoMaxKb, 1024) * 1024;
+  return (Number(row?.bytes) || 0) > cap;
+}
+
+async function swapArtifactTab(tab, facts, path) {
+  const url = pathAsFileUrl(path);
+  const host = groupOf(tab.pane)?.browserView ?? null;
+  const reading = host && !host.hidden && host._browserTab === tab && tab.worktree === activeWorktreePath
+    && activeTabIn(tab.pane)?.id === tab.id && artifactPaneShown(tab);
+  if (!reading) {
+    submitBrowserAddress(tab, url);
+    startArtifactOpenClock(tab, url);
+    return;
+  }
+  await layArtifactShade(tab, host);
+  let scroll = null;
+  try {
+    scroll = await invoke("browser_eval", { label: tab.label, expression: "[scrollX, scrollY]" });
+  } catch {
+    scroll = null;
+  }
+  // 묻는 사이 또 바뀌었거나 탭이 떠났으면 이 바꾸기는 지난 것이다.
+  if (tab.artifact !== facts || !tabs.includes(tab)) return;
+  const at = Array.isArray(scroll) && scroll.length === 2 && scroll.every((n) => Number.isFinite(n))
+    ? scroll.map((n) => Math.round(n))
+    : null;
+  tab.artifactSwap = { url, scroll: at };
+  // 판이 덮개 뒤에 눕는다 — 덮개는 이미 깔렸으니 찍지 않는다.
+  syncBrowserPanes();
+  submitBrowserAddress(tab, url);
+  startArtifactOpenClock(tab, url);
+}
+
+/* 새 판이 떴다: 읽던 자리로 돌려놓은 다음 판을 세운다. 자리를 못 돌려도 새 판은 선다. */
+async function settleArtifactSwap(tab, swap) {
+  const [x, y] = swap.scroll ?? [0, 0];
+  if (x !== 0 || y !== 0) {
+    try {
+      await invoke("browser_eval", { label: tab.label, expression: `scrollTo(${x}, ${y})` });
+    } catch {
+      // 판의 세계가 답하지 않았다 — 맨 위라도 새 판이다.
+    }
+  }
+  if (tab.artifactSwap !== swap) return;
+  tab.artifactSwap = null;
+  syncBrowserPanes();
+}
+
+function dropArtifactSwap(tab) {
+  if (!tab.artifactSwap) return;
+  tab.artifactSwap = null;
+  syncBrowserPanes();
+}
+
+/* 머리띠의 셋째 줄(⑦·⑧): 기다리는 새 판 — 「새 버전 N이 발행되었습니다 · 최신으로」. 없으면 접힌다. */
+function paintArtifactStripNote(strip, tab) {
+  const note = strip.querySelector(".artifact-strip-note");
+  if (!note) return;
+  const facts = tab?.artifact ?? null;
+  const words = note.querySelector(".artifact-strip-note-words");
+  const act = note.querySelector(".artifact-strip-note-act");
+  let pending = facts?.pending ?? null;
+  // 사람이 고르개로 그 번호를 골랐거나 그 사이 더 새 판이 섰으면 기다릴 것이 없다.
+  if (pending && (pending.version === facts.version || (pending.version ?? 0) <= (facts.current ?? 0))) {
+    facts.pending = null;
+    pending = null;
+  }
+  if (pending) {
+    words.textContent = t("artifacts.strip.newVersion", "새 버전 {{n}}이 발행되었습니다", { n: pending.version });
+    act.textContent = t("artifacts.strip.latest", "최신으로");
+    act.hidden = false;
+    act.onclick = () => {
+      facts.pending = null;
+      refreshArtifactTab(tab, pending, { force: true });
+    };
+    note.dataset.kind = "pending";
+    note.hidden = false;
+    return;
+  }
+  // 늦은 열기(⑧): 느림의 눈금을 지나면 「아직 읽는 중」, 멈춤의 눈금을 지나면 「멈춘 열기」와 다시 읽기.
+  const clock = tab?.kind === "browser" ? artifactOpenClocks.get(tab.label) ?? null : null;
+  if (clock && clock.tab === tab && !clock.painted && (clock.slow || clock.stalled)) {
+    if (clock.stalled) {
+      words.textContent = t("artifacts.open.stalled", "멈춘 열기 — 페이지가 {{seconds}}초 동안 뜨지 않았습니다", {
+        seconds: Math.round(artifactPageNumber(ARTIFACT_PAGE_TOKENS.openStalled, 30000) / 1000),
+      });
+      act.textContent = t("artifacts.open.retry", "다시 읽기");
+      act.hidden = false;
+      act.onclick = () => retryArtifactOpen(tab);
+      note.dataset.kind = "stalled";
+    } else {
+      words.textContent = t("artifacts.open.slow", "아직 읽는 중입니다…");
+      act.hidden = true;
+      note.dataset.kind = "slow";
+    }
+    note.hidden = false;
+    return;
+  }
+  note.hidden = true;
+  act.hidden = true;
+  delete note.dataset.kind;
+}
+
+
+/* 본 판의 그림을 갤러리 썸네일로: 현재 파일(최신 번호)을 보는 페이지 판만, 열쇠마다 한 번. 답이
+ * 그림이면 카드의 캐시에 들고, 서 있는 카드와 서랍에 바로 입힌다. */
+async function snapArtifactSeen(clock) {
+  const tab = clock.tab;
+  const facts = tab.artifact;
+  const row = facts?.row ?? artifactRows.get(facts?.id ?? "") ?? null;
+  if (!row || row.kind !== "page" || !ARTIFACT_THUMB_KINDS.has(row.kind)) return;
+  const seat = artifactFeedbackSeat(tab);
+  if (seat === null || (seat.shown !== null && seat.shown.n !== (facts.current ?? null))) return;
+  const key = artifactThumbnailKey(row);
+  if (artifactSeenShots.get(row.id) === key) return;
+  artifactSeenShots.set(row.id, key);
+  let answer = null;
+  try {
+    answer = await invoke("artifact_thumbnail", { id: row.id, label: tab.label });
+  } catch {
+    answer = null;
+  }
+  if (typeof answer?.data_url !== "string" || answer.data_url === "") {
+    artifactSeenShots.delete(row.id);
+    return;
+  }
+  artifactThumbFailed.delete(row.id);
+  rememberArtifactThumb(row.id, answer.data_url);
+  const node = artifactCardNodeFor(row.id);
+  if (node) {
+    const thumb = node.querySelector(".artifact-card-thumb");
+    thumb.src = answer.data_url;
+    thumb.hidden = false;
+    node._thumbSrc = answer.data_url;
+  }
+  const view = artifactsView();
+  if (view && artifactSelectedId === row.id) void paintArtifactPreview(view, artifactRows.get(row.id) ?? row);
 }
 
 /* 머리띠가 든 만든 판 — 주석의 받을 곳이 기본으로 고른다. 없으면 null. */

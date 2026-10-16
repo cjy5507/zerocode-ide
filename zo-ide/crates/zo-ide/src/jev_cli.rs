@@ -276,6 +276,7 @@ fn run_summary(request: &SummaryRequest, cwd: &Path, now_ms: i64, offset_s: i64)
         offset_s,
         request.recent,
     );
+    let seats = jev_summary::with_rests(seats, &cwd);
     Report {
         text: if request.json {
             render_json(&seats, request.act_lines).to_string()
@@ -532,6 +533,13 @@ fn render_json(seats: &[SeatReport], act_lines: bool) -> Value {
                 "negativesWanted": seat.negatives_wanted,
                 "stand": seat.stand.token(),
                 "applies": seat.applies,
+                // Why the seat rests now and until when (t-58193): the one
+                // field the panel's chip and sentence both read.
+                "resting": seat.resting.map(|rest| json!({
+                    "untilMs": rest.until_ms,
+                    "cause": rest.cause.word(),
+                    "unanswered": rest.unanswered,
+                })),
                 "verdict": seat.judged.as_ref().map(|judged| json!({
                     "verdict": judged.verdict.token(),
                     "line": judged.verdict.line().map(tools::jev_summary::line_token),

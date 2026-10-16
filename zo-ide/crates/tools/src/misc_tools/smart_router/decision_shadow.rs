@@ -405,6 +405,9 @@ pub struct DecisionShadowRow {
     /// ([`zerocode_core::jev::hangul_share_permille`]) — the language column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hangul_permille: Option<u16>,
+    /// What the server said beside a refusal (t-58193).
+    #[serde(flatten)]
+    pub server_said: jev_gate::ServerSaid,
 }
 
 impl DecisionShadowRow {
@@ -447,6 +450,7 @@ impl DecisionShadowRow {
         self.hedge_fired = hedge.map(|_| call.hedge.is_some());
         self.hedge_won = call.hedge.map(|ran| ran.won);
         self.loser_ms = call.hedge.and_then(|ran| ran.loser_ms);
+        self.server_said = jev_gate::ServerSaid::of(call);
     }
 
     fn new(
@@ -481,6 +485,7 @@ impl DecisionShadowRow {
             reading: None,
             rule: None,
             hangul_permille: None,
+            server_said: jev_gate::ServerSaid::default(),
         }
     }
 

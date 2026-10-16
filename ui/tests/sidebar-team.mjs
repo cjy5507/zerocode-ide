@@ -21,7 +21,7 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *   ⑦ a quiet beat writes no row, a status letter writes one, and pointing at a row reads its pane's last
  *      three lines once;
  *   ⑧ the landing line counts what waits to land and opens that list on the task board;
- *   ⑨ 「가지별 보기」 brings the branch list back, stored, and the list's own switch brings the team back;
+ *   ⑨ 「브랜치 보기」 brings the branch list back, stored, and the list's own switch brings the team back;
  *      a restart restores the choice;
  *   ⑩ every new word reads in the four other catalogues;
  *   ⑪ with no coordinator sitting the view reads nothing and the branch list is what it was.
@@ -219,6 +219,8 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
           pane: text(".team-pane"),
           now: text(".team-now"),
           dot: [...node.querySelector(".team-dot").classList].find((name) => name.startsWith("is-"))?.slice(3) ?? "",
+          spinning: /\bwt-spin-\d+\b/.test(node.querySelector(".team-dot").className),
+          moving: node.classList.contains("is-working"),
           cells: [...node.querySelectorAll(".team-strip .team-step")].map((cell) =>
             [...cell.classList].find((name) => name.startsWith("is-"))?.slice(3) ?? ""),
           step: text(".team-step-word"),
@@ -281,7 +283,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
         cells("w-b1") === "on,stuck,,,," && read["w-b1"].step === words.commit1 &&
         cells("w-b2") === "on,on,stuck,on,cur," && read["w-b2"].step === words.verify &&
         read["w-b2"].stepsTip.includes(words.checkFailed) &&
-        cells("w-c1") === "on,on,,on,on,cur" && read["w-c1"].step === words.land,
+        cells("w-c1") === "on,on,past,on,on,cur" && read["w-c1"].step === words.land,
       JSON.stringify(read),
     );
     ok(
@@ -291,6 +293,17 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
         read["w-b1"].dot === "asking" && read["w-b1"].chip === words.asking && read["w-b1"].question &&
         read["w-b2"].dot === "waiting" && read["w-c1"].dot === "waiting",
       JSON.stringify(read),
+    );
+    /* A working row moves — its dot's ring carries a spin angle within a beat and the row wears the flowing
+     * border; a blocked or waiting row stands still. */
+    const moving = await page.evaluate(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 160));
+      return { a1: window.__READ_WORKER__("w-a1"), a2: window.__READ_WORKER__("w-a2"), c1: window.__READ_WORKER__("w-c1") };
+    });
+    ok(
+      "a working row moves — its dot carries a spin angle and the row wears the flowing border — and a blocked or waiting row stands still",
+      moving.a1.spinning && moving.a1.moving && !moving.a2.spinning && !moving.a2.moving && !moving.c1.spinning && !moving.c1.moving,
+      JSON.stringify(moving),
     );
     ok(
       "the line under a worker is the first sentence of its last status — at most thirty characters — and when it was said; a worker that said nothing has no line; the title is the task and the pane is the ledger's",
@@ -306,6 +319,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       .map((node) => [node.dataset.teamKey, {
         name: node.querySelector(".team-name")?.textContent ?? "",
         run: node.querySelector(".team-run")?.hidden ? "" : node.querySelector(".team-run")?.textContent ?? "",
+        project: node.querySelector(".team-project")?.hidden ? "" : node.querySelector(".team-project")?.textContent ?? "",
         questions: node.querySelector(".team-badge.is-question")?.hidden ? "" : node.querySelector(".team-badge.is-question")?.textContent ?? "",
         letters: node.querySelector(".team-badge.is-letters")?.hidden ? "" : node.querySelector(".team-badge.is-letters")?.textContent ?? "",
         face: node.querySelector(".team-face .agent-ico") !== null,
@@ -322,6 +336,11 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
         cards["c:run-team-a"].letters === cardWords.letters2 && cards["c:run-team-a"].questions === "" &&
         cards["c:run-team-b"]?.questions === cardWords.question1 && cards["c:run-team-b"].letters === "" &&
         Object.values(cards).every((one) => one.face) && cards["c:run-team-a"].tip.includes("묶음 런"),
+      JSON.stringify(cards),
+    );
+    ok(
+      "a coordinator card names the project it works in — the scene's three seats all sit in r",
+      Object.values(cards).every((one) => one.project === "r"),
       JSON.stringify(cards),
     );
     const landing = await page.evaluate(() => {
@@ -478,7 +497,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
     });
     ok(
       "a released worker's handed-in work keeps its row under its coordinator — waiting at 검증, with no pane to name — while work that landed leaves the team",
-      settled.shown?.dot === "waiting" && settled.shown.pane === "" && settled.shown.cells.join(",") === "on,,,on,cur," &&
+      settled.shown?.dot === "waiting" && settled.shown.pane === "" && settled.shown.cells.join(",") === "on,past,past,on,cur," &&
         settled.landedGone && settled.order.indexOf("w:run-team-c/w-c2") === settled.order.indexOf("c:run-team-c") + 2 &&
         settled.afterGone,
       JSON.stringify(settled),
@@ -524,7 +543,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       return { branches, team, restored };
     });
     ok(
-      "「가지별 보기」 brings the branch list back — thirteen rows — and stores the choice; the list's switch brings the team back the same way; a restart's snapshot restores it",
+      "「브랜치 보기」 brings the branch list back — thirteen rows — and stores the choice; the list's switch brings the team back the same way; a restart's snapshot restores it",
       toggled.branches.layout === "branches" && toggled.branches.written?.layout === "branches" &&
         toggled.branches.written?.groupBy === "repo" && toggled.branches.rows.branches === 13 &&
         toggled.branches.teamHidden && toggled.branches.switchShown && toggled.branches.teamNodes === 0 &&

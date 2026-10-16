@@ -392,11 +392,11 @@ use cmd::{
 use cmd::{
     artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
     artifact_export, artifact_feedback_record, artifact_import_transcripts, artifact_open,
-    artifact_page_at, artifact_preference_revoke, artifact_preference_save, artifact_preferences,
-    artifact_preview, artifact_register, artifact_reveal, artifact_search, artifact_tasks,
-    artifact_thumbnail, artifact_versions, artifacts_list, explain_cancel, explain_preview,
-    explain_roads, explain_start, set_artifacts_auto_open_beside, set_artifacts_retention_days,
-    set_vault_session_limit,
+    artifact_open_record, artifact_page_at, artifact_preference_revoke, artifact_preference_save,
+    artifact_preferences, artifact_preview, artifact_register, artifact_reveal, artifact_search,
+    artifact_tasks, artifact_thumbnail, artifact_versions, artifacts_list, explain_cancel,
+    explain_preview, explain_roads, explain_start, set_artifacts_auto_open_beside,
+    set_artifacts_retention_days, set_vault_session_limit,
 };
 use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
@@ -3149,6 +3149,7 @@ fn main() -> ExitCode {
             explain_start,
             artifact_page_at,
             artifact_feedback_record,
+            artifact_open_record,
             artifact_preferences,
             artifact_preference_save,
             artifact_preference_revoke,

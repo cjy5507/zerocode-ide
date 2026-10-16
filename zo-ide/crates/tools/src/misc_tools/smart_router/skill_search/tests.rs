@@ -858,6 +858,97 @@ fn the_suggestion_asks_nothing_where_its_person_turned_the_search_off() {
     assert!(neither.0 && neither.1 >= 1 && neither.2 >= 1, "neither word: asked as before the split: {neither:?}");
 }
 
+/// A managed server whose provider refused the suggestion's answer says why
+/// beside its `502`, and the suggestion's row keeps both words next to the
+/// status (t-58193).
+#[test]
+fn a_refused_suggestions_row_keeps_what_the_server_said() {
+    use super::super::jev_mock::{machine_words, Mock};
+    let said = json!({"error": "native_protocol_failed", "refusal": "provider_context_truncated"});
+    let mock = Mock::serving(502, said.to_string());
+    machine_words(&[(SKILL_SUGGESTION.setting, JevMode::Auto.key())], &mock.base_url, |cwd| {
+        let skill = cwd.join(".zo").join("skills").join("docx");
+        std::fs::create_dir_all(&skill).expect("a skill folder");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: docx\ndescription: Create and edit Word documents.\n---\n# docx\n",
+        )
+        .expect("a skill");
+        let judge = SkillSuggestionJudge::at(cwd);
+        let asked = judge.suggest("draft the quarterly report as a Word file".to_string());
+        assert_eq!(api::sync_bridge::run_blocking(asked), None, "a recording seat hands nothing");
+        let ledger = skill_suggestion_path(cwd);
+        let started = Instant::now();
+        let mut rows = super::super::jev_summary::read_rows(&ledger);
+        while rows.is_empty() && started.elapsed() < Duration::from_secs(15) {
+            std::thread::sleep(Duration::from_millis(20));
+            rows = super::super::jev_summary::read_rows(&ledger);
+        }
+        finish_turn_suggestion(cwd, &[]);
+        let refused = SystemOneFailure::Http(502).ledger_token();
+        let row = rows.iter().find(|row| row["outcome"] == refused.as_str());
+        let row = row.expect("a refused row");
+        assert_eq!(row["serverErrorCode"], "native_protocol_failed", "{row}");
+        assert_eq!(row["serverRefusal"], "provider_context_truncated", "{row}");
+    });
+}
+
+/// A provider that cannot read the suggestion's catalog (t-58193): the first
+/// suggestion is refused as cut, and the next one does not ask that provider
+/// — its row says `resting` under a room of half the catalog that was cut,
+/// and no second request leaves. The suggestion cannot carry less than its
+/// whole catalog, so once [`jev_gate::REST`] has passed since the cut the
+/// whole catalog goes once more; cut again, it waits again.
+#[test]
+fn a_suggestion_whose_catalog_was_cut_waits_a_rest_to_ask_again() {
+    use super::super::jev_mock::{age_ledger, machine_words, Mock};
+    let said = json!({"error": "native_protocol_failed", "refusal": "provider_context_truncated"});
+    let mock = Mock::serving(502, said.to_string());
+    machine_words(&[(SKILL_SUGGESTION.setting, JevMode::Auto.key())], &mock.base_url, |cwd| {
+        let skill = cwd.join(".zo").join("skills").join("docx");
+        std::fs::create_dir_all(&skill).expect("a skill folder");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: docx\ndescription: Create and edit Word documents.\n---\n# docx\n",
+        )
+        .expect("a skill");
+        let judge = SkillSuggestionJudge::at(cwd);
+        let ledger = skill_suggestion_path(cwd);
+        let asked = |rows: Vec<Value>| -> Vec<Value> {
+            rows.into_iter().filter(|row| row.get("outcome").is_some()).collect()
+        };
+        let suggest = |task: &str, wanted: usize| -> Vec<Value> {
+            let handed = api::sync_bridge::run_blocking(judge.suggest(task.to_string()));
+            assert_eq!(handed, None, "a recording seat hands nothing");
+            let started = Instant::now();
+            let mut rows = asked(super::super::jev_summary::read_rows(&ledger));
+            while rows.len() < wanted && started.elapsed() < Duration::from_secs(15) {
+                std::thread::sleep(Duration::from_millis(20));
+                rows = asked(super::super::jev_summary::read_rows(&ledger));
+            }
+            finish_turn_suggestion(cwd, &[]);
+            rows
+        };
+
+        suggest("draft the quarterly report as a Word file", 1);
+        let rows = suggest("turn these meeting notes into a memo document", 2);
+
+        assert_eq!(rows[0]["serverRefusal"], "provider_context_truncated", "{rows:?}");
+        assert_eq!(rows[1]["outcome"], "resting", "{rows:?}");
+        let catalog = rows[0]["candidates"].as_u64().expect("the catalog that was cut");
+        assert_eq!(rows[1]["room"], catalog / 2, "{rows:?}");
+        assert_eq!(mock.requests().len(), 1, "the cut catalog is not sent again");
+
+        age_ledger(&ledger, jev_gate::REST + Duration::from_secs(60));
+        let rows = suggest("summarise the contract as a one-page brief", 3);
+        assert_eq!(mock.requests().len(), 2, "a rest later the whole catalog goes once more");
+        assert_eq!(rows[2]["candidates"], catalog, "{rows:?}");
+        let rows = suggest("list the risks this plan leaves open", 4);
+        assert_eq!(rows[3]["outcome"], "resting", "{rows:?}");
+        assert_eq!(mock.requests().len(), 2, "cut again, it waits again");
+    });
+}
+
 #[test]
 fn judging_a_skill_label_does_not_invent_a_missing_baseline() {
     use zerocode_core::jev::promote::{judge_seat, Line, Verdict};
