@@ -3563,11 +3563,14 @@ fn said_once() -> &'static Mutex<std::collections::HashSet<String>> {
     TOLD.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-/// A conversation bound to `run` stands in terminal `term`, and another live
-/// pane holds the run's chair. The chair is not taken from its holder, and the
-/// person is told once which pane holds it (t-21908): a beat is a second long,
-/// so a repeat of the same fact is the same line over again.
-fn tell_chair_held_once(run: &str, holder: &str, term: u32) {
+/// A conversation bound to `run` stands in terminal `term`, and the run's live
+/// chair stays with `holder`: this same conversation, still open in the pane
+/// at terminal `twin`, or a pane this conversation did not sit (`None`). The
+/// chair is not taken from its holder, and the person is told once which pane
+/// holds it (t-21908): a beat is a second long, so a repeat of the same fact
+/// is the same line over again. The line names the HOLDER — until t-57705 it
+/// named this pane's own chair, and the `--from` it suggested was refused.
+fn tell_chair_held_once(run: &str, holder: &str, term: u32, twin: Option<u32>) {
     let key = format!("{run}\u{1f}{holder}\u{1f}{term}");
     let first = said_once()
         .lock()
@@ -3577,14 +3580,157 @@ fn tell_chair_held_once(run: &str, holder: &str, term: u32) {
         return;
     }
     let Some(root) = BLACKBOX.get() else { return };
+    let line = match twin {
+        Some(open) => format!(
+            "orchestration: run {run}'s coordinator seat stays with pane {holder} (terminal \
+             {open}), where the same conversation is still open; terminal {term} did not take \
+             it. To move it here, close the pane of terminal {open} or run-takeover --run {run} \
+             --from {holder} --reason <why>"
+        ),
+        None => format!(
+            "orchestration: run {run}'s coordinator seat is held by pane {holder}, which this \
+             conversation did not sit; terminal {term} did not take it. To replace that holder: \
+             run-takeover --run {run} --from {holder} --reason <why>"
+        ),
+    };
+    crate::note_window_event(root, &line);
+}
+
+/// Why a run's live chair is no longer its conversation's pane in this window
+/// (t-57705): the three facts on which the chair follows its conversation
+/// into the pane it went on in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeatLeft {
+    /// No pane by the chair's name stands in this window's table.
+    Gone,
+    /// The chair's pane shows another conversation now.
+    Another,
+    /// The person closed the chair's pane, and its agent kept running.
+    Closed,
+}
+
+impl SeatLeft {
+    /// The fact, as the pane the chair left reads it in its handoff receipt
+    /// and the window's log says it after the move.
+    const fn why(self) -> &'static str {
+        match self {
+            Self::Gone => "the pane this seat was sat from is not in the window any more",
+            Self::Another => "the pane this seat was sat from shows another conversation now",
+            Self::Closed => {
+                "the pane this seat was sat from was closed while its agent kept running"
+            }
+        }
+    }
+}
+
+/// What the beat makes of a run's live chair for a conversation the ledger
+/// binds to that run, standing in another leader pane (t-57705).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chair {
+    /// The chair follows the conversation into its pane.
+    Follows(SeatLeft),
+    /// The chair stays: its holder is this same conversation, still open in
+    /// the pane at this terminal — a twin the person has in front of them,
+    /// whose seat is theirs to move.
+    Twin(u32),
+    /// The chair stays: the holder is not this conversation, or nothing here
+    /// says which conversation it is.
+    Held,
+    /// The pane this conversation shows in is itself closed: no tab shows it,
+    /// so nothing moves into it and nobody is told about it.
+    Unseen,
+}
+
+/// Where `holder` — a run's live chair — stands for `conversation`, which the
+/// ledger binds to that run and which shows in the leader pane at `here`.
+///
+/// The chair follows only its OWN conversation: a seat whose recorded actor is
+/// another one, or none, is somebody's to replace by `run-takeover`. And only
+/// out of a pane that is no longer that conversation's pane in this window —
+/// a pane the table does not hold, a pane showing another conversation, or a
+/// pane the person closed while its agent ran on (2026-10-15 19:15 and
+/// 2026-10-16 07:29, both at a quota wall). A pane the conversation still
+/// shows in a tab is a twin, and stays (t-21908). A conversation in a pane
+/// that is itself closed takes nothing: the person is not looking at it.
+fn chair_for(
+    host: &dyn Host,
+    tables: &std::collections::HashMap<String, zerocode_core::agent_teams::Team>,
+    holder: &zerocode_core::orchestration::CoordinatorSeat,
+    conversation: &str,
+    here: u32,
+) -> Chair {
+    if host.pane_detached(here) {
+        return Chair::Unseen;
+    }
+    if holder.actor.as_deref() != Some(conversation) {
+        return Chair::Held;
+    }
+    let Some(term) = holder
+        .seat
+        .split_once('/')
+        .and_then(|(team, pane)| tables.get(team)?.term_of(pane))
+    else {
+        return Chair::Follows(SeatLeft::Gone);
+    };
+    if term == here {
+        return Chair::Held;
+    }
+    match host.actor_for(term) {
+        Some(shown) if shown != conversation => Chair::Follows(SeatLeft::Another),
+        _ if host.pane_detached(term) => Chair::Follows(SeatLeft::Closed),
+        _ => Chair::Twin(term),
+    }
+}
+
+/// A run's live chair followed its conversation from the pane `from` into the
+/// pane at terminal `term` (t-57705). Said once per move: the next beat finds
+/// the chair where the conversation is.
+fn note_seat_followed(run: &str, from: &str, term: u32, left: SeatLeft) {
+    let Some(root) = BLACKBOX.get() else { return };
     crate::note_window_event(
         root,
         &format!(
-            "orchestration: run {run}'s coordinator chair is held by live pane {holder}; \
-             the conversation in terminal {term} did not take it. To move it, close that \
-             pane or run-takeover --run {run} --from {holder} --reason <why>"
+            "orchestration: run {run}'s coordinator seat followed its conversation from pane \
+             {from} to terminal {term}: {}",
+            left.why()
         ),
     );
+}
+
+/// The terminals whose pane the person closed while the agent in it kept
+/// running (t-57705), as the window's surface reports them
+/// (`note_term_detached`): no tab shows them, and their programs go on with
+/// their conversations. Keyed by a terminal number this process never mints
+/// twice, and emptied of a terminal when it ends ([`forget_detached_term`]).
+fn detached_terms() -> &'static Mutex<std::collections::HashSet<u32>> {
+    static DETACHED: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+    DETACHED.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// The surface says the pane at `term` was closed with its agent left running
+/// (`detached`), or brought back into a tab. Answers whether the fact changed.
+pub(crate) fn note_term_detached(term: u32, detached: bool) -> bool {
+    let mut held = detached_terms()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner());
+    if detached {
+        held.insert(term)
+    } else {
+        held.remove(&term)
+    }
+}
+
+/// Whether the person closed the pane at `term` and left its agent running.
+pub(crate) fn term_detached(term: u32) -> bool {
+    detached_terms()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .contains(&term)
+}
+
+/// A terminal ended, so nothing of it stands detached any more.
+pub(crate) fn forget_detached_term(term: u32) {
+    note_term_detached(term, false);
 }
 
 /// A sleeper the window could not seat again in its pane, and the refusal that
@@ -8126,8 +8272,23 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
         leader_term: u32,
     }
     let mut sitting: Vec<Sitting> = Vec::new();
-    // Conversations bound to a run that stand behind another live pane's chair.
-    let mut held_chairs: Vec<(String, String, u32)> = Vec::new();
+    /// A conversation bound to a run holds the run's live chair from a pane
+    /// that is no longer that conversation's pane here, and goes on in this
+    /// one (t-57705). Moved once the marks are let go, by the takeover road.
+    struct Following {
+        run: String,
+        team: String,
+        pane: String,
+        actor: Option<String>,
+        from: String,
+        leader_term: u32,
+        left: SeatLeft,
+    }
+    let mut following: Vec<Following> = Vec::new();
+    // Conversations bound to a run that stand beside another live pane's
+    // chair: the run, the chair's holder, this pane's terminal, and the
+    // holder's terminal when the holder is this same conversation.
+    let mut held_chairs: Vec<(String, String, u32, Option<u32>)> = Vec::new();
     {
         let tables = crate::agent_teams::teams();
         let mut marks = pointed().lock().unwrap_or_else(|held| held.into_inner());
@@ -8176,12 +8337,42 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     .as_deref()
                     .is_some_and(|actor| rows.bound_run(actor) == Some(run.id.as_str()));
                 if run.seat_is_coordinator(&chair) == Some(false) {
-                    /* A live chair its holder keeps is never taken here
-                     * (t-21908). A conversation bound to this run that stands in
-                     * this pane beside it is told once, in the window's own log,
-                     * which pane holds the chair. */
-                    if bound_here {
-                        held_chairs.push((run.id.clone(), chair.clone(), team.leader_term));
+                    /* A live chair its holder keeps is not taken here
+                     * (t-21908) — unless its holder is this same conversation
+                     * and the pane it sat from is no longer that
+                     * conversation's pane in this window: gone from the table,
+                     * showing another conversation, or closed with its agent
+                     * left running. Then the chair follows the conversation
+                     * into this pane, by the takeover road, once the marks are
+                     * let go (t-57705). Otherwise this pane is told once, in
+                     * the window's own log, which pane holds the chair. */
+                    if let (true, Some(actor), Some(holder)) =
+                        (bound_here, conversation.as_deref(), run.coordinator_live())
+                    {
+                        match chair_for(host, &tables, holder, actor, team.leader_term) {
+                            Chair::Follows(left) => following.push(Following {
+                                run: run.id.clone(),
+                                team: id.clone(),
+                                pane: team.leader_pane.clone(),
+                                actor: conversation.clone(),
+                                from: holder.seat.clone(),
+                                leader_term: team.leader_term,
+                                left,
+                            }),
+                            Chair::Twin(open) => held_chairs.push((
+                                run.id.clone(),
+                                holder.seat.clone(),
+                                team.leader_term,
+                                Some(open),
+                            )),
+                            Chair::Held => held_chairs.push((
+                                run.id.clone(),
+                                holder.seat.clone(),
+                                team.leader_term,
+                                None,
+                            )),
+                            Chair::Unseen => {}
+                        }
                     }
                     continue;
                 }
@@ -8788,8 +8979,25 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
             host.coordinator_sat(chair.leader_term);
         }
     }
-    for (run, holder, term) in held_chairs {
-        tell_chair_held_once(&run, &holder, term);
+    for one in following {
+        let reason = format!(
+            "the same conversation goes on in terminal {}; {}",
+            one.leader_term,
+            one.left.why()
+        );
+        let Ok((moved, _)) = held.actor.coordinator_followed(
+            &one.run, &one.team, &one.pane, one.actor, &one.from, reason, now_ms,
+        ) else {
+            continue;
+        };
+        rang(moved);
+        if moved {
+            note_seat_followed(&one.run, &one.from, one.leader_term, one.left);
+            host.coordinator_sat(one.leader_term);
+        }
+    }
+    for (run, holder, term, twin) in held_chairs {
+        tell_chair_held_once(&run, &holder, term, twin);
     }
     for one in pointing {
         let key = (one.run, one.address);

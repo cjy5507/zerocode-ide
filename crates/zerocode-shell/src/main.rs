@@ -246,6 +246,7 @@ use browser_guest_runtime::*;
 use browser_nav_state::*;
 use browser_runtime::*;
 use cmd::judgment_latest_request;
+use cmd::note_term_detached;
 use cmd::{
     abort_conflict_operation, ack_board_agent, add_claude_account, add_codex_account, agent_icon,
     agent_launch_plans, agent_models, agent_teams_mode, agent_terms, answer_approval, answer_ask,
@@ -2630,6 +2631,7 @@ fn main() -> ExitCode {
             judge_worker_room,
             note_worker_room_change,
             note_worker_room_seen,
+            note_term_detached,
             crash_bundle,
             crash_open_log,
             set_crash_watchdog,

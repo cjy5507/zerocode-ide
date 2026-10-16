@@ -183,6 +183,10 @@ pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
         include_str!("../../src/cmd/worker_room.rs"),
     ),
     (
+        "cmd/term_detach.rs",
+        include_str!("../../src/cmd/term_detach.rs"),
+    ),
+    (
         "cmd/artifacts.rs",
         include_str!("../../src/cmd/artifacts.rs"),
     ),

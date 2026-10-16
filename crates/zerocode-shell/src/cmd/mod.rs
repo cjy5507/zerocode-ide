@@ -168,6 +168,9 @@ pub(crate) use type_value::{remove_type_value_key, save_type_value_key, type_val
 pub(crate) mod worker_room;
 pub(crate) use worker_room::{judge_worker_room, note_worker_room_change, note_worker_room_seen};
 
+pub(crate) mod term_detach;
+pub(crate) use term_detach::note_term_detached;
+
 pub(crate) use github_pr::{github_pr_file_diff, github_set_reviewers};
 
 pub(crate) use repo_policy::{
