@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
@@ -33,8 +33,9 @@ const MEMORY_LIMIT_EXIT: i32 = 75;
 /// stopped while ending.
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 
-/// How much of its runtime's stderr a server keeps: the last lines, each cut
-/// short at a word, never more bytes in all.
+/// How much of its runtime's stderr a server keeps until the runtime is first
+/// asked anything: the last lines, each cut short at a word, never more bytes
+/// in all.
 const STDERR_LINES: usize = 20;
 const STDERR_LINE_BYTES: usize = 512;
 const STDERR_BYTES: usize = 4 * 1024;
@@ -45,15 +46,6 @@ const STDERR_SETTLE: Duration = Duration::from_millis(500);
 /// How often a server looks at its runtime, so its end is told even while
 /// another process keeps the runtime's output open.
 const WATCH: Duration = Duration::from_millis(200);
-
-/// A stderr line that repeats what the runtime was last asked is left out of
-/// the tail, as mask finds keys and paths but not a person's sentence: the
-/// whole of an asked text of `ASKED_TEXT` to `ASKED_RUN` characters, or
-/// `ASKED_RUN` characters in a row of a longer one. Shorter texts are single
-/// words a runtime's own lines share by chance.
-const ASKED_TEXT: usize = 8;
-const ASKED_RUN: usize = 12;
-const _: () = assert!(STDERR_LINES <= u32::BITS as usize);
 
 /// How many whole seconds a client waits before it asks an ended server whose
 /// restart is planned or loading again.
@@ -103,7 +95,9 @@ enum Stop {
 
 /// How a runtime ended: the stop this side made or the runtime's own end,
 /// the code or signal it ended with, the task a deadline stop's request
-/// named, and the last of its stderr, bounded and scrubbed.
+/// named, and the last of its stderr, bounded and scrubbed, when it was never
+/// asked anything. Of a runtime that was asked, only how many stderr lines it
+/// wrote from then on is kept.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ended {
@@ -112,10 +106,13 @@ pub struct Ended {
     pub signal: Option<i32>,
     pub task: Option<String>,
     pub stderr: Vec<String>,
+    pub stderr_withheld: u32,
 }
 
 /// The last lines a runtime wrote to stderr, read as it writes them so a
-/// full pipe never holds it up.
+/// full pipe never holds it up. Once the runtime is asked anything its stderr
+/// may repeat what a person asked, which mask cannot tell from other text, so
+/// from then on no line is kept, whenever it drains: lines are only counted.
 #[derive(Default)]
 struct Tail {
     held: Mutex<Held>,
@@ -127,7 +124,9 @@ struct Held {
     lines: VecDeque<String>,
     bytes: usize,
     closed: bool,
-    asked: Vec<u8>,
+    /// How many lines, blank ones aside, were left out since the runtime was
+    /// first asked, once it has been; never reset for its process.
+    withheld: Option<u32>,
 }
 
 struct Pipe {
@@ -360,7 +359,7 @@ impl Engine {
         if bytes.len() >= MAX_FRAME {
             return Err(Error::TooLarge);
         }
-        self.stderr.asking(bytes);
+        self.stderr.withhold();
         let mut io = lock(&self.io);
         io.input
             .write_all(bytes)
@@ -407,12 +406,14 @@ impl Engine {
             None if code == Some(MEMORY_LIMIT_EXIT) => (Error::MemoryLimit, None),
             None => (Error::RuntimeExited, None),
         };
+        let (stderr, stderr_withheld) = self.stderr.settled();
         Some(Ended {
             cause: cause.token(),
             code,
             signal,
             task,
-            stderr: self.stderr.lines(),
+            stderr,
+            stderr_withheld,
         })
     }
 
@@ -462,8 +463,23 @@ fn killed_here(code: Option<i32>, _signal: Option<i32>) -> bool {
 impl Tail {
     /// Keeps one line, cut at its last whole word when it ran past the
     /// length a line may keep, so no value survives in part; the oldest
-    /// lines give way past the bounds.
+    /// lines give way past the bounds. Once the tail withholds, a line is
+    /// only counted, and only when it would have been kept, judged before
+    /// anything is copied.
     fn push(&self, line: &[u8], long: bool) {
+        let mut held = lock(&self.held);
+        if let Some(withheld) = &mut held.withheld {
+            // Blank as judged below: a cut line ends in an ellipsis and a
+            // byte that is not UTF-8 reads as U+FFFD, so neither is blank.
+            if long
+                || line
+                    .utf8_chunks()
+                    .any(|chunk| !chunk.invalid().is_empty() || !chunk.valid().trim().is_empty())
+            {
+                *withheld = withheld.saturating_add(1);
+            }
+            return;
+        }
         let mut line = String::from_utf8_lossy(line).into_owned();
         if long {
             let cut = line
@@ -476,7 +492,6 @@ impl Tail {
         if line.trim().is_empty() {
             return;
         }
-        let mut held = lock(&self.held);
         held.bytes += line.len();
         held.lines.push_back(line);
         while held.lines.len() > STDERR_LINES || held.bytes > STDERR_BYTES {
@@ -492,30 +507,34 @@ impl Tail {
         self.closed.notify_all();
     }
 
-    /// Keeps the request the runtime is asked now in place of the last.
-    fn asking(&self, request: &[u8]) {
+    /// Stops keeping lines for good and lets go of those held, before the
+    /// runtime is first asked anything, as no request can be told apart from
+    /// a person's. A line the runtime began earlier but ends later is judged
+    /// as it ends, so it is withheld too.
+    fn withhold(&self) {
         let mut held = lock(&self.held);
-        held.asked.clear();
-        held.asked.extend_from_slice(request);
+        if held.withheld.is_none() {
+            held.withheld = Some(0);
+            held.lines = VecDeque::new();
+            held.bytes = 0;
+        }
     }
 
-    /// The kept lines, once stderr has closed or [`STDERR_SETTLE`] has
-    /// passed: without those that repeat what the runtime was last asked
-    /// (see [`ASKED_RUN`]), with their private values masked by the table the
-    /// release gate reads, and still within the bounds after masking.
-    fn lines(&self) -> Vec<String> {
+    /// The kept lines and how many were withheld, once stderr has closed or
+    /// [`STDERR_SETTLE`] has passed: the lines with their private values
+    /// masked by the table the release gate reads, and still within the
+    /// bounds after masking.
+    fn settled(&self) -> (Vec<String>, u32) {
         let held = self
             .closed
             .wait_timeout_while(lock(&self.held), STDERR_SETTLE, |held| !held.closed)
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .0;
-        let repeated = repeating(&held.lines, &held.asked);
+        let withheld = held.withheld.unwrap_or(0);
         let mut lines: Vec<String> = held
             .lines
             .iter()
-            .enumerate()
-            .filter(|&(index, _)| repeated & (1 << index) == 0)
-            .map(|(_, line)| {
+            .map(|line| {
                 let mut masked = zerocode_core::private_data::mask(line).text;
                 let mut end = masked.len().min(STDERR_LINE_BYTES);
                 while !masked.is_char_boundary(end) {
@@ -536,62 +555,7 @@ impl Tail {
             })
             .count();
         lines.drain(..lines.len() - kept);
-        lines
-    }
-}
-
-/// Which of `lines` repeat text from `asked`, the request the runtime was
-/// last asked, one bit a line: see [`ASKED_RUN`].
-fn repeating(lines: &VecDeque<String>, asked: &[u8]) -> u32 {
-    let Ok(mut request) = serde_json::from_slice::<Value>(asked) else {
-        return 0;
-    };
-    if let Some(request) = request.as_object_mut() {
-        request.remove("model");
-    }
-    let mut texts = Vec::new();
-    strings(&request, &mut texts);
-    let mut runs: HashMap<&str, u32> = HashMap::new();
-    for (index, line) in lines.iter().enumerate() {
-        let starts = char_starts(line);
-        for (first, &from) in starts.iter().enumerate() {
-            for &to in starts
-                .iter()
-                .skip(first + ASKED_TEXT)
-                .take(ASKED_RUN - ASKED_TEXT + 1)
-            {
-                *runs.entry(&line[from..to]).or_default() |= 1 << index;
-            }
-        }
-    }
-    let mut repeated = 0;
-    for text in texts {
-        let starts = char_starts(text);
-        let run = (starts.len() - 1).min(ASKED_RUN);
-        if run < ASKED_TEXT {
-            continue;
-        }
-        for piece in starts.windows(run + 1) {
-            repeated |= runs.get(&text[piece[0]..piece[run]]).copied().unwrap_or(0);
-        }
-    }
-    repeated
-}
-
-/// Where each character of `text` starts, and where the last one ends.
-fn char_starts(text: &str) -> Vec<usize> {
-    text.char_indices()
-        .map(|(at, _)| at)
-        .chain([text.len()])
-        .collect()
-}
-
-fn strings<'a>(value: &'a Value, found: &mut Vec<&'a str>) {
-    match value {
-        Value::String(text) => found.push(text),
-        Value::Array(items) => items.iter().for_each(|item| strings(item, found)),
-        Value::Object(fields) => fields.values().for_each(|field| strings(field, found)),
-        _ => {}
+        (lines, withheld)
     }
 }
 
