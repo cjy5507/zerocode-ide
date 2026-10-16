@@ -392,6 +392,17 @@ class BridgeBoundary(unittest.TestCase):
             self.assertIn("limits", vars(adapter), "D3 holding %r never decided what to declare" % (unusable,))
             self.assertIsNone(adapter.limits, "D3 holding %r declared a number" % (unusable,))
 
+    def test_the_measure_changes_nothing_the_runtime_computes(self):
+        capped = choice(4, ("yes", " ".join(["detail"] * (CAP + 12))))
+        crowded = choice(2, ("a b c d e f", "g h i j k l", "m n o p q r", "s t u v w x"))
+        to_internal = stand_in_laya().Agent._to_internal
+        for tokenizer in (Words(), Letters()):
+            for question, budget in [(choice(40), 24), (capped, 256), (crowded, 40), (choice(4), 256)]:
+                internal = to_internal(question)
+                plain = stand_in_build_head(tokenizer, internal, budget, option_order=[1, 0])
+                head, _ = bridge["measured_head"](stand_in_build_head, tokenizer, internal, budget, option_order=[1, 0])
+                self.assertEqual(head, plain, "the measure changed the ids, markers or stats build_head computes")
+
     def test_a_head_that_fits_is_not_named(self):
         adapter, _ = self.laya({"max_len": 1024, "head_max_len": 256})
         answered = adapter.predict({"state": "fixture state", "questions": {"goal": choice(40), "other": choice(4)}})
