@@ -348,6 +348,74 @@ mod tests {
         assert_eq!(standing.as_deref(), Some(STOP_REASON_HOTKEY));
     }
 
+    /// One resume at a time (t-59372): the person's resume of a newer stop,
+    /// asked while the older resume is still stopping the helper it woke, is
+    /// refused before the helper — else that helper is woken and then stopped
+    /// by the older resume, and the window runs beside a stopped helper — and
+    /// lifts the newer stop once the older resume ends.
+    #[test]
+    fn a_resume_asked_while_another_is_under_way_never_reaches_the_helper_until_it_ends() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_WINDOW);
+        let seen = revision();
+        let mut inner = None;
+        let mut inner_asked = 0;
+        let first = resume(
+            Lifter::Person { revision: seen },
+            || {
+                stop(STOP_REASON_HOTKEY);
+                Ok(Value::from("resumed"))
+            },
+            || {
+                let newer = revision();
+                inner = Some(resume(
+                    Lifter::Person { revision: newer },
+                    || {
+                        inner_asked += 1;
+                        Ok(Value::from("resumed"))
+                    },
+                    || true,
+                ));
+                true
+            },
+        );
+        let standing = stopped_reason();
+        let newer = revision();
+        let mut retry_asked = 0;
+        let retry = resume(
+            Lifter::Person { revision: newer },
+            || {
+                retry_asked += 1;
+                Ok(Value::from("resumed"))
+            },
+            || true,
+        );
+        let after = stopped_reason();
+        lift();
+        let inner = inner.expect("the first resume stops the helper it woke again");
+        assert_eq!(
+            inner_asked, 0,
+            "a resume asked inside another never reaches the helper"
+        );
+        assert!(!inner.lifted, "{inner:?}");
+        assert_eq!(
+            inner.stopped.as_deref(),
+            Some(STOP_REASON_HOTKEY),
+            "{inner:?}"
+        );
+        assert!(!first.lifted, "{first:?}");
+        assert_eq!(
+            standing.as_deref(),
+            Some(STOP_REASON_HOTKEY),
+            "the newer stop stands once the first resume ends"
+        );
+        assert_eq!(retry_asked, 1, "asked again after, it reaches the helper");
+        assert!(retry.lifted, "{retry:?}");
+        assert_eq!(after, None);
+    }
+
     #[test]
     fn an_agents_resume_never_lifts_the_persons_stop_nor_asks_the_helper() {
         let _hand = one_hand();
