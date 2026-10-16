@@ -4754,9 +4754,9 @@ await test("the provider accounts pane carries a Google card whose login the win
   const loginWords = await pageA.evaluate(() => ({
     about: document.querySelector('[data-i18n="settings.googleAccount.about"]')?.textContent ?? "",
     note: document.getElementById("google-account-note")?.textContent ?? "",
-    differs: t("settings.googleAccount.agyDiffers", "x"),
-    shared: t("settings.googleAccount.about", "x"),
-    gauge: t("usage.antigravityTip", "x"),
+    differs: t("settings.googleAccount.agyDiffers", "터미널의 agy는 자기 로그인을 따로 가지므로 다른 계정일 수 있습니다."),
+    shared: t("settings.googleAccount.about", "zo와 창이 함께 쓰는 Google 로그인(credentials.json)입니다."),
+    gauge: t("usage.antigravityTip", "zo와 창이 함께 쓰는 Google 로그인(credentials.json)으로 읽습니다 — 터미널의 agy는 다른 계정일 수 있습니다."),
   }));
   assertEqual(loginWords.about.trim(), loginWords.shared, "the Google card does not say whose login it shows");
   assert(loginWords.note.includes(loginWords.differs), "the Google card does not say agy may use another login");

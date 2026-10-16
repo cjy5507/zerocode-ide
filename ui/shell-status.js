@@ -1284,7 +1284,12 @@ function paintProviderSegment(provider) {
   delete figure.dataset.tone;
   // 로그인이 돌아오면 호버도 돌아온다: 위 갈래가 세그먼트의 말을 바꿔 두므로,
   // 수치가 서는 이 갈래가 그것을 되돌리지 않으면 고쳐진 뒤에도 옛 이유가 남는다.
-  segment.dataset.tip = t("usage.title", "플랜 사용량");
+  segment.dataset.tip = provider.id === "antigravity"
+    ? t(
+      "usage.antigravityTip",
+      "zo와 창이 함께 쓰는 Google 로그인(credentials.json)으로 읽습니다 — 터미널의 agy는 다른 계정일 수 있습니다.",
+    )
+    : t("usage.title", "플랜 사용량");
 }
 
 /* Every segment the bar carries. Named for what it does now: it painted only
