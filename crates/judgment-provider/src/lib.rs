@@ -304,7 +304,9 @@ pub struct Limits {
     pub tokens: TokenLimits,
 }
 
-/// Counts in the loaded model's own tokens, under its runtime's own names.
+/// Counts in the loaded model's own tokens: `max_len`, the longest input it
+/// takes, and `head_max_len`, each question's head budget, when its runtime
+/// has one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TokenLimits {
     pub max_len: NonZeroU64,
