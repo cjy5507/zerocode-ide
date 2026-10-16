@@ -11239,6 +11239,7 @@ async function focusAgentPane(worktree, tabId, term, agent = null) {
     if (detachedAgents.has(term)) {
       if (revealListedWorker(term, worktree, agent)) return;
       detachedAgents.delete(term);
+      noteAgentDetachment(term, false);
       mountTermTab(term, { worktree, ...(agent ? { agent: agentName(agent) } : {}) }, { placement: "tab" });
       // The person brought a parked worker back onto the stage.
       noteWorkerRoomChange(term, "tab");

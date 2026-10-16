@@ -8907,6 +8907,15 @@ function noteLeafLeft(term, tab, road, to) {
   void invoke("log_window_error", { message: `term ${term} ${from} by ${road} → ${to}` }).catch(() => {});
 }
 
+/* 떼어 둔 판을 백엔드에 알린다(t-57705): 「이 판은 닫혔고 그 에이전트는 돈다」,
+ * 또는 「다시 탭에 섰다」. 백엔드는 이 사실로 코디 자리가 그 대화를 따라 새 판으로
+ * 갈지 판정한다(`chair_for`) — 사람이 한도 벽에 선 코디 판을 닫고 같은 대화를 새
+ * 판에서 이어 가면, 원장의 자리가 닫힌 판에 남지 않는다. 싣는 것은 번호와
+ * 참·거짓뿐이고, 답을 기다리지 않는다. */
+function noteAgentDetachment(term, detached) {
+  void invoke("note_term_detached", { term, detached }).catch(() => {});
+}
+
 /* 탭째 끝나는 길(탭 닫기, 워크트리·프로젝트 제거): 그 탭의 판마다 한 줄. */
 function noteTabsLeaving(held, road) {
   for (const tab of held) {
@@ -8931,6 +8940,7 @@ function strandHome(term) {
  * 다시 붙는다(`focusAgentPane`). */
 function adoptStrandedTerm(term, worktree, road) {
   detachedAgents.set(term, worktree);
+  noteAgentDetachment(term, true);
   noteLeafLeft(term, null, road, `detached ${worktree}`);
   paintRunningCount();
   scheduleAgentPaint(["cards", "badge", "board"]);
@@ -8996,6 +9006,7 @@ function closePaneLeaf(tab, going) {
   tab.activePane = staying[0];
   if (termHoldsAgent(going)) {
     detachedAgents.set(going, tab.worktree);
+    noteAgentDetachment(going, true);
     dropTermScreen(going);
     // The person closed a tiled worker's pane: it went to the background.
     noteWorkerRoomChange(going, "background");

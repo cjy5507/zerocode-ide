@@ -20495,6 +20495,56 @@ fn formatted_over(decided: &mut Decided) {
     decided.reply.stdout = format!("{answer}\n");
 }
 
+/// The seat a pane bound to `run_id` is not (t-57705): who holds the run's
+/// coordinator seat, how much of the run's mail waits there, and the one verb
+/// that moves the seat — for a pane reading its own inbox (`address`), where
+/// the run's mail never arrives. `None` for the seat itself, a worker, a pane
+/// the run has no word with, and a run nobody sits in.
+fn seat_elsewhere(
+    ledger: &Ledger,
+    run_id: &str,
+    address: &str,
+    caller: &str,
+    seat: &str,
+) -> Option<serde_json::Value> {
+    if !address.starts_with(PANE_ADDRESS_PREFIX)
+        || standing_in(ledger, caller, seat).as_deref() != Some(run_id)
+    {
+        return None;
+    }
+    let run = ledger.run(run_id)?;
+    let held = run.coordinator_live().filter(|held| held.seat != seat)?;
+    let waiting = run.unread(&run.address()).len();
+    let takeover = format!(
+        "run-takeover --run {run_id} --from {} --reason <why> {RETRY_REQUEST} <name>",
+        held.seat
+    );
+    let said = format!(
+        "This pane is not run {run_id}'s coordinator seat: {} holds it (generation {}), and \
+         {waiting} of the run's messages wait there, not here. To move the seat to this pane: \
+         {takeover}",
+        held.seat, held.generation
+    );
+    Some(serde_json::json!({
+        "run": run_id,
+        "heldBy": held.seat,
+        "generation": held.generation,
+        "waiting": waiting,
+        "takeover": takeover,
+        "said": said,
+    }))
+}
+
+/// Put `value` under `key` beside what a look answered, leaving the rest of
+/// the answer as it was.
+fn said_beside(decided: &mut Decided, key: &str, value: serde_json::Value) {
+    let Ok(mut answer) = serde_json::from_str::<serde_json::Value>(&decided.reply.stdout) else {
+        return;
+    };
+    answer[key] = value;
+    decided.reply.stdout = format!("{answer}\n");
+}
+
 /// The transcript `worker-transcript` reads for `worker`: the row's OWN
 /// reported session's file, or why there is none. Three absences, each
 /// opening with [`crate::worker_transcript::UNAVAILABLE`] so a caller can
@@ -23864,6 +23914,17 @@ fn plan_inner(
             } else {
                 look(ledger, &run_id, &address, &kinds, Some((&seat, now_ms)))?
             };
+            /* A pane bound to this run that is not its seat reads its own
+             * pane inbox, and the run's mail waits at the seat (t-57705): on
+             * 2026-10-15 a coordinator's new pane read `count: 0` for two
+             * hours over 21 letters, and nothing in the answer said why. Not
+             * on a named check — its retry is rebuilt from the batch alone
+             * (`CheckV1`) and must answer the same bytes. */
+            let elsewhere = words
+                .value(RETRY_REQUEST)
+                .is_none()
+                .then(|| seat_elsewhere(ledger, &run_id, &address, &caller, &seat))
+                .flatten();
             // Nothing there, and the caller said it would rather sleep than
             // ask again. The ack above has already been spent — it happens
             // ONCE, before the first look — so the window may repeat the look
@@ -23883,6 +23944,10 @@ fn plan_inner(
             }
             if let Some(asked) = over_ceiling {
                 note_wait_ceiling(&mut decided, asked);
+            }
+            // A wait that sleeps answers with a later look, not this one.
+            if let Some(elsewhere) = elsewhere.filter(|_| decided.waiting.is_none()) {
+                said_beside(&mut decided, "seatElsewhere", elsewhere);
             }
             if words.has("--format") {
                 formatted_over(&mut decided);

@@ -757,6 +757,7 @@ pub fn forget_term(term: u32) {
     crate::orchestration_notify::forget_term(term);
     crate::orchestration::forget_taken_term(term);
     crate::orchestration::forget_pane_attention(term);
+    crate::orchestration::forget_detached_term(term);
     let mut held = teams();
     let mut retired = Vec::new();
     /* A leader's exit retires the LEADER's pane, not its children's (t-2512).
@@ -1291,6 +1292,15 @@ pub trait Host {
     /// mount. Nothing is typed into the pane here. Defaulted to nothing, so a
     /// host that seats no sleepers keeps the chair without them.
     fn coordinator_sat(&self, _leader_term: u32) {}
+
+    /// Whether the person closed this pane while its agent kept running
+    /// (t-57705): no tab shows it, and its program goes on with its
+    /// conversation — the window's detached agent, as its surface reports it.
+    /// A coordinator seat follows its conversation out of a pane like that.
+    /// Hosts that draw no tabs detach nothing.
+    fn pane_detached(&self, _term: u32) -> bool {
+        false
+    }
 
     /// Which agent runs in this terminal, as the catalog spells it.
     ///

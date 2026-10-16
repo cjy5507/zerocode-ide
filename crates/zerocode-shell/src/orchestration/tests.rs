@@ -23282,6 +23282,10 @@ mod restore_seams;
 /// and a working coordinator goes on without being spoken to
 /// (`tests/restore_wake.rs`).
 mod restore_wake;
+/// t-57705: a coordinator seat follows its conversation into a new pane when
+/// the pane it sat from is no longer that conversation's pane here
+/// (`tests/seat_follows.rs`).
+mod seat_follows;
 
 /* ---- account switch: the same seat, another login (t-7538) --------------- */
 
