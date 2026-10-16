@@ -39884,6 +39884,87 @@ details.task-board-section > summary {
   background: var(--surface-deck);
 }
 
+/* 덮개 그림(t-59665 ④): 메뉴·고르개가 덮어 판이 눕는 동안 판의 마지막 그림이 그 자리에 선다 —
+ * 네이티브 판과 같은 사각형을 입고, 판이 다시 서면 걷힌다. 손은 받지 않는다: 그 위의 메뉴가
+ * 손의 주인이다. */
+.browser-body > .artifact-shade {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
+}
+
+.browser-body > .artifact-shade[hidden] { display: none; }
+
+/* 문서 보기(t-59665 ⑥): 아티팩트를 제 파일 위에서 보는 동안 주소줄은 접히고, 도구 줄의 나머지 자식은
+ * 머리띠와 한 줄에 선다 — 머리가 한 줄이 되어 읽는 면이 도구 줄 한 줄만큼 넓어진다. 링크로 다른
+ * 곳에 가면 `is-artifact-reading`이 내려가 주소줄이 다시 선다. 규칙은 아티팩트 탭의 판에만
+ * 닿고(`.browser-view.is-artifact-reading`), 접는 것은 주소 슬롯 하나다: 도구 줄의 다른 자식 —
+ * 뒤로·앞으로·새로고침·잡기·주석·그리기·찾기·개발자 도구·바깥·메뉴와, 뒤에 들어올 작업 공간
+ * 상태 같은 자식 — 은 그대로 보인다. 판은 두 열의 격자가 된다: 첫 줄은 도구 줄(왼쪽, 제 폭)과
+ * 머리띠(오른쪽, 남는 폭)이고, 그 아래 줄들은 전처럼 하나씩 선 뒤 몸이 남는 높이를 다 가진다.
+ * 판이 도구 줄 더하기 머리띠의 최소 폭보다 좁으면(`is-artifact-reading-stacked`, 창이 잰다) 둘은
+ * 전처럼 위아래로 서고 주소줄만 접힌다. */
+.browser-view.is-artifact-reading {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  /* 머리의 줄들은 차례로 서고(없는 줄은 0) 몸은 열셋째 줄에서 남는 높이를 다 가진다 — 머리에 뒤에
+   * 들어올 자식이 있어도 몸 위에 선다. */
+  grid-template-rows: repeat(12, auto) minmax(0, 1fr);
+}
+
+.browser-view.is-artifact-reading > * { grid-column: 1 / -1; }
+
+.browser-view.is-artifact-reading > .browser-toolbar {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.browser-view.is-artifact-reading .browser-address-slot { display: none; }
+
+/* 머리띠 한 줄: 제목 줄과 만든 이 줄이 한 줄에 나란히 서고, 좁으면 만든 이 줄이 아래로 접힌다. */
+.browser-view.is-artifact-reading > .artifact-strip {
+  grid-column: 2;
+  grid-row: 1;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-3);
+}
+
+.browser-view.is-artifact-reading > .artifact-strip > .artifact-strip-head {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.browser-view.is-artifact-reading > .artifact-strip > .artifact-strip-meta { flex: 0 1 auto; }
+
+.browser-view.is-artifact-reading > .artifact-strip .artifact-strip-version { margin-left: 0; }
+
+/* 제목은 사라지지 않는다 — 행동이 접히기 전까지 몇 글자는 지킨다. */
+.browser-view.is-artifact-reading > .artifact-strip .artifact-strip-title { min-width: 6ch; }
+
+/* 도구 줄과 한 줄을 나누는 머리띠는 제 폭이 640px 아래면 둘째 행동들을 「⋯」로 접는다 — 한 줄에
+ * 제목·「주석」·「⋯」·만든 이·버전이 선다(Codex의 머리 칸 접기 순위). 혼자 한 줄을 가진 머리띠는
+ * 전처럼 480px에서 접는다. */
+@container (max-width: 639.98px) {
+  .browser-view.is-artifact-reading:not(.is-artifact-reading-stacked) > .artifact-strip .artifact-strip-act.is-secondary { display: none; }
+  .browser-view.is-artifact-reading:not(.is-artifact-reading-stacked) > .artifact-strip .artifact-strip-more { display: inline-flex; }
+}
+
+.browser-view.is-artifact-reading.is-artifact-reading-stacked { grid-template-columns: minmax(0, 1fr); }
+
+.browser-view.is-artifact-reading.is-artifact-reading-stacked > .browser-toolbar,
+.browser-view.is-artifact-reading.is-artifact-reading-stacked > .artifact-strip {
+  grid-column: 1 / -1;
+  grid-row: auto;
+}
+
+.browser-view.is-artifact-reading > .browser-body { grid-row: 13; }
+
 /* ---- 스크린샷 마크업(B02 ②) — Orca MarkupOverlay의 실측 옷 ----
  * 오버레이 `absolute inset-0 z-20`, 바탕 이미지 `objectFit: fill`, 캔버스는
  * `touch-none cursor-crosshair`, 아래 가운데에 도구 막대(`rounded-md border
@@ -46204,9 +46285,53 @@ button.jev-token:hover {
   font-size: var(--text-xs);
 }
 
+/* 머리띠의 셋째 줄(t-59665 ⑦·⑧): 새 판이 기다리거나 열기가 늦을 때만 선다 — 낱말 한 줄과 행동 하나.
+ * 문서 보기의 한 줄 머리띠에서는 제 줄로 접혀 내려온다. */
+.artifact-strip-note {
+  display: flex;
+  flex: 1 0 100%;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--artifact-strip-ink-soft);
+  font-size: var(--text-2xs);
+}
+
+.artifact-strip-note[hidden] { display: none; }
+
+.artifact-strip-note-words {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-strip-note-act {
+  flex: none;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--artifact-new-ink);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--motion-fast);
+}
+
+.artifact-strip-note-act[hidden] { display: none; }
+
+.artifact-strip-note-act:hover,
+.artifact-strip-note-act:focus-visible {
+  background: var(--artifact-new-bg);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .artifact-strip-act,
-  .artifact-strip-more { transition: none; }
+  .artifact-strip-more,
+  .artifact-strip-note-act { transition: none; }
 }
 
 /* 파일 뷰의 머리는 한 줄 플렉스라 머리띠가 서면 두 줄로 접힌다. */

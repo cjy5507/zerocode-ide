@@ -413,7 +413,8 @@ pub struct Artifact {
 /// as the ledger keeps the runs they belong to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Limits {
-    /// Characters of a text preview kept in the index.
+    /// Characters of a text preview kept in the index — a Markdown card's
+    /// face is the excerpt of these (t-59665 ⑤).
     pub preview_chars: usize,
     /// Characters of a title, cut from the file name.
     pub title_chars: usize,
@@ -503,7 +504,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            preview_chars: 600,
+            preview_chars: 1200,
             title_chars: 80,
             preview_text_bytes_max: 512 * 1024,
             preview_image_bytes_max: 4 * 1024 * 1024,
