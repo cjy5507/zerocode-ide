@@ -29,9 +29,13 @@ const SLASH_CATALOG_TTL_MS = 5 * 60 * 1000;
  * the breath: an Enter that fails AFTER that leaves the words standing over
  * there, and the caller has to wear that difference (`run.sendUncertain` —
  * 「전달됐지만 전송 완료를 확인하지 못했습니다」) rather than report a send
- * that simply failed. */
-async function deliverToPane(term, text, landed = null) {
-  await invoke("term_paste", { term, text });
+ * that simply failed.
+ *
+ * `road` names the chip whose command this is (`model`, `permission`), so the
+ * window does not count it as the person's words (t-57712). Only the paste
+ * carries it: the Enter after it adds no words of anyone's. */
+async function deliverToPane(term, text, landed = null, road = null) {
+  await invoke("term_paste", road ? { term, text, road } : { term, text });
   landed?.();
   await new Promise((done) => setTimeout(done, COMPOSER_SUBMIT_DELAY_MS));
   await invoke("term_key", { term, press: { key: "Enter", ctrl: false, alt: false } });
@@ -610,10 +614,10 @@ async function openComposerMenu(chip, run, spec) {
 async function switchPaneModel(run, spec, id) {
   try {
     if (spec.model_command_takes_id) {
-      await deliverToPane(run.term, `${spec.model_command} ${id}`);
+      await deliverToPane(run.term, `${spec.model_command} ${id}`, null, "model");
     } else {
       showPaneScreen(run.term);
-      await deliverToPane(run.term, spec.model_command);
+      await deliverToPane(run.term, spec.model_command, null, "model");
     }
   } catch (error) {
     showError(error);
@@ -626,10 +630,10 @@ async function cyclePanePermission(run, spec) {
   try {
     if (spec.permission_road === "shift-tab") {
       const press = { key: "Tab", ctrl: false, alt: false, shift: true };
-      await invoke("term_key", { term: run.term, press });
+      await invoke("term_key", { term: run.term, press, road: "permission" });
     } else if (spec.permission_road) {
       showPaneScreen(run.term);
-      await deliverToPane(run.term, spec.permission_road);
+      await deliverToPane(run.term, spec.permission_road, null, "permission");
     }
   } catch (error) {
     showError(error);

@@ -55826,8 +55826,11 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       const settle = (ms = 60) => new Promise((done) => setTimeout(done, ms));
       const seen = {};
       const calls = [];
-      window.__ANSWER__.term_paste = (args) => (calls.push(["paste", args.term, args.text]), null);
-      window.__ANSWER__.term_key = (args) => (calls.push(["key", args.term, args.press.key, args.press.shift === true]), null);
+      // Which road each write named (t-57712): a chip's command is the
+      // chip's, and the person's own words name none.
+      const roads = [];
+      window.__ANSWER__.term_paste = (args) => (calls.push(["paste", args.term, args.text]), roads.push(args.road ?? null), null);
+      window.__ANSWER__.term_key = (args) => (calls.push(["key", args.term, args.press.key, args.press.shift === true]), roads.push(args.road ?? null), null);
       window.__ANSWER__.agent_models = (args) => args.agent === "claude"
         ? [{ id: "claude-fable-5-1", display_name: "Fable 5.1", provider: "claude" },
            { id: "claude-opus-5", display_name: "Opus 5", provider: "claude" }]
@@ -55892,12 +55895,14 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       await settle(700);
       seen.modelSent = JSON.stringify(calls.slice(-2));
       seen.wantModelSent = JSON.stringify([["paste", term, "/model claude-opus-5"], ["key", term, "Enter", false]]);
+      seen.modelRoads = JSON.stringify(roads.slice(-2));
       seen.menuClosed = composer?.querySelector(".composer-menu") === null;
       // The mode chip cycles with the CLI's own key.
       modeChip?.click();
       await settle(30);
       seen.modeKey = JSON.stringify(calls.at(-1));
       seen.wantModeKey = JSON.stringify(["key", term, "Tab", true]);
+      seen.modeRoad = roads.at(-1);
       // Another CLI opens a fresh pane in the same checkout.
       agentChip?.click();
       await settle(120);
@@ -55958,6 +55963,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       await settle(700);
       seen.enterRan = JSON.stringify(calls.slice(-2));
       seen.wantEnterRan = JSON.stringify([["paste", term, "/clear"], ["key", term, "Enter", false]]);
+      seen.enterRanRoads = JSON.stringify(roads.slice(-2));
       seen.boxClearedAfterRun = box.value === "";
       // The window's own command only fills the box.
       box.value = "/art";
@@ -55999,6 +56005,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       await settle(700);
       seen.codexPick = JSON.stringify(calls.slice(-2));
       seen.wantCodexPick = JSON.stringify([["paste", codexTerm, "/model"], ["key", codexTerm, "Enter", false]]);
+      seen.codexRoads = JSON.stringify(roads.slice(-2));
       seen.codexScreenBack = paneChatOn(codexTerm) === false;
       // The palette head names a documented list as such.
       seen.codexHead = null;
@@ -56086,6 +56093,12 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
     ok(
       "a CLI whose picker lives on its own screen gets the bare command and the screen back, and a documented list is named as such on the palette's head",
       seen.codexPick === seen.wantCodexPick && seen.codexScreenBack && seen.codexHead === seen.wantCodexHead,
+      JSON.stringify(seen),
+    );
+    ok(
+      "a chip's command names the chip's road, so the window does not count it as the person's words, while a command the person ran from the palette names none (t-57712)",
+      seen.modelRoads === JSON.stringify(["model", null]) && seen.codexRoads === JSON.stringify(["model", null]) &&
+        seen.modeRoad === "permission" && seen.enterRanRoads === JSON.stringify([null, null]),
       JSON.stringify(seen),
     );
   } finally {

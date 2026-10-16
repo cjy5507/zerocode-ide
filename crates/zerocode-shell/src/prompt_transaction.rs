@@ -76,11 +76,13 @@ pub(super) fn refresh_hand(term: TermId, line: Line) -> Line {
 /// Record a successful human write before the caller releases the terminal
 /// lock. Keys, paste and committed IME text all use this door.
 ///
-/// Answers whether the hand put the PERSON's own words on the line — the
-/// question a takeover asks (t-17644). A lone Enter on a line holding no
-/// words of theirs only submitted what the window placed there (a resume
-/// nudge, a mail pointer, a preamble) or nothing at all: the window's own
-/// record of the line says so, read before this write moves it.
+/// Answers whether the hand put the PERSON's own words on the line, or sent
+/// them — the question a takeover asks (t-17644). A key that adds no words —
+/// an arrow, Escape, Tab, a control key — is a hand and takes nothing
+/// (t-57712). A lone Enter on a line holding no words of theirs only
+/// submitted what the window placed there (a resume nudge, a mail pointer, a
+/// preamble) or nothing at all: the window's own record of the line says so,
+/// read before this write moves it.
 pub(super) fn human_write<E>(
     term: TermId,
     bytes: &[u8],
@@ -88,12 +90,44 @@ pub(super) fn human_write<E>(
 ) -> Result<bool, E> {
     let theirs_before = crate::human_input::holds_own_words(term);
     write()?;
-    crate::human_input::typed(term);
+    let words = puts_words(bytes);
+    if words {
+        crate::human_input::typed(term);
+    } else {
+        crate::human_input::keyed(term);
+    }
     let text = std::str::from_utf8(bytes).ok();
     if text.is_some_and(zerocode_core::ask::is_potential_submit_input) {
         crate::human_input::entered(term);
     }
-    Ok(theirs_before || !text.is_some_and(zerocode_core::ask::is_submit_enter))
+    Ok(words || (theirs_before && text.is_some_and(zerocode_core::ask::is_submit_enter)))
+}
+
+/// Whether these bytes put words on the line (t-57712): printable text with
+/// no escape in it — a printable key, committed IME text, a paste inside or
+/// outside its brackets (a paste's own escapes are already inert,
+/// `zerocode_pty::sanitize_paste`). An arrow, Escape, Tab, Shift-Tab, a
+/// control key and an Enter carry none.
+fn puts_words(bytes: &[u8]) -> bool {
+    let bytes = bytes
+        .strip_prefix(b"\x1b[200~")
+        .and_then(|inside| inside.strip_suffix(b"\x1b[201~"))
+        .unwrap_or(bytes);
+    std::str::from_utf8(bytes)
+        .is_ok_and(|text| !text.contains('\x1b') && text.chars().any(|ch| !ch.is_control()))
+}
+
+/// Record a composer chip's write at the person's click — the model chip's
+/// command, the permission chip's key (t-57712). A hand, so a delivery yields
+/// to the line it reached; never their words, so its answer to
+/// [`human_write`]'s question is always no.
+pub(super) fn chip_write<E>(
+    term: TermId,
+    write: impl FnOnce() -> Result<(), E>,
+) -> Result<bool, E> {
+    write()?;
+    crate::human_input::keyed(term);
+    Ok(false)
 }
 
 /// Whether a question or an approval is on the pane's screen, waiting for a
@@ -470,8 +504,115 @@ mod tests {
         assert!(human_write(TERM, b"\r", || Ok::<(), ()>(())).unwrap());
         crate::human_input::submitted(TERM);
         assert!(!human_write(TERM, b"\r", || Ok::<(), ()>(())).unwrap());
-        // Any other key — an arrow, an interrupt — is still a hand.
-        assert!(human_write(TERM, b"\x03", || Ok::<(), ()>(())).unwrap());
+        // Any other key — an arrow, an interrupt — is still a hand, and adds
+        // none of their words (t-57712).
+        assert!(!human_write(TERM, b"\x03", || Ok::<(), ()>(())).unwrap());
+        crate::human_input::forget_term(TERM);
+    }
+
+    fn press(key: &str, ctrl: bool, shift: bool) -> zerocode_pty::KeyPress {
+        zerocode_pty::KeyPress {
+            key: key.to_string(),
+            ctrl,
+            alt: false,
+            shift,
+        }
+    }
+
+    fn keyed(key: &str) -> Vec<u8> {
+        zerocode_pty::encode_key(&press(key, false, false)).expect("a key the window sends")
+    }
+
+    /// The ledger marked two workers' panes as the person's, and the person
+    /// typed nothing in them (t-57712). A key that puts no words on the line
+    /// takes no pane over, and it is still a hand: the delivery guard sees
+    /// the line was reached. The bytes are `term_key`'s own.
+    #[test]
+    fn a_key_that_puts_no_words_on_the_line_takes_no_pane_over_but_is_still_a_hand() {
+        const TERM: TermId = 57_712;
+        let old = Line::default();
+        for key in [
+            press("ArrowUp", false, false),
+            press("ArrowDown", false, false),
+            press("Escape", false, false),
+            press("Tab", false, false),
+            press("Tab", false, true),
+            press("c", true, false),
+        ] {
+            crate::human_input::forget_term(TERM);
+            let bytes = zerocode_pty::encode_key(&key).expect("a key the window sends");
+            assert!(
+                !human_write(TERM, &bytes, || Ok::<(), ()>(())).unwrap(),
+                "{key:?} took the pane over with no word of the person's"
+            );
+            let line = refresh_hand(TERM, old);
+            assert!(
+                line.draft && line.hand.is_some(),
+                "{key:?} left the delivery guard blind to a hand"
+            );
+        }
+        crate::human_input::forget_term(TERM);
+    }
+
+    /// A pick in a menu — an arrow, then Enter — on a line holding none of
+    /// the person's words sends nothing of theirs (t-57712).
+    #[test]
+    fn an_arrow_then_enter_on_a_line_without_their_words_takes_no_pane_over() {
+        const TERM: TermId = 57_713;
+        crate::human_input::forget_term(TERM);
+        human_write(TERM, &keyed("ArrowDown"), || Ok::<(), ()>(())).unwrap();
+        assert!(
+            !human_write(TERM, &keyed("Enter"), || Ok::<(), ()>(())).unwrap(),
+            "the Enter after an arrow sent words the person never typed"
+        );
+        crate::human_input::forget_term(TERM);
+    }
+
+    /// The person's own words still take a pane over (t-17644, kept by
+    /// t-57712): a printable key, committed IME text, a paste — the road the
+    /// composer's own send takes — and the Enter that sends them, after any
+    /// key that adds none.
+    #[test]
+    fn the_persons_own_words_still_take_the_pane_over_and_so_does_their_send() {
+        const TERM: TermId = 57_714;
+        for words in [
+            keyed("a"),
+            "한글".as_bytes().to_vec(),
+            zerocode_pty::encode_paste("fix the build", true),
+            zerocode_pty::encode_paste("fix the build", false),
+        ] {
+            crate::human_input::forget_term(TERM);
+            assert!(
+                human_write(TERM, &words, || Ok::<(), ()>(())).unwrap(),
+                "{words:?} is the person's words"
+            );
+            human_write(TERM, &keyed("ArrowLeft"), || Ok::<(), ()>(())).unwrap();
+            assert!(
+                human_write(TERM, &keyed("Enter"), || Ok::<(), ()>(())).unwrap(),
+                "the Enter sending {words:?} is the person's send"
+            );
+        }
+        crate::human_input::forget_term(TERM);
+    }
+
+    /// A pane parked on its own question or approval reads its keys like any
+    /// other line (t-57712). A digit is a printable key and counts as words,
+    /// as it did before (the evidence did not settle whether answering the
+    /// worker's own dialog should be exempt); an arrow and Enter add none.
+    #[test]
+    fn a_parked_panes_dialog_keys_follow_the_same_words_rule() {
+        const TERM: TermId = 57_715;
+        crate::human_input::forget_term(TERM);
+        assert!(
+            human_write(TERM, &keyed("1"), || Ok::<(), ()>(())).unwrap(),
+            "a digit stopped counting as the person's words"
+        );
+        crate::human_input::forget_term(TERM);
+        human_write(TERM, &keyed("ArrowDown"), || Ok::<(), ()>(())).unwrap();
+        assert!(
+            !human_write(TERM, &keyed("Enter"), || Ok::<(), ()>(())).unwrap(),
+            "an arrow and Enter answering a dialog took the pane over"
+        );
         crate::human_input::forget_term(TERM);
     }
 

@@ -5859,24 +5859,31 @@ fn reported_sessions() -> &'static Mutex<ReportedSessions> {
 /// it stays taken: the ledger marks the worker sitting there as the
 /// person's, and the gate keeps every later keystroke to a lock-and-probe
 /// until the beat sees the pane returned ([`forget_returned_terms`]).
-pub(crate) fn pane_taken_over(term: u32, now_ms: i64) {
+///
+/// Answers the seat this report marked, `team/pane`, for the window log's
+/// takeover line (t-57712), and `None` when it marked nothing.
+pub(crate) fn pane_taken_over(term: u32, now_ms: i64) -> Option<String> {
     {
         let mut taken = taken_terms()
             .lock()
             .unwrap_or_else(|held| held.into_inner());
         if !taken.insert(term) {
-            return;
+            return None;
         }
     }
     if unavailable().is_some() {
-        return;
+        return None;
     }
-    let Some(held) = runtime() else {
-        return;
-    };
-    if let Ok((moved, _)) = held.actor.pane_taken_over(term, now_ms) {
-        rang(moved);
+    let held = runtime()?;
+    let (moved, _) = held.actor.pane_taken_over(term, now_ms).ok()?;
+    rang(moved);
+    let mut seat = None;
+    if moved {
+        ShellPaneTable.with_seat_of_term(term, &mut |found| {
+            seat = found.map(|(team, pane)| format!("{team}/{pane}"));
+        });
     }
+    seat
 }
 
 /// The terminal a live worker sits in, read from its row and the seats.

@@ -19,7 +19,10 @@
 //!
 //! · A person's hand — `term_key` and `term_paste` are the only doors a
 //!   keystroke of theirs comes through; every programmatic write takes
-//!   another. Each one marks this pane as holding something unsent.
+//!   another. Each one marks this pane as holding something unsent. Only a
+//!   hand that puts words there — typed or IME text, a printable key, a
+//!   paste — makes what is held the PERSON's words (t-57712); an arrow,
+//!   Escape or a control key marks the line and adds nothing of theirs.
 //!
 //! · An Enter reaching the pane — the person's own, through `term_key` in
 //!   any of its spellings, or one the pump wrote for a delivery. Either is a
@@ -106,6 +109,10 @@ struct Typed {
     /// prompt event answering the last gesture clears this; the generation
     /// above stays.
     pending: bool,
+    /// Whether the person's own WORDS are among what the line holds: a hand
+    /// put words there and no Enter has closed over them (t-57712). A hand
+    /// that adds none carries this from the draft it lands in.
+    words: bool,
     /// The hand count an Enter last closed over — a person's own key, or a
     /// delivery's — and `None` once a prompt event has answered it or nothing
     /// has been entered since the last hand.
@@ -166,8 +173,25 @@ pub(crate) fn taken(term: u32) -> u64 {
         .unwrap_or_default()
 }
 
-/// A person's hand reached this pane's line.
+/// A person's hand put their own words on this pane's line: typed or IME
+/// text, a printable key, a paste.
 pub(crate) fn typed(term: u32) {
+    hand(term, true);
+}
+
+/// A person's hand reached this pane's line without putting words on it —
+/// an arrow, Escape, Tab, a control key, an Enter, or the words a composer
+/// chip places at their click (t-57712).
+///
+/// Still a hand: the generation moves and the line stays marked, because a
+/// key can bring words onto a composer this window cannot read — an arrow
+/// walking the prompt history — and a delivery yields to whatever is there.
+/// It adds nothing of theirs, so it takes no pane over.
+pub(crate) fn keyed(term: u32) {
+    hand(term, false);
+}
+
+fn hand(term: u32, words: bool) {
     let generation = next_generation();
     let mut typed = hands()
         .typed
@@ -186,11 +210,17 @@ pub(crate) fn typed(term: u32) {
             typed.remove(&oldest);
         }
     }
+    // Their words stay theirs under later keys until an Enter closes over
+    // them or the provider reports taking the line.
+    let carried = typed
+        .get(&term)
+        .is_some_and(|held| held.words && held.pending && held.entered_at.is_none());
     typed.insert(
         term,
         Typed {
             generation,
             pending: true,
+            words: words || carried,
             // A new hand after an Enter is a new draft; the Enter before it
             // is no longer what the next prompt event answers.
             entered_at: None,
@@ -312,19 +342,21 @@ pub(crate) fn generation(term: u32) -> Option<u64> {
         .map(|held| held.generation)
 }
 
-/// Whether the PERSON's own words sit unsent on this pane's line: a hand
-/// reached it and no Enter has closed over that hand yet.
+/// Whether the PERSON's own words sit unsent on this pane's line: a hand put
+/// words there and no Enter has closed over them yet.
 ///
 /// Narrower than the draft a delivery refuses on: a line whose last hand was
-/// an Enter still waits for the provider's word, but it holds nothing of the
-/// person's to lose — which is what a takeover and a hand-back ask (t-17644).
+/// an Enter still waits for the provider's word, and one only an arrow or
+/// Escape reached may hold anything at all, but neither holds words of the
+/// person's to lose — which is what a takeover and a hand-back ask (t-17644,
+/// t-57712).
 pub(crate) fn holds_own_words(term: u32) -> bool {
     hands()
         .typed
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&term)
-        .is_some_and(|held| held.pending && held.entered_at != Some(held.generation))
+        .is_some_and(|held| held.pending && held.words && held.entered_at != Some(held.generation))
 }
 
 /// What the window knows about this pane's line, in the delivery's words —
