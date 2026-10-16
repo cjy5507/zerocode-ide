@@ -28,6 +28,7 @@
 //! as the sample floor (`Line::only_holds`): a missing record is a gap in
 //! the evidence, not a mark against the seat.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::Value;
@@ -36,8 +37,8 @@ use sha2::{Digest, Sha256};
 use crate::jev::promote::permille;
 use crate::jev::summary::{
     AGREED, BASELINE_AGREED, CURRENT_ELAPSED_MS, CURRENT_INPUT_TOKENS, ELAPSED_MS, INPUT_TOKENS,
-    JUDGED_EVERY_ROWS, LABEL, LABEL_AUTHOR, LABEL_SOURCE, WILSON_Z_95, grades_a_request,
-    wilson_lower,
+    JUDGED_EVERY_ROWS, LABEL, LABEL_AUTHOR, LABEL_PART, LABEL_SOURCE, WILSON_Z_95,
+    grades_a_request, wilson_lower,
 };
 use crate::jev::threshold::Graded;
 use crate::jev::{CurrentSide, JevUse};
@@ -582,17 +583,28 @@ pub fn bundle_of(rows: &[Value], seat_id: &str, policy: &BundlePolicy) -> Bundle
     }
 }
 
-/// The (label, mark) pairs of the person-judged rows, in label order.
+/// The (label, mark) pairs of the person-judged rows, in label order. Of two
+/// rows naming one request and one part of it ([`LABEL_PART`]), the newest
+/// counts, as in the labels line ([`crate::jev::promote::person_labels`]): a
+/// label a person changed is read once, as it reads now.
 fn judged_of(rows: &[Value]) -> Vec<(String, bool)> {
-    let mut judged: Vec<(String, bool)> = rows
-        .iter()
-        .filter(|row| source_of(row) == Some(LabelSource::Person))
-        .filter_map(|row| {
-            Some((
-                LABEL.read(row)?.as_str()?.to_string(),
-                AGREED.read(row)?.as_bool()?,
-            ))
-        })
+    let mut newest = HashMap::new();
+    for row in rows {
+        if source_of(row) != Some(LabelSource::Person) {
+            continue;
+        }
+        let (Some(label), Some(agreed)) = (
+            LABEL.read(row).and_then(Value::as_str),
+            AGREED.read(row).and_then(Value::as_bool),
+        ) else {
+            continue;
+        };
+        let part = LABEL_PART.read(row).and_then(Value::as_str);
+        newest.insert((label, part), agreed);
+    }
+    let mut judged: Vec<(String, bool)> = newest
+        .into_iter()
+        .map(|((label, _), agreed)| (label.to_string(), agreed))
         .collect();
     judged.sort();
     judged
