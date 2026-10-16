@@ -52,15 +52,16 @@ pub(super) fn letter(from: &str, to: &str, body: &str) -> Draft {
 }
 
 /// The questions the run's own seat is counted as owing, as both counts read
-/// them: [`open_questions_to`] (the receiver notices) and [`open_questions`]
-/// (the rings of waiting), each sorted.
+/// them at the bench's clock: [`open_questions_to`] (the receiver notices)
+/// and [`open_questions`] (the rings of waiting), each sorted.
 fn held_open(bench: &Bench, run_id: &str) -> (Vec<String>, Vec<String>) {
     let run = bench.ledger.run(run_id).expect("the run");
-    let mut to_seat: Vec<String> = open_questions_to(&bench.ledger, run, &run.address())
-        .into_iter()
-        .map(|question| question.id.clone())
-        .collect();
-    let mut every: Vec<String> = open_questions(&bench.ledger, run)
+    let mut to_seat: Vec<String> =
+        open_questions_to(&bench.ledger, run, &run.address(), bench.clock)
+            .into_iter()
+            .map(|question| question.id.clone())
+            .collect();
+    let mut every: Vec<String> = open_questions(&bench.ledger, run, bench.clock)
         .into_iter()
         .filter(|(_, to, _)| *to == run.address())
         .map(|(_, _, id)| id.to_string())

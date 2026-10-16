@@ -252,10 +252,12 @@ pub(crate) struct DeskLetters {
     /// delivered, until it is answered or can no longer be — the ledger's
     /// own reading of a wait (`Run::awaits_answer`, the one
     /// `Run::awaiting_reply` asks) and the reply verb's own rule
-    /// (`Run::question_is_answerable`), less the questions the seat wrote
-    /// back about in a letter naming them (`Ledger::answered_by_letters`,
-    /// t-59383), which the ledger's own counts take as answered. The
-    /// ledger's notices are never owed an answer.
+    /// (`Run::question_is_answerable`), less the questions the ledger's own
+    /// counts no longer hold open (`Ledger::still_owed`): written back about
+    /// in a letter naming them (t-59383), or expired — three days unanswered,
+    /// or a day after the coordinator's chair that asked emptied with nothing
+    /// said from it since (t-59383 r2). The ledger's notices are never owed
+    /// an answer.
     pub(crate) mail: Vec<DeskMail>,
     /// Owed an acknowledgement, oldest first: one line per notice or per
     /// quiet episode, as [`DESK_NEWS`] says.
@@ -324,11 +326,11 @@ pub(crate) fn desk_letters(ledger: &Ledger, run: &Run, now_ms: i64) -> DeskLette
         }
     }
     // The same count the ledger keeps (t-59383): a question the seat wrote
-    // back about, in a letter naming it, is owed nothing more.
-    let written_back = ledger.answered_by_letters(run, &asked);
-    owed.mail = asked
+    // back about in a letter naming it, or one that expired, is owed nothing
+    // more.
+    owed.mail = ledger
+        .still_owed(run, asked, now_ms)
         .into_iter()
-        .filter(|question| !written_back.contains(question.id.as_str()))
         .map(|question| mail_row(run, question, &inbox))
         .collect();
     owed.news.sort_by_key(|line| line.created_ms);
