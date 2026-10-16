@@ -113,7 +113,7 @@
 //! recorded walk's clearing shares those seats and still presses under
 //! `auto` only on a rise ([`risen`]).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
 
@@ -1242,11 +1242,11 @@ impl Agreement {
 /// instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Labels {
-    /// Labelled rows compared.
+    /// Labelled requests compared.
     pub compared: usize,
-    /// Rows where the judgment named what the label named.
+    /// Labelled parts of them where the judgment named what the label named.
     pub judgment_right: usize,
-    /// Rows where the probe did.
+    /// Labelled parts where the probe did.
     pub probe_right: usize,
 }
 
@@ -1264,7 +1264,9 @@ impl Labels {
 /// replace — and no other source. Of two rows naming one request and one
 /// part of it ([`LABEL_PART`]), the newest counts; a row graded against
 /// another version than `model`, the one answering now, counts for nothing.
-/// `None` where no row counts.
+/// The requests are counted toward a window's worth, as the file a person
+/// named counted them; who was right, part by part. `None` where no row
+/// counts.
 #[must_use]
 pub fn person_labels(rows: &[Value], model: Option<&str>) -> Option<Labels> {
     let mut newest = HashMap::new();
@@ -1287,8 +1289,9 @@ pub fn person_labels(rows: &[Value], model: Option<&str>) -> Option<Labels> {
     if newest.is_empty() {
         return None;
     }
+    let requests: HashSet<&str> = newest.keys().map(|(label, _)| *label).collect();
     Some(Labels {
-        compared: newest.len(),
+        compared: requests.len(),
         judgment_right: newest.values().filter(|(judgment, _)| *judgment).count(),
         probe_right: newest.values().filter(|(_, current)| *current).count(),
     })
