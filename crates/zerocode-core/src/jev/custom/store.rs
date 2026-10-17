@@ -17,9 +17,11 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -41,6 +43,12 @@ const INDEX_MAX_BYTES: usize = 16 * 1024;
 
 /// Hex digits in a version's name: a SHA-256, written out.
 const VERSION_HEX_DIGITS: usize = 64;
+
+/// How long a writer waits for another to let go of the store before it reports it busy: the project-rules store's wait.
+const LOCK_WAIT: Duration = Duration::from_millis(25);
+
+/// How often a waiting writer looks again.
+const LOCK_POLL: Duration = Duration::from_millis(1);
 
 /// Who may read and write the store's files: the person alone, whose words they are.
 #[cfg(unix)]
@@ -573,7 +581,21 @@ fn lock(root: &Path) -> io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(PRIVATE_MODE);
     }
-    options.open(root.join(LOCK))
+    let file = options.open(root.join(LOCK))?;
+    let until = Instant::now() + LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if Instant::now() < until => thread::sleep(LOCK_POLL),
+            Err(TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "another writer holds the decisions store",
+                ));
+            }
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
 }
 
 #[cfg(test)]
