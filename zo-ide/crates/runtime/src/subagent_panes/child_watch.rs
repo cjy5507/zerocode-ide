@@ -470,12 +470,30 @@ mod tests {
         assert_eq!(accepted, 1, "the same channel was connected to again");
 
         // Nobody listens on a port that was just released.
-        let closed = {
-            let gone = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            gone.local_addr().expect("addr")
-        };
+        let (_held, closed) = a_port_nobody_answers_on();
         assert!(!watch.hold_channel(closed));
         assert!(!watch.holds_channel(), "a refused channel replaced the held one with nothing held");
+    }
+
+    /// A loopback port nobody listens on, released.
+    fn a_port_nobody_answers_on() -> ((), std::net::SocketAddr) {
+        let gone = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        ((), gone.local_addr().expect("addr"))
+    }
+
+    /// Under load another test binary can bind a released port before the
+    /// watch connects to it (t-47435). Here a neighbour takes it first: while
+    /// the port is the test's, nobody else can listen on it.
+    #[test]
+    fn a_neighbour_cannot_answer_on_the_port_nobody_answers_on() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut watch = ChildWatch::open(directory.path()).expect("watch");
+        let (_held, closed) = a_port_nobody_answers_on();
+        let neighbour = std::net::TcpListener::bind(closed).ok();
+        assert!(
+            !watch.hold_channel(closed),
+            "a neighbour that bound the port answered for it: {neighbour:?}"
+        );
     }
 
     /// Another thread ends a rest at once, and the rest says nothing about the
