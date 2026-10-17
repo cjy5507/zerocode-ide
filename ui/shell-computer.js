@@ -69,6 +69,7 @@ function paintComputerBand() {
   // nothing to name.
   el("computer-band-resume").hidden = !stopped || state.revision == null || state.resuming || state.stopping;
   el("computer-band-view").hidden = computerBandLook == null;
+  paintComputerProgressControl();
 }
 
 function computerBandSlipAway() {
@@ -155,8 +156,9 @@ el("computer-band-view").addEventListener("click", () => {
  * page a look was taken by its number (`computer:frame`), never by picture; the
  * panel asks the window's own door for it — one ask out at a time, the newest
  * number held while one is out — and keeps one picture, let go when it closes or
- * turns to another assignment. Nothing here runs on a clock. The desktop only:
- * the dedicated browser's tabs are watched in their own tab. */
+ * turns to another assignment. Nothing here runs on a clock. The desktop's
+ * pictures only: the dedicated browser's tabs are watched in their own tab, and
+ * the panel says only who holds them (`paintComputerProgressControl`). */
 let computerProgress = null;
 let computerProgressSessions = 0;
 let computerProgressAsking = false;
@@ -182,6 +184,77 @@ function paintComputerProgressSubject(look) {
     });
     return t("computer.progress.seen", "{{name}} · {{time}}에 마지막으로 본 화면", { name, time });
   });
+}
+
+/* Who holds control, a line each (t-62464): the desktop as the backend granted
+ * its stop — the band's state, in its revision order — and each work browser
+ * the panel's pane owns as the dedicated browser's own state says it
+ * (`tab.workspace`, which shell-browser.js takes in revision order), in that
+ * browser's own words. The panel moves no control: a work browser's row leads
+ * to that browser's own bar, where 「내가 조작」 and 「다시 맡기기」 change it.
+ * Painted when the panel opens, when the band's state moves and with every
+ * repaint of the work browsers' chrome. */
+function computerProgressBrowsers(term) {
+  const owner = String(term);
+  return tabs.filter((tab) => tab.kind === "browser" && tab.agentWorkspace === true
+    && tab.workspace?.ownerTerm === owner && browserWorkspaceLive(tab));
+}
+
+function computerProgressBrowserWords(id) {
+  const tab = tabs.find((one) => one.id === id);
+  if (!tab) return "";
+  return t("computer.progress.browser", "작업 브라우저 {{name}} · {{state}}", {
+    name: tabLabel(tab),
+    state: browserWorkspaceWords(tab),
+  });
+}
+
+function forgetComputerProgressRows(list) {
+  for (const row of list.children) {
+    for (const node of row.children) say(node, null);
+  }
+  list.replaceChildren();
+  delete list.dataset.tabs;
+}
+
+function paintComputerProgressControl() {
+  const panel = computerProgress;
+  if (!panel) return;
+  const stopped = computerBandState.stopped;
+  say(el("computer-progress-desk"), () => stopped != null
+    ? t("computer.progress.deskStopped", "데스크톱 · 정지됨({{reason}}) · 에이전트는 입력할 수 없습니다", { reason: stopped })
+    : t("computer.progress.deskAgent", "데스크톱 · 에이전트에게 제어권이 있습니다"));
+  const held = computerProgressBrowsers(panel.term);
+  const list = el("computer-progress-browsers");
+  const signature = held.map((tab) => tab.id).join("\n");
+  if ((list.dataset.tabs ?? "") !== signature) {
+    forgetComputerProgressRows(list);
+    list.append(...held.map((tab) => {
+      const row = document.createElement("li");
+      row.dataset.tab = tab.id;
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "btn computer-progress-browser-go";
+      row.append(document.createElement("span"), go);
+      return row;
+    }));
+    list.dataset.tabs = signature;
+  }
+  for (const row of list.children) {
+    const id = row.dataset.tab;
+    say(row.firstElementChild, () => computerProgressBrowserWords(id));
+    const go = row.lastElementChild;
+    say(go, () => t("computer.progress.browserGo", "그 막대 열기"));
+    // C8's own launcher leads only to the browsers of the workspace on screen.
+    go.hidden = held.find((tab) => tab.id === id)?.worktree !== activeWorktreePath;
+  }
+  list.hidden = held.length === 0;
+  const hint = el("computer-progress-browser-hint");
+  say(hint, held.length === 0 ? null : () => t("computer.progress.browserHint",
+    "작업 브라우저의 제어권은 그 막대의 「{{human}}」·「{{agent}}」로 바꿉니다 · 띠의 정지는 데스크톱만 멈춥니다",
+    { human: BROWSER_WORKSPACE_ACTION_WORDS.human(), agent: BROWSER_WORKSPACE_ACTION_WORDS.agent() }));
+  if (held.length === 0) hint.textContent = "";
+  hint.hidden = held.length === 0;
 }
 
 /* Paint one look: its number, its picture when one was kept, and why there is
@@ -240,6 +313,14 @@ function closeComputerProgress() {
   note.textContent = "";
   note.hidden = true;
   say(el("computer-progress-subject"), null);
+  say(el("computer-progress-desk"), null);
+  el("computer-progress-desk").textContent = "";
+  forgetComputerProgressRows(el("computer-progress-browsers"));
+  el("computer-progress-browsers").hidden = true;
+  const hint = el("computer-progress-browser-hint");
+  say(hint, null);
+  hint.textContent = "";
+  hint.hidden = true;
 }
 
 function openComputerProgress(subject) {
@@ -257,10 +338,22 @@ function openComputerProgress(subject) {
   };
   el("computer-progress").hidden = false;
   paintComputerProgressSubject(null);
+  paintComputerProgressControl();
   askComputerProgress();
 }
 
 el("computer-progress-close").addEventListener("click", closeComputerProgress);
+
+/* A work browser's row leads to that browser's own bar, beside the
+ * conversation, as C8's own launcher does — the browser still held by this
+ * pane, and only in the workspace on screen. */
+el("computer-progress-browsers").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-tab]");
+  if (!row || !event.target.closest("button") || !computerProgress) return;
+  const tab = computerProgressBrowsers(computerProgress.term).find((one) => one.id === row.dataset.tab);
+  if (tab && tab.worktree === activeWorktreePath) watchBrowserWorkspace(tab, { beside: true });
+  else paintComputerProgressControl();
+});
 
 listen("computer:frame", (event) => {
   const word = event.payload ?? {};

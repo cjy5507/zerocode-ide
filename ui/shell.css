@@ -47907,15 +47907,45 @@ button.jev-token:hover {
 }
 
 .computer-progress-subject,
+.computer-progress-desk,
+.computer-progress-browser-hint,
 .computer-progress-note,
 .computer-progress-scope {
   margin: 0;
   font-size: var(--text-xs);
 }
 
+.computer-progress-browser-hint,
 .computer-progress-note,
 .computer-progress-scope {
   color: var(--ink-mist);
+}
+
+/* Who holds control (t-62464): the desktop's line, then a row for each work
+ * browser the pane holds — its words, and a button to that browser's own bar
+ * that wraps under them on a narrow screen. */
+.computer-progress-control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.computer-progress-browsers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+}
+
+.computer-progress-browsers > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
 }
 
 .computer-progress-frame {
