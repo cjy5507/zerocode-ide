@@ -3,6 +3,7 @@
 import importlib.metadata
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import pickle
@@ -130,32 +131,154 @@ class LayaAdapter:
         self.limits = declared_limits(
             initial, {"max_len": loaded.get("max_len"), "head_max_len": loaded.get("head_max_len")}
         )
+        budget = loaded.get("head_max_len")
+        self.head_budget = budget if type(budget) is int and budget > 0 else None
+
+    def fits(self, question):
+        if self.head_budget is None:
+            return False
+        internal = self.agent._to_internal(question)
+        _, whole = measured_head(
+            self.measure.build_head, self.agent.tok, internal, self.head_budget,
+            option_order=internal.get("option_order"),
+        )
+        return whole
+
+    def pages(self, question):
+        if self.head_budget is None or self.fits(question):
+            return [question]
+        if question.get("type") != "choice" or "option_order" in question:
+            return [question]
+        criteria = self.agent._to_internal(question)["crit"]
+        pages, current = [], {}
+        for label, description in criteria.items():
+            extended = dict(current, **{label: description})
+            if self.fits(dict(question, criteria=extended)):
+                current = extended
+                continue
+            if not current:
+                return [question]
+            pages.append(dict(question, criteria=current))
+            current = {label: description}
+            if not self.fits(dict(question, criteria=current)):
+                return [question]
+        if current:
+            pages.append(dict(question, criteria=current))
+        return pages if len(pages) < len(criteria) else [question]
+
+    def merge_page(self, question, answer, clusters):
+        labels = self.agent._to_internal(question)["crit"]
+        probabilities = answer.get("probabilities")
+        if not isinstance(probabilities, dict) or probabilities.keys() != labels.keys():
+            raise ValueError("page_answer")
+        if any(type(chance) not in (int, float) or not math.isfinite(chance) or not 0 <= chance <= 1
+               for chance in probabilities.values()):
+            raise ValueError("page_answer")
+        if abs(sum(probabilities.values()) - 1) > len(labels) * 0.000051 + 0.000001:
+            raise ValueError("page_answer")
+        winner = answer.get("choice")
+        chance = probabilities.get(winner, 0)
+        if chance <= 0 or chance < max(probabilities.values()):
+            raise ValueError("page_answer")
+        weights = {}
+        for label, probability in probabilities.items():
+            for original, weight in clusters[label]["weights"].items():
+                weights[original] = weight * (probability / chance)
+        confidence = answer.get("confidence")
+        answer_confidence = answer.get("answer_confidence", confidence)
+        if any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1
+               for value in (confidence, answer_confidence)):
+            raise ValueError("page_answer")
+        return winner, {
+            "weights": weights,
+            "confidence": min(clusters[winner]["confidence"], confidence, chance),
+            "answer_confidence": min(clusters[winner]["answer_confidence"], answer_confidence, chance),
+        }
 
     def predict(self, request):
-        questions = list(request["questions"].items())
         answers = {}
-        usage = {"input_tokens": 0, "output_tokens": 0}
+        usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0, "head_pages": {}}
         named = []
-        for start in range(0, len(questions), 4):
-            batch = dict(questions[start:start + 4])
-            native, heads = self.measure.during(lambda: self.agent.predict(request["state"], batch))
-            answers.update(native["answers"])
-            measured = native["usage"]
-            for key in ("input_tokens", "output_tokens", "state_tokens_dropped"):
-                if key in measured:
-                    usage[key] = usage.get(key, 0) + measured[key]
-            if measured.get("truncated"):
-                usage["truncated"] = True
-            named.extend(measured.get("truncated_questions") or ())
-            for name, question in batch.items():
-                internal = self.agent._to_internal(question)
-                kept = [whole for seen, whole in heads if seen == internal]
-                if not kept:
+        pending = {}
+        for name, question in request["questions"].items():
+            criteria = self.agent._to_internal(question).get("crit") if question.get("type") == "choice" else {}
+            criteria = criteria if isinstance(criteria, dict) else {}
+            pending[name] = {
+                "question": question,
+                "clusters": {label: {"weights": {label: 1.0}, "confidence": 1.0, "answer_confidence": 1.0}
+                             for label in criteria},
+                "partitioned": False,
+            }
+            usage["head_pages"][name] = {"pages": 0, "rounds": 0, "partitioned": False}
+        while pending:
+            tasks = []
+            used = set(request["questions"])
+            for name, progress in pending.items():
+                pages = self.pages(progress["question"])
+                progress["partitioned"] = progress["partitioned"] or len(pages) > 1
+                progress["results"] = []
+                details = usage["head_pages"][name]
+                details["pages"] += len(pages)
+                details["rounds"] += 1
+                details["partitioned"] = progress["partitioned"]
+                for index, page in enumerate(pages):
+                    identifier = name if len(pages) == 1 else "%s:%d" % (name, index)
+                    if len(pages) > 1:
+                        while identifier in used:
+                            identifier += ":"
+                    used.add(identifier)
+                    tasks.append((identifier, name, page))
+            failed = set()
+            for start in range(0, len(tasks), 4):
+                group = tasks[start:start + 4]
+                batch = {identifier: question for identifier, _, question in group}
+                native, heads = self.measure.during(lambda: self.agent.predict(request["state"], batch))
+                usage["model_calls"] += 1
+                measured = native["usage"]
+                for key in ("input_tokens", "output_tokens", "state_tokens_dropped"):
+                    if key in measured:
+                        usage[key] = usage.get(key, 0) + measured[key]
+                if measured.get("truncated"):
+                    usage["truncated"] = True
+                truncated = measured.get("truncated_questions") or ()
+                if any(identifier not in batch for identifier in truncated):
                     raise ValueError("head_unmeasured")
-                if not all(kept):
-                    named.append(name)
-            if measured.get("options"):
-                usage.setdefault("options", {}).update(measured["options"])
+                for identifier, name, question in group:
+                    internal = self.agent._to_internal(question)
+                    kept = [whole for seen, whole in heads if seen == internal]
+                    if not kept:
+                        raise ValueError("head_unmeasured")
+                    if not all(kept) or identifier in truncated:
+                        named.append(name)
+                        failed.add(name)
+                    pending[name]["results"].append((question, native["answers"][identifier]))
+                if measured.get("options"):
+                    usage.setdefault("options", {}).update(measured["options"])
+            following = {}
+            for name, progress in pending.items():
+                results = progress["results"]
+                if name in failed or not progress["partitioned"]:
+                    answers[name] = results[0][1]
+                    continue
+                winners = {}
+                for question, answer in results:
+                    winner, cluster = self.merge_page(question, answer, progress["clusters"])
+                    winners[winner] = cluster
+                if len(results) == 1:
+                    winner, cluster = next(iter(winners.items()))
+                    total = sum(cluster["weights"].values())
+                    probabilities = {label: cluster["weights"][label] / total
+                                     for label in self.agent._to_internal(request["questions"][name])["crit"]}
+                    final = dict(results[0][1], probabilities=probabilities)
+                    final["confidence"] = min(cluster["confidence"], probabilities[winner])
+                    final["answer_confidence"] = min(cluster["answer_confidence"], probabilities[winner])
+                    answers[name] = final
+                else:
+                    criteria = self.agent._to_internal(progress["question"])["crit"]
+                    progress["question"] = dict(progress["question"], criteria={label: criteria[label] for label in winners})
+                    progress["clusters"] = winners
+                    following[name] = progress
+            pending = following
         if named:
             usage["truncated_questions"] = list(dict.fromkeys(named))
         return {"answers": answers, "usage": usage}

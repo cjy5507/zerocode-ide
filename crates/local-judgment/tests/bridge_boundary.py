@@ -85,8 +85,16 @@ def stand_in_laya(through_module=True):
             build_head = common.build_head if through_module else stand_in_build_head
             for question in questions.values():
                 build_head(self.tok, self._to_internal(question), self.cfg.get("head_max_len", 64))
+            answers = {name: {"type": question["type"]} for name, question in questions.items()}
+            for name, question in questions.items():
+                if question["type"] == "choice":
+                    labels = list(question["criteria"])
+                    answers[name].update(
+                        choice=labels[0], probabilities={label: 1 / len(labels) for label in labels},
+                        confidence=0.0, answer_confidence=1 / len(labels),
+                    )
             return {
-                "answers": {name: {"type": question["type"]} for name, question in questions.items()},
+                "answers": answers,
                 "usage": {"input_tokens": 1, "output_tokens": 0, "truncated": False, "truncated_questions": []},
             }
 
@@ -197,11 +205,34 @@ class BridgeBoundary(unittest.TestCase):
                     seen.update(asked["criteria"])
                 self.assertEqual(seen, set(question["criteria"]))
                 self.assertGreater(adapter.agent.batches, 1)
+                self.assertEqual(result["usage"]["model_calls"], adapter.agent.batches)
                 answer = result["answers"]["action"]
                 self.assertEqual(set(answer["probabilities"]), set(question["criteria"]))
                 self.assertAlmostEqual(sum(answer["probabilities"].values()), 1.0)
                 self.assertEqual(answer["choice"], max(question["criteria"]))
                 self.assertLessEqual(answer["answer_confidence"], max(answer["probabilities"].values()))
+
+    def test_pages_that_cannot_compare_any_pair_keep_the_cut_refusal(self):
+        adapter, _ = self.laya({"max_len": 1024, "head_max_len": 20}, ranked_laya())
+        question = choice(8, ["one two three four five six seven eight"] * 10)
+        self.assertEqual(self.named(adapter, {"action": question}), ["action"])
+        self.assertEqual(adapter.agent.batches, 1)
+
+    def test_a_page_winner_must_belong_to_the_page_it_was_asked(self):
+        runtime = ranked_laya()
+        original = runtime.Agent
+
+        class Unoffered(original):
+            def predict(self, state, questions):
+                native = super().predict(state, questions)
+                for answer in native["answers"].values():
+                    answer["choice"] = "unoffered"
+                return native
+
+        runtime.Agent = Unoffered
+        adapter, _ = self.laya({"max_len": 1024, "head_max_len": 40}, runtime)
+        with self.assertRaisesRegex(ValueError, "page_answer"):
+            adapter.predict({"state": "same evidence", "questions": {"action": choice(8, ["control %d" % index for index in range(20)])}})
 
     def test_a_choice_that_already_fits_keeps_the_native_answer(self):
         adapter, _ = self.laya({"max_len": 1024, "head_max_len": 256}, ranked_laya())
@@ -346,13 +377,13 @@ class BridgeBoundary(unittest.TestCase):
             "an option the runtime capped was answered as whole",
         )
 
-    def test_a_question_whose_options_the_runtime_recuts_is_named(self):
+    def test_a_question_whose_options_the_runtime_recuts_is_paged(self):
         adapter, _ = self.laya({"max_len": 1024, "head_max_len": 40})
         crowded = choice(2, ("a b c d e f", "g h i j k l", "m n o p q r", "s t u v w x"))
         self.assertEqual(
             self.named(adapter, {"goal": crowded, "other": choice(2)}),
-            ["goal"],
-            "options the runtime re-cut were answered as whole",
+            None,
+            "options the runtime re-cut were not recovered by paging",
         )
 
     def test_the_named_questions_follow_the_loaded_budget_and_the_tokenizer(self):
@@ -397,14 +428,12 @@ class BridgeBoundary(unittest.TestCase):
                         for name, size in zip(("action", "walled", "instructed"), sizes)
                     }
                     named[shape, goal, bool(navigation)] = self.named(adapter, questions)
-        cut = {("baseline", goal, True): ["action"] for goal in ("recorded_trial", "english_400", "korean_400")}
-        cut.update({
-            ("candidate", "recorded_trial", True): ["action"],
+        cut = {
             ("candidate", "english_400", False): ["action"],
             ("candidate", "english_400", True): ["action"],
             ("candidate", "korean_400", False): ["action", "walled"],
             ("candidate", "korean_400", True): ["action", "walled"],
-        })
+        }
         self.assertEqual(
             named,
             {request: cut.get(request) for request in named},
