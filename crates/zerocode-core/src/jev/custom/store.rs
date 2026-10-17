@@ -49,6 +49,7 @@ const PRIVATE_MODE: u32 = 0o600;
 const INDEX: &str = "index.json";
 const DEFINITIONS: &str = "definitions";
 const TRASH: &str = "trash";
+const LOCK: &str = ".lock";
 const JSON: &str = "json";
 
 /// One decision as the index lists it.
@@ -155,6 +156,7 @@ pub fn create(
     now_ms: i64,
 ) -> Result<String, Error> {
     let root = root(home);
+    let _lock = lock(&root)?;
     let mut index = read_index(&root)?;
     let mut refused = check(definition);
     if !MODES.contains(&mode) {
@@ -201,6 +203,7 @@ pub fn create(
 /// every rule it breaks, and [`Error::Io`].
 pub fn edit(home: &Path, definition: &Definition, now_ms: i64) -> Result<String, Error> {
     let root = root(home);
+    let _lock = lock(&root)?;
     let mut index = read_index(&root)?;
     let Some(at) = index.iter().position(|entry| entry.id == definition.id) else {
         return Err(Error::Missing);
@@ -236,6 +239,7 @@ pub fn set_mode(home: &Path, id: &str, mode: JevMode, now_ms: i64) -> Result<(),
         return Err(Error::Refused(vec![Refusal::Mode]));
     }
     let root = root(home);
+    let _lock = lock(&root)?;
     let mut index = read_index(&root)?;
     let Some(entry) = index.iter_mut().find(|entry| entry.id == id) else {
         return Err(Error::Missing);
@@ -257,6 +261,7 @@ pub fn delete(home: &Path, id: &str, now_ms: i64) -> Result<(), Error> {
         return Err(Error::Missing);
     }
     let root = root(home);
+    let _lock = lock(&root)?;
     let mut index = read_index(&root)?;
     let Some(at) = index.iter().position(|entry| entry.id == id) else {
         return Err(Error::Missing);
@@ -311,6 +316,7 @@ pub fn restore(home: &Path, id: &str) -> Result<(), Error> {
         return Err(Error::Missing);
     }
     let root = root(home);
+    let _lock = lock(&root)?;
     let mut index = read_index(&root)?;
     let trash = root.join(TRASH);
     let row = trash.join(json(id));
@@ -357,6 +363,7 @@ pub fn restore(home: &Path, id: &str) -> Result<(), Error> {
 /// A trash that cannot be listed, or a file in it that cannot be removed.
 pub fn empty_trash(home: &Path, now_ms: i64) -> io::Result<usize> {
     let root = root(home);
+    let _lock = lock(&root)?;
     let trash = root.join(TRASH);
     let kept = TRASH_KEPT_DAYS * civil::MS_PER_DAY;
     let mut emptied = 0;
@@ -557,9 +564,23 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
+fn lock(root: &Path) -> io::Result<File> {
+    fs::create_dir_all(root)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(PRIVATE_MODE);
+    }
+    options.open(root.join(LOCK))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::thread;
+    use std::time::Duration;
 
     use super::super::Folders;
     use super::super::tests::{NOW, yes_no};
@@ -719,5 +740,59 @@ mod tests {
             0,
             "a row it cannot date stays"
         );
+    }
+
+    /// Every write holds the store's lock, so two writers at once each land
+    /// whole: neither tears the index, and neither loses the other's change.
+    #[test]
+    fn two_writers_do_not_tear_the_index() {
+        let home = tempfile::tempdir().unwrap();
+        let held = lock(&root(home.path())).unwrap();
+        let waited = create(
+            home.path(),
+            &yes_no("d-0000000a", "First"),
+            JevMode::Shadow,
+            NOW,
+        );
+        assert!(
+            matches!(&waited, Err(Error::Io(error)) if error.kind() == io::ErrorKind::WouldBlock),
+            "a writer does not write while another holds the store: {waited:?}",
+        );
+        assert!(list(home.path()).unwrap().is_empty());
+        drop(held);
+
+        let writers: Vec<_> = (0..2)
+            .map(|writer| {
+                let home = home.path().to_path_buf();
+                thread::spawn(move || {
+                    for n in 0..5 {
+                        let decision =
+                            yes_no(&format!("d-{writer}000000{n}"), &format!("{writer}.{n}"));
+                        loop {
+                            match create(&home, &decision, JevMode::Shadow, NOW) {
+                                Ok(_) => break,
+                                Err(Error::Io(error))
+                                    if error.kind() == io::ErrorKind::WouldBlock =>
+                                {
+                                    thread::sleep(Duration::from_millis(1));
+                                }
+                                Err(error) => panic!("{error:?}"),
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let listed = list(home.path()).unwrap();
+        assert_eq!(listed.len(), 10, "no writer's change was lost: {listed:?}");
+        for entry in &listed {
+            assert_eq!(
+                definition(home.path(), &entry.definition).unwrap().id,
+                entry.id
+            );
+        }
     }
 }
