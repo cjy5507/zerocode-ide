@@ -26,6 +26,9 @@ const ONE_REQUEST: &[u8] = b".";
 /// What an hour file's name starts with, before its local hour and its key.
 const HOUR_FILE_PREFIX: &str = "hour-";
 
+/// The local hour an hour file's name holds, in the shape [`hour_of`] writes.
+const HOUR_SHAPE: &str = "YYYY-MM-DDTHH";
+
 /// One minute, in milliseconds: the unit a clock's offset is given in.
 const MS_PER_MINUTE: i64 = 60_000;
 
@@ -92,7 +95,11 @@ pub fn hour_path(config_home: &Path, key: &str, hour: &str) -> PathBuf {
 /// # Errors
 /// An hour file that cannot be created or written.
 pub fn count_one_in_the_hour(path: &Path) -> io::Result<u64> {
-    append_one(path).map(|(place, _)| place)
+    let (place, first) = append_one(path)?;
+    if first {
+        forget_earlier_hours(path);
+    }
+    Ok(place)
 }
 
 /// Append one request's byte to `path`: the place it took, and whether it
@@ -166,4 +173,35 @@ pub fn forget_earlier_days(
             let _ = fs::remove_file(&path);
         }
     }
+}
+
+/// Remove the hour files beside `this_hour` whose hour is earlier than its
+/// own. A name whose hour does not read is kept, as a day file's is.
+fn forget_earlier_hours(this_hour: &Path) {
+    let (Some(dir), Some(now)) = (this_hour.parent(), hour_named(this_hour)) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // `YYYY-MM-DDTHH` orders as the clock does.
+        if hour_named(&path).is_some_and(|hour| hour < now) {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// The hour an hour file names — the `YYYY-MM-DDTHH` after its prefix,
+/// before a dash and its key — or `None` for any other name.
+fn hour_named(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let rest = name
+        .strip_prefix(HOUR_FILE_PREFIX)?
+        .strip_suffix(DAY_FILE_SUFFIX)?;
+    let (hour, key) = rest.split_at_checked(HOUR_SHAPE.len())?;
+    let at = crate::civil::epoch_ms_of_iso(&format!("{hour}:00:00Z"))?;
+    (hour_of(at, 0) == hour && key.strip_prefix('-').is_some_and(|key| !key.is_empty()))
+        .then(|| hour.to_string())
 }
