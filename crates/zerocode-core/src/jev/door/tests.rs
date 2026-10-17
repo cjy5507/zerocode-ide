@@ -1050,6 +1050,49 @@ fn a_day_file_counts_one_byte_per_request_and_forgets_earlier_days() {
     assert_eq!(count::day_of(afternoon_utc, SEOUL_MINUTES), "1970-01-02");
 }
 
+/// An hour file counts one decision's requests, or all of theirs together,
+/// the way a day file counts the day's; the first request of an hour forgets
+/// the hours before it, and nothing else.
+#[test]
+fn an_hour_file_counts_one_byte_per_request_and_forgets_earlier_hours() {
+    const SEOUL_MINUTES: i32 = 9 * 60;
+    let home = tempfile::tempdir().expect("a config home");
+    let last_of_nine =
+        crate::civil::epoch_ms_of_iso("2026-10-17T09:59:59.999+09:00").expect("a stamp");
+    let nine = count::hour_of(last_of_nine, SEOUL_MINUTES);
+    let ten = count::hour_of(last_of_nine + 1, SEOUL_MINUTES);
+    assert_eq!(
+        (nine.as_str(), ten.as_str()),
+        ("2026-10-17T09", "2026-10-17T10")
+    );
+
+    let decision = count::hour_path(home.path(), "d-3f9a1c2e", &nine);
+    let every = count::hour_path(home.path(), crate::jev::custom::EVERY_DECISION, &nine);
+    assert_eq!(count::count_one_in_the_hour(&decision).expect("count"), 1);
+    assert_eq!(count::count_one_in_the_hour(&decision).expect("count"), 2);
+    assert_eq!(count::count_one_in_the_hour(&every).expect("count"), 1);
+    assert_eq!(count::sent(&decision), 2);
+    let today = count::requests_path(home.path(), "2026-10-17");
+    count::count_one(&today).expect("count");
+
+    let next = count::hour_path(home.path(), "d-0000000b", &ten);
+    assert_eq!(count::count_one_in_the_hour(&next).expect("count"), 1);
+    assert!(
+        !decision.exists() && !every.exists(),
+        "the first request of an hour forgets every earlier hour's count, whatever its key",
+    );
+    assert_eq!(count::sent(&today), 1, "and never the day's");
+
+    // A request cleared at 09:59 and counted after ten counts in an hour that
+    // has ended, and does not wipe the one that has begun.
+    assert_eq!(count::count_one_in_the_hour(&decision).expect("count"), 1);
+    assert_eq!(count::sent(&next), 1);
+
+    assert_eq!(count::hour_of(0, 0), "1970-01-01T00");
+    assert_eq!(count::hour_of(-1, 0), "1969-12-31T23");
+    assert_eq!(count::hour_of(0, -90), "1969-12-31T22");
+}
+
 #[test]
 fn a_row_without_the_doors_count_predates_the_door() {
     assert!(predates_the_door(

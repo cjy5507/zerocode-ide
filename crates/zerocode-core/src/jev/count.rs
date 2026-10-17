@@ -23,6 +23,12 @@ const DAY_FILE_SUFFIX: &str = ".count";
 /// The byte one request is counted with.
 const ONE_REQUEST: &[u8] = b".";
 
+/// What an hour file's name starts with, before its local hour and its key.
+const HOUR_FILE_PREFIX: &str = "hour-";
+
+/// One minute, in milliseconds: the unit a clock's offset is given in.
+const MS_PER_MINUTE: i64 = 60_000;
+
 /// The day file for `day` (`YYYY-MM-DD`, local) under `config_home`.
 #[must_use]
 pub fn requests_path(config_home: &Path, day: &str) -> PathBuf {
@@ -51,17 +57,54 @@ pub fn sent(path: &Path) -> u64 {
 /// # Errors
 /// A day file that cannot be created or written.
 pub fn count_one(path: &Path) -> io::Result<u64> {
-    let first_of_the_day = !path.exists();
+    let (place, first_of_the_day) = append_one(path)?;
+    if first_of_the_day {
+        forget_earlier_days(path, DAY_FILE_PREFIX, DAY_FILE_SUFFIX, |_, _| false);
+    }
+    Ok(place)
+}
+
+/// The local hour `epoch_ms` falls in, as `YYYY-MM-DDTHH`, for a clock
+/// `offset_minutes` ahead of UTC: the hour a person's decision counts its
+/// requests in (`super::custom::HOURLY_REQUESTS`).
+#[must_use]
+pub fn hour_of(epoch_ms: i64, offset_minutes: i32) -> String {
+    let local_ms = epoch_ms + i64::from(offset_minutes) * MS_PER_MINUTE;
+    let hour = local_ms.rem_euclid(crate::civil::MS_PER_DAY) / crate::civil::MS_PER_HOUR;
+    format!("{}T{hour:02}", day_of(epoch_ms, offset_minutes))
+}
+
+/// The hour file for `key` in `hour` (`YYYY-MM-DDTHH`, local) under
+/// `config_home`: `key` is a decision's id, or the key every decision is
+/// counted under together (`super::custom::EVERY_DECISION`).
+#[must_use]
+pub fn hour_path(config_home: &Path, key: &str, hour: &str) -> PathBuf {
+    config_home
+        .join(REQUESTS_DIR)
+        .join(format!("{HOUR_FILE_PREFIX}{hour}-{key}{DAY_FILE_SUFFIX}"))
+}
+
+/// Count one request in `path`, an hour file, and answer its place in the
+/// hour. The first request a file counts clears the hour files of earlier
+/// hours, whatever their key — never its own hour's nor a later one's, for
+/// the reason the day's count keeps today's ([`forget_earlier_days`]).
+///
+/// # Errors
+/// An hour file that cannot be created or written.
+pub fn count_one_in_the_hour(path: &Path) -> io::Result<u64> {
+    append_one(path).map(|(place, _)| place)
+}
+
+/// Append one request's byte to `path`: the place it took, and whether it
+/// was the file's first.
+fn append_one(path: &Path) -> io::Result<(u64, bool)> {
+    let first = !path.exists();
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(ONE_REQUEST)?;
-    let place = file.stream_position()?;
-    if first_of_the_day {
-        forget_earlier_days(path, DAY_FILE_PREFIX, DAY_FILE_SUFFIX, |_, _| false);
-    }
-    Ok(place)
+    Ok((file.stream_position()?, first))
 }
 
 /// The day before `day` (`YYYY-MM-DD`), or `None` for a word that is not a
