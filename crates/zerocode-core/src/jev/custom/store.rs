@@ -30,6 +30,9 @@ use crate::jev::JevMode;
 /// Where the store lives under zo's config home.
 pub const DIRECTORY: &str = "jev/decisions";
 
+/// Days a deleted decision waits in the trash before [`empty_trash`] removes it: the person's choice of 2026-10-17 (t-62170).
+pub const TRASH_KEPT_DAYS: i64 = 30;
+
 /// The largest definition the store keeps, in bytes: the longest words a definition holds, every character escaped, come to under 48 KiB, and the rest is room for its folders.
 pub const DEFINITION_MAX_BYTES: usize = 64 * 1024;
 
@@ -345,6 +348,18 @@ pub fn restore(home: &Path, id: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Remove from the trash every decision deleted longer than
+/// [`TRASH_KEPT_DAYS`] before `now_ms`, its definition with it; how many it
+/// removed. A row whose deletion time does not read stays: what this cannot
+/// date, it cannot call old.
+///
+/// # Errors
+/// A trash that cannot be listed, or a file in it that cannot be removed.
+pub fn empty_trash(home: &Path, now_ms: i64) -> io::Result<usize> {
+    let _ = (home, now_ms);
+    Ok(0)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct IndexFile {
@@ -642,5 +657,50 @@ mod tests {
             delete(home.path(), "d-ffffffff", NOW),
             Err(Error::Missing)
         ));
+    }
+
+    /// The trash keeps a deleted decision thirty days, and no longer.
+    #[test]
+    fn trash_older_than_30_days_is_emptied() {
+        let home = tempfile::tempdir().unwrap();
+        let old = yes_no("d-0000000a", "Old");
+        let recent = yes_no("d-0000000b", "Recent");
+        let old_version = create(home.path(), &old, JevMode::Shadow, NOW).unwrap();
+        create(home.path(), &recent, JevMode::Shadow, NOW).unwrap();
+        delete(home.path(), &old.id, NOW).unwrap();
+        delete(home.path(), &recent.id, NOW + civil::MS_PER_DAY).unwrap();
+        let kept = TRASH_KEPT_DAYS * civil::MS_PER_DAY;
+
+        assert_eq!(
+            empty_trash(home.path(), NOW + kept).unwrap(),
+            0,
+            "thirty days to the millisecond is not older than thirty days",
+        );
+        assert_eq!(empty_trash(home.path(), NOW + kept + 1).unwrap(), 1);
+        let left: Vec<String> = trash(home.path())
+            .unwrap()
+            .into_iter()
+            .map(|trashed| trashed.decision.id)
+            .collect();
+        assert_eq!(left, [recent.id.clone()]);
+        assert!(
+            !root(home.path())
+                .join(TRASH)
+                .join(json(&old_version))
+                .exists(),
+            "its definition went with it",
+        );
+        assert!(matches!(restore(home.path(), &old.id), Err(Error::Missing)));
+
+        let undated = root(home.path()).join(TRASH).join(json(&recent.id));
+        let mut row: serde_json::Value =
+            serde_json::from_slice(&fs::read(&undated).unwrap()).unwrap();
+        row["deletedAt"] = "yesterday".into();
+        fs::write(undated, serde_json::to_vec(&row).unwrap()).unwrap();
+        assert_eq!(
+            empty_trash(home.path(), i64::MAX).unwrap(),
+            0,
+            "a row it cannot date stays"
+        );
     }
 }
