@@ -32,8 +32,11 @@ class Words:
     mask_token = "[MASK]"
     cls_token_id, sep_token_id, mask_token_id = 1, 2, 3
 
+    def __init__(self):
+        self.vocabulary = {}
+
     def __call__(self, text, add_special_tokens=True, truncation=False, max_length=None):
-        ids = [10 + len(piece) for piece in self.pieces(text)]
+        ids = [self.vocabulary.setdefault(piece, 10 + len(self.vocabulary)) for piece in self.pieces(text)]
         return {"input_ids": ids[:max_length] if truncation else ids}
 
     def pieces(self, text):
@@ -217,6 +220,12 @@ class BridgeBoundary(unittest.TestCase):
         question = choice(8, ["one two three four five six seven eight"] * 10)
         self.assertEqual(self.named(adapter, {"action": question}), ["action"])
         self.assertEqual(adapter.agent.batches, 1)
+
+    def test_pages_do_not_hide_identical_option_encodings_in_different_groups(self):
+        adapter, _ = self.laya({"max_len": 1024, "head_max_len": 40}, ranked_laya())
+        descriptions = ["control %d" % index for index in range(20)]
+        descriptions[-1] = descriptions[0]
+        self.assertEqual(self.named(adapter, {"action": choice(8, descriptions)}), ["action"])
 
     def test_a_page_winner_must_belong_to_the_page_it_was_asked(self):
         runtime = ranked_laya()
@@ -428,12 +437,14 @@ class BridgeBoundary(unittest.TestCase):
                         for name, size in zip(("action", "walled", "instructed"), sizes)
                     }
                     named[shape, goal, bool(navigation)] = self.named(adapter, questions)
-        cut = {
+        cut = {("baseline", goal, True): ["action"] for goal in ("recorded_trial", "english_400", "korean_400")}
+        cut.update({
+            ("candidate", "recorded_trial", True): ["action"],
             ("candidate", "english_400", False): ["action"],
             ("candidate", "english_400", True): ["action"],
             ("candidate", "korean_400", False): ["action", "walled"],
             ("candidate", "korean_400", True): ["action", "walled"],
-        }
+        })
         self.assertEqual(
             named,
             {request: cut.get(request) for request in named},

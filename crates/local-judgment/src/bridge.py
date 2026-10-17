@@ -151,7 +151,13 @@ class LayaAdapter:
             return [question]
         if question.get("type") != "choice" or "option_order" in question:
             return [question]
-        criteria = self.agent._to_internal(question)["crit"]
+        internal = self.agent._to_internal(question)
+        criteria = internal["crit"]
+        record = EncodingRecord(self.agent.tok)
+        self.measure.build_head(record, internal, self.head_budget)
+        options = [tuple(encoded) for encoded in record.whole[1:]]
+        if len(set(options)) != len(options):
+            return [question]
         pages, current = [], {}
         for label, description in criteria.items():
             extended = dict(current, **{label: description})
