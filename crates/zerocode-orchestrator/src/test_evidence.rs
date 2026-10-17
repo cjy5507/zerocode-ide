@@ -2148,17 +2148,39 @@ mod tests {
     }
 
     /// `neighbour` stands for another test of this binary; what it returns
-    /// stays open until the proof is over.
+    /// stays open until the proof is over. The proof counts the descriptors of
+    /// its process (`/dev/fd`), so it runs in a process of its own and counts
+    /// only the descriptors it made (t-54220).
     fn prove_a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence<T>(
         neighbour: impl FnOnce() -> T,
     ) {
+        const ALONE: &str = "ZEROCODE_PIPE_HOLDER_PROOF_ALONE";
+        const PROOF: &str = "test_evidence::tests::a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence";
+        if std::env::var_os(ALONE).is_some() {
+            prove_a_daemonized_pipe_holder_in_this_process();
+            return;
+        }
+        let _neighbour = neighbour();
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args([PROOF, "--exact", "--test-threads=1"])
+            .env(ALONE, "1")
+            .output()
+            .expect("run the proof in a process of its own");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "the proof failed in a process of its own:\n{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn prove_a_daemonized_pipe_holder_in_this_process() {
         let repository = repository(Vec::new());
         let home = tempfile::tempdir().expect("authority home");
         let (_, store) = store(&home);
         let python =
             resolve_host_executable(OsString::from("python3")).expect("absolute Python executable");
         let before_fds = open_fd_count();
-        let _neighbour = neighbour();
         let mut attempt = 0;
         let mut proven = 0;
         while proven < 3 {
