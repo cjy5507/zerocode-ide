@@ -16,6 +16,7 @@
 //! definition is read back only while its bytes still hash to its name.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -249,8 +250,33 @@ pub fn set_mode(home: &Path, id: &str, mode: JevMode, now_ms: i64) -> Result<(),
 /// # Errors
 /// [`Error::Missing`] and [`Error::Io`].
 pub fn delete(home: &Path, id: &str, now_ms: i64) -> Result<(), Error> {
-    let _ = (home, id, now_ms);
-    Ok(())
+    if !is_id(id) {
+        return Err(Error::Missing);
+    }
+    let root = root(home);
+    let mut index = read_index(&root)?;
+    let Some(at) = index.iter().position(|entry| entry.id == id) else {
+        return Err(Error::Missing);
+    };
+    let decision = index.remove(at);
+    let trash = root.join(TRASH);
+    fs::create_dir_all(&trash)?;
+    let from = root.join(DEFINITIONS).join(json(&decision.definition));
+    let to = trash.join(json(&decision.definition));
+    let row = TrashFile {
+        schema_version: SCHEMA_VERSION,
+        decision,
+        deleted_at: civil::iso_utc_of(now_ms),
+    };
+    replace(
+        &trash.join(json(id)),
+        &serde_json::to_vec(&row).map_err(io::Error::other)?,
+    )?;
+    write_index(&root, index)?;
+    match fs::rename(from, to) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
 }
 
 /// The deleted decisions still waiting in the trash, the earliest deleted
@@ -259,8 +285,14 @@ pub fn delete(home: &Path, id: &str, now_ms: i64) -> Result<(), Error> {
 /// # Errors
 /// A trash that cannot be listed.
 pub fn trash(home: &Path) -> io::Result<Vec<Trashed>> {
-    let _ = home;
-    Ok(Vec::new())
+    let mut trashed: Vec<Trashed> = trashed_in(&root(home).join(TRASH))?
+        .into_iter()
+        .map(|(_, trashed)| trashed)
+        .collect();
+    trashed.sort_by(|one, other| {
+        (&one.deleted_at, &one.decision.id).cmp(&(&other.deleted_at, &other.decision.id))
+    });
+    Ok(trashed)
 }
 
 /// Bring the deleted decision `id` back from the trash as it was: the same
@@ -272,7 +304,44 @@ pub fn trash(home: &Path) -> io::Result<Vec<Trashed>> {
 /// store, and [`Error::Io`] — a definition that no longer hashes to its name
 /// among them.
 pub fn restore(home: &Path, id: &str) -> Result<(), Error> {
-    let _ = (home, id);
+    if !is_id(id) {
+        return Err(Error::Missing);
+    }
+    let root = root(home);
+    let mut index = read_index(&root)?;
+    let trash = root.join(TRASH);
+    let row = trash.join(json(id));
+    let Trashed { decision, .. } = match read_trashed(&row) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(Error::Missing),
+        read => read?,
+    };
+    let mut refused = Vec::new();
+    if index.iter().any(|entry| entry.id == decision.id) {
+        refused.push(Refusal::IdTaken);
+    }
+    if index
+        .iter()
+        .any(|entry| entry.name.trim() == decision.name.trim())
+    {
+        refused.push(Refusal::NameTaken);
+    }
+    if index.len() >= DECISIONS_MAX {
+        refused.push(Refusal::TooMany);
+    }
+    if !refused.is_empty() {
+        return Err(Error::Refused(refused));
+    }
+    let definitions = root.join(DEFINITIONS);
+    let trashed = trash.join(json(&decision.definition));
+    if trashed.exists() {
+        fs::create_dir_all(&definitions)?;
+        fs::rename(trashed, definitions.join(json(&decision.definition)))?;
+    }
+    read_definition(&definitions, &decision.definition)?;
+    let at = index.partition_point(|entry| entry.created_at <= decision.created_at);
+    index.insert(at, decision);
+    write_index(&root, index)?;
+    fs::remove_file(row)?;
     Ok(())
 }
 
@@ -281,6 +350,14 @@ pub fn restore(home: &Path, id: &str) -> Result<(), Error> {
 struct IndexFile {
     schema_version: u32,
     decisions: Vec<Entry>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TrashFile {
+    schema_version: u32,
+    decision: Entry,
+    deleted_at: String,
 }
 
 fn write_mode<S: Serializer>(mode: &JevMode, serializer: S) -> Result<S::Ok, S::Error> {
@@ -351,6 +428,40 @@ fn write_definition(root: &Path, bytes: &[u8]) -> io::Result<String> {
         return Err(unreadable("a definition that no longer hashes to its name"));
     }
     Ok(version)
+}
+
+fn read_trashed(path: &Path) -> io::Result<Trashed> {
+    let row: TrashFile = serde_json::from_slice(&bounded(path, INDEX_MAX_BYTES)?)
+        .map_err(|_| unreadable("not a trash row this store writes"))?;
+    if row.schema_version != SCHEMA_VERSION || !well_named(&row.decision) {
+        return Err(unreadable("not a trash row this store writes"));
+    }
+    Ok(Trashed {
+        decision: row.decision,
+        deleted_at: row.deleted_at,
+    })
+}
+
+/// Every row in `trash` that reads, with its file: named by its own
+/// decision's id.
+fn trashed_in(trash: &Path) -> io::Result<Vec<(PathBuf, Trashed)>> {
+    let entries = match fs::read_dir(trash) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        read => read?,
+    };
+    Ok(entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension() == Some(OsStr::new(JSON)))
+        .filter_map(|path| {
+            let id = path.file_stem()?.to_str()?;
+            if !is_id(id) {
+                return None;
+            }
+            let trashed = read_trashed(&path).ok()?;
+            (trashed.decision.id == id).then_some((path, trashed))
+        })
+        .collect())
 }
 
 fn well_named(entry: &Entry) -> bool {
