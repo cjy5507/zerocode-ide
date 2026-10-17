@@ -357,20 +357,36 @@ pub(super) fn workflow_rate_governor(kind: ProviderKind) -> &'static RateGoverno
 /// Code default). Exposed so the engine can window its spawning to the same
 /// bound and never open more OS threads than can actually run.
 pub(crate) fn workflow_concurrency_limit() -> usize {
-    std::env::var(WORKFLOW_AGENT_MAX_CONCURRENCY_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
+    workflow_concurrency_limit_from(
+        std::env::var(WORKFLOW_AGENT_MAX_CONCURRENCY_ENV).ok().as_deref(),
+        machine_cores(),
+    )
+}
+
+fn workflow_concurrency_limit_from(raw: Option<&str>, cores: Option<usize>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .map_or_else(default_workflow_concurrency, |value| {
-            value.min(MAX_WORKFLOW_AGENT_CONCURRENCY)
-        })
+        .map_or_else(
+            || default_workflow_concurrency_for(cores),
+            |value| value.min(MAX_WORKFLOW_AGENT_CONCURRENCY),
+        )
+}
+
+fn machine_cores() -> Option<usize> {
+    std::thread::available_parallelism()
+        .ok()
+        .map(std::num::NonZeroUsize::get)
+}
+
+fn default_workflow_concurrency() -> usize {
+    default_workflow_concurrency_for(machine_cores())
 }
 
 /// `min(16, available_parallelism - 2)`, clamped to at least 1 — the Claude Code
 /// workflow default. Leaves headroom for the main loop + IO threads.
-fn default_workflow_concurrency() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(2))
+fn default_workflow_concurrency_for(cores: Option<usize>) -> usize {
+    cores
+        .map(|n| n.saturating_sub(2))
         .unwrap_or(4)
         .clamp(1, 16)
 }
@@ -440,12 +456,13 @@ mod tests {
     // tests stay green unchanged. The pure cool-down/headroom-arithmetic tests
     // that exercised the migrated *private* helpers moved to `api::quota`.
     use super::{
-        adaptive_seed_at, agent_rate_governor, mark_capacity_stall_from,
-        parse_agent_api_concurrency_limit, rate_limit_cooldown_remaining_ms, rate_limit_headroom_low,
-        seed_snapshot_for, wait_for_rate_limit_cooldown_cancellable, RateGovernor,
+        adaptive_seed_at, agent_rate_governor, default_workflow_concurrency_for,
+        mark_capacity_stall_from, parse_agent_api_concurrency_limit,
+        rate_limit_cooldown_remaining_ms, rate_limit_headroom_low, seed_snapshot_for,
+        wait_for_rate_limit_cooldown_cancellable, workflow_concurrency_limit_from, RateGovernor,
         DEFAULT_AGENT_MAX_CONCURRENCY, GOVERNOR_SUCCESSES_PER_INCREASE,
         HEALTHY_AGENT_INITIAL_CONCURRENCY, MAX_AGENT_MAX_CONCURRENCY,
-        MODERATE_AGENT_INITIAL_CONCURRENCY, QUOTA_SNAPSHOT_FRESH,
+        MAX_WORKFLOW_AGENT_CONCURRENCY, MODERATE_AGENT_INITIAL_CONCURRENCY, QUOTA_SNAPSHOT_FRESH,
     };
     // Test-only cool-down helpers pulled straight from `api::quota` (the tools
     // lib itself no longer references them, so re-exporting would read as an
@@ -609,6 +626,41 @@ mod tests {
             Some(Duration::from_secs(60)),
             0,
         );
+    }
+
+    #[test]
+    fn workflow_default_is_cores_minus_two_but_never_below_four_nor_above_sixteen() {
+        for (cores, expected) in [
+            (Some(2), 4),
+            (Some(3), 4),
+            (Some(6), 4),
+            (Some(8), 6),
+            (Some(18), 16),
+            (None, 4),
+        ] {
+            assert_eq!(
+                default_workflow_concurrency_for(cores),
+                expected,
+                "{cores:?} cores"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_env_override_still_wins_over_the_default() {
+        assert_eq!(workflow_concurrency_limit_from(Some("2"), Some(18)), 2);
+        assert_eq!(workflow_concurrency_limit_from(Some("9"), Some(2)), 9);
+        assert_eq!(
+            workflow_concurrency_limit_from(Some(" 99 "), Some(8)),
+            MAX_WORKFLOW_AGENT_CONCURRENCY
+        );
+        for unset in [None, Some(""), Some("0"), Some("many")] {
+            assert_eq!(
+                workflow_concurrency_limit_from(unset, Some(8)),
+                default_workflow_concurrency_for(Some(8)),
+                "{unset:?} falls back to the default"
+            );
+        }
     }
 
     #[test]
