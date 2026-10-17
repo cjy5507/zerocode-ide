@@ -394,7 +394,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": MAX_SPAWN_MULTI_AGENT_AGENTS,
-                        "description": "Live sub-agent window; unset defaults to min(16, cores-2) and later members queue for freed slots. Provider requests still pass through the adaptive per-provider rate governor, so widening this never raises real API concurrency."
+                        "description": "Live sub-agent window; unset defaults to min(16, max(cores-2, 4)) and later members queue for freed slots. Provider requests still pass through the adaptive per-provider rate governor, so widening this never raises real API concurrency."
                     }
                 },
                 "required": ["agents"],
