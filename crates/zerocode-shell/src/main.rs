@@ -100,6 +100,7 @@ mod conversation_wake;
 mod crash;
 mod crash_triage;
 mod credential_store;
+mod credential_store_policy;
 mod crumbs;
 mod developer_permissions;
 mod durable_file;
@@ -2525,6 +2526,16 @@ fn main() -> ExitCode {
         println!("commit {}", env!("ZEROCODE_COMMIT"));
         println!("ui {}", env!("ZEROCODE_UI_DIGEST"));
         return ExitCode::SUCCESS;
+    }
+    if credential_store_policy::disabled() {
+        crumbs::record(
+            "runtime_policy",
+            format_args!("{}", credential_store_policy::DISABLED_MESSAGE),
+        );
+        eprintln!(
+            "zerocode-shell: {}",
+            credential_store_policy::DISABLED_MESSAGE
+        );
     }
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     if let Err(error) = chromium_browser::install_application() {

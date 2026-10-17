@@ -689,6 +689,7 @@ pub fn read_netscape_cookies(path: &Path) -> Result<CookieReadOutcome, String> {
 /// (`getMacEncryptionKey`, `:991-1010`). 사용자가 거절하면 그 사실이 답이다.
 #[cfg(target_os = "macos")]
 pub fn obtain_keys(family: &str) -> Result<EncryptionKeys, String> {
+    crate::credential_store_policy::ensure_access()?;
     let (service, account) =
         keychain_names(family).ok_or_else(|| "모르는 브라우저입니다".to_string())?;
     let output = crate::proc::quiet_command("security")

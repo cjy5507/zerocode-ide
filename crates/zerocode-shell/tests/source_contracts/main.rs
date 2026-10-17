@@ -25248,6 +25248,13 @@ mod tests {
              keychain service again:\n{services}"
         );
         let tool = block_after(accounts, "fn security_command(");
+        let access_check = tool
+            .find("credential_store_policy::ensure_access()?")
+            .expect("the real keychain path must check its process policy");
+        let security_process = tool
+            .find("quiet_command(\"/usr/bin/security\")")
+            .expect("the real keychain command must stay explicit");
+        assert!(access_check < security_process);
         assert!(
             tool.contains("/usr/bin/security") && tool.contains("KEYCHAIN_TIMEOUT"),
             "keychain calls left Apple's tool, or lost the bound that keeps a \
