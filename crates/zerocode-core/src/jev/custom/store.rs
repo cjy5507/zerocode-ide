@@ -64,6 +64,15 @@ pub struct Entry {
     pub updated_at: String,
 }
 
+/// A deleted decision waiting in the trash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trashed {
+    /// Its row as the index held it.
+    pub decision: Entry,
+    /// When it was deleted, as [`civil::iso_utc_of`] writes a stamp.
+    pub deleted_at: String,
+}
+
 /// Why the store kept nothing.
 #[derive(Debug)]
 pub enum Error {
@@ -230,6 +239,40 @@ pub fn set_mode(home: &Path, id: &str, mode: JevMode, now_ms: i64) -> Result<(),
     entry.mode = mode;
     entry.updated_at = civil::iso_utc_of(now_ms);
     write_index(&root, index)?;
+    Ok(())
+}
+
+/// Delete the decision `id` at `now_ms`: its row leaves the index, and the row
+/// and its definition wait in the trash. Its ledger lines stay where they
+/// are.
+///
+/// # Errors
+/// [`Error::Missing`] and [`Error::Io`].
+pub fn delete(home: &Path, id: &str, now_ms: i64) -> Result<(), Error> {
+    let _ = (home, id, now_ms);
+    Ok(())
+}
+
+/// The deleted decisions still waiting in the trash, the earliest deleted
+/// first. A row that does not read is left out: it cannot be restored.
+///
+/// # Errors
+/// A trash that cannot be listed.
+pub fn trash(home: &Path) -> io::Result<Vec<Trashed>> {
+    let _ = home;
+    Ok(Vec::new())
+}
+
+/// Bring the deleted decision `id` back from the trash as it was: the same
+/// row, so the same mode and the same version.
+///
+/// # Errors
+/// [`Error::Missing`] when the trash holds no such decision,
+/// [`Error::Refused`] when a decision made since took its name or filled the
+/// store, and [`Error::Io`] — a definition that no longer hashes to its name
+/// among them.
+pub fn restore(home: &Path, id: &str) -> Result<(), Error> {
+    let _ = (home, id);
     Ok(())
 }
 
@@ -435,5 +478,58 @@ mod tests {
             asking_in(&planted, workspace.path()).is_ok(),
             "the planted store reads — it is only never asked",
         );
+    }
+
+    /// Deleting keeps the decision whole in the trash, and restoring puts the
+    /// same row back: its mode, and the version its definition hashes to.
+    #[test]
+    fn delete_moves_to_trash_and_restore_brings_it_back() {
+        let home = tempfile::tempdir().unwrap();
+        let decision = yes_no("d-0000000a", "Release notes");
+        let version = create(home.path(), &decision, JevMode::On, NOW).unwrap();
+        let before = list(home.path()).unwrap();
+
+        delete(home.path(), &decision.id, NOW + 1).unwrap();
+        assert!(
+            list(home.path()).unwrap().is_empty(),
+            "a deleted decision leaves the list"
+        );
+        let store = root(home.path());
+        assert!(!store.join(DEFINITIONS).join(json(&version)).exists());
+        assert!(
+            store.join(TRASH).join(json(&version)).is_file(),
+            "its definition waits in the trash",
+        );
+        assert_eq!(
+            trash(home.path()).unwrap(),
+            [Trashed {
+                decision: before[0].clone(),
+                deleted_at: civil::iso_utc_of(NOW + 1),
+            }],
+        );
+        assert!(
+            matches!(
+                create(home.path(), &decision, JevMode::On, NOW + 2),
+                Err(Error::Refused(refused)) if refused == [Refusal::IdTaken]
+            ),
+            "its id stays taken while it waits",
+        );
+
+        restore(home.path(), &decision.id).unwrap();
+        assert_eq!(
+            list(home.path()).unwrap(),
+            before,
+            "it comes back as it was: its mode, and the same version",
+        );
+        assert_eq!(definition(home.path(), &version).unwrap(), decision);
+        assert!(trash(home.path()).unwrap().is_empty());
+        assert!(matches!(
+            restore(home.path(), &decision.id),
+            Err(Error::Missing)
+        ));
+        assert!(matches!(
+            delete(home.path(), "d-ffffffff", NOW),
+            Err(Error::Missing)
+        ));
     }
 }
