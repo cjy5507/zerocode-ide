@@ -365,7 +365,7 @@ fn spawn_multi_agent_schema_exposes_concurrency_window() {
 #[test]
 fn spawn_multi_agent_respects_concurrency() {
     // The permit-before-spawn window bounds how many agents run at once.
-    // Unset → the workflow execution bound (min(16, cores-2), the CC model);
+    // Unset → the workflow execution bound (min(16, max(cores-2, 4)));
     // a request is clamped to [1, cap] and may widen beyond the default.
     assert_eq!(
         effective_spawn_window(None, 4),
