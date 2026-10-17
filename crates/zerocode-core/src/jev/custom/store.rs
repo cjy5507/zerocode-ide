@@ -110,6 +110,18 @@ pub fn definition(home: &Path, version: &str) -> io::Result<Definition> {
     read_definition(&root(home).join(DEFINITIONS), version)
 }
 
+/// The decisions that ask in `workspace`, each with its definition: those not
+/// `off` whose folders hold it ([`super::asks_in`]). Read from `home` alone —
+/// nothing under `workspace` is opened. A definition that no longer reads is
+/// left out: a damaged file asks nothing.
+///
+/// # Errors
+/// [`list`]'s.
+pub fn asking_in(home: &Path, workspace: &Path) -> io::Result<Vec<(Entry, Definition)>> {
+    let _ = (home, workspace);
+    Ok(Vec::new())
+}
+
 /// Keep `definition` as a new decision in `mode`, made at `now_ms`; its
 /// version.
 ///
@@ -350,4 +362,71 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(temp);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::super::Folders;
+    use super::super::tests::{NOW, yes_no};
+    use super::*;
+
+    fn ids(decisions: &[(Entry, Definition)]) -> Vec<&str> {
+        decisions
+            .iter()
+            .map(|(entry, _)| entry.id.as_str())
+            .collect()
+    }
+
+    fn folder(path: &Path) -> Folders {
+        Folders::Chosen(BTreeSet::from([path.to_string_lossy().into_owned()]))
+    }
+
+    /// A repository that ships a store of its own under its `.zo/` defines
+    /// nothing: decisions are the person's, read from their home alone.
+    #[test]
+    fn only_the_home_store_defines_decisions() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let mine = yes_no("d-0000000a", "Release notes");
+        create(home.path(), &mine, JevMode::Shadow, NOW).unwrap();
+        let planted = workspace.path().join(".zo");
+        create(&planted, &yes_no("d-0000000b", "Planted"), JevMode::On, NOW).unwrap();
+        assert!(
+            root(&planted).join(INDEX).is_file(),
+            "the planted store is one this store would read",
+        );
+
+        let asking = asking_in(home.path(), workspace.path()).unwrap();
+        assert_eq!(
+            ids(&asking),
+            [mine.id.as_str()],
+            "only the home store's decision asks"
+        );
+        assert_eq!(asking[0].1, mine);
+
+        let mut elsewhere = yes_no("d-0000000c", "Elsewhere");
+        elsewhere.folders = folder(&home.path().join("elsewhere"));
+        create(home.path(), &elsewhere, JevMode::On, NOW).unwrap();
+        create(
+            home.path(),
+            &yes_no("d-0000000d", "Silent"),
+            JevMode::Off,
+            NOW,
+        )
+        .unwrap();
+        let mut here = yes_no("d-0000000e", "Here");
+        here.folders = folder(workspace.path());
+        create(home.path(), &here, JevMode::On, NOW).unwrap();
+        assert_eq!(
+            ids(&asking_in(home.path(), &workspace.path().join("crates")).unwrap()),
+            ["d-0000000a", "d-0000000e"],
+            "an off decision asks nothing, and a chosen folder holds the folders under it",
+        );
+        assert!(
+            asking_in(&planted, workspace.path()).is_ok(),
+            "the planted store reads — it is only never asked",
+        );
+    }
 }
