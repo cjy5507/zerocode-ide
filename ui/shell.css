@@ -39963,7 +39963,9 @@ details.task-board-section > summary {
   max-width: 100%;
   min-height: 30px;
   color: var(--ink-chalk);
-  background: var(--surface-deck);
+  /* background-color, not the shorthand: the shared select rule paints the
+   * chevron as this control's background-image, and the shorthand wiped it. */
+  background-color: var(--surface-deck);
   border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-sm);
 }
