@@ -11159,38 +11159,49 @@ mod tests {
         for block in &blocks {
             callers = callers.replace(block.as_str(), "");
         }
-        let workspace_actions = block_after(&callers, "const BROWSER_WORKSPACE_ACTIONS = [");
+        // Each workspace action names its own key inside its own t() call, so
+        // the Korean fallback never stands on a line without one; the row's
+        // name must be the key's, or a button would ask for another's words.
+        let workspace_actions = block_after(&callers, "const BROWSER_WORKSPACE_ACTION_WORDS = {");
         let workspace_keys = workspace_actions
             .lines()
-            .filter_map(|line| line.trim().strip_prefix("[\""))
-            .map(|row| {
-                let (name, _) = row
-                    .split_once("\",")
-                    .expect("a literal workspace action name");
+            .skip(1)
+            .filter_map(|line| line.trim().split_once(": () => t(\""))
+            .map(|(name, call)| {
                 assert!(
                     !name.is_empty()
                         && name
                             .bytes()
                             .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
                 );
-                format!("browser.workspace.{name}Action")
+                let key = format!("browser.workspace.{name}Action");
+                assert!(
+                    call.starts_with(&format!("{key}\", \"")),
+                    "workspace action `{name}` asks t() for another key: {call}"
+                );
+                key
             })
             .collect::<HashSet<_>>();
         assert!(
             !workspace_keys.is_empty(),
             "workspace actions were not parsed"
         );
+        assert!(
+            callers.contains(
+                "const BROWSER_WORKSPACE_ACTIONS = Object.keys(BROWSER_WORKSPACE_ACTION_WORDS);"
+            ),
+            "the workspace action list is no longer the word table's own names"
+        );
         let building_workspace = block_after(&callers, "function buildBrowserWorkspaceBar(");
         let painting_workspace = block_after(&callers, "function paintBrowserWorkspace(");
         assert!(
-            building_workspace
-                .contains("for (const [name, fallback] of BROWSER_WORKSPACE_ACTIONS)")
+            building_workspace.contains("for (const name of BROWSER_WORKSPACE_ACTIONS)")
                 && building_workspace
                     .contains("button.dataset.i18n = `browser.workspace.${name}Action`;")
-                && building_workspace.contains("t(button.dataset.i18n, fallback)")
-                && painting_workspace
-                    .contains("for (const [name, fallback] of BROWSER_WORKSPACE_ACTIONS)")
-                && painting_workspace.contains("t(`browser.workspace.${name}Action`, fallback)"),
+                && building_workspace
+                    .contains("button.textContent = BROWSER_WORKSPACE_ACTION_WORDS[name]();")
+                && painting_workspace.contains("for (const name of BROWSER_WORKSPACE_ACTIONS)")
+                && painting_workspace.contains("BROWSER_WORKSPACE_ACTION_WORDS[name]()"),
             "workspace catalog keys do not reach both their rendered buttons and repaint"
         );
         // Cheap proof the cut actually happened: a key defined only in the
