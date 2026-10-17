@@ -2131,12 +2131,34 @@ mod tests {
 
     #[test]
     fn a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence() {
+        prove_a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence(|| ());
+    }
+
+    /// A neighbour test of this binary opens pipes once the proof has counted
+    /// its descriptors and holds them past the proof's last look (t-54220,
+    /// tools/release/flakes.txt): they are not the proof's, and must not read
+    /// as escaped writers.
+    #[test]
+    fn pipes_a_neighbour_test_holds_do_not_read_as_escaped_writers() {
+        prove_a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence(|| {
+            (0..2)
+                .map(|_| std::io::pipe().expect("neighbour pipe"))
+                .collect::<Vec<_>>()
+        });
+    }
+
+    /// `neighbour` stands for another test of this binary; what it returns
+    /// stays open until the proof is over.
+    fn prove_a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence<T>(
+        neighbour: impl FnOnce() -> T,
+    ) {
         let repository = repository(Vec::new());
         let home = tempfile::tempdir().expect("authority home");
         let (_, store) = store(&home);
         let python =
             resolve_host_executable(OsString::from("python3")).expect("absolute Python executable");
         let before_fds = open_fd_count();
+        let _neighbour = neighbour();
         let mut attempt = 0;
         let mut proven = 0;
         while proven < 3 {
