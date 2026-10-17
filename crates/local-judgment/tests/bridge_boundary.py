@@ -130,6 +130,7 @@ def ranked_laya():
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.submitted = []
+            self.returned = []
 
         def predict(self, state, questions):
             self.submitted.append((state, questions))
@@ -139,12 +140,17 @@ def ranked_laya():
                 winner = max(labels)
                 weights = {label: (20 if label == winner else 1) for label in labels}
                 total = sum(weights.values())
+                chance = self.cfg.get("first_probability" if self.batches == 1 else "final_probability")
+                probabilities = {label: weight / total for label, weight in weights.items()}
+                if chance is not None and len(labels) > 1:
+                    probabilities = {label: chance if label == winner else (1 - chance) / (len(labels) - 1) for label in labels}
                 native["answers"][name].update(
                     choice=winner,
-                    probabilities={label: weight / total for label, weight in weights.items()},
+                    probabilities=probabilities,
                     confidence=self.cfg.get("first_confidence", 0.95) if self.batches == 1 else 0.95,
                     answer_confidence=self.cfg.get("first_confidence", 0.95) if self.batches == 1 else 0.95,
                 )
+            self.returned.append(json.loads(json.dumps(native)))
             return native
 
     runtime.Agent = Ranked
@@ -207,13 +213,18 @@ class BridgeBoundary(unittest.TestCase):
 
     def test_a_final_round_cannot_raise_a_weak_winners_confidence(self):
         adapter, _ = self.laya(
-            {"max_len": 1024, "head_max_len": 40, "first_confidence": 0.3}, ranked_laya()
+            {"max_len": 1024, "head_max_len": 40, "first_confidence": 0.3,
+             "first_probability": 0.3, "final_probability": 0.9}, ranked_laya()
         )
         result = adapter.predict({"state": "same evidence", "questions": {"action": choice(8, ["control %d" % index for index in range(20)])}})
         self.assertFalse(result["usage"].get("truncated_questions"), "a pageable head was still refused")
         answer = result["answers"]["action"]
         self.assertLessEqual(answer["confidence"], 0.3, "a smaller final choice inflated confidence")
         self.assertLessEqual(answer["answer_confidence"], 0.3)
+        self.assertLessEqual(answer["probabilities"][answer["choice"]], 0.3)
+        self.assertLessEqual(answer["probabilities"][answer["choice"]], 0.9)
+        self.assertEqual(set(answer["probabilities"]), set(choice(8, ["control %d" % index for index in range(20)])["criteria"]))
+        self.assertAlmostEqual(sum(answer["probabilities"].values()), 1.0)
         self.assertGreater(result["usage"]["head_pages"]["action"]["pages"], 1)
 
     @unittest.skipUnless(compiled_shapes is not None, "the Rust boundary test supplies compiled questions")

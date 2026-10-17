@@ -550,6 +550,49 @@ fn compiled_goal_head_shapes() -> Vec<Value> {
     shapes
 }
 
+fn compiled_recorded_goal_heads() -> Vec<Value> {
+    use zerocode_core::screen_action::{ActionLook, Beside, Errand, Navigation, Where, ask_with};
+
+    let Some(root) = std::env::var_os("LOCAL_JUDGMENT_RECORDED_TRIAL") else {
+        return Vec::new();
+    };
+    let root = Path::new(&root);
+    let fixture: Value =
+        serde_json::from_slice(&std::fs::read(root.join("fixture.json")).unwrap()).unwrap();
+    let marks: Value =
+        serde_json::from_slice(&std::fs::read(root.join("marks.txt")).unwrap()).unwrap();
+    let address = url::Url::parse(fixture["url"].as_str().unwrap()).unwrap();
+    [false, true]
+        .into_iter()
+        .map(|navigation| {
+            let asked = ask_with(
+                &ActionLook {
+                    goal: fixture["goal"].as_str().unwrap(),
+                    errand: Errand::Goal,
+                    at: Where::Page {
+                        host: address.host_str().unwrap(),
+                        path: address.path(),
+                    },
+                    tried: &[],
+                    items: marks["items"].as_array().unwrap(),
+                    pressed: &[],
+                    shows: &[],
+                },
+                &Beside {
+                    navigation: if navigation { &Navigation::PAGE } else { &[] },
+                    ..Beside::default()
+                },
+            )
+            .unwrap();
+            json!({
+                "shape": {"legend": "recorded", "navigation": if navigation { "page" } else { "none" },
+                          "candidates": asked.marks().len(), "more": false},
+                "request": {"state": asked.state, "questions": asked.questions},
+            })
+        })
+        .collect()
+}
+
 #[test]
 fn compiled_goal_shapes_fit_a_loaded_stand_in_budget() {
     let payload = serde_json::to_vec(&compiled_goal_head_shapes()).unwrap();
@@ -593,11 +636,23 @@ fn compiled_goal_heads_fit_the_manifest_pinned_tokenizer() {
         .unwrap();
     let runtime = Path::new(&root).join("runtime").join(&profile.id);
     let folder = Path::new(&root).join("models").join(&model.id);
-    let shapes = compiled_goal_head_shapes();
+    for (place, fingerprint) in [
+        (&runtime, profile.fingerprint().unwrap()),
+        (&folder, model.fingerprint().unwrap()),
+    ] {
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(place.join("receipt.json")).unwrap()).unwrap();
+        assert_eq!(
+            receipt["fingerprint"], fingerprint,
+            "did not run: the clone is not manifest-pinned"
+        );
+    }
+    let mut shapes = compiled_goal_head_shapes();
     assert_eq!(
         shapes.len(),
         5 * (zerocode_core::jev::SCREEN_CANDIDATE_CAP + 1) * 2 * 2
     );
+    shapes.extend(compiled_recorded_goal_heads());
     let payload = serde_json::to_vec(&shapes).unwrap();
     if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_COMPILED_REQUESTS") {
         std::fs::write(path, &payload).unwrap();
