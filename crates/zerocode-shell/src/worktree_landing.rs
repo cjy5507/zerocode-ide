@@ -154,6 +154,9 @@ pub(super) struct LandingBase {
     pub(super) name: Option<String>,
     pub(super) oid: Option<String>,
     pub(super) updated_ms: Option<i64>,
+    /// The repository and pin this was asked for: what [`known_landing_base`] is asked again to
+    /// tell whether an answer that stood on `oid` is still today's (t-44451).
+    pub(super) asked_of: KnownRepo,
 }
 
 /// The one door the git of this module goes through, with `--no-optional-locks`
@@ -209,11 +212,16 @@ pub(super) fn resolve_landing_base(
                 }
             })
         });
+    let asked_of = KnownRepo {
+        root: repo_root.to_path_buf(),
+        pinned: pinned.map(str::to_string),
+    };
     let Some(name) = name else {
         return LandingBase {
             name: None,
             oid: None,
             updated_ms: None,
+            asked_of,
         };
     };
     let oid = landing_git_text(
@@ -239,6 +247,7 @@ pub(super) fn resolve_landing_base(
         name: Some(name),
         oid,
         updated_ms,
+        asked_of,
     }
 }
 
@@ -281,6 +290,8 @@ struct HeldLanding {
     /// `overlap`을 읽은 작업 폴더 변경의 지문([`changes_mark`]). 열쇠(머리·비교 ref·브랜치)와
     /// 이것이 같으면 겹침도 같다 — 겹침이 읽는 것은 그 셋과 바뀐 추적 파일의 목록뿐이다.
     changes: Option<u64>,
+    /// The repository and pin the compare ref was asked for, as [`LandingBase::asked_of`].
+    asked_of: Option<KnownRepo>,
     landing: WorktreeLanding,
 }
 
@@ -330,7 +341,10 @@ fn millis(ttl: Duration) -> i64 {
 /// never classified has no witness and the ledger hears nothing of git for it.
 ///
 /// A held answer outlives its folder, and nothing reads a removed checkout again: a folder that is
-/// gone is no witness, whatever was last said of it (t-44451). That costs one `stat`.
+/// gone is no witness, whatever was last said of it (t-44451). That costs one `stat`. Nor is an
+/// answer that stood on a compare oid nobody can say is today's: the window reads its catalog
+/// again only while it is shown, and this is asked every minute. Work that landed stays landed,
+/// as [`commit_stands`] holds it.
 pub(crate) fn witness_for(
     path: &Path,
     occupied: bool,
@@ -346,6 +360,14 @@ pub(crate) fn witness_for(
     let compare_oid = parts.next().unwrap_or("");
     let branch = parts.next().filter(|branch| !branch.is_empty());
     let landing = &held.landing;
+    let today = held
+        .asked_of
+        .as_ref()
+        .and_then(|repo| known_landing_base(&repo.root, repo.pinned.as_deref()))
+        .and_then(|base| base.oid);
+    if landing.state != "landed" && today.as_deref() != Some(compare_oid) {
+        return None;
+    }
     let git = match landing.state {
         "landed" => GitSays::Landed {
             at_ms: landing.landed_in.as_ref().map(|taken| taken.time_ms),
@@ -559,6 +581,7 @@ fn hold_failure(path: &Path, base: Option<&LandingBase>) {
         HeldLanding {
             key: String::new(),
             changes: None,
+            asked_of: base.map(|base| base.asked_of.clone()),
             landing: WorktreeLanding::failed(base),
         },
     );
@@ -657,6 +680,7 @@ fn worktree_landing_within(
         HeldLanding {
             key,
             changes: Some(changes),
+            asked_of: Some(base.asked_of.clone()),
             landing: landing.clone(),
         },
     );
