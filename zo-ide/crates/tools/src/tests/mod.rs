@@ -67,6 +67,22 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
     })
 }
 
+/// The threads waiting for `env_lock` that said so first (t-57711). A test
+/// that holds a cwd window open closes it once the colliding call waits for
+/// the lock, so the collision needs no timing.
+fn env_lock_waiters() -> &'static Mutex<Vec<thread::ThreadId>> {
+    static WAITERS: OnceLock<Mutex<Vec<thread::ThreadId>>> = OnceLock::new();
+    WAITERS.get_or_init(Mutex::default)
+}
+
+/// Whether `waiter` waits for `env_lock` and said so.
+pub(crate) fn waits_for_env_lock(waiter: thread::ThreadId) -> bool {
+    env_lock_waiters()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&waiter)
+}
+
 /// A `ToolContext` for tests that may run beside another test's `set_current_dir`
 /// window (t-21146). `ToolContext::new()` binds the process cwd's `.zo/registries`
 /// when it is built, so the construction waits for `env_lock`, which each window's
