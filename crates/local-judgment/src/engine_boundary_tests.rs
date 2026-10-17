@@ -748,6 +748,101 @@ fn compiled_recorded_actions_run_on_the_manifest_pinned_model() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "contract: checks a client deadline against the manifest-pinned model in PINNED_ROOT"]
+async fn a_screen_client_deadline_does_not_leave_inference_ahead_of_the_next_request() {
+    let root = std::env::var_os(PINNED_ROOT)
+        .unwrap_or_else(|| panic!("did not run: {PINNED_ROOT} names no folder"));
+    let profile = crate::catalog::runtime().unwrap().unwrap();
+    let model = crate::catalog::catalog()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.engine == EngineKind::Laya)
+        .unwrap();
+    let runtime = Path::new(&root).join("runtime").join(&profile.id);
+    let folder = Path::new(&root).join("models").join(&model.id);
+    let engine = Engine::spawn(&runtime, &profile, Some((folder.as_path(), &model))).unwrap();
+    let process = engine.clone();
+    tokio::time::timeout(
+        START_TIMEOUT,
+        tokio::task::spawn_blocking(move || process.ready()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let running = serve(&model, engine.clone(), Arc::new(|| {}))
+        .await
+        .unwrap();
+    let mut crowded = compiled_goal_head_shapes()
+        .into_iter()
+        .find(|fixture| {
+            fixture["shape"]["legend"] == "long"
+                && fixture["shape"]["navigation"] == "all"
+                && fixture["shape"]["candidates"] == zerocode_core::jev::SCREEN_CANDIDATE_CAP
+                && fixture["shape"]["more"] == true
+        })
+        .unwrap()["request"]
+        .clone();
+    crowded["model"] = json!(model.id);
+    let deadline = Duration::from_millis(zerocode_core::jev::SCREEN_APPLY_DEADLINE_MS);
+    let began = Instant::now();
+    let first = client()
+        .post(running.provider.request_url())
+        .timeout(deadline)
+        .json(&crowded)
+        .send()
+        .await;
+    let first_elapsed = began.elapsed();
+    let first_timed_out = first.as_ref().is_err_and(reqwest::Error::is_timeout);
+    let first_status = first
+        .as_ref()
+        .ok()
+        .map(|response| response.status().as_u16());
+    let first_body = match first {
+        Ok(response) => response.json::<Value>().await.unwrap(),
+        Err(_) => Value::Null,
+    };
+    let admitted_after_first = running.admitted();
+    let mut following = compiled_recorded_goal_heads()
+        .into_iter()
+        .find(|fixture| fixture["shape"]["navigation"] == "none")
+        .unwrap()["request"]
+        .clone();
+    following["model"] = json!(model.id);
+    let began = Instant::now();
+    let response = client()
+        .post(running.provider.request_url())
+        .timeout(REQUEST_TIMEOUT)
+        .json(&following)
+        .send()
+        .await
+        .unwrap();
+    let following_elapsed = began.elapsed();
+    let following_status = response.status();
+    let following_body = response.json::<Value>().await.unwrap();
+    let report = json!({
+        "first_timed_out": first_timed_out,
+        "first_status": first_status,
+        "first_body": first_body,
+        "first_elapsed_ms": first_elapsed.as_secs_f64() * 1000.0,
+        "admitted_after_first": admitted_after_first,
+        "following_elapsed_ms": following_elapsed.as_secs_f64() * 1000.0,
+        "following_status": following_status.as_u16(),
+        "following_body": following_body,
+        "engine_alive_after_following": engine.alive(),
+    });
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_CANCELLATION_REPORT") {
+        std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
+    }
+    assert_eq!(following_status, reqwest::StatusCode::OK, "{report}");
+    assert!(
+        following_elapsed <= deadline,
+        "a client deadline left native inference ahead of the next request: {report}"
+    );
+}
+
 #[test]
 #[ignore = "contract: measures compiled questions with the manifest-pinned tokenizer in PINNED_ROOT"]
 fn compiled_goal_heads_fit_the_manifest_pinned_tokenizer() {
