@@ -375,7 +375,7 @@ impl Definition {
     /// # Errors
     /// [`Self::to_bytes`]'s.
     pub fn version(&self) -> serde_json::Result<String> {
-        Ok(version_of(self.id.as_bytes()))
+        self.to_bytes().map(|bytes| version_of(&bytes))
     }
 
     /// The definition `bytes` hold.

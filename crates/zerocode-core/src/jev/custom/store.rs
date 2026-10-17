@@ -107,8 +107,7 @@ pub fn list(home: &Path) -> io::Result<Vec<Entry>> {
 /// No such version, a file past [`DEFINITION_MAX_BYTES`], bytes that no
 /// longer hash to `version`, or bytes that are not a definition.
 pub fn definition(home: &Path, version: &str) -> io::Result<Definition> {
-    let _ = (home, version);
-    Err(io::ErrorKind::NotFound.into())
+    read_definition(&root(home).join(DEFINITIONS), version)
 }
 
 /// Keep `definition` as a new decision in `mode`, made at `now_ms`; its
@@ -169,8 +168,29 @@ pub fn create(
 /// [`Error::Missing`] when no decision has its id, [`Error::Refused`] with
 /// every rule it breaks, and [`Error::Io`].
 pub fn edit(home: &Path, definition: &Definition, now_ms: i64) -> Result<String, Error> {
-    let _ = (home, definition, now_ms);
-    Err(Error::Missing)
+    let root = root(home);
+    let mut index = read_index(&root)?;
+    let Some(at) = index.iter().position(|entry| entry.id == definition.id) else {
+        return Err(Error::Missing);
+    };
+    let mut refused = check(definition);
+    if name_taken(&index, definition) {
+        refused.push(Refusal::NameTaken);
+    }
+    let bytes = definition.to_bytes().map_err(io::Error::other)?;
+    if bytes.len() > DEFINITION_MAX_BYTES {
+        refused.push(Refusal::TooLarge);
+    }
+    if !refused.is_empty() {
+        return Err(Error::Refused(refused));
+    }
+    let version = write_definition(&root, &bytes)?;
+    let entry = &mut index[at];
+    entry.name.clone_from(&definition.name);
+    entry.definition.clone_from(&version);
+    entry.updated_at = civil::iso_utc_of(now_ms);
+    write_index(&root, index)?;
+    Ok(version)
 }
 
 /// Set the decision `id` to `mode` at `now_ms`. Only the index changes: the
@@ -180,8 +200,18 @@ pub fn edit(home: &Path, definition: &Definition, now_ms: i64) -> Result<String,
 /// [`Error::Missing`], [`Error::Refused`] with [`Refusal::Mode`] for a mode
 /// no decision offers, and [`Error::Io`].
 pub fn set_mode(home: &Path, id: &str, mode: JevMode, now_ms: i64) -> Result<(), Error> {
-    let _ = (home, id, mode, now_ms);
-    Err(Error::Missing)
+    if !MODES.contains(&mode) {
+        return Err(Error::Refused(vec![Refusal::Mode]));
+    }
+    let root = root(home);
+    let mut index = read_index(&root)?;
+    let Some(entry) = index.iter_mut().find(|entry| entry.id == id) else {
+        return Err(Error::Missing);
+    };
+    entry.mode = mode;
+    entry.updated_at = civil::iso_utc_of(now_ms);
+    write_index(&root, index)?;
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -233,6 +263,17 @@ fn write_index(root: &Path, decisions: Vec<Entry>) -> io::Result<()> {
         &root.join(INDEX),
         &serde_json::to_vec(&index).map_err(io::Error::other)?,
     )
+}
+
+fn read_definition(dir: &Path, version: &str) -> io::Result<Definition> {
+    if !is_version(version) {
+        return Err(unreadable("not a version's name"));
+    }
+    let bytes = bounded(&dir.join(json(version)), DEFINITION_MAX_BYTES)?;
+    if version_of(&bytes) != version {
+        return Err(unreadable("a definition that no longer hashes to its name"));
+    }
+    Definition::from_bytes(&bytes).map_err(|_| unreadable("not a definition this store writes"))
 }
 
 /// Write a definition's bytes under the name they hash to, unless that file
