@@ -623,6 +623,124 @@ fn compiled_goal_shapes_fit_a_loaded_stand_in_budget() {
 }
 
 #[test]
+#[ignore = "contract: runs recorded compiled actions with the manifest-pinned model in PINNED_ROOT"]
+fn compiled_recorded_actions_run_on_the_manifest_pinned_model() {
+    let root = std::env::var_os(PINNED_ROOT)
+        .unwrap_or_else(|| panic!("did not run: {PINNED_ROOT} names no folder"));
+    let profile = crate::catalog::runtime().unwrap().unwrap();
+    let model = crate::catalog::catalog()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.engine == EngineKind::Laya)
+        .unwrap();
+    let runtime = Path::new(&root).join("runtime").join(&profile.id);
+    let folder = Path::new(&root).join("models").join(&model.id);
+    for (place, fingerprint) in [
+        (&runtime, profile.fingerprint().unwrap()),
+        (&folder, model.fingerprint().unwrap()),
+    ] {
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(place.join("receipt.json")).unwrap()).unwrap();
+        assert_eq!(
+            receipt["fingerprint"], fingerprint,
+            "did not run: the clone is not manifest-pinned"
+        );
+    }
+    let mut shapes = Vec::new();
+    for mut fixture in compiled_recorded_goal_heads() {
+        fixture["shape"]["questions"] = json!("all");
+        shapes.push(fixture.clone());
+        fixture["shape"]["questions"] = json!("action");
+        fixture["request"]["questions"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|name, _| name == "action");
+        shapes.push(fixture);
+    }
+    assert_eq!(
+        shapes.len(),
+        4,
+        "did not run: no recorded trial was compiled"
+    );
+    let packages: serde_json::Map<String, Value> = profile
+        .wheels
+        .iter()
+        .filter_map(|wheel| Some((wheel.package.clone()?, json!(wheel.version.as_ref()?))))
+        .collect();
+    let initial = json!({
+        "engine": "laya", "modelDirectory": folder, "modelId": model.id,
+        "runtime": profile.fingerprint().unwrap(), "packages": packages,
+    });
+    let source = std::env::var_os("LOCAL_JUDGMENT_BRIDGE_SOURCE")
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .unwrap_or_else(|| include_str!("bridge.py").to_string());
+    let payload = serde_json::to_vec(&shapes).unwrap();
+    let cache = runtime.join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let mut process = Command::new(child(&runtime, &profile.executable).unwrap())
+        .args(["-I", "-B", "-c", include_str!("../tests/infer_compiled.py")])
+        .arg(source)
+        .arg(initial.to_string())
+        .env_clear()
+        .env("HOME", &cache)
+        .env("HF_HOME", &cache)
+        .env("TMPDIR", &cache)
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1")
+        .env("OMP_NUM_THREADS", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let writing = std::thread::spawn(move || input.write_all(&payload));
+    let output = process.wait_with_output().unwrap();
+    writing.join().unwrap().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let measured: Value = serde_json::from_slice(&output.stdout).unwrap();
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_INFERENCE_REPORT") {
+        std::fs::write(path, &output.stdout).unwrap();
+    }
+    let provider = Provider {
+        kind: ProviderKind::Local,
+        protocol: Protocol::SystemOne,
+        base_url: "http://127.0.0.1".to_string(),
+        model: model.id,
+        requires_auth: false,
+    };
+    let expected_refusal =
+        std::env::var("LOCAL_JUDGMENT_EXPECT_REFUSAL").is_ok_and(|value| value == "1");
+    let rows = measured["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), shapes.len() * 3);
+    for (index, row) in rows.iter().enumerate() {
+        let mut request = shapes[index / 3]["request"].clone();
+        request["model"] = json!(provider.identity());
+        let prepared = provider
+            .prepare(serde_json::to_vec(&request).unwrap())
+            .unwrap();
+        let decoded = provider.decode(&prepared, serde_json::to_vec(&row["result"]).unwrap());
+        if expected_refusal && row["shape"]["navigation"] == "page" {
+            assert_eq!(decoded, Err(judgment_provider::Refusal::Truncated), "{row}");
+        } else {
+            let decoded: Value = serde_json::from_str(&decoded.unwrap()).unwrap();
+            assert_eq!(decoded["usage"], row["result"]["usage"]);
+            assert!(
+                row["result"]["usage"]["truncated_questions"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty)
+            );
+        }
+    }
+}
+
+#[test]
 #[ignore = "contract: measures compiled questions with the manifest-pinned tokenizer in PINNED_ROOT"]
 fn compiled_goal_heads_fit_the_manifest_pinned_tokenizer() {
     let root = std::env::var_os(PINNED_ROOT)
@@ -657,10 +775,16 @@ fn compiled_goal_heads_fit_the_manifest_pinned_tokenizer() {
     if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_COMPILED_REQUESTS") {
         std::fs::write(path, &payload).unwrap();
     }
+    let cache = runtime.join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
     let mut process = Command::new(child(&runtime, &profile.executable).unwrap())
         .args(["-I", "-B", "-c", include_str!("../tests/compiled_heads.py")])
         .arg(include_str!("bridge.py"))
         .arg(&folder)
+        .env_clear()
+        .env("HOME", &cache)
+        .env("HF_HOME", &cache)
+        .env("TMPDIR", &cache)
         .env("HF_HUB_OFFLINE", "1")
         .env("TRANSFORMERS_OFFLINE", "1")
         .env("OMP_NUM_THREADS", "1")
@@ -785,7 +909,7 @@ async fn the_manifest_pinned_runtime_refuses_a_cut_head_and_declares_the_config_
     // longer than the loaded head budget, and the same question without it.
     let home = tempfile::tempdir().unwrap();
     let heads = Command::new(child(&runtime, &profile.executable).unwrap())
-        .args(["-I", "-c", PINNED_HEADS])
+        .args(["-I", "-B", "-c", PINNED_HEADS])
         .arg(include_str!("bridge.py"))
         .arg(&folder)
         .env_clear()

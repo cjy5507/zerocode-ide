@@ -12,6 +12,8 @@ import sys
 import threading
 import time
 
+sys.dont_write_bytecode = True
+
 MAX_FRAME = 2 * 1024 * 1024
 wire = sys.stdout.buffer
 sys.stdout = sys.stderr
