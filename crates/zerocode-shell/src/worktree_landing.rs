@@ -2477,6 +2477,44 @@ mod tests {
         }
     }
 
+    /// An answer stands on the compare oid it was read at. The window reads its catalog again
+    /// only while it is shown, and the ledger's watch asks every minute: once main has moved,
+    /// an old "unlanded" is no fact of today. Here main took the work, and the old answer would
+    /// tell the ledger that merged work is not in main (t-44451). Work that landed stays landed.
+    #[test]
+    fn an_answer_read_before_the_compare_ref_moved_is_no_witness() {
+        let bench = Bench::open();
+        let wt = bench.worktree("moved");
+        bench.commit(&wt, "w.txt", "work\n");
+        assert!(is_unlanded(witnessed(&bench, &wt, "wt/moved").as_ref()));
+        git(
+            &bench.repo,
+            &["merge", "--no-ff", "-q", "-m", "merge it", "wt/moved"],
+        );
+        bench.publish();
+        assert_eq!(
+            witness_for(&wt, false),
+            None,
+            "nothing knows the compare oid of today yet"
+        );
+        // Another row's job reads the compare ref again; this row's answer is still the old one.
+        let host = Host::for_workspace(&bench.repo);
+        landing_base(&host, &bench.repo, None);
+        assert_eq!(
+            witness_for(&wt, false),
+            None,
+            "the answer stood on an oid the compare ref has left"
+        );
+        let landed = witnessed(&bench, &wt, "wt/moved").map(|held| held.git);
+        assert!(matches!(
+            landed,
+            Some(zerocode_core::orchestration::landing_watch::GitSays::Landed { .. })
+        ));
+        bench.commit(&bench.repo, "m.txt", "main moves on\n");
+        bench.publish();
+        assert_eq!(witness_for(&wt, false).map(|held| held.git), landed);
+    }
+
     fn the_repo(bench: &Bench) -> Vec<KnownRepo> {
         vec![KnownRepo {
             root: bench.repo.clone(),
