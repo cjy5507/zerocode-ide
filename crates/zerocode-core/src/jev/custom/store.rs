@@ -742,7 +742,7 @@ mod tests {
             .into_iter()
             .map(|trashed| trashed.decision.id)
             .collect();
-        assert_eq!(left, [recent.id.clone()]);
+        assert_eq!(left, std::slice::from_ref(&recent.id));
         assert!(
             !root(home.path())
                 .join(TRASH)
