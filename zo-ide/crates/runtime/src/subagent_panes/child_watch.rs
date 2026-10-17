@@ -469,16 +469,29 @@ mod tests {
         let accepted = accepted_within(&listener, FIRST_ACCEPT_DEADLINE, SECOND_ACCEPT_QUIET);
         assert_eq!(accepted, 1, "the same channel was connected to again");
 
-        // Nobody listens on a port that was just released.
+        // Nobody answers on a port the test holds without listening.
         let (_held, closed) = a_port_nobody_answers_on();
         assert!(!watch.hold_channel(closed));
         assert!(!watch.holds_channel(), "a refused channel replaced the held one with nothing held");
     }
 
-    /// A loopback port nobody listens on, released.
-    fn a_port_nobody_answers_on() -> ((), std::net::SocketAddr) {
-        let gone = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        ((), gone.local_addr().expect("addr"))
+    /// A loopback port nobody answers on while the returned socket lives. The
+    /// socket holds 127.0.0.1 at that port bound without listening: no other
+    /// socket can bind that address, and macOS answers no connect to it, even
+    /// beside a listener on the same port of every address, so the watch's
+    /// connect budget ends the attempt (t-47435).
+    fn a_port_nobody_answers_on() -> (std::os::fd::OwnedFd, std::net::SocketAddr) {
+        use std::os::fd::AsRawFd as _;
+
+        use nix::sys::socket::{
+            AddressFamily, SockFlag, SockType, SockaddrIn, bind, getsockname, socket,
+        };
+
+        let held = socket(AddressFamily::Inet, SockType::Stream, SockFlag::empty(), None)
+            .expect("socket");
+        bind(held.as_raw_fd(), &SockaddrIn::new(127, 0, 0, 1, 0)).expect("bind");
+        let bound: SockaddrIn = getsockname(held.as_raw_fd()).expect("bound address");
+        (held, std::net::SocketAddr::V4(bound.into()))
     }
 
     /// Under load another test binary can bind a released port before the
