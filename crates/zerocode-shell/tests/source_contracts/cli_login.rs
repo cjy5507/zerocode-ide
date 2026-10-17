@@ -140,7 +140,7 @@ fn the_three_logins_with_a_card_of_their_own_are_not_rows_as_well() {
     }
     // And the card each of them is: the Claude accounts card asks the CLI
     // itself, the Codex card runs on this file's own runner, and the
-    // window's Google login is the credential the Antigravity gauge reads.
+    // window's Google login is the credential zo runs on (no gauge reads it).
     assert!(shipped("accounts.rs").contains("\"auth\", \"status\""));
     assert!(shipped("codex_accounts.rs").contains("cli_login::run_login("));
     assert!(shipped("google_login.rs").contains("google_code_assist_oauth"));

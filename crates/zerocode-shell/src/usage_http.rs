@@ -222,31 +222,11 @@ pub(crate) fn get_json(
     send(request, now_ms)
 }
 
-/// POST a JSON body as a bearer, answering JSON.
-///
-/// The second verb this road needs: quota is asked for rather than looked up,
-/// and the project it is billed to is asked for the same way.
-pub(crate) fn post_json_bearer(
-    url: &str,
-    access_token: &str,
-    headers: &[(&str, &str)],
-    body: &serde_json::Value,
-    now_ms: i64,
-) -> Result<serde_json::Value, Failure> {
-    let mut request = client()?
-        .post(url)
-        .header("Authorization", format!("Bearer {access_token}"));
-    for (name, value) in headers {
-        request = request.header(*name, *value);
-    }
-    let request = request.json(body);
-    send(request, now_ms)
-}
-
 /// POST a form-encoded body, answering JSON.
 ///
-/// The third shape this area needs and the only one that is not a bearer
-/// asking a product API: OAuth token endpoints speak
+/// The second shape this area needs, and not a bearer asking a product API
+/// (the one that was — the Antigravity gauge's quota POST — went 2026-10-17,
+/// t-62187): OAuth token endpoints speak
 /// `application/x-www-form-urlencoded`, so a refresh comes through here.
 pub(crate) fn post_form(
     url: &str,
