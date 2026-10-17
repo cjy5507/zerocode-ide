@@ -97,9 +97,11 @@ pub struct ResetCredits {
     pub credits: Vec<ResetCredit>,
 }
 
-/// One window wearing its own name — Code Assist quota answers per MODEL
-/// (`buckets[]`), and the panel lists each by name while the segment shows
-/// only the most constrained. Claude and Codex never fill this.
+/// One window wearing its own name — a provider whose quota is answered per
+/// MODEL fills `buckets[]`; the panel lists each by name while the segment
+/// shows only the most constrained. No shipped gauge fills it today (the Code
+/// Assist one went 2026-10-17, t-62187); a stored snapshot that holds it
+/// still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedWindow {
     pub name: String,
@@ -120,9 +122,8 @@ pub struct ProviderUsage {
     /// a month put there reads as a model name to the person looking at it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monthly: Option<UsageWindow>,
-    /// Per-model windows, when the provider's API speaks that way (Code Assist —
-    /// and Antigravity, which mirrors it). Absent for everyone else, and
-    /// absent from their stored snapshots.
+    /// Per-model windows, when a provider's API speaks that way. Absent for
+    /// every shipped gauge, and absent from their stored snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buckets: Option<Vec<NamedWindow>>,
     /// Epoch milliseconds of the scan that produced this.

@@ -5882,15 +5882,14 @@ async function googleLogout() {
 }
 
 /* The Claude and Codex pair are `claudeLoginMoved` and `codexLoginMoved`, and
- * this is the same hand for the same reason: the bar's Antigravity figure is
- * a fact about THIS login, and without a forced re-read the segment keeps the
- * previous one's word — 「Antigravity 로그인 필요」 standing under an account
- * that just signed in — until an agent stirs or the fifteen-minute poll comes
- * round. The verbs above all wait for the backend to finish writing before
- * they answer, so by the time this runs the new login is on disk. */
+ * this is the same hand: every road through the card ends here. It repaints
+ * the card and asks the bar nothing — the Antigravity gauge that re-read this
+ * login forced is gone (t-62187: the window sends nothing to Google's quota
+ * API, 「구독 OAuth로 제품 호출 금지」). The verbs above all wait for the
+ * backend to finish writing before they answer, so by the time this runs the
+ * new login is on disk. */
 function googleLoginMoved() {
   paintGoogleAccount();
-  void refreshProviderUsage(usageProvider("antigravity"), true);
 }
 
 /* ---- and the fourth: every CLI that signs itself in ----
