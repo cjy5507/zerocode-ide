@@ -1728,6 +1728,108 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     assert_eq!(JEV_USES.len(), 33);
 }
 
+/// A person's decisions are one row of the table (t-62170), and the row
+/// never rises: nothing compares a decision's answers with another reader's
+/// or learns later whether they were right, so it offers no `auto`, and a
+/// decision acts only where its person says `on`. Its door clears every input
+/// the four points lend and the person's own words — the question and what
+/// each answer means — and cuts none of what the store keeps.
+#[test]
+fn the_custom_seat_never_rises_and_has_no_auto() {
+    use super::custom::{self, Answer, Definition, Input, Point};
+    assert_eq!(
+        jev_use(CUSTOM_DECISIONS.id),
+        Some(&CUSTOM_DECISIONS),
+        "a person's decisions are a row of the table"
+    );
+    assert_eq!(CUSTOM_DECISIONS.id, "custom");
+    assert!(!CUSTOM_DECISIONS.promotes);
+    assert_eq!(CUSTOM_DECISIONS.modes, custom::MODES);
+    assert!(!CUSTOM_DECISIONS.modes.contains(&JevMode::Auto));
+    assert_eq!(CUSTOM_DECISIONS.recommended, JevMode::On);
+    assert_eq!(CUSTOM_DECISIONS.abstain, Abstain::Offered);
+
+    let cleared_at: Vec<&str> = CUSTOM_DECISIONS.sends.iter().map(|sent| sent.at).collect();
+    for input in Input::ALL {
+        let at = format!("/state/{}", input.key());
+        assert!(cleared_at.contains(&at.as_str()), "{at} is not cleared");
+    }
+    for words in ["/questions/*/instructions", "/questions/*/criteria/*"] {
+        assert!(cleared_at.contains(&words), "{words} is not cleared");
+    }
+
+    let settings = door::JevSettings {
+        enabled: true,
+        workspaces: vec!["/work/app".to_string()],
+        daily_requests: None,
+        model: DEFAULT_MODEL.to_string(),
+    };
+    let asking = door::Asking {
+        key: true,
+        settings: &settings,
+        workspace: Some("/work/app"),
+        sent_today: 0,
+    };
+    let sent = |definition: &Definition| {
+        let cleared = door::may_send(
+            &CUSTOM_DECISIONS,
+            &asking,
+            json!({ "questions": custom::questions(definition) }),
+        )
+        .expect("a consented folder's request");
+        let body: Value = serde_json::from_slice(cleared.bytes()).expect("a body");
+        (body["questions"].clone(), cleared.withheld_lines())
+    };
+    let longest = |answer: Answer| {
+        let definition = Definition::new(
+            "d-0000000a".to_string(),
+            "가".repeat(custom::NAME_MAX_CHARS),
+            "가".repeat(custom::QUESTION_MAX_CHARS),
+            answer,
+            Point::TurnEnd,
+        );
+        assert_eq!(
+            custom::check(&definition),
+            Vec::<custom::Refusal>::new(),
+            "the store keeps it"
+        );
+        definition
+    };
+    let meaning = "가".repeat(custom::MEANING_MAX_CHARS);
+    let most = *custom::OPTIONS.end();
+    for answer in [
+        Answer::YesNo {
+            yes: meaning.clone(),
+            no: meaning.clone(),
+        },
+        Answer::Choice(
+            (0..most)
+                .map(|n| {
+                    let name = format!("{n}{}", "가".repeat(custom::NAME_MAX_CHARS - 1));
+                    (name, meaning.clone())
+                })
+                .collect(),
+        ),
+        Answer::Score(vec![meaning.clone(); most]),
+    ] {
+        let definition = longest(answer);
+        assert_eq!(
+            sent(&definition),
+            (custom::questions(&definition), 0),
+            "the door cuts none of what the store keeps"
+        );
+    }
+
+    let mut leaking = longest(Answer::Score(vec![meaning; 2]));
+    leaking.question = "Does it ship?\nAuthorization: Bearer abc".to_string();
+    let (questions, withheld) = sent(&leaking);
+    assert_eq!(
+        withheld, 1,
+        "a line of the person's question is cleared as an input's is"
+    );
+    assert!(!questions.to_string().contains("Bearer abc"));
+}
+
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
 /// top candidates each tried on a saved device and the results compared —
 /// and rises on the walk's own next step.

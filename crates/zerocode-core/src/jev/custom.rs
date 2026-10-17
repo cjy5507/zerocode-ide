@@ -38,6 +38,9 @@ pub const NAME_MAX_CHARS: usize = 40;
 /// The longest question, in characters: the bound a project rule's question has (`project_rules::MAX_QUESTION_CHARS`).
 pub const QUESTION_MAX_CHARS: usize = 1_000;
 
+/// The longest instructions a request carries, in characters, where the door cuts them: the longest question and the sentence wrapping it, which names four inputs at most, with room to spare.
+pub const INSTRUCTIONS_MAX_CHARS: usize = 2 * QUESTION_MAX_CHARS;
+
 /// Options a choice offers and levels a score names: one is no choice, and a score's wire takes ten at most ([`super::AGENT_TOOL_LEVELS`]).
 pub const OPTIONS: RangeInclusive<usize> = 2..=10;
 
