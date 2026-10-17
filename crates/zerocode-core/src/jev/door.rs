@@ -496,8 +496,14 @@ pub fn within_budget(settings: &JevSettings, sent: u64) -> bool {
 /// sent, as a day's budget of the wrong shape sends nothing.
 #[must_use]
 pub fn custom_hourly_requests(root: &Value) -> u64 {
-    let _ = root;
-    super::custom::ALL_HOURLY_DEFAULT
+    match root
+        .get(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(JEV_SETTINGS_KEY))
+        .and_then(|jev| jev.get(CUSTOM_HOURLY_REQUESTS_SETTING))
+    {
+        None | Some(Value::Null) => super::custom::ALL_HOURLY_DEFAULT,
+        Some(most) => most.as_u64().unwrap_or(0),
+    }
 }
 
 /// Ask the door about one request of `row`'s, its body built as the use
@@ -713,8 +719,31 @@ pub fn pass_within_the_hour(
     requests: &Path,
     hour: Hour<'_>,
 ) -> Result<Cleared, Refused> {
-    let _ = hour;
-    pass(ask, key, settings, workspace, requests)
+    let asking = Asking {
+        key,
+        settings,
+        workspace,
+        sent_today: count::sent(requests),
+    };
+    let cleared = ask(&asking)?;
+    if count::sent(hour.decision) >= hour.decision_most
+        || count::sent(hour.every) >= hour.every_most
+    {
+        return Err(Refused::HourlyBudget);
+    }
+    take_an_hours_place(hour.decision, hour.decision_most)?;
+    take_an_hours_place(hour.every, hour.every_most)?;
+    take_a_place(settings, requests)?;
+    Ok(cleared)
+}
+
+/// Count one request in an hour file and answer whether the hour had room
+/// for it, as [`take_a_place`] does the day's.
+fn take_an_hours_place(hour: &Path, most: u64) -> Result<(), Refused> {
+    match count::count_one_in_the_hour(hour) {
+        Ok(place) if place <= most => Ok(()),
+        _ => Err(Refused::HourlyBudget),
+    }
 }
 
 /// Count one request in the day and answer whether the day had room for it.
