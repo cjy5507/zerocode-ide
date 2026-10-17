@@ -13648,6 +13648,35 @@ await test("the Jev page is named for the decisions it shows — the tab, the ti
   return JSON.stringify(seen);
 });
 
+/* The Google card speaks of what uses the sign-in now (t-62187 removed the Antigravity gauge): zo alone.
+ * Its signed-out line and its hint name no gauge in any language. */
+await test("the Google card names only zo as the sign-in's user — no gauge, in every language", async () => {
+  const gauge = /게이지|gauge|ゲージ|用量条|medidor/i;
+  const seen = {};
+  try {
+    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      await setQualityLocale(pageA, locale);
+      const words = await pageA.evaluate(() => {
+        const was = googleAccount;
+        try {
+          googleAccount = { signed_in: false, store: "" };
+          const none = googleLoginUnder();
+          googleAccount = { signed_in: true, renewable: true, store: "file", email: "dev@example.com" };
+          return { none, hint: googleAccountNote() };
+        } finally {
+          googleAccount = was;
+        }
+      });
+      seen[locale] = words;
+      assert(typeof words.none === "string" && words.none.includes("zo") && !gauge.test(words.none), `${locale}: the signed-out line names only zo`, words);
+      assert(typeof words.hint === "string" && words.hint.includes("zo") && !gauge.test(words.hint), `${locale}: the hint names only zo`, words);
+    }
+  } finally {
+    await setQualityLocale(pageA, "ko");
+  }
+  return JSON.stringify(seen);
+});
+
 await test("the stateful backend refused every command the fixture did not define", async () => {
   assertEqual(backend.unknown, [], "unknown IPC was treated as success");
 });
