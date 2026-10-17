@@ -819,11 +819,21 @@ impl Recovering {
     /// status a read returns, which is what the window reads.
     async fn kept_end(&self, server: &str) -> Vec<(&'static str, Value, String)> {
         let told = self.ended(server).await["server"]["exit"].clone();
-        let record = self
-            .exits()
-            .into_iter()
-            .rfind(|record| record["serverId"] == server)
-            .unwrap_or_default();
+        let began = Instant::now();
+        let record = loop {
+            if let Some(record) = self
+                .exits()
+                .into_iter()
+                .rfind(|record| record["serverId"] == server)
+            {
+                break record;
+            }
+            assert!(
+                began.elapsed() < SETTLE,
+                "the exit event for {server} reached no journal row within {SETTLE:?}"
+            );
+            tokio::task::yield_now().await;
+        };
         let status = serde_json::to_value(self.manager.snapshot()).unwrap();
         vec![
             (
