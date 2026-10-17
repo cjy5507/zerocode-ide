@@ -135,6 +135,70 @@ async fn a_prepared_frame_at_the_pipe_limit_is_refused_without_stopping_the_runt
     assert!(!root.path().join("received").exists());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_deadline_owner_stops_inference_before_its_release_signal() {
+    use std::os::unix::net::UnixListener;
+
+    let root = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(root.path().join("release.sock")).unwrap();
+    let program = r#"import json,socket,sys
+from pathlib import Path
+request=json.loads(sys.stdin.readline())
+release=socket.socket(socket.AF_UNIX)
+release.connect(str(Path(sys.argv[1])/'release.sock'))
+release.recv(1)
+print(json.dumps({'model':request['model'],'answers':{'only':{'type':'noul','noul':0.5}},'usage':{'input_tokens':1,'output_tokens':0}}),flush=True)
+sys.stdin.read()
+"#;
+    let (_running, state) = fixture(program, root.path()).await;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::HOST,
+        state
+            .provider
+            .base_url
+            .trim_start_matches("http://")
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(
+        "x-zerocode-judgment-deadline-ms",
+        zerocode_core::jev::BROWSER
+            .apply_deadline_ms
+            .unwrap()
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+    let body = serde_json::to_vec(&json!({
+        "model": state.provider.model,
+        "state": "fixture",
+        "questions": {"only": {"type": "noul", "instructions": "fixture"}},
+    }))
+    .unwrap();
+    let called = state.clone();
+    let owner =
+        tokio::spawn(async move { predict(State(called), headers, Bytes::from(body)).await });
+    let (mut release, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || listener.accept()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    owner.abort();
+    assert!(owner.await.unwrap_err().is_cancelled());
+    let stopped_before_release = !state.engine.alive();
+    let closed_before_release = state.admission.turn.is_closed();
+    let _ = release.write_all(b"release");
+    state.engine.stop();
+    assert!(
+        stopped_before_release && closed_before_release,
+        "a cancelled deadline owner left native inference running before its release signal"
+    );
+}
+
 #[test]
 fn withheld_lines_count_alike_whether_they_end_in_lf_or_crlf_or_blank_pieces_stand_between() {
     let said = ["judging: the harbor plan", "still judging", "done"];
