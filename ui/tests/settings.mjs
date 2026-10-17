@@ -11557,6 +11557,47 @@ await test("stale windows preserve disjoint status-bar item patches", async () =
   }, ["status_bar_items"]);
 });
 
+await test("a stored status-bar id the catalog no longer offers is skipped, never painted", async () => {
+  // An install that saved its list while the Antigravity gauge existed
+  // (removed 2026-10-17, t-62187: the window sends nothing to Google's quota
+  // API) still boots, still shows every item it DOES know, and raises no
+  // error for the one it does not — the stored id is skipped, not offered.
+  const stale = ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"];
+  try {
+    await backend.externalPatch(
+      { status_bar_items: stale, status_bar_items_seen: stale },
+      ["status_bar_items", "status_bar_items_seen"],
+    );
+    await openSettings(pageA, "appearance");
+    const controls = await pageA.$$eval("[data-status-bar-item]", (fields) =>
+      fields.map((field) => field.dataset.statusBarItem));
+    assertEqual(
+      controls,
+      stale.filter((item) => item !== "antigravity"),
+      "Appearance offers a status-bar item no segment stands behind",
+    );
+    assertEqual(
+      await pageA.evaluate(() => ({
+        enabled: statusBarItemEnabled("antigravity"),
+        segment: document.getElementById("sb-antigravity") !== null,
+        known: [...statusBarItems].sort(),
+      })),
+      { enabled: false, segment: false, known: [...controls].sort() },
+      "a stored id with no catalog row reached the status bar",
+    );
+  } finally {
+    // Back to the fresh-install document — the serialized Rust default — even
+    // when an assertion above fails, so the suites after this one start clean.
+    await backend.externalPatch(
+      {
+        status_bar_items: RUST_DEFAULT_DOCUMENT.status_bar_items,
+        status_bar_items_seen: RUST_DEFAULT_DOCUMENT.status_bar_items_seen,
+      },
+      ["status_bar_items", "status_bar_items_seen"],
+    );
+  }
+});
+
 await test("browser default zoom is Rust-derived, persisted, and restored", async () => {
   await openSettings(pageA, "browser");
   const choices = await pageA.$$eval("#browser-default-zoom option", (options) =>

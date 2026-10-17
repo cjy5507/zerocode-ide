@@ -13,6 +13,7 @@ mod coordinator_desk;
 mod crash_report;
 mod fixture_cases;
 mod git_doors;
+mod google_quota_api;
 mod hand_in_keep;
 mod handoff_code;
 mod jev_pane_seats;

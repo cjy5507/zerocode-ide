@@ -2421,6 +2421,10 @@ fn status_bar_items_are_one_available_catalog_and_item_patch() {
             "unknown".to_string(),
             "claude".to_string(),
             "ports".to_string(),
+            // An id a stored list may still hold from an install that had the
+            // Antigravity gauge (removed 2026-10-17, t-62187): skipped like
+            // any other name the catalog does not know, never an error.
+            "antigravity".to_string(),
         ]),
         ["claude", "ports"]
     );
