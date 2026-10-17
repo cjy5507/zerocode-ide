@@ -210,6 +210,61 @@ const installComputerHands = ({ hotkey }) => {
     },
     frameListeners: () => ["computer:frame", "computer:activity"]
       .reduce((total, name) => total + (window.__LISTENERS__[name]?.length ?? 0), 0),
+    /* The panel's say of who holds control: the desktop's line, each work
+     * browser's row (its tab, its words, whether its button is offered) and
+     * the hint beside the rows. */
+    readControl: () => {
+      const desk = document.getElementById("computer-progress-desk");
+      const list = document.getElementById("computer-progress-browsers");
+      const hint = document.getElementById("computer-progress-browser-hint");
+      const rows = list && !list.hidden ? [...list.querySelectorAll("[data-tab]")] : [];
+      return {
+        desk: desk && !desk.hidden ? desk.textContent : null,
+        rows: rows.map((row) => {
+          const button = row.querySelector("button");
+          return {
+            tab: row.dataset.tab,
+            words: row.querySelector("span")?.textContent ?? null,
+            offersGo: !!button && !button.hidden && !button.disabled,
+          };
+        }),
+        hint: hint && !hint.hidden ? hint.textContent : null,
+      };
+    },
+  };
+};
+
+/* The dedicated work browser (t-62460) as its own suite stands it
+ * (browser-workspace.mjs): the backend's answers for its tabs and its
+ * `browser:workspace` word. The panel reads only what shell-browser.js took
+ * in, so a mode change sent from here would be a second controller. */
+const installWorkBrowsers = () => {
+  const work = { modes: [], states: new Map() };
+  window.__WORK_BROWSERS__ = work;
+  window.__ANSWER__.open_browser_pane = (args) => args.label;
+  window.__ANSWER__.browser_place = () => null;
+  window.__ANSWER__.browser_zoom = () => null;
+  window.__ANSWER__.close_browser_pane = () => null;
+  window.__ANSWER__.set_browser_open_tabs = ({ tabs: records }) => ({ browser: { ...browserPrefs, open_tabs: records } });
+  window.__ANSWER__.get_browser_workspaces = () => [...work.states.values()];
+  window.__ANSWER__.set_browser_workspace_mode = (args) => {
+    work.modes.push(args);
+    return null;
+  };
+  work.open = (label) => {
+    for (const hear of window.__LISTENERS__["browser:agent-open"] ?? []) {
+      hear({ payload: { label, url: `https://example.com/${label}` } });
+    }
+  };
+  work.say = (state) => {
+    const said = { inFlight: 0, needsObservation: false, snapshotSupported: false, ...state };
+    work.states.set(said.label, said);
+    for (const hear of window.__LISTENERS__["browser:workspace"] ?? []) hear({ payload: said });
+  };
+  work.tab = (label) => tabs.find((one) => one.kind === "browser" && one.label === label) ?? null;
+  work.words = (label) => {
+    const tab = work.tab(label);
+    return tab ? browserWorkspaceWords(tab) : null;
   };
 };
 
@@ -911,10 +966,187 @@ async function testTheBandWithThePanel(browser, origin, ok) {
   } finally { await page.close(); }
 }
 
+/* Who holds control, read in the panel (t-62464): the desktop as the backend
+ * granted its stop, and each work browser the panel's pane owns as the
+ * dedicated browser's own state says it — in its revision order — with a way
+ * to that browser's own bar, where its control changes. The panel sends no
+ * control of its own. */
+async function testThePanelReadsTheWorkBrowser(browser, origin, ok) {
+  const { page, faults } = await openComputerPage(browser, origin);
+  try {
+    await page.evaluate(installWorkBrowsers);
+    const desk = await evaluateCase(page, async ({ subject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.recordCommand("computer_progress_frame", () => null);
+      hands.announce("computer:activity", hands.operatorReport({ revision: 30, active: true }));
+      hands.openPanel(subject);
+      await hands.settle();
+      const agents = hands.readControl();
+      const stops = hands.holdCommand("computer_stop");
+      hands.pressBand("stop");
+      await hands.settle();
+      const whileStopWaits = hands.readControl();
+      hands.announce("computer:activity", hands.operatorReport({ revision: 31, stopped: "window" }));
+      stops.answerOldest({ stopped: true, reason: "window", revision: 31, helperSignalled: false });
+      await hands.settle();
+      const granted = hands.readControl();
+      hands.announce("computer:activity", hands.operatorReport({ revision: 30, active: true }));
+      await hands.settle();
+      const afterOlderReport = hands.readControl();
+      hands.recordCommand("computer_resume", () => ({ resumed: true, revision: 32, stopped: null, helper: "idle" }));
+      hands.pressBand("resume");
+      await hands.settle();
+      const resumed = hands.readControl();
+      return { agents, whileStopWaits, granted, afterOlderReport, resumed };
+    }, { subject: SUBJECT });
+    ok(
+      "the open panel says in one line that the desktop is the agent's while no stop is granted, and a stop still waiting for the backend does not change it",
+      Boolean(desk.agents?.desk) && desk.whileStopWaits?.desk === desk.agents?.desk,
+      JSON.stringify(desk),
+    );
+    ok(
+      "the desktop line says the stop once the backend grants it, with its reason, and an older report cannot take it back",
+      Boolean(desk.granted?.desk) && desk.granted?.desk !== desk.agents?.desk && desk.granted?.desk.includes("window") &&
+        desk.afterOlderReport?.desk === desk.granted?.desk,
+      JSON.stringify(desk),
+    );
+    ok(
+      "a granted resume gives the desktop line back to the agent",
+      Boolean(desk.resumed?.desk) && desk.resumed?.desk === desk.agents?.desk,
+      JSON.stringify(desk),
+    );
+
+    const rows = await evaluateCase(page, async ({ subject, otherTerm }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const work = window.__WORK_BROWSERS__;
+      const owner = String(subject.term);
+      const other = String(otherTerm);
+      work.open("browser-901");
+      work.open("browser-902");
+      for (let round = 0; round < 50 && !(work.tab("browser-901") && work.tab("browser-902")); round += 1) {
+        await hands.settle();
+      }
+      work.say({ label: "browser-901", mode: "agent", revision: 3, ownerTerm: owner });
+      work.say({ label: "browser-902", mode: "agent", revision: 2, ownerTerm: other });
+      await hands.settle();
+      const owned = hands.readControl();
+      const agentWords = work.words("browser-901");
+      work.say({ label: "browser-901", mode: "human", revision: 5, ownerTerm: owner });
+      await hands.settle();
+      const human = hands.readControl();
+      const humanWords = work.words("browser-901");
+      work.say({ label: "browser-901", mode: "agent", revision: 4, ownerTerm: owner });
+      await hands.settle();
+      const afterOlder = hands.readControl();
+      work.say({ label: "browser-901", mode: "paused", revision: 6, ownerTerm: other });
+      await hands.settle();
+      const handedAway = hands.readControl();
+      work.say({ label: "browser-901", mode: "agent", revision: 7, ownerTerm: owner });
+      await hands.settle();
+      const handedBack = hands.readControl();
+      return {
+        owned, agentWords, human, humanWords, afterOlder, handedAway, handedBack,
+        tab: work.tab("browser-901")?.id ?? null,
+        otherTab: work.tab("browser-902")?.id ?? null,
+        bar: { human: BROWSER_WORKSPACE_ACTION_WORDS.human(), agent: BROWSER_WORKSPACE_ACTION_WORDS.agent() },
+      };
+    }, { subject: SUBJECT, otherTerm: OTHER_TERM });
+    ok(
+      "a work browser the panel's pane owns stands in the panel in the dedicated browser's own words for its state, and one another pane owns does not",
+      Boolean(rows.tab) && rows.owned?.rows?.length === 1 && rows.owned.rows[0].tab === rows.tab &&
+        Boolean(rows.agentWords) && rows.owned.rows[0].words?.includes(rows.agentWords) &&
+        !rows.owned.rows.some((row) => row.tab === rows.otherTab),
+      JSON.stringify(rows),
+    );
+    ok(
+      "the work browser's row follows the dedicated browser's newer revision, and an older revision cannot change it back",
+      rows.human?.rows?.length === 1 && Boolean(rows.humanWords) && rows.humanWords !== rows.agentWords &&
+        rows.human.rows[0].words?.includes(rows.humanWords) && rows.afterOlder?.rows?.[0]?.words === rows.human.rows[0].words,
+      JSON.stringify(rows),
+    );
+    ok(
+      "a work browser handed to another pane leaves the panel, and stands in it again once it is handed back",
+      rows.handedAway?.rows?.length === 0 && rows.handedBack?.rows?.length === 1 && rows.handedBack.rows[0].tab === rows.tab,
+      JSON.stringify(rows),
+    );
+    ok(
+      "beside a work browser's row the panel says that its control changes in that browser's own bar, in the bar's own words, and says nothing of it with no row",
+      Boolean(rows.owned?.hint) && rows.owned.hint.includes(rows.bar?.human) && rows.owned.hint.includes(rows.bar?.agent) &&
+        rows.handedAway?.hint === null && rows.handedBack?.rows?.[0]?.offersGo === true,
+      JSON.stringify(rows),
+    );
+
+    const idle = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      const before = hands.readControl();
+      const savedLocale = locale;
+      locale = "en";
+      applyLocale();
+      await hands.settle();
+      const english = hands.readControl();
+      locale = savedLocale;
+      applyLocale();
+      await hands.settle();
+      const watched = ["computer_progress_frame", "get_browser_workspaces", "set_browser_workspace_mode", "browser_snapshot"];
+      const sentBefore = watched.map((name) => hands.sentCount(name));
+      await new Promise((done) => hands.census.native.setTimeout(done, 1500));
+      const sent = watched.filter((name, at) => hands.sentCount(name) !== sentBefore[at]);
+      return { before, english, census: hands.census.live(), sent, after: hands.readControl() };
+    });
+    const hangul = /[ㄱ-힝]/u;
+    ok(
+      "a language change repaints the panel's desktop line, the work browser's row and the hint beside it",
+      Boolean(idle.before?.desk) && Boolean(idle.english?.desk) && idle.english.desk !== idle.before.desk &&
+        !hangul.test(idle.english.desk) && idle.english?.rows?.length === 1 &&
+        idle.english.rows[0].words !== idle.before?.rows?.[0]?.words && !hangul.test(idle.english.rows[0].words ?? "") &&
+        Boolean(idle.english?.hint) && !hangul.test(idle.english.hint) && idle.after?.desk === idle.before.desk,
+      JSON.stringify(idle),
+    );
+    ok(
+      "with the panel open beside a work browser's row, an idle second and a half asks nothing and leaves no timer, interval or animation frame of the Computer Use files",
+      idle.sent?.length === 0 && idle.census?.timeouts === 0 && idle.census?.intervals === 0 &&
+        idle.census?.animationFrames === 0,
+      JSON.stringify(idle),
+    );
+
+    const going = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      const work = window.__WORK_BROWSERS__;
+      const tab = work.tab("browser-901");
+      const row = tab ? document.querySelector(`#computer-progress-browsers [data-tab="${CSS.escape(tab.id)}"]`) : null;
+      const button = row?.querySelector("button") ?? null;
+      const offered = !!button && !button.hidden && !button.disabled;
+      const control = ["set_browser_workspace_mode", "computer_stop", "computer_resume"];
+      const sentBefore = control.map((name) => hands.sentCount(name));
+      button?.click();
+      await hands.settle();
+      const sent = control.map((name, at) => hands.sentCount(name) - sentBefore[at]);
+      const viewing = { active: activeTabId, viewing: tab?.workspaceViewing === true };
+      closeTab(tab.id);
+      await hands.settle();
+      const afterClose = hands.readControl();
+      return { tab: tab?.id ?? null, offered, viewing, sent, modes: work.modes.length, afterClose };
+    });
+    ok(
+      "the row's button opens that work browser's own bar beside the conversation and moves no control: no mode change, stop or resume is sent",
+      going.offered === true && going.viewing?.active === going.tab && going.viewing?.viewing === true &&
+        going.sent?.every((count) => count === 0) && going.modes === 0,
+      JSON.stringify(going),
+    );
+    ok(
+      "a closed work browser leaves the panel at once, and the hint beside it goes too",
+      going.afterClose?.rows?.length === 0 && going.afterClose?.hint === null && Boolean(going.afterClose?.desk),
+      JSON.stringify(going),
+    );
+    ok("the work browser scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
 export async function testComputerProgress(browser, origin, ok) {
   await testTheBand(browser, origin, ok);
   await testTheProgressPanel(browser, origin, ok);
   await testTheBandWithThePanel(browser, origin, ok);
+  await testThePanelReadsTheWorkBrowser(browser, origin, ok);
 }
 
 if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {

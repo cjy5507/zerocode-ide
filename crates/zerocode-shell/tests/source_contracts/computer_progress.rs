@@ -136,6 +136,39 @@ fn the_panel_keeps_one_picture_no_copy_and_no_timer() {
     );
 }
 
+/// Who holds a work browser is the dedicated browser's own word (t-62464):
+/// the panel reads the state shell-browser.js took in, in its revision order,
+/// and leads to that browser's own bar. It asks the backend nothing about the
+/// work browser and changes no control of it — a second road there would be a
+/// second controller.
+#[test]
+fn the_panel_reads_who_holds_a_work_browser_and_moves_no_control_of_its_own() {
+    let page = ui_file("shell-computer.js");
+    for read in ["browserWorkspaceWords(", "watchBrowserWorkspace("] {
+        assert!(
+            page.contains(read),
+            "the panel reads the dedicated browser through {read}"
+        );
+    }
+    for road in [
+        "\"set_browser_workspace_mode\"",
+        "\"get_browser_workspaces\"",
+        "\"browser_snapshot\"",
+        "\"browser:workspace\"",
+    ] {
+        assert!(
+            !page.contains(road),
+            "shell-computer.js names {road}, a second road to the work browser's control"
+        );
+    }
+    let browser = ui_file("shell-browser.js");
+    assert!(
+        block_after(&browser, "function paintBrowserWorkspaceChrome(")
+            .contains("paintComputerProgressControl();"),
+        "every repaint of the work browsers' chrome repaints the panel's control lines"
+    );
+}
+
 #[test]
 fn a_stop_is_lifted_on_either_road_only_by_the_one_resume() {
     let runtime = strip_rust_comments(RUNTIME);
