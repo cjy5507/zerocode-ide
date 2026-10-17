@@ -489,8 +489,10 @@ fn given_read_only_enforcer_when_read_only_safe_bash_then_allowed() {
     );
 }
 
-/// The read-only-safe bash call, run from the process cwd.
+/// The read-only-safe bash call. It spawns from the process cwd, which the
+/// tests that move it change only while they hold `env_lock` (t-47231).
 fn run_read_only_safe_bash(registry: &crate::GlobalToolRegistry) -> Result<String, ToolError> {
+    let _guard = crate::tests::lock_env_announced();
     registry.execute("bash", &json!({ "command": "echo zo-readonly-ok" }))
 }
 

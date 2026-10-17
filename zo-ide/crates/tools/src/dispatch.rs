@@ -1065,7 +1065,12 @@ mod auto_format_guard_tests {
     fn over_cap_bash_dispatch_returns_digest_and_recovery_notice() {
         let artifact_dir = unique_temp_path("bash-digest-artifacts");
         std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
-        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        // The bash call spawns from the process cwd, which the tests that
+        // move it change only while they hold `env_lock` (t-47231).
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ctx = crate::ToolContext::new();
         let command = "i=0; while [ $i -lt 1200 ]; do printf 'stdout-line-%04d detail detail detail\n' \"$i\"; i=$((i+1)); done; printf 'stderr-tail failure detail\n' >&2; exit 1";
         let input = serde_json::json!({ "command": command, "timeout": 20 });
 
@@ -1098,7 +1103,12 @@ mod auto_format_guard_tests {
 
         let artifact_dir = unique_temp_path("bash-small-artifacts");
         std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
-        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        // The bash call spawns from the process cwd, which the tests that
+        // move it change only while they hold `env_lock` (t-47231).
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ctx = crate::ToolContext::new();
         let input = serde_json::json!({ "command": "echo waited", "timeout": 20000 });
 
         let content = super::execute_tool_with_context_and_artifact_dir(
@@ -1136,7 +1146,12 @@ mod auto_format_guard_tests {
 
         let artifact_dir = unique_temp_path("cargo-test-bash-artifacts");
         std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
-        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        // The bash call spawns from the process cwd, which the tests that
+        // move it change only while they hold `env_lock` (t-47231).
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ctx = crate::ToolContext::new();
         let command = "echo 'running 901 tests'; i=0; while [ $i -lt 900 ]; do printf 'test pass_%04d ... ok\n' \"$i\"; i=$((i+1)); done; printf 'test fail_case ... FAILED\n\nfailures:\n\n---- fail_case stdout ----\nthread '\''fail_case'\'' panicked at crates/demo.rs:42:9:\nexpected true\n\nfailures:\n    fail_case\n\ntest result: FAILED. 900 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n'; exit 1";
         let input = serde_json::json!({ "command": command, "timeout": 20 });
 

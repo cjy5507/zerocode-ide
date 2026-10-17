@@ -83,6 +83,23 @@ pub(crate) fn waits_for_env_lock(waiter: thread::ThreadId) -> bool {
         .contains(&waiter)
 }
 
+/// `env_lock`, taken by a thread that first says it waits for it.
+pub(crate) fn lock_env_announced() -> std::sync::MutexGuard<'static, ()> {
+    let me = thread::current().id();
+    env_lock_waiters()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(me);
+    let guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    env_lock_waiters()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|waiter| *waiter != me);
+    guard
+}
+
 /// A `ToolContext` for tests that may run beside another test's `set_current_dir`
 /// window (t-21146). `ToolContext::new()` binds the process cwd's `.zo/registries`
 /// when it is built, so the construction waits for `env_lock`, which each window's
