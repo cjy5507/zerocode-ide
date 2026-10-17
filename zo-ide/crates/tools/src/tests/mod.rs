@@ -331,6 +331,14 @@ impl TestServer {
     fn addr(&self) -> SocketAddr {
         self.addr
     }
+
+    /// Stop the server; `Err` when its thread ended in a panic.
+    fn stop(mut self) -> thread::Result<()> {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        self.handle.take().map_or(Ok(()), thread::JoinHandle::join)
+    }
 }
 
 impl Drop for TestServer {
