@@ -663,6 +663,14 @@ fn compiled_recorded_actions_run_on_the_manifest_pinned_model() {
         4,
         "did not run: no recorded trial was compiled"
     );
+    if std::env::var("LOCAL_JUDGMENT_INFERENCE_EXTREMES").is_ok_and(|value| value == "1") {
+        shapes.extend(compiled_goal_head_shapes().into_iter().filter(|fixture| {
+            fixture["shape"]["navigation"] == "all"
+                && fixture["shape"]["candidates"] == zerocode_core::jev::SCREEN_CANDIDATE_CAP
+                && fixture["shape"]["more"] == true
+        }));
+        assert_eq!(shapes.len(), 6);
+    }
     let packages: serde_json::Map<String, Value> = profile
         .wheels
         .iter()
@@ -726,7 +734,7 @@ fn compiled_recorded_actions_run_on_the_manifest_pinned_model() {
             .prepare(serde_json::to_vec(&request).unwrap())
             .unwrap();
         let decoded = provider.decode(&prepared, serde_json::to_vec(&row["result"]).unwrap());
-        if expected_refusal && row["shape"]["navigation"] == "page" {
+        if expected_refusal && row["shape"]["navigation"] != "none" {
             assert_eq!(decoded, Err(judgment_provider::Refusal::Truncated), "{row}");
         } else {
             let decoded: Value = serde_json::from_str(&decoded.unwrap()).unwrap();
