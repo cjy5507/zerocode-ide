@@ -551,6 +551,16 @@ pub fn questions(definition: &Definition) -> Value {
     Value::Object(Map::from_iter([(definition.id.clone(), question)]))
 }
 
+/// Whether `definition` asks in `workspace`: everywhere the door lets it, or
+/// only in the folders it chose and the folders under them.
+#[must_use]
+pub fn asks_in(definition: &Definition, workspace: &Path) -> bool {
+    match &definition.folders {
+        Folders::Consented => true,
+        Folders::Chosen(folders) => folders.iter().any(|folder| workspace.starts_with(folder)),
+    }
+}
+
 /// A new decision's id: [`ID_PREFIX`] and the head of a random UUID. The
 /// window makes it; the store refuses one already taken.
 #[must_use]

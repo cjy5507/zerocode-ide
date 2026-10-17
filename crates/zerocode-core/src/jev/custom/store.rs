@@ -118,8 +118,15 @@ pub fn definition(home: &Path, version: &str) -> io::Result<Definition> {
 /// # Errors
 /// [`list`]'s.
 pub fn asking_in(home: &Path, workspace: &Path) -> io::Result<Vec<(Entry, Definition)>> {
-    let _ = (home, workspace);
-    Ok(Vec::new())
+    Ok(list(home)?
+        .into_iter()
+        .filter(|entry| entry.mode.asks())
+        .filter_map(|entry| {
+            let definition = definition(home, &entry.definition).ok()?;
+            (definition.id == entry.id && super::asks_in(&definition, workspace))
+                .then_some((entry, definition))
+        })
+        .collect())
 }
 
 /// Keep `definition` as a new decision in `mode`, made at `now_ms`; its
