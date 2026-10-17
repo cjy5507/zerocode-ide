@@ -574,6 +574,7 @@ const JEV_TOKENS = Object.freeze({
   provider_client_outdated: { key: "jev.token.clientOutdated", word: "판단 클라이언트 업데이트 필요", saidKey: "settings.judgment.outdated", said: "판단 제공자를 지원하는 최신 zo가 필요합니다. 앱과 zo의 업데이트 상태를 확인하세요." },
   rules_unavailable: { key: "jev.token.rulesUnavailable", word: "규칙 정의를 확인하거나 다시 준비해야 함" },
   budget: { key: "jev.token.budget", word: "하루 한도 초과", fix: "budget" },
+  hourly_budget: { key: "jev.token.hourlyBudget", word: "시간당 한도 초과" },
   resting: { key: "jev.token.resting", word: "쉬는 중" },
   timeout: { key: "jev.token.timeout", word: "시간 초과" },
   schema: { key: "jev.token.schema", word: "형식 오류" },

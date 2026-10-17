@@ -92,6 +92,7 @@ fn the_door_asks_in_order_and_names_each_refusal() {
             "off",
             "not_consented",
             "budget",
+            "hourly_budget",
             "settings_changed",
             "resting"
         ]
@@ -1091,6 +1092,121 @@ fn an_hour_file_counts_one_byte_per_request_and_forgets_earlier_hours() {
     assert_eq!(count::hour_of(0, 0), "1970-01-01T00");
     assert_eq!(count::hour_of(-1, 0), "1969-12-31T23");
     assert_eq!(count::hour_of(0, -90), "1969-12-31T22");
+}
+
+/// A person's decision asks within two hours besides the day (t-62170): its
+/// own bound, and the bound every decision shares, which the person's
+/// settings name and which stands at 60 unset. The 21st request of a
+/// decision bound at 20 stops with `hourly_budget`, and so does the 61st of
+/// every decision together; a request that its hour, the shared hour or the
+/// day refuses is counted in none of the three.
+#[test]
+fn the_hourly_bound_stops_with_hourly_budget() {
+    use crate::jev::custom::{ALL_HOURLY_DEFAULT, EVERY_DECISION, HOURLY_DEFAULT};
+    let home = tempfile::tempdir().expect("a config home");
+    let today = count::requests_path(home.path(), "2026-10-17");
+    let body = routing_body("rename a variable");
+    let ask = |asking: &Asking<'_>| may_send(&ROUTING, asking, body.clone());
+    let every_most = custom_hourly_requests(&json!({}));
+    assert_eq!(every_most, ALL_HOURLY_DEFAULT);
+    let asks = |decision: &str, hour: &str, settings: &JevSettings| {
+        let mine = count::hour_path(home.path(), decision, hour);
+        let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+        pass_within_the_hour(
+            ask,
+            true,
+            settings,
+            Some(APP),
+            &today,
+            Hour {
+                decision: &mine,
+                decision_most: HOURLY_DEFAULT,
+                every: &every,
+                every_most,
+            },
+        )
+    };
+    let counted = |decision: &str, hour: &str| {
+        (
+            count::sent(&count::hour_path(home.path(), decision, hour)),
+            count::sent(&count::hour_path(home.path(), EVERY_DECISION, hour)),
+            count::sent(&today),
+        )
+    };
+    let (nine, ten) = ("2026-10-17T09", "2026-10-17T10");
+    let open = settings(None);
+
+    for _ in 0..HOURLY_DEFAULT {
+        assert!(asks("d-0000000a", nine, &open).is_ok());
+    }
+    assert_eq!(
+        asks("d-0000000a", nine, &open).err(),
+        Some(Refused::HourlyBudget),
+        "a decision's 21st request in an hour"
+    );
+    assert_eq!(
+        counted("d-0000000a", nine),
+        (20, 20, 20),
+        "is counted nowhere"
+    );
+
+    for decision in ["d-0000000b", "d-0000000c"] {
+        for _ in 0..HOURLY_DEFAULT {
+            assert!(asks(decision, nine, &open).is_ok());
+        }
+    }
+    assert_eq!(
+        asks("d-0000000d", nine, &open).err(),
+        Some(Refused::HourlyBudget),
+        "the 61st request of every decision together"
+    );
+    assert_eq!(counted("d-0000000d", nine), (0, 60, 60));
+
+    assert_eq!(
+        asks("d-0000000a", ten, &settings(Some(60))).err(),
+        Some(Refused::Budget),
+        "a day with no place left"
+    );
+    assert_eq!(
+        counted("d-0000000a", ten),
+        (0, 0, 60),
+        "refuses before either hour is counted"
+    );
+    assert!(
+        asks("d-0000000a", ten, &open).is_ok(),
+        "a new hour has room again"
+    );
+    assert_eq!(counted("d-0000000a", ten), (1, 1, 61));
+
+    let blocked = home.path().join("a-file");
+    std::fs::write(&blocked, "").expect("a file where the directory should be");
+    let unkept = count::hour_path(&blocked, "d-0000000a", ten);
+    let unkept_hour = Hour {
+        decision: &unkept,
+        decision_most: HOURLY_DEFAULT,
+        every: &unkept,
+        every_most,
+    };
+    assert_eq!(
+        pass_within_the_hour(ask, true, &open, Some(APP), &today, unkept_hour).err(),
+        Some(Refused::HourlyBudget),
+        "an hour the door cannot count is one it may not send past"
+    );
+    assert_eq!(count::sent(&today), 61);
+
+    let bound = |most: Value| {
+        custom_hourly_requests(&json!({
+            SMART_SETTINGS_KEY: { JEV_SETTINGS_KEY: { CUSTOM_HOURLY_REQUESTS_SETTING: most } }
+        }))
+    };
+    assert_eq!(bound(json!(2)), 2);
+    assert_eq!(bound(Value::Null), ALL_HOURLY_DEFAULT);
+    assert_eq!(
+        bound(json!("sixty")),
+        0,
+        "a bound of the wrong shape sends nothing"
+    );
+    assert_eq!(bound(json!(-1)), 0);
 }
 
 #[test]
