@@ -8567,6 +8567,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hiding_a_browser_pane_preserves_its_page_viewport() {
+        let shell = shipped_backend();
+        let placing = block_after(shell, "fn browser_place(");
+        let hiding = block_after(placing, "if !shown {");
+        assert!(hiding.contains("return hide_browser_pane(&pane, &webview);"));
+        assert!(!hiding.contains("place_native_browser("));
+        let hide_at = placing.find("if !shown {").unwrap();
+        let resize_at = placing.find("place_native_browser(").unwrap();
+        assert!(hide_at < resize_at);
+        assert!(placing[..hide_at].contains("from_the_main_webview(&webview)?"));
+        assert!(placing[..hide_at].contains("browser_pane_of(&app, &state, &label)?"));
+    }
+
     /// The browser pane answers only to labels this window minted, and the
     /// guard travels with the page.
     ///
@@ -9026,7 +9040,7 @@ mod tests {
             "the dead clock's number left its table"
         );
         assert!(
-            closing.contains("browser_records().remove(&label)"),
+            closing.contains("browser_records().remove(label)"),
             "the close leaves a pane's record behind:\n{closing}"
         );
         // And the window's spinner stops on `dead` as it does on `finished`:

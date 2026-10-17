@@ -2364,6 +2364,9 @@ pub(crate) fn browser_place(
             return Err(error);
         }
     };
+    if !shown {
+        return hide_browser_pane(&pane, &webview);
+    }
     place_native_browser(
         &app,
         &pane,
