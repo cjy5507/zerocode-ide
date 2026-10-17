@@ -63,18 +63,82 @@ def memory_guard(process, limit):
         time.sleep(0.25)
 
 
+class EncodingRecord:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.whole = []
+
+    def __getattr__(self, name):
+        return getattr(self.tokenizer, name)
+
+    def __call__(self, text, **kwargs):
+        encoded = self.tokenizer(text, **kwargs)
+        uncapped = {key: value for key, value in kwargs.items() if key not in ("truncation", "max_length")}
+        whole = encoded if uncapped == kwargs else self.tokenizer(text, **uncapped)
+        self.whole.append(list(whole["input_ids"]))
+        return encoded
+
+
+def measured_head(build_head, tokenizer, question, head_max_len, *args, **kwargs):
+    # A record per head: the runtime reuses a text's ids only for a tokenizer object it has
+    # already seen in the call, so every text of this head reaches this record.
+    record = EncodingRecord(tokenizer)
+    head = build_head(record, question, head_max_len, *args, **kwargs)
+    ids, markers = head[0], head[1]
+    stops = list(markers) + [len(ids) - 1]
+    spans = [ids[1:stops[0] - 1]] + [ids[start + 1:stop] for start, stop in zip(markers, stops[1:])]
+    return head, spans == record.whole
+
+
+class HeadMeasure:
+    def __init__(self, common):
+        self.build_head = common.build_head
+        self.heads = None
+        common.build_head = self.measured
+
+    def measured(self, tokenizer, question, head_max_len, *args, **kwargs):
+        head, whole = measured_head(self.build_head, tokenizer, question, head_max_len, *args, **kwargs)
+        if self.heads is not None:
+            self.heads.append((question, whole))
+        return head
+
+    def during(self, call):
+        self.heads = []
+        try:
+            return call(), self.heads
+        finally:
+            self.heads = None
+
+
+def declared_limits(initial, tokens):
+    model, runtime = initial.get("modelId"), initial.get("runtime")
+    if not all(isinstance(name, str) and name for name in (model, runtime)):
+        return None
+    if not all(type(count) is int and count > 0 for count in tokens.values()):
+        return None
+    return {"model": model, "runtime": runtime, "tokens": tokens}
+
+
 class LayaAdapter:
     def __init__(self, initial):
-        from laya import Agent
+        from laya import Agent, common
 
         self.agent = Agent(initial["modelDirectory"], device="cpu", compile=False)
+        self.measure = HeadMeasure(common)
+        loaded = getattr(self.agent, "cfg", None)
+        loaded = loaded if isinstance(loaded, dict) else {}
+        self.limits = declared_limits(
+            initial, {"max_len": loaded.get("max_len"), "head_max_len": loaded.get("head_max_len")}
+        )
 
     def predict(self, request):
         questions = list(request["questions"].items())
         answers = {}
         usage = {"input_tokens": 0, "output_tokens": 0}
+        named = []
         for start in range(0, len(questions), 4):
-            native = self.agent.predict(request["state"], dict(questions[start:start + 4]))
+            batch = dict(questions[start:start + 4])
+            native, heads = self.measure.during(lambda: self.agent.predict(request["state"], batch))
             answers.update(native["answers"])
             measured = native["usage"]
             for key in ("input_tokens", "output_tokens", "state_tokens_dropped"):
@@ -82,10 +146,18 @@ class LayaAdapter:
                     usage[key] = usage.get(key, 0) + measured[key]
             if measured.get("truncated"):
                 usage["truncated"] = True
-            if measured.get("truncated_questions"):
-                usage.setdefault("truncated_questions", []).extend(measured["truncated_questions"])
+            named.extend(measured.get("truncated_questions") or ())
+            for name, question in batch.items():
+                internal = self.agent._to_internal(question)
+                kept = [whole for seen, whole in heads if seen == internal]
+                if not kept:
+                    raise ValueError("head_unmeasured")
+                if not all(kept):
+                    named.append(name)
             if measured.get("options"):
                 usage.setdefault("options", {}).update(measured["options"])
+        if named:
+            usage["truncated_questions"] = list(dict.fromkeys(named))
         return {"answers": answers, "usage": usage}
 
 
@@ -123,6 +195,7 @@ class TransformersSystemOneAdapter:
         runtime = reviewed_system_one_runtime()
         root = verify_model_data(initial)
         self.model = runtime.D3(root, device="cpu", batch_size=2, max_length=1024, model_name=initial["modelId"])
+        self.limits = declared_limits(initial, {"max_len": getattr(self.model, "max_length", None)})
 
     def predict(self, request):
         return self.model.system_one(state=request["state"], questions=request["questions"])
@@ -182,7 +255,10 @@ try:
         adapter = ADAPTERS[initial["engine"]](initial)
     elif initial["engine"] == "transformers_system_one":
         reviewed_system_one_runtime()
-    reply({"ready": True})
+    ready = {"ready": True}
+    if getattr(adapter, "limits", None):
+        ready["limits"] = adapter.limits
+    reply(ready)
 except Exception:
     reply({"error": "runtime_failed"})
     os._exit(1)

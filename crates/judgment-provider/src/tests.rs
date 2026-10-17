@@ -301,6 +301,7 @@ fn changing_auth_requirements_cannot_reuse_the_old_judgment_identity() {
 fn discovery_uses_server_model_ids_not_a_product_model_table() {
     let expected = vec![Model {
         id: "acme/new-model".to_string(),
+        limits: None,
     }];
     for body in [
         json!({"data":[{"id":"acme/new-model"}]}),
@@ -329,6 +330,73 @@ fn model_list_size_is_bounded() {
         read_models(body.to_string().as_bytes()),
         Err(Refusal::TooLarge)
     );
+}
+
+fn declared(model: &str, tokens: Value) -> Value {
+    json!({"model":model,"runtime":"runtime-fixture","generation":"server-fixture","tokens":tokens})
+}
+
+#[test]
+fn discovery_keeps_the_limits_a_server_declared_as_data() {
+    for tokens in [
+        json!({"max_len":1024,"head_max_len":256}),
+        json!({"max_len":2048,"head_max_len":300}),
+        json!({"max_len":1024}),
+    ] {
+        let limits = declared("acme/judge", tokens);
+        for body in [
+            json!({"data":[{"id":"acme/judge","limits":limits}]}),
+            json!({"models":[{"name":"acme/judge","limits":limits}]}),
+        ] {
+            let models = read_models(body.to_string().as_bytes()).expect("model list");
+            assert_eq!(
+                serde_json::to_value(&models).expect("JSON"),
+                json!([{"id":"acme/judge","limits":limits}]),
+                "the limits a server declared were not kept as data"
+            );
+        }
+    }
+}
+
+#[test]
+fn unusable_limits_declare_nothing() {
+    let mut bodies = vec![
+        json!({"data":[{"id":"acme/judge"}]}),
+        json!({"models":["acme/judge"]}),
+        json!({"data":[
+            {"id":"acme/judge","limits":declared("acme/judge", json!({"max_len":1024}))},
+            {"id":"acme/judge","limits":declared("acme/judge", json!({"max_len":2048}))},
+        ]}),
+    ];
+    for limits in [
+        declared("acme/judge", json!({"max_len":0,"head_max_len":256})),
+        declared("acme/judge", json!({"max_len":1024,"head_max_len":0})),
+        declared("acme/judge", json!({"max_len":-1024})),
+        declared("acme/judge", json!({"max_len":"1024"})),
+        declared("acme/judge", json!({"max_len":true})),
+        declared("acme/judge", json!({"max_len":1024.5})),
+        declared("acme/judge", json!({"head_max_len":256})),
+        declared(
+            "acme/other-judge",
+            json!({"max_len":1024,"head_max_len":256}),
+        ),
+        json!({"model":"acme/judge","runtime":"","generation":"server-fixture","tokens":{"max_len":1024}}),
+        json!({"model":"acme/judge","runtime":"runtime-fixture","generation":"","tokens":{"max_len":1024}}),
+        json!({"model":"acme/judge","runtime":"runtime-fixture","tokens":{"max_len":1024}}),
+        json!({"tokens":{"max_len":1024}}),
+        json!(1024),
+        Value::Null,
+    ] {
+        bodies.push(json!({"data":[{"id":"acme/judge","limits":limits}]}));
+    }
+    for body in bodies {
+        let models = read_models(body.to_string().as_bytes()).expect("model list");
+        assert_eq!(
+            serde_json::to_value(&models).expect("JSON"),
+            json!([{"id":"acme/judge"}]),
+            "{body} declared a limit"
+        );
+    }
 }
 
 #[test]

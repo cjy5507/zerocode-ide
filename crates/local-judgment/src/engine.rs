@@ -12,7 +12,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use judgment_provider::{Protocol, Provider, ProviderKind};
+use judgment_provider::{Protocol, Provider, ProviderKind, TokenLimits};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -80,6 +80,27 @@ pub struct Engine {
     on_exit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     stopped: Mutex<Option<Stop>>,
     stderr: Arc<Tail>,
+    started: Option<Started>,
+    declared: Mutex<Option<TokenLimits>>,
+}
+
+/// The model and runtime build a runtime was started with, which the limits
+/// its ready frame declares have to name.
+struct Started {
+    model: String,
+    runtime: String,
+}
+
+impl Started {
+    /// The token limits `limits` declares, or `None` unless it names this
+    /// start's model and runtime build.
+    fn declared(&self, limits: &Value) -> Option<TokenLimits> {
+        let names = |key: &str, name: &str| limits.get(key).and_then(Value::as_str) == Some(name);
+        if !names("model", &self.model) || !names("runtime", &self.runtime) {
+            return None;
+        }
+        TokenLimits::read(limits.get("tokens")?)
+    }
 }
 
 /// Why this side ended a runtime that was still running.
@@ -168,6 +189,7 @@ impl Engine {
             )?;
             crate::storage::verify(&path, artifact, &AtomicBool::new(false))?;
         }
+        let fingerprint = profile.fingerprint()?;
         let executable = child(runtime, &profile.executable)?;
         let cache = child(runtime, "cache")?;
         crate::storage::private_dir(&cache)?;
@@ -208,7 +230,11 @@ impl Engine {
             command.creation_flags(0x0800_0000);
         }
         let process = command.spawn().map_err(|_| Error::RuntimeFailed)?;
-        let engine = Self::from_child(process)?;
+        let started = model.map(|(_, model)| Started {
+            model: model.id.clone(),
+            runtime: fingerprint.clone(),
+        });
+        let engine = Self::from_child(process, started)?;
         let packages: serde_json::Map<String, Value> = profile
             .wheels
             .iter()
@@ -234,13 +260,14 @@ impl Engine {
             initial["modelDirectory"] = json!(directory);
             initial["modelId"] = json!(model.id);
             initial["modelFiles"] = json!(model.files);
+            initial["runtime"] = json!(fingerprint);
         }
         let bytes = serde_json::to_vec(&initial).map_err(|_| Error::RuntimeFailed)?;
         engine.write(&bytes)?;
         Ok(engine)
     }
 
-    fn from_child(mut process: Child) -> Result<Arc<Self>> {
+    fn from_child(mut process: Child, started: Option<Started>) -> Result<Arc<Self>> {
         let Some(input) = process.stdin.take() else {
             let _ = process.kill();
             let _ = process.wait();
@@ -264,6 +291,8 @@ impl Engine {
             on_exit: Mutex::new(None),
             stopped: Mutex::new(None),
             stderr: Arc::new(Tail::default()),
+            started,
+            declared: Mutex::new(None),
         });
         match errors {
             Some(errors) => {
@@ -352,7 +381,22 @@ impl Engine {
         if value.get("ready").and_then(Value::as_bool) != Some(true) {
             return Err(Error::RuntimeFailed);
         }
+        *lock(&self.declared) = self
+            .started
+            .as_ref()
+            .zip(value.get("limits"))
+            .and_then(|(started, limits)| started.declared(limits));
         Ok(())
+    }
+
+    /// The runtime build and token limits this runtime declared when it was
+    /// ready, if it was started with `model`.
+    fn declared(&self, model: &str) -> Option<(String, TokenLimits)> {
+        let started = self
+            .started
+            .as_ref()
+            .filter(|started| started.model == model)?;
+        Some((started.runtime.clone(), (*lock(&self.declared))?))
     }
 
     pub(crate) fn exchange(&self, bytes: &[u8]) -> Result<Vec<u8>> {
@@ -431,7 +475,7 @@ impl Engine {
                 .spawn()
                 .unwrap()
         };
-        Self::from_child(child).unwrap()
+        Self::from_child(child, None).unwrap()
     }
 }
 
@@ -674,6 +718,7 @@ struct HttpState {
     provider: Provider,
     admission: Arc<Admission>,
     failed: Arc<dyn Fn() + Send + Sync>,
+    declared: Option<judgment_provider::Limits>,
 }
 
 fn browser_request(headers: &HeaderMap, provider: &Provider) -> bool {
@@ -711,7 +756,11 @@ async fn models(State(state): State<HttpState>, headers: HeaderMap) -> Response 
     if !state.engine.alive() {
         return failure(StatusCode::SERVICE_UNAVAILABLE, Error::ServerStopped);
     }
-    axum::Json(json!({"data":[{"id":state.provider.model}]})).into_response()
+    let mut model = json!({"id":state.provider.model});
+    if let Some(declared) = &state.declared {
+        model["limits"] = json!(declared);
+    }
+    axum::Json(json!({"data":[model]})).into_response()
 }
 
 async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes) -> Response {
@@ -922,11 +971,21 @@ async fn serve_with(
         model: model.id.clone(),
         requires_auth: false,
     };
+    let id = uuid::Uuid::new_v4().to_string();
+    let declared = engine
+        .declared(&model.id)
+        .map(|(runtime, tokens)| judgment_provider::Limits {
+            model: model.id.clone(),
+            runtime,
+            generation: id.clone(),
+            tokens,
+        });
     let state = HttpState {
         engine: engine.clone(),
         provider: provider.clone(),
         admission: admission.clone(),
         failed,
+        declared,
     };
     let router = axum::Router::new()
         .route("/v1/models", get(models))
@@ -937,7 +996,7 @@ async fn serve_with(
         let _ = axum::serve(listener, router).await;
     });
     Ok(Running {
-        id: uuid::Uuid::new_v4().to_string(),
+        id,
         model_id: model.id.clone(),
         provider,
         engine,
