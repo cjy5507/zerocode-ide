@@ -100,6 +100,17 @@ pub fn list(home: &Path) -> io::Result<Vec<Entry>> {
     read_index(&root(home))
 }
 
+/// The definition `version` names, read only while its bytes still hash to
+/// that name.
+///
+/// # Errors
+/// No such version, a file past [`DEFINITION_MAX_BYTES`], bytes that no
+/// longer hash to `version`, or bytes that are not a definition.
+pub fn definition(home: &Path, version: &str) -> io::Result<Definition> {
+    let _ = (home, version);
+    Err(io::ErrorKind::NotFound.into())
+}
+
 /// Keep `definition` as a new decision in `mode`, made at `now_ms`; its
 /// version.
 ///
@@ -148,6 +159,29 @@ pub fn create(
     });
     write_index(&root, index)?;
     Ok(version)
+}
+
+/// Keep `definition` as the newest version of the decision with its id,
+/// changed at `now_ms`; that version. The old version stays, and so does the
+/// decision's mode.
+///
+/// # Errors
+/// [`Error::Missing`] when no decision has its id, [`Error::Refused`] with
+/// every rule it breaks, and [`Error::Io`].
+pub fn edit(home: &Path, definition: &Definition, now_ms: i64) -> Result<String, Error> {
+    let _ = (home, definition, now_ms);
+    Err(Error::Missing)
+}
+
+/// Set the decision `id` to `mode` at `now_ms`. Only the index changes: the
+/// definition, and so its version, stays where it was.
+///
+/// # Errors
+/// [`Error::Missing`], [`Error::Refused`] with [`Refusal::Mode`] for a mode
+/// no decision offers, and [`Error::Io`].
+pub fn set_mode(home: &Path, id: &str, mode: JevMode, now_ms: i64) -> Result<(), Error> {
+    let _ = (home, id, mode, now_ms);
+    Err(Error::Missing)
 }
 
 #[derive(Serialize, Deserialize)]

@@ -317,6 +317,63 @@ fn limits_hold() {
     );
 }
 
+/// A definition's version is the hash of its bytes: the same words, the same
+/// version; one character more, another. A mode is not one of its words.
+#[test]
+fn a_changed_word_makes_a_new_version() {
+    let definition = yes_no("d-0000000a", "Release notes");
+    assert_eq!(
+        definition.version().unwrap(),
+        definition.clone().version().unwrap()
+    );
+    let mut changed = definition.clone();
+    changed.question.push('?');
+    assert_ne!(
+        definition.version().unwrap(),
+        changed.version().unwrap(),
+        "one character more is another version",
+    );
+    let mut fewer = definition.clone();
+    fewer.reads.remove(&Input::Evidence);
+    assert_ne!(
+        definition.version().unwrap(),
+        fewer.version().unwrap(),
+        "and so is one input less",
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    let first = store::create(home.path(), &definition, JevMode::Shadow, NOW).unwrap();
+    assert_eq!(first, definition.version().unwrap());
+    store::set_mode(home.path(), &definition.id, JevMode::On, NOW + 1).unwrap();
+    let listed = store::list(home.path()).unwrap();
+    assert_eq!(
+        (listed[0].mode, listed[0].definition.as_str()),
+        (JevMode::On, first.as_str()),
+        "a mode leaves the version where it was",
+    );
+    assert!(
+        matches!(
+            store::set_mode(home.path(), &definition.id, JevMode::Auto, NOW + 1),
+            Err(Error::Refused(refused)) if refused == [Refusal::Mode]
+        ),
+        "and no decision offers auto",
+    );
+
+    let second = store::edit(home.path(), &changed, NOW + 2).unwrap();
+    assert_eq!(second, changed.version().unwrap());
+    let listed = store::list(home.path()).unwrap();
+    assert_eq!(
+        (listed[0].mode, listed[0].definition.as_str()),
+        (JevMode::On, second.as_str())
+    );
+    assert_eq!(
+        store::definition(home.path(), &first).unwrap(),
+        definition,
+        "the old version stays",
+    );
+    assert_eq!(store::definition(home.path(), &second).unwrap(), changed);
+}
+
 /// A score asks the wire's own primitive: its tag, the person's question, and
 /// the levels in order, lowest first, as a list — and nothing else.
 #[test]
