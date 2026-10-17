@@ -8647,7 +8647,7 @@ mod tests {
             .find("inject_staged_cookies(")
             .expect("the pane no longer seats the staged cookies");
         let leaving = opening
-            .find(".navigate(parsed)")
+            .find("navigate_known(app, &pane, &label, parsed, Default::default())")
             .expect("the pane never leaves about:blank");
         assert!(
             seated < leaving,
@@ -9912,15 +9912,36 @@ mod tests {
                 && window.contains("/^browser-\\d+$/.test(label)"),
             "the agent listeners lost their label validation"
         );
-        // The two listeners of §2.2: popout-guarded, label-validated, and
-        // walking the window's own roads (closeTab, the viewport preset).
         let hearing_close = block_after(window, "listen(\"browser:agent-close\", (event) => {");
         assert!(
             hearing_close.starts_with(
                 "listen(\"browser:agent-close\", (event) => {\n  if (isPopout) return;"
-            ) && hearing_close.contains("agentPaneLabel(event.payload?.label)")
-                && hearing_close.contains("closeTab(tab.id)"),
-            "the agent-close listener lost its guard, its validation, or the ordinary close:\n{hearing_close}"
+            ) && hearing_close.contains("return closeAgentBrowserTab(event.payload);"),
+            "the agent-close listener lost its guard or its confirmed close path:\n{hearing_close}"
+        );
+        let closing_tab = block_after(window, "async function closeAgentBrowserTab(");
+        assert!(
+            closing_tab.contains("const label = agentPaneLabel(said?.label);")
+                && closing_tab.contains(
+                    "if (label === null || !Number.isSafeInteger(revision) || revision < 0) return;"
+                )
+                && closing_tab.contains("tab.workspace.mode === \"human\"")
+                && closing_tab.contains("tab.workspace.revision !== revision"),
+            "the confirmed close lost label, revision, or person-control validation:\n{closing_tab}"
+        );
+        let confirmation = closing_tab
+            .find("await confirmAgentBrowserClose(label, revision)")
+            .expect("the close must wait for backend confirmation");
+        let dropping = closing_tab
+            .find("dropTab(tab.id, { closed: true, nativeClosed: true });")
+            .expect("the confirmed close must use the window's tab cleanup");
+        let refusal = closing_tab
+            .split_once("if (!closed) {")
+            .and_then(|(_, tail)| tail.split_once("\n  }").map(|(body, _)| body))
+            .expect("the close must keep a refused tab");
+        assert!(
+            confirmation < dropping && refusal.contains("return;") && !refusal.contains("dropTab("),
+            "the tab is removed without a successful native close:\n{closing_tab}"
         );
         let hearing_viewport =
             block_after(window, "listen(\"browser:agent-viewport\", (event) => {");
@@ -11123,6 +11144,40 @@ mod tests {
         for block in &blocks {
             callers = callers.replace(block.as_str(), "");
         }
+        let workspace_actions = block_after(&callers, "const BROWSER_WORKSPACE_ACTIONS = [");
+        let workspace_keys = workspace_actions
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("[\""))
+            .map(|row| {
+                let (name, _) = row
+                    .split_once("\",")
+                    .expect("a literal workspace action name");
+                assert!(
+                    !name.is_empty()
+                        && name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                );
+                format!("browser.workspace.{name}Action")
+            })
+            .collect::<HashSet<_>>();
+        assert!(
+            !workspace_keys.is_empty(),
+            "workspace actions were not parsed"
+        );
+        let building_workspace = block_after(&callers, "function buildBrowserWorkspaceBar(");
+        let painting_workspace = block_after(&callers, "function paintBrowserWorkspace(");
+        assert!(
+            building_workspace
+                .contains("for (const [name, fallback] of BROWSER_WORKSPACE_ACTIONS)")
+                && building_workspace
+                    .contains("button.dataset.i18n = `browser.workspace.${name}Action`;")
+                && building_workspace.contains("t(button.dataset.i18n, fallback)")
+                && painting_workspace
+                    .contains("for (const [name, fallback] of BROWSER_WORKSPACE_ACTIONS)")
+                && painting_workspace.contains("t(`browser.workspace.${name}Action`, fallback)"),
+            "workspace catalog keys do not reach both their rendered buttons and repaint"
+        );
         // Cheap proof the cut actually happened: a key defined only in the
         // catalogs must not survive in `callers`, or every key looks reached
         // by its own definition and this gate quietly passes forever.
@@ -11145,6 +11200,7 @@ mod tests {
         let asked = |key: &str| {
             named.contains(&key)
                 || callers.contains(&format!("\"{key}\""))
+                || workspace_keys.contains(key)
                 || (key.starts_with("skills.")
                     && backend.contains(&format!("\"{key}\""))
                     && skills_code.contains("key.startsWith(\"skills.\")"))
@@ -11159,6 +11215,11 @@ mod tests {
                         })
                 })
         };
+
+        assert!(
+            !asked("browser.workspace.__not_declared__Action"),
+            "an undeclared workspace action bypasses the unused-key check"
+        );
 
         let mut unused: Vec<&str> = Vec::new();
         // Catalog entries close with `  },`, while `block_after` deliberately
@@ -22109,9 +22170,13 @@ mod tests {
              update is a first appearance:\n{door}"
         );
         assert_eq!(
-            shipped.matches("forget(").count(),
+            shipped.matches(".forget(").count(),
             1,
-            "forget is called somewhere beside close_lane"
+            "a forget method is called somewhere beside close_lane"
+        );
+        assert!(
+            !shipped.contains("LaneBell::forget("),
+            "a by-path call bypasses the lane bell's close method"
         );
         assert_eq!(
             shipped.matches("lane_bell()").count(),
