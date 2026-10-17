@@ -281,6 +281,7 @@ class BridgeBoundary(unittest.TestCase):
                 adapter, _ = self.laya({"max_len": budget * 8, "head_max_len": budget}, ranked_laya())
                 result = adapter.predict(fixture["request"])
                 self.assertFalse(result["usage"].get("truncated_questions"), "a compiled pageable head was still refused")
+                self.assertEqual(set(result["answers"]), set(fixture["request"]["questions"]))
                 seen = set()
                 for state, batch in adapter.agent.submitted:
                     self.assertEqual(state, fixture["request"]["state"])

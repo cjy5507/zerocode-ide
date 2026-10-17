@@ -74,12 +74,16 @@ for fixture in json.load(sys.stdin):
     after = [measure(question) for question in submitted]
     seen = set()
     intact = True
+    guards = {name: 0 for name, question in request["questions"].items() if question["type"] == "noul"}
     for state, batch in adapter.agent.submitted:
         intact = intact and state == request["state"]
         for question in batch.values():
             originals = [original for original in request["questions"].values()
                          if original["instructions"] == question["instructions"]]
             intact = intact and bool(originals)
+            for name in guards:
+                if question == request["questions"][name]:
+                    guards[name] += 1
             if question["type"] == "choice":
                 seen.update(question["criteria"])
                 intact = intact and all(
@@ -91,7 +95,9 @@ for fixture in json.load(sys.stdin):
         "shape": fixture["shape"], "before": before, "after": after,
         "calls": len(adapter.agent.submitted),
         "pass": all(head["whole"] for head in after)
-                and not result["usage"].get("truncated_questions") and intact and seen == expected,
+                and not result["usage"].get("truncated_questions") and intact and seen == expected
+                and set(result["answers"]) == set(request["questions"])
+                and all(count == 1 for count in guards.values()),
     })
 print(json.dumps({
     "head_max_len": budget, "rows": rows, "runtime_executable": sys.executable,
