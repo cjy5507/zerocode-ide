@@ -463,6 +463,183 @@ async fn a_ready_frame_declares_limits_only_for_its_own_model_and_runtime() {
 /// model the contract test below runs. No other test reads it.
 const PINNED_ROOT: &str = "LOCAL_JUDGMENT_PINNED_ROOT";
 
+fn compiled_goal_head_shapes() -> Vec<Value> {
+    use zerocode_core::screen_action::{
+        ActionLook, Beside, Errand, MAX_ACTION_CANDIDATES, MORE_CONTROLS, Navigation, Where,
+        ask_with, mark_of,
+    };
+
+    let navigation_sets: [(&str, &[Navigation]); 5] = [
+        ("none", &[]),
+        ("wait", &[Navigation::Wait]),
+        ("page", &Navigation::PAGE),
+        ("desktop", &Navigation::DESKTOP),
+        ("all", &Navigation::ALL),
+    ];
+    let mut shapes = Vec::new();
+    for (legend, label) in [
+        ("short", "Open workspace"),
+        (
+            "long",
+            "Open the project workspace and review the latest completed test results, including the detailed status for each selected task",
+        ),
+    ] {
+        let items: Vec<Value> = (1..=MAX_ACTION_CANDIDATES + 1)
+            .map(|mark| {
+                json!({
+                    "mark": mark, "role": "button", "label": format!("{label} {mark}"),
+                    "centerX": 100 + mark * 20, "centerY": 200 + mark * 30,
+                })
+            })
+            .collect();
+        let look = ActionLook {
+            goal: "Open the task workspace, then confirm test completion.",
+            errand: Errand::Goal,
+            at: Where::Page {
+                host: "example.test",
+                path: "/start",
+            },
+            tried: &[],
+            items: &items,
+            pressed: &[],
+            shows: &[],
+        };
+        let crowded = ask_with(
+            &look,
+            &Beside {
+                navigation: &Navigation::ALL,
+                ..Beside::default()
+            },
+        )
+        .unwrap();
+        for (navigation_name, navigation) in navigation_sets {
+            for count in 0..=MAX_ACTION_CANDIDATES {
+                for more in [false, true] {
+                    let available = count.max(1);
+                    let mut asked = ask_with(
+                        &ActionLook {
+                            items: &items[..available],
+                            ..look
+                        },
+                        &Beside {
+                            navigation,
+                            ..Beside::default()
+                        },
+                    )
+                    .unwrap();
+                    if more {
+                        asked.questions["action"]["instructions"] =
+                            crowded.questions["action"]["instructions"].clone();
+                        asked.questions["action"]["criteria"][MORE_CONTROLS] =
+                            crowded.questions["action"]["criteria"][MORE_CONTROLS].clone();
+                    }
+                    asked.questions["action"]["criteria"]
+                        .as_object_mut()
+                        .unwrap()
+                        .retain(|option, _| mark_of(option).is_none_or(|mark| mark <= count));
+                    let candidates = asked.state["candidates"].as_array_mut().unwrap();
+                    candidates.truncate(count);
+                    shapes.push(json!({
+                        "shape": {"legend": legend, "navigation": navigation_name, "candidates": count, "more": more},
+                        "request": {"state": asked.state, "questions": asked.questions},
+                    }));
+                }
+            }
+        }
+    }
+    shapes
+}
+
+#[test]
+fn compiled_goal_shapes_fit_a_loaded_stand_in_budget() {
+    let payload = serde_json::to_vec(&compiled_goal_head_shapes()).unwrap();
+    let mut process = Command::new("python3")
+        .args([
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            include_str!("../tests/bridge_boundary.py"),
+        ])
+        .arg(serde_json::to_string(include_str!("bridge.py")).unwrap())
+        .arg("--compiled")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let writing = std::thread::spawn(move || input.write_all(&payload));
+    let output = process.wait_with_output().unwrap();
+    writing.join().unwrap().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "contract: measures compiled questions with the manifest-pinned tokenizer in PINNED_ROOT"]
+fn compiled_goal_heads_fit_the_manifest_pinned_tokenizer() {
+    let root = std::env::var_os(PINNED_ROOT)
+        .unwrap_or_else(|| panic!("did not run: {PINNED_ROOT} names no folder"));
+    let profile = crate::catalog::runtime().unwrap().unwrap();
+    let model = crate::catalog::catalog()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.engine == EngineKind::Laya)
+        .unwrap();
+    let runtime = Path::new(&root).join("runtime").join(&profile.id);
+    let folder = Path::new(&root).join("models").join(&model.id);
+    let shapes = compiled_goal_head_shapes();
+    assert_eq!(
+        shapes.len(),
+        5 * (zerocode_core::jev::SCREEN_CANDIDATE_CAP + 1) * 2 * 2
+    );
+    let payload = serde_json::to_vec(&shapes).unwrap();
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_COMPILED_REQUESTS") {
+        std::fs::write(path, &payload).unwrap();
+    }
+    let mut process = Command::new(child(&runtime, &profile.executable).unwrap())
+        .args(["-I", "-B", "-c", include_str!("../tests/compiled_heads.py")])
+        .arg(include_str!("bridge.py"))
+        .arg(&folder)
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1")
+        .env("OMP_NUM_THREADS", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let writing = std::thread::spawn(move || input.write_all(&payload));
+    let output = process.wait_with_output().unwrap();
+    writing.join().unwrap().unwrap();
+    assert!(
+        output.status.success(),
+        "the loaded tokenizer did not measure the compiled requests: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_HEAD_REPORT") {
+        std::fs::write(path, &output.stdout).unwrap();
+    }
+    let measured: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = measured["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), shapes.len());
+    let failed: Vec<&Value> = rows.iter().filter(|row| row["pass"] != true).collect();
+    assert!(
+        failed.is_empty(),
+        "{} compiled request shapes submit cut heads or lose options against the loaded head budget of {} tokens; first: {}",
+        failed.len(),
+        measured["head_max_len"],
+        failed.first().unwrap_or(&&Value::Null)
+    );
+}
+
 /// Runs in the pinned runtime with the loaded agent's tokenizer and head
 /// budget. It grows a goal one sentence at a time until the instruction
 /// carrying it, the first text the runtime's own `build_head` encodes, is

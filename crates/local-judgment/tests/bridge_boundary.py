@@ -16,6 +16,7 @@ definitions = [
 ]
 bridge = {}
 exec(compile(ast.Module(body=definitions, type_ignores=[]), "owned-bridge", "exec"), bridge)
+compiled_shapes = json.load(sys.stdin) if len(sys.argv) > 2 and sys.argv[2] == "--compiled" else None
 
 # A stand-in for the laya runtime, for the bridge's own logic only: it proves nothing about real
 # tokens, which the contract test against the manifest-pinned runtime measures. Its head keeps
@@ -121,6 +122,35 @@ def sized(instruction, options):
     return choice(instruction - 2, [" ".join(["word"] * (size - 1)) for size in options])
 
 
+def ranked_laya():
+    runtime = stand_in_laya()
+    original = runtime.Agent
+
+    class Ranked(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.submitted = []
+
+        def predict(self, state, questions):
+            self.submitted.append((state, questions))
+            native = super().predict(state, questions)
+            for name, question in questions.items():
+                labels = list(question["criteria"])
+                winner = max(labels)
+                weights = {label: (20 if label == winner else 1) for label in labels}
+                total = sum(weights.values())
+                native["answers"][name].update(
+                    choice=winner,
+                    probabilities={label: weight / total for label, weight in weights.items()},
+                    confidence=self.cfg.get("first_confidence", 0.95) if self.batches == 1 else 0.95,
+                    answer_confidence=self.cfg.get("first_confidence", 0.95) if self.batches == 1 else 0.95,
+                )
+            return native
+
+    runtime.Agent = Ranked
+    return runtime
+
+
 class BridgeBoundary(unittest.TestCase):
     def laya(self, config, stand_in=None, start=None):
         folder = tempfile.TemporaryDirectory()
@@ -140,6 +170,78 @@ class BridgeBoundary(unittest.TestCase):
 
     def named(self, adapter, questions):
         return adapter.predict({"state": "fixture state", "questions": questions})["usage"].get("truncated_questions")
+
+    def test_crowded_choices_keep_every_word_and_offer_every_option(self):
+        for budget, tokenizer in ((40, "words"), (64, "words"), (96, "letters")):
+            with self.subTest(budget=budget, tokenizer=tokenizer):
+                adapter, _ = self.laya(
+                    {"max_len": 1024, "head_max_len": budget, "tokenizer": tokenizer}, ranked_laya()
+                )
+                question = choice(8, ["visible control %d" % index for index in range(20)])
+                result = adapter.predict({"state": {"goal": "open the final control"}, "questions": {"action": question}})
+                self.assertFalse(result["usage"].get("truncated_questions"), "a pageable head was still refused")
+                submitted = [asked for _, batch in adapter.agent.submitted for asked in batch.values()]
+                seen = set()
+                for asked in submitted:
+                    self.assertEqual(asked["instructions"], question["instructions"])
+                    _, whole = bridge["measured_head"](
+                        stand_in_build_head, adapter.agent.tok, adapter.agent._to_internal(asked), budget
+                    )
+                    self.assertTrue(whole, "inference received a cut head")
+                    seen.update(asked["criteria"])
+                self.assertEqual(seen, set(question["criteria"]))
+                self.assertGreater(adapter.agent.batches, 1)
+                answer = result["answers"]["action"]
+                self.assertEqual(set(answer["probabilities"]), set(question["criteria"]))
+                self.assertAlmostEqual(sum(answer["probabilities"].values()), 1.0)
+                self.assertEqual(answer["choice"], max(question["criteria"]))
+                self.assertLessEqual(answer["answer_confidence"], max(answer["probabilities"].values()))
+
+    def test_a_choice_that_already_fits_keeps_the_native_answer(self):
+        adapter, _ = self.laya({"max_len": 1024, "head_max_len": 256}, ranked_laya())
+        question = choice(4)
+        result = adapter.predict({"state": "unchanged", "questions": {"action": question}})
+        self.assertEqual(adapter.agent.batches, 1)
+        self.assertEqual(adapter.agent.submitted[0][1], {"action": question})
+        self.assertEqual(result["answers"]["action"]["answer_confidence"], 0.95)
+
+    def test_a_final_round_cannot_raise_a_weak_winners_confidence(self):
+        adapter, _ = self.laya(
+            {"max_len": 1024, "head_max_len": 40, "first_confidence": 0.3}, ranked_laya()
+        )
+        result = adapter.predict({"state": "same evidence", "questions": {"action": choice(8, ["control %d" % index for index in range(20)])}})
+        self.assertFalse(result["usage"].get("truncated_questions"), "a pageable head was still refused")
+        answer = result["answers"]["action"]
+        self.assertLessEqual(answer["confidence"], 0.3, "a smaller final choice inflated confidence")
+        self.assertLessEqual(answer["answer_confidence"], 0.3)
+        self.assertGreater(result["usage"]["head_pages"]["action"]["pages"], 1)
+
+    @unittest.skipUnless(compiled_shapes is not None, "the Rust boundary test supplies compiled questions")
+    def test_compiled_goal_shapes_keep_fixed_options_and_controls(self):
+        tokenizer = Words()
+        questions = [question for fixture in compiled_shapes for question in fixture["request"]["questions"].values()]
+        instructions = max(len(tokenizer(question["type"] + " question: " + question["instructions"])["input_ids"])
+                           for question in questions)
+        option_size = max(len(tokenizer(description)["input_ids"]) + 1
+                          for question in questions for description in question["criteria"].values())
+        budget = instructions + 2 * option_size
+        for fixture in compiled_shapes:
+            with self.subTest(shape=fixture["shape"]):
+                adapter, _ = self.laya({"max_len": budget * 8, "head_max_len": budget}, ranked_laya())
+                result = adapter.predict(fixture["request"])
+                self.assertFalse(result["usage"].get("truncated_questions"), "a compiled pageable head was still refused")
+                seen = set()
+                for state, batch in adapter.agent.submitted:
+                    self.assertEqual(state, fixture["request"]["state"])
+                    for question in batch.values():
+                        _, whole = bridge["measured_head"](
+                            stand_in_build_head, adapter.agent.tok, adapter.agent._to_internal(question), budget
+                        )
+                        self.assertTrue(whole, "a compiled request submitted a cut head")
+                        if question["type"] == "choice":
+                            self.assertEqual(question["instructions"], fixture["request"]["questions"]["action"]["instructions"])
+                            seen.update(question["criteria"])
+                self.assertEqual(seen, set(fixture["request"]["questions"]["action"]["criteria"]))
 
     def test_loaders_force_offline_mode_and_replace_untrusted_templates(self):
         received = []
@@ -421,4 +523,4 @@ class BridgeBoundary(unittest.TestCase):
         self.assertEqual(answered["answers"], refused["answers"])
 
 
-unittest.main(argv=["bridge-boundary"], verbosity=2)
+unittest.main(argv=["bridge-boundary"] + (["BridgeBoundary.test_compiled_goal_shapes_keep_fixed_options_and_controls"] if compiled_shapes is not None else []), verbosity=2)
