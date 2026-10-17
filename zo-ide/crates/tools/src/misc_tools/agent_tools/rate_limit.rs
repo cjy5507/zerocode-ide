@@ -25,12 +25,12 @@ const AGENT_MAX_CONCURRENCY_ENV: &str = "ZO_AGENT_MAX_CONCURRENCY";
 pub(super) const DEFAULT_AGENT_MAX_CONCURRENCY: usize = 1;
 /// Clamp for the explicit overrides (`ZO_AGENT_MAX_CONCURRENCY` and the
 /// env-fixed governor): aligned with the CC workflow execution bound
-/// (`min(16, cores-2)` tops out at 16), so a manual setting can reach full
+/// (`min(16, max(cores-2, 4))` tops out at 16), so a manual setting can reach full
 /// CC-level API parallelism but never exceed it.
 pub(super) const MAX_AGENT_MAX_CONCURRENCY: usize = 16;
 /// Absolute bound on the adaptive ceiling; the effective hard max is
-/// `min(16, cores-2)` (see [`adaptive_agent_hard_max`]) — the same execution
-/// bound CC uses. The AIMD governor still has to EARN it: admission seeds
+/// `min(16, max(cores-2, 4))` (see [`adaptive_agent_hard_max`]) — the workflow
+/// execution bound. The AIMD governor still has to EARN it: admission seeds
 /// small and grows one slot per success streak, while a 429 or low quota
 /// headroom collapses it back to serial. CC-level parallelism when the
 /// account is healthy, none of it when the provider is stressed.
@@ -44,13 +44,20 @@ const MODERATE_AGENT_INITIAL_CONCURRENCY: usize = DEFAULT_AGENT_MAX_CONCURRENCY 
 const SEED_UTIL_LOW: f64 = 0.5;
 /// Env override for the *workflow-engine* concurrency cap. Workflows are
 /// multi-phase fan-outs that can spawn hundreds of agents, so — unlike a flat
-/// `SpawnMultiAgent` — they default to genuine parallelism (`min(16, cores-2)`,
-/// the Claude Code model), bounded by a hard ceiling. The adaptive governor
+/// `SpawnMultiAgent` — they default to genuine parallelism
+/// (`min(16, max(cores-2, 4))`), bounded by a hard ceiling. The adaptive governor
 /// then ramps the *live* limit down on a 429 and back up on sustained success.
 const WORKFLOW_AGENT_MAX_CONCURRENCY_ENV: &str = "ZO_WORKFLOW_MAX_CONCURRENCY";
 /// Hard ceiling on the workflow cap, so a runaway env value can't open hundreds
 /// of concurrent provider streams (and OS threads) at once.
 const MAX_WORKFLOW_AGENT_CONCURRENCY: usize = 64;
+/// Floor under the default workflow cap. A helper mostly waits on its provider
+/// stream, not on a core, so cores minus two alone ran a 2- or 3-core machine's
+/// helpers (GitHub's macOS arm64 runner has 3) one at a time. Throttling stays
+/// with the rate governors: a 429 halves the workflow governor's live limit and
+/// parks every helper for the cool-down, and the flat fan-out's adaptive
+/// governor also drops to serial on low quota.
+const MIN_WORKFLOW_AGENT_CONCURRENCY: usize = 4;
 
 pub(crate) fn shared_agent_runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -353,26 +360,44 @@ pub(super) fn workflow_rate_governor(kind: ProviderKind) -> &'static RateGoverno
 }
 
 /// The workflow-engine concurrency cap: `ZO_WORKFLOW_MAX_CONCURRENCY` clamped
-/// to `[1, MAX_WORKFLOW_AGENT_CONCURRENCY]`, else `min(16, cores-2)` (the Claude
-/// Code default). Exposed so the engine can window its spawning to the same
+/// to `[1, MAX_WORKFLOW_AGENT_CONCURRENCY]`, else `min(16, max(cores-2, 4))`.
+/// Exposed so the engine can window its spawning to the same
 /// bound and never open more OS threads than can actually run.
 pub(crate) fn workflow_concurrency_limit() -> usize {
-    std::env::var(WORKFLOW_AGENT_MAX_CONCURRENCY_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .map_or_else(default_workflow_concurrency, |value| {
-            value.min(MAX_WORKFLOW_AGENT_CONCURRENCY)
-        })
+    workflow_concurrency_limit_from(
+        std::env::var(WORKFLOW_AGENT_MAX_CONCURRENCY_ENV).ok().as_deref(),
+        machine_cores(),
+    )
 }
 
-/// `min(16, available_parallelism - 2)`, clamped to at least 1 — the Claude Code
-/// workflow default. Leaves headroom for the main loop + IO threads.
-fn default_workflow_concurrency() -> usize {
+fn workflow_concurrency_limit_from(raw: Option<&str>, cores: Option<usize>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map_or_else(
+            || default_workflow_concurrency_for(cores),
+            |value| value.min(MAX_WORKFLOW_AGENT_CONCURRENCY),
+        )
+}
+
+fn machine_cores() -> Option<usize> {
     std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(2))
-        .unwrap_or(4)
-        .clamp(1, 16)
+        .ok()
+        .map(std::num::NonZeroUsize::get)
+}
+
+fn default_workflow_concurrency() -> usize {
+    default_workflow_concurrency_for(machine_cores())
+}
+
+/// `cores - 2` (headroom for the main loop + IO threads), but never below
+/// [`MIN_WORKFLOW_AGENT_CONCURRENCY`] — also the answer when the core count is
+/// unknown — nor above [`ADAPTIVE_AGENT_MAX_CONCURRENCY`].
+fn default_workflow_concurrency_for(cores: Option<usize>) -> usize {
+    cores
+        .map_or(MIN_WORKFLOW_AGENT_CONCURRENCY, |n| {
+            n.saturating_sub(2).max(MIN_WORKFLOW_AGENT_CONCURRENCY)
+        })
+        .min(ADAPTIVE_AGENT_MAX_CONCURRENCY)
 }
 
 /// Slice length for cancellable cool-down waits: short enough that a foreground
@@ -440,12 +465,13 @@ mod tests {
     // tests stay green unchanged. The pure cool-down/headroom-arithmetic tests
     // that exercised the migrated *private* helpers moved to `api::quota`.
     use super::{
-        adaptive_seed_at, agent_rate_governor, mark_capacity_stall_from,
-        parse_agent_api_concurrency_limit, rate_limit_cooldown_remaining_ms, rate_limit_headroom_low,
-        seed_snapshot_for, wait_for_rate_limit_cooldown_cancellable, RateGovernor,
+        adaptive_seed_at, agent_rate_governor, default_workflow_concurrency_for,
+        mark_capacity_stall_from, parse_agent_api_concurrency_limit,
+        rate_limit_cooldown_remaining_ms, rate_limit_headroom_low, seed_snapshot_for,
+        wait_for_rate_limit_cooldown_cancellable, workflow_concurrency_limit_from, RateGovernor,
         DEFAULT_AGENT_MAX_CONCURRENCY, GOVERNOR_SUCCESSES_PER_INCREASE,
         HEALTHY_AGENT_INITIAL_CONCURRENCY, MAX_AGENT_MAX_CONCURRENCY,
-        MODERATE_AGENT_INITIAL_CONCURRENCY, QUOTA_SNAPSHOT_FRESH,
+        MAX_WORKFLOW_AGENT_CONCURRENCY, MODERATE_AGENT_INITIAL_CONCURRENCY, QUOTA_SNAPSHOT_FRESH,
     };
     // Test-only cool-down helpers pulled straight from `api::quota` (the tools
     // lib itself no longer references them, so re-exporting would read as an
@@ -609,6 +635,41 @@ mod tests {
             Some(Duration::from_secs(60)),
             0,
         );
+    }
+
+    #[test]
+    fn workflow_default_is_cores_minus_two_but_never_below_four_nor_above_sixteen() {
+        for (cores, expected) in [
+            (Some(2), 4),
+            (Some(3), 4),
+            (Some(6), 4),
+            (Some(8), 6),
+            (Some(18), 16),
+            (None, 4),
+        ] {
+            assert_eq!(
+                default_workflow_concurrency_for(cores),
+                expected,
+                "{cores:?} cores"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_env_override_still_wins_over_the_default() {
+        assert_eq!(workflow_concurrency_limit_from(Some("2"), Some(18)), 2);
+        assert_eq!(workflow_concurrency_limit_from(Some("9"), Some(2)), 9);
+        assert_eq!(
+            workflow_concurrency_limit_from(Some(" 99 "), Some(8)),
+            MAX_WORKFLOW_AGENT_CONCURRENCY
+        );
+        for unset in [None, Some(""), Some("0"), Some("many")] {
+            assert_eq!(
+                workflow_concurrency_limit_from(unset, Some(8)),
+                default_workflow_concurrency_for(Some(8)),
+                "{unset:?} falls back to the default"
+            );
+        }
     }
 
     #[test]

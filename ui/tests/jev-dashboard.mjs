@@ -1432,7 +1432,7 @@ export async function testJevDashboard(browser, origin, ok) {
       return said;
     });
     ok("the dashboard's words are the catalog's, in the language in force",
-      english.head === "Feature" && english.title === "Jev dashboard" && english.refresh === "Refresh" && english.back === "기능",
+      english.head === "Feature" && english.title === "Decisions" && english.refresh === "Refresh" && english.back === "기능",
       JSON.stringify(english));
 
     // zo that cannot count: the table still stands with the switches and says why.

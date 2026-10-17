@@ -827,6 +827,7 @@ const SECURITY_PROMPT_BYTES: usize = 128;
 fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String> {
     use std::io::{Read, Write};
 
+    crate::credential_store_policy::ensure_access()?;
     let mut child = crate::proc::quiet_command("/usr/bin/security")
         .args(args)
         .stdin(std::process::Stdio::piped())

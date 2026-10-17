@@ -66,6 +66,7 @@ import { testAgentConversation } from "./agent-conversation.mjs";
 import { testHelperDoors } from "./helper-doors.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
+import { testBrowserWorkspace } from "./browser-workspace.mjs";
 import { testEmulatorSeat } from "./emulator-seat.mjs";
 import { testEmulatorLoans } from "./emulator-loans.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
@@ -302,6 +303,7 @@ suite("agent-conversation", ({ browser, origin, ok }) => testAgentConversation(b
 suite("helper-doors", ({ browser, origin, ok }) => testHelperDoors(browser, origin, ok));
 suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(browser, origin, ok));
 suite("browser-panes-survive", ({ browser, origin, ok }) => testBrowserPanesSurvive(browser, origin, ok));
+suite("browser-workspace", ({ browser, origin, ok }) => testBrowserWorkspace(browser, origin, ok));
 suite("emulator-seat", ({ browser, origin, ok }) => testEmulatorSeat(browser, origin, ok));
 suite("artifact-beside", ({ browser, origin, ok }) => testArtifactBeside(browser, origin, ok, join(UI, "..", "output/playwright")));
 suite("artifact-band", ({ browser, origin, ok }) => testArtifactBand(browser, origin, ok, join(UI, "..", "output/playwright")));
@@ -11296,9 +11298,11 @@ const agentOpenAtHome = await page.evaluate(async () => {
   }
   const before = { worktree: activeWorktreePath, tab: activeTabId };
   let seat = 0;
-  window.__ANSWER__.open_browser_pane = () => `browser-home-${++seat}`;
+  // The backend answers the label the bridge reserved (C8: a different answer is refused as unconfirmed).
+  window.__ANSWER__.open_browser_pane = (args) => args.label ?? `browser-home-${++seat}`;
   for (const speak of window.__LISTENERS__["browser:agent-open"] ?? []) {
-    speak({ payload: { label: "", url: "https://example.com/at-home", term: worker } });
+    // The bridge reserves the label before it emits, and the window opens only a reserved one (C8, t-62460).
+    speak({ payload: { label: "browser-13601", url: "https://example.com/at-home", term: worker } });
   }
   await new Promise((done) => setTimeout(done, 120));
   const opened = tabs.find((one) => one.kind === "browser" && one.url === "https://example.com/at-home");
@@ -11310,7 +11314,7 @@ const agentOpenAtHome = await page.evaluate(async () => {
   // 같은 워크트리에서 부른 것도 탭 줄에만 선다 — 스테이지와 키보드는 사람의 것.
   const beforeHere = { worktree: activeWorktreePath, tab: activeTabId };
   for (const speak of window.__LISTENERS__["browser:agent-open"] ?? []) {
-    speak({ payload: { label: "", url: "https://example.com/here", term: leader } });
+    speak({ payload: { label: "browser-13602", url: "https://example.com/here", term: leader } });
   }
   await new Promise((done) => setTimeout(done, 120));
   const here = tabs.find((one) => one.kind === "browser" && one.url === "https://example.com/here");
@@ -11335,7 +11339,9 @@ ok(
 
 /* 에이전트의 open 은 라벨을 먼저 예약해 온다: 창은 그 라벨을 그대로
  * open_browser_pane 에 건네고 탭은 그 이름을 입는다; 판 이름 모양이 아닌
- * 라벨은 건네지 않는다. agent-close 는 공용 closeTab 을 지나 판을 태운다. */
+ * 라벨로는 아무것도 열지 않는다(C8: 예약된 주인만). agent-close 는 제어 개정판
+ * (revision)을 실어 와야 하고, 창은 그 개정판으로 네이티브 닫기를 확인받은 뒤에만
+ * 탭을 내린다(t-62460, 옛 「공용 closeTab」 길을 대신함). */
 const agentReservedLabel = await page.evaluate(async () => {
   const asked = [];
   window.__ANSWER__.open_browser_pane = (args) => {
@@ -11352,22 +11358,28 @@ const agentReservedLabel = await page.evaluate(async () => {
     speak({ payload: { label: "main", url: "https://example.com/unreserved" } });
   }
   await new Promise((done) => setTimeout(done, 120));
-  seen.refusedShape = asked[1] ? !("label" in asked[1]) : null;
   const stray = tabs.find((one) => one.kind === "browser" && one.url === "https://example.com/unreserved");
+  seen.refusedShape = asked.length === 1 && !stray;
   if (stray) dropTab(stray.id);
   const closed = [];
   window.__ANSWER__.close_browser_pane = (args) => {
     closed.push(args.label);
     return null;
   };
+  // Without the control revision nothing closes; with it, the native close is confirmed first.
   for (const speak of window.__LISTENERS__["browser:agent-close"] ?? []) {
     speak({ payload: { label: "browser-77" } });
+  }
+  await new Promise((done) => setTimeout(done, 30));
+  seen.unrevisedIgnored = closed.length === 0 && tabs.some((one) => one.id === "browser:browser-77");
+  for (const speak of window.__LISTENERS__["browser:agent-close"] ?? []) {
+    speak({ payload: { label: "browser-77", revision: 0 } });
   }
   await new Promise((done) => setTimeout(done, 60));
   seen.closedLabel = closed[0] ?? null;
   seen.tabGone = !tabs.some((one) => one.id === "browser:browser-77");
   for (const speak of window.__LISTENERS__["browser:agent-close"] ?? []) {
-    speak({ payload: { label: "not-a-pane" } });
+    speak({ payload: { label: "not-a-pane", revision: 0 } });
     speak({ payload: {} });
   }
   await new Promise((done) => setTimeout(done, 30));
@@ -11376,10 +11388,10 @@ const agentReservedLabel = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "an agent's reserved label rides through openBrowserTab, and agent-close walks the ordinary close",
+  "an agent's reserved label rides through openBrowserTab, an unreserved one opens nothing, and agent-close confirms the native close at its revision",
   agentReservedLabel.passed === "browser-77" && agentReservedLabel.tabLabel === "browser-77"
     && agentReservedLabel.tabId === "browser:browser-77" && agentReservedLabel.refusedShape === true
-    && agentReservedLabel.closedLabel === "browser-77" && agentReservedLabel.tabGone
+    && agentReservedLabel.unrevisedIgnored && agentReservedLabel.closedLabel === "browser-77" && agentReservedLabel.tabGone
     && agentReservedLabel.closeCalls === 1,
   JSON.stringify(agentReservedLabel),
 );
@@ -14592,7 +14604,6 @@ ok(
   JSON.stringify(statusBarChoices.offered) === JSON.stringify([
     { item: "claude", checked: true },
     { item: "codex", checked: true },
-    { item: "antigravity", checked: false },
     { item: "kimi", checked: false },
     { item: "grok", checked: false },
     { item: "opencode-go", checked: false },
@@ -24171,7 +24182,7 @@ const settingsUsage = await page.evaluate(async () => {
 ok(
   "Stats & Usage reuses the provider read model and refresh action without a setting write",
   JSON.stringify(settingsUsage.options)
-    === JSON.stringify(["claude", "codex", "antigravity", "kimi", "grok", "opencode-go"]) &&
+    === JSON.stringify(["claude", "codex", "kimi", "grok", "opencode-go"]) &&
     settingsUsage.rows === 2 && settingsUsage.refreshed === 1,
   JSON.stringify(settingsUsage),
 );
@@ -30658,7 +30669,7 @@ const googleCard = await page.evaluate(async () => {
   }
 });
 ok(
-  "the Google card signs in through the system browser and re-reads the gauge once",
+  "the Google card signs in through the system browser and re-reads no gauge — the Antigravity gauge is gone (t-62187)",
   googleCard.out.count === 1 &&
     googleCard.noRadio &&
     googleCard.out.who === googleCard.words.signedOut &&
@@ -30676,13 +30687,13 @@ ok(
     googleCard.waitingNote === googleCard.expectSystemBrowserNote &&
     googleCard.systemUrl === googleCard.systemUrlAtStart &&
     googleCard.forcedWhileWaiting === 0 &&
-    // 끝난 뒤: 이름, 두 버튼, 그리고 강제 재조회 딱 한 번.
+    // 끝난 뒤: 이름, 두 버튼. 다시 읽을 게이지는 없다(t-62187이 Antigravity 게이지를 없앰).
     googleCard.signedIn.who === "me@example.com" &&
     googleCard.signedIn.under === "/h/.zo/credentials.json" &&
     JSON.stringify(googleCard.signedIn.buttons) ===
       JSON.stringify([googleCard.words.relogin, googleCard.words.logout]) &&
     googleCard.signedIn.alarmed === false &&
-    googleCard.forcedAfterLogin === 1 &&
+    googleCard.forcedAfterLogin === 0 &&
     // 부족한 로그인 둘은 배지와 붉음과 문장을 함께 입는다.
     googleCard.narrow.alarmed === true &&
     googleCard.narrow.badge === googleCard.words.badge &&
@@ -30690,15 +30701,15 @@ ok(
     googleCard.narrow.under === googleCard.words.narrow &&
     googleCard.stranded.alarmed === true &&
     googleCard.stranded.badge === googleCard.words.badge &&
-    // 로그아웃: 물었고, 파일을 이름 댔고, 다시 읽었다.
+    // 로그아웃: 물었고, 파일을 이름 댔고, 게이지는 묻지 않는다.
     googleCard.asked &&
     googleCard.askedNamesTheFile &&
     googleCard.afterLogout.who === googleCard.words.signedOut &&
-    googleCard.forcedAfterLogout === 2 &&
+    googleCard.forcedAfterLogout === 0 &&
     // 취소: 백엔드에 닿았고, 게이지는 그대로다.
     googleCard.cancels === 1 &&
     googleCard.afterCancel.who === googleCard.words.signedOut &&
-    googleCard.forcedAfterCancel === 2,
+    googleCard.forcedAfterCancel === 0,
   JSON.stringify(googleCard),
 );
 
@@ -51160,10 +51171,10 @@ const kimiGauge = await page.evaluate(async () => {
   // 카탈로그와 창의 프로바이더 표가 같은 이름을 안다.
   seen.inCatalog = STATUS_BAR_ITEM_CATALOG.some((item) => item.id === "kimi");
   seen.inProviders = USAGE_PROVIDERS.some((one) => one.id === "kimi" && one.command === "kimi_usage");
-  // 그리고 Orca 의 바 순서: antigravity 다음, resource-usage 앞.
+  // 그리고 Orca 의 바 순서: codex 다음(Antigravity 게이지가 빠진 자리, t-62187), resource-usage 앞.
   const order = STATUS_BAR_ITEM_CATALOG.map((item) => item.id);
   seen.ordered =
-    order.indexOf("kimi") === order.indexOf("antigravity") + 1 &&
+    order.indexOf("kimi") === order.indexOf("codex") + 1 &&
     order.indexOf("kimi") < order.indexOf("resource-usage");
   const provider = USAGE_PROVIDERS.find((one) => one.id === "kimi");
   const button = el("sb-kimi");

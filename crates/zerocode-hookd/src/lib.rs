@@ -397,6 +397,9 @@ impl TeamAnswer {
 /// blocked CLI waiting on the window.
 pub struct BrowserRequest {
     pub argv: Vec<String>,
+    /// The original agent observation's control revision, validated before
+    /// queueing. Omission is preserved; the receiver must not fill it in.
+    pub workspace_revision: Option<u64>,
     /// The pane key (`term-<n>`) of the shell that sent this, when the shim
     /// knew its own — a hand-typed shell outside a pane sends none.
     pub pane: Option<String>,
@@ -1100,6 +1103,22 @@ fn refused(why: impl Into<String>) -> Response {
     (StatusCode::CONFLICT, why.into()).into_response()
 }
 
+fn workspace_revision_of(request: &Request) -> Result<Option<u64>, String> {
+    use zerocode_core::agent_browser::{WORKSPACE_REVISION_HEADER, parse_workspace_revision};
+    let headers = request.headers().get_all(WORKSPACE_REVISION_HEADER);
+    let mut values = headers.iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err("workspace_revision_invalid: repeated workspace revision header".into());
+    }
+    let raw = value
+        .to_str()
+        .map_err(|_| "workspace_revision_invalid: expected an unsigned decimal u64")?;
+    parse_workspace_revision(raw).map(Some)
+}
+
 /// Answer one `zerocode-browser …`. The same reply contract as the teams
 /// road: the agent is blocked on this, so every road out writes a status the
 /// shim turns into an exit code, and the wait is bounded.
@@ -1116,15 +1135,27 @@ async fn receive_browser_command(State(state): State<BridgeState>, request: Requ
     if !constant_time_eq(presented.as_bytes(), state.browser_token.as_bytes()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let workspace_revision = match workspace_revision_of(&request) {
+        Ok(revision) => revision,
+        Err(error) => return refused(format!("zerocode-browser: {error}\n")),
+    };
     let evidence = run_evidence_of(&request);
     let pane = pane_of(&request);
     let body = match axum::body::to_bytes(request.into_body(), MAX_HOOK_BODY_BYTES).await {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(_) => return refused("zerocode-browser: unreadable command\n"),
     };
+    let command = match zerocode_core::agent_browser::parse_workspace_command(
+        &zerocode_core::agent_teams::unpack_argv(&body),
+        workspace_revision,
+    ) {
+        Ok(command) => command,
+        Err(error) => return refused(format!("zerocode-browser: {error}\n")),
+    };
     let (answer, wait) = tokio::sync::oneshot::channel();
     let sent = state.browser.send(BrowserRequest {
-        argv: zerocode_core::agent_teams::unpack_argv(&body),
+        argv: command.argv,
+        workspace_revision: command.workspace_revision,
         pane,
         evidence,
         answer,
@@ -2194,6 +2225,118 @@ pub fn hook_script(agent: AgentKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_original_workspace_revisions_never_reach_the_browser_queue() {
+        for raw in [
+            "",
+            "-1",
+            "+1",
+            "1.5",
+            " 1",
+            "1,2",
+            "18446744073709551616",
+            "x",
+        ] {
+            let (state, _events, _teams, mut browser) = BridgeState::new("hook", "browser");
+            let request = Request::builder()
+                .header(BROWSER_TOKEN_HEADER, "browser")
+                .header("x-zerocode-workspace-revision", raw)
+                .body(axum::body::Body::from(
+                    "click\u{1f}browser-1\u{1f}#submit\u{1f}",
+                ))
+                .unwrap();
+            let mut pending = tokio::spawn(receive_browser_command(State(state), request));
+            let response = tokio::select! {
+                response = &mut pending => response.unwrap(),
+                queued = browser.recv() => {
+                    assert!(queued.is_none(), "malformed revision {raw:?} was dispatched");
+                    pending.await.unwrap()
+                },
+            };
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert!(browser.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_original_workspace_revision_headers_never_reach_the_browser_queue() {
+        let (state, _events, _teams, mut browser) = BridgeState::new("hook", "browser");
+        let request = Request::builder()
+            .header(BROWSER_TOKEN_HEADER, "browser")
+            .header("x-zerocode-workspace-revision", "7")
+            .header("x-zerocode-workspace-revision", "7")
+            .body(axum::body::Body::from(
+                "click\u{1f}browser-1\u{1f}#submit\u{1f}",
+            ))
+            .unwrap();
+        let mut pending = tokio::spawn(receive_browser_command(State(state), request));
+        let response = tokio::select! {
+            response = &mut pending => response.unwrap(),
+            queued = browser.recv() => {
+                assert!(queued.is_none(), "duplicate revision headers were dispatched");
+                pending.await.unwrap()
+            },
+        };
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(browser.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn browser_queue_preserves_omission_zero_and_the_full_unsigned_revision() {
+        for (raw, expected) in [
+            (None, None),
+            (Some("0"), Some(0)),
+            (Some("0007"), Some(7)),
+            (Some("18446744073709551615"), Some(u64::MAX)),
+        ] {
+            let (state, _events, _teams, mut browser) = BridgeState::new("hook", "browser");
+            let mut builder = Request::builder().header(BROWSER_TOKEN_HEADER, "browser");
+            if let Some(raw) = raw {
+                builder = builder.header("x-zerocode-workspace-revision", raw);
+            }
+            let request = builder
+                .body(axum::body::Body::from(
+                    "click\u{1f}browser-1\u{1f}#submit\u{1f}",
+                ))
+                .unwrap();
+            let pending = tokio::spawn(receive_browser_command(State(state), request));
+            let forwarded = tokio::time::timeout(std::time::Duration::from_secs(2), browser.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(forwarded.workspace_revision, expected);
+            assert_eq!(forwarded.argv, ["click", "browser-1", "#submit"]);
+            let _ = forwarded.answer.send(TeamAnswer {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            });
+            assert_eq!(pending.await.unwrap().status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revision_in_both_header_and_argv_is_refused_before_queueing() {
+        let (state, _events, _teams, mut browser) = BridgeState::new("hook", "browser");
+        let request = Request::builder()
+            .header(BROWSER_TOKEN_HEADER, "browser")
+            .header("x-zerocode-workspace-revision", "7")
+            .body(axum::body::Body::from(
+                "click\u{1f}browser-1\u{1f}#submit\u{1f}--workspace-revision\u{1f}7\u{1f}",
+            ))
+            .unwrap();
+        let mut pending = tokio::spawn(receive_browser_command(State(state), request));
+        let response = tokio::select! {
+            response = &mut pending => response.unwrap(),
+            queued = browser.recv() => {
+                assert!(queued.is_none(), "two revision sources were dispatched");
+                pending.await.unwrap()
+            },
+        };
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(browser.try_recv().is_err());
+    }
 
     /// Every vendor, both dialects, one assertion each — the shape the
     /// upstream fix (#15520) taught: a per-vendor test cannot see a vendor's

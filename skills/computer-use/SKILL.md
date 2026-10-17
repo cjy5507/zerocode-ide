@@ -93,6 +93,70 @@ person's input setting, or substitute a shared-input shell command. Only the
 person can explicitly enable shared desktop input in Computer Use settings.
 A background run cannot inherit that weaker policy partway through its steps.
 
+For websites, open a dedicated working tab with `zerocode-browser open <url>`.
+This is a real page in the window's browser, not another Chrome or Safari
+window and not a copy of an external browser's login. Opening it does not
+switch the person's tab. The person can watch its actual snapshots, collapse
+the viewer without stopping the page, or pause and take control. Watching
+does not grant shared mouse or keyboard access. Capture runs only while the
+viewer is visible on platforms that support page snapshots. The backend
+limits watch captures to one per second and keeps one native capture in
+flight per tab. Agent screenshots share that concurrency limit.
+Restored and unassigned working tabs start paused. The person selects an
+existing terminal before assigning an unbound tab to an agent.
+Human control rejects every agent request for that tab, including reads.
+Pausing an owned tab also blocks that agent's new writes to other tabs and
+new working tabs. Browser steps inside a walk use the same checks.
+Managed working tabs refuse arbitrary `eval`. Use `read`, `marks`,
+`fields`, `fill`, and the other known browser commands.
+Ordinary website scripts and network requests can continue while paused,
+and a script, timer or request the site already started can still finish
+after a handoff. A handoff first waits briefly until the browser engine
+itself has answered the current navigation this window sent (`goto`, the
+person's address bar, a popup, a working tab's first page) and then
+reports nothing loading in the affected tabs, including a load the page
+began itself. A page's own "finished" message, its `readyState` or time
+alone never ends the wait, so a load that has not ended keeps control
+paused, and asking again stays paused until it ends or the tab is closed.
+On Windows a working tab's loading state is unknown until one navigation
+seen from its start has ended; until then a handoff stays paused.
+A mutation the command refused before anything was sent (its arguments,
+URL, selector, mark, text length, scroll target, expression or pane)
+leaves control as it was. A mutation that was sent and then failed, timed
+out or was canceled, including the page's own error answer, an unreadable
+`eval` or `find` result and a `fill` that wrote only some fields, pauses
+that tab and the owner's other writes. Control returns only when the person hands it back, after the
+affected page answers a bounded confirmation request. Never bypass a refusal
+with another surface. Once control returns, read the page again before
+acting, including navigation; previous form and numbered-element
+observations have been discarded. After a person has controlled a working
+tab, `console`, `network` and `diagnose` refuse that tab for the rest of its
+life (`workspace_history_unsupported`); open a new working tab when you need
+them. A working tab's step frame is taken and kept only while the same
+agent still controls it at the same revision; otherwise the step's evidence
+line says `control_changed`. A frame is never an observation.
+Every model uses the same original-observation rule. A successful managed-tab
+`read`, `marks`, `fields`, or agent `screenshot` returns `workspaceRevision`.
+The backend issues it only if owner, mode, and revision still match at read
+completion. JSON carries the root key. Plain output ends with a backend
+`workspaceRevision: <u64>` line outside the page's untrusted-content fence.
+Keep that value with the observation that selected the action. Send it as
+`--workspace-revision <u64>` on every managed-tab mutation, including `goto`,
+`close`, `scroll`, and `find`. Missing, repeated, malformed, or stale values
+are refusals. Never query the current control revision to fill missing input.
+The page's `documentEpoch`, a number in page text, and watch snapshots cannot
+supply this value. `open` has no prior page observation. Ordinary tabs keep
+omission compatibility. A recipe uses observations made during its current
+run; include a read before its managed actions. It discards recorded control
+revisions. A code handoff keeps the original revision while the person answers.
+Working-tab `viewport` requests report that application cannot be confirmed.
+The ownership check uses the current window's terminal identity. The browser
+bridge also requires its existing capability token. Ownership prevents
+accidental interference between agents; it does not bind that shared token
+to a terminal's reported identity.
+Returning control permits the agent to continue; it is not evidence that
+the agent's task has resumed or completed.
+
 Under background-only policy, recipes never watch the person's shared pointer;
 each desktop input is admitted independently and an unsupported step stops.
 Recipes containing only built-in browser, emulator or explicitly background
@@ -158,27 +222,27 @@ For a website, open and inspect the page through the pane ZeroCode owns:
 zerocode-browser open <https-url>
 zerocode-browser list
 zerocode-browser tabs
-zerocode-browser close <pane-label>
-zerocode-browser goto <pane-label> <url>
+zerocode-browser close <pane-label> --workspace-revision <revision>
+zerocode-browser goto <pane-label> <url> --workspace-revision <revision>
 zerocode-browser read <pane-label> [css]
 zerocode-browser eval <pane-label> <expr>
 zerocode-browser eval <pane-label> --value-stdin       # the expression from stdin (a script that fills a form: see below)
-zerocode-browser click <pane-label> <css>
+zerocode-browser click <pane-label> <css> --workspace-revision <revision>
 zerocode-browser marks <pane-label> [--json]            # number the controls a person could hit (picture: screenshot --marks)
-zerocode-browser click <pane-label> --mark <n>          # press mark n from the last marks (refused if it moved or changed)
-zerocode-browser click <pane-label> --mark <n> --settle-later  # answer at once with the page the press changed (JSON); the pane's next marks finishes the settle and says it — a press that left the legend as it was settles first and says it (`settle`)
-zerocode-browser type <pane-label> <css> <text>
-zerocode-browser type <pane-label> <css> --value-stdin   # a password field: the value from stdin, never argv
+zerocode-browser click <pane-label> --mark <n> --workspace-revision <revision> # use the last marks' revision and pinned number
+zerocode-browser click <pane-label> --mark <n> --settle-later --workspace-revision <revision> # the next marks finishes the settle
+zerocode-browser type <pane-label> <css> <text> --workspace-revision <revision>
+zerocode-browser type <pane-label> <css> --workspace-revision <revision> --value-stdin # the value stays on stdin
 zerocode-browser wait <pane-label> <css> [timeout-ms]
 zerocode-browser screenshot <pane-label> [--out <path>] [--json] [--marks]
 zerocode-browser console <pane-label> [--since N] [--level error|warn|all]
 zerocode-browser network <pane-label> [--since N] [--failed]
 zerocode-browser viewport <pane-label> <preset|WxH|default>
-zerocode-browser scroll <pane-label> <css|top|bottom|page-up|page-down|dx,dy>
-zerocode-browser find <pane-label> <text>
+zerocode-browser scroll <pane-label> <css|top|bottom|page-up|page-down|dx,dy> --workspace-revision <revision>
+zerocode-browser find <pane-label> <text> --workspace-revision <revision>
 zerocode-browser diagnose <pane-label> [--json]
 zerocode-browser fields <pane-label> [--json]           # every field of the page's forms at once: handle, kind, words, value, choices, required; and the buttons
-zerocode-browser fill <pane-label> --value-stdin        # stdin: {"<handle>": value, …} — written in order, each read back
+zerocode-browser fill <pane-label> --workspace-revision <revision> --value-stdin # stdin: {"<handle>": value, …}
 ```
 
 Words a page wrote — `read`, `eval`, `fields`, `fill`, `console`,
@@ -381,7 +445,7 @@ the frame: `document.querySelector(String.raw`<frame>`).contentDocument.querySel
 Use the handles and words exactly as `fields` printed them; never guess a
 selector. A password field is refused by `fill` (use `type … --value-stdin`),
 a file field and a code sent to the person's phone are the person's turn
-(`handoff`; for a code, `--ask-code --into '["browser","type","<pane-label>","<handle>"]'`), and a field `fill` could not write says so — fall back to
+(`handoff`; for a code, `--ask-code --into '["browser","type","<pane-label>","<handle>","--workspace-revision","<revision>"]'`), and a field `fill` could not write says so — fall back to
 `click` and a look for that one field only.
 
 When a page looks wrong, ask `diagnose` before guessing: it reads the pane's
@@ -859,7 +923,7 @@ Recording permission the screenshots use — no new prompt.
   # the focused field of an app
   zerocode-computer handoff --ask-code --reason "…" --into '["type-text","--app","<app>","--restore-window"]'
   # a tab of the window's browser: its label, and the field's selector or the handle `fields` printed
-  zerocode-computer handoff --ask-code --reason "…" --into '["browser","type","<pane-label>","<css>"]'
+  zerocode-computer handoff --ask-code --reason "…" --into '["browser","type","<pane-label>","<css>","--workspace-revision","<revision>"]'
   # a phone
   zerocode-computer handoff --ask-code --reason "…" --into '["emulator","text","--platform","ios","--device","<id>"]'
   ```

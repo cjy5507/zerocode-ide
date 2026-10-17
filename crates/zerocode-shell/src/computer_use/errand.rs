@@ -393,6 +393,10 @@ pub struct Screen {
 /// in, its form fields, and the containers, images and rows it found.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Snapshot {
+    /// The backend's control revision at observation completion. This is
+    /// separate from the page's document epoch and travels with the screen
+    /// whose judgment chose the action, including judgments asked ahead.
+    pub workspace_revision: Option<u64>,
     /// The document's epoch, as the look spelled it; empty when it named
     /// none.
     pub epoch: String,
@@ -421,6 +425,9 @@ impl Snapshot {
             _ => String::new(),
         };
         Self {
+            workspace_revision: said
+                .get(zerocode_core::agent_browser::WORKSPACE_REVISION_KEY)
+                .and_then(Value::as_u64),
             epoch,
             fields: list(snapshot::FIELDS_KEY),
             containers: list(Observe::Container.key()),
@@ -1222,6 +1229,10 @@ fn walk(
     // ([`Options::overlap`]): used when the next look asks the same question,
     // dropped when it does not.
     let mut ahead: Option<Pending> = None;
+    // Identical page words across a control transition are not the same
+    // original observation. Do not apply an old in-flight answer using the
+    // revision from a newer look, even if its model question is byte-identical.
+    let mut ahead_revision: Option<u64> = None;
     // Whether the last press's settle cancelled the judgment begun on the page
     // it left (t-9712) — the next row says so.
     let mut cancelled = false;
@@ -1321,6 +1332,7 @@ fn walk(
         };
         let press_policy = seat_of(screen.at.surface());
         let shows_lines = screen.shows.len();
+        let workspace_revision = screen.snapshot.workspace_revision;
         before = Some(screen);
 
         let candidates = asked.marks().len();
@@ -1331,7 +1343,7 @@ fn walk(
         // it IS this question; the row says which way it went, and how much
         // of the judgment the walk never waited for.
         let (judged, overlap) = match ahead.take() {
-            Some(begun) if begun.matches(&asked) => {
+            Some(begun) if begun.matches(&asked) && ahead_revision == workspace_revision => {
                 let hidden_ms = begun.ran_ms();
                 walked.overlapped += 1;
                 (
@@ -1827,6 +1839,7 @@ fn walk(
                     ),
                 )
                 .and_then(|question| judge.begin(&question));
+                ahead_revision = seen.snapshot.workspace_revision;
             }
             let pressed = match forked.pressed {
                 Some(pressed) => pressed,
@@ -1900,6 +1913,7 @@ fn walk(
                         ),
                     )
                     .and_then(|question| judge.begin(&question));
+                    ahead_revision = screen.snapshot.workspace_revision;
                 }
             }
             // A page whose press answered before it settled is settled now,

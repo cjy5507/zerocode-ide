@@ -2981,8 +2981,8 @@ mod tests {
 
     /// The three whose road is another card on this same screen — the Claude
     /// accounts card, the Codex accounts card, and the window's own Google
-    /// login (whose credential is what the Antigravity gauge reads; `agy`'s
-    /// keyring session is a different login).
+    /// login (the credential zo runs on; `agy`'s keyring session is a
+    /// different login).
     const OWN_CARDS: &[&str] = &["claude", "codex", "antigravity"];
 
     /// What the survey found NO login road for, spelled here so a future row

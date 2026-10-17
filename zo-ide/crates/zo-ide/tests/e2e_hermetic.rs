@@ -2486,7 +2486,8 @@ async fn e2e_workflow_first_tool_frame_shows_both_live_helpers() {
     .await
     .expect("start workflow script");
     // Both helpers must be live together, which is the cap the child reads:
-    // cores minus two, one on a 3-core CI runner. Hand the child its own two.
+    // cores minus two but at least four. Hand the child its own two, so the
+    // run does not depend on the machine's core count.
     let mut run = pty_with_env(
         &layout,
         service.base_url(),

@@ -60,7 +60,6 @@ pub(crate) mod artifact_file {
     /// dies halfway finishes the receipts on its next look (t-7538).
     pub(crate) const CLAUDE_ACCOUNT_SWITCH: &str = "claude-account-switch.json";
     pub(crate) const CODEX_USAGE: &str = "codex-usage.json";
-    pub(crate) const ANTIGRAVITY_USAGE: &str = "antigravity-usage.json";
     /// Kimi 게이지의 스냅샷 — 프로바이더마다 자기 파일이다(한 파일을 나눠
     /// 쓰면 한 CLI 의 수치가 다른 이름 아래 선다).
     pub(crate) const KIMI_USAGE: &str = "kimi-usage.json";

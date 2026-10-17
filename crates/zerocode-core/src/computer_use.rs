@@ -4905,6 +4905,11 @@ impl PowerShellBridgeShim<'_> {
             deadline_seconds,
             ..
         } = self;
+        let [revision_init, revision_arg, revision_end, revision_header] = if *route == "/browser" {
+            crate::agent_browser::revision_shim_posix()
+        } else {
+            std::array::from_fn(|_| String::new())
+        };
         let cwd_args = self.cwd_flag.map_or(String::new(), |flag| {
             format!("set -- \"$@\" '{flag}' \"$PWD\"\n")
         });
@@ -4964,8 +4969,8 @@ fi
 sep=$(printf '\037')
 body="{prefix}"
 stdin_name=""
-{cwd_args}{pane_args}for arg in "$@"; do
-  case "$arg" in
+{cwd_args}{pane_args}{revision_init}for arg in "$@"; do
+{revision_arg}  case "$arg" in
     --text-stdin) stdin_name="text"; continue ;;
     --value-stdin) stdin_name="value"; continue ;;
     *"$sep"*)
@@ -4975,7 +4980,7 @@ stdin_name=""
   esac
   body="$body$arg$sep"
 done
-if [ -n "$stdin_name" ]; then
+{revision_end}if [ -n "$stdin_name" ]; then
   payload=$(cat)
   case "$payload" in
     *"$sep"*)
@@ -4993,7 +4998,7 @@ printf 'header = "x-zerocode-hook-token: %s"\nheader = "{capability_header}: %s"
 if [ -n "${{{RUN_EVIDENCE_DIR_ENV}:-}}" ]; then
   printf 'header = "{RUN_EVIDENCE_HEADER}: %s"\n' "${RUN_EVIDENCE_DIR_ENV}" >> "$headers"
 fi
-{pane_lines}{cwd_lines}out=$(printf '%s' "$body" | curl -q -sS --noproxy '*' --proto =http \
+{pane_lines}{cwd_lines}{revision_header}out=$(printf '%s' "$body" | curl -q -sS --noproxy '*' --proto =http \
   --max-time {deadline_seconds} -w '\n%{{http_code}}' \
   -K "$headers" -H "content-type: application/octet-stream" --data-binary @- \
   "http://127.0.0.1:$port{route}" 2>/dev/null) || {{
@@ -5031,6 +5036,11 @@ printf '%s' "$said"
             cwd_flag,
             pane_flag,
         } = self;
+        let [revision_init, revision_arg, revision_end, revision_header] = if *route == "/browser" {
+            crate::agent_browser::revision_shim_powershell()
+        } else {
+            std::array::from_fn(|_| String::new())
+        };
         let cwd_args = cwd_flag.map_or(String::new(), |flag| {
             format!("$args = @($args) + @('{flag}', (Get-Location).Path)\n")
         });
@@ -5095,15 +5105,15 @@ if (-not $capability) {{
 $sep = [string][char]0x1f
 $body = '{prefix}'
 $stdinName = ''
-{cwd_args}{pane_args}foreach ($arg in $args) {{
+{cwd_args}{pane_args}{revision_init}foreach ($arg in $args) {{
   $word = [string]$arg
-{stdin_arms}  if ($word.Contains($sep)) {{
+{revision_arg}{stdin_arms}  if ($word.Contains($sep)) {{
     [Console]::Error.WriteLine('{command}: an argument may not contain the separator byte')
     exit 1
   }}
   $body = $body + $word + $sep
 }}
-if ($stdinName) {{
+{revision_end}if ($stdinName) {{
   $payload = [Console]::In.ReadToEnd()
   if ($payload.Contains($sep)) {{
     [Console]::Error.WriteLine('{command}: stdin may not contain the separator byte')
@@ -5123,7 +5133,7 @@ try {{
   $request.Headers.Add('{capability_header}', $capability)
   $evidence = $env:{RUN_EVIDENCE_DIR_ENV}
   if ($evidence) {{ $request.Headers.Add('{RUN_EVIDENCE_HEADER}', $evidence) }}
-{pane_lines}{cwd_lines}  $asking = $request.GetRequestStream()
+{pane_lines}{cwd_lines}{revision_header}  $asking = $request.GetRequestStream()
   $asking.Write($bytes, 0, $bytes.Length)
   $asking.Close()
   $response = $request.GetResponse()

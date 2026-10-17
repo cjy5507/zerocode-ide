@@ -78,10 +78,12 @@ mod browser_cookie_import;
 mod browser_cookies;
 mod browser_diagnose;
 mod browser_guest_runtime;
+mod browser_native_nav;
 mod browser_nav_state;
 mod browser_read;
 mod browser_runtime;
 mod browser_user_agent;
+mod browser_workspace;
 mod checks_runtime;
 #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
 mod chromium_browser;
@@ -98,6 +100,7 @@ mod conversation_wake;
 mod crash;
 mod crash_triage;
 mod credential_store;
+mod credential_store_policy;
 mod crumbs;
 mod developer_permissions;
 mod durable_file;
@@ -211,7 +214,6 @@ mod ui_source;
 mod update_runtime;
 mod update_store;
 mod usage;
-mod usage_antigravity;
 mod usage_grok;
 mod usage_http;
 mod usage_kimi;
@@ -250,41 +252,40 @@ use cmd::note_term_detached;
 use cmd::{
     abort_conflict_operation, ack_board_agent, add_claude_account, add_codex_account, agent_icon,
     agent_launch_plans, agent_models, agent_teams_mode, agent_terms, answer_approval, answer_ask,
-    answer_secret, antigravity_usage, api_router_keys_kept, api_router_presets,
-    api_router_providers, apply_ghostty_import, apply_ui_zoom, archive_trust_standing,
-    automation_born_worktrees, board_columns, board_desk, board_snapshot, boot_report, browse_dir,
-    browse_places, browser_click, browser_console, browser_devtools, browser_diagnose,
-    browser_eval, browser_find, browser_find_clear, browser_grab_arm, browser_grab_disarm,
-    browser_grab_take, browser_history, browser_menu_take, browser_navigate, browser_network,
-    browser_place, browser_profiles, browser_read, browser_reload, browser_scroll,
-    browser_snapshot, browser_stop, browser_type, browser_wait, browser_zoom, build_stamp,
-    busy_census, cancel_folder_panel, cancel_google_login, check_typesafe_key, choose_paths,
-    choose_project, claude_account_usage, claude_accounts, claude_autoswitch_apply,
-    claude_autoswitch_mode, claude_token_usage, claude_usage, claude_usage_stats,
-    clear_delivered_diff_notes, clear_diff_notes, clear_finish_mark, cli_login_list,
-    cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness, cli_login_witness_drop,
-    clipboard_has_image, clone_repository, clone_target_name, close_browser_pane, close_lane,
-    close_onboarding, close_term, codex_account_list, codex_token_usage, codex_usage,
-    codex_usage_stats, commit_failure_card, commit_file_diff, commit_files, commit_landings,
-    commit_staged, computer_awake_status, computer_confirm_answer, computer_guard_status,
-    computer_handoff_code, computer_live_reflex_check, computer_resume, computer_stop,
-    computer_use_capabilities, computer_use_permission_status, computer_use_skill_report,
-    computer_use_tcc_row_action, conflict_card, continuation_source, cookie_sources, crash_bundle,
-    crash_open_log, create_browser_profile, create_project, create_pull_request,
-    create_untitled_markdown, create_worktree, default_project_parent, default_tabs,
-    delete_automation, delete_browser_profile, delete_diff_note, delete_quick_command,
-    delete_untitled_markdown, delete_untracked, desk_ack, desk_checkouts, desk_reply,
-    developer_permission_statuses, discard_paths, dismiss_external_worktree_prompt,
+    answer_secret, api_router_keys_kept, api_router_presets, api_router_providers,
+    apply_ghostty_import, apply_ui_zoom, archive_trust_standing, automation_born_worktrees,
+    board_columns, board_desk, board_snapshot, boot_report, browse_dir, browse_places,
+    browser_click, browser_console, browser_devtools, browser_diagnose, browser_eval, browser_find,
+    browser_find_clear, browser_grab_arm, browser_grab_disarm, browser_grab_take, browser_history,
+    browser_menu_take, browser_navigate, browser_network, browser_place, browser_profiles,
+    browser_read, browser_reload, browser_scroll, browser_snapshot, browser_stop, browser_type,
+    browser_wait, browser_zoom, build_stamp, busy_census, cancel_folder_panel, cancel_google_login,
+    check_typesafe_key, choose_paths, choose_project, claude_account_usage, claude_accounts,
+    claude_autoswitch_apply, claude_autoswitch_mode, claude_token_usage, claude_usage,
+    claude_usage_stats, clear_delivered_diff_notes, clear_diff_notes, clear_finish_mark,
+    cli_login_list, cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness,
+    cli_login_witness_drop, clipboard_has_image, clone_repository, clone_target_name,
+    close_browser_pane, close_lane, close_onboarding, close_term, codex_account_list,
+    codex_token_usage, codex_usage, codex_usage_stats, commit_failure_card, commit_file_diff,
+    commit_files, commit_landings, commit_staged, computer_awake_status, computer_confirm_answer,
+    computer_guard_status, computer_handoff_code, computer_live_reflex_check, computer_resume,
+    computer_stop, computer_use_capabilities, computer_use_permission_status,
+    computer_use_skill_report, computer_use_tcc_row_action, conflict_card, continuation_source,
+    cookie_sources, crash_bundle, crash_open_log, create_browser_profile, create_project,
+    create_pull_request, create_untitled_markdown, create_worktree, default_project_parent,
+    default_tabs, delete_automation, delete_browser_profile, delete_diff_note,
+    delete_quick_command, delete_untitled_markdown, delete_untracked, desk_ack, desk_checkouts,
+    desk_reply, developer_permission_statuses, discard_paths, dismiss_external_worktree_prompt,
     enable_automation, end_all_terminal_sessions, end_terminal_session, file_diff, file_version,
     floating_workspace_seat, flow_list, flow_set, focus_lane, focus_main, fs_create, fs_duplicate,
     fs_move, fs_open_default, fs_redo, fs_rename, fs_reveal, fs_trash, fs_undo, gate_lane,
-    generate_branch_name, generate_commit_message, generate_pull_request, get_second_brain_scenes,
-    git_history, github_assignable_users, github_comment_work_item, github_disconnect,
-    github_login_intent, github_merge_pr, github_pr_file_diff, github_preset_query,
-    github_review_states, github_select_account, github_set_reviewers, github_set_work_item_open,
-    github_status, github_test_connection, github_web_urls, github_work_item_detail,
-    github_work_items, gitlab_comment_item, gitlab_inline_comment, gitlab_item_detail,
-    gitlab_job_trace, gitlab_merge_mr, gitlab_mr_review, gitlab_pipeline_jobs,
+    generate_branch_name, generate_commit_message, generate_pull_request, get_browser_workspaces,
+    get_second_brain_scenes, git_history, github_assignable_users, github_comment_work_item,
+    github_disconnect, github_login_intent, github_merge_pr, github_pr_file_diff,
+    github_preset_query, github_review_states, github_select_account, github_set_reviewers,
+    github_set_work_item_open, github_status, github_test_connection, github_web_urls,
+    github_work_item_detail, github_work_items, gitlab_comment_item, gitlab_inline_comment,
+    gitlab_item_detail, gitlab_job_trace, gitlab_merge_mr, gitlab_mr_review, gitlab_pipeline_jobs,
     gitlab_project_members, gitlab_retry_job, gitlab_set_item_open, gitlab_set_mr_reviewers,
     gitlab_status, gitlab_todos, gitlab_update_mr, gitlab_work_items, google_account,
     google_login_finish, google_login_start, google_logout, grok_usage, harness_status,
@@ -340,13 +341,14 @@ use cmd::{
     set_agent_activity_display, set_agent_permission_mode, set_agent_teams_mode,
     set_app_font_family, set_browser_default_profile, set_browser_default_zoom,
     set_browser_home_page, set_browser_open_tabs, set_browser_restore_tabs,
-    set_browser_search_engine, set_browser_visits, set_claude_autoswitch_mode, set_clipboard_image,
-    set_compact_worktree_cards, set_computer_awake_mode, set_computer_confirm,
-    set_computer_generator_road, set_computer_input_policy, set_computer_live_reflex,
-    set_confirm_close_pinned, set_conversation_focus_view, set_crash_watchdog,
-    set_ctrl_tab_order_mode, set_default_agent, set_default_task_source, set_diff_side_by_side,
-    set_dock_badge, set_external_worktree_visibility, set_finish_notification_mode,
-    set_guide_dismissed, set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
+    set_browser_search_engine, set_browser_visits, set_browser_workspace_mode,
+    set_claude_autoswitch_mode, set_clipboard_image, set_compact_worktree_cards,
+    set_computer_awake_mode, set_computer_confirm, set_computer_generator_road,
+    set_computer_input_policy, set_computer_live_reflex, set_confirm_close_pinned,
+    set_conversation_focus_view, set_crash_watchdog, set_ctrl_tab_order_mode, set_default_agent,
+    set_default_task_source, set_diff_side_by_side, set_dock_badge,
+    set_external_worktree_visibility, set_finish_notification_mode, set_guide_dismissed,
+    set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
     set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
     set_hide_sleeping_workspaces, set_hooks_enabled, set_jev_enabled, set_jev_model,
@@ -1082,6 +1084,7 @@ struct ShellRuntime {
     /// window handed out. Without the set, any local process that can knock
     /// could close webviews — including the main one — by guessing labels.
     browser_panes: Mutex<std::collections::HashSet<String>>,
+    browser_workspaces: browser_workspace::Workspaces,
     /// Where each browser pane stands, as its OWN page-load events last said
     /// (opened at, navigated to, loaded). The window never asks a webview for
     /// its URL: wry unwraps `WKWebView.URL`, which is nil after a failed
@@ -2417,6 +2420,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         launch_tokens: Mutex::new(HashMap::new()),
         untitled_markdowns: Mutex::new(std::collections::HashSet::new()),
         browser_panes: Mutex::new(std::collections::HashSet::new()),
+        browser_workspaces: browser_workspace::Workspaces::default(),
         browser_urls: Mutex::new(HashMap::new()),
         browser_born: Mutex::new(0),
         browser_records: Mutex::new(HashMap::new()),
@@ -2520,6 +2524,16 @@ fn main() -> ExitCode {
         println!("commit {}", env!("ZEROCODE_COMMIT"));
         println!("ui {}", env!("ZEROCODE_UI_DIGEST"));
         return ExitCode::SUCCESS;
+    }
+    if credential_store_policy::disabled() {
+        crumbs::record(
+            "runtime_policy",
+            format_args!("{}", credential_store_policy::DISABLED_MESSAGE),
+        );
+        eprintln!(
+            "zerocode-shell: {}",
+            credential_store_policy::DISABLED_MESSAGE
+        );
     }
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     if let Err(error) = chromium_browser::install_application() {
@@ -2885,7 +2899,6 @@ fn main() -> ExitCode {
             opencode_usage,
             set_opencode_cookie,
             set_opencode_workspace,
-            antigravity_usage,
             google_account,
             google_login_start,
             google_login_finish,
@@ -2901,6 +2914,8 @@ fn main() -> ExitCode {
             release_untitled_markdown,
             delete_untitled_markdown,
             open_browser_pane,
+            get_browser_workspaces,
+            set_browser_workspace_mode,
             browser_profiles,
             create_browser_profile,
             delete_browser_profile,
