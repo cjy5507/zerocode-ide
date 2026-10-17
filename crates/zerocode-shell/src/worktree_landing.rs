@@ -342,9 +342,9 @@ fn millis(ttl: Duration) -> i64 {
 ///
 /// A held answer outlives its folder, and nothing reads a removed checkout again: a folder that is
 /// gone is no witness, whatever was last said of it (t-44451). That costs one `stat`. Nor is an
-/// answer that stood on a compare oid nobody can say is today's: the window reads its catalog
-/// again only while it is shown, and this is asked every minute. Work that landed stays landed,
-/// as [`commit_stands`] holds it.
+/// answer that stood on a compare oid the window no longer holds as today's: the window reads its
+/// catalog again only while it is shown, and this is asked every minute. Work that landed stays
+/// landed, as [`commit_stands`] holds it.
 pub(crate) fn witness_for(
     path: &Path,
     occupied: bool,
@@ -360,12 +360,16 @@ pub(crate) fn witness_for(
     let compare_oid = parts.next().unwrap_or("");
     let branch = parts.next().filter(|branch| !branch.is_empty());
     let landing = &held.landing;
-    let today = held
-        .asked_of
-        .as_ref()
-        .and_then(|repo| known_landing_base(&repo.root, repo.pinned.as_deref()))
-        .and_then(|base| base.oid);
-    if landing.state != "landed" && today.as_deref() != Some(compare_oid) {
+    // A repository whose `.git` is not a directory has its compare ref asked of git on every read
+    // (`landing_base`): no oid of today is held for it, and its answer keeps the rule it had.
+    let stale = held.asked_of.as_ref().is_some_and(|repo| {
+        repo.root.join(".git").is_dir()
+            && known_landing_base(&repo.root, repo.pinned.as_deref())
+                .and_then(|base| base.oid)
+                .as_deref()
+                != Some(compare_oid)
+    });
+    if landing.state != "landed" && stale {
         return None;
     }
     let git = match landing.state {
