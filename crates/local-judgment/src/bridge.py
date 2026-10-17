@@ -171,7 +171,7 @@ class LayaAdapter:
     def merge_page(self, question, answer, clusters):
         labels = self.agent._to_internal(question)["crit"]
         probabilities = answer.get("probabilities")
-        if not isinstance(probabilities, dict) or probabilities.keys() != labels.keys():
+        if answer.get("type") != "choice" or not isinstance(probabilities, dict) or probabilities.keys() != labels.keys():
             raise ValueError("page_answer")
         if any(type(chance) not in (int, float) or not math.isfinite(chance) or not 0 <= chance <= 1
                for chance in probabilities.values()):
