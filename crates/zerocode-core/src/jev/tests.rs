@@ -1743,7 +1743,7 @@ fn the_custom_seat_never_rises_and_has_no_auto() {
         "a person's decisions are a row of the table"
     );
     assert_eq!(CUSTOM_DECISIONS.id, "custom");
-    assert!(!CUSTOM_DECISIONS.promotes);
+    const { assert!(!CUSTOM_DECISIONS.promotes) };
     assert_eq!(CUSTOM_DECISIONS.modes, custom::MODES);
     assert!(!CUSTOM_DECISIONS.modes.contains(&JevMode::Auto));
     assert_eq!(CUSTOM_DECISIONS.recommended, JevMode::On);
