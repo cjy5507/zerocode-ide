@@ -34,6 +34,7 @@ pub mod choice;
 pub mod claim;
 pub mod count;
 pub mod cover;
+pub mod custom;
 pub mod door;
 pub mod file_pick;
 pub mod hedge;
