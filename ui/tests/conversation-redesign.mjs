@@ -889,6 +889,20 @@ async function redesignNoWorkPerToken(browser, origin, ok) {
         await frame();
       };
       const paints = () => ({ rail: rail?.__paints ?? null, stack: stack?.__paints ?? null });
+      // The clock is held while the words are counted: a beat landing in the window parks (answered to no one, counted
+      // by no one) until the count is read, then every parked beat is answered once so no latch stays set for the
+      // scenes after this one. The wire is not the clock — `wire_log` carries the deltas and keeps answering.
+      // And the checkout's status is read before the count, not during it: the stack's git fact carries the
+      // checkout's change count, null until `scm_status` has answered for it, 0 after — that one step, landing
+      // inside the window, painted the stack once (l39 g5, 10-17, twice: factsMoved [git]). Awaited here, the
+      // same answer later moves nothing.
+      if (typeof refreshScm === "function") await refreshScm();
+      await frame();
+      await frame();
+      const held = window.__HOLD_POLLERS__;
+      const wireWasClock = window.__POLLERS__?.delete("wire_log") ?? false;
+      window.__HOLD_POLLERS__ = true;
+      try {
       // Up the list: the reader is away from the foot, so nothing the words do moves the rows.
       list.scrollTop = Math.floor(list.scrollHeight / 3);
       list.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true }));
@@ -932,7 +946,14 @@ async function redesignNoWorkPerToken(browser, origin, ok) {
         // The wire is not the clock: `wire_log` is how the fifty deltas arrive, and it is counted apart.
         clockAnswered: Object.keys(callsAfter).filter((name) => name !== "wire_log" && window.__POLLERS__?.has(name)
           && (callsAfter[name] ?? 0) > (callsBefore[name] ?? 0)),
+        beatsParked: window.__PARKED__?.length ?? 0,
       };
+      } finally {
+        delete window.__ANSWER__.worktree_stamp;
+        if (wireWasClock) window.__POLLERS__.add("wire_log");
+        window.__HOLD_POLLERS__ = held;
+        window.__RELEASE_POLLERS__?.();
+      }
     });
     ok(
       "R8/R9: fifty streamed deltas paint the rail and the stack zero times; following the words, the stack still never paints",
