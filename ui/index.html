@@ -4619,6 +4619,11 @@
             <span data-jev-summary data-i18n="settings.typesafe.project_rulesSummary">턴이 끝나면 등록된 프로젝트 지침과 작업 근거를 대조합니다. 켜면 확인할 규칙을 다음 턴에 한 번 전달합니다.</span>
             <p data-jev-hint data-i18n="settings.typesafe.project_rulesHint">원문과 해시가 확인된 규칙만 점검하며, 지침이 바뀌면 정의를 다시 준비할 때까지 적용하지 않습니다. 확정적으로 검사할 항목은 코드로 확인하고, 해석이 필요한 규칙만 Jev에 묻습니다. 보내는 것은 해당 규칙, 요청·작업 근거·최종 응답의 제한된 부분입니다. 기록만 하는 모드에서는 알림을 전달하지 않으며, 판단이 오지 않거나 근거가 부족하면 위반으로 단정하지 않습니다.</p>
           </div>
+          <div data-jev-feature="custom">
+            <span data-jev-name data-i18n="settings.typesafe.custom">내가 만든 결정</span>
+            <span data-jev-summary data-i18n="settings.typesafe.customSummary">직접 적은 질문을 zo의 네 지점(요청을 받은 직후, 턴이 끝난 뒤, 셸 명령 직전, 에이전트가 이름으로 물을 때) 중 고른 곳에서 Jev에 묻습니다. 켜면 답을 그 지점에 한 줄로 전하거나, 묻는 에이전트에게 돌려줍니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.customHint">결정마다 고른 지점의 입력만 보냅니다. 요청을 받은 직후에는 요청 앞 2,000자, 턴이 끝난 뒤에는 요청(2,000자)과 에이전트의 마지막 답(4,000자)·도구 결과 16 KiB·고친 파일 경로 32개까지, 셸 명령 직전에는 명령 1,000자·실행 폴더·요청 첫 줄 400자, 에이전트가 물을 때는 넘긴 맥락과 항목(각 2,000자, 50개까지)입니다. 질문과 각 답의 뜻도 함께 보냅니다. 비밀처럼 보이는 줄은 저장할 때 그 줄을 짚어 거절하고, 보낼 때 한 번 더 지웁니다. 결정 하나는 한 시간에 20회(1~120회로 바꿀 수 있음), 모든 결정을 합쳐 한 시간에 60회까지 묻고, 하루 한도도 그대로 걸립니다. 답을 견줄 기준이 없어 자동으로 적용되지 않고, 켠 결정만 답을 씁니다. 결정은 이 컴퓨터의 zo 홈에만 두며, 저장소 안의 파일로는 만들 수 없습니다.</p>
+          </div>
           <div data-jev-feature="browser_read">
             <span data-jev-name data-i18n="settings.typesafe.browser_read">웹페이지 잡음 제거</span>
             <span data-jev-summary data-i18n="settings.typesafe.browser_readSummary">에이전트가 웹페이지를 읽을 때 메뉴·푸터·배너 같은 블록이 본문인지 판단합니다. 켜면 본문이 아닌 블록을 접어서 넘깁니다.</span>

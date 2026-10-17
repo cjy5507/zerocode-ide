@@ -4839,7 +4839,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 33] = [
+pub static JEV_USES: [JevUse; 34] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -4859,6 +4859,7 @@ pub static JEV_USES: [JevUse; 33] = [
     COMPACTION,
     AGENT_TOOL,
     PROJECT_RULES,
+    CUSTOM_DECISIONS,
     BROWSER_READ,
     NOTIFY,
     MENTION_RERANK,

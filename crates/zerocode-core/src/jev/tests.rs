@@ -1725,7 +1725,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 33);
+    assert_eq!(JEV_USES.len(), 34);
 }
 
 /// A person's decisions are one row of the table (t-62170), and the row
@@ -2129,7 +2129,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 33);
+    assert_eq!(JEV_USES.len(), 34);
     assert_eq!(JEV_USES.get(JEV_USES.len() - 4), Some(&FILE_PICK));
 }
 
@@ -3380,6 +3380,39 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
                     centre_hidden: true,
                 })
                 .questions,
+            ]
+        }
+        id if id == CUSTOM_DECISIONS.id => {
+            use super::custom::{Answer, Definition, Point, questions};
+            let asked_with = |answer: Answer| {
+                questions(&Definition::new(
+                    "d-0000000a".to_string(),
+                    "Release notes".to_string(),
+                    "Did this turn change what a person using the product sees?".to_string(),
+                    answer,
+                    Point::TurnEnd,
+                ))
+            };
+            vec![
+                asked_with(Answer::YesNo {
+                    yes: "The evidence shows a visible change.".to_string(),
+                    no: "Nothing visible changed, or the evidence cannot tell.".to_string(),
+                }),
+                asked_with(Answer::Choice(std::collections::BTreeMap::from([
+                    (
+                        "visible".to_string(),
+                        "A person using the product sees the change.".to_string(),
+                    ),
+                    (
+                        "internal".to_string(),
+                        "Only the code behind the product changed.".to_string(),
+                    ),
+                ]))),
+                asked_with(Answer::Score(vec![
+                    "Nothing a person sees changed.".to_string(),
+                    "A detail a person may notice changed.".to_string(),
+                    "What a person does every day changed.".to_string(),
+                ])),
             ]
         }
         _ => return None,
