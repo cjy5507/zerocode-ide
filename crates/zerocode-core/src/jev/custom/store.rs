@@ -356,8 +356,25 @@ pub fn restore(home: &Path, id: &str) -> Result<(), Error> {
 /// # Errors
 /// A trash that cannot be listed, or a file in it that cannot be removed.
 pub fn empty_trash(home: &Path, now_ms: i64) -> io::Result<usize> {
-    let _ = (home, now_ms);
-    Ok(0)
+    let root = root(home);
+    let trash = root.join(TRASH);
+    let kept = TRASH_KEPT_DAYS * civil::MS_PER_DAY;
+    let mut emptied = 0;
+    for (row, trashed) in trashed_in(&trash)? {
+        let Some(deleted) = civil::epoch_ms_of_iso(&trashed.deleted_at) else {
+            continue;
+        };
+        if now_ms.saturating_sub(deleted) > kept {
+            if let Err(error) = fs::remove_file(trash.join(json(&trashed.decision.definition)))
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(error);
+            }
+            fs::remove_file(row)?;
+            emptied += 1;
+        }
+    }
+    Ok(emptied)
 }
 
 #[derive(Serialize, Deserialize)]
