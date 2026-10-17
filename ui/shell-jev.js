@@ -722,7 +722,7 @@ function buildJevView() {
   root.id = "jev-view";
   root.hidden = true;
   root.dataset.i18nAria = "jev.title";
-  root.setAttribute("aria-label", t("jev.title", "Jev 대시보드"));
+  root.setAttribute("aria-label", t("jev.title", "의사결정 모델"));
 
   // The drawer a feature's row opens (t-6277 D6), first so it stays at the
   // top of the page while the page scrolls under it.
@@ -731,7 +731,7 @@ function buildJevView() {
   // The eyebrow is a name, the same in every language, so it takes no key.
   const heading = jevNode("div", "jev-heading",
     jevNode("p", "jev-eyebrow", document.createTextNode("TYPESAFE · JEV")),
-    jevText("jev.title", "Jev 대시보드", "h1", "jev-title"),
+    jevText("jev.title", "의사결정 모델", "h1", "jev-title"),
     jevText("jev.about", "기능별로 AI에게 판단을 몇 번 맡겼고, 얼마나 정확했고, 자동 적용까지 무엇이 남았는지 보여 줍니다.", "p", "jev-about"));
   const freshness = jevNode("span", "jev-freshness");
   freshness.setAttribute("role", "status");
