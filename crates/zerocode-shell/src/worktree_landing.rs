@@ -2396,6 +2396,81 @@ mod tests {
         );
     }
 
+    /// The catalog reads one checkout and its job answers, as the sidebar does; then what the
+    /// ledger's watch is handed for it.
+    fn witnessed(
+        bench: &Bench,
+        wt: &Path,
+        branch: &str,
+    ) -> Option<zerocode_core::orchestration::landing_watch::LandingWitness> {
+        let head = git(wt, &["rev-parse", "HEAD"]);
+        let mut rows = [entry(wt, branch, &head)];
+        if let Some(job) = plan_landings(&mut rows, &bench.repo, None) {
+            noticed(&job);
+        }
+        witness_for(wt, false)
+    }
+
+    fn is_unlanded(
+        witness: Option<&zerocode_core::orchestration::landing_watch::LandingWitness>,
+    ) -> bool {
+        matches!(
+            witness.map(|held| &held.git),
+            Some(zerocode_core::orchestration::landing_watch::GitSays::Unlanded { .. })
+        )
+    }
+
+    /// A checkout that stands and holds work main does not have is told to the ledger, minute
+    /// after minute, with the head and the compare oid the answer stood on (t-44451).
+    #[test]
+    fn a_standing_unlanded_checkout_is_the_ledgers_witness() {
+        let bench = Bench::open();
+        let wt = bench.worktree("told");
+        bench.commit(&wt, "w.txt", "work\n");
+        let witness = witnessed(&bench, &wt, "wt/told").expect("a classified checkout");
+        assert!(is_unlanded(Some(&witness)));
+        assert_eq!(witness.head, git(&wt, &["rev-parse", "HEAD"]));
+        assert_eq!(
+            witness.compare_oid,
+            git(&bench.repo, &["rev-parse", "origin/main"])
+        );
+        assert_eq!(witness.branch.as_deref(), Some("wt/told"));
+        assert!(is_unlanded(witness_for(&wt, false).as_ref()));
+    }
+
+    /// The window's last answer for a checkout outlives the folder. Once the folder is gone that
+    /// answer is no fact of today: "unlanded" told the ledger merged work was not in main, and
+    /// "landed" told it nobody was in a folder that is not there (t-44451).
+    #[test]
+    fn a_removed_checkout_is_no_witness() {
+        let bench = Bench::open();
+        let unlanded = bench.worktree("gone-unlanded");
+        bench.commit(&unlanded, "u.txt", "work\n");
+        assert!(is_unlanded(
+            witnessed(&bench, &unlanded, "wt/gone-unlanded").as_ref()
+        ));
+        let landed = bench.worktree("gone-landed");
+        bench.commit(&landed, "l.txt", "work\n");
+        git(&bench.repo, &["merge", "--ff-only", "-q", "wt/gone-landed"]);
+        bench.publish();
+        assert!(matches!(
+            witnessed(&bench, &landed, "wt/gone-landed").map(|held| held.git),
+            Some(zerocode_core::orchestration::landing_watch::GitSays::Landed { .. })
+        ));
+        for wt in [&unlanded, &landed] {
+            git(
+                &bench.repo,
+                &["worktree", "remove", "--force", &wt.to_string_lossy()],
+            );
+            assert!(!wt.exists(), "the checkout is gone");
+            assert_eq!(
+                witness_for(wt, false),
+                None,
+                "a removed checkout is no witness"
+            );
+        }
+    }
+
     fn the_repo(bench: &Bench) -> Vec<KnownRepo> {
         vec![KnownRepo {
             root: bench.repo.clone(),
