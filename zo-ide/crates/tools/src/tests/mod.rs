@@ -309,9 +309,10 @@ impl TestServer {
                         let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
                         let request_line = request.lines().next().unwrap_or_default().to_string();
                         let response = handler(&request_line);
-                        stream
-                            .write_all(response.to_bytes().as_slice())
-                            .expect("write response");
+                        // A client may hang up before the whole response is
+                        // out (WebFetch does at its body cap); that ends the
+                        // exchange, and the client asserts what it received.
+                        let _ = stream.write_all(response.to_bytes().as_slice());
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
