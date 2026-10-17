@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde_json::json;
 
 use super::store::{self, Error};
@@ -27,6 +29,25 @@ fn choice(options: &[(&str, &str)]) -> Answer {
             .map(|(name, meaning)| ((*name).to_string(), (*meaning).to_string()))
             .collect(),
     )
+}
+
+fn options(count: usize) -> Answer {
+    Answer::Choice(
+        (0..count)
+            .map(|n| (format!("option {n}"), format!("Option {n} fits.")))
+            .collect::<BTreeMap<_, _>>(),
+    )
+}
+
+fn levels(count: usize) -> Answer {
+    Answer::Score((0..count).map(|n| format!("Level {n}.")).collect())
+}
+
+/// What the check says of the fixture after `change`.
+fn refused(change: fn(&mut Definition)) -> Vec<Refusal> {
+    let mut definition = yes_no("d-0000000a", "Release notes");
+    change(&mut definition);
+    check(&definition)
 }
 
 /// Every line a person writes is read by the detector the door clears a
@@ -108,6 +129,191 @@ fn a_question_with_a_secret_line_is_refused_with_its_line() {
             field: Field::Level(1),
             line: 1,
         }],
+    );
+}
+
+/// Every limit is the person's, and holds at its edge: the most passes, and
+/// one more is refused.
+#[test]
+fn limits_hold() {
+    assert_eq!(
+        (
+            NAME_MAX_CHARS,
+            QUESTION_MAX_CHARS,
+            OPTIONS,
+            MEANING_MAX_CHARS,
+            DECISIONS_MAX,
+            HOURLY_REQUESTS,
+            HOURLY_DEFAULT,
+            ALL_HOURLY_DEFAULT,
+        ),
+        (40, 1_000, 2..=10, 600, 20, 1..=120, 20, 60),
+    );
+    assert!(refused(|_| {}).is_empty(), "the fixture keeps every rule");
+
+    assert!(refused(|d| d.name = "가".repeat(NAME_MAX_CHARS)).is_empty());
+    assert_eq!(
+        refused(|d| d.name = "가".repeat(NAME_MAX_CHARS + 1)),
+        [Refusal::NameLength],
+        "a name is counted in characters",
+    );
+    assert_eq!(refused(|d| d.name = " ".to_string()), [Refusal::NameLength]);
+    assert!(refused(|d| d.question = "가".repeat(QUESTION_MAX_CHARS)).is_empty());
+    assert_eq!(
+        refused(|d| d.question = "가".repeat(QUESTION_MAX_CHARS + 1)),
+        [Refusal::QuestionLength],
+    );
+
+    let mut definition = yes_no("d-0000000a", "Release notes");
+    for count in [*OPTIONS.start(), *OPTIONS.end()] {
+        definition.answer = options(count);
+        assert!(check(&definition).is_empty(), "{count} options");
+        definition.answer = levels(count);
+        assert!(check(&definition).is_empty(), "{count} levels");
+    }
+    for count in [*OPTIONS.start() - 1, *OPTIONS.end() + 1] {
+        definition.answer = options(count);
+        assert_eq!(
+            check(&definition),
+            [Refusal::OptionCount],
+            "{count} options"
+        );
+        definition.answer = levels(count);
+        assert_eq!(check(&definition), [Refusal::OptionCount], "{count} levels");
+    }
+    definition.answer = choice(&[("ship", "Ship it."), (NOT_APPLICABLE, "Neither.")]);
+    assert_eq!(
+        check(&definition),
+        [Refusal::OptionName(NOT_APPLICABLE.to_string())],
+        "every choice offers it already",
+    );
+    let long = "가".repeat(NAME_MAX_CHARS + 1);
+    definition.answer = choice(&[("ship", "Ship it."), (long.as_str(), "Long.")]);
+    assert_eq!(check(&definition), [Refusal::OptionName(long)]);
+
+    let most = "가".repeat(MEANING_MAX_CHARS);
+    let over = "가".repeat(MEANING_MAX_CHARS + 1);
+    definition.answer = Answer::YesNo {
+        yes: most.clone(),
+        no: over.clone(),
+    };
+    assert_eq!(check(&definition), [Refusal::MeaningLength(Field::No)]);
+    definition.answer = choice(&[("ship", most.as_str()), ("wait", over.as_str())]);
+    assert_eq!(
+        check(&definition),
+        [Refusal::MeaningLength(Field::Meaning("wait".to_string()))],
+    );
+    definition.answer = Answer::Score(vec![most.clone(), over.clone()]);
+    assert_eq!(
+        check(&definition),
+        [Refusal::MeaningLength(Field::Level(1))]
+    );
+    definition.answer = Answer::YesNo {
+        yes: String::new(),
+        no: most,
+    };
+    assert_eq!(check(&definition), [Refusal::MeaningLength(Field::Yes)]);
+
+    assert!(refused(|d| d.max_per_hour = *HOURLY_REQUESTS.start()).is_empty());
+    assert!(refused(|d| d.max_per_hour = *HOURLY_REQUESTS.end()).is_empty());
+    assert_eq!(
+        refused(|d| d.max_per_hour = *HOURLY_REQUESTS.start() - 1),
+        [Refusal::MaxPerHour],
+    );
+    assert_eq!(
+        refused(|d| d.max_per_hour = *HOURLY_REQUESTS.end() + 1),
+        [Refusal::MaxPerHour],
+    );
+    assert_eq!(
+        yes_no("d-0000000a", "New").max_per_hour,
+        HOURLY_DEFAULT,
+        "a new decision starts at the person's bound",
+    );
+    assert!(refused(|d| d.act_from = *ACT_FROM.start()).is_empty());
+    assert!(refused(|d| d.act_from = *ACT_FROM.end()).is_empty());
+    assert_eq!(refused(|d| d.act_from = 0.49), [Refusal::ActFrom]);
+    assert_eq!(refused(|d| d.act_from = 0.96), [Refusal::ActFrom]);
+    assert_eq!(refused(|d| d.act_from = f64::NAN), [Refusal::ActFrom]);
+
+    assert_eq!(refused(|d| d.reads.clear()), [Refusal::Reads]);
+    assert_eq!(
+        refused(|d| {
+            d.reads.insert(Input::Command);
+        }),
+        [Refusal::Reads],
+        "a turn's end offers no command",
+    );
+    assert_eq!(
+        refused(|d| d.folders = Folders::Chosen(BTreeSet::new())),
+        [Refusal::Folders],
+    );
+    assert_eq!(
+        refused(|d| d.folders = Folders::Chosen(BTreeSet::from(["work/product".to_string()]))),
+        [Refusal::Folders],
+    );
+    assert!(
+        refused(|d| d.folders = Folders::Chosen(BTreeSet::from(["/work/product".to_string()])))
+            .is_empty()
+    );
+    assert_eq!(refused(|d| d.id = "d-0000000A".to_string()), [Refusal::Id]);
+    assert_eq!(
+        refused(|d| d.id = "skill_suggest".to_string()),
+        [Refusal::Id]
+    );
+    assert!(check(&yes_no(&new_id(), "Fresh")).is_empty());
+    assert_ne!(new_id(), new_id());
+
+    let home = tempfile::tempdir().unwrap();
+    for n in 0..DECISIONS_MAX {
+        let decision = yes_no(&format!("d-{n:08x}"), &format!("Decision {n}"));
+        store::create(home.path(), &decision, JevMode::Shadow, NOW).unwrap();
+    }
+    assert!(
+        matches!(
+            store::create(home.path(), &yes_no("d-000000ff", "One more"), JevMode::Shadow, NOW),
+            Err(Error::Refused(refused)) if refused == [Refusal::TooMany]
+        ),
+        "the twenty-first decision is refused",
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    let kept = yes_no("d-0000000a", "Release notes");
+    store::create(home.path(), &kept, JevMode::Shadow, NOW).unwrap();
+    let refused_by_the_store = |definition: &Definition, mode: JevMode| match store::create(
+        home.path(),
+        definition,
+        mode,
+        NOW,
+    ) {
+        Err(Error::Refused(refused)) => refused,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        refused_by_the_store(&yes_no("d-0000000b", " Release notes "), JevMode::Shadow),
+        [Refusal::NameTaken],
+    );
+    assert_eq!(
+        refused_by_the_store(&yes_no(&kept.id, "Another"), JevMode::Shadow),
+        [Refusal::IdTaken],
+    );
+    assert_eq!(
+        refused_by_the_store(&yes_no("d-0000000c", "Acting alone"), JevMode::Auto),
+        [Refusal::Mode],
+    );
+    let mut large = yes_no("d-0000000d", "Large");
+    large.folders = Folders::Chosen(
+        (0..store::DEFINITION_MAX_BYTES / 64)
+            .map(|n| format!("/work/{n:058}"))
+            .collect(),
+    );
+    assert_eq!(
+        refused_by_the_store(&large, JevMode::Shadow),
+        [Refusal::TooLarge]
+    );
+    assert_eq!(
+        store::list(home.path()).unwrap().len(),
+        1,
+        "nothing refused was kept"
     );
 }
 
