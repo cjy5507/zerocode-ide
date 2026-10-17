@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -92,4 +93,7 @@ for fixture in json.load(sys.stdin):
         "pass": all(head["whole"] for head in after)
                 and not result["usage"].get("truncated_questions") and intact and seen == expected,
     })
-print(json.dumps({"head_max_len": budget, "rows": rows}))
+print(json.dumps({
+    "head_max_len": budget, "rows": rows, "runtime_executable": sys.executable,
+    "model_directory": str(model), "bridge_sha256": hashlib.sha256(sys.argv[1].encode()).hexdigest(),
+}))

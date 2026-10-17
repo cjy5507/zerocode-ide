@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import importlib.metadata
 import json
 import pickle
@@ -50,6 +51,11 @@ for fixture in json.load(sys.stdin):
         result["model"] = initial["modelId"]
         rows.append({
             "shape": fixture["shape"], "repetition": repetition,
+            "request_sha256": hashlib.sha256(json.dumps(fixture["request"], sort_keys=True).encode()).hexdigest(),
             "elapsed_ms": elapsed_ms, "calls": list(calls), "result": result,
         })
-print(json.dumps({"startup_ms": startup_ms, "rows": rows}))
+print(json.dumps({
+    "startup_ms": startup_ms, "rows": rows, "runtime_executable": sys.executable,
+    "model_directory": initial["modelDirectory"], "loaded_limits": adapter.limits,
+    "bridge_sha256": hashlib.sha256(sys.argv[1].encode()).hexdigest(),
+}))
