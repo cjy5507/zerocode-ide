@@ -133,6 +133,104 @@ fn a_report_nobody_verified_is_told_after_two_hours_once_and_again_after_six() {
     assert_eq!(news(&bench, MessageKind::LandingStalled).len(), 2);
 }
 
+/// A coordinator who looked and wrote `verified: false` with a reason has reviewed the hand-in:
+/// "nobody verified it" is not true of it, and it is not told every six hours until the horizon
+/// (t-44451, t-54222).
+#[test]
+fn a_review_that_said_no_is_not_told_as_no_review() {
+    let mut bench = Bench::new();
+    let handed = handed_in(&mut bench, CHECKOUT, HEAD);
+    review(
+        &mut bench,
+        &handed,
+        "\"verified\":false,\"reason\":\"fails\"",
+    );
+    let facts = {
+        let run = &bench.ledger.runs()[0];
+        run.review_of(run.task(&handed.task).expect("the task"))
+    };
+    assert!(facts.written && !facts.verified, "{facts:?}");
+    let seen = silent();
+    for after in [VERIFY_OVERDUE_MS, VERIFY_OVERDUE_MS + RENOTIFY_MS] {
+        assert_eq!(
+            bench.ledger.landing_watch(&seen, handed.done_at + after),
+            0,
+            "a review that said no is a review"
+        );
+    }
+    assert!(news(&bench, MessageKind::LandingStalled).is_empty());
+}
+
+/// The review is of one hand-in. A new attempt, or a new commit on the same attempt, is a hand-in
+/// nobody has reviewed, and it is told again (t-44451).
+#[test]
+fn a_new_hand_in_after_a_review_that_said_no_is_told_as_no_review() {
+    let mut bench = Bench::new();
+    let handed = handed_in(&mut bench, CHECKOUT, HEAD);
+    review(
+        &mut bench,
+        &handed,
+        "\"verified\":false,\"reason\":\"fails\"",
+    );
+    bench.json(&format!(
+        "task-update --task {} --status ready",
+        handed.task
+    ));
+    let (_, pane) = bench.seat(&format!(
+        "worker-start --agent claude --task {}",
+        handed.task
+    ));
+    let second = bench.ledger.runs()[0]
+        .dispatches
+        .last()
+        .expect("a second attempt")
+        .id
+        .clone();
+    assert_ne!(second, handed.dispatch);
+    bench.json_at(
+        &pane,
+        "send --type worker_done --body {\"ok\":true,\"head\":\"def5678def5678def5678def5678def5678def5\"}",
+    );
+    let second_done = bench.clock;
+    assert_eq!(
+        bench
+            .ledger
+            .landing_watch(&silent(), second_done + VERIFY_OVERDUE_MS),
+        1
+    );
+    let told = news(&bench, MessageKind::LandingStalled);
+    assert_eq!(body(&told[0])["reason"], "no_review");
+    assert_eq!(body(&told[0])["dispatchId"], second.as_str());
+
+    // The same attempt hands in another commit: the review named the first one.
+    let mut same = Bench::new();
+    let handed = handed_in(&mut same, CHECKOUT, HEAD);
+    review(
+        &mut same,
+        &handed,
+        "\"verified\":false,\"reason\":\"fails\"",
+    );
+    let mut moved = same.ledger.export();
+    moved
+        .dispatches
+        .iter_mut()
+        .find(|row| row.id == handed.dispatch)
+        .expect("the attempt")
+        .source = Some("123abcd123abcd123abcd123abcd123abcd123ab".to_string());
+    same.ledger = Ledger::rebuild(moved).expect("a readable changed hand-in");
+    assert_eq!(
+        same.ledger
+            .landing_watch(&silent(), handed.done_at + VERIFY_OVERDUE_MS),
+        1
+    );
+    let told = news(&same, MessageKind::LandingStalled);
+    assert_eq!(body(&told[0])["reason"], "no_review");
+    assert_eq!(
+        body(&told[0])["head"],
+        "123abcd123abcd123abcd123abcd123abcd123ab"
+    );
+}
+
 #[test]
 fn a_verification_nobody_merged_is_told_two_hours_after_the_verification_not_the_report() {
     let mut bench = Bench::new();
