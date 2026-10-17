@@ -932,6 +932,10 @@ async fn a_screen_client_deadline_does_not_leave_inference_ahead_of_the_next_req
     }
     assert_eq!(following_status, reqwest::StatusCode::OK, "{report}");
     assert!(
+        !first_timed_out || admitted_after_first == 0,
+        "a client deadline left native inference ahead of the next request: {report}"
+    );
+    assert!(
         following_elapsed <= deadline,
         "a client deadline left native inference ahead of the next request: {report}"
     );
