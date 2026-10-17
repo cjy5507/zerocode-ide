@@ -328,11 +328,17 @@ fn millis(ttl: Duration) -> i64 {
 /// compare ref's oid the classification stood on, what git said of the work, and whether a pane is in
 /// the folder now. Reads the cache only — no git, no process, no new loop — so a checkout the sidebar
 /// never classified has no witness and the ledger hears nothing of git for it.
+///
+/// A held answer outlives its folder, and nothing reads a removed checkout again: a folder that is
+/// gone is no witness, whatever was last said of it (t-44451). That costs one `stat`.
 pub(crate) fn witness_for(
     path: &Path,
     occupied: bool,
 ) -> Option<zerocode_core::orchestration::landing_watch::LandingWitness> {
     use zerocode_core::orchestration::landing_watch::{ConflictCell, GitSays, LandingWitness};
+    if !path.is_dir() {
+        return None;
+    }
     let held = held_landing(path)?;
     // The key is `head|compare oid|branch`; a failure is held under an empty key and is no witness.
     let mut parts = held.key.splitn(3, '|');
