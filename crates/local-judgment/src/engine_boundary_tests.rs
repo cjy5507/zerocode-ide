@@ -762,6 +762,10 @@ fn compiled_recorded_actions_run_on_the_manifest_pinned_model() {
         .env("TRANSFORMERS_OFFLINE", "1")
         .env("OMP_NUM_THREADS", "1")
         .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env(
+            "LOCAL_JUDGMENT_BUILD_RUN",
+            std::env::var_os("LOCAL_JUDGMENT_BUILD_RUN").unwrap_or_default(),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -851,6 +855,21 @@ async fn a_screen_client_deadline_does_not_leave_inference_ahead_of_the_next_req
         .clone();
     crowded["model"] = json!(model.id);
     let deadline = Duration::from_millis(zerocode_core::jev::SCREEN_APPLY_DEADLINE_MS);
+    let context = || {
+        let mut jobs = std::env::var_os("LOCAL_JUDGMENT_BUILD_RUN")
+            .and_then(|path| std::fs::read_dir(path).ok())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        jobs.sort();
+        json!({
+            "at_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+            "running_jobs": jobs,
+        })
+    };
+    let first_context = context();
     let began = Instant::now();
     let first = client()
         .post(running.provider.request_url())
@@ -875,6 +894,7 @@ async fn a_screen_client_deadline_does_not_leave_inference_ahead_of_the_next_req
         .unwrap()["request"]
         .clone();
     following["model"] = json!(model.id);
+    let following_context = context();
     let began = Instant::now();
     let response = client()
         .post(running.provider.request_url())
@@ -888,11 +908,13 @@ async fn a_screen_client_deadline_does_not_leave_inference_ahead_of_the_next_req
     let following_body = response.json::<Value>().await.unwrap();
     let report = json!({
         "first_timed_out": first_timed_out,
+        "first_context": first_context,
         "first_status": first_status,
         "first_body": first_body,
         "first_elapsed_ms": first_elapsed.as_secs_f64() * 1000.0,
         "admitted_after_first": admitted_after_first,
         "following_elapsed_ms": following_elapsed.as_secs_f64() * 1000.0,
+        "following_context": following_context,
         "following_status": following_status.as_u16(),
         "following_body": following_body,
         "engine_alive_after_following": engine.alive(),
