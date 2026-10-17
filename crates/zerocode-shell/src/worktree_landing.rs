@@ -2539,6 +2539,31 @@ mod tests {
         assert_eq!(witness_for(&wt, false).map(|held| held.git), landed);
     }
 
+    /// A project opened at a linked checkout has its compare ref asked of git on every read
+    /// ([`landing_base`]), so no oid of today is held to measure an answer against. Its checkouts
+    /// keep the rule they had: the answer of a folder that stands is the witness, and a folder that
+    /// is gone is none (t-44451).
+    #[test]
+    fn a_project_opened_at_a_linked_checkout_keeps_its_witness_while_the_folder_stands() {
+        let bench = Bench::open();
+        let home = bench.worktree("home");
+        let wt = bench.worktree("linked-told");
+        bench.commit(&wt, "w.txt", "work\n");
+        let head = git(&wt, &["rev-parse", "HEAD"]);
+        let mut rows = [entry(&wt, "wt/linked-told", &head)];
+        let job = plan_landings(&mut rows, &home, None).expect("first read");
+        assert_eq!(noticed(&job), 1);
+        assert!(
+            is_unlanded(witness_for(&wt, false).as_ref()),
+            "unlanded work in a project opened at a linked checkout is told"
+        );
+        git(
+            &bench.repo,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        assert_eq!(witness_for(&wt, false), None);
+    }
+
     fn the_repo(bench: &Bench) -> Vec<KnownRepo> {
         vec![KnownRepo {
             root: bench.repo.clone(),
