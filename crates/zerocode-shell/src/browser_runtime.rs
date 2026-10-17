@@ -201,6 +201,7 @@ pub(super) fn claim_label(
 #[derive(Clone, Serialize)]
 pub(super) struct BrowserAgentClose {
     pub(super) label: String,
+    pub(super) revision: Option<u64>,
 }
 
 /// An agent's `viewport` for one pane (`browser:agent-viewport`): a preset
@@ -223,6 +224,8 @@ pub(super) struct BrowserPopup {
     /// none and lands beside the page that spawned it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) term: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) revision: Option<u64>,
 }
 
 /// A browser profile: its own cookie jar and storage under a

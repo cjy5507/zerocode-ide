@@ -917,7 +917,11 @@ const ACTIONS = [
     title: () => t("browser.reloadAction", "브라우저 새로고침"),
     chord: "mod+r",
     when: browserChordScope,
-    run: () => invoke("browser_reload", { label: currentTab().label }).catch(() => {}),
+    run: () => {
+      const tab = currentTab();
+      if (tab?.kind !== "browser" || !browserWorkspaceCanControl(tab)) return;
+      return invoke("browser_reload", browserWorkspaceArgs(tab)).catch(() => {});
+    },
   },
   {
     // The chord moved up to the zoom router (`zoom.in` below), which still

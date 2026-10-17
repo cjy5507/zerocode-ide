@@ -5472,7 +5472,7 @@ async function openDefaultTabsOnce(worktree) {
  * person closed is one they do not want back; a tab this window took away is
  * one they never let go of, and rewriting the record for it is how a window
  * comes back on the next start with nothing in it (t-5453). */
-function dropTab(id, { closed = false } = {}) {
+function dropTab(id, { closed = false, nativeClosed = false } = {}) {
   const at = tabs.findIndex((tab) => tab.id === id);
   const removed = tabs[at];
   const leaf = removed?.pane ?? focusedPane;
@@ -5573,7 +5573,7 @@ function dropTab(id, { closed = false } = {}) {
   if (removed?.kind === "browser") {
     // A crosshair armed on the pane that is leaving has nothing left to grab.
     if (browserGrab !== null && browserGrab.label === removed.label) stopBrowserGrab(false);
-    invoke("close_browser_pane", { label: removed.label }).catch(() => {});
+    if (!nativeClosed) invoke("close_browser_pane", { label: removed.label }).catch(() => {});
     cancelBrowserRetry(removed);
     browserSaid.delete(removed.label);
     browserEarly.delete(removed.label);

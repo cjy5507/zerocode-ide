@@ -36,6 +36,32 @@ fn marks_answer() -> String {
     .to_string()
 }
 
+#[test]
+fn a_nested_press_keeps_the_revision_from_its_marks_response() {
+    let mut road = Road::new();
+    let mut marks: serde_json::Value = serde_json::from_str(&marks_answer()).unwrap();
+    marks["workspaceRevision"] = json!(7);
+    road.marks = ok(&marks.to_string());
+    let mut drive = road.drive();
+    let mut walk = |_: &mut _, _: u64, _: usize| None;
+    let mut world = WalkWorld::new(
+        &mut drive,
+        &mut walk,
+        "app",
+        (String::new(), String::new()),
+        60_000,
+        0,
+    );
+    assert!(world.look().is_some());
+    assert!(world.press(1));
+    let sent = road.sent();
+    assert!(
+        sent[1]
+            .windows(2)
+            .any(|words| words == ["--workspace-revision", "7"])
+    );
+}
+
 /// A road that answers by verb and remembers every argv it was handed.
 struct Road {
     sent: RefCell<Vec<Vec<String>>>,

@@ -107,6 +107,13 @@ Tauri rather than Electron — one native process, not a browser runtime per pan
 
 `just verify` is the gate, and it is read by its exit code, never through a pipe.
 
+Isolated desktop checks can set `ZEROCODE_DISABLE_CREDENTIAL_STORE=1` to refuse
+the shell's macOS credential-store commands, including account and router keys
+and browser decryption-key lookups. The process logs this mode once at startup.
+It is off by default; leave it unset for normal release launches. This option
+does not grant browser or desktop permissions, disable Chromium's sandbox, or
+isolate ordinary files and environment variables.
+
 | Gate | What it covers |
 |---|---|
 | `just verify` | Rust tests, source contracts, `clippy -D warnings`, rustdoc, window and settings browser harnesses |

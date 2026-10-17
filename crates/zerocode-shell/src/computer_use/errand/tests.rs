@@ -2313,6 +2313,61 @@ fn a_judgment_begun_ahead_is_dropped_when_the_next_look_asks_another_question() 
     assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_DISCARDED));
 }
 
+#[test]
+fn an_identical_preview_question_cannot_borrow_a_new_control_revision() {
+    #[derive(Default)]
+    struct Reassigned {
+        looks: usize,
+        presses: Vec<usize>,
+    }
+    fn screen(revision: u64, changed: bool) -> Screen {
+        let mut screen = FakeWorld::showing(&[1, 2]).look_now();
+        if changed {
+            screen.items[0]["label"] = json!("after");
+        }
+        screen.snapshot.workspace_revision = Some(revision);
+        screen
+    }
+    impl World for Reassigned {
+        fn look(&mut self) -> Option<Screen> {
+            self.looks += 1;
+            Some(screen(if self.looks == 1 { 1 } else { 2 }, self.looks != 1))
+        }
+        fn press(&mut self, mark: usize) -> bool {
+            self.presses.push(mark);
+            true
+        }
+        fn left_ms(&mut self) -> u64 {
+            60_000
+        }
+        fn asks_ahead_of_the_press(&self) -> bool {
+            false
+        }
+        fn unsettled(&mut self) -> Option<Screen> {
+            Some(screen(1, true))
+        }
+    }
+    let mut judge = FakeJudge::chose(&[1, 2, 2]);
+    let mut world = Reassigned::default();
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            ..Options::default()
+        },
+        None,
+    );
+    assert_eq!(world.presses, [1, 2]);
+    assert_eq!((walked.overlapped, walked.discarded), (0, 1));
+    assert_eq!(judge.asked.len(), 2);
+    assert_eq!(judge.finished, 0);
+}
+
 /// No question is begun ahead after a link, on the last step, on a screen
 /// one more stand from stuck, for a walk that clears a stop, or by a judge
 /// that cannot ask ahead.

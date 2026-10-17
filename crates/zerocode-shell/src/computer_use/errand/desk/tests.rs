@@ -84,6 +84,85 @@ fn pane_answer() -> String {
 }
 
 #[test]
+fn goal_press_scroll_and_find_use_the_revision_of_the_selected_screen() {
+    let road = Road::new(|verb| match verb {
+        "marks" => {
+            let mut page: Value = serde_json::from_str(&pane_answer()).unwrap();
+            page["workspaceRevision"] = json!(7);
+            ok(&page.to_string())
+        }
+        "find" => ok(r#"{"count":0}"#),
+        _ => ok("{}"),
+    });
+    let mut send = road.road();
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "browser-1".into(),
+        },
+        Seen::default(),
+        Some("done".into()),
+        60_000,
+        0,
+    );
+    assert!(world.look().is_some());
+    assert!(world.press(3));
+    assert!(world.navigate(Navigation::ScrollDown));
+    assert_eq!(world.reached(), Some(false));
+    let sent = road.said.borrow();
+    let acts: Vec<_> = sent
+        .iter()
+        .filter(|(_, argv)| matches!(argv[0].as_str(), "click" | "scroll" | "find"))
+        .collect();
+    assert_eq!(acts.len(), 3);
+    for (_, argv) in acts {
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--workspace-revision", "7"])
+        );
+    }
+}
+
+#[test]
+fn generated_entry_keeps_the_field_observations_revision_on_both_inputs() {
+    let mut page: Value =
+        serde_json::from_str(&a_page_with_a_field("doc-1", "", "#destination")).unwrap();
+    page["workspaceRevision"] = json!(7);
+    let road = Kept::on(page.to_string());
+    let mut send = road.road();
+    let (pen, _, _) = Pen::writing("London");
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "browser-9".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .writing(Box::new(pen))
+    .remembering(memory());
+    assert!(world.look().is_some());
+    assert!(matches!(
+        world.type_into(1, "Set destination"),
+        Typed::Entered { .. }
+    ));
+    let calls = road.calls.borrow();
+    let inputs: Vec<_> = calls
+        .iter()
+        .filter(|(_, argv, _)| matches!(argv[0].as_str(), "click" | "type"))
+        .collect();
+    assert_eq!(inputs.len(), 2);
+    for (_, argv, _) in inputs {
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--workspace-revision", "7"])
+        );
+    }
+}
+
+#[test]
 fn desktop_words_come_from_the_same_observation_as_its_marks() {
     let road = Road::new(|verb| match verb {
         "observe" => {

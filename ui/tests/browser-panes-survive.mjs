@@ -218,8 +218,9 @@ export async function testBrowserPanesSurvive(browser, origin, ok) {
       field.id = "browser-close-typing";
       document.body.appendChild(field);
       field.focus();
-      for (const hear of window.__LISTENERS__["browser:agent-close"] ?? []) hear({ payload: { label } });
-      await browserPlacing;
+      const beforeClose = window.__PANES__.closed.length;
+      const revision = Number(label.slice("browser-".length));
+      await Promise.all((window.__LISTENERS__["browser:agent-close"] ?? []).map((hear) => hear({ payload: { label, revision } })));
       return {
         tabKept: activeTabId === before.tab,
         focusKept: focusedPane === before.focused,
@@ -227,6 +228,7 @@ export async function testBrowserPanesSurvive(browser, origin, ok) {
         receiverKept: document.activeElement === field,
         removed: !tabs.some((one) => one.kind === "browser" && one.label === label),
         nativeClosed: window.__PANES__.closed.includes(label),
+        nativeCloseCount: window.__PANES__.closed.length - beforeClose,
       };
     });
     await page.keyboard.type("kept");
@@ -234,7 +236,7 @@ export async function testBrowserPanesSurvive(browser, origin, ok) {
     await page.locator("#browser-close-typing").evaluate((field) => field.remove());
     ok("closing a hidden agent browser preserves the active tab, layout and actual typing receiver",
       hiddenClose.tabKept && hiddenClose.focusKept && hiddenClose.stageKept
-        && hiddenClose.receiverKept && hiddenClose.removed && hiddenClose.nativeClosed
+        && hiddenClose.receiverKept && hiddenClose.removed && hiddenClose.nativeClosed && hiddenClose.nativeCloseCount === 1
         && keptTyping === "kept", JSON.stringify({ hiddenClose, keptTyping }));
 
     ok("the pane survival suite raised no page errors", faults.length === 0, faults.join("\n"));

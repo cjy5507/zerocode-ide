@@ -5211,6 +5211,643 @@ fn a_load_is_dead_by_the_clock_not_by_wry() {
     assert_eq!(NAV_DEAD_AFTER_SECS, 20, "the table's number");
 }
 
+#[test]
+fn a_requested_navigation_is_pending_until_its_document_settles() {
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let mut record = NavRecord::born(true, t0);
+    assert!(!record.pending());
+    let number = record.admit();
+    assert!(record.pending());
+    assert_eq!(record.observed(t0), NavState::Blank);
+    assert!(record.sent(number));
+    record.answered(number, NavAnswer::Loading);
+    record.started(t0);
+    assert!(record.pending());
+    record.finished(false);
+    assert!(record.pending(), "a Finished carries no request number");
+    assert_eq!(record.settle_if_idle(false), NavProof::Ready);
+    assert!(!record.pending());
+    record.admit();
+    record.finished(true);
+    assert!(record.pending());
+    let mut loading = NavRecord::born(false, t0);
+    assert!(loading.pending());
+    loading.finished(false);
+    assert!(loading.pending(), "a Finished carries no request number");
+    assert_eq!(
+        loading.settle_if_idle(false),
+        NavProof::Waiting,
+        "the first document's send has no engine answer yet"
+    );
+    let stood = t0
+        .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS))
+        .unwrap();
+    assert!(NavRecord::born(false, stood).pending());
+}
+
+#[test]
+fn a_known_navigation_is_not_settled_by_the_clock_alone() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let stood = now
+        .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS + 1))
+        .unwrap();
+    let mut started = NavRecord::born(true, stood);
+    let generation = started.started(stood);
+    assert_eq!(started.observed(now), NavState::Dead);
+    assert_eq!(
+        started.settle_if_idle(true),
+        NavProof::Waiting,
+        "a Started that outlived the dead clock has not finished"
+    );
+    assert!(started.dead_if_still(generation, now));
+    assert_eq!(
+        started.settle_if_idle(true),
+        NavProof::Waiting,
+        "the spinner's dead mark is not a finish"
+    );
+    assert_eq!(
+        started.settle_if_idle(true),
+        NavProof::Waiting,
+        "a second handoff reads the same record and still waits"
+    );
+    started.finished(false);
+    assert_eq!(
+        started.settle_if_idle(false),
+        NavProof::Ready,
+        "the engine's own idle settles it"
+    );
+    let mut born = NavRecord::born(false, stood);
+    assert_eq!(born.observed(now), NavState::Dead);
+    assert!(
+        born.pending(),
+        "a first document past the dead clock has not finished"
+    );
+    born.finished(false);
+    assert!(born.pending(), "a Finished carries no request number");
+    let number = born.admit();
+    assert!(born.sent(number));
+    born.answered(number, NavAnswer::Loading);
+    assert_eq!(born.settle_if_idle(false), NavProof::Ready);
+    assert!(!born.pending());
+}
+
+#[test]
+fn a_requested_navigation_waits_for_the_finish_after_its_own_started() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let stood = now
+        .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS + 1))
+        .unwrap();
+    let mut record = NavRecord::born(true, stood);
+    let number = record.admit();
+    record.finished(false);
+    assert!(
+        record.pending(),
+        "a Finished before the request's own Started belongs to the page before it"
+    );
+    assert!(record.sent(number));
+    record.answered(number, NavAnswer::Loading);
+    let generation = record.started(stood);
+    assert!(
+        record.pending(),
+        "a request whose Started came late and stood past the clock has not finished"
+    );
+    assert!(record.dead_if_still(generation, now));
+    assert!(record.pending());
+    record.finished(false);
+    assert!(record.pending(), "a Finished carries no request number");
+    assert_eq!(record.settle_if_idle(true), NavProof::Waiting);
+    assert_eq!(record.settle_if_idle(false), NavProof::Ready);
+    assert!(!record.pending());
+}
+
+mod known_navigation_proof_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn sent_and_loading(record: &mut NavRecord) -> u64 {
+        let number = record.admit();
+        assert!(record.sent(number));
+        record.answered(number, NavAnswer::Loading);
+        number
+    }
+
+    #[test]
+    fn a_late_finish_of_the_page_before_does_not_settle_a_newer_request() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(true, now);
+        let mut other_tab = NavRecord::born(true, now);
+        record.started(now);
+        sent_and_loading(&mut record);
+        sent_and_loading(&mut other_tab);
+        record.started(now);
+        record.finished(false);
+        assert!(
+            record.pending(),
+            "the page before finished after the request's own Started"
+        );
+        assert_eq!(record.settle_if_idle(true), NavProof::Waiting);
+        assert_eq!(record.settle_if_idle(false), NavProof::Ready);
+        assert!(
+            other_tab.pending(),
+            "one tab's idle engine settles no other tab"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    #[test]
+    fn a_late_failure_of_the_page_before_does_not_settle_a_newer_request() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(true, now);
+        record.started(now);
+        sent_and_loading(&mut record);
+        record.started(now);
+        record.failed();
+        assert!(record.pending());
+        assert_eq!(record.settle_if_idle(false), NavProof::Ready);
+    }
+
+    #[test]
+    fn a_page_load_between_admission_and_send_does_not_take_the_request() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(true, now);
+        let number = record.admit();
+        record.started(now);
+        record.finished(false);
+        assert!(
+            record.pending(),
+            "a page's own load before the send is not the request"
+        );
+        assert_eq!(
+            record.settle_if_idle(false),
+            NavProof::Waiting,
+            "an idle engine before the send proves nothing"
+        );
+        assert!(record.sent(number));
+        assert_eq!(
+            record.settle_if_idle(false),
+            NavProof::Waiting,
+            "an idle engine before its answer proves nothing"
+        );
+        record.answered(number, NavAnswer::Loading);
+        assert_eq!(record.settle_if_idle(false), NavProof::Ready);
+    }
+
+    #[test]
+    fn an_engine_answer_without_a_new_document_settles_once_the_engine_is_idle() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(false, now);
+        let number = record.admit();
+        assert!(record.sent(number));
+        record.answered(number, NavAnswer::Resolved);
+        assert_eq!(record.settle_if_idle(true), NavProof::Waiting);
+        assert_eq!(
+            record.settle_if_idle(false),
+            NavProof::Ready,
+            "a same-document move or a failure before commit has no Started or Finished"
+        );
+    }
+
+    #[test]
+    fn a_request_refused_before_its_send_stands_no_longer_and_one_sent_still_does() {
+        let now = Instant::now();
+        let mut record = NavRecord::born(true, now);
+        let number = record.admit();
+        record.withdrawn(number);
+        assert_eq!(record.proof(), NavProof::Ready);
+        let number = record.admit();
+        assert!(record.sent(number));
+        record.withdrawn(number);
+        assert_eq!(
+            record.proof(),
+            NavProof::Waiting,
+            "a request already sent is not withdrawn"
+        );
+    }
+
+    #[test]
+    fn an_answer_for_another_request_changes_nothing() {
+        let now = Instant::now();
+        let mut closed = NavRecord::born(true, now);
+        let old = closed.admit();
+        let mut reopened = NavRecord::born(true, now);
+        let fresh = reopened.admit();
+        assert_ne!(old, fresh);
+        assert!(
+            !reopened.sent(old),
+            "a send queued for the closed record is not the reopened record's"
+        );
+        reopened.answered(old, NavAnswer::Loading);
+        assert_eq!(reopened.settle_if_idle(false), NavProof::Waiting);
+        assert!(reopened.sent(fresh));
+        let newer = reopened.admit();
+        reopened.answered(fresh, NavAnswer::Loading);
+        assert!(!reopened.sent(fresh));
+        assert_eq!(
+            reopened.settle_if_idle(false),
+            NavProof::Waiting,
+            "the older request's answer does not settle the newer one"
+        );
+        assert!(reopened.sent(newer));
+        reopened.answered(newer, NavAnswer::Resolved);
+        assert_eq!(reopened.settle_if_idle(false), NavProof::Ready);
+    }
+
+    #[test]
+    fn an_engine_that_shows_no_load_right_after_taking_a_request_settles_on_its_next_idle_reading()
+    {
+        let now = Instant::now();
+        let mut record = NavRecord::born(true, now);
+        let number = record.admit();
+        assert!(record.sent(number));
+        record.answered(number, NavAnswer::from_engine(false, false));
+        assert_eq!(record.proof(), NavProof::Waiting);
+        assert_eq!(
+            record.settle_if_idle(true),
+            NavProof::Waiting,
+            "a load the engine shows after its answer is waited for"
+        );
+        assert_eq!(record.settle_if_idle(false), NavProof::Ready);
+    }
+
+    #[test]
+    fn the_dead_clock_marks_once_and_never_settles_a_request() {
+        let now = Instant::now();
+        let stood = now
+            .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS + 1))
+            .unwrap();
+        let mut record = NavRecord::born(true, stood);
+        sent_and_loading(&mut record);
+        let generation = record.started(stood);
+        assert!(record.dead_if_still(generation, now), "the first timeout");
+        assert!(
+            !record.dead_if_still(generation, now),
+            "the same generation's clock marks a dead load once"
+        );
+        assert!(record.pending(), "the clock's mark is not a finish");
+        assert_eq!(record.settle_if_idle(true), NavProof::Waiting);
+        let generation = record.started(stood);
+        record.finished(false);
+        assert!(
+            !record.dead_if_still(generation, now),
+            "a load that finished is never marked dead"
+        );
+        let stale = record.started(stood);
+        record.started(stood);
+        assert!(
+            !record.dead_if_still(stale, now),
+            "a newer load's clock is its own"
+        );
+    }
+
+    #[test]
+    fn chromiums_page_navigate_answer_names_a_new_document_only_by_its_loader() {
+        let committed = serde_json::json!({"frameId": "main", "loaderId": "loader-b"});
+        assert_eq!(page_navigate_answer(true, &committed), NavAnswer::Loading);
+        for ended in [
+            serde_json::json!({"frameId": "main"}),
+            serde_json::json!({"frameId": "main", "loaderId": ""}),
+            serde_json::json!({"frameId": "main", "loaderId": "loader-b", "errorText": "net::ERR_NAME_NOT_RESOLVED"}),
+            serde_json::Value::Null,
+        ] {
+            assert_eq!(
+                page_navigate_answer(true, &ended),
+                NavAnswer::Resolved,
+                "{ended}"
+            );
+        }
+        assert_eq!(
+            page_navigate_answer(false, &committed),
+            NavAnswer::Resolved,
+            "a refused method sent nothing to wait for"
+        );
+        assert_eq!(
+            page_navigate_answer(
+                true,
+                &serde_json::json!({"loaderId": "loader-b", "errorText": ""})
+            ),
+            NavAnswer::Loading
+        );
+    }
+
+    #[test]
+    fn webview2_navigations_pair_by_number_and_start_unknown() {
+        let mut ids = NavigationIds::default();
+        assert_eq!(
+            ids.loading(),
+            None,
+            "a load under way before the watch was not seen"
+        );
+        ids.completed(1, true);
+        assert_eq!(
+            ids.loading(),
+            None,
+            "a completion never seen starting proves nothing"
+        );
+        ids.starting(2);
+        ids.completed(2, false);
+        assert_eq!(
+            ids.loading(),
+            None,
+            "a cancelled navigation replaced no document"
+        );
+        ids.starting(3);
+        assert_eq!(ids.loading(), None);
+        ids.completed(3, true);
+        assert_eq!(ids.loading(), Some(false));
+        ids.starting(4);
+        ids.starting(5);
+        ids.completed(4, true);
+        assert_eq!(
+            ids.loading(),
+            Some(true),
+            "the late completion of the navigation before does not end the newer one"
+        );
+        ids.starting(5);
+        ids.completed(5, true);
+        assert_eq!(
+            ids.loading(),
+            Some(false),
+            "a repeated Starting is one navigation"
+        );
+        ids.completed(6, true);
+        ids.starting(6);
+        assert_eq!(
+            ids.loading(),
+            Some(true),
+            "a completion seen before its Starting never ends it"
+        );
+        let mut waiting = NavigationIds::default();
+        waiting.starting(7);
+        waiting.starting(8);
+        waiting.completed(7, true);
+        assert_eq!(
+            waiting.loading(),
+            None,
+            "known only with nothing else in flight"
+        );
+        waiting.completed(8, true);
+        assert_eq!(waiting.loading(), Some(false));
+    }
+
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    #[test]
+    fn a_failed_load_is_never_marked_dead_by_its_clock() {
+        let now = Instant::now();
+        let stood = now
+            .checked_sub(Duration::from_secs(NAV_DEAD_AFTER_SECS + 1))
+            .unwrap();
+        let mut record = NavRecord::born(true, stood);
+        let generation = record.started(stood);
+        record.failed();
+        assert!(!record.dead_if_still(generation, now));
+        assert_eq!(record.observed(now), NavState::Dead);
+    }
+}
+
+mod browser_dispatch_outcome_tests {
+    use super::*;
+    use crate::browser_workspace::{Dispatch, Mode, Workspaces};
+    use std::cell::Cell;
+
+    const MUTATORS: [(&str, &str); 6] = [
+        ("click", "browser-1"),
+        ("type", "browser-1"),
+        ("scroll", "browser-1"),
+        ("eval", "browser-person"),
+        ("find", "browser-1"),
+        ("fill", "browser-1"),
+    ];
+
+    fn owned_tabs() -> Workspaces {
+        let workspaces = Workspaces::default();
+        for label in ["browser-1", "browser-2"] {
+            workspaces.register(label, Some("term-1"), false).unwrap();
+            let revision = workspaces.snapshot(label).unwrap().unwrap().revision;
+            workspaces
+                .begin_at(label, Some("term-1"), "read", Some(revision))
+                .unwrap()
+                .unwrap()
+                .finish_observation()
+                .unwrap();
+        }
+        workspaces
+    }
+
+    fn settled(
+        workspaces: &Workspaces,
+        verb: &str,
+        label: &str,
+        answer: impl FnOnce(&mut Dispatch) -> zerocode_hookd::TeamAnswer,
+    ) -> (zerocode_hookd::TeamAnswer, Dispatch) {
+        let revision = workspaces
+            .snapshot(label)
+            .unwrap()
+            .map(|snapshot| snapshot.revision);
+        let operation = workspaces
+            .begin_at(label, Some("term-1"), verb, revision)
+            .unwrap();
+        let actor = workspaces
+            .begin_actor_target(Some("term-1"), verb, Some(label))
+            .unwrap()
+            .unwrap();
+        let mut dispatched = Dispatch::Uncertain;
+        let answer = answer(&mut dispatched);
+        if answer.exit_code == 0 {
+            dispatched = Dispatch::Completed;
+        }
+        if let Some(operation) = operation {
+            operation.settle(dispatched);
+        }
+        actor.settle(dispatched);
+        (answer, dispatched)
+    }
+
+    fn modes(workspaces: &Workspaces) -> [Mode; 2] {
+        ["browser-1", "browser-2"].map(|label| workspaces.snapshot(label).unwrap().unwrap().mode)
+    }
+
+    #[tokio::test]
+    async fn a_mutators_own_check_refuses_before_its_first_send_and_keeps_every_owned_tab() {
+        let long_text = "x".repeat(100_001);
+        let long_expression = "1".repeat(64_001);
+        let blank_scroll = zerocode_core::agent_browser::ScrollTarget::Selector(" ".to_string());
+        let checks: [(&str, &str, Result<(), String>); 7] = [
+            ("click", "browser-1", cmd::browser::checked_selector("   ")),
+            (
+                "click",
+                "browser-1",
+                cmd::browser::pressable_mark("browser-dispatch-unmarked", 1).map(|_| ()),
+            ),
+            (
+                "type",
+                "browser-1",
+                cmd::browser::type_checked("   ", "words"),
+            ),
+            (
+                "type",
+                "browser-1",
+                cmd::browser::type_checked("#name", &long_text),
+            ),
+            (
+                "scroll",
+                "browser-1",
+                cmd::browser::scroll_request(&blank_scroll).map(|_| ()),
+            ),
+            (
+                "eval",
+                "browser-person",
+                cmd::browser::checked_expression(&long_expression),
+            ),
+            (
+                "eval",
+                "browser-person",
+                cmd::browser::checked_expression("document.cookie"),
+            ),
+        ];
+        for (verb, label, checked) in checks {
+            let workspaces = owned_tabs();
+            let sends = Cell::new(0);
+            let refusal = cmd::browser::send_after_checks(
+                checked,
+                || Ok::<_, String>(()),
+                |(), ()| async {
+                    sends.set(sends.get() + 1);
+                    Ok::<_, String>(())
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(sends.get(), 0, "{verb}: a script reached the page");
+            let (answer, dispatched) = settled(&workspaces, verb, label, |dispatched| {
+                executor_refused(dispatched, refusal)
+            });
+            assert_eq!(answer.exit_code, 1, "{verb}");
+            assert_eq!(dispatched, Dispatch::NotSent, "{verb}");
+            assert_eq!(modes(&workspaces), [Mode::Agent; 2], "{verb}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pane_gone_before_the_first_send_refuses_without_pausing_its_owner() {
+        for (verb, label) in MUTATORS {
+            let workspaces = owned_tabs();
+            let sends = Cell::new(0);
+            let refusal = cmd::browser::send_after_checks(
+                Ok(()),
+                || Err::<(), _>("브라우저 판이 이미 닫혔습니다".to_string()),
+                |(), ()| async {
+                    sends.set(sends.get() + 1);
+                    Ok::<_, String>(())
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(sends.get(), 0, "{verb}");
+            let (_, dispatched) = settled(&workspaces, verb, label, |dispatched| {
+                executor_refused(dispatched, refusal)
+            });
+            assert_eq!(dispatched, Dispatch::NotSent, "{verb}");
+            assert_eq!(modes(&workspaces), [Mode::Agent; 2], "{verb}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_after_the_first_send_stays_uncertain_and_pauses_the_owner() {
+        for (verb, label) in MUTATORS {
+            let workspaces = owned_tabs();
+            let sends = Cell::new(0);
+            let refusal = cmd::browser::send_after_checks(
+                Ok(()),
+                || Ok::<_, String>(()),
+                |(), ()| async {
+                    sends.set(sends.get() + 1);
+                    Err::<(), _>(cmd::browser::PAGE_TIMED_OUT.to_string())
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(sends.get(), 1, "{verb}");
+            let (answer, dispatched) = settled(&workspaces, verb, label, |dispatched| {
+                executor_refused(dispatched, refusal)
+            });
+            assert_eq!(answer.exit_code, 1, "{verb}");
+            assert_eq!(dispatched, Dispatch::Uncertain, "{verb}");
+            assert_eq!(modes(&workspaces), [Mode::Paused; 2], "{verb}");
+        }
+    }
+
+    #[test]
+    fn a_find_answer_without_a_whole_tally_is_refused_and_stays_uncertain() {
+        for malformed in [
+            json!({ "count": "invalid", "index": 0 }),
+            json!({ "index": 0 }),
+            json!({ "count": 1 }),
+            json!({ "count": -1, "index": 0 }),
+            json!({ "count": 1.5, "index": 0 }),
+            json!(null),
+        ] {
+            let workspaces = owned_tabs();
+            let found = cmd::browser::find_tally(&malformed);
+            let (answer, dispatched) = settled(&workspaces, "find", "browser-1", |dispatched| {
+                found_answer(Ok(found), dispatched)
+            });
+            assert_eq!(answer.exit_code, 1, "{malformed}");
+            assert!(answer.stdout.is_empty(), "{malformed}");
+            assert_eq!(dispatched, Dispatch::Uncertain, "{malformed}");
+            assert_eq!(modes(&workspaces), [Mode::Paused; 2], "{malformed}");
+        }
+        let workspaces = owned_tabs();
+        let found = cmd::browser::find_tally(&json!({ "count": 0, "index": 0 }));
+        let (answer, dispatched) = settled(&workspaces, "find", "browser-1", |dispatched| {
+            found_answer(Ok(found), dispatched)
+        });
+        assert_eq!(answer.exit_code, 0);
+        assert_eq!(answer.stdout, "{\"count\":0,\"index\":0}\n");
+        assert_eq!(dispatched, Dispatch::Completed);
+        assert_eq!(modes(&workspaces), [Mode::Agent; 2]);
+    }
+}
+
+mod browser_observation_stamp_tests {
+    use super::*;
+
+    #[test]
+    fn json_stamps_use_the_backend_revision_and_preserve_page_result_keys() {
+        for verb in ["marks", "fields", "screenshot"] {
+            let argv = [verb, "browser-1", "--json"].map(str::to_string);
+            let mut answer = browser_said(
+                "{\"items\":[],\"untrustedExternalContent\":true,\"workspaceRevision\":99,\"result\":{\"bytes\":12}}\n",
+            );
+            stamp_browser_observation(&mut answer, &argv, 7).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&answer.stdout).unwrap();
+            assert_eq!(value["workspaceRevision"], 7);
+            assert_eq!(value["untrustedExternalContent"], true);
+            assert_eq!(value["result"]["bytes"], 12);
+            assert_eq!(value["items"], json!([]));
+        }
+    }
+
+    #[test]
+    fn plain_and_full_reads_put_the_stamp_after_the_existing_page_fence() {
+        for argv in [
+            vec!["read".into(), "browser-1".into()],
+            vec!["read".into(), "browser-1".into(), "--full".into()],
+        ] {
+            let mut answer = page_said("browser-1", "workspaceRevision: 99\n");
+            stamp_browser_observation(&mut answer, &argv, 7).unwrap();
+            assert!(answer.stdout.ends_with("workspaceRevision: 7\n"));
+            assert!(answer.stdout.contains("END UNTRUSTED EXTERNAL CONTENT"));
+            assert_eq!(
+                zerocode_core::agent_browser::observation_revision(&answer.stdout),
+                Some(7)
+            );
+        }
+    }
+}
+
 /// `tabs` answers one line per pane in birth order, every column a record.
 #[test]
 fn tabs_answer_one_row_per_pane_in_birth_order() {
@@ -5704,7 +6341,7 @@ fn browser_type_refuses_a_password_field_and_value_stdin_uses_the_setter_only() 
         run_evidence::redacted("browser", &words(&["type", "b", "#pw", "hunter2"]))[3],
         "[7 chars]"
     );
-    let dispatcher = block_after(shipped_backend(), "async fn answer_browser_command(");
+    let dispatcher = block_after(shipped_backend(), "async fn dispatch_browser_command(");
     assert!(
         dispatcher.contains("(\"type\", 5)") && dispatcher.contains("TypeRoad::Setter"),
         "the door dispatches the stdin shape to the setter road:\n{dispatcher}"
@@ -15861,6 +16498,7 @@ fn non_default_settings_are_the_next_boot_snapshot() {
             default_zoom_level: 1.5,
             open_tabs: vec![StoredBrowserTab {
                 url: "https://example.com/work".to_string(),
+                agent_workspace: false,
                 viewport: Some("mobile-m".to_string()),
                 mobile: true,
                 reader: None,
@@ -16059,6 +16697,7 @@ fn non_default_settings_are_the_next_boot_snapshot() {
         boot.document.browser.open_tabs,
         [StoredBrowserTab {
             url: "https://example.com/work".to_string(),
+            agent_workspace: false,
             viewport: Some("mobile-m".to_string()),
             mobile: true,
             reader: None,
@@ -16086,6 +16725,7 @@ fn non_default_settings_are_the_next_boot_snapshot() {
         migrated.open_tabs[0],
         StoredBrowserTab {
             url: "https://a.example/".to_string(),
+            agent_workspace: false,
             viewport: None,
             mobile: false,
             reader: None,
@@ -16094,6 +16734,15 @@ fn non_default_settings_are_the_next_boot_snapshot() {
     );
     assert_eq!(migrated.open_tabs[1].viewport.as_deref(), Some("mobile-m"));
     assert!(migrated.open_tabs[1].mobile);
+    let workspaces: BrowserPrefs = serde_json::from_value(serde_json::json!({
+        "open_tabs": [{ "url": "https://example.com/work", "agentWorkspace": true }],
+    }))
+    .expect("workspace marker reads");
+    assert!(workspaces.open_tabs[0].agent_workspace);
+    let stored_workspace = serde_json::to_value(&workspaces).expect("workspace marker writes");
+    assert_eq!(stored_workspace["open_tabs"][0]["agentWorkspace"], true);
+    let stored_legacy = serde_json::to_value(&migrated).expect("legacy tabs write");
+    assert!(stored_legacy["open_tabs"][0].get("agentWorkspace").is_none());
     assert_eq!(
         migrated.open_tabs[1].reader, None,
         "the old spelling names no reader string"
@@ -24069,13 +24718,24 @@ mod browser_look_settle_pin {
             "the look finishes a held settle by the one settle road before it reads:\n{look}"
         );
         let press = block("async fn press_mark(");
-        let refused = press
+        let checked = press
+            .find("pressable_mark(label, mark_n)")
+            .expect("the press checks its mark first");
+        let minted = press
+            .find("browser_pane_of(app, state, label)")
+            .expect("the press finds its pane");
+        assert!(
+            checked < minted,
+            "the mark is checked before the pane is asked for:\n{press}"
+        );
+        let pressable = block("pub(crate) fn pressable_mark(");
+        let refused = pressable
             .find("settle_held(label)")
             .expect("a held settle refuses");
-        let pinned = press.find("recall_table(").expect("the pin is read");
+        let pinned = pressable.find("recall_table(").expect("the pin is read");
         assert!(
             refused < pinned,
-            "a held settle refuses the press before the pin is read:\n{press}"
+            "a held settle refuses the press before the pin is read:\n{pressable}"
         );
     }
 }
@@ -24337,6 +24997,7 @@ mod handoff_code_road {
         doors: Vec<&'static str>,
         computer: Vec<ComputerCommand>,
         browser: Vec<Vec<String>>,
+        browser_revisions: Vec<Option<u64>>,
         emulator: Vec<Vec<String>>,
         /// What the form refuses with instead of taking the text.
         refuses_with: Option<ComputerUseError>,
@@ -24374,10 +25035,15 @@ mod handoff_code_road {
             }))
         }
 
-        fn browser(&mut self, words: &[String]) -> Result<(), ComputerUseError> {
+        fn browser(
+            &mut self,
+            words: &[String],
+            workspace_revision: Option<u64>,
+        ) -> Result<(), ComputerUseError> {
             let mut form = self.0.borrow_mut();
             form.doors.push("browser");
             form.browser.push(words.to_vec());
+            form.browser_revisions.push(workspace_revision);
             if let Some(error) = form.refuses_with.clone() {
                 return Err(error);
             }
@@ -24398,6 +25064,30 @@ mod handoff_code_road {
                 .map(|pair| pair[1].clone());
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_browser_code_entry_uses_the_revision_given_before_the_person_answered() {
+        let _hand = one_hand();
+        seat_a_person();
+        person_types(TYPED);
+        let form = RefCell::new(Form::default());
+        let said = at_the_door(
+            &[
+                "handoff",
+                "--ask-code",
+                "--reason",
+                A_CODE_REASON,
+                "--into",
+                r##"["browser","type","browser-1","#otp","--workspace-revision","7"]"##,
+                "--json",
+            ],
+            &form,
+        );
+        assert_eq!(said.exit_code, 0, "{}{}", said.stdout, said.stderr);
+        assert_eq!(form.borrow().browser_revisions, [Some(7)]);
+        assert_eq!(form.borrow().doors, ["browser"]);
+        assert!(!holds_the_code(&told(&said)));
     }
 
     fn at_the_door_with(argv: &[String], typer: &mut dyn Typer) -> zerocode_hookd::TeamAnswer {

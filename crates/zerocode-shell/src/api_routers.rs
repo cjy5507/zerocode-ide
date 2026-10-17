@@ -342,7 +342,8 @@ pub struct Keychain {
 impl Keychain {
     pub fn of_this_machine() -> Self {
         Self {
-            available: crate::accounts::KEYCHAIN_AVAILABLE,
+            available: crate::accounts::KEYCHAIN_AVAILABLE
+                && !crate::credential_store_policy::disabled(),
         }
     }
 
@@ -1490,7 +1491,7 @@ mod tests {
         assert!(!nowhere.keeps_keys());
         assert_eq!(
             Keychain::of_this_machine().keeps_keys(),
-            crate::accounts::KEYCHAIN_AVAILABLE
+            crate::accounts::KEYCHAIN_AVAILABLE && !crate::credential_store_policy::disabled()
         );
     }
 

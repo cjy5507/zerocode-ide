@@ -24,7 +24,11 @@ pub trait Typer {
     /// code already its value. Answers the helper's answer.
     fn computer(&mut self, command: &ComputerCommand) -> Result<Value, ComputerUseError>;
     /// A tab's input — the door's words, the code the last of them.
-    fn browser(&mut self, words: &[String]) -> Result<(), ComputerUseError>;
+    fn browser(
+        &mut self,
+        words: &[String],
+        workspace_revision: Option<u64>,
+    ) -> Result<(), ComputerUseError>;
     /// A phone's input — the door's words, the code the value of `--text`.
     fn emulator(&mut self, words: &[String]) -> Result<(), ComputerUseError>;
 }
@@ -68,7 +72,7 @@ pub fn enter(
         }
         EnterTool::Browser => {
             typer
-                .browser(&typed)
+                .browser(&typed, into.workspace_revision())
                 .map_err(|error| dropped(&code, error))?;
             UNREAD
         }

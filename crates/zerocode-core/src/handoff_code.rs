@@ -339,6 +339,9 @@ const ENTER_SHAPES: &str = "set-value (--app, --element-index), type-text (--app
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnterInto {
     tool: EnterTool,
+    /// The observation the agent used before asking the person for a code.
+    /// Kept separately so verb/selector/value grammar stays unchanged.
+    workspace_revision: Option<u64>,
     /// The words as the agent gave them, door prefix (`browser`, `emulator`)
     /// and all.
     given: Vec<String>,
@@ -369,9 +372,18 @@ impl EnterInto {
             "emulator" => EnterTool::Emulator,
             _ => EnterTool::Computer,
         };
+        let (given, workspace_revision) = if tool == EnterTool::Browser {
+            let command = crate::agent_browser::parse_workspace_command(&all[1..], None)?;
+            let mut given = vec!["browser".to_string()];
+            given.extend(command.argv);
+            (given, command.workspace_revision)
+        } else {
+            (all.to_vec(), None)
+        };
         let into = Self {
             tool,
-            given: all.to_vec(),
+            workspace_revision,
+            given,
         };
         match tool {
             EnterTool::Computer => into.check_computer()?,
@@ -385,6 +397,11 @@ impl EnterInto {
     #[must_use]
     pub const fn tool(&self) -> EnterTool {
         self.tool
+    }
+
+    #[must_use]
+    pub const fn workspace_revision(&self) -> Option<u64> {
+        self.workspace_revision
     }
 
     /// The words after the door's prefix: the input command itself.
@@ -418,7 +435,22 @@ impl EnterInto {
     /// The array as the agent gave it, door prefix and all.
     #[must_use]
     pub fn to_words(&self) -> Vec<String> {
-        self.given.clone()
+        let mut given = self.given.clone();
+        if self.tool == EnterTool::Browser {
+            // The optional setter flag has no value until the person replies.
+            // Keep the common option before it on this serialized target.
+            let setter = given
+                .last()
+                .is_some_and(|word| word == crate::agent_browser::TYPE_VALUE_FLAG);
+            if setter {
+                given.pop();
+            }
+            crate::agent_browser::with_workspace_revision(&mut given, self.workspace_revision);
+            if setter {
+                given.push(crate::agent_browser::TYPE_VALUE_FLAG.into());
+            }
+        }
+        given
     }
 
     /// No word of `words` that would carry a value of its own, or a way past
@@ -477,7 +509,7 @@ impl EnterInto {
 
     fn check_browser(&self) -> Result<(), String> {
         let words = self.words();
-        let shaped = "--into for the browser is [\"browser\",\"type\",\"<tab>\",\"<selector>\"] — no text: the window types the code (a selector may be a handle `fields` printed)";
+        let shaped = "--into for the browser is [\"browser\",\"type\",\"<tab>\",\"<selector>\",\"--workspace-revision\",\"<original revision>\"] — no text: the window types the code (ordinary tabs may omit the revision)";
         let (words, setter) = match words.last().map(String::as_str) {
             Some(crate::agent_browser::TYPE_VALUE_FLAG) if words.len() == 4 => (&words[..3], true),
             _ => (words, false),

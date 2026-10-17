@@ -78,10 +78,12 @@ mod browser_cookie_import;
 mod browser_cookies;
 mod browser_diagnose;
 mod browser_guest_runtime;
+mod browser_native_nav;
 mod browser_nav_state;
 mod browser_read;
 mod browser_runtime;
 mod browser_user_agent;
+mod browser_workspace;
 mod checks_runtime;
 #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
 mod chromium_browser;
@@ -98,6 +100,7 @@ mod conversation_wake;
 mod crash;
 mod crash_triage;
 mod credential_store;
+mod credential_store_policy;
 mod crumbs;
 mod developer_permissions;
 mod durable_file;
@@ -276,13 +279,13 @@ use cmd::{
     enable_automation, end_all_terminal_sessions, end_terminal_session, file_diff, file_version,
     floating_workspace_seat, flow_list, flow_set, focus_lane, focus_main, fs_create, fs_duplicate,
     fs_move, fs_open_default, fs_redo, fs_rename, fs_reveal, fs_trash, fs_undo, gate_lane,
-    generate_branch_name, generate_commit_message, generate_pull_request, get_second_brain_scenes,
-    git_history, github_assignable_users, github_comment_work_item, github_disconnect,
-    github_login_intent, github_merge_pr, github_pr_file_diff, github_preset_query,
-    github_review_states, github_select_account, github_set_reviewers, github_set_work_item_open,
-    github_status, github_test_connection, github_web_urls, github_work_item_detail,
-    github_work_items, gitlab_comment_item, gitlab_inline_comment, gitlab_item_detail,
-    gitlab_job_trace, gitlab_merge_mr, gitlab_mr_review, gitlab_pipeline_jobs,
+    generate_branch_name, generate_commit_message, generate_pull_request, get_browser_workspaces,
+    get_second_brain_scenes, git_history, github_assignable_users, github_comment_work_item,
+    github_disconnect, github_login_intent, github_merge_pr, github_pr_file_diff,
+    github_preset_query, github_review_states, github_select_account, github_set_reviewers,
+    github_set_work_item_open, github_status, github_test_connection, github_web_urls,
+    github_work_item_detail, github_work_items, gitlab_comment_item, gitlab_inline_comment,
+    gitlab_item_detail, gitlab_job_trace, gitlab_merge_mr, gitlab_mr_review, gitlab_pipeline_jobs,
     gitlab_project_members, gitlab_retry_job, gitlab_set_item_open, gitlab_set_mr_reviewers,
     gitlab_status, gitlab_todos, gitlab_update_mr, gitlab_work_items, google_account,
     google_login_finish, google_login_start, google_logout, grok_usage, harness_status,
@@ -338,13 +341,14 @@ use cmd::{
     set_agent_activity_display, set_agent_permission_mode, set_agent_teams_mode,
     set_app_font_family, set_browser_default_profile, set_browser_default_zoom,
     set_browser_home_page, set_browser_open_tabs, set_browser_restore_tabs,
-    set_browser_search_engine, set_browser_visits, set_claude_autoswitch_mode, set_clipboard_image,
-    set_compact_worktree_cards, set_computer_awake_mode, set_computer_confirm,
-    set_computer_generator_road, set_computer_input_policy, set_computer_live_reflex,
-    set_confirm_close_pinned, set_conversation_focus_view, set_crash_watchdog,
-    set_ctrl_tab_order_mode, set_default_agent, set_default_task_source, set_diff_side_by_side,
-    set_dock_badge, set_external_worktree_visibility, set_finish_notification_mode,
-    set_guide_dismissed, set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
+    set_browser_search_engine, set_browser_visits, set_browser_workspace_mode,
+    set_claude_autoswitch_mode, set_clipboard_image, set_compact_worktree_cards,
+    set_computer_awake_mode, set_computer_confirm, set_computer_generator_road,
+    set_computer_input_policy, set_computer_live_reflex, set_confirm_close_pinned,
+    set_conversation_focus_view, set_crash_watchdog, set_ctrl_tab_order_mode, set_default_agent,
+    set_default_task_source, set_diff_side_by_side, set_dock_badge,
+    set_external_worktree_visibility, set_finish_notification_mode, set_guide_dismissed,
+    set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
     set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
     set_hide_sleeping_workspaces, set_hooks_enabled, set_jev_enabled, set_jev_model,
@@ -1080,6 +1084,7 @@ struct ShellRuntime {
     /// window handed out. Without the set, any local process that can knock
     /// could close webviews — including the main one — by guessing labels.
     browser_panes: Mutex<std::collections::HashSet<String>>,
+    browser_workspaces: browser_workspace::Workspaces,
     /// Where each browser pane stands, as its OWN page-load events last said
     /// (opened at, navigated to, loaded). The window never asks a webview for
     /// its URL: wry unwraps `WKWebView.URL`, which is nil after a failed
@@ -2415,6 +2420,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         launch_tokens: Mutex::new(HashMap::new()),
         untitled_markdowns: Mutex::new(std::collections::HashSet::new()),
         browser_panes: Mutex::new(std::collections::HashSet::new()),
+        browser_workspaces: browser_workspace::Workspaces::default(),
         browser_urls: Mutex::new(HashMap::new()),
         browser_born: Mutex::new(0),
         browser_records: Mutex::new(HashMap::new()),
@@ -2518,6 +2524,16 @@ fn main() -> ExitCode {
         println!("commit {}", env!("ZEROCODE_COMMIT"));
         println!("ui {}", env!("ZEROCODE_UI_DIGEST"));
         return ExitCode::SUCCESS;
+    }
+    if credential_store_policy::disabled() {
+        crumbs::record(
+            "runtime_policy",
+            format_args!("{}", credential_store_policy::DISABLED_MESSAGE),
+        );
+        eprintln!(
+            "zerocode-shell: {}",
+            credential_store_policy::DISABLED_MESSAGE
+        );
     }
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     if let Err(error) = chromium_browser::install_application() {
@@ -2898,6 +2914,8 @@ fn main() -> ExitCode {
             release_untitled_markdown,
             delete_untitled_markdown,
             open_browser_pane,
+            get_browser_workspaces,
+            set_browser_workspace_mode,
             browser_profiles,
             create_browser_profile,
             delete_browser_profile,
