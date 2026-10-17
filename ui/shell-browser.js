@@ -403,14 +403,17 @@ const browserBodyWatch = new ResizeObserver(() => syncBrowserPanes());
 const BROWSER_WORKSPACE_CAPTURE_MS = 1000;
 const BROWSER_WORKSPACE_FRAME_MAX_BYTES = 32 * 1024 * 1024;
 const BROWSER_WORKSPACE_MODES = new Set(["agent", "pausing", "paused", "human"]);
-const BROWSER_WORKSPACE_ACTIONS = [
-  ["watch", "지금 보기"],
-  ["collapse", "원래 창으로 접기"],
-  ["pause", "일시정지"],
-  ["human", "내가 조작"],
-  ["agent", "다시 맡기기"],
-  ["refresh", "상태 다시 확인"],
-];
+/* Each action's words come from the catalog (`browser.workspace.<name>Action`); the Korean
+ * fallback sits inside its own t() so no label reaches the window as a hardcoded string. */
+const BROWSER_WORKSPACE_ACTION_WORDS = {
+  watch: () => t("browser.workspace.watchAction", "지금 보기"),
+  collapse: () => t("browser.workspace.collapseAction", "원래 창으로 접기"),
+  pause: () => t("browser.workspace.pauseAction", "일시정지"),
+  human: () => t("browser.workspace.humanAction", "내가 조작"),
+  agent: () => t("browser.workspace.agentAction", "다시 맡기기"),
+  refresh: () => t("browser.workspace.refreshAction", "상태 다시 확인"),
+};
+const BROWSER_WORKSPACE_ACTIONS = Object.keys(BROWSER_WORKSPACE_ACTION_WORDS);
 let browserWorkspaceCaptureTimer = 0;
 let browserWorkspaceCaptureBusy = false;
 let browserWorkspaceCaptureAt = -Infinity;
@@ -789,12 +792,12 @@ function buildBrowserWorkspaceBar() {
   status.setAttribute("aria-live", "polite");
   const actions = document.createElement("div");
   actions.className = "browser-workspace-actions";
-  for (const [name, fallback] of BROWSER_WORKSPACE_ACTIONS) {
+  for (const name of BROWSER_WORKSPACE_ACTIONS) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `btn browser-workspace-${name}`;
     button.dataset.i18n = `browser.workspace.${name}Action`;
-    button.textContent = t(button.dataset.i18n, fallback);
+    button.textContent = BROWSER_WORKSPACE_ACTION_WORDS[name]();
     actions.appendChild(button);
   }
   const owner = document.createElement("div");
@@ -866,8 +869,8 @@ function paintBrowserWorkspace(host, tab) {
   host.querySelector(".browser-workspace-watch").hidden = tab.workspaceViewing === true;
   host.querySelector(".browser-workspace-collapse").hidden = tab.workspaceViewing !== true;
   const blocked = !!tab.workspacePending || !tab.workspace || !!tab.workspaceError || tab.workspace.mode === "pausing";
-  for (const [name, fallback] of BROWSER_WORKSPACE_ACTIONS) {
-    writeTextContent(host.querySelector(`.browser-workspace-${name}`), t(`browser.workspace.${name}Action`, fallback));
+  for (const name of BROWSER_WORKSPACE_ACTIONS) {
+    writeTextContent(host.querySelector(`.browser-workspace-${name}`), BROWSER_WORKSPACE_ACTION_WORDS[name]());
   }
   for (const [name, mode] of [["pause", "paused"], ["human", "human"], ["agent", "agent"]]) {
     const button = host.querySelector(`.browser-workspace-${name}`);
@@ -1273,7 +1276,7 @@ function wireBrowserHost(host) {
     tab.workspaceViewEpoch = (tab.workspaceViewEpoch ?? 0) + 1;
     paintBrowserWorkspaceTab(tab);
   });
-  for (const [name] of BROWSER_WORKSPACE_ACTIONS) {
+  for (const name of BROWSER_WORKSPACE_ACTIONS) {
     host.querySelector(`.browser-workspace-${name}`).addEventListener("click", () => {
       const tab = held();
       if (!browserWorkspaceLive(tab) || !tab.agentWorkspace) return;
@@ -6259,8 +6262,8 @@ async function paintTabCreate() {
     glyph: "globe",
     label: t("browser.workspace.new", "새 전용 작업 브라우저"),
     hint: t("browser.workspace.newHint", "관전 · 일시정지 · 직접 조작"),
-    words: ["browser", "workspace", "agent", "watch", "브라우저", "작업", "관전",
-      t("browser.workspace.new", "새 전용 작업 브라우저")],
+    words: ["browser", "workspace", "agent", "watch",
+      "브라우저", "작업", "관전", t("browser.workspace.new", "새 전용 작업 브라우저")],
     run: () => void openBrowserTab(undefined, { agentWorkspace: true, beside: true }),
   };
   if (!query || tcMatches(query, workspaceRow.words)) acts.push(workspaceRow);
