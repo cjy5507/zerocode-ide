@@ -162,7 +162,7 @@ sys.stdin.read()
             .unwrap(),
     );
     headers.insert(
-        "x-zerocode-judgment-deadline-ms",
+        judgment_provider::DEADLINE_HEADER,
         zerocode_core::jev::BROWSER
             .apply_deadline_ms
             .unwrap()
@@ -874,6 +874,10 @@ async fn a_screen_client_deadline_does_not_leave_inference_ahead_of_the_next_req
     let first = client()
         .post(running.provider.request_url())
         .timeout(deadline)
+        .header(
+            judgment_provider::DEADLINE_HEADER,
+            deadline.as_millis().to_string(),
+        )
         .json(&crowded)
         .send()
         .await;
@@ -899,6 +903,10 @@ async fn a_screen_client_deadline_does_not_leave_inference_ahead_of_the_next_req
     let response = client()
         .post(running.provider.request_url())
         .timeout(REQUEST_TIMEOUT)
+        .header(
+            judgment_provider::DEADLINE_HEADER,
+            deadline.as_millis().to_string(),
+        )
         .json(&following)
         .send()
         .await

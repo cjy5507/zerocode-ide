@@ -13,6 +13,7 @@ mod protocol;
 pub use protocol::Prepared;
 
 pub const SETTINGS_KEY: &str = "judgmentProvider";
+pub const DEADLINE_HEADER: &str = "x-zerocode-judgment-deadline-ms";
 pub const JEV_BASE_URL: &str = "https://api.typesafe.ai";
 pub const JEV_DEFAULT_MODEL: &str = "jev-latest";
 pub const JEV_KEY_ENV: &str = "TYPESAFE_API_KEY";
