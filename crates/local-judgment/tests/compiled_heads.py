@@ -65,6 +65,7 @@ rows = []
 for fixture in json.load(sys.stdin):
     request = fixture["request"]
     before = {name: measure(question) for name, question in request["questions"].items()}
+    measured_common.build_head = native_build_head
     with patch.dict(sys.modules, {"laya": SimpleNamespace(Agent=MeasuredAgent, common=measured_common)}):
         adapter = bridge["LayaAdapter"]({"modelDirectory": str(model), "modelId": "loaded", "runtime": "loaded"})
     result = adapter.predict(request)
