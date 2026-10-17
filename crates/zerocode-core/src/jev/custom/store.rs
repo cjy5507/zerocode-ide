@@ -15,12 +15,15 @@
 //! under the lock, into a temporary file renamed over the old one; and a
 //! definition is read back only while its bytes still hash to its name.
 
-use std::io;
+use std::collections::BTreeSet;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::{Definition, MODES, Refusal};
+use super::{Definition, MODES, Refusal, SCHEMA_VERSION, check, is_id, version_of};
+use crate::civil;
 use crate::jev::JevMode;
 
 /// Where the store lives under zo's config home.
@@ -28,6 +31,20 @@ pub const DIRECTORY: &str = "jev/decisions";
 
 /// The largest definition the store keeps, in bytes: the longest words a definition holds, every character escaped, come to under 48 KiB, and the rest is room for its folders.
 pub const DEFINITION_MAX_BYTES: usize = 64 * 1024;
+
+/// The largest index, or trash row, the store reads back, in bytes: twenty rows of the longest name, every character escaped, come to under 9 KiB.
+const INDEX_MAX_BYTES: usize = 16 * 1024;
+
+/// Hex digits in a version's name: a SHA-256, written out.
+const VERSION_HEX_DIGITS: usize = 64;
+
+/// Who may read and write the store's files: the person alone, whose words they are.
+#[cfg(unix)]
+const PRIVATE_MODE: u32 = 0o600;
+
+const INDEX: &str = "index.json";
+const DEFINITIONS: &str = "definitions";
+const JSON: &str = "json";
 
 /// One decision as the index lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,8 +96,7 @@ pub fn root(home: &Path) -> PathBuf {
 /// # Errors
 /// An index that cannot be read, or is not one this store writes.
 pub fn list(home: &Path) -> io::Result<Vec<Entry>> {
-    let _ = home;
-    Ok(Vec::new())
+    read_index(&root(home))
 }
 
 /// Keep `definition` as a new decision in `mode`, made at `now_ms`; its
@@ -95,8 +111,32 @@ pub fn create(
     mode: JevMode,
     now_ms: i64,
 ) -> Result<String, Error> {
-    let _ = (home, definition, mode, now_ms);
-    Ok(String::new())
+    let root = root(home);
+    let mut index = read_index(&root)?;
+    let refused = check(definition);
+    if !refused.is_empty() {
+        return Err(Error::Refused(refused));
+    }
+    let bytes = definition.to_bytes().map_err(io::Error::other)?;
+    let version = write_definition(&root, &bytes)?;
+    let stamp = civil::iso_utc_of(now_ms);
+    index.push(Entry {
+        id: definition.id.clone(),
+        name: definition.name.clone(),
+        mode,
+        definition: version.clone(),
+        created_at: stamp.clone(),
+        updated_at: stamp,
+    });
+    write_index(&root, index)?;
+    Ok(version)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IndexFile {
+    schema_version: u32,
+    decisions: Vec<Entry>,
 }
 
 fn write_mode<S: Serializer>(mode: &JevMode, serializer: S) -> Result<S::Ok, S::Error> {
@@ -109,4 +149,106 @@ fn read_mode<'de, D: Deserializer<'de>>(deserializer: D) -> Result<JevMode, D::E
         .into_iter()
         .find(|mode| mode.key() == word)
         .unwrap_or_default())
+}
+
+fn read_index(root: &Path) -> io::Result<Vec<Entry>> {
+    let bytes = match bounded(&root.join(INDEX), INDEX_MAX_BYTES) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        read => read?,
+    };
+    let index: IndexFile =
+        serde_json::from_slice(&bytes).map_err(|_| unreadable("not an index this store writes"))?;
+    let ids: BTreeSet<&str> = index
+        .decisions
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    if index.schema_version != SCHEMA_VERSION
+        || ids.len() != index.decisions.len()
+        || !index.decisions.iter().all(well_named)
+    {
+        return Err(unreadable("not an index this store writes"));
+    }
+    Ok(index.decisions)
+}
+
+fn write_index(root: &Path, decisions: Vec<Entry>) -> io::Result<()> {
+    let index = IndexFile {
+        schema_version: SCHEMA_VERSION,
+        decisions,
+    };
+    replace(
+        &root.join(INDEX),
+        &serde_json::to_vec(&index).map_err(io::Error::other)?,
+    )
+}
+
+/// Write a definition's bytes under the name they hash to, unless that file
+/// holds them already; the name.
+fn write_definition(root: &Path, bytes: &[u8]) -> io::Result<String> {
+    let version = version_of(bytes);
+    let dir = root.join(DEFINITIONS);
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(json(&version));
+    if !path.exists() {
+        replace(&path, bytes)?;
+    } else if bounded(&path, DEFINITION_MAX_BYTES)? != bytes {
+        return Err(unreadable("a definition that no longer hashes to its name"));
+    }
+    Ok(version)
+}
+
+fn well_named(entry: &Entry) -> bool {
+    is_id(&entry.id) && is_version(&entry.definition)
+}
+
+fn is_version(word: &str) -> bool {
+    word.len() == VERSION_HEX_DIGITS
+        && word
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn json(stem: &str) -> String {
+    format!("{stem}.{JSON}")
+}
+
+fn unreadable(what: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, what)
+}
+
+fn bounded(path: &Path, cap: usize) -> io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    File::open(path)?
+        .take(u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut data)?;
+    if data.len() > cap {
+        return Err(unreadable("a file past what the store reads back"));
+    }
+    Ok(data)
+}
+
+fn private_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(PRIVATE_MODE);
+    }
+    options.open(path)
+}
+
+fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut out = private_file(&temp)?;
+        out.write_all(bytes)?;
+        out.sync_all()?;
+        fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
 }

@@ -416,6 +416,40 @@ impl Definition {
             max_per_hour: stored.max_per_hour,
         })
     }
+
+    /// What each answer means, with the field it stands in.
+    fn meanings(&self) -> Vec<(Field, &str)> {
+        match &self.answer {
+            Answer::YesNo { yes, no } => vec![(Field::Yes, yes.as_str()), (Field::No, no.as_str())],
+            Answer::Choice(options) => options
+                .iter()
+                .map(|(name, meaning)| (Field::Meaning(name.clone()), meaning.as_str()))
+                .collect(),
+            Answer::Score(levels) => levels
+                .iter()
+                .enumerate()
+                .map(|(level, meaning)| (Field::Level(level), meaning.as_str()))
+                .collect(),
+        }
+    }
+
+    /// Every text the person wrote that leaves the store: the name, the
+    /// question, a choice's option names, and what each answer means.
+    fn words(&self) -> Vec<(Field, &str)> {
+        let mut words = vec![
+            (Field::Name, self.name.as_str()),
+            (Field::Question, self.question.as_str()),
+        ];
+        if let Answer::Choice(options) = &self.answer {
+            words.extend(
+                options
+                    .keys()
+                    .map(|name| (Field::OptionName(name.clone()), name.as_str())),
+            );
+        }
+        words.extend(self.meanings());
+        words
+    }
 }
 
 /// The name stored bytes go by: their SHA-256, as lowercase hex.
@@ -429,8 +463,14 @@ pub fn version_of(bytes: &[u8]) -> String {
 /// taken, a store already full — is the store's to add ([`store`]).
 #[must_use]
 pub fn check(definition: &Definition) -> Vec<Refusal> {
-    let _ = definition;
-    Vec::new()
+    let mut refused = Vec::new();
+    for (field, text) in definition.words() {
+        refused.extend(secret_lines(text).map(|line| Refusal::SecretLine {
+            field: field.clone(),
+            line,
+        }));
+    }
+    refused
 }
 
 /// The `questions` of a request asking `definition`, under its id: the
@@ -461,6 +501,26 @@ pub fn questions(definition: &Definition) -> Value {
 pub fn new_id() -> String {
     let random = uuid::Uuid::new_v4().simple().to_string();
     format!("{ID_PREFIX}{}", &random[..ID_HEX_DIGITS])
+}
+
+fn is_id(id: &str) -> bool {
+    id.strip_prefix(ID_PREFIX).is_some_and(|hex| {
+        hex.len() == ID_HEX_DIGITS
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+/// The lines of `text` that may carry a credential, counted from one: split
+/// as the door splits a text it clears (`super::door::clear_text`), and read
+/// by the door's own detector, so a line stored here is one the door would
+/// send.
+fn secret_lines(text: &str) -> impl Iterator<Item = usize> {
+    text.split('\n')
+        .enumerate()
+        .filter(|(_, line)| crate::credential::may_carry_a_credential(line))
+        .map(|(index, _)| index + 1)
 }
 
 /// What a person's question is wrapped in: the inputs it reads are evidence,
