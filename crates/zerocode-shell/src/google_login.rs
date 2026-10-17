@@ -3,8 +3,10 @@
 //!
 //! One login, two readers. zo signs in with `zo login google` and keeps the
 //! result under `google_code_assist_oauth` in
-//! `${ZO_CONFIG_HOME:-~/.zo}/credentials.json`; the window's Antigravity
-//! gauge ([`crate::usage_antigravity`]) reads that same entry for quota. Until
+//! `${ZO_CONFIG_HOME:-~/.zo}/credentials.json`; the window's Google card reads
+//! that same entry to say who is signed in — and spends it on nothing: the
+//! Antigravity gauge that asked Google's quota API with it went 2026-10-17
+//! (t-62187, 「구독 OAuth로 제품 호출 금지」). Until
 //! now the window could only READ it, so a person whose Google login had
 //! never happened — or had come undone — was sent to a terminal to type a zo
 //! command, while the Claude and Codex logins both had a card in 설정 >
@@ -14,8 +16,8 @@
 //! So this module owns BOTH halves of that one login and nothing else does:
 //! the store's path, key and shape, the OAuth client, the consent round trip,
 //! and the reading that turns what is on disk into what a card can say. The
-//! gauge asks it for the path, the credentials and a token refresh; the
-//! commands in `cmd/usage.rs` ask it for the login flow. Neither owns a copy.
+//! commands in `cmd/usage.rs` ask it for the login flow and for who is signed
+//! in; nothing else in this window reads the file.
 //!
 //! The write side follows zo's own protocol rather than inventing one
 //! (`zo-ide/crates/api/src/oauth_store.rs`): the advisory lock on
@@ -47,9 +49,8 @@ const OAUTH_KEY: &str = "google_code_assist_oauth";
 /// in and extractable from the desktop client (RFC 8252 §8.5) — and using
 /// Antigravity's own client is what lets this sign-in need no per-user setup.
 ///
-/// Named here ONCE. The gauge's refresh and this module's exchange both read
-/// these, and a second copy would be a login that works and a refresh that
-/// does not.
+/// Named here ONCE: the exchange and the card's refresh both read these, and
+/// a second copy would be a login that works and a refresh that does not.
 const CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
 const CLIENT_SECRET: &str = "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";
 
@@ -411,9 +412,9 @@ pub(crate) fn refreshed_access_token(refresh_token: &str, now_ms: i64) -> Option
 /// Whether the stored access token has to be renewed before it is used.
 ///
 /// The margin is what makes a token that would die mid-request get renewed
-/// BEFORE the request rather than after it. Named here because the gauge
-/// decides the same thing behind its own test seam
-/// ([`crate::usage_antigravity`]) — one margin, two refreshers.
+/// BEFORE the request rather than after it. One margin, one refresher — the
+/// card's ([`usable_token`]); the gauge that refreshed through its own wire
+/// went with the quota road (t-62187).
 pub(crate) fn needs_refresh(held: &Credentials, now_ms: i64) -> bool {
     let now_seconds = u64::try_from(now_ms.max(0)).unwrap_or_default() / 1_000;
     held.access_token.is_empty()
@@ -422,8 +423,8 @@ pub(crate) fn needs_refresh(held: &Credentials, now_ms: i64) -> bool {
             .is_some_and(|expires| expires <= now_seconds.saturating_add(REFRESH_SLOP_SECONDS))
 }
 
-/// A bearer good right now, refreshing first when the stored one is spent.
-/// The card's own road; the gauge refreshes through its wire.
+/// A bearer good right now, refreshing first when the stored one is spent —
+/// the card's road, and the only one.
 ///
 /// Named for what it IS rather than for the field it comes out of: a gate
 /// over the shipped backend refuses any credential field name there, because

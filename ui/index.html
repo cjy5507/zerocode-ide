@@ -1261,9 +1261,9 @@
                  decisions and the week's trend, read from the same count the
                  settings card draws. Beside the live-agent door because both
                  report what a runtime measured. -->
-            <button class="foot-icon" id="nav-jev" type="button" aria-pressed="false" data-i18n-title="jev.tab" data-tip="Jev 대시보드">
+            <button class="foot-icon" id="nav-jev" type="button" aria-pressed="false" data-i18n-title="jev.tab" data-tip="의사결정 모델">
               <svg class="icon" aria-hidden="true"><use href="#i-gauge"></use></svg>
-              <span class="sr" data-i18n="jev.tab">Jev 대시보드</span>
+              <span class="sr" data-i18n="jev.tab">의사결정 모델</span>
             </button>
             <button class="foot-icon" id="nav-board" type="button" aria-pressed="false" data-i18n-title="workspaceBoard.label" data-tip="워크스페이스 보드">
               <svg class="icon" aria-hidden="true"><use href="#i-kanban"></use></svg>
@@ -3969,8 +3969,8 @@
         <p class="settings-hint" id="codex-account-note"></p>
 
         <!-- And Google, which has no CLI of its own on this machine: zo signs
-             in with `zo login google` and the Antigravity gauge reads the same
-             file, so this window runs the OAuth flow ITSELF
+             in with `zo login google` and this window reads the same file to say
+             who is signed in, so it runs the OAuth flow ITSELF
              (`crates/zerocode-shell/src/google_login.rs`) and writes the
              result where zo will find it. One machine, ONE Google login — a
              picker here would be a choice with one option in it — so the list
@@ -4459,7 +4459,7 @@
           <!-- Each feature's numbers, accuracy and last judgments live on the
                dashboard; the card says where, in one line. -->
           <p class="settings-jev-dashboard settings-row-desc">
-            <span data-i18n="settings.typesafe.dashboardLine">기능별 사용 현황과 정확도는 Jev 대시보드에서 봅니다.</span>
+            <span data-i18n="settings.typesafe.dashboardLine">기능별 사용 현황과 정확도는 의사결정 모델에서 봅니다.</span>
             <button class="settings-jev-link" type="button" id="jev-open-dashboard" data-i18n="settings.typesafe.openDashboard">대시보드 열기</button>
           </p>
           </details>
@@ -6101,7 +6101,7 @@
              locale; anything a person would type in their own language is
              already written on the page. -->
         <section class="settings-pane" data-pane="stats"
-                 data-keywords="claude codex opencode grok antigravity anthropic openai xai kimi token tokens cache subscription credits" hidden>
+                 data-keywords="claude codex opencode grok anthropic openai xai kimi token tokens cache subscription credits" hidden>
         <header class="settings-section-head">
           <h2 class="settings-section-title" data-i18n="settings.stats.title">통계 및 사용량</h2>
           <p class="settings-section-desc" data-i18n="settings.stats.about">
@@ -6860,17 +6860,6 @@
           </label>
         </div>
         <div class="settings-option-row settings-option-row--copy">
-          <label class="settings-check" for="status-bar-antigravity">
-            <input type="checkbox" id="status-bar-antigravity" data-status-bar-item="antigravity" />
-            <span>
-              <span class="settings-label" data-i18n="settings.statusBar.antigravity">Antigravity 사용량</span>
-              <span class="settings-row-desc" data-i18n="settings.statusBar.antigravityHint">
-                zo의 Google 로그인으로 Antigravity 모델별 쿼터를 표시합니다.
-              </span>
-            </span>
-          </label>
-        </div>
-        <div class="settings-option-row settings-option-row--copy">
           <label class="settings-check" for="status-bar-kimi">
             <input type="checkbox" id="status-bar-kimi" data-status-bar-item="kimi" />
             <span>
@@ -7526,15 +7515,9 @@
         <span class="sb-figure sb-claude-pct" id="sb-codex-pct" hidden></span>
         <svg class="icon sb-claude-warn" id="sb-codex-warn" hidden aria-hidden="true"><use href="#i-alert"></use></svg>
       </span>
-      <!-- Antigravity reads the Google login saved by zo. -->
-      <span class="sb-claude" id="sb-antigravity" hidden>
-        <span class="sb-claude-ico" id="sb-antigravity-ico"></span>
-        <span class="sb-usage-bar" id="sb-antigravity-bar" hidden><span class="sb-usage-fill" id="sb-antigravity-fill"></span></span>
-        <span class="sb-figure sb-claude-pct" id="sb-antigravity-pct" hidden></span>
-        <svg class="icon sb-claude-warn" id="sb-antigravity-warn" hidden aria-hidden="true"><use href="#i-alert"></use></svg>
-      </span>
-      <!-- Kimi after Antigravity, still Orca's own bar order
-           (`status-bar-defaults.ts:3-15`). Hidden until it has something to
+      <!-- Kimi after Codex — Orca's own bar order (`status-bar-defaults.ts:3-15`)
+           less its Antigravity slot: that gauge spent the shared Google login
+           on a quota API and went 2026-10-17 (t-62187). Hidden until it has something to
            say: a machine with no Kimi CLI on it should not carry an empty
            segment. -->
       <span class="sb-claude" id="sb-kimi" hidden>

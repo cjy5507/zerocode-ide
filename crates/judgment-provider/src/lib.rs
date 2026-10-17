@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::Read;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -288,6 +289,66 @@ fn valid_model(model: &str) -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Limits>,
+}
+
+/// What a local server declared about the model it serves: the token limits
+/// of the process that loaded it, that process's runtime build, and the
+/// server start that loaded it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Limits {
+    pub model: String,
+    pub runtime: String,
+    pub generation: String,
+    pub tokens: TokenLimits,
+}
+
+/// Counts in the loaded model's own tokens: `max_len`, the longest input it
+/// takes, and `head_max_len`, each question's head budget, when its runtime
+/// has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TokenLimits {
+    pub max_len: NonZeroU64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_max_len: Option<NonZeroU64>,
+}
+
+impl TokenLimits {
+    /// The counts `tokens` declares, or `None` unless its `max_len`, and its
+    /// `head_max_len` when it has one, are positive integers.
+    #[must_use]
+    pub fn read(tokens: &Value) -> Option<Self> {
+        let count = |count: &Value| count.as_u64().and_then(NonZeroU64::new);
+        let head_max_len = match tokens.get("head_max_len") {
+            Some(head_max_len) => Some(count(head_max_len)?),
+            None => None,
+        };
+        Some(Self {
+            max_len: count(tokens.get("max_len")?)?,
+            head_max_len,
+        })
+    }
+}
+
+impl Limits {
+    /// The limits `limits` declares for model `id`, or `None` unless they name
+    /// that model, a runtime build, a server start and usable token counts.
+    fn read(limits: &Value, id: &str) -> Option<Self> {
+        let name = |key: &str| {
+            limits
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|name| valid_model(name))
+                .map(str::to_owned)
+        };
+        Some(Self {
+            model: name("model").filter(|model| model == id)?,
+            runtime: name("runtime")?,
+            generation: name("generation")?,
+            tokens: TokenLimits::read(limits.get("tokens")?)?,
+        })
+    }
 }
 
 pub fn read_models(body: &[u8]) -> Result<Vec<Model>, Refusal> {
@@ -303,7 +364,7 @@ pub fn read_models(body: &[u8]) -> Result<Vec<Model>, Refusal> {
     if entries.len() > MAX_MODELS {
         return Err(Refusal::TooLarge);
     }
-    let mut models = std::collections::BTreeSet::new();
+    let mut models = std::collections::BTreeMap::new();
     for entry in entries {
         let name = entry
             .as_str()
@@ -313,9 +374,24 @@ pub fn read_models(body: &[u8]) -> Result<Vec<Model>, Refusal> {
         if !valid_model(name) {
             return Err(Refusal::Model);
         }
-        models.insert(name.to_string());
+        let limits = entry
+            .get("limits")
+            .and_then(|limits| Limits::read(limits, name));
+        match models.entry(name.to_string()) {
+            std::collections::btree_map::Entry::Vacant(model) => {
+                model.insert(limits);
+            }
+            std::collections::btree_map::Entry::Occupied(mut model) => {
+                if *model.get() != limits {
+                    model.insert(None);
+                }
+            }
+        }
     }
-    Ok(models.into_iter().map(|id| Model { id }).collect())
+    Ok(models
+        .into_iter()
+        .map(|(id, limits)| Model { id, limits })
+        .collect())
 }
 
 #[cfg(test)]

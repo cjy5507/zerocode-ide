@@ -889,6 +889,20 @@ async function redesignNoWorkPerToken(browser, origin, ok) {
         await frame();
       };
       const paints = () => ({ rail: rail?.__paints ?? null, stack: stack?.__paints ?? null });
+      // The clock is held while the words are counted: a beat landing in the window parks (answered to no one, counted
+      // by no one) until the count is read, then every parked beat is answered once so no latch stays set for the
+      // scenes after this one. The wire is not the clock — `wire_log` carries the deltas and keeps answering.
+      // And the checkout's status is read before the count, not during it: the stack's git fact carries the
+      // checkout's change count, null until `scm_status` has answered for it, 0 after — that one step, landing
+      // inside the window, painted the stack once (l39 g5, 10-17, twice: factsMoved [git]). Awaited here, the
+      // same answer later moves nothing.
+      if (typeof refreshScm === "function") await refreshScm();
+      await frame();
+      await frame();
+      const held = window.__HOLD_POLLERS__;
+      const wireWasClock = window.__POLLERS__?.delete("wire_log") ?? false;
+      window.__HOLD_POLLERS__ = true;
+      try {
       // Up the list: the reader is away from the foot, so nothing the words do moves the rows.
       list.scrollTop = Math.floor(list.scrollHeight / 3);
       list.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true }));
@@ -906,10 +920,13 @@ async function redesignNoWorkPerToken(browser, origin, ok) {
       await new Promise((done) => setTimeout(done, 120));
       const atFoot = paints();
       // What the following window moved, for a failure: which facts of the stack changed (a token moves the words; a poll
-      // moves the checkout, the `git` fact), and the poll commands the clock sent inside the window. The clock is not held
-      // here: whether a poll's value moved is read from this detail first.
+      // moves the checkout, the `git` fact), and the clock's poll commands answered inside the window. A clock beat is
+      // forced into the window, as the window's own clock lands one at its phase (l39 g5, 10-17, twice: the checkout's
+      // stamp moved and the stack painted once): no beat may be answered while the words are counted.
       const factsBefore = stack?.__said ?? null;
       const callsBefore = { ...(window.__COUNTS__ ?? {}) };
+      window.__ANSWER__.worktree_stamp = () => `redesign-${Date.now()}`;
+      void lookForCheckoutsNobodyAskedFor();
       await feed(50);
       const following = paints();
       const factsAfter = stack?.__said ?? null;
@@ -926,13 +943,28 @@ async function redesignNoWorkPerToken(browser, origin, ok) {
         factsMoved: moved(factsBefore, factsAfter),
         pollsSent: Object.keys(callsAfter).filter((name) => window.__POLLERS__?.has(name)
           && (callsAfter[name] ?? 0) > (callsBefore[name] ?? 0)),
+        // The wire is not the clock: `wire_log` is how the fifty deltas arrive, and it is counted apart.
+        clockAnswered: Object.keys(callsAfter).filter((name) => name !== "wire_log" && window.__POLLERS__?.has(name)
+          && (callsAfter[name] ?? 0) > (callsBefore[name] ?? 0)),
+        beatsParked: window.__PARKED__?.length ?? 0,
       };
+      } finally {
+        delete window.__ANSWER__.worktree_stamp;
+        if (wireWasClock) window.__POLLERS__.add("wire_log");
+        window.__HOLD_POLLERS__ = held;
+        window.__RELEASE_POLLERS__?.();
+      }
     });
     ok(
       "R8/R9: fifty streamed deltas paint the rail and the stack zero times; following the words, the stack still never paints",
       seen.stands && seen.before.rail !== null && seen.away.rail === seen.before.rail && seen.away.stack === seen.before.stack &&
         seen.followingStack === 0,
       JSON.stringify(seen),
+    );
+    ok(
+      "R8/R9: the following window holds the clock — a beat forced into it is answered to no one while the words are counted",
+      seen.clockAnswered.length === 0,
+      JSON.stringify({ clockAnswered: seen.clockAnswered, pollsSent: seen.pollsSent, factsMoved: seen.factsMoved }),
     );
     ok("R8/R9: the streaming count raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {

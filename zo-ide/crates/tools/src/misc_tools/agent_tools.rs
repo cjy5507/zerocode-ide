@@ -210,7 +210,7 @@ pub(crate) struct AgentInput {
     pub background: Option<bool>,
     /// Set by the workflow engine so its sub-agents use the higher
     /// workflow-specific concurrency cap (`ZO_WORKFLOW_MAX_CONCURRENCY`,
-    /// default `min(16, cores-2)`) instead of the shared `SpawnMultiAgent`
+    /// default `min(16, max(cores-2, 4))`) instead of the shared `SpawnMultiAgent`
     /// semaphore (default 1, tuned for rate-limit safety). Never set from
     /// external tool input — `#[serde(default)]` keeps it false there.
     #[serde(default)]

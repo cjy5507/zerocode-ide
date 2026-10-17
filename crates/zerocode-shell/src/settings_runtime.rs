@@ -162,24 +162,25 @@ pub(super) mod setting_key {
 }
 
 /// Status fields ZeroCode can actually render, in Orca's own default
-/// order (`status-bar-defaults.ts:3-15` — claude, codex, antigravity,
-/// … resource-usage, ports; every one of them ON out of the
-/// box). The five names between antigravity and resource-usage there —
-/// opencode-go, kimi, minimax, grok, ssh — arrive here the day their
-/// segments do: a settings switch that can never paint a segment is not
-/// an available item. Caffeinate is absent on purpose, not for lack of a
-/// segment: Orca draws it OUTSIDE this catalog, always on with no
+/// order (`status-bar-defaults.ts:3-15` — claude, codex, … resource-usage,
+/// ports; every one of them ON out of the box). A name there whose
+/// segment this window does not draw — minimax, ssh — arrives here the
+/// day its segment does: a settings switch that can never paint a segment
+/// is not an available item. Orca's antigravity is absent on purpose: the
+/// gauge behind it spent the subscription Google login zo and the window
+/// share on a product API call and was removed (2026-10-17, t-62187); a
+/// stored list that still names it is intersected with this catalog and
+/// the name is skipped. Caffeinate is absent on purpose too, not for lack
+/// of a segment: Orca draws it OUTSIDE this catalog, always on with no
 /// checkbox (`StatusBar.tsx:2393`, and none in :2456-2571's list).
 ///
 /// This list IS the `set_status_bar_item` gate, so it must move in step
-/// with the window's `STATUS_BAR_ITEM_CATALOG` — it did not when the
-/// Antigravity gauge landed, and its toggle was being refused
-/// by the very backend that painted them (caught 2026-08-18 while seating
-/// caffeinate).
+/// with the window's `STATUS_BAR_ITEM_CATALOG` — it did not when a gauge
+/// landed in 2026-08, and its toggle was being refused by the very
+/// backend that painted it (caught 2026-08-18 while seating caffeinate).
 pub(super) const STATUS_BAR_ITEMS: &[&str] = &[
     "claude",
     "codex",
-    "antigravity",
     "kimi",
     "grok",
     "opencode-go",
@@ -208,8 +209,9 @@ pub(super) fn normalize_status_bar_items(items: Vec<String>) -> Vec<String> {
 /// [`normalize_status_bar_items`] intersects, which means a name missing from
 /// a stored list is indistinguishable from one the person switched off — and
 /// so an item that ships AFTER a list was written can never appear. That is
-/// not hypothetical: four gauges (antigravity, kimi, grok,
-/// opencode-go) joined this catalog after most stored lists were written, and
+/// not hypothetical: the gauges that shipped later (kimi, grok, opencode-go —
+/// and antigravity, since removed) joined this catalog after most stored
+/// lists were written, and
 /// on those installs their settings checkboxes read unchecked, ticking them
 /// did nothing anybody could see, and no road existed that would ever add
 /// them. "Antigravity never shows up" was this, not the OAuth gate below it.

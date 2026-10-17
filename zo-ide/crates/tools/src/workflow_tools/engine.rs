@@ -86,7 +86,8 @@ pub(crate) trait AgentBackend {
         false
     }
     /// How many agents of one phase may be live at once. The machine's answer
-    /// (`ZO_WORKFLOW_MAX_CONCURRENCY`, else cores minus two) unless a backend
+    /// (`ZO_WORKFLOW_MAX_CONCURRENCY`, else cores minus two but at least four)
+    /// unless a backend
     /// states its own — a test backend does, so what it expects of the engine
     /// does not depend on the core count of whoever runs it.
     fn concurrency_window(&self) -> usize {
