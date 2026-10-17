@@ -360,13 +360,12 @@ type AskUsage = for<'a> fn(State<'a, AppState>, bool) -> UsageReport;
 /// (`zerocode_core::orchestration::quota_gauge_for`), and the command the
 /// status bar asks it through — one table, so the beat's re-read and the
 /// cache it reads name the same gauges (t-6427).
-pub(crate) const USAGE_ASKS: [(&str, AskUsage); 6] = [
+pub(crate) const USAGE_ASKS: [(&str, AskUsage); 5] = [
     ("claude", claude_usage),
     ("codex", codex_usage),
     ("opencode", opencode_usage),
     ("grok", grok_usage),
     ("kimi", kimi_usage),
-    ("antigravity", antigravity_usage),
 ];
 
 /// Ask one gauge to read its provider again, never forced: the refetch
@@ -563,11 +562,6 @@ pub(crate) fn kimi_usage(state: State<'_, AppState>, force: bool) -> UsageReport
         force,
         move || Scanned::api(usage_kimi::scan(epoch_ms_now())),
     )
-}
-
-#[tauri::command(async)]
-pub(crate) fn antigravity_usage(state: State<'_, AppState>, force: bool) -> UsageReport {
-    antigravity_usage_report(&state, force)
 }
 
 #[tauri::command(async)]
@@ -1044,7 +1038,9 @@ pub(crate) fn remove_claude_account(
  * owns their browser round trip, so those cards spawn it and wait; Google has
  * no such CLI here — zo does its own `zo login google` — so the window runs
  * the OAuth flow ([`google_login`]) and writes the result into the file zo
- * reads. One login, shared: the Antigravity gauge and zo both use it.
+ * reads. One login, shared with zo — the window makes it and shows who is
+ * signed in, and spends it on nothing: the Antigravity gauge that read it for
+ * quota went 2026-10-17 (t-62187, 「구독 OAuth로 제품 호출 금지」).
  *
  * Two commands rather than one because the CONSENT SCREEN belongs on this
  * surface: `google_login_start` binds the loopback seat and hands back the

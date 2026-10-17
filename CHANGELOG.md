@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.75] — 2026-10-17
+
+- 창의 Antigravity 사용량 게이지를 없앴습니다 — 창이 zo와 함께 쓰는 Google 로그인으로 Google 쿼터 API(v1internal)를 부르던 길이라 「구독 로그인으로 제품 호출 금지」에 맞지 않았습니다. 게이지 갱신 한 번에 나가던 요청 2건 → 0건, 상태 막대 항목 8 → 7, Google 토큰 갱신 길 2 → 1(설정 카드만). 설정의 Google 계정 카드는 그대로이고, 그 안내 문장도 이제 zo만 말합니다 (t-62187, t-62313)
+- 「Jev 대시보드」의 이름이 「의사결정 모델」이 됐습니다 — 레일 탭·툴팁·페이지 제목·TypeSafe 카드 문구(en Decisions · ja 意思決定 · zh 决策 · es Decisiones). 설정의 「Decision model」 문구는 그대로입니다 (t-62188)
+- zo: 워크플로가 코어가 적은 기계(2~5코어)에서도 도우미를 최소 넷 동시에 돌립니다 — 기본값이 코어−2에서 max(코어−2, 4)로(상한 16, ZO_WORKFLOW_MAX_CONCURRENCY가 우선). 6코어 이상은 그대로입니다 (t-20572, ZO)
+
 ## [1.1.74] — 2026-10-17
 
 - Jev 관리 판단 서버: 런타임이 머리를 잘라 낸 질문을 거절한다 — 브리지가 런타임의 build_head로 모든 머리를 재어 지시문이 잘렸거나 선택지가 48토큰 상한에 닿은 질문을 usage.truncated_questions에 적고, 서버는 그 질문에 502 provider_context_truncated로 답하며, 준비 프레임이 읽어 들인 max_len·head_max_len을 모델 id·런타임 지문과 함께 선언해 /v1/models가 그 한도를 데이터로 보여 준다(고정 런타임 계약 시험 1 passed) (t-58744, ZO)

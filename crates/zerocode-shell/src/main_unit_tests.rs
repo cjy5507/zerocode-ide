@@ -2421,6 +2421,10 @@ fn status_bar_items_are_one_available_catalog_and_item_patch() {
             "unknown".to_string(),
             "claude".to_string(),
             "ports".to_string(),
+            // An id a stored list may still hold from an install that had the
+            // Antigravity gauge (removed 2026-10-17, t-62187): skipped like
+            // any other name the catalog does not know, never an error.
+            "antigravity".to_string(),
         ]),
         ["claude", "ports"]
     );
@@ -6453,7 +6457,7 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
     ];
     let mut seen = Vec::new();
     adopt_unseen_status_bar_items(&mut items, &mut seen);
-    for gauge in ["antigravity", "kimi", "grok", "opencode-go"] {
+    for gauge in ["kimi", "grok", "opencode-go"] {
         assert!(
             items.iter().any(|held| held == gauge),
             "`{gauge}` shipped after this list was written and still \

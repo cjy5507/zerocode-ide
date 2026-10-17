@@ -2367,46 +2367,6 @@ pub(super) fn kimi_usage_cache(
 pub(super) static KIMI_USAGE_SCANNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-pub(super) fn antigravity_usage_file(local_data_root: &Path) -> PathBuf {
-    local_data_root.join(artifact_file::ANTIGRAVITY_USAGE)
-}
-
-pub(super) fn antigravity_usage_cache(
-    local_data_root: &Path,
-) -> &'static Mutex<Option<usage::ProviderUsage>> {
-    static CACHE: std::sync::OnceLock<Mutex<Option<usage::ProviderUsage>>> =
-        std::sync::OnceLock::new();
-    CACHE.get_or_init(|| {
-        Mutex::new(
-            std::fs::read_to_string(antigravity_usage_file(local_data_root))
-                .ok()
-                .and_then(|text| serde_json::from_str(&text).ok()),
-        )
-    })
-}
-
-pub(super) static ANTIGRAVITY_USAGE_SCANNING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// The same never-block contract as [`claude_usage`] and [`codex_usage`],
-/// against Google's quota API — no hidden terminal at all, but the same
-/// cache file, in-flight flag and refetch floor, so all gauges age by one rule.
-pub(super) fn antigravity_usage_report(state: &State<'_, AppState>, force: bool) -> UsageReport {
-    let local_data_root = state.local_data_root().to_path_buf();
-    usage_report(
-        UsageGauge {
-            provider: "antigravity",
-            cache: antigravity_usage_cache(&local_data_root),
-            file: antigravity_usage_file(&local_data_root),
-            scanning: &ANTIGRAVITY_USAGE_SCANNING,
-            log_root: local_data_root,
-        },
-        |_| true,
-        force,
-        move || Scanned::api(usage_antigravity::scan(epoch_ms_now())),
-    )
-}
-
 /* ---- CI checks --------------------------------------------------------------
  *
  * What CI says about the review this checkout is on. The normalisers are in

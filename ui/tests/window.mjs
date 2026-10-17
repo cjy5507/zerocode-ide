@@ -14592,7 +14592,6 @@ ok(
   JSON.stringify(statusBarChoices.offered) === JSON.stringify([
     { item: "claude", checked: true },
     { item: "codex", checked: true },
-    { item: "antigravity", checked: false },
     { item: "kimi", checked: false },
     { item: "grok", checked: false },
     { item: "opencode-go", checked: false },
@@ -24171,7 +24170,7 @@ const settingsUsage = await page.evaluate(async () => {
 ok(
   "Stats & Usage reuses the provider read model and refresh action without a setting write",
   JSON.stringify(settingsUsage.options)
-    === JSON.stringify(["claude", "codex", "antigravity", "kimi", "grok", "opencode-go"]) &&
+    === JSON.stringify(["claude", "codex", "kimi", "grok", "opencode-go"]) &&
     settingsUsage.rows === 2 && settingsUsage.refreshed === 1,
   JSON.stringify(settingsUsage),
 );
@@ -30658,7 +30657,7 @@ const googleCard = await page.evaluate(async () => {
   }
 });
 ok(
-  "the Google card signs in through the system browser and re-reads the gauge once",
+  "the Google card signs in through the system browser and re-reads no gauge — the Antigravity gauge is gone (t-62187)",
   googleCard.out.count === 1 &&
     googleCard.noRadio &&
     googleCard.out.who === googleCard.words.signedOut &&
@@ -30676,13 +30675,13 @@ ok(
     googleCard.waitingNote === googleCard.expectSystemBrowserNote &&
     googleCard.systemUrl === googleCard.systemUrlAtStart &&
     googleCard.forcedWhileWaiting === 0 &&
-    // 끝난 뒤: 이름, 두 버튼, 그리고 강제 재조회 딱 한 번.
+    // 끝난 뒤: 이름, 두 버튼. 다시 읽을 게이지는 없다(t-62187이 Antigravity 게이지를 없앰).
     googleCard.signedIn.who === "me@example.com" &&
     googleCard.signedIn.under === "/h/.zo/credentials.json" &&
     JSON.stringify(googleCard.signedIn.buttons) ===
       JSON.stringify([googleCard.words.relogin, googleCard.words.logout]) &&
     googleCard.signedIn.alarmed === false &&
-    googleCard.forcedAfterLogin === 1 &&
+    googleCard.forcedAfterLogin === 0 &&
     // 부족한 로그인 둘은 배지와 붉음과 문장을 함께 입는다.
     googleCard.narrow.alarmed === true &&
     googleCard.narrow.badge === googleCard.words.badge &&
@@ -30690,15 +30689,15 @@ ok(
     googleCard.narrow.under === googleCard.words.narrow &&
     googleCard.stranded.alarmed === true &&
     googleCard.stranded.badge === googleCard.words.badge &&
-    // 로그아웃: 물었고, 파일을 이름 댔고, 다시 읽었다.
+    // 로그아웃: 물었고, 파일을 이름 댔고, 게이지는 묻지 않는다.
     googleCard.asked &&
     googleCard.askedNamesTheFile &&
     googleCard.afterLogout.who === googleCard.words.signedOut &&
-    googleCard.forcedAfterLogout === 2 &&
+    googleCard.forcedAfterLogout === 0 &&
     // 취소: 백엔드에 닿았고, 게이지는 그대로다.
     googleCard.cancels === 1 &&
     googleCard.afterCancel.who === googleCard.words.signedOut &&
-    googleCard.forcedAfterCancel === 2,
+    googleCard.forcedAfterCancel === 0,
   JSON.stringify(googleCard),
 );
 
@@ -51160,10 +51159,10 @@ const kimiGauge = await page.evaluate(async () => {
   // 카탈로그와 창의 프로바이더 표가 같은 이름을 안다.
   seen.inCatalog = STATUS_BAR_ITEM_CATALOG.some((item) => item.id === "kimi");
   seen.inProviders = USAGE_PROVIDERS.some((one) => one.id === "kimi" && one.command === "kimi_usage");
-  // 그리고 Orca 의 바 순서: antigravity 다음, resource-usage 앞.
+  // 그리고 Orca 의 바 순서: codex 다음(Antigravity 게이지가 빠진 자리, t-62187), resource-usage 앞.
   const order = STATUS_BAR_ITEM_CATALOG.map((item) => item.id);
   seen.ordered =
-    order.indexOf("kimi") === order.indexOf("antigravity") + 1 &&
+    order.indexOf("kimi") === order.indexOf("codex") + 1 &&
     order.indexOf("kimi") < order.indexOf("resource-usage");
   const provider = USAGE_PROVIDERS.find((one) => one.id === "kimi");
   const button = el("sb-kimi");

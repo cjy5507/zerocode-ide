@@ -668,8 +668,8 @@ pub(crate) struct SpawnMultiAgentInput {
     pub agents: Vec<Value>,
     /// Permit-before-spawn window: at most this many sub-agents run at once, so a
     /// flat fan-out can no longer create N OS threads eagerly (BUG-R11/D4). `None`
-    /// uses the workflow execution window (`min(16, cores-2)`, the Claude Code
-    /// model) — later members queue for a freed slot. Clamped to
+    /// uses the workflow execution window (`min(16, max(cores-2, 4))`) — later
+    /// members queue for a freed slot. Clamped to
     /// `[1, MAX_SPAWN_MULTI_AGENT_AGENTS]`. Lenient like `agents`: models emit
     /// `"3"` (string) or `3.0` (integral float) instead of a bare integer, and a
     /// strict parse rejected the whole fan-out call.
@@ -716,7 +716,7 @@ pub(crate) struct SpawnMultiAgentInput {
 pub(crate) const MAX_SPAWN_MULTI_AGENT_AGENTS: usize = 64;
 
 /// Resolve the effective permit-before-spawn window. Defaults to the workflow
-/// execution bound (`min(16, cores-2)`, the Claude Code model): a large
+/// execution bound (`min(16, max(cores-2, 4))`): a large
 /// fan-out spawns that many members immediately and streams the rest in as
 /// slots free up, instead of opening one OS thread per member eagerly
 /// (BUG-R11/D4). An explicit `concurrency` request may tighten the window to 1
