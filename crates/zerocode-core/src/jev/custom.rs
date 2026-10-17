@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
+use std::path::Path;
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -464,11 +465,66 @@ pub fn version_of(bytes: &[u8]) -> String {
 #[must_use]
 pub fn check(definition: &Definition) -> Vec<Refusal> {
     let mut refused = Vec::new();
+    if !is_id(&definition.id) {
+        refused.push(Refusal::Id);
+    }
+    if !fits(&definition.name, NAME_MAX_CHARS) {
+        refused.push(Refusal::NameLength);
+    }
+    if !fits(&definition.question, QUESTION_MAX_CHARS) {
+        refused.push(Refusal::QuestionLength);
+    }
+    let offered = match &definition.answer {
+        Answer::YesNo { .. } => None,
+        Answer::Choice(options) => Some(options.len()),
+        Answer::Score(levels) => Some(levels.len()),
+    };
+    if offered.is_some_and(|count| !OPTIONS.contains(&count)) {
+        refused.push(Refusal::OptionCount);
+    }
+    if let Answer::Choice(options) = &definition.answer {
+        refused.extend(
+            options
+                .keys()
+                .filter(|name| !fits(name, NAME_MAX_CHARS) || name.as_str() == NOT_APPLICABLE)
+                .map(|name| Refusal::OptionName(name.clone())),
+        );
+    }
+    refused.extend(
+        definition
+            .meanings()
+            .into_iter()
+            .filter(|(_, meaning)| !fits(meaning, MEANING_MAX_CHARS))
+            .map(|(field, _)| Refusal::MeaningLength(field)),
+    );
     for (field, text) in definition.words() {
         refused.extend(secret_lines(text).map(|line| Refusal::SecretLine {
             field: field.clone(),
             line,
         }));
+    }
+    let readable = definition.at.inputs();
+    if definition.reads.is_empty()
+        || definition
+            .reads
+            .iter()
+            .any(|input| !readable.contains(input))
+    {
+        refused.push(Refusal::Reads);
+    }
+    if let Folders::Chosen(folders) = &definition.folders
+        && (folders.is_empty()
+            || folders
+                .iter()
+                .any(|folder| !Path::new(folder).is_absolute()))
+    {
+        refused.push(Refusal::Folders);
+    }
+    if !ACT_FROM.contains(&definition.act_from) {
+        refused.push(Refusal::ActFrom);
+    }
+    if !HOURLY_REQUESTS.contains(&definition.max_per_hour) {
+        refused.push(Refusal::MaxPerHour);
     }
     refused
 }
@@ -510,6 +566,11 @@ fn is_id(id: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     })
+}
+
+/// Whether `text` holds something and at most `most` characters.
+fn fits(text: &str, most: usize) -> bool {
+    !text.trim().is_empty() && text.chars().count() <= most
 }
 
 /// The lines of `text` that may carry a credential, counted from one: split

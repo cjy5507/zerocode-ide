@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::{Definition, MODES, Refusal, SCHEMA_VERSION, check, is_id, version_of};
+use super::{DECISIONS_MAX, Definition, MODES, Refusal, SCHEMA_VERSION, check, is_id, version_of};
 use crate::civil;
 use crate::jev::JevMode;
 
@@ -44,6 +44,7 @@ const PRIVATE_MODE: u32 = 0o600;
 
 const INDEX: &str = "index.json";
 const DEFINITIONS: &str = "definitions";
+const TRASH: &str = "trash";
 const JSON: &str = "json";
 
 /// One decision as the index lists it.
@@ -113,11 +114,28 @@ pub fn create(
 ) -> Result<String, Error> {
     let root = root(home);
     let mut index = read_index(&root)?;
-    let refused = check(definition);
+    let mut refused = check(definition);
+    if !MODES.contains(&mode) {
+        refused.push(Refusal::Mode);
+    }
+    if index.iter().any(|entry| entry.id == definition.id)
+        || (is_id(&definition.id) && root.join(TRASH).join(json(&definition.id)).exists())
+    {
+        refused.push(Refusal::IdTaken);
+    }
+    if name_taken(&index, definition) {
+        refused.push(Refusal::NameTaken);
+    }
+    if index.len() >= DECISIONS_MAX {
+        refused.push(Refusal::TooMany);
+    }
+    let bytes = definition.to_bytes().map_err(io::Error::other)?;
+    if bytes.len() > DEFINITION_MAX_BYTES {
+        refused.push(Refusal::TooLarge);
+    }
     if !refused.is_empty() {
         return Err(Error::Refused(refused));
     }
-    let bytes = definition.to_bytes().map_err(io::Error::other)?;
     let version = write_definition(&root, &bytes)?;
     let stamp = civil::iso_utc_of(now_ms);
     index.push(Entry {
@@ -200,6 +218,12 @@ fn write_definition(root: &Path, bytes: &[u8]) -> io::Result<String> {
 
 fn well_named(entry: &Entry) -> bool {
     is_id(&entry.id) && is_version(&entry.definition)
+}
+
+fn name_taken(index: &[Entry], definition: &Definition) -> bool {
+    index
+        .iter()
+        .any(|entry| entry.id != definition.id && entry.name.trim() == definition.name.trim())
 }
 
 fn is_version(word: &str) -> bool {
