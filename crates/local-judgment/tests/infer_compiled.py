@@ -30,7 +30,9 @@ started = time.perf_counter()
 adapter = bridge["LayaAdapter"](initial)
 startup_ms = (time.perf_counter() - started) * 1000
 native_predict = adapter.agent.predict
+native_forward = adapter.agent._forward
 calls = []
+forwards = []
 
 
 def counted_predict(state, questions):
@@ -41,10 +43,21 @@ def counted_predict(state, questions):
 
 
 adapter.agent.predict = counted_predict
+
+
+def counted_forward(batch):
+    started = time.perf_counter()
+    result = native_forward(batch)
+    forwards.append({"elapsed_ms": (time.perf_counter() - started) * 1000})
+    return result
+
+
+adapter.agent._forward = counted_forward
 rows = []
 for fixture in json.load(sys.stdin):
     for repetition in range(3):
         calls.clear()
+        forwards.clear()
         started = time.perf_counter()
         result = adapter.predict(fixture["request"])
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -52,7 +65,7 @@ for fixture in json.load(sys.stdin):
         rows.append({
             "shape": fixture["shape"], "repetition": repetition,
             "request_sha256": hashlib.sha256(json.dumps(fixture["request"], sort_keys=True).encode()).hexdigest(),
-            "elapsed_ms": elapsed_ms, "calls": list(calls), "result": result,
+            "elapsed_ms": elapsed_ms, "calls": list(calls), "forwards": list(forwards), "result": result,
         })
 print(json.dumps({
     "startup_ms": startup_ms, "rows": rows, "runtime_executable": sys.executable,
