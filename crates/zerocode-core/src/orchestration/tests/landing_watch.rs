@@ -388,6 +388,41 @@ fn a_merged_checkout_nobody_is_in_is_told_as_cleanable_after_an_hour() {
     let _ = handed.pane;
 }
 
+/// No witness is no word from git: the window gives none for a removed folder, or for an answer that
+/// stood on a compare oid it no longer holds as today's (t-44451). Read as nothing, it never makes a
+/// landing, a disagreement or a folder to clean up.
+#[test]
+fn no_witness_is_never_read_as_landed_unlanded_or_cleanable() {
+    let reasons = |bench: &Bench| {
+        news(bench, MessageKind::LandingStalled)
+            .iter()
+            .map(|told| body(told)["reason"].as_str().unwrap_or("").to_string())
+            .collect::<Vec<_>>()
+    };
+    let mut merged = Bench::new();
+    let handed = handed_in(&mut merged, CHECKOUT, HEAD);
+    let merged_at = review(
+        &mut merged,
+        &handed,
+        &format!("\"verified\":true,\"mergeHead\":\"{HEAD}\""),
+    );
+    assert_eq!(
+        merged
+            .ledger
+            .landing_watch(&[], merged_at + 10 * CLEANABLE_AFTER_MS),
+        0
+    );
+    assert!(reasons(&merged).is_empty(), "{:?}", reasons(&merged));
+
+    let mut verified = Bench::new();
+    let handed = handed_in(&mut verified, CHECKOUT, HEAD);
+    let verified_at = review(&mut verified, &handed, "\"verified\":true");
+    verified
+        .ledger
+        .landing_watch(&[], verified_at + 10 * MERGED_UNRECORDED_GRACE_MS);
+    assert_eq!(reasons(&verified), ["no_merge"]);
+}
+
 #[test]
 fn a_ledger_that_says_merged_where_git_has_no_such_head_is_told_at_once() {
     let mut bench = Bench::new();
