@@ -13609,6 +13609,45 @@ await test("on Windows the integration queue switch is locked and says why", asy
   }
 });
 
+/* The page that shows Jev's judgments is named for what it holds — the person's decision models — not
+ * for the engine (10-17, the person: 「Jev 대시보드」→「의사결정 모델」). Visible words only: the rail's tab,
+ * the page title and the TypeSafe card's line, in every language; ids, keys and file names keep their
+ * names. The settings' own "Decision model(s)" (settings.judgment.*, settings.managed.*) are another
+ * thing and stay; the page is "Decisions" in English so the two never read as one. */
+await test("the Jev page is named for the decisions it shows — the tab, the title and the TypeSafe card's line, in every language", async () => {
+  const names = { ko: "의사결정 모델", en: "Decisions", ja: "意思決定", zh: "决策", es: "Decisiones" };
+  const engineName = /대시보드|dashboard|ダッシュボード|仪表板|panel de jev/i;
+  const seen = {};
+  try {
+    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      await setQualityLocale(pageA, locale);
+      // Read where the person reads it, not through t() with a fallback of the test's own: Korean keeps no
+      // table row for these keys, so its words are the surfaces' own (the tab label, the page the rail
+      // opens, the card's line), and a fallback written here would only ever echo itself.
+      const words = await pageA.evaluate(() => {
+        const page = buildJevView();
+        return {
+          tab: tabLabel({ kind: "jev" }),
+          title: page.querySelector(".jev-title")?.textContent ?? null,
+          aria: page.getAttribute("aria-label"),
+          line: document.querySelector('[data-i18n="settings.typesafe.dashboardLine"]')?.textContent ?? null,
+          navSr: document.querySelector("#nav-jev .sr")?.textContent ?? null,
+          navTip: document.getElementById("nav-jev")?.dataset.tip ?? null,
+        };
+      });
+      seen[locale] = words;
+      const want = names[locale];
+      assert(words.tab === want && words.title === want && words.aria === want, `${locale}: the tab and the page's title say its name`, words);
+      assert(words.navSr === want, `${locale}: the rail's tab reads the page's name`, words);
+      assert(words.line?.includes(want) && !engineName.test(words.line), `${locale}: the TypeSafe card's line names the page`, words);
+      if (locale === "ko") assert(words.navTip === want, "ko: the rail's tip is the page's name", words);
+    }
+  } finally {
+    await setQualityLocale(pageA, "ko");
+  }
+  return JSON.stringify(seen);
+});
+
 /* The Google card speaks of what uses the sign-in now (t-62187 removed the Antigravity gauge): zo alone.
  * Its signed-out line and its hint name no gauge in any language. */
 await test("the Google card names only zo as the sign-in's user — no gauge, in every language", async () => {

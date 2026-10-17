@@ -9335,7 +9335,7 @@ function tabLabel(tab) {
   if (tab.kind === "knowledge") return t("knowledge.tab", "지식 그래프");
   if (tab.kind === "skills") return skillText("title");
   if (tab.kind === "artifacts") return t("artifacts.tab", "아티팩트");
-  if (tab.kind === "jev") return t("jev.tab", "Jev 대시보드");
+  if (tab.kind === "jev") return t("jev.tab", "의사결정 모델");
   if (tab.kind === "tokens") return t("tokens.tab", "토큰 사용량");
   if (tab.kind === "emulator") {
     return tab.deviceName || t("emulator.tab", "모바일 에뮬레이터");
