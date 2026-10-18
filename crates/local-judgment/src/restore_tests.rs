@@ -363,6 +363,7 @@ async fn restore_gate_skips_without_changing_state_and_has_a_live_control() {
         "off",
         "unmanaged",
         "missing_model",
+        "uncatalogued_model",
         "missing_runtime",
         "unverified_runtime",
         "unsupported",
@@ -379,6 +380,10 @@ async fn restore_gate_skips_without_changing_state_and_has_a_live_control() {
                     .unwrap();
                 fs::remove_file(Path::new(&directory).join(&fixture.models[0].files[0].path))
                     .unwrap();
+            }
+            "uncatalogued_model" => {
+                fixture.models.clear();
+                fixture.reopen_with_runtime(true);
             }
             "missing_runtime" => {
                 fs::remove_dir_all(fixture.data.join("managed-judgment/runtime")).unwrap()
@@ -452,7 +457,11 @@ async fn invalid_intents_skip_and_a_valid_intent_still_restores() {
         match case {
             "missing" => fs::remove_file(fixture.intent_path()).unwrap(),
             "corrupt" => fs::write(fixture.intent_path(), b"{").unwrap(),
-            "oversized" => fs::write(fixture.intent_path(), vec![b' '; 1025]).unwrap(),
+            "oversized" => {
+                let mut bytes = serde_json::to_vec(&intent).unwrap();
+                bytes.resize(1025, b' ');
+                fs::write(fixture.intent_path(), bytes).unwrap();
+            }
             _ => {
                 match case {
                     "unknown_field" => intent["unexpected"] = json!(true),
