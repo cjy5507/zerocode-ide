@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use local_judgment::{Binding, Manager, Snapshot, SourceInput, SourceInspection};
 use tauri::{AppHandle, Emitter, Manager as TauriManager};
@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, Manager as TauriManager};
 use crate::{AppState, api_routers, typesafe_settings};
 
 static SERVICE: OnceLock<Mutex<Option<Arc<Manager>>>> = OnceLock::new();
+static RESTORE_AT_BOOT: Once = Once::new();
 
 fn service(app: &AppHandle) -> Result<Arc<Manager>, String> {
     let mut service = SERVICE
@@ -32,6 +33,37 @@ fn service(app: &AppHandle) -> Result<Arc<Manager>, String> {
     .map_err(|error| error.to_string())?;
     *service = Some(manager.clone());
     Ok(manager)
+}
+
+pub(crate) fn restore_at_boot(app: &AppHandle) {
+    let app = app.clone();
+    RESTORE_AT_BOOT.call_once(|| {
+        tauri::async_runtime::spawn(async move {
+            let Ok(manager) = service(&app) else {
+                return;
+            };
+            let Some(path) = api_routers::zo_settings_path() else {
+                return;
+            };
+            let Ok(root) = api_routers::read_zo_settings_root(&path) else {
+                return;
+            };
+            let document = serde_json::Value::Object(root);
+            let allowed = manager
+                .restore_provider_identity()
+                .is_some_and(|identity| restore_allowed(&document, &identity));
+            let guard_path = path.clone();
+            let _ = manager.restore_guarded(
+                allowed,
+                (
+                    move |provider, expected, binding| {
+                        save_checked_provider(&path, provider, expected, binding)
+                    },
+                    move |action| guard_provider(&guard_path, action),
+                ),
+            );
+        });
+    });
 }
 
 pub(crate) fn shutdown() {
@@ -187,27 +219,32 @@ pub(crate) fn managed_judgment_switch_model(
                 move |provider, expected, binding| {
                     save_checked_provider(&path, provider, expected, binding)
                 },
-                move |action| {
-                    let mut action_error = None;
-                    typesafe_settings::with_provider_locked(&guard_path, || {
-                        action().map_err(|error| {
-                            action_error = Some(error);
-                            error.to_string()
-                        })
-                    })
-                    .map_err(|error| {
-                        action_error.unwrap_or_else(|| {
-                            if error == "settings_changed" {
-                                local_judgment::Error::SettingsChanged
-                            } else {
-                                local_judgment::Error::Storage
-                            }
-                        })
-                    })
-                },
+                move |action| guard_provider(&guard_path, action),
             ),
         )
         .map_err(|error| error.to_string())
+}
+
+fn guard_provider(
+    path: &Path,
+    action: &mut dyn FnMut() -> local_judgment::Result<()>,
+) -> local_judgment::Result<()> {
+    let mut action_error = None;
+    typesafe_settings::with_provider_locked(path, || {
+        action().map_err(|error| {
+            action_error = Some(error);
+            error.to_string()
+        })
+    })
+    .map_err(|error| {
+        action_error.unwrap_or_else(|| {
+            if error == "settings_changed" {
+                local_judgment::Error::SettingsChanged
+            } else {
+                local_judgment::Error::Storage
+            }
+        })
+    })
 }
 
 fn save_checked_provider(
@@ -271,8 +308,18 @@ pub(crate) fn managed_judgment_remove(
         .map_err(|error| error.to_string())
 }
 
-fn restore_allowed(_document: &serde_json::Value, _intent_identity: &str) -> bool {
-    false
+fn restore_allowed(document: &serde_json::Value, intent_identity: &str) -> bool {
+    let Ok(provider) = judgment_provider::Provider::from_root(document) else {
+        return false;
+    };
+    provider.kind == judgment_provider::ProviderKind::Local
+        && provider.identity() == intent_identity
+        && typesafe_settings::JevSwitch::of(document).on
+        && document
+            .get(zerocode_core::jev::SMART_SETTINGS_KEY)
+            .and_then(|smart| smart.get(local_judgment::MANAGED_MODEL_KEY))
+            .and_then(|binding| serde_json::from_value::<Binding>(binding.clone()).ok())
+            .is_some_and(|binding| binding.matches(&provider))
 }
 
 #[cfg(test)]

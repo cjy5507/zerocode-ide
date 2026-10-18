@@ -224,7 +224,7 @@ pub struct JevSwitch {
 }
 
 impl JevSwitch {
-    fn of(document: &Value) -> Self {
+    pub(crate) fn of(document: &Value) -> Self {
         let door = JevSettings::from_root(document);
         let folders = door.folders().count();
         let consented = door.everywhere() || folders > 0;
