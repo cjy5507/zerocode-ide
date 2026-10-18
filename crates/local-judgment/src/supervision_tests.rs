@@ -819,11 +819,21 @@ impl Recovering {
     /// status a read returns, which is what the window reads.
     async fn kept_end(&self, server: &str) -> Vec<(&'static str, Value, String)> {
         let told = self.ended(server).await["server"]["exit"].clone();
-        let record = self
-            .exits()
-            .into_iter()
-            .rfind(|record| record["serverId"] == server)
-            .unwrap_or_default();
+        let began = Instant::now();
+        let record = loop {
+            if let Some(record) = self
+                .exits()
+                .into_iter()
+                .rfind(|record| record["serverId"] == server)
+            {
+                break record;
+            }
+            assert!(
+                began.elapsed() < SETTLE,
+                "the exit event for {server} reached no journal row within {SETTLE:?}"
+            );
+            tokio::task::yield_now().await;
+        };
         let status = serde_json::to_value(self.manager.snapshot()).unwrap();
         vec![
             (
@@ -1709,6 +1719,40 @@ async fn a_line_still_open_when_the_runtime_is_first_asked_is_not_kept_in_part()
     withheld_everywhere(
         &fixture.kept_end(&server).await,
         &[ASKED_FIRST, "warming up for"],
+    );
+}
+
+#[tokio::test]
+async fn kept_end_waits_for_the_journal_row_after_the_exit_event() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let fixture = recovering();
+    let server = "delayed-exit";
+    let exit = json!({"stderr": [], "stderrWithheld": 1});
+    fixture.told.lock().unwrap().push(json!({
+        "server": {"id": server, "exit": exit},
+    }));
+    let mut reading = Box::pin(fixture.kept_end(server));
+    let first = {
+        let mut context = Context::from_waker(Waker::noop());
+        reading.as_mut().poll(&mut context)
+    };
+    let record = json!({"serverId": server, "stderr": [], "stderrWithheld": 1});
+    let journal = fixture.data.join("managed-judgment/server-exits.jsonl");
+    fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    fs::write(&journal, format!("{record}\n")).unwrap();
+    let kept = match first {
+        Poll::Ready(kept) => kept,
+        Poll::Pending => reading.await,
+    };
+    assert_eq!(
+        kept.iter()
+            .find(|(place, _, _)| *place == "server-exits.jsonl")
+            .unwrap()
+            .1,
+        record,
+        "kept_end returned before the exit event's journal row was written"
     );
 }
 

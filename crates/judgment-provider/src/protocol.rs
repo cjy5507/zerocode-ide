@@ -131,6 +131,9 @@ fn validate_answers(questions: &Value, response: &Value) -> Result<(), Refusal> 
         .get("truncated")
         .is_some_and(|flag| !flag.is_boolean())
         || usage
+            .get("deadline_budget_exceeded")
+            .is_some_and(|flag| !flag.is_boolean())
+        || usage
             .get("state_tokens_dropped")
             .is_some_and(|count| count.as_u64().is_none())
     {
@@ -160,6 +163,13 @@ fn validate_answers(questions: &Value, response: &Value) -> Result<(), Refusal> 
         })
     {
         return Err(Refusal::Truncated);
+    }
+    if usage
+        .get("deadline_budget_exceeded")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err(Refusal::DeadlineBudget);
     }
     let questions = questions.as_object().ok_or(Refusal::Request)?;
     let answers = response

@@ -564,3 +564,40 @@ fn an_oversized_answer_is_rejected_before_json_parsing() {
         Err(Refusal::TooLarge)
     );
 }
+
+#[test]
+fn a_deadline_budget_refusal_cannot_be_applied_as_a_complete_answer() {
+    let provider = local();
+    let prepared = provider.prepare(request(&provider)).unwrap();
+    let mut answer = response();
+    answer["usage"]["deadline_budget_exceeded"] = json!(true);
+    assert_eq!(
+        provider
+            .decode(&prepared, answer.to_string().into_bytes())
+            .map_err(Refusal::token),
+        Err("provider_deadline_budget"),
+        "a deadline-budget refusal was accepted as a complete answer"
+    );
+}
+
+#[test]
+fn a_malformed_deadline_budget_flag_is_not_a_decision() {
+    let provider = local();
+    let prepared = provider.prepare(request(&provider)).unwrap();
+    for flag in [Value::Null, json!("true"), json!(1), json!({})] {
+        let mut answer = response();
+        answer["usage"]["deadline_budget_exceeded"] = flag;
+        assert_eq!(
+            provider.decode(&prepared, answer.to_string().into_bytes()),
+            Err(Refusal::Response),
+            "a malformed deadline-budget flag was accepted"
+        );
+    }
+    let mut answer = response();
+    answer["usage"]["deadline_budget_exceeded"] = json!(false);
+    assert!(
+        provider
+            .decode(&prepared, answer.to_string().into_bytes())
+            .is_ok()
+    );
+}

@@ -72,6 +72,94 @@ impl Limits {
     };
 }
 
+#[derive(Default)]
+struct ResponseTime {
+    http: Option<Duration>,
+    pipe: Duration,
+    validation: Duration,
+}
+
+struct DeadlineOwner {
+    state: HttpState,
+    named: Option<String>,
+    armed: bool,
+    completed: Arc<AtomicBool>,
+}
+
+impl Drop for DeadlineOwner {
+    fn drop(&mut self) {
+        if self.armed && !self.completed.load(Ordering::Acquire) {
+            self.state.admission.close();
+            self.state
+                .engine
+                .stop_for(Stop::Deadline(self.named.take()));
+        }
+    }
+}
+
+fn caller_deadline(
+    headers: &HeaderMap,
+    state: &HttpState,
+    began: Instant,
+) -> Result<Option<Instant>> {
+    let all = headers.get_all(judgment_provider::DEADLINE_HEADER);
+    let mut values = all.iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(Error::Protocol);
+    }
+    let value = value.to_str().map_err(|_| Error::Protocol)?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::Protocol);
+    }
+    let milliseconds: u64 = value.parse().map_err(|_| Error::Protocol)?;
+    let ceiling = state
+        .admission
+        .limits
+        .request
+        .saturating_add(state.admission.limits.queue_wait);
+    began
+        .checked_add(Duration::from_millis(milliseconds).min(ceiling))
+        .map(Some)
+        .ok_or(Error::Protocol)
+}
+
+fn deadline_refusal(usage: Value) -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        axum::Json(json!({
+            "error": Error::Protocol.token(),
+            "refusal": judgment_provider::Refusal::DeadlineBudget.token(),
+            "usage": usage,
+        })),
+    )
+        .into_response()
+}
+
+fn deadline_usage(bytes: &[u8]) -> Value {
+    let native: Value = serde_json::from_slice(bytes).unwrap_or_default();
+    let mut usage = serde_json::Map::new();
+    for name in ["model_calls", "deadline_budget_ms"] {
+        if let Some(value) = native["usage"][name].as_u64() {
+            usage.insert(name.to_string(), json!(value));
+        }
+    }
+    if let Some(value) = native["usage"]["estimated_ms"]
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+    {
+        usage.insert("estimated_ms".to_string(), json!(value));
+    }
+    if let Some(reason @ ("estimated" | "elapsed" | "unmeasured")) =
+        native["usage"]["deadline_budget_reason"].as_str()
+    {
+        usage.insert("deadline_budget_reason".to_string(), json!(reason));
+    }
+    Value::Object(usage)
+}
+
 pub struct Engine {
     child: Mutex<Child>,
     io: Mutex<Pipe>,
@@ -82,6 +170,7 @@ pub struct Engine {
     stderr: Arc<Tail>,
     started: Option<Started>,
     declared: Mutex<Option<TokenLimits>>,
+    response_time: Mutex<ResponseTime>,
 }
 
 /// The model and runtime build a runtime was started with, which the limits
@@ -241,6 +330,7 @@ impl Engine {
             .filter_map(|wheel| Some((wheel.package.clone()?, json!(wheel.version.as_ref()?))))
             .collect();
         let mut initial = json!({"engine":profile.engine,"mode":"verify","packages":packages});
+        initial["measure_deadlines"] = json!(true);
         initial["rssLimitBytes"] = json!(profile.max_rss_bytes);
         if profile.engine == EngineKind::TransformersSystemOne {
             let template = profile
@@ -293,6 +383,7 @@ impl Engine {
             stderr: Arc::new(Tail::default()),
             started,
             declared: Mutex::new(None),
+            response_time: Mutex::new(ResponseTime::default()),
         });
         match errors {
             Some(errors) => {
@@ -403,6 +494,7 @@ impl Engine {
         if bytes.len() >= MAX_FRAME {
             return Err(Error::TooLarge);
         }
+        let began = Instant::now();
         self.stderr.withhold();
         let mut io = lock(&self.io);
         io.input
@@ -410,7 +502,34 @@ impl Engine {
             .and_then(|()| io.input.write_all(b"\n"))
             .and_then(|()| io.input.flush())
             .map_err(|_| Error::RuntimeFailed)?;
-        io.output.recv().map_err(|_| Error::RuntimeFailed)?
+        let result = io.output.recv().map_err(|_| Error::RuntimeFailed)?;
+        if let Ok(bytes) = &result
+            && let Some(native) = serde_json::from_slice::<Value>(bytes)
+                .ok()
+                .and_then(|value| value["usage"]["processing_ms"].as_f64())
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .and_then(|value| Duration::try_from_secs_f64(value / 1000.0).ok())
+        {
+            let elapsed = began.elapsed();
+            if native <= elapsed {
+                let mut response = lock(&self.response_time);
+                response.pipe = response.pipe.max(elapsed - native);
+            }
+        }
+        result
+    }
+
+    fn response_reserve(&self) -> Option<Duration> {
+        let response = lock(&self.response_time);
+        response.http.map(|http| {
+            http.saturating_add(response.pipe)
+                .saturating_add(response.validation)
+        })
+    }
+
+    fn measured_response(&self, elapsed: Duration) {
+        let mut response = lock(&self.response_time);
+        response.validation = response.validation.max(elapsed);
     }
 
     pub fn alive(&self) -> bool {
@@ -764,12 +883,17 @@ async fn models(State(state): State<HttpState>, headers: HeaderMap) -> Response 
 }
 
 async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes) -> Response {
+    let received = Instant::now();
     if browser_request(&headers, &state.provider) {
         return failure(StatusCode::FORBIDDEN, Error::Protocol);
     }
     if let Some(seconds) = state.admission.retry_after() {
         return retry_later(seconds);
     }
+    let client_deadline = match caller_deadline(&headers, &state, received) {
+        Ok(deadline) => deadline,
+        Err(error) => return failure(StatusCode::BAD_REQUEST, error),
+    };
     let Some(ticket) = state.admission.enter() else {
         return failure(StatusCode::SERVICE_UNAVAILABLE, Error::Busy);
     };
@@ -791,7 +915,7 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
         return failure(StatusCode::PAYLOAD_TOO_LARGE, Error::TooLarge);
     }
     request["model"] = json!(state.provider.identity());
-    let mut prepared = match serde_json::to_vec(&request)
+    let prepared = match serde_json::to_vec(&request)
         .ok()
         .and_then(|bytes| state.provider.prepare(bytes).ok())
     {
@@ -804,33 +928,95 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
     let named = task_name(&request);
     drop(request);
     drop(body);
-    let turn = match tokio::time::timeout(
-        state.admission.limits.queue_wait,
-        state.admission.turn.clone().acquire_owned(),
-    )
-    .await
+    let queue_limit = client_deadline.map_or(state.admission.limits.queue_wait, |deadline| {
+        state
+            .admission
+            .limits
+            .queue_wait
+            .min(deadline.saturating_duration_since(Instant::now()))
+    });
+    if queue_limit.is_zero() {
+        return failure(StatusCode::SERVICE_UNAVAILABLE, Error::Timeout);
+    }
+    let turn = match tokio::time::timeout(queue_limit, state.admission.turn.clone().acquire_owned())
+        .await
     {
         Ok(Ok(turn)) => turn,
         Ok(Err(_)) => return failure(StatusCode::SERVICE_UNAVAILABLE, Error::ServerStopped),
-        Err(_) => return failure(StatusCode::SERVICE_UNAVAILABLE, Error::Busy),
+        Err(_) => {
+            return failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                if client_deadline.is_some() {
+                    Error::Timeout
+                } else {
+                    Error::Busy
+                },
+            );
+        }
     };
-    let bytes = std::mem::take(&mut prepared.body);
-    match tokio::spawn(exchange_in_turn(state.clone(), turn, ticket, bytes, named)).await {
-        Ok(Ok(bytes)) => match state.provider.decode(&prepared, bytes.clone()) {
+    let mut native_deadline = None;
+    let bytes = if let Some(deadline) = client_deadline {
+        let Some(reserve) = state.engine.response_reserve() else {
+            return deadline_refusal(
+                json!({"model_calls":0,"deadline_budget_reason":"unmeasured"}),
+            );
+        };
+        let deadline = deadline.checked_sub(reserve).unwrap_or(received);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return failure(StatusCode::SERVICE_UNAVAILABLE, Error::Timeout);
+        }
+        native_deadline = Some(deadline);
+        let request: Value = match serde_json::from_slice(&prepared.body) {
+            Ok(request) => request,
+            Err(_) => return failure(StatusCode::BAD_REQUEST, Error::Protocol),
+        };
+        match serde_json::to_vec(&json!({"request":request,"budget_ms":remaining.as_millis()})) {
+            Ok(bytes) if bytes.len() < MAX_FRAME => bytes,
+            Ok(_) => return failure(StatusCode::PAYLOAD_TOO_LARGE, Error::TooLarge),
+            Err(_) => return failure(StatusCode::BAD_REQUEST, Error::Protocol),
+        }
+    } else {
+        prepared.body.clone()
+    };
+    let exchanged = if native_deadline.is_some() {
+        exchange_in_turn(state.clone(), turn, ticket, bytes, named, native_deadline).await
+    } else {
+        match tokio::spawn(exchange_in_turn(
+            state.clone(),
+            turn,
+            ticket,
+            bytes,
+            named,
+            None,
+        ))
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Error::RuntimeFailed),
+        }
+    };
+    let responding = Instant::now();
+    let response = match exchanged {
+        Ok(bytes) => match state.provider.decode(&prepared, bytes.clone()) {
             Ok(_) => (
                 [(axum::http::header::CONTENT_TYPE, "application/json")],
                 bytes,
             )
                 .into_response(),
+            Err(judgment_provider::Refusal::DeadlineBudget) => {
+                deadline_refusal(deadline_usage(&bytes))
+            }
             Err(refusal) => (
                 StatusCode::BAD_GATEWAY,
                 axum::Json(json!({"error":Error::Protocol.token(),"refusal":refusal.token()})),
             )
                 .into_response(),
         },
-        Ok(Err(error)) => failure(StatusCode::SERVICE_UNAVAILABLE, error),
-        Err(_) => failure(StatusCode::SERVICE_UNAVAILABLE, Error::RuntimeFailed),
-    }
+        Err(error) => failure(StatusCode::SERVICE_UNAVAILABLE, error),
+    };
+    state.engine.measured_response(responding.elapsed());
+    response
 }
 
 /// The task a request names in its body, kept with a deadline stop so the
@@ -860,8 +1046,26 @@ async fn exchange_in_turn(
     ticket: Ticket,
     bytes: Vec<u8>,
     named: Option<String>,
+    deadline: Option<Instant>,
 ) -> Result<Vec<u8>> {
     let _ticket = ticket;
+    let limit = deadline.map_or(state.admission.limits.request, |deadline| {
+        state
+            .admission
+            .limits
+            .request
+            .min(deadline.saturating_duration_since(Instant::now()))
+    });
+    if limit.is_zero() {
+        return Err(Error::Timeout);
+    }
+    let completed = Arc::new(AtomicBool::new(false));
+    let mut owner = deadline.map(|_| DeadlineOwner {
+        state: state.clone(),
+        named: named.clone(),
+        armed: true,
+        completed: completed.clone(),
+    });
     let engine = state.engine.clone();
     let admission = state.admission.clone();
     let task = tokio::task::spawn_blocking(move || {
@@ -870,10 +1074,16 @@ async fn exchange_in_turn(
         if result.is_err() {
             admission.close();
         }
+        completed.store(true, Ordering::Release);
         result
     });
-    let (error, stop) = match tokio::time::timeout(state.admission.limits.request, task).await {
-        Ok(Ok(Ok(bytes))) => return Ok(bytes),
+    let (error, stop) = match tokio::time::timeout(limit, task).await {
+        Ok(Ok(Ok(bytes))) => {
+            if let Some(owner) = &mut owner {
+                owner.armed = false;
+            }
+            return Ok(bytes);
+        }
         Err(_) => (Error::Timeout, Stop::Deadline(named)),
         Ok(_) => {
             let began = Instant::now();
@@ -883,6 +1093,9 @@ async fn exchange_in_turn(
             (Error::RuntimeFailed, Stop::Failed)
         }
     };
+    if let Some(owner) = &mut owner {
+        owner.armed = false;
+    }
     state.admission.close();
     state.engine.stop_for(stop);
     (state.failed)();
@@ -995,6 +1208,17 @@ async fn serve_with(
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
+    let probing = Instant::now();
+    if let Ok(client) = reqwest::Client::builder().no_proxy().build()
+        && let Ok(response) = client
+            .get(provider.api_url("models"))
+            .timeout(START_TIMEOUT)
+            .send()
+            .await
+        && response.bytes().await.is_ok()
+    {
+        lock(&engine.response_time).http = Some(probing.elapsed());
+    }
     Ok(Running {
         id,
         model_id: model.id.clone(),
