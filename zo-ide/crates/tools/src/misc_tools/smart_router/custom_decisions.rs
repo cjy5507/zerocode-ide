@@ -631,8 +631,8 @@ pub(super) async fn after_command(project: PathBuf, owner: String, tool_use_id: 
     let Some((asked_at, judged)) = waiting else {
         return Vec::new();
     };
-    drop((asked_at, judged));
-    Vec::new()
+    let wall = deadline_at(Point::BeforeCommand).saturating_sub(asked_at.elapsed());
+    tokio::time::timeout(wall, judged).await.unwrap_or_default()
 }
 
 /* ---- an agent asks by name ---------------------------------------------------- */
