@@ -4,9 +4,11 @@
 //! `pub(super)`/`pub(crate)` visibility so the loops in `mod.rs` (and the tests)
 //! still reach them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use zerocode_core::surface_execution::{SurfaceEffect, SurfaceExecution, SURFACE_EXECUTION_CACHE_LIMIT};
+use zerocode_core::agent_browser::{self, BROWSER_CLI};
 
 use crate::permissions::PermissionOutcome;
 use crate::session::ContentBlock;
@@ -14,8 +16,196 @@ use crate::session::ContentBlock;
 use super::Attendance;
 use super::{
     is_concurrency_safe, is_edit_or_write_tool, ApiClient, ConversationRuntime, ToolExecutor,
-    TurnContinuity, TurnStopSignal,
+    ResolvedToolCall, TurnContinuity, TurnStopSignal,
 };
+
+const MAX_SURFACE_FINGERPRINTS: usize = 512;
+
+#[derive(Default)]
+pub(super) struct SurfaceRepetitionState {
+    surfaces: HashMap<String, SurfaceRevision>,
+    fingerprints: HashMap<u64, String>,
+}
+
+struct SurfaceRevision {
+    revision: u64,
+    observed: bool,
+    fingerprints: HashSet<u64>,
+    acknowledged_revision: Option<u64>,
+    verification_pending: bool,
+}
+
+#[derive(Default)]
+struct SurfaceUpdate {
+    fingerprints: Vec<u64>,
+    confirmed: bool,
+    accepted: bool,
+}
+
+impl SurfaceRepetitionState {
+    fn protect(&mut self, fingerprint: u64) {
+        if self.fingerprints.len() < MAX_SURFACE_FINGERPRINTS {
+            self.fingerprints.entry(fingerprint).or_default();
+        }
+    }
+
+    fn apply(&mut self, fingerprint: u64, execution: SurfaceExecution) -> SurfaceUpdate {
+        if !execution.is_valid()
+            || (!self.surfaces.contains_key(&execution.surface_id)
+                && self.surfaces.len() >= SURFACE_EXECUTION_CACHE_LIMIT)
+            || (!self.fingerprints.contains_key(&fingerprint)
+                && self.fingerprints.len() >= MAX_SURFACE_FINGERPRINTS)
+        {
+            return SurfaceUpdate::default();
+        }
+        let previous = self.fingerprints.get(&fingerprint)
+            .filter(|previous| *previous != &execution.surface_id)
+            .and_then(|previous| self.surfaces.get_mut(previous));
+        if let Some(previous) = previous {
+            previous.fingerprints.remove(&fingerprint);
+        }
+        self.fingerprints.insert(fingerprint, execution.surface_id.clone());
+        let surface = self.surfaces.entry(execution.surface_id).or_insert_with(|| SurfaceRevision {
+            revision: execution.state_revision,
+            observed: false,
+            fingerprints: HashSet::new(),
+            acknowledged_revision: None,
+            verification_pending: false,
+        });
+        surface.fingerprints.insert(fingerprint);
+        let mut update = SurfaceUpdate { accepted:true, ..SurfaceUpdate::default() };
+        match execution.effect {
+            SurfaceEffect::Observation => {
+                surface.verification_pending = false;
+                if surface.observed && execution.state_revision > surface.revision {
+                    update.fingerprints.extend(surface.fingerprints.iter().copied());
+                    surface.acknowledged_revision = None;
+                    surface.verification_pending = false;
+                }
+                if !surface.observed || execution.state_revision >= surface.revision {
+                    surface.revision = execution.state_revision;
+                    surface.observed = true;
+                }
+            }
+            SurfaceEffect::Acknowledged => {
+                if surface.observed
+                    && execution.state_revision == surface.revision
+                    && surface.acknowledged_revision != Some(surface.revision)
+                {
+                    surface.acknowledged_revision = Some(surface.revision);
+                    surface.verification_pending = true;
+                }
+            }
+            SurfaceEffect::ConfirmedChange { previous_revision } => {
+                if surface.observed
+                    && previous_revision == surface.revision
+                    && execution.state_revision > surface.revision
+                {
+                    surface.revision = execution.state_revision;
+                    surface.acknowledged_revision = None;
+                    surface.verification_pending = false;
+                    update.fingerprints.extend(surface.fingerprints.iter().copied());
+                    update.confirmed = true;
+                }
+            }
+            SurfaceEffect::Uncertain => {}
+        }
+        update
+    }
+
+    fn take_verification(&mut self, fingerprint: u64) -> bool {
+        let Some(surface_id) = self.fingerprints.get(&fingerprint) else {
+            return false;
+        };
+        let Some(surface) = self.surfaces.get_mut(surface_id) else {
+            return false;
+        };
+        std::mem::take(&mut surface.verification_pending)
+    }
+}
+
+fn is_surface_observation(tool_name: &str, input: &str) -> bool {
+    if tool_name == "Computer" {
+        return serde_json::from_str::<serde_json::Value>(input).is_ok_and(|value| {
+            matches!(value.get("action").and_then(serde_json::Value::as_str),
+                Some("observe" | "screenshot" | "read" | "find" | "wait_for"))
+        });
+    }
+    tool_name == BROWSER_CLI && serde_json::from_str::<Vec<String>>(input).is_ok_and(|argv| {
+        argv.len() > 1 && argv.first().is_some_and(|verb| agent_browser::browser_verb(verb)
+            .is_some_and(|verb| !verb.acts))
+    })
+}
+
+fn surface_observation_fingerprint(tool_name: &str, input: &str, surface_id: &str) -> Option<u64> {
+    let key = if tool_name == "Computer" {
+        let value: serde_json::Value = serde_json::from_str(input).ok()?;
+        let action = value.get("action")?.as_str()?;
+        if !matches!(action, "observe" | "screenshot") {
+            return None;
+        }
+        serde_json::to_string(&(surface_id, action)).ok()?
+    } else if tool_name == BROWSER_CLI {
+        let mut argv: Vec<String> = serde_json::from_str(input).ok()?;
+        if argv.len() < 2 || !agent_browser::observes(&argv[0]) {
+            return None;
+        }
+        argv.remove(1);
+        serde_json::to_string(&(surface_id, argv)).ok()?
+    } else {
+        return None;
+    };
+    Some(fingerprint_tool_call(tool_name, &key))
+}
+
+#[cfg(test)]
+mod surface_state_tests {
+    use super::*;
+
+    fn observation(surface_id: String, state_revision: u64) -> SurfaceExecution {
+        SurfaceExecution { surface_id, state_revision, effect: SurfaceEffect::Observation }
+    }
+
+    #[test]
+    fn new_surfaces_past_the_memory_limit_do_not_receive_forgiveness() {
+        let mut state = SurfaceRepetitionState::default();
+        for index in 0..SURFACE_EXECUTION_CACHE_LIMIT {
+            state.apply(u64::try_from(index).unwrap(), observation(format!("fixture-surface-{index}"), 0));
+        }
+        let update = state.apply(u64::try_from(SURFACE_EXECUTION_CACHE_LIMIT).unwrap(),
+            observation("another-fixture-surface".to_string(), 1));
+        assert_eq!(state.surfaces.len(), SURFACE_EXECUTION_CACHE_LIMIT);
+        assert!(update.fingerprints.is_empty() && !update.confirmed);
+    }
+
+    #[test]
+    fn the_binding_limit_keeps_existing_surface_confirmation_available() {
+        let mut state = SurfaceRepetitionState::default();
+        for index in 0..MAX_SURFACE_FINGERPRINTS {
+            state.protect(u64::try_from(index).unwrap());
+        }
+        let discarded = state.apply(u64::try_from(MAX_SURFACE_FINGERPRINTS).unwrap(),
+            observation("discarded-fixture-surface".to_string(), 1));
+        assert!(discarded.fingerprints.is_empty());
+        state.apply(0, observation("retained-fixture-surface".to_string(), 0));
+        let confirmed = state.apply(0, SurfaceExecution { surface_id:"retained-fixture-surface".to_string(),
+            state_revision:1, effect:SurfaceEffect::ConfirmedChange { previous_revision:0 } });
+        assert!(confirmed.confirmed);
+        assert_eq!(state.fingerprints.len(), MAX_SURFACE_FINGERPRINTS);
+    }
+
+    #[test]
+    fn same_revision_acknowledgements_cannot_reissue_consumed_verification() {
+        let mut state = SurfaceRepetitionState::default();
+        state.apply(1, observation("fixture-surface".to_string(), 7));
+        let acknowledged = SurfaceExecution { surface_id:"fixture-surface".to_string(),
+            state_revision:7, effect:SurfaceEffect::Acknowledged };
+        state.apply(2, acknowledged.clone());
+        assert!(state.take_verification(1));
+        state.apply(2, acknowledged);
+        assert!(!state.take_verification(1));
+    }
+}
 
 /// Per-turn count of identical (normalized) tool calls that triggers one
 /// repetition advisory. A per-turn tally — not a rolling window — so fan-out
@@ -91,7 +281,7 @@ pub(super) fn fingerprint_tool_call(tool_name: &str, input: &str) -> u64 {
 /// progress, and collapsing them makes normal source reading look like a
 /// no-progress loop.
 fn tool_normalizes_json_input(tool_name: &str) -> bool {
-    matches!(tool_name, "read_file" | "retrieve_output")
+    matches!(tool_name, "read_file" | "retrieve_output" | "Computer")
 }
 
 /// Canonicalize a tool input before fingerprinting. For selected JSON-object
@@ -245,7 +435,7 @@ fn microcompacted_reread_advisory(tool_name: &str) -> String {
 
 fn per_turn_tool_repetition_hard_stop_notice(tool_name: &str, count: usize) -> String {
     format!(
-        "<system-reminder>Ending this turn: `{tool_name}` has been called with identical input {count} times without making progress — a no-progress loop, since the repeated call keeps returning the same result. Stopping so you can rethink; when you continue, take a different approach or ask the user for guidance.</system-reminder>"
+        "<system-reminder>Ending this turn: the same `{tool_name}` request or scoped observation has repeated {count} times without verified progress. Keep the original target when choosing another allowed way to verify it, or explain what is blocked.</system-reminder>"
     )
 }
 
@@ -257,7 +447,7 @@ fn per_turn_tool_repetition_hard_stop_notice(tool_name: &str, count: usize) -> S
 /// stop-then-resume stutter this variant exists to prevent.
 pub(crate) fn per_turn_tool_repetition_nonterminating_notice(tool_name: &str, count: usize) -> String {
     format!(
-        "<system-reminder>`{tool_name}` has been called with identical input {count} times without making progress — the repeated call keeps returning the same result. This exact repeat was skipped. Do not repeat it again; use the result you already have, change the arguments, or move on. The turn continues.</system-reminder>"
+        "<system-reminder>The same `{tool_name}` request or scoped observation has repeated {count} times without verified progress. Use the available evidence or make a meaningful change while keeping the original target. The turn continues.</system-reminder>"
     )
 }
 
@@ -269,22 +459,19 @@ pub(crate) fn per_turn_tool_repetition_nonterminating_notice(tool_name: &str, co
 /// stutter the per-turn variant's doc already warns about.
 fn cross_turn_tool_repetition_nonterminating_notice(tool_name: &str, cross: usize) -> String {
     format!(
-        "<system-reminder>`{tool_name}` has been called with identical input across {cross} \
-         separate turns without making progress. This exact repeat was skipped. This turn has \
-         changed files, so it continues — but do not issue this call again: use the result you \
-         already have, change the arguments, or move on to the next concrete step.</system-reminder>"
+        "<system-reminder>The same `{tool_name}` request or scoped observation has repeated across {cross} separate turns without verified progress. Use the available evidence or make a meaningful change while keeping the original target. The turn continues.</system-reminder>"
     )
 }
 
 fn cross_turn_tool_repetition_hard_stop_notice(tool_name: &str, cross: usize) -> String {
     format!(
-        "<system-reminder>Ending this turn: `{tool_name}` has been called with identical input across {cross} separate turns without making progress — a cross-turn no-progress loop that the per-turn guard cannot see (its counter resets each turn). Stop repeating it: take a genuinely different approach, or ask the user for guidance.</system-reminder>"
+        "<system-reminder>Ending this turn: the same `{tool_name}` request or scoped observation has repeated across {cross} separate turns without verified progress. Keep the original target when choosing another allowed way to verify it, or explain what is blocked.</system-reminder>"
     )
 }
 
 pub(crate) fn skipped_after_repetition_stop_notice(tool_name: &str) -> String {
     format!(
-        "<system-reminder>Skipping `{tool_name}` because this turn already hit a repeated-tool no-progress stop. The tool was not executed; change approach or ask the user for guidance.</system-reminder>"
+        "<system-reminder>Skipping `{tool_name}` because this turn already hit a repeated-tool no-progress stop. The tool was not executed. Keep the original target when choosing another allowed observation method.</system-reminder>"
     )
 }
 
@@ -298,27 +485,46 @@ pub(super) struct ToolBatchRepetitionHardStops {
 }
 
 impl ToolBatchRepetitionHardStops {
-    pub(super) fn preflight_notice(
+    fn rekey(&mut self, original: u64, canonical: u64) {
+        if original == canonical {
+            return;
+        }
+        if let Some(terminates) = self.hard_stopped_fps.remove(&original) {
+            self.hard_stopped_fps.entry(canonical)
+                .and_modify(|current| *current |= terminates).or_insert(terminates);
+        }
+    }
+
+    fn has_terminating_stop(&self) -> bool {
+        self.hard_stopped_fps.values().any(|terminates| *terminates)
+    }
+
+    fn forget(&mut self, fingerprints: &[u64]) {
+        for fingerprint in fingerprints {
+            self.hard_stopped_fps.remove(fingerprint);
+        }
+    }
+
+    fn preflight_notice_for(
         &mut self,
+        fingerprint: u64,
         tool_name: &str,
-        input: &str,
         hard_stop_notice: impl FnOnce() -> Option<(String, bool)>,
     ) -> Option<(String, bool)> {
-        let fp = fingerprint_tool_call(tool_name, input);
-        if let Some(&terminates) = self.hard_stopped_fps.get(&fp) {
+        if let Some(&terminates) = self.hard_stopped_fps.get(&fingerprint) {
             return Some((skipped_after_repetition_stop_notice(tool_name), terminates));
         }
         let notice = hard_stop_notice();
         if let Some((_, terminates)) = &notice {
-            self.hard_stopped_fps.insert(fp, *terminates);
+            self.hard_stopped_fps.insert(fingerprint, *terminates);
         }
         notice
     }
 
-    fn record_outcome(&mut self, tool_name: &str, input: &str, repetition: &ToolRepetition) {
+    fn record_outcome_for(&mut self, fingerprint: u64, repetition: &ToolRepetition) {
         if let ToolRepetition::HardStop { terminates, .. } = repetition {
             self.hard_stopped_fps
-                .insert(fingerprint_tool_call(tool_name, input), *terminates);
+                .insert(fingerprint, *terminates);
         }
     }
 }
@@ -328,6 +534,140 @@ where
     C: ApiClient,
     T: ToolExecutor,
 {
+    fn resolved_repetition_call(&self, tool_name: &str, input: &str) -> Option<ResolvedToolCall> {
+        match self.tool_executor.resolve_call(tool_name, input) {
+            Ok(resolved) => resolved,
+            Err(_) if tool_name == "CapabilityInvoke" => Some(ResolvedToolCall {
+                name: tool_name.to_string(),
+                input: "invalid capability invocation".to_string(),
+            }),
+            Err(_) => None,
+        }
+    }
+
+    fn repetition_fingerprint(&self, tool_name: &str, input: &str) -> u64 {
+        let raw = fingerprint_tool_call(tool_name, input);
+        self.surface_repetition_state.fingerprints.get(&raw)
+            .filter(|identity| !identity.is_empty())
+            .and_then(|identity| surface_observation_fingerprint(tool_name, input, identity))
+            .unwrap_or(raw)
+    }
+
+    fn move_repetition_fingerprint(&mut self, original: u64, canonical: u64) {
+        if original == canonical {
+            return;
+        }
+        if let Some(count) = self.tool_fingerprint_counts.remove(&original) {
+            let current = self.tool_fingerprint_counts.entry(canonical).or_default();
+            *current = current.saturating_add(count);
+        }
+        if let Some(count) = self.cross_turn_tool_fingerprints.remove(&original) {
+            let current = self.cross_turn_tool_fingerprints.entry(canonical).or_default();
+            *current = (*current).max(count);
+        }
+        for fingerprints in [
+            &mut self.tool_repetition_pending_hard_stop_fps,
+            &mut self.tool_repetition_hard_stop_fps,
+            &mut self.cross_turn_tool_repetition_pending_hard_stop_fps,
+            &mut self.cross_turn_tool_repetition_hard_stop_fps,
+        ] {
+            if fingerprints.remove(&original) {
+                fingerprints.insert(canonical);
+            }
+        }
+        self.pathless_fingerprints.remove(&original);
+    }
+
+    pub(super) fn tool_repetition_preflight(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        batch_hard_stops: &mut ToolBatchRepetitionHardStops,
+    ) -> Option<(String, bool)> {
+        let resolved = self.resolved_repetition_call(tool_name, input);
+        let (tool_name, input) = resolved.as_ref()
+            .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
+        let raw = fingerprint_tool_call(tool_name, input);
+        if is_surface_observation(tool_name, input)
+            && self.surface_repetition_state.fingerprints.len() >= MAX_SURFACE_FINGERPRINTS
+            && !self.surface_repetition_state.fingerprints.contains_key(&raw)
+        {
+            return Some((
+                "<system-reminder>This scoped observation cannot be tracked within the current surface evidence bound. Keep the original target and use an already observed scoped request, or start a fresh authorized session.</system-reminder>".to_string(),
+                self.attendance == Attendance::Unattended,
+            ));
+        }
+        let fingerprint = self.repetition_fingerprint(tool_name, input);
+        let previous_count = self.tool_fingerprint_counts.get(&fingerprint).copied();
+        let notice = batch_hard_stops.preflight_notice_for(fingerprint, tool_name, || {
+            self.next_tool_repetition_hard_stop_notice(tool_name, input)
+        });
+        if is_surface_observation(tool_name, input)
+            && self.surface_repetition_state.take_verification(fingerprint)
+            && notice.is_some()
+        {
+            batch_hard_stops.forget(&[fingerprint]);
+            if let Some(count) = previous_count {
+                self.tool_fingerprint_counts.insert(fingerprint, count);
+            } else {
+                self.tool_fingerprint_counts.remove(&fingerprint);
+            }
+            return None;
+        }
+        notice
+    }
+
+    pub(super) fn note_surface_execution(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        surface: Option<SurfaceExecution>,
+        is_error: bool,
+        batch_hard_stops: &mut ToolBatchRepetitionHardStops,
+    ) {
+        let Some(surface) = surface.filter(|_| !is_error) else {
+            return;
+        };
+        let resolved = self.resolved_repetition_call(tool_name, input);
+        let (tool_name, input) = resolved.as_ref()
+            .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
+        let raw = fingerprint_tool_call(tool_name, input);
+        let fingerprint = surface_observation_fingerprint(tool_name, input, &surface.surface_id).unwrap_or(raw);
+        let needed = usize::from(!self.surface_repetition_state.fingerprints.contains_key(&raw))
+            + usize::from(raw != fingerprint && !self.surface_repetition_state.fingerprints.contains_key(&fingerprint));
+        if self.surface_repetition_state.fingerprints.len().saturating_add(needed) > MAX_SURFACE_FINGERPRINTS {
+            return;
+        }
+        let identity = surface.surface_id.clone();
+        let update = self.surface_repetition_state.apply(fingerprint, surface);
+        if !update.accepted {
+            return;
+        }
+        self.surface_repetition_state.fingerprints.insert(raw, identity);
+        self.move_repetition_fingerprint(raw, fingerprint);
+        batch_hard_stops.rekey(raw, fingerprint);
+        if self.surface_repetition_state.fingerprints.contains_key(&fingerprint) {
+            self.pathless_fingerprints.remove(&raw);
+            self.pathless_fingerprints.remove(&fingerprint);
+        }
+        for fingerprint in &update.fingerprints {
+            self.tool_fingerprint_counts.remove(fingerprint);
+            self.tool_repetition_pending_hard_stop_fps.remove(fingerprint);
+            self.tool_repetition_hard_stop_fps.remove(fingerprint);
+            self.cross_turn_tool_fingerprints.remove(fingerprint);
+            self.cross_turn_tool_repetition_pending_hard_stop_fps.remove(fingerprint);
+            self.cross_turn_tool_repetition_hard_stop_fps.remove(fingerprint);
+        }
+        let was_stopped = batch_hard_stops.has_terminating_stop();
+        batch_hard_stops.forget(&update.fingerprints);
+        if was_stopped && !batch_hard_stops.has_terminating_stop() {
+            self.tool_loop_break_requested = false;
+        }
+        if update.confirmed {
+            self.turn_progress_results = self.turn_progress_results.saturating_add(1);
+        }
+    }
+
     /// Record an executed tool call and, the first time the same
     /// `(tool_name, input)` pair reaches [`TOOL_REPETITION_THRESHOLD`]
     /// occurrences within the rolling window, return a one-line advisory to
@@ -342,7 +682,14 @@ where
         input: &str,
         is_error: bool,
     ) -> ToolRepetition {
-        let fp = fingerprint_tool_call(tool_name, input);
+        let resolved = self.resolved_repetition_call(tool_name, input);
+        let (tool_name, input) = resolved.as_ref()
+            .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
+        let raw = fingerprint_tool_call(tool_name, input);
+        if matches!(tool_name, "Computer" | BROWSER_CLI) {
+            self.surface_repetition_state.protect(raw);
+        }
+        let fp = self.repetition_fingerprint(tool_name, input);
         let is_mutation = is_edit_or_write_tool(tool_name);
         // A SUCCESSFUL file mutation is real progress: re-reading a just-edited
         // file is legitimate, so clear the cross-turn tally (which, unlike the
@@ -372,7 +719,9 @@ where
             }
         }
         let count = record_tool_fingerprint(&mut self.tool_fingerprint_counts, fp);
-        if !is_mutation {
+        if !is_mutation && !matches!(tool_name, "Computer" | BROWSER_CLI)
+            && !self.surface_repetition_state.fingerprints.contains_key(&fp)
+        {
             self.index_read_fingerprint(input, fp);
         }
         let recovering_microcompacted_result = !is_mutation
@@ -482,7 +831,7 @@ where
             self.tool_repetition_pending_hard_stop_fps.insert(fp);
             ToolRepetition::Advise(format!(
                 "<system-reminder>You have now called `{tool_name}` with identical input \
-                 {TOOL_REPETITION_THRESHOLD} times this turn. Repeating the same call will not \
+                 {TOOL_REPETITION_THRESHOLD} times this turn without verified progress. Repeating the same call may not \
                  produce a different result — change approach: vary the arguments, try a \
                  different tool, or if you are blocked, say so and ask the user. Do not repeat \
                  this exact call again.</system-reminder>"
@@ -491,7 +840,7 @@ where
             self.cross_turn_tool_repetition_pending_hard_stop_fps.insert(fp);
             ToolRepetition::Advise(format!(
                 "<system-reminder>You have now called `{tool_name}` with identical input across \
-                 {cross} separate turns. Re-issuing it keeps returning the same result and is \
+                 {cross} separate turns. The runtime has not confirmed progress from these requests and is \
                  making no progress — change approach, try a different tool, or ask the user what \
                  they need. Do not repeat this exact call again.</system-reminder>"
             ))
@@ -545,16 +894,19 @@ where
     /// The pre-scoping behaviour, kept for a mutation whose target path is not
     /// recoverable from its input.
     fn forgive_all_repetition(&mut self) {
-        self.tool_fingerprint_counts.clear();
+        let protected = &self.surface_repetition_state.fingerprints;
+        let retain_every_fingerprint = protected.len() >= MAX_SURFACE_FINGERPRINTS;
+        let keep = |fingerprint: &u64| retain_every_fingerprint || protected.contains_key(fingerprint);
+        self.tool_fingerprint_counts.retain(|fingerprint, _| keep(fingerprint));
         self.pathless_fingerprints.clear();
-        self.tool_repetition_pending_hard_stop_fps.clear();
-        self.tool_repetition_hard_stop_fps.clear();
+        self.tool_repetition_pending_hard_stop_fps.retain(keep);
+        self.tool_repetition_hard_stop_fps.retain(keep);
         self.read_file_ranges_by_path.clear();
         self.read_file_redundant_advised_paths.clear();
         self.read_fingerprints_by_path.clear();
-        self.cross_turn_tool_fingerprints.clear();
-        self.cross_turn_tool_repetition_pending_hard_stop_fps.clear();
-        self.cross_turn_tool_repetition_hard_stop_fps.clear();
+        self.cross_turn_tool_fingerprints.retain(|fingerprint, _| keep(fingerprint));
+        self.cross_turn_tool_repetition_pending_hard_stop_fps.retain(keep);
+        self.cross_turn_tool_repetition_hard_stop_fps.retain(keep);
     }
 
     fn note_read_file_window(
@@ -607,8 +959,11 @@ where
             for block in &message.blocks {
                 match block {
                     ContentBlock::ToolUse { id, name, input } => {
+                        let resolved = self.resolved_repetition_call(name, input);
+                        let (name, input) = resolved.as_ref()
+                            .map_or((name.as_str(), input.as_str()), |call| (call.name.as_str(), call.input.as_str()));
                         tool_use_fingerprints
-                            .insert(id.as_str(), fingerprint_tool_call(name, input));
+                            .insert(id.as_str(), self.repetition_fingerprint(name, input));
                     }
                     ContentBlock::ToolResult {
                         tool_use_id,
@@ -616,10 +971,14 @@ where
                         is_error,
                         ..
                     } => {
+                        let matching = tool_use_fingerprints.get(tool_use_id.as_str()) == Some(&fp);
                         if *is_error {
+                            if matching && self.surface_repetition_state.fingerprints.contains_key(&fp) {
+                                latest_match_was_cleared = Some(false);
+                            }
                             continue;
                         }
-                        if tool_use_fingerprints.get(tool_use_id.as_str()) == Some(&fp) {
+                        if matching {
                             latest_match_was_cleared =
                                 Some(output == crate::MICROCOMPACT_PLACEHOLDER);
                         }
@@ -688,7 +1047,10 @@ where
         tool_name: &str,
         input: &str,
     ) -> Option<(String, bool)> {
-        let fp = fingerprint_tool_call(tool_name, input);
+        let resolved = self.resolved_repetition_call(tool_name, input);
+        let (tool_name, input) = resolved.as_ref()
+            .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
+        let fp = self.repetition_fingerprint(tool_name, input);
         let is_mutation = is_edit_or_write_tool(tool_name);
         if !is_mutation && self.latest_matching_tool_result_was_microcompacted(fp) {
             return None;
@@ -842,8 +1204,11 @@ where
         is_error: bool,
         batch_hard_stops: &mut ToolBatchRepetitionHardStops,
     ) {
+        let resolved = self.resolved_repetition_call(tool_name, input);
+        let (tool_name, input) = resolved.as_ref()
+            .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
         let repetition = self.note_tool_repetition(tool_name, input, is_error);
-        batch_hard_stops.record_outcome(tool_name, input, &repetition);
+        batch_hard_stops.record_outcome_for(self.repetition_fingerprint(tool_name, input), &repetition);
         match repetition {
             ToolRepetition::Ok => {}
             ToolRepetition::Advise(advisory) => {
@@ -867,12 +1232,15 @@ where
         let mut projected_counts = self.tool_fingerprint_counts.clone();
         let mut projected_cross_counts = self.cross_turn_tool_fingerprints.clone();
         for (tool_name, input, permission_outcome) in tools {
+            let resolved = self.resolved_repetition_call(tool_name, input);
+            let (tool_name, input) = resolved.as_ref()
+                .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
             if !matches!(permission_outcome, PermissionOutcome::Allow)
                 || !is_concurrency_safe(tool_name)
             {
                 continue;
             }
-            let fp = fingerprint_tool_call(tool_name, input);
+            let fp = self.repetition_fingerprint(tool_name, input);
             let is_mutation = is_edit_or_write_tool(tool_name);
             let recovering_microcompacted_result =
                 !is_mutation && self.latest_matching_tool_result_was_microcompacted(fp);

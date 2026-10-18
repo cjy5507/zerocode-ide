@@ -21,7 +21,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+use zerocode_core::surface_execution::SurfaceExecution;
 
+use super::ConversationRuntime;
 use super::MAX_SLEEP_TOOL_DURATION_MS;
 use super::error::ToolError;
 
@@ -33,6 +35,42 @@ use super::error::ToolError;
 use super::error::ToolTextKind;
 
 pub type ConcurrentDispatchFn = Arc<dyn Fn(&str, &str) -> Result<String, ToolError> + Send + Sync>;
+
+pub type ConcurrentResultDispatchFn =
+    Arc<dyn Fn(&str, &str) -> Result<ToolExecutionResult, ToolError> + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolExecutionResult {
+    pub text: String,
+    pub surface: Option<SurfaceExecution>,
+}
+
+impl From<String> for ToolExecutionResult {
+    fn from(text: String) -> Self {
+        Self { text, surface: None }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedToolCall {
+    pub name: String,
+    pub input: String,
+}
+
+impl<C, T> ConversationRuntime<C, T> {
+    pub(super) fn result_dispatch(&self) -> Option<ConcurrentResultDispatchFn> {
+        if let Some(dispatch) = &self.concurrent_result_dispatch {
+            return Some(Arc::clone(dispatch));
+        }
+        self.concurrent_dispatch.as_ref().map(|dispatch| {
+            let dispatch = Arc::clone(dispatch);
+            let result_dispatch: ConcurrentResultDispatchFn = Arc::new(move |name, input| {
+                dispatch(name, input).map(ToolExecutionResult::from)
+            });
+            result_dispatch
+        })
+    }
+}
 
 /// Predicate the host installs to mark tools whose execution may block. This is
 /// retained as compatibility metadata for dynamic plugin/MCP registrations; the
@@ -49,6 +87,22 @@ pub trait ToolExecutor {
     fn execution_cwd(&self) -> Option<&Path> { None }
 
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
+
+    fn execute_result(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+    ) -> Result<ToolExecutionResult, ToolError> {
+        self.execute(tool_name, input).map(ToolExecutionResult::from)
+    }
+
+    fn resolve_call(
+        &self,
+        _tool_name: &str,
+        _input: &str,
+    ) -> Result<Option<ResolvedToolCall>, ToolError> {
+        Ok(None)
+    }
 
     /// Out-of-band images (`media_type`, base64) staged by the most recent
     /// [`Self::execute`] (e.g. by a `read_image` tool). The conversation loop
@@ -103,10 +157,10 @@ pub(super) fn unblock_tool_execute<T: ToolExecutor>(
     executor: &mut T,
     tool_name: &str,
     input: &str,
-) -> (String, ToolTextKind) {
-    let mut run = || match executor.execute(tool_name, input) {
+) -> (ToolExecutionResult, ToolTextKind) {
+    let mut run = || match executor.execute_result(tool_name, input) {
         Ok(output) => (output, ToolTextKind::Answer),
-        Err(error) => (error.to_string(), error.kind()),
+        Err(error) => (error.to_string().into(), error.kind()),
     };
     match tokio::runtime::Handle::try_current() {
         Ok(h)

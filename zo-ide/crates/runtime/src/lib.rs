@@ -89,8 +89,8 @@ pub use core_types::sse;
 pub use core_types::usage;
 
 pub use bash::{
-    execute_bash, execute_bash_with_tasks, interrupt_foreground_bash, timeout_stderr,
-    timeout_stderr_with_background_advice, BashCommandInput, BashCommandOutput,
+    execute_bash, execute_bash_with_tasks, interrupt_foreground_bash, replace_bash_transport_output, timeout_stderr,
+    timeout_stderr_with_background_advice, BashCommandInput, BashCommandOutput, BASH_TRANSPORT_MAX_BYTES,
 };
 pub use tool_cancel::{
     ToolCancelSignal, ToolCancelWatch, ToolDispatchOutcome, CANCELLED_TOOL_RESULT,
@@ -170,9 +170,9 @@ pub use conversation::{
     take_verifier_calibration_events, VerifierCalibrationEvent,
     flush_pending_tool_events, prompt_cache_record_to_event, record_non_anthropic_prompt_cache_usage, push_output_block, push_refusal_category, redacted_thinking_data_to_string, refusal_category_of, response_to_events, ApiClient, ApiRequest,
     AssistantEvent, AsyncApiClient, Attendance, AutoCompactionEvent, BudgetExhausted,
-    ConcurrentDispatchFn, ConversationRuntime, DeepGateConfig, DeepMode, ManualCompaction,
+    ConcurrentDispatchFn, ConcurrentResultDispatchFn, ConversationRuntime, DeepGateConfig, DeepMode, ManualCompaction,
     DeepOutcome, ExecContract, PromptCacheEvent, ProviderStateBlob, RuntimeError, StaticToolExecutor,
-    StreamingTurnError, ToolError, ToolExecutor, ToolTextKind, TurnSummary, AUTO_RETRY_MARKER,
+    ResolvedToolCall, StreamingTurnError, ToolError, ToolExecutionResult, ToolExecutor, ToolTextKind, TurnSummary, AUTO_RETRY_MARKER,
     DEEP_EXEC_MARKER, DEEP_PLAN_MARKER, DEEP_VERIFY_MARKER,
     DEFAULT_STREAMING_CHANNEL_CAPACITY, DEFAULT_TURN_DEADLINE_SECS,
     COMPLETION_RECEIPT_LEAD, COMPLETION_RECEIPT_SEPARATOR, DEFAULT_TURN_INPUT_TOKEN_BUDGET,

@@ -117,6 +117,7 @@ pub mod source_control_ai;
 pub mod stall_cause;
 pub mod stats_events;
 pub mod step_effort;
+pub mod surface_execution;
 pub mod summon_assign;
 pub mod summon_choice;
 pub mod summon_difficulty;
