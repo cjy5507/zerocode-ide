@@ -69,7 +69,7 @@ struct ScriptState {
 
 #[derive(Clone)]
 struct ScriptExecutor {
-    resolutions: Arc<AtomicUsize>,
+    resolutions: Option<Arc<AtomicUsize>>,
     state: Arc<Mutex<ScriptState>>,
 }
 
@@ -120,7 +120,7 @@ impl ToolExecutor for ScriptExecutor {
     }
 
     fn resolve_call(&self, name: &str, input: &str) -> Result<Option<ResolvedToolCall>, ToolError> {
-        self.resolutions.fetch_add(1, Ordering::Relaxed);
+        if let Some(resolutions) = &self.resolutions { resolutions.fetch_add(1, Ordering::Relaxed); }
         if name == "Bash" {
             let value: Value = serde_json::from_str(input).map_err(|error| ToolError::new(error.to_string()))?;
             if let Some(words) = value.get("command").and_then(Value::as_str).and_then(crate::bash_validation::literal_argv) {
@@ -249,7 +249,7 @@ fn runtime_for_batches(
         batches: Arc::new(Mutex::new(batches)),
     };
     let executor = ScriptExecutor {
-        resolutions: Arc::new(AtomicUsize::new(0)),
+        resolutions: Some(Arc::new(AtomicUsize::new(0))),
         state: Arc::new(Mutex::new(ScriptState {
             replies,
             executed: Vec::new(),
@@ -1278,15 +1278,16 @@ fn a_second_repetition_check_reuses_parsed_tool_use_fingerprints() {
     let input = json!({"command":"printf fixture-1999", "description":"ordinary Bash call"}).to_string();
     runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
     runtime.session_mut().name = Some("Fixture metadata rename".into());
-    let before = executor.resolutions.load(Ordering::Relaxed);
+    let before = executor.resolutions.as_ref().unwrap().load(Ordering::Relaxed);
     runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
-    assert_eq!(executor.resolutions.load(Ordering::Relaxed) - before, 1,
+    assert_eq!(executor.resolutions.as_ref().unwrap().load(Ordering::Relaxed) - before, 1,
         "the second check resolves its current call once and reuses all 2,000 transcript fingerprints");
 }
 
 #[test]
 fn measure_repetition_check_for_two_thousand_ordinary_tool_calls() {
     let (mut runtime, _) = long_repetition_transcript();
+    runtime.tool_executor_mut().resolutions = None;
     let input = json!({"command":"printf fixture-1999", "description":"ordinary Bash call"}).to_string();
     runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
     let mut samples = (0..101).map(|_| {
