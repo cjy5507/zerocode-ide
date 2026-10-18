@@ -203,7 +203,7 @@ fn surface_observation_fingerprint(tool_name: &str, input: &str, surface_id: &st
     } else if tool_name == BROWSER_CLI {
         let argv: Vec<String> = serde_json::from_str(input).ok()?;
         let read = agent_browser::parse_read(&argv).ok()?;
-        serde_json::to_string(&(surface_id, ("read", read.selector.as_deref().map(str::trim), read.full))).ok()?
+        serde_json::to_string(&(surface_id, ("read", read.selector.as_deref().map(agent_browser::read_selector_view), read.full))).ok()?
     } else {
         return None;
     };

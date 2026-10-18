@@ -482,9 +482,14 @@ impl BrowserContext {
             }
             let observation = observation.filter(|observed| observed.label == self.label)?;
             let read = zerocode_core::agent_browser::parse_read(&command.argv).ok()?;
-            let view =
-                serde_json::to_string(&(verb, read.selector.as_deref().map(str::trim), read.full))
-                    .ok()?;
+            let view = serde_json::to_string(&(
+                verb,
+                read.selector
+                    .as_deref()
+                    .map(zerocode_core::agent_browser::read_selector_view),
+                read.full,
+            ))
+            .ok()?;
             tracker.observe_view(identity, view, observation.fingerprint)
         } else if zerocode_core::agent_browser::acts(verb) {
             tracker.acknowledge(identity, verb != "eval")
@@ -670,6 +675,36 @@ mod tests {
             advances, 0,
             "an unchanged view must not borrow another view's fingerprint"
         );
+    }
+
+    #[test]
+    fn non_ascii_and_escaped_selector_characters_keep_distinct_observation_views() {
+        let mut tracker = Tracker::default();
+        let scope = BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
+        let selectors = [
+            "h1".to_string(),
+            "h1\u{00a0}".to_string(),
+            format!("#tail{} ", char::from(92)),
+            format!("#tail{}\t", char::from(92)),
+        ];
+        for _ in 0..3 {
+            for (index, selector) in selectors.iter().enumerate() {
+                let read = ["read".to_string(), "browser-1".into(), selector.clone()];
+                let text = format!("View {index}");
+                let evidence = scope
+                    .finish_at(
+                        &read,
+                        &browser_answer(&text, 7),
+                        Some(&browser_observation("browser-1", &text)),
+                        &mut tracker,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    evidence.state_revision, 0,
+                    "non-ASCII and escaped selector characters must keep their own unchanged observation view"
+                );
+            }
+        }
     }
 
     #[test]

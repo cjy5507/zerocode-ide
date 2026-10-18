@@ -575,6 +575,31 @@ pub fn parse_read(argv: &[String]) -> Result<ReadCommand, String> {
     }
 }
 
+/// The selector part of an observation view. Remove only ignored outer CSS
+/// whitespace; escaped whitespace and non-ASCII identifier characters remain.
+#[must_use]
+pub fn read_selector_view(selector: &str) -> &str {
+    let selector = selector.trim_start_matches([' ', '\t', '\n', '\r', '\x0c']);
+    let mut end = selector.len();
+    while end > 0
+        && matches!(
+            selector.as_bytes()[end - 1],
+            b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'
+        )
+    {
+        let slashes = selector.as_bytes()[..end - 1]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        if !slashes.is_multiple_of(2) {
+            break;
+        }
+        end -= 1;
+    }
+    &selector[..end]
+}
+
 /// One control the `marks` page script saw: where it is (CSS pixels, viewport
 /// relative), what a person calls it (`role`, `label`), how the page finds it
 /// again (`selector`), and whether a person could hit it — `elementFromPoint`
