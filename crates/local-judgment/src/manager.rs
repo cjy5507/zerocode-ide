@@ -1897,6 +1897,18 @@ impl Manager {
         )
     }
 
+    pub fn restore_guarded<Apply, Guard>(
+        self: &Arc<Self>,
+        _allowed: bool,
+        _callbacks: (Apply, Guard),
+    ) -> Result<Snapshot>
+    where
+        Apply: FnOnce(&Provider, &str, &Binding) -> Result<()> + Send + 'static,
+        Guard: Fn(&mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync + 'static,
+    {
+        Ok(self.snapshot())
+    }
+
     pub fn switch_model_guarded<Apply, Guard>(
         self: &Arc<Self>,
         model_id: &str,
@@ -2801,6 +2813,32 @@ pub(crate) mod test_support {
         storage::private_dir(executable.parent().unwrap()).unwrap();
         fs::write(executable, b"fixture").unwrap();
         manager.store.commit_runtime(&mut stage, &profile).unwrap();
+        manager
+    }
+
+    #[cfg(unix)]
+    pub fn reopened_manager(
+        root: &Path,
+        settings: &Path,
+        models: Vec<Model>,
+        factory: EngineFactory,
+        sink: Arc<dyn Fn(Snapshot) + Send + Sync>,
+        runtime_verified: bool,
+    ) -> Arc<Manager> {
+        let runtimes: serde_json::Value =
+            serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
+        let mut profile: RuntimeProfile =
+            serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
+        profile.validated = runtime_verified;
+        let manager = Manager::with_catalog(
+            root,
+            settings,
+            Catalog { version: 1, models },
+            Some(profile),
+            sink,
+        )
+        .unwrap();
+        *lock(&manager.engine_factory) = Some(factory);
         manager
     }
 

@@ -123,6 +123,8 @@ impl std::error::Error for Error {}
 
 #[cfg(all(test, unix))]
 mod admission_tests;
+#[cfg(all(test, unix))]
+mod restore_tests;
 #[cfg(test)]
 mod source_tests;
 #[cfg(all(test, unix))]
