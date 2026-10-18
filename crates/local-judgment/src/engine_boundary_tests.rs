@@ -1432,3 +1432,315 @@ async fn an_expired_budget_stops_between_native_batches_and_leaves_the_next_requ
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert!(running.engine.alive());
 }
+
+fn observation_context() -> Value {
+    let mut jobs = std::env::var_os("LOCAL_JUDGMENT_BUILD_RUN")
+        .and_then(|path| std::fs::read_dir(path).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    jobs.sort();
+    json!({
+        "at_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+        "running_jobs": jobs,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "contract: runs every compiled screen shape against the pinned model with its caller deadline"]
+async fn every_compiled_screen_shape_finishes_or_refuses_before_its_caller_deadline() {
+    let root = std::env::var_os(PINNED_ROOT)
+        .unwrap_or_else(|| panic!("did not run: {PINNED_ROOT} names no folder"));
+    let profile = crate::catalog::runtime().unwrap().unwrap();
+    let model = crate::catalog::catalog()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.engine == EngineKind::Laya)
+        .unwrap();
+    let runtime = Path::new(&root).join("runtime").join(&profile.id);
+    let folder = Path::new(&root).join("models").join(&model.id);
+    for (place, fingerprint) in [
+        (&runtime, profile.fingerprint().unwrap()),
+        (&folder, model.fingerprint().unwrap()),
+    ] {
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(place.join("receipt.json")).unwrap()).unwrap();
+        assert_eq!(
+            receipt["fingerprint"], fingerprint,
+            "did not run: the clone is not manifest-pinned"
+        );
+    }
+    let startup_context = observation_context();
+    let began = Instant::now();
+    let engine = Engine::spawn(&runtime, &profile, Some((folder.as_path(), &model))).unwrap();
+    let process = engine.clone();
+    tokio::time::timeout(
+        START_TIMEOUT,
+        tokio::task::spawn_blocking(move || process.ready()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let running = serve(&model, engine, Arc::new(|| {})).await.unwrap();
+    let startup_ms = began.elapsed().as_secs_f64() * 1000.0;
+    let mut fixtures = compiled_goal_head_shapes();
+    for mut fixture in compiled_recorded_goal_heads() {
+        fixtures.push(fixture.clone());
+        fixture["shape"]["questions"] = json!("action");
+        fixture["request"]["questions"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|name, _| name == "action");
+        fixtures.push(fixture);
+    }
+    let budget_ms = zerocode_core::jev::BROWSER.apply_deadline_ms.unwrap();
+    let deadline = Duration::from_millis(budget_ms);
+    let client = client();
+    let mut rows = Vec::new();
+    for fixture in fixtures {
+        let mut request = fixture["request"].clone();
+        request["model"] = json!(model.id);
+        let context = observation_context();
+        let began = Instant::now();
+        let response = client
+            .post(running.provider.request_url())
+            .header(judgment_provider::DEADLINE_HEADER, budget_ms.to_string())
+            .timeout(deadline)
+            .json(&request)
+            .send()
+            .await;
+        let (status, body, timed_out) = match response {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let body = response.json::<Value>().await.unwrap_or(Value::Null);
+                (Some(status), body, false)
+            }
+            Err(error) => (None, Value::Null, error.is_timeout()),
+        };
+        let elapsed = began.elapsed();
+        let outcome = if status == Some(200) {
+            body["usage"]["truncated"] != true
+                && body["usage"]["state_tokens_dropped"]
+                    .as_u64()
+                    .is_none_or(|dropped| dropped == 0)
+                && body["usage"]["truncated_questions"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty)
+                && body["answers"].as_object().is_some_and(|answers| {
+                    answers.len() == request["questions"].as_object().unwrap().len()
+                })
+        } else {
+            status == Some(502)
+                && body["refusal"] == "provider_deadline_budget"
+                && body["usage"]["model_calls"] == 0
+        };
+        rows.push(json!({
+            "shape": fixture["shape"], "context": context, "finished_context": observation_context(),
+            "elapsed_ms": elapsed.as_secs_f64() * 1000.0, "status": status, "body": body,
+            "timed_out": timed_out, "pass": outcome && !timed_out && elapsed <= deadline,
+        }));
+    }
+    let report = json!({"budget_ms":budget_ms,"startup_ms":startup_ms,"startup_context":startup_context,"rows":rows});
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_DEADLINE_REPORT") {
+        std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
+    }
+    let failed: Vec<&Value> = report["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["pass"] != true)
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "{} compiled screen shapes missed their caller deadline or lacked a named preflight refusal; first: {}",
+        failed.len(),
+        failed.first().copied().unwrap_or(&Value::Null)
+    );
+}
+
+async fn snapshot_matching(
+    snapshots: &mut tokio::sync::mpsc::UnboundedReceiver<crate::Snapshot>,
+    predicate: impl Fn(&crate::Snapshot) -> bool,
+) -> crate::Snapshot {
+    tokio::time::timeout(START_TIMEOUT, async {
+        loop {
+            let snapshot = snapshots
+                .recv()
+                .await
+                .expect("the manager still reports its state");
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+        }
+    })
+    .await
+    .expect("the manager reaches the requested state before its startup bound")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "contract: records native deadline restart cost and the persisted exit in PINNED_ROOT"]
+async fn a_deadline_stop_records_its_exit_and_the_cost_of_the_next_successful_question() {
+    let root = std::env::var_os(PINNED_ROOT)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| panic!("did not run: {PINNED_ROOT} names no folder"));
+    let profile = crate::catalog::runtime().unwrap().unwrap();
+    let model = crate::catalog::catalog()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.engine == EngineKind::Laya)
+        .unwrap();
+    let managed = root.join("managed-judgment");
+    std::fs::create_dir(&managed).unwrap();
+    std::fs::rename(root.join("runtime"), managed.join("runtime")).unwrap();
+    std::fs::rename(root.join("models"), managed.join("models")).unwrap();
+    let runtime = managed.join("runtime").join(&profile.id);
+    let folder = managed.join("models").join(&model.id);
+    let settings = root.join("fixture-settings.json");
+    std::fs::write(&settings, b"{}").unwrap();
+    let (notices, mut snapshots) = tokio::sync::mpsc::unbounded_channel();
+    let manager = crate::Manager::new(&root, &settings, move |snapshot| {
+        let _ = notices.send(snapshot);
+    })
+    .unwrap();
+    let spawned = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = spawned.clone();
+    crate::manager::test_support::replace_engine_factory(
+        &manager,
+        Arc::new(move |model| {
+            let engine = Engine::spawn(&runtime, &profile, Some((folder.as_path(), model)))?;
+            capture.lock().unwrap().push(engine.clone());
+            Ok(engine)
+        }),
+    );
+    let first_context = observation_context();
+    let began = Instant::now();
+    manager.start(&model.id, &model.revision).unwrap();
+    let ready = snapshot_matching(&mut snapshots, |snapshot| {
+        snapshot.server.state == "ready"
+            && snapshot
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.state == "done")
+    })
+    .await;
+    let first_start = began.elapsed();
+    let first_id = ready.server.id.unwrap();
+    manager.check(&first_id).unwrap();
+    snapshot_matching(&mut snapshots, |snapshot| {
+        snapshot.server.checked
+            && snapshot
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.state == "done")
+    })
+    .await;
+    let expected = Provider::read(&settings).unwrap().identity();
+    manager
+        .apply(&first_id, &expected, |provider, expected, binding| {
+            assert_eq!(Provider::read(&settings).unwrap().identity(), expected);
+            std::fs::write(
+                &settings,
+                serde_json::to_vec(&json!({"smart":{
+                    "judgmentProvider": provider, (crate::MANAGED_MODEL_KEY): binding,
+                }}))
+                .unwrap(),
+            )
+            .map_err(|_| Error::Storage)
+        })
+        .unwrap();
+    let configured = std::fs::read(&settings).unwrap();
+    let engine = spawned.lock().unwrap()[0].clone();
+    let stopped_context = observation_context();
+    let stopped = Instant::now();
+    engine.stop_for(Stop::Deadline(Some("deadline-contract".to_string())));
+    let recovering =
+        snapshot_matching(&mut snapshots, |snapshot| snapshot.server.exit.is_some()).await;
+    let provider = recovering.server.provider.clone().unwrap();
+    let mut request = compiled_recorded_goal_heads()
+        .into_iter()
+        .find(|fixture| fixture["shape"]["navigation"] == "none")
+        .unwrap()["request"]
+        .clone();
+    request["model"] = json!(model.id);
+    let deadline = zerocode_core::jev::BROWSER.apply_deadline_ms.unwrap();
+    let refused_context = observation_context();
+    let asking = Instant::now();
+    let refused = client()
+        .post(provider.request_url())
+        .header(judgment_provider::DEADLINE_HEADER, deadline.to_string())
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    let refused_ms = asking.elapsed().as_secs_f64() * 1000.0;
+    let refused_status = refused.status();
+    let refused_body: Value = refused.json().await.unwrap();
+    let restored = snapshot_matching(&mut snapshots, |snapshot| {
+        snapshot.server.state == "ready" && snapshot.server.id.as_deref() != Some(&first_id)
+    })
+    .await;
+    let restore_ms = stopped.elapsed().as_secs_f64() * 1000.0;
+    let provider = restored.server.provider.clone().unwrap();
+    let response_context = observation_context();
+    let asking = Instant::now();
+    let response = client()
+        .post(provider.request_url())
+        .header(judgment_provider::DEADLINE_HEADER, deadline.to_string())
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    let response_ms = asking.elapsed().as_secs_f64() * 1000.0;
+    let response_status = response.status();
+    let response_body: Value = response.json().await.unwrap();
+    let successful_ms = stopped.elapsed().as_secs_f64() * 1000.0;
+    let journal = managed.join("server-exits.jsonl");
+    let record = tokio::time::timeout(START_TIMEOUT, async {
+        loop {
+            let text = tokio::fs::read_to_string(&journal)
+                .await
+                .unwrap_or_default();
+            if let Some(record) = text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|record| record["serverId"] == first_id && record.get("kind").is_none())
+            {
+                break record;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let report = json!({
+        "first_context":first_context,"stopped_context":stopped_context,"refused_context":refused_context,"response_context":response_context,"finished_context":observation_context(),
+        "first_start_ready_ms": first_start.as_secs_f64() * 1000.0,
+        "immediate_following_ms": refused_ms, "immediate_following_status": refused_status.as_u16(),
+        "immediate_following_body": refused_body, "restart_ready_ms": restore_ms,
+        "successful_following_ms_including_restart": successful_ms,
+        "successful_request_ms": response_ms, "successful_request_status": response_status.as_u16(),
+        "successful_response": response_body, "exit_record": record,
+        "engine_loads": spawned.lock().unwrap().len(),
+    });
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_RESTART_REPORT") {
+        std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
+    }
+    assert_eq!(
+        refused_status,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "{report}"
+    );
+    assert_eq!(response_status, reqwest::StatusCode::OK, "{report}");
+    assert_eq!(record["cause"], Error::Timeout.token());
+    assert_eq!(record["recovery"], "restart");
+    assert_eq!(std::fs::read(&settings).unwrap(), configured);
+    assert_eq!(spawned.lock().unwrap().len(), 2);
+    manager
+        .stop(restored.server.id.as_deref().unwrap())
+        .unwrap();
+}
