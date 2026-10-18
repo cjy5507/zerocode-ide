@@ -1773,6 +1773,8 @@ mod tests {
         machine_words(&decisions::words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
             let clients = tempfile::tempdir().expect("a folder for the vendors' clients");
             let ran = clients.path().join("ran");
+            // Telemetry looks for claude on PATH once per process: settle that before the fake claude goes first.
+            let _ = telemetry::claude_code_version();
             #[cfg(unix)]
             let _restored = clients_first_on_path(clients.path(), &ran);
             for point in Point::ALL {
