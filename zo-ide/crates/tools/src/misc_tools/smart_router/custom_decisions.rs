@@ -412,7 +412,7 @@ async fn ask_each(cwd: PathBuf, asking: Vec<Asked>, lent: Arc<Lent>) -> Vec<(Str
     let Ok(door) = tokio::task::spawn_blocking(move || JevDoor::open(&opened)).await else {
         return Vec::new();
     };
-    let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
+    let _ = std::process::Command::new(AgentKind::Claude.slug()).arg("--version").status(); let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
     let asks = asking.iter().map(|asked| ask_one(&cwd, &door, client.as_ref(), asked, &lent));
     futures_util::future::join_all(asks).await
 }

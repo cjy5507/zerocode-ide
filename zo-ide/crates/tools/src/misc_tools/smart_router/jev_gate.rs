@@ -1746,4 +1746,84 @@ mod tests {
             "a refused consent writes nothing"
         );
     }
+
+    /// A person's own decisions ask the judgment provider and no one else
+    /// (t-62170): at each of the four points every request reaches the System
+    /// One route under its key, and — where a script can stand in for one — a
+    /// vendor's own client first on `PATH`, the subscription road of
+    /// `zerocode_core::type_value::Road`, never runs. The decisions' source
+    /// names neither that module nor a road.
+    #[test]
+    fn custom_decisions_reach_only_the_judgment_provider() {
+        use api::sync_bridge::run_blocking;
+        use runtime::skill_rank::SkillSuggestionSeat;
+        use runtime::{ConversationMessage, ToolGuardSeat};
+        use zerocode_core::jev::custom::Point;
+        use super::super::custom_decisions::{decide, tests as decisions};
+        use super::super::jev_mock::machine_words;
+        use super::super::project_rules::note_project_rule_turn;
+        use super::super::skill_search::SkillSuggestionJudge;
+        use super::super::tool_guard::ToolGuardJudge;
+
+        let source = include_str!("custom_decisions.rs");
+        for named in ["type_value", "Road::"] {
+            assert!(!source.contains(named), "the decisions name {named}");
+        }
+        let mock = decisions::replying(|_| decisions::a_noul(0.9));
+        machine_words(&decisions::words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+            let clients = tempfile::tempdir().expect("a folder for the vendors' clients");
+            let ran = clients.path().join("ran");
+            #[cfg(unix)]
+            let _restored = clients_first_on_path(clients.path(), &ran);
+            for point in Point::ALL {
+                decisions::keep(&decisions::yes_no(point.key(), point), JevMode::On);
+            }
+            run_blocking(SkillSuggestionJudge::at(cwd).suggest(decisions::TASK.to_string()));
+            let guard = ToolGuardJudge::at(cwd);
+            guard.command(decisions::command_ask(cwd, "clean", "rm -rf build"));
+            run_blocking(guard.command_ran(decisions::finished("clean")));
+            note_project_rule_turn(cwd, "session", "turn-1", &[ConversationMessage::user_text(decisions::TASK)]);
+            decide(cwd, Point::AgentAsks.key(), Some("the diff adds one test"), &[]).expect("a verdict");
+            let rows = decisions::rows_in(cwd, Point::ALL.len());
+            assert!(rows.len() == Point::ALL.len() && rows.iter().all(|row| row["requests"] == 1), "{rows:?}");
+            let key = std::env::var(api::SYSTEMONE_API_KEY_ENV).expect("the judgment provider's key");
+            let heads = mock.heads();
+            assert_eq!(heads.len(), Point::ALL.len(), "one request a point");
+            for head in heads.iter().map(|head| head.to_ascii_lowercase()) {
+                assert!(head.starts_with(&format!("post {} http/1.1", api::SYSTEMONE_PATH)), "{head}");
+                assert!(head.contains(&format!("authorization: bearer {key}")), "{head}");
+            }
+            assert!(!ran.exists(), "a vendor's own client ran: {:?}", std::fs::read_to_string(&ran));
+        });
+    }
+
+    /// `PATH` as it stood before a test put a folder first, put back however
+    /// the test ends.
+    #[cfg(unix)]
+    struct PathAsItWas(std::ffi::OsString);
+
+    #[cfg(unix)]
+    impl Drop for PathAsItWas {
+        fn drop(&mut self) {
+            std::env::set_var("PATH", &self.0);
+        }
+    }
+
+    /// The subscription roads' own clients as scripts in `folder`, each noting
+    /// its every run in `ran`, first on `PATH` until what this returns drops.
+    #[cfg(unix)]
+    fn clients_first_on_path(folder: &Path, ran: &Path) -> PathAsItWas {
+        use std::os::unix::fs::PermissionsExt;
+        use zerocode_core::AgentKind;
+        for agent in [AgentKind::Claude, AgentKind::Codex] {
+            let client = folder.join(agent.slug());
+            std::fs::write(&client, format!("#!/bin/sh\necho {} >> '{}'\n", agent.slug(), ran.display()))
+                .expect("a client");
+            std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o755)).expect("a client that runs");
+        }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let first = std::iter::once(folder.to_path_buf());
+        std::env::set_var("PATH", std::env::join_paths(first.chain(std::env::split_paths(&path))).expect("a PATH"));
+        PathAsItWas(path)
+    }
 }
