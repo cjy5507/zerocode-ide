@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use runtime::{BashCommandInput, ResolvedToolCall, ToolExecutionResult};
 use serde_json::Value;
@@ -142,11 +142,11 @@ mod tests {
             surface_execution:Some(expected.clone()) };
         let host = surface_host::SurfaceHost::start(directory.path(), Some(vec![json!({"verb":"read","answer":reply})]),
             zerocode_core::agent_shims::SurfaceShim::Browser);
-        let _host_environment = crate::tests::EnvGuard::set_many(host.environment());
+        let host_environment = crate::tests::EnvGuard::set_many(host.environment());
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf())
             .chain(std::env::split_paths(&inherited_path))).unwrap();
-        let _path = _host_environment.set_also("PATH", &path);
+        let _path = host_environment.set_also("PATH", &path);
         let input: BashCommandInput = serde_json::from_value(json!({"command":"zerocode-browser read browser-1",
             "timeout":5000,"dangerouslyDisableSandbox":true})).unwrap();
         let prepared = BrowserExecution::prepare(&input);

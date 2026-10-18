@@ -2383,12 +2383,12 @@ mod tests {
     #[test]
     fn production_registry_and_capability_preserve_only_outer_host_surface_metadata() {
         let dir = tempfile::tempdir().unwrap();
-        let _host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
-        let _host_environment = crate::tests::EnvGuard::set_many(_host.environment());
+        let host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
+        let host_environment = crate::tests::EnvGuard::set_many(host.environment());
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf())
             .chain(std::env::split_paths(&inherited_path))).unwrap();
-        let _path = _host_environment.set_also("PATH", &path);
+        let _path = host_environment.set_also("PATH", &path);
         let expected = SurfaceExecution { surface_id: "fixture-host/computer/41/lease-a".into(), state_revision: 7,
             effect: zerocode_core::surface_execution::SurfaceEffect::Observation };
         let host = json!({"ok":true,"surfaceExecution":expected,"result":{"window":{"id":41}}});
@@ -2456,8 +2456,8 @@ mod tests {
     #[test]
     fn a_post_action_observation_keeps_its_host_effect_outside_the_visible_body() {
         let dir = tempfile::tempdir().unwrap();
-        let _host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
-        let _host_environment = crate::tests::EnvGuard::set_many(_host.environment());
+        let host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
+        let _host_environment = crate::tests::EnvGuard::set_many(host.environment());
         let road = ComputerRoad { program:dir.path().join(COMPUTER_SHIM) };
         let ctx = crate::tests::tool_context_outside_cwd_windows();
         let acknowledged = SurfaceExecution { surface_id:"fixture-host/computer/41/lease-a".into(), state_revision:7,
