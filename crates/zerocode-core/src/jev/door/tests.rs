@@ -1247,6 +1247,37 @@ fn a_shared_hour_write_failure_returns_the_decisions_place() {
         (1, 0, 1),
         "a shared hour that cannot be written spends no hourly or daily place",
     );
+
+    let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+    count::count_one_in_the_hour(&every).unwrap();
+    let writable = std::fs::metadata(&every).unwrap().permissions();
+    let mut readonly = writable.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&every, readonly).unwrap();
+    let result = pass_within_the_hour(
+        |asking| may_send(&ROUTING, asking, routing_body("rename a variable")),
+        true,
+        &settings(None),
+        Some(APP),
+        &today,
+        Hour {
+            decision: &decision,
+            decision_most: HOURLY_DEFAULT,
+            every: &every,
+            every_most: ALL_HOURLY_DEFAULT,
+        },
+    );
+    std::fs::set_permissions(&every, writable).unwrap();
+    assert_eq!(result.err(), Some(Refused::HourlyBudget));
+    assert_eq!(
+        (
+            count::sent(&decision),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (1, 1, 1),
+        "an append failure after the decision was counted returns its place",
+    );
 }
 
 #[test]
@@ -1373,6 +1404,43 @@ fn the_shared_hour_is_locked_and_the_loser_spends_no_hourly_place() {
             1
         ),
         "only the winner takes an hourly place, and the day counts that request once",
+    );
+}
+
+#[test]
+fn losing_the_days_last_place_returns_the_hours_but_keeps_the_daily_rule() {
+    use crate::jev::custom::{ALL_HOURLY_DEFAULT, EVERY_DECISION, HOURLY_DEFAULT};
+
+    let home = tempfile::tempdir().unwrap();
+    let hour = "2026-10-17T10";
+    let decision = count::hour_path(home.path(), "d-0000000a", hour);
+    let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+    let today = count::requests_path(home.path(), "2026-10-17");
+    let result = pass_within_the_hour(
+        |asking| {
+            count::count_one(&today).unwrap();
+            may_send(&ROUTING, asking, routing_body("rename a variable"))
+        },
+        true,
+        &settings(Some(1)),
+        Some(APP),
+        &today,
+        Hour {
+            decision: &decision,
+            decision_most: HOURLY_DEFAULT,
+            every: &every,
+            every_most: ALL_HOURLY_DEFAULT,
+        },
+    );
+    assert_eq!(result.err(), Some(Refused::Budget));
+    assert_eq!(
+        (
+            count::sent(&decision),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (0, 0, 2),
+        "a daily request counted after the first check keeps its daily place only",
     );
 }
 

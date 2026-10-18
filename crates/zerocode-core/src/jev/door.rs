@@ -699,17 +699,19 @@ pub struct Hour<'a> {
 
 /// [`pass`] for a person's decision (t-62170), whose requests count in two
 /// hours besides the day ([`Hour`]). The door's questions come first, the
-/// day's budget among them. Both hours are checked and counted before the
-/// day. Any refusal or write failure returns the hour counts to their prior
-/// values. If a return fails, the count stays high: later requests may be
-/// refused, and this request is never sent. The day keeps [`take_a_place`]'s
-/// rule: losing its last place to a concurrent request spends that daily
-/// place even though the request is refused.
+/// day's budget among them. One exclusive file lock beside the hour files
+/// covers every hour writer while both hours are checked, counted, and the
+/// day is taken last. Any refusal or write failure returns the hour counts
+/// to their prior values before releasing the lock. If a return fails, the
+/// count stays high: later requests may be refused, and this request is never
+/// sent. The day keeps [`take_a_place`]'s rule: losing its last place to a
+/// concurrent request spends that daily place even though the request is refused.
 ///
 /// # Errors
-/// As [`pass`], and [`Refused::HourlyBudget`] when either hour is full or
-/// cannot be counted: an hour's bound is always set, so a count the door
-/// cannot keep is one it may not send past.
+/// As [`pass`], and [`Refused::HourlyBudget`] when the bounded lock wait
+/// expires, either hour is full, or an hour cannot be read, counted or
+/// returned: an hour's bound is always set, so a count the door cannot keep
+/// is one it may not send past.
 pub fn pass_within_the_hour(
     ask: impl FnOnce(&Asking<'_>) -> Result<Cleared, Refused>,
     key: bool,
@@ -725,12 +727,14 @@ pub fn pass_within_the_hour(
         sent_today: count::sent(requests),
     };
     let cleared = ask(&asking)?;
-    if count::sent(hour.decision) >= hour.decision_most
-        || count::sent(hour.every) >= hour.every_most
-    {
+    let _lock = count::lock_hours(hour.every).map_err(|_| Refused::HourlyBudget)?;
+    let before = (
+        count::sent_in_the_hour(hour.decision).map_err(|_| Refused::HourlyBudget)?,
+        count::sent_in_the_hour(hour.every).map_err(|_| Refused::HourlyBudget)?,
+    );
+    if before.0 >= hour.decision_most || before.1 >= hour.every_most {
         return Err(Refused::HourlyBudget);
     }
-    let before = (count::sent(hour.decision), count::sent(hour.every));
     if let Err(refused) = take_an_hours_place(hour.decision, hour.decision_most)
         .and_then(|()| take_an_hours_place(hour.every, hour.every_most))
         .and_then(|()| take_a_place(settings, requests))

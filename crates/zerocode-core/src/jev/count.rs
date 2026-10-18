@@ -9,9 +9,11 @@
 //! request's own place in the day, so two programs counting at the same
 //! moment each learn which of them took the last place.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// The directory under zo's config home the day files live in.
 pub const REQUESTS_DIR: &str = "jev";
@@ -28,6 +30,14 @@ const HOUR_FILE_PREFIX: &str = "hour-";
 
 /// The lock beside every hour file, shared across decisions and hours.
 pub(super) const HOURS_LOCK_FILE: &str = ".hours.lock";
+
+/// The maximum wait and retry interval for an hour writer, as in the decisions store.
+const HOURS_LOCK_WAIT: Duration = Duration::from_millis(25);
+const HOURS_LOCK_POLL: Duration = Duration::from_millis(1);
+
+/// The hour lock is readable and writable by its owner alone.
+#[cfg(unix)]
+const HOURS_LOCK_MODE: u32 = 0o600;
 
 /// The local hour an hour file's name holds, in the shape [`hour_of`] writes.
 const HOUR_SHAPE: &str = "YYYY-MM-DDTHH";
@@ -88,6 +98,48 @@ pub fn hour_path(config_home: &Path, key: &str, hour: &str) -> PathBuf {
     config_home
         .join(REQUESTS_DIR)
         .join(format!("{HOUR_FILE_PREFIX}{hour}-{key}{DAY_FILE_SUFFIX}"))
+}
+
+/// Exclude every other hour writer until the returned file is dropped.
+/// A lock that stays busy past [`HOURS_LOCK_WAIT`] returns `WouldBlock`.
+pub(super) fn lock_hours(every: &Path) -> io::Result<File> {
+    let path = every.with_file_name(HOURS_LOCK_FILE);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(HOURS_LOCK_MODE);
+    }
+    let file = options.open(path)?;
+    let until = Instant::now() + HOURS_LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if Instant::now() < until => {
+                thread::sleep(HOURS_LOCK_POLL);
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "another writer holds the hourly counts",
+                ));
+            }
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
+}
+
+/// An hour's count, with an unreadable count refused instead of read as zero.
+pub(super) fn sent_in_the_hour(path: &Path) -> io::Result<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
 }
 
 /// Count one request in `path`, an hour file, and answer its place in the
