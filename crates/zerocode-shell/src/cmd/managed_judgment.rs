@@ -270,3 +270,74 @@ pub(crate) fn managed_judgment_remove(
         })
         .map_err(|error| error.to_string())
 }
+
+fn restore_allowed(_document: &serde_json::Value, _intent_identity: &str) -> bool {
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Map, Value, json};
+
+    use super::restore_allowed;
+
+    #[test]
+    fn restore_gate_uses_the_window_switch_and_matching_local_binding() {
+        let catalog = local_judgment::Catalog::parse(include_str!(
+            "../../../local-judgment/manifests/models.json"
+        ))
+        .unwrap();
+        let model = &catalog.models[0];
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let provider = judgment_provider::Provider {
+            kind: judgment_provider::ProviderKind::Local,
+            protocol: judgment_provider::Protocol::SystemOne,
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            model: model.id.clone(),
+            requires_auth: false,
+        };
+        let binding = local_judgment::Binding {
+            model_id: model.id.clone(),
+            revision: model.revision.clone(),
+            provider_identity: provider.identity(),
+        };
+        let mut smart = Map::new();
+        zerocode_core::jev::door::switch_on(&mut smart).unwrap();
+        smart.insert("judgmentProvider".to_owned(), json!(provider));
+        smart.insert(local_judgment::MANAGED_MODEL_KEY.to_owned(), json!(binding));
+        let enabled = json!({"smart": smart});
+        let mut off = enabled.clone();
+        zerocode_core::jev::door::switch_off(off["smart"].as_object_mut().unwrap()).unwrap();
+        assert!(!restore_allowed(&off, &provider.identity()));
+        let mut unmanaged = enabled.clone();
+        unmanaged["smart"]["judgmentProvider"] =
+            json!(judgment_provider::Provider::from_root(&json!({})).unwrap());
+        assert!(!restore_allowed(&unmanaged, &provider.identity()));
+        let mut mismatch = enabled.clone();
+        mismatch["smart"][local_judgment::MANAGED_MODEL_KEY]["modelId"] =
+            json!(format!("{}-other", model.id));
+        assert!(!restore_allowed(&mismatch, &provider.identity()));
+        let mut missing = enabled.clone();
+        missing["smart"][local_judgment::MANAGED_MODEL_KEY] = Value::Null;
+        assert!(!restore_allowed(&missing, &provider.identity()));
+        assert!(!restore_allowed(
+            &enabled,
+            &judgment_provider::Provider::from_root(&json!({}))
+                .unwrap()
+                .identity()
+        ));
+        assert!(
+            restore_allowed(&enabled, &provider.identity()),
+            "local enabled matching binding must permit restoration"
+        );
+        let mut legacy = enabled;
+        legacy["smart"]["jev"]
+            .as_object_mut()
+            .unwrap()
+            .remove(zerocode_core::jev::door::ENABLED_SETTING);
+        assert!(
+            restore_allowed(&legacy, &provider.identity()),
+            "legacy settings must use the window switch semantics"
+        );
+    }
+}
