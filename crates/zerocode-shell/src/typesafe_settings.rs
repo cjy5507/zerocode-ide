@@ -3210,6 +3210,43 @@ mod tests {
             "the editor offers or bounds something core does not hold"
         );
     }
+
+    /// The editor's six doors (t-62170 stage 3) are registered with the
+    /// webview, answered by the settings harness's fake backend, and asked
+    /// by the dashboard: a door the page asks that nobody registered is a
+    /// button that does nothing, and one the harness never answers is one no
+    /// page test presses.
+    #[test]
+    fn the_decision_editor_asks_six_registered_doors_the_harness_answers() {
+        let main = include_str!("main.rs");
+        let handlers = main
+            .split_once("tauri::generate_handler![")
+            .map(|(_, list)| list)
+            .expect("the handler list");
+        let harness = include_str!("../../../ui/tests/settings.mjs");
+        let dashboard = include_str!("../../../ui/shell-jev.js");
+        for command in [
+            "list_custom_decisions",
+            "check_custom_decision",
+            "save_custom_decision",
+            "delete_custom_decision",
+            "restore_custom_decision",
+            "set_custom_decision_mode",
+        ] {
+            assert!(
+                handlers.contains(&format!("{command},")),
+                "{command} is not registered"
+            );
+            assert!(
+                harness.contains(&format!("case \"{command}\"")),
+                "the settings harness never answers {command}"
+            );
+            assert!(
+                dashboard.contains(&format!("invoke(\"{command}\"")),
+                "the dashboard never asks {command}"
+            );
+        }
+    }
 }
 
 /// One seat's numbers, as `zo jev summary --json` reports them and the card
