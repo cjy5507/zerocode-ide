@@ -14,11 +14,13 @@
 //! the check execs `zo decision-shadow check --json`, which puts the shadow's
 //! own question through the same key road, request and answer check.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use zerocode_core::jev::custom;
 use zerocode_core::jev::door::{self, JevSettings, NotAnObject};
 use zerocode_core::jev::{
     CLASSIFIER_SETTING, ClassifierMode, DEFAULT_MODEL, JEV_USES, JevMode, JevUse, MODEL_SETTING,
@@ -913,6 +915,57 @@ pub fn read_day(path: &Path) -> DayBudget {
         sent,
         most: JevSettings::from_root(&root).daily_requests,
     }
+}
+
+/// A person's decision as the dashboard's editor sends it and is sent it
+/// back (t-62170): a definition's fields ([`custom::Definition`]), with no id
+/// until the store keeps one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionDraft {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub question: String,
+    pub answer: AnswerDraft,
+    pub at: custom::Point,
+    pub reads: BTreeSet<custom::Input>,
+    /// The folders it asks in; none for every folder the person consented to.
+    #[serde(default)]
+    pub folders: Option<BTreeSet<String>>,
+    pub act_from: f64,
+    pub max_per_hour: u64,
+}
+
+/// What a decision's answer is, as the editor writes it: a choice's options
+/// in the order the person wrote them, so a name written twice is seen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AnswerDraft {
+    YesNo { yes: String, no: String },
+    Choice { options: Vec<ChoiceOption> },
+    Score { levels: Vec<String> },
+}
+
+/// One option of a choice: its name, and what it means.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChoiceOption {
+    pub name: String,
+    pub means: String,
+}
+
+/// Keep `draft` in the person's store under `home`, zo's config home, at
+/// `now_ms`: a new decision when it has no id, else the newest version of
+/// the one with its id. Its version.
+///
+/// # Errors
+/// Whatever keeps it from the store.
+pub fn save_custom_decision_at(
+    _home: &Path,
+    _draft: DecisionDraft,
+    _now_ms: i64,
+) -> Result<String, custom::store::Error> {
+    Ok(String::new())
 }
 
 #[cfg(test)]
@@ -2886,6 +2939,47 @@ mod tests {
             sent[0]["mode"],
             serde_json::json!("off"),
             "the mode zo read never reaches the card: {sent}"
+        );
+    }
+
+    /// The store refuses a secret line whoever asks it: a draft that never
+    /// passed the editor's check is refused at the line core's detector
+    /// reads, and nothing is kept (t-62170 stage 3, test 9).
+    #[test]
+    fn saving_refuses_a_secret_line_without_the_screen() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let draft = DecisionDraft {
+            id: None,
+            name: "Release notes".to_string(),
+            question: "Did this turn change what a person sees?\nRead the diff first.\n\
+                       Authorization: Bearer abc\nThen answer."
+                .to_string(),
+            answer: AnswerDraft::YesNo {
+                yes: "It changed what a person sees.".to_string(),
+                no: "Nothing a person sees changed.".to_string(),
+            },
+            at: custom::Point::TurnEnd,
+            reads: BTreeSet::from([custom::Input::Task]),
+            folders: None,
+            act_from: custom::ACT_FROM_DEFAULT,
+            max_per_hour: custom::HOURLY_DEFAULT,
+        };
+        match save_custom_decision_at(home.path(), draft, 1_792_300_000_000) {
+            Err(custom::store::Error::Refused(refusals)) => assert_eq!(
+                refusals,
+                vec![custom::Refusal::SecretLine {
+                    field: custom::Field::Question,
+                    line: 3,
+                }],
+                "refused, but not at the secret line"
+            ),
+            kept => panic!("the save kept a question with a secret line: {kept:?}"),
+        }
+        assert!(
+            custom::store::list(home.path())
+                .expect("the store reads")
+                .is_empty(),
+            "a refused decision stands in the store"
         );
     }
 }
