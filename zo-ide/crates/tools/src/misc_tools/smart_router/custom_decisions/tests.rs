@@ -764,3 +764,36 @@ fn a_read_only_command_asks_nothing_and_writes_no_row() {
         assert!(rows_now(cwd).is_empty(), "and wrote no row");
     });
 }
+
+/// A turn whose start has a decision's line and no skill suggestion carries
+/// the line under the skill note's prefix alone, so the next turn's start
+/// clears it like any skill note: the model reads it in its own turn only.
+#[test]
+fn a_lone_decision_line_opens_with_the_skill_prefix_and_is_gone_next_turn() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let entry = keep(&yes_no("Docs", Point::TurnStart), JevMode::On);
+        let line = custom::line("Docs", AGENT_TOOL_ASK_OPTIONS[0], 0.9);
+        let carried = Arc::new(Mutex::new(Vec::new()));
+        let mut turns = ConversationRuntime::new(
+            Session::new(),
+            Answers { line: line.clone(), carried: Arc::clone(&carried) },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+        turns.set_skill_suggestion_seat(Some(Arc::new(SkillSuggestionJudge::at(cwd)) as Arc<dyn SkillSuggestionSeat>));
+        let prefix = runtime::SKILL_RECOMMENDATION_REMINDER_PREFIX;
+        turns.run_turn(TASK, None).expect("the first turn");
+        let noted: Vec<&String> = turns.transient_reminders().iter().filter(|reminder| reminder.starts_with(prefix)).collect();
+        assert_eq!(noted, [&format!("{prefix}\n{line}")], "the line rides the skill note's prefix alone");
+        let first = carried.lock().expect("what the model read").clone();
+        assert!(!first.is_empty() && first.iter().all(|seen| *seen), "the first turn's model read the line: {first:?}");
+        store::set_mode(&runtime::default_config_home(), &entry.id, JevMode::Off, 1).expect("the decision turned off");
+        turns.run_turn("and the changelog", None).expect("the second turn");
+        assert!(turns.transient_reminders().iter().all(|reminder| !reminder.starts_with(prefix)), "the note is gone");
+        let second = carried.lock().expect("what the model read")[first.len()..].to_vec();
+        assert!(!second.is_empty() && second.iter().all(|seen| !*seen), "the next turn's model never read it: {second:?}");
+        assert_eq!(mock.requests().len(), 1, "the decision was asked in the first turn alone");
+    });
+}

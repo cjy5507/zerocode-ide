@@ -554,7 +554,6 @@ impl SkillSuggestionSeat for SkillSuggestionJudge {
         let decided = super::custom_decisions::at_turn_start(self.cwd.clone(), request.clone());
         Box::pin(async move {
             let (note, lines) = futures_util::future::join(suggest_at(self.cwd.clone(), request, session), decided).await;
-            let note = note.or_else(|| (!lines.is_empty()).then(|| runtime::SKILL_RECOMMENDATION_REMINDER_PREFIX.to_string()));
             super::custom_decisions::beside(note, &lines)
         })
     }
