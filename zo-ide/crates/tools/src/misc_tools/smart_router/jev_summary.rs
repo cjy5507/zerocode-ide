@@ -273,6 +273,19 @@ pub fn report_with_recent(
     offset_s: i64,
     recent: usize,
 ) -> Vec<SeatReport> {
+    let config_home = runtime::default_config_home();
+    report_with_recent_in(&config_home, roots, sessions, settings, now_ms, offset_s, recent)
+}
+
+fn report_with_recent_in(
+    _config_home: &Path,
+    roots: &[PathBuf],
+    sessions: Option<&Path>,
+    settings: Option<&Value>,
+    now_ms: i64,
+    offset_s: i64,
+    recent: usize,
+) -> Vec<SeatReport> {
     JEV_USES
         .iter()
         .map(|seat| one_with(seat, roots, sessions, settings, now_ms, offset_s, recent))
