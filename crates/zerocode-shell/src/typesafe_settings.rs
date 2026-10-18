@@ -1129,6 +1129,100 @@ impl<T: Copy> Within<T> {
     }
 }
 
+/// A decision the store keeps, as the dashboard lists it: its mode, its
+/// version, when it was made and changed, and its newest version as the
+/// editor writes it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeptDecision {
+    pub mode: &'static str,
+    pub version: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub draft: DecisionDraft,
+}
+
+/// A deleted decision the store can still bring back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashedDecision {
+    pub id: String,
+    pub name: String,
+    pub deleted_at: String,
+}
+
+/// Every decision the person keeps, the deleted ones still to be restored,
+/// and the folders a decision may be narrowed to.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomDecisions {
+    pub decisions: Vec<KeptDecision>,
+    pub trash: Vec<TrashedDecision>,
+    /// The folders the person consented to by name.
+    pub folders: Vec<String>,
+    /// Whether the person consented to every folder.
+    pub everywhere: bool,
+}
+
+/// What core says of a draft before anything keeps it: the rules it breaks,
+/// the version it would be, and the question it would ask.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftCheck {
+    pub refusals: Vec<custom::Refusal>,
+    pub version: String,
+    pub questions: Value,
+}
+
+/// The person's decisions under `home`, zo's config home, and the folders
+/// `settings` consents to.
+///
+/// # Errors
+/// A store that cannot be read.
+pub fn custom_decisions_at(_home: &Path, _settings: &Value) -> std::io::Result<CustomDecisions> {
+    Ok(CustomDecisions {
+        decisions: Vec::new(),
+        trash: Vec::new(),
+        folders: Vec::new(),
+        everywhere: false,
+    })
+}
+
+/// Core's check of `draft`, with nothing kept.
+#[must_use]
+pub fn check_custom_decision(_draft: DecisionDraft) -> DraftCheck {
+    DraftCheck {
+        refusals: Vec::new(),
+        version: String::new(),
+        questions: Value::Null,
+    }
+}
+
+/// Delete the decision `id` under `home` at `now_ms`, and empty the trash of
+/// what waited in it past its days.
+///
+/// # Errors
+/// Whatever keeps the store from it.
+pub fn delete_custom_decision_at(
+    _home: &Path,
+    _id: &str,
+    _now_ms: i64,
+) -> Result<(), custom::store::Error> {
+    Ok(())
+}
+
+/// Set the decision `id` under `home` to the mode named `mode` at `now_ms`.
+///
+/// # Errors
+/// A mode no decision offers, and whatever keeps the store from it.
+pub fn set_custom_decision_mode_at(
+    _home: &Path,
+    _id: &str,
+    _mode: &str,
+    _now_ms: i64,
+) -> Result<(), custom::store::Error> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod provider_tests;
 
@@ -3245,6 +3339,134 @@ mod tests {
                 dashboard.contains(&format!("invoke(\"{command}\"")),
                 "the dashboard never asks {command}"
             );
+        }
+    }
+
+    /// A decision made in the window comes back from the store as the editor
+    /// wrote it, recording first; core's check finds nothing in it and names
+    /// the version the store keeps; switched on and then edited into a new
+    /// version, it keeps its mode; a mode no decision offers is refused;
+    /// deleted, it waits in the trash and comes back as it was; and a choice
+    /// that names an option twice is refused at that name (t-62170 stage 3).
+    #[test]
+    fn a_decision_goes_through_the_editors_doors_and_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let settings = serde_json::json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: {
+            door::WORKSPACES_SETTING: ["/work/acme"],
+        } } });
+        let option = |name: &str, means: &str| ChoiceOption {
+            name: name.to_string(),
+            means: means.to_string(),
+        };
+        let draft = DecisionDraft {
+            id: None,
+            name: "Release risk".to_string(),
+            question: "How risky is this change to ship today?".to_string(),
+            answer: AnswerDraft::Choice {
+                options: vec![
+                    option("hold", "Wait for a person."),
+                    option("ship", "Ship it now."),
+                ],
+            },
+            at: custom::Point::TurnEnd,
+            reads: BTreeSet::from([custom::Input::Task, custom::Input::EditedPaths]),
+            folders: Some(BTreeSet::from(["/work/acme".to_string()])),
+            act_from: custom::ACT_FROM_DEFAULT,
+            max_per_hour: custom::HOURLY_DEFAULT,
+        };
+        let first = save_custom_decision_at(home, draft.clone(), 1_000).expect("kept");
+        let listed = custom_decisions_at(home, &settings).expect("listed");
+        assert_eq!(listed.decisions.len(), 1, "one decision is kept");
+        let kept = listed.decisions[0].clone();
+        let id = kept.draft.id.clone().expect("the store keeps it by an id");
+        assert_eq!(
+            kept.draft,
+            DecisionDraft {
+                id: Some(id.clone()),
+                ..draft.clone()
+            },
+            "the editor gets back what it wrote"
+        );
+        assert_eq!(
+            (kept.mode, kept.version.as_str()),
+            (JevMode::Shadow.key(), first.as_str()),
+            "a new decision records first"
+        );
+        assert_eq!(
+            (listed.folders, listed.everywhere),
+            (vec!["/work/acme".to_string()], false)
+        );
+        let checked = check_custom_decision(kept.draft.clone());
+        assert_eq!(
+            (checked.refusals, checked.version),
+            (Vec::new(), first.clone()),
+            "core finds nothing in a kept decision, and names its version"
+        );
+
+        set_custom_decision_mode_at(home, &id, JevMode::On.key(), 2_000).expect("on");
+        let edited = DecisionDraft {
+            question: "How risky is this change to ship this week?".to_string(),
+            ..kept.draft.clone()
+        };
+        let second = save_custom_decision_at(home, edited, 3_000).expect("edited");
+        assert_ne!(second, first, "an edited question is a new version");
+        let listed = custom_decisions_at(home, &settings).expect("listed");
+        assert_eq!(
+            (
+                listed.decisions[0].mode,
+                listed.decisions[0].version.as_str()
+            ),
+            (JevMode::On.key(), second.as_str()),
+            "an edit keeps the mode"
+        );
+        match set_custom_decision_mode_at(home, &id, JevMode::Auto.key(), 4_000) {
+            Err(custom::store::Error::Refused(refusals)) => assert_eq!(
+                refusals,
+                vec![custom::Refusal::Mode],
+                "refused, but not as a mode no decision offers"
+            ),
+            kept => panic!("a decision took the automatic mode: {kept:?}"),
+        }
+
+        delete_custom_decision_at(home, &id, 5_000).expect("deleted");
+        let listed = custom_decisions_at(home, &settings).expect("listed");
+        assert!(
+            listed.decisions.is_empty(),
+            "a deleted decision is not listed"
+        );
+        assert_eq!(
+            listed
+                .trash
+                .iter()
+                .map(|trashed| trashed.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![id.as_str()],
+            "it waits in the trash"
+        );
+        custom::store::restore(home, &id).expect("restored");
+        let listed = custom_decisions_at(home, &settings).expect("listed");
+        assert_eq!(
+            (
+                listed.decisions[0].mode,
+                listed.decisions[0].version.as_str()
+            ),
+            (JevMode::On.key(), second.as_str()),
+            "it comes back as it was"
+        );
+
+        let twice = DecisionDraft {
+            answer: AnswerDraft::Choice {
+                options: vec![option("ship", "Ship it now."), option("ship", "Ship it.")],
+            },
+            ..draft
+        };
+        match save_custom_decision_at(home, twice, 6_000) {
+            Err(custom::store::Error::Refused(refusals)) => assert!(
+                refusals.contains(&custom::Refusal::OptionName("ship".to_string())),
+                "refused, but not at the name given twice: {refusals:?}"
+            ),
+            kept => panic!("a choice that names an option twice was kept: {kept:?}"),
         }
     }
 }
