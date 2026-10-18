@@ -487,3 +487,14 @@ fn every_refusal_and_field_has_a_word_of_its_own_and_never_its_payload() {
         );
     }
 }
+
+/// The line an agent is handed reads as DESIGN 2.4 writes it, the confidence
+/// a whole percent.
+#[test]
+fn a_line_reads_as_the_design_writes_it() {
+    assert_eq!(line("이름", "보기", 0.85), "「이름」 판단: 보기 (확신 85%)");
+    assert_eq!(
+        line("Release notes", "yes", 0.5),
+        "「Release notes」 판단: yes (확신 50%)"
+    );
+}

@@ -362,6 +362,20 @@ impl Refusal {
     }
 }
 
+/// The most characters the one line a decision hands an agent holds
+/// (DESIGN 2.4). [`line`] holds it by construction: a name and an option are
+/// each [`NAME_MAX_CHARS`] at most, so no line is ever cut.
+pub const LINE_MAX_CHARS: usize = 200;
+
+/// The one line a decision that is on hands the agent when its answer is as
+/// sure as its act-from line (DESIGN 2.4): `「name」 판단: option (확신 85%)`,
+/// the confidence a whole percent. Every place a decision is asked builds it
+/// here, so the line an agent reads is the same wherever it was asked.
+#[must_use]
+pub fn line(name: &str, option: &str, confidence: f64) -> String {
+    String::new()
+}
+
 /// Bytes that are not a definition this version reads: damaged, or of
 /// another shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
