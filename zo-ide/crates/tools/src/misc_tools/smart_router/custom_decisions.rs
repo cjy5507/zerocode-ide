@@ -496,11 +496,11 @@ fn offers() -> &'static Mutex<Offers> {
 /// to the next turn ([`pending_lines`]). `turn` is read only when a decision
 /// asks.
 pub(super) fn at_turn_end(workspace: &Path, recipient: &str, turn: impl FnOnce() -> TurnEnd) {
-    let TurnEnd { task, final_text, evidence, edited_paths } = turn();
     let asking = asking_at(workspace, Point::TurnEnd);
     if asking.is_empty() {
         return;
     }
+    let TurnEnd { task, final_text, evidence, edited_paths } = turn();
     let lent: Lent = [
         (Input::Task.key().to_string(), Value::from(task)),
         (Input::FinalText.key().to_string(), Value::from(final_text)),
