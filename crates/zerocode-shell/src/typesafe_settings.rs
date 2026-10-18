@@ -242,7 +242,7 @@ impl JevSwitch {
 /// What the pane paints: whether a key could be kept here, whether one is
 /// saved — never the key itself — the one switch, and every feature as its
 /// reader reads it, with the modes it offers in the table's order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypeSafeSettings {
     pub keys_kept_here: bool,
@@ -272,6 +272,8 @@ pub struct TypeSafeSettings {
     /// The routing classifier, which decides whether the routing seat is asked
     /// anything at all.
     pub classifier: ClassifierRow,
+    /// What the editor of the person's own decisions offers and bounds.
+    pub custom_decisions: CustomDecisionRules,
 }
 
 /// Every agent's launch rows against `lineup`; an agent with none is left
@@ -353,6 +355,7 @@ pub fn read_settings(
             gates: ROUTING.id,
             modes: ClassifierMode::ALL.map(ClassifierChoice::of).to_vec(),
         },
+        custom_decisions: CustomDecisionRules::of(&document),
     })
 }
 
@@ -1019,6 +1022,57 @@ pub fn save_custom_decision_at(
         custom::store::edit(home, &definition, now_ms)
     } else {
         custom::store::create(home, &definition, JevMode::Shadow, now_ms)
+    }
+}
+
+/// What the dashboard's editor of a person's decisions reads before any is
+/// listed (t-62170): the feature they stand under, every bound a definition
+/// keeps, the kinds of answer, where one may ask and what it may read there,
+/// and the modes one offers, each core's, so the page writes none.
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomDecisionRules {
+    /// The use the person's decisions stand under in the use table.
+    pub feature: &'static str,
+    pub decisions_max: usize,
+    pub name_max_chars: usize,
+    pub question_max_chars: usize,
+    pub meaning_max_chars: usize,
+    pub options: Within<usize>,
+    pub hourly: Within<u64>,
+    pub hourly_default: u64,
+    /// The most requests every decision sends together in an hour, as the
+    /// person's settings hold it.
+    pub hourly_all: u64,
+    pub act_from: Within<f64>,
+    pub act_from_default: f64,
+    /// How many days a deleted decision waits to be restored.
+    pub trash_kept_days: i64,
+    /// The word each kind of answer travels under, in the editor's order.
+    pub kinds: Vec<String>,
+    /// Where a decision may ask, and what it may read there.
+    pub points: Vec<DecisionPoint>,
+    /// The modes a decision offers, each by what it does.
+    pub modes: Vec<ModeChoice>,
+}
+
+/// The least and the most a bound allows, both allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
+pub struct Within<T> {
+    pub least: T,
+    pub most: T,
+}
+
+/// A point a decision may ask at, and the inputs it may read there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DecisionPoint {
+    pub at: custom::Point,
+    pub inputs: &'static [custom::Input],
+}
+
+impl CustomDecisionRules {
+    fn of(_document: &Value) -> Self {
+        Self::default()
     }
 }
 
@@ -3034,6 +3088,73 @@ mod tests {
                 .expect("the store reads")
                 .is_empty(),
             "a refused decision stands in the store"
+        );
+    }
+
+    /// The editor of a person's decisions offers and bounds only what core
+    /// holds (t-62170 stage 3): the feature, every limit, the shared hourly
+    /// bound as the person's settings hold it, the kinds of answer under the
+    /// words core's own files keep, the points with their inputs, and the
+    /// modes, each by what it does. The page reads them; it writes none.
+    #[test]
+    fn the_editor_reads_every_bound_and_word_of_a_persons_decisions_from_core() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let hourly_all = custom::ALL_HOURLY_DEFAULT + 1;
+        let document = serde_json::json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: {
+            door::CUSTOM_HOURLY_REQUESTS_SETTING: hourly_all,
+        } } });
+        std::fs::write(&path, document.to_string()).expect("write");
+        let settings = read_settings(&path, &HeldKeys::default(), true).expect("settings");
+        let sent = serde_json::to_value(&settings).expect("the settings, sent");
+        let kinds: Vec<Value> = [
+            custom::Answer::YesNo {
+                yes: String::new(),
+                no: String::new(),
+            },
+            custom::Answer::Choice(BTreeMap::new()),
+            custom::Answer::Score(Vec::new()),
+        ]
+        .into_iter()
+        .map(|answer| {
+            let written = custom::Definition::new(
+                custom::new_id(),
+                String::new(),
+                String::new(),
+                answer,
+                custom::Point::TurnStart,
+            )
+            .to_bytes()
+            .expect("a definition writes");
+            serde_json::from_slice::<Value>(&written).expect("its bytes read")["kind"].clone()
+        })
+        .collect();
+        assert_eq!(
+            sent["customDecisions"],
+            serde_json::json!({
+                "feature": zerocode_core::jev::CUSTOM_DECISIONS.id,
+                "decisionsMax": custom::DECISIONS_MAX,
+                "nameMaxChars": custom::NAME_MAX_CHARS,
+                "questionMaxChars": custom::QUESTION_MAX_CHARS,
+                "meaningMaxChars": custom::MEANING_MAX_CHARS,
+                "options": { "least": custom::OPTIONS.start(), "most": custom::OPTIONS.end() },
+                "hourly": {
+                    "least": custom::HOURLY_REQUESTS.start(),
+                    "most": custom::HOURLY_REQUESTS.end(),
+                },
+                "hourlyDefault": custom::HOURLY_DEFAULT,
+                "hourlyAll": hourly_all,
+                "actFrom": { "least": custom::ACT_FROM.start(), "most": custom::ACT_FROM.end() },
+                "actFromDefault": custom::ACT_FROM_DEFAULT,
+                "trashKeptDays": custom::store::TRASH_KEPT_DAYS,
+                "kinds": kinds,
+                "points": custom::Point::ALL.map(|at| serde_json::json!({
+                    "at": at.key(),
+                    "inputs": at.inputs().iter().map(|input| input.key()).collect::<Vec<_>>(),
+                })),
+                "modes": custom::MODES.map(ModeChoice::of),
+            }),
+            "the editor offers or bounds something core does not hold"
         );
     }
 }
