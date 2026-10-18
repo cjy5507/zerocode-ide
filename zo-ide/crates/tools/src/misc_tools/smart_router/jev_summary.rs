@@ -18,11 +18,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use zerocode_core::jev::count::REQUESTS_DIR;
+use zerocode_core::jev::custom::store;
 use zerocode_core::jev::promote::{self, Stand, Verdict};
 use zerocode_core::jev::recent::{self, Decision};
 use zerocode_core::jev::summary::{self, Tally};
 use zerocode_core::jev::threshold::{self, AtLine, Calibrated};
-use zerocode_core::jev::{JEV_USES, JevMode, JevUse};
+use zerocode_core::jev::{CUSTOM_DECISIONS, JEV_USES, JevMode, JevUse};
 
 /// What a reader of this report needs from the table's own counter, re-said
 /// here so a caller does not have to take a dependency on the shared core to
@@ -245,10 +246,9 @@ pub fn raised_in(seat: &JevUse, ledger: &Path) -> bool {
 /// Count every seat in the table, looking for each seat's ledger under the
 /// given roots.
 ///
-/// The roots are handed in and not read from the environment here: a counter
-/// that asked the process where home was would read the person's own ledgers
-/// from inside a test, and a test that passes because the machine it runs on
-/// has rows is not a test.
+/// Ledger roots are handed in. The custom decisions store is read from zo's
+/// canonical settings home ([`runtime::default_config_home`]), independently
+/// of those roots. Tests hand a temporary config home to the same reader.
 #[must_use]
 pub fn report(
     roots: &[PathBuf],
@@ -273,10 +273,45 @@ pub fn report_with_recent(
     offset_s: i64,
     recent: usize,
 ) -> Vec<SeatReport> {
+    let config_home = runtime::default_config_home();
+    report_with_recent_in(&config_home, roots, sessions, settings, now_ms, offset_s, recent)
+}
+
+fn report_with_recent_in(
+    config_home: &Path,
+    roots: &[PathBuf],
+    sessions: Option<&Path>,
+    settings: Option<&Value>,
+    now_ms: i64,
+    offset_s: i64,
+    recent: usize,
+) -> Vec<SeatReport> {
+    let custom_mode = custom_mode_in(config_home, settings.map_or(JevMode::Off, |root| CUSTOM_DECISIONS.mode_in(root)));
     JEV_USES
         .iter()
-        .map(|seat| one_with(seat, roots, sessions, settings, now_ms, offset_s, recent))
+        .map(|seat| {
+            let mut row = one_with(seat, roots, sessions, settings, now_ms, offset_s, recent);
+            if seat.id == CUSTOM_DECISIONS.id {
+                row.mode = custom_mode;
+                row.applies = custom_mode.applies();
+            }
+            row
+        })
         .collect()
+}
+
+fn custom_mode_in(config_home: &Path, configured: JevMode) -> JevMode {
+    if !configured.asks() {
+        return JevMode::Off;
+    }
+    let decisions = store::list(config_home).unwrap_or_default();
+    if decisions.iter().any(|decision| decision.mode.applies()) {
+        configured
+    } else if decisions.iter().any(|decision| decision.mode.asks()) {
+        JevMode::Shadow
+    } else {
+        JevMode::Off
+    }
 }
 
 /// `seats` with each one's rest as the door for words from `cwd` reads it now

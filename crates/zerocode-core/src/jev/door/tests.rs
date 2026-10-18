@@ -92,6 +92,7 @@ fn the_door_asks_in_order_and_names_each_refusal() {
             "off",
             "not_consented",
             "budget",
+            "hourly_budget",
             "settings_changed",
             "resting"
         ]
@@ -1048,6 +1049,399 @@ fn a_day_file_counts_one_byte_per_request_and_forgets_earlier_days() {
     let afternoon_utc = 15 * 60 * 60 * 1_000;
     assert_eq!(count::day_of(afternoon_utc, 0), "1970-01-01");
     assert_eq!(count::day_of(afternoon_utc, SEOUL_MINUTES), "1970-01-02");
+}
+
+/// An hour file counts one decision's requests, or all of theirs together,
+/// the way a day file counts the day's; the first request of an hour forgets
+/// the hours before it, and nothing else.
+#[test]
+fn an_hour_file_counts_one_byte_per_request_and_forgets_earlier_hours() {
+    const SEOUL_MINUTES: i32 = 9 * 60;
+    let home = tempfile::tempdir().expect("a config home");
+    let last_of_nine =
+        crate::civil::epoch_ms_of_iso("2026-10-17T09:59:59.999+09:00").expect("a stamp");
+    let nine = count::hour_of(last_of_nine, SEOUL_MINUTES);
+    let ten = count::hour_of(last_of_nine + 1, SEOUL_MINUTES);
+    assert_eq!(
+        (nine.as_str(), ten.as_str()),
+        ("2026-10-17T09", "2026-10-17T10")
+    );
+
+    let decision = count::hour_path(home.path(), "d-3f9a1c2e", &nine);
+    let every = count::hour_path(home.path(), crate::jev::custom::EVERY_DECISION, &nine);
+    assert_eq!(count::count_one_in_the_hour(&decision).expect("count"), 1);
+    assert_eq!(count::count_one_in_the_hour(&decision).expect("count"), 2);
+    assert_eq!(count::count_one_in_the_hour(&every).expect("count"), 1);
+    assert_eq!(count::sent(&decision), 2);
+    let today = count::requests_path(home.path(), "2026-10-17");
+    count::count_one(&today).expect("count");
+
+    let next = count::hour_path(home.path(), "d-0000000b", &ten);
+    assert_eq!(count::count_one_in_the_hour(&next).expect("count"), 1);
+    assert!(
+        !decision.exists() && !every.exists(),
+        "the first request of an hour forgets every earlier hour's count, whatever its key",
+    );
+    assert_eq!(count::sent(&today), 1, "and never the day's");
+
+    // A request cleared at 09:59 and counted after ten counts in an hour that
+    // has ended, and does not wipe the one that has begun.
+    assert_eq!(count::count_one_in_the_hour(&decision).expect("count"), 1);
+    assert_eq!(count::sent(&next), 1);
+
+    assert_eq!(count::hour_of(0, 0), "1970-01-01T00");
+    assert_eq!(count::hour_of(-1, 0), "1969-12-31T23");
+    assert_eq!(count::hour_of(0, -90), "1969-12-31T22");
+}
+
+/// A person's decision asks within two hours besides the day (t-62170): its
+/// own bound, and the bound every decision shares, which the person's
+/// settings name and which stands at 60 unset. The 21st request of a
+/// decision bound at 20 stops with `hourly_budget`, and so does the 61st of
+/// every decision together; a request that its hour, the shared hour or the
+/// day refuses is counted in none of the three.
+#[test]
+fn the_hourly_bound_stops_with_hourly_budget() {
+    use crate::jev::custom::{ALL_HOURLY_DEFAULT, EVERY_DECISION, HOURLY_DEFAULT};
+    let home = tempfile::tempdir().expect("a config home");
+    let today = count::requests_path(home.path(), "2026-10-17");
+    let body = routing_body("rename a variable");
+    let ask = |asking: &Asking<'_>| may_send(&ROUTING, asking, body.clone());
+    let every_most = custom_hourly_requests(&json!({}));
+    assert_eq!(every_most, ALL_HOURLY_DEFAULT);
+    let asks = |decision: &str, hour: &str, settings: &JevSettings| {
+        let mine = count::hour_path(home.path(), decision, hour);
+        let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+        pass_within_the_hour(
+            ask,
+            true,
+            settings,
+            Some(APP),
+            &today,
+            Hour {
+                decision: &mine,
+                decision_most: HOURLY_DEFAULT,
+                every: &every,
+                every_most,
+            },
+        )
+    };
+    let counted = |decision: &str, hour: &str| {
+        (
+            count::sent(&count::hour_path(home.path(), decision, hour)),
+            count::sent(&count::hour_path(home.path(), EVERY_DECISION, hour)),
+            count::sent(&today),
+        )
+    };
+    let (nine, ten) = ("2026-10-17T09", "2026-10-17T10");
+    let open = settings(None);
+
+    for _ in 0..HOURLY_DEFAULT {
+        assert!(asks("d-0000000a", nine, &open).is_ok());
+    }
+    assert_eq!(
+        asks("d-0000000a", nine, &open).err(),
+        Some(Refused::HourlyBudget),
+        "a decision's 21st request in an hour"
+    );
+    assert_eq!(
+        counted("d-0000000a", nine),
+        (20, 20, 20),
+        "is counted nowhere"
+    );
+
+    for decision in ["d-0000000b", "d-0000000c"] {
+        for _ in 0..HOURLY_DEFAULT {
+            assert!(asks(decision, nine, &open).is_ok());
+        }
+    }
+    assert_eq!(
+        asks("d-0000000d", nine, &open).err(),
+        Some(Refused::HourlyBudget),
+        "the 61st request of every decision together"
+    );
+    assert_eq!(counted("d-0000000d", nine), (0, 60, 60));
+
+    assert_eq!(
+        asks("d-0000000a", ten, &settings(Some(60))).err(),
+        Some(Refused::Budget),
+        "a day with no place left"
+    );
+    assert_eq!(
+        counted("d-0000000a", ten),
+        (0, 0, 60),
+        "refuses before either hour is counted"
+    );
+    assert!(
+        asks("d-0000000a", ten, &open).is_ok(),
+        "a new hour has room again"
+    );
+    assert_eq!(counted("d-0000000a", ten), (1, 1, 61));
+
+    let blocked = home.path().join("a-file");
+    std::fs::write(&blocked, "").expect("a file where the directory should be");
+    let unkept = count::hour_path(&blocked, "d-0000000a", ten);
+    let unkept_hour = Hour {
+        decision: &unkept,
+        decision_most: HOURLY_DEFAULT,
+        every: &unkept,
+        every_most,
+    };
+    assert_eq!(
+        pass_within_the_hour(ask, true, &open, Some(APP), &today, unkept_hour).err(),
+        Some(Refused::HourlyBudget),
+        "an hour the door cannot count is one it may not send past"
+    );
+    assert_eq!(count::sent(&today), 61);
+
+    let bound = |most: Value| {
+        custom_hourly_requests(&json!({
+            SMART_SETTINGS_KEY: { JEV_SETTINGS_KEY: { CUSTOM_HOURLY_REQUESTS_SETTING: most } }
+        }))
+    };
+    assert_eq!(bound(json!(2)), 2);
+    assert_eq!(bound(Value::Null), ALL_HOURLY_DEFAULT);
+    assert_eq!(
+        bound(json!("sixty")),
+        0,
+        "a bound of the wrong shape sends nothing"
+    );
+    assert_eq!(bound(json!(-1)), 0);
+}
+
+#[test]
+fn a_shared_hour_write_failure_returns_the_decisions_place() {
+    use crate::jev::custom::{ALL_HOURLY_DEFAULT, EVERY_DECISION, HOURLY_DEFAULT};
+
+    let home = tempfile::tempdir().unwrap();
+    let hour = "2026-10-17T10";
+    let decision = count::hour_path(home.path(), "d-0000000a", hour);
+    let blocked = home.path().join("blocked");
+    std::fs::write(&blocked, b"a file").unwrap();
+    let every = count::hour_path(&blocked, EVERY_DECISION, hour);
+    let today = count::requests_path(home.path(), "2026-10-17");
+    count::count_one_in_the_hour(&decision).unwrap();
+    count::count_one(&today).unwrap();
+
+    let result = pass_within_the_hour(
+        |asking| may_send(&ROUTING, asking, routing_body("rename a variable")),
+        true,
+        &settings(None),
+        Some(APP),
+        &today,
+        Hour {
+            decision: &decision,
+            decision_most: HOURLY_DEFAULT,
+            every: &every,
+            every_most: ALL_HOURLY_DEFAULT,
+        },
+    );
+
+    assert_eq!(result.err(), Some(Refused::HourlyBudget));
+    assert_eq!(
+        (
+            count::sent(&decision),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (1, 0, 1),
+        "a shared hour that cannot be written spends no hourly or daily place",
+    );
+
+    let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+    count::count_one_in_the_hour(&every).unwrap();
+    let writable = std::fs::metadata(&every).unwrap().permissions();
+    let mut readonly = writable.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&every, readonly).unwrap();
+    let result = pass_within_the_hour(
+        |asking| may_send(&ROUTING, asking, routing_body("rename a variable")),
+        true,
+        &settings(None),
+        Some(APP),
+        &today,
+        Hour {
+            decision: &decision,
+            decision_most: HOURLY_DEFAULT,
+            every: &every,
+            every_most: ALL_HOURLY_DEFAULT,
+        },
+    );
+    std::fs::set_permissions(&every, writable).unwrap();
+    assert_eq!(result.err(), Some(Refused::HourlyBudget));
+    assert_eq!(
+        (
+            count::sent(&decision),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (1, 1, 1),
+        "an append failure after the decision was counted returns its place",
+    );
+}
+
+#[test]
+fn a_day_write_failure_returns_both_hourly_places() {
+    use crate::jev::custom::{ALL_HOURLY_DEFAULT, EVERY_DECISION, HOURLY_DEFAULT};
+
+    let home = tempfile::tempdir().unwrap();
+    let hour = "2026-10-17T10";
+    let decision = count::hour_path(home.path(), "d-0000000a", hour);
+    let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+    count::count_one_in_the_hour(&decision).unwrap();
+    count::count_one_in_the_hour(&every).unwrap();
+    let blocked = home.path().join("blocked");
+    std::fs::write(&blocked, b"a file").unwrap();
+    let today = count::requests_path(&blocked, "2026-10-17");
+
+    let result = pass_within_the_hour(
+        |asking| may_send(&ROUTING, asking, routing_body("rename a variable")),
+        true,
+        &settings(Some(HOURLY_DEFAULT)),
+        Some(APP),
+        &today,
+        Hour {
+            decision: &decision,
+            decision_most: HOURLY_DEFAULT,
+            every: &every,
+            every_most: ALL_HOURLY_DEFAULT,
+        },
+    );
+
+    assert_eq!(result.err(), Some(Refused::Budget));
+    assert_eq!(
+        (
+            count::sent(&decision),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (1, 1, 0),
+        "a day that cannot be written spends no place in either hour",
+    );
+}
+
+#[test]
+fn the_shared_hour_is_locked_and_the_loser_spends_no_hourly_place() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    use crate::jev::custom::{ALL_HOURLY_DEFAULT, EVERY_DECISION, HOURLY_DEFAULT};
+
+    let home = tempfile::tempdir().unwrap();
+    let hour = "2026-10-17T10";
+    let first = count::hour_path(home.path(), "d-0000000a", hour);
+    let second = count::hour_path(home.path(), "d-0000000b", hour);
+    let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+    let today = count::requests_path(home.path(), "2026-10-17");
+    for _ in 1..ALL_HOURLY_DEFAULT {
+        count::count_one_in_the_hour(&every).unwrap();
+    }
+    let open = settings(None);
+    let together = || {
+        let ready = Barrier::new(3);
+        let request = |decision: &std::path::Path| {
+            pass_within_the_hour(
+                |asking| {
+                    ready.wait();
+                    may_send(&ROUTING, asking, routing_body("rename a variable"))
+                },
+                true,
+                &open,
+                Some(APP),
+                &today,
+                Hour {
+                    decision,
+                    decision_most: HOURLY_DEFAULT,
+                    every: &every,
+                    every_most: ALL_HOURLY_DEFAULT,
+                },
+            )
+            .err()
+        };
+        thread::scope(|scope| {
+            let first_request = scope.spawn(|| request(&first));
+            let second_request = scope.spawn(|| request(&second));
+            ready.wait();
+            [
+                first_request.join().unwrap(),
+                second_request.join().unwrap(),
+            ]
+        })
+    };
+
+    let lock = std::fs::File::create(every.with_file_name(count::HOURS_LOCK_FILE)).unwrap();
+    lock.lock().unwrap();
+    assert_eq!(
+        together(),
+        [Some(Refused::HourlyBudget); 2],
+        "a held hourly lock refuses both requests before they spend anything",
+    );
+    assert_eq!(
+        (
+            count::sent(&first),
+            count::sent(&second),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (0, 0, ALL_HOURLY_DEFAULT - 1, 0),
+    );
+    drop(lock);
+
+    let refused = together();
+    assert_eq!(refused.iter().filter(|result| result.is_none()).count(), 1);
+    assert!(refused.contains(&Some(Refused::HourlyBudget)));
+    assert_eq!(
+        (
+            count::sent(&first),
+            count::sent(&second),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (
+            u64::from(refused[0].is_none()),
+            u64::from(refused[1].is_none()),
+            ALL_HOURLY_DEFAULT,
+            1
+        ),
+        "only the winner takes an hourly place, and the day counts that request once",
+    );
+}
+
+#[test]
+fn losing_the_days_last_place_returns_the_hours_but_keeps_the_daily_rule() {
+    use crate::jev::custom::{ALL_HOURLY_DEFAULT, EVERY_DECISION, HOURLY_DEFAULT};
+
+    let home = tempfile::tempdir().unwrap();
+    let hour = "2026-10-17T10";
+    let decision = count::hour_path(home.path(), "d-0000000a", hour);
+    let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+    let today = count::requests_path(home.path(), "2026-10-17");
+    let result = pass_within_the_hour(
+        |asking| {
+            count::count_one(&today).unwrap();
+            may_send(&ROUTING, asking, routing_body("rename a variable"))
+        },
+        true,
+        &settings(Some(1)),
+        Some(APP),
+        &today,
+        Hour {
+            decision: &decision,
+            decision_most: HOURLY_DEFAULT,
+            every: &every,
+            every_most: ALL_HOURLY_DEFAULT,
+        },
+    );
+    assert_eq!(result.err(), Some(Refused::Budget));
+    assert_eq!(
+        (
+            count::sent(&decision),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (0, 0, 2),
+        "a daily request counted after the first check keeps its daily place only",
+    );
 }
 
 #[test]

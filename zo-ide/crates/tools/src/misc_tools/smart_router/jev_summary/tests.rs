@@ -100,6 +100,60 @@ fn every_seat_in_the_table_gets_a_row_whether_or_not_it_has_a_ledger() {
 }
 
 #[test]
+fn the_custom_row_reads_the_config_store_and_uses_the_lower_mode() {
+    use zerocode_core::jev::custom::{Answer, Definition, Point, store};
+    use zerocode_core::jev::{CUSTOM_DECISIONS, SMART_SETTINGS_KEY, door};
+
+    let decision = Definition::new(
+        "d-0000000a".to_string(),
+        "Release notes".to_string(),
+        "Did the product change?".to_string(),
+        Answer::YesNo {
+            yes: "A visible change.".to_string(),
+            no: "No visible change.".to_string(),
+        },
+        Point::TurnEnd,
+    );
+    let other = tempfile::tempdir().unwrap();
+    store::create(other.path(), &decision, JevMode::On, 1_000).unwrap();
+    let roots = [other.path().to_path_buf()];
+    let cases = [
+        ("empty", None, JevMode::On, JevMode::Off),
+        ("one on", Some(JevMode::On), JevMode::On, JevMode::On),
+        ("one off", Some(JevMode::Off), JevMode::On, JevMode::Off),
+        ("one shadow", Some(JevMode::Shadow), JevMode::On, JevMode::Shadow),
+        ("row shadow", Some(JevMode::On), JevMode::Shadow, JevMode::Shadow),
+        ("row off", Some(JevMode::On), JevMode::Off, JevMode::Off),
+    ];
+    let mut actual = Vec::new();
+    let mut expected = Vec::new();
+    let mut rows_to_compare = Vec::new();
+    for (case, decision_mode, row_mode, expected_mode) in cases {
+        let home = tempfile::tempdir().unwrap();
+        if let Some(mode) = decision_mode {
+            store::create(home.path(), &decision, mode, 1_000).unwrap();
+        }
+        let settings = json!({
+            (SMART_SETTINGS_KEY): {
+                (door::JEV_SETTINGS_KEY): { (door::ENABLED_SETTING): true },
+                (CUSTOM_DECISIONS.setting): row_mode.key(),
+            }
+        });
+        let rows = report_with_recent_in(home.path(), &roots, None, Some(&settings), 1_000, 0, 0);
+        let row = rows.into_iter().find(|row| row.id == CUSTOM_DECISIONS.id).unwrap();
+        actual.push((case, row.mode, row.applies));
+        expected.push((case, expected_mode, expected_mode.applies()));
+        let mut expected_settings = settings;
+        expected_settings[SMART_SETTINGS_KEY][CUSTOM_DECISIONS.setting] = json!(expected_mode.key());
+        rows_to_compare.push((row, one(&CUSTOM_DECISIONS, &roots, None, Some(&expected_settings), 1_000, 0)));
+    }
+    assert_eq!(actual, expected, "the store's home is independent of the ledger roots");
+    for (actual_row, expected_row) in rows_to_compare {
+        assert_eq!(actual_row, expected_row, "the custom row matches the effective mode's report in every field");
+    }
+}
+
+#[test]
 fn a_screen_seats_rows_are_counted_across_its_session_folders() {
     // The window's screen seats append beside each walk's evidence:
     // <sessions>/<session>/<ledger>. Counted from every folder, oldest first,
@@ -871,7 +925,7 @@ fn the_recent_list_is_read_from_the_same_rows_and_only_when_asked() {
     assert!(quiet.recent.is_empty(), "the card's ask lists nothing");
     assert_eq!(quiet.week.rows, 2);
 
-    let asked = report_with_recent(&roots, None, None, 1_000, 0, 5);
+    let asked = report_with_recent_in(home.path(), &roots, None, None, 1_000, 0, 5);
     let stall = asked.iter().find(|row| row.id == seat.id).expect("stall");
     assert_eq!(stall.week.rows, 2, "the same count");
     assert_eq!(stall.recent.len(), 2);
@@ -882,7 +936,7 @@ fn the_recent_list_is_read_from_the_same_rows_and_only_when_asked() {
     assert_eq!(labelled.followed.as_deref(), Some("worker_done"));
     assert_eq!(labelled.agreed, Some(false));
     assert_eq!(labelled.asked.get("worker"), Some(&json!("w-2")));
-    let one_row = report_with_recent(&roots, None, None, 1_000, 0, 1);
+    let one_row = report_with_recent_in(home.path(), &roots, None, None, 1_000, 0, 1);
     assert_eq!(one_row.iter().find(|row| row.id == seat.id).expect("stall").recent.len(), 1);
     for other in asked.iter().filter(|row| row.id != seat.id) {
         assert!(other.recent.is_empty(), "{} has no rows to list", other.id);
