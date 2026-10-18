@@ -98,9 +98,7 @@ fn asking_at(cwd: &Path, point: Point) -> Vec<Asked> {
         return Vec::new();
     }
     let workspace = PathBuf::from(door::resolved_path(cwd));
-    store::asking_in(&runtime::default_config_home(), &workspace)
-        .unwrap_or_default()
-        .into_iter()
+    store::list(&runtime::default_config_home()).unwrap_or_default().into_iter().filter(|entry| entry.mode.asks()).filter_map(|entry| { let bytes = std::fs::read(store::root(&runtime::default_config_home()).join("definitions").join(format!("{}.json", entry.definition))).ok()?; let definition = Definition::from_bytes(&bytes).ok().filter(|_| bytes.len() <= store::DEFINITION_MAX_BYTES)?; (definition.id == entry.id && custom::asks_in(&definition, &workspace)).then_some((entry, definition)) })
         .filter(|(_, definition)| definition.at == point)
         .map(|(entry, definition)| Asked { mode: standing(switch, entry.mode), entry, definition })
         .filter(|asked| asked.mode.asks())

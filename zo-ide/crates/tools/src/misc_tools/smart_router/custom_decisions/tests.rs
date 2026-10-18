@@ -696,3 +696,10 @@ fn a_damaged_store_asks_nothing(damage: Damage) {
 fn a_torn_index_asks_nothing_and_leaves_the_turn_as_it_was() {
     a_damaged_store_asks_nothing(Damage::TornIndex);
 }
+
+/// A definition whose bytes no longer hash to its name asks nothing, writes
+/// nothing, and leaves the turn as it was.
+#[test]
+fn a_definition_that_no_longer_hashes_to_its_name_asks_nothing() {
+    a_damaged_store_asks_nothing(Damage::ChangedBytes);
+}
