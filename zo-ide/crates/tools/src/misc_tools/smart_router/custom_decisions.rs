@@ -424,6 +424,12 @@ async fn ask_all(cwd: PathBuf, asking: Vec<Asked>, lent: Lent) -> Vec<Handed> {
     let (acting, recording): (Vec<Asked>, Vec<Asked>) =
         asking.into_iter().filter_map(|asked| kept(&cwd, asked).ok()).partition(|asked| asked.mode.applies());
     let lent = Arc::new(lent);
+    if !recording.is_empty() {
+        let (cwd, lent) = (cwd.clone(), Arc::clone(&lent));
+        detach(async move {
+            drop(ask_each(cwd, recording, lent).await);
+        });
+    }
     if acting.is_empty() {
         return Vec::new();
     }
