@@ -131,6 +131,127 @@ impl<T> Kept<T> {
 
 static LAST: Mutex<Kept<LastFrame>> = Mutex::new(Kept::new(OBSERVE_FRAMES_MAX));
 
+/// How a pane's newest look saw the screen, as the work screen panel tells it
+/// (t-59372).
+enum Seen {
+    /// Its picture, kept.
+    Picture(std::sync::Arc<[u8]>),
+    /// The screen's structure alone: no picture was taken.
+    Tree,
+    /// A picture the window no longer keeps.
+    Gone,
+}
+
+/// A pane's newest look, under the assignment the pane held when it looked.
+struct OwnedLook {
+    pane: String,
+    scope: String,
+    seq: u64,
+    at: i64,
+    seen: Seen,
+}
+
+/// The looks the work screen panel may show: each pane's newest, newest last,
+/// numbered in the order they were taken.
+struct Owned {
+    looks: Vec<OwnedLook>,
+    seq: u64,
+}
+
+/// How many panes' newest looks are kept; pictures are kept for the newest
+/// `OBSERVE_FRAMES_MAX` of them.
+const OWNED_PANES_MAX: usize = 64;
+
+static OWNED: Mutex<Owned> = Mutex::new(Owned {
+    looks: Vec::new(),
+    seq: 0,
+});
+
+/// The work screen panel's door (t-59372): the newest look the pane `pane`
+/// took under the assignment `scope` — its number, when, and its picture
+/// while one is kept. Nothing when the pane's newest look is another
+/// assignment's: an earlier look is never shown in a later one's place.
+pub(crate) fn owned_look(pane: &str, scope: &str) -> Option<Value> {
+    use base64::Engine as _;
+    let (seq, at, perception, picture) = {
+        let owned = OWNED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let look = owned
+            .looks
+            .iter()
+            .find(|look| look.pane == pane && look.scope == scope)?;
+        let (perception, picture) = match &look.seen {
+            Seen::Picture(png) => ("screenshot", Some(png.clone())),
+            Seen::Tree => ("accessibility", None),
+            Seen::Gone => ("gone", None),
+        };
+        (look.seq, look.at, perception, picture)
+    };
+    Some(serde_json::json!({
+        "seq": seq,
+        "at": at,
+        "perception": perception,
+        "png": picture.map(|png| base64::engine::general_purpose::STANDARD.encode(png)),
+    }))
+}
+
+/// Keep a look as the newest of the pane this thread acts for, under the
+/// assignment the pane holds, and tell the window its number. A look taken
+/// for no pane, or for a pane whose assignment the window cannot tell, is
+/// nobody's.
+fn own(seen: impl FnOnce() -> Seen) {
+    let Some(pane) = crate::run_evidence::actor_pane() else {
+        return;
+    };
+    let Some(scope) = crate::run_evidence::actor().and_then(|actor| actor.scope) else {
+        return;
+    };
+    let seen = seen();
+    let seq = {
+        let mut owned = OWNED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        owned.seq += 1;
+        let seq = owned.seq;
+        owned.looks.retain(|look| look.pane != pane);
+        owned.looks.push(OwnedLook {
+            pane: pane.clone(),
+            scope: scope.clone(),
+            seq,
+            at: crate::now_epoch_ms(),
+            seen,
+        });
+        if owned.looks.len() > OWNED_PANES_MAX {
+            owned.looks.remove(0);
+        }
+        for look in owned
+            .looks
+            .iter_mut()
+            .rev()
+            .filter(|look| matches!(look.seen, Seen::Picture(_)))
+            .skip(OBSERVE_FRAMES_MAX)
+        {
+            look.seen = Seen::Gone;
+        }
+        seq
+    };
+    if let Some(notice) = NOTICE.get() {
+        notice(&pane, &scope, seq);
+    }
+}
+
+/// What tells the window a pane took a look: the pane, the assignment it
+/// held and the look's number — never the picture.
+pub(crate) type LookNotice = dyn Fn(&str, &str, u64) + Send + Sync;
+
+static NOTICE: std::sync::OnceLock<Box<LookNotice>> = std::sync::OnceLock::new();
+
+/// Install the window's notice, once.
+pub(crate) fn install_notice(notice: Box<LookNotice>) {
+    let _ = NOTICE.set(notice);
+}
+
 /// Which place a look is of: an app's window (by id, index or the front one)
 /// or a desktop display and region — the key its last frame is kept under.
 fn frame_key(params: &Map<String, Value>) -> String {
@@ -314,6 +435,7 @@ fn changes_where_repainted(
 /// full-resolution shot is not the picture `observe` takes there, so it is
 /// not the one to diff.
 pub fn remember(params: &Map<String, Value>, answer: &Value, png: Vec<u8>) {
+    own(|| Seen::Picture(png.as_slice().into()));
     if params.contains_key("app") || params.get("fullRes").and_then(Value::as_bool) == Some(true) {
         return;
     }
@@ -487,6 +609,7 @@ fn structured_look(
     params: &Map<String, Value>,
     mut ask: Map<String, Value>,
     call: &mut dyn FnMut(&str, Value) -> Result<Value, ComputerUseError>,
+    epoch: u64,
 ) -> Result<Option<Value>, ComputerUseError> {
     let began = std::time::Instant::now();
     ask.insert("noScreenshot".into(), true.into());
@@ -496,7 +619,7 @@ fn structured_look(
     let frame = call("getAppState", Value::Object(ask))?;
     let key = resolved_key(params, &frame).unwrap_or_else(|| frame_key(params));
     let marked = if params.get("marks") == Some(&Value::Bool(true)) {
-        let Some(marked) = super::marks::structured_marks(&frame, &key)? else {
+        let Some(marked) = super::marks::structured_marks(&frame, &key, epoch)? else {
             return Ok(None);
         };
         Some(marked.answer)
@@ -518,6 +641,7 @@ fn structured_look(
         "diff": false,
         "imageBytes": 0,
     }));
+    own(|| Seen::Tree);
     Ok(Some(serde_json::json!({
         "app": frame.pointer("/snapshot/app"),
         "screenshot": null,
@@ -550,6 +674,9 @@ fn look(
     wait: Option<&mut dyn FnMut(std::time::Duration)>,
 ) -> Result<Value, ComputerUseError> {
     let began = std::time::Instant::now();
+    // The stop the look began under, read before the helper is asked
+    // anything: its marks are pressed only while no stop came after it.
+    let epoch = super::guard::stop_generation();
     let app = params.contains_key("app");
     let marks = params.get("marks").and_then(Value::as_bool) == Some(true);
     let diffing = params.get("diff").and_then(Value::as_bool) == Some(true);
@@ -572,7 +699,7 @@ fn look(
         && !diffing
         && params.get("ocr") != Some(&Value::Bool(true))
         && params.get("settle") != Some(&Value::Bool(true))
-        && let Some(answer) = structured_look(params, ask.clone(), call)?
+        && let Some(answer) = structured_look(params, ask.clone(), call, epoch)?
     {
         return Ok(answer);
     }
@@ -731,6 +858,7 @@ fn look(
     } else {
         held.and_then(|held| held.before(acts))
     };
+    own(|| Seen::Picture(png.as_slice().into()));
     keep(
         key.clone(),
         LastFrame {
@@ -790,6 +918,7 @@ fn look(
                     placed,
                     place: &key,
                     text: text.as_ref(),
+                    epoch,
                 };
                 let marked = super::marks::mark_look(params, &frame, &picture, before, call);
                 if let Some(png) = &marked.png {
@@ -829,6 +958,9 @@ fn note_line(line: &Value) {
 
 #[cfg(test)]
 mod structured_tests;
+
+#[cfg(test)]
+mod owned_tests;
 
 #[cfg(test)]
 mod tests {

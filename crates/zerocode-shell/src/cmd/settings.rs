@@ -1585,21 +1585,58 @@ pub(crate) fn computer_stop(app: AppHandle) -> serde_json::Value {
     answer
 }
 
-/// The window's resume button.
+/// The window's resume button: the person lifts the stop whose revision the
+/// band showed (`guard::resume`).
 #[tauri::command(async)]
-pub(crate) fn computer_resume(app: AppHandle, reset: bool) -> serde_json::Value {
-    computer_use::guard::lift();
-    let helper = if computer_use::session_stands() {
-        computer_use::call("resume", serde_json::json!({ "resetBudget": reset }))
-            .unwrap_or_else(|error| serde_json::json!({ "error": error.code }))
-    } else {
-        serde_json::Value::String("idle".into())
-    };
+pub(crate) fn computer_resume(
+    app: AppHandle,
+    reset: bool,
+    revision: Option<u64>,
+) -> serde_json::Value {
+    let resumed = computer_use::guard::resume(
+        computer_use::guard::Lifter::Person { revision },
+        || computer_use::guard::helper_resume(reset),
+        computer_use::guard::stop_helper,
+    );
     let _ = app.emit(
         "computer:activity",
         computer_use::guard::activity_report(None),
     );
-    serde_json::json!({ "resumed": true, "helper": helper })
+    resumed.answer()
+}
+
+/// The work screen panel's look (t-59372): the newest look the pane `term`
+/// took under the assignment `scope` it still holds — its number, when it was
+/// taken and its picture when one is kept. Only the window's own page asks,
+/// and only about a pane the window holds; a pane whose assignment the window
+/// cannot tell is refused, never shown.
+#[tauri::command(async)]
+pub(crate) fn computer_progress_frame(
+    app: AppHandle,
+    webview: tauri::Webview,
+    term: TermId,
+    scope: String,
+    seq: Option<u64>,
+) -> Result<Option<serde_json::Value>, String> {
+    let _crumb = crate::crumbs::Command::enter("computer_progress_frame");
+    from_the_main_webview(&webview)?;
+    let held = crate::artifact_runtime::held_pane(&app, &crate::hooks::pane_key_of(term))
+        .ok_or("computer_progress_pane_unknown: 이 창에 없는 판입니다")?;
+    let holds = crate::agent_tools_runtime::computer_frame_scope(&app, &held).ok_or(
+        "computer_progress_scope_unknown: 이 판의 지금 일과 대화를 가릴 수 없어 화면을 보이지 않습니다",
+    )?;
+    if holds != scope {
+        return Ok(None);
+    }
+    let Some(mut look) = computer_use::observe::owned_look(&held.key, &scope) else {
+        return Ok(None);
+    };
+    if seq.is_some_and(|wanted| look["seq"].as_u64().is_none_or(|newest| newest < wanted)) {
+        return Ok(None);
+    }
+    look["term"] = term.into();
+    look["scope"] = scope.into();
+    Ok(Some(look))
 }
 
 /// Where the operator stands, for the page.

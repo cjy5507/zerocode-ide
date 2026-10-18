@@ -166,6 +166,15 @@ fn no_helper() -> impl FnMut(&str, Value) -> Result<Value, ComputerUseError> {
     |method: &str, _params: Value| panic!("no helper call expected, got {method}")
 }
 
+/// The stop the fixtures' looks begin under and their clicks are pressed
+/// under. The window's own count moves with every test that stops the
+/// operator, so these tests never read it.
+const FIXTURE_EPOCH: u64 = 0;
+
+fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
+    pinned_click_at(params, FIXTURE_EPOCH)
+}
+
 fn shot<'a>(
     clean: &'a RgbaImage,
     fingerprint: u64,
@@ -178,6 +187,7 @@ fn shot<'a>(
         placed,
         place,
         text: None,
+        epoch: FIXTURE_EPOCH,
     }
 }
 
@@ -406,6 +416,68 @@ fn a_look_keeps_its_numbers_only_for_the_very_same_picture() {
 
 fn list(rows: &[Value]) -> Result<Vec<DesktopWindow>, ComputerUseError> {
     Ok(rows.iter().filter_map(DesktopWindow::from_row).collect())
+}
+
+/// A stop moves the window's stop count (t-59372): a look taken before it is
+/// never pressed after it, however young — the screen it read may have
+/// changed under the person's hand.
+#[test]
+fn a_look_taken_before_a_stop_is_never_pressed_after_it() {
+    let clean = picture(320, 512, |_, _| [255, 255, 255, 255]);
+    let placed = ShotFrame::new((100.0, 50.0), 1.6).unwrap();
+    let marked = mark_look(
+        &json!({"app": "Stopped-before"})
+            .as_object()
+            .unwrap()
+            .clone(),
+        &app_answer(&keypad(2), "Stopped-before"),
+        &Picture {
+            epoch: 41,
+            ..shot(&clean, 61, placed, "stop-before")
+        },
+        None,
+        &mut no_helper(),
+    );
+    let click = json!({"look": marked.answer["lookId"], "mark": 1});
+    assert!(
+        pinned_click_at(&click, 41).is_ok(),
+        "pressed under the stop it was taken under"
+    );
+    let refused = pinned_click_at(&click, 42).unwrap_err();
+    assert_eq!(refused.code, "element_not_found");
+    assert!(refused.message.contains("stopped"), "{}", refused.message);
+}
+
+/// The same pixels seen after a stop are walked again and numbered anew
+/// (t-59372): a kept table serves only a look under the stop it was made
+/// under, so an old look's id never comes back to life — neither for an
+/// app's look nor for a desktop look of the very same picture.
+#[test]
+fn the_same_pixels_seen_after_a_stop_are_numbered_anew() {
+    let answer = app_answer(&keypad(4), "Same-after-stop");
+    let placed = ShotFrame::new((100.0, 50.0), 1.6).unwrap();
+    let clean = &picture(320, 512, |_, _| [255, 255, 255, 255]);
+    let params = json!({"app": "Same-after-stop"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let under = move |epoch| Picture {
+        epoch,
+        ..shot(clean, 71, placed, "same-after-stop")
+    };
+    let before = mark_look(&params, &answer, &under(51), None, &mut no_helper());
+    let after = mark_look(&params, &answer, &under(52), None, &mut no_helper());
+    assert_ne!(after.answer["lookId"], before.answer["lookId"]);
+    assert!(after.answer.get("sameAsLastLook").is_none());
+    let old = json!({"look": before.answer["lookId"], "mark": 1});
+    let new = json!({"look": after.answer["lookId"], "mark": 1});
+    assert!(pinned_click_at(&old, 52).is_err());
+    assert!(pinned_click_at(&new, 52).is_ok());
+    let desktop = mark_look(&Map::new(), &answer, &under(53), None, &mut no_helper());
+    assert_ne!(
+        desktop.answer["lookId"], after.answer["lookId"],
+        "a desktop look after another stop is not served the kept numbers"
+    );
 }
 
 #[test]

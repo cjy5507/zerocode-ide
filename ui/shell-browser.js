@@ -1001,6 +1001,9 @@ function paintBrowserWorkspaceChrome() {
       writeTextContent(badge, t("browser.workspace.badge", "작업"));
     }
   }
+  // The work screen panel says who holds each of these (t-62464); it reads
+  // them here, where every change of theirs is painted.
+  if (typeof paintComputerProgressControl === "function") paintComputerProgressControl();
 }
 
 /* 좁은 판의 주소창(실측 browser-address-bar-expansion.ts): 다른 툴바
