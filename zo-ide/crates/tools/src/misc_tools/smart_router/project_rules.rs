@@ -15,7 +15,7 @@ use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_
 
 /// What every advice for the next turn opens with, its key and `]` after it:
 /// how a host finds the advice again in the transcript, and how it clears it.
-const ADVICE_PREFIX: &str = "[zo:custom-decisions:";
+const ADVICE_PREFIX: &str = "[zo:project-rules:";
 
 #[derive(Debug)]
 struct Turn {
