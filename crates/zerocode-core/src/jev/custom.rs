@@ -275,6 +275,16 @@ pub enum Field {
     Level(usize),
 }
 
+impl Field {
+    /// The field's own word, spelled as [`Refusal::word`] spells a rule: one
+    /// per field, and never what the field carries — no option's name and
+    /// no level's number.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        ""
+    }
+}
+
 /// A rule a definition breaks. Nothing that breaks one is stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
@@ -314,6 +324,17 @@ pub enum Refusal {
     /// Its bytes are past what the store reads back
     /// ([`store::DEFINITION_MAX_BYTES`]): a list of folders too long.
     TooLarge,
+}
+
+impl Refusal {
+    /// The rule's own word, as a ledger row spells it: one per rule, and
+    /// never what the refusal carries — no option's name, no field, no line
+    /// number — so a row can say why a definition is never asked without
+    /// holding a word the person wrote.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        ""
+    }
 }
 
 /// Bytes that are not a definition this version reads: damaged, or of

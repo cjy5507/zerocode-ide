@@ -404,3 +404,86 @@ fn a_score_asks_its_levels_in_order() {
         "{instructions}"
     );
 }
+
+/// Every refusal says which rule it is, and every field where, with a word of
+/// its own in snake case, and no word holds what it was built with: an
+/// option's name, the field a line stands in, a level's number, or the line's
+/// number. zo writes a refusal's word on a row for a stored definition that
+/// fails the check again, and the drawer keys its fields on a field's word,
+/// so the person's words reach neither.
+#[test]
+fn every_refusal_and_field_has_a_word_of_its_own_and_never_its_payload() {
+    let written = "deploy";
+    let fields = [
+        Field::Name,
+        Field::Question,
+        Field::Yes,
+        Field::No,
+        Field::OptionName(written.to_string()),
+        Field::Meaning(written.to_string()),
+        Field::Level(7),
+    ];
+    let field_words: BTreeSet<&str> = fields.iter().map(Field::word).collect();
+    assert_eq!(
+        field_words.len(),
+        fields.len(),
+        "two fields share a word: {field_words:?}"
+    );
+    let one_of_each = [
+        Refusal::Id,
+        Refusal::IdTaken,
+        Refusal::NameLength,
+        Refusal::NameTaken,
+        Refusal::QuestionLength,
+        Refusal::OptionCount,
+        Refusal::OptionName(written.to_string()),
+        Refusal::MeaningLength(Field::Meaning(written.to_string())),
+        Refusal::SecretLine {
+            field: Field::OptionName(written.to_string()),
+            line: 7,
+        },
+        Refusal::Reads,
+        Refusal::Folders,
+        Refusal::ActFrom,
+        Refusal::MaxPerHour,
+        Refusal::Mode,
+        Refusal::TooMany,
+        Refusal::TooLarge,
+    ];
+    let words: BTreeSet<&str> = one_of_each.iter().map(Refusal::word).collect();
+    assert_eq!(
+        words.len(),
+        one_of_each.len(),
+        "two rules share a word: {words:?}"
+    );
+    let carrying_more = [
+        Refusal::MeaningLength(Field::Level(7)),
+        Refusal::SecretLine {
+            field: Field::Meaning(written.to_string()),
+            line: 7,
+        },
+    ];
+    let spoken = one_of_each
+        .iter()
+        .chain(&carrying_more)
+        .map(|refusal| (refusal.word(), format!("{refusal:?}")))
+        .chain(
+            fields
+                .iter()
+                .map(|field| (field.word(), format!("{field:?}"))),
+        );
+    for (word, built) in spoken {
+        let snake = !word.is_empty()
+            && !word.starts_with('_')
+            && !word.ends_with('_')
+            && !word.contains("__")
+            && word
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
+        assert!(snake, "{word} is not snake case");
+        assert!(
+            !word.contains(written) && !word.contains('7'),
+            "{word} holds what {built} was built with"
+        );
+    }
+}
