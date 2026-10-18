@@ -2459,7 +2459,7 @@ mod tests {
         let host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
         let _host_environment = crate::tests::EnvGuard::set_many(host.environment());
         let road = ComputerRoad { program:dir.path().join(COMPUTER_SHIM) };
-        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let ctx = ToolContext::new();
         let acknowledged = SurfaceExecution { surface_id:"fixture-host/computer/41/lease-a".into(), state_revision:7,
             effect:zerocode_core::surface_execution::SurfaceEffect::Acknowledged };
         let confirmed = SurfaceExecution { surface_id:acknowledged.surface_id.clone(), state_revision:8,
@@ -2481,7 +2481,7 @@ mod tests {
         let host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
         let _host_environment = crate::tests::EnvGuard::set_many(host.environment());
         let road = ComputerRoad { program:dir.path().join(COMPUTER_SHIM) };
-        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let ctx = ToolContext::new();
         std::fs::write(dir.path().join("reply-click"), json!({"ok":true,"surfaceExecution":{
             "surfaceId":"fixture-host/computer/41/lease-a","stateRevision":7,"effect":{"kind":"acknowledged"}},
             "result":{"action":{"targetWindowId":41}}}).to_string()).unwrap();
