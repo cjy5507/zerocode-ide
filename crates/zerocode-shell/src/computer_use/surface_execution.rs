@@ -494,6 +494,10 @@ mod tests {
     }
 
     fn execution(answer: &Value) -> SurfaceExecution {
+        assert!(
+            answer.get("surfaceExecution").is_some(),
+            "the host must produce separate surface evidence for an owned provider response"
+        );
         serde_json::from_value(answer["surfaceExecution"].clone())
             .expect("the host reports typed evidence outside the result body")
     }
