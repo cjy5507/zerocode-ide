@@ -444,3 +444,36 @@ fn before_a_command_never_stops_it() {
         });
     }
 }
+
+/// A folder the person never consented to asks nothing, and its row says
+/// the door refused; a decision whose folders hold neither the folder asked
+/// in nor one above it asks nothing and writes nothing.
+#[test]
+fn outside_consent_or_scope_asks_nothing() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |_| {
+        let unconsented = tempfile::tempdir().expect("a folder nobody consented to");
+        let elsewhere = fs::canonicalize(unconsented.path()).expect("the folder resolved");
+        keep(&yes_no("Docs", Point::TurnStart), JevMode::On);
+        assert!(run_blocking(at_turn_start(elsewhere.clone(), TASK.to_string())).is_empty());
+        let refused = rows_now(&elsewhere);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(refused[0]["outcome"], Refused::NotConsented.token());
+        assert_eq!(refused[0]["requests"], 0);
+        assert!(unasked(&mock), "nothing left for a folder nobody consented to");
+    });
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let chosen = tempfile::tempdir().expect("the one folder the decisions ask in");
+        let folders = BTreeSet::from([fs::canonicalize(chosen.path()).expect("resolved").to_string_lossy().into_owned()]);
+        for point in [Point::TurnStart, Point::AgentAsks] {
+            let mut definition = yes_no(point.key(), point);
+            definition.folders = Folders::Chosen(folders.clone());
+            keep(&definition, JevMode::On);
+        }
+        assert!(run_blocking(at_turn_start(cwd.to_path_buf(), TASK.to_string())).is_empty());
+        let verdict = decide(cwd, Point::AgentAsks.key(), Some("the diff adds one test"), &[]).expect("a verdict");
+        assert_eq!((verdict.line.as_deref(), verdict.outcome.as_str()), (None, JevMode::Off.key()));
+        assert!(unasked(&mock), "nothing left outside the decisions' folders");
+        assert!(rows_now(cwd).is_empty(), "and nothing was written");
+    });
+}
