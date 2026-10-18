@@ -221,7 +221,7 @@ fn dispatch_concurrent_tool_result(
     remote_mcp: Option<&crate::remote_mcp::RemoteMcp>,
     tool_name: &str,
     input: &str,
-) -> Result<runtime::conversation::ToolExecutionResult, runtime::ToolError> {
+) -> Result<runtime::ToolExecutionResult, runtime::ToolError> {
     // `CapabilityInvoke` is an address, not a privilege. Unwrap before every
     // session/turn gate and re-enter this production dispatcher with the inner
     // name, exactly like the serial fallback does. The live runtime routes all
@@ -246,7 +246,7 @@ fn dispatch_concurrent_tool_result(
     check_disallowed_tools(disallowed_tools, tool_name)?;
     if tool_name == crate::autonomy::wakeup::TOOL_NAME {
         let value = parse_tool_input_json(tool_name, input)?;
-        return crate::autonomy::wakeup::execute(value).map(runtime::conversation::ToolExecutionResult::from);
+        return crate::autonomy::wakeup::execute(value).map(runtime::ToolExecutionResult::from);
     }
     if let Some(allowed) = allowed_tools {
         if !allowed.contains(tool_name) {
@@ -266,7 +266,7 @@ fn dispatch_concurrent_tool_result(
         // A pane child's parent answers first (t-2513 §2.1): its MCP tools
         // are the parent's, and the parent's runtime is where they live.
         if let Some(remote) = remote_mcp {
-            return remote.dispatch(tool_name, value).map(runtime::conversation::ToolExecutionResult::from);
+            return remote.dispatch(tool_name, value).map(runtime::ToolExecutionResult::from);
         }
         let Some(mcp_state) = mcp_state else {
             return Err(runtime::ToolError::new(format!(
@@ -279,7 +279,7 @@ fn dispatch_concurrent_tool_result(
         // Same meta-tool handling as the serial CliToolExecutor path, so
         // `ListMcpResourcesTool` & friends don't hit `call_tool` and fail as
         // "unknown MCP tool" when dispatched concurrently/long-running.
-        state.dispatch_runtime_tool(tool_name, value).map(runtime::conversation::ToolExecutionResult::from)
+        state.dispatch_runtime_tool(tool_name, value).map(runtime::ToolExecutionResult::from)
     } else {
         tool_registry
             .execute_result(tool_name, &value)
@@ -524,7 +524,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     let dispatch_disallowed = disallowed_tools;
     let dispatch_mcp = mcp_state.clone();
     let dispatch_remote_mcp = remote_mcp;
-    let concurrent_dispatch: runtime::conversation::ConcurrentResultDispatchFn =
+    let concurrent_dispatch: runtime::ConcurrentResultDispatchFn =
         std::sync::Arc::new(move |tool_name: &str, input: &str| {
             dispatch_concurrent_tool_result(
                 &dispatch_registry,

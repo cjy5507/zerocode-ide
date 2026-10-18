@@ -1100,7 +1100,7 @@ impl GlobalToolRegistry {
     // gates is security-significant; splitting it would hide early-return
     // precedence merely to meet a line-count heuristic.
     #[allow(clippy::too_many_lines)]
-    pub fn execute_result(&self, name: &str, input: &Value) -> Result<runtime::conversation::ToolExecutionResult, ToolError> {
+    pub fn execute_result(&self, name: &str, input: &Value) -> Result<runtime::ToolExecutionResult, ToolError> {
         // Accept PascalCase (`Read`, `Write`, ...) and short forms (`read`)
         // by resolving to the canonical handler name before lookup/dispatch.
         let canonical = crate::aliases::canonical_tool_name(name);
@@ -1177,7 +1177,7 @@ impl GlobalToolRegistry {
             return Err(error);
         }
         if canonical_ref == "ToolSearch" {
-            return self.execute_tool_search(name, input).map(runtime::conversation::ToolExecutionResult::from);
+            return self.execute_tool_search(name, input).map(runtime::ToolExecutionResult::from);
         }
         if mvp_tool_specs()
             .iter()

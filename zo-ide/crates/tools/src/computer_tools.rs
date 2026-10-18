@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use runtime::permission_enforcer::PermissionEnforcer;
 use runtime::PermissionMode;
-use runtime::conversation::ToolExecutionResult;
+use runtime::ToolExecutionResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use zerocode_core::computer_use::{

@@ -23,7 +23,7 @@ use runtime::{
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     truncate_tool_output, TruncationConfig,
 };
-use runtime::conversation::ToolExecutionResult;
+use runtime::ToolExecutionResult;
 use serde::Deserialize;
 use serde_json::Value;
 

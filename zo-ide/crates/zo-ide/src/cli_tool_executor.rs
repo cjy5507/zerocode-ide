@@ -10,7 +10,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use runtime::{ToolError, ToolExecutor};
-use runtime::conversation::{ResolvedToolCall, ToolExecutionResult};
+use runtime::{ResolvedToolCall, ToolExecutionResult};
 use tools::GlobalToolRegistry;
 
 use crate::cli_args::{AllowedToolSet, DisallowedToolSet};
