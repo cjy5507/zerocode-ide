@@ -493,7 +493,7 @@ export async function measureKnowledgeScenes(page, ok,
  * 수)와 **놓는가**(버퍼·요소·리스너). 아래 한 함수가 표의 페인터를 전부 돌며 그 둘을
  * 묻는다 — P1에서는 줄이 하나(SVG)이므로 「열 번 갈아 끼워도 판이 자란 자리가
  * 없다」를 묻고, P2에서 GL 줄이 들어오면 같은 물음이 두 손을 오간다. */
-/* 열 번 갈아 끼운 뒤의 JS 힙이 처음과 다를 수 있는 몫(%). 판정과 증명 회차의 덩어리가 같이 쓴다. */
+/* 열 번 갈아 끼운 뒤의 JS 힙이 처음보다 자랄 수 있는 몫(%). 판정과 증명 회차의 덩어리가 같이 쓴다. */
 const HEAP_DRIFT_PERCENT = 5;
 /* 증명 회차(`KNOWLEDGE_MACHINE_PROOF`, t-62848)가 두 힙 읽기에 거는 것 — 덩어리는 셋 다 허용치의 두 배다.
  * `frame`은 둘째 읽기의 프레임마다 덩어리를 짓고 그 프레임에서 놓는다(프레임이 남긴 쓰레기). `release`는
@@ -568,14 +568,18 @@ export async function measureKnowledgePainterSwap(page, ok, { proof = null } = {
         cached: knowledgeLayouts.get(view).nodeCache.size,
       };
     };
-    /* 수거를 두 번 돌리고 읽는다 — 한 번의 `gc()`는 방금 놓은 것을 아직 들고 있는
-     * 세대를 남긴다. 손잡이가 없는 판에서는 0을 돌려주고 판정은 요소 수만 본다. */
+    /* 수거를 두 번 돌리고 마지막 수거의 자리에서 읽는다 — 한 번의 `gc()`는 방금 놓은 것을 아직 들고 있는
+     * 세대를 남기고(그래서 두 수거 사이에 프레임 하나), 수거 뒤의 프레임은 제가 지은 것을 읽기에 얹는다(이
+     * 판은 앉는 동안 프레임마다 다시 그린다). 한 프레임 뒤의 값은 METRIC 줄에만 적는다 — 프레임이 읽기에
+     * 얹는 몫을 회차마다 보인다. 손잡이가 없는 판에서는 0을 돌려주고 판정은 요소 수만 본다. */
+    const read = () => (performance.memory ? performance.memory.usedJSHeapSize : 0);
     const heap = async () => {
-      for (let round = 0; round < 2; round += 1) {
-        if (typeof window.gc === "function") window.gc();
-        await frame();
-      }
-      return performance.memory ? performance.memory.usedJSHeapSize : 0;
+      if (typeof window.gc === "function") window.gc();
+      await frame();
+      if (typeof window.gc === "function") window.gc();
+      const at = read();
+      await frame();
+      return { at, later: read() };
     };
     /* 증명 회차의 덩어리: 지금 힙의 `share`만큼 배열을 쥐고 돌려준다. 크기는 잰 힙에서 정하고, 쥔 채로
      * 재므로 도중의 수거가 덩어리를 줄이지 않는다. 배열 하나가 적어도 칸마다 4바이트라서, 그 수에 닿으면
@@ -628,9 +632,10 @@ export async function measureKnowledgePainterSwap(page, ok, { proof = null } = {
     keep.block = null;
     knowledgePainterKind = pinned;
     return { kinds, interfaced, probes, emptyPick, before, after, emptied,
-      heapBefore, heapAfter,
-      heapDrift: heapBefore === 0 ? 0
-        : Math.round(((heapAfter - heapBefore) / heapBefore) * 1000) / 10 };
+      heapBefore: heapBefore.at, heapAfter: heapAfter.at,
+      frameLater: { heapBefore: heapBefore.later, heapAfter: heapAfter.later },
+      heapDrift: heapBefore.at === 0 ? 0
+        : Math.round(((heapAfter.at - heapBefore.at) / heapBefore.at) * 1000) / 10 };
   }, { proof, share: (2 * HEAP_DRIFT_PERCENT) / 100 });
   ok("every painter wears the same five-method shape, the projector lands on the ink the browser drew, and that spot picks its own seat",
     swap.interfaced && swap.probes.length > 0
@@ -638,17 +643,22 @@ export async function measureKnowledgePainterSwap(page, ok, { proof = null } = {
         && Math.abs(row.driftX) < 1 && Math.abs(row.driftY) < 1)
       && swap.emptyPick === -1,
     JSON.stringify({ kinds: swap.kinds, probes: swap.probes, emptyPick: swap.emptyPick }));
-  /* ±5%: 판 하나를 열 번 갈아 끼운 뒤의 힙이 처음과 같아야 한다. 갈아 끼우는
-   * 동안 판이 요소를 쥐고 있으면(놓지 않은 창고·리스너·버퍼) 이 수가 자란다. */
-  ok("ten painter swaps leave the picture, its element count and the JS heap where they started",
+  /* 판 하나를 열 번 갈아 끼운 뒤의 JS 힙은 처음보다 많아야 `HEAP_DRIFT_PERCENT`(5%)만큼 자란다. 갈아 끼우는
+   * 동안 판이 요소를 쥐고 있으면(놓지 않은 창고·리스너·버퍼) 이 수가 자란다. 줄어든 힙은 판이 쥔 것이 아니라
+   * 두 읽기 사이에 다른 무엇이 놓인 것이라(10-18 02:33: 31.46 → 25.91 MB) 판정하지 않는다 — 5%를 넘게
+   * 줄면 METRIC 줄의 `heapDrop`이 그 크기를 「recorded」로 적는다. */
+  ok(`ten painter swaps leave the picture and its element count where they started, and grow the JS heap by at most ${HEAP_DRIFT_PERCENT}%`,
     swap.emptied === 10 && swap.after.elements === swap.before.elements
       && swap.after.nodeEls === swap.before.nodeEls
       && swap.after.cached === swap.before.cached
-      && Math.abs(swap.heapDrift) <= HEAP_DRIFT_PERCENT,
+      && swap.heapDrift <= HEAP_DRIFT_PERCENT,
     JSON.stringify(swap));
+  const dropped = swap.heapDrift < -HEAP_DRIFT_PERCENT;
   console.log(`METRIC knowledge painter swap: ${JSON.stringify({ kinds: swap.kinds,
     elements: swap.before.elements, heapBefore: swap.heapBefore, heapAfter: swap.heapAfter,
-    heapDrift: `${swap.heapDrift}%`, memory: memoryNote(), ...(proof ? { proof } : {}) })}`);
+    heapDrift: `${swap.heapDrift}%`,
+    ...(dropped ? { heapDrop: `${swap.heapBefore - swap.heapAfter} bytes, ${-swap.heapDrift}% (recorded)` } : {}),
+    frameLater: swap.frameLater, memory: memoryNote(), ...(proof ? { proof } : {}) })}`);
   return swap;
 }
 
