@@ -711,6 +711,10 @@ pub fn decide(cwd: &Path, name: &str, context: Option<&str>, items: &[String]) -
     if !mode.asks() {
         return Ok(CustomVerdict::nothing(name, mode, off, format!("'{name}' is off, so nothing was asked; decide this yourself.")));
     }
+    if !custom::asks_in(&definition, Path::new(&door::resolved_path(cwd))) {
+        let note = format!("'{name}' does not ask in this folder, so nothing was asked; decide this yourself.");
+        return Ok(CustomVerdict::nothing(name, mode, off, note));
+    }
     let asked = match kept(cwd, Asked { entry, definition, mode }) {
         Ok(asked) => asked,
         Err(word) => {
