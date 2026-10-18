@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use local_judgment::{Binding, Manager, Snapshot, SourceInput, SourceInspection};
@@ -8,6 +9,7 @@ use crate::{AppState, api_routers, typesafe_settings};
 
 static SERVICE: OnceLock<Mutex<Option<Arc<Manager>>>> = OnceLock::new();
 static RESTORE_AT_BOOT: Once = Once::new();
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 fn service(app: &AppHandle) -> Result<Arc<Manager>, String> {
     let mut service = SERVICE
@@ -39,7 +41,11 @@ pub(crate) fn restore_at_boot(app: &AppHandle) {
     let app = app.clone();
     RESTORE_AT_BOOT.call_once(|| {
         tauri::async_runtime::spawn(async move {
-            let Ok(manager) = service(&app) else {
+            let Some(manager) = boot_service(
+                &SHUTTING_DOWN,
+                || service(&app),
+                |manager| manager.shutdown(),
+            ) else {
                 return;
             };
             let Some(path) = api_routers::zo_settings_path() else {
@@ -67,6 +73,7 @@ pub(crate) fn restore_at_boot(app: &AppHandle) {
 }
 
 pub(crate) fn shutdown() {
+    SHUTTING_DOWN.store(true, Ordering::Release);
     if let Some(service) = SERVICE.get() {
         let service = service
             .lock()
@@ -309,11 +316,19 @@ pub(crate) fn managed_judgment_remove(
 }
 
 fn boot_service<Service>(
-    _closing: &std::sync::atomic::AtomicBool,
+    closing: &AtomicBool,
     open: impl FnOnce() -> Result<Service, String>,
-    _close: impl FnOnce(&Service),
+    close: impl FnOnce(&Service),
 ) -> Option<Service> {
-    open().ok()
+    if closing.load(Ordering::Acquire) {
+        return None;
+    }
+    let service = open().ok()?;
+    if closing.load(Ordering::Acquire) {
+        close(&service);
+        return None;
+    }
+    Some(service)
 }
 
 fn restore_allowed(document: &serde_json::Value, intent_identity: &str) -> bool {
