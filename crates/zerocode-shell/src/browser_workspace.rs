@@ -325,6 +325,10 @@ fn busy() -> String {
     "workspace_busy: 작업 브라우저의 이전 요청이 끝나지 않았습니다".to_string()
 }
 
+/// What an agent is told at the work browsers' door while the person's stop
+/// stands (t-62872): the person stopped it, and only they start it again.
+pub(crate) const PERSONS_STOPPED: &str = "workspace_person_stopped: 사람이 정지했습니다 — 사람이 띠에서 다시 시작할 때까지 작업 브라우저를 열거나 쓰지 마세요. 어디까지 했는지 알리고 기다리세요";
+
 fn next_revision(state: &mut State) -> Result<(), String> {
     state.revision = state
         .revision
@@ -595,16 +599,24 @@ impl Workspaces {
         }))
     }
 
-    /// An agent's `open`, at the door.
+    /// An agent's `open`, at the door (t-62872): refused while the person's
+    /// stop stands, and registered under that stop's own lock, so no work
+    /// browser comes into an agent's hands after the person's stop.
     pub(crate) fn register_agents(
         &self,
         label: &str,
         owner: Option<&str>,
     ) -> Result<Snapshot, String> {
-        self.register(label, owner, false)
+        crate::computer_use::guard::unless_persons_stop(|| self.register(label, owner, false))
+            .unwrap_or_else(|| Err(PERSONS_STOPPED.to_string()))
     }
 
-    /// An agent's verb on a browser, at the door.
+    /// An agent's verb on a browser, at the door (t-62872): on a work browser
+    /// it is refused while the person's stop stands — the window's own stop,
+    /// the helper never asked — and admitted under that stop's own lock, so no
+    /// read or input an agent sends after the person's stop gets in while the
+    /// window is still on its way to pause the browser. A browser that is no
+    /// work browser is not the stop's.
     pub(crate) fn begin_agents(
         &self,
         label: &str,
@@ -612,7 +624,13 @@ impl Workspaces {
         verb: &str,
         expected_revision: Option<u64>,
     ) -> Result<Option<Operation>, String> {
-        self.begin_at(label, actor, verb, expected_revision)
+        if self.get(label)?.is_none() {
+            return self.begin_at(label, actor, verb, expected_revision);
+        }
+        crate::computer_use::guard::unless_persons_stop(|| {
+            self.begin_at(label, actor, verb, expected_revision)
+        })
+        .unwrap_or_else(|| Err(PERSONS_STOPPED.to_string()))
     }
 
     pub(crate) fn begin_person(

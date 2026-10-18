@@ -4072,26 +4072,44 @@ fn repeat_answer(
     }
 }
 
-/// A stop the helper answers with, taken in by the window (`guard::adopt`).
-fn adopt_helper_stop(helper: &serde_json::Value) {
-    if helper.get("stopped").and_then(serde_json::Value::as_bool) == Some(true)
+/// A stop the helper answers with, taken in by the window (`guard::adopt`),
+/// and told to the band when it moved the window's stop (t-62872): the
+/// person's chord heard over an agent's stop is the person's from then on,
+/// and the work browsers stop too once the band hears it. Answers whether it
+/// moved the stop.
+fn adopt_helper_stop(helper: &serde_json::Value, app: Option<&AppHandle>) -> bool {
+    let took = if helper.get("stopped").and_then(serde_json::Value::as_bool) == Some(true)
         && let Some(reason) = helper.get("reason").and_then(serde_json::Value::as_str)
     {
-        computer_use::guard::adopt(reason);
+        computer_use::guard::adopt(reason)
+    } else {
+        false
+    };
+    if took && let Some(app) = app {
+        let _ = app.emit(
+            "computer:activity",
+            computer_use::guard::activity_report(None),
+        );
     }
+    took
 }
 
 /// The person's stop, when one stands — the window's own (its button, or a
-/// chord it took in) or the helper's chord.
-fn persons_stop_standing() -> Option<String> {
+/// chord it took in) or the helper's chord, which the window takes in once it
+/// hears it.
+fn persons_stop_standing(app: Option<&AppHandle>) -> Option<String> {
     let persons = |reason: &String| zerocode_core::computer_use::persons_stop(reason);
     computer_use::guard::stopped_reason()
         .filter(persons)
         .or_else(|| {
-            computer_use::session_stands()
+            let helper = computer_use::session_stands()
                 .then(|| computer_use::call("status", serde_json::json!({})).ok())
-                .flatten()
-                .and_then(|helper| helper.get("reason")?.as_str().map(str::to_string))
+                .flatten()?;
+            adopt_helper_stop(&helper, app);
+            helper
+                .get("reason")?
+                .as_str()
+                .map(str::to_string)
                 .filter(persons)
         })
 }
@@ -5479,7 +5497,7 @@ pub(super) fn answer_computer_command_with(
             zerocode_core::computer_use::STOP_REASON_REQUEST,
         ))
     } else if let Some(reason) = (command.method == ComputerMethod::Resume)
-        .then(persons_stop_standing)
+        .then(|| persons_stop_standing(permission_window))
         .flatten()
     {
         // The person's stop is theirs: the window's resume lifts it, never
@@ -5504,7 +5522,7 @@ pub(super) fn answer_computer_command_with(
         } else {
             serde_json::Value::String("idle".into())
         };
-        adopt_helper_stop(&helper);
+        adopt_helper_stop(&helper, permission_window);
         // The pace is the window's table, answered whether or not a helper
         // session stands — a caller spacing its actions needs it before the
         // first one starts a session. Unlimited says so (`mode`), with no
@@ -5730,13 +5748,15 @@ pub(super) fn answer_computer_command_with(
                 let _ = window.emit("computer:permission-denied", serde_json::json!({}));
             }
             // A stop the helper made on its own (the person's chord): the
-            // window takes it in, so its band shows it and the resume.
+            // window takes it in, so its band shows it and the resume — over
+            // a stop of an agent's too, which it then is the person's
+            // (t-62872).
             if error.code == error_code::STOPPED
-                && computer_use::guard::stopped_reason().is_none()
+                && !computer_use::guard::persons_stop_stands()
                 && computer_use::session_stands()
                 && let Ok(helper) = computer_use::call("status", serde_json::json!({}))
             {
-                adopt_helper_stop(&helper);
+                adopt_helper_stop(&helper, permission_window);
             }
             // A password field refused the keys, or a line break would have
             // pressed: the helper's terse words as the model reads them. A
@@ -6877,6 +6897,23 @@ pub(super) async fn answer_browser_command(
     if label.is_some_and(|label| !state.browser_panes().contains(label)) {
         return browser_refused("zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n");
     }
+    // The person's stop holds every work browser and every agent's `open`
+    // (t-62872): said here, before any other refusal, and read again where
+    // the door admits, under that stop's own lock.
+    if computer_use::guard::persons_stop_stands()
+        && label.map_or(verb == "open", |label| {
+            state
+                .shell_runtime()
+                .browser_workspaces
+                .snapshot(label)
+                .is_ok_and(|held| held.is_some())
+        })
+    {
+        return browser_refused(format!(
+            "zerocode-browser: {}\n",
+            crate::browser_workspace::PERSONS_STOPPED
+        ));
+    }
     if let Err(error) = state
         .shell_runtime()
         .browser_workspaces
@@ -6899,7 +6936,7 @@ pub(super) async fn answer_browser_command(
     }
     let notify_app = app.clone();
     let operation = match label {
-        Some(label) => match state.shell_runtime().browser_workspaces.begin_at(
+        Some(label) => match state.shell_runtime().browser_workspaces.begin_agents(
             label,
             pane,
             verb,
@@ -7090,7 +7127,7 @@ async fn dispatch_browser_command(
             let creation = match state
                 .shell_runtime()
                 .browser_workspaces
-                .register(&label, pane, false)
+                .register_agents(&label, pane)
             {
                 Ok(snapshot) => snapshot,
                 Err(error) => {

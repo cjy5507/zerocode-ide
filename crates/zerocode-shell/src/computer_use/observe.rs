@@ -217,17 +217,28 @@ pub(crate) fn owned_look(pane: &str, scope: &str) -> Option<Value> {
 /// assignment the pane holds, and tell the window its number. A look taken
 /// for no pane, or for a pane whose assignment the window cannot tell, is
 /// nobody's — and the pane's older look goes (t-63505 ④): it is no longer the
-/// pane's newest, so it is never shown as that.
+/// pane's newest, so it is never shown as that. The window is told it went
+/// (t-62872), under its assignment and by a newer number the door has no
+/// look for, so a panel still showing it asks, gets nothing and lets it go.
 fn own(seen: impl FnOnce() -> Seen) {
     let Some(pane) = crate::run_evidence::actor_pane() else {
         return;
     };
     let Some(scope) = crate::run_evidence::actor().and_then(|actor| actor.scope) else {
-        OWNED
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .looks
-            .retain(|look| look.pane != pane);
+        let gone = {
+            let mut owned = OWNED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let at = owned.looks.iter().position(|look| look.pane == pane);
+            at.map(|at| {
+                let look = owned.looks.remove(at);
+                owned.seq += 1;
+                (look.scope, owned.seq)
+            })
+        };
+        if let (Some((scope, seq)), Some(notice)) = (gone, NOTICE.get()) {
+            notice(&pane, &scope, seq);
+        }
         return;
     };
     let seen = seen();

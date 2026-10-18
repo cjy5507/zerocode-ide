@@ -81,16 +81,41 @@ pub fn refusal(reason: &str) -> ComputerUseError {
 /// Take in a stop the helper made on its own — the person's chord heard on
 /// the desktop — so the window refuses at its door too and its band shows the
 /// stop and the resume the person lifts it with. The helper is already
-/// stopped: nothing is signalled. Answers whether the window's stop moved.
+/// stopped: nothing is signalled. The person's chord takes the place of a
+/// stop that is not theirs (t-62872), as their band's stop does: heard over
+/// an agent's stop, the stop is the person's from then on, and reaches the
+/// work browsers too. Anything else over a standing stop moves nothing, so a
+/// helper that answers every `status` with its stop never moves the revision
+/// the band's resume names. Answers whether the window's stop moved.
 pub fn adopt(reason: &str) -> bool {
     let mut held = stopped();
-    let takes = held.reason.is_none();
+    let takes =
+        held.reason.is_none() || (!persons(held.reason.as_deref()) && persons(Some(reason)));
     if takes {
         STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
         held.reason = Some(reason.to_string());
         held.revision += 1;
     }
     takes
+}
+
+/// Whether the person's stop stands in the window — the stop the work
+/// browsers' door reads (t-62872), never asking the helper.
+#[must_use]
+pub fn persons_stop_stands() -> bool {
+    persons(stopped().reason.as_deref())
+}
+
+/// Let `admit` in unless the person's stop stands, under that stop's own lock
+/// (t-62872): a stop the person makes meanwhile waits for `admit` to end, so
+/// nothing `admit` lets in comes after their stop. `None`: the person's stop
+/// stands, and `admit` never ran. `admit` reads no stop of its own — it runs
+/// under this one's lock.
+pub fn unless_persons_stop<T>(admit: impl FnOnce() -> T) -> Option<T> {
+    let held = stopped();
+    let admitted = (!persons(held.reason.as_deref())).then(admit);
+    drop(held);
+    admitted
 }
 
 /// Stop now: the window refuses every action from here on, and the helper is

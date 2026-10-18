@@ -36330,6 +36330,11 @@ details.task-board-section > summary {
 /* The empty stage's invitation to open a terminal is the main window's — this
  * window's stage is never empty and has no `⌘T`. */
 :root[data-surface="popout"] .placeholder,
+/* The person's stop is safe from anywhere, so the band here offers it; the
+ * resume gives the work browsers back and the view opens the work screen
+ * panel, and both of those live in the main window (t-62872). */
+:root[data-surface="popout"] .computer-band-resume,
+:root[data-surface="popout"] .computer-band-view,
 /* Already this window — a button that opens it would open nothing. */
 :root[data-surface="popout"] .board-popout {
   display: none;

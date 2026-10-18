@@ -149,8 +149,11 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The revocation tests below, each from the stop it finds.
+    /// The revocation tests below. Each lifts the stop it finds first: an
+    /// agent's stop over a person's stop another test left moves nothing, and
+    /// the revocation would never move the count (t-62872).
     fn a_revoked_shared_request_stays_revoked() {
+        super::super::guard::lift();
         let _scope = enter(InputPolicy::SharedDesktop);
         let captured = capture();
         super::super::guard::stop("fixture policy change");
@@ -177,6 +180,7 @@ mod tests {
     }
 
     fn a_racing_policy_read_grants_nothing() {
+        super::super::guard::lift();
         let _scope = enter_with(|| {
             super::super::guard::stop("fixture policy change");
             super::super::guard::lift();
@@ -189,6 +193,7 @@ mod tests {
     }
 
     fn a_new_request_reads_the_new_grant() {
+        super::super::guard::lift();
         {
             let _old = enter(InputPolicy::SharedDesktop);
             super::super::guard::stop("fixture policy change");
